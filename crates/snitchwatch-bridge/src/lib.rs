@@ -10,6 +10,7 @@ pub mod cache;
 pub mod error;
 pub mod grpc_client;
 pub mod translator;
+pub mod web_assets;
 pub mod ws_messages;
 pub mod ws_server;
 
