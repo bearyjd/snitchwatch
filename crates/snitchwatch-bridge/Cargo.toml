@@ -5,3 +5,19 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+snitchwatch-proto = { path = "../snitchwatch-proto" }
+tokio = { workspace = true }
+tonic = { workspace = true }
+prost = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+axum = { workspace = true }
+tokio-tungstenite = { workspace = true }
+futures-util = { workspace = true }
+regex = { workspace = true }
+anyhow = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
