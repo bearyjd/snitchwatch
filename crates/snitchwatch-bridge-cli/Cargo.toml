@@ -9,3 +9,10 @@ name = "snitchwatch-bridge-cli"
 path = "src/main.rs"
 
 [dependencies]
+snitchwatch-bridge = { path = "../snitchwatch-bridge" }
+snitchwatch-proto = { path = "../snitchwatch-proto" }
+tokio = { workspace = true }
+tonic = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
