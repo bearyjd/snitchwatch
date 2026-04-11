@@ -1,0 +1,11 @@
+[package]
+name = "snitchwatch-bridge-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "snitchwatch-bridge-cli"
+path = "src/main.rs"
+
+[dependencies]

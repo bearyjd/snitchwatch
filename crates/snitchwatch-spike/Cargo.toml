@@ -1,0 +1,11 @@
+[package]
+name = "snitchwatch-spike"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "snitchwatch-spike"
+path = "src/main.rs"
+
+[dependencies]
