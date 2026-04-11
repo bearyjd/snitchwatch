@@ -12,39 +12,92 @@ use serde::{Deserialize, Serialize};
 /// Server → client message envelope. Each variant matches one of the 22
 /// `handleServerCommand` cases in the LS UI's `app.js`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "action", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "action",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum ServerMessage {
-    InsertConnectionRows { rows: Vec<ConnectionRow> },
-    UpdateConnectionRows { rows: Vec<ConnectionRow> },
-    RemoveConnectionRows { ids: Vec<String> },
+    InsertConnectionRows {
+        rows: Vec<ConnectionRow>,
+    },
+    UpdateConnectionRows {
+        rows: Vec<ConnectionRow>,
+    },
+    RemoveConnectionRows {
+        ids: Vec<String>,
+    },
     /// Note the typo: this is in upstream LS, we preserve it.
     #[serde(rename = "moveConnetionRows")]
-    MoveConnetionRows { ids: Vec<String> },
+    MoveConnetionRows {
+        ids: Vec<String>,
+    },
     ClearConnectionRows,
-    SetInspector { inspector: serde_json::Value },
-    UpdateRuleButtons { buttons: serde_json::Value },
-    HighlightRuleForRows { rule_id: String, row_ids: Vec<String> },
-    TrafficEvents { events: Vec<TrafficEvent> },
-    SetTrafficData { data: serde_json::Value },
-    UpdateTrafficData { data: serde_json::Value },
-    SetRules { rules: Vec<serde_json::Value> },
-    UpdateRules { rules: Vec<serde_json::Value> },
-    SetBlocklists { blocklists: Vec<serde_json::Value> },
-    SetBlocklistDetails { details: serde_json::Value },
-    SetBlocklistEntries { entries: Vec<serde_json::Value> },
-    SetBlocklistEntryLocation { location: serde_json::Value },
-    SetBlocklistStatus { status: serde_json::Value },
-    SetConnectionsStatus { status: ConnectionsStatus },
-    SetAboutInfo { info: AboutInfo },
-    SetUndoStack { stack: Vec<serde_json::Value> },
-    LocalizationTable { table: serde_json::Value },
-    GlobalSettings { settings: serde_json::Value },
+    SetInspector {
+        inspector: serde_json::Value,
+    },
+    UpdateRuleButtons {
+        buttons: serde_json::Value,
+    },
+    HighlightRuleForRows {
+        rule_id: String,
+        row_ids: Vec<String>,
+    },
+    TrafficEvents {
+        events: Vec<TrafficEvent>,
+    },
+    SetTrafficData {
+        data: serde_json::Value,
+    },
+    UpdateTrafficData {
+        data: serde_json::Value,
+    },
+    SetRules {
+        rules: Vec<serde_json::Value>,
+    },
+    UpdateRules {
+        rules: Vec<serde_json::Value>,
+    },
+    SetBlocklists {
+        blocklists: Vec<serde_json::Value>,
+    },
+    SetBlocklistDetails {
+        details: serde_json::Value,
+    },
+    SetBlocklistEntries {
+        entries: Vec<serde_json::Value>,
+    },
+    SetBlocklistEntryLocation {
+        location: serde_json::Value,
+    },
+    SetBlocklistStatus {
+        status: serde_json::Value,
+    },
+    SetConnectionsStatus {
+        status: ConnectionsStatus,
+    },
+    SetAboutInfo {
+        info: AboutInfo,
+    },
+    SetUndoStack {
+        stack: Vec<serde_json::Value>,
+    },
+    LocalizationTable {
+        table: serde_json::Value,
+    },
+    GlobalSettings {
+        settings: serde_json::Value,
+    },
 }
 
 /// Client → server messages. These come from the UI's `sendAction(type, payload)`
 /// calls. The `action` discriminator is the type name.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "action", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "action",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum ClientMessage {
     SetVerdict {
         row_id: String,

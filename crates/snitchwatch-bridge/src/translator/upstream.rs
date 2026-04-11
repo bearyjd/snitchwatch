@@ -76,7 +76,9 @@ mod tests {
     use crate::ws_messages::{ConnectionRow, VerdictScope};
 
     fn make_pending(cache: &mut ConnectionCache, id: &str) {
-        let _ = cache.insert_pending(ConnectionRow {
+        // The returned verdict receiver is intentionally dropped: these tests
+        // only exercise `upstream::apply`, not the oneshot round-trip.
+        drop(cache.insert_pending(ConnectionRow {
             id: id.to_string(),
             process: "p".to_string(),
             process_path: None,
@@ -89,7 +91,7 @@ mod tests {
             bytes_sent: 0,
             bytes_received: 0,
             started_at_ms: 0,
-        });
+        }));
     }
 
     #[test]

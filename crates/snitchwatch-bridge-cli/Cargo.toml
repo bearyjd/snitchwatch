@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[lib]
+name = "snitchwatch_bridge_cli"
+path = "src/lib.rs"
+
 [[bin]]
 name = "snitchwatch-bridge-cli"
 path = "src/main.rs"
@@ -12,7 +16,9 @@ path = "src/main.rs"
 snitchwatch-bridge = { path = "../snitchwatch-bridge" }
 snitchwatch-proto = { path = "../snitchwatch-proto" }
 tokio = { workspace = true }
+tokio-stream = "0.1"
 tonic = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
+serde_json = { workspace = true }

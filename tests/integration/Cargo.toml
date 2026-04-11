@@ -10,6 +10,7 @@ path = "../bridge_protocol_test.rs"
 
 [dev-dependencies]
 snitchwatch-bridge = { path = "../../crates/snitchwatch-bridge" }
+snitchwatch-bridge-cli = { path = "../../crates/snitchwatch-bridge-cli" }
 snitchwatch-proto = { path = "../../crates/snitchwatch-proto" }
 mock-opensnitchd = { path = "../mock_opensnitchd" }
 tokio = { workspace = true }
