@@ -4,6 +4,7 @@
 //! on 127.0.0.1) and serves the `/stream` endpoint. The Tauri shell reads
 //! the actual bound port after startup and points the webview at it.
 
+use crate::web_assets::{serve_asset, serve_fallback, serve_index};
 use crate::ws_messages::{ClientMessage, ServerMessage};
 use axum::{
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
@@ -46,9 +47,12 @@ impl WsServer {
     pub async fn serve(self, listener: TcpListener) -> std::io::Result<()> {
         let app = Router::new()
             .route("/stream", get(ws_handler))
+            .route("/", get(serve_index))
+            .route("/assets/*path", get(serve_asset))
+            .fallback(serve_fallback)
             .with_state(self.handles);
 
-        info!(addr = ?listener.local_addr()?, "WS server starting");
+        info!(addr = ?listener.local_addr()?, "WS+HTTP server starting");
         axum::serve(listener, app).await
     }
 }
@@ -120,5 +124,64 @@ mod tests {
         let server = WsServer::new("127.0.0.1:0".parse().unwrap(), handles);
         let (_listener, addr) = server.bind().await.unwrap();
         assert_ne!(addr.port(), 0, "ephemeral port should resolve to a real port");
+    }
+
+    #[tokio::test]
+    async fn server_serves_index_html_at_root() {
+        use axum::body::to_bytes;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let (broadcast_tx, _) = broadcast::channel(16);
+        let (inbound_tx, _) = mpsc::channel(16);
+        let handles = WsHandles {
+            broadcast: broadcast_tx,
+            inbound: inbound_tx,
+        };
+
+        let app = Router::new()
+            .route("/stream", get(ws_handler))
+            .route("/", get(serve_index))
+            .route("/assets/*path", get(serve_asset))
+            .fallback(serve_fallback)
+            .with_state(handles);
+
+        let response = app
+            .oneshot(Request::builder().uri("/").body(axum::body::Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        assert!(std::str::from_utf8(&body).unwrap().contains("Snitchwatch"));
+    }
+
+    #[tokio::test]
+    async fn server_serves_asset_js() {
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let (broadcast_tx, _) = broadcast::channel(16);
+        let (inbound_tx, _) = mpsc::channel(16);
+        let handles = WsHandles {
+            broadcast: broadcast_tx,
+            inbound: inbound_tx,
+        };
+        let app = Router::new()
+            .route("/stream", get(ws_handler))
+            .route("/", get(serve_index))
+            .route("/assets/*path", get(serve_asset))
+            .fallback(serve_fallback)
+            .with_state(handles);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/assets/js/app.js")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
     }
 }
