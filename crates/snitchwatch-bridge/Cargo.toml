@@ -15,6 +15,8 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 axum = { workspace = true }
 tokio-tungstenite = { workspace = true }
+rust-embed = { version = "8", features = ["interpolate-folder-path"] }
+mime_guess = "2"
 futures-util = { workspace = true }
 regex = { workspace = true }
 anyhow = { workspace = true }
