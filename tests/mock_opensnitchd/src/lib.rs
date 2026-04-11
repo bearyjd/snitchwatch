@@ -90,17 +90,11 @@ impl Ui for MockOpensnitchd {
     type NotificationsStream =
         Pin<Box<dyn Stream<Item = Result<Notification, Status>> + Send + 'static>>;
 
-    async fn ping(
-        &self,
-        _request: Request<PingRequest>,
-    ) -> Result<Response<PingReply>, Status> {
+    async fn ping(&self, _request: Request<PingRequest>) -> Result<Response<PingReply>, Status> {
         Ok(Response::new(PingReply::default()))
     }
 
-    async fn ask_rule(
-        &self,
-        _request: Request<Connection>,
-    ) -> Result<Response<Rule>, Status> {
+    async fn ask_rule(&self, _request: Request<Connection>) -> Result<Response<Rule>, Status> {
         let default = self.state.lock().await.ask_rule_default.clone();
         Ok(Response::new(default.unwrap_or_default()))
     }
@@ -112,10 +106,7 @@ impl Ui for MockOpensnitchd {
         Ok(Response::new(request.into_inner()))
     }
 
-    async fn post_alert(
-        &self,
-        _request: Request<Alert>,
-    ) -> Result<Response<MsgResponse>, Status> {
+    async fn post_alert(&self, _request: Request<Alert>) -> Result<Response<MsgResponse>, Status> {
         Ok(Response::new(MsgResponse::default()))
     }
 
@@ -177,8 +168,7 @@ mod tests {
             .await
             .unwrap();
 
-        let mut client =
-            snitchwatch_proto::protocol::ui_client::UiClient::new(channel);
+        let mut client = snitchwatch_proto::protocol::ui_client::UiClient::new(channel);
         let reply = client.ping(PingRequest::default()).await.unwrap();
         let _ = reply.into_inner();
     }

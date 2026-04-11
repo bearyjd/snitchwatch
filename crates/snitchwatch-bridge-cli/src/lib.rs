@@ -6,7 +6,7 @@
 //!
 //! What `run` wires together:
 //!
-//! 1. Binds the WebSocket server on `ws_bind` (ephemeral by default).
+//! 1. Binds the WebSocket server on `ws_bind` (defaults to `127.0.0.1:3031`).
 //! 2. Dials the gRPC endpoint at `grpc_url` with exponential backoff.
 //! 3. Opens the `Notifications` bidi stream. Outbound goes through an mpsc
 //!    which is fed by the verdict-round-trip task; inbound is the daemon's
@@ -41,7 +41,7 @@ use tracing::{error, info, warn};
 pub struct BridgeConfig {
     /// gRPC endpoint to dial. e.g. `http://127.0.0.1:50051`.
     pub grpc_url: String,
-    /// Address to bind the WebSocket server on. Use port `0` for ephemeral.
+    /// Address to bind the WebSocket server on. Defaults to `127.0.0.1:3031`; use port `0` for ephemeral (tests).
     pub ws_bind: SocketAddr,
     /// Cache capacity (number of recent rows retained).
     pub cache_capacity: usize,

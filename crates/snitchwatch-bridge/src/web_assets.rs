@@ -71,8 +71,14 @@ mod tests {
         );
         let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
         let body_str = std::str::from_utf8(&body).unwrap();
-        assert!(body_str.contains("Snitchwatch"), "rebrand should be applied");
-        assert!(!body_str.contains("Little Snitch"), "no leftover LS branding");
+        assert!(
+            body_str.contains("Snitchwatch"),
+            "rebrand should be applied"
+        );
+        assert!(
+            !body_str.contains("Little Snitch"),
+            "no leftover LS branding"
+        );
     }
 
     #[tokio::test]

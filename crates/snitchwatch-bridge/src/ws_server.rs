@@ -123,7 +123,11 @@ mod tests {
         };
         let server = WsServer::new("127.0.0.1:0".parse().unwrap(), handles);
         let (_listener, addr) = server.bind().await.unwrap();
-        assert_ne!(addr.port(), 0, "ephemeral port should resolve to a real port");
+        assert_ne!(
+            addr.port(),
+            0,
+            "ephemeral port should resolve to a real port"
+        );
     }
 
     #[tokio::test]
@@ -147,7 +151,12 @@ mod tests {
             .with_state(handles);
 
         let response = app
-            .oneshot(Request::builder().uri("/").body(axum::body::Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(response.status(), 200);

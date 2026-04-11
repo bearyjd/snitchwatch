@@ -31,6 +31,8 @@ async fn main() -> Result<()> {
 
     // Machine-parseable line for test harnesses.
     println!("WS_LISTEN_ADDR={}", bridge.ws_addr);
+    println!();
+    println!("→ open http://{}/ in your browser", bridge.ws_addr);
 
     tokio::signal::ctrl_c().await?;
     info!("shutdown signal received");

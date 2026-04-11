@@ -91,7 +91,8 @@ async fn ask_rule_round_trip_full() {
         loop {
             match ws.next().await {
                 Some(Ok(Message::Text(t))) => {
-                    let v: serde_json::Value = serde_json::from_str(&t).expect("server sent bad json");
+                    let v: serde_json::Value =
+                        serde_json::from_str(&t).expect("server sent bad json");
                     if v.get("action").and_then(|a| a.as_str()) == Some("insertConnectionRows") {
                         break v;
                     }

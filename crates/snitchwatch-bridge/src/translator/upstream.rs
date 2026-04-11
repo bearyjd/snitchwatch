@@ -127,11 +127,7 @@ mod tests {
     fn add_rule_returns_add_rule_effect() {
         let mut cache = ConnectionCache::new(10);
         let rule = serde_json::json!({"name": "block-everything"});
-        let effect = apply(
-            &mut cache,
-            ClientMessage::AddRule { rule: rule.clone() },
-        )
-        .unwrap();
+        let effect = apply(&mut cache, ClientMessage::AddRule { rule: rule.clone() }).unwrap();
         assert_eq!(effect, UpstreamEffect::AddRule { rule });
     }
 
