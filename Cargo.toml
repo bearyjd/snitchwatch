@@ -1,0 +1,33 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/snitchwatch-proto",
+    "crates/snitchwatch-spike",
+    "crates/snitchwatch-bridge",
+    "crates/snitchwatch-bridge-cli",
+    "tests/mock_opensnitchd",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0"
+repository = "https://github.com/example/snitchwatch"
+
+[workspace.dependencies]
+tokio = { version = "1.40", features = ["full"] }
+tonic = "0.12"
+tonic-build = "0.12"
+prost = "0.13"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+axum = { version = "0.7", features = ["ws"] }
+tokio-tungstenite = "0.24"
+futures-util = "0.3"
+regex = "1"
+anyhow = "1"
+proptest = "1"
+async-stream = "0.3"
