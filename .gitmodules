@@ -1,0 +1,3 @@
+[submodule "vendor/opensnitch"]
+	path = vendor/opensnitch
+	url = https://github.com/evilsocket/opensnitch.git
