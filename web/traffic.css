@@ -1,0 +1,104 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+/* Copyright (C) 2026 Objective Development Software GmbH */
+
+.h-splitter {
+  flex-shrink: 0;
+  height: 4px;
+  cursor: row-resize;
+  background: var(--line);
+}
+
+.h-splitter:active,
+.h-splitter:hover {
+  background: var(--line-hover);
+}
+
+.traffic-chart-wrap {
+  flex-shrink: 0;
+  position: relative;
+  height: 220px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--surface);
+  border-top: none;
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+  padding-right: 16px;
+  padding-bottom: 16px;
+}
+
+.traffic-mode-selector {
+  position: absolute;
+  bottom: 6px;
+  right: 8px;
+  z-index: 10;
+  font-size: var(--font-micro);
+  padding: 2px 4px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--surface);
+  color: inherit;
+  cursor: pointer;
+}
+
+/* Ensure explicit display values don't override the hidden attribute. */
+.traffic-filter-badge[hidden],
+.time-filter-indicator[hidden] {
+  display: none;
+}
+
+/* Badge overlaid on the chart when an explicit time filter is active. */
+.traffic-filter-badge {
+  position: absolute;
+  bottom: 6px;
+  left: 8px;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font: inherit;
+  font-size: var(--font-micro);
+  padding: 2px 6px;
+  border: 1px solid var(--accent-border);
+  border-radius: 4px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  cursor: pointer;
+}
+
+.traffic-filter-badge:hover {
+  background: var(--accent-border);
+}
+
+
+/* Fixed-width legend value cells so the legend doesn't reflow while hovering. */
+.traffic-chart-wrap .u-series .u-value {
+  display: inline-block;
+  text-align: left;
+  font-variant-numeric: tabular-nums;
+  position: relative;
+  top: 0.5px; /* don't know why, but without this labels and values don't align */
+}
+.traffic-chart-wrap .u-series:first-child .u-value {
+  width: 9.5em; /* wide enough for "2026-02-28 12:30 pm" */
+}
+.traffic-chart-wrap .u-series:not(:first-child) .u-value {
+  width: 4.5em; /* wide enough for "999TB/s" */
+}
+
+/* Topbar replacement for the visible-period-filter select when a time filter is active.
+   Inherits layout/sizing/active colours from .filter-btn and .filter-btn.is-active. */
+.time-filter-indicator {
+  font: inherit;          /* buttons don't inherit font-family by default */
+  vertical-align: middle;
+}
+
+.time-filter-indicator:hover {
+  background: var(--accent-border); /* subtle darkening; is-active suppresses the default filter-btn:hover */
+}
+
+/* Override uPlot's hardcoded crosshair and selection colors to respect dark mode */
+.u-hz .u-cursor-x { border-right-color: var(--text-muted); }
+.u-hz .u-cursor-y { border-bottom-color: var(--text-muted); }
+.u-select { background: var(--chart-select-bg); }

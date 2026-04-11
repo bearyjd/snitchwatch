@@ -1,0 +1,504 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+/* Copyright (C) 2026 Objective Development Software GmbH */
+
+/* Column widths — overridden at runtime via applyLocalizationToDOM() */
+:root {
+  --col-action-w: 75px;
+  --col-dir-w:    70px;
+  --col-port-w:   15%;
+}
+
+#rules-list {
+  padding: 0 3px;
+  overflow-x: clip; /* clip the sticky-header background pseudo-elements without creating a scroll container */
+}
+
+.rules-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  table-layout: fixed;
+  font-size: var(--font-default);
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.rules-table th {
+  border-bottom: 1px solid var(--line);
+}
+
+.rules-table th,
+.rules-table td {
+  padding: 0 6px;
+  vertical-align: middle;
+  text-align: left;
+  box-sizing: border-box;
+}
+
+.rules-table tr:not(:first-child) td {
+  border-top: 1px solid var(--line);
+}
+
+.rules-table td:last-child * {
+  display: flex;
+  align-items: center;
+}
+
+.rules-table th {
+  height: var(--pane-hdr-h);
+  position: sticky;
+  top: 0;
+  background-clip: padding-box;
+  color: var(--text-muted);
+  font-size: var(--font-meta);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  z-index: 3;
+  box-shadow: inset 0 -1px 0 var(--line);
+  white-space: nowrap;
+  background-color: var(--surface);
+}
+
+/* Extend sticky header background into left/right padding and scrollbar gutter */
+.rules-table thead tr th:first-child::before,
+.rules-table thead tr th:last-child::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 100vw;
+  background: var(--surface-muted);
+  box-shadow: inset 0 -1px 0 var(--line);
+}
+.rules-table thead tr th:first-child::before {
+  right: 100%;
+}
+.rules-table thead tr th:last-child::after {
+  left: 100%;
+}
+
+.rules-table td {
+  padding: 0;
+}
+
+[data-role=rule-enabled] .rule-cell-inner {
+  display: flex;
+}
+
+/* Inner wrapper for each cell — carries the row height so it can be animated */
+.rule-cell-inner {
+  height: var(--row-h);
+  overflow: hidden;
+}
+
+.rule-cell-inner > * {
+  vertical-align: middle;
+}
+
+[data-role=rule-action] svg,
+[data-role=rule-direction] svg {
+  margin-right: 4px;
+}
+
+.rules-sortable-header {
+  cursor: pointer;
+}
+
+.rules-sortable-header {
+  color: var(--text-muted);
+}
+
+.rules-sortable-header:hover {
+  color: var(--text);
+}
+
+.rules-sortable-header:active {
+  color: var(--text);
+  opacity: 0.7;
+}
+
+.rules-sortable-header:hover .rules-sort-indicator {
+  color: var(--text);
+}
+
+.rules-sortable-header:active .rules-sort-indicator {
+  color: var(--text);
+}
+
+.rules-sort-indicator {
+  display: inline-block;
+  width: 0.9em;
+  text-align: center;
+  margin-left: 4px;
+  vertical-align: baseline;
+  font-size: var(--font-micro);
+  color: var(--text-muted);
+  font-weight: 500;
+  line-height: 1em;
+  position: relative;
+  top: -0.18em;
+}
+
+.rules-table th:nth-child(1),
+.rules-table td:nth-child(1) {
+  width: 34px;
+  text-align: center;
+}
+
+
+.rules-table th:nth-child(2),
+.rules-table td:nth-child(2) {
+  width: var(--col-action-w);
+}
+
+.rules-table th:nth-child(4),
+.rules-table td:nth-child(4) {
+  width: var(--col-dir-w);
+}
+
+.rules-table th:nth-child(6),
+.rules-table td:nth-child(6) {
+  width: var(--col-port-w);
+}
+
+.rules-table th:nth-child(7),
+.rules-table td:nth-child(7) {
+  width: 62px;
+  text-align: right;
+}
+
+/* Checkbox cell — center the checkbox */
+.rules-table td:nth-child(1) .rule-cell-inner {
+  justify-content: center;
+}
+
+/* Text cells — block layout so text-overflow: ellipsis works; line-height centers single-line text */
+.rules-table td:nth-child(2) .rule-cell-inner,
+.rules-table td:nth-child(3) .rule-cell-inner,
+.rules-table td:nth-child(4) .rule-cell-inner,
+.rules-table td:nth-child(5) .rule-cell-inner,
+.rules-table td:nth-child(6) .rule-cell-inner {
+  line-height: var(--row-h);
+  padding: 0 6px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* Actions cell — right-align with padding */
+.rules-table td:nth-child(7) .rule-cell-inner {
+  justify-content: flex-end;
+  padding-right: 4px;
+}
+
+.rule-th-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.rule-row-actions {
+  display: flex;
+  gap: 1px;
+  justify-content: flex-end;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 100ms ease;
+}
+
+.rules-table tbody tr:hover .rule-row-actions,
+html.dark .rules-table tbody tr:hover .rule-row-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.rule-row-btn {
+  border: none;
+  background: none;
+  cursor: pointer;
+  padding: 3px;
+  border-radius: 4px;
+  font-size: var(--font-body);
+  color: var(--text-muted);
+  line-height: 1;
+}
+
+.rule-row-btn:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.rule-row-btn-danger:hover {
+  background: var(--danger-bg);
+  color: var(--danger-text);
+}
+
+
+.rules-table:focus,
+.rules-table *:focus {
+  outline: none;
+}
+
+.rules-table tbody tr:hover > td {
+  background: var(--row-hover-bg);
+  border-top-color: transparent;
+}
+
+.rules-table tbody tr.is-selected > td:first-child,
+.rules-table tbody tr:hover > td:first-child {
+  border-top-left-radius: 6px;
+  border-bottom-left-radius: 6px;
+}
+
+.rules-table tbody tr.is-selected > td:last-child,
+.rules-table tbody tr:hover > td:last-child {
+  border-top-right-radius: 6px;
+  border-bottom-right-radius: 6px;
+}
+
+
+.rules-table tbody tr.is-selected > td {
+  background: var(--row-selected-bg);
+  border-top-color: transparent;
+}
+
+.rules-table tbody tr.is-selected + tr > td,
+.rules-table tbody tr:hover + tr > td {
+  border-top-color: transparent;
+}
+
+.rules-table tbody tr.is-selected:hover > td {
+  background: var(--row-selected-hover-bg);
+}
+
+.rules-table tbody tr.is-selected:has(+ tr.is-selected) > td:first-child {
+  border-bottom-left-radius: 0px;
+}
+
+.rules-table tbody tr.is-selected:has(+ tr.is-selected) > td:last-child {
+  border-bottom-right-radius: 0px;
+}
+
+.rules-table tbody tr.is-selected + tr.is-selected > td:first-child {
+  border-top-left-radius: 0px;
+}
+
+.rules-table tbody tr.is-selected + tr.is-selected > td:last-child {
+  border-top-right-radius: 0px;
+}
+
+.rules-table .rule-high-priority td {
+  font-weight: 700;
+}
+
+.rules-table .rule-priority {
+  color: var(--text-muted);
+}
+
+.rules-search-highlight {
+  background: var(--search-highlight-bg);
+  color: inherit;
+  border-radius: 2px;
+  padding: 0 1px;
+}
+
+.rule-modal-row {
+  display: flex;
+  gap: 10px;
+}
+
+.rule-modal-half {
+  flex: 1;
+  min-width: 0;
+}
+
+.rule-modal-checkbox {
+  display: flex;
+  align-items: center;
+  margin-top: 22px;
+}
+
+.rule-modal-collapsible {
+  overflow: hidden;
+  max-height: 84px;
+  opacity: 1;
+  transform: translateY(0);
+  transition: max-height 180ms ease, opacity 140ms ease, transform 180ms ease, margin 180ms ease;
+}
+
+.rule-modal-collapsible.is-collapsed {
+  max-height: 0;
+  opacity: 0;
+  transform: translateY(-4px);
+  margin: 0;
+  pointer-events: none;
+}
+
+.inspector-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.inspector-card {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 10px;
+}
+
+.inspector-headline {
+  font-size: var(--font-default);
+  font-weight: 700;
+  margin-bottom: 8px;
+}
+
+.inspector-headline > * {
+  vertical-align: middle;
+}
+
+.inspector-headline > :not(:last-child) {
+  margin-right: 4px;
+}
+
+.inspector-grid {
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.inspector-row {
+  display: flex;
+  flex-grow: 1;
+  gap: 4px;
+  align-items: baseline;
+}
+
+.inspector-key {
+  width: 120px;
+  min-width: 120px;
+  text-align: right;
+  color: var(--text-muted);
+  font-size: var(--font-meta);
+  font-weight: 600;
+}
+
+.inspector-key::after {
+  content: ":";
+  margin-left: 2px;
+}
+
+.inspector-value {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  color: var(--text);
+  font-size: var(--font-default);
+  overflow-wrap: anywhere;
+  line-height: 1.33;
+}
+
+.inspector-box-block {
+  margin-top: 16px;
+}
+
+.inspector-box-headline {
+  color: var(--text-muted);
+  font-size: var(--font-meta);
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.inspector-box {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface-muted);
+  padding: 8px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: var(--font-default);
+}
+
+.inspector-notes-input {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px;
+  resize: vertical;
+  min-height: 76px;
+  font: inherit;
+  color: var(--text);
+  background: var(--surface);
+}
+
+.inspector-notes-input.is-search-match {
+  background: var(--locate-highlight-bg);
+}
+
+.inspector-save-button {
+  margin-top: 8px;
+}
+
+/* Keep action buttons hidden on disabled rows (overrides .is-disabled > * from styles.css);
+   the existing tr:hover rule restores them on hover. */
+.is-disabled > .rule-cell-inner > .rule-row-actions,
+html.dark .is-disabled > .rule-cell-inner > .rule-row-actions {
+  opacity: 0;
+  pointer-events: none;
+}
+
+
+.rules-sort-popup {
+  position: fixed;
+  z-index: 100;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  box-shadow: var(--shadow-subtle);
+  padding: 4px 0;
+  min-width: 160px;
+}
+
+.rules-sort-popup-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 12px;
+  cursor: pointer;
+  font-size: var(--font-default);
+  color: var(--text);
+  white-space: nowrap;
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: normal;
+}
+
+.rules-sort-popup-option:hover {
+  background: var(--surface-hover);
+}
+
+.rules-sort-popup-option.is-active {
+  color: var(--accent, var(--text));
+  font-weight: 600;
+}
+
+/* ── Row insert / remove animations (via inner cell wrapper) ── */
+@keyframes rule-row-enter {
+  from { max-height: 0; opacity: 0; }
+  to   { max-height: var(--row-h); opacity: 1; }
+}
+
+@keyframes rule-row-exit {
+  from { max-height: var(--row-h); opacity: 1; }
+  to   { max-height: 0; opacity: 0; }
+}
+
+.rules-table tbody tr.is-row-added .rule-cell-inner {
+  animation: rule-row-enter 250ms ease-out both;
+}
+
+.rules-table tbody tr.is-row-removing .rule-cell-inner {
+  animation: rule-row-exit 250ms ease-out both;
+}
