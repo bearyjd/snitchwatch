@@ -61,7 +61,7 @@ websocat ws://127.0.0.1:NNNNN/stream
 Environment variables:
 
 - `SNITCHWATCH_GRPC` — opensnitchd gRPC endpoint (default `http://127.0.0.1:50051`)
-- `SNITCHWATCH_WS_BIND` — WebSocket bind address (default `127.0.0.1:0`, ephemeral port)
+- `SNITCHWATCH_WS_BIND` — WebSocket bind address (default `127.0.0.1:3031`)
 - `RUST_LOG` — tracing filter, e.g. `info`, `snitchwatch_bridge=debug`
 
 ## Workspace layout

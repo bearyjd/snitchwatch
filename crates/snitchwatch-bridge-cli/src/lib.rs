@@ -52,7 +52,7 @@ impl BridgeConfig {
         let grpc_url = std::env::var("SNITCHWATCH_GRPC")
             .unwrap_or_else(|_| "http://127.0.0.1:50051".to_string());
         let ws_bind_str =
-            std::env::var("SNITCHWATCH_WS_BIND").unwrap_or_else(|_| "127.0.0.1:0".to_string());
+            std::env::var("SNITCHWATCH_WS_BIND").unwrap_or_else(|_| "127.0.0.1:3031".to_string());
         let ws_bind: SocketAddr = ws_bind_str
             .parse()
             .with_context(|| format!("invalid SNITCHWATCH_WS_BIND: {ws_bind_str}"))?;

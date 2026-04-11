@@ -5,7 +5,7 @@
 //!
 //! Env vars (all optional):
 //!   SNITCHWATCH_GRPC      gRPC endpoint (default: http://127.0.0.1:50051)
-//!   SNITCHWATCH_WS_BIND   WebSocket bind address (default: 127.0.0.1:0)
+//!   SNITCHWATCH_WS_BIND   WebSocket bind address (default: 127.0.0.1:3031)
 //!
 //! On startup the CLI prints `WS_LISTEN_ADDR=<addr>` to stdout so tests and
 //! wrapping processes can discover the port.
