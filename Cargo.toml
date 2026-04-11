@@ -6,6 +6,7 @@ members = [
     "crates/snitchwatch-bridge",
     "crates/snitchwatch-bridge-cli",
     "tests/mock_opensnitchd",
+    "tests/integration",
 ]
 
 [workspace.package]
