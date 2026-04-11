@@ -16,7 +16,7 @@ use rust_embed::RustEmbed;
 
 #[derive(RustEmbed)]
 #[folder = "$CARGO_MANIFEST_DIR/../../web/"]
-pub struct WebAssets;
+pub(crate) struct WebAssets;
 
 pub async fn serve_index() -> Response {
     serve_path("index.html")
@@ -42,12 +42,12 @@ fn serve_path(path: &str) -> Response {
                 .status(StatusCode::OK)
                 .header(header::CONTENT_TYPE, header_value)
                 .body(Body::from(asset.data.into_owned()))
-                .unwrap()
+                .expect("response builder cannot fail with static status and validated header")
         }
         None => Response::builder()
             .status(StatusCode::NOT_FOUND)
             .body(Body::from("not found"))
-            .unwrap(),
+            .expect("response builder cannot fail with static status and static body"),
     }
 }
 
