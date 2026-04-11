@@ -8,3 +8,10 @@ license.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
+snitchwatch-proto = { path = "../../crates/snitchwatch-proto" }
+tokio = { workspace = true }
+tonic = { workspace = true }
+prost = { workspace = true }
+tracing = { workspace = true }
+tokio-stream = "0.1"
+async-stream = "0.3"
