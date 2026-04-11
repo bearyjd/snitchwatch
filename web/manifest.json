@@ -1,18 +1,18 @@
 {
-  "name": "Little Snitch for Linux",
-  "short_name": "Little Snitch",
+  "name": "Snitchwatch",
+  "short_name": "Snitchwatch",
   "start_url": "/",
   "display": "standalone",
   "theme_color": "#0d6abf",
   "background_color": "#f6f8fc",
   "icons": [
     {
-      "src": "littlesnitch-192.png",
+      "src": "snitchwatch-192.png",
       "sizes": "192x192",
       "type": "image/png"
     },
     {
-      "src": "littlesnitch-512.png",
+      "src": "snitchwatch-512.png",
       "sizes": "512x512",
       "type": "image/png",
       "purpose": "any maskable"

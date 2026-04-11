@@ -211,7 +211,7 @@ const _strings = {
   'err-direction-required':  'Direction, protocol and remote type are required.',
 
   // --- App / product ---
-  // app-title is derived: 'Little Snitch' + brand-connector + 'Linux'
+  // app-title is derived: 'Snitchwatch' + brand-connector + 'Linux'
   'brand-connector':  ' for ',
   'daemon-offline':   'Daemon offline \u2014 reconnecting\u2026',
 
@@ -226,8 +226,8 @@ const _strings = {
   'theme-dark':       'Dark',
 
   // --- About dialog ---
-  'about-btn-label':   'About Little Snitch for Linux',
-  'about-icon-alt':    'Little Snitch for Linux icon',
+  'about-btn-label':   'About Snitchwatch',
+  'about-icon-alt':    'Snitchwatch icon',
   'about-main-commit': 'Main commit',
   'about-ebpf-commit': 'eBPF commit',
 
@@ -360,7 +360,7 @@ function applyLocalizationToDOM() {
     'col-action-w', 'col-dir-w', 'col-port-w',       // rules table
   ].forEach(key => root.style.setProperty('--' + key, t(key)));
 
-  const appTitle = 'Little Snitch' + t('brand-connector') + 'Linux';
+  const appTitle = 'Snitchwatch' + t('brand-connector') + 'Linux';
   const titleEl = document.querySelector('title');
   if (titleEl) titleEl.textContent = appTitle;
   document.querySelectorAll('[data-i18n="app-title"]').forEach(el => {
