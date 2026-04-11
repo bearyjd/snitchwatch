@@ -9,3 +9,13 @@ name = "snitchwatch-spike"
 path = "src/main.rs"
 
 [dependencies]
+snitchwatch-proto = { path = "../snitchwatch-proto" }
+tokio = { workspace = true }
+tokio-stream = "0.1"
+tonic = { workspace = true }
+prost = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+async-stream = { workspace = true }
+futures-util = { workspace = true }
