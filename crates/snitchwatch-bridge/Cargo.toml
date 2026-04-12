@@ -20,6 +20,8 @@ mime_guess = "2"
 futures-util = { workspace = true }
 regex = { workspace = true }
 anyhow = { workspace = true }
+async-stream = { workspace = true }
+tokio-stream = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

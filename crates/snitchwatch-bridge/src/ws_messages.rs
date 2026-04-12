@@ -2,10 +2,6 @@
 //!
 //! All server-to-client messages share the same envelope: `{action: "...", ...}`.
 //! We model this as a tagged enum for round-trip type safety.
-//!
-//! TODO(task-7-followup): capture real `setVerdict` payloads from the local LS
-//! instance at `http://localhost:3031/` (browser devtools → WS → messages) and
-//! reconcile the `verdict` field name with what LS actually sends.
 
 use serde::{Deserialize, Serialize};
 

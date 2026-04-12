@@ -35,6 +35,25 @@ The headline integration test is `ask_rule_round_trip_full` in
 opensnitchd, boots the bridge, drives a full AskRule → pending row →
 setVerdict → NotificationReply round trip through the WebSocket.
 
+## Architecture
+
+The bridge is a Rust workspace member that exposes two server sockets on
+loopback:
+
+- **gRPC `protocol.UI` server** — opensnitchd dials in here as the gRPC
+  client. The bridge implements `Ping`, `AskRule`, `Subscribe`, `PostAlert`,
+  and the bidi `Notifications` stream. `AskRule` is a blocking unary handler:
+  the bridge inserts a pending row into its in-memory cache, broadcasts it on
+  the WebSocket, awaits the user verdict via a `oneshot`, then translates the
+  verdict into a `Rule` reply.
+- **WebSocket server** — the front-end (vendored LS-for-Linux UI in M2,
+  Tauri shell in M3) connects to `/stream` and exchanges Little Snitch v6
+  protocol messages with the bridge.
+
+opensnitchd's `Server.Address` config tells it where to dial. The bridge
+publishes both bound addresses on stdout at startup as `GRPC_LISTEN_ADDR=...`
+and `WS_LISTEN_ADDR=...`.
+
 ## Running the bridge against real opensnitchd
 
 Start opensnitchd in a rootful podman container (it needs `NET_ADMIN`
@@ -51,8 +70,11 @@ podman run -d --rm \
 just run-bridge
 ```
 
-The bridge prints `WS_LISTEN_ADDR=127.0.0.1:NNNNN` to stdout on startup.
-You can poke it with `websocat`:
+The bridge prints `GRPC_LISTEN_ADDR=127.0.0.1:NNNNN` and
+`WS_LISTEN_ADDR=127.0.0.1:NNNNN` to stdout on startup. Set opensnitchd's
+`default-config.json` `Server.Address` field to the bridge's
+`GRPC_LISTEN_ADDR` (e.g. `127.0.0.1:50051`) so the daemon dials in.
+You can poke the WebSocket with `websocat`:
 
 ```bash
 websocat ws://127.0.0.1:NNNNN/stream
@@ -60,7 +82,7 @@ websocat ws://127.0.0.1:NNNNN/stream
 
 Environment variables:
 
-- `SNITCHWATCH_GRPC` — opensnitchd gRPC endpoint (default `http://127.0.0.1:50051`)
+- `SNITCHWATCH_GRPC_BIND` — gRPC bind address (default `127.0.0.1:50051`)
 - `SNITCHWATCH_WS_BIND` — WebSocket bind address (default `127.0.0.1:3031`)
 - `RUST_LOG` — tracing filter, e.g. `info`, `snitchwatch_bridge=debug`
 

@@ -8,7 +8,7 @@
 
 pub mod cache;
 pub mod error;
-pub mod grpc_client;
+pub mod grpc_server;
 pub mod translator;
 pub mod web_assets;
 pub mod ws_messages;

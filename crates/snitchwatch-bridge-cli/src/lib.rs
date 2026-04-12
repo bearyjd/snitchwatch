@@ -6,42 +6,32 @@
 //!
 //! What `run` wires together:
 //!
-//! 1. Binds the WebSocket server on `ws_bind` (defaults to `127.0.0.1:3031`).
-//! 2. Dials the gRPC endpoint at `grpc_url` with exponential backoff.
-//! 3. Opens the `Notifications` bidi stream. Outbound goes through an mpsc
-//!    which is fed by the verdict-round-trip task; inbound is the daemon's
-//!    notification stream.
-//! 4. For each inbound notification, runs [`downstream::translate_notification`]:
-//!    - `Translated::AskRule(row)` → insert into the cache as pending, await
-//!      the `oneshot<Verdict>`, push an `InsertConnectionRows` broadcast so
-//!      the WebSocket UI sees it, then send a `NotificationReply` upstream
-//!      so the daemon unblocks.
-//!    - `Translated::Ignored` → drop.
-//! 5. Inbound WebSocket `ClientMessage`s go through `upstream::apply`, which
+//! 1. Binds the WebSocket server on `ws_bind`.
+//! 2. Binds the gRPC `Ui` server on `grpc_bind` — opensnitchd dials in here.
+//! 3. Inbound `AskRule` RPCs insert a pending row into the cache, broadcast
+//!    it on the WebSocket, and await a `oneshot<Verdict>` from the WS layer.
+//! 4. Inbound WebSocket `ClientMessage`s go through `upstream::apply`, which
 //!    mutates the cache (resolving pending rows by firing the oneshot).
-//!
-//! See the Task 20 note in `downstream.rs` for why ask-rule events ride on
-//! the Notifications stream for M1.
 
 use anyhow::{Context, Result};
-use snitchwatch_bridge::cache::connections::{ConnectionCache, Verdict};
-use snitchwatch_bridge::grpc_client::{GrpcClient, UiClient};
-use snitchwatch_bridge::translator::{downstream, downstream::Translated, upstream};
+use snitchwatch_bridge::cache::connections::ConnectionCache;
+use snitchwatch_bridge::grpc_server::UiService;
+use snitchwatch_bridge::translator::upstream;
 use snitchwatch_bridge::ws_messages::{ClientMessage, ServerMessage};
 use snitchwatch_bridge::ws_server::{WsHandles, WsServer};
-use snitchwatch_proto::protocol::{NotificationReply, NotificationReplyCode};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
-use tokio_stream::wrappers::ReceiverStream;
-use tracing::{error, info, warn};
+use tonic::transport::Server;
+use tracing::{error, info};
 
 /// Runtime configuration for [`run`].
 #[derive(Debug, Clone)]
 pub struct BridgeConfig {
-    /// gRPC endpoint to dial. e.g. `http://127.0.0.1:50051`.
-    pub grpc_url: String,
-    /// Address to bind the WebSocket server on. Defaults to `127.0.0.1:3031`; use port `0` for ephemeral (tests).
+    /// Address to bind the gRPC `Ui` server on. opensnitchd will dial this.
+    /// Use port `0` for ephemeral.
+    pub grpc_bind: SocketAddr,
+    /// Address to bind the WebSocket server on. Use port `0` for ephemeral.
     pub ws_bind: SocketAddr,
     /// Cache capacity (number of recent rows retained).
     pub cache_capacity: usize,
@@ -49,15 +39,20 @@ pub struct BridgeConfig {
 
 impl BridgeConfig {
     pub fn from_env() -> Result<Self> {
-        let grpc_url = std::env::var("SNITCHWATCH_GRPC")
-            .unwrap_or_else(|_| "http://127.0.0.1:50051".to_string());
+        let grpc_bind_str =
+            std::env::var("SNITCHWATCH_GRPC_BIND").unwrap_or_else(|_| "127.0.0.1:0".to_string());
+        let grpc_bind: SocketAddr = grpc_bind_str
+            .parse()
+            .with_context(|| format!("invalid SNITCHWATCH_GRPC_BIND: {grpc_bind_str}"))?;
+
         let ws_bind_str =
-            std::env::var("SNITCHWATCH_WS_BIND").unwrap_or_else(|_| "127.0.0.1:3031".to_string());
+            std::env::var("SNITCHWATCH_WS_BIND").unwrap_or_else(|_| "127.0.0.1:0".to_string());
         let ws_bind: SocketAddr = ws_bind_str
             .parse()
             .with_context(|| format!("invalid SNITCHWATCH_WS_BIND: {ws_bind_str}"))?;
+
         Ok(Self {
-            grpc_url,
+            grpc_bind,
             ws_bind,
             cache_capacity: 10_000,
         })
@@ -67,15 +62,21 @@ impl BridgeConfig {
 /// Handle to a running bridge. Dropping this does **not** shut the bridge
 /// down — call [`RunningBridge::shutdown`] explicitly when you're done.
 pub struct RunningBridge {
-    /// Actual bound WebSocket address (so callers who passed `:0` can discover it).
+    /// Actual bound WebSocket address.
     pub ws_addr: SocketAddr,
-    shutdown_tx: Option<oneshot::Sender<()>>,
+    /// Actual bound gRPC address (so callers who passed `:0` can discover it).
+    pub grpc_addr: SocketAddr,
+    ws_shutdown_tx: Option<oneshot::Sender<()>>,
+    grpc_shutdown_tx: Option<oneshot::Sender<()>>,
 }
 
 impl RunningBridge {
     /// Signal every background task to stop. Safe to call more than once.
     pub fn shutdown(mut self) {
-        if let Some(tx) = self.shutdown_tx.take() {
+        if let Some(tx) = self.ws_shutdown_tx.take() {
+            let _ = tx.send(());
+        }
+        if let Some(tx) = self.grpc_shutdown_tx.take() {
             let _ = tx.send(());
         }
     }
@@ -83,10 +84,8 @@ impl RunningBridge {
 
 /// Start the bridge and return as soon as every background task is running.
 ///
-/// The WebSocket server is up and accepting connections by the time this
-/// returns, but the gRPC `Notifications` stream may still be in the middle
-/// of its initial handshake. That's fine — scripted mock events are buffered
-/// on the server side and replayed once the stream opens.
+/// Both the WebSocket server and the gRPC `Ui` server are bound and accepting
+/// connections by the time this returns. opensnitchd can dial in immediately.
 pub async fn run(config: BridgeConfig) -> Result<RunningBridge> {
     info!(?config, "starting snitchwatch-bridge");
 
@@ -103,57 +102,48 @@ pub async fn run(config: BridgeConfig) -> Result<RunningBridge> {
         inbound: inbound_tx,
     };
     let ws_server = WsServer::new(config.ws_bind, ws_handles);
-    let (listener, ws_addr) = ws_server
+    let (ws_listener, ws_addr) = ws_server
         .bind()
         .await
         .context("failed to bind WebSocket listener")?;
-    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let (ws_shutdown_tx, ws_shutdown_rx) = oneshot::channel::<()>();
 
     tokio::spawn(async move {
         tokio::select! {
-            res = ws_server.serve(listener) => {
+            res = ws_server.serve(ws_listener) => {
                 if let Err(e) = res {
                     error!(error = %e, "ws_server::serve exited");
                 }
             }
-            _ = shutdown_rx => {
+            _ = ws_shutdown_rx => {
                 info!("ws server shutdown signal received");
             }
         }
     });
 
-    // --- gRPC channel + notifications stream --------------------------------
-    let client = GrpcClient::new(config.grpc_url.clone());
-    let channel = client
-        .connect_with_backoff()
+    // --- gRPC Ui server -----------------------------------------------------
+    let grpc_listener = tokio::net::TcpListener::bind(config.grpc_bind)
         .await
-        .context("failed to connect to opensnitchd gRPC")?;
+        .with_context(|| format!("failed to bind gRPC listener on {}", config.grpc_bind))?;
+    let grpc_addr = grpc_listener
+        .local_addr()
+        .context("gRPC listener has no local address")?;
 
-    // Outbound NotificationReply channel: the downstream pump sends replies
-    // into this mpsc, which is wrapped as a Stream and handed to the
-    // Notifications bidi RPC.
-    let (reply_tx, reply_rx) = mpsc::channel::<NotificationReply>(64);
-    let outbound_stream = ReceiverStream::new(reply_rx);
+    let ui_service = UiService::new(cache.clone(), broadcast_tx.clone()).into_server();
+    let (grpc_shutdown_tx, grpc_shutdown_rx) = oneshot::channel::<()>();
 
-    let mut ui_client = UiClient::new(channel);
-    let inbound_stream = ui_client
-        .notifications(outbound_stream)
-        .await
-        .context("failed to open Notifications bidi stream")?
-        .into_inner();
-
-    // --- Downstream pump: notifications → cache → WS broadcast --------------
-    let cache_for_downstream = cache.clone();
-    let broadcast_for_downstream = broadcast_tx.clone();
-    let reply_tx_for_downstream = reply_tx.clone();
     tokio::spawn(async move {
-        downstream_pump(
-            inbound_stream,
-            cache_for_downstream,
-            broadcast_for_downstream,
-            reply_tx_for_downstream,
-        )
-        .await;
+        let incoming = tokio_stream::wrappers::TcpListenerStream::new(grpc_listener);
+        let serve = Server::builder()
+            .add_service(ui_service)
+            .serve_with_incoming_shutdown(incoming, async {
+                let _ = grpc_shutdown_rx.await;
+            });
+        if let Err(e) = serve.await {
+            error!(error = %e, "grpc Ui server exited");
+        } else {
+            info!("grpc Ui server shutdown signal received");
+        }
     });
 
     // --- Upstream pump: WS client messages → cache (→ oneshot resolve) -------
@@ -162,12 +152,7 @@ pub async fn run(config: BridgeConfig) -> Result<RunningBridge> {
         while let Some(msg) = inbound_rx.recv().await {
             let mut cache = cache_for_upstream.lock().await;
             match upstream::apply(&mut cache, msg) {
-                Ok(effect) => {
-                    info!(?effect, "applied upstream effect");
-                    // TODO (M2): perform gRPC side effects here (AddRule,
-                    // DeleteRule, UpdateRule). The verdict side effect is
-                    // already covered by cache.resolve firing the oneshot.
-                }
+                Ok(effect) => info!(?effect, "applied upstream effect"),
                 Err(e) => error!(error = %e, "upstream apply failed"),
             }
         }
@@ -175,101 +160,26 @@ pub async fn run(config: BridgeConfig) -> Result<RunningBridge> {
 
     Ok(RunningBridge {
         ws_addr,
-        shutdown_tx: Some(shutdown_tx),
+        grpc_addr,
+        ws_shutdown_tx: Some(ws_shutdown_tx),
+        grpc_shutdown_tx: Some(grpc_shutdown_tx),
     })
-}
-
-/// Downstream pump: read each Notification, translate, insert-pending into
-/// the cache, broadcast to WS, await the verdict oneshot, then send a
-/// NotificationReply upstream.
-async fn downstream_pump(
-    mut inbound: tonic::Streaming<snitchwatch_proto::protocol::Notification>,
-    cache: Arc<Mutex<ConnectionCache>>,
-    broadcast_tx: broadcast::Sender<ServerMessage>,
-    reply_tx: mpsc::Sender<NotificationReply>,
-) {
-    loop {
-        let msg = match inbound.message().await {
-            Ok(Some(n)) => n,
-            Ok(None) => {
-                info!("notifications stream closed by daemon");
-                return;
-            }
-            Err(e) => {
-                warn!(error = %e, "notifications stream error");
-                return;
-            }
-        };
-
-        let notification_id = msg.id;
-        match downstream::translate_notification(&msg) {
-            Translated::Ignored => {
-                // Nothing to do.
-            }
-            Translated::AskRule(boxed_row) => {
-                let row = *boxed_row;
-                // 1. Insert as pending and grab the verdict receiver.
-                let verdict_rx = {
-                    let mut cache = cache.lock().await;
-                    cache.insert_pending(row.clone())
-                };
-
-                // 2. Broadcast to any connected WS clients so the UI shows it.
-                if broadcast_tx.receiver_count() > 0 {
-                    let broadcast_msg = ServerMessage::InsertConnectionRows {
-                        rows: vec![row.clone()],
-                    };
-                    if let Err(e) = broadcast_tx.send(broadcast_msg) {
-                        warn!(error = %e, "broadcast send failed (no subscribers?)");
-                    }
-                }
-
-                // 3. Spawn a task to await the verdict and send the reply.
-                //    We spawn so a slow user doesn't stall the downstream pump.
-                let reply_tx = reply_tx.clone();
-                tokio::spawn(async move {
-                    match verdict_rx.await {
-                        Ok(verdict) => {
-                            let reply = NotificationReply {
-                                id: notification_id,
-                                code: NotificationReplyCode::Ok as i32,
-                                data: verdict_to_json(verdict),
-                            };
-                            if let Err(e) = reply_tx.send(reply).await {
-                                warn!(error = %e, "failed to send NotificationReply");
-                            }
-                        }
-                        Err(_canceled) => {
-                            warn!(
-                                notification_id,
-                                "verdict oneshot dropped before it was resolved"
-                            );
-                        }
-                    }
-                });
-            }
-        }
-    }
-}
-
-fn verdict_to_json(v: Verdict) -> String {
-    match v {
-        Verdict::Allow => r#"{"verdict":"allow"}"#.to_string(),
-        Verdict::Deny => r#"{"verdict":"deny"}"#.to_string(),
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn verdict_allow_serializes() {
-        assert_eq!(verdict_to_json(Verdict::Allow), r#"{"verdict":"allow"}"#);
-    }
-
-    #[test]
-    fn verdict_deny_serializes() {
-        assert_eq!(verdict_to_json(Verdict::Deny), r#"{"verdict":"deny"}"#);
+    #[tokio::test]
+    async fn run_binds_both_ports_and_shutdown_works() {
+        let cfg = BridgeConfig {
+            grpc_bind: "127.0.0.1:0".parse().unwrap(),
+            ws_bind: "127.0.0.1:0".parse().unwrap(),
+            cache_capacity: 64,
+        };
+        let bridge = run(cfg).await.expect("run failed");
+        assert!(bridge.ws_addr.port() != 0);
+        assert!(bridge.grpc_addr.port() != 0);
+        bridge.shutdown();
     }
 }

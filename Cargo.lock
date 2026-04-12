@@ -672,13 +672,13 @@ dependencies = [
 name = "mock-opensnitchd"
 version = "0.1.0"
 dependencies = [
- "async-stream",
  "prost",
+ "snitchwatch-bridge",
  "snitchwatch-proto",
+ "thiserror 1.0.69",
  "tokio",
  "tokio-stream",
  "tonic",
- "tracing",
 ]
 
 [[package]]
@@ -1251,6 +1251,7 @@ name = "snitchwatch-bridge"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-stream",
  "axum",
  "futures-util",
  "mime_guess",
@@ -1263,6 +1264,7 @@ dependencies = [
  "snitchwatch-proto",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-stream",
  "tokio-tungstenite",
  "tonic",
  "tower 0.5.3",
