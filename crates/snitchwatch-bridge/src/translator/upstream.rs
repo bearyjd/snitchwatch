@@ -4,6 +4,9 @@
 //! and returns an `UpstreamEffect` describing the side effect the bridge
 //! orchestrator should perform against the gRPC client.
 
+use std::sync::Arc;
+
+use crate::blocklists::BlocklistsManager;
 use crate::cache::connections::{ConnectionCache, Verdict};
 use crate::ws_messages::{ClientMessage, VerdictAction};
 
@@ -67,6 +70,81 @@ pub fn apply(
         | ClientMessage::UnsubscribeBlocklist { .. }
         | ClientMessage::Undo
         | ClientMessage::Redo => Ok(UpstreamEffect::None),
+    }
+}
+
+/// Outcome of routing a blocklist-related ClientMessage to the manager.
+#[derive(Debug, PartialEq)]
+pub enum BlocklistActionOutcome {
+    Subscribed { id: String },
+    Unsubscribed { id: String },
+    Unhandled(Box<ClientMessage>),
+}
+
+/// Route a blocklist ClientMessage to the appropriate BlocklistsManager method.
+pub async fn handle_blocklist_action(
+    mgr: Arc<BlocklistsManager>,
+    action: ClientMessage,
+) -> anyhow::Result<BlocklistActionOutcome> {
+    match action {
+        ClientMessage::SubscribeBlocklist { url } => {
+            let id = mgr.add_subscription(&url).await?;
+            let _ = mgr.refresh_now(&id).await;
+            Ok(BlocklistActionOutcome::Subscribed { id })
+        }
+        ClientMessage::UnsubscribeBlocklist { id } => {
+            mgr.remove_subscription(&id).await?;
+            Ok(BlocklistActionOutcome::Unsubscribed { id })
+        }
+        other => Ok(BlocklistActionOutcome::Unhandled(Box::new(other))),
+    }
+}
+
+#[cfg(test)]
+mod blocklist_action_tests {
+    use super::*;
+    use crate::blocklists::store::BlocklistStore;
+    use crate::blocklists::BlocklistsManager;
+    use crate::ws_messages::ClientMessage;
+    use std::sync::Arc;
+
+    fn manager() -> Arc<BlocklistsManager> {
+        Arc::new(BlocklistsManager::new(Arc::new(
+            BlocklistStore::open_in_memory().unwrap(),
+        )))
+    }
+
+    #[tokio::test]
+    async fn subscribe_blocklist_adds_subscription_to_store() {
+        let mgr = manager();
+        let action = ClientMessage::SubscribeBlocklist {
+            url: "https://example.invalid/hosts.txt".into(),
+        };
+        handle_blocklist_action(mgr.clone(), action).await.unwrap();
+        let subs = mgr.store().list_subscriptions().unwrap();
+        assert_eq!(subs.len(), 1);
+        assert_eq!(subs[0].url, "https://example.invalid/hosts.txt");
+    }
+
+    #[tokio::test]
+    async fn unsubscribe_blocklist_removes_subscription() {
+        let mgr = manager();
+        let id = mgr
+            .add_subscription("https://example.invalid/hosts.txt")
+            .await
+            .unwrap();
+        handle_blocklist_action(mgr.clone(), ClientMessage::UnsubscribeBlocklist { id })
+            .await
+            .unwrap();
+        assert!(mgr.store().list_subscriptions().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn non_blocklist_action_is_returned_unhandled() {
+        let mgr = manager();
+        let action = ClientMessage::Undo;
+        let outcome = handle_blocklist_action(mgr.clone(), action).await.unwrap();
+        assert_eq!(outcome, BlocklistActionOutcome::Unhandled(Box::new(ClientMessage::Undo)));
     }
 }
 
