@@ -5,6 +5,7 @@ members = [
     "crates/snitchwatch-spike",
     "crates/snitchwatch-bridge",
     "crates/snitchwatch-bridge-cli",
+    "crates/snitchwatch-tauri",
     "tests/mock_opensnitchd",
     "tests/integration",
 ]

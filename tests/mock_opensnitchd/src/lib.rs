@@ -124,7 +124,9 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let cache = Arc::new(Mutex::new(ConnectionCache::new(64)));
         let (tx, _rx) = broadcast::channel::<ServerMessage>(16);
-        let svc = UiService::new(cache, tx).into_server();
+        let tray_pub = Arc::new(snitchwatch_bridge::tray_state::TrayStatePublisher::new());
+        let notice_bus = Arc::new(snitchwatch_bridge::notice::NoticeBus::new());
+        let svc = UiService::new(cache, tx, tray_pub, notice_bus).into_server();
         tokio::spawn(async move {
             Server::builder()
                 .add_service(svc)

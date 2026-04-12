@@ -9,7 +9,9 @@
 pub mod cache;
 pub mod error;
 pub mod grpc_server;
+pub mod notice;
 pub mod translator;
+pub mod tray_state;
 pub mod web_assets;
 pub mod ws_messages;
 pub mod ws_server;

@@ -16,12 +16,14 @@
 use anyhow::{Context, Result};
 use snitchwatch_bridge::cache::connections::ConnectionCache;
 use snitchwatch_bridge::grpc_server::UiService;
+use snitchwatch_bridge::notice::{Notice, NoticeBus};
 use snitchwatch_bridge::translator::upstream;
+use snitchwatch_bridge::tray_state::{TrayState, TrayStatePublisher};
 use snitchwatch_bridge::ws_messages::{ClientMessage, ServerMessage};
 use snitchwatch_bridge::ws_server::{WsHandles, WsServer};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
+use tokio::sync::{broadcast, mpsc, oneshot, watch, Mutex};
 use tonic::transport::Server;
 use tracing::{error, info};
 
@@ -66,6 +68,10 @@ pub struct RunningBridge {
     pub ws_addr: SocketAddr,
     /// Actual bound gRPC address (so callers who passed `:0` can discover it).
     pub grpc_addr: SocketAddr,
+    /// Receiver for tray icon state changes published by the bridge.
+    pub tray_rx: watch::Receiver<TrayState>,
+    /// Receiver for desktop notifications published by the bridge.
+    pub notice_rx: broadcast::Receiver<Notice>,
     ws_shutdown_tx: Option<oneshot::Sender<()>>,
     grpc_shutdown_tx: Option<oneshot::Sender<()>>,
 }
@@ -129,7 +135,13 @@ pub async fn run(config: BridgeConfig) -> Result<RunningBridge> {
         .local_addr()
         .context("gRPC listener has no local address")?;
 
-    let ui_service = UiService::new(cache.clone(), broadcast_tx.clone()).into_server();
+    let tray_pub = Arc::new(TrayStatePublisher::new());
+    let notice_bus = Arc::new(NoticeBus::new());
+    let tray_rx = tray_pub.subscribe();
+    let notice_rx = notice_bus.subscribe();
+
+    let ui_service =
+        UiService::new(cache.clone(), broadcast_tx.clone(), tray_pub, notice_bus).into_server();
     let (grpc_shutdown_tx, grpc_shutdown_rx) = oneshot::channel::<()>();
 
     tokio::spawn(async move {
@@ -161,6 +173,8 @@ pub async fn run(config: BridgeConfig) -> Result<RunningBridge> {
     Ok(RunningBridge {
         ws_addr,
         grpc_addr,
+        tray_rx,
+        notice_rx,
         ws_shutdown_tx: Some(ws_shutdown_tx),
         grpc_shutdown_tx: Some(grpc_shutdown_tx),
     })
