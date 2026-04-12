@@ -1,0 +1,7 @@
+# Title: StevenBlack tiny test fixture
+# Generated: 2026-04-11
+127.0.0.1 localhost
+0.0.0.0 doubleclick.net
+0.0.0.0 google-analytics.com
+0.0.0.0 facebook.net
+0.0.0.0 scorecardresearch.com
