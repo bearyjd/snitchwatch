@@ -1,0 +1,53 @@
+#onboarding-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(15, 22, 38, 0.92);
+    color: #f6f8fc;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 10000;
+    font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+#onboarding-overlay[hidden] {
+    display: none;
+}
+
+#onboarding-overlay .card {
+    max-width: 480px;
+    padding: 2.5rem;
+    background: #0d6abf;
+    border-radius: 12px;
+    box-shadow: 0 30px 60px rgba(0, 0, 0, 0.4);
+}
+
+#onboarding-overlay h1 {
+    margin: 0 0 0.75rem 0;
+    font-size: 1.4rem;
+    font-weight: 600;
+}
+
+#onboarding-overlay p {
+    margin: 0 0 1.5rem 0;
+    line-height: 1.5;
+    opacity: 0.92;
+}
+
+#onboarding-overlay button {
+    appearance: none;
+    border: none;
+    background: #72c419;
+    color: #06121f;
+    font-weight: 600;
+    padding: 0.75rem 1.25rem;
+    border-radius: 6px;
+    cursor: pointer;
+    margin-right: 0.5rem;
+}
+
+#onboarding-overlay button.secondary {
+    background: transparent;
+    border: 1px solid rgba(255, 255, 255, 0.4);
+    color: #f6f8fc;
+}
