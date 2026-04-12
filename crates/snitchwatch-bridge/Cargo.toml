@@ -31,3 +31,5 @@ async-trait = { workspace = true }
 [dev-dependencies]
 proptest = { workspace = true }
 tower = { version = "0.5", features = ["util"] }
+tokio-tungstenite = { workspace = true }
+futures-util = { workspace = true }
