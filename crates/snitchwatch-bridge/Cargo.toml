@@ -26,6 +26,7 @@ rusqlite = { workspace = true }
 reqwest = { workspace = true }
 addr = { workspace = true }
 chrono = { workspace = true }
+async-trait = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

@@ -38,3 +38,4 @@ rusqlite = { version = "0.32", features = ["bundled", "chrono"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "gzip"] }
 addr = "0.15"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+async-trait = "0.1"
