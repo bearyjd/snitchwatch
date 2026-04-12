@@ -543,9 +543,18 @@ Scripted scenario list, run manually on a Bazzite VM with real opensnitchd in th
 | **✅ M1.5 — Topology Flip** | Inverts gRPC topology to match real opensnitchd protocol; deletes JSON envelope; mock becomes client. | Bridge binds gRPC `Ui` server; opensnitchd dials in as the gRPC client; all tests pass with corrected topology. |
 | **✅ M2 — Vendored UI** | Pull `web/`, run rebrand script, serve it from the bridge, point a real browser at it. No Tauri yet — just a browser tab. | Open `http://127.0.0.1:3031/` in Firefox, see the LS UI rendered, see live connections from real opensnitchd, click Allow/Deny in the inspector and have it work. |
 | **✅ M3 — Tauri shell** | Wrap M2 in a native window with tray icon, autostart, notifications. WS still on a fixed local port for debugging. | A real desktop app you can install and use. First version a non-developer could try. |
-| **M4 — Blocklists** | Subscription manager, hosts-file fetcher, deny-rule materializer, Blocklists tab fully wired. | Subscribe to StevenBlack/hosts, watch a tracker get blocked. |
+| **M4 — Blocklists** ✅ | Subscription manager, hosts-file fetcher, deny-rule materializer, Blocklists tab fully wired. | Subscribe to StevenBlack/hosts, watch a tracker get blocked. |
 | **M5 — Packaging** | Flatpak manifest, quadlet, install script, first-run wizard, all failure-mode handling wired up. | Fresh Bazzite VM → run `install.sh` → working Snitchwatch with no manual steps. |
 | **M6 — Public** | Tighten ephemeral port to Option A, document the upgrade path to Option C, polish, README, contributor docs, GitHub release. | A stranger can find the repo, follow the README, and have it running on their own Bazzite box. |
+
+**M4 implementation notes (2026-04-11).** Implemented per
+[`docs/superpowers/plans/2026-04-11-blocklists.md`](../plans/2026-04-11-blocklists.md).
+The bridge owns a SQLite store at `$XDG_DATA_HOME/snitchwatch/blocklists.db`,
+sniffs hosts/domains/ABP formats, materializes entries as `900-band` deny
+rules tagged `__source: blocklist:<id>`, and pushes them through a `RuleSink`
+trait so unit tests can verify materialization without a live daemon. The
+StevenBlack-on-real-daemon smoke test is deferred to the same Plan 7
+environmental verification slot as the M1 deferred items.
 
 ### Deliberately not in v1
 
