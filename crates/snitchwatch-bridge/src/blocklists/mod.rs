@@ -6,9 +6,11 @@ pub mod materializer;
 pub mod store;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use chrono::Utc;
 use tokio::sync::broadcast;
+use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
 use crate::blocklists::fetcher::{build_client, fetch, FetchOutcome};
@@ -107,6 +109,44 @@ impl BlocklistsManager {
         };
         Ok(new_status)
     }
+
+    pub fn spawn_refresh_loop(self: Arc<Self>, tick: Duration) -> JoinHandle<()> {
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(tick);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                let due = match self.due_subscriptions() {
+                    Ok(d) => d,
+                    Err(e) => {
+                        warn!(error = %e, "blocklist scheduler: store read failed");
+                        continue;
+                    }
+                };
+                for id in due {
+                    if let Err(e) = self.refresh_now(&id).await {
+                        warn!(%id, error = %e, "scheduled refresh failed");
+                    }
+                }
+            }
+        })
+    }
+
+    fn due_subscriptions(&self) -> Result<Vec<String>, store::StoreError> {
+        let now = Utc::now();
+        let subs = self.store.list_subscriptions()?;
+        Ok(subs
+            .into_iter()
+            .filter(|s| match s.last_fetched_at {
+                None => true,
+                Some(t) => {
+                    let elapsed = (now - t).num_seconds();
+                    elapsed >= s.refresh_interval_secs
+                }
+            })
+            .map(|s| s.id)
+            .collect())
+    }
 }
 
 fn derive_id(url: &str) -> String {
@@ -176,5 +216,48 @@ mod tests {
         assert_eq!(derive_id("https://x.example/hosts.txt?branch=main"), "hosts");
         assert_eq!(derive_id("https://x.example/StevenBlack/hosts"), "hosts");
         assert_eq!(derive_id("https://x.example/path/with%20space"), "with_20space");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn refresh_loop_drives_pending_subscriptions_with_short_interval() {
+        use std::time::Duration;
+        let store = Arc::new(BlocklistStore::open_in_memory().unwrap());
+        let fixture_path = std::env::current_dir()
+            .unwrap()
+            .join("../../tests/fixtures/blocklists/domains-tiny.txt")
+            .canonicalize()
+            .unwrap();
+        let url = format!("file://{}", fixture_path.display());
+        store
+            .upsert_subscription(&Subscription {
+                id: "tiny".into(),
+                url,
+                display_name: "tiny".into(),
+                format_hint: None,
+                refresh_interval_secs: 1,
+                last_fetched_at: None,
+                last_fetch_status: FetchStatus::Pending,
+                entry_count: 0,
+            })
+            .unwrap();
+        let mgr = Arc::new(BlocklistsManager::new(store.clone()));
+        let mut rx = mgr.subscribe();
+        let handle = BlocklistsManager::spawn_refresh_loop(mgr.clone(), Duration::from_millis(100));
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if tokio::time::Instant::now() >= deadline {
+                handle.abort();
+                panic!("never observed EntriesChanged for tiny");
+            }
+            match tokio::time::timeout(Duration::from_millis(200), rx.recv()).await {
+                Ok(Ok(BlocklistEvent::EntriesChanged { subscription_id })) if subscription_id == "tiny" => break,
+                Ok(Ok(_)) => continue,
+                Ok(Err(_)) => continue,
+                Err(_) => continue,
+            }
+        }
+        handle.abort();
+        let entries = store.list_entries("tiny").unwrap();
+        assert!(entries.contains(&"doubleclick.net".to_string()));
     }
 }

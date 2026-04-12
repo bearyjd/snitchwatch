@@ -36,6 +36,14 @@ pub fn build_client() -> Client {
 
 pub async fn fetch(client: &Client, url: &str) -> FetchOutcome {
     debug!(url, "blocklist fetch begin");
+    if let Some(path) = url.strip_prefix("file://") {
+        return match tokio::fs::read_to_string(path).await {
+            Ok(body) => process_body(&body),
+            Err(e) => FetchOutcome::Failed {
+                reason: format!("file://{path}: {e}"),
+            },
+        };
+    }
     let resp = match client.get(url).send().await {
         Ok(r) => r,
         Err(e) => {
