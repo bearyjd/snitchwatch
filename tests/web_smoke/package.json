@@ -1,0 +1,14 @@
+{
+  "name": "snitchwatch-web-smoke",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Playwright smoke tests for the bridge-served vendored UI.",
+  "scripts": {
+    "test": "playwright test",
+    "test:headed": "playwright test --headed",
+    "install-browsers": "playwright install firefox"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.47.0"
+  }
+}

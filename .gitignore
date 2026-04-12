@@ -5,3 +5,7 @@ Cargo.lock.bak
 .idea/
 *.swp
 .DS_Store
+
+tests/web_smoke/node_modules/
+tests/web_smoke/playwright-report/
+tests/web_smoke/test-results/
