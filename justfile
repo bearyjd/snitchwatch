@@ -54,3 +54,12 @@ tauri-smoke:
 # One-time install of the Playwright deps
 tauri-smoke-install:
     cd tests/tauri_smoke && npm install && npx playwright install firefox
+
+# Serve test fixtures over HTTP for manual blocklist subscription smoke testing.
+blocklist-fixture-server:
+    cd tests/fixtures/blocklists && python3 -m http.server 8731
+
+# Run only the blocklist test suite.
+test-blocklists:
+    cargo test -p snitchwatch-bridge blocklists -- --nocapture
+    cargo test -p snitchwatch-bridge --test blocklists_e2e -- --nocapture

@@ -111,6 +111,36 @@ Panics are written to `$XDG_STATE_HOME/snitchwatch/crash.log` (default
 `~/.local/state/snitchwatch/crash.log`). View the last 200 lines from the
 **Diagnostics** tab.
 
+## M4 — Subscribe to a blocklist
+
+Snitchwatch ships its own blocklist subscription manager. To smoke-test it
+end-to-end against the local fixture set:
+
+```bash
+just blocklist-fixture-server &       # serves tests/fixtures/blocklists/ on :8731
+cargo run -p snitchwatch-bridge-cli   # bridge boots on 127.0.0.1:3031
+```
+
+In another terminal, send a `subscribeBlocklist` action over the WS:
+
+```bash
+websocat ws://127.0.0.1:3031/stream <<EOF
+{"action":"subscribeBlocklist","url":"http://127.0.0.1:8731/domains-tiny.txt"}
+EOF
+```
+
+You should immediately see two server messages: `setBlocklists` (with the new
+subscription) and `setBlocklistEntries` (with the parsed hosts). The bridge
+also pushes 5 deny rules into opensnitchd in the `900-blocklist:domains-tiny:`
+band — visible via `opensnitchd-cli list-rules` if you have a real daemon
+attached.
+
+To run the blocklist test suite in isolation:
+
+```bash
+just test-blocklists
+```
+
 ## Workspace layout
 
 ```text

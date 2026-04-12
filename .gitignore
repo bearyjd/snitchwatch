@@ -14,3 +14,8 @@ tests/tauri_smoke/node_modules
 tests/tauri_smoke/playwright-report
 tests/tauri_smoke/test-results
 crates/snitchwatch-tauri/gen/
+
+# Blocklist database written during ad-hoc test runs (in-memory in unit tests)
+**/blocklists.db
+**/blocklists.db-wal
+**/blocklists.db-shm
