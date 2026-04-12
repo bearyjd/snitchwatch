@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { spawn, ChildProcess, spawnSync } from 'node:child_process';
+import { spawn, ChildProcess } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 
 let bridge: ChildProcess;
