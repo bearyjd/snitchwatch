@@ -5,8 +5,10 @@
 //! `grpc_client.rs` and `translator/downstream.rs` envelope hack.
 
 use crate::cache::connections::ConnectionCache;
+use crate::notice::NoticeBus;
 use crate::translator::connection::connection_to_row;
 use crate::translator::verdict::verdict_to_rule;
+use crate::tray_state::TrayStatePublisher;
 use crate::ws_messages::ServerMessage;
 use snitchwatch_proto::protocol::ui_server::{Ui, UiServer};
 use snitchwatch_proto::protocol::{
@@ -27,17 +29,25 @@ pub struct UiService {
     cache: Arc<Mutex<ConnectionCache>>,
     broadcast: broadcast::Sender<ServerMessage>,
     next_ask_id: Arc<AtomicU64>,
+    // Stored for future use by M3+ gRPC handlers; not yet read.
+    #[allow(dead_code)]
+    tray_pub: Arc<TrayStatePublisher>,
+    notice_bus: Arc<NoticeBus>,
 }
 
 impl UiService {
     pub fn new(
         cache: Arc<Mutex<ConnectionCache>>,
         broadcast: broadcast::Sender<ServerMessage>,
+        tray_pub: Arc<TrayStatePublisher>,
+        notice_bus: Arc<NoticeBus>,
     ) -> Self {
         Self {
             cache,
             broadcast,
             next_ask_id: Arc::new(AtomicU64::new(1)),
+            tray_pub,
+            notice_bus,
         }
     }
 
@@ -71,6 +81,12 @@ impl Ui for UiService {
                 warn!(error = %e, "broadcast send failed");
             }
         }
+
+        // Notify desktop (Tauri shell shows a notification bubble).
+        self.notice_bus.send(crate::notice::Notice::Pending {
+            row_id: ask_id,
+            process: conn.process_path.clone(),
+        });
 
         let verdict = verdict_rx
             .await
@@ -145,7 +161,9 @@ mod tests {
 
         let cache = Arc::new(Mutex::new(ConnectionCache::new(64)));
         let (tx, _rx) = broadcast::channel(16);
-        let svc = UiService::new(cache, tx).into_server();
+        let tray_pub = Arc::new(crate::tray_state::TrayStatePublisher::new());
+        let notice_bus = Arc::new(crate::notice::NoticeBus::new());
+        let svc = UiService::new(cache, tx, tray_pub, notice_bus).into_server();
 
         tokio::spawn(async move {
             Server::builder()
@@ -208,7 +226,9 @@ mod tests {
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let svc = UiService::new(cache.clone(), tx).into_server();
+        let tray_pub = Arc::new(crate::tray_state::TrayStatePublisher::new());
+        let notice_bus = Arc::new(crate::notice::NoticeBus::new());
+        let svc = UiService::new(cache.clone(), tx, tray_pub, notice_bus).into_server();
         tokio::spawn(async move {
             Server::builder()
                 .add_service(svc)
@@ -263,7 +283,9 @@ mod tests {
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let svc = UiService::new(cache.clone(), tx).into_server();
+        let tray_pub = Arc::new(crate::tray_state::TrayStatePublisher::new());
+        let notice_bus = Arc::new(crate::notice::NoticeBus::new());
+        let svc = UiService::new(cache.clone(), tx, tray_pub, notice_bus).into_server();
         tokio::spawn(async move {
             Server::builder()
                 .add_service(svc)
@@ -312,7 +334,9 @@ mod tests {
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let svc = UiService::new(cache.clone(), tx).into_server();
+        let tray_pub = Arc::new(crate::tray_state::TrayStatePublisher::new());
+        let notice_bus = Arc::new(crate::notice::NoticeBus::new());
+        let svc = UiService::new(cache.clone(), tx, tray_pub, notice_bus).into_server();
         tokio::spawn(async move {
             Server::builder()
                 .add_service(svc)
