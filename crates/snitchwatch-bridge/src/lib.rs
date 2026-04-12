@@ -9,6 +9,7 @@
 pub mod blocklists;
 pub mod cache;
 pub mod error;
+pub mod grpc_client;
 pub mod grpc_server;
 pub mod notice;
 pub mod translator;
