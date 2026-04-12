@@ -260,4 +260,58 @@ mod tests {
         let entries = store.list_entries("tiny").unwrap();
         assert!(entries.contains(&"doubleclick.net".to_string()));
     }
+
+    #[tokio::test]
+    async fn failed_refresh_preserves_prior_entries() {
+        let store = Arc::new(BlocklistStore::open_in_memory().unwrap());
+        let good = std::env::current_dir()
+            .unwrap()
+            .join("../../tests/fixtures/blocklists/domains-tiny.txt")
+            .canonicalize()
+            .unwrap();
+        store
+            .upsert_subscription(&Subscription {
+                id: "preserve".into(),
+                url: format!("file://{}", good.display()),
+                display_name: "preserve".into(),
+                format_hint: None,
+                refresh_interval_secs: 86_400,
+                last_fetched_at: None,
+                last_fetch_status: FetchStatus::Pending,
+                entry_count: 0,
+            })
+            .unwrap();
+        let mgr = BlocklistsManager::new(store.clone());
+        mgr.refresh_now("preserve").await.unwrap();
+        let count_before = store.list_entries("preserve").unwrap().len();
+        assert!(count_before > 0, "priming failed");
+
+        // Now point the URL at a file that does not exist and refresh again.
+        store
+            .upsert_subscription(&Subscription {
+                id: "preserve".into(),
+                url: "file:///definitely/does/not/exist.txt".into(),
+                display_name: "preserve".into(),
+                format_hint: None,
+                refresh_interval_secs: 86_400,
+                last_fetched_at: Some(Utc::now() - chrono::Duration::seconds(100_000)),
+                last_fetch_status: FetchStatus::Ok,
+                entry_count: count_before as i64,
+            })
+            .unwrap();
+        let status = mgr.refresh_now("preserve").await.unwrap();
+        match status {
+            FetchStatus::Failed { reason } => {
+                assert!(reason.contains("does/not/exist") || reason.contains("No such file"));
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        // Critical: entries must STILL be present.
+        let entries_after = store.list_entries("preserve").unwrap();
+        assert_eq!(
+            entries_after.len(),
+            count_before,
+            "failed fetch must not clear cached entries"
+        );
+    }
 }
