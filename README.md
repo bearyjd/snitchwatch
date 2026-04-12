@@ -64,6 +64,39 @@ Environment variables:
 - `SNITCHWATCH_WS_BIND` — WebSocket bind address (default `127.0.0.1:3031`)
 - `RUST_LOG` — tracing filter, e.g. `info`, `snitchwatch_bridge=debug`
 
+## Try it in your browser (M2 milestone)
+
+Snitchwatch's M2 milestone serves the vendored Little Snitch for Linux UI directly
+from the bridge — no Tauri shell yet, just a browser tab.
+
+1. Build the bridge once:
+   ```bash
+   cargo build -p snitchwatch-bridge-cli
+   ```
+2. Run it:
+   ```bash
+   cargo run -p snitchwatch-bridge-cli
+   ```
+3. The bridge prints its listen address on startup:
+   ```text
+   WS_LISTEN_ADDR=127.0.0.1:3031
+
+   → open http://127.0.0.1:3031/ in your browser
+   ```
+4. Open that URL in Firefox (or any modern browser). The Connections, Rules,
+   Blocklists, and Traffic tabs render against the vendored SPA.
+
+To exercise the live AskRule round trip without a real opensnitchd, point the
+helper binary at the bridge's gRPC address:
+
+```bash
+cargo run --quiet --manifest-path tests/web_smoke/helpers/Cargo.toml -- \
+  --grpc 127.0.0.1:50321 --process /usr/bin/curl --host example.com --port 443
+```
+
+The browser tab shows the pending row. Click Allow or Deny in the inspector and
+the helper exits with the synthesized rule.
+
 ## Workspace layout
 
 ```text
