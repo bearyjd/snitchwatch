@@ -9,3 +9,8 @@ Cargo.lock.bak
 tests/web_smoke/node_modules/
 tests/web_smoke/playwright-report/
 tests/web_smoke/test-results/
+
+tests/tauri_smoke/node_modules
+tests/tauri_smoke/playwright-report
+tests/tauri_smoke/test-results
+crates/snitchwatch-tauri/gen/
