@@ -8,12 +8,14 @@ pub mod store;
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use chrono::Utc;
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
 use crate::blocklists::fetcher::{build_client, fetch, FetchOutcome};
+use crate::blocklists::materializer::{materialize_batch, MaterializedRule};
 use crate::blocklists::store::{BlocklistStore, FetchStatus, Subscription};
 
 /// Events emitted whenever blocklist state changes. The translator subscribes
@@ -25,10 +27,37 @@ pub enum BlocklistEvent {
     StatusChanged { subscription_id: String },
 }
 
+/// Sink that receives materialized deny rules after a successful blocklist
+/// refresh. The default implementation is [`NoopRuleSink`]; replace it with
+/// [`BlocklistsManager::with_rule_sink`] to wire in the real opensnitchd writer.
+#[async_trait]
+pub trait RuleSink: Send + Sync + 'static {
+    async fn replace_blocklist_rules(
+        &self,
+        list_id: &str,
+        rules: Vec<MaterializedRule>,
+    ) -> anyhow::Result<()>;
+}
+
+/// No-op sink used when no real sink has been wired in.
+pub struct NoopRuleSink;
+
+#[async_trait]
+impl RuleSink for NoopRuleSink {
+    async fn replace_blocklist_rules(
+        &self,
+        _list_id: &str,
+        _rules: Vec<MaterializedRule>,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
 pub struct BlocklistsManager {
     store: Arc<BlocklistStore>,
     bus: broadcast::Sender<BlocklistEvent>,
     client: reqwest::Client,
+    rule_sink: Arc<dyn RuleSink>,
 }
 
 impl BlocklistsManager {
@@ -38,7 +67,14 @@ impl BlocklistsManager {
             store,
             bus,
             client: build_client(),
+            rule_sink: Arc::new(NoopRuleSink),
         }
+    }
+
+    /// Replace the default no-op rule sink with a real implementation.
+    pub fn with_rule_sink(mut self, sink: Arc<dyn RuleSink>) -> Self {
+        self.rule_sink = sink;
+        self
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<BlocklistEvent> {
@@ -88,6 +124,10 @@ impl BlocklistsManager {
                 sub.last_fetched_at = Some(Utc::now());
                 sub.last_fetch_status = FetchStatus::Ok;
                 self.store.upsert_subscription(&sub)?;
+                let materialized = materialize_batch(&sub.id, &hosts);
+                if let Err(e) = self.rule_sink.replace_blocklist_rules(&sub.id, materialized).await {
+                    warn!(id = %sub.id, error = %e, "rule sink push failed; entries cached but not enforced");
+                }
                 let _ = self.bus.send(BlocklistEvent::EntriesChanged {
                     subscription_id: sub.id.clone(),
                 });
@@ -171,6 +211,37 @@ fn derive_id(url: &str) -> String {
 
 fn derive_display_name(url: &str) -> String {
     derive_id(url).replace('_', " ")
+}
+
+#[cfg(test)]
+pub mod test_helpers {
+    use std::sync::Arc;
+    use crate::blocklists::store::{BlocklistStore, FetchStatus, Subscription};
+    use crate::blocklists::BlocklistsManager;
+
+    pub fn seeded_manager(seeds: &[(&str, usize)]) -> BlocklistsManager {
+        let store = Arc::new(BlocklistStore::open_in_memory().unwrap());
+        for (id, n_entries) in seeds {
+            store
+                .upsert_subscription(&Subscription {
+                    id: (*id).to_string(),
+                    url: format!("https://example.invalid/{id}.txt"),
+                    display_name: (*id).to_string(),
+                    format_hint: None,
+                    refresh_interval_secs: 86_400,
+                    last_fetched_at: None,
+                    last_fetch_status: FetchStatus::Ok,
+                    entry_count: *n_entries as i64,
+                })
+                .unwrap();
+            let hosts: Vec<String> = (0..*n_entries)
+                .map(|i| format!("host{i}.{id}.example"))
+                .collect();
+            let host_refs: Vec<&str> = hosts.iter().map(String::as_str).collect();
+            store.replace_entries(id, &host_refs).unwrap();
+        }
+        BlocklistsManager::new(store)
+    }
 }
 
 #[cfg(test)]
@@ -259,6 +330,55 @@ mod tests {
         handle.abort();
         let entries = store.list_entries("tiny").unwrap();
         assert!(entries.contains(&"doubleclick.net".to_string()));
+    }
+
+    #[tokio::test]
+    async fn refresh_pushes_materialized_rules_to_sink() {
+        use crate::blocklists::materializer::MaterializedRule;
+        use std::sync::Mutex as StdMutex;
+
+        #[derive(Default)]
+        struct CapturingSink {
+            calls: StdMutex<Vec<Vec<MaterializedRule>>>,
+        }
+
+        #[async_trait]
+        impl super::RuleSink for CapturingSink {
+            async fn replace_blocklist_rules(
+                &self,
+                _list_id: &str,
+                rules: Vec<MaterializedRule>,
+            ) -> anyhow::Result<()> {
+                self.calls.lock().unwrap().push(rules);
+                Ok(())
+            }
+        }
+
+        let store = Arc::new(BlocklistStore::open_in_memory().unwrap());
+        let fixture = std::env::current_dir()
+            .unwrap()
+            .join("../../tests/fixtures/blocklists/domains-tiny.txt")
+            .canonicalize()
+            .unwrap();
+        store
+            .upsert_subscription(&Subscription {
+                id: "tiny".into(),
+                url: format!("file://{}", fixture.display()),
+                display_name: "tiny".into(),
+                format_hint: None,
+                refresh_interval_secs: 86_400,
+                last_fetched_at: None,
+                last_fetch_status: FetchStatus::Pending,
+                entry_count: 0,
+            })
+            .unwrap();
+        let sink: Arc<CapturingSink> = Arc::new(CapturingSink::default());
+        let mgr = BlocklistsManager::new(store).with_rule_sink(sink.clone());
+        mgr.refresh_now("tiny").await.unwrap();
+        let calls = sink.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1, "expected one push call");
+        assert!(calls[0].len() > 0, "domains-tiny.txt should have hosts");
+        assert!(calls[0][0].name.starts_with("900-blocklist:tiny:"));
     }
 
     #[tokio::test]
