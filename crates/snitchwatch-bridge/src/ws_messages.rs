@@ -55,19 +55,25 @@ pub enum ServerMessage {
         rules: Vec<serde_json::Value>,
     },
     SetBlocklists {
-        blocklists: Vec<serde_json::Value>,
+        blocklists: Vec<BlocklistSummary>,
     },
     SetBlocklistDetails {
-        details: serde_json::Value,
+        details: BlocklistSummary,
     },
     SetBlocklistEntries {
-        entries: Vec<serde_json::Value>,
+        subscription_id: String,
+        entries: Vec<BlocklistEntry>,
     },
     SetBlocklistEntryLocation {
-        location: serde_json::Value,
+        subscription_id: String,
+        host: String,
+        line_number: u64,
     },
     SetBlocklistStatus {
-        status: serde_json::Value,
+        subscription_id: String,
+        status: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        last_failure_reason: Option<String>,
     },
     SetConnectionsStatus {
         status: ConnectionsStatus,
@@ -186,6 +192,26 @@ pub struct AboutInfo {
     pub ebpf_commit: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BlocklistSummary {
+    pub id: String,
+    pub display_name: String,
+    pub url: String,
+    pub entry_count: i64,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_updated_iso8601: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_failure_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BlocklistEntry {
+    pub host: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -254,5 +280,55 @@ mod tests {
             }
             _ => panic!("wrong variant"),
         }
+    }
+}
+
+#[cfg(test)]
+mod blocklist_message_tests {
+    use super::*;
+
+    #[test]
+    fn set_blocklists_serializes_to_camel_case_action() {
+        let msg = ServerMessage::SetBlocklists {
+            blocklists: vec![BlocklistSummary {
+                id: "stevenblack".into(),
+                display_name: "StevenBlack".into(),
+                url: "https://x.example/hosts".into(),
+                entry_count: 1234,
+                status: "ok".into(),
+                last_updated_iso8601: Some("2026-04-11T12:00:00Z".into()),
+                last_failure_reason: None,
+            }],
+        };
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["action"], "setBlocklists");
+        assert_eq!(json["blocklists"][0]["id"], "stevenblack");
+        assert_eq!(json["blocklists"][0]["displayName"], "StevenBlack");
+        assert_eq!(json["blocklists"][0]["entryCount"], 1234);
+    }
+
+    #[test]
+    fn set_blocklist_entries_carries_strongly_typed_entries() {
+        let msg = ServerMessage::SetBlocklistEntries {
+            subscription_id: "stevenblack".into(),
+            entries: vec![
+                BlocklistEntry { host: "doubleclick.net".into() },
+                BlocklistEntry { host: "google-analytics.com".into() },
+            ],
+        };
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["action"], "setBlocklistEntries");
+        assert_eq!(json["subscriptionId"], "stevenblack");
+        assert_eq!(json["entries"][0]["host"], "doubleclick.net");
+    }
+
+    #[test]
+    fn subscribe_blocklist_action_round_trips() {
+        let action = ClientMessage::SubscribeBlocklist {
+            url: "https://x.example/hosts".into(),
+        };
+        let json = serde_json::to_string(&action).unwrap();
+        let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, action);
     }
 }
