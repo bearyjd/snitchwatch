@@ -14,6 +14,8 @@
 //!    mutates the cache (resolving pending rows by firing the oneshot).
 
 use anyhow::{Context, Result};
+use snitchwatch_bridge::blocklists::store::BlocklistStore;
+use snitchwatch_bridge::blocklists::BlocklistsManager;
 use snitchwatch_bridge::cache::connections::ConnectionCache;
 use snitchwatch_bridge::grpc_server::UiService;
 use snitchwatch_bridge::notice::{Notice, NoticeBus};
@@ -102,10 +104,17 @@ pub async fn run(config: BridgeConfig) -> Result<RunningBridge> {
     // Shared connection cache (pending-row state + decided-row history).
     let cache = Arc::new(Mutex::new(ConnectionCache::new(config.cache_capacity)));
 
+    // --- BlocklistsManager (in-memory store; callers may swap in a persisted one) ---
+    let blocklists_store = Arc::new(
+        BlocklistStore::open_in_memory().context("failed to open in-memory blocklist store")?,
+    );
+    let blocklists_mgr = Arc::new(BlocklistsManager::new(blocklists_store));
+
     // --- WebSocket server ---------------------------------------------------
     let ws_handles = WsHandles {
         broadcast: broadcast_tx.clone(),
         inbound: inbound_tx,
+        blocklists: blocklists_mgr,
     };
     let ws_server = WsServer::new(config.ws_bind, ws_handles);
     let (ws_listener, ws_addr) = ws_server

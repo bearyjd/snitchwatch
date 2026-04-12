@@ -4,6 +4,7 @@
 //! on 127.0.0.1) and serves the `/stream` endpoint. The Tauri shell reads
 //! the actual bound port after startup and points the webview at it.
 
+use crate::blocklists::BlocklistsManager;
 use crate::web_assets::{serve_asset, serve_fallback, serve_index};
 use crate::ws_messages::{ClientMessage, ServerMessage};
 use axum::{
@@ -13,6 +14,7 @@ use axum::{
     Router,
 };
 use std::net::SocketAddr;
+use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, error, info};
@@ -24,6 +26,8 @@ pub struct WsHandles {
     pub broadcast: broadcast::Sender<ServerMessage>,
     /// Inbound client messages get forwarded here for the bridge to act on.
     pub inbound: mpsc::Sender<ClientMessage>,
+    /// Shared blocklists manager — provides subscription state to WS handlers.
+    pub blocklists: Arc<BlocklistsManager>,
 }
 
 pub struct WsServer {
@@ -34,6 +38,26 @@ pub struct WsServer {
 impl WsServer {
     pub fn new(bind: SocketAddr, handles: WsHandles) -> Self {
         Self { bind, handles }
+    }
+
+    /// Construct a `WsServer` with an explicit `BlocklistsManager`.
+    pub fn new_with_blocklists(
+        bind: SocketAddr,
+        handles: WsHandles,
+        blocklists: Arc<BlocklistsManager>,
+    ) -> Self {
+        Self {
+            bind,
+            handles: WsHandles {
+                blocklists,
+                ..handles
+            },
+        }
+    }
+
+    /// Return a reference to the shared `BlocklistsManager`.
+    pub fn blocklists(&self) -> &Arc<BlocklistsManager> {
+        &self.handles.blocklists
     }
 
     /// Bind the listener and return the actual bound address (so callers can
@@ -113,14 +137,37 @@ async fn handle_socket(socket: WebSocket, handles: WsHandles) {
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn server_binds_to_ephemeral_port() {
+    fn default_handles() -> WsHandles {
         let (broadcast_tx, _) = broadcast::channel(16);
         let (inbound_tx, _) = mpsc::channel(16);
-        let handles = WsHandles {
+        let store = Arc::new(
+            crate::blocklists::store::BlocklistStore::open_in_memory().unwrap(),
+        );
+        WsHandles {
             broadcast: broadcast_tx,
             inbound: inbound_tx,
-        };
+            blocklists: Arc::new(BlocklistsManager::new(store)),
+        }
+    }
+
+    #[tokio::test]
+    async fn server_state_carries_blocklists_manager() {
+        use crate::blocklists::store::BlocklistStore;
+        use crate::blocklists::BlocklistsManager;
+        let store = Arc::new(BlocklistStore::open_in_memory().unwrap());
+        let mgr = Arc::new(BlocklistsManager::new(store));
+        let handles = default_handles();
+        let server = WsServer::new_with_blocklists(
+            "127.0.0.1:0".parse().unwrap(),
+            handles,
+            mgr.clone(),
+        );
+        assert!(Arc::ptr_eq(server.blocklists(), &mgr));
+    }
+
+    #[tokio::test]
+    async fn server_binds_to_ephemeral_port() {
+        let handles = default_handles();
         let server = WsServer::new("127.0.0.1:0".parse().unwrap(), handles);
         let (_listener, addr) = server.bind().await.unwrap();
         assert_ne!(
@@ -136,12 +183,7 @@ mod tests {
         use axum::http::Request;
         use tower::ServiceExt;
 
-        let (broadcast_tx, _) = broadcast::channel(16);
-        let (inbound_tx, _) = mpsc::channel(16);
-        let handles = WsHandles {
-            broadcast: broadcast_tx,
-            inbound: inbound_tx,
-        };
+        let handles = default_handles();
 
         let app = Router::new()
             .route("/stream", get(ws_handler))
@@ -169,12 +211,7 @@ mod tests {
         use axum::http::Request;
         use tower::ServiceExt;
 
-        let (broadcast_tx, _) = broadcast::channel(16);
-        let (inbound_tx, _) = mpsc::channel(16);
-        let handles = WsHandles {
-            broadcast: broadcast_tx,
-            inbound: inbound_tx,
-        };
+        let handles = default_handles();
         let app = Router::new()
             .route("/stream", get(ws_handler))
             .route("/", get(serve_index))
