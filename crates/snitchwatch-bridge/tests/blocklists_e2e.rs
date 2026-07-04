@@ -8,6 +8,7 @@ use futures_util::{SinkExt, StreamExt};
 use snitchwatch_bridge::blocklists::store::BlocklistStore;
 use snitchwatch_bridge::blocklists::BlocklistsManager;
 use snitchwatch_bridge::ws_messages::{ClientMessage, ServerMessage};
+use tokio::net::UnixStream;
 use tokio_tungstenite::tungstenite::Message;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -21,17 +22,27 @@ async fn subscribe_blocklist_via_ws_yields_entries() {
 
     let store = Arc::new(BlocklistStore::open_in_memory().unwrap());
     let mgr = Arc::new(BlocklistsManager::new(store));
-    let (ws_url, _shutdown) =
-        snitchwatch_bridge::ws_server::serve_with_blocklists("127.0.0.1:0".parse().unwrap(), mgr)
+    let socket_dir = tempfile::tempdir().unwrap();
+    let socket_path = socket_dir.path().join("bridge.sock");
+    let (socket_path, token, _shutdown) =
+        snitchwatch_bridge::ws_server::serve_with_blocklists(socket_path, mgr)
             .await
             .expect("bridge boots");
 
     // Brief pause to let the server start accepting.
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    let (mut ws, _resp) = tokio_tungstenite::connect_async(&ws_url)
+    let stream = UnixStream::connect(&socket_path)
+        .await
+        .expect("unix socket connect failed");
+    let (mut ws, _resp) = tokio_tungstenite::client_async("ws://localhost/stream", stream)
         .await
         .expect("ws client connects");
+
+    // Present the handshake token before anything else.
+    ws.send(Message::Text(token.as_str().to_string()))
+        .await
+        .expect("token handshake send failed");
 
     // Subscribe to the file:// blocklist.
     let sub_msg = ClientMessage::SubscribeBlocklist { url: file_url };

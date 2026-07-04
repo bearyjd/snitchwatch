@@ -6,7 +6,8 @@
 //!
 //! What `run` wires together:
 //!
-//! 1. Binds the WebSocket server on `ws_bind`.
+//! 1. Binds the WebSocket server on the Unix domain socket at
+//!    `ws_socket_path` and writes a fresh handshake token alongside it.
 //! 2. Binds the gRPC `Ui` server on `grpc_bind` — opensnitchd dials in here.
 //! 3. Inbound `AskRule` RPCs insert a pending row into the cache, broadcast
 //!    it on the WebSocket, and await a `oneshot<Verdict>` from the WS layer.
@@ -14,6 +15,7 @@
 //!    mutates the cache (resolving pending rows by firing the oneshot).
 
 use anyhow::{Context, Result};
+use snitchwatch_bridge::auth::{self, Token};
 use snitchwatch_bridge::blocklists::store::BlocklistStore;
 use snitchwatch_bridge::blocklists::BlocklistsManager;
 use snitchwatch_bridge::cache::connections::ConnectionCache;
@@ -24,6 +26,7 @@ use snitchwatch_bridge::tray_state::{TrayState, TrayStatePublisher};
 use snitchwatch_bridge::ws_messages::{ClientMessage, ServerMessage};
 use snitchwatch_bridge::ws_server::{WsHandles, WsServer};
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, oneshot, watch, Mutex};
 use tonic::transport::Server;
@@ -35,8 +38,9 @@ pub struct BridgeConfig {
     /// Address to bind the gRPC `Ui` server on. opensnitchd will dial this.
     /// Use port `0` for ephemeral.
     pub grpc_bind: SocketAddr,
-    /// Address to bind the WebSocket server on. Use port `0` for ephemeral.
-    pub ws_bind: SocketAddr,
+    /// Path to the Unix domain socket the WS server binds. Defaults to
+    /// `$XDG_RUNTIME_DIR/snitchwatch/bridge.sock`.
+    pub ws_socket_path: PathBuf,
     /// Cache capacity (number of recent rows retained).
     pub cache_capacity: usize,
 }
@@ -49,15 +53,13 @@ impl BridgeConfig {
             .parse()
             .with_context(|| format!("invalid SNITCHWATCH_GRPC_BIND: {grpc_bind_str}"))?;
 
-        let ws_bind_str =
-            std::env::var("SNITCHWATCH_WS_BIND").unwrap_or_else(|_| "127.0.0.1:0".to_string());
-        let ws_bind: SocketAddr = ws_bind_str
-            .parse()
-            .with_context(|| format!("invalid SNITCHWATCH_WS_BIND: {ws_bind_str}"))?;
+        let ws_socket_path = std::env::var_os("SNITCHWATCH_WS_SOCKET")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| auth::runtime_dir().join("bridge.sock"));
 
         Ok(Self {
             grpc_bind,
-            ws_bind,
+            ws_socket_path,
             cache_capacity: 10_000,
         })
     }
@@ -66,8 +68,13 @@ impl BridgeConfig {
 /// Handle to a running bridge. Dropping this does **not** shut the bridge
 /// down — call [`RunningBridge::shutdown`] explicitly when you're done.
 pub struct RunningBridge {
-    /// Actual bound WebSocket address.
-    pub ws_addr: SocketAddr,
+    /// Unix domain socket path the WS server is listening on.
+    pub ws_socket_path: PathBuf,
+    /// Path to the token file written alongside the socket (mode 0600).
+    pub ws_token_path: PathBuf,
+    /// The handshake token itself, so in-process callers (e.g. the Tauri
+    /// shell, tests) don't have to re-read it from disk.
+    pub ws_token: Token,
     /// Actual bound gRPC address (so callers who passed `:0` can discover it).
     pub grpc_addr: SocketAddr,
     /// Receiver for tray icon state changes published by the bridge.
@@ -111,16 +118,29 @@ pub async fn run(config: BridgeConfig) -> Result<RunningBridge> {
     let blocklists_mgr = Arc::new(BlocklistsManager::new(blocklists_store));
 
     // --- WebSocket server ---------------------------------------------------
+    // Generate a fresh handshake token and write it to a file alongside the
+    // socket (see `snitchwatch_bridge::auth` for why this is a file, not an
+    // env var: a Flatpak-sandboxed GUI client won't share this process's
+    // environment, but can read a file under the same
+    // `$XDG_RUNTIME_DIR/snitchwatch/` the socket lives under).
+    let token = Token::generate();
+    let ws_token_path = config
+        .ws_socket_path
+        .parent()
+        .map(|p| p.join("token"))
+        .unwrap_or_else(|| PathBuf::from("token"));
+    auth::write_token_file(&token, &ws_token_path).context("failed to write token file")?;
+
     let ws_handles = WsHandles {
         broadcast: broadcast_tx.clone(),
         inbound: inbound_tx,
         blocklists: blocklists_mgr,
     };
-    let ws_server = WsServer::new(config.ws_bind, ws_handles);
-    let (ws_listener, ws_addr) = ws_server
+    let ws_server = WsServer::new(config.ws_socket_path.clone(), token.clone(), ws_handles);
+    let ws_listener = ws_server
         .bind()
         .await
-        .context("failed to bind WebSocket listener")?;
+        .context("failed to bind WebSocket unix socket")?;
     let (ws_shutdown_tx, ws_shutdown_rx) = oneshot::channel::<()>();
 
     tokio::spawn(async move {
@@ -180,7 +200,9 @@ pub async fn run(config: BridgeConfig) -> Result<RunningBridge> {
     });
 
     Ok(RunningBridge {
-        ws_addr,
+        ws_socket_path: config.ws_socket_path,
+        ws_token_path,
+        ws_token: token,
         grpc_addr,
         tray_rx,
         notice_rx,
@@ -194,14 +216,16 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn run_binds_both_ports_and_shutdown_works() {
+    async fn run_binds_socket_and_grpc_port_and_shutdown_works() {
+        let dir = tempfile::tempdir().unwrap();
         let cfg = BridgeConfig {
             grpc_bind: "127.0.0.1:0".parse().unwrap(),
-            ws_bind: "127.0.0.1:0".parse().unwrap(),
+            ws_socket_path: dir.path().join("bridge.sock"),
             cache_capacity: 64,
         };
         let bridge = run(cfg).await.expect("run failed");
-        assert!(bridge.ws_addr.port() != 0);
+        assert!(bridge.ws_socket_path.exists());
+        assert!(bridge.ws_token_path.exists());
         assert!(bridge.grpc_addr.port() != 0);
         bridge.shutdown();
     }
