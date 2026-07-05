@@ -17,6 +17,7 @@ fn main() {
         "qml/RulesPage.qml",
         "qml/TrafficPage.qml",
         "qml/OnboardingPage.qml",
+        "qml/DiagnosticsPage.qml",
     ]))
     .file("src/bridge_bindings.rs")
     .file("src/bridge_feed.rs")
@@ -26,5 +27,6 @@ fn main() {
     .file("src/rules_model.rs")
     .file("src/traffic_model.rs")
     .file("src/wizard_controller.rs")
+    .file("src/settings_controller.rs")
     .build();
 }

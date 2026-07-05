@@ -67,6 +67,12 @@ Kirigami.ApplicationWindow {
         id: wizardController
     }
 
+    // Settings & Diagnostics (Tasks 15, 16). Autostart toggle + crash-log
+    // viewer; both are plain-file-backed, no bridge dependency.
+    SettingsController {
+        id: settingsController
+    }
+
     // Guards against pushing the onboarding page more than once and against
     // popping when it was never pushed (e.g. "Continue anyway" already
     // dismissed it before a stray stateChanged fires).
@@ -176,6 +182,12 @@ Kirigami.ApplicationWindow {
             model: trafficModel
         }
     }
+    Component {
+        id: diagnosticsPageComponent
+        DiagnosticsPage {
+            controller: settingsController
+        }
+    }
     // Tracks the last-seen pending count so we only raise on a *new* pending
     // arrival, not on every count change (e.g. 2 -> 3 while already visible).
     property int lastPendingCount: 0
@@ -238,6 +250,11 @@ Kirigami.ApplicationWindow {
                 text: "Traffic"
                 icon.name: "office-chart-line"
                 onTriggered: root.pageStack.replace(trafficPageComponent)
+            },
+            Kirigami.Action {
+                text: "Settings & Diagnostics"
+                icon.name: "settings-configure"
+                onTriggered: root.pageStack.replace(diagnosticsPageComponent)
             }
         ]
     }
