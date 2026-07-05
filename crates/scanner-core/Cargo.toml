@@ -1,0 +1,22 @@
+[package]
+name = "scanner-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Component B (Bazzite security scanner) — userspace-tier drift/anomaly detection core."
+
+[lib]
+name = "scanner_core"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+rusqlite = { workspace = true }
+sha2 = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
