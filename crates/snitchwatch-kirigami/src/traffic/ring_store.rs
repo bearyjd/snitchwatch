@@ -189,4 +189,46 @@ mod tests {
         assert_eq!(format_bytes(0), "0");
         assert_eq!(format_bytes(1_500), "1.5kB");
     }
+
+    #[test]
+    fn bridge_serialized_traffic_events_round_trip_into_the_store() {
+        // Cross-crate end-to-end shape check (bridge TrafficEvents wiring):
+        // build the exact events the bridge's outbound traffic pump would
+        // compute from a connection row's byte counters
+        // (`snitchwatch_bridge::cache::traffic_tracker::TrafficTracker`,
+        // wrapping the same `TrafficBinner` this store wraps), serialize them
+        // the same way the bridge's outbound feed does (plain
+        // `serde_json::to_string`, mirroring
+        // `snitchwatch_kirigami::bridge_dispatch::encode_server`), and
+        // confirm the resulting JSON deserializes and folds into this store
+        // exactly like `TrafficModel::applyServerMessageJson` does in
+        // production.
+        use snitchwatch_bridge::cache::traffic_tracker::TrafficTracker;
+        use snitchwatch_bridge::ws_messages::ConnectionRow;
+
+        let row = ConnectionRow {
+            id: "ask-1".into(),
+            process: "curl".into(),
+            process_path: Some("/usr/bin/curl".into()),
+            dst_host: "example.com".into(),
+            dst_ip: "93.184.216.34".into(),
+            dst_port: 443,
+            protocol: "tcp".into(),
+            direction: "outgoing".into(),
+            action: None,
+            bytes_sent: 1234,
+            bytes_received: 5678,
+            started_at_ms: 0,
+        };
+        let mut tracker = TrafficTracker::new(60);
+        let events = tracker.record_rows(1_000_000_000_000, &[row]);
+        let bridge_msg = ServerMessage::TrafficEvents { events };
+
+        let json = serde_json::to_string(&bridge_msg).expect("bridge-side encode");
+        let decoded: ServerMessage = serde_json::from_str(&json).expect("kirigami-side decode");
+
+        let mut store = TrafficStore::new(60);
+        assert!(store.apply(&decoded));
+        assert_eq!(store.current_rates(), (5678, 1234));
+    }
 }

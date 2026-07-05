@@ -19,6 +19,7 @@ use snitchwatch_bridge::auth::{self, Token};
 use snitchwatch_bridge::blocklists::store::BlocklistStore;
 use snitchwatch_bridge::blocklists::BlocklistsManager;
 use snitchwatch_bridge::cache::connections::ConnectionCache;
+use snitchwatch_bridge::cache::traffic_tracker::TrafficTracker;
 use snitchwatch_bridge::grpc_server::UiService;
 use snitchwatch_bridge::notice::{Notice, NoticeBus};
 use snitchwatch_bridge::translator::upstream;
@@ -30,7 +31,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, oneshot, watch, Mutex};
 use tonic::transport::Server;
-use tracing::{error, info};
+use tracing::{error, info, warn};
+
+/// Rolling window kept by the traffic pump's [`TrafficTracker`], matching
+/// `snitchwatch-kirigami::traffic::ring_store::DEFAULT_WINDOW_SECONDS` (the
+/// consumer side of the same underlying `TrafficBinner`).
+const TRAFFIC_WINDOW_SECONDS: usize = 300;
 
 /// Runtime configuration for [`run`].
 #[derive(Debug, Clone)]
@@ -210,6 +216,48 @@ pub async fn run(config: BridgeConfig) -> Result<RunningBridge> {
         }
     });
 
+    // --- Traffic pump: connection-row byte counters → binned TrafficEvents --
+    // Additive: subscribes to the same outbound broadcast every other
+    // consumer uses and folds each connection-row batch's byte counters
+    // through `TrafficTracker` (wrapping the existing, already-tested
+    // `TrafficBinner`), re-broadcasting the result as `TrafficEvents` — the
+    // one typed traffic variant the native Kirigami shell's `TrafficModel`
+    // consumes (`bridge_dispatch::interests_traffic`). Never touches the
+    // legacy `SetTrafficData`/`UpdateTrafficData` variants.
+    let mut traffic_rx = broadcast_tx.subscribe();
+    let traffic_tx = broadcast_tx.clone();
+    tokio::spawn(async move {
+        let mut tracker = TrafficTracker::new(TRAFFIC_WINDOW_SECONDS);
+        loop {
+            let msg = match traffic_rx.recv().await {
+                Ok(msg) => msg,
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    warn!(skipped = n, "traffic pump lagged behind broadcast");
+                    continue;
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            };
+            let rows = match &msg {
+                ServerMessage::InsertConnectionRows { rows } => rows,
+                ServerMessage::UpdateConnectionRows { rows } => rows,
+                _ => continue,
+            };
+            if rows.is_empty() {
+                continue;
+            }
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0);
+            let events = tracker.record_rows(now_ms, rows);
+            if traffic_tx.receiver_count() > 0 {
+                if let Err(e) = traffic_tx.send(ServerMessage::TrafficEvents { events }) {
+                    warn!(error = %e, "traffic pump: broadcast send failed");
+                }
+            }
+        }
+    });
+
     Ok(RunningBridge {
         ws_socket_path: config.ws_socket_path,
         ws_token_path,
@@ -269,6 +317,73 @@ mod tests {
             .send(ClientMessage::Undo)
             .await
             .expect("inbound channel closed");
+
+        bridge.shutdown();
+    }
+
+    #[tokio::test]
+    async fn synthetic_connection_activity_is_rebroadcast_as_traffic_events() {
+        use snitchwatch_bridge::ws_messages::ConnectionRow;
+
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = BridgeConfig {
+            grpc_bind: "127.0.0.1:0".parse().unwrap(),
+            ws_socket_path: dir.path().join("bridge.sock"),
+            cache_capacity: 64,
+        };
+        let bridge = run(cfg).await.expect("run failed");
+        let mut rx = bridge.broadcast_tx.subscribe();
+
+        // Simulate what `UiService::ask_rule` broadcasts on a real connection
+        // (a synthetic row with non-zero byte counters, since production
+        // `ask_rule` rows start at zero — this exercises the pump's mapping
+        // end-to-end regardless of what today's actual producer sends).
+        let row = ConnectionRow {
+            id: "ask-1".into(),
+            process: "curl".into(),
+            process_path: Some("/usr/bin/curl".into()),
+            dst_host: "example.com".into(),
+            dst_ip: "93.184.216.34".into(),
+            dst_port: 443,
+            protocol: "tcp".into(),
+            direction: "outgoing".into(),
+            action: None,
+            bytes_sent: 1234,
+            bytes_received: 5678,
+            started_at_ms: 0,
+        };
+        bridge
+            .broadcast_tx
+            .send(ServerMessage::InsertConnectionRows {
+                rows: vec![row.clone()],
+            })
+            .expect("broadcast send failed");
+
+        // First: the original InsertConnectionRows, echoed to every subscriber
+        // (including this test's own, exactly like a browser WS client).
+        let first = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("no broadcast within timeout")
+            .expect("broadcast channel closed");
+        assert_eq!(
+            first,
+            ServerMessage::InsertConnectionRows { rows: vec![row] }
+        );
+
+        // Second: the traffic pump's derived TrafficEvents, mapping
+        // bytes_sent -> bytesOut and bytes_received -> bytesIn.
+        let second = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("no TrafficEvents broadcast within timeout")
+            .expect("broadcast channel closed");
+        match second {
+            ServerMessage::TrafficEvents { events } => {
+                assert_eq!(events.len(), 1);
+                assert_eq!(events[0].bytes_in, 5678);
+                assert_eq!(events[0].bytes_out, 1234);
+            }
+            other => panic!("expected TrafficEvents, got {other:?}"),
+        }
 
         bridge.shutdown();
     }
