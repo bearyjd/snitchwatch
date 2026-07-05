@@ -28,6 +28,7 @@ addr = { workspace = true }
 chrono = { workspace = true }
 async-trait = { workspace = true }
 rand = { workspace = true }
+zbus = { workspace = true }
 # axum 0.7's `axum::serve` only accepts a `tokio::net::TcpListener`; serving
 # over a `UnixListener` requires driving hyper directly (mirrors axum's own
 # `unix-domain-socket` example).

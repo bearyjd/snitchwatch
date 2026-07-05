@@ -75,6 +75,12 @@ pub enum ServerMessage {
         #[serde(skip_serializing_if = "Option::is_none")]
         last_failure_reason: Option<String>,
     },
+    SetProfiles {
+        profiles: Vec<ProfileSummary>,
+    },
+    ProfileChanged {
+        active_profile_id: Option<String>,
+    },
     SetConnectionsStatus {
         status: ConnectionsStatus,
     },
@@ -127,6 +133,31 @@ pub enum ClientMessage {
     },
     UnsubscribeBlocklist {
         id: String,
+    },
+    CreateProfile {
+        id: String,
+        name: String,
+        network_matchers: Vec<String>,
+    },
+    UpdateProfile {
+        id: String,
+        name: String,
+        network_matchers: Vec<String>,
+    },
+    DeleteProfile {
+        id: String,
+    },
+    ActivateProfile {
+        id: String,
+    },
+    DeactivateProfile,
+    AddProfileRule {
+        profile_id: String,
+        rule: ProfileRuleWire,
+    },
+    RemoveProfileRule {
+        profile_id: String,
+        rule_id: String,
     },
     Undo,
     Redo,
@@ -210,6 +241,30 @@ pub struct BlocklistSummary {
 #[serde(rename_all = "camelCase")]
 pub struct BlocklistEntry {
     pub host: String,
+}
+
+/// One rule override within a profile, as carried over the wire (mirrors
+/// `snitchwatch_bridge::profiles::store::ProfileRule`, kept as a distinct
+/// type here the same way `BlocklistSummary` is distinct from
+/// `blocklists::store::Subscription` — the wire shape is the stable
+/// contract, the store shape is free to evolve independently).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileRuleWire {
+    pub id: String,
+    pub action: String,
+    pub operand: String,
+    pub data: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileSummary {
+    pub id: String,
+    pub name: String,
+    pub network_matchers: Vec<String>,
+    pub rules: Vec<ProfileRuleWire>,
+    pub active: bool,
 }
 
 #[cfg(test)]
@@ -334,5 +389,126 @@ mod blocklist_message_tests {
         let json = serde_json::to_string(&action).unwrap();
         let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, action);
+    }
+}
+
+#[cfg(test)]
+mod profile_message_tests {
+    use super::*;
+
+    fn summary(id: &str, active: bool) -> ProfileSummary {
+        ProfileSummary {
+            id: id.into(),
+            name: "At Home".into(),
+            network_matchers: vec!["Home*".into()],
+            rules: vec![ProfileRuleWire {
+                id: "r1".into(),
+                action: "allow".into(),
+                operand: "dest.host".into(),
+                data: "nas.local".into(),
+            }],
+            active,
+        }
+    }
+
+    #[test]
+    fn set_profiles_serializes_to_camel_case_action() {
+        let msg = ServerMessage::SetProfiles {
+            profiles: vec![summary("home", true)],
+        };
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["action"], "setProfiles");
+        assert_eq!(json["profiles"][0]["id"], "home");
+        assert_eq!(json["profiles"][0]["networkMatchers"][0], "Home*");
+        assert_eq!(json["profiles"][0]["rules"][0]["operand"], "dest.host");
+        assert_eq!(json["profiles"][0]["active"], true);
+    }
+
+    #[test]
+    fn set_profiles_round_trips() {
+        let msg = ServerMessage::SetProfiles {
+            profiles: vec![summary("home", false)],
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, msg);
+    }
+
+    #[test]
+    fn profile_changed_round_trips_with_and_without_active_id() {
+        let with_id = ServerMessage::ProfileChanged {
+            active_profile_id: Some("home".into()),
+        };
+        let json = serde_json::to_string(&with_id).unwrap();
+        assert!(json.contains(r#""action":"profileChanged""#));
+        assert_eq!(
+            serde_json::from_str::<ServerMessage>(&json).unwrap(),
+            with_id
+        );
+
+        let none = ServerMessage::ProfileChanged {
+            active_profile_id: None,
+        };
+        let json = serde_json::to_string(&none).unwrap();
+        assert_eq!(serde_json::from_str::<ServerMessage>(&json).unwrap(), none);
+    }
+
+    #[test]
+    fn create_profile_round_trips() {
+        let action = ClientMessage::CreateProfile {
+            id: "home".into(),
+            name: "At Home".into(),
+            network_matchers: vec!["Home*".into()],
+        };
+        let json = serde_json::to_string(&action).unwrap();
+        assert!(json.contains(r#""action":"createProfile""#));
+        assert!(json.contains(r#""networkMatchers""#));
+        assert_eq!(
+            serde_json::from_str::<ClientMessage>(&json).unwrap(),
+            action
+        );
+    }
+
+    #[test]
+    fn activate_and_deactivate_profile_round_trip() {
+        let activate = ClientMessage::ActivateProfile { id: "home".into() };
+        let json = serde_json::to_string(&activate).unwrap();
+        assert_eq!(
+            serde_json::from_str::<ClientMessage>(&json).unwrap(),
+            activate
+        );
+
+        let deactivate = ClientMessage::DeactivateProfile;
+        let json = serde_json::to_string(&deactivate).unwrap();
+        assert_eq!(json, r#"{"action":"deactivateProfile"}"#);
+        assert_eq!(
+            serde_json::from_str::<ClientMessage>(&json).unwrap(),
+            deactivate
+        );
+    }
+
+    #[test]
+    fn add_and_remove_profile_rule_round_trip() {
+        let add = ClientMessage::AddProfileRule {
+            profile_id: "home".into(),
+            rule: ProfileRuleWire {
+                id: "r1".into(),
+                action: "deny".into(),
+                operand: "dest.host".into(),
+                data: "ads.example".into(),
+            },
+        };
+        let json = serde_json::to_string(&add).unwrap();
+        assert_eq!(serde_json::from_str::<ClientMessage>(&json).unwrap(), add);
+
+        let remove = ClientMessage::RemoveProfileRule {
+            profile_id: "home".into(),
+            rule_id: "r1".into(),
+        };
+        let json = serde_json::to_string(&remove).unwrap();
+        assert_eq!(
+            serde_json::from_str::<ClientMessage>(&json).unwrap(),
+            remove
+        );
     }
 }

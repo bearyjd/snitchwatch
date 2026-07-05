@@ -1,8 +1,12 @@
-//! Helpers that build server-to-client [`ServerMessage`] variants for blocklist events.
+//! Helpers that build server-to-client [`ServerMessage`] variants for
+//! blocklist and profile events.
 
 use crate::blocklists::store::FetchStatus;
 use crate::blocklists::BlocklistsManager;
-use crate::ws_messages::{BlocklistEntry, BlocklistSummary, ServerMessage};
+use crate::profiles::ProfilesManager;
+use crate::ws_messages::{
+    BlocklistEntry, BlocklistSummary, ProfileRuleWire, ProfileSummary, ServerMessage,
+};
 
 pub async fn build_set_blocklists(mgr: &BlocklistsManager) -> anyhow::Result<ServerMessage> {
     let subs = mgr.store().list_subscriptions()?;
@@ -61,6 +65,77 @@ pub async fn build_set_blocklist_status(
         status,
         last_failure_reason,
     })
+}
+
+pub async fn build_set_profiles(mgr: &ProfilesManager) -> anyhow::Result<ServerMessage> {
+    let profiles = mgr
+        .store()
+        .list_profiles()?
+        .into_iter()
+        .map(|p| ProfileSummary {
+            id: p.id,
+            name: p.name,
+            network_matchers: p.network_matchers,
+            rules: p
+                .rules
+                .into_iter()
+                .map(|r| ProfileRuleWire {
+                    id: r.id,
+                    action: r.action,
+                    operand: r.operand,
+                    data: r.data,
+                })
+                .collect(),
+            active: p.active,
+        })
+        .collect();
+    Ok(ServerMessage::SetProfiles { profiles })
+}
+
+pub fn build_profile_changed(active_profile_id: Option<String>) -> ServerMessage {
+    ServerMessage::ProfileChanged { active_profile_id }
+}
+
+#[cfg(test)]
+mod profile_emission_tests {
+    use super::*;
+    use crate::profiles::store::{Profile, ProfileStore};
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn profiles_changed_yields_set_profiles() {
+        let store = Arc::new(ProfileStore::open_in_memory().unwrap());
+        store
+            .upsert_profile(&Profile {
+                id: "home".into(),
+                name: "At Home".into(),
+                network_matchers: vec!["Home*".into()],
+                rules: vec![],
+                active: true,
+            })
+            .unwrap();
+        let mgr = ProfilesManager::new(store);
+        let msg = build_set_profiles(&mgr).await.unwrap();
+        match msg {
+            ServerMessage::SetProfiles { profiles } => {
+                assert_eq!(profiles.len(), 1);
+                assert_eq!(profiles[0].id, "home");
+                assert!(profiles[0].active);
+            }
+            other => panic!("expected SetProfiles, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn profile_changed_carries_active_id() {
+        let msg = build_profile_changed(Some("home".into()));
+        assert_eq!(
+            msg,
+            ServerMessage::ProfileChanged {
+                active_profile_id: Some("home".into())
+            }
+        );
+    }
 }
 
 #[cfg(test)]

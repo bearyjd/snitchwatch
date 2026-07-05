@@ -65,3 +65,4 @@ async-trait = "0.1"
 rand = "0.8"
 tempfile = "3"
 sha2 = "0.10"
+zbus = { version = "4", default-features = false, features = ["tokio"] }

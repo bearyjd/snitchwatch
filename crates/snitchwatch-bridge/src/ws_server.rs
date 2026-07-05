@@ -19,8 +19,10 @@
 
 use crate::auth::Token;
 use crate::blocklists::BlocklistsManager;
+use crate::profiles::ProfilesManager;
 use crate::web_assets::{serve_asset, serve_fallback, serve_index};
 use crate::ws_messages::{ClientMessage, ServerMessage};
+use anyhow::Context;
 use axum::{
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
     extract::State,
@@ -45,6 +47,8 @@ pub struct WsHandles {
     pub inbound: mpsc::Sender<ClientMessage>,
     /// Shared blocklists manager — provides subscription state to WS handlers.
     pub blocklists: Arc<BlocklistsManager>,
+    /// Shared profiles manager — provides profile state to WS handlers.
+    pub profiles: Arc<ProfilesManager>,
 }
 
 /// State handed to axum's router: the WS channels plus the handshake token
@@ -244,10 +248,18 @@ pub async fn serve_with_blocklists(
 ) -> anyhow::Result<(PathBuf, Token, tokio::task::JoinHandle<()>)> {
     let (broadcast_tx, _) = broadcast::channel(16);
     let (inbound_tx, mut inbound_rx) = mpsc::channel::<ClientMessage>(64);
+    // This helper is blocklists-focused (see `blocklists_e2e.rs`); profiles
+    // get a private in-memory manager so `WsHandles` stays fully populated
+    // without changing this function's public signature.
+    let profiles = Arc::new(ProfilesManager::new(Arc::new(
+        crate::profiles::store::ProfileStore::open_in_memory()
+            .context("failed to open in-memory profile store")?,
+    )));
     let handles = WsHandles {
         broadcast: broadcast_tx.clone(),
         inbound: inbound_tx,
         blocklists: blocklists.clone(),
+        profiles,
     };
     let token = Token::generate();
     let server = WsServer::new(socket_path.clone(), token.clone(), handles);
@@ -342,10 +354,13 @@ mod tests {
         let (broadcast_tx, _) = broadcast::channel(16);
         let (inbound_tx, _) = mpsc::channel(16);
         let store = Arc::new(crate::blocklists::store::BlocklistStore::open_in_memory().unwrap());
+        let profile_store =
+            Arc::new(crate::profiles::store::ProfileStore::open_in_memory().unwrap());
         WsHandles {
             broadcast: broadcast_tx,
             inbound: inbound_tx,
             blocklists: Arc::new(BlocklistsManager::new(store)),
+            profiles: Arc::new(crate::profiles::ProfilesManager::new(profile_store)),
         }
     }
 
@@ -364,10 +379,13 @@ mod tests {
         let (broadcast_tx, _) = broadcast::channel(16);
         let (inbound_tx, inbound_rx) = mpsc::channel(16);
         let store = Arc::new(crate::blocklists::store::BlocklistStore::open_in_memory().unwrap());
+        let profile_store =
+            Arc::new(crate::profiles::store::ProfileStore::open_in_memory().unwrap());
         let handles = WsHandles {
             broadcast: broadcast_tx.clone(),
             inbound: inbound_tx,
             blocklists: Arc::new(BlocklistsManager::new(store)),
+            profiles: Arc::new(crate::profiles::ProfilesManager::new(profile_store)),
         };
 
         let path = socket_path(dir);

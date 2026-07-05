@@ -8,6 +8,8 @@ use std::sync::Arc;
 
 use crate::blocklists::BlocklistsManager;
 use crate::cache::connections::{ConnectionCache, Verdict};
+use crate::profiles::store::ProfileRule;
+use crate::profiles::ProfilesManager;
 use crate::ws_messages::{ClientMessage, VerdictAction};
 
 #[derive(Debug, thiserror::Error)]
@@ -68,6 +70,13 @@ pub fn apply(
         ClientMessage::GlobalSettings { .. }
         | ClientMessage::SubscribeBlocklist { .. }
         | ClientMessage::UnsubscribeBlocklist { .. }
+        | ClientMessage::CreateProfile { .. }
+        | ClientMessage::UpdateProfile { .. }
+        | ClientMessage::DeleteProfile { .. }
+        | ClientMessage::ActivateProfile { .. }
+        | ClientMessage::DeactivateProfile
+        | ClientMessage::AddProfileRule { .. }
+        | ClientMessage::RemoveProfileRule { .. }
         | ClientMessage::Undo
         | ClientMessage::Redo => Ok(UpstreamEffect::None),
     }
@@ -97,6 +106,201 @@ pub async fn handle_blocklist_action(
             Ok(BlocklistActionOutcome::Unsubscribed { id })
         }
         other => Ok(BlocklistActionOutcome::Unhandled(Box::new(other))),
+    }
+}
+
+/// Outcome of routing a profile-related ClientMessage to the manager.
+#[derive(Debug, PartialEq)]
+pub enum ProfileActionOutcome {
+    Created { id: String },
+    Updated { id: String },
+    Deleted { id: String },
+    Activated { id: String },
+    Deactivated,
+    RuleAdded { profile_id: String },
+    RuleRemoved { profile_id: String },
+    Unhandled(Box<ClientMessage>),
+}
+
+/// Route a profile ClientMessage to the appropriate ProfilesManager method.
+pub async fn handle_profile_action(
+    mgr: Arc<ProfilesManager>,
+    action: ClientMessage,
+) -> anyhow::Result<ProfileActionOutcome> {
+    match action {
+        ClientMessage::CreateProfile {
+            id,
+            name,
+            network_matchers,
+        } => {
+            mgr.create_profile(&id, &name, network_matchers).await?;
+            Ok(ProfileActionOutcome::Created { id })
+        }
+        ClientMessage::UpdateProfile {
+            id,
+            name,
+            network_matchers,
+        } => {
+            mgr.update_profile(&id, &name, network_matchers).await?;
+            Ok(ProfileActionOutcome::Updated { id })
+        }
+        ClientMessage::DeleteProfile { id } => {
+            mgr.delete_profile(&id).await?;
+            Ok(ProfileActionOutcome::Deleted { id })
+        }
+        ClientMessage::ActivateProfile { id } => {
+            mgr.activate(&id).await?;
+            Ok(ProfileActionOutcome::Activated { id })
+        }
+        ClientMessage::DeactivateProfile => {
+            mgr.deactivate().await?;
+            Ok(ProfileActionOutcome::Deactivated)
+        }
+        ClientMessage::AddProfileRule { profile_id, rule } => {
+            mgr.add_rule(
+                &profile_id,
+                ProfileRule {
+                    id: rule.id,
+                    action: rule.action,
+                    operand: rule.operand,
+                    data: rule.data,
+                },
+            )
+            .await?;
+            Ok(ProfileActionOutcome::RuleAdded { profile_id })
+        }
+        ClientMessage::RemoveProfileRule {
+            profile_id,
+            rule_id,
+        } => {
+            mgr.remove_rule(&profile_id, &rule_id).await?;
+            Ok(ProfileActionOutcome::RuleRemoved { profile_id })
+        }
+        other => Ok(ProfileActionOutcome::Unhandled(Box::new(other))),
+    }
+}
+
+#[cfg(test)]
+mod profile_action_tests {
+    use super::*;
+    use crate::profiles::store::ProfileStore;
+    use crate::ws_messages::ProfileRuleWire;
+    use std::sync::Arc;
+
+    fn manager() -> Arc<ProfilesManager> {
+        Arc::new(ProfilesManager::new(Arc::new(
+            ProfileStore::open_in_memory().unwrap(),
+        )))
+    }
+
+    #[tokio::test]
+    async fn create_profile_adds_to_store() {
+        let mgr = manager();
+        let action = ClientMessage::CreateProfile {
+            id: "home".into(),
+            name: "At Home".into(),
+            network_matchers: vec!["Home*".into()],
+        };
+        handle_profile_action(mgr.clone(), action).await.unwrap();
+        let profiles = mgr.store().list_profiles().unwrap();
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0].id, "home");
+    }
+
+    #[tokio::test]
+    async fn activate_and_deactivate_profile_round_trip() {
+        let mgr = manager();
+        handle_profile_action(
+            mgr.clone(),
+            ClientMessage::CreateProfile {
+                id: "home".into(),
+                name: "Home".into(),
+                network_matchers: vec![],
+            },
+        )
+        .await
+        .unwrap();
+
+        handle_profile_action(
+            mgr.clone(),
+            ClientMessage::ActivateProfile { id: "home".into() },
+        )
+        .await
+        .unwrap();
+        assert_eq!(mgr.store().get_active().unwrap().unwrap().id, "home");
+
+        handle_profile_action(mgr.clone(), ClientMessage::DeactivateProfile)
+            .await
+            .unwrap();
+        assert!(mgr.store().get_active().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn add_and_remove_profile_rule() {
+        let mgr = manager();
+        handle_profile_action(
+            mgr.clone(),
+            ClientMessage::CreateProfile {
+                id: "home".into(),
+                name: "Home".into(),
+                network_matchers: vec![],
+            },
+        )
+        .await
+        .unwrap();
+
+        handle_profile_action(
+            mgr.clone(),
+            ClientMessage::AddProfileRule {
+                profile_id: "home".into(),
+                rule: ProfileRuleWire {
+                    id: "r1".into(),
+                    action: "deny".into(),
+                    operand: "dest.host".into(),
+                    data: "ads.example".into(),
+                },
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            mgr.store()
+                .get_profile("home")
+                .unwrap()
+                .unwrap()
+                .rules
+                .len(),
+            1
+        );
+
+        handle_profile_action(
+            mgr.clone(),
+            ClientMessage::RemoveProfileRule {
+                profile_id: "home".into(),
+                rule_id: "r1".into(),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(mgr
+            .store()
+            .get_profile("home")
+            .unwrap()
+            .unwrap()
+            .rules
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn non_profile_action_is_returned_unhandled() {
+        let mgr = manager();
+        let outcome = handle_profile_action(mgr.clone(), ClientMessage::Undo)
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome,
+            ProfileActionOutcome::Unhandled(Box::new(ClientMessage::Undo))
+        );
     }
 }
 
