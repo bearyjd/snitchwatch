@@ -49,6 +49,24 @@ async fn try_grpc_dial(endpoint: &str) -> Result<(), String> {
         .map_err(|_| "timeout".to_string())?
 }
 
+/// `systemctl --user start snitchwatch-opensnitchd.service`, ported unchanged
+/// from `snitchwatch-tauri::commands::start_daemon_unit` (Task 12's
+/// "UnitInactive -> Start it" CTA). Never panics: a missing `systemctl`
+/// binary (e.g. a non-systemd host) or a non-zero exit both surface as an
+/// `Err` string for the caller to display, not an abort.
+pub fn start_unit_via_systemctl() -> Result<(), String> {
+    let systemctl = which::which("systemctl").map_err(|e| e.to_string())?;
+    let status = std::process::Command::new(systemctl)
+        .args(["--user", "start", "snitchwatch-opensnitchd.service"])
+        .status()
+        .map_err(|e| e.to_string())?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("systemctl exited with {status}"))
+    }
+}
+
 fn run_systemctl_list_unit_files() -> String {
     let systemctl = match which::which("systemctl") {
         Ok(p) => p,

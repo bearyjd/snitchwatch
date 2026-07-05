@@ -16,6 +16,7 @@ fn main() {
         "qml/BlocklistsPage.qml",
         "qml/RulesPage.qml",
         "qml/TrafficPage.qml",
+        "qml/OnboardingPage.qml",
     ]))
     .file("src/bridge_bindings.rs")
     .file("src/bridge_feed.rs")
@@ -24,5 +25,6 @@ fn main() {
     .file("src/blocklists_model.rs")
     .file("src/rules_model.rs")
     .file("src/traffic_model.rs")
+    .file("src/wizard_controller.rs")
     .build();
 }

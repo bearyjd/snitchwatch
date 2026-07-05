@@ -22,3 +22,4 @@ pub mod rules_model;
 pub mod traffic;
 pub mod traffic_model;
 pub mod wizard;
+pub mod wizard_controller;

@@ -61,6 +61,47 @@ Kirigami.ApplicationWindow {
         id: trafficModel
     }
 
+    // First-run onboarding wizard (Task 12). Owns daemon-detection state; the
+    // onboarding page itself is pushed/popped below based on `state`.
+    WizardController {
+        id: wizardController
+    }
+
+    // Guards against pushing the onboarding page more than once and against
+    // popping when it was never pushed (e.g. "Continue anyway" already
+    // dismissed it before a stray stateChanged fires).
+    property bool onboardingShown: false
+
+    Component {
+        id: onboardingPageComponent
+        OnboardingPage {
+            controller: wizardController
+            onDismissed: {
+                root.onboardingShown = false;
+                root.pageStack.pop();
+            }
+        }
+    }
+
+    // Show the wizard only when detection actually finds a problem — the
+    // controller's optimistic default (`connected`) means a healthy daemon
+    // never triggers this at all (no `stateChanged` fires if probe() confirms
+    // the default). Never blocks the window permanently: `OnboardingPage`'s
+    // "Continue anyway" button and this same handler's pop-on-connected path
+    // both let the user past it.
+    Connections {
+        target: wizardController
+        function onStateChanged() {
+            if (wizardController.state !== "connected" && !root.onboardingShown) {
+                root.onboardingShown = true;
+                root.pageStack.push(onboardingPageComponent);
+            } else if (wizardController.state === "connected" && root.onboardingShown) {
+                root.onboardingShown = false;
+                root.pageStack.pop();
+            }
+        }
+    }
+
     // Task 13 live wiring. The bridge is already started (main.rs); here we (a)
     // reflect its status into the banner, and (b) start each model's outbound
     // feed task. startBridgeFeed()/refresh() are no-ops when the bridge failed
@@ -72,6 +113,7 @@ Kirigami.ApplicationWindow {
         blocklistEntriesModel.startBridgeFeed();
         rulesModel.startBridgeFeed();
         trafficModel.startBridgeFeed();
+        wizardController.probe();
     }
 
     // Inbound routing (Task 13): model request signals carry a JSON-encoded
