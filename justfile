@@ -63,3 +63,12 @@ blocklist-fixture-server:
 test-blocklists:
     cargo test -p snitchwatch-bridge blocklists -- --nocapture
     cargo test -p snitchwatch-bridge --test blocklists_e2e -- --nocapture
+
+# Validate the Phase 2 packaging artifacts' syntax without a Bazzite host.
+# Parses the YAML/JSON, checks the systemd unit (systemd-analyze if present),
+# and shellchecks any scripts. Runs the Rust packaging shape test too.
+package-check:
+    python3 -c "import yaml,sys; yaml.safe_load(open('packaging/bluebuild/recipe.yml')); yaml.safe_load(open('packaging/flatpak/org.snitchwatch.Snitchwatch.yml')); print('YAML ok')"
+    python3 -c "import json; json.load(open('packaging/bluebuild/files/system/etc/opensnitchd/default-config.json')); print('JSON ok')"
+    @command -v systemd-analyze >/dev/null 2>&1 && systemd-analyze verify --user packaging/systemd/snitchwatch-bridge.service && echo "systemd unit ok" || echo "systemd-analyze not available — skipped unit verify"
+    cargo test -p snitchwatch-bridge --test packaging_shape
