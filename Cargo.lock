@@ -4542,6 +4542,7 @@ dependencies = [
  "cxx-qt-build",
  "cxx-qt-lib",
  "serde",
+ "serde_json",
  "snitchwatch-bridge",
  "snitchwatch-bridge-cli",
  "tempfile",

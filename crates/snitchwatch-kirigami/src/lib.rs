@@ -7,6 +7,8 @@
 //! `crates/kirigami-spike/tests/link_770.rs`).
 
 pub mod bridge_bindings;
+pub mod connections;
+pub mod connections_model;
 pub mod panic_hook;
 pub mod paths;
 pub mod wizard;

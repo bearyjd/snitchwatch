@@ -13,5 +13,6 @@ fn main() {
         QmlModule::new("com.snitchwatch.shell").qml_files(["qml/main.qml"]),
     )
     .file("src/bridge_bindings.rs")
+    .file("src/connections_model.rs")
     .build();
 }
