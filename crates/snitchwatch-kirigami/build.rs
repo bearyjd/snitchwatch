@@ -14,10 +14,12 @@ fn main() {
         "qml/ConnectionsPage.qml",
         "qml/PendingDecisionSheet.qml",
         "qml/BlocklistsPage.qml",
+        "qml/RulesPage.qml",
     ]))
     .file("src/bridge_bindings.rs")
     .file("src/connections_model.rs")
     .file("src/pending_decision.rs")
     .file("src/blocklists_model.rs")
+    .file("src/rules_model.rs")
     .build();
 }

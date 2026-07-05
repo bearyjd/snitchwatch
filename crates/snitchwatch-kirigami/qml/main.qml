@@ -40,6 +40,13 @@ Kirigami.ApplicationWindow {
         id: blocklistEntriesModel
     }
 
+    // Rules tab model (Task 10). Same window-scope-owned lifetime as the
+    // models above; the live bridge feed attaches the same way once that
+    // follow-up wiring lands.
+    RulesModel {
+        id: rulesModel
+    }
+
     // Page components, swapped into pageStack by the drawer actions below.
     Component {
         id: connectionsPageComponent
@@ -54,7 +61,12 @@ Kirigami.ApplicationWindow {
             entriesModel: blocklistEntriesModel
         }
     }
-
+    Component {
+        id: rulesPageComponent
+        RulesPage {
+            model: rulesModel
+        }
+    }
     // Tracks the last-seen pending count so we only raise on a *new* pending
     // arrival, not on every count change (e.g. 2 -> 3 while already visible).
     property int lastPendingCount: 0

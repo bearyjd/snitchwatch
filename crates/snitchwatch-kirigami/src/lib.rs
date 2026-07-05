@@ -14,4 +14,6 @@ pub mod connections_model;
 pub mod panic_hook;
 pub mod paths;
 pub mod pending_decision;
+pub mod rules;
+pub mod rules_model;
 pub mod wizard;
