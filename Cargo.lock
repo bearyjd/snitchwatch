@@ -4080,6 +4080,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "scanner-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "scanner-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "scanner-core"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tracing",
+]
+
+[[package]]
 name = "schemars"
 version = "0.8.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"

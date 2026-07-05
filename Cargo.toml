@@ -7,6 +7,8 @@ members = [
     "crates/snitchwatch-bridge-cli",
     "crates/snitchwatch-tauri",
     "crates/kirigami-spike",
+    "crates/scanner-core",
+    "crates/scanner-cli",
     "tests/mock_opensnitchd",
     "tests/integration",
 ]
@@ -21,6 +23,8 @@ default-members = [
     "crates/snitchwatch-bridge",
     "crates/snitchwatch-bridge-cli",
     "crates/snitchwatch-tauri",
+    "crates/scanner-core",
+    "crates/scanner-cli",
     "tests/mock_opensnitchd",
     "tests/integration",
 ]
@@ -56,3 +60,4 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "serd
 async-trait = "0.1"
 rand = "0.8"
 tempfile = "3"
+sha2 = "0.10"
