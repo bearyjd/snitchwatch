@@ -16,6 +16,16 @@
 //     decision: OverlaySheet over a SplitView detail column, chosen because it
 //     works identically on narrow and wide windows and matches the pending-row
 //     inspector described in the design spec without a responsive-layout branch).
+//
+// Little-Snitch-parity grouping (Process -> Domain -> connection): the
+// header's "Grouped" switch drives `ConnectionsModel.setGrouped`. In grouped
+// mode the same `ListView`/delegate renders a mix of row kinds — process
+// headers (depth 0), domain headers (depth 1), and leaf connection rows
+// (depth 2) — distinguished by the `isGroupHeader`/`depth` roles the Rust
+// model exposes; clicking a header toggles its expand state via
+// `toggleProcessGroup`/`toggleDomainGroup` instead of opening the inspector.
+// All grouping/aggregate logic lives in Rust (`connections::grouping`); this
+// QML only renders the flattened projection and forwards toggle clicks.
 import QtQuick
 import QtQuick.Layouts
 import QtQuick.Controls as Controls
@@ -95,6 +105,12 @@ Kirigami.ScrollablePage {
             text: "Pending only"
             onToggled: page.model.setPendingOnly(checked)
         }
+        Controls.Switch {
+            id: grouped
+            text: "Grouped"
+            checked: page.model ? page.model.grouped : true
+            onToggled: page.model.setGrouped(checked)
+        }
     }
 
     Kirigami.PlaceholderMessage {
@@ -137,7 +153,32 @@ Kirigami.ScrollablePage {
             required property string verdict
             required property bool pending
 
+            // Grouping roles (Little-Snitch-parity Process->Domain view).
+            // depth: 0 = process header, 1 = domain header, 2 = leaf
+            // connection row. Flat mode always reports depth 0 / isGroupHeader
+            // false, so this delegate renders identically to before grouping
+            // was added.
+            required property int depth
+            required property bool isGroupHeader
+            required property bool expanded
+            required property string groupKey
+            required property string groupParentKey
+            required property string groupLabel
+            required property int groupTotal
+            required property int groupPending
+            required property int groupAllowed
+            required property int groupDenied
+            required property int groupBlocklisted
+
             onClicked: {
+                if (row.isGroupHeader) {
+                    if (row.depth === 0) {
+                        page.model.toggleProcessGroup(row.groupKey);
+                    } else {
+                        page.model.toggleDomainGroup(row.groupParentKey, row.groupKey);
+                    }
+                    return;
+                }
                 list.currentIndex = row.index;
                 page.openInspector(row);
             }
@@ -145,13 +186,28 @@ Kirigami.ScrollablePage {
             contentItem: RowLayout {
                 spacing: Kirigami.Units.largeSpacing
 
+                Item {
+                    // Indent nested rows/headers under their ancestors.
+                    Layout.preferredWidth: row.depth * Kirigami.Units.gridUnit
+                }
+
+                Kirigami.Icon {
+                    visible: row.isGroupHeader
+                    source: row.expanded ? "arrow-down" : "arrow-right"
+                    Layout.preferredWidth: Kirigami.Units.iconSizes.small
+                    Layout.preferredHeight: Kirigami.Units.iconSizes.small
+                    Layout.alignment: Qt.AlignVCenter
+                }
+
                 Controls.Label {
+                    visible: !row.isGroupHeader
                     text: page.verdictGlyph(row.verdict, row.pending)
                     color: page.verdictColor(row.verdict)
                     Layout.alignment: Qt.AlignVCenter
                 }
 
                 ColumnLayout {
+                    visible: !row.isGroupHeader
                     Layout.fillWidth: true
                     spacing: 0
                     Controls.Label {
@@ -170,8 +226,27 @@ Kirigami.ScrollablePage {
                 }
 
                 Controls.Label {
+                    visible: !row.isGroupHeader
                     text: row.pending ? "pending" : row.verdict
                     color: page.verdictColor(row.verdict)
+                    Layout.alignment: Qt.AlignVCenter
+                }
+
+                Controls.Label {
+                    visible: row.isGroupHeader
+                    text: row.groupLabel
+                    font.bold: true
+                    color: row.groupPending > 0 ? Kirigami.Theme.neutralTextColor : Kirigami.Theme.textColor
+                    elide: Text.ElideRight
+                    Layout.fillWidth: true
+                }
+
+                Controls.Label {
+                    visible: row.isGroupHeader
+                    text: row.groupPending > 0
+                          ? (row.groupTotal + " · " + row.groupPending + " pending")
+                          : (row.groupTotal + " connection" + (row.groupTotal === 1 ? "" : "s"))
+                    color: row.groupPending > 0 ? Kirigami.Theme.neutralTextColor : Kirigami.Theme.disabledTextColor
                     Layout.alignment: Qt.AlignVCenter
                 }
             }

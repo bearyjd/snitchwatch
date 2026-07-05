@@ -17,6 +17,8 @@
 //! protocol itself is unchanged, per the plan's non-goals).
 
 use core::pin::Pin;
+use std::collections::HashMap;
+
 use cxx_qt::CxxQtType;
 use cxx_qt::Threading;
 use cxx_qt_lib::{
@@ -24,10 +26,17 @@ use cxx_qt_lib::{
 };
 use tokio::sync::broadcast;
 
+use crate::connections::filter::ConnectionFilter;
+use crate::connections::grouping::{GroupTree, VisibleEntry};
 use crate::connections::row_store::{ModelOp, RowStore, Verdict};
 use snitchwatch_bridge::ws_messages::{ConnectionRow, ServerMessage};
 
-// Role ids exposed to the QML delegate.
+// Role ids exposed to the QML delegate. Flat-mode leaf rows use 0-6; the
+// grouping layer (Little-Snitch-parity Process->Domain view) adds 7+. None
+// of these names collide with Qt Quick Controls built-ins on `ItemDelegate`
+// (in particular, never name a role `action` — see module docs on
+// `connections::grouping` / the design spec's pitfall note: a role or
+// required-property named `action` silently breaks delegates).
 const ROLE_ID: i32 = 0;
 const ROLE_PROCESS: i32 = 1;
 const ROLE_HOST: i32 = 2;
@@ -35,6 +44,17 @@ const ROLE_PORT: i32 = 3;
 const ROLE_PROTOCOL: i32 = 4;
 const ROLE_VERDICT: i32 = 5;
 const ROLE_PENDING: i32 = 6;
+const ROLE_DEPTH: i32 = 7;
+const ROLE_IS_GROUP_HEADER: i32 = 8;
+const ROLE_EXPANDED: i32 = 9;
+const ROLE_GROUP_KEY: i32 = 10;
+const ROLE_GROUP_PARENT_KEY: i32 = 11;
+const ROLE_GROUP_LABEL: i32 = 12;
+const ROLE_GROUP_TOTAL: i32 = 13;
+const ROLE_GROUP_PENDING: i32 = 14;
+const ROLE_GROUP_ALLOWED: i32 = 15;
+const ROLE_GROUP_DENIED: i32 = 16;
+const ROLE_GROUP_BLOCKLISTED: i32 = 17;
 
 #[cxx_qt::bridge]
 pub mod qobject {
@@ -68,6 +88,13 @@ pub mod qobject {
         /// Total rows in the store regardless of filter — lets the view tell
         /// "no connections yet" apart from "no rows match the filter".
         #[qproperty(i32, total_count, cxx_name = "totalCount")]
+        /// Whether the view is currently in grouped (Process -> Domain ->
+        /// connection) mode as opposed to the flat list. Defaults to `true`
+        /// per the design spec ("defaulting to grouped"). Toggle via the
+        /// `setGrouped` invokable, not by writing this property directly —
+        /// the toggle needs to rebracket the Qt model reset and rebuild the
+        /// grouped projection.
+        #[qproperty(bool, grouped)]
         type ConnectionsModel = super::ConnectionsModelRust;
 
         /// Emitted when the auto-select policy decides a freshly arrived pending
@@ -129,6 +156,32 @@ pub mod qobject {
         #[qinvokable]
         #[cxx_name = "setCurrentRowId"]
         fn set_current_row_id(self: Pin<&mut ConnectionsModel>, id: &QString);
+
+        // --- Grouping (Little-Snitch-parity Process->Domain view) ----------
+        /// Switch between grouped (Process -> Domain -> connection) and flat
+        /// list views. Named distinctly from the `grouped` qproperty and its
+        /// auto-generated `setGrouped` setter (which only stores the value
+        /// and emits the change signal) because this one also rebrackets the
+        /// Qt reset and rebuilds the grouped projection; QML must call this,
+        /// not assign the property.
+        #[qinvokable]
+        #[cxx_name = "setGroupedMode"]
+        fn set_grouped_mode(self: Pin<&mut ConnectionsModel>, grouped: bool);
+
+        /// Toggle a top-level process group's expand/collapse state.
+        #[qinvokable]
+        #[cxx_name = "toggleProcessGroup"]
+        fn toggle_process_group(self: Pin<&mut ConnectionsModel>, key: &QString);
+
+        /// Toggle a domain subgroup's expand/collapse state within its
+        /// parent process group.
+        #[qinvokable]
+        #[cxx_name = "toggleDomainGroup"]
+        fn toggle_domain_group(
+            self: Pin<&mut ConnectionsModel>,
+            process_key: &QString,
+            domain_key: &QString,
+        );
     }
 
     // Protected base-class helpers inherited from QAbstractListModel.
@@ -186,9 +239,20 @@ pub mod qobject {
 }
 
 /// Rust-side state for [`qobject::ConnectionsModel`].
-#[derive(Default)]
 pub struct ConnectionsModelRust {
     store: RowStore,
+    /// Process -> Domain group tree (Little-Snitch-parity grouped view),
+    /// mirrored incrementally alongside `store` from every applied
+    /// `ServerMessage` — see `apply_server_message`'s grouping-mirror step.
+    grouping: GroupTree,
+    /// Cached flattened projection the grouped view reads from `data()` /
+    /// `row_count()`. Rebuilt (not the tree itself — see `connections::
+    /// grouping` module docs) after every mutation and after every
+    /// expand/collapse toggle.
+    grouped_projection: Vec<VisibleEntry>,
+    /// Backing field for the `grouped` qproperty — see its doc comment in
+    /// the `#[cxx_qt::bridge]` block. Defaults to `true` (grouped view).
+    grouped: bool,
     count: i32,
     pending_count: i32,
     total_count: i32,
@@ -197,12 +261,37 @@ pub struct ConnectionsModelRust {
     current_row_id: String,
 }
 
+impl Default for ConnectionsModelRust {
+    fn default() -> Self {
+        Self {
+            store: RowStore::default(),
+            grouping: GroupTree::default(),
+            grouped_projection: Vec::new(),
+            grouped: true,
+            count: 0,
+            pending_count: 0,
+            total_count: 0,
+            current_row_id: String::new(),
+        }
+    }
+}
+
 impl qobject::ConnectionsModel {
     fn row_count(&self, _parent: &QModelIndex) -> i32 {
-        self.store.visible_len() as i32
+        if self.grouped {
+            self.grouped_projection.len() as i32
+        } else {
+            self.store.visible_len() as i32
+        }
     }
 
     unsafe fn data(&self, index: &QModelIndex, role: i32) -> QVariant {
+        if self.grouped {
+            let Some(entry) = self.grouped_projection.get(index.row() as usize) else {
+                return QVariant::default();
+            };
+            return grouped_entry_data(entry, role, &self.store);
+        }
         let Some(row) = self.store.visible_row(index.row() as usize) else {
             return QVariant::default();
         };
@@ -217,6 +306,17 @@ impl qobject::ConnectionsModel {
                 QVariant::from(&QString::from(v.as_token()))
             }
             ROLE_PENDING => QVariant::from(&row.action.is_none()),
+            ROLE_DEPTH => QVariant::from(&0i32),
+            ROLE_IS_GROUP_HEADER => QVariant::from(&false),
+            ROLE_EXPANDED => QVariant::from(&false),
+            ROLE_GROUP_KEY | ROLE_GROUP_PARENT_KEY | ROLE_GROUP_LABEL => {
+                QVariant::from(&QString::from(""))
+            }
+            ROLE_GROUP_TOTAL
+            | ROLE_GROUP_PENDING
+            | ROLE_GROUP_ALLOWED
+            | ROLE_GROUP_DENIED
+            | ROLE_GROUP_BLOCKLISTED => QVariant::from(&0i32),
             _ => QVariant::default(),
         }
     }
@@ -230,6 +330,17 @@ impl qobject::ConnectionsModel {
         roles.insert(ROLE_PROTOCOL, QByteArray::from("protocol"));
         roles.insert(ROLE_VERDICT, QByteArray::from("verdict"));
         roles.insert(ROLE_PENDING, QByteArray::from("pending"));
+        roles.insert(ROLE_DEPTH, QByteArray::from("depth"));
+        roles.insert(ROLE_IS_GROUP_HEADER, QByteArray::from("isGroupHeader"));
+        roles.insert(ROLE_EXPANDED, QByteArray::from("expanded"));
+        roles.insert(ROLE_GROUP_KEY, QByteArray::from("groupKey"));
+        roles.insert(ROLE_GROUP_PARENT_KEY, QByteArray::from("groupParentKey"));
+        roles.insert(ROLE_GROUP_LABEL, QByteArray::from("groupLabel"));
+        roles.insert(ROLE_GROUP_TOTAL, QByteArray::from("groupTotal"));
+        roles.insert(ROLE_GROUP_PENDING, QByteArray::from("groupPending"));
+        roles.insert(ROLE_GROUP_ALLOWED, QByteArray::from("groupAllowed"));
+        roles.insert(ROLE_GROUP_DENIED, QByteArray::from("groupDenied"));
+        roles.insert(ROLE_GROUP_BLOCKLISTED, QByteArray::from("groupBlocklisted"));
         roles
     }
 
@@ -307,7 +418,59 @@ impl qobject::ConnectionsModel {
             _ => Vec::new(),
         };
 
-        if self.store.is_filtered() {
+        // Mirror the same delta into the Process->Domain group tree, Qt-free
+        // and incremental (see `connections::grouping` module docs), so both
+        // projections stay live regardless of which one is currently on
+        // screen. This must happen before `msg` is consumed by `store.apply`
+        // below, hence matching on `&msg` here.
+        {
+            let mut rust = self.as_mut().rust_mut();
+            match &msg {
+                ServerMessage::InsertConnectionRows { rows }
+                | ServerMessage::UpdateConnectionRows { rows } => {
+                    for row in rows {
+                        rust.grouping.upsert_row(row);
+                    }
+                }
+                ServerMessage::RemoveConnectionRows { ids } => {
+                    for id in ids {
+                        rust.grouping.remove_row(id);
+                    }
+                }
+                ServerMessage::MoveConnetionRows { ids } => {
+                    rust.grouping.move_to_front(ids);
+                }
+                ServerMessage::ClearConnectionRows => {
+                    rust.grouping.clear();
+                }
+                _ => {}
+            }
+        }
+
+        if self.grouped {
+            // The grouped view's visible-row set (headers appearing/
+            // disappearing, expand state interacting with membership changes)
+            // doesn't map onto incremental begin/insert/remove brackets as
+            // cleanly as the flat list does; mirroring the precedent the
+            // filtered-flat branch below already sets ("a filter is an
+            // explicit user investigation mode... a reset is acceptable
+            // here"), the grouped view is refreshed via a full Qt reset while
+            // the underlying tree/aggregates stay incrementally maintained.
+            unsafe {
+                self.as_mut().begin_reset_model();
+            }
+            {
+                let mut rust = self.as_mut().rust_mut();
+                rust.store.apply(msg);
+                if rust.store.is_filtered() {
+                    rust.store.recompute_visible();
+                }
+            }
+            self.as_mut().rebuild_grouped_projection();
+            unsafe {
+                self.as_mut().end_reset_model();
+            }
+        } else if self.store.is_filtered() {
             // With an active filter the visible→store index mapping shifts in
             // ways that don't map cleanly onto incremental begin/insert/remove
             // brackets; a filter is an explicit user investigation mode, so a
@@ -347,20 +510,97 @@ impl qobject::ConnectionsModel {
         self.maybe_auto_select(&new_pending_ids);
     }
 
+    /// Rebuild the cached flattened grouped projection from the current
+    /// group tree, store rows, and active filter. Cheap relative to a tree
+    /// rebuild — see `connections::grouping` module docs.
+    fn rebuild_grouped_projection(mut self: Pin<&mut Self>) {
+        let filter = self.store.filter().clone();
+        let projection = {
+            let rows_by_id: HashMap<&str, &ConnectionRow> = self
+                .store
+                .rows()
+                .iter()
+                .map(|r| (r.id.as_str(), r))
+                .collect();
+            self.grouping.build_projection(&rows_by_id, &filter)
+        };
+        self.as_mut().rust_mut().grouped_projection = projection;
+    }
+
     /// Replace the active filter, bracketed by a model reset (the whole visible
-    /// set changes), and refresh the derived counts.
-    fn apply_filter(
-        mut self: Pin<&mut Self>,
-        filter: crate::connections::filter::ConnectionFilter,
-    ) {
+    /// set changes), and refresh the derived counts. Filter/search applies in
+    /// both flat and grouped modes — the grouped projection is rebuilt too so
+    /// matched children keep their ancestor group headers visible.
+    fn apply_filter(mut self: Pin<&mut Self>, filter: ConnectionFilter) {
         unsafe {
             self.as_mut().begin_reset_model();
         }
         self.as_mut().rust_mut().store.set_filter(filter);
+        if self.grouped {
+            self.as_mut().rebuild_grouped_projection();
+        }
         unsafe {
             self.as_mut().end_reset_model();
         }
         self.refresh_counts();
+    }
+
+    /// Switch between grouped and flat views. A no-op if already in the
+    /// requested mode. Bracketed by a reset since the entire visible row set
+    /// changes shape.
+    fn set_grouped_mode(mut self: Pin<&mut Self>, grouped: bool) {
+        if grouped == self.grouped {
+            return;
+        }
+        unsafe {
+            self.as_mut().begin_reset_model();
+        }
+        self.as_mut().set_grouped(grouped);
+        if grouped {
+            self.as_mut().rebuild_grouped_projection();
+        }
+        unsafe {
+            self.as_mut().end_reset_model();
+        }
+    }
+
+    /// Toggle a process group's expand/collapse state and refresh the
+    /// grouped projection. No-op when not currently in grouped mode.
+    fn toggle_process_group(mut self: Pin<&mut Self>, key: &QString) {
+        if !self.grouped {
+            return;
+        }
+        unsafe {
+            self.as_mut().begin_reset_model();
+        }
+        self.as_mut()
+            .rust_mut()
+            .grouping
+            .toggle_process(&key.to_string());
+        self.as_mut().rebuild_grouped_projection();
+        unsafe {
+            self.as_mut().end_reset_model();
+        }
+    }
+
+    /// Toggle a domain subgroup's expand/collapse state within its parent
+    /// process group and refresh the grouped projection. No-op when not
+    /// currently in grouped mode.
+    fn toggle_domain_group(mut self: Pin<&mut Self>, process_key: &QString, domain_key: &QString) {
+        if !self.grouped {
+            return;
+        }
+        unsafe {
+            self.as_mut().begin_reset_model();
+        }
+        self.as_mut()
+            .rust_mut()
+            .grouping
+            .toggle_domain(&process_key.to_string(), &domain_key.to_string());
+        self.as_mut().rebuild_grouped_projection();
+        unsafe {
+            self.as_mut().end_reset_model();
+        }
     }
 
     /// Apply the auto-select-on-new-pending-row policy. Sets `autoSelectRowId`
@@ -386,8 +626,21 @@ impl qobject::ConnectionsModel {
             return;
         };
         // Translate the chosen id to its current *visible* index for QML. If the
-        // target is filtered out of view there's nothing to select.
-        if let Some(vis) = self.store.visible_index_of(&target) {
+        // target is filtered out of view there's nothing to select. In grouped
+        // mode this is a position in the flattened projection rather than the
+        // flat store's visible list; the projection is guaranteed to already
+        // contain the row because `build_projection` force-expands the path
+        // to any group with a pending descendant (see `connections::grouping`
+        // module docs), which satisfies "auto-expand the path to a new
+        // pending row" without any extra state here.
+        let vis = if self.grouped {
+            self.grouped_projection
+                .iter()
+                .position(|entry| matches!(entry, VisibleEntry::Row { id, .. } if id == &target))
+        } else {
+            self.store.visible_index_of(&target)
+        };
+        if let Some(vis) = vis {
             // Adopt the auto-selected row as the current selection so the *next*
             // pending arrival won't jump the selection off it (surface one
             // pending decision at a time, per the design spec).
@@ -483,7 +736,14 @@ impl qobject::ConnectionsModel {
     }
 
     fn refresh_counts(mut self: Pin<&mut Self>) {
-        let visible = self.store.visible_len() as i32;
+        // `count` tracks what the ListView actually shows: the grouped
+        // projection's row count (headers + visible leaves) in grouped mode,
+        // the flat filtered/unfiltered visible length otherwise.
+        let visible = if self.grouped {
+            self.grouped_projection.len() as i32
+        } else {
+            self.store.visible_len() as i32
+        };
         let total = self.store.len() as i32;
         let pending = self
             .store
@@ -491,10 +751,98 @@ impl qobject::ConnectionsModel {
             .iter()
             .filter(|r| r.action.is_none())
             .count() as i32;
-        // `count` tracks what the ListView shows (post-filter); `totalCount`
-        // stays the whole store so the view can distinguish empty from filtered.
+        // `totalCount` stays the whole store so the view can distinguish
+        // empty from filtered.
         self.as_mut().set_count(visible);
         self.as_mut().set_total_count(total);
         self.as_mut().set_pending_count(pending);
+    }
+}
+
+/// Read one role of a grouped-projection [`VisibleEntry`] into the QVariant
+/// shape `data()` returns. `store` resolves leaf `Row` entries' full
+/// `ConnectionRow` content (the tree only tracks ids).
+fn grouped_entry_data(entry: &VisibleEntry, role: i32, store: &RowStore) -> QVariant {
+    match entry {
+        VisibleEntry::ProcessHeader {
+            key,
+            label,
+            expanded,
+            counts,
+        } => match role {
+            ROLE_ID => QVariant::from(&QString::from(&format!("process:{key}"))),
+            ROLE_PROCESS | ROLE_HOST | ROLE_PROTOCOL | ROLE_VERDICT => {
+                QVariant::from(&QString::from(""))
+            }
+            ROLE_PORT => QVariant::from(&0i32),
+            ROLE_PENDING => QVariant::from(&(counts.pending > 0)),
+            ROLE_DEPTH => QVariant::from(&0i32),
+            ROLE_IS_GROUP_HEADER => QVariant::from(&true),
+            ROLE_EXPANDED => QVariant::from(expanded),
+            ROLE_GROUP_KEY => QVariant::from(&QString::from(key)),
+            ROLE_GROUP_PARENT_KEY => QVariant::from(&QString::from("")),
+            ROLE_GROUP_LABEL => QVariant::from(&QString::from(label)),
+            ROLE_GROUP_TOTAL => QVariant::from(&(counts.total as i32)),
+            ROLE_GROUP_PENDING => QVariant::from(&(counts.pending as i32)),
+            ROLE_GROUP_ALLOWED => QVariant::from(&(counts.allowed as i32)),
+            ROLE_GROUP_DENIED => QVariant::from(&(counts.denied as i32)),
+            ROLE_GROUP_BLOCKLISTED => QVariant::from(&(counts.blocklisted as i32)),
+            _ => QVariant::default(),
+        },
+        VisibleEntry::DomainHeader {
+            process_key,
+            key,
+            label,
+            expanded,
+            counts,
+        } => match role {
+            ROLE_ID => QVariant::from(&QString::from(&format!("domain:{process_key}|{key}"))),
+            ROLE_PROCESS | ROLE_HOST | ROLE_PROTOCOL | ROLE_VERDICT => {
+                QVariant::from(&QString::from(""))
+            }
+            ROLE_PORT => QVariant::from(&0i32),
+            ROLE_PENDING => QVariant::from(&(counts.pending > 0)),
+            ROLE_DEPTH => QVariant::from(&1i32),
+            ROLE_IS_GROUP_HEADER => QVariant::from(&true),
+            ROLE_EXPANDED => QVariant::from(expanded),
+            ROLE_GROUP_KEY => QVariant::from(&QString::from(key)),
+            ROLE_GROUP_PARENT_KEY => QVariant::from(&QString::from(process_key)),
+            ROLE_GROUP_LABEL => QVariant::from(&QString::from(label)),
+            ROLE_GROUP_TOTAL => QVariant::from(&(counts.total as i32)),
+            ROLE_GROUP_PENDING => QVariant::from(&(counts.pending as i32)),
+            ROLE_GROUP_ALLOWED => QVariant::from(&(counts.allowed as i32)),
+            ROLE_GROUP_DENIED => QVariant::from(&(counts.denied as i32)),
+            ROLE_GROUP_BLOCKLISTED => QVariant::from(&(counts.blocklisted as i32)),
+            _ => QVariant::default(),
+        },
+        VisibleEntry::Row { id, .. } => {
+            let Some(row) = store.row_by_id(id) else {
+                return QVariant::default();
+            };
+            match role {
+                ROLE_ID => QVariant::from(&QString::from(&row.id)),
+                ROLE_PROCESS => QVariant::from(&QString::from(&row.process)),
+                ROLE_HOST => QVariant::from(&QString::from(&row.dst_host)),
+                ROLE_PORT => QVariant::from(&(row.dst_port as i32)),
+                ROLE_PROTOCOL => QVariant::from(&QString::from(&row.protocol)),
+                ROLE_VERDICT => {
+                    let v = Verdict::from_action(row.action.as_deref());
+                    QVariant::from(&QString::from(v.as_token()))
+                }
+                ROLE_PENDING => QVariant::from(&row.action.is_none()),
+                ROLE_DEPTH => QVariant::from(&2i32),
+                ROLE_IS_GROUP_HEADER => QVariant::from(&false),
+                ROLE_EXPANDED => QVariant::from(&false),
+                ROLE_GROUP_KEY | ROLE_GROUP_PARENT_KEY | ROLE_GROUP_LABEL => {
+                    QVariant::from(&QString::from(""))
+                }
+                ROLE_GROUP_TOTAL
+                | ROLE_GROUP_PENDING
+                | ROLE_GROUP_ALLOWED
+                | ROLE_GROUP_DENIED
+                | ROLE_GROUP_BLOCKLISTED => QVariant::from(&0i32),
+                _ => QVariant::default(),
+            }
+        }
     }
 }

@@ -111,6 +111,13 @@ impl RowStore {
         self.rows.get(index)
     }
 
+    /// Look up a row by id regardless of filter state. Used by the grouping
+    /// projection (`connections::grouping`) to resolve the `ConnectionRow`
+    /// content for ids the group tree tracks by id only.
+    pub fn row_by_id(&self, id: &str) -> Option<&ConnectionRow> {
+        self.rows.iter().find(|r| r.id == id)
+    }
+
     /// Number of rows in `incoming` that [`insert_rows`](Self::insert_rows)
     /// will actually append as *new* rows: ids not already present in the store
     /// **and** not already seen earlier within this same batch.

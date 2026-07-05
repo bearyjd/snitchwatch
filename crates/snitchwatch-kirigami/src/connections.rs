@@ -8,4 +8,5 @@
 //!   directory (Qt bug QTBUG-93443), alongside `bridge_bindings.rs`.
 
 pub mod filter;
+pub mod grouping;
 pub mod row_store;
