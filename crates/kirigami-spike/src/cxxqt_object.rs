@@ -146,11 +146,7 @@ impl qobject::ConnectionModel {
         let new_count = self.entries.len() as i32;
         self.as_mut().set_count(new_count);
         // Spike evidence on stdout (throwaway instrumentation).
-        println!(
-            "[spike] append_row on Qt thread: row {new_count} = {} -> {}",
-            process.to_string(),
-            destination.to_string()
-        );
+        println!("[spike] append_row on Qt thread: row {new_count} = {process} -> {destination}");
         // Proof point 1: emit the Qt signal from the Qt thread.
         self.connection_added(process, destination);
     }

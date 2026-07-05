@@ -15,8 +15,13 @@ use cxx_qt_lib::{QGuiApplication, QQmlApplicationEngine, QString, QUrl};
 fn main() {
     // Kirigami works with QGuiApplication; pick a QtQuick.Controls style that
     // does not require a QApplication so this runs under `offscreen`.
+    // `org.kde.desktop` (Kirigami's usual default) hangs indefinitely under
+    // `QT_QPA_PLATFORM=offscreen` — confirmed by running this binary with no
+    // other env vars set: exit 124, zero output, hangs before QML even
+    // loads. `Basic` is the QApplication-free style that actually completes
+    // headless (matches what `tests/link_770.rs` already sets).
     if std::env::var_os("QT_QUICK_CONTROLS_STYLE").is_none() {
-        std::env::set_var("QT_QUICK_CONTROLS_STYLE", "org.kde.desktop");
+        std::env::set_var("QT_QUICK_CONTROLS_STYLE", "Basic");
     }
 
     let mut app = QGuiApplication::new();
