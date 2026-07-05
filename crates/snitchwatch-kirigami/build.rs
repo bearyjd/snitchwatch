@@ -15,6 +15,7 @@ fn main() {
         "qml/PendingDecisionSheet.qml",
         "qml/BlocklistsPage.qml",
         "qml/RulesPage.qml",
+        "qml/TrafficPage.qml",
     ]))
     .file("src/bridge_bindings.rs")
     .file("src/bridge_feed.rs")
@@ -22,5 +23,6 @@ fn main() {
     .file("src/pending_decision.rs")
     .file("src/blocklists_model.rs")
     .file("src/rules_model.rs")
+    .file("src/traffic_model.rs")
     .build();
 }

@@ -19,4 +19,6 @@ pub mod paths;
 pub mod pending_decision;
 pub mod rules;
 pub mod rules_model;
+pub mod traffic;
+pub mod traffic_model;
 pub mod wizard;

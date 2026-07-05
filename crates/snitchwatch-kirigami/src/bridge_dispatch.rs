@@ -54,6 +54,14 @@ pub fn interests_blocklist_entries(msg: &ServerMessage) -> bool {
     matches!(msg, ServerMessage::SetBlocklistEntries { .. })
 }
 
+/// True when `msg` carries new binned traffic samples (drives
+/// `TrafficModel`). `SetTrafficData`/`UpdateTrafficData` are deliberately
+/// excluded — see `crate::traffic::ring_store`'s module docs for why those
+/// legacy uPlot-shaped blobs aren't consumed.
+pub fn interests_traffic(msg: &ServerMessage) -> bool {
+    matches!(msg, ServerMessage::TrafficEvents { .. })
+}
+
 /// Serialize an outbound `ServerMessage` to the JSON the models'
 /// `applyServerMessageJson` invokable consumes.
 pub fn encode_server(msg: &ServerMessage) -> Result<String, serde_json::Error> {
@@ -71,7 +79,7 @@ pub fn decode_client(json: &str) -> Result<ClientMessage, serde_json::Error> {
 mod tests {
     use super::*;
     use snitchwatch_bridge::ws_messages::{
-        BlocklistEntry, BlocklistSummary, ConnectionRow, VerdictAction, VerdictScope,
+        BlocklistEntry, BlocklistSummary, ConnectionRow, TrafficEvent, VerdictAction, VerdictScope,
     };
 
     fn conn_row(id: &str) -> ConnectionRow {
@@ -153,6 +161,32 @@ mod tests {
         assert!(interests_blocklist_entries(&msg));
         assert!(!interests_blocklists(&msg));
         assert!(!interests_connections(&msg));
+    }
+
+    #[test]
+    fn traffic_event_messages_route_only_to_traffic() {
+        let msg = ServerMessage::TrafficEvents {
+            events: vec![TrafficEvent {
+                timestamp_ms: 1_000_000_000_000,
+                bytes_in: 100,
+                bytes_out: 50,
+            }],
+        };
+        assert!(interests_traffic(&msg));
+        assert!(!interests_connections(&msg));
+        assert!(!interests_rules(&msg));
+        assert!(!interests_blocklists(&msg));
+        assert!(!interests_blocklist_entries(&msg));
+    }
+
+    #[test]
+    fn legacy_uplot_traffic_blobs_are_not_routed_to_traffic() {
+        assert!(!interests_traffic(&ServerMessage::SetTrafficData {
+            data: serde_json::json!({}),
+        }));
+        assert!(!interests_traffic(&ServerMessage::UpdateTrafficData {
+            data: serde_json::json!({}),
+        }));
     }
 
     #[test]

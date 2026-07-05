@@ -55,6 +55,12 @@ Kirigami.ApplicationWindow {
         id: rulesModel
     }
 
+    // Traffic tab model (Task 11). Outbound feed started alongside the
+    // others below; read-only (no request signal to route back).
+    TrafficModel {
+        id: trafficModel
+    }
+
     // Task 13 live wiring. The bridge is already started (main.rs); here we (a)
     // reflect its status into the banner, and (b) start each model's outbound
     // feed task. startBridgeFeed()/refresh() are no-ops when the bridge failed
@@ -65,6 +71,7 @@ Kirigami.ApplicationWindow {
         blocklistsModel.startBridgeFeed();
         blocklistEntriesModel.startBridgeFeed();
         rulesModel.startBridgeFeed();
+        trafficModel.startBridgeFeed();
     }
 
     // Inbound routing (Task 13): model request signals carry a JSON-encoded
@@ -119,6 +126,12 @@ Kirigami.ApplicationWindow {
         id: rulesPageComponent
         RulesPage {
             model: rulesModel
+        }
+    }
+    Component {
+        id: trafficPageComponent
+        TrafficPage {
+            model: trafficModel
         }
     }
     // Tracks the last-seen pending count so we only raise on a *new* pending
@@ -182,6 +195,7 @@ Kirigami.ApplicationWindow {
             Kirigami.Action {
                 text: "Traffic"
                 icon.name: "office-chart-line"
+                onTriggered: root.pageStack.replace(trafficPageComponent)
             }
         ]
     }
