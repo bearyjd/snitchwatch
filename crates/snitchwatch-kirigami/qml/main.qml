@@ -5,6 +5,7 @@
 // Traffic pages task-by-task. App identity is bound from the Rust `AppInfo`
 // QObject (no hardcoded strings in QML).
 import QtQuick
+import QtQuick.Window
 import QtQuick.Layouts
 import QtQuick.Controls as Controls
 import org.kde.kirigami as Kirigami
@@ -27,6 +28,44 @@ Kirigami.ApplicationWindow {
     // window; pages bind to it. Live bridge feed attaches in a follow-up.
     ConnectionsModel {
         id: connectionsModel
+    }
+
+    // Tracks the last-seen pending count so we only raise on a *new* pending
+    // arrival, not on every count change (e.g. 2 -> 3 while already visible).
+    property int lastPendingCount: 0
+
+    // Task 7 requirement 1 — raise/focus over fullscreen.
+    //
+    // When a novel connection needs a decision, the window must come to the
+    // front even over a fullscreen game (Bazzite is gaming-focused; a novel
+    // connection often fires right as a game launches). We use Qt's native
+    // window-activation calls rather than assuming the compositor surfaces the
+    // window on its own — the exact "does the prompt actually appear over a
+    // fullscreen game" claim the GUI decision doc flagged as untested.
+    //
+    // MANUAL VERIFICATION STILL REQUIRED (cannot be done in a headless CI/
+    // sandbox — needs a live Plasma/Wayland session):
+    //   1. Launch a borderless-fullscreen app (e.g. `gamescope -f -- <app>` or
+    //      a fullscreen Qt test window).
+    //   2. Drive a pending connection so pendingCount goes 0 -> >0.
+    //   3. Confirm THIS window raises and gains keyboard focus over the
+    //      fullscreen surface. On Wayland, raise()/requestActivate() are
+    //      subject to the compositor's focus-stealing-prevention policy; if it
+    //      does not surface, the fallback is the KDE notification with a
+    //      "Review" action (Task 17/19) — which is why that path exists.
+    // Record the pass/fail result on real hardware before shipping.
+    Connections {
+        target: connectionsModel
+        function onPendingCountChanged() {
+            const now = connectionsModel.pendingCount;
+            if (now > root.lastPendingCount) {
+                if (root.visibility === Window.Minimized || root.visibility === Window.Hidden)
+                    root.showNormal();
+                root.raise();
+                root.requestActivate();
+            }
+            root.lastPendingCount = now;
+        }
     }
 
     globalDrawer: Kirigami.GlobalDrawer {
