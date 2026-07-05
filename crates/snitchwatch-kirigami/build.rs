@@ -10,7 +10,8 @@ use cxx_qt_build::{CxxQtBuilder, QmlModule};
 
 fn main() {
     CxxQtBuilder::new_qml_module(
-        QmlModule::new("com.snitchwatch.shell").qml_files(["qml/main.qml"]),
+        QmlModule::new("com.snitchwatch.shell")
+            .qml_files(["qml/main.qml", "qml/ConnectionsPage.qml"]),
     )
     .file("src/bridge_bindings.rs")
     .file("src/connections_model.rs")

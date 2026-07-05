@@ -23,6 +23,12 @@ Kirigami.ApplicationWindow {
         id: appInfo
     }
 
+    // Core-loop connection model (Task 6). Owned here so its lifetime spans the
+    // window; pages bind to it. Live bridge feed attaches in a follow-up.
+    ConnectionsModel {
+        id: connectionsModel
+    }
+
     globalDrawer: Kirigami.GlobalDrawer {
         title: appInfo.appName
         titleIcon: "security-high"
@@ -48,16 +54,7 @@ Kirigami.ApplicationWindow {
         ]
     }
 
-    pageStack.initialPage: Kirigami.ScrollablePage {
-        title: "Connections"
-
-        Kirigami.PlaceholderMessage {
-            anchors.centerIn: parent
-            width: parent.width - (Kirigami.Units.largeSpacing * 4)
-            icon.name: "network-connect"
-            text: "Snitchwatch shell"
-            explanation: appInfo.appName + " " + appInfo.version
-                + " — Kirigami shell scaffold. Connections list lands in Task 6/8."
-        }
+    pageStack.initialPage: ConnectionsPage {
+        model: connectionsModel
     }
 }

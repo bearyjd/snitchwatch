@@ -8,7 +8,11 @@
 //!
 //! Load-bearing assertion: `objectCreated` fires with a non-null root object,
 //! which means `main.qml` parsed, `org.kde.kirigami` resolved, and the Rust
-//! `AppInfo` QML type registered. Run headless with `QT_QPA_PLATFORM=offscreen`.
+//! `AppInfo` QML type registered. Because `main.qml` references the
+//! `ConnectionsPage` type and instantiates a `ConnectionsModel` inline in its
+//! object tree, this also transitively proves `ConnectionsPage.qml` compiles
+//! and the model binds (a component-time type error there nulls the root —
+//! verified). Run headless with `QT_QPA_PLATFORM=offscreen`.
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
