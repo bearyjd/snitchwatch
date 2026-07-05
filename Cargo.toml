@@ -6,6 +6,21 @@ members = [
     "crates/snitchwatch-bridge",
     "crates/snitchwatch-bridge-cli",
     "crates/snitchwatch-tauri",
+    "crates/kirigami-spike",
+    "tests/mock_opensnitchd",
+    "tests/integration",
+]
+# `kirigami-spike` requires system Qt6 + Kirigami dev packages to build (see
+# docs/superpowers/specs/2026-07-04-cxx-qt-feasibility-research.md) — it's a
+# throwaway Phase 3a feasibility spike, not shipped functionality, and
+# shouldn't force that dependency on every contributor running a bare
+# `cargo build`/`cargo test`. Build it explicitly via `-p kirigami-spike`.
+default-members = [
+    "crates/snitchwatch-proto",
+    "crates/snitchwatch-spike",
+    "crates/snitchwatch-bridge",
+    "crates/snitchwatch-bridge-cli",
+    "crates/snitchwatch-tauri",
     "tests/mock_opensnitchd",
     "tests/integration",
 ]
