@@ -28,5 +28,7 @@ fn main() {
     .file("src/traffic_model.rs")
     .file("src/wizard_controller.rs")
     .file("src/settings_controller.rs")
+    .file("src/notification_controller.rs")
+    .file("src/tray_controller.rs")
     .build();
 }

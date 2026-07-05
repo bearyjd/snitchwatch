@@ -30,7 +30,7 @@ use std::sync::{Mutex, OnceLock};
 use snitchwatch_bridge::ws_messages::{ClientMessage, ServerMessage};
 use snitchwatch_bridge_cli::{BridgeConfig, RunningBridge};
 use tokio::runtime::{Handle, Runtime};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, watch};
 
 /// Cheaply-clonable handles into the running in-process bridge, handed to each
 /// model's live feed. Cloning is cheap: two channel senders and a runtime
@@ -170,6 +170,29 @@ pub fn status() -> Option<(bool, String)> {
     STARTED.get().map(status_of)
 }
 
+/// A clone of the bridge's tray-state watch receiver (Task 18's
+/// `TrayController` feed), or `None` if the bridge never started/failed to
+/// start. Pure read; never triggers startup — a headless test that never
+/// calls [`ensure_started`] gets `None` and simply no-ops its live feed.
+pub fn tray_rx() -> Option<watch::Receiver<BridgeTrayState>> {
+    match STARTED.get()? {
+        Outcome::Running(rt) => Some(rt._kept.lock().unwrap()._bridge.tray_rx.clone()),
+        Outcome::Failed(_) => None,
+    }
+}
+
+/// A fresh subscription to the bridge's notice broadcast (Task 17's
+/// `NotificationController` feed), or `None` under the same conditions as
+/// [`tray_rx`]. `resubscribe()` (not `.clone()`) because
+/// `broadcast::Receiver` cursors are per-subscriber; each caller needs its own
+/// starting from "now", mirroring `BridgeHandles::subscribe`.
+pub fn notice_rx() -> Option<broadcast::Receiver<BridgeNotice>> {
+    match STARTED.get()? {
+        Outcome::Running(rt) => Some(rt._kept.lock().unwrap()._bridge.notice_rx.resubscribe()),
+        Outcome::Failed(_) => None,
+    }
+}
+
 fn status_of(outcome: &Outcome) -> (bool, String) {
     match outcome {
         Outcome::Running(rt) => (true, format!("Connected to bridge (gRPC {})", rt.grpc_addr)),
@@ -177,7 +200,8 @@ fn status_of(outcome: &Outcome) -> (bool, String) {
     }
 }
 
-// `Notice` / `TrayState` are re-exported so the shell-chrome tasks (Tasks
-// 17–20) that will consume `tray_rx` / `notice_rx` have a single import site.
+// `Notice` / `TrayState` are re-exported so the shell-chrome tasks that
+// consume `tray_rx()` / `notice_rx()` (`TrayController`, Task 18;
+// `NotificationController`, Task 17) have a single import site.
 pub use snitchwatch_bridge::notice::Notice as BridgeNotice;
 pub use snitchwatch_bridge::tray_state::TrayState as BridgeTrayState;

@@ -8,6 +8,7 @@ import QtQuick
 import QtQuick.Window
 import QtQuick.Layouts
 import QtQuick.Controls as Controls
+import Qt.labs.platform as Labs
 import org.kde.kirigami as Kirigami
 import com.snitchwatch.shell
 
@@ -73,6 +74,21 @@ Kirigami.ApplicationWindow {
         id: settingsController
     }
 
+    // Desktop notification dispatch (Task 17). `windowActive` is a live
+    // binding so the 5-second-grace-period check in Rust always sees this
+    // window's current active state, not a stale snapshot.
+    NotificationController {
+        id: notificationController
+        windowActive: root.active
+    }
+
+    // Tray icon state feed (Task 18). The actual `SystemTrayIcon` is declared
+    // further down; this object only derives its tooltip/menu-label text from
+    // the bridge's `TrayState`.
+    TrayController {
+        id: trayController
+    }
+
     // Guards against pushing the onboarding page more than once and against
     // popping when it was never pushed (e.g. "Continue anyway" already
     // dismissed it before a stray stateChanged fires).
@@ -120,6 +136,8 @@ Kirigami.ApplicationWindow {
         rulesModel.startBridgeFeed();
         trafficModel.startBridgeFeed();
         wizardController.probe();
+        notificationController.startBridgeFeed();
+        trayController.startBridgeFeed();
     }
 
     // Inbound routing (Task 13): model request signals carry a JSON-encoded
@@ -217,13 +235,73 @@ Kirigami.ApplicationWindow {
         function onPendingCountChanged() {
             const now = connectionsModel.pendingCount;
             if (now > root.lastPendingCount) {
-                if (root.visibility === Window.Minimized || root.visibility === Window.Hidden)
-                    root.showNormal();
-                root.raise();
-                root.requestActivate();
+                root.raiseAndActivate();
             }
             root.lastPendingCount = now;
         }
+    }
+
+    // Shared raise/focus helper (Task 7 requirement 1). Used both by the
+    // in-app pending-row handler above and by the "Review" action on a
+    // fallback desktop notification (Task 17) — same recovery path either
+    // way, so there is exactly one place that needs the manual fullscreen-
+    // focus verification noted above.
+    function raiseAndActivate() {
+        if (root.visibility === Window.Minimized || root.visibility === Window.Hidden)
+            root.showNormal();
+        root.raise();
+        root.requestActivate();
+    }
+
+    // Task 17's fallback path: the user clicked "Review" on a desktop
+    // notification because the window was hidden/unfocused when a connection
+    // had been pending for 5+ seconds. Bring the window back exactly like a
+    // fresh pending row would.
+    Connections {
+        target: notificationController
+        function onReviewRequested() {
+            root.raiseAndActivate();
+        }
+    }
+
+    // Task 18 tray icon. `Qt.labs.platform.SystemTrayIcon` (verified present
+    // at /usr/lib64/qt6/qml/Qt/labs/platform in this environment) renders via
+    // the platform's StatusNotifierItem support on Plasma — no cxx-qt/KDE
+    // Frameworks binding layer needed.
+    Labs.SystemTrayIcon {
+        id: trayIcon
+        visible: true
+        icon.name: "security-high"
+        tooltip: trayController.tooltip
+
+        onActivated: function (reason) {
+            if (reason === Labs.SystemTrayIcon.Trigger) {
+                root.visible ? root.hide() : root.raiseAndActivate();
+            }
+        }
+
+        menu: Labs.Menu {
+            Labs.MenuItem {
+                text: root.visible ? "Hide window" : "Show window"
+                onTriggered: root.visible ? root.hide() : root.raiseAndActivate()
+            }
+            Labs.MenuItem {
+                separator: true
+            }
+            Labs.MenuItem {
+                text: "Quit"
+                onTriggered: Qt.quit()
+            }
+        }
+    }
+
+    // Close-to-tray (Task 18), matching `snitchwatch-tauri`'s
+    // `on_window_event`/`CloseRequested` handler: closing the window hides it
+    // instead of quitting, since the tray icon is the only way back in
+    // otherwise. `Qt.quit()` above (tray menu) is the actual exit path.
+    onClosing: function (close) {
+        close.accepted = false;
+        root.hide();
     }
 
     globalDrawer: Kirigami.GlobalDrawer {
