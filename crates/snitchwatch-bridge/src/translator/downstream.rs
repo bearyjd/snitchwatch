@@ -75,8 +75,12 @@ mod blocklist_emission_tests {
         match msg {
             ServerMessage::SetBlocklists { blocklists } => {
                 assert_eq!(blocklists.len(), 2);
-                assert!(blocklists.iter().any(|b| b.id == "stevenblack" && b.entry_count == 5));
-                assert!(blocklists.iter().any(|b| b.id == "easylist" && b.entry_count == 3));
+                assert!(blocklists
+                    .iter()
+                    .any(|b| b.id == "stevenblack" && b.entry_count == 5));
+                assert!(blocklists
+                    .iter()
+                    .any(|b| b.id == "easylist" && b.entry_count == 3));
             }
             other => panic!("expected SetBlocklists, got {other:?}"),
         }

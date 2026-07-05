@@ -12,7 +12,10 @@ pub enum TrayState {
     #[default]
     Idle,
     Pending(usize),
-    RecentBlock { what: String, ttl: Duration },
+    RecentBlock {
+        what: String,
+        ttl: Duration,
+    },
     FilterOff,
     DaemonDown,
 }

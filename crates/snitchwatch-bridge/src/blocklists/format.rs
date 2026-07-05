@@ -25,7 +25,11 @@ pub fn sniff_format(body: &str) -> ListFormat {
     let mut domain_hits = 0u32;
     for line in body.lines().take(64) {
         let line = line.trim();
-        if line.is_empty() || line.starts_with('#') || line.starts_with('!') || line.starts_with('[') {
+        if line.is_empty()
+            || line.starts_with('#')
+            || line.starts_with('!')
+            || line.starts_with('[')
+        {
             continue;
         }
         if line.starts_with("||") && line.contains('^') {
@@ -50,7 +54,11 @@ pub fn parse(format: ListFormat, body: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for line in body.lines() {
         let line = line.trim();
-        if line.is_empty() || line.starts_with('#') || line.starts_with('!') || line.starts_with('[') {
+        if line.is_empty()
+            || line.starts_with('#')
+            || line.starts_with('!')
+            || line.starts_with('[')
+        {
             continue;
         }
         let host_opt = match format {
@@ -156,7 +164,8 @@ mod tests {
 
     #[test]
     fn parses_abp_extracts_domain_between_pipes_and_caret() {
-        let body = "[Adblock Plus 2.0]\n||doubleclick.net^\n!comment\n||tracker.example^$third-party\n";
+        let body =
+            "[Adblock Plus 2.0]\n||doubleclick.net^\n!comment\n||tracker.example^$third-party\n";
         let parsed = parse(ListFormat::AdblockPlus, body);
         assert_eq!(parsed, vec!["doubleclick.net", "tracker.example"]);
     }

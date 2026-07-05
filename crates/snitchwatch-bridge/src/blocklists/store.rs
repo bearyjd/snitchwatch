@@ -182,9 +182,8 @@ impl BlocklistStore {
             params![sub_id],
         )?;
         {
-            let mut stmt = tx.prepare(
-                "INSERT INTO entries (subscription_id, host) VALUES (?1, ?2)",
-            )?;
+            let mut stmt =
+                tx.prepare("INSERT INTO entries (subscription_id, host) VALUES (?1, ?2)")?;
             for host in hosts {
                 stmt.execute(params![sub_id, host])?;
             }
@@ -199,9 +198,8 @@ impl BlocklistStore {
 
     pub fn list_entries(&self, sub_id: &str) -> Result<Vec<String>, StoreError> {
         let conn = self.lock()?;
-        let mut stmt = conn.prepare(
-            "SELECT host FROM entries WHERE subscription_id = ?1 ORDER BY host",
-        )?;
+        let mut stmt =
+            conn.prepare("SELECT host FROM entries WHERE subscription_id = ?1 ORDER BY host")?;
         let rows = stmt
             .query_map(params![sub_id], |row| row.get::<_, String>(0))?
             .collect::<Result<Vec<_>, _>>()?;
@@ -219,8 +217,11 @@ fn row_to_subscription(row: &rusqlite::Row<'_>) -> rusqlite::Result<Subscription
     let kind: String = row.get(6)?;
     let reason: Option<String> = row.get(7)?;
     let entry_count: i64 = row.get(8)?;
-    let last_fetched_at = last_fetched_at
-        .and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|t| t.with_timezone(&Utc)));
+    let last_fetched_at = last_fetched_at.and_then(|s| {
+        DateTime::parse_from_rfc3339(&s)
+            .ok()
+            .map(|t| t.with_timezone(&Utc))
+    });
     Ok(Subscription {
         id,
         url,
@@ -262,7 +263,10 @@ mod tests {
             entry_count: 0,
         };
         store.upsert_subscription(&sub).expect("upsert");
-        let loaded = store.get_subscription("stevenblack").expect("get").expect("found");
+        let loaded = store
+            .get_subscription("stevenblack")
+            .expect("get")
+            .expect("found");
         assert_eq!(loaded, sub);
     }
 

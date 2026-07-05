@@ -125,7 +125,11 @@ impl BlocklistsManager {
                 sub.last_fetch_status = FetchStatus::Ok;
                 self.store.upsert_subscription(&sub)?;
                 let materialized = materialize_batch(&sub.id, &hosts);
-                if let Err(e) = self.rule_sink.replace_blocklist_rules(&sub.id, materialized).await {
+                if let Err(e) = self
+                    .rule_sink
+                    .replace_blocklist_rules(&sub.id, materialized)
+                    .await
+                {
                     warn!(id = %sub.id, error = %e, "rule sink push failed; entries cached but not enforced");
                 }
                 let _ = self.bus.send(BlocklistEvent::EntriesChanged {
@@ -138,7 +142,9 @@ impl BlocklistsManager {
                 FetchStatus::Ok
             }
             FetchOutcome::Failed { reason } => {
-                sub.last_fetch_status = FetchStatus::Failed { reason: reason.clone() };
+                sub.last_fetch_status = FetchStatus::Failed {
+                    reason: reason.clone(),
+                };
                 self.store.upsert_subscription(&sub)?;
                 let _ = self.bus.send(BlocklistEvent::StatusChanged {
                     subscription_id: sub.id.clone(),
@@ -200,7 +206,13 @@ fn derive_id(url: &str) -> String {
         .trim_end_matches(".txt");
     let cleaned: String = stem
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     if cleaned.is_empty() {
         format!("list-{:x}", url.len())
@@ -215,9 +227,9 @@ fn derive_display_name(url: &str) -> String {
 
 #[cfg(test)]
 pub mod test_helpers {
-    use std::sync::Arc;
     use crate::blocklists::store::{BlocklistStore, FetchStatus, Subscription};
     use crate::blocklists::BlocklistsManager;
+    use std::sync::Arc;
 
     pub fn seeded_manager(seeds: &[(&str, usize)]) -> BlocklistsManager {
         let store = Arc::new(BlocklistStore::open_in_memory().unwrap());
@@ -284,9 +296,15 @@ mod tests {
 
     #[test]
     fn derive_id_handles_query_strings_and_special_chars() {
-        assert_eq!(derive_id("https://x.example/hosts.txt?branch=main"), "hosts");
+        assert_eq!(
+            derive_id("https://x.example/hosts.txt?branch=main"),
+            "hosts"
+        );
         assert_eq!(derive_id("https://x.example/StevenBlack/hosts"), "hosts");
-        assert_eq!(derive_id("https://x.example/path/with%20space"), "with_20space");
+        assert_eq!(
+            derive_id("https://x.example/path/with%20space"),
+            "with_20space"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -321,7 +339,11 @@ mod tests {
                 panic!("never observed EntriesChanged for tiny");
             }
             match tokio::time::timeout(Duration::from_millis(200), rx.recv()).await {
-                Ok(Ok(BlocklistEvent::EntriesChanged { subscription_id })) if subscription_id == "tiny" => break,
+                Ok(Ok(BlocklistEvent::EntriesChanged { subscription_id }))
+                    if subscription_id == "tiny" =>
+                {
+                    break
+                }
                 Ok(Ok(_)) => continue,
                 Ok(Err(_)) => continue,
                 Err(_) => continue,

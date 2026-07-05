@@ -144,7 +144,10 @@ mod blocklist_action_tests {
         let mgr = manager();
         let action = ClientMessage::Undo;
         let outcome = handle_blocklist_action(mgr.clone(), action).await.unwrap();
-        assert_eq!(outcome, BlocklistActionOutcome::Unhandled(Box::new(ClientMessage::Undo)));
+        assert_eq!(
+            outcome,
+            BlocklistActionOutcome::Unhandled(Box::new(ClientMessage::Undo))
+        );
     }
 }
 

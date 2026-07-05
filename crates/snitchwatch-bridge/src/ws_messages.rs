@@ -312,8 +312,12 @@ mod blocklist_message_tests {
         let msg = ServerMessage::SetBlocklistEntries {
             subscription_id: "stevenblack".into(),
             entries: vec![
-                BlocklistEntry { host: "doubleclick.net".into() },
-                BlocklistEntry { host: "google-analytics.com".into() },
+                BlocklistEntry {
+                    host: "doubleclick.net".into(),
+                },
+                BlocklistEntry {
+                    host: "google-analytics.com".into(),
+                },
             ],
         };
         let json = serde_json::to_value(&msg).unwrap();
