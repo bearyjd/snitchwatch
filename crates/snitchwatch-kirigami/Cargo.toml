@@ -40,6 +40,7 @@ regex = { workspace = true }
 anyhow = "1"
 which = "6"
 notify-rust = "4"
+maxminddb = "0.29"
 
 [build-dependencies]
 cxx-qt-build = "=0.9.1"

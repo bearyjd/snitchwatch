@@ -29,6 +29,27 @@ pub fn interests_connections(msg: &ServerMessage) -> bool {
     )
 }
 
+/// True when `msg` mutates the connection list — the same variants
+/// `interests_connections` cares about, but drives `GeoModel`'s per-country
+/// aggregate instead. Kept as its own named predicate (rather than reusing
+/// `interests_connections` directly at the call site) so each model's feed
+/// task reads as "this predicate is *my* routing rule", matching the style of
+/// every other `interests_*` function here — even though the two currently
+/// happen to match an identical variant set, they're conceptually different
+/// consumers (an ordered row list vs. a country-keyed aggregate) and may
+/// diverge later (e.g. if the geo panel starts consuming a dedicated
+/// traffic-volume message the row list doesn't need).
+pub fn interests_geo(msg: &ServerMessage) -> bool {
+    matches!(
+        msg,
+        ServerMessage::InsertConnectionRows { .. }
+            | ServerMessage::UpdateConnectionRows { .. }
+            | ServerMessage::RemoveConnectionRows { .. }
+            | ServerMessage::MoveConnetionRows { .. }
+            | ServerMessage::ClearConnectionRows
+    )
+}
+
 /// True when `msg` mutates the rule list (drives `RulesModel`).
 pub fn interests_rules(msg: &ServerMessage) -> bool {
     matches!(
@@ -122,6 +143,32 @@ mod tests {
         assert!(interests_connections(&ServerMessage::ClearConnectionRows));
         assert!(interests_connections(&ServerMessage::MoveConnetionRows {
             ids: vec!["r1".into()]
+        }));
+    }
+
+    #[test]
+    fn connection_messages_also_route_to_geo() {
+        let msg = ServerMessage::InsertConnectionRows {
+            rows: vec![conn_row("r1")],
+        };
+        assert!(interests_geo(&msg));
+        assert!(interests_geo(&ServerMessage::UpdateConnectionRows {
+            rows: vec![conn_row("r1")]
+        }));
+        assert!(interests_geo(&ServerMessage::RemoveConnectionRows {
+            ids: vec!["r1".into()]
+        }));
+        assert!(interests_geo(&ServerMessage::MoveConnetionRows {
+            ids: vec!["r1".into()]
+        }));
+        assert!(interests_geo(&ServerMessage::ClearConnectionRows));
+    }
+
+    #[test]
+    fn unrelated_messages_do_not_route_to_geo() {
+        assert!(!interests_geo(&ServerMessage::SetRules { rules: vec![] }));
+        assert!(!interests_geo(&ServerMessage::SetConnectionsStatus {
+            status: snitchwatch_bridge::ws_messages::ConnectionsStatus::Connected
         }));
     }
 

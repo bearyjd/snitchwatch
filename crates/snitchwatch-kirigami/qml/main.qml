@@ -40,6 +40,13 @@ Kirigami.ApplicationWindow {
         id: connectionsModel
     }
 
+    // Per-country geographic breakdown (Geo panel). Same lifetime/ownership
+    // shape as connectionsModel; outbound feed started alongside the others
+    // below via startBridgeFeed().
+    GeoModel {
+        id: geoModel
+    }
+
     // Blocklists tab models (Task 9). Outbound feeds started alongside the
     // others below; the subscribe/unsubscribe request signal is routed to the
     // bridge inbound via the Connections block further down.
@@ -144,6 +151,7 @@ Kirigami.ApplicationWindow {
         rulesModel.startBridgeFeed();
         trafficModel.startBridgeFeed();
         profilesModel.startBridgeFeed();
+        geoModel.startBridgeFeed();
         wizardController.probe();
         notificationController.startBridgeFeed();
         trayController.startBridgeFeed();
@@ -234,6 +242,12 @@ Kirigami.ApplicationWindow {
         id: diagnosticsPageComponent
         DiagnosticsPage {
             controller: settingsController
+        }
+    }
+    Component {
+        id: geoPageComponent
+        GeoPage {
+            model: geoModel
         }
     }
     // Tracks the last-seen pending count so we only raise on a *new* pending
@@ -344,6 +358,11 @@ Kirigami.ApplicationWindow {
                 icon.name: "network-connect"
                 checked: true
                 onTriggered: root.pageStack.replace(connectionsPageComponent)
+            },
+            Kirigami.Action {
+                text: "Geography"
+                icon.name: "map-globe"
+                onTriggered: root.pageStack.replace(geoPageComponent)
             },
             Kirigami.Action {
                 text: "Rules"

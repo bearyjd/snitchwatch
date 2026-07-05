@@ -19,6 +19,7 @@ fn main() {
         "qml/TrafficPage.qml",
         "qml/OnboardingPage.qml",
         "qml/DiagnosticsPage.qml",
+        "qml/GeoPage.qml",
     ]))
     .file("src/bridge_bindings.rs")
     .file("src/bridge_feed.rs")
@@ -32,5 +33,6 @@ fn main() {
     .file("src/settings_controller.rs")
     .file("src/notification_controller.rs")
     .file("src/tray_controller.rs")
+    .file("src/geo_model.rs")
     .build();
 }
