@@ -26,12 +26,28 @@ ColumnLayout {
     // Server-owned countdown to the automatic fallback action. Negative hides it.
     property int remainingSeconds: -1
 
+    // Live-wiring hub (Task 13), injected from ConnectionsPage. When set, a
+    // submitted verdict's JSON is routed to the bridge's inbound pump. Null in
+    // isolated component tests, in which case the verdict is a no-op sink.
+    property var bridgeFeed: null
+
     // Emitted after a verdict is submitted so the container can close/advance.
     signal decided()
 
     // Rust submission surface (pure verdict→ClientMessage mapping lives there).
     PendingDecision {
         id: decision
+    }
+
+    // Route the emitted SetVerdict JSON to the bridge inbound (Task 13). Kept as
+    // a signal→dispatcher hop (not a direct call in submit()) so the pure
+    // verdict→ClientMessage mapping stays the single source of the JSON.
+    Connections {
+        target: decision
+        enabled: sheet.bridgeFeed !== null
+        function onVerdictSubmitted(json) {
+            sheet.bridgeFeed.sendClientJson(json);
+        }
     }
 
     Kirigami.InlineMessage {

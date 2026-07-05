@@ -77,6 +77,17 @@ pub struct RunningBridge {
     pub ws_token: Token,
     /// Actual bound gRPC address (so callers who passed `:0` can discover it).
     pub grpc_addr: SocketAddr,
+    /// Outbound `ServerMessage` broadcast sender. In-process consumers (the
+    /// native Kirigami shell) call `.subscribe()` here to receive the exact
+    /// stream the WebSocket server fans out to browser clients — no WS
+    /// round-trip to ourselves. The WS server keeps using its own clone of this
+    /// same sender, so both consumption paths stay in lockstep.
+    pub broadcast_tx: broadcast::Sender<ServerMessage>,
+    /// Inbound `ClientMessage` sender. In-process consumers push UI-origin
+    /// messages here — the same channel the WebSocket server feeds — so they
+    /// flow through the identical `upstream::apply` pump (verdict resolution,
+    /// rule effects). This is the in-process equivalent of a WS client frame.
+    pub inbound_tx: mpsc::Sender<ClientMessage>,
     /// Receiver for tray icon state changes published by the bridge.
     pub tray_rx: watch::Receiver<TrayState>,
     /// Receiver for desktop notifications published by the bridge.
@@ -133,7 +144,7 @@ pub async fn run(config: BridgeConfig) -> Result<RunningBridge> {
 
     let ws_handles = WsHandles {
         broadcast: broadcast_tx.clone(),
-        inbound: inbound_tx,
+        inbound: inbound_tx.clone(),
         blocklists: blocklists_mgr,
     };
     let ws_server = WsServer::new(config.ws_socket_path.clone(), token.clone(), ws_handles);
@@ -204,6 +215,8 @@ pub async fn run(config: BridgeConfig) -> Result<RunningBridge> {
         ws_token_path,
         ws_token: token,
         grpc_addr,
+        broadcast_tx,
+        inbound_tx,
         tray_rx,
         notice_rx,
         ws_shutdown_tx: Some(ws_shutdown_tx),
@@ -227,6 +240,36 @@ mod tests {
         assert!(bridge.ws_socket_path.exists());
         assert!(bridge.ws_token_path.exists());
         assert!(bridge.grpc_addr.port() != 0);
+        bridge.shutdown();
+    }
+
+    #[tokio::test]
+    async fn exposes_in_process_broadcast_and_inbound_handles() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = BridgeConfig {
+            grpc_bind: "127.0.0.1:0".parse().unwrap(),
+            ws_socket_path: dir.path().join("bridge.sock"),
+            cache_capacity: 64,
+        };
+        let bridge = run(cfg).await.expect("run failed");
+
+        // Outbound: a subscriber gets the exact ServerMessage the bridge fans out.
+        let mut rx = bridge.broadcast_tx.subscribe();
+        let msg = ServerMessage::ClearConnectionRows;
+        bridge.broadcast_tx.send(msg.clone()).unwrap();
+        let got = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .expect("no broadcast within timeout")
+            .expect("broadcast channel closed");
+        assert_eq!(got, msg);
+
+        // Inbound: a UI-origin ClientMessage is accepted onto the upstream pump.
+        bridge
+            .inbound_tx
+            .send(ClientMessage::Undo)
+            .await
+            .expect("inbound channel closed");
+
         bridge.shutdown();
     }
 }

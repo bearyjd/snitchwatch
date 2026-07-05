@@ -24,15 +24,24 @@ Kirigami.ApplicationWindow {
         id: appInfo
     }
 
+    // Live-wiring hub (Task 13). Owns the app-level bridge status surface and is
+    // the single inbound sink the models' request signals feed. The in-process
+    // bridge itself is started in `main.rs` before this QML loads; `refresh()`
+    // (below) just reflects its outcome.
+    BridgeFeed {
+        id: bridgeFeed
+    }
+
     // Core-loop connection model (Task 6). Owned here so its lifetime spans the
-    // window; pages bind to it. Live bridge feed attaches in a follow-up.
+    // window; pages bind to it. Its live outbound feed is started in the
+    // window's Component.onCompleted via startBridgeFeed().
     ConnectionsModel {
         id: connectionsModel
     }
 
-    // Blocklists tab models (Task 9). Same lifetime-owned-at-window-scope
-    // pattern as connectionsModel above; the live bridge feed attaches the
-    // same way once that follow-up wiring lands.
+    // Blocklists tab models (Task 9). Outbound feeds started alongside the
+    // others below; the subscribe/unsubscribe request signal is routed to the
+    // bridge inbound via the Connections block further down.
     BlocklistsModel {
         id: blocklistsModel
     }
@@ -40,11 +49,55 @@ Kirigami.ApplicationWindow {
         id: blocklistEntriesModel
     }
 
-    // Rules tab model (Task 10). Same window-scope-owned lifetime as the
-    // models above; the live bridge feed attaches the same way once that
-    // follow-up wiring lands.
+    // Rules tab model (Task 10). Outbound feed started below; rule-change
+    // request signal routed to the bridge inbound via the Connections block.
     RulesModel {
         id: rulesModel
+    }
+
+    // Task 13 live wiring. The bridge is already started (main.rs); here we (a)
+    // reflect its status into the banner, and (b) start each model's outbound
+    // feed task. startBridgeFeed()/refresh() are no-ops when the bridge failed
+    // to start, so a degraded bridge still yields a working (if empty) window.
+    Component.onCompleted: {
+        bridgeFeed.refresh();
+        connectionsModel.startBridgeFeed();
+        blocklistsModel.startBridgeFeed();
+        blocklistEntriesModel.startBridgeFeed();
+        rulesModel.startBridgeFeed();
+    }
+
+    // Inbound routing (Task 13): model request signals carry a JSON-encoded
+    // ClientMessage; the BridgeFeed deserializes and pushes each onto the
+    // bridge's inbound pump — the same path a WS client frame takes.
+    Connections {
+        target: blocklistsModel
+        function onSubscriptionRequested(json) {
+            bridgeFeed.sendClientJson(json);
+        }
+    }
+    Connections {
+        target: rulesModel
+        function onRuleChangeRequested(json) {
+            bridgeFeed.sendClientJson(json);
+        }
+    }
+
+    // App-level bridge status. Hidden while the bridge is healthy; shows an
+    // error banner over the current page if it failed to start. Floats above
+    // pageStack so it's visible on any tab.
+    Kirigami.InlineMessage {
+        id: bridgeBanner
+        z: 999
+        anchors {
+            top: parent.top
+            left: parent.left
+            right: parent.right
+            margins: Kirigami.Units.smallSpacing
+        }
+        type: Kirigami.MessageType.Error
+        visible: !bridgeFeed.ok
+        text: bridgeFeed.statusText
     }
 
     // Page components, swapped into pageStack by the drawer actions below.
@@ -52,6 +105,7 @@ Kirigami.ApplicationWindow {
         id: connectionsPageComponent
         ConnectionsPage {
             model: connectionsModel
+            bridgeFeed: bridgeFeed
         }
     }
     Component {

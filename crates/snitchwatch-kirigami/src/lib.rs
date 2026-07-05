@@ -9,6 +9,9 @@
 pub mod blocklists;
 pub mod blocklists_model;
 pub mod bridge_bindings;
+pub mod bridge_dispatch;
+pub mod bridge_feed;
+pub mod bridge_runtime;
 pub mod connections;
 pub mod connections_model;
 pub mod panic_hook;

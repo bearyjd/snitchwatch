@@ -18,9 +18,11 @@
 
 use core::pin::Pin;
 use cxx_qt::CxxQtType;
+use cxx_qt::Threading;
 use cxx_qt_lib::{
     QByteArray, QHash, QHashPair_i32_QByteArray, QList, QModelIndex, QString, QVariant,
 };
+use tokio::sync::broadcast;
 
 use crate::connections::row_store::{ModelOp, RowStore, Verdict};
 use snitchwatch_bridge::ws_messages::{ConnectionRow, ServerMessage};
@@ -99,6 +101,15 @@ pub mod qobject {
         #[qinvokable]
         #[cxx_name = "applyServerMessageJson"]
         fn apply_server_message_json(self: Pin<&mut ConnectionsModel>, json: &QString);
+
+        /// Start the live outbound feed (Task 13): subscribe to the bridge's
+        /// `ServerMessage` broadcast and queue connection-relevant messages onto
+        /// the Qt thread via `applyServerMessageJson`. No-op when the bridge
+        /// isn't running (e.g. headless tests). Called from QML
+        /// `Component.onCompleted`; safe to call at most once per instance.
+        #[qinvokable]
+        #[cxx_name = "startBridgeFeed"]
+        fn start_bridge_feed(self: Pin<&mut ConnectionsModel>);
 
         // --- Filter / search (Task 8) --------------------------------------
         /// Set the case-insensitive substring search query. Empty clears it.
@@ -243,6 +254,40 @@ impl qobject::ConnectionsModel {
 
     fn set_current_row_id(mut self: Pin<&mut Self>, id: &QString) {
         self.as_mut().rust_mut().current_row_id = id.to_string();
+    }
+
+    fn start_bridge_feed(self: Pin<&mut Self>) {
+        let Some(handles) = crate::bridge_runtime::handles() else {
+            tracing::warn!("ConnectionsModel: bridge not running; live feed disabled");
+            return;
+        };
+        let qt_thread = self.qt_thread();
+        let mut rx = handles.subscribe();
+        handles.runtime().spawn(async move {
+            loop {
+                match rx.recv().await {
+                    Ok(msg) => {
+                        if !crate::bridge_dispatch::interests_connections(&msg) {
+                            continue;
+                        }
+                        match crate::bridge_dispatch::encode_server(&msg) {
+                            Ok(json) => {
+                                let _ = qt_thread.queue(move |qobject| {
+                                    qobject.apply_server_message_json(&QString::from(&json));
+                                });
+                            }
+                            Err(e) => {
+                                tracing::warn!(error = %e, "ConnectionsModel feed: encode failed")
+                            }
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!(skipped = n, "ConnectionsModel feed lagged behind bridge")
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
     }
 }
 

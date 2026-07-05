@@ -15,7 +15,9 @@
 
 use core::pin::Pin;
 use cxx_qt::CxxQtType;
+use cxx_qt::Threading;
 use cxx_qt_lib::{QByteArray, QHash, QHashPair_i32_QByteArray, QModelIndex, QString, QVariant};
+use tokio::sync::broadcast;
 
 use crate::rules::row_store::{RuleSource, RulesStore};
 use snitchwatch_bridge::ws_messages::{ClientMessage, ServerMessage};
@@ -78,6 +80,14 @@ pub mod qobject {
         #[cxx_name = "applyServerMessageJson"]
         fn apply_server_message_json(self: Pin<&mut RulesModel>, json: &QString);
 
+        /// Start the live outbound feed (Task 13): subscribe to the bridge's
+        /// `ServerMessage` broadcast and queue rule-list messages onto the Qt
+        /// thread. No-op when the bridge isn't running. Called from QML
+        /// `Component.onCompleted`.
+        #[qinvokable]
+        #[cxx_name = "startBridgeFeed"]
+        fn start_bridge_feed(self: Pin<&mut RulesModel>);
+
         /// Toggle a rule's enabled flag (emits `UpdateRule` with the rule's
         /// full payload, `enabled` flipped, every other field preserved).
         #[qinvokable]
@@ -98,6 +108,8 @@ pub mod qobject {
         #[cxx_name = "endResetModel"]
         unsafe fn end_reset_model(self: Pin<&mut RulesModel>);
     }
+
+    impl cxx_qt::Threading for RulesModel {}
 }
 
 /// Rust-side state for [`qobject::RulesModel`].
@@ -180,6 +192,38 @@ impl qobject::RulesModel {
     fn delete_rule(self: Pin<&mut Self>, name: &QString) {
         self.emit_client(ClientMessage::DeleteRule {
             rule_id: name.to_string(),
+        });
+    }
+
+    fn start_bridge_feed(self: Pin<&mut Self>) {
+        let Some(handles) = crate::bridge_runtime::handles() else {
+            tracing::warn!("RulesModel: bridge not running; live feed disabled");
+            return;
+        };
+        let qt_thread = self.qt_thread();
+        let mut rx = handles.subscribe();
+        handles.runtime().spawn(async move {
+            loop {
+                match rx.recv().await {
+                    Ok(msg) => {
+                        if !crate::bridge_dispatch::interests_rules(&msg) {
+                            continue;
+                        }
+                        match crate::bridge_dispatch::encode_server(&msg) {
+                            Ok(json) => {
+                                let _ = qt_thread.queue(move |qobject| {
+                                    qobject.apply_server_message_json(&QString::from(&json));
+                                });
+                            }
+                            Err(e) => tracing::warn!(error = %e, "RulesModel feed: encode failed"),
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!(skipped = n, "RulesModel feed lagged behind bridge")
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
         });
     }
 }

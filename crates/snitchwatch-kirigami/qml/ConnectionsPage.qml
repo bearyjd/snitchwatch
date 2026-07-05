@@ -29,6 +29,11 @@ Kirigami.ScrollablePage {
     // Injected by the caller (main.qml) so the model's lifetime is owned there.
     property ConnectionsModel model
 
+    // Live-wiring hub (Task 13), injected by main.qml. Threaded down to the
+    // embedded PendingDecisionSheet so a submitted verdict reaches the bridge's
+    // inbound pump. Null in isolated component tests (the sheet no-ops then).
+    property var bridgeFeed: null
+
     // Snapshot of the row currently shown in the inspector sheet.
     property string inspectId: ""
     property string inspectProcess: ""
@@ -224,6 +229,7 @@ Kirigami.ScrollablePage {
                 rowId: page.inspectId
                 process: page.inspectProcess
                 host: page.inspectHost
+                bridgeFeed: page.bridgeFeed
                 onDecided: inspector.close()
             }
         }

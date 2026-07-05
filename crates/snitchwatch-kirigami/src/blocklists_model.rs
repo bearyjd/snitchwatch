@@ -15,7 +15,9 @@
 
 use core::pin::Pin;
 use cxx_qt::CxxQtType;
+use cxx_qt::Threading;
 use cxx_qt_lib::{QByteArray, QHash, QHashPair_i32_QByteArray, QModelIndex, QString, QVariant};
+use tokio::sync::broadcast;
 
 use crate::blocklists::row_store::{EntriesStore, SubscriptionsStore};
 use snitchwatch_bridge::ws_messages::{ClientMessage, ServerMessage};
@@ -80,6 +82,14 @@ pub mod qobject {
         #[cxx_name = "applyServerMessageJson"]
         fn apply_server_message_json(self: Pin<&mut BlocklistsModel>, json: &QString);
 
+        /// Start the live outbound feed (Task 13): subscribe to the bridge's
+        /// `ServerMessage` broadcast and queue subscription-list messages onto
+        /// the Qt thread. No-op when the bridge isn't running. Called from QML
+        /// `Component.onCompleted`.
+        #[qinvokable]
+        #[cxx_name = "startBridgeFeed"]
+        fn start_bridge_feed(self: Pin<&mut BlocklistsModel>);
+
         /// Subscribe to a new blocklist URL (emits SubscribeBlocklist).
         #[qinvokable]
         fn subscribe(self: Pin<&mut BlocklistsModel>, url: &QString);
@@ -114,6 +124,14 @@ pub mod qobject {
         #[cxx_name = "applyServerMessageJson"]
         fn apply_server_message_json(self: Pin<&mut BlocklistEntriesModel>, json: &QString);
 
+        /// Start the live outbound feed (Task 13): subscribe to the bridge's
+        /// `ServerMessage` broadcast and queue entry-list messages onto the Qt
+        /// thread. No-op when the bridge isn't running. Called from QML
+        /// `Component.onCompleted`.
+        #[qinvokable]
+        #[cxx_name = "startBridgeFeed"]
+        fn start_bridge_feed(self: Pin<&mut BlocklistEntriesModel>);
+
         /// Clear the detail list (e.g. when the selection is cleared).
         #[qinvokable]
         #[cxx_name = "clearEntries"]
@@ -135,6 +153,9 @@ pub mod qobject {
         #[cxx_name = "endResetModel"]
         unsafe fn end_reset_model(self: Pin<&mut BlocklistEntriesModel>);
     }
+
+    impl cxx_qt::Threading for BlocklistsModel {}
+    impl cxx_qt::Threading for BlocklistEntriesModel {}
 }
 
 // --- Subscriptions model -----------------------------------------------------
@@ -198,6 +219,40 @@ impl qobject::BlocklistsModel {
 
     fn unsubscribe(self: Pin<&mut Self>, id: &QString) {
         self.emit_client(ClientMessage::UnsubscribeBlocklist { id: id.to_string() });
+    }
+
+    fn start_bridge_feed(self: Pin<&mut Self>) {
+        let Some(handles) = crate::bridge_runtime::handles() else {
+            tracing::warn!("BlocklistsModel: bridge not running; live feed disabled");
+            return;
+        };
+        let qt_thread = self.qt_thread();
+        let mut rx = handles.subscribe();
+        handles.runtime().spawn(async move {
+            loop {
+                match rx.recv().await {
+                    Ok(msg) => {
+                        if !crate::bridge_dispatch::interests_blocklists(&msg) {
+                            continue;
+                        }
+                        match crate::bridge_dispatch::encode_server(&msg) {
+                            Ok(json) => {
+                                let _ = qt_thread.queue(move |qobject| {
+                                    qobject.apply_server_message_json(&QString::from(&json));
+                                });
+                            }
+                            Err(e) => {
+                                tracing::warn!(error = %e, "BlocklistsModel feed: encode failed")
+                            }
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!(skipped = n, "BlocklistsModel feed lagged behind bridge")
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
     }
 }
 
@@ -279,6 +334,42 @@ impl qobject::BlocklistEntriesModel {
             self.as_mut().set_count(0);
             self.as_mut().set_subscription_id(QString::default());
         }
+    }
+
+    fn start_bridge_feed(self: Pin<&mut Self>) {
+        let Some(handles) = crate::bridge_runtime::handles() else {
+            tracing::warn!("BlocklistEntriesModel: bridge not running; live feed disabled");
+            return;
+        };
+        let qt_thread = self.qt_thread();
+        let mut rx = handles.subscribe();
+        handles.runtime().spawn(async move {
+            loop {
+                match rx.recv().await {
+                    Ok(msg) => {
+                        if !crate::bridge_dispatch::interests_blocklist_entries(&msg) {
+                            continue;
+                        }
+                        match crate::bridge_dispatch::encode_server(&msg) {
+                            Ok(json) => {
+                                let _ = qt_thread.queue(move |qobject| {
+                                    qobject.apply_server_message_json(&QString::from(&json));
+                                });
+                            }
+                            Err(e) => tracing::warn!(
+                                error = %e,
+                                "BlocklistEntriesModel feed: encode failed"
+                            ),
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => tracing::warn!(
+                        skipped = n,
+                        "BlocklistEntriesModel feed lagged behind bridge"
+                    ),
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
     }
 }
 

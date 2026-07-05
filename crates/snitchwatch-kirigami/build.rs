@@ -17,6 +17,7 @@ fn main() {
         "qml/RulesPage.qml",
     ]))
     .file("src/bridge_bindings.rs")
+    .file("src/bridge_feed.rs")
     .file("src/connections_model.rs")
     .file("src/pending_decision.rs")
     .file("src/blocklists_model.rs")

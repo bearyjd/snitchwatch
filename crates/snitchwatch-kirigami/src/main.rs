@@ -15,6 +15,7 @@
 use snitchwatch_kirigami::bridge_bindings as _;
 
 use cxx_qt_lib::{QGuiApplication, QQmlApplicationEngine, QString, QUrl};
+use snitchwatch_kirigami::bridge_runtime;
 
 fn main() {
     // Kirigami's usual `org.kde.desktop` style needs a real Plasma session and
@@ -26,6 +27,17 @@ fn main() {
         && std::env::var_os("QT_QPA_PLATFORM").as_deref() == Some(std::ffi::OsStr::new("offscreen"))
     {
         std::env::set_var("QT_QUICK_CONTROLS_STYLE", "Basic");
+    }
+
+    // Start the in-process bridge before loading QML so the models' live feeds
+    // find it already running when their `Component.onCompleted` fires. Startup
+    // failure is non-fatal: the window still opens and the error is surfaced in
+    // the UI via the `BridgeFeed` status property (bound to a Kirigami
+    // InlineMessage in main.qml). Never panic here — a failed bridge must
+    // degrade to a visible status, not a dead window.
+    match bridge_runtime::ensure_started() {
+        (true, msg) => tracing::info!(status = %msg, "in-process bridge started"),
+        (false, msg) => tracing::error!(status = %msg, "in-process bridge unavailable"),
     }
 
     let mut app = QGuiApplication::new();
