@@ -16,13 +16,23 @@
 //! The `/stream` WebSocket route is the one exception: the bridge requires
 //! a handshake token as the first WS text frame (see
 //! `snitchwatch_bridge::auth`) before it treats the connection as trusted.
-//! Rather than changing the webview's JS to fetch and send that token
-//! itself, this proxy reads the token once (already known by the in-process
-//! bridge) and injects it as a raw, correctly-masked WS frame on the
-//! bridge-facing side of any `/stream` connection — right after the WS
-//! upgrade handshake completes, before relaying anything the client itself
-//! sends. The webview's own WS client code is completely unaware this
-//! happens.
+//!
+//! Because this proxy listens on plain loopback TCP (not the Unix socket's
+//! 0600-permissioned file), any local process — not just the legitimate
+//! webview — can dial `127.0.0.1:PORT` and reach `/stream`. To avoid
+//! defeating the whole point of the bridge's auth token, the proxy requires
+//! the *caller* to already know the token, presented as a `?token=`
+//! query parameter on the `/stream` upgrade request, before it will even
+//! dial the backend Unix socket. A caller that doesn't present the correct
+//! token gets a `403` with no backend connection ever made — the proxy
+//! never "auths on behalf of" an unverified caller.
+//!
+//! The webview learns the token via a Tauri `initialization_script`
+//! (see `crate::main`), which Tauri guarantees runs before any page script,
+//! so `window.__SNITCHWATCH_TOKEN__` is set before `web/js/app.js` ever
+//! constructs its WebSocket URL. This is not observable by other local
+//! processes — it's injected directly into the webview's JS context by
+//! Tauri's own engine, never sent over any network channel.
 
 use snitchwatch_bridge::auth::Token;
 use std::io;
@@ -31,6 +41,8 @@ use std::path::{Path, PathBuf};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UnixStream};
 use tracing::debug;
+
+const FORBIDDEN_RESPONSE: &[u8] = b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
 
 /// Bind a loopback TCP listener at `tcp_bind` and proxy every connection to
 /// the Unix socket at `socket_path`, transparently injecting `token` as the
@@ -55,13 +67,22 @@ async fn proxy_connection(
     socket_path: &Path,
     token: &Token,
 ) -> io::Result<()> {
-    let mut uds_stream = UnixStream::connect(socket_path).await?;
-
     // Peek the request line to decide whether this is the `/stream` upgrade
-    // (which needs the token injected) or a plain asset GET (byte-for-byte
-    // passthrough, no further protocol awareness needed).
+    // (which needs the caller to already prove they know the token) or a
+    // plain asset GET (byte-for-byte passthrough, no further protocol
+    // awareness needed).
     let request_head = read_http_head(&mut tcp_stream).await?;
     let is_stream = is_stream_request(&request_head);
+
+    if is_stream && query_token(&request_head).as_deref() != Some(token.as_str()) {
+        // Caller doesn't already know the token — refuse before ever
+        // dialing the backend Unix socket, so an unverified local process
+        // gets nothing, not an auto-authenticated session.
+        let _ = tcp_stream.write_all(FORBIDDEN_RESPONSE).await;
+        return Ok(());
+    }
+
+    let mut uds_stream = UnixStream::connect(socket_path).await?;
     uds_stream.write_all(&request_head).await?;
 
     if is_stream {
@@ -107,14 +128,33 @@ async fn read_http_head<R: AsyncRead + Unpin>(stream: &mut R) -> io::Result<Vec<
     Ok(buf)
 }
 
-/// Whether an HTTP request head's request line targets `/stream`.
-fn is_stream_request(head: &[u8]) -> bool {
+/// The request line's path and query string, e.g. `("/stream", Some("token=abc"))`.
+fn request_path_and_query(head: &[u8]) -> (String, Option<String>) {
     let first_line_end = head
         .windows(2)
         .position(|w| w == b"\r\n")
         .unwrap_or(head.len());
     let first_line = String::from_utf8_lossy(&head[..first_line_end]);
-    first_line.split_whitespace().nth(1) == Some("/stream")
+    let target = first_line.split_whitespace().nth(1).unwrap_or("");
+    match target.split_once('?') {
+        Some((path, query)) => (path.to_string(), Some(query.to_string())),
+        None => (target.to_string(), None),
+    }
+}
+
+/// Whether an HTTP request head's request line targets `/stream` (ignoring
+/// any query string).
+fn is_stream_request(head: &[u8]) -> bool {
+    request_path_and_query(head).0 == "/stream"
+}
+
+/// The `token` query parameter on the request line, if present.
+fn query_token(head: &[u8]) -> Option<String> {
+    let (_, query) = request_path_and_query(head);
+    query?.split('&').find_map(|kv| {
+        let (key, value) = kv.split_once('=')?;
+        (key == "token").then(|| value.to_string())
+    })
 }
 
 /// Encode `payload` as a single, masked WS text frame (RFC 6455 §5.2) —
@@ -157,6 +197,32 @@ mod tests {
         assert!(!is_stream_request(head));
         let head = b"GET /assets/js/app.js HTTP/1.1\r\nHost: x\r\n\r\n";
         assert!(!is_stream_request(head));
+    }
+
+    #[test]
+    fn is_stream_request_matches_stream_path_with_query_string() {
+        let head = b"GET /stream?token=abc123 HTTP/1.1\r\nHost: x\r\n\r\n";
+        assert!(is_stream_request(head));
+    }
+
+    #[test]
+    fn query_token_extracts_token_param() {
+        let head = b"GET /stream?token=abc123 HTTP/1.1\r\nHost: x\r\n\r\n";
+        assert_eq!(query_token(head).as_deref(), Some("abc123"));
+    }
+
+    #[test]
+    fn query_token_extracts_token_among_other_params() {
+        let head = b"GET /stream?foo=bar&token=abc123&baz=qux HTTP/1.1\r\nHost: x\r\n\r\n";
+        assert_eq!(query_token(head).as_deref(), Some("abc123"));
+    }
+
+    #[test]
+    fn query_token_none_when_absent() {
+        let head = b"GET /stream HTTP/1.1\r\nHost: x\r\n\r\n";
+        assert_eq!(query_token(head), None);
+        let head = b"GET /stream?foo=bar HTTP/1.1\r\nHost: x\r\n\r\n";
+        assert_eq!(query_token(head), None);
     }
 
     #[tokio::test]
@@ -228,6 +294,118 @@ mod tests {
         let mut response = Vec::new();
         client.read_to_end(&mut response).await.unwrap();
         assert!(response.ends_with(b"OK"));
+
+        server.await.unwrap();
+        proxy.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stream_request_without_token_is_refused_before_dialing_backend() {
+        let dir = tempfile::tempdir().unwrap();
+        // Deliberately do NOT bind a listener on this path — if the proxy
+        // dials it, `UnixStream::connect` fails immediately (no such
+        // listener), proving a wrong/missing token never even reaches the
+        // point of contacting the backend.
+        let socket_path = dir.path().join("bridge.sock");
+
+        let tcp_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_addr = tcp_listener.local_addr().unwrap();
+        let token = Token::generate();
+        let socket_path_for_proxy = socket_path.clone();
+        let proxy = tokio::spawn(async move {
+            let (tcp_stream, _) = tcp_listener.accept().await.unwrap();
+            proxy_connection(tcp_stream, &socket_path_for_proxy, &token).await
+        });
+
+        let mut client = TcpStream::connect(proxy_addr).await.unwrap();
+        client
+            .write_all(b"GET /stream HTTP/1.1\r\nHost: x\r\n\r\n")
+            .await
+            .unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).await.unwrap();
+
+        assert!(
+            response.starts_with(b"HTTP/1.1 403"),
+            "expected 403 Forbidden, got: {}",
+            String::from_utf8_lossy(&response)
+        );
+        // The proxy task must return Ok(()) having never attempted to dial
+        // the (nonexistent) backend socket — if it had tried, this would be
+        // an Err (connection refused / no such file), not Ok.
+        proxy.await.unwrap().expect(
+            "proxy must return without error — it must never attempt to dial the backend \
+             when the caller doesn't present a valid token",
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_request_with_wrong_token_is_refused_before_dialing_backend() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket_path = dir.path().join("bridge.sock");
+
+        let tcp_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_addr = tcp_listener.local_addr().unwrap();
+        let token = Token::generate();
+        let socket_path_for_proxy = socket_path.clone();
+        let proxy = tokio::spawn(async move {
+            let (tcp_stream, _) = tcp_listener.accept().await.unwrap();
+            proxy_connection(tcp_stream, &socket_path_for_proxy, &token).await
+        });
+
+        let mut client = TcpStream::connect(proxy_addr).await.unwrap();
+        client
+            .write_all(b"GET /stream?token=not-the-real-token HTTP/1.1\r\nHost: x\r\n\r\n")
+            .await
+            .unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).await.unwrap();
+
+        assert!(response.starts_with(b"HTTP/1.1 403"));
+        proxy.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn stream_request_with_correct_token_reaches_backend() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket_path = dir.path().join("bridge.sock");
+
+        let uds_listener = tokio::net::UnixListener::bind(&socket_path).unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = uds_listener.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = stream.read(&mut buf).await.unwrap();
+            stream
+                .write_all(b"HTTP/1.1 101 Switching Protocols\r\n\r\n")
+                .await
+                .unwrap();
+        });
+
+        let tcp_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_addr = tcp_listener.local_addr().unwrap();
+        let token = Token::generate();
+        let expected_token = token.as_str().to_string();
+        let socket_path_for_proxy = socket_path.clone();
+        let proxy = tokio::spawn(async move {
+            let (tcp_stream, _) = tcp_listener.accept().await.unwrap();
+            proxy_connection(tcp_stream, &socket_path_for_proxy, &token)
+                .await
+                .ok();
+        });
+
+        let mut client = TcpStream::connect(proxy_addr).await.unwrap();
+        let request = format!("GET /stream?token={expected_token} HTTP/1.1\r\nHost: x\r\n\r\n");
+        client.write_all(request.as_bytes()).await.unwrap();
+        // Half-close so `copy_bidirectional`'s tcp→uds direction sees EOF
+        // too (the mock server never reads further after its one response,
+        // so without this the proxy would idle waiting for more client data).
+        tokio::io::AsyncWriteExt::shutdown(&mut client)
+            .await
+            .unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).await.unwrap();
+
+        assert!(response.starts_with(b"HTTP/1.1 101"));
 
         server.await.unwrap();
         proxy.await.unwrap();

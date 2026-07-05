@@ -57,6 +57,16 @@ fn main() -> anyhow::Result<()> {
 
     let tray_rx = bridge_runtime.tray_rx().clone();
     let notice_rx = bridge_runtime.notice_rx();
+    // The webview can't dial the bridge's Unix socket directly (WebKitGTK
+    // has no such API — see `loopback_proxy`), and the loopback TCP proxy
+    // it does dial requires callers to already know this token before it
+    // will forward anything to `/stream`. Injecting it via an
+    // `initialization_script` (below) is the only channel that's both
+    // guaranteed to run before `web/js/app.js`'s first WS connection
+    // attempt and invisible to any other local process — never sent over
+    // the network, never written to a file or env var another process
+    // could read.
+    let ws_token = bridge_runtime.bridge.ws_token.as_str().to_string();
 
     // Spawn the notifier task on the tokio runtime before entering the Tauri loop.
     runtime.spawn(async move {
@@ -81,6 +91,34 @@ fn main() -> anyhow::Result<()> {
             let handle = app.handle().clone();
             Tray::install(&handle, tray_rx)?;
             tracing::info!("tray installed");
+
+            // Built programmatically (not declared in tauri.conf.json)
+            // specifically so `ws_token` — generated fresh per launch — can
+            // be injected via `initialization_script`. Tauri guarantees
+            // this script runs before any page script, so
+            // `window.__SNITCHWATCH_TOKEN__` is set before `app.js`
+            // constructs its first WebSocket URL.
+            let init_script = format!(
+                "window.__SNITCHWATCH_TOKEN__ = {};",
+                serde_json::to_string(&ws_token).expect("token string always serializes")
+            );
+            tauri::WebviewWindowBuilder::new(
+                app,
+                "main",
+                tauri::WebviewUrl::External(
+                    "http://127.0.0.1:3031/"
+                        .parse()
+                        .expect("hardcoded loopback URL is always valid"),
+                ),
+            )
+            .title("Snitchwatch")
+            .inner_size(1100.0, 720.0)
+            .min_inner_size(800.0, 540.0)
+            .resizable(true)
+            .fullscreen(false)
+            .initialization_script(&init_script)
+            .build()?;
+
             Ok(())
         })
         .on_window_event(|window, event| {
