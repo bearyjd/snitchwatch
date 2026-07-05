@@ -38,14 +38,29 @@ fn parse_ss(output: &str) -> Vec<SurfaceItem> {
         } else {
             "unknown-process".to_string()
         };
+        // Baseline `value` tracks only the program name, not pid/fd — those
+        // are volatile across reboots and service restarts, so including
+        // them would re-flag every legitimate listener (sshd, chronyd, ...)
+        // as "changed" on the very first re-scan after any restart. A
+        // different program seizing the same port still trips (the name
+        // changes); pid/fd stay available for operators in `detail`.
+        let program_name = extract_program_name(&process).unwrap_or_else(|| process.clone());
         let key = format!("listener:{netid}:{local}");
         items.push(SurfaceItem {
             detail: format!("listening socket {local} ({netid}) owned by {process}"),
-            value: process,
+            value: program_name,
             key,
         });
     }
     items
+}
+
+/// Extract the program name from a `ss` process column of the form
+/// `users:(("name",pid=800,fd=3))`, ignoring the volatile `pid`/`fd` fields.
+fn extract_program_name(process_column: &str) -> Option<String> {
+    let start = process_column.find('"')? + 1;
+    let end = process_column[start..].find('"')? + start;
+    Some(process_column[start..end].to_string())
 }
 
 impl Check for ListenersCheck {
@@ -150,6 +165,60 @@ tcp   LISTEN 0 1   0.0.0.0:4444 0.0.0.0:* users:((\"nc\",pid=31337,fd=3))
         ListenersCheck.run(&ctx(&sys, &scans)).unwrap();
         match ListenersCheck.run(&ctx(&sys, &scans)).unwrap() {
             CheckOutcome::Ran { anomalies, .. } => assert!(anomalies.is_empty()),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn extract_program_name_ignores_pid_and_fd() {
+        assert_eq!(
+            extract_program_name("users:((\"sshd\",pid=800,fd=3))").as_deref(),
+            Some("sshd")
+        );
+    }
+
+    #[test]
+    fn service_restart_with_new_pid_is_not_flagged() {
+        // Same program, same port, but pid/fd changed (as happens on every
+        // restart/reboot) -- must NOT be treated as an anomaly.
+        const SS_SSHD_RESTARTED: &str = "\
+tcp   LISTEN 0 128 0.0.0.0:22 0.0.0.0:* users:((\"sshd\",pid=9012,fd=7))
+udp   UNCONN 0 0   127.0.0.1:323 0.0.0.0:* users:((\"chronyd\",pid=4310,fd=11))
+";
+        let scans = ScanStore::open_in_memory().unwrap();
+        let base = MockInspector::new().with_stdout("ss", &["-H", "-tulnp"], SS_BASE);
+        ListenersCheck.run(&ctx(&base, &scans)).unwrap();
+
+        let restarted =
+            MockInspector::new().with_stdout("ss", &["-H", "-tulnp"], SS_SSHD_RESTARTED);
+        match ListenersCheck.run(&ctx(&restarted, &scans)).unwrap() {
+            CheckOutcome::Ran { anomalies, .. } => assert!(
+                anomalies.is_empty(),
+                "pid/fd churn from a restart must not be flagged: {anomalies:?}"
+            ),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn different_program_on_same_port_is_still_flagged() {
+        // The security property extract_program_name must preserve: a
+        // *different* program seizing a previously-trusted port still trips.
+        const SS_HIJACKED: &str = "\
+tcp   LISTEN 0 128 0.0.0.0:22 0.0.0.0:* users:((\"evil-backdoor\",pid=666,fd=3))
+udp   UNCONN 0 0   127.0.0.1:323 0.0.0.0:* users:((\"chronyd\",pid=750,fd=5))
+";
+        let scans = ScanStore::open_in_memory().unwrap();
+        let base = MockInspector::new().with_stdout("ss", &["-H", "-tulnp"], SS_BASE);
+        ListenersCheck.run(&ctx(&base, &scans)).unwrap();
+
+        let hijacked = MockInspector::new().with_stdout("ss", &["-H", "-tulnp"], SS_HIJACKED);
+        match ListenersCheck.run(&ctx(&hijacked, &scans)).unwrap() {
+            CheckOutcome::Ran { anomalies, .. } => {
+                assert_eq!(anomalies.len(), 1);
+                assert_eq!(anomalies[0].path, "listener:tcp:0.0.0.0:22");
+                assert!(anomalies[0].detail.contains("evil-backdoor"));
+            }
             other => panic!("unexpected {other:?}"),
         }
     }
