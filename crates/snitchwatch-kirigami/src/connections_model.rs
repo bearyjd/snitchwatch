@@ -1,0 +1,307 @@
+//! `ConnectionsModel` — a `QAbstractListModel` exposing the connection list to
+//! QML (Task 6).
+//!
+//! The pure ordering/CRUD logic lives in [`super::row_store::RowStore`] and is
+//! unit-tested without Qt. This module is the thin cxx-qt wrapper that:
+//!   * exposes rows to a QML `ListView` via role names, and
+//!   * replays [`RowStore`] mutations behind the correct Qt begin/end row
+//!     signals so the view updates incrementally (no full reset on every new
+//!     connection — important so the core-loop list doesn't steal focus/scroll
+//!     from a row the user is investigating).
+//!
+//! Live wiring — a Tokio task subscribing to the bridge's typed
+//! `broadcast::Receiver<ServerMessage>` and calling `qt_thread.queue(|m|
+//! m.apply_server_message(...))` per the Task 1 async pattern — attaches via
+//! [`qobject::ConnectionsModel::apply_server_message`]. Exposing that receiver
+//! from `RunningBridge` is a small consumer-side follow-up (the bridge's WS
+//! protocol itself is unchanged, per the plan's non-goals).
+
+use core::pin::Pin;
+use cxx_qt::CxxQtType;
+use cxx_qt_lib::{
+    QByteArray, QHash, QHashPair_i32_QByteArray, QList, QModelIndex, QString, QVariant,
+};
+
+use crate::connections::row_store::{ModelOp, RowStore, Verdict};
+use snitchwatch_bridge::ws_messages::{ConnectionRow, ServerMessage};
+
+// Role ids exposed to the QML delegate.
+const ROLE_ID: i32 = 0;
+const ROLE_PROCESS: i32 = 1;
+const ROLE_HOST: i32 = 2;
+const ROLE_PORT: i32 = 3;
+const ROLE_PROTOCOL: i32 = 4;
+const ROLE_VERDICT: i32 = 5;
+const ROLE_PENDING: i32 = 6;
+
+#[cxx_qt::bridge]
+pub mod qobject {
+    unsafe extern "C++" {
+        include!("cxx-qt-lib/qstring.h");
+        type QString = cxx_qt_lib::QString;
+        include!("cxx-qt-lib/qvariant.h");
+        type QVariant = cxx_qt_lib::QVariant;
+        include!("cxx-qt-lib/qmodelindex.h");
+        type QModelIndex = cxx_qt_lib::QModelIndex;
+        include!("cxx-qt-lib/qhash.h");
+        type QHash_i32_QByteArray = cxx_qt_lib::QHash<cxx_qt_lib::QHashPair_i32_QByteArray>;
+        include!("cxx-qt-lib/qlist.h");
+        type QList_i32 = cxx_qt_lib::QList<i32>;
+
+        include!(<QtCore/QAbstractListModel>);
+        type QAbstractListModel;
+    }
+
+    extern "RustQt" {
+        /// Connection list model bound by `ConnectionsPage.qml`'s `ListView`.
+        #[qobject]
+        #[qml_element]
+        #[base = QAbstractListModel]
+        #[qproperty(i32, count)]
+        #[qproperty(i32, pending_count, cxx_name = "pendingCount")]
+        type ConnectionsModel = super::ConnectionsModelRust;
+
+        // --- QAbstractListModel overrides -----------------------------------
+        #[qinvokable]
+        #[cxx_override]
+        #[cxx_name = "rowCount"]
+        fn row_count(self: &ConnectionsModel, _parent: &QModelIndex) -> i32;
+
+        #[qinvokable]
+        #[cxx_override]
+        unsafe fn data(self: &ConnectionsModel, index: &QModelIndex, role: i32) -> QVariant;
+
+        #[qinvokable]
+        #[cxx_override]
+        #[cxx_name = "roleNames"]
+        fn role_names(self: &ConnectionsModel) -> QHash_i32_QByteArray;
+
+        // --- Feed ingestion (QML/string convenience) ------------------------
+        /// Apply one JSON-encoded bridge `ServerMessage`. Convenience wrapper
+        /// over the typed `apply_server_message`, callable from QML; malformed
+        /// input is logged and ignored.
+        #[qinvokable]
+        #[cxx_name = "applyServerMessageJson"]
+        fn apply_server_message_json(self: Pin<&mut ConnectionsModel>, json: &QString);
+    }
+
+    // Protected base-class helpers inherited from QAbstractListModel.
+    unsafe extern "RustQt" {
+        #[inherit]
+        #[cxx_name = "beginInsertRows"]
+        unsafe fn begin_insert_rows(
+            self: Pin<&mut ConnectionsModel>,
+            parent: &QModelIndex,
+            first: i32,
+            last: i32,
+        );
+        #[inherit]
+        #[cxx_name = "endInsertRows"]
+        unsafe fn end_insert_rows(self: Pin<&mut ConnectionsModel>);
+
+        #[inherit]
+        #[cxx_name = "beginRemoveRows"]
+        unsafe fn begin_remove_rows(
+            self: Pin<&mut ConnectionsModel>,
+            parent: &QModelIndex,
+            first: i32,
+            last: i32,
+        );
+        #[inherit]
+        #[cxx_name = "endRemoveRows"]
+        unsafe fn end_remove_rows(self: Pin<&mut ConnectionsModel>);
+
+        #[inherit]
+        #[cxx_name = "beginResetModel"]
+        unsafe fn begin_reset_model(self: Pin<&mut ConnectionsModel>);
+        #[inherit]
+        #[cxx_name = "endResetModel"]
+        unsafe fn end_reset_model(self: Pin<&mut ConnectionsModel>);
+
+        #[inherit]
+        fn index(
+            self: &ConnectionsModel,
+            row: i32,
+            column: i32,
+            parent: &QModelIndex,
+        ) -> QModelIndex;
+
+        #[inherit]
+        #[cxx_name = "dataChanged"]
+        fn data_changed(
+            self: Pin<&mut ConnectionsModel>,
+            top_left: &QModelIndex,
+            bottom_right: &QModelIndex,
+            roles: &QList_i32,
+        );
+    }
+
+    impl cxx_qt::Threading for ConnectionsModel {}
+}
+
+/// Rust-side state for [`qobject::ConnectionsModel`].
+#[derive(Default)]
+pub struct ConnectionsModelRust {
+    store: RowStore,
+    count: i32,
+    pending_count: i32,
+}
+
+impl qobject::ConnectionsModel {
+    fn row_count(&self, _parent: &QModelIndex) -> i32 {
+        self.store.len() as i32
+    }
+
+    unsafe fn data(&self, index: &QModelIndex, role: i32) -> QVariant {
+        let Some(row) = self.store.row(index.row() as usize) else {
+            return QVariant::default();
+        };
+        match role {
+            ROLE_ID => QVariant::from(&QString::from(&row.id)),
+            ROLE_PROCESS => QVariant::from(&QString::from(&row.process)),
+            ROLE_HOST => QVariant::from(&QString::from(&row.dst_host)),
+            ROLE_PORT => QVariant::from(&(row.dst_port as i32)),
+            ROLE_PROTOCOL => QVariant::from(&QString::from(&row.protocol)),
+            ROLE_VERDICT => {
+                let v = Verdict::from_action(row.action.as_deref());
+                QVariant::from(&QString::from(v.as_token()))
+            }
+            ROLE_PENDING => QVariant::from(&row.action.is_none()),
+            _ => QVariant::default(),
+        }
+    }
+
+    fn role_names(&self) -> QHash<QHashPair_i32_QByteArray> {
+        let mut roles = QHash::<QHashPair_i32_QByteArray>::default();
+        roles.insert(ROLE_ID, QByteArray::from("rowId"));
+        roles.insert(ROLE_PROCESS, QByteArray::from("process"));
+        roles.insert(ROLE_HOST, QByteArray::from("host"));
+        roles.insert(ROLE_PORT, QByteArray::from("port"));
+        roles.insert(ROLE_PROTOCOL, QByteArray::from("protocol"));
+        roles.insert(ROLE_VERDICT, QByteArray::from("verdict"));
+        roles.insert(ROLE_PENDING, QByteArray::from("pending"));
+        roles
+    }
+
+    fn apply_server_message_json(self: Pin<&mut Self>, json: &QString) {
+        match serde_json::from_str::<ServerMessage>(&json.to_string()) {
+            Ok(msg) => self.apply_server_message(msg),
+            Err(e) => tracing::warn!(error = %e, "ConnectionsModel: bad ServerMessage JSON"),
+        }
+    }
+}
+
+impl qobject::ConnectionsModel {
+    /// Apply a typed bridge message, replaying each change behind the correct
+    /// Qt begin/end signals. This is the direct-typed-API path (no JSON
+    /// round-trip); `apply_server_message_json` is the QML string wrapper.
+    pub fn apply_server_message(mut self: Pin<&mut Self>, msg: ServerMessage) {
+        match msg {
+            ServerMessage::InsertConnectionRows { rows } => self.as_mut().apply_insert(rows),
+            ServerMessage::RemoveConnectionRows { ids } => self.as_mut().apply_remove(&ids),
+            ServerMessage::UpdateConnectionRows { rows } => self.as_mut().apply_update(rows),
+            other => {
+                // Move/Clear (and no-op variants): bracket with a full reset —
+                // rare relative to insert/update, and always view-correct.
+                unsafe {
+                    self.as_mut().begin_reset_model();
+                }
+                self.as_mut().rust_mut().store.apply(other);
+                unsafe {
+                    self.as_mut().end_reset_model();
+                }
+            }
+        }
+        self.refresh_counts();
+    }
+
+    fn apply_insert(mut self: Pin<&mut Self>, rows: Vec<ConnectionRow>) {
+        // Predict the appended count (read-only) so beginInsertRows brackets
+        // exactly the new range.
+        let existing = self.store.len();
+        let appended = rows
+            .iter()
+            .filter(|r| self.store.rows().iter().all(|e| e.id != r.id))
+            .count();
+
+        if appended > 0 {
+            let first = existing as i32;
+            let last = (existing + appended - 1) as i32;
+            unsafe {
+                self.as_mut()
+                    .begin_insert_rows(&QModelIndex::default(), first, last);
+            }
+        }
+        let ops = self.as_mut().rust_mut().store.insert_rows(rows);
+        if appended > 0 {
+            unsafe {
+                self.as_mut().end_insert_rows();
+            }
+        }
+        self.emit_changed_ops(&ops);
+    }
+
+    fn apply_remove(mut self: Pin<&mut Self>, ids: &[String]) {
+        let mut indices: Vec<usize> = ids
+            .iter()
+            .filter_map(|id| self.store.rows().iter().position(|r| &r.id == id))
+            .collect();
+        if indices.is_empty() {
+            return;
+        }
+        indices.sort_unstable();
+        indices.dedup();
+        let mut runs: Vec<(usize, usize)> = Vec::new();
+        for &i in &indices {
+            match runs.last_mut() {
+                Some(run) if run.1 == i => run.1 = i + 1,
+                _ => runs.push((i, i + 1)),
+            }
+        }
+        // High-index run first so lower indices stay valid as we remove.
+        for &(start, end) in runs.iter().rev() {
+            unsafe {
+                self.as_mut().begin_remove_rows(
+                    &QModelIndex::default(),
+                    start as i32,
+                    (end - 1) as i32,
+                );
+            }
+            self.as_mut().rust_mut().store.remove_range(start, end);
+            unsafe {
+                self.as_mut().end_remove_rows();
+            }
+        }
+    }
+
+    fn apply_update(mut self: Pin<&mut Self>, rows: Vec<ConnectionRow>) {
+        let ops = self.as_mut().rust_mut().store.update_rows(rows);
+        self.emit_changed_ops(&ops);
+    }
+
+    fn emit_changed_ops(mut self: Pin<&mut Self>, ops: &[ModelOp]) {
+        for op in ops {
+            if let ModelOp::Changed { indices } = op {
+                for &idx in indices {
+                    let tl = self.index(idx as i32, 0, &QModelIndex::default());
+                    let br = self.index(idx as i32, 0, &QModelIndex::default());
+                    // Empty roles list = "all roles changed" — the view re-reads.
+                    let roles = QList::<i32>::default();
+                    self.as_mut().data_changed(&tl, &br, &roles);
+                }
+            }
+        }
+    }
+
+    fn refresh_counts(mut self: Pin<&mut Self>) {
+        let total = self.store.len() as i32;
+        let pending = self
+            .store
+            .rows()
+            .iter()
+            .filter(|r| r.action.is_none())
+            .count() as i32;
+        self.as_mut().set_count(total);
+        self.as_mut().set_pending_count(pending);
+    }
+}
