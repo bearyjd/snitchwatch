@@ -1,0 +1,53 @@
+[Unit]
+Description=Snitchwatch bridge (OpenSnitch gRPC <-> WebSocket translator)
+Documentation=https://github.com/example/snitchwatch
+# The bridge is a per-user service, intentionally decoupled from the GUI
+# window. opensnitchd applies its DefaultAction whenever no UI client is
+# connected; if the bridge only ran while the GUI window was open, closing
+# the window would silently take the AskRule decision channel down. Running
+# the bridge as its own user service keeps that channel up regardless of
+# whether the GUI is open, so the daemon's fail-closed default is only ever
+# reached on a genuine bridge outage, not on "user closed the window".
+After=graphical-session.target
+
+[Service]
+Type=simple
+# Image-baked ("batteries-included") install location. For a lightweight /
+# rpm-ostree-layered install where the binary lives elsewhere (e.g.
+# ~/.local/bin), override this with:
+#   systemctl --user edit snitchwatch-bridge.service
+# and set ExecStart to the correct absolute path.
+ExecStart=/usr/bin/snitchwatch-bridge-cli
+
+# Stable gRPC bind so opensnitchd's Server.Address (127.0.0.1:50051) has a
+# fixed target to dial. The bridge-cli otherwise defaults to an ephemeral
+# port (127.0.0.1:0), which is fine for tests but not for a daemon that needs
+# a known address to connect to.
+Environment=SNITCHWATCH_GRPC_BIND=127.0.0.1:50051
+# WS Unix domain socket + handshake token live under
+# $XDG_RUNTIME_DIR/snitchwatch/ (this is the default the bridge-cli picks when
+# SNITCHWATCH_WS_SOCKET is unset; stated explicitly here for clarity and so an
+# operator editing this unit sees where the socket lands). The sandboxed
+# Flatpak GUI reaches this directory via --filesystem=xdg-run/snitchwatch.
+Environment=SNITCHWATCH_WS_SOCKET=%t/snitchwatch/bridge.sock
+Environment=RUST_LOG=info
+
+Restart=on-failure
+RestartSec=2s
+# The bridge handles SIGTERM for a clean shutdown (see bridge-cli main.rs).
+KillSignal=SIGTERM
+TimeoutStopSec=10s
+
+# Hardening. Kept deliberately light: this is a --user service that still
+# needs to write its crash log under $XDG_STATE_HOME and its socket + token
+# under $XDG_RUNTIME_DIR, so aggressive ProtectHome/ProtectSystem directives
+# are avoided (they interact badly with user-session state paths). systemd
+# creates the runtime dir at 0700 for us and cleans it up on stop.
+NoNewPrivileges=true
+RuntimeDirectory=snitchwatch
+RuntimeDirectoryMode=0700
+# Create/track the crash-log + state dir under $XDG_STATE_HOME/snitchwatch.
+StateDirectory=snitchwatch
+
+[Install]
+WantedBy=default.target

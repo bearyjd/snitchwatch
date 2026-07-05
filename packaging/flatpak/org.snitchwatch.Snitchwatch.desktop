@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=Snitchwatch
+GenericName=Application Firewall
+Comment=Per-application outbound firewall GUI for OpenSnitch
+Exec=snitchwatch-tauri
+Icon=org.snitchwatch.Snitchwatch
+Terminal=false
+Categories=Network;Security;System;
+Keywords=firewall;security;network;privacy;opensnitch;
+StartupNotify=true
+StartupWMClass=org.snitchwatch.Snitchwatch
+X-Flatpak=org.snitchwatch.Snitchwatch

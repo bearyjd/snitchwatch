@@ -171,6 +171,51 @@ To run the blocklist test suite in isolation:
 just test-blocklists
 ```
 
+## Install on Bazzite (M5 / Phase 2 packaging)
+
+Snitchwatch installs on Bazzite (or any Universal Blue / immutable Fedora)
+host two ways. Both are supported — pick by taste, not by tier:
+
+- **Batteries-included** — a signed custom Bazzite image with `opensnitchd`
+  baked in and enabled from first boot. Recipe:
+  [`packaging/bluebuild/recipe.yml`](packaging/bluebuild/recipe.yml). Build
+  with the [`bluebuild`](https://blue-build.org) CLI.
+- **Lightweight / DIY** — layer `opensnitchd` onto stock Bazzite with
+  `rpm-ostree`. Step-by-step walkthrough:
+  [`docs/packaging/rpm-ostree-layering.md`](docs/packaging/rpm-ostree-layering.md).
+
+In both cases the GUI ships as a Flatpak
+([`packaging/flatpak/org.snitchwatch.Snitchwatch.yml`](packaging/flatpak/org.snitchwatch.Snitchwatch.yml))
+and the bridge runs as a systemd `--user` service
+([`packaging/systemd/snitchwatch-bridge.service`](packaging/systemd/snitchwatch-bridge.service)).
+The Flatpak reaches the host-side bridge over the Phase 1 Unix domain socket
+via `--filesystem=xdg-run/snitchwatch` — it holds **no** network permission
+(`--share=network` is deliberately absent; a Flatpak's private network
+namespace can't reach host loopback anyway, and that grant would open full
+internet access rather than scoped loopback). See
+[`packaging/README.md`](packaging/README.md) for the full architecture.
+
+### Fail-closed by default
+
+Upstream OpenSnitch ships `DefaultAction: allow`, so the daemon silently
+**allows** all traffic whenever no UI client is connected. Snitchwatch's
+packaging overrides this with `DefaultAction: deny`
+([`packaging/bluebuild/files/system/etc/opensnitchd/default-config.json`](packaging/bluebuild/files/system/etc/opensnitchd/default-config.json)):
+a firewall whose whole premise is "ask before allowing" should fail **closed**
+when its decision channel is down. The bridge runs as its own `--user`
+service precisely so that *closing the GUI window* is not mistaken for *the
+decision channel being down* — the daemon only reaches its deny default on a
+genuine bridge outage.
+
+### Coexistence with upstream `opensnitch-ui`
+
+Snitchwatch replaces the upstream OpenSnitch GUI. If `opensnitch-ui` is also
+installed and autostarting, the two will contend for the daemon's UI gRPC
+channel (and the vendored `ui.proto` may drift from a differently-versioned
+upstream). Install only the daemon (`opensnitch`), not `opensnitch-ui`, and
+disable any existing `~/.config/autostart/opensnitch_ui.desktop`. The
+rpm-ostree walkthrough documents the detect-and-disable step.
+
 ## Workspace layout
 
 ```text
