@@ -4533,6 +4533,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "snitchwatch-kirigami"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cxx",
+ "cxx-qt",
+ "cxx-qt-build",
+ "cxx-qt-lib",
+ "serde",
+ "snitchwatch-bridge",
+ "snitchwatch-bridge-cli",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "which 6.0.3",
+]
+
+[[package]]
 name = "snitchwatch-proto"
 version = "0.1.0"
 dependencies = [
