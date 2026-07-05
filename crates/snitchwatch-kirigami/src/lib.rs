@@ -21,6 +21,8 @@ pub mod notifier;
 pub mod panic_hook;
 pub mod paths;
 pub mod pending_decision;
+pub mod profiles;
+pub mod profiles_model;
 pub mod rules;
 pub mod rules_model;
 pub mod settings_controller;

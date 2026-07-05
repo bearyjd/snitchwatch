@@ -62,6 +62,14 @@ Kirigami.ApplicationWindow {
         id: trafficModel
     }
 
+    // Profiles tab model (switchable "At Home"/"Public Wi-Fi"/"Office"
+    // firewall profiles, with network-based auto-activation on the bridge
+    // side). Outbound feed started below; profile-change request signal
+    // routed to the bridge inbound via the Connections block further down.
+    ProfilesModel {
+        id: profilesModel
+    }
+
     // First-run onboarding wizard (Task 12). Owns daemon-detection state; the
     // onboarding page itself is pushed/popped below based on `state`.
     WizardController {
@@ -135,6 +143,7 @@ Kirigami.ApplicationWindow {
         blocklistEntriesModel.startBridgeFeed();
         rulesModel.startBridgeFeed();
         trafficModel.startBridgeFeed();
+        profilesModel.startBridgeFeed();
         wizardController.probe();
         notificationController.startBridgeFeed();
         trayController.startBridgeFeed();
@@ -152,6 +161,12 @@ Kirigami.ApplicationWindow {
     Connections {
         target: rulesModel
         function onRuleChangeRequested(json) {
+            bridgeFeed.sendClientJson(json);
+        }
+    }
+    Connections {
+        target: profilesModel
+        function onProfileChangeRequested(json) {
             bridgeFeed.sendClientJson(json);
         }
     }
@@ -198,6 +213,12 @@ Kirigami.ApplicationWindow {
         id: trafficPageComponent
         TrafficPage {
             model: trafficModel
+        }
+    }
+    Component {
+        id: profilesPageComponent
+        ProfilesPage {
+            model: profilesModel
         }
     }
     Component {
@@ -328,6 +349,11 @@ Kirigami.ApplicationWindow {
                 text: "Traffic"
                 icon.name: "office-chart-line"
                 onTriggered: root.pageStack.replace(trafficPageComponent)
+            },
+            Kirigami.Action {
+                text: "Profiles"
+                icon.name: "preferences-system-network"
+                onTriggered: root.pageStack.replace(profilesPageComponent)
             },
             Kirigami.Action {
                 text: "Settings & Diagnostics"
