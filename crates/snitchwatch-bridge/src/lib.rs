@@ -6,6 +6,7 @@
 //! in-process tonic server). It does not depend on Tauri, WebKitGTK, or any
 //! windowing system.
 
+pub mod auth;
 pub mod blocklists;
 pub mod cache;
 pub mod error;

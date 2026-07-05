@@ -37,22 +37,36 @@ setVerdict → NotificationReply round trip through the WebSocket.
 
 ## Architecture
 
-The bridge is a Rust workspace member that exposes two server sockets on
-loopback:
+The bridge is a Rust workspace member that exposes:
 
-- **gRPC `protocol.UI` server** — opensnitchd dials in here as the gRPC
-  client. The bridge implements `Ping`, `AskRule`, `Subscribe`, `PostAlert`,
-  and the bidi `Notifications` stream. `AskRule` is a blocking unary handler:
-  the bridge inserts a pending row into its in-memory cache, broadcasts it on
-  the WebSocket, awaits the user verdict via a `oneshot`, then translates the
-  verdict into a `Rule` reply.
-- **WebSocket server** — the front-end (vendored LS-for-Linux UI in M2,
-  Tauri shell in M3) connects to `/stream` and exchanges Little Snitch v6
-  protocol messages with the bridge.
+- **gRPC `protocol.UI` server** (TCP loopback) — opensnitchd dials in here
+  as the gRPC client. The bridge implements `Ping`, `AskRule`, `Subscribe`,
+  `PostAlert`, and the bidi `Notifications` stream. `AskRule` is a blocking
+  unary handler: the bridge inserts a pending row into its in-memory cache,
+  broadcasts it on the WebSocket, awaits the user verdict via a `oneshot`,
+  then translates the verdict into a `Rule` reply.
+- **WebSocket+HTTP server** (Unix domain socket) — the front-end (vendored
+  LS-for-Linux UI in M2, Tauri shell in M3) connects to `/stream` and
+  exchanges Little Snitch v6 protocol messages with the bridge; `/`,
+  `/assets/*`, and the SPA fallback serve the static frontend. This server
+  binds a Unix domain socket under `$XDG_RUNTIME_DIR/snitchwatch/` (mode
+  0700 dir, 0600 socket file) rather than TCP loopback — a Flatpak-sandboxed
+  GUI gets its own private network namespace and can never reach TCP
+  loopback on the host regardless of auth, but a Unix socket under
+  `$XDG_RUNTIME_DIR` is reachable via the well-precedented
+  `--filesystem=xdg-run/snitchwatch` Flatpak permission. A fresh
+  shared-secret **handshake token** is generated at startup and written
+  alongside the socket (`$XDG_RUNTIME_DIR/snitchwatch/token`, mode 0600); a
+  client must send it as the first WS text frame on `/stream` before the
+  bridge treats the connection as trusted (the Unix socket's `SO_PEERCRED`
+  gives a verified UID essentially for free, but this token is kept as an
+  additional, simpler-to-reason-about layer on top of that, not the sole
+  guard).
 
-opensnitchd's `Server.Address` config tells it where to dial. The bridge
-publishes both bound addresses on stdout at startup as `GRPC_LISTEN_ADDR=...`
-and `WS_LISTEN_ADDR=...`.
+opensnitchd's `Server.Address` config tells it where to dial the gRPC
+server. The bridge publishes the socket, token path, and gRPC address on
+stdout at startup as `GRPC_LISTEN_ADDR=...`, `WS_SOCKET_PATH=...`, and
+`WS_TOKEN_PATH=...`.
 
 ## Running the bridge against real opensnitchd
 
@@ -70,20 +84,30 @@ podman run -d --rm \
 just run-bridge
 ```
 
-The bridge prints `GRPC_LISTEN_ADDR=127.0.0.1:NNNNN` and
-`WS_LISTEN_ADDR=127.0.0.1:NNNNN` to stdout on startup. Set opensnitchd's
-`default-config.json` `Server.Address` field to the bridge's
+The bridge prints `GRPC_LISTEN_ADDR=127.0.0.1:NNNNN`,
+`WS_SOCKET_PATH=/run/user/<uid>/snitchwatch/bridge.sock`, and
+`WS_TOKEN_PATH=/run/user/<uid>/snitchwatch/token` to stdout on startup. Set
+opensnitchd's `default-config.json` `Server.Address` field to the bridge's
 `GRPC_LISTEN_ADDR` (e.g. `127.0.0.1:50051`) so the daemon dials in.
-You can poke the WebSocket with `websocat`:
+
+You can poke the WebSocket with `websocat`'s Unix-socket mode, presenting
+the token as the first line so the bridge accepts the connection:
 
 ```bash
-websocat ws://127.0.0.1:NNNNN/stream
+TOKEN=$(cat "$XDG_RUNTIME_DIR/snitchwatch/token")
+{ printf '%s\n' "$TOKEN"; cat; } | websocat --unix-listen -t \
+    ws-c:unix:"$XDG_RUNTIME_DIR/snitchwatch/bridge.sock":/stream
 ```
+
+(the exact `websocat` invocation for dialing a Unix socket as a WS client is
+`websocat ws-c:unix:<path>:/stream` — check `websocat --help` for your
+installed version's exact Unix-socket flag spelling.)
 
 Environment variables:
 
 - `SNITCHWATCH_GRPC_BIND` — gRPC bind address (default `127.0.0.1:50051`)
-- `SNITCHWATCH_WS_BIND` — WebSocket bind address (default `127.0.0.1:3031`)
+- `SNITCHWATCH_WS_SOCKET` — WS Unix domain socket path (default
+  `$XDG_RUNTIME_DIR/snitchwatch/bridge.sock`)
 - `RUST_LOG` — tracing filter, e.g. `info`, `snitchwatch_bridge=debug`
 
 ## Try it as a native desktop app (M3)
@@ -94,10 +118,15 @@ After installing the workspace tooling (`cargo`, `just`, optional Playwright for
 just tauri-dev
 ```
 
-A native Snitchwatch window opens. The bridge runs in-process on
-`127.0.0.1:3031` (you can still attach a browser tab there for debugging).
-The system tray shows the current state — hover for a tooltip, right-click
-for the menu.
+A native Snitchwatch window opens. The bridge runs in-process, binding its
+WS+HTTP server on a Unix domain socket (see Architecture above), and a
+small local loopback proxy (`snitchwatch_tauri::loopback_proxy`) bridges
+that socket back to `127.0.0.1:3031` so the webview's `http://` URL keeps
+working unchanged — you can still attach a browser tab there for debugging,
+same as before. The proxy transparently presents the handshake token on the
+webview's behalf, so no separate auth step is needed to use the app. The
+system tray shows the current state — hover for a tooltip, right-click for
+the menu.
 
 ### Autostart
 
@@ -118,15 +147,16 @@ end-to-end against the local fixture set:
 
 ```bash
 just blocklist-fixture-server &       # serves tests/fixtures/blocklists/ on :8731
-cargo run -p snitchwatch-bridge-cli   # bridge boots on 127.0.0.1:3031
+cargo run -p snitchwatch-bridge-cli   # bridge boots its WS socket under $XDG_RUNTIME_DIR/snitchwatch/
 ```
 
-In another terminal, send a `subscribeBlocklist` action over the WS:
+In another terminal, send a `subscribeBlocklist` action over the WS (token
+first, per the Unix-socket handshake described above):
 
 ```bash
-websocat ws://127.0.0.1:3031/stream <<EOF
-{"action":"subscribeBlocklist","url":"http://127.0.0.1:8731/domains-tiny.txt"}
-EOF
+TOKEN=$(cat "$XDG_RUNTIME_DIR/snitchwatch/token")
+{ printf '%s\n' "$TOKEN"; printf '%s\n' '{"action":"subscribeBlocklist","url":"http://127.0.0.1:8731/domains-tiny.txt"}'; cat; } \
+    | websocat ws-c:unix:"$XDG_RUNTIME_DIR/snitchwatch/bridge.sock":/stream
 ```
 
 You should immediately see two server messages: `setBlocklists` (with the new

@@ -3,7 +3,7 @@ use snitchwatch_tauri::bridge_runtime::{spawn_bridge_runtime, BridgeRuntimeConfi
 #[tokio::test]
 async fn spawned_bridge_publishes_initial_idle_state() {
     let cfg = BridgeRuntimeConfig {
-        ws_bind: "127.0.0.1:0".parse().unwrap(),
+        ws_proxy_bind: "127.0.0.1:0".parse().unwrap(),
         grpc_bind: "127.0.0.1:0".parse().unwrap(),
     };
     let runtime = spawn_bridge_runtime(cfg).await.unwrap();

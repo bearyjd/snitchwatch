@@ -15,26 +15,43 @@ use serde_json::json;
 use snitchwatch_bridge_cli::{run, BridgeConfig};
 use snitchwatch_proto::protocol::Connection;
 use std::time::Duration;
+use tokio::net::UnixStream;
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::WebSocketStream;
+
+/// Connect to the bridge's `/stream` route over its Unix domain socket and
+/// present the handshake token as the first frame, exactly as a real client
+/// (or `crate::loopback_proxy` on the Tauri shell's behalf) must.
+async fn connect_stream(socket_path: &std::path::Path, token: &str) -> WebSocketStream<UnixStream> {
+    let stream = UnixStream::connect(socket_path)
+        .await
+        .expect("unix socket connect failed");
+    let (mut ws, _resp) = tokio_tungstenite::client_async("ws://localhost/stream", stream)
+        .await
+        .expect("ws handshake failed");
+    ws.send(Message::Text(token.to_string()))
+        .await
+        .expect("token handshake send failed");
+    ws
+}
 
 #[tokio::test]
 async fn ask_rule_round_trip_unary() {
     let _ = tracing_subscriber::fmt::try_init();
 
-    // 1. Boot the bridge with both ephemeral ports.
+    // 1. Boot the bridge: ephemeral gRPC port + a Unix socket under a fresh
+    //    temp dir for the WS server.
+    let socket_dir = tempfile::tempdir().unwrap();
     let cfg = BridgeConfig {
         grpc_bind: "127.0.0.1:0".parse().unwrap(),
-        ws_bind: "127.0.0.1:0".parse().unwrap(),
+        ws_socket_path: socket_dir.path().join("bridge.sock"),
         cache_capacity: 1024,
     };
     let bridge = run(cfg).await.expect("bridge run failed");
 
-    // 2. Connect a WebSocket client BEFORE the AskRule call so we don't miss
-    //    the broadcast.
-    let ws_url = format!("ws://{}/stream", bridge.ws_addr);
-    let (mut ws, _) = tokio_tungstenite::connect_async(&ws_url)
-        .await
-        .expect("ws connect failed");
+    // 2. Connect a WebSocket client (presenting the handshake token) BEFORE
+    //    the AskRule call so we don't miss the broadcast.
+    let mut ws = connect_stream(&bridge.ws_socket_path, bridge.ws_token.as_str()).await;
 
     // 3. Spawn an opensnitchd mock client and fire AskRule in the background.
     let grpc_addr = bridge.grpc_addr;
@@ -122,17 +139,15 @@ async fn ask_rule_round_trip_unary() {
 async fn deny_round_trip_unary() {
     let _ = tracing_subscriber::fmt::try_init();
 
+    let socket_dir = tempfile::tempdir().unwrap();
     let cfg = BridgeConfig {
         grpc_bind: "127.0.0.1:0".parse().unwrap(),
-        ws_bind: "127.0.0.1:0".parse().unwrap(),
+        ws_socket_path: socket_dir.path().join("bridge.sock"),
         cache_capacity: 1024,
     };
     let bridge = run(cfg).await.expect("bridge run failed");
 
-    let ws_url = format!("ws://{}/stream", bridge.ws_addr);
-    let (mut ws, _) = tokio_tungstenite::connect_async(&ws_url)
-        .await
-        .expect("ws connect failed");
+    let mut ws = connect_stream(&bridge.ws_socket_path, bridge.ws_token.as_str()).await;
 
     let grpc_addr = bridge.grpc_addr;
     let ask_handle = tokio::spawn(async move {

@@ -57,7 +57,17 @@
       window.location.host !== ""
         ? `${protocol}//${window.location.host}/stream`
         : "ws://127.0.0.1:3031/stream";
-    const socket = new WebSocket(socketUrl);
+    // The Tauri shell's loopback proxy (see crates/snitchwatch-tauri) only
+    // forwards `/stream` connections that already present this token as a
+    // query param — it's injected into `window.__SNITCHWATCH_TOKEN__`
+    // before this script runs (see snitchwatch-tauri's `initialization_script`).
+    // Absent when loaded outside Tauri (e.g. a plain browser tab against a
+    // dev server without the token check).
+    const token = window.__SNITCHWATCH_TOKEN__;
+    const authedSocketUrl = token
+      ? `${socketUrl}?token=${encodeURIComponent(token)}`
+      : socketUrl;
+    const socket = new WebSocket(authedSocketUrl);
 
     socket.addEventListener("open", () => {
       console.log("WebSocket connected");

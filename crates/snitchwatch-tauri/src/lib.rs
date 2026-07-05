@@ -6,6 +6,7 @@
 
 pub mod bridge_runtime;
 pub mod commands;
+pub mod loopback_proxy;
 pub mod notifier;
 pub mod panic_hook;
 pub mod paths;

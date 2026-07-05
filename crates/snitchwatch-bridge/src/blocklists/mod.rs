@@ -377,7 +377,7 @@ mod tests {
         mgr.refresh_now("tiny").await.unwrap();
         let calls = sink.calls.lock().unwrap();
         assert_eq!(calls.len(), 1, "expected one push call");
-        assert!(calls[0].len() > 0, "domains-tiny.txt should have hosts");
+        assert!(!calls[0].is_empty(), "domains-tiny.txt should have hosts");
         assert!(calls[0][0].name.starts_with("900-blocklist:tiny:"));
     }
 
