@@ -1,0 +1,31 @@
+[package]
+name = "scanner-privileged"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Component B privileged tier. This crate is a SEPARATE, ON-DEMAND binary
+# invoked via polkit/pkexec — it is deliberately NOT a daemon, has no
+# long-running process, no systemd unit, and no background thread. See
+# docs/superpowers/specs/2026-07-04-scanner-privileged-tier-design.md.
+
+[lib]
+name = "scanner_privileged"
+path = "src/lib.rs"
+
+[[bin]]
+name = "snitchwatch-scanner-privileged"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+rusqlite = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

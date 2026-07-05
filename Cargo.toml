@@ -10,6 +10,7 @@ members = [
     "crates/snitchwatch-kirigami",
     "crates/scanner-core",
     "crates/scanner-cli",
+    "crates/scanner-privileged",
     "tests/mock_opensnitchd",
     "tests/integration",
 ]
@@ -27,6 +28,7 @@ default-members = [
     "crates/snitchwatch-tauri",
     "crates/scanner-core",
     "crates/scanner-cli",
+    "crates/scanner-privileged",
     "tests/mock_opensnitchd",
     "tests/integration",
 ]
