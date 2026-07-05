@@ -9,11 +9,13 @@
 use cxx_qt_build::{CxxQtBuilder, QmlModule};
 
 fn main() {
-    CxxQtBuilder::new_qml_module(
-        QmlModule::new("com.snitchwatch.shell")
-            .qml_files(["qml/main.qml", "qml/ConnectionsPage.qml"]),
-    )
+    CxxQtBuilder::new_qml_module(QmlModule::new("com.snitchwatch.shell").qml_files([
+        "qml/main.qml",
+        "qml/ConnectionsPage.qml",
+        "qml/PendingDecisionSheet.qml",
+    ]))
     .file("src/bridge_bindings.rs")
     .file("src/connections_model.rs")
+    .file("src/pending_decision.rs")
     .build();
 }

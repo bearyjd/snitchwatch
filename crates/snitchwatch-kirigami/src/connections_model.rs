@@ -57,9 +57,25 @@ pub mod qobject {
         #[qobject]
         #[qml_element]
         #[base = QAbstractListModel]
+        /// Number of rows currently *visible* (after any active filter). This
+        /// is what the bound `ListView` shows.
         #[qproperty(i32, count)]
+        /// Number of rows still awaiting a decision, across the *whole* store
+        /// (independent of the filter) — drives the pending badge/tray.
         #[qproperty(i32, pending_count, cxx_name = "pendingCount")]
+        /// Total rows in the store regardless of filter — lets the view tell
+        /// "no connections yet" apart from "no rows match the filter".
+        #[qproperty(i32, total_count, cxx_name = "totalCount")]
         type ConnectionsModel = super::ConnectionsModelRust;
+
+        /// Emitted when the auto-select policy decides a freshly arrived pending
+        /// row should take the selection. `row` is the *visible* index to
+        /// select. A signal (not a property) so it always fires — even when the
+        /// target index equals the current one — and never steals focus except
+        /// when the policy says to. QML connects it to `ListView.currentIndex`.
+        #[qsignal]
+        #[cxx_name = "autoSelectRequested"]
+        fn auto_select_requested(self: Pin<&mut ConnectionsModel>, row: i32);
 
         // --- QAbstractListModel overrides -----------------------------------
         #[qinvokable]
@@ -83,6 +99,25 @@ pub mod qobject {
         #[qinvokable]
         #[cxx_name = "applyServerMessageJson"]
         fn apply_server_message_json(self: Pin<&mut ConnectionsModel>, json: &QString);
+
+        // --- Filter / search (Task 8) --------------------------------------
+        /// Set the case-insensitive substring search query. Empty clears it.
+        #[qinvokable]
+        #[cxx_name = "setFilterQuery"]
+        fn set_filter_query(self: Pin<&mut ConnectionsModel>, query: &QString);
+
+        /// Toggle "show only pending rows".
+        #[qinvokable]
+        #[cxx_name = "setPendingOnly"]
+        fn set_pending_only(self: Pin<&mut ConnectionsModel>, pending_only: bool);
+
+        // --- Selection tracking (Task 8 auto-select) ------------------------
+        /// Tell the model which row the user currently has selected (empty =
+        /// none), so the auto-select policy can avoid stealing focus from a
+        /// pending row the user is investigating.
+        #[qinvokable]
+        #[cxx_name = "setCurrentRowId"]
+        fn set_current_row_id(self: Pin<&mut ConnectionsModel>, id: &QString);
     }
 
     // Protected base-class helpers inherited from QAbstractListModel.
@@ -145,15 +180,19 @@ pub struct ConnectionsModelRust {
     store: RowStore,
     count: i32,
     pending_count: i32,
+    total_count: i32,
+    /// Id of the row the user currently has selected (empty = none). Fed from
+    /// QML via `setCurrentRowId`; consulted by the auto-select policy.
+    current_row_id: String,
 }
 
 impl qobject::ConnectionsModel {
     fn row_count(&self, _parent: &QModelIndex) -> i32 {
-        self.store.len() as i32
+        self.store.visible_len() as i32
     }
 
     unsafe fn data(&self, index: &QModelIndex, role: i32) -> QVariant {
-        let Some(row) = self.store.row(index.row() as usize) else {
+        let Some(row) = self.store.visible_row(index.row() as usize) else {
             return QVariant::default();
         };
         match role {
@@ -189,6 +228,22 @@ impl qobject::ConnectionsModel {
             Err(e) => tracing::warn!(error = %e, "ConnectionsModel: bad ServerMessage JSON"),
         }
     }
+
+    fn set_filter_query(self: Pin<&mut Self>, query: &QString) {
+        let mut filter = self.store.filter().clone();
+        filter.set_query(query.to_string());
+        self.apply_filter(filter);
+    }
+
+    fn set_pending_only(self: Pin<&mut Self>, pending_only: bool) {
+        let mut filter = self.store.filter().clone();
+        filter.set_pending_only(pending_only);
+        self.apply_filter(filter);
+    }
+
+    fn set_current_row_id(mut self: Pin<&mut Self>, id: &QString) {
+        self.as_mut().rust_mut().current_row_id = id.to_string();
+    }
 }
 
 impl qobject::ConnectionsModel {
@@ -196,23 +251,104 @@ impl qobject::ConnectionsModel {
     /// Qt begin/end signals. This is the direct-typed-API path (no JSON
     /// round-trip); `apply_server_message_json` is the QML string wrapper.
     pub fn apply_server_message(mut self: Pin<&mut Self>, msg: ServerMessage) {
-        match msg {
-            ServerMessage::InsertConnectionRows { rows } => self.as_mut().apply_insert(rows),
-            ServerMessage::RemoveConnectionRows { ids } => self.as_mut().apply_remove(&ids),
-            ServerMessage::UpdateConnectionRows { rows } => self.as_mut().apply_update(rows),
-            other => {
-                // Move/Clear (and no-op variants): bracket with a full reset —
-                // rare relative to insert/update, and always view-correct.
-                unsafe {
-                    self.as_mut().begin_reset_model();
-                }
-                self.as_mut().rust_mut().store.apply(other);
-                unsafe {
-                    self.as_mut().end_reset_model();
+        // Ids that arrive *pending* in this batch — captured before mutation so
+        // the auto-select policy can react to them afterward.
+        let new_pending_ids: Vec<String> = match &msg {
+            ServerMessage::InsertConnectionRows { rows } => rows
+                .iter()
+                .filter(|r| r.action.is_none())
+                .map(|r| r.id.clone())
+                .collect(),
+            _ => Vec::new(),
+        };
+
+        if self.store.is_filtered() {
+            // With an active filter the visible→store index mapping shifts in
+            // ways that don't map cleanly onto incremental begin/insert/remove
+            // brackets; a filter is an explicit user investigation mode, so a
+            // reset is acceptable here (and doesn't affect the unfiltered
+            // core-loop path below, which stays incremental to preserve scroll
+            // position). Recompute the projection inside the reset bracket.
+            unsafe {
+                self.as_mut().begin_reset_model();
+            }
+            {
+                let mut rust = self.as_mut().rust_mut();
+                rust.store.apply(msg);
+                rust.store.recompute_visible();
+            }
+            unsafe {
+                self.as_mut().end_reset_model();
+            }
+        } else {
+            match msg {
+                ServerMessage::InsertConnectionRows { rows } => self.as_mut().apply_insert(rows),
+                ServerMessage::RemoveConnectionRows { ids } => self.as_mut().apply_remove(&ids),
+                ServerMessage::UpdateConnectionRows { rows } => self.as_mut().apply_update(rows),
+                other => {
+                    // Move/Clear (and no-op variants): bracket with a full reset
+                    // — rare relative to insert/update, and always view-correct.
+                    unsafe {
+                        self.as_mut().begin_reset_model();
+                    }
+                    self.as_mut().rust_mut().store.apply(other);
+                    unsafe {
+                        self.as_mut().end_reset_model();
+                    }
                 }
             }
         }
+        self.as_mut().refresh_counts();
+        self.maybe_auto_select(&new_pending_ids);
+    }
+
+    /// Replace the active filter, bracketed by a model reset (the whole visible
+    /// set changes), and refresh the derived counts.
+    fn apply_filter(
+        mut self: Pin<&mut Self>,
+        filter: crate::connections::filter::ConnectionFilter,
+    ) {
+        unsafe {
+            self.as_mut().begin_reset_model();
+        }
+        self.as_mut().rust_mut().store.set_filter(filter);
+        unsafe {
+            self.as_mut().end_reset_model();
+        }
         self.refresh_counts();
+    }
+
+    /// Apply the auto-select-on-new-pending-row policy. Sets `autoSelectRowId`
+    /// (which QML watches) when a freshly arrived pending row should take the
+    /// selection, without stealing focus from a pending row the user is on.
+    fn maybe_auto_select(mut self: Pin<&mut Self>, new_pending_ids: &[String]) {
+        if new_pending_ids.is_empty() {
+            return;
+        }
+        let current = self.current_row_id.clone();
+        let current_opt = if current.is_empty() {
+            None
+        } else {
+            Some(current.as_str())
+        };
+        let current_is_pending = current_opt
+            .and_then(|id| self.store.is_pending(id))
+            .unwrap_or(false);
+        let refs: Vec<&str> = new_pending_ids.iter().map(String::as_str).collect();
+        let Some(target) =
+            crate::connections::filter::auto_select_target(current_opt, current_is_pending, &refs)
+        else {
+            return;
+        };
+        // Translate the chosen id to its current *visible* index for QML. If the
+        // target is filtered out of view there's nothing to select.
+        if let Some(vis) = self.store.visible_index_of(&target) {
+            // Adopt the auto-selected row as the current selection so the *next*
+            // pending arrival won't jump the selection off it (surface one
+            // pending decision at a time, per the design spec).
+            self.as_mut().rust_mut().current_row_id = target;
+            self.as_mut().auto_select_requested(vis as i32);
+        }
     }
 
     fn apply_insert(mut self: Pin<&mut Self>, rows: Vec<ConnectionRow>) {
@@ -302,6 +438,7 @@ impl qobject::ConnectionsModel {
     }
 
     fn refresh_counts(mut self: Pin<&mut Self>) {
+        let visible = self.store.visible_len() as i32;
         let total = self.store.len() as i32;
         let pending = self
             .store
@@ -309,7 +446,10 @@ impl qobject::ConnectionsModel {
             .iter()
             .filter(|r| r.action.is_none())
             .count() as i32;
-        self.as_mut().set_count(total);
+        // `count` tracks what the ListView shows (post-filter); `totalCount`
+        // stays the whole store so the view can distinguish empty from filtered.
+        self.as_mut().set_count(visible);
+        self.as_mut().set_total_count(total);
         self.as_mut().set_pending_count(pending);
     }
 }
