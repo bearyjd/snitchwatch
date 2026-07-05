@@ -99,6 +99,28 @@ impl RowStore {
         self.rows.get(index)
     }
 
+    /// Number of rows in `incoming` that [`insert_rows`](Self::insert_rows)
+    /// will actually append as *new* rows: ids not already present in the store
+    /// **and** not already seen earlier within this same batch.
+    ///
+    /// The cxx-qt `ConnectionsModel` wrapper brackets its `beginInsertRows`
+    /// call with this count *before* mutating the store, so it must match the
+    /// store's real growth exactly. A naive "filter incoming against the
+    /// current store" prediction over-counts when one batch carries the same
+    /// new id twice (the second occurrence is folded into an in-place update by
+    /// `insert_rows`, not a second append) — which would bracket more rows than
+    /// were inserted and violate a `QAbstractListModel` invariant. This helper
+    /// mirrors `insert_rows`'s dedup-against-store-*and*-within-batch behaviour
+    /// so the two never disagree.
+    pub fn count_new_ids(&self, incoming: &[ConnectionRow]) -> usize {
+        let mut seen: std::collections::HashSet<&str> =
+            self.rows.iter().map(|r| r.id.as_str()).collect();
+        incoming
+            .iter()
+            .filter(|r| seen.insert(r.id.as_str()))
+            .count()
+    }
+
     pub fn verdict_at(&self, index: usize) -> Option<Verdict> {
         self.rows
             .get(index)
@@ -359,6 +381,66 @@ mod tests {
         });
         assert_eq!(ops2, vec![ModelOp::Insert { at: 2, count: 1 }]);
         assert_eq!(ids(&s), vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn count_new_ids_matches_actual_append_delta() {
+        let mut s = RowStore::new();
+        s.insert_rows(vec![row("a", None)]);
+        // "b" and "c" are new; "a" already exists.
+        let batch = vec![row("b", None), row("a", Some("allow")), row("c", None)];
+        let predicted = s.count_new_ids(&batch);
+        let before = s.len();
+        s.insert_rows(batch);
+        assert_eq!(predicted, s.len() - before);
+        assert_eq!(predicted, 2);
+    }
+
+    #[test]
+    fn count_new_ids_dedups_duplicate_new_id_within_one_batch() {
+        // Regression: a single insert batch carrying the same *new* id twice.
+        // insert_rows appends the first occurrence and folds the second into an
+        // in-place update, so the real store grows by 1 — not 2. count_new_ids
+        // must report exactly that, or the model wrapper's beginInsertRows
+        // bracket desyncs from the store and violates a QAbstractListModel
+        // invariant.
+        let mut s = RowStore::new();
+        s.insert_rows(vec![row("a", None)]);
+        let batch = vec![
+            row("dup", None),
+            row("dup", Some("allow")), // same new id, second time
+            row("a", None),            // already present -> update
+            row("fresh", None),        // genuinely new
+        ];
+        let predicted = s.count_new_ids(&batch);
+        let before = s.len();
+        let ops = s.insert_rows(batch);
+        let actual = s.len() - before;
+
+        assert_eq!(
+            predicted, actual,
+            "count_new_ids must equal insert_rows's real store growth"
+        );
+        assert_eq!(predicted, 2, "only 'dup' and 'fresh' are genuinely new");
+        // The emitted Insert op's count agrees too.
+        let inserted: usize = ops
+            .iter()
+            .map(|op| match op {
+                ModelOp::Insert { count, .. } => *count,
+                _ => 0,
+            })
+            .sum();
+        assert_eq!(inserted, actual);
+        // The second "dup" won: its action is the update-in-place value.
+        let dup_idx = s.rows().iter().position(|r| r.id == "dup").unwrap();
+        assert_eq!(s.verdict_at(dup_idx), Some(Verdict::Allowed));
+    }
+
+    #[test]
+    fn count_new_ids_all_existing_is_zero() {
+        let mut s = RowStore::new();
+        s.insert_rows(vec![row("a", None), row("b", None)]);
+        assert_eq!(s.count_new_ids(&[row("a", None), row("b", None)]), 0);
     }
 
     #[test]

@@ -216,13 +216,14 @@ impl qobject::ConnectionsModel {
     }
 
     fn apply_insert(mut self: Pin<&mut Self>, rows: Vec<ConnectionRow>) {
-        // Predict the appended count (read-only) so beginInsertRows brackets
-        // exactly the new range.
+        // beginInsertRows must bracket exactly the range the store will grow by.
+        // Derive that count from the store's own dedup-aware `count_new_ids`,
+        // which mirrors `insert_rows` including the duplicate-id-in-one-batch
+        // case (a naive filter against the pre-insert store over-counts there
+        // and would desync the bracket from the real store delta — a
+        // QAbstractListModel invariant violation).
         let existing = self.store.len();
-        let appended = rows
-            .iter()
-            .filter(|r| self.store.rows().iter().all(|e| e.id != r.id))
-            .count();
+        let appended = self.store.count_new_ids(&rows);
 
         if appended > 0 {
             let first = existing as i32;
@@ -233,6 +234,13 @@ impl qobject::ConnectionsModel {
             }
         }
         let ops = self.as_mut().rust_mut().store.insert_rows(rows);
+        // The bracketed count must equal the store's actual growth. This is the
+        // snapshot-before/after reconciliation guarding the Qt invariant.
+        debug_assert_eq!(
+            self.store.len(),
+            existing + appended,
+            "beginInsertRows bracket ({appended}) desynced from actual store delta"
+        );
         if appended > 0 {
             unsafe {
                 self.as_mut().end_insert_rows();
