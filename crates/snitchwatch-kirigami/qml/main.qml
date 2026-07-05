@@ -30,6 +30,31 @@ Kirigami.ApplicationWindow {
         id: connectionsModel
     }
 
+    // Blocklists tab models (Task 9). Same lifetime-owned-at-window-scope
+    // pattern as connectionsModel above; the live bridge feed attaches the
+    // same way once that follow-up wiring lands.
+    BlocklistsModel {
+        id: blocklistsModel
+    }
+    BlocklistEntriesModel {
+        id: blocklistEntriesModel
+    }
+
+    // Page components, swapped into pageStack by the drawer actions below.
+    Component {
+        id: connectionsPageComponent
+        ConnectionsPage {
+            model: connectionsModel
+        }
+    }
+    Component {
+        id: blocklistsPageComponent
+        BlocklistsPage {
+            model: blocklistsModel
+            entriesModel: blocklistEntriesModel
+        }
+    }
+
     // Tracks the last-seen pending count so we only raise on a *new* pending
     // arrival, not on every count change (e.g. 2 -> 3 while already visible).
     property int lastPendingCount: 0
@@ -77,6 +102,7 @@ Kirigami.ApplicationWindow {
                 text: "Connections"
                 icon.name: "network-connect"
                 checked: true
+                onTriggered: root.pageStack.replace(connectionsPageComponent)
             },
             Kirigami.Action {
                 text: "Rules"
@@ -85,6 +111,7 @@ Kirigami.ApplicationWindow {
             Kirigami.Action {
                 text: "Blocklists"
                 icon.name: "edit-delete"
+                onTriggered: root.pageStack.replace(blocklistsPageComponent)
             },
             Kirigami.Action {
                 text: "Traffic"
@@ -93,7 +120,5 @@ Kirigami.ApplicationWindow {
         ]
     }
 
-    pageStack.initialPage: ConnectionsPage {
-        model: connectionsModel
-    }
+    pageStack.initialPage: connectionsPageComponent
 }

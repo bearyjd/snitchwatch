@@ -6,6 +6,8 @@
 //! Phase 3a spike proved cxx-qt issue #770 does not bite this repo — see
 //! `crates/kirigami-spike/tests/link_770.rs`).
 
+pub mod blocklists;
+pub mod blocklists_model;
 pub mod bridge_bindings;
 pub mod connections;
 pub mod connections_model;
