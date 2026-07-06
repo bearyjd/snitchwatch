@@ -16,7 +16,6 @@ use cxx_qt::CxxQtType;
 use cxx_qt::Threading;
 use cxx_qt_lib::QString;
 use serde::Serialize;
-use tokio::sync::broadcast;
 
 use crate::traffic::ring_store::{format_rate, TrafficStore};
 use snitchwatch_bridge::ws_messages::ServerMessage;
@@ -100,32 +99,16 @@ impl qobject::TrafficModel {
             return;
         };
         let qt_thread = self.qt_thread();
-        let mut rx = handles.subscribe();
-        handles.runtime().spawn(async move {
-            loop {
-                match rx.recv().await {
-                    Ok(msg) => {
-                        if !crate::bridge_dispatch::interests_traffic(&msg) {
-                            continue;
-                        }
-                        match crate::bridge_dispatch::encode_server(&msg) {
-                            Ok(json) => {
-                                let _ = qt_thread.queue(move |qobject| {
-                                    qobject.apply_server_message_json(&QString::from(&json));
-                                });
-                            }
-                            Err(e) => {
-                                tracing::warn!(error = %e, "TrafficModel feed: encode failed")
-                            }
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::warn!(skipped = n, "TrafficModel feed lagged behind bridge")
-                    }
-                    Err(broadcast::error::RecvError::Closed) => break,
-                }
-            }
-        });
+        crate::bridge_dispatch::spawn_feed(
+            &handles,
+            "TrafficModel",
+            crate::bridge_dispatch::interests_traffic,
+            move |_msg, json| {
+                let _ = qt_thread.queue(move |qobject| {
+                    qobject.apply_server_message_json(&QString::from(&json));
+                });
+            },
+        );
     }
 }
 

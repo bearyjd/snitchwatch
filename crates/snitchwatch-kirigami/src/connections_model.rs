@@ -24,7 +24,6 @@ use cxx_qt::Threading;
 use cxx_qt_lib::{
     QByteArray, QHash, QHashPair_i32_QByteArray, QList, QModelIndex, QString, QVariant,
 };
-use tokio::sync::broadcast;
 
 use crate::connections::filter::ConnectionFilter;
 use crate::connections::grouping::{GroupTree, VisibleEntry};
@@ -255,6 +254,53 @@ pub mod qobject {
     impl cxx_qt::Threading for ConnectionsModel {}
 }
 
+/// How long grouped-mode mutations are coalesced before one Qt model reset
+/// flushes them all. Chosen well under perception threshold but long enough
+/// that a busy system's per-connection event bursts (dozens/sec) collapse to
+/// ~6 resets/sec worst case instead of one per message.
+const GROUPED_FLUSH_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(150);
+
+/// Ids that arrive *pending* anywhere in a batch of buffered messages —
+/// the flush-time input to the auto-select policy (Qt-free, tested below).
+fn collect_new_pending_ids(msgs: &[ServerMessage]) -> Vec<String> {
+    msgs.iter()
+        .flat_map(|msg| match msg {
+            ServerMessage::InsertConnectionRows { rows } => rows
+                .iter()
+                .filter(|r| r.action.is_none())
+                .map(|r| r.id.clone())
+                .collect::<Vec<_>>(),
+            _ => Vec::new(),
+        })
+        .collect()
+}
+
+/// Mirror one message's delta into the Process->Domain group tree, Qt-free
+/// and incremental (see `connections::grouping` module docs) — shared by the
+/// immediate and debounced apply paths.
+fn mirror_into_grouping(rust: &mut ConnectionsModelRust, msg: &ServerMessage) {
+    match msg {
+        ServerMessage::InsertConnectionRows { rows }
+        | ServerMessage::UpdateConnectionRows { rows } => {
+            for row in rows {
+                rust.grouping.upsert_row(row);
+            }
+        }
+        ServerMessage::RemoveConnectionRows { ids } => {
+            for id in ids {
+                rust.grouping.remove_row(id);
+            }
+        }
+        ServerMessage::MoveConnetionRows { ids } => {
+            rust.grouping.move_to_front(ids);
+        }
+        ServerMessage::ClearConnectionRows => {
+            rust.grouping.clear();
+        }
+        _ => {}
+    }
+}
+
 /// Rust-side state for [`qobject::ConnectionsModel`].
 pub struct ConnectionsModelRust {
     store: RowStore,
@@ -276,6 +322,12 @@ pub struct ConnectionsModelRust {
     /// Id of the row the user currently has selected (empty = none). Fed from
     /// QML via `setCurrentRowId`; consulted by the auto-select policy.
     current_row_id: String,
+    /// Grouped-mode debounce buffer: messages received but not yet applied.
+    /// Only used when the bridge runtime is available to schedule the flush;
+    /// see `apply_server_message`. Never touched in flat mode.
+    pending_grouped_msgs: Vec<ServerMessage>,
+    /// Whether a debounced flush is already scheduled for the buffer above.
+    grouped_flush_scheduled: bool,
 }
 
 impl Default for ConnectionsModelRust {
@@ -289,6 +341,8 @@ impl Default for ConnectionsModelRust {
             pending_count: 0,
             total_count: 0,
             current_row_id: String::new(),
+            pending_grouped_msgs: Vec::new(),
+            grouped_flush_scheduled: false,
         }
     }
 }
@@ -399,50 +453,108 @@ impl qobject::ConnectionsModel {
             return;
         };
         let qt_thread = self.qt_thread();
-        let mut rx = handles.subscribe();
-        handles.runtime().spawn(async move {
-            loop {
-                match rx.recv().await {
-                    Ok(msg) => {
-                        if !crate::bridge_dispatch::interests_connections(&msg) {
-                            continue;
-                        }
-                        match crate::bridge_dispatch::encode_server(&msg) {
-                            Ok(json) => {
-                                let _ = qt_thread.queue(move |qobject| {
-                                    qobject.apply_server_message_json(&QString::from(&json));
-                                });
-                            }
-                            Err(e) => {
-                                tracing::warn!(error = %e, "ConnectionsModel feed: encode failed")
-                            }
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::warn!(skipped = n, "ConnectionsModel feed lagged behind bridge")
-                    }
-                    Err(broadcast::error::RecvError::Closed) => break,
-                }
-            }
-        });
+        crate::bridge_dispatch::spawn_feed(
+            &handles,
+            "ConnectionsModel",
+            crate::bridge_dispatch::interests_connections,
+            move |_msg, json| {
+                let _ = qt_thread.queue(move |qobject| {
+                    qobject.apply_server_message_json(&QString::from(&json));
+                });
+            },
+        );
     }
 }
 
 impl qobject::ConnectionsModel {
-    /// Apply a typed bridge message, replaying each change behind the correct
-    /// Qt begin/end signals. This is the direct-typed-API path (no JSON
-    /// round-trip); `apply_server_message_json` is the QML string wrapper.
+    /// Apply a typed bridge message. In grouped mode with the bridge runtime
+    /// available, messages are *buffered* and flushed in one Qt model reset
+    /// per [`GROUPED_FLUSH_DEBOUNCE`] window ([`Self::flush_grouped_messages`])
+    /// — a busy system's event bursts would otherwise cost one full reset
+    /// (delegate churn, scroll/selection loss) per message. Everywhere else
+    /// (flat mode, headless tests, bridge-less operation) the message applies
+    /// immediately via [`Self::apply_now`].
     pub fn apply_server_message(mut self: Pin<&mut Self>, msg: ServerMessage) {
+        if self.grouped {
+            if let Some(handles) = crate::bridge_runtime::handles() {
+                let schedule = {
+                    let mut rust = self.as_mut().rust_mut();
+                    rust.pending_grouped_msgs.push(msg);
+                    if rust.grouped_flush_scheduled {
+                        false
+                    } else {
+                        rust.grouped_flush_scheduled = true;
+                        true
+                    }
+                };
+                if schedule {
+                    let qt_thread = self.qt_thread();
+                    handles.runtime().spawn(async move {
+                        tokio::time::sleep(GROUPED_FLUSH_DEBOUNCE).await;
+                        let _ = qt_thread.queue(|qobject| qobject.flush_grouped_messages());
+                    });
+                }
+                return;
+            }
+        }
+        self.apply_now(msg);
+    }
+
+    /// Apply any grouped-mode messages still sitting in the debounce buffer,
+    /// all inside a single Qt model reset, then re-run the auto-select policy
+    /// over every pending row that arrived in the batch and re-anchor the
+    /// user's selection (a reset clears the view's `currentIndex`).
+    fn flush_grouped_messages(mut self: Pin<&mut Self>) {
+        let msgs = {
+            let mut rust = self.as_mut().rust_mut();
+            rust.grouped_flush_scheduled = false;
+            std::mem::take(&mut rust.pending_grouped_msgs)
+        };
+        if msgs.is_empty() {
+            return;
+        }
+        let new_pending_ids = collect_new_pending_ids(&msgs);
+        let selected_before = self.current_row_id.clone();
+
+        unsafe {
+            self.as_mut().begin_reset_model();
+        }
+        {
+            let mut rust = self.as_mut().rust_mut();
+            for msg in msgs {
+                mirror_into_grouping(&mut rust, &msg);
+                rust.store.apply(msg);
+            }
+            if rust.store.is_filtered() {
+                rust.store.recompute_visible();
+            }
+        }
+        self.as_mut().rebuild_grouped_projection();
+        unsafe {
+            self.as_mut().end_reset_model();
+        }
+        self.as_mut().refresh_counts();
+        self.as_mut().maybe_auto_select(&new_pending_ids);
+
+        // If auto-select didn't move the selection, re-anchor the row the
+        // user had selected before the reset (if it still exists/is visible).
+        if !selected_before.is_empty() && self.current_row_id == selected_before {
+            let vis = self
+                .grouped_projection
+                .iter()
+                .position(|e| matches!(e, VisibleEntry::Row { id, .. } if id == &selected_before));
+            if let Some(vis) = vis {
+                self.as_mut().auto_select_requested(vis as i32);
+            }
+        }
+    }
+
+    /// The immediate (non-debounced) apply path: replay one message behind
+    /// the correct Qt begin/end signals.
+    fn apply_now(mut self: Pin<&mut Self>, msg: ServerMessage) {
         // Ids that arrive *pending* in this batch — captured before mutation so
         // the auto-select policy can react to them afterward.
-        let new_pending_ids: Vec<String> = match &msg {
-            ServerMessage::InsertConnectionRows { rows } => rows
-                .iter()
-                .filter(|r| r.action.is_none())
-                .map(|r| r.id.clone())
-                .collect(),
-            _ => Vec::new(),
-        };
+        let new_pending_ids = collect_new_pending_ids(std::slice::from_ref(&msg));
 
         // Mirror the same delta into the Process->Domain group tree, Qt-free
         // and incremental (see `connections::grouping` module docs), so both
@@ -451,26 +563,7 @@ impl qobject::ConnectionsModel {
         // below, hence matching on `&msg` here.
         {
             let mut rust = self.as_mut().rust_mut();
-            match &msg {
-                ServerMessage::InsertConnectionRows { rows }
-                | ServerMessage::UpdateConnectionRows { rows } => {
-                    for row in rows {
-                        rust.grouping.upsert_row(row);
-                    }
-                }
-                ServerMessage::RemoveConnectionRows { ids } => {
-                    for id in ids {
-                        rust.grouping.remove_row(id);
-                    }
-                }
-                ServerMessage::MoveConnetionRows { ids } => {
-                    rust.grouping.move_to_front(ids);
-                }
-                ServerMessage::ClearConnectionRows => {
-                    rust.grouping.clear();
-                }
-                _ => {}
-            }
+            mirror_into_grouping(&mut rust, &msg);
         }
 
         if self.grouped {
@@ -558,6 +651,9 @@ impl qobject::ConnectionsModel {
     /// both flat and grouped modes — the grouped projection is rebuilt too so
     /// matched children keep their ancestor group headers visible.
     fn apply_filter(mut self: Pin<&mut Self>, filter: ConnectionFilter) {
+        // Anything still in the grouped debounce buffer must land first so the
+        // filter is computed over current data.
+        self.as_mut().flush_grouped_messages();
         unsafe {
             self.as_mut().begin_reset_model();
         }
@@ -578,6 +674,9 @@ impl qobject::ConnectionsModel {
         if grouped == self.grouped {
             return;
         }
+        // Buffered grouped-mode messages must apply before the mode flips so
+        // the flat view starts from current data.
+        self.as_mut().flush_grouped_messages();
         unsafe {
             self.as_mut().begin_reset_model();
         }
@@ -596,6 +695,7 @@ impl qobject::ConnectionsModel {
         if !self.grouped {
             return;
         }
+        self.as_mut().flush_grouped_messages();
         unsafe {
             self.as_mut().begin_reset_model();
         }
@@ -616,6 +716,7 @@ impl qobject::ConnectionsModel {
         if !self.grouped {
             return;
         }
+        self.as_mut().flush_grouped_messages();
         unsafe {
             self.as_mut().begin_reset_model();
         }
@@ -815,6 +916,7 @@ impl qobject::ConnectionsModel {
     }
 }
 
+
 /// Read one role of a grouped-projection [`VisibleEntry`] into the QVariant
 /// shape `data()` returns. `store` resolves leaf `Row` entries' full
 /// `ConnectionRow` content (the tree only tracks ids).
@@ -908,5 +1010,52 @@ fn grouped_entry_data(entry: &VisibleEntry, role: i32, store: &RowStore) -> QVar
                 _ => QVariant::default(),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(id: &str, action: Option<&str>) -> ConnectionRow {
+        ConnectionRow {
+            id: id.to_string(),
+            process: "p".into(),
+            process_path: None,
+            dst_host: "h".into(),
+            dst_ip: "1.1.1.1".into(),
+            dst_port: 1,
+            protocol: "tcp".into(),
+            direction: "outgoing".into(),
+            action: action.map(str::to_string),
+            bytes_sent: 0,
+            bytes_received: 0,
+            started_at_ms: 0,
+            matched_rule: None,
+        }
+    }
+
+    #[test]
+    fn collect_new_pending_ids_spans_the_whole_batch() {
+        let msgs = vec![
+            ServerMessage::InsertConnectionRows {
+                rows: vec![row("a", None), row("b", Some("allow"))],
+            },
+            ServerMessage::ClearConnectionRows,
+            ServerMessage::InsertConnectionRows {
+                rows: vec![row("c", None)],
+            },
+            // Updates never count as *new* pending arrivals.
+            ServerMessage::UpdateConnectionRows {
+                rows: vec![row("d", None)],
+            },
+        ];
+        assert_eq!(collect_new_pending_ids(&msgs), vec!["a", "c"]);
+    }
+
+    #[test]
+    fn collect_new_pending_ids_empty_for_non_insert_batches() {
+        assert!(collect_new_pending_ids(&[ServerMessage::ClearConnectionRows]).is_empty());
+        assert!(collect_new_pending_ids(&[]).is_empty());
     }
 }

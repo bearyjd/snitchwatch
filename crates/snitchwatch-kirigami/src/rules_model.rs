@@ -17,7 +17,6 @@ use core::pin::Pin;
 use cxx_qt::CxxQtType;
 use cxx_qt::Threading;
 use cxx_qt_lib::{QByteArray, QHash, QHashPair_i32_QByteArray, QModelIndex, QString, QVariant};
-use tokio::sync::broadcast;
 
 use crate::rules::row_store::{RuleSource, RulesStore};
 use snitchwatch_bridge::ws_messages::{ClientMessage, ServerMessage};
@@ -264,30 +263,16 @@ impl qobject::RulesModel {
             return;
         };
         let qt_thread = self.qt_thread();
-        let mut rx = handles.subscribe();
-        handles.runtime().spawn(async move {
-            loop {
-                match rx.recv().await {
-                    Ok(msg) => {
-                        if !crate::bridge_dispatch::interests_rules(&msg) {
-                            continue;
-                        }
-                        match crate::bridge_dispatch::encode_server(&msg) {
-                            Ok(json) => {
-                                let _ = qt_thread.queue(move |qobject| {
-                                    qobject.apply_server_message_json(&QString::from(&json));
-                                });
-                            }
-                            Err(e) => tracing::warn!(error = %e, "RulesModel feed: encode failed"),
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::warn!(skipped = n, "RulesModel feed lagged behind bridge")
-                    }
-                    Err(broadcast::error::RecvError::Closed) => break,
-                }
-            }
-        });
+        crate::bridge_dispatch::spawn_feed(
+            &handles,
+            "RulesModel",
+            crate::bridge_dispatch::interests_rules,
+            move |_msg, json| {
+                let _ = qt_thread.queue(move |qobject| {
+                    qobject.apply_server_message_json(&QString::from(&json));
+                });
+            },
+        );
     }
 }
 

@@ -105,6 +105,73 @@ pub fn decode_client(json: &str) -> Result<ClientMessage, serde_json::Error> {
     serde_json::from_str(json)
 }
 
+/// The shared feed loop every model's `startBridgeFeed()` runs (Qt-free, so
+/// it's directly unit-testable below). Receives every outbound
+/// [`ServerMessage`], keeps only those `interest` routes to this model,
+/// encodes to the JSON `applyServerMessageJson` consumes, and hands
+/// `(typed message, json)` to `deliver` — the model-supplied closure that
+/// queues onto the Qt thread (and, for `GeoModel`, warms the GeoIP cache
+/// first; that's why the typed message is passed alongside the JSON).
+///
+/// On [`broadcast::error::RecvError::Lagged`] the loop asks the bridge to
+/// re-broadcast full snapshots ([`ClientMessage::RequestSnapshot`]): these are
+/// stateful snapshot+delta streams, so silently skipping deltas would leave
+/// the model stale until the next natural snapshot — which for connections
+/// never comes. Exits when either channel closes.
+pub async fn run_feed<F>(
+    mut rx: tokio::sync::broadcast::Receiver<ServerMessage>,
+    inbound: tokio::sync::mpsc::Sender<ClientMessage>,
+    label: &'static str,
+    interest: fn(&ServerMessage) -> bool,
+    deliver: F,
+) where
+    F: Fn(&ServerMessage, String) + Send + 'static,
+{
+    use tokio::sync::broadcast::error::RecvError;
+    loop {
+        match rx.recv().await {
+            Ok(msg) => {
+                if !interest(&msg) {
+                    continue;
+                }
+                match encode_server(&msg) {
+                    Ok(json) => deliver(&msg, json),
+                    Err(e) => tracing::warn!(feed = label, error = %e, "feed: encode failed"),
+                }
+            }
+            Err(RecvError::Lagged(n)) => {
+                tracing::warn!(
+                    feed = label,
+                    skipped = n,
+                    "feed lagged behind bridge; requesting snapshot resync"
+                );
+                if inbound.send(ClientMessage::RequestSnapshot).await.is_err() {
+                    break;
+                }
+            }
+            Err(RecvError::Closed) => break,
+        }
+    }
+}
+
+/// Spawn [`run_feed`] for one model on the bridge runtime. This is the whole
+/// body of every model's `startBridgeFeed()` beyond obtaining its
+/// `CxxQtThread` handle — one place to change feed behavior for all models.
+pub fn spawn_feed<F>(
+    handles: &crate::bridge_runtime::BridgeHandles,
+    label: &'static str,
+    interest: fn(&ServerMessage) -> bool,
+    deliver: F,
+) where
+    F: Fn(&ServerMessage, String) + Send + 'static,
+{
+    let rx = handles.subscribe();
+    let inbound = handles.inbound_tx();
+    handles
+        .runtime()
+        .spawn(run_feed(rx, inbound, label, interest, deliver));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -353,5 +420,80 @@ mod tests {
     fn decode_client_rejects_malformed_json() {
         assert!(decode_client("{ not json").is_err());
         assert!(decode_client(r#"{"action":"noSuchAction"}"#).is_err());
+    }
+
+    #[tokio::test]
+    async fn run_feed_delivers_only_messages_its_predicate_routes() {
+        let (btx, brx) = tokio::sync::broadcast::channel(16);
+        let (itx, _irx) = tokio::sync::mpsc::channel(4);
+        let (dtx, mut drx) = tokio::sync::mpsc::unbounded_channel();
+
+        let feed = tokio::spawn(run_feed(
+            brx,
+            itx,
+            "test-rules",
+            interests_rules,
+            move |msg, json| {
+                assert!(
+                    interests_rules(msg),
+                    "deliver must only see routed messages"
+                );
+                let _ = dtx.send(json);
+            },
+        ));
+
+        btx.send(ServerMessage::SetRules { rules: vec![] }).unwrap();
+        btx.send(ServerMessage::ClearConnectionRows).unwrap(); // filtered out
+        btx.send(ServerMessage::UpdateRules { rules: vec![] })
+            .unwrap();
+
+        let first = tokio::time::timeout(std::time::Duration::from_secs(1), drx.recv())
+            .await
+            .expect("no delivery")
+            .expect("deliver channel closed");
+        assert!(
+            first.contains("etRules"),
+            "expected a rules message, got {first}"
+        );
+        let second = tokio::time::timeout(std::time::Duration::from_secs(1), drx.recv())
+            .await
+            .expect("no second delivery")
+            .expect("deliver channel closed");
+        assert!(
+            second.contains("Rules"),
+            "expected a rules message, got {second}"
+        );
+
+        drop(btx); // Closed → loop exits
+        tokio::time::timeout(std::time::Duration::from_secs(1), feed)
+            .await
+            .expect("feed did not exit on channel close")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn run_feed_requests_snapshot_resync_after_lagging() {
+        // Capacity-1 broadcast: overrunning it before the consumer task starts
+        // guarantees the first recv() observes Lagged.
+        let (btx, brx) = tokio::sync::broadcast::channel(1);
+        let (itx, mut irx) = tokio::sync::mpsc::channel(4);
+
+        btx.send(ServerMessage::ClearConnectionRows).unwrap();
+        btx.send(ServerMessage::ClearConnectionRows).unwrap();
+        btx.send(ServerMessage::ClearConnectionRows).unwrap();
+
+        tokio::spawn(run_feed(
+            brx,
+            itx,
+            "test-lag",
+            interests_connections,
+            |_msg, _json| {},
+        ));
+
+        let resync = tokio::time::timeout(std::time::Duration::from_secs(1), irx.recv())
+            .await
+            .expect("no snapshot request after lag")
+            .expect("inbound channel closed");
+        assert_eq!(resync, ClientMessage::RequestSnapshot);
     }
 }

@@ -30,7 +30,6 @@ use core::pin::Pin;
 use cxx_qt::CxxQtType;
 use cxx_qt::Threading;
 use cxx_qt_lib::{QByteArray, QHash, QHashPair_i32_QByteArray, QModelIndex, QString, QVariant};
-use tokio::sync::broadcast;
 
 use crate::geo::resolver::SharedResolver;
 use crate::geo::store::GeoStore;
@@ -199,37 +198,22 @@ impl qobject::GeoModel {
         };
         let qt_thread = self.qt_thread();
         let resolver = self.resolver.clone();
-        let mut rx = handles.subscribe();
-        handles.runtime().spawn(async move {
-            loop {
-                match rx.recv().await {
-                    Ok(msg) => {
-                        if !crate::bridge_dispatch::interests_geo(&msg) {
-                            continue;
-                        }
-                        // Resolve every row's destination IP here, off the Qt
-                        // thread — this is the actual GeoIP database read.
-                        // `resolver` shares its cache with the `GeoStore` the
-                        // Qt-thread-side `apply_server_message_json` call
-                        // below will invoke, so that call only ever hits the
-                        // now-warm cache.
-                        warm_resolver_cache(&resolver, &msg);
-                        match crate::bridge_dispatch::encode_server(&msg) {
-                            Ok(json) => {
-                                let _ = qt_thread.queue(move |qobject| {
-                                    qobject.apply_server_message_json(&QString::from(&json));
-                                });
-                            }
-                            Err(e) => tracing::warn!(error = %e, "GeoModel feed: encode failed"),
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::warn!(skipped = n, "GeoModel feed lagged behind bridge")
-                    }
-                    Err(broadcast::error::RecvError::Closed) => break,
-                }
-            }
-        });
+        crate::bridge_dispatch::spawn_feed(
+            &handles,
+            "GeoModel",
+            crate::bridge_dispatch::interests_geo,
+            move |msg, json| {
+                // Resolve every row's destination IP here, off the Qt
+                // thread — this is the actual GeoIP database read.
+                // `resolver` shares its cache with the Qt-thread-side
+                // `GeoStore`, so the queued apply below only ever hits
+                // the now-warm cache.
+                warm_resolver_cache(&resolver, msg);
+                let _ = qt_thread.queue(move |qobject| {
+                    qobject.apply_server_message_json(&QString::from(&json));
+                });
+            },
+        );
     }
 }
 
