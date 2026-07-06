@@ -112,12 +112,21 @@ impl ConnectionCache {
         // It's fine if the receiver was dropped (e.g. gRPC stream broke).
         let _ = sender.send(verdict);
 
-        // Update the row's action so future re-renders show it as decided.
+        // Update the row's action so future re-renders show it as decided,
+        // and record which rule now governs this connection: the same
+        // synthetic once-off rule name `verdict_to_rule` hands back to
+        // opensnitchd as the `AskRule` reply (see `rule_name_for`'s doc
+        // comment for why this is the single source of truth for that name).
         let result = if let Some(row) = self.rows.iter_mut().find(|r| r.id == row_id) {
             row.action = Some(match verdict {
                 Verdict::Allow => "allow".to_string(),
                 Verdict::Deny => "deny".to_string(),
             });
+            row.matched_rule = Some(crate::translator::verdict::rule_name_for(
+                verdict,
+                &row.dst_host,
+                row.dst_port,
+            ));
             Ok(())
         } else {
             Err(CacheError::NotFound(row_id.to_string()))
@@ -180,6 +189,7 @@ mod tests {
             bytes_sent: 0,
             bytes_received: 0,
             started_at_ms: 0,
+            matched_rule: None,
         }
     }
 
@@ -227,6 +237,17 @@ mod tests {
         assert_eq!(c.rows()[0].action.as_deref(), Some("allow"));
     }
 
+    #[tokio::test]
+    async fn resolve_populates_matched_rule_with_the_synthetic_rule_name() {
+        let mut c = ConnectionCache::new(10);
+        let _rx = c.insert_pending(pending_row("p1"));
+        c.resolve("p1", Verdict::Deny).unwrap();
+        assert_eq!(
+            c.rows()[0].matched_rule.as_deref(),
+            Some("snitchwatch-deny-h-443")
+        );
+    }
+
     #[test]
     fn resolve_unknown_row_errors() {
         let mut c = ConnectionCache::new(10);
@@ -265,6 +286,7 @@ mod tray_state_tests {
             bytes_sent: 0,
             bytes_received: 0,
             started_at_ms: 0,
+            matched_rule: None,
         }
     }
 

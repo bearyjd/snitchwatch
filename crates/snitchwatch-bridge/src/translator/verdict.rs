@@ -11,11 +11,30 @@
 use crate::cache::connections::Verdict;
 use snitchwatch_proto::protocol::{Connection, Rule};
 
-pub fn verdict_to_rule(verdict: Verdict, conn: &Connection, now_secs: i64) -> Rule {
-    let action = match verdict {
+/// The action token used both in the synthetic rule name and as the `Rule`
+/// proto's `action` field.
+pub fn verdict_action_str(verdict: Verdict) -> &'static str {
+    match verdict {
         Verdict::Allow => "allow",
         Verdict::Deny => "deny",
-    };
+    }
+}
+
+/// Build the synthetic once-off rule name the bridge hands back to
+/// opensnitchd as the `AskRule` reply for an interactive verdict.
+///
+/// This is the single source of truth for that name: [`verdict_to_rule`]
+/// uses it to build the `Rule` proto, and
+/// [`crate::cache::connections::ConnectionCache::resolve`] uses it to
+/// populate the resolved row's `matched_rule` for the UI, so the two never
+/// drift apart. `host` should already have the empty-dst-host-falls-back-to-
+/// dst-ip substitution applied by the caller (both call sites do).
+pub fn rule_name_for(verdict: Verdict, host: &str, port: u16) -> String {
+    format!("snitchwatch-{}-{host}-{port}", verdict_action_str(verdict))
+}
+
+pub fn verdict_to_rule(verdict: Verdict, conn: &Connection, now_secs: i64) -> Rule {
+    let action = verdict_action_str(verdict);
 
     let host = if conn.dst_host.is_empty() {
         conn.dst_ip.as_str()
@@ -25,7 +44,7 @@ pub fn verdict_to_rule(verdict: Verdict, conn: &Connection, now_secs: i64) -> Ru
 
     Rule {
         created: now_secs,
-        name: format!("snitchwatch-{action}-{host}-{}", conn.dst_port),
+        name: rule_name_for(verdict, host, conn.dst_port as u16),
         description: "snitchwatch interactive verdict".to_string(),
         enabled: true,
         precedence: false,
@@ -74,5 +93,18 @@ mod tests {
     fn rule_name_includes_remote_host_for_traceability() {
         let rule = verdict_to_rule(Verdict::Allow, &sample_connection(), 0);
         assert!(rule.name.contains("github.com"), "got: {}", rule.name);
+    }
+
+    #[test]
+    fn rule_name_for_matches_verdict_to_rule_name() {
+        // Single source of truth: the name the daemon gets back (via
+        // `verdict_to_rule`) and the name the UI shows as `matched_rule` (via
+        // `rule_name_for`, called from `ConnectionCache::resolve`) must be
+        // identical for the same inputs, or the "Show rule" jump would land
+        // on a rule that doesn't exist.
+        let conn = sample_connection();
+        let rule = verdict_to_rule(Verdict::Allow, &conn, 1_700_000_000);
+        let name = rule_name_for(Verdict::Allow, &conn.dst_host, conn.dst_port as u16);
+        assert_eq!(rule.name, name);
     }
 }

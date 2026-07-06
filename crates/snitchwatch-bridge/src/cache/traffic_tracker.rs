@@ -71,6 +71,7 @@ mod tests {
             bytes_sent,
             bytes_received,
             started_at_ms: 0,
+            matched_rule: None,
         }
     }
 

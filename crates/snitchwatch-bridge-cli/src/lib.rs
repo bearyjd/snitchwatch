@@ -351,6 +351,7 @@ mod tests {
             bytes_sent: 1234,
             bytes_received: 5678,
             started_at_ms: 0,
+            matched_rule: None,
         };
         bridge
             .broadcast_tx

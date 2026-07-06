@@ -166,6 +166,19 @@ pub struct ConnectionRow {
     pub bytes_sent: u64,
     pub bytes_received: u64,
     pub started_at_ms: i64,
+    /// Name of the opensnitchd rule that decided this connection's `action`,
+    /// if known. `None` while the row is pending (no rule has fired yet —
+    /// that's exactly why the daemon asked). Once decided, this is either the
+    /// synthetic once-off rule name the bridge handed back for an interactive
+    /// verdict (see `translator::verdict::rule_name_for`), or the name of a
+    /// pre-existing rule the daemon itself reports as having matched, via
+    /// `Statistics.events[].rule.name` on a `Ping` call (see
+    /// `translator::connection::event_to_row`). Additive field: old wire
+    /// payloads without it deserialize with `None` via `#[serde(default)]`,
+    /// and it is omitted from serialized JSON when absent so existing
+    /// consumers (the web frontend) that don't know about it are unaffected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matched_rule: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -232,15 +245,66 @@ mod tests {
                 bytes_sent: 0,
                 bytes_received: 0,
                 started_at_ms: 1_700_000_000_000,
+                matched_rule: None,
             }],
         };
 
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains(r#""action":"insertConnectionRows""#));
         assert!(json.contains(r#""dstHost":"github.com""#));
+        assert!(
+            !json.contains("matchedRule"),
+            "matchedRule must be omitted when None, so old web-frontend consumers are unaffected: {json}"
+        );
 
         let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, msg);
+    }
+
+    #[test]
+    fn connection_row_carries_matched_rule_when_decided() {
+        let row = ConnectionRow {
+            id: "r1".to_string(),
+            process: "firefox".to_string(),
+            process_path: Some("/usr/bin/firefox".to_string()),
+            dst_host: "github.com".to_string(),
+            dst_ip: "140.82.121.4".to_string(),
+            dst_port: 443,
+            protocol: "tcp".to_string(),
+            direction: "outgoing".to_string(),
+            action: Some("allow".to_string()),
+            bytes_sent: 0,
+            bytes_received: 0,
+            started_at_ms: 1_700_000_000_000,
+            matched_rule: Some("899-firefox-allow-out.json".to_string()),
+        };
+        let json = serde_json::to_value(&row).unwrap();
+        assert_eq!(json["matchedRule"], "899-firefox-allow-out.json");
+
+        let parsed: ConnectionRow = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed, row);
+    }
+
+    #[test]
+    fn connection_row_without_matched_rule_field_defaults_to_none() {
+        // Simulates an old wire payload (or a hand-authored test fixture)
+        // that predates this field entirely.
+        let json = serde_json::json!({
+            "id": "r1",
+            "process": "firefox",
+            "processPath": null,
+            "dstHost": "github.com",
+            "dstIp": "140.82.121.4",
+            "dstPort": 443,
+            "protocol": "tcp",
+            "direction": "outgoing",
+            "action": null,
+            "bytesSent": 0,
+            "bytesReceived": 0,
+            "startedAtMs": 0
+        });
+        let parsed: ConnectionRow = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed.matched_rule, None);
     }
 
     #[test]

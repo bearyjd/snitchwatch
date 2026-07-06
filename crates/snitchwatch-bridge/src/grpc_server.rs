@@ -6,7 +6,7 @@
 
 use crate::cache::connections::ConnectionCache;
 use crate::notice::NoticeBus;
-use crate::translator::connection::connection_to_row;
+use crate::translator::connection::{connection_to_row, event_to_row};
 use crate::translator::verdict::verdict_to_rule;
 use crate::tray_state::TrayStatePublisher;
 use crate::ws_messages::ServerMessage;
@@ -61,7 +61,34 @@ impl UiService {
 #[tonic::async_trait]
 impl Ui for UiService {
     async fn ping(&self, request: Request<PingRequest>) -> Result<Response<PingReply>, Status> {
-        let id = request.into_inner().id;
+        let req = request.into_inner();
+        let id = req.id;
+
+        // The daemon's periodic Ping carries `Statistics.events`: recent
+        // connections it matched (and decided) against a *pre-existing*
+        // rule, entirely without going through the interactive `AskRule`
+        // flow above. This is the only place the bridge learns about that
+        // traffic and the rule name that governed it — surface each as a
+        // decided row so the Connections view's rule-match diagnostics cover
+        // every connection, not just the ones the user was prompted for.
+        if let Some(stats) = req.stats {
+            let new_rows: Vec<_> = stats.events.iter().filter_map(event_to_row).collect();
+            if !new_rows.is_empty() {
+                {
+                    let mut cache = self.cache.lock().await;
+                    for row in &new_rows {
+                        cache.insert_decided(row.clone());
+                    }
+                }
+                if self.broadcast.receiver_count() > 0 {
+                    let msg = ServerMessage::InsertConnectionRows { rows: new_rows };
+                    if let Err(e) = self.broadcast.send(msg) {
+                        warn!(error = %e, "ping: broadcast send failed");
+                    }
+                }
+            }
+        }
+
         Ok(Response::new(PingReply { id }))
     }
 
@@ -194,6 +221,107 @@ mod tests {
             .unwrap()
             .into_inner();
         assert_eq!(reply.id, 99);
+    }
+
+    #[tokio::test]
+    async fn ping_with_stats_events_inserts_decided_rows_with_matched_rule() {
+        use snitchwatch_proto::protocol::{Event, Rule as ProtoRule, Statistics};
+
+        let cache = Arc::new(Mutex::new(ConnectionCache::new(64)));
+        let (tx, mut rx) = broadcast::channel::<ServerMessage>(16);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let tray_pub = Arc::new(crate::tray_state::TrayStatePublisher::new());
+        let notice_bus = Arc::new(crate::notice::NoticeBus::new());
+        let svc = UiService::new(cache.clone(), tx, tray_pub, notice_bus).into_server();
+        tokio::spawn(async move {
+            Server::builder()
+                .add_service(svc)
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+                .await
+                .ok();
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let channel = tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
+            .unwrap()
+            .connect()
+            .await
+            .unwrap();
+        let mut client = UiClient::new(channel);
+
+        let event = Event {
+            time: "2026-07-05T00:00:00Z".to_string(),
+            connection: Some(Connection {
+                protocol: "tcp".into(),
+                dst_host: "example.com".into(),
+                dst_ip: "93.184.216.34".into(),
+                dst_port: 443,
+                process_path: "/usr/bin/curl".into(),
+                ..Default::default()
+            }),
+            rule: Some(ProtoRule {
+                created: 1_700_000_000,
+                name: "899-curl-allow-out.json".into(),
+                description: String::new(),
+                enabled: true,
+                precedence: false,
+                nolog: false,
+                action: "allow".into(),
+                duration: "always".into(),
+                operator: None,
+            }),
+            unixnano: 1_700_000_000_000_000_000,
+        };
+
+        let reply = client
+            .ping(PingRequest {
+                id: 7,
+                stats: Some(Statistics {
+                    events: vec![event],
+                    ..Default::default()
+                }),
+            })
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(reply.id, 7);
+
+        let broadcasted = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("ping did not broadcast the decided row")
+            .expect("broadcast error");
+        match broadcasted {
+            ServerMessage::InsertConnectionRows { rows } => {
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0].dst_host, "example.com");
+                assert_eq!(rows[0].action.as_deref(), Some("allow"));
+                assert_eq!(
+                    rows[0].matched_rule.as_deref(),
+                    Some("899-curl-allow-out.json")
+                );
+            }
+            other => panic!("expected InsertConnectionRows, got {other:?}"),
+        }
+        assert_eq!(cache.lock().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn ping_without_stats_is_a_noop() {
+        let addr = spawn_test_service().await;
+        let channel = tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
+            .unwrap()
+            .connect()
+            .await
+            .unwrap();
+        let mut client = UiClient::new(channel);
+        let reply = client
+            .ping(PingRequest { id: 3, stats: None })
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(reply.id, 3);
     }
 
     #[tokio::test]

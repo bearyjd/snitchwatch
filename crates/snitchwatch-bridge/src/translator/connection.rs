@@ -6,9 +6,14 @@
 //! `setVerdict` referencing the same row.
 
 use crate::ws_messages::ConnectionRow;
-use snitchwatch_proto::protocol::Connection;
+use snitchwatch_proto::protocol::{Connection, Event};
 
 pub const ASK_ROW_PREFIX: &str = "ask-";
+/// Id prefix for rows synthesized from a daemon-reported `Event` (see
+/// [`event_to_row`]) — connections the daemon already matched against an
+/// existing rule and reports via `Statistics.events` on a `Ping` call, as
+/// opposed to `ASK_ROW_PREFIX` rows the daemon is actively prompting for.
+pub const EVENT_ROW_PREFIX: &str = "event-";
 
 pub fn ask_row_id(notification_id: u64) -> String {
     format!("{ASK_ROW_PREFIX}{notification_id}")
@@ -50,7 +55,46 @@ pub fn connection_to_row(conn: &Connection, notification_id: u64) -> ConnectionR
         bytes_sent: 0,
         bytes_received: 0,
         started_at_ms: 0,
+        // An AskRule row is, by construction, a connection opensnitchd found
+        // no existing rule for (that's exactly why it's asking) — there is no
+        // matched rule yet. `ConnectionCache::resolve` fills this in once the
+        // user's verdict becomes the governing rule.
+        matched_rule: None,
     }
+}
+
+/// Normalize a daemon-reported rule action string the same way
+/// `snitchwatch-kirigami`'s `rules::row_store::Rule::normalized_action` does:
+/// exactly `"allow"` or `"deny"`, folding anything else (opensnitchd's
+/// `"reject"` included) into `"deny"`.
+fn normalized_action(action: &str) -> &'static str {
+    if action.eq_ignore_ascii_case("allow") {
+        "allow"
+    } else {
+        "deny"
+    }
+}
+
+/// Translate a daemon-reported `Event` (a `Connection` paired with the `Rule`
+/// that decided it) into a *decided* `ConnectionRow` carrying that rule's
+/// name in `matched_rule`.
+///
+/// The daemon includes recent `Event`s in `Statistics.events` on its
+/// periodic `Ping` calls — this is how the bridge learns about connections
+/// that matched a pre-existing rule and therefore never went through the
+/// interactive `AskRule` flow (see `grpc_server::UiService::ping`). Returns
+/// `None` when the event doesn't carry both a connection and the rule that
+/// matched it — there is nothing useful to show without both.
+pub fn event_to_row(event: &Event) -> Option<ConnectionRow> {
+    let conn = event.connection.as_ref()?;
+    let rule = event.rule.as_ref()?;
+
+    let mut row = connection_to_row(conn, 0);
+    row.id = format!("{EVENT_ROW_PREFIX}{}", event.unixnano);
+    row.action = Some(normalized_action(&rule.action).to_string());
+    row.matched_rule = Some(rule.name.clone());
+    row.started_at_ms = event.unixnano / 1_000_000;
+    Some(row)
 }
 
 #[cfg(test)]
@@ -122,5 +166,82 @@ mod tests {
         let row = connection_to_row(&conn, 1);
         assert_eq!(row.process, "<unknown>");
         assert_eq!(row.process_path, None);
+    }
+
+    #[test]
+    fn ask_rows_start_with_no_matched_rule() {
+        let row = connection_to_row(&sample_connection(), 1);
+        assert!(row.matched_rule.is_none());
+    }
+
+    fn sample_rule(name: &str, action: &str) -> snitchwatch_proto::protocol::Rule {
+        snitchwatch_proto::protocol::Rule {
+            created: 1_700_000_000,
+            name: name.to_string(),
+            description: String::new(),
+            enabled: true,
+            precedence: false,
+            nolog: false,
+            action: action.to_string(),
+            duration: "always".to_string(),
+            operator: None,
+        }
+    }
+
+    #[test]
+    fn event_to_row_carries_the_matched_rule_name_and_decided_action() {
+        let event = Event {
+            time: "2026-07-05T12:00:00Z".to_string(),
+            connection: Some(sample_connection()),
+            rule: Some(sample_rule("899-firefox-allow-out.json", "allow")),
+            unixnano: 1_700_000_000_123_456_789,
+        };
+        let row = event_to_row(&event).expect("both connection and rule present");
+        assert_eq!(row.id, "event-1700000000123456789");
+        assert_eq!(row.process, "curl");
+        assert_eq!(row.dst_host, "github.com");
+        assert_eq!(row.action.as_deref(), Some("allow"));
+        assert_eq!(
+            row.matched_rule.as_deref(),
+            Some("899-firefox-allow-out.json")
+        );
+        assert_eq!(row.started_at_ms, 1_700_000_000_123);
+    }
+
+    #[test]
+    fn event_to_row_folds_reject_action_to_deny() {
+        let event = Event {
+            time: String::new(),
+            connection: Some(sample_connection()),
+            rule: Some(sample_rule(
+                "900-blocklist:ads:0001-tracker.example",
+                "reject",
+            )),
+            unixnano: 1,
+        };
+        let row = event_to_row(&event).unwrap();
+        assert_eq!(row.action.as_deref(), Some("deny"));
+    }
+
+    #[test]
+    fn event_to_row_is_none_without_a_connection() {
+        let event = Event {
+            time: String::new(),
+            connection: None,
+            rule: Some(sample_rule("899-firefox-allow-out.json", "allow")),
+            unixnano: 1,
+        };
+        assert!(event_to_row(&event).is_none());
+    }
+
+    #[test]
+    fn event_to_row_is_none_without_a_rule() {
+        let event = Event {
+            time: String::new(),
+            connection: Some(sample_connection()),
+            rule: None,
+            unixnano: 1,
+        };
+        assert!(event_to_row(&event).is_none());
     }
 }
