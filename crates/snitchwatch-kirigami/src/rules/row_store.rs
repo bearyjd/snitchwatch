@@ -12,7 +12,7 @@
 //! Per the design doc
 //! (`docs/superpowers/specs/2026-04-10-snitchwatch-design.md`, "The blocklist
 //! verdict type"), the bridge materializes every subscribed blocklist entry as
-//! a deny rule named `900-blocklist:<list_id>:<seq>-<host>` (see
+//! a deny rule named `z00-blocklist:<list_id>:<seq>-<host>` (see
 //! `snitchwatch_bridge::blocklists::materializer`). [`Rule::source`] detects
 //! that band by name prefix so the Rules tab can render blocklist-sourced
 //! rules distinctly (and grouped) instead of mixing them in with user rules —
@@ -28,10 +28,18 @@ use serde::{Deserialize, Serialize};
 
 use snitchwatch_bridge::ws_messages::ServerMessage;
 
-/// The `900-blocklist:<list_id>:<seq>-<host>` filename band a subscribed
-/// blocklist's materialized deny rules always fall in (see
+/// The `z00-blocklist:<list_id>:<seq>-<host>` filename band a subscribed
+/// blocklist's materialized deny rules fall in (see
 /// `snitchwatch_bridge::blocklists::materializer::materialize_entry`).
-const BLOCKLIST_RULE_NAME_PREFIX: &str = "900-blocklist:";
+const BLOCKLIST_RULE_NAME_PREFIX: &str = "z00-blocklist:";
+
+/// The legacy `900-blocklist:` band emitted by pre-migration builds. Still
+/// recognized so that, during a migration window, a not-yet-purged old-band
+/// deny surfaced by a stale daemon renders in the Rules tab as blocklist-
+/// sourced (grouped/muted) rather than masquerading as a user rule. Once the
+/// bridge has refreshed every subscription these no longer exist; see the
+/// migration note in `snitchwatch_bridge::blocklists::materializer`.
+const LEGACY_BLOCKLIST_RULE_NAME_PREFIX: &str = "900-blocklist:";
 
 fn default_enabled() -> bool {
     true
@@ -54,7 +62,8 @@ pub struct Rule {
 }
 
 /// Where a rule originated: authored directly by the user, or materialized
-/// from a subscribed blocklist entry (the `900-blocklist:<id>:` band).
+/// from a subscribed blocklist entry (the `z00-blocklist:<id>:` band, or the
+/// legacy `900-blocklist:<id>:` band during a migration window).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuleSource {
     User,
@@ -62,9 +71,16 @@ pub enum RuleSource {
 }
 
 impl Rule {
-    /// Classify this rule's source by its `name` prefix.
+    /// Classify this rule's source by its `name` prefix. Recognizes both the
+    /// current `z00-blocklist:` band and the legacy `900-blocklist:` band (see
+    /// [`LEGACY_BLOCKLIST_RULE_NAME_PREFIX`]) so migration-window rules still
+    /// group correctly.
     pub fn source(&self) -> RuleSource {
-        match self.name.strip_prefix(BLOCKLIST_RULE_NAME_PREFIX) {
+        let rest = self
+            .name
+            .strip_prefix(BLOCKLIST_RULE_NAME_PREFIX)
+            .or_else(|| self.name.strip_prefix(LEGACY_BLOCKLIST_RULE_NAME_PREFIX));
+        match rest {
             Some(rest) => RuleSource::Blocklist {
                 list_id: rest.split(':').next().unwrap_or("").to_string(),
             },
@@ -287,13 +303,13 @@ mod tests {
         assert!(s.apply(&ServerMessage::SetRules {
             rules: vec![
                 serde_json::to_value(rule("899-firefox", true, "allow")).unwrap(),
-                serde_json::to_value(rule("900-blocklist:ads:0001-x.example", true, "deny"))
+                serde_json::to_value(rule("z00-blocklist:ads:0001-x.example", true, "deny"))
                     .unwrap(),
             ],
         }));
         assert_eq!(
             names(&s),
-            vec!["899-firefox", "900-blocklist:ads:0001-x.example"]
+            vec!["899-firefox", "z00-blocklist:ads:0001-x.example"]
         );
 
         // A second SetRules replaces wholesale.
@@ -354,6 +370,25 @@ mod tests {
 
     #[test]
     fn blocklist_band_name_detected_by_prefix() {
+        let r = rule(
+            "z00-blocklist:stevenblack:0001-doubleclick.net",
+            true,
+            "deny",
+        );
+        assert_eq!(
+            r.source(),
+            RuleSource::Blocklist {
+                list_id: "stevenblack".to_string()
+            }
+        );
+        assert!(r.is_blocklist_sourced());
+    }
+
+    #[test]
+    fn legacy_blocklist_band_name_still_detected() {
+        // Migration-window tolerance: a stale pre-migration daemon may still
+        // surface a "900-blocklist:" rule before the bridge purges it. It must
+        // still group as blocklist-sourced, not masquerade as a user rule.
         let r = rule(
             "900-blocklist:stevenblack:0001-doubleclick.net",
             true,
@@ -440,13 +475,13 @@ mod tests {
         s.apply(&ServerMessage::SetRules {
             rules: vec![
                 serde_json::to_value(rule("899-firefox", true, "allow")).unwrap(),
-                serde_json::to_value(rule("900-blocklist:ads:0001-x.example", true, "deny"))
+                serde_json::to_value(rule("z00-blocklist:ads:0001-x.example", true, "deny"))
                     .unwrap(),
             ],
         });
-        let json = found_rule_json(&s, "900-blocklist:ads:0001-x.example").expect("known rule");
+        let json = found_rule_json(&s, "z00-blocklist:ads:0001-x.example").expect("known rule");
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed["name"], "900-blocklist:ads:0001-x.example");
+        assert_eq!(parsed["name"], "z00-blocklist:ads:0001-x.example");
         assert_eq!(parsed["precedence"], 1);
         assert_eq!(parsed["source"], "blocklist");
         assert_eq!(parsed["blocklistId"], "ads");
@@ -465,12 +500,12 @@ mod tests {
         s.apply(&ServerMessage::SetRules {
             rules: vec![
                 serde_json::to_value(rule("899-firefox", true, "allow")).unwrap(),
-                serde_json::to_value(rule("900-blocklist:ads:0001-x.example", true, "deny"))
+                serde_json::to_value(rule("z00-blocklist:ads:0001-x.example", true, "deny"))
                     .unwrap(),
             ],
         });
         assert_eq!(s.index_of("899-firefox"), Some(0));
-        assert_eq!(s.index_of("900-blocklist:ads:0001-x.example"), Some(1));
+        assert_eq!(s.index_of("z00-blocklist:ads:0001-x.example"), Some(1));
         assert_eq!(s.index_of("nope"), None);
     }
 }

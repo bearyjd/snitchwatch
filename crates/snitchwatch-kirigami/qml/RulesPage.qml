@@ -6,7 +6,7 @@
 //
 // Grouping: per the design doc's "blocklist verdict type" section, every
 // subscribed blocklist entry is materialized into a deny rule in the
-// `900-blocklist:<id>:` filename band. Those rules are the SAME underlying
+// `z00-blocklist:<id>:` filename band. Those rules are the SAME underlying
 // deny rules already shown in full (per-host) on the Blocklists tab, so this
 // page groups them into their own "Blocklist rules" section — via
 // ListView.section keyed on the model's `source` role — rendered visually

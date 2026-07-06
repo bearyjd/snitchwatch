@@ -57,7 +57,7 @@ QtObject {
                 { name: "899-firefox-allow-out", enabled: true, action: "allow",
                   duration: "always", description: "",
                   operator: { operand: "process.path", data: "/usr/bin/firefox" } },
-                { name: "900-blocklist:stevenblack:0001-doubleclick.net", enabled: true,
+                { name: "z00-blocklist:stevenblack:0001-doubleclick.net", enabled: true,
                   action: "deny", duration: "always", description: "",
                   operator: { operand: "dest.host", data: "doubleclick.net" } }
             ]
@@ -71,7 +71,7 @@ QtObject {
             ]
         }));
         model.toggleEnabled("899-firefox-allow-out");
-        model.deleteRule("900-blocklist:stevenblack:0001-doubleclick.net");
+        model.deleteRule("z00-blocklist:stevenblack:0001-doubleclick.net");
         // Best-effort visibility only (not load-bearing — see module docs).
         console.log("[test] RulesModel.count after insert =", model.count);
     }
