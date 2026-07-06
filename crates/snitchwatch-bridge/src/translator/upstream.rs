@@ -54,11 +54,14 @@ pub fn apply(
             verdict,
             scope: _,
             duration,
+            remember: legacy_remember,
         } => {
             let v = match verdict {
                 VerdictAction::Allow => Verdict::Allow,
                 VerdictAction::Deny => Verdict::Deny,
             };
+            let duration =
+                crate::ws_messages::effective_verdict_duration(duration, legacy_remember);
             let remember = duration.remembers();
             cache.resolve(&row_id, v, duration)?;
             Ok(UpstreamEffect::VerdictApplied {
@@ -396,7 +399,8 @@ mod tests {
                 row_id: "p1".to_string(),
                 verdict: VerdictAction::Allow,
                 scope: VerdictScope::ThisHost,
-                duration: VerdictDuration::Once,
+                duration: Some(VerdictDuration::Once),
+                remember: None,
             },
         )
         .unwrap();
@@ -425,7 +429,8 @@ mod tests {
                 row_id: "p1".to_string(),
                 verdict: VerdictAction::Deny,
                 scope: VerdictScope::ThisHost,
-                duration: VerdictDuration::Always,
+                duration: Some(VerdictDuration::Always),
+                remember: None,
             },
         )
         .unwrap();

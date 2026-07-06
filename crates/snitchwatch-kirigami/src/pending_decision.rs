@@ -109,7 +109,8 @@ pub fn build_verdict_message(
         row_id: row_id.to_string(),
         verdict: choice.action(),
         scope: parse_scope(scope_token),
-        duration: parse_duration(duration_token),
+        duration: Some(parse_duration(duration_token)),
+        remember: None,
     })
 }
 
@@ -239,11 +240,13 @@ mod tests {
                 verdict,
                 scope,
                 duration,
+                remember,
             } => {
                 assert_eq!(row_id, "r1");
                 assert_eq!(verdict, VerdictAction::Deny);
                 assert_eq!(scope, VerdictScope::AnyHost);
-                assert_eq!(duration, VerdictDuration::Always);
+                assert_eq!(duration, Some(VerdictDuration::Always));
+                assert_eq!(remember, None);
             }
             other => panic!("expected SetVerdict, got {other:?}"),
         }

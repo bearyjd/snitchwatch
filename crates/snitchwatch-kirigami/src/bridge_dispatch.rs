@@ -366,11 +366,13 @@ mod tests {
                 verdict,
                 scope,
                 duration,
+                remember,
             } => {
                 assert_eq!(row_id, "r1");
                 assert_eq!(verdict, VerdictAction::Deny);
                 assert_eq!(scope, VerdictScope::AnyHost);
-                assert_eq!(duration, VerdictDuration::Always);
+                assert_eq!(duration, Some(VerdictDuration::Always));
+                assert_eq!(remember, None);
             }
             other => panic!("expected SetVerdict, got {other:?}"),
         }

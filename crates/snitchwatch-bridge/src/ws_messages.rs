@@ -114,7 +114,17 @@ pub enum ClientMessage {
         verdict: VerdictAction,
         scope: VerdictScope,
         /// How long the resulting rule should live — see [`VerdictDuration`].
-        duration: VerdictDuration,
+        /// Optional on the wire: legacy clients (the vendored `web/` frontend
+        /// predates the duration selector) send `remember: bool` instead.
+        /// Resolve the effective value via [`effective_verdict_duration`] —
+        /// never read this field directly.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration: Option<VerdictDuration>,
+        /// Legacy pre-duration field ("remember this decision"): `true` maps
+        /// to [`VerdictDuration::Always`], absent/`false` to `Once` — but only
+        /// when `duration` itself is absent. Current clients never send it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        remember: Option<bool>,
     },
     AddRule {
         rule: serde_json::Value,
@@ -169,6 +179,22 @@ pub enum ClientMessage {
     /// the bridge holds no rule cache (`SetRules` originates upstream of it),
     /// so a lagged rules feed recovers on the daemon's next rule push.
     RequestSnapshot,
+}
+
+/// Resolve [`ClientMessage::SetVerdict`]'s effective duration from the new
+/// `duration` field and the legacy `remember` flag: an explicit duration
+/// always wins; otherwise legacy `remember: true` means [`VerdictDuration::
+/// Always`] (that's exactly what the pre-duration protocol expressed with it)
+/// and anything else is a one-shot verdict.
+pub fn effective_verdict_duration(
+    duration: Option<VerdictDuration>,
+    remember: Option<bool>,
+) -> VerdictDuration {
+    duration.unwrap_or(if remember.unwrap_or(false) {
+        VerdictDuration::Always
+    } else {
+        VerdictDuration::Once
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -449,14 +475,57 @@ mod tests {
                 verdict,
                 scope,
                 duration,
+                remember,
             } => {
                 assert_eq!(row_id, "r1");
                 assert_eq!(verdict, VerdictAction::Allow);
                 assert_eq!(scope, VerdictScope::ThisHost);
-                assert_eq!(duration, VerdictDuration::Always);
+                assert_eq!(duration, Some(VerdictDuration::Always));
+                assert_eq!(remember, None);
             }
             _ => panic!("wrong variant"),
         }
+    }
+
+    #[test]
+    fn client_set_verdict_parses_legacy_remember_shape() {
+        // The pre-duration wire shape the vendored web/ frontend still sends.
+        let json = r#"{
+            "action": "setVerdict",
+            "rowId": "r1",
+            "verdict": "deny",
+            "scope": "this_host",
+            "remember": true
+        }"#;
+        let parsed: ClientMessage = serde_json::from_str(json).unwrap();
+        match parsed {
+            ClientMessage::SetVerdict {
+                duration, remember, ..
+            } => {
+                assert_eq!(duration, None);
+                assert_eq!(remember, Some(true));
+                assert_eq!(
+                    effective_verdict_duration(duration, remember),
+                    VerdictDuration::Always
+                );
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn effective_verdict_duration_folds_legacy_and_new() {
+        use VerdictDuration::*;
+        // Explicit duration always wins, even over remember.
+        assert_eq!(
+            effective_verdict_duration(Some(FiveMinutes), Some(true)),
+            FiveMinutes
+        );
+        // Legacy remember semantics.
+        assert_eq!(effective_verdict_duration(None, Some(true)), Always);
+        assert_eq!(effective_verdict_duration(None, Some(false)), Once);
+        // Neither present: the safe default.
+        assert_eq!(effective_verdict_duration(None, None), Once);
     }
 
     #[test]
