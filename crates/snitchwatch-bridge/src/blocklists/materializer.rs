@@ -1,12 +1,33 @@
 //! Convert blocklist entries into opensnitchd deny rules.
 //!
-//! Each entry produces one rule in the `900–999` specificity band so user rules
-//! always win. The rule's `description` field carries a JSON tag
+//! Each entry produces one rule in the **alpha** `z`-band documented by
+//! [`crate::translator::specificity`] (`"z00".."z99"`), so every blocklist
+//! filename sorts lexicographically *after* every numeric user-rule prefix
+//! (`"789".."999"`) and user rules always win — opensnitchd evaluates rules in
+//! ascending filename order (`sort.Strings` in `daemon/rule/loader.go`). The
+//! rule's `description` field carries a JSON tag
 //! `{"snitchwatch": {"source": "blocklist", "list_id": "<id>", "entry": "<host>"}}`
-//! so the bridge can re-group rules into the Blocklists tab on the next
-//! `ListRules` reconciliation.
+//! so the bridge can re-group rules into the Blocklists tab (and reconcile them
+//! band-independently — see [`crate::grpc_client::classify_rule`]) on the next
+//! `ListRules` pass.
+//!
+//! ## Legacy band migration
+//!
+//! Earlier builds materialized these rules under a hardcoded decimal
+//! `"900-blocklist:"` prefix, which falls *inside* the user-rule numeric range
+//! and so violated the "user rules always win" invariant. The band moved to
+//! `"z00-blocklist:"`; because the rule *name* changes, a deployed daemon can
+//! still hold orphaned old-band denies after an upgrade. The
+//! [`RuleSink`](crate::blocklists::RuleSink) contract therefore requires
+//! "replace" to purge *every* name in [`owned_blocklist_rule_name_prefixes`]
+//! (current **and** legacy) before installing the new set, so a refresh cleans
+//! up the old-prefix duplicates. Reconciliation by `description` tag
+//! ([`crate::grpc_client::classify_rule`]) is band-agnostic and catches these
+//! regardless.
 
 use serde::{Deserialize, Serialize};
+
+use crate::translator::specificity::BLOCKLIST_BAND_PREFIX;
 
 /// Plain-data shape that mirrors the subset of `protocol::ui::Rule` we need
 /// when materializing into opensnitchd. The bridge converts this to the prost
@@ -30,16 +51,51 @@ pub struct Operator {
     pub data: String,
 }
 
+/// Legacy filename band token used by earlier builds. Retained only so the
+/// sync path can recognize and purge orphaned old-band rules on refresh — see
+/// [`owned_blocklist_rule_name_prefixes`]. Never emitted for new rules.
+const LEGACY_BLOCKLIST_BAND: &str = "900-blocklist:";
+
+/// The band token that leads every current blocklist rule filename, e.g.
+/// `"z00-blocklist:"`. Built from [`BLOCKLIST_BAND_PREFIX`] (`"z"`) so it stays
+/// in lockstep with the documented alpha band in `translator::specificity`; a
+/// unit test asserts it sorts after the weakest user prefix (`"999"`).
+fn current_blocklist_band() -> String {
+    // "z" + "00" (lowest slot in the "z00".."z99" band) + the ":"-delimited tag.
+    format!("{BLOCKLIST_BAND_PREFIX}00-blocklist:")
+}
+
+/// The current filename prefix that identifies one list's materialized rules,
+/// e.g. `"z00-blocklist:ads:"`.
+pub fn blocklist_rule_name_prefix(list_id: &str) -> String {
+    format!("{}{}:", current_blocklist_band(), sanitize_id(list_id))
+}
+
+/// Every filename prefix (current **and** legacy) under which a list's
+/// bridge-managed blocklist rules may currently exist on a daemon. A
+/// [`RuleSink`](crate::blocklists::RuleSink) implementation must delete every
+/// existing rule whose name starts with any of these before installing the
+/// fresh set, so a band migration leaves no orphaned old-prefix denies.
+pub fn owned_blocklist_rule_name_prefixes(list_id: &str) -> Vec<String> {
+    let safe_id = sanitize_id(list_id);
+    vec![
+        blocklist_rule_name_prefix(list_id),
+        format!("{LEGACY_BLOCKLIST_BAND}{safe_id}:"),
+    ]
+}
+
 /// Deterministic per-entry materialization.
 ///
-/// Filename layout: `900-blocklist:<sanitized_id>:<seq04>-<host>.json`
+/// Filename layout: `z00-blocklist:<sanitized_id>:<seq04>-<host>.json`
 /// stored in the rule `name` field; the daemon strips the `.json` suffix when
-/// loading. The `900-` prefix puts every blocklist rule below the 0–899 user
-/// rule band so user rules win on conflict.
+/// loading. The alpha `z00-` band sorts after every numeric user-rule prefix
+/// (`"789".."999"`) so user rules always win on conflict.
 pub fn materialize_entry(list_id: &str, host: &str, seq: usize) -> MaterializedRule {
-    let safe_id = sanitize_id(list_id);
     let safe_host = host.to_ascii_lowercase();
-    let name = format!("900-blocklist:{safe_id}:{seq:04}-{safe_host}");
+    let name = format!(
+        "{}{seq:04}-{safe_host}",
+        blocklist_rule_name_prefix(list_id)
+    );
     let description = serde_json::json!({
         "snitchwatch": {
             "source": "blocklist",
@@ -93,11 +149,64 @@ mod tests {
         assert_eq!(rule.duration, "always");
         assert!(rule.enabled);
         assert!(
-            rule.name.starts_with("900-blocklist:stevenblack:"),
-            "name should be in 900-band: {}",
+            rule.name.starts_with("z00-blocklist:stevenblack:"),
+            "name should be in z00-band: {}",
             rule.name
         );
         assert!(rule.name.contains("doubleclick.net") || rule.name.contains("0017"));
+    }
+
+    #[test]
+    fn current_band_tracks_the_documented_alpha_prefix() {
+        // The band token must be built from `specificity::BLOCKLIST_BAND_PREFIX`
+        // so the two never drift apart.
+        assert!(current_blocklist_band().starts_with(BLOCKLIST_BAND_PREFIX));
+        assert_eq!(current_blocklist_band(), "z00-blocklist:");
+    }
+
+    #[test]
+    fn blocklist_band_sorts_after_every_user_prefix() {
+        use crate::translator::specificity::{user_rule_prefix, SpecificityInputs};
+        // Strongest possible user rule ("789") and weakest ("999") — the band
+        // must sort after both so user rules are always evaluated first.
+        let strongest = user_rule_prefix(&SpecificityInputs {
+            has_process: true,
+            has_remote_host_exact: true,
+            has_remote_host_glob: false,
+            has_port: true,
+            has_protocol: true,
+        });
+        let weakest = user_rule_prefix(&SpecificityInputs {
+            has_process: false,
+            has_remote_host_exact: false,
+            has_remote_host_glob: false,
+            has_port: false,
+            has_protocol: false,
+        });
+        assert_eq!(strongest, "789");
+        assert_eq!(weakest, "999");
+        let blocklist = materialize_entry("ads", "x.example", 0).name;
+        assert!(
+            blocklist.as_str() > strongest.as_str(),
+            "{blocklist} must sort after strongest user {strongest}"
+        );
+        assert!(
+            blocklist.as_str() > weakest.as_str(),
+            "{blocklist} must sort after weakest user {weakest}"
+        );
+    }
+
+    #[test]
+    fn owned_prefixes_cover_current_and_legacy_bands() {
+        let prefixes = owned_blocklist_rule_name_prefixes("ads");
+        assert!(
+            prefixes.contains(&"z00-blocklist:ads:".to_string()),
+            "must own current band: {prefixes:?}"
+        );
+        assert!(
+            prefixes.contains(&"900-blocklist:ads:".to_string()),
+            "must own legacy band for migration cleanup: {prefixes:?}"
+        );
     }
 
     #[test]

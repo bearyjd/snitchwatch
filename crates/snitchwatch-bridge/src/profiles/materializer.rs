@@ -1,28 +1,19 @@
 //! Convert an active profile's rule overrides into opensnitchd rules.
 //!
-//! ## Band placement finding
+//! ## Band placement
 //!
-//! `translator::specificity` documents (and its
-//! `blocklist_prefix_sorts_after_every_user_rule` test asserts) an **alpha**
-//! band (`"z00".."z99"`) for blocklist rules, specifically so that every
-//! blocklist filename sorts after every possible user-rule filename
-//! (`"000".."999"`) and user rules always win.
+//! `translator::specificity` documents an **alpha** band (`"z00".."z99"`) for
+//! blocklist rules, so that every blocklist filename sorts after every possible
+//! user-rule filename (`"789".."999"`) and user rules always win.
+//! [`crate::blocklists::materializer`] now emits that band (`"z00-blocklist:"`).
 //!
-//! The actual [`crate::blocklists::materializer::materialize_entry`] does
-//! **not** use that alpha band — it hardcodes a decimal `"900-blocklist:"`
-//! prefix directly. Since `translator::specificity::user_rule_prefix` only
-//! ever produces `"789".."999"` (score 0..=210, `999 - score`), a `"900-"`
-//! blocklist rule filename actually sorts *before* any user rule with prefix
-//! "901".."999" (i.e. any low-specificity user rule scoring under ~98) —
-//! contradicting the "user rules always win" invariant `specificity.rs`
-//! documents. This is a pre-existing inconsistency in the blocklists
-//! materializer, out of scope to fix here, but it directly informs where to
-//! place the profiles band: profiles must sort *before* (lower prefix, higher
-//! precedence than) the blocklists band, and the task's own suggested
-//! `"850-profile:<id>:"` example already achieves that relative to the
-//! existing `"900-blocklist:"` hardcoded prefix, so this materializer follows
-//! the blocklists module's actual (decimal, not alpha) convention rather than
-//! the aspirational one in `specificity.rs`.
+//! Profile rule overrides must sort *before* (lower prefix, higher precedence
+//! than) both blocklist-sourced denies and low-specificity user rules, so this
+//! module places them in a `"850-profile:"` band. `'8' < '9' < 'z'`, so the
+//! profiles band sorts before the current blocklist band (`"z00-blocklist:"`)
+//! **and** before the legacy `"900-blocklist:"` band a not-yet-migrated daemon
+//! may still hold — profile overrides win over blocklist denies in either case.
+//! The `profile_band_sorts_before_blocklist_band` test asserts this.
 //!
 //! Filename layout: `850-profile:<sanitized_id>:<seq04>-<rule_id>.json`
 //! (`.json` suffix stripped by the daemon on load, matching
@@ -35,11 +26,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::profiles::store::ProfileRule;
 
-/// Band prefix used for profile-materialized rules. Lower than the
-/// blocklists module's hardcoded `"900-blocklist:"` prefix, so profile rule
-/// overrides always win over blocklist-sourced denies — see the module docs
-/// above for why this compares against the *actual* blocklists prefix rather
-/// than the alpha band `translator::specificity` describes.
+/// Band prefix used for profile-materialized rules. Sorts before the current
+/// blocklist band (`"z00-blocklist:"`) and the legacy `"900-blocklist:"` band
+/// alike (`'8' < '9' < 'z'`), so profile rule overrides always win over
+/// blocklist-sourced denies — see the module docs above.
 pub const PROFILE_BAND_PREFIX: &str = "850-profile:";
 
 /// Plain-data shape mirroring the subset of `protocol::ui::Rule` needed to
@@ -167,17 +157,25 @@ mod tests {
     }
 
     #[test]
-    fn profile_band_sorts_before_hardcoded_blocklist_band() {
-        // Directly exercises the finding documented in the module docs: the
-        // profiles band must sort (lexicographically, by rule filename)
+    fn profile_band_sorts_before_blocklist_band() {
+        // The profiles band must sort (lexicographically, by rule filename)
         // before every blocklist-band filename, so profile overrides always
-        // win over blocklist-sourced denies.
+        // win over blocklist-sourced denies — for both the current "z00-" band
+        // and the legacy "900-" band a not-yet-migrated daemon may still hold.
         let profile_name = materialize_rule("home", &rule("r1", "deny"), 0).name;
         let blocklist_name =
             crate::blocklists::materializer::materialize_entry("ads", "x.example", 0).name;
         assert!(
+            blocklist_name.starts_with("z00-blocklist:"),
+            "blocklist rule should be in the current z00 band: {blocklist_name}"
+        );
+        assert!(
             profile_name < blocklist_name,
-            "{profile_name} should sort before {blocklist_name}"
+            "{profile_name} should sort before current band {blocklist_name}"
+        );
+        assert!(
+            profile_name.as_str() < "900-blocklist:ads:0000-x.example",
+            "{profile_name} should sort before the legacy 900 band too"
         );
     }
 

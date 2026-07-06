@@ -214,7 +214,7 @@ mod tests {
             time: String::new(),
             connection: Some(sample_connection()),
             rule: Some(sample_rule(
-                "900-blocklist:ads:0001-tracker.example",
+                "z00-blocklist:ads:0001-tracker.example",
                 "reject",
             )),
             unixnano: 1,

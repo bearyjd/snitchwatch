@@ -39,7 +39,24 @@ mod blocklist_reconciliation_tests {
     use super::*;
 
     #[test]
-    fn classify_900_band_rule_as_blocklist() {
+    fn classify_current_band_rule_as_blocklist() {
+        let cat = classify_rule(
+            "z00-blocklist:stevenblack:0001-doubleclick.net",
+            r#"{"snitchwatch":{"source":"blocklist","list_id":"stevenblack","entry":"doubleclick.net"}}"#,
+        );
+        assert_eq!(
+            cat,
+            RuleCategory::Blocklist {
+                list_id: "stevenblack".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn classify_legacy_900_band_rule_as_blocklist() {
+        // Classification keys on the `description` tag, not the filename band,
+        // so an orphaned legacy-band rule left by a pre-migration daemon still
+        // classifies as blocklist-owned and can be reconciled/purged.
         let cat = classify_rule(
             "900-blocklist:stevenblack:0001-doubleclick.net",
             r#"{"snitchwatch":{"source":"blocklist","list_id":"stevenblack","entry":"doubleclick.net"}}"#,

@@ -30,6 +30,22 @@ pub enum BlocklistEvent {
 /// Sink that receives materialized deny rules after a successful blocklist
 /// refresh. The default implementation is [`NoopRuleSink`]; replace it with
 /// [`BlocklistsManager::with_rule_sink`] to wire in the real opensnitchd writer.
+///
+/// ## Replace contract (migration-critical)
+///
+/// `replace_blocklist_rules` has *replace* — not merely *add* — semantics: the
+/// daemon's set of rules for `list_id` must end up **exactly** `rules`. An
+/// implementation must therefore delete every existing rule whose name starts
+/// with any prefix in
+/// [`materializer::owned_blocklist_rule_name_prefixes`](crate::blocklists::materializer::owned_blocklist_rule_name_prefixes)
+/// (that set spans both the current `"z00-blocklist:"` band and the legacy
+/// `"900-blocklist:"` band) before installing `rules`. That is what migrates a
+/// daemon off the old band: because the band move changes each rule's *name*,
+/// the new rules do not overwrite the old ones by name, so the stale
+/// old-prefix denies must be purged explicitly. See
+/// [`materializer`](crate::blocklists::materializer)'s "Legacy band migration"
+/// note. The `refresh_removes_legacy_band_rules` test exercises a sink that
+/// honors this contract end-to-end.
 #[async_trait]
 pub trait RuleSink: Send + Sync + 'static {
     async fn replace_blocklist_rules(
@@ -400,7 +416,118 @@ mod tests {
         let calls = sink.calls.lock().unwrap();
         assert_eq!(calls.len(), 1, "expected one push call");
         assert!(!calls[0].is_empty(), "domains-tiny.txt should have hosts");
-        assert!(calls[0][0].name.starts_with("900-blocklist:tiny:"));
+        assert!(calls[0][0].name.starts_with("z00-blocklist:tiny:"));
+    }
+
+    #[tokio::test]
+    async fn refresh_removes_legacy_band_rules() {
+        // A sink that models a daemon's name-keyed rule set and honors the
+        // `RuleSink` replace contract: on each replace it purges every existing
+        // rule under the list's owned prefixes (current + legacy band), then
+        // installs the fresh set. Proves an upgrade off the old "900-blocklist:"
+        // band leaves no orphaned old-prefix denies.
+        use crate::blocklists::materializer::{
+            owned_blocklist_rule_name_prefixes, MaterializedRule,
+        };
+        use std::collections::BTreeMap;
+        use std::sync::Mutex as StdMutex;
+
+        #[derive(Default)]
+        struct RuleStoreSink {
+            rules: StdMutex<BTreeMap<String, MaterializedRule>>,
+        }
+
+        #[async_trait]
+        impl super::RuleSink for RuleStoreSink {
+            async fn replace_blocklist_rules(
+                &self,
+                list_id: &str,
+                rules: Vec<MaterializedRule>,
+            ) -> anyhow::Result<()> {
+                let mut map = self.rules.lock().unwrap();
+                let owned = owned_blocklist_rule_name_prefixes(list_id);
+                map.retain(|name, _| !owned.iter().any(|p| name.starts_with(p.as_str())));
+                for rule in rules {
+                    map.insert(rule.name.clone(), rule);
+                }
+                Ok(())
+            }
+        }
+
+        let store = Arc::new(BlocklistStore::open_in_memory().unwrap());
+        let fixture = std::env::current_dir()
+            .unwrap()
+            .join("../../tests/fixtures/blocklists/domains-tiny.txt")
+            .canonicalize()
+            .unwrap();
+        store
+            .upsert_subscription(&Subscription {
+                id: "tiny".into(),
+                url: format!("file://{}", fixture.display()),
+                display_name: "tiny".into(),
+                format_hint: None,
+                refresh_interval_secs: 86_400,
+                last_fetched_at: None,
+                last_fetch_status: FetchStatus::Pending,
+                entry_count: 0,
+            })
+            .unwrap();
+
+        let sink: Arc<RuleStoreSink> = Arc::new(RuleStoreSink::default());
+        // Seed the daemon with an orphaned legacy-band rule, as a pre-upgrade
+        // daemon would hold, plus an unrelated user rule that must survive.
+        {
+            let mut map = sink.rules.lock().unwrap();
+            map.insert(
+                "900-blocklist:tiny:0000-doubleclick.net".to_string(),
+                MaterializedRule {
+                    name: "900-blocklist:tiny:0000-doubleclick.net".to_string(),
+                    enabled: true,
+                    action: "deny".to_string(),
+                    duration: "always".to_string(),
+                    description: String::new(),
+                    operator: super::materializer::Operator {
+                        kind: "simple".to_string(),
+                        operand: "dest.host".to_string(),
+                        data: "doubleclick.net".to_string(),
+                    },
+                },
+            );
+            map.insert(
+                "899-firefox-allow-out".to_string(),
+                MaterializedRule {
+                    name: "899-firefox-allow-out".to_string(),
+                    enabled: true,
+                    action: "allow".to_string(),
+                    duration: "always".to_string(),
+                    description: String::new(),
+                    operator: super::materializer::Operator {
+                        kind: "simple".to_string(),
+                        operand: "process.path".to_string(),
+                        data: "/usr/bin/firefox".to_string(),
+                    },
+                },
+            );
+        }
+
+        let mgr = BlocklistsManager::new(store).with_rule_sink(sink.clone());
+        mgr.refresh_now("tiny").await.unwrap();
+
+        let map = sink.rules.lock().unwrap();
+        assert!(
+            !map.keys().any(|n| n.starts_with("900-blocklist:tiny:")),
+            "legacy-band rules must be purged on refresh: {:?}",
+            map.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            map.keys().any(|n| n.starts_with("z00-blocklist:tiny:")),
+            "current-band rules must be installed: {:?}",
+            map.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            map.contains_key("899-firefox-allow-out"),
+            "unrelated user rules must survive the replace"
+        );
     }
 
     #[tokio::test]
