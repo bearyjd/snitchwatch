@@ -54,6 +54,15 @@ pub fn interests_blocklist_entries(msg: &ServerMessage) -> bool {
     matches!(msg, ServerMessage::SetBlocklistEntries { .. })
 }
 
+/// True when `msg` mutates the profile list or active-profile selection
+/// (drives `ProfilesModel`).
+pub fn interests_profiles(msg: &ServerMessage) -> bool {
+    matches!(
+        msg,
+        ServerMessage::SetProfiles { .. } | ServerMessage::ProfileChanged { .. }
+    )
+}
+
 /// True when `msg` carries new binned traffic samples (drives
 /// `TrafficModel`). `SetTrafficData`/`UpdateTrafficData` are deliberately
 /// excluded — see `crate::traffic::ring_store`'s module docs for why those
@@ -165,6 +174,36 @@ mod tests {
     }
 
     #[test]
+    fn profile_messages_route_only_to_profiles() {
+        use snitchwatch_bridge::ws_messages::{ProfileRuleWire, ProfileSummary};
+
+        let msg = ServerMessage::SetProfiles {
+            profiles: vec![ProfileSummary {
+                id: "home".into(),
+                name: "At Home".into(),
+                network_matchers: vec!["Home*".into()],
+                rules: vec![ProfileRuleWire {
+                    id: "r1".into(),
+                    action: "allow".into(),
+                    operand: "dest.host".into(),
+                    data: "nas.local".into(),
+                }],
+                active: true,
+            }],
+        };
+        assert!(interests_profiles(&msg));
+        assert!(!interests_connections(&msg));
+        assert!(!interests_rules(&msg));
+        assert!(!interests_blocklists(&msg));
+        assert!(!interests_blocklist_entries(&msg));
+        assert!(!interests_traffic(&msg));
+
+        assert!(interests_profiles(&ServerMessage::ProfileChanged {
+            active_profile_id: Some("home".into())
+        }));
+    }
+
+    #[test]
     fn traffic_event_messages_route_only_to_traffic() {
         let msg = ServerMessage::TrafficEvents {
             events: vec![TrafficEvent {
@@ -231,6 +270,34 @@ mod tests {
         match decode_client(r#"{"action":"deleteRule","ruleId":"block-ads"}"#).unwrap() {
             ClientMessage::DeleteRule { rule_id } => assert_eq!(rule_id, "block-ads"),
             other => panic!("expected DeleteRule, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_client_parses_profile_json() {
+        match decode_client(
+            r#"{"action":"createProfile","id":"home","name":"At Home","networkMatchers":["Home*"]}"#,
+        )
+        .unwrap()
+        {
+            ClientMessage::CreateProfile {
+                id,
+                name,
+                network_matchers,
+            } => {
+                assert_eq!(id, "home");
+                assert_eq!(name, "At Home");
+                assert_eq!(network_matchers, vec!["Home*".to_string()]);
+            }
+            other => panic!("expected CreateProfile, got {other:?}"),
+        }
+        match decode_client(r#"{"action":"activateProfile","id":"home"}"#).unwrap() {
+            ClientMessage::ActivateProfile { id } => assert_eq!(id, "home"),
+            other => panic!("expected ActivateProfile, got {other:?}"),
+        }
+        match decode_client(r#"{"action":"deactivateProfile"}"#).unwrap() {
+            ClientMessage::DeactivateProfile => {}
+            other => panic!("expected DeactivateProfile, got {other:?}"),
         }
     }
 

@@ -22,6 +22,9 @@ use snitchwatch_bridge::cache::connections::ConnectionCache;
 use snitchwatch_bridge::cache::traffic_tracker::TrafficTracker;
 use snitchwatch_bridge::grpc_server::UiService;
 use snitchwatch_bridge::notice::{Notice, NoticeBus};
+use snitchwatch_bridge::profiles::network_watcher;
+use snitchwatch_bridge::profiles::store::ProfileStore;
+use snitchwatch_bridge::profiles::ProfilesManager;
 use snitchwatch_bridge::translator::upstream;
 use snitchwatch_bridge::tray_state::{TrayState, TrayStatePublisher};
 use snitchwatch_bridge::ws_messages::{ClientMessage, ServerMessage};
@@ -37,6 +40,22 @@ use tracing::{error, info, warn};
 /// `snitchwatch-kirigami::traffic::ring_store::DEFAULT_WINDOW_SECONDS` (the
 /// consumer side of the same underlying `TrafficBinner`).
 const TRAFFIC_WINDOW_SECONDS: usize = 300;
+
+/// True for every `ClientMessage` variant `ProfilesManager` owns handling of.
+/// Kept as a free function (rather than inlined into the pump's `match`) so
+/// it reads as one clear routing decision at the call site.
+fn is_profile_message(msg: &ClientMessage) -> bool {
+    matches!(
+        msg,
+        ClientMessage::CreateProfile { .. }
+            | ClientMessage::UpdateProfile { .. }
+            | ClientMessage::DeleteProfile { .. }
+            | ClientMessage::ActivateProfile { .. }
+            | ClientMessage::DeactivateProfile
+            | ClientMessage::AddProfileRule { .. }
+            | ClientMessage::RemoveProfileRule { .. }
+    )
+}
 
 /// Runtime configuration for [`run`].
 #[derive(Debug, Clone)]
@@ -134,6 +153,17 @@ pub async fn run(config: BridgeConfig) -> Result<RunningBridge> {
     );
     let blocklists_mgr = Arc::new(BlocklistsManager::new(blocklists_store));
 
+    // --- ProfilesManager (in-memory store; callers may swap in a persisted one) ---
+    let profiles_store =
+        Arc::new(ProfileStore::open_in_memory().context("failed to open in-memory profile store")?);
+    let profiles_mgr = Arc::new(ProfilesManager::new(profiles_store));
+
+    // Network-driven auto-activation. `connect_watcher` degrades to a no-op
+    // watcher (manual-activation-only) if NetworkManager/D-Bus isn't
+    // reachable — never fails `run`, never panics.
+    let network_watcher = network_watcher::connect_watcher().await;
+    let _profile_auto_switch_handle = profiles_mgr.clone().spawn_auto_switch(network_watcher);
+
     // --- WebSocket server ---------------------------------------------------
     // Generate a fresh handshake token and write it to a file alongside the
     // socket (see `snitchwatch_bridge::auth` for why this is a file, not an
@@ -152,6 +182,7 @@ pub async fn run(config: BridgeConfig) -> Result<RunningBridge> {
         broadcast: broadcast_tx.clone(),
         inbound: inbound_tx.clone(),
         blocklists: blocklists_mgr,
+        profiles: profiles_mgr.clone(),
     };
     let ws_server = WsServer::new(config.ws_socket_path.clone(), token.clone(), ws_handles);
     let ws_listener = ws_server
@@ -204,10 +235,53 @@ pub async fn run(config: BridgeConfig) -> Result<RunningBridge> {
         }
     });
 
+    // --- Profile events → SetProfiles / ProfileChanged broadcasts -----------
+    // Mirrors `ws_server::serve_with_blocklists`'s blocklist-event pump: the
+    // manager owns no knowledge of the WS wire format, so this is where its
+    // internal `ProfileEvent`s become the typed `ServerMessage`s every
+    // consumer (WS clients, the in-process Kirigami shell) sees.
+    {
+        let profiles_for_events = profiles_mgr.clone();
+        let mut profile_rx = profiles_mgr.subscribe();
+        let bc_tx = broadcast_tx.clone();
+        tokio::spawn(async move {
+            use snitchwatch_bridge::profiles::ProfileEvent as Evt;
+            use snitchwatch_bridge::translator::downstream::{
+                build_profile_changed, build_set_profiles,
+            };
+            while let Ok(evt) = profile_rx.recv().await {
+                match evt {
+                    Evt::ProfilesChanged => {
+                        if let Ok(m) = build_set_profiles(&profiles_for_events).await {
+                            let _ = bc_tx.send(m);
+                        }
+                    }
+                    Evt::ActiveProfileChanged { profile_id } => {
+                        let _ = bc_tx.send(build_profile_changed(profile_id));
+                        if let Ok(m) = build_set_profiles(&profiles_for_events).await {
+                            let _ = bc_tx.send(m);
+                        }
+                    }
+                }
+            }
+        });
+    }
+
     // --- Upstream pump: WS client messages → cache (→ oneshot resolve) -------
+    // Profile-related messages are routed to `ProfilesManager` directly
+    // (mirroring `handle_blocklist_action`'s treatment of blocklist
+    // messages); everything else goes through the connection-cache pump.
     let cache_for_upstream = cache.clone();
+    let profiles_for_upstream = profiles_mgr;
     tokio::spawn(async move {
         while let Some(msg) = inbound_rx.recv().await {
+            if is_profile_message(&msg) {
+                use snitchwatch_bridge::translator::upstream::handle_profile_action;
+                if let Err(e) = handle_profile_action(profiles_for_upstream.clone(), msg).await {
+                    error!(error = %e, "profile action failed");
+                }
+                continue;
+            }
             let mut cache = cache_for_upstream.lock().await;
             match upstream::apply(&mut cache, msg) {
                 Ok(effect) => info!(?effect, "applied upstream effect"),

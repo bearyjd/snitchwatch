@@ -15,6 +15,7 @@ fn main() {
         "qml/PendingDecisionSheet.qml",
         "qml/BlocklistsPage.qml",
         "qml/RulesPage.qml",
+        "qml/ProfilesPage.qml",
         "qml/TrafficPage.qml",
         "qml/OnboardingPage.qml",
         "qml/DiagnosticsPage.qml",
@@ -25,6 +26,7 @@ fn main() {
     .file("src/pending_decision.rs")
     .file("src/blocklists_model.rs")
     .file("src/rules_model.rs")
+    .file("src/profiles_model.rs")
     .file("src/traffic_model.rs")
     .file("src/wizard_controller.rs")
     .file("src/settings_controller.rs")

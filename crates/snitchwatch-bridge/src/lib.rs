@@ -13,6 +13,7 @@ pub mod error;
 pub mod grpc_client;
 pub mod grpc_server;
 pub mod notice;
+pub mod profiles;
 pub mod translator;
 pub mod tray_state;
 pub mod web_assets;
