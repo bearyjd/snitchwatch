@@ -16,6 +16,8 @@ pub mod bridge_runtime;
 pub mod connections;
 pub mod connections_model;
 pub mod crash_log;
+pub mod geo;
+pub mod geo_model;
 pub mod insight;
 pub mod insight_model;
 pub mod notification_controller;

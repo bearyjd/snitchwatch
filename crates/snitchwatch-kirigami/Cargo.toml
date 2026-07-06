@@ -49,6 +49,7 @@ reqwest = { workspace = true, features = ["json"] }
 # blocking syscall. RDAP reuses the workspace `reqwest` already pulled in by
 # the blocklists fetcher.
 dns-lookup = "2"
+maxminddb = "0.29"
 
 [build-dependencies]
 cxx-qt-build = "=0.9.1"
