@@ -162,6 +162,13 @@ pub enum ClientMessage {
     },
     Undo,
     Redo,
+    /// Ask the bridge to re-broadcast full state snapshots (connections,
+    /// blocklists, profiles). Sent by in-process feed consumers after a
+    /// `broadcast::RecvError::Lagged` so a model that skipped delta messages
+    /// can recover instead of staying silently stale. Rules are NOT included:
+    /// the bridge holds no rule cache (`SetRules` originates upstream of it),
+    /// so a lagged rules feed recovers on the daemon's next rule push.
+    RequestSnapshot,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

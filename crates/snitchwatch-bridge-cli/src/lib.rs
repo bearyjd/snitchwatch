@@ -25,7 +25,8 @@ use snitchwatch_bridge::notice::{Notice, NoticeBus};
 use snitchwatch_bridge::profiles::network_watcher;
 use snitchwatch_bridge::profiles::store::ProfileStore;
 use snitchwatch_bridge::profiles::ProfilesManager;
-use snitchwatch_bridge::translator::upstream;
+use snitchwatch_bridge::translator::downstream;
+use snitchwatch_bridge::translator::upstream::{self, UpstreamEffect};
 use snitchwatch_bridge::tray_state::{TrayState, TrayStatePublisher};
 use snitchwatch_bridge::ws_messages::{ClientMessage, ServerMessage};
 use snitchwatch_bridge::ws_server::{WsHandles, WsServer};
@@ -181,7 +182,7 @@ pub async fn run(config: BridgeConfig) -> Result<RunningBridge> {
     let ws_handles = WsHandles {
         broadcast: broadcast_tx.clone(),
         inbound: inbound_tx.clone(),
-        blocklists: blocklists_mgr,
+        blocklists: blocklists_mgr.clone(),
         profiles: profiles_mgr.clone(),
     };
     let ws_server = WsServer::new(config.ws_socket_path.clone(), token.clone(), ws_handles);
@@ -273,6 +274,8 @@ pub async fn run(config: BridgeConfig) -> Result<RunningBridge> {
     // messages); everything else goes through the connection-cache pump.
     let cache_for_upstream = cache.clone();
     let profiles_for_upstream = profiles_mgr;
+    let blocklists_for_upstream = blocklists_mgr;
+    let snapshot_tx = broadcast_tx.clone();
     tokio::spawn(async move {
         while let Some(msg) = inbound_rx.recv().await {
             if is_profile_message(&msg) {
@@ -282,8 +285,37 @@ pub async fn run(config: BridgeConfig) -> Result<RunningBridge> {
                 }
                 continue;
             }
-            let mut cache = cache_for_upstream.lock().await;
-            match upstream::apply(&mut cache, msg) {
+            let effect = {
+                let mut cache = cache_for_upstream.lock().await;
+                upstream::apply(&mut cache, msg)
+            };
+            match effect {
+                Ok(UpstreamEffect::SnapshotRequested) => {
+                    // A feed consumer lagged past delta messages and asked for
+                    // full state. Re-broadcast the snapshots the bridge itself
+                    // owns: connection rows (clear + full insert, the same
+                    // sequence a fresh view needs), blocklists, and profiles.
+                    // Rules are excluded — the bridge holds no rule cache (see
+                    // `ClientMessage::RequestSnapshot` docs).
+                    let rows = cache_for_upstream.lock().await.rows().to_vec();
+                    let _ = snapshot_tx.send(ServerMessage::ClearConnectionRows);
+                    if !rows.is_empty() {
+                        let _ = snapshot_tx.send(ServerMessage::InsertConnectionRows { rows });
+                    }
+                    match downstream::build_set_blocklists(&blocklists_for_upstream).await {
+                        Ok(m) => {
+                            let _ = snapshot_tx.send(m);
+                        }
+                        Err(e) => warn!(error = %e, "snapshot: blocklists rebuild failed"),
+                    }
+                    match downstream::build_set_profiles(&profiles_for_upstream).await {
+                        Ok(m) => {
+                            let _ = snapshot_tx.send(m);
+                        }
+                        Err(e) => warn!(error = %e, "snapshot: profiles rebuild failed"),
+                    }
+                    info!("re-broadcast state snapshots after feed lag");
+                }
                 Ok(effect) => info!(?effect, "applied upstream effect"),
                 Err(e) => error!(error = %e, "upstream apply failed"),
             }
@@ -392,6 +424,46 @@ mod tests {
             .await
             .expect("inbound channel closed");
 
+        bridge.shutdown();
+    }
+
+    #[tokio::test]
+    async fn request_snapshot_rebroadcasts_bridge_owned_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = BridgeConfig {
+            grpc_bind: "127.0.0.1:0".parse().unwrap(),
+            ws_socket_path: dir.path().join("bridge.sock"),
+            cache_capacity: 64,
+        };
+        let bridge = run(cfg).await.expect("run failed");
+        let mut rx = bridge.broadcast_tx.subscribe();
+
+        bridge
+            .inbound_tx
+            .send(ClientMessage::RequestSnapshot)
+            .await
+            .expect("inbound channel closed");
+
+        // Expected snapshot sequence for an empty bridge: a connections clear
+        // (no insert — the cache is empty), then blocklists, then profiles.
+        // Ignore unrelated interleavings (e.g. traffic pump output) but bound
+        // the wait so a missing snapshot fails rather than hangs.
+        let mut saw_clear = false;
+        let mut saw_blocklists = false;
+        let mut saw_profiles = false;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+        while !(saw_clear && saw_blocklists && saw_profiles) {
+            let msg = tokio::time::timeout_at(deadline, rx.recv())
+                .await
+                .expect("snapshot messages not re-broadcast within timeout")
+                .expect("broadcast channel closed");
+            match msg {
+                ServerMessage::ClearConnectionRows => saw_clear = true,
+                ServerMessage::SetBlocklists { .. } => saw_blocklists = true,
+                ServerMessage::SetProfiles { .. } => saw_profiles = true,
+                _ => {}
+            }
+        }
         bridge.shutdown();
     }
 

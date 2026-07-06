@@ -37,6 +37,10 @@ pub enum UpstreamEffect {
         rule_id: String,
         rule: serde_json::Value,
     },
+    /// A feed consumer lagged and asked for full state snapshots to be
+    /// re-broadcast. The orchestrator answers with the current connection
+    /// rows plus blocklist/profile snapshots (see `snitchwatch-bridge-cli`).
+    SnapshotRequested,
 }
 
 /// Apply a ClientMessage to the bridge's state.
@@ -68,6 +72,7 @@ pub fn apply(
         ClientMessage::UpdateRule { rule_id, rule } => {
             Ok(UpstreamEffect::UpdateRule { rule_id, rule })
         }
+        ClientMessage::RequestSnapshot => Ok(UpstreamEffect::SnapshotRequested),
         ClientMessage::GlobalSettings { .. }
         | ClientMessage::SubscribeBlocklist { .. }
         | ClientMessage::UnsubscribeBlocklist { .. }
