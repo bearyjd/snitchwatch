@@ -176,7 +176,14 @@ pub fn status() -> Option<(bool, String)> {
 /// calls [`ensure_started`] gets `None` and simply no-ops its live feed.
 pub fn tray_rx() -> Option<watch::Receiver<BridgeTrayState>> {
     match STARTED.get()? {
-        Outcome::Running(rt) => Some(rt._kept.lock().unwrap()._bridge.tray_rx.clone()),
+        Outcome::Running(rt) => Some(
+            rt._kept
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                ._bridge
+                .tray_rx
+                .clone(),
+        ),
         Outcome::Failed(_) => None,
     }
 }
@@ -188,7 +195,14 @@ pub fn tray_rx() -> Option<watch::Receiver<BridgeTrayState>> {
 /// starting from "now", mirroring `BridgeHandles::subscribe`.
 pub fn notice_rx() -> Option<broadcast::Receiver<BridgeNotice>> {
     match STARTED.get()? {
-        Outcome::Running(rt) => Some(rt._kept.lock().unwrap()._bridge.notice_rx.resubscribe()),
+        Outcome::Running(rt) => Some(
+            rt._kept
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                ._bridge
+                .notice_rx
+                .resubscribe(),
+        ),
         Outcome::Failed(_) => None,
     }
 }

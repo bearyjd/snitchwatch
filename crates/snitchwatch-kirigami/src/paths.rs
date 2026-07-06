@@ -28,6 +28,11 @@ pub fn autostart_path() -> PathBuf {
         .join("snitchwatch.desktop")
 }
 
+/// Persisted preferences (`crate::settings`), e.g. the RDAP opt-in flag.
+pub fn settings_path() -> PathBuf {
+    config_dir().join("settings.json")
+}
+
 pub fn bridge_log_path() -> PathBuf {
     state_dir().join("bridge.log")
 }
@@ -115,6 +120,16 @@ mod tests {
         assert_eq!(
             autostart_path(),
             PathBuf::from("/tmp/cfg/autostart/snitchwatch.desktop")
+        );
+    }
+
+    #[test]
+    fn settings_path_uses_config_dir() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _g = EnvVarGuard::set("XDG_CONFIG_HOME", "/tmp/cfg");
+        assert_eq!(
+            settings_path(),
+            PathBuf::from("/tmp/cfg/snitchwatch/settings.json")
         );
     }
 }

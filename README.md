@@ -140,6 +140,17 @@ Panics are written to `$XDG_STATE_HOME/snitchwatch/crash.log` (default
 `~/.local/state/snitchwatch/crash.log`). View the last 200 lines from the
 **Diagnostics** tab.
 
+### Privacy
+
+The pending-decision dialog's insight panel can show reverse-DNS and RDAP
+(online registration) info for a connection's remote IP. Reverse DNS always
+uses the system resolver. RDAP queries a third-party service (`rdap.org`)
+with the remote IP, so it is **opt-in and off by default** — enable it from
+**Settings → Diagnostics → Online research (RDAP) in decision dialog**. A
+Flatpak-sandboxed install has no network access for the GUI at all (see
+"Install on Bazzite" above), so online research there requires a
+non-sandboxed install or an explicit network permission grant.
+
 ## M4 — Subscribe to a blocklist
 
 Snitchwatch ships its own blocklist subscription manager. To smoke-test it

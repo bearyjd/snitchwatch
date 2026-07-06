@@ -24,6 +24,7 @@ Kirigami.ScrollablePage {
         if (page.controller) {
             page.controller.refreshAutostart();
             page.controller.refreshCrashLog();
+            page.controller.refreshRdapEnabled();
         }
     }
 
@@ -47,6 +48,20 @@ Kirigami.ScrollablePage {
                 text: page.controller ? page.controller.autostartError : ""
                 color: Kirigami.Theme.negativeTextColor
                 wrapMode: Text.Wrap
+            }
+
+            Controls.Switch {
+                Kirigami.FormData.label: "Online research (RDAP) in decision dialog"
+                checked: page.controller ? page.controller.rdapEnabled : false
+                enabled: page.controller && !page.controller.busy
+                onToggled: page.controller.toggleRdapEnabled(checked)
+            }
+
+            Controls.Label {
+                Kirigami.FormData.label: ""
+                opacity: 0.7
+                wrapMode: Text.Wrap
+                text: "Off by default: when enabled, a pending connection's remote IP is sent to rdap.org to look up its registration info. Reverse DNS lookups always use the system resolver and are unaffected by this setting."
             }
         }
 

@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex};
 use cxx_qt::Threading;
 use cxx_qt_lib::QString;
 
-use crate::insight::client::{resolve, InsightResult, InsightSource, RealInsightSource};
+use crate::insight::client::{cache_key, resolve, InsightResult, InsightSource, RealInsightSource};
 
 #[cxx_qt::bridge]
 pub mod qobject {
@@ -42,6 +42,11 @@ pub mod qobject {
         /// Whether there is anything at all to show (drives the QML
         /// "unavailable (offline?)" fallback once loading has finished).
         #[qproperty(bool, available)]
+        /// Whether RDAP (online registration research) was enabled for the
+        /// most recent `lookup()` call, per the persisted opt-in setting
+        /// (`crate::settings`). Drives the "enable in Settings" hint in
+        /// `PendingDecisionSheet.qml` when off.
+        #[qproperty(bool, rdap_enabled, cxx_name = "rdapEnabled")]
         #[qproperty(QString, hostname)]
         #[qproperty(QString, org)]
         #[qproperty(QString, registrar)]
@@ -62,6 +67,7 @@ pub mod qobject {
 pub struct PendingInsightRust {
     loading: bool,
     available: bool,
+    rdap_enabled: bool,
     hostname: QString,
     org: QString,
     registrar: QString,
@@ -78,6 +84,7 @@ impl Default for PendingInsightRust {
         Self {
             loading: false,
             available: false,
+            rdap_enabled: false,
             hostname: QString::default(),
             org: QString::default(),
             registrar: QString::default(),
@@ -95,11 +102,24 @@ impl qobject::PendingInsight {
             return;
         }
 
+        // RDAP is opt-in (default off, see `crate::settings`): a firewall
+        // app must not send every pending connection's remote IP to
+        // `rdap.org` unless the user has explicitly enabled it. This is a
+        // small local file read (not network), so it's fine to do
+        // synchronously here rather than bouncing to the runtime.
+        let rdap_enabled = crate::settings::read_rdap_enabled(&crate::paths::settings_path());
+        self.as_mut().set_rdap_enabled(rdap_enabled);
+
         // Fast synchronous path: already cached (e.g. re-opening the
         // inspector for the same remote host) — no spinner flash. The lock
         // guard is dropped before `apply()` so the mutable borrow below is
         // never live at the same time as the immutable one.
-        let cached = self.cache.lock().unwrap().get(&ip).cloned();
+        let cached = self
+            .cache
+            .lock()
+            .unwrap()
+            .get(&cache_key(&ip, rdap_enabled))
+            .cloned();
         if let Some(cached) = cached {
             self.as_mut().apply(&cached);
             return;
@@ -118,7 +138,7 @@ impl qobject::PendingInsight {
         let source = self.source.clone();
         let cache = self.cache.clone();
         handles.runtime().spawn(async move {
-            let result = resolve(source.as_ref(), &cache, &ip).await;
+            let result = resolve(source.as_ref(), &cache, &ip, rdap_enabled).await;
             let _ = qt_thread.queue(move |qobject| {
                 qobject.apply(&result);
             });

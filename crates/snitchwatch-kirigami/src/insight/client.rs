@@ -84,7 +84,12 @@ fn build_http_client() -> Client {
     Client::builder()
         .user_agent(concat!("snitchwatch/", env!("CARGO_PKG_VERSION")))
         .build()
-        .expect("reqwest client builds")
+        // A hand-rolled `Client` (no custom TLS/proxy/timeout config beyond
+        // what we just set) fails to build only in truly exotic environments
+        // (e.g. no usable TLS backend). Degrading to `Client::new()` — and,
+        // failing that, giving up the user agent — keeps startup infallible;
+        // every request already tolerates network failure via `.ok()?`.
+        .unwrap_or_else(|_| Client::new())
 }
 
 #[async_trait]
@@ -98,7 +103,7 @@ impl InsightSource for RealInsightSource {
     }
 
     async fn rdap(&self, ip: &str) -> Option<RdapInfo> {
-        let url = format!("https://rdap.org/ip/{ip}");
+        let url = rdap_url(ip)?;
         let resp = self.http.get(&url).send().await.ok()?;
         if !resp.status().is_success() {
             return None;
@@ -106,6 +111,18 @@ impl InsightSource for RealInsightSource {
         let body: Value = resp.json().await.ok()?;
         Some(parse_rdap(&body))
     }
+}
+
+/// Build the RDAP request URL for `ip`, or `None` if it isn't a valid IP
+/// address. Parsing first (rather than interpolating the raw string) is
+/// load-bearing: `ip` ultimately comes from a pending connection's remote
+/// address, so a hostile value (e.g. containing `/../` or embedded host
+/// segments) must never reach the request path unparsed. Routing everything
+/// through [`std::net::IpAddr`]'s formatter also normalizes the address
+/// (e.g. IPv6 zone/scope handling) before it's sent.
+fn rdap_url(ip: &str) -> Option<String> {
+    let addr: IpAddr = ip.parse().ok()?;
+    Some(format!("https://rdap.org/ip/{addr}"))
 }
 
 /// Extract org/registrar/country from an RDAP IP-network response. Every
@@ -154,13 +171,27 @@ fn find_entity_fn(body: &Value, role: &str) -> Option<String> {
 /// Run both lookups (with the per-lookup timeout applied to each) and fold
 /// them into one [`InsightResult`]. Pure with respect to caching — callers
 /// that want caching go through [`resolve`].
-pub async fn fetch(source: &dyn InsightSource, ip: &str) -> InsightResult {
-    let (hostname_res, rdap_res) = tokio::join!(
+///
+/// `rdap_enabled` gates the RDAP lookup only — reverse DNS always runs. RDAP
+/// sends the pending connection's remote IP to a third-party registry
+/// (`rdap.org`), so it is opt-in (default off); see `PendingInsight::lookup`
+/// for where the persisted setting is read.
+pub async fn fetch(source: &dyn InsightSource, ip: &str, rdap_enabled: bool) -> InsightResult {
+    let rdap_lookup = async {
+        if rdap_enabled {
+            tokio::time::timeout(LOOKUP_TIMEOUT, source.rdap(ip))
+                .await
+                .ok()
+                .flatten()
+        } else {
+            None
+        }
+    };
+    let (hostname_res, rdap) = tokio::join!(
         tokio::time::timeout(LOOKUP_TIMEOUT, source.reverse_dns(ip)),
-        tokio::time::timeout(LOOKUP_TIMEOUT, source.rdap(ip)),
+        rdap_lookup,
     );
     let hostname = hostname_res.ok().flatten();
-    let rdap = rdap_res.ok().flatten();
     InsightResult {
         hostname,
         org: rdap.as_ref().and_then(|r| r.org.clone()),
@@ -172,17 +203,31 @@ pub async fn fetch(source: &dyn InsightSource, ip: &str) -> InsightResult {
 /// [`fetch`] with a per-IP session cache. `cache` uses `std::sync::Mutex`
 /// (not `tokio::sync::Mutex`) since every critical section is synchronous —
 /// no `.await` is ever held across the lock.
+///
+/// Caches every outcome, including an all-`None` [`InsightResult`] from a
+/// failing/offline resolver — otherwise reopening the dialog for the same IP
+/// re-runs (and re-blocks a thread on) a lookup already known to fail. The
+/// cache key folds in `rdap_enabled` so a result cached while RDAP was off
+/// doesn't mask RDAP data once the user turns it on later in the session.
 pub async fn resolve(
     source: &dyn InsightSource,
     cache: &Mutex<HashMap<String, InsightResult>>,
     ip: &str,
+    rdap_enabled: bool,
 ) -> InsightResult {
-    if let Some(cached) = cache.lock().unwrap().get(ip).cloned() {
+    let key = cache_key(ip, rdap_enabled);
+    if let Some(cached) = cache.lock().unwrap().get(&key).cloned() {
         return cached;
     }
-    let result = fetch(source, ip).await;
-    cache.lock().unwrap().insert(ip.to_string(), result.clone());
+    let result = fetch(source, ip, rdap_enabled).await;
+    cache.lock().unwrap().insert(key, result.clone());
     result
+}
+
+/// Exposed to `insight_model` so its fast synchronous cache-hit path (before
+/// spawning any network work) uses the exact same key `resolve` does.
+pub(crate) fn cache_key(ip: &str, rdap_enabled: bool) -> String {
+    format!("{ip}|rdap={rdap_enabled}")
 }
 
 #[cfg(test)]
@@ -193,6 +238,7 @@ mod tests {
     #[derive(Default)]
     struct FakeSource {
         calls: AtomicUsize,
+        rdap_calls: AtomicUsize,
         hostname: Option<String>,
         rdap: Option<RdapInfo>,
     }
@@ -205,6 +251,7 @@ mod tests {
         }
 
         async fn rdap(&self, _ip: &str) -> Option<RdapInfo> {
+            self.rdap_calls.fetch_add(1, Ordering::SeqCst);
             self.rdap.clone()
         }
     }
@@ -235,7 +282,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let result = fetch(&source, "8.8.8.8").await;
+        let result = fetch(&source, "8.8.8.8", true).await;
         assert_eq!(result.hostname.as_deref(), Some("dns.google"));
         assert_eq!(result.org.as_deref(), Some("Google LLC"));
         assert_eq!(result.country.as_deref(), Some("US"));
@@ -245,7 +292,7 @@ mod tests {
     #[tokio::test]
     async fn fetch_degrades_gracefully_when_source_returns_nothing() {
         let source = FakeSource::default();
-        let result = fetch(&source, "10.0.0.1").await;
+        let result = fetch(&source, "10.0.0.1", true).await;
         assert!(!result.has_any_data());
     }
 
@@ -254,10 +301,30 @@ mod tests {
         // Both lookups sleep for 30s; LOOKUP_TIMEOUT is 4s. With the tokio
         // clock paused, this resolves instantly (no real 4s wait) while
         // still proving the timeout — not the source — is what bounds this.
-        let result = fetch(&SlowSource, "1.2.3.4").await;
+        let result = fetch(&SlowSource, "1.2.3.4", true).await;
         assert!(
             !result.has_any_data(),
             "a hung lookup must degrade to unavailable, never block"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_never_calls_rdap_source_when_disabled() {
+        let source = FakeSource {
+            hostname: Some("dns.google".to_string()),
+            rdap: Some(RdapInfo {
+                org: Some("Google LLC".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let result = fetch(&source, "8.8.8.8", false).await;
+        assert_eq!(result.hostname.as_deref(), Some("dns.google"));
+        assert!(result.org.is_none());
+        assert_eq!(
+            source.rdap_calls.load(Ordering::SeqCst),
+            0,
+            "RDAP must be opt-in: disabled means the RDAP source is never invoked"
         );
     }
 
@@ -268,8 +335,8 @@ mod tests {
             ..Default::default()
         };
         let cache = Mutex::new(HashMap::new());
-        let first = resolve(&source, &cache, "1.1.1.1").await;
-        let second = resolve(&source, &cache, "1.1.1.1").await;
+        let first = resolve(&source, &cache, "1.1.1.1", true).await;
+        let second = resolve(&source, &cache, "1.1.1.1", true).await;
         assert_eq!(first, second);
         assert_eq!(
             source.calls.load(Ordering::SeqCst),
@@ -285,9 +352,49 @@ mod tests {
             ..Default::default()
         };
         let cache = Mutex::new(HashMap::new());
-        resolve(&source, &cache, "1.1.1.1").await;
-        resolve(&source, &cache, "2.2.2.2").await;
+        resolve(&source, &cache, "1.1.1.1", true).await;
+        resolve(&source, &cache, "2.2.2.2", true).await;
         assert_eq!(source.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn resolve_caches_a_failing_lookup_and_never_refetches() {
+        // Negative caching: a resolver that returns nothing (dead/offline)
+        // must still be cached, so reopening the dialog for the same IP
+        // doesn't re-run (and re-park a thread on) a lookup already known
+        // to fail.
+        let source = FakeSource::default();
+        let cache = Mutex::new(HashMap::new());
+        let first = resolve(&source, &cache, "10.0.0.1", true).await;
+        let second = resolve(&source, &cache, "10.0.0.1", true).await;
+        assert!(!first.has_any_data());
+        assert_eq!(first, second);
+        assert_eq!(
+            source.calls.load(Ordering::SeqCst),
+            1,
+            "a second resolve() for a known-failing IP must hit the cache, not refetch"
+        );
+    }
+
+    #[test]
+    fn rdap_url_rejects_a_hostile_string_masquerading_as_an_ip() {
+        // A string smuggling a path-traversal / alternate host segment past
+        // naive interpolation must never become a request URL.
+        assert_eq!(rdap_url("1.2.3.4/../domain/evil.com"), None);
+        assert_eq!(rdap_url("8.8.8.8@evil.com"), None);
+        assert_eq!(rdap_url(""), None);
+    }
+
+    #[test]
+    fn rdap_url_accepts_valid_ipv4_and_ipv6() {
+        assert_eq!(
+            rdap_url("8.8.8.8").as_deref(),
+            Some("https://rdap.org/ip/8.8.8.8")
+        );
+        assert_eq!(
+            rdap_url("2001:4860:4860::8888").as_deref(),
+            Some("https://rdap.org/ip/2001:4860:4860::8888")
+        );
     }
 
     #[test]

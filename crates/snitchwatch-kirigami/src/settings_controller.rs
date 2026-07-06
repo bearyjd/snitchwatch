@@ -15,7 +15,8 @@ use cxx_qt_lib::QString;
 
 use crate::autostart::{read_autostart_state, remove_autostart_desktop, write_autostart_desktop};
 use crate::crash_log::read_crash_log_tail;
-use crate::paths::{autostart_path, crash_log_path};
+use crate::paths::{autostart_path, crash_log_path, settings_path};
+use crate::settings::{read_settings, write_settings};
 
 const CRASH_LOG_TAIL_LINES: usize = 200;
 
@@ -48,6 +49,10 @@ pub mod qobject {
         #[qproperty(QString, autostart_error, cxx_name = "autostartError")]
         /// The last 200 lines of `crash.log`, or a friendly placeholder.
         #[qproperty(QString, crash_log_text, cxx_name = "crashLogText")]
+        /// Whether the pending-decision insight panel may query RDAP
+        /// (`rdap.org`) for registration info. Opt-in, default off; reverse
+        /// DNS is unaffected. See `crate::settings` and `PendingInsight`.
+        #[qproperty(bool, rdap_enabled, cxx_name = "rdapEnabled")]
         /// True while a background refresh/write is in flight.
         #[qproperty(bool, busy)]
         type SettingsController = super::SettingsControllerRust;
@@ -70,6 +75,20 @@ pub mod qobject {
         #[qinvokable]
         #[cxx_name = "refreshCrashLog"]
         fn refresh_crash_log(self: Pin<&mut SettingsController>);
+
+        /// Re-read the persisted RDAP opt-in setting off the UI thread.
+        /// Called from `DiagnosticsPage.qml`'s `Component.onCompleted`.
+        #[qinvokable]
+        #[cxx_name = "refreshRdapEnabled"]
+        fn refresh_rdap_enabled(self: Pin<&mut SettingsController>);
+
+        /// Persist the RDAP opt-in toggle, then refresh `rdapEnabled` from
+        /// the result. Wired to the Diagnostics page's RDAP switch. Named
+        /// `toggleRdapEnabled` (not `setRdapEnabled`) to avoid colliding
+        /// with the `rdapEnabled` qproperty's own auto-generated setter.
+        #[qinvokable]
+        #[cxx_name = "toggleRdapEnabled"]
+        fn toggle_rdap_enabled(self: Pin<&mut SettingsController>, enabled: bool);
     }
 
     impl cxx_qt::Threading for SettingsController {}
@@ -80,6 +99,7 @@ pub struct SettingsControllerRust {
     autostart_enabled: bool,
     autostart_error: QString,
     crash_log_text: QString,
+    rdap_enabled: bool,
     busy: bool,
 }
 
@@ -89,6 +109,7 @@ impl Default for SettingsControllerRust {
             autostart_enabled: false,
             autostart_error: QString::default(),
             crash_log_text: QString::from("Loading\u{2026}"),
+            rdap_enabled: false,
             busy: false,
         }
     }
@@ -133,6 +154,41 @@ impl qobject::SettingsController {
             let text = read_crash_log_tail(&crash_log_path(), CRASH_LOG_TAIL_LINES);
             let _ = qt_thread.queue(move |mut qobject| {
                 qobject.as_mut().set_crash_log_text(QString::from(&text));
+                qobject.as_mut().set_busy(false);
+            });
+        });
+    }
+
+    fn refresh_rdap_enabled(mut self: Pin<&mut Self>) {
+        self.as_mut().set_busy(true);
+        let qt_thread = self.qt_thread();
+        std::thread::spawn(move || {
+            let enabled = read_settings(&settings_path()).rdap_enabled;
+            let _ = qt_thread.queue(move |mut qobject| {
+                qobject.as_mut().set_rdap_enabled(enabled);
+                qobject.as_mut().set_busy(false);
+            });
+        });
+    }
+
+    fn toggle_rdap_enabled(mut self: Pin<&mut Self>, enabled: bool) {
+        self.as_mut().set_busy(true);
+        let qt_thread = self.qt_thread();
+        std::thread::spawn(move || {
+            let path = settings_path();
+            // Preserve any other persisted fields rather than clobbering
+            // them with a lone-field write.
+            let mut settings = read_settings(&path);
+            settings.rdap_enabled = enabled;
+            let write_err = write_settings(&path, &settings).err();
+            if let Some(e) = write_err {
+                tracing::warn!(error = %e, "failed to persist RDAP setting");
+            }
+            // Re-read from disk rather than trusting `enabled` blindly, so a
+            // failed write still reports the setting's actual on-disk state.
+            let actual = read_settings(&path).rdap_enabled;
+            let _ = qt_thread.queue(move |mut qobject| {
+                qobject.as_mut().set_rdap_enabled(actual);
                 qobject.as_mut().set_busy(false);
             });
         });

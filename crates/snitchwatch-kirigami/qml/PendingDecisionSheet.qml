@@ -220,9 +220,15 @@ ColumnLayout {
         }
         Controls.Label {
             Kirigami.FormData.label: "Registration info"
-            visible: !insight.loading && !insight.available
+            visible: !insight.loading && !insight.available && insight.rdapEnabled
             opacity: 0.7
             text: "unavailable (offline?)"
+        }
+        Controls.Label {
+            Kirigami.FormData.label: "Registration info"
+            visible: !insight.rdapEnabled
+            opacity: 0.7
+            text: "Online research disabled — enable in Settings"
         }
     }
 

@@ -29,6 +29,7 @@ pub mod profiles;
 pub mod profiles_model;
 pub mod rules;
 pub mod rules_model;
+pub mod settings;
 pub mod settings_controller;
 pub mod traffic;
 pub mod traffic_model;
