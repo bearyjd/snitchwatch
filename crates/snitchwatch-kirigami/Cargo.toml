@@ -1,0 +1,64 @@
+# Snitchwatch native desktop shell — Qt6/QML + Kirigami on cxx-qt.
+#
+# Replaces `snitchwatch-tauri` + the vendored `web/` frontend (Phase 3b).
+# This is a *parallel* build: `snitchwatch-tauri` and `web/` stay in the repo,
+# working, until this shell reaches feature parity (see
+# docs/superpowers/plans/2026-07-04-kirigami-shell-rewrite.md non-goals).
+#
+# Requires system Qt6 + KDE Frameworks 6 (Kirigami) dev packages to build, so —
+# like `kirigami-spike` — it is intentionally NOT in the workspace
+# `default-members`; build it explicitly via `-p snitchwatch-kirigami`.
+#
+# cxx-qt is pre-1.0 and churns between patch releases; per the feasibility
+# research we pin EXACT patch versions rather than a caret range.
+[package]
+name = "snitchwatch-kirigami"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0"
+description = "Snitchwatch desktop shell — Qt6/QML + Kirigami native UI on cxx-qt."
+
+[lib]
+name = "snitchwatch_kirigami"
+path = "src/lib.rs"
+
+[[bin]]
+name = "snitchwatch-kirigami"
+path = "src/main.rs"
+
+[dependencies]
+snitchwatch-bridge = { path = "../snitchwatch-bridge" }
+snitchwatch-bridge-cli = { path = "../snitchwatch-bridge-cli" }
+cxx = "=1.0.194"
+cxx-qt = "=0.9.1"
+cxx-qt-lib = { version = "=0.9.1", features = ["qt_full"] }
+tokio = { version = "1.40", features = ["rt-multi-thread", "sync", "macros", "net", "io-util", "time"] }
+tracing = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+regex = { workspace = true }
+anyhow = "1"
+which = "6"
+notify-rust = "4"
+async-trait = { workspace = true }
+reqwest = { workspace = true, features = ["json"] }
+# Reverse-DNS (PTR) lookup for the pending-decision insight panel (Parity 2).
+# No async-DNS crate (hickory/trust-dns) was already in the dependency graph
+# (verified via Cargo.lock) so this is a new, deliberately small dependency:
+# a thin libc getnameinfo() wrapper, called via `spawn_blocking` since it's a
+# blocking syscall. RDAP reuses the workspace `reqwest` already pulled in by
+# the blocklists fetcher.
+dns-lookup = "2"
+maxminddb = "0.29"
+
+[build-dependencies]
+cxx-qt-build = "=0.9.1"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1.40", features = ["test-util"] }
+# Live core-loop integration test (tests/live_loop.rs): drives the in-process
+# bridge with the same mock daemon the workspace-root protocol test uses.
+mock-opensnitchd = { path = "../../tests/mock_opensnitchd" }
+snitchwatch-proto = { path = "../snitchwatch-proto" }
+tracing-subscriber = "0.3"

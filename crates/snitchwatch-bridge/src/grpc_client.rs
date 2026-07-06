@@ -1,88 +1,83 @@
-//! gRPC client to opensnitchd, with exponential-backoff reconnect.
+//! Rule classification helpers for blocklist reconciliation.
 //!
-//! This module only provides the low-level connection helper. The actual
-//! notification stream subscription (translating opensnitchd `Notification`
-//! events into `ServerMessage` and feeding them to the WS server) is wired
-//! up in Task 16 (downstream translator) once we have a clearer picture
-//! from the M0 spike about the exact stream RPC shapes.
+//! The materializer writes a JSON tag into each blocklist rule's `description`
+//! field: `{"snitchwatch":{"source":"blocklist","list_id":"<id>","entry":"<host>"}}`.
+//! `classify_rule` reads that tag and returns a `RuleCategory` so the
+//! reconciler can distinguish user-authored rules from bridge-managed ones.
 
-use crate::error::BridgeError;
-use std::time::Duration;
-use tonic::transport::{Channel, Endpoint};
-use tracing::{info, warn};
-
-// The generated client lives at `snitchwatch_proto::protocol::ui_client::UiClient`
-// (the proto declares `package protocol; service UI`). Task 16 will wire the
-// actual RPC calls; for now we only need `Channel` here.
-pub use snitchwatch_proto::protocol::ui_client::UiClient;
-
-pub struct GrpcClient {
-    endpoint: String,
+/// Classification of an opensnitchd rule for reconciliation purposes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuleCategory {
+    /// A user-authored rule — must never be touched by the bridge.
+    User,
+    /// A bridge-managed blocklist rule for the given list.
+    Blocklist { list_id: String },
 }
 
-impl GrpcClient {
-    pub fn new(endpoint: impl Into<String>) -> Self {
-        Self {
-            endpoint: endpoint.into(),
-        }
-    }
-
-    pub fn endpoint(&self) -> &str {
-        &self.endpoint
-    }
-
-    /// Connect with exponential backoff. Returns the connected channel.
-    ///
-    /// The caller can then construct a `UiClient::new(channel)` to issue RPCs.
-    pub async fn connect_with_backoff(&self) -> Result<Channel, BridgeError> {
-        let mut delay = Duration::from_millis(500);
-        let max_delay = Duration::from_secs(60);
-
-        loop {
-            match Endpoint::from_shared(self.endpoint.clone())?
-                .connect_timeout(Duration::from_secs(3))
-                .connect()
-                .await
-            {
-                Ok(channel) => {
-                    info!(endpoint = %self.endpoint, "connected to opensnitchd");
-                    return Ok(channel);
-                }
-                Err(e) => {
-                    warn!(
-                        error = %e,
-                        retry_in_ms = delay.as_millis() as u64,
-                        "gRPC connect failed, retrying"
-                    );
-                    tokio::time::sleep(delay).await;
-                    delay = (delay * 2).min(max_delay);
+/// Classify a rule by inspecting its `description` JSON tag.
+///
+/// Returns `RuleCategory::Blocklist` when the description contains a valid
+/// snitchwatch blocklist tag, and `RuleCategory::User` for everything else
+/// (missing tag, malformed JSON, wrong source value, missing list_id).
+pub fn classify_rule(_name: &str, description: &str) -> RuleCategory {
+    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(description) {
+        if let Some(meta) = parsed.get("snitchwatch") {
+            if meta.get("source").and_then(|v| v.as_str()) == Some("blocklist") {
+                if let Some(list_id) = meta.get("list_id").and_then(|v| v.as_str()) {
+                    return RuleCategory::Blocklist {
+                        list_id: list_id.to_string(),
+                    };
                 }
             }
         }
     }
+    RuleCategory::User
 }
 
 #[cfg(test)]
-mod tests {
+mod blocklist_reconciliation_tests {
     use super::*;
 
-    #[tokio::test]
-    async fn invalid_endpoint_eventually_errors() {
-        // We can't easily test the infinite loop, but we can test that a
-        // malformed endpoint surfaces an error before we enter the retry
-        // loop — `Endpoint::from_shared` parses the URI up front.
-        // Spaces are not valid URI characters, so this must reject.
-        let client = GrpcClient::new("not a url");
-        let result = Endpoint::from_shared(client.endpoint().to_string());
-        assert!(result.is_err(), "malformed URI should be rejected");
+    #[test]
+    fn classify_current_band_rule_as_blocklist() {
+        let cat = classify_rule(
+            "z00-blocklist:stevenblack:0001-doubleclick.net",
+            r#"{"snitchwatch":{"source":"blocklist","list_id":"stevenblack","entry":"doubleclick.net"}}"#,
+        );
+        assert_eq!(
+            cat,
+            RuleCategory::Blocklist {
+                list_id: "stevenblack".into(),
+            }
+        );
     }
 
-    #[tokio::test]
-    async fn valid_endpoint_parses() {
-        // A well-formed http endpoint should parse without error, even if
-        // we never actually call `.connect()` on it.
-        let client = GrpcClient::new("http://127.0.0.1:50051");
-        let result = Endpoint::from_shared(client.endpoint().to_string());
-        assert!(result.is_ok(), "valid URI should parse");
+    #[test]
+    fn classify_legacy_900_band_rule_as_blocklist() {
+        // Classification keys on the `description` tag, not the filename band,
+        // so an orphaned legacy-band rule left by a pre-migration daemon still
+        // classifies as blocklist-owned and can be reconciled/purged.
+        let cat = classify_rule(
+            "900-blocklist:stevenblack:0001-doubleclick.net",
+            r#"{"snitchwatch":{"source":"blocklist","list_id":"stevenblack","entry":"doubleclick.net"}}"#,
+        );
+        assert_eq!(
+            cat,
+            RuleCategory::Blocklist {
+                list_id: "stevenblack".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn classify_user_rule_as_user() {
+        let cat = classify_rule("050-allow-firefox", "");
+        assert_eq!(cat, RuleCategory::User);
+    }
+
+    #[test]
+    fn classify_legacy_900_rule_without_tag_as_user() {
+        let cat = classify_rule("900-legacy-rule", "{}");
+        assert_eq!(cat, RuleCategory::User);
     }
 }

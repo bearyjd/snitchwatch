@@ -6,59 +6,86 @@
 //!
 //! What `run` wires together:
 //!
-//! 1. Binds the WebSocket server on `ws_bind` (ephemeral by default).
-//! 2. Dials the gRPC endpoint at `grpc_url` with exponential backoff.
-//! 3. Opens the `Notifications` bidi stream. Outbound goes through an mpsc
-//!    which is fed by the verdict-round-trip task; inbound is the daemon's
-//!    notification stream.
-//! 4. For each inbound notification, runs [`downstream::translate_notification`]:
-//!    - `Translated::AskRule(row)` → insert into the cache as pending, await
-//!      the `oneshot<Verdict>`, push an `InsertConnectionRows` broadcast so
-//!      the WebSocket UI sees it, then send a `NotificationReply` upstream
-//!      so the daemon unblocks.
-//!    - `Translated::Ignored` → drop.
-//! 5. Inbound WebSocket `ClientMessage`s go through `upstream::apply`, which
+//! 1. Binds the WebSocket server on the Unix domain socket at
+//!    `ws_socket_path` and writes a fresh handshake token alongside it.
+//! 2. Binds the gRPC `Ui` server on `grpc_bind` — opensnitchd dials in here.
+//! 3. Inbound `AskRule` RPCs insert a pending row into the cache, broadcast
+//!    it on the WebSocket, and await a `oneshot<Verdict>` from the WS layer.
+//! 4. Inbound WebSocket `ClientMessage`s go through `upstream::apply`, which
 //!    mutates the cache (resolving pending rows by firing the oneshot).
-//!
-//! See the Task 20 note in `downstream.rs` for why ask-rule events ride on
-//! the Notifications stream for M1.
 
 use anyhow::{Context, Result};
-use snitchwatch_bridge::cache::connections::{ConnectionCache, Verdict};
-use snitchwatch_bridge::grpc_client::{GrpcClient, UiClient};
-use snitchwatch_bridge::translator::{downstream, downstream::Translated, upstream};
+use snitchwatch_bridge::auth::{self, Token};
+use snitchwatch_bridge::blocklists::store::BlocklistStore;
+use snitchwatch_bridge::blocklists::BlocklistsManager;
+use snitchwatch_bridge::cache::connections::ConnectionCache;
+use snitchwatch_bridge::cache::traffic_tracker::TrafficTracker;
+use snitchwatch_bridge::grpc_server::UiService;
+use snitchwatch_bridge::notice::{Notice, NoticeBus};
+use snitchwatch_bridge::profiles::network_watcher;
+use snitchwatch_bridge::profiles::store::ProfileStore;
+use snitchwatch_bridge::profiles::ProfilesManager;
+use snitchwatch_bridge::translator::downstream;
+use snitchwatch_bridge::translator::upstream::{self, UpstreamEffect};
+use snitchwatch_bridge::tray_state::{TrayState, TrayStatePublisher};
 use snitchwatch_bridge::ws_messages::{ClientMessage, ServerMessage};
 use snitchwatch_bridge::ws_server::{WsHandles, WsServer};
-use snitchwatch_proto::protocol::{NotificationReply, NotificationReplyCode};
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
-use tokio_stream::wrappers::ReceiverStream;
+use tokio::sync::{broadcast, mpsc, oneshot, watch, Mutex};
+use tonic::transport::Server;
 use tracing::{error, info, warn};
+
+/// Rolling window kept by the traffic pump's [`TrafficTracker`], matching
+/// `snitchwatch-kirigami::traffic::ring_store::DEFAULT_WINDOW_SECONDS` (the
+/// consumer side of the same underlying `TrafficBinner`).
+const TRAFFIC_WINDOW_SECONDS: usize = 300;
+
+/// True for every `ClientMessage` variant `ProfilesManager` owns handling of.
+/// Kept as a free function (rather than inlined into the pump's `match`) so
+/// it reads as one clear routing decision at the call site.
+fn is_profile_message(msg: &ClientMessage) -> bool {
+    matches!(
+        msg,
+        ClientMessage::CreateProfile { .. }
+            | ClientMessage::UpdateProfile { .. }
+            | ClientMessage::DeleteProfile { .. }
+            | ClientMessage::ActivateProfile { .. }
+            | ClientMessage::DeactivateProfile
+            | ClientMessage::AddProfileRule { .. }
+            | ClientMessage::RemoveProfileRule { .. }
+    )
+}
 
 /// Runtime configuration for [`run`].
 #[derive(Debug, Clone)]
 pub struct BridgeConfig {
-    /// gRPC endpoint to dial. e.g. `http://127.0.0.1:50051`.
-    pub grpc_url: String,
-    /// Address to bind the WebSocket server on. Use port `0` for ephemeral.
-    pub ws_bind: SocketAddr,
+    /// Address to bind the gRPC `Ui` server on. opensnitchd will dial this.
+    /// Use port `0` for ephemeral.
+    pub grpc_bind: SocketAddr,
+    /// Path to the Unix domain socket the WS server binds. Defaults to
+    /// `$XDG_RUNTIME_DIR/snitchwatch/bridge.sock`.
+    pub ws_socket_path: PathBuf,
     /// Cache capacity (number of recent rows retained).
     pub cache_capacity: usize,
 }
 
 impl BridgeConfig {
     pub fn from_env() -> Result<Self> {
-        let grpc_url = std::env::var("SNITCHWATCH_GRPC")
-            .unwrap_or_else(|_| "http://127.0.0.1:50051".to_string());
-        let ws_bind_str =
-            std::env::var("SNITCHWATCH_WS_BIND").unwrap_or_else(|_| "127.0.0.1:0".to_string());
-        let ws_bind: SocketAddr = ws_bind_str
+        let grpc_bind_str =
+            std::env::var("SNITCHWATCH_GRPC_BIND").unwrap_or_else(|_| "127.0.0.1:0".to_string());
+        let grpc_bind: SocketAddr = grpc_bind_str
             .parse()
-            .with_context(|| format!("invalid SNITCHWATCH_WS_BIND: {ws_bind_str}"))?;
+            .with_context(|| format!("invalid SNITCHWATCH_GRPC_BIND: {grpc_bind_str}"))?;
+
+        let ws_socket_path = std::env::var_os("SNITCHWATCH_WS_SOCKET")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| auth::runtime_dir().join("bridge.sock"));
+
         Ok(Self {
-            grpc_url,
-            ws_bind,
+            grpc_bind,
+            ws_socket_path,
             cache_capacity: 10_000,
         })
     }
@@ -67,15 +94,41 @@ impl BridgeConfig {
 /// Handle to a running bridge. Dropping this does **not** shut the bridge
 /// down — call [`RunningBridge::shutdown`] explicitly when you're done.
 pub struct RunningBridge {
-    /// Actual bound WebSocket address (so callers who passed `:0` can discover it).
-    pub ws_addr: SocketAddr,
-    shutdown_tx: Option<oneshot::Sender<()>>,
+    /// Unix domain socket path the WS server is listening on.
+    pub ws_socket_path: PathBuf,
+    /// Path to the token file written alongside the socket (mode 0600).
+    pub ws_token_path: PathBuf,
+    /// The handshake token itself, so in-process callers (e.g. the Tauri
+    /// shell, tests) don't have to re-read it from disk.
+    pub ws_token: Token,
+    /// Actual bound gRPC address (so callers who passed `:0` can discover it).
+    pub grpc_addr: SocketAddr,
+    /// Outbound `ServerMessage` broadcast sender. In-process consumers (the
+    /// native Kirigami shell) call `.subscribe()` here to receive the exact
+    /// stream the WebSocket server fans out to browser clients — no WS
+    /// round-trip to ourselves. The WS server keeps using its own clone of this
+    /// same sender, so both consumption paths stay in lockstep.
+    pub broadcast_tx: broadcast::Sender<ServerMessage>,
+    /// Inbound `ClientMessage` sender. In-process consumers push UI-origin
+    /// messages here — the same channel the WebSocket server feeds — so they
+    /// flow through the identical `upstream::apply` pump (verdict resolution,
+    /// rule effects). This is the in-process equivalent of a WS client frame.
+    pub inbound_tx: mpsc::Sender<ClientMessage>,
+    /// Receiver for tray icon state changes published by the bridge.
+    pub tray_rx: watch::Receiver<TrayState>,
+    /// Receiver for desktop notifications published by the bridge.
+    pub notice_rx: broadcast::Receiver<Notice>,
+    ws_shutdown_tx: Option<oneshot::Sender<()>>,
+    grpc_shutdown_tx: Option<oneshot::Sender<()>>,
 }
 
 impl RunningBridge {
     /// Signal every background task to stop. Safe to call more than once.
     pub fn shutdown(mut self) {
-        if let Some(tx) = self.shutdown_tx.take() {
+        if let Some(tx) = self.ws_shutdown_tx.take() {
+            let _ = tx.send(());
+        }
+        if let Some(tx) = self.grpc_shutdown_tx.take() {
             let _ = tx.send(());
         }
     }
@@ -83,10 +136,8 @@ impl RunningBridge {
 
 /// Start the bridge and return as soon as every background task is running.
 ///
-/// The WebSocket server is up and accepting connections by the time this
-/// returns, but the gRPC `Notifications` stream may still be in the middle
-/// of its initial handshake. That's fine — scripted mock events are buffered
-/// on the server side and replayed once the stream opens.
+/// Both the WebSocket server and the gRPC `Ui` server are bound and accepting
+/// connections by the time this returns. opensnitchd can dial in immediately.
 pub async fn run(config: BridgeConfig) -> Result<RunningBridge> {
     info!(?config, "starting snitchwatch-bridge");
 
@@ -97,179 +148,390 @@ pub async fn run(config: BridgeConfig) -> Result<RunningBridge> {
     // Shared connection cache (pending-row state + decided-row history).
     let cache = Arc::new(Mutex::new(ConnectionCache::new(config.cache_capacity)));
 
+    // --- BlocklistsManager (in-memory store; callers may swap in a persisted one) ---
+    let blocklists_store = Arc::new(
+        BlocklistStore::open_in_memory().context("failed to open in-memory blocklist store")?,
+    );
+    let blocklists_mgr = Arc::new(BlocklistsManager::new(blocklists_store));
+
+    // --- ProfilesManager (in-memory store; callers may swap in a persisted one) ---
+    let profiles_store =
+        Arc::new(ProfileStore::open_in_memory().context("failed to open in-memory profile store")?);
+    let profiles_mgr = Arc::new(ProfilesManager::new(profiles_store));
+
+    // Network-driven auto-activation. `connect_watcher` degrades to a no-op
+    // watcher (manual-activation-only) if NetworkManager/D-Bus isn't
+    // reachable — never fails `run`, never panics.
+    let network_watcher = network_watcher::connect_watcher().await;
+    let _profile_auto_switch_handle = profiles_mgr.clone().spawn_auto_switch(network_watcher);
+
     // --- WebSocket server ---------------------------------------------------
+    // Generate a fresh handshake token and write it to a file alongside the
+    // socket (see `snitchwatch_bridge::auth` for why this is a file, not an
+    // env var: a Flatpak-sandboxed GUI client won't share this process's
+    // environment, but can read a file under the same
+    // `$XDG_RUNTIME_DIR/snitchwatch/` the socket lives under).
+    let token = Token::generate();
+    let ws_token_path = config
+        .ws_socket_path
+        .parent()
+        .map(|p| p.join("token"))
+        .unwrap_or_else(|| PathBuf::from("token"));
+    auth::write_token_file(&token, &ws_token_path).context("failed to write token file")?;
+
     let ws_handles = WsHandles {
         broadcast: broadcast_tx.clone(),
-        inbound: inbound_tx,
+        inbound: inbound_tx.clone(),
+        blocklists: blocklists_mgr.clone(),
+        profiles: profiles_mgr.clone(),
     };
-    let ws_server = WsServer::new(config.ws_bind, ws_handles);
-    let (listener, ws_addr) = ws_server
+    let ws_server = WsServer::new(config.ws_socket_path.clone(), token.clone(), ws_handles);
+    let ws_listener = ws_server
         .bind()
         .await
-        .context("failed to bind WebSocket listener")?;
-    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        .context("failed to bind WebSocket unix socket")?;
+    let (ws_shutdown_tx, ws_shutdown_rx) = oneshot::channel::<()>();
 
     tokio::spawn(async move {
         tokio::select! {
-            res = ws_server.serve(listener) => {
+            res = ws_server.serve(ws_listener) => {
                 if let Err(e) = res {
                     error!(error = %e, "ws_server::serve exited");
                 }
             }
-            _ = shutdown_rx => {
+            _ = ws_shutdown_rx => {
                 info!("ws server shutdown signal received");
             }
         }
     });
 
-    // --- gRPC channel + notifications stream --------------------------------
-    let client = GrpcClient::new(config.grpc_url.clone());
-    let channel = client
-        .connect_with_backoff()
+    // --- gRPC Ui server -----------------------------------------------------
+    let grpc_listener = tokio::net::TcpListener::bind(config.grpc_bind)
         .await
-        .context("failed to connect to opensnitchd gRPC")?;
+        .with_context(|| format!("failed to bind gRPC listener on {}", config.grpc_bind))?;
+    let grpc_addr = grpc_listener
+        .local_addr()
+        .context("gRPC listener has no local address")?;
 
-    // Outbound NotificationReply channel: the downstream pump sends replies
-    // into this mpsc, which is wrapped as a Stream and handed to the
-    // Notifications bidi RPC.
-    let (reply_tx, reply_rx) = mpsc::channel::<NotificationReply>(64);
-    let outbound_stream = ReceiverStream::new(reply_rx);
+    let tray_pub = Arc::new(TrayStatePublisher::new());
+    let notice_bus = Arc::new(NoticeBus::new());
+    let tray_rx = tray_pub.subscribe();
+    let notice_rx = notice_bus.subscribe();
 
-    let mut ui_client = UiClient::new(channel);
-    let inbound_stream = ui_client
-        .notifications(outbound_stream)
-        .await
-        .context("failed to open Notifications bidi stream")?
-        .into_inner();
+    let ui_service =
+        UiService::new(cache.clone(), broadcast_tx.clone(), tray_pub, notice_bus).into_server();
+    let (grpc_shutdown_tx, grpc_shutdown_rx) = oneshot::channel::<()>();
 
-    // --- Downstream pump: notifications → cache → WS broadcast --------------
-    let cache_for_downstream = cache.clone();
-    let broadcast_for_downstream = broadcast_tx.clone();
-    let reply_tx_for_downstream = reply_tx.clone();
     tokio::spawn(async move {
-        downstream_pump(
-            inbound_stream,
-            cache_for_downstream,
-            broadcast_for_downstream,
-            reply_tx_for_downstream,
-        )
-        .await;
+        let incoming = tokio_stream::wrappers::TcpListenerStream::new(grpc_listener);
+        let serve = Server::builder()
+            .add_service(ui_service)
+            .serve_with_incoming_shutdown(incoming, async {
+                let _ = grpc_shutdown_rx.await;
+            });
+        if let Err(e) = serve.await {
+            error!(error = %e, "grpc Ui server exited");
+        } else {
+            info!("grpc Ui server shutdown signal received");
+        }
     });
 
+    // --- Profile events → SetProfiles / ProfileChanged broadcasts -----------
+    // Mirrors `ws_server::serve_with_blocklists`'s blocklist-event pump: the
+    // manager owns no knowledge of the WS wire format, so this is where its
+    // internal `ProfileEvent`s become the typed `ServerMessage`s every
+    // consumer (WS clients, the in-process Kirigami shell) sees.
+    {
+        let profiles_for_events = profiles_mgr.clone();
+        let mut profile_rx = profiles_mgr.subscribe();
+        let bc_tx = broadcast_tx.clone();
+        tokio::spawn(async move {
+            use snitchwatch_bridge::profiles::ProfileEvent as Evt;
+            use snitchwatch_bridge::translator::downstream::{
+                build_profile_changed, build_set_profiles,
+            };
+            while let Ok(evt) = profile_rx.recv().await {
+                match evt {
+                    Evt::ProfilesChanged => {
+                        if let Ok(m) = build_set_profiles(&profiles_for_events).await {
+                            let _ = bc_tx.send(m);
+                        }
+                    }
+                    Evt::ActiveProfileChanged { profile_id } => {
+                        let _ = bc_tx.send(build_profile_changed(profile_id));
+                        if let Ok(m) = build_set_profiles(&profiles_for_events).await {
+                            let _ = bc_tx.send(m);
+                        }
+                    }
+                }
+            }
+        });
+    }
+
     // --- Upstream pump: WS client messages → cache (→ oneshot resolve) -------
+    // Profile-related messages are routed to `ProfilesManager` directly
+    // (mirroring `handle_blocklist_action`'s treatment of blocklist
+    // messages); everything else goes through the connection-cache pump.
     let cache_for_upstream = cache.clone();
+    let profiles_for_upstream = profiles_mgr;
+    let blocklists_for_upstream = blocklists_mgr;
+    let snapshot_tx = broadcast_tx.clone();
     tokio::spawn(async move {
         while let Some(msg) = inbound_rx.recv().await {
-            let mut cache = cache_for_upstream.lock().await;
-            match upstream::apply(&mut cache, msg) {
-                Ok(effect) => {
-                    info!(?effect, "applied upstream effect");
-                    // TODO (M2): perform gRPC side effects here (AddRule,
-                    // DeleteRule, UpdateRule). The verdict side effect is
-                    // already covered by cache.resolve firing the oneshot.
+            if is_profile_message(&msg) {
+                use snitchwatch_bridge::translator::upstream::handle_profile_action;
+                if let Err(e) = handle_profile_action(profiles_for_upstream.clone(), msg).await {
+                    error!(error = %e, "profile action failed");
                 }
+                continue;
+            }
+            let effect = {
+                let mut cache = cache_for_upstream.lock().await;
+                upstream::apply(&mut cache, msg)
+            };
+            match effect {
+                Ok(UpstreamEffect::SnapshotRequested) => {
+                    // A feed consumer lagged past delta messages and asked for
+                    // full state. Re-broadcast the snapshots the bridge itself
+                    // owns: connection rows (clear + full insert, the same
+                    // sequence a fresh view needs), blocklists, and profiles.
+                    // Rules are excluded — the bridge holds no rule cache (see
+                    // `ClientMessage::RequestSnapshot` docs).
+                    let rows = cache_for_upstream.lock().await.rows().to_vec();
+                    let _ = snapshot_tx.send(ServerMessage::ClearConnectionRows);
+                    if !rows.is_empty() {
+                        let _ = snapshot_tx.send(ServerMessage::InsertConnectionRows { rows });
+                    }
+                    match downstream::build_set_blocklists(&blocklists_for_upstream).await {
+                        Ok(m) => {
+                            let _ = snapshot_tx.send(m);
+                        }
+                        Err(e) => warn!(error = %e, "snapshot: blocklists rebuild failed"),
+                    }
+                    match downstream::build_set_profiles(&profiles_for_upstream).await {
+                        Ok(m) => {
+                            let _ = snapshot_tx.send(m);
+                        }
+                        Err(e) => warn!(error = %e, "snapshot: profiles rebuild failed"),
+                    }
+                    info!("re-broadcast state snapshots after feed lag");
+                }
+                Ok(effect) => info!(?effect, "applied upstream effect"),
                 Err(e) => error!(error = %e, "upstream apply failed"),
             }
         }
     });
 
-    Ok(RunningBridge {
-        ws_addr,
-        shutdown_tx: Some(shutdown_tx),
-    })
-}
-
-/// Downstream pump: read each Notification, translate, insert-pending into
-/// the cache, broadcast to WS, await the verdict oneshot, then send a
-/// NotificationReply upstream.
-async fn downstream_pump(
-    mut inbound: tonic::Streaming<snitchwatch_proto::protocol::Notification>,
-    cache: Arc<Mutex<ConnectionCache>>,
-    broadcast_tx: broadcast::Sender<ServerMessage>,
-    reply_tx: mpsc::Sender<NotificationReply>,
-) {
-    loop {
-        let msg = match inbound.message().await {
-            Ok(Some(n)) => n,
-            Ok(None) => {
-                info!("notifications stream closed by daemon");
-                return;
-            }
-            Err(e) => {
-                warn!(error = %e, "notifications stream error");
-                return;
-            }
-        };
-
-        let notification_id = msg.id;
-        match downstream::translate_notification(&msg) {
-            Translated::Ignored => {
-                // Nothing to do.
-            }
-            Translated::AskRule(boxed_row) => {
-                let row = *boxed_row;
-                // 1. Insert as pending and grab the verdict receiver.
-                let verdict_rx = {
-                    let mut cache = cache.lock().await;
-                    cache.insert_pending(row.clone())
-                };
-
-                // 2. Broadcast to any connected WS clients so the UI shows it.
-                if broadcast_tx.receiver_count() > 0 {
-                    let broadcast_msg = ServerMessage::InsertConnectionRows {
-                        rows: vec![row.clone()],
-                    };
-                    if let Err(e) = broadcast_tx.send(broadcast_msg) {
-                        warn!(error = %e, "broadcast send failed (no subscribers?)");
-                    }
+    // --- Traffic pump: connection-row byte counters → binned TrafficEvents --
+    // Additive: subscribes to the same outbound broadcast every other
+    // consumer uses and folds each connection-row batch's byte counters
+    // through `TrafficTracker` (wrapping the existing, already-tested
+    // `TrafficBinner`), re-broadcasting the result as `TrafficEvents` — the
+    // one typed traffic variant the native Kirigami shell's `TrafficModel`
+    // consumes (`bridge_dispatch::interests_traffic`). Never touches the
+    // legacy `SetTrafficData`/`UpdateTrafficData` variants.
+    let mut traffic_rx = broadcast_tx.subscribe();
+    let traffic_tx = broadcast_tx.clone();
+    tokio::spawn(async move {
+        let mut tracker = TrafficTracker::new(TRAFFIC_WINDOW_SECONDS);
+        loop {
+            let msg = match traffic_rx.recv().await {
+                Ok(msg) => msg,
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    warn!(skipped = n, "traffic pump lagged behind broadcast");
+                    continue;
                 }
-
-                // 3. Spawn a task to await the verdict and send the reply.
-                //    We spawn so a slow user doesn't stall the downstream pump.
-                let reply_tx = reply_tx.clone();
-                tokio::spawn(async move {
-                    match verdict_rx.await {
-                        Ok(verdict) => {
-                            let reply = NotificationReply {
-                                id: notification_id,
-                                code: NotificationReplyCode::Ok as i32,
-                                data: verdict_to_json(verdict),
-                            };
-                            if let Err(e) = reply_tx.send(reply).await {
-                                warn!(error = %e, "failed to send NotificationReply");
-                            }
-                        }
-                        Err(_canceled) => {
-                            warn!(
-                                notification_id,
-                                "verdict oneshot dropped before it was resolved"
-                            );
-                        }
-                    }
-                });
+                Err(broadcast::error::RecvError::Closed) => break,
+            };
+            let rows = match &msg {
+                ServerMessage::InsertConnectionRows { rows } => rows,
+                ServerMessage::UpdateConnectionRows { rows } => rows,
+                _ => continue,
+            };
+            if rows.is_empty() {
+                continue;
+            }
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0);
+            let events = tracker.record_rows(now_ms, rows);
+            if traffic_tx.receiver_count() > 0 {
+                if let Err(e) = traffic_tx.send(ServerMessage::TrafficEvents { events }) {
+                    warn!(error = %e, "traffic pump: broadcast send failed");
+                }
             }
         }
-    }
-}
+    });
 
-fn verdict_to_json(v: Verdict) -> String {
-    match v {
-        Verdict::Allow => r#"{"verdict":"allow"}"#.to_string(),
-        Verdict::Deny => r#"{"verdict":"deny"}"#.to_string(),
-    }
+    Ok(RunningBridge {
+        ws_socket_path: config.ws_socket_path,
+        ws_token_path,
+        ws_token: token,
+        grpc_addr,
+        broadcast_tx,
+        inbound_tx,
+        tray_rx,
+        notice_rx,
+        ws_shutdown_tx: Some(ws_shutdown_tx),
+        grpc_shutdown_tx: Some(grpc_shutdown_tx),
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn verdict_allow_serializes() {
-        assert_eq!(verdict_to_json(Verdict::Allow), r#"{"verdict":"allow"}"#);
+    #[tokio::test]
+    async fn run_binds_socket_and_grpc_port_and_shutdown_works() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = BridgeConfig {
+            grpc_bind: "127.0.0.1:0".parse().unwrap(),
+            ws_socket_path: dir.path().join("bridge.sock"),
+            cache_capacity: 64,
+        };
+        let bridge = run(cfg).await.expect("run failed");
+        assert!(bridge.ws_socket_path.exists());
+        assert!(bridge.ws_token_path.exists());
+        assert!(bridge.grpc_addr.port() != 0);
+        bridge.shutdown();
     }
 
-    #[test]
-    fn verdict_deny_serializes() {
-        assert_eq!(verdict_to_json(Verdict::Deny), r#"{"verdict":"deny"}"#);
+    #[tokio::test]
+    async fn exposes_in_process_broadcast_and_inbound_handles() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = BridgeConfig {
+            grpc_bind: "127.0.0.1:0".parse().unwrap(),
+            ws_socket_path: dir.path().join("bridge.sock"),
+            cache_capacity: 64,
+        };
+        let bridge = run(cfg).await.expect("run failed");
+
+        // Outbound: a subscriber gets the exact ServerMessage the bridge fans out.
+        let mut rx = bridge.broadcast_tx.subscribe();
+        let msg = ServerMessage::ClearConnectionRows;
+        bridge.broadcast_tx.send(msg.clone()).unwrap();
+        let got = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .expect("no broadcast within timeout")
+            .expect("broadcast channel closed");
+        assert_eq!(got, msg);
+
+        // Inbound: a UI-origin ClientMessage is accepted onto the upstream pump.
+        bridge
+            .inbound_tx
+            .send(ClientMessage::Undo)
+            .await
+            .expect("inbound channel closed");
+
+        bridge.shutdown();
+    }
+
+    #[tokio::test]
+    async fn request_snapshot_rebroadcasts_bridge_owned_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = BridgeConfig {
+            grpc_bind: "127.0.0.1:0".parse().unwrap(),
+            ws_socket_path: dir.path().join("bridge.sock"),
+            cache_capacity: 64,
+        };
+        let bridge = run(cfg).await.expect("run failed");
+        let mut rx = bridge.broadcast_tx.subscribe();
+
+        bridge
+            .inbound_tx
+            .send(ClientMessage::RequestSnapshot)
+            .await
+            .expect("inbound channel closed");
+
+        // Expected snapshot sequence for an empty bridge: a connections clear
+        // (no insert — the cache is empty), then blocklists, then profiles.
+        // Ignore unrelated interleavings (e.g. traffic pump output) but bound
+        // the wait so a missing snapshot fails rather than hangs.
+        let mut saw_clear = false;
+        let mut saw_blocklists = false;
+        let mut saw_profiles = false;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+        while !(saw_clear && saw_blocklists && saw_profiles) {
+            let msg = tokio::time::timeout_at(deadline, rx.recv())
+                .await
+                .expect("snapshot messages not re-broadcast within timeout")
+                .expect("broadcast channel closed");
+            match msg {
+                ServerMessage::ClearConnectionRows => saw_clear = true,
+                ServerMessage::SetBlocklists { .. } => saw_blocklists = true,
+                ServerMessage::SetProfiles { .. } => saw_profiles = true,
+                _ => {}
+            }
+        }
+        bridge.shutdown();
+    }
+
+    #[tokio::test]
+    async fn synthetic_connection_activity_is_rebroadcast_as_traffic_events() {
+        use snitchwatch_bridge::ws_messages::ConnectionRow;
+
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = BridgeConfig {
+            grpc_bind: "127.0.0.1:0".parse().unwrap(),
+            ws_socket_path: dir.path().join("bridge.sock"),
+            cache_capacity: 64,
+        };
+        let bridge = run(cfg).await.expect("run failed");
+        let mut rx = bridge.broadcast_tx.subscribe();
+
+        // Simulate what `UiService::ask_rule` broadcasts on a real connection
+        // (a synthetic row with non-zero byte counters, since production
+        // `ask_rule` rows start at zero — this exercises the pump's mapping
+        // end-to-end regardless of what today's actual producer sends).
+        let row = ConnectionRow {
+            id: "ask-1".into(),
+            process: "curl".into(),
+            process_path: Some("/usr/bin/curl".into()),
+            dst_host: "example.com".into(),
+            dst_ip: "93.184.216.34".into(),
+            dst_port: 443,
+            protocol: "tcp".into(),
+            direction: "outgoing".into(),
+            action: None,
+            bytes_sent: 1234,
+            bytes_received: 5678,
+            started_at_ms: 0,
+            matched_rule: None,
+        };
+        bridge
+            .broadcast_tx
+            .send(ServerMessage::InsertConnectionRows {
+                rows: vec![row.clone()],
+            })
+            .expect("broadcast send failed");
+
+        // First: the original InsertConnectionRows, echoed to every subscriber
+        // (including this test's own, exactly like a browser WS client).
+        let first = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("no broadcast within timeout")
+            .expect("broadcast channel closed");
+        assert_eq!(
+            first,
+            ServerMessage::InsertConnectionRows { rows: vec![row] }
+        );
+
+        // Second: the traffic pump's derived TrafficEvents, mapping
+        // bytes_sent -> bytesOut and bytes_received -> bytesIn.
+        let second = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("no TrafficEvents broadcast within timeout")
+            .expect("broadcast channel closed");
+        match second {
+            ServerMessage::TrafficEvents { events } => {
+                assert_eq!(events.len(), 1);
+                assert_eq!(events[0].bytes_in, 5678);
+                assert_eq!(events[0].bytes_out, 1234);
+            }
+            other => panic!("expected TrafficEvents, got {other:?}"),
+        }
+
+        bridge.shutdown();
     }
 }

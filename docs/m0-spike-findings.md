@@ -146,3 +146,14 @@ Moving on to Part B (bridge crate skeleton — Task 6) is safe because:
 - `crates/snitchwatch-spike/src/main.rs` — tonic `Ui` server implementation
 - `docs/superpowers/specs/2026-04-10-snitchwatch-design.md` — design doc
 - `docs/superpowers/plans/2026-04-10-bridge-foundation.md` — Plan 1
+
+---
+
+## Adjustment applied
+
+The topology correction documented in this spike was implemented in Plan 2
+("M1.5 — Topology Flip"). The bridge now binds the gRPC `Ui` server and
+opensnitchd dials in as the gRPC client. The M1 JSON envelope inside
+`Notification.data` and the `grpc_client.rs` reconnect helper have been
+deleted. See `crates/snitchwatch-bridge/src/grpc_server.rs` and
+`docs/superpowers/plans/2026-04-11-topology-flip.md`.

@@ -1,0 +1,16 @@
+[package]
+name = "fire_ask_rule"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "fire_ask_rule"
+path = "fire_ask_rule.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1.40", features = ["macros", "rt-multi-thread"] }
+tonic = "0.12"
+snitchwatch-proto = { path = "../../../crates/snitchwatch-proto" }

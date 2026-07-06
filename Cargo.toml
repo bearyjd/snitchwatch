@@ -5,6 +5,30 @@ members = [
     "crates/snitchwatch-spike",
     "crates/snitchwatch-bridge",
     "crates/snitchwatch-bridge-cli",
+    "crates/snitchwatch-tauri",
+    "crates/kirigami-spike",
+    "crates/snitchwatch-kirigami",
+    "crates/scanner-core",
+    "crates/scanner-cli",
+    "crates/scanner-privileged",
+    "tests/mock_opensnitchd",
+    "tests/integration",
+]
+# `kirigami-spike` and `snitchwatch-kirigami` require system Qt6 + Kirigami dev
+# packages to build (see
+# docs/superpowers/specs/2026-07-04-cxx-qt-feasibility-research.md) — it's a
+# throwaway Phase 3a feasibility spike, not shipped functionality, and
+# shouldn't force that dependency on every contributor running a bare
+# `cargo build`/`cargo test`. Build it explicitly via `-p kirigami-spike`.
+default-members = [
+    "crates/snitchwatch-proto",
+    "crates/snitchwatch-spike",
+    "crates/snitchwatch-bridge",
+    "crates/snitchwatch-bridge-cli",
+    "crates/snitchwatch-tauri",
+    "crates/scanner-core",
+    "crates/scanner-cli",
+    "crates/scanner-privileged",
     "tests/mock_opensnitchd",
     "tests/integration",
 ]
@@ -32,3 +56,13 @@ regex = "1"
 anyhow = "1"
 proptest = "1"
 async-stream = "0.3"
+tokio-stream = "0.1"
+rusqlite = { version = "0.32", features = ["bundled", "chrono"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "gzip"] }
+addr = "0.15"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+async-trait = "0.1"
+rand = "0.8"
+tempfile = "3"
+sha2 = "0.10"
+zbus = { version = "4", default-features = false, features = ["tokio"] }

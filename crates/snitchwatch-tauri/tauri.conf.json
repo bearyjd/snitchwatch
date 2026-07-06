@@ -1,0 +1,25 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Snitchwatch",
+  "version": "0.1.0",
+  "identifier": "org.snitchwatch.Snitchwatch",
+  "build": {
+    "frontendDist": "../../web"
+  },
+  "app": {
+    "windows": [],
+    "security": {
+      "csp": null
+    },
+    "trayIcon": {
+      "iconPath": "icons/snitchwatch.png",
+      "iconAsTemplate": true
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["deb", "rpm", "appimage"],
+    "icon": ["icons/snitchwatch.png"],
+    "category": "Network"
+  }
+}

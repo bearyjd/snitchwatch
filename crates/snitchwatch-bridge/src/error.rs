@@ -22,6 +22,9 @@ pub enum BridgeError {
     #[error("connection cache error: {reason}")]
     Cache { reason: String },
 
+    #[error("blocklist store error: {0}")]
+    Blocklist(#[from] crate::blocklists::store::StoreError),
+
     #[error("daemon disconnected — reconnecting")]
     Disconnected,
 

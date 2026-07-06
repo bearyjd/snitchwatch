@@ -12,6 +12,8 @@ snitchwatch-proto = { path = "../../crates/snitchwatch-proto" }
 tokio = { workspace = true }
 tonic = { workspace = true }
 prost = { workspace = true }
-tracing = { workspace = true }
 tokio-stream = "0.1"
-async-stream = "0.3"
+thiserror = { workspace = true }
+
+[dev-dependencies]
+snitchwatch-bridge = { path = "../../crates/snitchwatch-bridge" }

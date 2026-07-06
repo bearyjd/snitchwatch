@@ -1,0 +1,31 @@
+# THROWAWAY SPIKE CRATE — NOT PRODUCTION CODE.
+#
+# Purpose: prove cxx-qt + Kirigami feasibility for Phase 3a of the
+# CXX-Qt feasibility research. This crate is a disposable probe. It is a
+# member of the workspace ONLY so we can prove cxx-qt-build's build.rs
+# coexists with the tonic (snitchwatch-proto) and tauri (snitchwatch-tauri)
+# build scripts in the same Cargo.lock / target dir. Delete when the
+# go/no-go decision on Phase 3b is made.
+[package]
+name = "kirigami-spike"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "THROWAWAY SPIKE: cxx-qt + Kirigami feasibility probe. Not production code."
+
+[lib]
+name = "kirigami_spike"
+path = "src/lib.rs"
+
+[[bin]]
+name = "kirigami-spike"
+path = "src/main.rs"
+
+[dependencies]
+cxx = "1"
+cxx-qt = "0.9"
+cxx-qt-lib = { version = "0.9", features = ["qt_full"] }
+tokio = { workspace = true }
+
+[build-dependencies]
+cxx-qt-build = "0.9"

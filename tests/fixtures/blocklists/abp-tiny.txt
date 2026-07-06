@@ -1,0 +1,5 @@
+[Adblock Plus 2.0]
+! tiny test fixture
+||doubleclick.net^
+||google-analytics.com^$third-party
+||facebook.net^

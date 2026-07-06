@@ -1,0 +1,25 @@
+[package]
+name = "scanner-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Component B userspace scanner CLI — runs a userspace-tier scan and prints a report."
+
+[lib]
+name = "scanner_cli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "scanner-cli"
+path = "src/main.rs"
+
+[dependencies]
+scanner-core = { path = "../scanner-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

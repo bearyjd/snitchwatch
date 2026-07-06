@@ -1,194 +1,156 @@
-//! In-process mock of opensnitchd's gRPC server.
+//! In-process mock of opensnitchd, the gRPC **client** that dials a
+//! Snitchwatch bridge.
 //!
-//! The mock implements the `UI` trait from the generated proto stubs and
-//! takes scripted event sequences via a public API. Tests construct a mock,
-//! script some events, hand the gRPC server's address to the bridge under
-//! test, and assert on the resulting WebSocket message stream.
-//!
-//! The proto package is `protocol`, so the generated server trait lives at
-//! `snitchwatch_proto::protocol::ui_server::Ui`.
+//! This crate exists for the post-M1.5 topology: the bridge binds the gRPC
+//! `Ui` server, and opensnitchd is the client. Tests construct a
+//! `MockOpensnitchd::connect(bridge_addr)`, then drive the bridge by calling
+//! the same RPCs the real daemon would: `ping`, `subscribe`, `ask_rule`,
+//! `notifications`, `post_alert`.
 
+use snitchwatch_proto::protocol::ui_client::UiClient;
 use snitchwatch_proto::protocol::{
-    ui_server::{Ui, UiServer},
-    Alert, ClientConfig, Connection, MsgResponse, Notification, NotificationReply, PingReply,
-    PingRequest, Rule,
+    Alert, ClientConfig, Connection, MsgResponse, NotificationReply, PingReply, PingRequest, Rule,
 };
 use std::net::SocketAddr;
-use std::pin::Pin;
-use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, Mutex};
-use tokio_stream::{wrappers::ReceiverStream, Stream};
-use tonic::{transport::Server, Request, Response, Status, Streaming};
+use tokio::sync::mpsc;
+use tonic::transport::{Channel, Endpoint};
 
-/// Scripted event the mock can deliver to the bridge.
-#[derive(Debug, Clone)]
-pub enum ScriptedEvent {
-    /// Send a Notification with the given payload to the connected client.
-    Notification(Notification),
-    /// Wait this many milliseconds before delivering the next event.
-    Delay(u64),
-    /// Forcibly close the stream (simulates daemon crash / network drop).
-    Disconnect,
+/// Errors the mock can surface to tests.
+#[derive(Debug, thiserror::Error)]
+pub enum MockError {
+    #[error("connect failed: {0}")]
+    Connect(#[from] tonic::transport::Error),
+    #[error("rpc failed: {0}")]
+    Rpc(#[from] tonic::Status),
 }
 
-#[derive(Default)]
-pub struct MockState {
-    pub scripted: Vec<ScriptedEvent>,
-    pub received_replies: Vec<NotificationReply>,
-    pub ask_rule_default: Option<Rule>,
-}
-
-#[derive(Clone, Default)]
+/// Mock opensnitchd as a gRPC client.
+#[derive(Clone)]
 pub struct MockOpensnitchd {
-    state: Arc<Mutex<MockState>>,
+    client: UiClient<Channel>,
 }
 
 impl MockOpensnitchd {
-    pub fn new() -> Self {
-        Self::default()
-    }
+    /// Dial the bridge at `addr`. Caller is responsible for ensuring the
+    /// bridge has bound its gRPC port (use `RunningBridge::grpc_addr`).
+    pub async fn connect(addr: SocketAddr) -> Result<Self, MockError> {
+        let endpoint = Endpoint::from_shared(format!("http://{addr}"))
+            .map_err(MockError::Connect)?
+            .connect_timeout(Duration::from_secs(2));
 
-    pub async fn script(&self, events: Vec<ScriptedEvent>) {
-        self.state.lock().await.scripted = events;
-    }
-
-    pub async fn set_ask_rule_default(&self, rule: Rule) {
-        self.state.lock().await.ask_rule_default = Some(rule);
-    }
-
-    pub async fn received_replies(&self) -> Vec<NotificationReply> {
-        self.state.lock().await.received_replies.clone()
-    }
-
-    pub fn into_server(self) -> UiServer<Self> {
-        UiServer::new(self)
-    }
-
-    /// Spawn the mock on a random local port and return its address.
-    pub async fn spawn(self) -> SocketAddr {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let server = self.into_server();
-
-        tokio::spawn(async move {
-            Server::builder()
-                .add_service(server)
-                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
-                .await
-                .ok();
-        });
-
-        // Brief pause to let the server actually start accepting connections.
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        addr
-    }
-}
-
-#[tonic::async_trait]
-impl Ui for MockOpensnitchd {
-    type NotificationsStream =
-        Pin<Box<dyn Stream<Item = Result<Notification, Status>> + Send + 'static>>;
-
-    async fn ping(
-        &self,
-        _request: Request<PingRequest>,
-    ) -> Result<Response<PingReply>, Status> {
-        Ok(Response::new(PingReply::default()))
-    }
-
-    async fn ask_rule(
-        &self,
-        _request: Request<Connection>,
-    ) -> Result<Response<Rule>, Status> {
-        let default = self.state.lock().await.ask_rule_default.clone();
-        Ok(Response::new(default.unwrap_or_default()))
-    }
-
-    async fn subscribe(
-        &self,
-        request: Request<ClientConfig>,
-    ) -> Result<Response<ClientConfig>, Status> {
-        Ok(Response::new(request.into_inner()))
-    }
-
-    async fn post_alert(
-        &self,
-        _request: Request<Alert>,
-    ) -> Result<Response<MsgResponse>, Status> {
-        Ok(Response::new(MsgResponse::default()))
-    }
-
-    async fn notifications(
-        &self,
-        request: Request<Streaming<NotificationReply>>,
-    ) -> Result<Response<Self::NotificationsStream>, Status> {
-        let state = self.state.clone();
-        let mut inbound = request.into_inner();
-
-        // Collector: record every NotificationReply the bridge sends.
-        let collector_state = state.clone();
-        tokio::spawn(async move {
-            while let Ok(Some(reply)) = inbound.message().await {
-                collector_state.lock().await.received_replies.push(reply);
+        let mut last_err = None;
+        for _ in 0..20 {
+            match endpoint.connect().await {
+                Ok(channel) => {
+                    return Ok(Self {
+                        client: UiClient::new(channel),
+                    });
+                }
+                Err(e) => {
+                    last_err = Some(e);
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
             }
-        });
+        }
+        Err(MockError::Connect(last_err.unwrap()))
+    }
 
-        // Outbound: drain scripted events onto an mpsc channel.
-        let (tx, rx) = mpsc::channel::<Result<Notification, Status>>(16);
-        let script = state.lock().await.scripted.clone();
+    pub async fn ping(&mut self, id: u64) -> Result<PingReply, MockError> {
+        let reply = self
+            .client
+            .ping(PingRequest { id, stats: None })
+            .await?
+            .into_inner();
+        Ok(reply)
+    }
 
+    pub async fn subscribe(&mut self, name: &str) -> Result<ClientConfig, MockError> {
+        let cfg = ClientConfig {
+            id: 1,
+            name: name.to_string(),
+            version: "mock-1.6.0".to_string(),
+            ..Default::default()
+        };
+        let echoed = self.client.subscribe(cfg).await?.into_inner();
+        Ok(echoed)
+    }
+
+    /// Send a single AskRule unary RPC and wait for the bridge's `Rule` reply.
+    pub async fn ask_rule(&mut self, conn: Connection) -> Result<Rule, MockError> {
+        let rule = self.client.ask_rule(conn).await?.into_inner();
+        Ok(rule)
+    }
+
+    pub async fn post_alert(&mut self, alert: Alert) -> Result<MsgResponse, MockError> {
+        let reply = self.client.post_alert(alert).await?.into_inner();
+        Ok(reply)
+    }
+
+    /// Open the bidi `Notifications` stream.
+    pub async fn open_notifications(
+        &mut self,
+    ) -> Result<(mpsc::Sender<NotificationReply>, mpsc::Receiver<u64>), MockError> {
+        let (reply_tx, reply_rx) = mpsc::channel::<NotificationReply>(16);
+        let outbound = tokio_stream::wrappers::ReceiverStream::new(reply_rx);
+
+        let mut inbound = self.client.notifications(outbound).await?.into_inner();
+
+        let (count_tx, count_rx) = mpsc::channel::<u64>(16);
         tokio::spawn(async move {
-            for event in script {
-                match event {
-                    ScriptedEvent::Notification(n) => {
-                        if tx.send(Ok(n)).await.is_err() {
-                            return;
-                        }
-                    }
-                    ScriptedEvent::Delay(ms) => {
-                        tokio::time::sleep(Duration::from_millis(ms)).await;
-                    }
-                    ScriptedEvent::Disconnect => {
-                        // Drop tx to close the stream.
-                        return;
-                    }
+            while let Ok(Some(n)) = inbound.message().await {
+                if count_tx.send(n.id).await.is_err() {
+                    return;
                 }
             }
         });
 
-        let stream = ReceiverStream::new(rx);
-        Ok(Response::new(Box::pin(stream) as Self::NotificationsStream))
+        Ok((reply_tx, count_rx))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use snitchwatch_bridge::cache::connections::ConnectionCache;
+    use snitchwatch_bridge::grpc_server::UiService;
+    use snitchwatch_bridge::ws_messages::ServerMessage;
+    use std::sync::Arc;
+    use tokio::sync::{broadcast, Mutex};
+    use tonic::transport::Server;
 
-    #[tokio::test]
-    async fn mock_spawns_and_accepts_ping() {
-        let mock = MockOpensnitchd::new();
-        let addr = mock.spawn().await;
-
-        let channel = tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
-            .unwrap()
-            .connect()
-            .await
-            .unwrap();
-
-        let mut client =
-            snitchwatch_proto::protocol::ui_client::UiClient::new(channel);
-        let reply = client.ping(PingRequest::default()).await.unwrap();
-        let _ = reply.into_inner();
+    async fn spawn_bridge_grpc() -> SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let cache = Arc::new(Mutex::new(ConnectionCache::new(64)));
+        let (tx, _rx) = broadcast::channel::<ServerMessage>(16);
+        let tray_pub = Arc::new(snitchwatch_bridge::tray_state::TrayStatePublisher::new());
+        let notice_bus = Arc::new(snitchwatch_bridge::notice::NoticeBus::new());
+        let svc = UiService::new(cache, tx, tray_pub, notice_bus).into_server();
+        tokio::spawn(async move {
+            Server::builder()
+                .add_service(svc)
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+                .await
+                .ok();
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        addr
     }
 
     #[tokio::test]
-    async fn script_stores_events() {
-        let mock = MockOpensnitchd::new();
-        mock.script(vec![ScriptedEvent::Delay(10), ScriptedEvent::Disconnect])
-            .await;
-        let state = mock.state.lock().await;
-        assert_eq!(state.scripted.len(), 2);
+    async fn mock_can_ping_bridge() {
+        let addr = spawn_bridge_grpc().await;
+        let mut mock = MockOpensnitchd::connect(addr).await.unwrap();
+        let reply = mock.ping(123).await.unwrap();
+        assert_eq!(reply.id, 123);
+    }
+
+    #[tokio::test]
+    async fn mock_can_subscribe_to_bridge() {
+        let addr = spawn_bridge_grpc().await;
+        let mut mock = MockOpensnitchd::connect(addr).await.unwrap();
+        let echoed = mock.subscribe("opensnitchd-mock").await.unwrap();
+        assert_eq!(echoed.name, "opensnitchd-mock");
     }
 }

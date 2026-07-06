@@ -1,0 +1,422 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+/* Copyright (C) 2026 Objective Development Software GmbH */
+
+/* Column widths — overridden at runtime via applyLocalizationToDOM() */
+:root {
+  --col-rule-w:     39px;
+  --col-traffic-w:  6em;
+  --col-activity-w: 7em;
+}
+
+/* ------------------------------------------ */
+/* Connections table header                   */
+/* ------------------------------------------ */
+#connections-header {
+  display: flex;
+  align-items: stretch;
+  height: var(--pane-hdr-h);
+  padding: 0 8px;
+  background-clip: padding-box;
+  box-shadow: inset 0 -1px 0 var(--line);
+  box-sizing: border-box;
+  flex-shrink: 0;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+#connections-header > div {
+  color: var(--text-muted);
+  padding: 2px 6px;
+}
+
+#connections-header > div:hover {
+  color: var(--text);
+}
+
+#connections-header > div:hover .rules-sort-indicator {
+  color: var(--text);
+}
+
+#connections-header > div:active {
+  color: var(--text);
+  opacity: 0.7;
+}
+
+#connections-header > div:active .rules-sort-indicator {
+  color: var(--text);
+}
+
+.connections-th {
+  display: flex;
+  align-items: center;
+  font-size: var(--font-meta);
+  font-weight: bold;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.connections-th[data-col="connection"] {
+  flex: 1;
+  min-width: 0;
+  padding-left: 14px; /* skip disclosure spacer (12px + 2px margin) */
+}
+
+.connections-th[data-col="rule"] {
+  flex-shrink: 0;
+  width: var(--col-rule-w);
+  justify-content: flex-end;
+  padding-right: 8px;
+}
+
+.connections-th[data-col="traffic"] {
+  flex-shrink: 0;
+  width: var(--col-traffic-w);
+  padding-right: 7px; /* matches .total-bytes padding-right */
+  justify-content: flex-end;
+}
+
+.connections-th[data-col="activity"] {
+  flex-shrink: 0;
+  width: var(--col-activity-w);
+  padding: 0 7px; /* matches .last-event padding */
+  justify-content: flex-end;
+}
+
+.connections-th.is-sortable {
+  cursor: pointer;
+}
+
+/* ------------------------------------------ */
+/* Row style */
+/* ------------------------------------------ */
+.row {
+  display: flex;
+  font-size: var(--font-body);
+  align-items: center;
+  height: var(--row-h);
+  padding-right: 8px;
+  box-sizing: border-box;
+  background: transparent;
+  transition: height 0.5s ease, opacity 0.5s ease;
+}
+
+.row + .row {
+  border-top: 1px solid var(--line);
+}
+
+.row + .row.is-selected,
+.row.is-selected + .row,
+.row + .row:hover,
+.row:hover + .row {
+  border-top: 1px solid transparent;
+}
+
+.row:hover {
+  background: var(--row-hover-bg);
+  border-radius: 6px;
+  border-bottom-color: transparent;
+}
+
+
+/* ------------------------------------------ */
+/* Disclosure triangle */
+/* ------------------------------------------ */
+.disclosure {
+  width: 24px;
+  height: 24px;
+  background-color: var(--text-muted);
+  mask-repeat: no-repeat;
+  mask-size: 18px 18px;
+  mask-position: center;
+  mask-image: url('data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"><path fill="%23000" fill-rule="nonzero" d="m6.53 3.47 4 4a.75.75 0 0 1 0 1.06l-4 4a.75.75 0 0 1-1.06-1.06L8.94 8 5.47 4.53a.75.75 0 0 1 1.06-1.016"/></svg>');
+  cursor: pointer;
+  flex-shrink: 0;
+  position: relative;
+  transform: translateX(4px);
+  transform-origin: 50% 50%;
+  transition: transform .5s ease;
+  border: 1px solid red;
+}
+
+.disclosure:not(.spacher):hover {
+  background-color: var(--text);
+}
+
+.disclosure.expanded {
+  transform: translateX(4px) rotate(90deg);
+}
+
+.disclosure.spacer {
+  visibility: hidden;
+}
+
+/* ------------------------------------------ */
+/* Title – text‑truncation */
+/* ------------------------------------------ */
+.title {
+  padding: 3px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.title.clickable {
+  cursor: pointer;
+}
+
+.title.clickable:hover {
+  background: var(--hover);
+  border-radius: 4px;
+}
+
+/* ------------------------------------------ */
+/* Statistics */
+/* ------------------------------------------ */
+.total-bytes {
+  font-size: var(--font-meta);
+  padding: 3px 7px 3px 0;
+  width: var(--col-traffic-w);
+  flex-shrink: 0;
+  text-align: right;
+}
+
+.last-event {
+  font-size: var(--font-meta);
+  padding: 3px 7px;
+  width: var(--col-activity-w);
+  flex-shrink: 0;
+  text-align: right;
+  border-radius: 5px;
+}
+
+.last-event.recent-allow {
+  background: var(--allow-bg);
+}
+
+.last-event.recent-deny {
+  background: var(--deny-bg);
+}
+
+.last-event.recent-mixed {
+  background: var(--mixed-bg);
+}
+
+/* ------------------------------------------ */
+/* Rule Button */
+/* ------------------------------------------ */
+.rule-col {
+  margin-left: auto;
+  flex-shrink: 0;
+  width: var(--col-rule-w);
+  display: flex;
+  justify-content: flex-end;
+}
+
+.rule-button {
+  display: flex;
+  align-items: center;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  overflow: hidden;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.rule-button:hover {
+  transform: scale(1.1);
+}
+
+.rule-button-placeholder {
+  flex-shrink: 0;
+  width: 24px; /* matches rule-button icon width */
+}
+
+.rule-button + .details-button {
+  margin-left: 4px;
+}
+
+
+.details-button {
+  display: flex;
+  align-items: center;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  overflow: hidden;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.details-button:hover {
+  transform: scale(1.1) translate(0.5px, 0px);
+}
+
+.details-button svg {
+  width: 15px;
+  height: 24px;
+}
+
+/* ------------------------------------------ */
+/* Inspector */
+/* ------------------------------------------ */
+
+/* Value-specific styles for connection inspector rows */
+.inspector-value.domain-name {
+  font-weight: 600;
+}
+
+.row-inspector .path {
+  color: var(--text);
+}
+
+.row-inspector .via {
+  color: var(--text-muted);
+}
+
+/* Container that holds all the rule lines */
+#rules {
+  line-height: 1.4;
+  color: var(--text);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.row-inspector {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.inspector-statistics {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.covering-rules-headline,
+.related-rules-headline {
+  font-size: var(--font-meta);
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  margin-top: 16px;
+}
+
+/* Individual parts of a rule line */
+.rule,
+.blocklist-entry {
+  margin: 0;
+  cursor: default;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  padding: 3px 6px;
+}
+
+.blocklist-entry .emoji svg {
+  margin: 1px;
+}
+
+.emoji {
+  margin-right: 0;
+  display: flex;
+  font-size: var(--font-default);
+}
+
+.process {
+  font-weight: 600;
+}
+
+.arrow {
+  display: flex;
+  margin: 0;
+}
+
+.proto {
+  color: var(--text-muted);
+}
+
+.rule.rule-link {
+  cursor: pointer;
+}
+
+.rule.rule-link:hover {
+  background: var(--hover);
+  border-radius: 4px;
+}
+
+.blocklist-entry.blocklist-entry-link {
+  cursor: pointer;
+}
+
+.blocklist-entry.blocklist-entry-link:hover {
+  background: var(--hover);
+  border-radius: 4px;
+}
+
+.rule-enable-checkbox {
+  display: inline-block;
+  vertical-align: middle;
+  margin: 0 2px 0 0;
+}
+
+.blocklist-item {
+  margin-right: .3em;
+}
+
+.list-info {
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.blocklist-names {
+  margin-top: .2em;
+  margin-left: 1.5em;
+  color: var(--text-muted);
+  display: none;
+}
+
+.blocklist-names li {
+  margin: .1em 0;
+}
+
+.inactive {
+  font-size: var(--font-micro);
+  opacity: 0.72;
+}
+
+.inactive .emoji {
+  font-size: var(--font-micro);
+}
+
+/* ------------------------------------------ */
+/* Rule button highlight animation            */
+/* ------------------------------------------ */
+@keyframes rule-button-bounce {
+  0%   { transform: scale(1.0); }
+  8%   { transform: scale(2.0); }
+  33%  { transform: scale(0.72); }
+  55%  { transform: scale(1.12); }
+  76%  { transform: scale(0.96); }
+  100% { transform: scale(1.0); }
+}
+
+.rule-button.rule-button-bounce,
+.details-button.rule-button-bounce {
+  animation: rule-button-bounce 1s linear;
+}
+
