@@ -57,3 +57,8 @@ cxx-qt-build = "=0.9.1"
 [dev-dependencies]
 tempfile = "3"
 tokio = { version = "1.40", features = ["test-util"] }
+# Live core-loop integration test (tests/live_loop.rs): drives the in-process
+# bridge with the same mock daemon the workspace-root protocol test uses.
+mock-opensnitchd = { path = "../../tests/mock_opensnitchd" }
+snitchwatch-proto = { path = "../snitchwatch-proto" }
+tracing-subscriber = "0.3"

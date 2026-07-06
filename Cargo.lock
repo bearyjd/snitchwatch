@@ -4631,6 +4631,7 @@ dependencies = [
  "cxx-qt-lib",
  "dns-lookup",
  "maxminddb",
+ "mock-opensnitchd",
  "notify-rust",
  "regex",
  "reqwest 0.12.28",
@@ -4638,9 +4639,11 @@ dependencies = [
  "serde_json",
  "snitchwatch-bridge",
  "snitchwatch-bridge-cli",
+ "snitchwatch-proto",
  "tempfile",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "which 6.0.3",
 ]
 
