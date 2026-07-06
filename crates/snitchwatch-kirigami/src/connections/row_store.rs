@@ -74,6 +74,29 @@ impl Verdict {
     }
 }
 
+/// Friendly, never-blank label for a row's rule-match diagnostics (Little-
+/// Snitch-parity "which rule decided this connection" surfacing).
+///
+/// * A pending row (no verdict yet) reads "— awaiting decision" — there is no
+///   rule to point to yet, and a blank field would look broken rather than
+///   "not applicable yet".
+/// * A decided row with a known `matched_rule` shows that rule's name
+///   verbatim (the inspector's "Show rule" action navigates to it).
+/// * A decided row with no rule name on record (e.g. a row that predates this
+///   field, or a decision path that doesn't yet populate it) reads "default
+///   action" rather than blank — the connection was still decided by
+///   *something* (opensnitchd's default action), even though the bridge
+///   doesn't have a specific rule name for it.
+pub fn matched_rule_display(row: &ConnectionRow) -> String {
+    if row.action.is_none() {
+        return "— awaiting decision".to_string();
+    }
+    match row.matched_rule.as_deref() {
+        Some(name) if !name.trim().is_empty() => name.to_string(),
+        _ => "default action".to_string(),
+    }
+}
+
 /// Ordered, id-addressable store of connection rows.
 ///
 /// The store always holds the *full* row list (`rows`). When `filter` is
@@ -456,6 +479,7 @@ mod tests {
             bytes_sent: 0,
             bytes_received: 0,
             started_at_ms: 0,
+            matched_rule: None,
         }
     }
 
@@ -763,6 +787,27 @@ mod tests {
         let ops = s.apply(ServerMessage::SetRules { rules: vec![] });
         assert!(ops.is_empty());
         assert_eq!(s.len(), 1);
+    }
+
+    #[test]
+    fn matched_rule_display_pending_row_shows_awaiting_decision() {
+        let mut r = row("p1", None);
+        r.matched_rule = None;
+        assert_eq!(matched_rule_display(&r), "— awaiting decision");
+    }
+
+    #[test]
+    fn matched_rule_display_decided_row_shows_the_rule_name() {
+        let mut r = row("a", Some("allow"));
+        r.matched_rule = Some("899-firefox-allow-out.json".to_string());
+        assert_eq!(matched_rule_display(&r), "899-firefox-allow-out.json");
+    }
+
+    #[test]
+    fn matched_rule_display_decided_row_without_rule_name_shows_default_action() {
+        let mut r = row("a", Some("allow"));
+        r.matched_rule = None;
+        assert_eq!(matched_rule_display(&r), "default action");
     }
 
     #[test]

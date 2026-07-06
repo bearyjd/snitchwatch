@@ -219,6 +219,7 @@ mod tests {
             bytes_sent: 1234,
             bytes_received: 5678,
             started_at_ms: 0,
+            matched_rule: None,
         };
         let mut tracker = TrafficTracker::new(60);
         let events = tracker.record_rows(1_000_000_000_000, &[row]);

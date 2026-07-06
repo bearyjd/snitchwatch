@@ -45,12 +45,90 @@ Kirigami.ScrollablePage {
     property string inspectBlocklistId: ""
     property bool confirmingDelete: false
 
+    // Simulate panel state (rule-match diagnostics' "Simulate" sheet — see
+    // `rules::simulator` module docs for exactly what semantics are
+    // reproduced). `simulateRan` distinguishes "never run" from "ran, no
+    // match" so the result section only appears after a real attempt.
+    property bool simulateRan: false
+    property string simulateMatchedRule: ""
+    property string simulateAction: ""
+    property int simulatePrecedence: -1
+    property var simulateUnsupported: []
+
     function actionColor(action) {
         return action === "allow" ? Kirigami.Theme.positiveTextColor : Kirigami.Theme.negativeTextColor;
     }
 
     function sourceLabel(source) {
         return source === "blocklist" ? "Blocklist rules" : "User rules";
+    }
+
+    // Rule-match diagnostics' "Show rule" jump target (called by main.qml
+    // after navigating here from ConnectionsPage's inspector). Re-populates
+    // the same inspect* properties `openInspector` uses — `selectRuleByName`
+    // returns the identical JSON shape — and opens the detail sheet directly,
+    // without needing to locate/scroll the row in the ListView first.
+    // Returns whether a rule by that name was found.
+    function openRuleByName(name) {
+        if (!page.model) return false;
+        const json = page.model.selectRuleByName(name);
+        if (!json) return false;
+        const rule = JSON.parse(json);
+        page.inspectName = rule.name;
+        page.inspectEnabled = rule.enabled;
+        page.inspectAction = rule.action;
+        page.inspectDuration = rule.duration;
+        page.inspectOperatorSummary = rule.operatorSummary;
+        page.inspectPrecedence = rule.precedence;
+        page.inspectSource = rule.source;
+        page.inspectBlocklistId = rule.blocklistId;
+        page.confirmingDelete = false;
+        list.currentIndex = rule.precedence;
+        list.positionViewAtIndex(rule.precedence, ListView.Contain);
+        inspector.open();
+        return true;
+    }
+
+    // Run the rule-match simulator (Qt-free logic in `rules::simulator`)
+    // against the sheet's candidate inputs and populate the result section.
+    function runSimulation() {
+        if (!page.model) return;
+        const json = page.model.simulate(
+            simProcessPath.text,
+            simHost.text,
+            simPort.value,
+            simProtocol.currentText
+        );
+        if (!json) return;
+        const result = JSON.parse(json);
+        page.simulateMatchedRule = result.matchedRule || "";
+        page.simulateAction = result.action || "";
+        page.simulatePrecedence = (result.precedence === undefined || result.precedence === null)
+            ? -1 : result.precedence;
+        page.simulateUnsupported = result.unsupportedOperands || [];
+        page.simulateRan = true;
+    }
+
+    // "Simulate" panel entry point (Little-Snitch-parity rule-match
+    // diagnostics), kept in the header so it stays reachable regardless of
+    // scroll position, same rationale as ConnectionsPage's search field.
+    titleDelegate: RowLayout {
+        Layout.fillWidth: true
+        spacing: Kirigami.Units.largeSpacing
+
+        Kirigami.Heading {
+            text: page.title
+            level: 1
+            Layout.alignment: Qt.AlignVCenter
+        }
+        Item {
+            Layout.fillWidth: true
+        }
+        Controls.Button {
+            text: "Simulate"
+            icon.name: "system-run"
+            onClicked: simulateSheet.open()
+        }
     }
 
     Kirigami.PlaceholderMessage {
@@ -253,6 +331,104 @@ Kirigami.ScrollablePage {
                             inspector.close();
                         }
                     }
+                }
+            }
+        }
+    }
+
+    // Rule-match simulator (Little-Snitch-parity "Simulate" panel). Pure,
+    // synchronous evaluation over already-cached rules (`RulesModel.simulate`
+    // -> `rules::simulator::simulate`) — never touches the network, so this
+    // is safe to run directly from the UI thread. Every result is labelled a
+    // simulation, never a live daemon verdict (see `rules::simulator` module
+    // docs for exactly what operand types are and aren't reproduced).
+    Kirigami.OverlaySheet {
+        id: simulateSheet
+        title: "Simulate rule match"
+
+        ColumnLayout {
+            Layout.preferredWidth: Kirigami.Units.gridUnit * 22
+            spacing: Kirigami.Units.largeSpacing
+
+            Controls.Label {
+                Layout.fillWidth: true
+                wrapMode: Text.Wrap
+                opacity: 0.7
+                font: Kirigami.Theme.smallFont
+                text: "Evaluates a candidate connection against the currently cached rules, using opensnitchd's own precedence rules. This is a simulation over cached data, not a live daemon verdict."
+            }
+
+            Kirigami.FormLayout {
+                Layout.fillWidth: true
+
+                Controls.TextField {
+                    id: simProcessPath
+                    Kirigami.FormData.label: "Process path"
+                    placeholderText: "/usr/bin/curl"
+                    Layout.fillWidth: true
+                }
+                Controls.TextField {
+                    id: simHost
+                    Kirigami.FormData.label: "Destination host"
+                    placeholderText: "github.com"
+                    Layout.fillWidth: true
+                }
+                Controls.SpinBox {
+                    id: simPort
+                    Kirigami.FormData.label: "Destination port"
+                    from: 0
+                    to: 65535
+                    value: 443
+                }
+                Controls.ComboBox {
+                    id: simProtocol
+                    Kirigami.FormData.label: "Protocol"
+                    model: ["tcp", "udp"]
+                }
+            }
+
+            Controls.Button {
+                Layout.fillWidth: true
+                text: "Run simulation"
+                icon.name: "system-run"
+                onClicked: page.runSimulation()
+            }
+
+            Kirigami.Separator {
+                Layout.fillWidth: true
+                visible: page.simulateRan
+            }
+
+            ColumnLayout {
+                Layout.fillWidth: true
+                visible: page.simulateRan
+                spacing: Kirigami.Units.smallSpacing
+
+                Controls.Label {
+                    Layout.fillWidth: true
+                    wrapMode: Text.Wrap
+                    font.bold: true
+                    text: page.simulateMatchedRule.length > 0
+                          ? ("Matched: " + page.simulateMatchedRule)
+                          : "No match — the daemon's default action would apply"
+                    color: page.simulateMatchedRule.length > 0
+                           ? page.actionColor(page.simulateAction)
+                           : Kirigami.Theme.neutralTextColor
+                }
+                Controls.Label {
+                    visible: page.simulateMatchedRule.length > 0
+                    text: "Action: " + page.simulateAction + "  ·  Position " + (page.simulatePrecedence + 1)
+                    color: page.actionColor(page.simulateAction)
+                }
+                Controls.Label {
+                    Layout.fillWidth: true
+                    visible: page.simulateUnsupported.length > 0
+                    wrapMode: Text.Wrap
+                    opacity: 0.8
+                    font: Kirigami.Theme.smallFont
+                    color: Kirigami.Theme.neutralTextColor
+                    text: "Note: this simulator doesn't evaluate " + page.simulateUnsupported.join(", ")
+                          + " — the result may not reflect real daemon behaviour for rules using them."
                 }
             }
         }

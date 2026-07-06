@@ -179,6 +179,15 @@ Kirigami.ApplicationWindow {
         ConnectionsPage {
             model: connectionsModel
             bridgeFeed: bridgeFeed
+
+            // Rule-match diagnostics "Show rule" jump (Parity 4): navigate to
+            // the Rules tab and open the matched rule's detail sheet
+            // directly, using the page instance `pageStack.replace` returns
+            // rather than a separate lookup/scroll step.
+            onShowRuleRequested: function(ruleName) {
+                const rulesPage = root.pageStack.replace(rulesPageComponent);
+                rulesPage.openRuleByName(ruleName);
+            }
         }
     }
     Component {
@@ -318,6 +327,7 @@ Kirigami.ApplicationWindow {
             Kirigami.Action {
                 text: "Rules"
                 icon.name: "view-list-details"
+                onTriggered: root.pageStack.replace(rulesPageComponent)
             },
             Kirigami.Action {
                 text: "Blocklists"

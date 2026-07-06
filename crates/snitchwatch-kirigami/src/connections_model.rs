@@ -28,7 +28,7 @@ use tokio::sync::broadcast;
 
 use crate::connections::filter::ConnectionFilter;
 use crate::connections::grouping::{GroupTree, VisibleEntry};
-use crate::connections::row_store::{ModelOp, RowStore, Verdict};
+use crate::connections::row_store::{matched_rule_display, ModelOp, RowStore, Verdict};
 use snitchwatch_bridge::ws_messages::{ConnectionRow, ServerMessage};
 
 // Role ids exposed to the QML delegate. Flat-mode leaf rows use 0-6; the
@@ -55,6 +55,14 @@ const ROLE_GROUP_PENDING: i32 = 14;
 const ROLE_GROUP_ALLOWED: i32 = 15;
 const ROLE_GROUP_DENIED: i32 = 16;
 const ROLE_GROUP_BLOCKLISTED: i32 = 17;
+/// Raw matched-rule name (empty string when unknown/not applicable), used by
+/// QML to drive the inspector's "Show rule" action — see
+/// `ConnectionsPage.qml`'s inspector and `RulesModel::select_rule_by_name`.
+const ROLE_MATCHED_RULE: i32 = 18;
+/// Friendly display string for the same — see
+/// `connections::row_store::matched_rule_display`'s doc comment for exactly
+/// what it shows for pending / no-rule-name rows.
+const ROLE_MATCHED_RULE_DISPLAY: i32 = 19;
 
 #[cxx_qt::bridge]
 pub mod qobject {
@@ -317,6 +325,10 @@ impl qobject::ConnectionsModel {
             | ROLE_GROUP_ALLOWED
             | ROLE_GROUP_DENIED
             | ROLE_GROUP_BLOCKLISTED => QVariant::from(&0i32),
+            ROLE_MATCHED_RULE => {
+                QVariant::from(&QString::from(row.matched_rule.as_deref().unwrap_or("")))
+            }
+            ROLE_MATCHED_RULE_DISPLAY => QVariant::from(&QString::from(&matched_rule_display(row))),
             _ => QVariant::default(),
         }
     }
@@ -341,6 +353,11 @@ impl qobject::ConnectionsModel {
         roles.insert(ROLE_GROUP_ALLOWED, QByteArray::from("groupAllowed"));
         roles.insert(ROLE_GROUP_DENIED, QByteArray::from("groupDenied"));
         roles.insert(ROLE_GROUP_BLOCKLISTED, QByteArray::from("groupBlocklisted"));
+        roles.insert(ROLE_MATCHED_RULE, QByteArray::from("matchedRule"));
+        roles.insert(
+            ROLE_MATCHED_RULE_DISPLAY,
+            QByteArray::from("matchedRuleDisplay"),
+        );
         roles
     }
 
@@ -787,6 +804,7 @@ fn grouped_entry_data(entry: &VisibleEntry, role: i32, store: &RowStore) -> QVar
             ROLE_GROUP_ALLOWED => QVariant::from(&(counts.allowed as i32)),
             ROLE_GROUP_DENIED => QVariant::from(&(counts.denied as i32)),
             ROLE_GROUP_BLOCKLISTED => QVariant::from(&(counts.blocklisted as i32)),
+            ROLE_MATCHED_RULE | ROLE_MATCHED_RULE_DISPLAY => QVariant::from(&QString::from("")),
             _ => QVariant::default(),
         },
         VisibleEntry::DomainHeader {
@@ -813,6 +831,7 @@ fn grouped_entry_data(entry: &VisibleEntry, role: i32, store: &RowStore) -> QVar
             ROLE_GROUP_ALLOWED => QVariant::from(&(counts.allowed as i32)),
             ROLE_GROUP_DENIED => QVariant::from(&(counts.denied as i32)),
             ROLE_GROUP_BLOCKLISTED => QVariant::from(&(counts.blocklisted as i32)),
+            ROLE_MATCHED_RULE | ROLE_MATCHED_RULE_DISPLAY => QVariant::from(&QString::from("")),
             _ => QVariant::default(),
         },
         VisibleEntry::Row { id, .. } => {
@@ -841,6 +860,12 @@ fn grouped_entry_data(entry: &VisibleEntry, role: i32, store: &RowStore) -> QVar
                 | ROLE_GROUP_ALLOWED
                 | ROLE_GROUP_DENIED
                 | ROLE_GROUP_BLOCKLISTED => QVariant::from(&0i32),
+                ROLE_MATCHED_RULE => {
+                    QVariant::from(&QString::from(row.matched_rule.as_deref().unwrap_or("")))
+                }
+                ROLE_MATCHED_RULE_DISPLAY => {
+                    QVariant::from(&QString::from(&matched_rule_display(row)))
+                }
                 _ => QVariant::default(),
             }
         }

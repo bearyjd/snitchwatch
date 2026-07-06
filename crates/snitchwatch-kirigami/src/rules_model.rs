@@ -98,6 +98,38 @@ pub mod qobject {
         #[qinvokable]
         #[cxx_name = "deleteRule"]
         fn delete_rule(self: Pin<&mut RulesModel>, name: &QString);
+
+        /// Look up a rule by name (Little-Snitch-parity rule-match
+        /// diagnostics' "Show rule" jump, invoked from `ConnectionsPage.qml`'s
+        /// inspector once the Rules tab is on screen). Returns a JSON object
+        /// describing the rule and its precedence position — the same
+        /// shape `RulesPage.qml`'s inspector already renders from, so it can
+        /// just re-populate its `inspect*` properties and open the sheet —
+        /// or an empty string if no rule by that name is known yet (e.g. the
+        /// live feed hasn't delivered a `SetRules` since the connection was
+        /// decided).
+        #[qinvokable]
+        #[cxx_name = "selectRuleByName"]
+        fn select_rule_by_name(self: Pin<&mut RulesModel>, name: &QString) -> QString;
+
+        /// Rule-match simulator (Little-Snitch-parity "Simulate" panel on
+        /// `RulesPage.qml`): evaluate a candidate process/host/port/protocol
+        /// against the currently cached rules using opensnitchd's own
+        /// precedence semantics (see `rules::simulator`'s module docs for
+        /// exactly what is and isn't reproduced). Pure, synchronous,
+        /// in-memory evaluation over already-cached data — never touches the
+        /// network or the Qt event loop's async machinery, so it's safe to
+        /// call directly from QML. Returns a JSON-encoded
+        /// `rules::simulator::SimulationResult`.
+        #[qinvokable]
+        #[cxx_name = "simulate"]
+        fn simulate(
+            self: &RulesModel,
+            process_path: &QString,
+            dest_host: &QString,
+            dest_port: i32,
+            protocol: &QString,
+        ) -> QString;
     }
 
     unsafe extern "RustQt" {
@@ -193,6 +225,37 @@ impl qobject::RulesModel {
         self.emit_client(ClientMessage::DeleteRule {
             rule_id: name.to_string(),
         });
+    }
+
+    fn select_rule_by_name(self: Pin<&mut Self>, name: &QString) -> QString {
+        let name = name.to_string();
+        match crate::rules::row_store::found_rule_json(&self.store, &name) {
+            Some(json) => QString::from(&json),
+            None => QString::from(""),
+        }
+    }
+
+    fn simulate(
+        &self,
+        process_path: &QString,
+        dest_host: &QString,
+        dest_port: i32,
+        protocol: &QString,
+    ) -> QString {
+        let input = crate::rules::simulator::SimulationInput {
+            process_path: process_path.to_string(),
+            dest_host: dest_host.to_string(),
+            dest_port: dest_port.clamp(0, u16::MAX as i32) as u16,
+            protocol: protocol.to_string(),
+        };
+        let result = crate::rules::simulator::simulate(&self.store, &input);
+        match serde_json::to_string(&result) {
+            Ok(json) => QString::from(&json),
+            Err(e) => {
+                tracing::error!(error = %e, "RulesModel: simulate result serialize failed");
+                QString::from("")
+            }
+        }
     }
 
     fn start_bridge_feed(self: Pin<&mut Self>) {

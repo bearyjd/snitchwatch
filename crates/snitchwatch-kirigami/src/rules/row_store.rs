@@ -164,6 +164,15 @@ impl RulesStore {
         self.rules.iter().find(|r| r.name == name)
     }
 
+    /// Position of the rule named `name`, or `None` if unknown. Since a
+    /// rule's index in this store *is* its precedence position (see the
+    /// struct doc comment), this doubles as "where does this rule sit in
+    /// evaluation order" — used by `RulesModel::select_rule_by_name` to jump
+    /// the Rules tab to a connection's matched rule.
+    pub fn index_of(&self, name: &str) -> Option<usize> {
+        self.rules.iter().position(|r| r.name == name)
+    }
+
     /// Apply one bridge message. Returns `true` if the rule list changed (the
     /// model wrapper resets on `true`).
     pub fn apply(&mut self, msg: &ServerMessage) -> bool {
@@ -207,6 +216,50 @@ impl RulesStore {
         updated.enabled = !updated.enabled;
         serde_json::to_value(&updated).ok()
     }
+}
+
+/// JSON shape [`found_rule_json`] returns — the same fields
+/// `RulesPage.qml`'s inspector already has properties for, so
+/// `RulesModel::select_rule_by_name`'s QML caller can `JSON.parse` this
+/// straight into `inspect*` and open the sheet.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FoundRule<'a> {
+    name: &'a str,
+    enabled: bool,
+    action: &'static str,
+    duration: &'a str,
+    operator_summary: String,
+    /// The rule's position in evaluation order (0-based), i.e. its index in
+    /// this store — see the struct doc comment on why that index *is* the
+    /// precedence position.
+    precedence: usize,
+    source: &'static str,
+    blocklist_id: String,
+}
+
+/// Look up `name` in `store` and, if found, serialize it to the JSON shape
+/// [`FoundRule`] describes for the "Show rule" jump (see
+/// `RulesModel::select_rule_by_name`). `None` when no rule by that name is
+/// currently known.
+pub fn found_rule_json(store: &RulesStore, name: &str) -> Option<String> {
+    let idx = store.index_of(name)?;
+    let rule = store.row(idx)?;
+    let (source, blocklist_id) = match rule.source() {
+        RuleSource::User => ("user", String::new()),
+        RuleSource::Blocklist { list_id } => ("blocklist", list_id),
+    };
+    let found = FoundRule {
+        name: &rule.name,
+        enabled: rule.enabled,
+        action: rule.normalized_action(),
+        duration: &rule.duration,
+        operator_summary: rule.operator_summary(),
+        precedence: idx,
+        source,
+        blocklist_id,
+    };
+    serde_json::to_string(&found).ok()
 }
 
 #[cfg(test)]
@@ -379,5 +432,45 @@ mod tests {
     fn toggled_rule_json_unknown_name_is_none() {
         let s = RulesStore::new();
         assert!(s.toggled_rule_json("nope").is_none());
+    }
+
+    #[test]
+    fn found_rule_json_returns_the_rule_shape_for_a_known_name() {
+        let mut s = RulesStore::new();
+        s.apply(&ServerMessage::SetRules {
+            rules: vec![
+                serde_json::to_value(rule("899-firefox", true, "allow")).unwrap(),
+                serde_json::to_value(rule("900-blocklist:ads:0001-x.example", true, "deny"))
+                    .unwrap(),
+            ],
+        });
+        let json = found_rule_json(&s, "900-blocklist:ads:0001-x.example").expect("known rule");
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["name"], "900-blocklist:ads:0001-x.example");
+        assert_eq!(parsed["precedence"], 1);
+        assert_eq!(parsed["source"], "blocklist");
+        assert_eq!(parsed["blocklistId"], "ads");
+        assert_eq!(parsed["action"], "deny");
+    }
+
+    #[test]
+    fn found_rule_json_is_none_for_an_unknown_name() {
+        let s = RulesStore::new();
+        assert!(found_rule_json(&s, "nope").is_none());
+    }
+
+    #[test]
+    fn index_of_finds_the_rules_precedence_position() {
+        let mut s = RulesStore::new();
+        s.apply(&ServerMessage::SetRules {
+            rules: vec![
+                serde_json::to_value(rule("899-firefox", true, "allow")).unwrap(),
+                serde_json::to_value(rule("900-blocklist:ads:0001-x.example", true, "deny"))
+                    .unwrap(),
+            ],
+        });
+        assert_eq!(s.index_of("899-firefox"), Some(0));
+        assert_eq!(s.index_of("900-blocklist:ads:0001-x.example"), Some(1));
+        assert_eq!(s.index_of("nope"), None);
     }
 }

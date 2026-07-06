@@ -52,6 +52,17 @@ Kirigami.ScrollablePage {
     property string inspectProtocol: ""
     property string inspectVerdict: ""
     property bool inspectPending: false
+    // Raw matched-rule name (empty when unknown/not applicable — drives the
+    // "Show rule" button's visibility) and its friendly display string (never
+    // blank — see `connections::row_store::matched_rule_display`).
+    property string inspectMatchedRule: ""
+    property string inspectMatchedRuleDisplay: ""
+
+    // Rule-match diagnostics (Little-Snitch-parity "which rule decided this
+    // connection" — jump to the Rules tab). Emitted by the inspector's "Show
+    // rule" button; main.qml routes it to a RulesPage navigation + highlight,
+    // since this page has no direct reference to the Rules tab's model/page.
+    signal showRuleRequested(string ruleName)
 
     // Verdict token -> accent colour. Kept in QML since it's pure presentation.
     function verdictColor(verdict) {
@@ -170,6 +181,12 @@ Kirigami.ScrollablePage {
             required property int groupDenied
             required property int groupBlocklisted
 
+            // Rule-match diagnostics roles. Header rows report empty strings
+            // for both (see `ConnectionsModel::grouped_entry_data`) since
+            // they aren't a single decided connection.
+            required property string matchedRule
+            required property string matchedRuleDisplay
+
             onClicked: {
                 if (row.isGroupHeader) {
                     if (row.depth === 0) {
@@ -261,6 +278,8 @@ Kirigami.ScrollablePage {
         page.inspectProtocol = row.protocol;
         page.inspectVerdict = row.verdict;
         page.inspectPending = row.pending;
+        page.inspectMatchedRule = row.matchedRule;
+        page.inspectMatchedRuleDisplay = row.matchedRuleDisplay;
         inspector.open();
     }
 
@@ -292,6 +311,27 @@ Kirigami.ScrollablePage {
                     Kirigami.FormData.label: "Verdict"
                     text: page.inspectPending ? "pending" : page.inspectVerdict
                     color: page.verdictColor(page.inspectVerdict)
+                }
+                Controls.Label {
+                    Kirigami.FormData.label: "Matched rule"
+                    text: page.inspectMatchedRuleDisplay
+                    elide: Text.ElideMiddle
+                }
+            }
+
+            // Rule-match diagnostics (Little-Snitch-parity "which rule
+            // decided this connection"). Only shown when a specific rule
+            // name is known — a pending row ("awaiting decision") or a
+            // decided row with no rule name on record ("default action")
+            // have nothing to jump to.
+            Controls.Button {
+                Layout.fillWidth: true
+                visible: page.inspectMatchedRule.length > 0
+                text: "Show rule"
+                icon.name: "view-list-details"
+                onClicked: {
+                    page.showRuleRequested(page.inspectMatchedRule);
+                    inspector.close();
                 }
             }
 

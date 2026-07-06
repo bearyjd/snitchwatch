@@ -129,6 +129,7 @@ mod tests {
             bytes_sent: 0,
             bytes_received: 0,
             started_at_ms: 0,
+            matched_rule: None,
         }
     }
 

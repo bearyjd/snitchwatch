@@ -537,6 +537,7 @@ mod tests {
             bytes_sent: 10,
             bytes_received: 20,
             started_at_ms: 0,
+            matched_rule: None,
         }
     }
 
