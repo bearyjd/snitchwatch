@@ -24,6 +24,7 @@ fn main() {
     .file("src/bridge_feed.rs")
     .file("src/connections_model.rs")
     .file("src/pending_decision.rs")
+    .file("src/insight_model.rs")
     .file("src/blocklists_model.rs")
     .file("src/rules_model.rs")
     .file("src/profiles_model.rs")

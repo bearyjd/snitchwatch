@@ -44,6 +44,11 @@ Kirigami.ScrollablePage {
     // inbound pump. Null in isolated component tests (the sheet no-ops then).
     property var bridgeFeed: null
 
+    // Parity 2: the shared TrafficModel instance, threaded down to the
+    // embedded PendingDecisionSheet's mini sparkline. Null in isolated
+    // component tests (the sparkline area is simply empty then).
+    property var trafficModel: null
+
     // Snapshot of the row currently shown in the inspector sheet.
     property string inspectId: ""
     property string inspectProcess: ""
@@ -52,6 +57,13 @@ Kirigami.ScrollablePage {
     property string inspectProtocol: ""
     property string inspectVerdict: ""
     property bool inspectPending: false
+    // Parity 2 (pending-decision insight panel + "this connection" byte
+    // readout) — pulled from `ConnectionsModel.rowDetailsJson` alongside the
+    // rest of the inspector snapshot. `real`, not `int`: byte counters can
+    // exceed 2^31 for long-lived high-throughput connections.
+    property string inspectIp: ""
+    property real inspectBytesSent: 0
+    property real inspectBytesReceived: 0
     // Raw matched-rule name (empty when unknown/not applicable — drives the
     // "Show rule" button's visibility) and its friendly display string (never
     // blank — see `connections::row_store::matched_rule_display`).
@@ -280,7 +292,29 @@ Kirigami.ScrollablePage {
         page.inspectPending = row.pending;
         page.inspectMatchedRule = row.matchedRule;
         page.inspectMatchedRuleDisplay = row.matchedRuleDisplay;
+        page.applyRowDetails(row.rowId);
         inspector.open();
+    }
+
+    // Parity 2: pull the destination IP + cumulative byte counters for the
+    // insight panel and "this connection" sparkline readout. Best-effort —
+    // malformed/missing JSON degrades to blank/zero values rather than
+    // throwing, since this is a decorative side-channel, never a blocker.
+    function applyRowDetails(id) {
+        page.inspectIp = "";
+        page.inspectBytesSent = 0;
+        page.inspectBytesReceived = 0;
+        if (!page.model) {
+            return;
+        }
+        try {
+            const details = JSON.parse(page.model.rowDetailsJson(id));
+            page.inspectIp = details.dstIp || "";
+            page.inspectBytesSent = details.bytesSent || 0;
+            page.inspectBytesReceived = details.bytesReceived || 0;
+        } catch (e) {
+            // Leave the defaults above.
+        }
     }
 
     // Row inspector. For a *pending* row this is where the decision prompt lives
@@ -344,6 +378,10 @@ Kirigami.ScrollablePage {
                 rowId: page.inspectId
                 process: page.inspectProcess
                 host: page.inspectHost
+                remoteIp: page.inspectIp
+                bytesSent: page.inspectBytesSent
+                bytesReceived: page.inspectBytesReceived
+                trafficModel: page.trafficModel
                 bridgeFeed: page.bridgeFeed
                 onDecided: inspector.close()
             }

@@ -40,6 +40,15 @@ regex = { workspace = true }
 anyhow = "1"
 which = "6"
 notify-rust = "4"
+async-trait = { workspace = true }
+reqwest = { workspace = true, features = ["json"] }
+# Reverse-DNS (PTR) lookup for the pending-decision insight panel (Parity 2).
+# No async-DNS crate (hickory/trust-dns) was already in the dependency graph
+# (verified via Cargo.lock) so this is a new, deliberately small dependency:
+# a thin libc getnameinfo() wrapper, called via `spawn_blocking` since it's a
+# blocking syscall. RDAP reuses the workspace `reqwest` already pulled in by
+# the blocklists fetcher.
+dns-lookup = "2"
 
 [build-dependencies]
 cxx-qt-build = "=0.9.1"

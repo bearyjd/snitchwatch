@@ -194,6 +194,7 @@ Kirigami.ApplicationWindow {
         ConnectionsPage {
             model: connectionsModel
             bridgeFeed: bridgeFeed
+            trafficModel: trafficModel
 
             // Rule-match diagnostics "Show rule" jump (Parity 4): navigate to
             // the Rules tab and open the matched rule's detail sheet

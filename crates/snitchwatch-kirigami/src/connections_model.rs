@@ -190,6 +190,15 @@ pub mod qobject {
             process_key: &QString,
             domain_key: &QString,
         );
+
+        /// Parity 2 (pending-decision insight panel + mini sparkline): the
+        /// destination IP and cumulative byte counters for a single row by
+        /// id, JSON-encoded as `{"dstIp","bytesSent","bytesReceived"}`.
+        /// Returns `"{}"` for an unknown id (e.g. a group-header pseudo-row)
+        /// rather than erroring — the inspector degrades to blank fields.
+        #[qinvokable]
+        #[cxx_name = "rowDetailsJson"]
+        fn row_details_json(self: &ConnectionsModel, id: &QString) -> QString;
     }
 
     // Protected base-class helpers inherited from QAbstractListModel.
@@ -618,6 +627,36 @@ impl qobject::ConnectionsModel {
         unsafe {
             self.as_mut().end_reset_model();
         }
+    }
+
+    /// Parity 2: destination IP + cumulative byte counters for a single row,
+    /// for the pending-decision dialog's insight panel and "this connection"
+    /// sparkline readout.
+    fn row_details_json(&self, id: &QString) -> QString {
+        let id = id.to_string();
+        let Some(row) = self.store.row_by_id(&id) else {
+            return QString::from("{}");
+        };
+
+        #[derive(serde::Serialize)]
+        struct RowDetails<'a> {
+            #[serde(rename = "dstIp")]
+            dst_ip: &'a str,
+            #[serde(rename = "bytesSent")]
+            bytes_sent: u64,
+            #[serde(rename = "bytesReceived")]
+            bytes_received: u64,
+        }
+
+        let details = RowDetails {
+            dst_ip: &row.dst_ip,
+            bytes_sent: row.bytes_sent,
+            bytes_received: row.bytes_received,
+        };
+        QString::from(&serde_json::to_string(&details).unwrap_or_else(|e| {
+            tracing::error!(error = %e, "ConnectionsModel: row details serialize failed");
+            "{}".to_string()
+        }))
     }
 
     /// Apply the auto-select-on-new-pending-row policy. Sets `autoSelectRowId`
