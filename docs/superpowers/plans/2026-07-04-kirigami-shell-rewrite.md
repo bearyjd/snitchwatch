@@ -2,6 +2,16 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **STATUS 2026-07-05 — Phase 3b COMPLETE (plus Little-Snitch parity features beyond this plan's scope).**
+> All tasks 1–18 implemented on `feat/snitchwatch-shell-and-release`. Highlights and deviations:
+> - Task 7 (PendingDecisionSheet) + Task 8 (Connections page, filter/search, auto-select) — landed via `feat/phase3b-kirigami-continue` merge.
+> - Task 9 Blocklists `2af8550`; Task 10 Rules `2721158` (note: a QML role named `action` collides silently with `ItemDelegate.action` — renamed `ruleAction`; avoid built-in-colliding names).
+> - Task 13 live bridge wiring `c50d977`: shell consumes `RunningBridge.broadcast_tx`/`inbound_tx` in-process (no WS round-trip); per-model `startBridgeFeed()` + `bridge_dispatch.rs` routing.
+> - Task 11 Traffic `503bf0d`: QtCharts/QtGraphs NOT available on the build host → QML Canvas polyline fallback (see annotated checkboxes below); bridge now emits `TrafficEvents` (`f1adad1`).
+> - Task 12 wizard `b71ccbd`; Tasks 15/16 `7194724`; Tasks 17/18 `0e61e8b` (notify-rust dispatch — cxx-kde-frameworks lacks KNotification; tray via Qt.labs.platform, present on host).
+> - Beyond-plan parity features: grouped Process→Domain monitor `da8ba56`; matched-rule diagnostics + simulator `61b7c33`/`4949559`; profiles with NetworkManager auto-activation (merge `2a6f316`); enhanced decision dialog (scopes/insight/sparkline) `f2022d0`/`4cbb0af`; geo panel (merge `e6d2d8c`).
+> - **Still outstanding:** Task 7's manual fullscreen-focus test on a real Plasma session; old Tauri/`web/` removal (gated on real-use proof per non-goals); known bug: blocklist `900-` band sorts inside the user-rule range (documented in `profiles/materializer.rs`).
+
 **Goal:** Replace `crates/snitchwatch-tauri/` (891 lines) and the vendored
 `web/` frontend (~6,939 lines of JS) with a Qt6/QML + Kirigami native shell
 built on `cxx-qt`, per Option D in
