@@ -916,7 +916,6 @@ impl qobject::ConnectionsModel {
     }
 }
 
-
 /// Read one role of a grouped-projection [`VisibleEntry`] into the QVariant
 /// shape `data()` returns. `store` resolves leaf `Row` entries' full
 /// `ConnectionRow` content (the tree only tracks ids).

@@ -46,10 +46,7 @@ impl Tray {
     ///
     /// In headless test mode (no AppHandle available), use the pure functions
     /// `derive_tooltip` and `derive_menu_label` directly instead.
-    pub fn install(
-        app: &tauri::AppHandle,
-        rx: watch::Receiver<TrayState>,
-    ) -> tauri::Result<Self> {
+    pub fn install(app: &tauri::AppHandle, rx: watch::Receiver<TrayState>) -> tauri::Result<Self> {
         use tauri::tray::TrayIconBuilder;
 
         let _icon = TrayIconBuilder::new()
@@ -85,7 +82,10 @@ mod tests {
 
     #[test]
     fn tooltip_pending_uses_count() {
-        assert_eq!(derive_tooltip(&TrayState::Pending(3)), "3 pending decisions");
+        assert_eq!(
+            derive_tooltip(&TrayState::Pending(3)),
+            "3 pending decisions"
+        );
     }
 
     #[test]

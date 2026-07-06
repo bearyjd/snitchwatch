@@ -52,7 +52,11 @@ fn run_systemctl_list_unit_files() -> String {
         Err(_) => return String::new(),
     };
     let output = std::process::Command::new(systemctl)
-        .args(["--user", "list-unit-files", "snitchwatch-opensnitchd.service"])
+        .args([
+            "--user",
+            "list-unit-files",
+            "snitchwatch-opensnitchd.service",
+        ])
         .output();
     match output {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).into_owned(),
@@ -99,10 +103,7 @@ mod tests {
     #[test]
     fn parse_disabled_returns_unit_inactive() {
         let stdout = "UNIT FILE                              STATE      VENDOR PRESET\nsnitchwatch-opensnitchd.service        disabled   disabled\n\n1 unit files listed.";
-        assert_eq!(
-            parse_systemctl_output(stdout),
-            DaemonState::UnitInactive
-        );
+        assert_eq!(parse_systemctl_output(stdout), DaemonState::UnitInactive);
     }
 
     #[test]
@@ -114,9 +115,6 @@ mod tests {
     #[test]
     fn parse_masked_returns_unit_inactive() {
         let stdout = "snitchwatch-opensnitchd.service        masked     disabled";
-        assert_eq!(
-            parse_systemctl_output(stdout),
-            DaemonState::UnitInactive
-        );
+        assert_eq!(parse_systemctl_output(stdout), DaemonState::UnitInactive);
     }
 }

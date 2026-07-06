@@ -7,8 +7,7 @@ use cxx_qt_build::{CxxQtBuilder, QmlModule};
 
 fn main() {
     CxxQtBuilder::new_qml_module(
-        QmlModule::new("com.snitchwatch.spike")
-            .qml_files(["qml/main.qml"]),
+        QmlModule::new("com.snitchwatch.spike").qml_files(["qml/main.qml"]),
     )
     .file("src/cxxqt_object.rs")
     .build();

@@ -52,8 +52,8 @@ fn main() -> anyhow::Result<()> {
 
     // 4. Spawn the in-process bridge; extract the channel receivers before
     //    moving anything into Tauri closures.
-    let bridge_runtime = runtime
-        .block_on(async { spawn_bridge_runtime(BridgeRuntimeConfig::default()).await })?;
+    let bridge_runtime =
+        runtime.block_on(async { spawn_bridge_runtime(BridgeRuntimeConfig::default()).await })?;
 
     let tray_rx = bridge_runtime.tray_rx().clone();
     let notice_rx = bridge_runtime.notice_rx();

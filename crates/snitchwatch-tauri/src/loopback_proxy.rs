@@ -42,7 +42,8 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UnixStream};
 use tracing::debug;
 
-const FORBIDDEN_RESPONSE: &[u8] = b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+const FORBIDDEN_RESPONSE: &[u8] =
+    b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
 
 /// Bind a loopback TCP listener at `tcp_bind` and proxy every connection to
 /// the Unix socket at `socket_path`, transparently injecting `token` as the
