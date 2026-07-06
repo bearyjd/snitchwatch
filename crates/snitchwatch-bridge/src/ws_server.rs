@@ -474,7 +474,7 @@ mod tests {
                 "rowId": "ask-1",
                 "verdict": "allow",
                 "scope": "this_host",
-                "remember": false
+                "duration": "once"
             })
             .to_string(),
         ))
@@ -543,7 +543,7 @@ mod tests {
             "rowId": "ask-1",
             "verdict": "allow",
             "scope": "this_host",
-            "remember": false
+            "duration": "once"
         });
         ws.send(TMessage::Text(verdict.to_string())).await.unwrap();
 

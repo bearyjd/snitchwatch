@@ -115,7 +115,7 @@ impl Ui for UiService {
             process: conn.process_path.clone(),
         });
 
-        let verdict = verdict_rx
+        let resolution = verdict_rx
             .await
             .map_err(|_canceled| Status::cancelled("verdict oneshot dropped before resolution"))?;
 
@@ -123,7 +123,12 @@ impl Ui for UiService {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
-        Ok(Response::new(verdict_to_rule(verdict, &conn, now_secs)))
+        Ok(Response::new(verdict_to_rule(
+            resolution.verdict,
+            resolution.duration,
+            &conn,
+            now_secs,
+        )))
     }
 
     async fn subscribe(
@@ -346,6 +351,7 @@ mod tests {
 
     use crate::cache::connections::Verdict;
     use crate::translator::connection::ask_row_id;
+    use crate::ws_messages::VerdictDuration;
 
     #[tokio::test]
     async fn ask_rule_blocks_until_cache_resolves_with_allow() {
@@ -396,7 +402,11 @@ mod tests {
         };
         assert_eq!(row_id, ask_row_id(1));
 
-        cache.lock().await.resolve(&row_id, Verdict::Allow).unwrap();
+        cache
+            .lock()
+            .await
+            .resolve(&row_id, Verdict::Allow, VerdictDuration::Once)
+            .unwrap();
 
         let rule = ask_handle.await.unwrap().unwrap().into_inner();
         assert_eq!(rule.action, "allow");
@@ -446,7 +456,12 @@ mod tests {
         let row_id = ask_row_id(1);
         for _ in 0..50 {
             tokio::time::sleep(Duration::from_millis(20)).await;
-            if cache.lock().await.resolve(&row_id, Verdict::Deny).is_ok() {
+            if cache
+                .lock()
+                .await
+                .resolve(&row_id, Verdict::Deny, VerdictDuration::Once)
+                .is_ok()
+            {
                 break;
             }
         }
@@ -502,7 +517,13 @@ mod tests {
         assert!(seen.contains(&ask_row_id(1)));
         assert!(seen.contains(&ask_row_id(2)));
 
-        let _ = cache.lock().await.resolve(&ask_row_id(1), Verdict::Deny);
-        let _ = cache.lock().await.resolve(&ask_row_id(2), Verdict::Deny);
+        let _ = cache
+            .lock()
+            .await
+            .resolve(&ask_row_id(1), Verdict::Deny, VerdictDuration::Once);
+        let _ = cache
+            .lock()
+            .await
+            .resolve(&ask_row_id(2), Verdict::Deny, VerdictDuration::Once);
     }
 }

@@ -49,13 +49,14 @@ pub fn apply(
             row_id,
             verdict,
             scope: _,
-            remember,
+            duration,
         } => {
             let v = match verdict {
                 VerdictAction::Allow => Verdict::Allow,
                 VerdictAction::Deny => Verdict::Deny,
             };
-            cache.resolve(&row_id, v)?;
+            let remember = duration.remembers();
+            cache.resolve(&row_id, v, duration)?;
             Ok(UpstreamEffect::VerdictApplied {
                 row_id,
                 verdict: v,
@@ -358,7 +359,7 @@ mod blocklist_action_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ws_messages::{ConnectionRow, VerdictScope};
+    use crate::ws_messages::{ConnectionRow, VerdictDuration, VerdictScope};
 
     fn make_pending(cache: &mut ConnectionCache, id: &str) {
         // The returned verdict receiver is intentionally dropped: these tests
@@ -390,7 +391,7 @@ mod tests {
                 row_id: "p1".to_string(),
                 verdict: VerdictAction::Allow,
                 scope: VerdictScope::ThisHost,
-                remember: false,
+                duration: VerdictDuration::Once,
             },
         )
         .unwrap();
@@ -407,6 +408,26 @@ mod tests {
             other => panic!("unexpected effect: {:?}", other),
         }
         assert!(cache.pending_ids().is_empty());
+    }
+
+    #[test]
+    fn set_verdict_with_a_persistent_duration_reports_remember_true() {
+        let mut cache = ConnectionCache::new(10);
+        make_pending(&mut cache, "p1");
+        let effect = apply(
+            &mut cache,
+            ClientMessage::SetVerdict {
+                row_id: "p1".to_string(),
+                verdict: VerdictAction::Deny,
+                scope: VerdictScope::ThisHost,
+                duration: VerdictDuration::Always,
+            },
+        )
+        .unwrap();
+        match effect {
+            UpstreamEffect::VerdictApplied { remember, .. } => assert!(remember),
+            other => panic!("unexpected effect: {:?}", other),
+        }
     }
 
     #[test]

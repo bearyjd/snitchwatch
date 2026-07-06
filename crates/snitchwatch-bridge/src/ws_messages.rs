@@ -113,7 +113,8 @@ pub enum ClientMessage {
         /// envelope's `action` discriminator. Verify against captured LS payload.
         verdict: VerdictAction,
         scope: VerdictScope,
-        remember: bool,
+        /// How long the resulting rule should live — see [`VerdictDuration`].
+        duration: VerdictDuration,
     },
     AddRule {
         rule: serde_json::Value,
@@ -179,6 +180,56 @@ pub enum VerdictScope {
     AnyHostOnDomain,
     /// Drop the host operator entirely.
     AnyHost,
+}
+
+/// How long a verdict's resulting rule should live, per the Little-Snitch-
+/// parity duration selector on the pending-decision dialog ("This time" /
+/// "For 5 minutes" / "Until quit" / "Forever").
+///
+/// Maps onto opensnitchd's native `Rule.duration` semantics
+/// (`vendor/opensnitch/daemon/rule/rule.go`): the daemon defines three named
+/// durations (`once`, `until restart`, `always`) plus arbitrary
+/// Go-`time.ParseDuration`-compatible strings (e.g. `"5m"`) for auto-expiring
+/// temporary rules (`vendor/opensnitch/daemon/rule/loader.go`'s
+/// `scheduleTemporaryRule`). The mapping used by [`Self::daemon_duration_str`]:
+///
+/// | UI option        | Wire value      | Daemon `Rule.duration` |
+/// |-------------------|-----------------|------------------------|
+/// | This time         | `once`          | `"once"`               |
+/// | For 5 minutes     | `five_minutes`  | `"5m"`                 |
+/// | Until quit        | `until_restart` | `"until restart"`      |
+/// | Forever           | `always`        | `"always"`             |
+///
+/// "Until quit" is documented to the user as "until the process exits", but
+/// opensnitchd has no per-process rule lifetime — the closest native
+/// equivalent is "until restart" (the rule survives until the daemon itself
+/// restarts). This is the one lossy mapping in the table above; there is no
+/// tighter daemon primitive to bind it to.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum VerdictDuration {
+    Once,
+    FiveMinutes,
+    UntilRestart,
+    Always,
+}
+
+impl VerdictDuration {
+    /// The exact string opensnitchd's `Rule.duration` field expects.
+    pub fn daemon_duration_str(self) -> &'static str {
+        match self {
+            Self::Once => "once",
+            Self::FiveMinutes => "5m",
+            Self::UntilRestart => "until restart",
+            Self::Always => "always",
+        }
+    }
+
+    /// Whether this duration persists the rule beyond the current connection
+    /// (i.e. anything other than a one-shot decision).
+    pub fn remembers(self) -> bool {
+        !matches!(self, Self::Once)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -382,7 +433,7 @@ mod tests {
             "rowId": "r1",
             "verdict": "allow",
             "scope": "this_host",
-            "remember": true
+            "duration": "always"
         }"#;
         let parsed: ClientMessage = serde_json::from_str(json).unwrap();
         match parsed {
@@ -390,15 +441,43 @@ mod tests {
                 row_id,
                 verdict,
                 scope,
-                remember,
+                duration,
             } => {
                 assert_eq!(row_id, "r1");
                 assert_eq!(verdict, VerdictAction::Allow);
                 assert_eq!(scope, VerdictScope::ThisHost);
-                assert!(remember);
+                assert_eq!(duration, VerdictDuration::Always);
             }
             _ => panic!("wrong variant"),
         }
+    }
+
+    #[test]
+    fn verdict_duration_maps_to_daemon_strings() {
+        assert_eq!(VerdictDuration::Once.daemon_duration_str(), "once");
+        assert_eq!(VerdictDuration::FiveMinutes.daemon_duration_str(), "5m");
+        assert_eq!(
+            VerdictDuration::UntilRestart.daemon_duration_str(),
+            "until restart"
+        );
+        assert_eq!(VerdictDuration::Always.daemon_duration_str(), "always");
+
+        assert!(!VerdictDuration::Once.remembers());
+        assert!(VerdictDuration::FiveMinutes.remembers());
+        assert!(VerdictDuration::UntilRestart.remembers());
+        assert!(VerdictDuration::Always.remembers());
+    }
+
+    #[test]
+    fn verdict_duration_wire_tokens_are_snake_case() {
+        assert_eq!(
+            serde_json::to_value(VerdictDuration::FiveMinutes).unwrap(),
+            "five_minutes"
+        );
+        assert_eq!(
+            serde_json::to_value(VerdictDuration::UntilRestart).unwrap(),
+            "until_restart"
+        );
     }
 }
 

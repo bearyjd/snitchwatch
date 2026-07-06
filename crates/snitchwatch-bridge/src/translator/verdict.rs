@@ -1,14 +1,17 @@
-//! Translate a user-supplied `Verdict` (allow / deny) into the `Rule` proto
-//! shape opensnitchd expects as the `AskRule` reply.
+//! Translate a user-supplied `Verdict` (allow / deny) plus its requested
+//! [`VerdictDuration`] into the `Rule` proto shape opensnitchd expects as the
+//! `AskRule` reply.
 //!
 //! The M0 spike taught us three things about `Rule`:
 //!   - `name` must be non-empty (the daemon rejects empty names).
 //!   - `created` is a unix-seconds int64.
-//!   - `duration: "once"` means "this connection only" — the daemon does not
-//!     persist the rule. Higher milestones (M2+) replace this with proper
-//!     scope/remember handling.
+//!   - `duration` is a plain string (`Rule.duration`, proto field 8) — see
+//!     [`VerdictDuration::daemon_duration_str`] for the exact mapping from the
+//!     pending-decision dialog's four duration options to opensnitchd's
+//!     `once` / `<Go duration>` / `until restart` / `always` vocabulary.
 
 use crate::cache::connections::Verdict;
+use crate::ws_messages::VerdictDuration;
 use snitchwatch_proto::protocol::{Connection, Rule};
 
 /// The action token used both in the synthetic rule name and as the `Rule`
@@ -33,7 +36,12 @@ pub fn rule_name_for(verdict: Verdict, host: &str, port: u16) -> String {
     format!("snitchwatch-{}-{host}-{port}", verdict_action_str(verdict))
 }
 
-pub fn verdict_to_rule(verdict: Verdict, conn: &Connection, now_secs: i64) -> Rule {
+pub fn verdict_to_rule(
+    verdict: Verdict,
+    duration: VerdictDuration,
+    conn: &Connection,
+    now_secs: i64,
+) -> Rule {
     let action = verdict_action_str(verdict);
 
     let host = if conn.dst_host.is_empty() {
@@ -50,7 +58,7 @@ pub fn verdict_to_rule(verdict: Verdict, conn: &Connection, now_secs: i64) -> Ru
         precedence: false,
         nolog: false,
         action: action.to_string(),
-        duration: "once".to_string(),
+        duration: duration.daemon_duration_str().to_string(),
         operator: None,
     }
 }
@@ -72,7 +80,12 @@ mod tests {
 
     #[test]
     fn allow_verdict_produces_allow_rule_with_once_duration() {
-        let rule = verdict_to_rule(Verdict::Allow, &sample_connection(), 1_700_000_000);
+        let rule = verdict_to_rule(
+            Verdict::Allow,
+            VerdictDuration::Once,
+            &sample_connection(),
+            1_700_000_000,
+        );
         assert_eq!(rule.action, "allow");
         assert_eq!(rule.duration, "once");
         assert!(rule.enabled);
@@ -83,7 +96,12 @@ mod tests {
 
     #[test]
     fn deny_verdict_produces_deny_rule() {
-        let rule = verdict_to_rule(Verdict::Deny, &sample_connection(), 1_700_000_000);
+        let rule = verdict_to_rule(
+            Verdict::Deny,
+            VerdictDuration::Once,
+            &sample_connection(),
+            1_700_000_000,
+        );
         assert_eq!(rule.action, "deny");
         assert_eq!(rule.duration, "once");
         assert!(rule.name.contains("deny"));
@@ -91,7 +109,12 @@ mod tests {
 
     #[test]
     fn rule_name_includes_remote_host_for_traceability() {
-        let rule = verdict_to_rule(Verdict::Allow, &sample_connection(), 0);
+        let rule = verdict_to_rule(
+            Verdict::Allow,
+            VerdictDuration::Once,
+            &sample_connection(),
+            0,
+        );
         assert!(rule.name.contains("github.com"), "got: {}", rule.name);
     }
 
@@ -103,8 +126,23 @@ mod tests {
         // identical for the same inputs, or the "Show rule" jump would land
         // on a rule that doesn't exist.
         let conn = sample_connection();
-        let rule = verdict_to_rule(Verdict::Allow, &conn, 1_700_000_000);
+        let rule = verdict_to_rule(Verdict::Allow, VerdictDuration::Once, &conn, 1_700_000_000);
         let name = rule_name_for(Verdict::Allow, &conn.dst_host, conn.dst_port as u16);
         assert_eq!(rule.name, name);
+    }
+
+    #[test]
+    fn each_ui_duration_maps_to_the_expected_daemon_string() {
+        let conn = sample_connection();
+        let cases = [
+            (VerdictDuration::Once, "once"),
+            (VerdictDuration::FiveMinutes, "5m"),
+            (VerdictDuration::UntilRestart, "until restart"),
+            (VerdictDuration::Always, "always"),
+        ];
+        for (duration, expected) in cases {
+            let rule = verdict_to_rule(Verdict::Allow, duration, &conn, 0);
+            assert_eq!(rule.duration, expected, "duration mapping for {duration:?}");
+        }
     }
 }

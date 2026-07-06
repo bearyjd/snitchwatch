@@ -88,7 +88,8 @@ pub fn decode_client(json: &str) -> Result<ClientMessage, serde_json::Error> {
 mod tests {
     use super::*;
     use snitchwatch_bridge::ws_messages::{
-        BlocklistEntry, BlocklistSummary, ConnectionRow, TrafficEvent, VerdictAction, VerdictScope,
+        BlocklistEntry, BlocklistSummary, ConnectionRow, TrafficEvent, VerdictAction,
+        VerdictDuration, VerdictScope,
     };
 
     fn conn_row(id: &str) -> ConnectionRow {
@@ -244,18 +245,18 @@ mod tests {
     #[test]
     fn decode_client_parses_model_emitted_verdict_json() {
         // Exactly the JSON `PendingDecision::submit` emits.
-        let json = r#"{"action":"setVerdict","rowId":"r1","verdict":"deny","scope":"any_host","remember":true}"#;
+        let json = r#"{"action":"setVerdict","rowId":"r1","verdict":"deny","scope":"any_host","duration":"always"}"#;
         match decode_client(json).expect("decode") {
             ClientMessage::SetVerdict {
                 row_id,
                 verdict,
                 scope,
-                remember,
+                duration,
             } => {
                 assert_eq!(row_id, "r1");
                 assert_eq!(verdict, VerdictAction::Deny);
                 assert_eq!(scope, VerdictScope::AnyHost);
-                assert!(remember);
+                assert_eq!(duration, VerdictDuration::Always);
             }
             other => panic!("expected SetVerdict, got {other:?}"),
         }

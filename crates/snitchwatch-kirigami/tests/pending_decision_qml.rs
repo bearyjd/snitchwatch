@@ -42,7 +42,7 @@ QtObject {
     }
     id: root
     Component.onCompleted: {
-        decision.submit("r1", "deny_always", "any_host");
+        decision.submit("r1", "deny", "any_host", "forever");
         console.log("[test] PendingDecision verdict json =", root.lastVerdict);
     }
 }
