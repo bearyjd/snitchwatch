@@ -27,6 +27,9 @@ use tokio::sync::watch;
 use tracing::warn;
 
 const NM_POLL_INTERVAL: Duration = Duration::from_secs(3);
+/// How long after poll-loop start a closed watch channel is still attributed
+/// to startup ordering (subscribers not yet attached) rather than teardown.
+const STARTUP_GRACE: Duration = Duration::from_secs(30);
 const NM_BUS_NAME: &str = "org.freedesktop.NetworkManager";
 const NM_OBJECT_PATH: &str = "/org/freedesktop/NetworkManager";
 const NM_INTERFACE: &str = "org.freedesktop.NetworkManager";
@@ -73,17 +76,28 @@ impl NetworkManagerWatcher {
 
     fn spawn_poll_loop(self: Arc<Self>, conn: zbus::Connection) {
         tokio::spawn(async move {
+            let started = tokio::time::Instant::now();
             let mut interval = tokio::time::interval(NM_POLL_INTERVAL);
             loop {
                 interval.tick().await;
                 match read_current_connection_id(&conn).await {
                     Ok(id) => {
                         if *self.tx.borrow() != id {
-                            // A closed channel (every receiver dropped) means
-                            // nobody's listening anymore; stop polling.
-                            if self.tx.send(id).is_err() {
-                                break;
-                            }
+                            // `send_replace`, not `send`: `connect()` drops its
+                            // initial receiver and `ProfilesManager`'s
+                            // auto-switch task subscribes *asynchronously
+                            // later*, so an early network change could observe
+                            // zero receivers. A plain `send` errors then, and
+                            // treating that as "nobody will ever listen" would
+                            // permanently kill auto-activation before it began.
+                            self.tx.send_replace(id);
+                        }
+                        // Only treat a closed channel as teardown once the
+                        // startup window has safely passed — after that, every
+                        // receiver dropping really does mean the consumers are
+                        // gone and the poll loop should stop.
+                        if self.tx.is_closed() && started.elapsed() > STARTUP_GRACE {
+                            break;
                         }
                     }
                     Err(e) => {
