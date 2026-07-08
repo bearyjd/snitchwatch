@@ -19,3 +19,9 @@ crates/snitchwatch-tauri/gen/
 **/blocklists.db
 **/blocklists.db-wal
 **/blocklists.db-shm
+
+# Agent runtime/session state (not project source)
+.omc/
+.superpowers/
+.claude/settings.local.json
+.claude/agent-memory/

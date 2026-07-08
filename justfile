@@ -1,6 +1,26 @@
 default:
     @just --list
 
+# Checks for one-time setup steps an agent/dev is likely to hit cold
+# (currently: Playwright browsers for the two smoke suites). Exits non-zero
+# with a fix hint if something's missing; does not modify anything.
+doctor:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    missing=0
+    if [ ! -d tests/web_smoke/node_modules ]; then
+        echo "MISSING: tests/web_smoke/node_modules — run 'just web-smoke-install' before 'just web-smoke'"
+        missing=1
+    fi
+    if [ ! -d tests/tauri_smoke/node_modules ]; then
+        echo "MISSING: tests/tauri_smoke/node_modules — run 'just tauri-smoke-install' before 'just tauri-smoke'"
+        missing=1
+    fi
+    if [ "$missing" -eq 0 ]; then
+        echo "doctor: all one-time setup steps look done"
+    fi
+    exit "$missing"
+
 build:
     cargo build --workspace
 

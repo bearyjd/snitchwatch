@@ -28,7 +28,22 @@ just build
 just test                    # full workspace: unit + integration tests
 just test-bridge             # just the bridge crate unit tests
 just check                   # cargo check + clippy -D warnings
+just doctor                  # checks for missing one-time setup steps below
 ```
+
+### Playwright smoke suites (one-time setup)
+
+`tests/web_smoke` and `tests/tauri_smoke` are Playwright suites and need a
+one-time browser install before they'll run — `just web-smoke`/
+`just tauri-smoke` will fail with a "missing browser" error otherwise, which
+is a setup gap, not a code regression:
+
+```bash
+just web-smoke-install       # once, before `just web-smoke`
+just tauri-smoke-install     # once, before `just tauri-smoke`
+```
+
+Run `just doctor` to check whether these have already been done.
 
 The headline integration test is `ask_rule_round_trip_full` in
 `tests/bridge_protocol_test.rs`: it spins up an in-process mock
