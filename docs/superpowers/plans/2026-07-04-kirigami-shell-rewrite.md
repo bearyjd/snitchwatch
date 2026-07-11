@@ -11,7 +11,7 @@
 > - Task 12 wizard `b71ccbd`; Tasks 15/16 `7194724`; Tasks 17/18 `0e61e8b` (notify-rust dispatch — cxx-kde-frameworks lacks KNotification; tray via Qt.labs.platform, present on host).
 > - Beyond-plan parity features: grouped Process→Domain monitor `da8ba56`; matched-rule diagnostics + simulator `61b7c33`/`4949559`; profiles with NetworkManager auto-activation (merge `2a6f316`); enhanced decision dialog (scopes/insight/sparkline) `f2022d0`/`4cbb0af`; geo panel (merge `e6d2d8c`).
 > - **Task 7's manual fullscreen-focus test: PASS, verified 2026-07-11** (see Task 7's checklist below for method/detail).
-> - **Still outstanding:** old Tauri/`web/` removal (gated on real-use proof per non-goals); known bug: blocklist `900-` band sorts inside the user-rule range (documented in `profiles/materializer.rs`).
+> - **Still outstanding:** old Tauri/`web/` removal (gated on real-use proof per non-goals). **Owner decision 2026-07-11: keep both `crates/snitchwatch-tauri/` and `web/` in the tree until a packaged release ships** — feature parity is done (incl. Task 7's fullscreen-focus verification), but "proven in real use" specifically means through a real packaged release, not a sandbox manual test. Don't remove either crate/dir before that regardless of parity status; re-raise with the owner if this criterion needs revisiting. Known bug: blocklist `900-` band sorts inside the user-rule range (documented in `profiles/materializer.rs`).
 
 **Goal:** Replace `crates/snitchwatch-tauri/` (891 lines) and the vendored
 `web/` frontend (~6,939 lines of JS) with a Qt6/QML + Kirigami native shell
