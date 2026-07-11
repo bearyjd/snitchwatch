@@ -10,7 +10,8 @@
 > - Task 11 Traffic `503bf0d`: QtCharts/QtGraphs NOT available on the build host → QML Canvas polyline fallback (see annotated checkboxes below); bridge now emits `TrafficEvents` (`f1adad1`).
 > - Task 12 wizard `b71ccbd`; Tasks 15/16 `7194724`; Tasks 17/18 `0e61e8b` (notify-rust dispatch — cxx-kde-frameworks lacks KNotification; tray via Qt.labs.platform, present on host).
 > - Beyond-plan parity features: grouped Process→Domain monitor `da8ba56`; matched-rule diagnostics + simulator `61b7c33`/`4949559`; profiles with NetworkManager auto-activation (merge `2a6f316`); enhanced decision dialog (scopes/insight/sparkline) `f2022d0`/`4cbb0af`; geo panel (merge `e6d2d8c`).
-> - **Still outstanding:** Task 7's manual fullscreen-focus test on a real Plasma session; old Tauri/`web/` removal (gated on real-use proof per non-goals); known bug: blocklist `900-` band sorts inside the user-rule range (documented in `profiles/materializer.rs`).
+> - **Task 7's manual fullscreen-focus test: PASS, verified 2026-07-11** (see Task 7's checklist below for method/detail).
+> - **Still outstanding:** old Tauri/`web/` removal (gated on real-use proof per non-goals); known bug: blocklist `900-` band sorts inside the user-rule range (documented in `profiles/materializer.rs`).
 
 **Goal:** Replace `crates/snitchwatch-tauri/` (891 lines) and the vendored
 `web/` frontend (~6,939 lines of JS) with a Qt6/QML + Kirigami native shell
@@ -250,17 +251,31 @@ countdown — but the reliability requirements below are the real work).
    the QML sheet is a pure display of remaining time, not a second place
    that owns the timeout — don't duplicate timer logic client-side.
 
-- [ ] Implement `PendingDecisionSheet.qml` as a Kirigami `OverlaySheet` (or
+- [x] Implement `PendingDecisionSheet.qml` as a Kirigami `OverlaySheet` (or
       `Kirigami.Dialog`, whichever survives the focus-reliability test
       above with fewer surprises — note in the plan which one was chosen
-      and why once Task 7 is done).
-- [ ] Wire the four verdict actions through to `pending_decision.rs`'s
+      and why once Task 7 is done). **Chosen: `Kirigami.OverlaySheet`**
+      (`ConnectionsPage.qml:323`), embedding `PendingDecisionSheet.qml` as
+      content — behaves consistently at every window width, per the
+      inline design-decision comment at `ConnectionsPage.qml:15-16`.
+- [x] Wire the four verdict actions through to `pending_decision.rs`'s
       `qinvokable`s, which call into the bridge's existing
       `oneshot::Sender<Verdict>` resolution path (no changes to bridge
       code — this task only calls the existing API).
-- [ ] **Manual test, not just unit test:** the fullscreen-focus scenario
+- [x] **Manual test, not just unit test:** the fullscreen-focus scenario
       above, run on a real Plasma session, documented with a pass/fail
-      note in this plan file.
+      note in this plan file. **PASS, verified 2026-07-11.** Method: a
+      throwaway fullscreen Qt6/QML stand-in window (built ad hoc, not
+      committed) simulated a fullscreen game on a live Plasma Wayland
+      session; `snitchwatch-kirigami` was launched on top of it; the
+      committed `tests/mock_opensnitchd/examples/fire_ask_rule.rs` harness
+      (see that file's doc comment) fired a synthetic `AskRule` at the
+      shell's gRPC port to trigger a real pending decision. The human
+      operator confirmed the `PendingDecisionSheet`'s `Kirigami.OverlaySheet`
+      raised and gained focus over the fullscreen window
+      (`root.raiseAndActivate()` in `main.qml:294-298` behaves as intended).
+      Re-run `fire_ask_rule` against a fresh `snitchwatch-kirigami` process
+      plus a fullscreen window to reproduce.
 
 ### Task 8: Connections list page
 
