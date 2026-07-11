@@ -103,10 +103,14 @@ fixed target (the bridge-cli otherwise defaults to an ephemeral port).
   the sandbox lacks; step-by-step manual verification instructions for all
   four are in
   [`../../packaging/phase2-manual-verification-runbook.md`](../../packaging/phase2-manual-verification-runbook.md).
-  **That runbook also flags an open question:** the Flatpak manifest still
-  packages `snitchwatch-tauri`/`web/`, not `snitchwatch-kirigami` — resolve
-  which shell ships before treating a run of these steps as validating the
-  real release target.
+  **Resolved 2026-07-11:** the Flatpak manifest now packages
+  `snitchwatch-kirigami` against `org.kde.Platform`, not
+  `snitchwatch-tauri`/`web/` against `org.gnome.Platform` — Kirigami is the
+  settled GUI stack and has feature parity plus a passing Task 7
+  fullscreen-focus test, so it's the correct release target. The manifest,
+  desktop entry, and metainfo were updated accordingly; `crates/
+  snitchwatch-tauri/` and `web/` remain in the repo but are intentionally not
+  what this manifest builds.
 
 ## Cross-cutting (per prompt's closing notes)
 

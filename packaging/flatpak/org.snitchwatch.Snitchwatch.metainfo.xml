@@ -29,7 +29,7 @@
   </categories>
 
   <provides>
-    <binary>snitchwatch-tauri</binary>
+    <binary>snitchwatch-kirigami</binary>
   </provides>
 
   <url type="homepage">https://github.com/example/snitchwatch</url>

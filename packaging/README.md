@@ -7,11 +7,21 @@ Bazzite / Universal Blue.
 
 Three processes, three trust levels:
 
-| Process                  | Where it runs                    | Packaged as |
-| ------------------------ | -------------------------------- | ----------- |
-| `opensnitchd`            | Host, privileged (root)          | Baked into a bluebuild image **or** rpm-ostree layered |
-| `snitchwatch-bridge-cli` | Host, unprivileged (`--user`)    | systemd user unit (`systemd/snitchwatch-bridge.service`) |
-| `snitchwatch-tauri` GUI  | Flatpak sandbox, unprivileged    | Flatpak (`flatpak/org.snitchwatch.Snitchwatch.yml`) |
+| Process                     | Where it runs                    | Packaged as |
+| --------------------------- | --------------------------------- | ----------- |
+| `opensnitchd`               | Host, privileged (root)          | Baked into a bluebuild image **or** rpm-ostree layered |
+| `snitchwatch-bridge-cli`    | Host, unprivileged (`--user`)    | systemd user unit (`systemd/snitchwatch-bridge.service`) |
+| `snitchwatch-kirigami` GUI  | Flatpak sandbox, unprivileged    | Flatpak (`flatpak/org.snitchwatch.Snitchwatch.yml`) |
+
+The Flatpak packages `snitchwatch-kirigami` (Qt6/QML + Kirigami), not
+`snitchwatch-tauri` — Kirigami is the settled GUI stack going forward (see
+this repo's `CLAUDE.md` "Settled architecture decisions" #4) and has reached
+feature parity including its Task 7 safety verification. `snitchwatch-tauri`
+and `web/` remain in the repo but are intentionally not what ships here —
+kept until this Flatpak's first real packaged release ships (owner
+decision, 2026-07-11); see
+[`../docs/superpowers/plans/2026-07-04-kirigami-shell-rewrite.md`](../docs/superpowers/plans/2026-07-04-kirigami-shell-rewrite.md)'s
+status note for detail.
 
 The GUI reaches the host-side bridge over a **Unix domain socket** under
 `$XDG_RUNTIME_DIR/snitchwatch/`, granted to the sandbox via
@@ -58,7 +68,7 @@ correct artifacts and their syntax is validated in CI (YAML/JSON parse +
 # Batteries-included image (needs the bluebuild CLI + podman/buildah):
 bluebuild build packaging/bluebuild/recipe.yml
 
-# GUI Flatpak (needs flatpak-builder + the GNOME 46 runtime):
+# GUI Flatpak (needs flatpak-builder + the KDE runtime, org.kde.Platform):
 python3 flatpak-cargo-generator.py Cargo.lock \
   -o packaging/flatpak/generated-cargo-sources.json
 flatpak run org.flatpak.Builder --user --install --force-clean \

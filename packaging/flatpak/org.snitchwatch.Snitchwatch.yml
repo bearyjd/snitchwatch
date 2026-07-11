@@ -8,6 +8,18 @@
 # and the feasibility research in
 # docs/superpowers/specs/2026-07-04-flatpak-feasibility-research.md.
 #
+# GUI shell: snitchwatch-kirigami (Qt6/QML + Kirigami, cxx-qt), NOT
+# snitchwatch-tauri. Per the settled architecture decision (see this repo's
+# CLAUDE.md "Settled architecture decisions" #4 and
+# docs/superpowers/plans/2026-07-04-kirigami-shell-rewrite.md), Kirigami is
+# the shell going forward — it's a native match for Bazzite's default KDE
+# Plasma desktop, has reached feature parity with the old Tauri+web shell,
+# and passed its Task 7 fullscreen-focus safety verification
+# (2026-07-11). `crates/snitchwatch-tauri/` and `web/` still exist in the
+# repo (kept until this Flatpak's first real packaged release ships — see
+# the kirigami-shell-rewrite plan's status note), but they are intentionally
+# NOT what this manifest packages.
+#
 # Why no --share=network:
 #   A Flatpak's default sandbox has its own private, isolated network
 #   namespace with its own private loopback device. It therefore CANNOT reach
@@ -19,8 +31,10 @@
 #   filesystem permission below. This is the exact daemon-over-socket pattern
 #   virt-manager's Flathub-approved manifest uses for libvirtd.
 #
-# Building (requires flatpak-builder + the GNOME runtime; NOT runnable in the
-# CI sandbox this was authored in):
+# Building (requires flatpak-builder + the KDE runtime; NOT runnable in the
+# CI sandbox this was authored in — verify runtime-version against whatever
+# org.kde.Platform release is current at build time, e.g.
+# `flatpak remote-info flathub org.kde.Platform`, and bump it if stale):
 #   1. Vendor Cargo deps offline (flatpak-builder has no network mid-build):
 #        python3 flatpak-cargo-generator.py Cargo.lock -o \
 #          packaging/flatpak/generated-cargo-sources.json
@@ -29,12 +43,12 @@
 #        build-dir packaging/flatpak/org.snitchwatch.Snitchwatch.yml
 ---
 app-id: org.snitchwatch.Snitchwatch
-runtime: org.gnome.Platform
-runtime-version: "46"
-sdk: org.gnome.Sdk
+runtime: org.kde.Platform
+runtime-version: "6.9"
+sdk: org.kde.Sdk
 sdk-extensions:
   - org.freedesktop.Sdk.Extension.rust-stable
-command: snitchwatch-tauri
+command: snitchwatch-kirigami
 
 build-options:
   append-path: /usr/lib/sdk/rust-stable/bin
@@ -44,15 +58,19 @@ build-options:
     # release build can link against pre-vendored crates.
     - --share=network
   env:
-    CARGO_HOME: /run/build/snitchwatch-tauri/cargo
+    CARGO_HOME: /run/build/snitchwatch-kirigami/cargo
 
 finish-args:
-  # Display + GPU for the webview.
+  # Display + GPU for QtQuick/QML rendering.
   - --socket=wayland
   - --socket=fallback-x11
   - --share=ipc
   - --device=dri
-  # Desktop integration: notifications + KStatusNotifierItem tray.
+  # Desktop integration: notifications (notify-rust, speaks the standard
+  # org.freedesktop.Notifications D-Bus interface directly — cxx-kde-frameworks
+  # doesn't expose KNotification, so this shell dispatches via that interface
+  # rather than KNotification) + tray (Qt.labs.platform.SystemTrayIcon, which
+  # renders via the host compositor's StatusNotifierItem support on Plasma).
   - --talk-name=org.freedesktop.Notifications
   - --talk-name=org.kde.StatusNotifierWatcher
   # Reach the host-side bridge's Unix domain socket + handshake token under
@@ -67,17 +85,24 @@ finish-args:
   - --filesystem=xdg-state/snitchwatch:create
 
 modules:
-  - name: snitchwatch-tauri
+  - name: snitchwatch-kirigami
     buildsystem: simple
     build-commands:
-      - cargo build --release --offline -p snitchwatch-tauri
-      - install -Dm755 target/release/snitchwatch-tauri /app/bin/snitchwatch-tauri
+      # No CMake step: snitchwatch-kirigami is a plain `cargo build` — its
+      # build.rs (cxx-qt-build) drives moc/rcc/qmlcachegen directly, with no
+      # CMakeLists.txt exporting to an external C++ build system. The KDE SDK
+      # provides the Qt6 build tools (moc, rcc, qmlcachegen) cxx-qt-build
+      # shells out to.
+      - cargo build --release --offline -p snitchwatch-kirigami
+      - install -Dm755 target/release/snitchwatch-kirigami /app/bin/snitchwatch-kirigami
       - install -Dm644 packaging/flatpak/org.snitchwatch.Snitchwatch.desktop
           /app/share/applications/org.snitchwatch.Snitchwatch.desktop
       - install -Dm644 packaging/flatpak/org.snitchwatch.Snitchwatch.metainfo.xml
           /app/share/metainfo/org.snitchwatch.Snitchwatch.metainfo.xml
-      - install -d /app/share/snitchwatch/web
-      - cp -a web/. /app/share/snitchwatch/web/
+      # No web/ install step: the Kirigami shell compiles its QML in via a
+      # qrc resource (see crates/snitchwatch-kirigami/build.rs's QmlModule),
+      # it does not serve web/ over HTTP into a webview the way
+      # snitchwatch-tauri did.
     sources:
       - type: dir
         path: ../..

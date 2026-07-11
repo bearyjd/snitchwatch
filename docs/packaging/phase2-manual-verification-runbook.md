@@ -7,24 +7,23 @@ passes in CI — this runbook is only for the parts that need a real Bazzite
 host. Run these in order; each one builds on the state left by the previous.
 
 **Needs:** a real Bazzite (or Fedora Silverblue/Kinoite-family) host with
-`bluebuild`, `podman`/`buildah`, `flatpak-builder`, and the GNOME 46 runtime
-installed. None of this is runnable in a CI sandbox or container without a
-real bootable rpm-ostree system underneath it.
+`bluebuild`, `podman`/`buildah`, `flatpak-builder`, and the KDE runtime
+(`org.kde.Platform`) installed. None of this is runnable in a CI sandbox or
+container without a real bootable rpm-ostree system underneath it.
 
-**Before you start — read this:** the Flatpak manifest
-(`packaging/flatpak/org.snitchwatch.Snitchwatch.yml`) currently packages
-`command: snitchwatch-tauri` and vendors `web/` into the sandbox, **not**
-`snitchwatch-kirigami`. Per the current architecture decision, Tauri/`web/`
-are being kept until a packaged release ships (see
-[[project_tauri_web_removal_gate]] / the kirigami-shell-rewrite plan's status
-note) — but that also means **a "packaged release" today ships the old Tauri
-shell, not the Kirigami one that actually passed Task 7's fullscreen-focus
-test.** If the intent is to ship Kirigami in the first real release, the
-Flatpak manifest's `command:` and `modules.snitchwatch-tauri` build steps
-need to be repointed at `snitchwatch-kirigami` (plus its Qt6/KDE Frameworks
-runtime deps added to `runtime`/`sdk-extensions`) *before* running Step 2
-below — otherwise this verification proves the wrong binary. Flag this to
-the owner before proceeding if it hasn't been decided.
+**Resolved 2026-07-11:** the Flatpak manifest
+(`packaging/flatpak/org.snitchwatch.Snitchwatch.yml`) now packages
+`command: snitchwatch-kirigami` against the `org.kde.Platform` runtime, not
+`snitchwatch-tauri`/`web/` — Kirigami is the settled GUI stack (see this
+repo's `CLAUDE.md` "Settled architecture decisions" #4) and has feature
+parity plus a passing Task 7 fullscreen-focus test. `snitchwatch-tauri` and
+`web/` remain in the repo but are intentionally not what this manifest
+builds; they're kept only until this Flatpak's first real packaged release
+ships (owner decision, 2026-07-11). Verify the pinned `runtime-version`
+against whatever `org.kde.Platform` release is actually current before
+building (`flatpak remote-info flathub org.kde.Platform`) — it was pinned
+from this repo's environment at the time of writing, not confirmed against
+a live Flathub listing, and may need bumping.
 
 ---
 
@@ -68,9 +67,7 @@ flatpak run org.flatpak.Builder --user --install --force-clean \
 ```
 
 **Pass condition:** build completes, `flatpak run org.snitchwatch.Snitchwatch`
-launches a window. Since the manifest currently targets `snitchwatch-tauri`,
-this is really "does the old shell still Flatpak-package cleanly" unless
-Step 0's manifest repoint happened first.
+launches the Kirigami shell's window.
 
 **Sandbox boundary sanity check** — confirm the isolation claims in the
 manifest's own comments actually hold, don't just take the YAML's word for it:
@@ -92,8 +89,13 @@ flatpak run --command=sh org.snitchwatch.Snitchwatch -c \
 **If it fails:** a `flatpak-builder` manifest error is usually a missing
 `generated-cargo-sources.json` regeneration (regenerate whenever
 `Cargo.lock` changes) or a runtime/SDK version not installed locally
-(`flatpak install org.gnome.Platform//46 org.gnome.Sdk//46
-org.freedesktop.Sdk.Extension.rust-stable//46`).
+(`flatpak install org.kde.Platform//6.9 org.kde.Sdk//6.9
+org.freedesktop.Sdk.Extension.rust-stable//6.9` — match the exact version to
+whatever `runtime-version` the manifest currently pins). A build failure
+specifically inside the `cxx-qt-build` step (moc/rcc/qmlcachegen not found)
+means the KDE SDK's Qt6 build tools aren't on `PATH` inside the build
+sandbox — check `org.kde.Sdk`'s own environment setup before assuming a
+`snitchwatch-kirigami` code problem.
 
 ---
 
@@ -151,8 +153,8 @@ fixes the problem it was built for — don't skip it even if Step 3 passed,
 since Step 3 doesn't exercise "GUI window closed."
 
 ```bash
-# With snitchwatch-bridge.service still running from Step 3, and any
-# snitchwatch-tauri/snitchwatch-kirigami GUI window explicitly NOT running:
+# With snitchwatch-bridge.service still running from Step 3, and the
+# snitchwatch-kirigami GUI window explicitly NOT running:
 systemctl --user status snitchwatch-bridge.service   # confirm still active
 
 TOKEN=$(cat "$XDG_RUNTIME_DIR/snitchwatch/token")
