@@ -100,7 +100,13 @@ fixed target (the bridge-cli otherwise defaults to an ephemeral port).
 - [ ] **Not verifiable in the CI sandbox:** actual `bluebuild build`,
   `flatpak-builder` run, live opensnitchd dial-in, and the closed-window
   AskRule round-trip on a real Bazzite host. These need tooling and a host
-  the sandbox lacks; steps are documented for manual execution.
+  the sandbox lacks; step-by-step manual verification instructions for all
+  four are in
+  [`../../packaging/phase2-manual-verification-runbook.md`](../../packaging/phase2-manual-verification-runbook.md).
+  **That runbook also flags an open question:** the Flatpak manifest still
+  packages `snitchwatch-tauri`/`web/`, not `snitchwatch-kirigami` — resolve
+  which shell ships before treating a run of these steps as validating the
+  real release target.
 
 ## Cross-cutting (per prompt's closing notes)
 
