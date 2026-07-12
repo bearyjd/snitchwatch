@@ -1,4 +1,122 @@
-# Linux App Firewall + Bazzite Security Scanner — Handoff (updated 2026-07-04)
+# Linux App Firewall + Bazzite Security Scanner — Handoff (updated 2026-07-12)
+
+> **Read this first if you're picking this repo up cold.** Everything below
+> the "Current status" section is the *original* handoff from 2026-07-04,
+> kept for history/decision rationale — it is accurate as a record of what
+> was decided and why, but stale as a status report. Trust this section for
+> "what's true today."
+
+## Current status (2026-07-12)
+
+Both components are **code-complete**. Everything reachable from a sandbox
+without real Bazzite hardware has been built, tested, and verified — CI is
+green on real GitHub Actions, not just locally. What's left is exclusively
+real-hardware verification and one release-timing decision, both described
+below.
+
+**Component A (Snitchwatch):**
+- Phases 1 (auth/socket), 2 (packaging), 3a/3b (Kirigami shell) are done.
+- The shell that ships is `crates/snitchwatch-kirigami/` (Qt6/QML +
+  Kirigami via `cxx-qt`) — feature-complete, including the safety-critical
+  pending-decision prompt (verified to raise/focus over a fullscreen window
+  on a real Plasma session) and all four tray states
+  (`Idle`/`Pending(n)`/`DaemonDown`/`RecentBlock`/`FilterOff`, the last
+  three added 2026-07-12, see `.agent_native/agent_roadmap.md` item 9).
+- `crates/snitchwatch-tauri/` + `web/` (the original shell) still exist and
+  work, but are intentionally **not** what the Flatpak packages —
+  `packaging/flatpak/org.snitchwatch.Snitchwatch.yml` targets
+  `snitchwatch-kirigami`. They're kept until a packaged release ships
+  (explicit owner decision, 2026-07-11) — don't remove them before that.
+
+**Component B (Bazzite scanner):** also done — Phases 4 (baseline design),
+5 (userspace tier), 6 (privileged tier + Kirigami report UI) are all
+code-complete. This section's original "not started, design-only" framing
+below is entirely superseded.
+
+**CI:** `.github/workflows/ci.yml` runs 4 jobs on every push/PR to `main`:
+`check`/`test` (default-members, Ubuntu), `package-check` (packaging
+artifact validation), and `kirigami` (builds/lints/tests
+`snitchwatch-kirigami` in a Fedora container, since KF6 Kirigami packages
+don't exist in Ubuntu's repos yet). All green as of the last commit.
+
+**What's actually left:**
+1. **Real Bazzite hardware verification** — a bluebuild image build, a
+   Flatpak build, a live `opensnitchd` dial-in, the closed-window
+   fail-open proof, and the tray-state transitions (5 steps total). Full
+   instructions: `docs/packaging/phase2-manual-verification-runbook.md`.
+   See "Running on real hardware" below for the short version.
+2. **Retiring `snitchwatch-tauri`/`web/`** — blocked on a packaged release
+   actually shipping, not on any remaining code work.
+
+Nothing else is blocked on more agent/sandbox work. If you're an agent
+picking this up: don't re-derive the phase status from `IMPLEMENTATION_PROMPT.md`'s
+original phase descriptions without reading each phase's own inline
+"Update" note first — they're kept current.
+
+---
+
+## Running on real hardware
+
+Quick-start for a Bazzite (or Fedora Silverblue/Kinoite-family) box. Full
+detail, pass/fail conditions, and troubleshooting per step are in
+`docs/packaging/phase2-manual-verification-runbook.md` — this is the short
+version.
+
+**Fastest path — just run the dev build, no packaging:**
+```bash
+git submodule update --init --recursive
+just build                # needs protoc; Tauri needs webkit2gtk-4.1 dev headers
+just kirigami-dev         # needs system Qt6 + KDE Frameworks 6 (Kirigami) dev packages
+```
+This runs the in-process bridge + Kirigami shell directly — no Flatpak, no
+bluebuild image, nothing installed system-wide. Good enough to confirm the
+GUI itself works on your hardware. It won't exercise real `opensnitchd`
+unless you also point it at one (see README's "Running the bridge against
+real opensnitchd").
+
+**Full packaged install (batteries-included):**
+```bash
+bluebuild build packaging/bluebuild/recipe.yml    # bakes opensnitchd + fail-closed config
+# ...rebase onto the resulting image per bluebuild's own instructions...
+```
+
+**Full packaged install (lightweight/DIY, layer onto stock Bazzite):**
+Follow `docs/packaging/rpm-ostree-layering.md` step by step — it covers
+`rpm-ostree install opensnitch`, the fail-closed config override, and
+installing `packaging/systemd/snitchwatch-bridge.service` as your own user
+service.
+
+**GUI either way — build + install the Flatpak:**
+```bash
+python3 flatpak-cargo-generator.py Cargo.lock \
+  -o packaging/flatpak/generated-cargo-sources.json
+flatpak run org.flatpak.Builder --user --install --force-clean \
+  build-dir packaging/flatpak/org.snitchwatch.Snitchwatch.yml
+flatpak run org.snitchwatch.Snitchwatch
+```
+
+**Then verify it's actually working**, not just installed — the 5 steps in
+`docs/packaging/phase2-manual-verification-runbook.md`:
+1. Bluebuild image actually has `opensnitchd` enabled + the fail-closed
+   config baked in.
+2. Flatpak sandbox boundary actually holds (no stray network access, the
+   Unix-socket filesystem permission actually crosses the sandbox).
+3. A real `opensnitchd` dial-in round-trips a live `AskRule`.
+4. Closing the GUI window does **not** kill the decision channel (the
+   whole point of Phase 2 — the bridge runs as its own systemd `--user`
+   service, decoupled from the GUI).
+5. The tray icon actually reflects `DaemonDown`/`RecentBlock`/`FilterOff`
+   in real time, not just in the sandbox's mocked tests.
+
+Record results by flipping the checkbox in
+`docs/superpowers/plans/2026-07-05-phase2-packaging.md`'s "Acceptance
+criteria & verification status" section, same convention Task 7's
+fullscreen-focus test used.
+
+---
+
+## Original 2026-07-04 handoff (history — decisions and rationale below are
+## still accurate; status framing above supersedes anything below)
 
 Two related but independent components, both targeting Bazzite. This
 supersedes the original handoff brief — all four of its open questions are
@@ -102,46 +220,9 @@ and protected by decision #1 below). Zero code exists; three design docs do
 | `docs/superpowers/specs/2026-07-04-scanner-baseline-design.md` | Component B's atomic-baseline classification design |
 | `docs/superpowers/specs/2026-07-04-scanner-privileged-tier-design.md` | Rootkit/kernel-audit tool selection for Component B |
 
-## Next step
-
-> **Update 2026-07-12: superseded — Phases 1–6 are done or code-complete.**
-> The plan below (Phase 1 first, etc.) is what this doc originally
-> recommended and is kept for history; it is not the current state. Current
-> status, in brief (see `IMPLEMENTATION_PROMPT.md` for the per-phase detail
-> and status notes):
-> - **Phase 1** (Unix socket + auth token): done.
-> - **Phase 2** (packaging — bluebuild/Flatpak/rpm-ostree/fail-closed
->   config): code/config done and validated in CI; only 4 items need a real
->   Bazzite host — see
->   `docs/packaging/phase2-manual-verification-runbook.md`.
-> - **Phase 3a/3b** (Kirigami shell): done — feature parity with the old
->   Tauri+`web/` shell, plus Task 7's fullscreen-focus safety test passed on
->   real hardware. `crates/snitchwatch-tauri/`+`web/` are kept in the repo
->   until a packaged release ships (owner decision, 2026-07-11), but the
->   Flatpak manifest already targets `snitchwatch-kirigami`.
-> - **Phase 4** (scanner baseline design): done.
-> - **Phase 5** (scanner userspace tier): done. Connection-log persistence
->   for the optional Component A→B signal was left undone deliberately
->   ("not needed yet" for v1).
-> - **Phase 6** (scanner privileged tier + report UI): code-complete,
->   including the Kirigami report UI. Needs the same real-hardware
->   verification as Phase 2 (polkit prompt, live
->   `chkrootkit`/`rpm-ostree`/`mokutil`).
-> - CI (`.github/workflows/ci.yml`) now runs `check`/`test`/`package-check`
->   on Ubuntu plus a dedicated `kirigami` job in a Fedora container
->   (verifies `snitchwatch-kirigami` builds/tests headless — was previously
->   unverified, see `.agent_native/agent_roadmap.md` item 6).
->
-> **What's actually left:** real Bazzite hardware verification for Phases 2
-> and 6 (runbooks exist for both), and the Tauri/`web/` removal once a
-> packaged release ships. Nothing else is blocked on more agent/sandbox
-> work.
-
-Implementation, phase by phase per `IMPLEMENTATION_PROMPT.md`, using
-Sonnet/Opus subagents (not Fable — Fable's role was research/design only,
-now complete for this pass). Start with **Phase 1** (Unix domain socket +
-auth token in `snitchwatch-bridge`) — it's unblocked and blocks all
-packaging work. Two stop-and-ask gates remain inside the phases themselves:
-Phase 3a's `cxx-qt` spike (go/no-go before the full Kirigami rewrite) and
-Phase 4 is already resolved so Phase 5 is unblocked once Phase 4's design
-doc is read by whoever implements it.
+(Later plan docs, not listed here individually, live in
+`docs/superpowers/plans/` — the naming convention is
+`YYYY-MM-DD-<slug>.md`; browse that directory for anything after
+2026-07-04, including the Phase 2 packaging plan, the Kirigami rewrite's
+final status, both scanner-tier plans, the Phase 6 report-UI plan, and the
+three 2026-07-12 tray-state plans.)
