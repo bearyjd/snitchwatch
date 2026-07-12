@@ -59,13 +59,28 @@ web-smoke:
 web-smoke-install:
     cd tests/web_smoke && npm install && npx playwright install firefox
 
-# Run the Tauri shell in dev mode (live bridge + native window)
+# Run the Tauri shell in dev mode (live bridge + native window). Kept
+# alongside kirigami-dev until Tauri/web/ are retired (see the
+# kirigami-shell-rewrite plan's status note) — Kirigami is the shell that
+# actually ships.
 tauri-dev:
     cargo run -p snitchwatch-tauri
 
 # Build a release Tauri bundle (deb/rpm/appimage as configured in tauri.conf.json)
 tauri-build:
     cargo build -p snitchwatch-tauri --release
+
+# Run the Kirigami shell in dev mode (live bridge + native Qt6/QML window).
+# Requires system Qt6 + KDE Frameworks 6 (Kirigami) dev packages — see
+# CLAUDE.md's "kirigami-spike and snitchwatch-kirigami are excluded from
+# default-members" note. This is the shell that actually ships (see
+# packaging/README.md).
+kirigami-dev:
+    cargo run -p snitchwatch-kirigami
+
+# Build a release Kirigami shell binary.
+kirigami-build:
+    cargo build -p snitchwatch-kirigami --release
 
 # Playwright smoke test for the Tauri shell (requires `npm install` in tests/tauri_smoke first)
 tauri-smoke:

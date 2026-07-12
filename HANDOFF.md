@@ -104,6 +104,39 @@ and protected by decision #1 below). Zero code exists; three design docs do
 
 ## Next step
 
+> **Update 2026-07-12: superseded — Phases 1–6 are done or code-complete.**
+> The plan below (Phase 1 first, etc.) is what this doc originally
+> recommended and is kept for history; it is not the current state. Current
+> status, in brief (see `IMPLEMENTATION_PROMPT.md` for the per-phase detail
+> and status notes):
+> - **Phase 1** (Unix socket + auth token): done.
+> - **Phase 2** (packaging — bluebuild/Flatpak/rpm-ostree/fail-closed
+>   config): code/config done and validated in CI; only 4 items need a real
+>   Bazzite host — see
+>   `docs/packaging/phase2-manual-verification-runbook.md`.
+> - **Phase 3a/3b** (Kirigami shell): done — feature parity with the old
+>   Tauri+`web/` shell, plus Task 7's fullscreen-focus safety test passed on
+>   real hardware. `crates/snitchwatch-tauri/`+`web/` are kept in the repo
+>   until a packaged release ships (owner decision, 2026-07-11), but the
+>   Flatpak manifest already targets `snitchwatch-kirigami`.
+> - **Phase 4** (scanner baseline design): done.
+> - **Phase 5** (scanner userspace tier): done. Connection-log persistence
+>   for the optional Component A→B signal was left undone deliberately
+>   ("not needed yet" for v1).
+> - **Phase 6** (scanner privileged tier + report UI): code-complete,
+>   including the Kirigami report UI. Needs the same real-hardware
+>   verification as Phase 2 (polkit prompt, live
+>   `chkrootkit`/`rpm-ostree`/`mokutil`).
+> - CI (`.github/workflows/ci.yml`) now runs `check`/`test`/`package-check`
+>   on Ubuntu plus a dedicated `kirigami` job in a Fedora container
+>   (verifies `snitchwatch-kirigami` builds/tests headless — was previously
+>   unverified, see `.agent_native/agent_roadmap.md` item 6).
+>
+> **What's actually left:** real Bazzite hardware verification for Phases 2
+> and 6 (runbooks exist for both), and the Tauri/`web/` removal once a
+> packaged release ships. Nothing else is blocked on more agent/sandbox
+> work.
+
 Implementation, phase by phase per `IMPLEMENTATION_PROMPT.md`, using
 Sonnet/Opus subagents (not Fable — Fable's role was research/design only,
 now complete for this pass). Start with **Phase 1** (Unix domain socket +

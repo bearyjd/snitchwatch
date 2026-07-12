@@ -21,6 +21,10 @@ been decided; see the updated Phase 3 below.)
 
 ## Phase 1 — WS transport: Unix domain socket + handshake auth token (Component A)
 
+> **Update: DONE.** `ws_server.rs` serves over `UnixListener`; the
+> handshake token lives in `crates/snitchwatch-bridge/src/auth.rs`. Unblocks
+> Phase 2, which is itself code-complete (see that section).
+
 **Blocks:** Phase 2 (all packaging work). A Flatpak-sandboxed GUI talking to
 an unauthenticated loopback WS is not shippable — see `AUDIT.md`'s
 independent-critique CRITICAL finding. **Scope expanded 2026-07-04**: the
@@ -109,6 +113,16 @@ transport change):**
 ---
 
 ## Phase 2 — Distribution: bluebuild (primary) + rpm-ostree layering (documented alternative) + Flatpak, with fail-open stance (Component A)
+
+> **Update 2026-07-12: code/config complete, real-hardware verification
+> pending.** All artifacts exist and validate in CI
+> (`docs/superpowers/plans/2026-07-05-phase2-packaging.md`) — the Flatpak
+> manifest was repointed to `snitchwatch-kirigami` (the shell that ships)
+> once Phase 3b landed. Four items genuinely need a real Bazzite host and
+> can't be verified in a sandbox: `bluebuild build`, `flatpak-builder`, a
+> live `opensnitchd` dial-in, and the closed-window fail-open proof — full
+> step-by-step instructions in
+> `docs/packaging/phase2-manual-verification-runbook.md`.
 
 **Blocks on:** Phase 1 (auth token must exist before shipping any packaged
 build that's reachable outside a single trusted dev machine).
@@ -213,6 +227,15 @@ depend on its default action at all).
 
 ## Phase 3 — Qt6/QML + Kirigami rewrite of the shell (Component A)
 
+> **Update 2026-07-11: DONE.** Both 3a and 3b shipped — see
+> `docs/superpowers/plans/2026-07-04-kirigami-shell-rewrite.md`'s status
+> note for the full task-by-task record, including parity features beyond
+> this prompt's original scope and Task 7's fullscreen-focus safety test
+> passing on real hardware. `crates/snitchwatch-tauri/` and `web/` are kept
+> per this section's own acceptance criteria — "only removed once the
+> Kirigami shell has shipped feature parity" — pending a packaged release
+> (owner decision, 2026-07-11), not because parity is missing.
+
 **DECIDED 2026-07-04** (was a stop-and-ask gate; see
 `docs/superpowers/specs/2026-07-04-gui-stack-decision.md` for the full
 Options A/B/C/D analysis). The human owner chose **Option D**: a full
@@ -278,6 +301,10 @@ prompt did for the overall project.
 
 ## Phase 4 — Component B baseline design session
 
+> **Update: DONE.** See
+> `docs/superpowers/specs/2026-07-04-scanner-baseline-design.md`. Unblocked
+> Phases 5 and 6, both now done/code-complete.
+
 **Blocks:** every other Component B phase (5, 6). No Component B code gets
 written before this lands — per `AUDIT.md`'s decision #4, unchanged by the
 independent critique.
@@ -307,6 +334,12 @@ and approved before Phase 5 starts.
 ---
 
 ## Phase 5 — Component B userspace tier (Component B)
+
+> **Update: DONE.** See
+> `docs/superpowers/plans/2026-07-05-scanner-userspace-tier.md`.
+> Connection-log persistence (the optional Component A→B signal channel
+> below) was deliberately left undone — "not needed yet" for v1, per that
+> plan doc.
 
 **Blocks on:** Phase 4 (baseline design must be approved). Also has an
 internal precondition below regarding the shared-signal channel.

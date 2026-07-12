@@ -4,14 +4,22 @@ A Little Snitch–style network firewall GUI for Linux, on top of OpenSnitch.
 
 ## Status
 
-Pre-alpha. Plan 1 (bridge foundation) is complete: the headless bridge
-crate translates between OpenSnitch's gRPC protocol and Little Snitch's
-WebSocket protocol, with full test coverage and an AskRule round-trip
-end-to-end test against an in-process mock daemon.
+Pre-alpha, but functionally complete end to end. The headless bridge
+translates between OpenSnitch's gRPC protocol and a Little-Snitch-style
+protocol, with full test coverage and an AskRule round-trip end-to-end test
+against an in-process mock daemon. The native desktop shell is
+**`snitchwatch-kirigami`** (Qt6/QML + Kirigami) — see "Try the Kirigami
+shell" below; `snitchwatch-tauri`/`web/` are an earlier shell kept in the
+tree only until a packaged release ships. Packaging (bluebuild image,
+rpm-ostree layering, Flatpak) and the Bazzite security scanner (Component
+B, `scanner-core`/`scanner-cli`/`scanner-privileged`) are also code-complete
+— remaining work is real-hardware verification, tracked in
+`docs/packaging/phase2-manual-verification-runbook.md` and
+`IMPLEMENTATION_PROMPT.md`.
 
-See `docs/superpowers/specs/2026-04-10-snitchwatch-design.md` for the design,
-and `docs/superpowers/plans/2026-04-10-bridge-foundation.md` for the Plan 1
-task breakdown.
+See `docs/superpowers/specs/2026-04-10-snitchwatch-design.md` for the
+original design and `IMPLEMENTATION_PROMPT.md` for the full phase-by-phase
+status.
 
 ## Building
 
@@ -125,9 +133,12 @@ Environment variables:
   `$XDG_RUNTIME_DIR/snitchwatch/bridge.sock`)
 - `RUST_LOG` — tracing filter, e.g. `info`, `snitchwatch_bridge=debug`
 
-## Try it as a native desktop app (M3)
+## Try the Tauri shell (earlier shell, kept until Kirigami's release ships)
 
-After installing the workspace tooling (`cargo`, `just`, optional Playwright for the smoke suite):
+For the shell that actually ships, see "Try the Kirigami shell" below. This
+Tauri+`web/` shell remains in the tree and works, but is being retired once
+a packaged Kirigami release ships. After installing the workspace tooling
+(`cargo`, `just`, optional Playwright for the smoke suite):
 
 ```bash
 just tauri-dev
@@ -165,6 +176,29 @@ with the remote IP, so it is **opt-in and off by default** — enable it from
 Flatpak-sandboxed install has no network access for the GUI at all (see
 "Install on Bazzite" above), so online research there requires a
 non-sandboxed install or an explicit network permission grant.
+
+## Try the Kirigami shell
+
+`snitchwatch-kirigami` (Qt6/QML + Kirigami, via `cxx-qt`) is the shell that
+actually ships — the Flatpak manifest builds it, not `snitchwatch-tauri`.
+It's a native match for Bazzite's default KDE Plasma desktop and has
+feature parity with the Tauri+`web/` shell above, including the same
+autostart/crash-log/RDAP/coexistence-check surfaces (**Settings &
+Diagnostics** page) and the same pending-decision safety behavior
+(verified to raise/focus over a fullscreen window on a real Plasma
+session).
+
+Requires system Qt6 + KDE Frameworks 6 (Kirigami) dev packages — this is
+why `kirigami-spike`/`snitchwatch-kirigami` are excluded from the workspace
+`default-members` (a plain `cargo build`/`just build` won't touch them).
+
+```bash
+just kirigami-dev
+```
+
+Everything else — autostart, crash log, privacy/RDAP opt-in, `opensnitch-ui`
+coexistence — works the same way as documented above for the Tauri shell,
+just reached from this shell's own **Settings & Diagnostics** page instead.
 
 ## M4 — Subscribe to a blocklist
 
@@ -240,7 +274,10 @@ installed and autostarting, the two will contend for the daemon's UI gRPC
 channel (and the vendored `ui.proto` may drift from a differently-versioned
 upstream). Install only the daemon (`opensnitch`), not `opensnitch-ui`, and
 disable any existing `~/.config/autostart/opensnitch_ui.desktop`. The
-rpm-ostree walkthrough documents the detect-and-disable step.
+rpm-ostree walkthrough documents the detect-and-disable step, and the
+Kirigami shell's **Settings & Diagnostics** page runs this same check
+automatically at runtime (warns if `opensnitch-ui` is installed or its
+autostart entry is present) — see `crates/snitchwatch-kirigami/src/coexistence.rs`.
 
 ## Workspace layout
 
@@ -250,12 +287,24 @@ crates/
 ├── snitchwatch-spike/       # M0 spike binary that probes a live daemon
 ├── snitchwatch-bridge/      # headless bridge library (cache, translator, ws server, grpc client)
 ├── snitchwatch-bridge-cli/  # thin orchestrator (lib::run + main.rs)
-└── snitchwatch-tauri/       # Tauri 2 desktop shell (tray, notifications, autostart, wizard)
+├── snitchwatch-kirigami/    # Qt6/QML + Kirigami desktop shell (cxx-qt) — the shell that ships
+├── snitchwatch-tauri/       # earlier Tauri 2 shell — kept until a packaged release ships
+├── kirigami-spike/          # throwaway cxx-qt feasibility spike (Phase 3a), not shipped
+├── scanner-core/            # Component B: userspace-tier Bazzite security scanner
+├── scanner-cli/             # Component B: userspace-tier CLI orchestrator
+└── scanner-privileged/      # Component B: on-demand privileged-tier scanner (polkit/pkexec)
 tests/
 ├── bridge_protocol_test.rs  # the round-trip integration test
 ├── integration/             # crate that owns the integration test
 └── mock_opensnitchd/        # in-process gRPC mock with scripted events
 ```
+
+`kirigami-spike` and `snitchwatch-kirigami` need system Qt6 + KDE Frameworks 6
+dev packages and are excluded from `default-members` — see "Try the
+Kirigami shell" above and `just build`/`just check` won't touch them.
+Component B (the scanner crates) is an unrelated product sharing this repo
+and, at most, a design system with Component A — see `CLAUDE.md`'s
+"Settled architecture decisions" for why they don't share a daemon.
 
 ## License
 
