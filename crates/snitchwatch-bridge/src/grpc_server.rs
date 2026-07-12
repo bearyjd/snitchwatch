@@ -29,7 +29,13 @@ pub struct UiService {
     cache: Arc<Mutex<ConnectionCache>>,
     broadcast: broadcast::Sender<ServerMessage>,
     next_ask_id: Arc<AtomicU64>,
-    // Stored for future use by M3+ gRPC handlers; not yet read.
+    // NOT the path that drives Idle/Pending — that's wired through
+    // ConnectionCache::with_tray_publisher (see cache/connections.rs),
+    // which the caller must also construct with the same publisher this
+    // field holds. This field is reserved for the other TrayState variants
+    // (DaemonDown detection off `ping()`'s recency, RecentBlock off a Deny
+    // verdict in ask_rule) — deliberately deferred, not dead: see
+    // .agent_native/agent_roadmap.md for the scoped follow-up.
     #[allow(dead_code)]
     tray_pub: Arc<TrayStatePublisher>,
     notice_bus: Arc<NoticeBus>,

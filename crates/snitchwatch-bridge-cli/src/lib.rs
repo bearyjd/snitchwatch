@@ -145,8 +145,21 @@ pub async fn run(config: BridgeConfig) -> Result<RunningBridge> {
     let (broadcast_tx, _) = broadcast::channel::<ServerMessage>(256);
     let (inbound_tx, mut inbound_rx) = mpsc::channel::<ClientMessage>(256);
 
+    // Tray-state publisher, constructed up front so the cache can wire its
+    // pending-count transitions into it (see `with_tray_publisher` below) —
+    // `TrayStatePublisher::set()` is otherwise never called in production,
+    // which left the tray icon stuck at `Idle` regardless of real state.
+    let tray_pub = Arc::new(TrayStatePublisher::new());
+
     // Shared connection cache (pending-row state + decided-row history).
-    let cache = Arc::new(Mutex::new(ConnectionCache::new(config.cache_capacity)));
+    // `with_tray_publisher` (not `::new`) so `insert_pending`/`resolve`
+    // republish `TrayState::Pending(n)`/`Idle` on every change — see
+    // `cache::connections`'s `tray_state_tests` module for the existing
+    // coverage this wiring already had, just never used in production.
+    let cache = Arc::new(Mutex::new(ConnectionCache::with_tray_publisher(
+        config.cache_capacity,
+        tray_pub.clone(),
+    )));
 
     // --- BlocklistsManager (in-memory store; callers may swap in a persisted one) ---
     let blocklists_store = Arc::new(
@@ -213,7 +226,6 @@ pub async fn run(config: BridgeConfig) -> Result<RunningBridge> {
         .local_addr()
         .context("gRPC listener has no local address")?;
 
-    let tray_pub = Arc::new(TrayStatePublisher::new());
     let notice_bus = Arc::new(NoticeBus::new());
     let tray_rx = tray_pub.subscribe();
     let notice_rx = notice_bus.subscribe();

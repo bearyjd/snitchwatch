@@ -104,6 +104,29 @@ immediately actionable with no further human input needed.
    implemented with the testkit pattern from item 5. No action needed beyond
    linking those docs from CLAUDE.md (done).
 
+9. **Tray state (`DaemonDown`/`RecentBlock`/`FilterOff`) is display-only —
+   nothing in production ever transitions the bridge's `TrayStatePublisher`
+   into those three states.** Found 2026-07-12 while investigating a
+   `#[allow(dead_code)]` in `grpc_server.rs`. `Idle`/`Pending(n)` are now
+   fixed (production wires `ConnectionCache::with_tray_publisher`, which
+   was always fully implemented and tested, just never called). The other
+   three need real design decisions before implementing, not just wiring:
+   - `DaemonDown`: buildable off `ping()`'s recency (opensnitchd's periodic
+     heartbeat already lands there) via a staleness watchdog. Bounded scope.
+   - `RecentBlock`: needs a timer-based revert-to-previous-state mechanism,
+     triggered from a Deny verdict in `ask_rule`.
+   - `FilterOff`: **not just unwired — the underlying feature doesn't exist
+     at all.** `MenuLabel::PauseFiltering`/`ResumeFiltering` are tray-menu
+     label strings with no gRPC call, config toggle, or bridge-side concept
+     of "filtering paused" behind them anywhere in the codebase. Building
+     this requires deciding what pausing means for a security product first
+     (auto-allow everything? stop prompting? flip opensnitchd's
+     `DefaultAction`?) — a product/security decision, not a wiring task.
+   Effort: small (DaemonDown) to open-ended (FilterOff, blocked on a design
+   decision). Payoff: medium — cosmetic today (nothing currently depends on
+   accurate tray state), but worth fixing before calling the shell
+   "feature-complete" for a real release.
+
 ## What's already good (don't touch)
 
 - The mock-daemon (`tests/mock_opensnitchd`) + `bridge_protocol_test.rs`
