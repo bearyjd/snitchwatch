@@ -76,6 +76,10 @@ pub fn apply(
             Ok(UpstreamEffect::UpdateRule { rule_id, rule })
         }
         ClientMessage::RequestSnapshot => Ok(UpstreamEffect::SnapshotRequested),
+        // SetFilteringPaused is intercepted earlier in the pump loop
+        // (snitchwatch-bridge-cli::run, mirroring how profile messages are
+        // special-cased before reaching here) since it toggles a shared
+        // flag + tray state, not cache state this function owns.
         ClientMessage::GlobalSettings { .. }
         | ClientMessage::SubscribeBlocklist { .. }
         | ClientMessage::UnsubscribeBlocklist { .. }
@@ -87,7 +91,8 @@ pub fn apply(
         | ClientMessage::AddProfileRule { .. }
         | ClientMessage::RemoveProfileRule { .. }
         | ClientMessage::Undo
-        | ClientMessage::Redo => Ok(UpstreamEffect::None),
+        | ClientMessage::Redo
+        | ClientMessage::SetFilteringPaused { .. } => Ok(UpstreamEffect::None),
     }
 }
 

@@ -185,6 +185,12 @@ Kirigami.ApplicationWindow {
             bridgeFeed.sendClientJson(json);
         }
     }
+    Connections {
+        target: trayController
+        function onFilteringToggleRequested(json) {
+            bridgeFeed.sendClientJson(json);
+        }
+    }
 
     // App-level bridge status. Hidden while the bridge is healthy; shows an
     // error banner over the current page if it failed to start. Floats above
@@ -337,6 +343,18 @@ Kirigami.ApplicationWindow {
             Labs.MenuItem {
                 text: root.visible ? "Hide window" : "Show window"
                 onTriggered: root.visible ? root.hide() : root.raiseAndActivate()
+            }
+            // Pause/resume filtering (Phase 6 tray-state follow-up). Only
+            // shown for the two tokens this action actually applies to —
+            // "reconnect" (DaemonDown) and "default" have no filtering
+            // toggle to offer. See tray_controller.rs's toggleFiltering doc.
+            Labs.MenuItem {
+                visible: trayController.menuLabel === "pause_filtering"
+                    || trayController.menuLabel === "resume_filtering"
+                text: trayController.menuLabel === "pause_filtering"
+                    ? "Pause filtering"
+                    : "Resume filtering"
+                onTriggered: trayController.toggleFiltering(trayController.menuLabel === "pause_filtering")
             }
             Labs.MenuItem {
                 separator: true

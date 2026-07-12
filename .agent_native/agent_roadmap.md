@@ -104,30 +104,36 @@ immediately actionable with no further human input needed.
    implemented with the testkit pattern from item 5. No action needed beyond
    linking those docs from CLAUDE.md (done).
 
-9. **Tray state (`DaemonDown`/`RecentBlock`/`FilterOff`) was display-only —
-   nothing in production transitioned the bridge's `TrayStatePublisher`
-   into those three states.** Found 2026-07-12 while investigating a
-   `#[allow(dead_code)]` in `grpc_server.rs`.
-   - `Idle`/`Pending(n)`: **fixed** (`b902a2a`) — production wires
-     `ConnectionCache::with_tray_publisher`, which was always fully
-     implemented and tested, just never called.
-   - `DaemonDown` and `RecentBlock`: **fixed** — see
+9. **RESOLVED 2026-07-12. Tray state (`DaemonDown`/`RecentBlock`/
+   `FilterOff`) was display-only — nothing in production transitioned the
+   bridge's `TrayStatePublisher` into those three states.** Found
+   2026-07-12 while investigating a `#[allow(dead_code)]` in
+   `grpc_server.rs`. All four variants (including `Idle`/`Pending(n)`) are
+   now wired end to end:
+   - `Idle`/`Pending(n)`: production wires `ConnectionCache::
+     with_tray_publisher`, which was always fully implemented and tested,
+     just never called (`b902a2a`).
+   - `DaemonDown`/`RecentBlock`: see
      `docs/superpowers/plans/2026-07-12-tray-daemon-down-recent-block.md`.
      `DaemonDown` is a staleness watchdog off `ping()`'s recency
      (`daemon_watchdog.rs`); `RecentBlock` publishes on a Deny verdict in
-     `ask_rule` with a generation-guarded revert timer (two blocks in quick
-     succession don't race each other's reverts). Both covered by new unit/
-     async tests; full workspace test suite green.
-   - `FilterOff`: **still not built, and still not just a wiring gap.**
-     `MenuLabel::PauseFiltering`/`ResumeFiltering` are tray-menu label
-     strings with no gRPC call, config toggle, or bridge-side concept of
-     "filtering paused" behind them anywhere in the codebase. Building this
-     requires deciding what pausing means for a security product first
-     (auto-allow everything? stop prompting? flip opensnitchd's
-     `DefaultAction`?) — a product/security decision, not a wiring task.
-   Remaining effort: open-ended, blocked on that product decision. Payoff:
-   low urgency — cosmetic (nothing depends on accurate tray state today),
-   but worth resolving before calling the shell "feature-complete."
+     `ask_rule` with a generation-guarded revert timer.
+   - `FilterOff`: owner decision (2026-07-12) — pausing keeps
+     `opensnitchd`'s `DefaultAction: deny` untouched; the bridge itself
+     auto-resolves every `AskRule` as Allow-Once while paused instead of
+     prompting, so a genuine bridge outage still fails closed. See
+     `docs/superpowers/plans/2026-07-12-tray-filter-off.md` for the full
+     design: a new `ClientMessage::SetFilteringPaused`, `UiService` gaining
+     a genuine `filtering_paused` constructor parameter (unlike
+     `last_ping`/`block_generation`, this one must be externally writable),
+     an inbound-pump toggle handler, and Kirigami shell wiring
+     (`TrayController::toggleFiltering` + a real tray-menu item — the
+     `menuLabel` tokens existed before this but nothing ever displayed or
+     triggered them).
+   Full workspace test suite green throughout (`cargo test --workspace`,
+   0 failures); `snitchwatch-kirigami`'s 247 tests include a passing
+   `main.qml` load, confirming the new tray menu item doesn't break QML
+   parsing. No unbuilt tray-state variants remain.
 
 ## What's already good (don't touch)
 

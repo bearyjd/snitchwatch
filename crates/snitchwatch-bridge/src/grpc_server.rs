@@ -9,14 +9,14 @@ use crate::notice::NoticeBus;
 use crate::translator::connection::{connection_to_row, event_to_row};
 use crate::translator::verdict::verdict_to_rule;
 use crate::tray_state::{TrayState, TrayStatePublisher};
-use crate::ws_messages::ServerMessage;
+use crate::ws_messages::{ServerMessage, VerdictDuration};
 use snitchwatch_proto::protocol::ui_server::{Ui, UiServer};
 use snitchwatch_proto::protocol::{
     Alert, ClientConfig, Connection, MsgResponse, Notification, NotificationReply, PingReply,
     PingRequest, Rule,
 };
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, Mutex};
@@ -49,6 +49,14 @@ pub struct UiService {
     /// counter still matches the value it captured at spawn time, so an
     /// older block's timer never stomps a newer block's still-live display.
     block_generation: Arc<AtomicU64>,
+    /// True while the user has paused interactive filtering (tray
+    /// "Pause filtering"). Unlike `last_ping`/`block_generation`, this must
+    /// be *writable* from outside `UiService` (the inbound `ClientMessage`
+    /// pump toggles it) as well as readable from inside `ask_rule` — the
+    /// same shape `tray_pub`/`cache` already have — so it's a genuine
+    /// constructor parameter, not internal-only state. See
+    /// `docs/superpowers/plans/2026-07-12-tray-filter-off.md`.
+    filtering_paused: Arc<AtomicBool>,
 }
 
 impl UiService {
@@ -57,6 +65,7 @@ impl UiService {
         broadcast: broadcast::Sender<ServerMessage>,
         tray_pub: Arc<TrayStatePublisher>,
         notice_bus: Arc<NoticeBus>,
+        filtering_paused: Arc<AtomicBool>,
     ) -> Self {
         Self {
             cache,
@@ -66,6 +75,7 @@ impl UiService {
             notice_bus,
             last_ping: Arc::new(StdMutex::new(Instant::now())),
             block_generation: Arc::new(AtomicU64::new(0)),
+            filtering_paused,
         }
     }
 
@@ -151,6 +161,40 @@ impl Ui for UiService {
     async fn ask_rule(&self, request: Request<Connection>) -> Result<Response<Rule>, Status> {
         let conn = request.into_inner();
         let ask_id = self.next_ask_id.fetch_add(1, Ordering::Relaxed);
+
+        // Filtering paused (tray "Pause filtering"): auto-allow without
+        // prompting. opensnitchd's own DefaultAction stays untouched — only
+        // the bridge's own decision policy changes, so a genuine bridge
+        // outage (this process crashing, not merely being paused) still
+        // hits the daemon's fail-closed default. See
+        // docs/superpowers/plans/2026-07-12-tray-filter-off.md.
+        if self.filtering_paused.load(Ordering::Relaxed) {
+            let row = connection_to_row(&conn, ask_id);
+            let mut decided_row = row.clone();
+            decided_row.action = Some("allow".to_string());
+            {
+                let mut cache = self.cache.lock().await;
+                cache.insert_decided(decided_row.clone());
+            }
+            if self.broadcast.receiver_count() > 0 {
+                let msg = ServerMessage::InsertConnectionRows {
+                    rows: vec![decided_row],
+                };
+                if let Err(e) = self.broadcast.send(msg) {
+                    warn!(error = %e, "ask_rule (paused): broadcast send failed");
+                }
+            }
+            let now_secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            return Ok(Response::new(verdict_to_rule(
+                Verdict::Allow,
+                VerdictDuration::Once,
+                &conn,
+                now_secs,
+            )));
+        }
 
         let row = connection_to_row(&conn, ask_id);
         // Captured before `row` moves into the broadcast message below —
@@ -259,7 +303,14 @@ mod tests {
         let (tx, _rx) = broadcast::channel(16);
         let tray_pub = Arc::new(crate::tray_state::TrayStatePublisher::new());
         let notice_bus = Arc::new(crate::notice::NoticeBus::new());
-        let svc = UiService::new(cache, tx, tray_pub, notice_bus).into_server();
+        let svc = UiService::new(
+            cache,
+            tx,
+            tray_pub,
+            notice_bus,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .into_server();
 
         tokio::spawn(async move {
             Server::builder()
@@ -303,7 +354,14 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let tray_pub = Arc::new(crate::tray_state::TrayStatePublisher::new());
         let notice_bus = Arc::new(crate::notice::NoticeBus::new());
-        let svc = UiService::new(cache.clone(), tx, tray_pub, notice_bus).into_server();
+        let svc = UiService::new(
+            cache.clone(),
+            tx,
+            tray_pub,
+            notice_bus,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .into_server();
         tokio::spawn(async move {
             Server::builder()
                 .add_service(svc)
@@ -426,7 +484,14 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let tray_pub = Arc::new(crate::tray_state::TrayStatePublisher::new());
         let notice_bus = Arc::new(crate::notice::NoticeBus::new());
-        let svc = UiService::new(cache.clone(), tx, tray_pub, notice_bus).into_server();
+        let svc = UiService::new(
+            cache.clone(),
+            tx,
+            tray_pub,
+            notice_bus,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .into_server();
         tokio::spawn(async move {
             Server::builder()
                 .add_service(svc)
@@ -487,7 +552,14 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let tray_pub = Arc::new(crate::tray_state::TrayStatePublisher::new());
         let notice_bus = Arc::new(crate::notice::NoticeBus::new());
-        let svc = UiService::new(cache.clone(), tx, tray_pub, notice_bus).into_server();
+        let svc = UiService::new(
+            cache.clone(),
+            tx,
+            tray_pub,
+            notice_bus,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .into_server();
         tokio::spawn(async move {
             Server::builder()
                 .add_service(svc)
@@ -543,7 +615,14 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let tray_pub = Arc::new(crate::tray_state::TrayStatePublisher::new());
         let notice_bus = Arc::new(crate::notice::NoticeBus::new());
-        let svc = UiService::new(cache.clone(), tx, tray_pub, notice_bus).into_server();
+        let svc = UiService::new(
+            cache.clone(),
+            tx,
+            tray_pub,
+            notice_bus,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .into_server();
         tokio::spawn(async move {
             Server::builder()
                 .add_service(svc)
@@ -603,7 +682,13 @@ mod tests {
         )));
         let (tx, _rx) = broadcast::channel::<ServerMessage>(16);
         let notice_bus = Arc::new(crate::notice::NoticeBus::new());
-        let svc = UiService::new(cache.clone(), tx, tray_pub.clone(), notice_bus);
+        let svc = UiService::new(
+            cache.clone(),
+            tx,
+            tray_pub.clone(),
+            notice_bus,
+            Arc::new(AtomicBool::new(false)),
+        );
 
         let mut tray_rx = tray_pub.subscribe();
 
@@ -656,7 +741,13 @@ mod tests {
         )));
         let (tx, _rx) = broadcast::channel::<ServerMessage>(16);
         let notice_bus = Arc::new(crate::notice::NoticeBus::new());
-        let svc = UiService::new(cache.clone(), tx, tray_pub.clone(), notice_bus);
+        let svc = UiService::new(
+            cache.clone(),
+            tx,
+            tray_pub.clone(),
+            notice_bus,
+            Arc::new(AtomicBool::new(false)),
+        );
         let mut tray_rx = tray_pub.subscribe();
 
         // First block.
@@ -715,5 +806,88 @@ mod tests {
         tokio::time::advance(RECENT_BLOCK_TTL).await;
         tray_rx.changed().await.unwrap();
         assert_eq!(*tray_rx.borrow(), TrayState::Idle);
+    }
+
+    #[tokio::test]
+    async fn ask_rule_auto_allows_immediately_when_filtering_paused() {
+        let tray_pub = Arc::new(crate::tray_state::TrayStatePublisher::new());
+        let cache = Arc::new(Mutex::new(ConnectionCache::new(64)));
+        let (tx, mut rx) = broadcast::channel::<ServerMessage>(16);
+        let notice_bus = Arc::new(crate::notice::NoticeBus::new());
+        let filtering_paused = Arc::new(AtomicBool::new(true));
+        let svc = UiService::new(
+            cache.clone(),
+            tx,
+            tray_pub,
+            notice_bus,
+            filtering_paused.clone(),
+        );
+
+        // No spawn/wait needed: paused ask_rule never blocks on a oneshot.
+        let rule = svc
+            .ask_rule(Request::new(Connection {
+                dst_host: "paused.example.com".into(),
+                process_path: "/usr/bin/curl".into(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(rule.action, "allow");
+
+        // No pending row was ever created.
+        assert_eq!(cache.lock().await.pending_count(), 0);
+        assert_eq!(cache.lock().await.len(), 1);
+
+        let broadcasted = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("paused ask_rule did not broadcast the decided row")
+            .expect("broadcast error");
+        match broadcasted {
+            ServerMessage::InsertConnectionRows { rows } => {
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0].action.as_deref(), Some("allow"));
+            }
+            other => panic!("expected InsertConnectionRows, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn ask_rule_prompts_normally_when_not_paused() {
+        use crate::translator::connection::ask_row_id;
+
+        let tray_pub = Arc::new(crate::tray_state::TrayStatePublisher::new());
+        let cache = Arc::new(Mutex::new(ConnectionCache::new(64)));
+        let (tx, _rx) = broadcast::channel::<ServerMessage>(16);
+        let notice_bus = Arc::new(crate::notice::NoticeBus::new());
+        let filtering_paused = Arc::new(AtomicBool::new(false));
+        let svc = UiService::new(cache.clone(), tx, tray_pub, notice_bus, filtering_paused);
+
+        let ask_handle = tokio::spawn({
+            let svc = svc.clone();
+            async move {
+                svc.ask_rule(Request::new(Connection {
+                    dst_host: "normal.example.com".into(),
+                    process_path: "/usr/bin/curl".into(),
+                    ..Default::default()
+                }))
+                .await
+            }
+        });
+
+        for _ in 0..50 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            if cache
+                .lock()
+                .await
+                .resolve(&ask_row_id(1), Verdict::Allow, VerdictDuration::Once)
+                .is_ok()
+            {
+                break;
+            }
+        }
+
+        let rule = ask_handle.await.unwrap().unwrap().into_inner();
+        assert_eq!(rule.action, "allow");
     }
 }

@@ -11,6 +11,7 @@
 //! Their 7 unit tests below transfer unchanged.
 
 use snitchwatch_bridge::tray_state::TrayState;
+use snitchwatch_bridge::ws_messages::ClientMessage;
 
 pub fn derive_tooltip(state: &TrayState) -> String {
     match state {
@@ -51,6 +52,17 @@ pub fn menu_label_token(label: &MenuLabel) -> &'static str {
         MenuLabel::ResumeFiltering => "resume_filtering",
         MenuLabel::Reconnect => "reconnect",
     }
+}
+
+/// Build the JSON-encoded `ClientMessage::SetFilteringPaused` the tray menu's
+/// "Pause/Resume filtering" item sends via `BridgeFeed::sendClientJson` (the
+/// same in-process path `PendingDecision::submit` and friends use — see
+/// `docs/superpowers/plans/2026-07-12-tray-filter-off.md`). Pure and
+/// infallible: unlike `PendingDecision`'s verdict-building, there's no
+/// free-text QML input to validate here, just a bool.
+pub fn build_set_filtering_paused_json(paused: bool) -> String {
+    serde_json::to_string(&ClientMessage::SetFilteringPaused { paused })
+        .expect("ClientMessage::SetFilteringPaused always serializes")
 }
 
 #[cfg(test)]
@@ -110,5 +122,13 @@ mod tests {
             derive_menu_label(&TrayState::DaemonDown),
             MenuLabel::Reconnect
         );
+    }
+
+    #[test]
+    fn set_filtering_paused_json_round_trips() {
+        let json = build_set_filtering_paused_json(true);
+        assert_eq!(json, r#"{"action":"setFilteringPaused","paused":true}"#);
+        let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, ClientMessage::SetFilteringPaused { paused: true });
     }
 }

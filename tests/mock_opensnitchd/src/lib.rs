@@ -126,7 +126,8 @@ mod tests {
         let (tx, _rx) = broadcast::channel::<ServerMessage>(16);
         let tray_pub = Arc::new(snitchwatch_bridge::tray_state::TrayStatePublisher::new());
         let notice_bus = Arc::new(snitchwatch_bridge::notice::NoticeBus::new());
-        let svc = UiService::new(cache, tx, tray_pub, notice_bus).into_server();
+        let filtering_paused = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let svc = UiService::new(cache, tx, tray_pub, notice_bus, filtering_paused).into_server();
         tokio::spawn(async move {
             Server::builder()
                 .add_service(svc)

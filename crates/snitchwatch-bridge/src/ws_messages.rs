@@ -179,6 +179,15 @@ pub enum ClientMessage {
     /// the bridge holds no rule cache (`SetRules` originates upstream of it),
     /// so a lagged rules feed recovers on the daemon's next rule push.
     RequestSnapshot,
+    /// Pause or resume interactive filtering (tray "Pause/Resume filtering").
+    /// While paused, `opensnitchd`'s own `DefaultAction: deny` is left
+    /// untouched — the bridge itself auto-resolves every `AskRule` as
+    /// `Allow-Once` instead of prompting, so a genuine bridge outage still
+    /// fails closed. See `grpc_server::UiService::ask_rule` and
+    /// `docs/superpowers/plans/2026-07-12-tray-filter-off.md`.
+    SetFilteringPaused {
+        paused: bool,
+    },
 }
 
 /// Resolve [`ClientMessage::SetVerdict`]'s effective duration from the new
@@ -729,5 +738,18 @@ mod profile_message_tests {
             serde_json::from_str::<ClientMessage>(&json).unwrap(),
             remove
         );
+    }
+}
+
+#[cfg(test)]
+mod filtering_pause_tests {
+    use super::*;
+
+    #[test]
+    fn client_set_filtering_paused_round_trips() {
+        let msg = ClientMessage::SetFilteringPaused { paused: true };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(json, r#"{"action":"setFilteringPaused","paused":true}"#);
+        assert_eq!(serde_json::from_str::<ClientMessage>(&json).unwrap(), msg);
     }
 }

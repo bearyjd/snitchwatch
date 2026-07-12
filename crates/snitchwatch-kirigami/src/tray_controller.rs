@@ -14,7 +14,9 @@ use core::pin::Pin;
 use cxx_qt::Threading;
 use cxx_qt_lib::QString;
 
-use crate::tray::{derive_menu_label, derive_tooltip, menu_label_token};
+use crate::tray::{
+    build_set_filtering_paused_json, derive_menu_label, derive_tooltip, menu_label_token,
+};
 
 #[cxx_qt::bridge]
 pub mod qobject {
@@ -45,6 +47,24 @@ pub mod qobject {
         #[qinvokable]
         #[cxx_name = "startBridgeFeed"]
         fn start_bridge_feed(self: Pin<&mut TrayController>);
+
+        /// Emitted with the JSON-encoded `ClientMessage::SetFilteringPaused`
+        /// for the tray menu's "Pause/Resume filtering" item. `main.qml`
+        /// connects this to `bridgeFeed.sendClientJson` — the same
+        /// in-process path `PendingDecision::verdictSubmitted` uses.
+        #[qsignal]
+        #[cxx_name = "filteringToggleRequested"]
+        fn filtering_toggle_requested(self: Pin<&mut TrayController>, json: QString);
+
+        /// Toggle interactive filtering. `paused = true` pauses (bridge
+        /// auto-allows every `AskRule`); `false` resumes normal prompting.
+        /// The tray menu item passes the *new* desired state, derived from
+        /// the current `menuLabel` token (`"pause_filtering"` means
+        /// currently unpaused, so clicking should pass `true`, and vice
+        /// versa) — see `main.qml`'s tray menu.
+        #[qinvokable]
+        #[cxx_name = "toggleFiltering"]
+        fn toggle_filtering(self: Pin<&mut TrayController>, paused: bool);
     }
 
     impl cxx_qt::Threading for TrayController {}
@@ -96,6 +116,13 @@ impl qobject::TrayController {
                 });
             }
         });
+    }
+}
+
+impl qobject::TrayController {
+    fn toggle_filtering(self: Pin<&mut Self>, paused: bool) {
+        let json = build_set_filtering_paused_json(paused);
+        self.filtering_toggle_requested(QString::from(&json));
     }
 }
 

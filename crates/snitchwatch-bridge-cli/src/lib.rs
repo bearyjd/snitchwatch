@@ -235,11 +235,17 @@ pub async fn run(config: BridgeConfig) -> Result<RunningBridge> {
     let tray_rx = tray_pub.subscribe();
     let notice_rx = notice_bus.subscribe();
 
+    // Shared with the inbound pump below (SetFilteringPaused toggles it) and
+    // read by UiService::ask_rule on every call. Resets to unpaused on every
+    // bridge start, matching every other in-memory bridge state.
+    let filtering_paused = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
     let ui_service_inner = UiService::new(
         cache.clone(),
         broadcast_tx.clone(),
         tray_pub.clone(),
         notice_bus,
+        filtering_paused.clone(),
     );
     // Grabbed before `.into_server()` consumes `ui_service_inner` — the
     // daemon-down watchdog below needs this to watch `ping()`'s recency.
@@ -252,7 +258,7 @@ pub async fn run(config: BridgeConfig) -> Result<RunningBridge> {
     // pings resume. See daemon_watchdog's module doc for the timeout rationale.
     let watchdog_handle = tokio::spawn(snitchwatch_bridge::daemon_watchdog::run(
         last_ping,
-        tray_pub,
+        tray_pub.clone(),
         cache.clone(),
     ));
 
@@ -310,8 +316,22 @@ pub async fn run(config: BridgeConfig) -> Result<RunningBridge> {
     let profiles_for_upstream = profiles_mgr;
     let blocklists_for_upstream = blocklists_mgr;
     let snapshot_tx = broadcast_tx.clone();
+    let tray_pub_for_pause = tray_pub.clone();
+    let filtering_paused_for_pump = filtering_paused.clone();
     tokio::spawn(async move {
         while let Some(msg) = inbound_rx.recv().await {
+            // Special-cased before is_profile_message/upstream::apply — this
+            // toggles a shared flag + tray state, not cache state those own.
+            // See docs/superpowers/plans/2026-07-12-tray-filter-off.md.
+            if let ClientMessage::SetFilteringPaused { paused } = msg {
+                filtering_paused_for_pump.store(paused, std::sync::atomic::Ordering::Relaxed);
+                if paused {
+                    tray_pub_for_pause.set(TrayState::FilterOff);
+                } else {
+                    cache_for_upstream.lock().await.resync_tray_state();
+                }
+                continue;
+            }
             if is_profile_message(&msg) {
                 use snitchwatch_bridge::translator::upstream::handle_profile_action;
                 if let Err(e) = handle_profile_action(profiles_for_upstream.clone(), msg).await {
@@ -566,6 +586,35 @@ mod tests {
             }
             other => panic!("expected TrafficEvents, got {other:?}"),
         }
+
+        bridge.shutdown();
+    }
+
+    #[tokio::test]
+    async fn set_filtering_paused_toggles_tray_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = BridgeConfig {
+            grpc_bind: "127.0.0.1:0".parse().unwrap(),
+            ws_socket_path: dir.path().join("bridge.sock"),
+            cache_capacity: 64,
+        };
+        let mut bridge = run(cfg).await.expect("run failed");
+
+        bridge
+            .inbound_tx
+            .send(ClientMessage::SetFilteringPaused { paused: true })
+            .await
+            .expect("inbound channel closed");
+        bridge.tray_rx.changed().await.unwrap();
+        assert_eq!(*bridge.tray_rx.borrow(), TrayState::FilterOff);
+
+        bridge
+            .inbound_tx
+            .send(ClientMessage::SetFilteringPaused { paused: false })
+            .await
+            .expect("inbound channel closed");
+        bridge.tray_rx.changed().await.unwrap();
+        assert_eq!(*bridge.tray_rx.borrow(), TrayState::Idle);
 
         bridge.shutdown();
     }
