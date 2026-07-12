@@ -13,6 +13,7 @@ pub mod bridge_bindings;
 pub mod bridge_dispatch;
 pub mod bridge_feed;
 pub mod bridge_runtime;
+pub mod coexistence;
 pub mod connections;
 pub mod connections_model;
 pub mod crash_log;

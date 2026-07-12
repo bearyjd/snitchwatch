@@ -14,6 +14,7 @@ use cxx_qt::Threading;
 use cxx_qt_lib::QString;
 
 use crate::autostart::{read_autostart_state, remove_autostart_desktop, write_autostart_desktop};
+use crate::coexistence::check_coexistence;
 use crate::crash_log::read_crash_log_tail;
 use crate::paths::{autostart_path, crash_log_path, settings_path};
 use crate::settings::{read_settings, write_settings};
@@ -53,6 +54,13 @@ pub mod qobject {
         /// (`rdap.org`) for registration info. Opt-in, default off; reverse
         /// DNS is unaffected. See `crate::settings` and `PendingInsight`.
         #[qproperty(bool, rdap_enabled, cxx_name = "rdapEnabled")]
+        /// True when upstream opensnitch-ui was detected (package installed
+        /// or its autostart entry present) — see `crate::coexistence`.
+        #[qproperty(bool, coexistence_conflict, cxx_name = "coexistenceConflict")]
+        /// Human-readable detail for `coexistenceConflict`, always set
+        /// (even when there's no conflict) so the page can show a positive
+        /// "no conflict" confirmation too.
+        #[qproperty(QString, coexistence_detail, cxx_name = "coexistenceDetail")]
         /// True while a background refresh/write is in flight.
         #[qproperty(bool, busy)]
         type SettingsController = super::SettingsControllerRust;
@@ -89,6 +97,13 @@ pub mod qobject {
         #[qinvokable]
         #[cxx_name = "toggleRdapEnabled"]
         fn toggle_rdap_enabled(self: Pin<&mut SettingsController>, enabled: bool);
+
+        /// Re-run the opensnitch-ui coexistence check off the UI thread.
+        /// Called on page load and from the Diagnostics page's "Check again"
+        /// button.
+        #[qinvokable]
+        #[cxx_name = "refreshCoexistence"]
+        fn refresh_coexistence(self: Pin<&mut SettingsController>);
     }
 
     impl cxx_qt::Threading for SettingsController {}
@@ -100,6 +115,8 @@ pub struct SettingsControllerRust {
     autostart_error: QString,
     crash_log_text: QString,
     rdap_enabled: bool,
+    coexistence_conflict: bool,
+    coexistence_detail: QString,
     busy: bool,
 }
 
@@ -110,6 +127,8 @@ impl Default for SettingsControllerRust {
             autostart_error: QString::default(),
             crash_log_text: QString::from("Loading\u{2026}"),
             rdap_enabled: false,
+            coexistence_conflict: false,
+            coexistence_detail: QString::from("Checking\u{2026}"),
             busy: false,
         }
     }
@@ -189,6 +208,23 @@ impl qobject::SettingsController {
             let actual = read_settings(&path).rdap_enabled;
             let _ = qt_thread.queue(move |mut qobject| {
                 qobject.as_mut().set_rdap_enabled(actual);
+                qobject.as_mut().set_busy(false);
+            });
+        });
+    }
+
+    fn refresh_coexistence(mut self: Pin<&mut Self>) {
+        self.as_mut().set_busy(true);
+        let qt_thread = self.qt_thread();
+        std::thread::spawn(move || {
+            let report = check_coexistence();
+            let conflict = report.conflict();
+            let detail = report.message();
+            let _ = qt_thread.queue(move |mut qobject| {
+                qobject.as_mut().set_coexistence_conflict(conflict);
+                qobject
+                    .as_mut()
+                    .set_coexistence_detail(QString::from(&detail));
                 qobject.as_mut().set_busy(false);
             });
         });

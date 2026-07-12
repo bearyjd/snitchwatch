@@ -117,3 +117,8 @@ fixed target (the bridge-cli otherwise defaults to an ephemeral port).
 - `opensnitch-ui` coexistence: documented a detect-and-disable step in the
   rpm-ostree doc and a README callout (running two UI clients against one
   daemon contends for the UI gRPC channel; `ui.proto` may also drift).
+  **Update 2026-07-11:** also a real runtime check now, not just docs —
+  `crates/snitchwatch-kirigami/src/coexistence.rs`, surfaced on the
+  Diagnostics page (checks `rpm -q opensnitch-ui` and the upstream
+  autostart entry, warns via a `Kirigami.InlineMessage` if either is
+  present).
