@@ -120,11 +120,16 @@ pub struct RunningBridge {
     pub notice_rx: broadcast::Receiver<Notice>,
     ws_shutdown_tx: Option<oneshot::Sender<()>>,
     grpc_shutdown_tx: Option<oneshot::Sender<()>>,
+    /// The daemon-down watchdog task (`daemon_watchdog::run`). It has no
+    /// external state to flush on stop — unlike the WS/gRPC servers, an
+    /// abort is sufficient rather than a graceful oneshot handshake.
+    watchdog_handle: tokio::task::JoinHandle<()>,
 }
 
 impl RunningBridge {
     /// Signal every background task to stop. Safe to call more than once.
     pub fn shutdown(mut self) {
+        self.watchdog_handle.abort();
         if let Some(tx) = self.ws_shutdown_tx.take() {
             let _ = tx.send(());
         }
@@ -230,9 +235,26 @@ pub async fn run(config: BridgeConfig) -> Result<RunningBridge> {
     let tray_rx = tray_pub.subscribe();
     let notice_rx = notice_bus.subscribe();
 
-    let ui_service =
-        UiService::new(cache.clone(), broadcast_tx.clone(), tray_pub, notice_bus).into_server();
+    let ui_service_inner = UiService::new(
+        cache.clone(),
+        broadcast_tx.clone(),
+        tray_pub.clone(),
+        notice_bus,
+    );
+    // Grabbed before `.into_server()` consumes `ui_service_inner` — the
+    // daemon-down watchdog below needs this to watch `ping()`'s recency.
+    let last_ping = ui_service_inner.last_ping_handle();
+    let ui_service = ui_service_inner.into_server();
     let (grpc_shutdown_tx, grpc_shutdown_rx) = oneshot::channel::<()>();
+
+    // Daemon-down watchdog: republishes TrayState::DaemonDown when opensnitchd
+    // stops pinging, and resyncs to the cache's real Idle/Pending(n) once
+    // pings resume. See daemon_watchdog's module doc for the timeout rationale.
+    let watchdog_handle = tokio::spawn(snitchwatch_bridge::daemon_watchdog::run(
+        last_ping,
+        tray_pub,
+        cache.clone(),
+    ));
 
     tokio::spawn(async move {
         let incoming = tokio_stream::wrappers::TcpListenerStream::new(grpc_listener);
@@ -387,6 +409,7 @@ pub async fn run(config: BridgeConfig) -> Result<RunningBridge> {
         notice_rx,
         ws_shutdown_tx: Some(ws_shutdown_tx),
         grpc_shutdown_tx: Some(grpc_shutdown_tx),
+        watchdog_handle,
     })
 }
 

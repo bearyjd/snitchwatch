@@ -4,11 +4,11 @@
 //! Replaces the M1 dial-out flow that lived in the now-deleted
 //! `grpc_client.rs` and `translator/downstream.rs` envelope hack.
 
-use crate::cache::connections::ConnectionCache;
+use crate::cache::connections::{ConnectionCache, Verdict};
 use crate::notice::NoticeBus;
 use crate::translator::connection::{connection_to_row, event_to_row};
 use crate::translator::verdict::verdict_to_rule;
-use crate::tray_state::TrayStatePublisher;
+use crate::tray_state::{TrayState, TrayStatePublisher};
 use crate::ws_messages::ServerMessage;
 use snitchwatch_proto::protocol::ui_server::{Ui, UiServer};
 use snitchwatch_proto::protocol::{
@@ -17,11 +17,19 @@ use snitchwatch_proto::protocol::{
 };
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
+use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, Mutex};
 use tokio_stream::Stream;
 use tonic::{Request, Response, Status, Streaming};
 use tracing::{info, warn};
+
+/// How long a `RecentBlock` tray state stays up before reverting to
+/// whatever `Idle`/`Pending(n)` the cache actually holds. A UX default with
+/// no prior precedent in this codebase to match (long enough for a glance
+/// at the tray tooltip, short enough not to hide a still-accurate `Pending`
+/// count for long) — easy to tune later, not a measured value.
+const RECENT_BLOCK_TTL: Duration = Duration::from_secs(5);
 
 /// Bridge-side gRPC server state. Handed to `UiServer::new` for tonic.
 #[derive(Clone)]
@@ -29,16 +37,18 @@ pub struct UiService {
     cache: Arc<Mutex<ConnectionCache>>,
     broadcast: broadcast::Sender<ServerMessage>,
     next_ask_id: Arc<AtomicU64>,
-    // NOT the path that drives Idle/Pending — that's wired through
-    // ConnectionCache::with_tray_publisher (see cache/connections.rs),
-    // which the caller must also construct with the same publisher this
-    // field holds. This field is reserved for the other TrayState variants
-    // (DaemonDown detection off `ping()`'s recency, RecentBlock off a Deny
-    // verdict in ask_rule) — deliberately deferred, not dead: see
-    // .agent_native/agent_roadmap.md for the scoped follow-up.
-    #[allow(dead_code)]
     tray_pub: Arc<TrayStatePublisher>,
     notice_bus: Arc<NoticeBus>,
+    /// Updated on every `ping()` arrival; read by
+    /// `daemon_watchdog::run` (via [`Self::last_ping_handle`]) to detect a
+    /// stale/unreachable daemon. `std::sync::Mutex`, not tokio's — this is a
+    /// plain timestamp read/write, never held across an `.await`.
+    last_ping: Arc<StdMutex<Instant>>,
+    /// Guards `RecentBlock`'s revert timer against a race between two
+    /// blocks in quick succession: each spawned revert only fires if this
+    /// counter still matches the value it captured at spawn time, so an
+    /// older block's timer never stomps a newer block's still-live display.
+    block_generation: Arc<AtomicU64>,
 }
 
 impl UiService {
@@ -54,6 +64,8 @@ impl UiService {
             next_ask_id: Arc::new(AtomicU64::new(1)),
             tray_pub,
             notice_bus,
+            last_ping: Arc::new(StdMutex::new(Instant::now())),
+            block_generation: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -62,6 +74,39 @@ impl UiService {
     pub fn into_server(self) -> UiServer<Self> {
         UiServer::new(self)
     }
+
+    /// Handle to the last-ping timestamp, for `daemon_watchdog::run` to
+    /// poll. Exposed as an accessor (not a `new()` parameter) so existing
+    /// call sites don't need to change.
+    pub fn last_ping_handle(&self) -> Arc<StdMutex<Instant>> {
+        self.last_ping.clone()
+    }
+
+    /// Publish `TrayState::RecentBlock` and schedule its own revert after
+    /// [`RECENT_BLOCK_TTL`]. If a second block happens before the first's
+    /// timer fires, the first's timer becomes a no-op (its captured
+    /// generation no longer matches) — the newer block's own timer owns the
+    /// eventual revert, so the tray never flickers back to a stale display
+    /// mid-block.
+    fn publish_recent_block(&self, what: String) {
+        let generation = self.block_generation.fetch_add(1, Ordering::SeqCst) + 1;
+        self.tray_pub.set(TrayState::RecentBlock {
+            what,
+            ttl: RECENT_BLOCK_TTL,
+        });
+
+        let cache = self.cache.clone();
+        let block_generation = self.block_generation.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(RECENT_BLOCK_TTL).await;
+            if block_generation.load(Ordering::SeqCst) == generation {
+                // Revert via the cache, which already holds the same
+                // publisher and knows the actual current Idle/Pending(n)
+                // state — not a hardcoded Idle.
+                cache.lock().await.resync_tray_state();
+            }
+        });
+    }
 }
 
 #[tonic::async_trait]
@@ -69,6 +114,11 @@ impl Ui for UiService {
     async fn ping(&self, request: Request<PingRequest>) -> Result<Response<PingReply>, Status> {
         let req = request.into_inner();
         let id = req.id;
+
+        // Every ping (not just ones carrying stats) counts as evidence the
+        // daemon is alive — see `daemon_watchdog`'s module doc for why this
+        // specific handler is the daemon's heartbeat.
+        *self.last_ping.lock().unwrap_or_else(|e| e.into_inner()) = Instant::now();
 
         // The daemon's periodic Ping carries `Statistics.events`: recent
         // connections it matched (and decided) against a *pre-existing*
@@ -103,6 +153,10 @@ impl Ui for UiService {
         let ask_id = self.next_ask_id.fetch_add(1, Ordering::Relaxed);
 
         let row = connection_to_row(&conn, ask_id);
+        // Captured before `row` moves into the broadcast message below —
+        // reused for RecentBlock's tooltip if this resolves to a Deny,
+        // rather than re-deriving the same process/host display logic.
+        let what = format!("{} → {}", row.process, row.dst_host);
         let verdict_rx = {
             let mut cache = self.cache.lock().await;
             cache.insert_pending(row.clone())
@@ -124,6 +178,10 @@ impl Ui for UiService {
         let resolution = verdict_rx
             .await
             .map_err(|_canceled| Status::cancelled("verdict oneshot dropped before resolution"))?;
+
+        if resolution.verdict == Verdict::Deny {
+            self.publish_recent_block(what);
+        }
 
         let now_secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -531,5 +589,131 @@ mod tests {
             .lock()
             .await
             .resolve(&ask_row_id(2), Verdict::Deny, VerdictDuration::Once);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ask_rule_deny_publishes_recent_block_then_reverts_to_idle() {
+        use crate::translator::connection::ask_row_id;
+        use crate::ws_messages::VerdictDuration;
+
+        let tray_pub = Arc::new(crate::tray_state::TrayStatePublisher::new());
+        let cache = Arc::new(Mutex::new(ConnectionCache::with_tray_publisher(
+            64,
+            tray_pub.clone(),
+        )));
+        let (tx, _rx) = broadcast::channel::<ServerMessage>(16);
+        let notice_bus = Arc::new(crate::notice::NoticeBus::new());
+        let svc = UiService::new(cache.clone(), tx, tray_pub.clone(), notice_bus);
+
+        let mut tray_rx = tray_pub.subscribe();
+
+        let svc_for_ask = svc.clone();
+        let ask_handle = tokio::spawn(async move {
+            svc_for_ask
+                .ask_rule(Request::new(Connection {
+                    protocol: "tcp".into(),
+                    dst_host: "tracker.example.com".into(),
+                    dst_ip: "1.2.3.4".into(),
+                    dst_port: 80,
+                    process_path: "/usr/bin/curl".into(),
+                    ..Default::default()
+                }))
+                .await
+        });
+
+        tray_rx.changed().await.unwrap();
+        assert_eq!(*tray_rx.borrow(), TrayState::Pending(1));
+
+        cache
+            .lock()
+            .await
+            .resolve(&ask_row_id(1), Verdict::Deny, VerdictDuration::Once)
+            .unwrap();
+        ask_handle.await.unwrap().unwrap();
+
+        tray_rx.changed().await.unwrap();
+        match &*tray_rx.borrow() {
+            TrayState::RecentBlock { what, .. } => {
+                assert!(what.contains("tracker.example.com"), "unexpected: {what}")
+            }
+            other => panic!("expected RecentBlock, got {other:?}"),
+        }
+
+        tokio::time::advance(RECENT_BLOCK_TTL + Duration::from_millis(100)).await;
+        tray_rx.changed().await.unwrap();
+        assert_eq!(*tray_rx.borrow(), TrayState::Idle);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn second_deny_within_ttl_supersedes_first_blocks_revert_timer() {
+        use crate::translator::connection::ask_row_id;
+        use crate::ws_messages::VerdictDuration;
+
+        let tray_pub = Arc::new(crate::tray_state::TrayStatePublisher::new());
+        let cache = Arc::new(Mutex::new(ConnectionCache::with_tray_publisher(
+            64,
+            tray_pub.clone(),
+        )));
+        let (tx, _rx) = broadcast::channel::<ServerMessage>(16);
+        let notice_bus = Arc::new(crate::notice::NoticeBus::new());
+        let svc = UiService::new(cache.clone(), tx, tray_pub.clone(), notice_bus);
+        let mut tray_rx = tray_pub.subscribe();
+
+        // First block.
+        let svc1 = svc.clone();
+        let ask1 = tokio::spawn(async move {
+            svc1.ask_rule(Request::new(Connection {
+                dst_host: "first.example.com".into(),
+                process_path: "/usr/bin/curl".into(),
+                ..Default::default()
+            }))
+            .await
+        });
+        tray_rx.changed().await.unwrap();
+        cache
+            .lock()
+            .await
+            .resolve(&ask_row_id(1), Verdict::Deny, VerdictDuration::Once)
+            .unwrap();
+        ask1.await.unwrap().unwrap();
+        tray_rx.changed().await.unwrap();
+        assert!(matches!(&*tray_rx.borrow(), TrayState::RecentBlock { .. }));
+
+        // Halfway through the first block's TTL, a second block supersedes it.
+        tokio::time::advance(RECENT_BLOCK_TTL / 2).await;
+        let svc2 = svc.clone();
+        let ask2 = tokio::spawn(async move {
+            svc2.ask_rule(Request::new(Connection {
+                dst_host: "second.example.com".into(),
+                process_path: "/usr/bin/curl".into(),
+                ..Default::default()
+            }))
+            .await
+        });
+        tray_rx.changed().await.unwrap(); // Pending(1) for the second ask
+        cache
+            .lock()
+            .await
+            .resolve(&ask_row_id(2), Verdict::Deny, VerdictDuration::Once)
+            .unwrap();
+        ask2.await.unwrap().unwrap();
+        tray_rx.changed().await.unwrap();
+        match &*tray_rx.borrow() {
+            TrayState::RecentBlock { what, .. } => assert!(what.contains("second.example.com")),
+            other => panic!("expected RecentBlock(second), got {other:?}"),
+        }
+
+        // When the FIRST block's original TTL would have elapsed, its timer
+        // must be a no-op — the tray should still show the second block.
+        tokio::time::advance(RECENT_BLOCK_TTL / 2 + Duration::from_millis(50)).await;
+        assert!(
+            matches!(&*tray_rx.borrow(), TrayState::RecentBlock { what, .. } if what.contains("second.example.com")),
+            "first block's timer must not have reverted the tray"
+        );
+
+        // Only once the SECOND block's own TTL elapses does it revert.
+        tokio::time::advance(RECENT_BLOCK_TTL).await;
+        tray_rx.changed().await.unwrap();
+        assert_eq!(*tray_rx.borrow(), TrayState::Idle);
     }
 }

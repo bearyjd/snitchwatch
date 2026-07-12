@@ -9,6 +9,7 @@
 pub mod auth;
 pub mod blocklists;
 pub mod cache;
+pub mod daemon_watchdog;
 pub mod error;
 pub mod grpc_client;
 pub mod grpc_server;

@@ -87,6 +87,15 @@ impl ConnectionCache {
         }
     }
 
+    /// Publish `Idle`/`Pending(n)` (whichever actually matches the current
+    /// cache state) to the tray, regardless of what it's currently showing.
+    /// Used to recover the tray's display after a transient override — the
+    /// daemon-down watchdog and a `RecentBlock` timer both need "what should
+    /// the tray show right now" rather than assuming `Idle`.
+    pub fn resync_tray_state(&self) {
+        self.republish_pending_count();
+    }
+
     pub fn is_empty(&self) -> bool {
         self.rows.is_empty()
     }
