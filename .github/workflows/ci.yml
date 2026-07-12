@@ -25,9 +25,16 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
+      # vendor/opensnitch must actually be checked out: snitchwatch-proto's
+      # build.rs (every default-member depends on it) compiles
+      # vendor/opensnitch/proto/ui.proto directly via tonic-build, so this
+      # workflow's original `submodules: false` was a real bug (fixed
+      # 2026-07-12, caught by this job's first real run) — the submodule
+      # isn't merely "reference only" the way vendor/opensnitch's other
+      # files (default-config.json, source for docs) are.
       - uses: actions/checkout@v4
         with:
-          submodules: false # vendor/opensnitch is reference-only, not needed to build
+          submodules: true
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -66,7 +73,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: false
+          submodules: true
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -94,7 +101,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: false
+          submodules: true
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -123,24 +130,39 @@ jobs:
   # those deliberately stay Qt6-free (see this file's header comment) so a
   # Qt6/KF6 packaging problem here can never block the default-members gate.
   #
-  # Package names confirmed against Ubuntu noble (24.04, this runner's
-  # image) via packages.ubuntu.com/launchpad, 2026-07-12 — corrected after
-  # this job's first real run failed on two wrong guesses:
-  #   qml6-module-qtquick-controls2 -> qml6-module-qtquick-controls (Qt6
-  #     dropped the legacy Qt5 "Controls 1 vs 2" distinction, so there's no
-  #     "2" suffix in the Qt6 QML module name)
-  #   libkf6kirigami2-dev -> libkirigami-dev (KF6's actual dev package name;
-  #     "kirigami2"/"libkf6kirigami2-dev" are the KF5-era names and don't
-  #     exist for KF6) — also added qml6-module-org-kde-kirigami, the
-  #     runtime QML plugin package (without it the QML engine can't resolve
-  #     `import org.kde.kirigami` at all, dev headers alone aren't enough
-  #     for the test suite, which actually loads main.qml).
+  # Runs inside a Fedora container, not on bare ubuntu-latest — 2026-07-12's
+  # first real run of an Ubuntu-apt-based version of this job discovered
+  # KF6 Kirigami packages (kf6-kirigami and friends) simply don't exist yet
+  # in Ubuntu noble's (24.04, ubuntu-latest's current image) repositories at
+  # all (confirmed via Launchpad: kf6-kirigami's earliest published series
+  # is well past noble) — not a package-naming mistake, a real availability
+  # gap. Fedora ships kf6-kirigami-devel and the rest of Qt6/KF6 today, and
+  # this exact package list is empirically confirmed to build+test
+  # snitchwatch-kirigami successfully in this repo's own dev sandbox
+  # (Fedora 43), so this job mirrors that known-good environment instead of
+  # guessing at Ubuntu package names/availability a second time.
   kirigami:
     runs-on: ubuntu-latest
+    container: fedora:43
     steps:
+      # git: needed for actions/checkout's own git operations inside the
+      # container (not provided by the fedora:43 base image). Everything
+      # else here mirrors this repo's dev sandbox's confirmed-working
+      # package set (see this job's header comment).
+      - name: Install system prerequisites
+        run: |
+          dnf install -y \
+            git \
+            gcc gcc-c++ make \
+            protobuf-compiler \
+            qt6-qtbase-devel \
+            qt6-qtdeclarative-devel \
+            qt6-qttools-devel \
+            kf6-kirigami-devel
+
       - uses: actions/checkout@v4
         with:
-          submodules: false
+          submodules: true
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -149,24 +171,6 @@ jobs:
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
-
-      # protobuf-compiler: see the `check` job's comment — snitchwatch-proto
-      # (a transitive dep via snitchwatch-bridge) needs `protoc`.
-      - name: Install Qt6 + KDE Frameworks 6 (Kirigami)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            qt6-base-dev \
-            qt6-base-dev-tools \
-            qt6-declarative-dev \
-            qt6-declarative-dev-tools \
-            qml6-module-qtquick-controls \
-            qml6-module-qtquick-layouts \
-            qml6-module-qtquick-window \
-            qml6-module-qt-labs-platform \
-            libkirigami-dev \
-            qml6-module-org-kde-kirigami \
-            protobuf-compiler
 
       - name: cargo check -p snitchwatch-kirigami
         run: cargo check -p snitchwatch-kirigami --locked
