@@ -5,18 +5,22 @@ on:
     branches: [main]
   pull_request:
 
-# Scope: default-members only (snitchwatch-proto, -spike, -bridge, -bridge-cli,
-# -tauri, scanner-core, scanner-cli, scanner-privileged, tests/mock_opensnitchd,
-# tests/integration). `kirigami-spike` / `snitchwatch-kirigami` are deliberately
-# NOT built here: they need system Qt6 + KF6 Kirigami dev packages that aren't
-# provisioned on this runner, and whether their tests pass headless in a CI
-# image is unverified (see .agent_native/agent_roadmap.md item 6 and
-# CLAUDE.md). `just check`/`just test` pass `--workspace` and so *do* touch
-# those two crates when run locally with Qt6 installed; this workflow uses
-# plain `cargo check`/`cargo clippy`/`cargo test` (no `--workspace`) so cargo
-# falls back to `default-members` from Cargo.toml, matching a bare `cargo
-# build` and avoiding the Qt6 dependency. Once item 6 is verified, this can
-# switch to literally shelling out to `just check`/`just test`.
+# check/test jobs: default-members only (snitchwatch-proto, -spike, -bridge,
+# -bridge-cli, -tauri, scanner-core, scanner-cli, scanner-privileged,
+# tests/mock_opensnitchd, tests/integration). Plain `cargo check`/`clippy`/
+# `test` (no `--workspace`), so cargo falls back to `default-members` from
+# Cargo.toml, matching a bare `cargo build`. This gate must never depend on
+# Qt6/KF6 packaging succeeding — see the separate `kirigami` job below.
+#
+# package-check job: validates the Phase 2 packaging artifacts (YAML/JSON
+# syntax, systemd unit, the Rust packaging shape test) via `just
+# package-check` — no Qt6 needed.
+#
+# kirigami job: builds/lints/tests `snitchwatch-kirigami` specifically
+# against Qt6 + KDE Frameworks 6, addressing
+# .agent_native/agent_roadmap.md item 6 ("whether these tests pass headless
+# in CI is unverified"). Kept as its own job, not folded into `check`/`test`,
+# so a Qt6/KF6 apt-package hiccup here never blocks the default-members gate.
 jobs:
   check:
     runs-on: ubuntu-latest
@@ -78,3 +82,84 @@ jobs:
 
       - name: cargo test (default-members)
         run: cargo test --locked
+
+  package-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - uses: extractions/setup-just@v2
+
+      - name: Install PyYAML (just package-check parses YAML with python3)
+        run: pip install --user pyyaml
+
+      - name: just package-check
+        run: just package-check
+
+  # Verifies .agent_native/agent_roadmap.md item 6: whether
+  # snitchwatch-kirigami's tests actually pass headless on a CI runner, not
+  # just that they compile. NOT scoped into the `check`/`test` jobs above —
+  # those deliberately stay Qt6-free (see this file's header comment) so a
+  # Qt6/KF6 packaging problem here can never block the default-members gate.
+  #
+  # Package names are best-effort, translated from this repo's own
+  # dev-sandbox environment (Fedora: qt6-qtbase-devel, qt6-qtdeclarative-devel,
+  # qt6-qttools-devel, kf6-kirigami-devel — all confirmed present and
+  # sufficient to build+test snitchwatch-kirigami there) to Ubuntu/Debian
+  # package-naming conventions. They have NOT been confirmed against a live
+  # apt repository from this sandbox (no outbound network here) — if this
+  # job's "Install Qt6 + KDE Frameworks 6 (Kirigami)" step fails with an
+  # unknown-package error, that's an apt package name to fix, not a
+  # snitchwatch-kirigami code problem.
+  kirigami:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Qt6 + KDE Frameworks 6 (Kirigami)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            qt6-base-dev \
+            qt6-base-dev-tools \
+            qt6-declarative-dev \
+            qt6-declarative-dev-tools \
+            qml6-module-qtquick-controls2 \
+            qml6-module-qtquick-layouts \
+            qml6-module-qtquick-window \
+            qml6-module-qt-labs-platform \
+            libkf6kirigami2-dev
+
+      - name: cargo check -p snitchwatch-kirigami
+        run: cargo check -p snitchwatch-kirigami --locked
+
+      - name: cargo clippy -p snitchwatch-kirigami
+        run: cargo clippy -p snitchwatch-kirigami --all-targets --locked -- -D warnings
+
+      # QT_QPA_PLATFORM=offscreen + QT_QUICK_CONTROLS_STYLE=Basic: Kirigami's
+      # default org.kde.desktop style needs a real Plasma session and hangs
+      # under offscreen (see main.rs's own comment); Basic is the
+      # QApplication-free style the test suite already targets.
+      - name: cargo test -p snitchwatch-kirigami (headless)
+        env:
+          QT_QPA_PLATFORM: offscreen
+          QT_QUICK_CONTROLS_STYLE: Basic
+        run: cargo test -p snitchwatch-kirigami --locked

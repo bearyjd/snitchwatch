@@ -54,15 +54,25 @@ regression.
 `just package-check` validates packaging artifacts (YAML/JSON/systemd unit
 syntax) without needing a Bazzite host.
 
-`.github/workflows/ci.yml` runs `cargo check`/`clippy -D warnings`/`test` on
-push to `main` and on PRs, but **scoped to `default-members` only** (plain
-`cargo check`/`clippy`/`test`, not `--workspace`) — it deliberately does not
-touch `kirigami-spike`/`snitchwatch-kirigami`, since those need system Qt6 +
-KDE Frameworks 6 dev packages not provisioned on the runner (see the
-workflow file's own header comment and `.agent_native/agent_roadmap.md` item
-6). So CI passing does **not** cover the Kirigami shell — running
-`just check` and `just test` locally (which do pass `--workspace`) remains
-mandatory before calling Kirigami-touching work done.
+`.github/workflows/ci.yml` runs four jobs on push to `main` and on PRs:
+- `check`/`test` — `cargo check`/`clippy -D warnings`/`test`, **scoped to
+  `default-members` only** (plain `cargo check`/`clippy`/`test`, not
+  `--workspace`) so this gate never depends on Qt6/KF6 packaging succeeding.
+- `package-check` — runs `just package-check` (Phase 2 packaging artifacts'
+  YAML/JSON/systemd syntax + the Rust packaging shape test).
+- `kirigami` — builds/lints/tests `snitchwatch-kirigami` specifically
+  against Qt6 + KDE Frameworks 6 on Ubuntu, headless
+  (`QT_QPA_PLATFORM=offscreen`). Addresses
+  `.agent_native/agent_roadmap.md` item 6. **Its apt package names are
+  best-effort** (translated from this sandbox's own Fedora packages, not
+  confirmed against a live Ubuntu apt repo from here — no outbound network
+  in this sandbox) — if it fails on an unknown-package error on its first
+  real run, that's a package-name fix, not a `snitchwatch-kirigami` code
+  problem.
+
+Until the `kirigami` job's package names are confirmed working on a real
+run, treat local `just check`/`just test` (which do pass `--workspace`) as
+still mandatory before calling Kirigami-touching work done.
 
 ## Reproduction paths — use these, don't reach for a real daemon/host
 
