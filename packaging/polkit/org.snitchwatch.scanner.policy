@@ -22,7 +22,7 @@
 <policyconfig>
 
   <vendor>Snitchwatch</vendor>
-  <vendor_url>https://github.com/example/snitchwatch</vendor_url>
+  <vendor_url>https://github.com/bearyjd/snitchwatch</vendor_url>
 
   <action id="org.snitchwatch.scanner.run-deep-scan">
     <description>Run a privileged Snitchwatch security scan</description>

@@ -1,5 +1,17 @@
 # AUDIT — App Firewall (Snitchwatch) + Bazzite Security Scanner
 
+> **Update 2026-07-12: historical record — all "Next step" items below are
+> now done or code-complete.** This doc is a point-in-time snapshot from
+> the original audit pass; it is not a living status doc. For current
+> phase-by-phase status see `IMPLEMENTATION_PROMPT.md` (which has its own
+> per-phase update notes) and `HANDOFF.md`. Component B (described below as
+> "does not exist yet") is also now code-complete (Phases 4-6). The
+> "GTK4-vs-Tauri conflict... still unresolved" note further down is
+> superseded by this same doc's own "RESOLVED 2026-07-04" GUI-stack
+> decision above it — that internal contradiction is a leftover from this
+> doc never being reconciled after the later decision, not a re-opening of
+> the question.
+
 Stage 1 audit: resolve the four open architecture questions from the original
 handoff brief against what's actually built in this repo, flag anything that
 still needs a dedicated design pass rather than guessing, and hand off a

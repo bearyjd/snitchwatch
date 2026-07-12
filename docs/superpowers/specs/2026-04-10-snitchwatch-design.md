@@ -1,7 +1,11 @@
 # Snitchwatch — design spec
 
 **Date:** 2026-04-10
-**Status:** Draft, awaiting user review
+**Status:** Original design, largely implemented since (M0-M4 shipped; see
+`IMPLEMENTATION_PROMPT.md` for current phase status). The GUI stack
+decision below (Tauri 2 + WebKitGTK) was later reversed — see
+`docs/superpowers/specs/2026-07-04-gui-stack-decision.md`: the shell that
+ships is `snitchwatch-kirigami` (Qt6/QML + Kirigami), not Tauri.
 **Audience:** Implementer (you, future-you, contributors)
 
 ## Summary

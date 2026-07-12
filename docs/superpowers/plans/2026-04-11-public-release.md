@@ -1,5 +1,20 @@
 # M6 Public Release Implementation Plan
 
+> **STATUS 2026-07-12: superseded, never executed as written.** This plan
+> predates the Kirigami GUI-stack decision
+> (`docs/superpowers/specs/2026-07-04-gui-stack-decision.md`) and assumes
+> `snitchwatch-tauri` + WebKitGTK is the final shipping shell (diagnostic
+> bundle via `tauri-plugin-clipboard-manager`, Tauri-specific
+> `panic_hook.rs`, etc.) — that's no longer true; `snitchwatch-kirigami` is
+> what ships (see `packaging/README.md`). The CI/release infrastructure
+> actually built (`.github/workflows/ci.yml`) is a simpler 4-job
+> check/test/package-check/kirigami workflow with no tag-driven
+> `release.yml` or `flatpak-github-actions` publishing step, unlike what
+> this plan specs. Real release-readiness work is now tracked in
+> `docs/packaging/phase2-manual-verification-runbook.md` and
+> `IMPLEMENTATION_PROMPT.md`'s Phase 2 status note. Kept below for history;
+> do not treat any of it as a current task list.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Tag and ship Snitchwatch v0.1.0 — polish the docs, wire CI + a tag-driven GitHub release that publishes the Flatpak artifact, complete the Plan 1 / Plan 5 / Plan 6 deferred verification work (live opensnitchd 60s smoke, ≥80% coverage gate, StevenBlack-on-real-daemon, WebKitGTK Flatpak permissions, GPL/Tauri legal sanity check), wire the four still-stubbed `LifecycleKind` emission points from Plan 6, ship the diagnostic-bundle "Copy" button, write the manual smoke checklist, and tick M6 ✅ in the spec milestone table.

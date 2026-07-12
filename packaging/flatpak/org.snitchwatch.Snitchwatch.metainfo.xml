@@ -32,8 +32,8 @@
     <binary>snitchwatch-kirigami</binary>
   </provides>
 
-  <url type="homepage">https://github.com/example/snitchwatch</url>
-  <url type="bugtracker">https://github.com/example/snitchwatch/issues</url>
+  <url type="homepage">https://github.com/bearyjd/snitchwatch</url>
+  <url type="bugtracker">https://github.com/bearyjd/snitchwatch/issues</url>
 
   <content_rating type="oars-1.1"/>
 

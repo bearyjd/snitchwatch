@@ -1,6 +1,6 @@
 [Unit]
 Description=Snitchwatch bridge (OpenSnitch gRPC <-> WebSocket translator)
-Documentation=https://github.com/example/snitchwatch
+Documentation=https://github.com/bearyjd/snitchwatch
 # The bridge is a per-user service, intentionally decoupled from the GUI
 # window. opensnitchd applies its DefaultAction whenever no UI client is
 # connected; if the bridge only ran while the GUI window was open, closing
