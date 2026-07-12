@@ -181,9 +181,62 @@ earlier bridge-cli run.
 
 ---
 
+## Step 5 — Tray state on real hardware (DaemonDown / RecentBlock / FilterOff)
+
+Added 2026-07-12 alongside the tray-state work itself
+(`.agent_native/agent_roadmap.md` item 9,
+`docs/superpowers/plans/2026-07-12-tray-daemon-down-recent-block.md` and
+`2026-07-12-tray-filter-off.md`). All three were verified with
+`tokio::time::pause`/mocked publishers in the sandbox — genuinely correct
+for the logic under test, but none of that exercises the real compositor
+tray icon, a real `opensnitchd` actually going silent, or a real polkit-free
+click path. With `snitchwatch-kirigami` running (Step 2 or `just
+kirigami-dev`) against a real bridge + `opensnitchd` (Step 3):
+
+**DaemonDown** — stop feeding it pings without killing the bridge itself:
+
+```bash
+# Stop opensnitchd (not the bridge!) so pings actually cease:
+podman stop opensnitchd-dev
+```
+
+**Pass condition:** the tray tooltip changes to "opensnitchd not reachable"
+within ~10-12 seconds (the `DAEMON_DOWN_TIMEOUT` in `daemon_watchdog.rs`
+plus one watchdog tick). Restart `opensnitchd-dev` and confirm the tooltip
+returns to "Snitchwatch — filtering" (or the correct `Pending(n)` count if
+a decision was queued while it was down) within a couple more seconds.
+
+**RecentBlock** — trigger a Deny verdict (allow-list a connection then deny
+one, or use the existing `tests/mock_opensnitchd/examples/fire_ask_rule.rs`
+harness against the real running shell — see its own doc comment) and
+confirm the tooltip shows "Blocked: \<process\> → \<host\>" for ~5 seconds
+before reverting.
+
+**FilterOff** — right-click the tray icon:
+
+```
+Tray menu should show "Pause filtering" (not currently paused).
+Click it -> tooltip becomes "Snitchwatch — filtering disabled",
+  menu item now reads "Resume filtering".
+Trigger a new connection (curl to an unclassified host) -> confirm it is
+  silently allowed with NO pending-decision prompt shown.
+Click "Resume filtering" -> tooltip returns to normal, menu item reads
+  "Pause filtering" again, and a fresh AskRule prompts normally again.
+```
+
+**If any of these fail:** first confirm the tray icon is even receiving
+live updates at all (`Qt.labs.platform.SystemTrayIcon`'s tooltip should
+already reflect `Pending(n)` correctly per Step 3 — if that baseline is
+broken, these three won't work either and the bug is upstream of this
+step). If the baseline works but a specific transition doesn't, that's a
+real regression in `daemon_watchdog.rs`/`grpc_server.rs`'s `ask_rule`/the
+`main.qml` tray menu wiring — not a hardware-vs-sandbox environment gap.
+
+---
+
 ## Recording results
 
-Once all four steps are run, update
+Once all five steps are run, update
 `docs/superpowers/plans/2026-07-05-phase2-packaging.md`'s "Acceptance
 criteria & verification status" section — flip the unchecked box to `[x]`
 and note the host/date, mirroring how Task 7's fullscreen-focus test was

@@ -79,7 +79,8 @@ For the lightweight path's step-by-step (including installing the bridge user
 service and end-to-end verification), follow
 [`../docs/packaging/rpm-ostree-layering.md`](../docs/packaging/rpm-ostree-layering.md).
 
-For the full manual verification runbook covering the four items above that
+For the full manual verification runbook covering the items above that
 need a real Bazzite host (bluebuild image build, Flatpak build, live
-opensnitchd dial-in, and the closed-window fail-open fix), see
+opensnitchd dial-in, the closed-window fail-open fix, and the tray-state
+transitions added 2026-07-12), see
 [`../docs/packaging/phase2-manual-verification-runbook.md`](../docs/packaging/phase2-manual-verification-runbook.md).

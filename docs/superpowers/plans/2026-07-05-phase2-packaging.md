@@ -98,10 +98,11 @@ fixed target (the bridge-cli otherwise defaults to an ephemeral port).
 - [x] README updated with both install paths as "batteries-included" vs
   "lightweight/DIY".
 - [ ] **Not verifiable in the CI sandbox:** actual `bluebuild build`,
-  `flatpak-builder` run, live opensnitchd dial-in, and the closed-window
-  AskRule round-trip on a real Bazzite host. These need tooling and a host
-  the sandbox lacks; step-by-step manual verification instructions for all
-  four are in
+  `flatpak-builder` run, live opensnitchd dial-in, the closed-window
+  AskRule round-trip, and (added 2026-07-12) the `DaemonDown`/
+  `RecentBlock`/`FilterOff` tray states on real hardware — all on a real
+  Bazzite host. These need tooling and a host the sandbox lacks;
+  step-by-step manual verification instructions for all five are in
   [`../../packaging/phase2-manual-verification-runbook.md`](../../packaging/phase2-manual-verification-runbook.md).
   **Resolved 2026-07-11:** the Flatpak manifest now packages
   `snitchwatch-kirigami` against `org.kde.Platform`, not
