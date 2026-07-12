@@ -355,6 +355,14 @@ Component B's userspace tier stands alone for its first release.
 
 ## Phase 6 — Component B privileged tier + report UI (Component B)
 
+> **Update 2026-07-11: code-complete.** The privileged-tier scanner landed
+> per `docs/superpowers/plans/2026-07-05-phase6-scanner-privileged.md`; the
+> report UI (`ScannerController`/`ScannerPage.qml`) landed once Phase 3b
+> shipped, per `docs/superpowers/plans/2026-07-11-phase6-scanner-report-ui.md`.
+> Only real-hardware manual verification (polkit prompt, live
+> `chkrootkit`/`rpm-ostree`/`mokutil`) remains — same "not verifiable in the
+> CI sandbox" boundary as Phase 2's packaging.
+
 **Blocks on:** Phase 5.
 
 **Goal:** the on-demand privileged tier (AIDE-style integrity check,

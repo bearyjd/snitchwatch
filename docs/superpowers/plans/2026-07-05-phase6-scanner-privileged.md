@@ -12,6 +12,14 @@ This pass implements **only the scanner** portion of Phase 6. The Kirigami
 landing first (spec + `IMPLEMENTATION_PROMPT.md` Phase 6), and Phase 3b is
 still in progress. No UI work started.
 
+> **Update 2026-07-11:** Phase 3b has since shipped (feature parity + Task 7
+> fullscreen-focus test passed). The report UI landed separately — see
+> `docs/superpowers/plans/2026-07-11-phase6-scanner-report-ui.md`
+> (`ScannerController` + `ScannerPage.qml` in `crates/snitchwatch-kirigami/`).
+> Phase 6 as a whole is now code-complete; only real-hardware manual
+> verification (polkit prompt, live `chkrootkit`/`rpm-ostree`/`mokutil`)
+> remains, same boundary this doc already flagged below.
+
 ## What landed
 
 New workspace member `crates/scanner-privileged/` — a **separate, on-demand

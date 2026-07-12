@@ -104,6 +104,13 @@ Kirigami.ApplicationWindow {
         id: trayController
     }
 
+    // Component B's privileged-tier scanner report (Phase 6). No bridge
+    // dependency — triggers an on-demand pkexec-gated deep scan and exposes
+    // its JSON report; see scanner_controller.rs's module doc.
+    ScannerController {
+        id: scannerController
+    }
+
     // Guards against pushing the onboarding page more than once and against
     // popping when it was never pushed (e.g. "Continue anyway" already
     // dismissed it before a stray stateChanged fires).
@@ -251,6 +258,12 @@ Kirigami.ApplicationWindow {
             model: geoModel
         }
     }
+    Component {
+        id: scannerPageComponent
+        ScannerPage {
+            controller: scannerController
+        }
+    }
     // Tracks the last-seen pending count so we only raise on a *new* pending
     // arrival, not on every count change (e.g. 2 -> 3 while already visible).
     property int lastPendingCount: 0
@@ -264,17 +277,12 @@ Kirigami.ApplicationWindow {
     // window on its own — the exact "does the prompt actually appear over a
     // fullscreen game" claim the GUI decision doc flagged as untested.
     //
-    // MANUAL VERIFICATION STILL REQUIRED (cannot be done in a headless CI/
-    // sandbox — needs a live Plasma/Wayland session):
-    //   1. Launch a borderless-fullscreen app (e.g. `gamescope -f -- <app>` or
-    //      a fullscreen Qt test window).
-    //   2. Drive a pending connection so pendingCount goes 0 -> >0.
-    //   3. Confirm THIS window raises and gains keyboard focus over the
-    //      fullscreen surface. On Wayland, raise()/requestActivate() are
-    //      subject to the compositor's focus-stealing-prevention policy; if it
-    //      does not surface, the fallback is the KDE notification with a
-    //      "Review" action (Task 17/19) — which is why that path exists.
-    // Record the pass/fail result on real hardware before shipping.
+    // MANUAL VERIFICATION: PASSED, 2026-07-11 (real Plasma Wayland session —
+    // see docs/superpowers/plans/2026-07-04-kirigami-shell-rewrite.md's Task 7
+    // checklist for method/detail). On Wayland, raise()/requestActivate() are
+    // still subject to the compositor's focus-stealing-prevention policy in
+    // general; the fallback is the KDE notification with a "Review" action
+    // (Task 17/19) — which is why that path exists regardless.
     Connections {
         target: connectionsModel
         function onPendingCountChanged() {
@@ -384,6 +392,11 @@ Kirigami.ApplicationWindow {
                 text: "Profiles"
                 icon.name: "preferences-system-network"
                 onTriggered: root.pageStack.replace(profilesPageComponent)
+            },
+            Kirigami.Action {
+                text: "Security Scan"
+                icon.name: "security-low"
+                onTriggered: root.pageStack.replace(scannerPageComponent)
             },
             Kirigami.Action {
                 text: "Settings & Diagnostics"

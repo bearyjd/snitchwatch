@@ -20,6 +20,7 @@ fn main() {
         "qml/OnboardingPage.qml",
         "qml/DiagnosticsPage.qml",
         "qml/GeoPage.qml",
+        "qml/ScannerPage.qml",
     ]))
     .file("src/bridge_bindings.rs")
     .file("src/bridge_feed.rs")
@@ -35,5 +36,6 @@ fn main() {
     .file("src/notification_controller.rs")
     .file("src/tray_controller.rs")
     .file("src/geo_model.rs")
+    .file("src/scanner_controller.rs")
     .build();
 }
