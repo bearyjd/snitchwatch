@@ -25,6 +25,7 @@ Kirigami.ScrollablePage {
             page.controller.refreshAutostart();
             page.controller.refreshCrashLog();
             page.controller.refreshRdapEnabled();
+            page.controller.refreshCoexistence();
         }
     }
 
@@ -63,6 +64,41 @@ Kirigami.ScrollablePage {
                 wrapMode: Text.Wrap
                 text: "Off by default: when enabled, a pending connection's remote IP is sent to rdap.org to look up its registration info. Reverse DNS lookups always use the system resolver and are unaffected by this setting."
             }
+        }
+
+        Kirigami.Separator {
+            Layout.fillWidth: true
+        }
+
+        RowLayout {
+            Layout.fillWidth: true
+
+            Kirigami.Heading {
+                Layout.fillWidth: true
+                level: 3
+                text: "Upstream opensnitch-ui coexistence"
+            }
+
+            Controls.Button {
+                text: "Check again"
+                icon.name: "view-refresh"
+                enabled: page.controller && !page.controller.busy
+                onClicked: page.controller.refreshCoexistence()
+            }
+        }
+
+        Kirigami.InlineMessage {
+            Layout.fillWidth: true
+            visible: page.controller && page.controller.coexistenceConflict
+            type: Kirigami.MessageType.Warning
+            text: page.controller ? page.controller.coexistenceDetail : ""
+        }
+
+        Controls.Label {
+            Layout.fillWidth: true
+            visible: page.controller && !page.controller.coexistenceConflict
+            text: page.controller ? page.controller.coexistenceDetail : ""
+            opacity: 0.7
         }
 
         Kirigami.Separator {

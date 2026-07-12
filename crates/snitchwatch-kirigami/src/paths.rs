@@ -28,6 +28,16 @@ pub fn autostart_path() -> PathBuf {
         .join("snitchwatch.desktop")
 }
 
+/// Per-user autostart entry for upstream `opensnitch-ui`, if installed —
+/// see `crate::coexistence` and README.md's "Coexistence with upstream
+/// opensnitch-ui" section. Same directory as our own `autostart_path()`,
+/// just the upstream project's filename.
+pub fn opensnitch_ui_autostart_path() -> PathBuf {
+    xdg_dir_or("XDG_CONFIG_HOME", ".config")
+        .join("autostart")
+        .join("opensnitch_ui.desktop")
+}
+
 /// Persisted preferences (`crate::settings`), e.g. the RDAP opt-in flag.
 pub fn settings_path() -> PathBuf {
     config_dir().join("settings.json")
@@ -120,6 +130,16 @@ mod tests {
         assert_eq!(
             autostart_path(),
             PathBuf::from("/tmp/cfg/autostart/snitchwatch.desktop")
+        );
+    }
+
+    #[test]
+    fn opensnitch_ui_autostart_path_uses_config_dir() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _g = EnvVarGuard::set("XDG_CONFIG_HOME", "/tmp/cfg");
+        assert_eq!(
+            opensnitch_ui_autostart_path(),
+            PathBuf::from("/tmp/cfg/autostart/opensnitch_ui.desktop")
         );
     }
 

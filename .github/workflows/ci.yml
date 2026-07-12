@@ -5,25 +5,36 @@ on:
     branches: [main]
   pull_request:
 
-# Scope: default-members only (snitchwatch-proto, -spike, -bridge, -bridge-cli,
-# -tauri, scanner-core, scanner-cli, scanner-privileged, tests/mock_opensnitchd,
-# tests/integration). `kirigami-spike` / `snitchwatch-kirigami` are deliberately
-# NOT built here: they need system Qt6 + KF6 Kirigami dev packages that aren't
-# provisioned on this runner, and whether their tests pass headless in a CI
-# image is unverified (see .agent_native/agent_roadmap.md item 6 and
-# CLAUDE.md). `just check`/`just test` pass `--workspace` and so *do* touch
-# those two crates when run locally with Qt6 installed; this workflow uses
-# plain `cargo check`/`cargo clippy`/`cargo test` (no `--workspace`) so cargo
-# falls back to `default-members` from Cargo.toml, matching a bare `cargo
-# build` and avoiding the Qt6 dependency. Once item 6 is verified, this can
-# switch to literally shelling out to `just check`/`just test`.
+# check/test jobs: default-members only (snitchwatch-proto, -spike, -bridge,
+# -bridge-cli, -tauri, scanner-core, scanner-cli, scanner-privileged,
+# tests/mock_opensnitchd, tests/integration). Plain `cargo check`/`clippy`/
+# `test` (no `--workspace`), so cargo falls back to `default-members` from
+# Cargo.toml, matching a bare `cargo build`. This gate must never depend on
+# Qt6/KF6 packaging succeeding — see the separate `kirigami` job below.
+#
+# package-check job: validates the Phase 2 packaging artifacts (YAML/JSON
+# syntax, systemd unit, the Rust packaging shape test) via `just
+# package-check` — no Qt6 needed.
+#
+# kirigami job: builds/lints/tests `snitchwatch-kirigami` specifically
+# against Qt6 + KDE Frameworks 6, addressing
+# .agent_native/agent_roadmap.md item 6 ("whether these tests pass headless
+# in CI is unverified"). Kept as its own job, not folded into `check`/`test`,
+# so a Qt6/KF6 apt-package hiccup here never blocks the default-members gate.
 jobs:
   check:
     runs-on: ubuntu-latest
     steps:
+      # vendor/opensnitch must actually be checked out: snitchwatch-proto's
+      # build.rs (every default-member depends on it) compiles
+      # vendor/opensnitch/proto/ui.proto directly via tonic-build, so this
+      # workflow's original `submodules: false` was a real bug (fixed
+      # 2026-07-12, caught by this job's first real run) — the submodule
+      # isn't merely "reference only" the way vendor/opensnitch's other
+      # files (default-config.json, source for docs) are.
       - uses: actions/checkout@v4
         with:
-          submodules: false # vendor/opensnitch is reference-only, not needed to build
+          submodules: true
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -35,6 +46,10 @@ jobs:
 
       # snitchwatch-tauri is in default-members and its build.rs links against
       # webkit2gtk/javascriptcoregtk via tauri-build, even for `cargo check`.
+      # protobuf-compiler: snitchwatch-proto's build.rs (tonic-build/
+      # prost-build) shells out to `protoc` to compile vendor/opensnitch's
+      # ui.proto — every default-member depends on snitchwatch-proto, so this
+      # is needed here too, not just where gRPC code is directly touched.
       - name: Install Tauri Linux build dependencies
         run: |
           sudo apt-get update
@@ -44,7 +59,8 @@ jobs:
             libsoup-3.0-dev \
             libgtk-3-dev \
             librsvg2-dev \
-            patchelf
+            patchelf \
+            protobuf-compiler
 
       - name: cargo check (default-members)
         run: cargo check --locked
@@ -57,7 +73,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: false
+          submodules: true
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -74,7 +90,100 @@ jobs:
             libsoup-3.0-dev \
             libgtk-3-dev \
             librsvg2-dev \
-            patchelf
+            patchelf \
+            protobuf-compiler
 
       - name: cargo test (default-members)
         run: cargo test --locked
+
+  package-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - uses: extractions/setup-just@v2
+
+      - name: Install PyYAML (just package-check parses YAML with python3)
+        run: pip install --user pyyaml
+
+      # package-check's Rust packaging_shape test builds snitchwatch-bridge,
+      # which depends on snitchwatch-proto's build.rs needing `protoc`.
+      - name: Install protobuf-compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+
+      - name: just package-check
+        run: just package-check
+
+  # Verifies .agent_native/agent_roadmap.md item 6: whether
+  # snitchwatch-kirigami's tests actually pass headless on a CI runner, not
+  # just that they compile. NOT scoped into the `check`/`test` jobs above —
+  # those deliberately stay Qt6-free (see this file's header comment) so a
+  # Qt6/KF6 packaging problem here can never block the default-members gate.
+  #
+  # Runs inside a Fedora container, not on bare ubuntu-latest — 2026-07-12's
+  # first real run of an Ubuntu-apt-based version of this job discovered
+  # KF6 Kirigami packages (kf6-kirigami and friends) simply don't exist yet
+  # in Ubuntu noble's (24.04, ubuntu-latest's current image) repositories at
+  # all (confirmed via Launchpad: kf6-kirigami's earliest published series
+  # is well past noble) — not a package-naming mistake, a real availability
+  # gap. Fedora ships kf6-kirigami-devel and the rest of Qt6/KF6 today, and
+  # this exact package list is empirically confirmed to build+test
+  # snitchwatch-kirigami successfully in this repo's own dev sandbox
+  # (Fedora 43), so this job mirrors that known-good environment instead of
+  # guessing at Ubuntu package names/availability a second time.
+  kirigami:
+    runs-on: ubuntu-latest
+    container: fedora:43
+    steps:
+      # git: needed for actions/checkout's own git operations inside the
+      # container (not provided by the fedora:43 base image). Everything
+      # else here mirrors this repo's dev sandbox's confirmed-working
+      # package set (see this job's header comment).
+      - name: Install system prerequisites
+        run: |
+          dnf install -y \
+            git \
+            gcc gcc-c++ make \
+            protobuf-compiler \
+            qt6-qtbase-devel \
+            qt6-qtdeclarative-devel \
+            qt6-qttools-devel \
+            kf6-kirigami-devel
+
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo check -p snitchwatch-kirigami
+        run: cargo check -p snitchwatch-kirigami --locked
+
+      - name: cargo clippy -p snitchwatch-kirigami
+        run: cargo clippy -p snitchwatch-kirigami --all-targets --locked -- -D warnings
+
+      # QT_QPA_PLATFORM=offscreen + QT_QUICK_CONTROLS_STYLE=Basic: Kirigami's
+      # default org.kde.desktop style needs a real Plasma session and hangs
+      # under offscreen (see main.rs's own comment); Basic is the
+      # QApplication-free style the test suite already targets.
+      - name: cargo test -p snitchwatch-kirigami (headless)
+        env:
+          QT_QPA_PLATFORM: offscreen
+          QT_QUICK_CONTROLS_STYLE: Basic
+        run: cargo test -p snitchwatch-kirigami --locked

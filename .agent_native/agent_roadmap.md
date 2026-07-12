@@ -73,15 +73,21 @@ immediately actionable with no further human input needed.
 
 ## Further out (real effort, defer until above lands)
 
-6. **QML/Kirigami test flakiness risk is unverified at scale.** The
-   `snitchwatch-kirigami` crate's tests require system Qt6 + Kirigami dev
-   packages and `QT_QPA_PLATFORM=offscreen`; they were not run as part of
-   this audit (no long builds, and Qt6 dev packages are not confirmed
-   present in this environment). Before leaning on an agent to iterate on
-   Kirigami UI bugs autonomously, someone should verify these tests actually
-   pass headless in the target CI/agent sandbox image, not just that they
-   compile. Effort: medium (needs a Qt6-provisioned environment). Payoff:
-   large if Kirigami work picks up, since Phase 3's whole rewrite lives here.
+6. **PARTIALLY DONE (2026-07-11).** A later session's sandbox turned out to
+   have Qt6 + KF6 Kirigami dev packages installed after all (Fedora:
+   `qt6-qtbase-devel`, `qt6-qtdeclarative-devel`, `qt6-qttools-devel`,
+   `kf6-kirigami-devel`) — confirmed `cargo build -p snitchwatch-kirigami`
+   and `cargo test -p snitchwatch-kirigami` (246 lib unit tests + 13
+   integration test files) pass headless there
+   (`QT_QPA_PLATFORM=offscreen`), including a real manual GUI verification
+   of Task 7's fullscreen-focus safety behavior on a live Plasma Wayland
+   session in that same sandbox. A `kirigami` job was added to
+   `.github/workflows/ci.yml` to make this a standing, automated check
+   rather than a one-off finding — **but its Ubuntu apt package names are
+   still unverified against a live run** (translated from the Fedora
+   package list above, no outbound network from the authoring sandbox to
+   check apt). Remaining effort: small — watch the first real CI run of
+   that job and fix any apt package-name mismatches.
 
 7. **No raw daemon-traffic recording/replay fixture yet.** The bridge's
    reproduction path (mock daemon + WS client) is script-driven and
