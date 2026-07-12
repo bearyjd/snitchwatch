@@ -199,7 +199,7 @@ impl ScanStore {
         }
 
         // Prior open findings absent now → resolved.
-        for (path, _id) in prior_open.iter() {
+        for path in prior_open.keys() {
             if !current_paths.contains(path.as_str()) {
                 tx.execute(
                     "UPDATE findings SET resolved_at_scan_id = ?1 \
