@@ -54,9 +54,15 @@ regression.
 `just package-check` validates packaging artifacts (YAML/JSON/systemd unit
 syntax) without needing a Bazzite host.
 
-There is currently **no CI workflow** (`.github/` does not exist). Until one
-is added, the only completion signal for a change is running `just check`
-and `just test` locally — treat both as mandatory before calling work done.
+`.github/workflows/ci.yml` runs `cargo check`/`clippy -D warnings`/`test` on
+push to `main` and on PRs, but **scoped to `default-members` only** (plain
+`cargo check`/`clippy`/`test`, not `--workspace`) — it deliberately does not
+touch `kirigami-spike`/`snitchwatch-kirigami`, since those need system Qt6 +
+KDE Frameworks 6 dev packages not provisioned on the runner (see the
+workflow file's own header comment and `.agent_native/agent_roadmap.md` item
+6). So CI passing does **not** cover the Kirigami shell — running
+`just check` and `just test` locally (which do pass `--workspace`) remains
+mandatory before calling Kirigami-touching work done.
 
 ## Reproduction paths — use these, don't reach for a real daemon/host
 
