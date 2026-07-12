@@ -39,6 +39,10 @@ jobs:
 
       # snitchwatch-tauri is in default-members and its build.rs links against
       # webkit2gtk/javascriptcoregtk via tauri-build, even for `cargo check`.
+      # protobuf-compiler: snitchwatch-proto's build.rs (tonic-build/
+      # prost-build) shells out to `protoc` to compile vendor/opensnitch's
+      # ui.proto — every default-member depends on snitchwatch-proto, so this
+      # is needed here too, not just where gRPC code is directly touched.
       - name: Install Tauri Linux build dependencies
         run: |
           sudo apt-get update
@@ -48,7 +52,8 @@ jobs:
             libsoup-3.0-dev \
             libgtk-3-dev \
             librsvg2-dev \
-            patchelf
+            patchelf \
+            protobuf-compiler
 
       - name: cargo check (default-members)
         run: cargo check --locked
@@ -78,7 +83,8 @@ jobs:
             libsoup-3.0-dev \
             libgtk-3-dev \
             librsvg2-dev \
-            patchelf
+            patchelf \
+            protobuf-compiler
 
       - name: cargo test (default-members)
         run: cargo test --locked
@@ -101,6 +107,13 @@ jobs:
       - name: Install PyYAML (just package-check parses YAML with python3)
         run: pip install --user pyyaml
 
+      # package-check's Rust packaging_shape test builds snitchwatch-bridge,
+      # which depends on snitchwatch-proto's build.rs needing `protoc`.
+      - name: Install protobuf-compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+
       - name: just package-check
         run: just package-check
 
@@ -110,15 +123,18 @@ jobs:
   # those deliberately stay Qt6-free (see this file's header comment) so a
   # Qt6/KF6 packaging problem here can never block the default-members gate.
   #
-  # Package names are best-effort, translated from this repo's own
-  # dev-sandbox environment (Fedora: qt6-qtbase-devel, qt6-qtdeclarative-devel,
-  # qt6-qttools-devel, kf6-kirigami-devel — all confirmed present and
-  # sufficient to build+test snitchwatch-kirigami there) to Ubuntu/Debian
-  # package-naming conventions. They have NOT been confirmed against a live
-  # apt repository from this sandbox (no outbound network here) — if this
-  # job's "Install Qt6 + KDE Frameworks 6 (Kirigami)" step fails with an
-  # unknown-package error, that's an apt package name to fix, not a
-  # snitchwatch-kirigami code problem.
+  # Package names confirmed against Ubuntu noble (24.04, this runner's
+  # image) via packages.ubuntu.com/launchpad, 2026-07-12 — corrected after
+  # this job's first real run failed on two wrong guesses:
+  #   qml6-module-qtquick-controls2 -> qml6-module-qtquick-controls (Qt6
+  #     dropped the legacy Qt5 "Controls 1 vs 2" distinction, so there's no
+  #     "2" suffix in the Qt6 QML module name)
+  #   libkf6kirigami2-dev -> libkirigami-dev (KF6's actual dev package name;
+  #     "kirigami2"/"libkf6kirigami2-dev" are the KF5-era names and don't
+  #     exist for KF6) — also added qml6-module-org-kde-kirigami, the
+  #     runtime QML plugin package (without it the QML engine can't resolve
+  #     `import org.kde.kirigami` at all, dev headers alone aren't enough
+  #     for the test suite, which actually loads main.qml).
   kirigami:
     runs-on: ubuntu-latest
     steps:
@@ -134,6 +150,8 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
+      # protobuf-compiler: see the `check` job's comment — snitchwatch-proto
+      # (a transitive dep via snitchwatch-bridge) needs `protoc`.
       - name: Install Qt6 + KDE Frameworks 6 (Kirigami)
         run: |
           sudo apt-get update
@@ -142,11 +160,13 @@ jobs:
             qt6-base-dev-tools \
             qt6-declarative-dev \
             qt6-declarative-dev-tools \
-            qml6-module-qtquick-controls2 \
+            qml6-module-qtquick-controls \
             qml6-module-qtquick-layouts \
             qml6-module-qtquick-window \
             qml6-module-qt-labs-platform \
-            libkf6kirigami2-dev
+            libkirigami-dev \
+            qml6-module-org-kde-kirigami \
+            protobuf-compiler
 
       - name: cargo check -p snitchwatch-kirigami
         run: cargo check -p snitchwatch-kirigami --locked
