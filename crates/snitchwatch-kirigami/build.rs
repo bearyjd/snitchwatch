@@ -37,5 +37,6 @@ fn main() {
     .file("src/tray_controller.rs")
     .file("src/geo_model.rs")
     .file("src/scanner_controller.rs")
+    .file("src/daemon_health_model.rs")
     .build();
 }

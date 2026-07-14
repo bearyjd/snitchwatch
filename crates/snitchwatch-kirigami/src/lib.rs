@@ -17,6 +17,7 @@ pub mod coexistence;
 pub mod connections;
 pub mod connections_model;
 pub mod crash_log;
+pub mod daemon_health_model;
 pub mod geo;
 pub mod geo_model;
 pub mod insight;
