@@ -45,7 +45,8 @@ pub mod qobject {
     }
 
     extern "RustQt" {
-        /// Daemon/kernel readiness summary, bound by `DiagnosticsPage.qml`.
+        /// Daemon/kernel readiness summary, bound by `DaemonHealthPage.qml`
+        /// and the `main.qml` banner.
         #[qobject]
         #[qml_element]
         /// True if any check in the latest report failed.
@@ -127,6 +128,19 @@ impl qobject::DaemonHealthModel {
                 });
             },
         );
+
+        // The bridge's one-time startup `DiagnosticsReport` fires from
+        // `ensure_started()` in `main()`, before QML (and thus this
+        // subscription) exists — tokio broadcast channels don't replay to
+        // late subscribers, so that report is otherwise lost forever. Pull
+        // the current state immediately so a kernel-prerequisite problem
+        // still surfaces without the user having to click "Recheck".
+        let inbound = handles.inbound_tx();
+        handles.runtime().spawn(async move {
+            let _ = inbound
+                .send(snitchwatch_bridge::ws_messages::ClientMessage::RecheckDiagnostics)
+                .await;
+        });
     }
 
     fn recheck(self: Pin<&mut Self>) {
