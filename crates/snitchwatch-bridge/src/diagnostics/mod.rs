@@ -89,6 +89,20 @@ impl DiagnosticsCtx {
         }
     }
 
+    /// Resets the stored firewall status back to `Unknown`. Called when the
+    /// watchdog detects the daemon just went down: the last-known firewall
+    /// status is opensnitchd-reported and goes stale the moment the daemon
+    /// stops talking to us, so keeping it around would make `report()`
+    /// self-contradictory (daemon unreachable, but firewall claimed
+    /// running).
+    pub fn reset_firewall_status_unknown(&self) {
+        let mut guard = self
+            .firewall_status
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        *guard = None;
+    }
+
     pub fn report(&self) -> Vec<DiagnosticCheck> {
         let last_ping = {
             let guard = self.last_ping.lock().unwrap_or_else(|e| e.into_inner());
@@ -222,5 +236,31 @@ mod tests {
             .find(|c| c.kind == CheckKind::FirewallRunning)
             .unwrap();
         assert_eq!(firewall.status, CheckStatus::Unknown);
+    }
+
+    #[test]
+    fn reset_firewall_status_unknown_clears_stale_known_status() {
+        let last_ping = Arc::new(StdMutex::new(Instant::now()));
+        let firewall_status = Arc::new(StdMutex::new(Some(true)));
+        let probe: Arc<dyn kernel_probe::KernelProbe> =
+            Arc::new(kernel_probe::testing::FakeKernelProbe::all_ok());
+        let ctx = DiagnosticsCtx::new(last_ping, firewall_status, probe);
+
+        // Sanity: starts out Ok (opensnitchd previously reported it running).
+        let before = ctx.report();
+        let firewall_before = before
+            .iter()
+            .find(|c| c.kind == CheckKind::FirewallRunning)
+            .unwrap();
+        assert_eq!(firewall_before.status, CheckStatus::Ok);
+
+        ctx.reset_firewall_status_unknown();
+
+        let after = ctx.report();
+        let firewall_after = after
+            .iter()
+            .find(|c| c.kind == CheckKind::FirewallRunning)
+            .unwrap();
+        assert_eq!(firewall_after.status, CheckStatus::Unknown);
     }
 }

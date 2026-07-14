@@ -53,6 +53,11 @@ pub async fn run(
 
         if down_now && !was_down {
             tray_pub.set(TrayState::DaemonDown);
+            // The last-known firewall status came from opensnitchd itself;
+            // now that the daemon is unreachable it's stale, not current —
+            // clear it so `report()` doesn't claim the firewall is still
+            // running while the daemon is down.
+            diagnostics_ctx.reset_firewall_status_unknown();
             let _ = broadcast_tx.send(crate::ws_messages::ServerMessage::DiagnosticsReport {
                 checks: diagnostics_ctx.report(),
             });
@@ -229,6 +234,59 @@ mod tests {
             msg,
             crate::ws_messages::ServerMessage::DiagnosticsReport { .. }
         ));
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn watchdog_resets_firewall_status_to_unknown_on_down_transition() {
+        let stale = Instant::now() - (DAEMON_DOWN_TIMEOUT + Duration::from_secs(1));
+        let last_ping = Arc::new(StdMutex::new(stale));
+        let tray_pub = Arc::new(TrayStatePublisher::new());
+        let cache = Arc::new(TokioMutex::new(ConnectionCache::new(64)));
+        let (broadcast_tx, mut broadcast_rx) = tokio::sync::broadcast::channel(16);
+        // Daemon previously reported the firewall as running.
+        let firewall_status = Arc::new(StdMutex::new(Some(true)));
+        let probe: Arc<dyn crate::diagnostics::kernel_probe::KernelProbe> =
+            Arc::new(crate::diagnostics::kernel_probe::testing::FakeKernelProbe::all_ok());
+        let diagnostics_ctx = Arc::new(crate::diagnostics::DiagnosticsCtx::new(
+            last_ping,
+            firewall_status,
+            probe,
+        ));
+
+        let handle = tokio::spawn(run(
+            Arc::new(StdMutex::new(stale)),
+            tray_pub,
+            cache,
+            diagnostics_ctx.clone(),
+            broadcast_tx,
+        ));
+
+        let msg = tokio::time::timeout(Duration::from_secs(3), broadcast_rx.recv())
+            .await
+            .expect("timed out waiting for DiagnosticsReport")
+            .unwrap();
+        let crate::ws_messages::ServerMessage::DiagnosticsReport { checks } = msg else {
+            panic!("expected DiagnosticsReport");
+        };
+        let firewall = checks
+            .iter()
+            .find(|c| c.kind == crate::ws_messages::CheckKind::FirewallRunning)
+            .unwrap();
+        assert_eq!(firewall.status, crate::ws_messages::CheckStatus::Unknown);
+
+        // The ctx's own state also reflects the reset (not just the one
+        // broadcast report).
+        let after = diagnostics_ctx.report();
+        let firewall_after = after
+            .iter()
+            .find(|c| c.kind == crate::ws_messages::CheckKind::FirewallRunning)
+            .unwrap();
+        assert_eq!(
+            firewall_after.status,
+            crate::ws_messages::CheckStatus::Unknown
+        );
 
         handle.abort();
     }
