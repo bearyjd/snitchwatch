@@ -92,6 +92,12 @@ pub fn interests_traffic(msg: &ServerMessage) -> bool {
     matches!(msg, ServerMessage::TrafficEvents { .. })
 }
 
+/// True when `msg` carries daemon diagnostics report data (drives
+/// `DaemonHealthModel`).
+pub fn interests_diagnostics(msg: &ServerMessage) -> bool {
+    matches!(msg, ServerMessage::DiagnosticsReport { .. })
+}
+
 /// Serialize an outbound `ServerMessage` to the JSON the models'
 /// `applyServerMessageJson` invokable consumes.
 pub fn encode_server(msg: &ServerMessage) -> Result<String, serde_json::Error> {
@@ -342,6 +348,15 @@ mod tests {
         assert!(!interests_traffic(&ServerMessage::UpdateTrafficData {
             data: serde_json::json!({}),
         }));
+    }
+
+    #[test]
+    fn diagnostics_route_only_to_diagnostics_report() {
+        let diagnostics_msg = ServerMessage::DiagnosticsReport { checks: vec![] };
+        assert!(interests_diagnostics(&diagnostics_msg));
+
+        let other_msg = ServerMessage::ClearConnectionRows;
+        assert!(!interests_diagnostics(&other_msg));
     }
 
     #[test]

@@ -92,7 +92,8 @@ pub fn apply(
         | ClientMessage::RemoveProfileRule { .. }
         | ClientMessage::Undo
         | ClientMessage::Redo
-        | ClientMessage::SetFilteringPaused { .. } => Ok(UpstreamEffect::None),
+        | ClientMessage::SetFilteringPaused { .. }
+        | ClientMessage::RecheckDiagnostics => Ok(UpstreamEffect::None),
     }
 }
 

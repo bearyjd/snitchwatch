@@ -76,6 +76,17 @@ impl MockOpensnitchd {
         Ok(echoed)
     }
 
+    /// Like [`Self::subscribe`], but takes a full `ClientConfig` the
+    /// caller controls — used by tests that need to drive a specific
+    /// `is_firewall_running`/`config` value through the bridge.
+    pub async fn subscribe_with_config(
+        &mut self,
+        cfg: ClientConfig,
+    ) -> Result<ClientConfig, MockError> {
+        let echoed = self.client.subscribe(cfg).await?.into_inner();
+        Ok(echoed)
+    }
+
     /// Send a single AskRule unary RPC and wait for the bridge's `Rule` reply.
     pub async fn ask_rule(&mut self, conn: Connection) -> Result<Rule, MockError> {
         let rule = self.client.ask_rule(conn).await?.into_inner();
