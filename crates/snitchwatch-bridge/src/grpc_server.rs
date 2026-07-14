@@ -57,6 +57,11 @@ pub struct UiService {
     /// constructor parameter, not internal-only state. See
     /// `docs/superpowers/plans/2026-07-12-tray-filter-off.md`.
     filtering_paused: Arc<AtomicBool>,
+    /// Set on every `subscribe()` call from opensnitchd's `is_firewall_running`
+    /// field on its `ClientConfig`; read by a later diagnostics report
+    /// assembler (via [`Self::firewall_status_handle`]) alongside the local
+    /// kernel checks. `None` until the daemon has subscribed at least once.
+    firewall_status: Arc<StdMutex<Option<bool>>>,
 }
 
 impl UiService {
@@ -76,6 +81,7 @@ impl UiService {
             last_ping: Arc::new(StdMutex::new(Instant::now())),
             block_generation: Arc::new(AtomicU64::new(0)),
             filtering_paused,
+            firewall_status: Arc::new(StdMutex::new(None)),
         }
     }
 
@@ -90,6 +96,14 @@ impl UiService {
     /// call sites don't need to change.
     pub fn last_ping_handle(&self) -> Arc<StdMutex<Instant>> {
         self.last_ping.clone()
+    }
+
+    /// Handle to the last-observed firewall status (from opensnitchd's
+    /// `subscribe()` handshake), for a later diagnostics report assembler
+    /// to poll. Exposed as an accessor for the same reason as
+    /// `last_ping_handle`.
+    pub fn firewall_status_handle(&self) -> Arc<StdMutex<Option<bool>>> {
+        self.firewall_status.clone()
     }
 
     /// Publish `TrayState::RecentBlock` and schedule its own revert after
@@ -245,6 +259,13 @@ impl Ui for UiService {
     ) -> Result<Response<ClientConfig>, Status> {
         let cfg = request.into_inner();
         info!(client = %cfg.name, version = %cfg.version, "client subscribed");
+        {
+            let mut guard = self
+                .firewall_status
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            *guard = Some(cfg.is_firewall_running);
+        }
         Ok(Response::new(cfg))
     }
 
@@ -449,6 +470,27 @@ mod tests {
             .unwrap()
             .into_inner();
         assert_eq!(reply.id, 3);
+    }
+
+    #[tokio::test]
+    async fn subscribe_captures_firewall_status() {
+        let cache = Arc::new(Mutex::new(ConnectionCache::new(64)));
+        let (tx, _rx) = broadcast::channel::<ServerMessage>(16);
+        let tray_pub = Arc::new(crate::tray_state::TrayStatePublisher::new());
+        let notice_bus = Arc::new(crate::notice::NoticeBus::new());
+        let filtering_paused = Arc::new(AtomicBool::new(false));
+        let service = UiService::new(cache, tx, tray_pub, notice_bus, filtering_paused);
+
+        let handle = service.firewall_status_handle();
+        assert_eq!(*handle.lock().unwrap(), None);
+
+        let cfg = ClientConfig {
+            is_firewall_running: true,
+            ..Default::default()
+        };
+        let _ = service.subscribe(Request::new(cfg)).await.unwrap();
+
+        assert_eq!(*handle.lock().unwrap(), Some(true));
     }
 
     #[tokio::test]
