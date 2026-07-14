@@ -51,10 +51,97 @@ pub fn local_checks(probe: &dyn KernelProbe) -> Vec<DiagnosticCheck> {
     ]
 }
 
+use std::sync::{Arc, Mutex as StdMutex};
+use std::time::Instant;
+
+pub const DAEMON_UNREACHABLE_TROUBLESHOOTING: &str = "opensnitchd isn't \
+    dialing in. Confirm it's installed and running (systemctl status \
+    opensnitchd), and that its Server.Address in \
+    /etc/opensnitchd/default-config.json matches the bridge's \
+    SNITCHWATCH_GRPC_BIND (default 127.0.0.1:50051). Check \
+    /var/log/opensnitchd.log for dial errors.";
+
+pub const FIREWALL_NOT_RUNNING_TROUBLESHOOTING: &str = "opensnitchd \
+    connected but its firewall backend isn't active. Check \
+    /var/log/opensnitchd.log for nftables errors; confirm nftables is \
+    enabled and not conflicting with iptables/firewalld rules already on \
+    the host.";
+
+/// Combines daemon-reachability (watchdog's `last_ping` staleness),
+/// opensnitchd-reported firewall status, and local kernel probes into the
+/// full four-check `DiagnosticCheck` list the GUI renders.
+pub struct DiagnosticsCtx {
+    last_ping: Arc<StdMutex<Instant>>,
+    firewall_status: Arc<StdMutex<Option<bool>>>,
+    probe: Arc<dyn kernel_probe::KernelProbe>,
+}
+
+impl DiagnosticsCtx {
+    pub fn new(
+        last_ping: Arc<StdMutex<Instant>>,
+        firewall_status: Arc<StdMutex<Option<bool>>>,
+        probe: Arc<dyn kernel_probe::KernelProbe>,
+    ) -> Self {
+        Self {
+            last_ping,
+            firewall_status,
+            probe,
+        }
+    }
+
+    pub fn report(&self) -> Vec<DiagnosticCheck> {
+        let last_ping = {
+            let guard = self.last_ping.lock().unwrap_or_else(|e| e.into_inner());
+            *guard
+        };
+        let daemon_status = if crate::daemon_watchdog::is_daemon_down(
+            last_ping,
+            Instant::now(),
+            crate::daemon_watchdog::DAEMON_DOWN_TIMEOUT,
+        ) {
+            CheckStatus::Failed {
+                detail: DAEMON_UNREACHABLE_TROUBLESHOOTING.to_string(),
+            }
+        } else {
+            CheckStatus::Ok
+        };
+
+        let firewall_status = {
+            let guard = self
+                .firewall_status
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            match *guard {
+                Some(true) => CheckStatus::Ok,
+                Some(false) => CheckStatus::Failed {
+                    detail: FIREWALL_NOT_RUNNING_TROUBLESHOOTING.to_string(),
+                },
+                None => CheckStatus::Unknown,
+            }
+        };
+
+        let mut checks = vec![
+            DiagnosticCheck {
+                kind: CheckKind::DaemonReachable,
+                status: daemon_status,
+            },
+            DiagnosticCheck {
+                kind: CheckKind::FirewallRunning,
+                status: firewall_status,
+            },
+        ];
+        checks.extend(local_checks(self.probe.as_ref()));
+        checks
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::kernel_probe::testing::FakeKernelProbe;
     use super::*;
+    use crate::daemon_watchdog::DAEMON_DOWN_TIMEOUT;
+    use std::sync::{Arc, Mutex as StdMutex};
+    use std::time::Instant;
 
     #[test]
     fn all_ok_probe_yields_two_ok_checks() {
@@ -91,5 +178,49 @@ mod tests {
             .find(|c| c.kind == CheckKind::NftablesSupport)
             .unwrap();
         assert!(matches!(nft.status, CheckStatus::Failed { .. }));
+    }
+
+    #[test]
+    fn report_reflects_daemon_reachable_and_firewall_running() {
+        let last_ping = Arc::new(StdMutex::new(Instant::now()));
+        let firewall_status = Arc::new(StdMutex::new(Some(true)));
+        let probe: Arc<dyn kernel_probe::KernelProbe> =
+            Arc::new(kernel_probe::testing::FakeKernelProbe::all_ok());
+        let ctx = DiagnosticsCtx::new(last_ping, firewall_status, probe);
+
+        let checks = ctx.report();
+        assert_eq!(checks.len(), 4);
+        let daemon = checks
+            .iter()
+            .find(|c| c.kind == CheckKind::DaemonReachable)
+            .unwrap();
+        assert_eq!(daemon.status, CheckStatus::Ok);
+        let firewall = checks
+            .iter()
+            .find(|c| c.kind == CheckKind::FirewallRunning)
+            .unwrap();
+        assert_eq!(firewall.status, CheckStatus::Ok);
+    }
+
+    #[test]
+    fn report_reflects_stale_ping_as_daemon_unreachable() {
+        let stale = Instant::now() - (DAEMON_DOWN_TIMEOUT + std::time::Duration::from_secs(1));
+        let last_ping = Arc::new(StdMutex::new(stale));
+        let firewall_status = Arc::new(StdMutex::new(None));
+        let probe: Arc<dyn kernel_probe::KernelProbe> =
+            Arc::new(kernel_probe::testing::FakeKernelProbe::all_ok());
+        let ctx = DiagnosticsCtx::new(last_ping, firewall_status, probe);
+
+        let checks = ctx.report();
+        let daemon = checks
+            .iter()
+            .find(|c| c.kind == CheckKind::DaemonReachable)
+            .unwrap();
+        assert!(matches!(daemon.status, CheckStatus::Failed { .. }));
+        let firewall = checks
+            .iter()
+            .find(|c| c.kind == CheckKind::FirewallRunning)
+            .unwrap();
+        assert_eq!(firewall.status, CheckStatus::Unknown);
     }
 }
