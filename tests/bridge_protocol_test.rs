@@ -195,3 +195,61 @@ async fn deny_round_trip_unary() {
 
     bridge.shutdown();
 }
+
+#[tokio::test]
+async fn diagnostics_report_reflects_firewall_down_after_subscribe() {
+    let socket_dir = tempfile::tempdir().unwrap();
+    let cfg = BridgeConfig {
+        grpc_bind: "127.0.0.1:0".parse().unwrap(),
+        ws_socket_path: socket_dir.path().join("bridge.sock"),
+        cache_capacity: 1024,
+    };
+    let bridge = run(cfg).await.expect("bridge run failed");
+
+    let mut ws = connect_stream(&bridge.ws_socket_path, bridge.ws_token.as_str()).await;
+
+    let grpc_addr = bridge.grpc_addr;
+    let subscribe_handle = tokio::spawn(async move {
+        let mut mock = MockOpensnitchd::connect(grpc_addr).await.unwrap();
+        mock.subscribe_with_config(snitchwatch_proto::protocol::ClientConfig {
+            id: 1,
+            name: "mock".to_string(),
+            version: "mock-1.6.0".to_string(),
+            is_firewall_running: false,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    });
+    subscribe_handle.await.unwrap();
+
+    ws.send(Message::Text(
+        json!({ "action": "requestSnapshot" }).to_string(),
+    ))
+    .await
+    .expect("send requestSnapshot failed");
+
+    let mut saw_firewall_failed = false;
+    for _ in 0..20 {
+        let Some(Ok(Message::Text(text))) = tokio::time::timeout(Duration::from_secs(3), ws.next())
+            .await
+            .expect("timed out waiting for a WS message")
+        else {
+            continue;
+        };
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        if v.get("action").and_then(|a| a.as_str()) == Some("diagnosticsReport") {
+            let checks = v["checks"].as_array().unwrap();
+            saw_firewall_failed = checks
+                .iter()
+                .any(|c| c["kind"] == "firewall_running" && c["status"]["status"] == "failed");
+            break;
+        }
+    }
+    assert!(
+        saw_firewall_failed,
+        "expected a diagnosticsReport with a failed firewall_running check"
+    );
+
+    bridge.shutdown();
+}
