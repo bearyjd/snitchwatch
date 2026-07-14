@@ -111,6 +111,14 @@ Kirigami.ApplicationWindow {
         id: scannerController
     }
 
+    // Daemon/kernel readiness diagnostics (Task 8/9). Polls the bridge for
+    // opensnitchd reachability and kernel prerequisite health; the banner
+    // and DaemonHealthPage below both bind to this.
+    DaemonHealthModel {
+        id: daemonHealthModel
+        Component.onCompleted: startBridgeFeed()
+    }
+
     // Guards against pushing the onboarding page more than once and against
     // popping when it was never pushed (e.g. "Continue anyway" already
     // dismissed it before a stray stateChanged fires).
@@ -209,6 +217,30 @@ Kirigami.ApplicationWindow {
         text: bridgeFeed.statusText
     }
 
+    // Daemon/kernel readiness banner — distinct from bridgeBanner above:
+    // bridgeBanner covers the bridge PROCESS failing to start; this covers
+    // the bridge running fine but opensnitchd/kernel prerequisites not
+    // being met. See docs/superpowers/specs/2026-07-14-daemon-kernel-diagnostics-design.md.
+    Kirigami.InlineMessage {
+        id: daemonHealthBanner
+        z: 999
+        anchors {
+            top: bridgeBanner.visible ? bridgeBanner.bottom : parent.top
+            left: parent.left
+            right: parent.right
+            margins: Kirigami.Units.smallSpacing
+        }
+        type: Kirigami.MessageType.Warning
+        visible: daemonHealthModel.hasProblem
+        text: daemonHealthModel.statusSummary
+        actions: [
+            Kirigami.Action {
+                text: "Details"
+                onTriggered: root.pageStack.replace(daemonHealthPageComponent)
+            }
+        ]
+    }
+
     // Page components, swapped into pageStack by the drawer actions below.
     Component {
         id: connectionsPageComponent
@@ -268,6 +300,12 @@ Kirigami.ApplicationWindow {
         id: scannerPageComponent
         ScannerPage {
             controller: scannerController
+        }
+    }
+    Component {
+        id: daemonHealthPageComponent
+        DaemonHealthPage {
+            model: daemonHealthModel
         }
     }
     // Tracks the last-seen pending count so we only raise on a *new* pending
@@ -420,6 +458,11 @@ Kirigami.ApplicationWindow {
                 text: "Settings & Diagnostics"
                 icon.name: "settings-configure"
                 onTriggered: root.pageStack.replace(diagnosticsPageComponent)
+            },
+            Kirigami.Action {
+                text: "Daemon Health"
+                icon.name: "dialog-warning"
+                onTriggered: root.pageStack.replace(daemonHealthPageComponent)
             }
         ]
     }

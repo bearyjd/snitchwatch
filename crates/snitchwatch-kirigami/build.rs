@@ -21,6 +21,7 @@ fn main() {
         "qml/DiagnosticsPage.qml",
         "qml/GeoPage.qml",
         "qml/ScannerPage.qml",
+        "qml/DaemonHealthPage.qml",
     ]))
     .file("src/bridge_bindings.rs")
     .file("src/bridge_feed.rs")
