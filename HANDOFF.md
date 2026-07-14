@@ -113,6 +113,73 @@ Record results by flipping the checkbox in
 criteria & verification status" section, same convention Task 7's
 fullscreen-focus test used.
 
+### Troubleshooting: GUI runs, but no visible connection to opensnitchd
+
+**Update (2026-07-14):** this class of problem now surfaces *inside the
+running GUI* — a warning banner plus a "Daemon Health" page — instead of
+requiring the manual `/var/log/opensnitchd.log` triage below. See
+`docs/superpowers/specs/2026-07-14-daemon-kernel-diagnostics-design.md`
+for the design and `docs/superpowers/plans/2026-07-14-daemon-kernel-diagnostics.md`
+for the implementation. The manual steps below remain accurate as a deeper
+fallback (the in-app troubleshooting text is deliberately terser) and as
+the only option before this feature shipped.
+
+Symptom hit 2026-07-13 verifying on real hardware: `snitchwatch-kirigami`
+builds and launches fine, but nothing happens and no error appears anywhere
+in the GUI. Root cause is topology, not a bug: **`opensnitchd` is the gRPC
+*client* — it dials out to the bridge, not the other way around** — so the
+GUI has no direct line to `opensnitchd` at all; it only ever talks to the
+bridge over the WS Unix socket. Two things have to line up for the dial-in
+to happen:
+
+1. `opensnitchd`'s own config (`/etc/opensnitchd/default-config.json` on
+   the host) needs `Server.Address` pointing at the bridge, e.g.
+   `127.0.0.1:50051`. The vendored default under
+   `vendor/opensnitch/daemon/data/default-config.json`
+   (`unix:///tmp/osui.sock`) is opensnitch's *own* built-in UI socket, not
+   this bridge — leaving it as-is means opensnitchd never even attempts to
+   dial the bridge.
+2. The bridge has to actually be listening on that same address.
+   `snitchwatch-bridge-cli` defaults to an **ephemeral port** unless
+   `SNITCHWATCH_GRPC_BIND=127.0.0.1:50051` is set explicitly — the shipped
+   `packaging/systemd/snitchwatch-bridge.service` sets this, but running
+   `just run-bridge` by hand does not.
+
+If either is off, there's silence by design — no error surfaces in
+Snitchwatch because opensnitchd never connects to hand one to the bridge in
+the first place. **Check `opensnitchd`'s own log**, not the GUI:
+
+```bash
+tail -f /var/log/opensnitchd.log
+```
+
+Fastest way to get a real signal:
+
+```bash
+# 1. Start the bridge with a fixed, known gRPC bind:
+SNITCHWATCH_GRPC_BIND=127.0.0.1:50051 RUST_LOG=debug just run-bridge
+# → watch for "GRPC_LISTEN_ADDR=127.0.0.1:50051" printed to stdout
+
+# 2. Confirm opensnitchd's config actually points there:
+grep -A2 '"Server"' /etc/opensnitchd/default-config.json
+
+# 3. Restart opensnitchd and tail its log for the dial attempt/failure:
+sudo systemctl restart opensnitchd
+sudo tail -f /var/log/opensnitchd.log
+```
+
+Separately: `opensnitchd` isn't installed at all in the dev sandbox this
+repo is normally worked in (no `opensnitchd` binary, and the sandbox isn't
+even running systemd as PID 1) — that environment can only verify the GUI
+launches, never a real daemon dial-in. Real-hardware verification is
+mandatory for this step, not optional. A first attempt at compiling
+`snitchwatch-tauri`/`snitchwatch-kirigami` on the reporting user's baremetal
+box also failed outright (pre-dial-in, a separate build-environment issue —
+missing system dev packages is the leading suspect per this file's
+"Running on real hardware" prerequisites); that failure was not yet
+diagnosed as of this note and should be resolved before re-attempting the
+daemon dial-in steps above.
+
 ---
 
 ## Original 2026-07-04 handoff (history — decisions and rationale below are
