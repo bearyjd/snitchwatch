@@ -160,6 +160,18 @@ Trigger points for a (re-)send, no new polling loop:
   existing `TrafficModel`/`RulesModel` pattern — updated on
   `DiagnosticsReport` receipt, exposed to QML.
 
+  **Descoped in the implementation plan:** dismissal and auto-navigation
+  were dropped when this design was broken into tasks (see the plan's
+  Task 9) in favor of the simpler always-visible-while-`hasProblem`
+  banner and a plain drawer entry — a real ongoing problem staying
+  visible was judged more important than avoiding a re-nag, and
+  auto-navigation added session-state tracking for a feature not yet
+  proven necessary. The shipped `DaemonHealthModel`/`DaemonHealthPage.qml`
+  (renamed from `DiagnosticsModel`/Diagnostics page to avoid colliding
+  with the pre-existing unrelated `DiagnosticsPage.qml`) reflect this
+  simplification; both listed behaviors above remain a reasonable future
+  enhancement, not a bug.
+
 ## Testing
 
 Per this repo's convention (`CLAUDE.md` "Reproduction paths"), all of this

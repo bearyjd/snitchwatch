@@ -264,11 +264,11 @@ pub async fn run(config: BridgeConfig) -> Result<RunningBridge> {
         firewall_status,
         kernel_probe,
     ));
-    if broadcast_tx.receiver_count() > 0 {
-        let _ = broadcast_tx.send(ServerMessage::DiagnosticsReport {
-            checks: diagnostics_ctx.report(),
-        });
-    }
+    // No startup broadcast here: no client has subscribed to `broadcast_tx`
+    // yet at this point in `run()`, so a send would always be dropped. The
+    // GUI's `DaemonHealthModel::start_bridge_feed` sends
+    // `ClientMessage::RecheckDiagnostics` immediately after subscribing,
+    // which is the actual startup-report delivery path.
 
     let ui_service = ui_service_inner.into_server();
     let (grpc_shutdown_tx, grpc_shutdown_rx) = oneshot::channel::<()>();

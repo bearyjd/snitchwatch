@@ -8,6 +8,8 @@ pub mod kernel_probe;
 
 use crate::ws_messages::{CheckKind, CheckStatus, DiagnosticCheck};
 use kernel_probe::KernelProbe;
+use std::sync::{Arc, Mutex as StdMutex};
+use std::time::Instant;
 
 pub const EBPF_TROUBLESHOOTING: &str = "This kernel doesn't expose BTF \
     (/sys/kernel/btf/vmlinux missing), which opensnitchd's default \
@@ -50,9 +52,6 @@ pub fn local_checks(probe: &dyn KernelProbe) -> Vec<DiagnosticCheck> {
         },
     ]
 }
-
-use std::sync::{Arc, Mutex as StdMutex};
-use std::time::Instant;
 
 pub const DAEMON_UNREACHABLE_TROUBLESHOOTING: &str = "opensnitchd isn't \
     dialing in. Confirm it's installed and running (systemctl status \
