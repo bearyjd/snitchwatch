@@ -250,6 +250,26 @@ pub async fn run(config: BridgeConfig) -> Result<RunningBridge> {
     // Grabbed before `.into_server()` consumes `ui_service_inner` — the
     // daemon-down watchdog below needs this to watch `ping()`'s recency.
     let last_ping = ui_service_inner.last_ping_handle();
+
+    // Diagnostics: combines daemon-reachability (`last_ping`), opensnitchd's
+    // reported firewall status, and local kernel probes into the four-check
+    // report the GUI renders. Constructed here (before `.into_server()`
+    // consumes `ui_service_inner`) so `firewall_status_handle()` is still
+    // reachable.
+    let firewall_status = ui_service_inner.firewall_status_handle();
+    let kernel_probe: Arc<dyn snitchwatch_bridge::diagnostics::kernel_probe::KernelProbe> =
+        Arc::new(snitchwatch_bridge::diagnostics::kernel_probe::RealKernelProbe);
+    let diagnostics_ctx = Arc::new(snitchwatch_bridge::diagnostics::DiagnosticsCtx::new(
+        last_ping.clone(),
+        firewall_status,
+        kernel_probe,
+    ));
+    if broadcast_tx.receiver_count() > 0 {
+        let _ = broadcast_tx.send(ServerMessage::DiagnosticsReport {
+            checks: diagnostics_ctx.report(),
+        });
+    }
+
     let ui_service = ui_service_inner.into_server();
     let (grpc_shutdown_tx, grpc_shutdown_rx) = oneshot::channel::<()>();
 
@@ -260,6 +280,8 @@ pub async fn run(config: BridgeConfig) -> Result<RunningBridge> {
         last_ping,
         tray_pub.clone(),
         cache.clone(),
+        diagnostics_ctx.clone(),
+        broadcast_tx.clone(),
     ));
 
     tokio::spawn(async move {
@@ -318,6 +340,7 @@ pub async fn run(config: BridgeConfig) -> Result<RunningBridge> {
     let snapshot_tx = broadcast_tx.clone();
     let tray_pub_for_pause = tray_pub.clone();
     let filtering_paused_for_pump = filtering_paused.clone();
+    let diagnostics_ctx_for_pump = diagnostics_ctx.clone();
     tokio::spawn(async move {
         while let Some(msg) = inbound_rx.recv().await {
             // Special-cased before is_profile_message/upstream::apply — this
@@ -330,6 +353,12 @@ pub async fn run(config: BridgeConfig) -> Result<RunningBridge> {
                 } else {
                     cache_for_upstream.lock().await.resync_tray_state();
                 }
+                continue;
+            }
+            if let ClientMessage::RecheckDiagnostics = msg {
+                let _ = snapshot_tx.send(ServerMessage::DiagnosticsReport {
+                    checks: diagnostics_ctx_for_pump.report(),
+                });
                 continue;
             }
             if is_profile_message(&msg) {
@@ -368,6 +397,9 @@ pub async fn run(config: BridgeConfig) -> Result<RunningBridge> {
                         }
                         Err(e) => warn!(error = %e, "snapshot: profiles rebuild failed"),
                     }
+                    let _ = snapshot_tx.send(ServerMessage::DiagnosticsReport {
+                        checks: diagnostics_ctx_for_pump.report(),
+                    });
                     info!("re-broadcast state snapshots after feed lag");
                 }
                 Ok(effect) => info!(?effect, "applied upstream effect"),
