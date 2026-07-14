@@ -5,6 +5,34 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Which readiness/connectivity property a diagnostic check covers.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckKind {
+    DaemonReachable,
+    FirewallRunning,
+    EbpfSupport,
+    NftablesSupport,
+}
+
+/// Result of one diagnostic check. `Unknown` covers "can't assess yet"
+/// (e.g. opensnitchd connected but hasn't sent a `ClientConfig` yet) —
+/// never reported as `Ok` or `Failed` when the bridge genuinely doesn't
+/// know.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum CheckStatus {
+    Ok,
+    Failed { detail: String },
+    Unknown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DiagnosticCheck {
+    pub kind: CheckKind,
+    pub status: CheckStatus,
+}
+
 /// Server → client message envelope. Each variant matches one of the 22
 /// `handleServerCommand` cases in the LS UI's `app.js`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -86,6 +114,9 @@ pub enum ServerMessage {
     },
     SetAboutInfo {
         info: AboutInfo,
+    },
+    DiagnosticsReport {
+        checks: Vec<DiagnosticCheck>,
     },
     SetUndoStack {
         stack: Vec<serde_json::Value>,
@@ -188,6 +219,7 @@ pub enum ClientMessage {
     SetFilteringPaused {
         paused: bool,
     },
+    RecheckDiagnostics,
 }
 
 /// Resolve [`ClientMessage::SetVerdict`]'s effective duration from the new
@@ -751,5 +783,40 @@ mod filtering_pause_tests {
         let json = serde_json::to_string(&msg).unwrap();
         assert_eq!(json, r#"{"action":"setFilteringPaused","paused":true}"#);
         assert_eq!(serde_json::from_str::<ClientMessage>(&json).unwrap(), msg);
+    }
+
+    #[test]
+    fn diagnostics_report_round_trips() {
+        let msg = ServerMessage::DiagnosticsReport {
+            checks: vec![
+                DiagnosticCheck {
+                    kind: CheckKind::DaemonReachable,
+                    status: CheckStatus::Ok,
+                },
+                DiagnosticCheck {
+                    kind: CheckKind::EbpfSupport,
+                    status: CheckStatus::Failed {
+                        detail: "no BTF".to_string(),
+                    },
+                },
+                DiagnosticCheck {
+                    kind: CheckKind::FirewallRunning,
+                    status: CheckStatus::Unknown,
+                },
+            ],
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"action\":\"diagnosticsReport\""));
+        let round_tripped: ServerMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(round_tripped, msg);
+    }
+
+    #[test]
+    fn recheck_diagnostics_round_trips() {
+        let msg = ClientMessage::RecheckDiagnostics;
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"action\":\"recheckDiagnostics\""));
+        let round_tripped: ClientMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(round_tripped, msg);
     }
 }
