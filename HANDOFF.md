@@ -176,9 +176,36 @@ mandatory for this step, not optional. A first attempt at compiling
 `snitchwatch-tauri`/`snitchwatch-kirigami` on the reporting user's baremetal
 box also failed outright (pre-dial-in, a separate build-environment issue —
 missing system dev packages is the leading suspect per this file's
-"Running on real hardware" prerequisites); that failure was not yet
-diagnosed as of this note and should be resolved before re-attempting the
-daemon dial-in steps above.
+"Running on real hardware" prerequisites).
+
+**Update (2026-07-30): baremetal build failure diagnosed and fixed.** It was
+not missing dev packages — all prerequisites were present. `just build`
+failed with both Kirigami crates' build scripts panicking:
+`Conflicting include_prefixes for cxx-qt! Dependency cxx-qt-lib conflicts
+with existing include path` (`cxx-qt-build 0.9.1`, `src/lib.rs:706`). Root
+cause: in this box's containerized dev shell (toolbox/distrobox-style —
+`systemctl` reports `offline` there), `/home/user` and `/var/home/user`
+are the same directory via *bind mount* (verified: same device+inode,
+`/home` a real directory) rather than the bare host's `/home → var/home`
+symlink, so `fs::canonicalize` cannot unify the two spellings. (On the
+bare host the symlink makes both spellings canonicalize identically and
+this failure cannot happen.) Earlier builds ran from a `/home/user/…`
+cwd and recorded `cxx-qt-lib`'s exported-include symlinks under that
+spelling in `target/`; a later build from `/var/home/user/…` re-ran only
+the consumer crates' build scripts, and cxx-qt-build's conflict check
+(`canonicalize(source) == canonicalize(dest)`) saw the same physical
+directory under two spellings and panicked. Fix:
+
+```bash
+cargo clean -p cxx-qt -p cxx-qt-lib -p cxx-qt-build \
+  -p kirigami-spike -p snitchwatch-kirigami
+just build   # from ONE consistent path spelling
+```
+
+**Gotcha to avoid recurrence:** always invoke cargo from the same path
+spelling on this box (pick `/var/home/user/…` or `/home/user/…` and stick
+with it — shells, IDEs, and agents included). Mixing them re-poisons
+`target/` and the panic returns until the cxx-qt crates are cleaned again.
 
 ---
 

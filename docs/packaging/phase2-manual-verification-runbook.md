@@ -234,6 +234,92 @@ real regression in `daemon_watchdog.rs`/`grpc_server.rs`'s `ask_rule`/the
 
 ---
 
+## Step 6 — Daemon Health diagnostics on real hardware
+
+Added 2026-07-14 alongside the daemon/kernel diagnostics feature itself
+(`docs/superpowers/specs/2026-07-14-daemon-kernel-diagnostics-design.md`,
+`docs/superpowers/plans/2026-07-14-daemon-kernel-diagnostics.md`). Everything
+about this feature was verified with `MockOpensnitchd` and a headless
+`QT_QPA_PLATFORM=offscreen` QML test in the sandbox — genuinely correct for
+the logic under test, but none of that exercises a real `opensnitchd`
+process, a real host kernel's actual eBPF/BTF or nftables support, or the
+real `Kirigami.InlineMessage` banner/page rendering on a real compositor.
+
+**6a — Baseline: everything healthy.** With `snitchwatch-kirigami` running
+(Step 2 or `just kirigami-dev`) against a real bridge + real `opensnitchd`
+already dialed in (Step 3):
+
+**Pass condition:** no "Daemon Health" warning banner appears at the top of
+the window, and the "Daemon Health" drawer entry's page shows all four
+checks (`opensnitchd reachable`, `firewall running`, `eBPF support`,
+`nftables support`) as healthy with the all-clear message, not a spinner or
+`Unknown`/blank state.
+
+**6b — Daemon unreachable.** Reuse Step 5's `DaemonDown` trigger:
+
+```bash
+podman stop opensnitchd-dev
+```
+
+**Pass condition:** the "Daemon Health" banner appears within ~10-12
+seconds (same `DAEMON_DOWN_TIMEOUT` + one watchdog tick as Step 5's tray
+check), showing the `DAEMON_UNREACHABLE_TROUBLESHOOTING` text
+(`opensnitchd isn't dialing in...`) on the page. Restart `opensnitchd-dev`
+and confirm the banner clears and the page returns to all-clear within a
+couple more seconds — this also confirms the watchdog's *recovery*
+transition re-broadcasts a fresh report, not just the down transition.
+
+**6c — Kernel prerequisite failure (the case this feature exists for).**
+This is the scenario Step 5 doesn't cover at all: `opensnitchd` reachable
+and healthy, but the host kernel can't satisfy what it's configured to use.
+Force it via the nftables check — temporarily rename `nft` off PATH (safe,
+easily reversible):
+
+```bash
+sudo mv "$(command -v nft)" "$(command -v nft).bak"
+```
+
+(The eBPF check can't be faked this way: `RealKernelProbe::btf_vmlinux_exists`
+only stats `/sys/kernel/btf/vmlinux` for existence, so tricks like
+bind-mounting `/dev/null` over it leave the path existing and the check
+passing. Forcing a real eBPF failure would need a kernel without
+`CONFIG_DEBUG_INFO_BTF` — not worth it; the nftables path exercises the
+identical failed-check → banner → troubleshooting-text plumbing.)
+
+**Pass condition — this is the finding the whole-branch review flagged and
+a follow-up fix addressed (see PR #3):** since `opensnitchd` itself never
+goes unreachable in this scenario, the watchdog never transitions, so the
+banner must appear via `DaemonHealthModel::start_bridge_feed`'s
+initial-recheck-on-connect instead. Confirm this actually happens: restart
+`snitchwatch-kirigami` fresh (`just kirigami-dev` again) *while* the
+kernel/PATH change from above is still in effect, and confirm the banner
+appears **on first render**, without needing to click "Recheck" manually.
+If it only appears after clicking Recheck, that's a regression of the fix
+made in response to the final whole-branch review — flag it, don't treat
+it as expected behavior.
+
+Then click "Recheck" anyway and confirm the page's failed check shows the
+correct troubleshooting text (`EBPF_TROUBLESHOOTING` or
+`NFTABLES_TROUBLESHOOTING` from `diagnostics/mod.rs`, matching whichever
+you broke).
+
+**Restore the host** before moving on:
+
+```bash
+sudo umount /sys/kernel/btf/vmlinux 2>/dev/null   # if the bind-mount was used
+sudo mv "$(command -v nft).bak" "$(dirname "$(command -v nft)")/nft" 2>/dev/null  # if renamed
+```
+
+**If any of 6a-6c fail:** first confirm Step 5's tray-tooltip baseline
+already works on this host — if that's broken, the Daemon Health feature
+rides the same watchdog/broadcast plumbing and won't work either, and the
+bug is upstream of this step. If the tray baseline is fine but only the
+banner/page is wrong, that's a real regression in
+`daemon_health_model.rs`/`main.qml`/`DaemonHealthPage.qml` or the kernel
+probe itself — not a hardware-vs-sandbox gap.
+
+---
+
 ## Recording results
 
 Once all five steps are run, update
