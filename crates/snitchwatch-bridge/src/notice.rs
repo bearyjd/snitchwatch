@@ -10,9 +10,24 @@ const BUS_CAPACITY: usize = 64;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Notice {
-    Pending { row_id: u64, process: String },
+    Pending {
+        row_id: u64,
+        process: String,
+    },
     DaemonAway,
     FilterPauseExpired,
+    /// A `Deny` verdict's requested scope (`AnyHostOnDomain`/`AnyHost`)
+    /// couldn't be honored and silently narrowed to an exact-host match —
+    /// see `translator::verdict::scope_degradation_reason` and issue #14's
+    /// security review FIX 2. Unlike a narrowed `Allow` (fail-safe, silent
+    /// by design), a narrowed `Deny` under-blocks relative to what the
+    /// pending-decision dialog offered, so the client must be told rather
+    /// than left to assume the wider block applied.
+    DenyScopeNarrowed {
+        row_id: u64,
+        what: String,
+        reason: String,
+    },
 }
 
 pub struct NoticeBus {

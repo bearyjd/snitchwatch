@@ -290,7 +290,24 @@ impl Ui for UiService {
             .map_err(|_canceled| Status::cancelled("verdict oneshot dropped before resolution"))?;
 
         if resolution.verdict == Verdict::Deny {
-            self.publish_recent_block(what);
+            self.publish_recent_block(what.clone());
+
+            // FIX 2 (issue #14 security review): a narrowed Deny
+            // under-blocks relative to what the pending-decision dialog
+            // offered, so the client must be told — not left to assume the
+            // wider block applied.
+            if let Some(reason) = crate::translator::verdict::scope_degradation_reason(
+                resolution.scope,
+                resolution.verdict,
+                &conn,
+            ) {
+                self.notice_bus
+                    .send(crate::notice::Notice::DenyScopeNarrowed {
+                        row_id: ask_id,
+                        what,
+                        reason,
+                    });
+            }
         }
 
         let now_secs = std::time::SystemTime::now()
