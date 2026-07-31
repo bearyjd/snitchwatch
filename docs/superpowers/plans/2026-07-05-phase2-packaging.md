@@ -110,14 +110,24 @@ fixed target (the bridge-cli otherwise defaults to an ephemeral port).
   - [x] **Step 6 diagnostics protocol** — `recheckDiagnostics` →
     `diagnosticsReport` round-trips live; kernel checks ran against the
     real host.
-  - [ ] **Verdict round-trip, sustained interception, tray states,
-    daemon-recovery rebroadcast** — blocked on findings filed as issues
-    #5 (daemon only Pings when new stats events exist → false DaemonDown
-    on idle systems; `firewall_running` staleness), #6 (EbpfSupport check
-    blind to real eBPF module-load failure, observed on kernel 6.19), and
-    #7 (opensnitch absent from Fedora/Bazzite repos → recipe/layering/
-    runbook install paths were wrong; docs corrected, recipe fix pending).
-    Re-run Steps 3/5/6 after #5's fix lands.
+  - [x] **Step 6b down + recovery transitions (live, 2026-07-31, after
+    the issue #5 fix merged in PR #9):** stopping `opensnitchd-dev`
+    produced an unsolicited `diagnosticsReport` with
+    `daemon_reachable: failed` **and** `firewall_running: unknown` (the
+    stale-ok contradiction is gone) within ~2 seconds — one watchdog
+    tick via the new Notifications-stream-close signal, vs. the old
+    10–12s ping-staleness path. Restarting the daemon produced a
+    push-style all-clear report on re-subscribe with no manual recheck.
+    Idle-daemon false-DaemonDown also re-verified fixed live (all four
+    checks Ok with a completely idle daemon).
+  - [ ] **Still open on the live checklist:** verdict round-trip under
+    sustained interception (plus the unexplained absence of nftables
+    queue rules during steady state — needs root-side diagnosis), the
+    GUI-visual halves of Steps 5/6 (tray icon + banner/page rendering on
+    a real compositor need human eyes), and runbook Step 6c's
+    daemon-alert path against the merged issue #6 fix (PR #11).
+    Issues #5/#6/#7 themselves are all fixed and closed (PRs #9, #11,
+    #10 respectively).
 - [ ] **Not verifiable in the CI sandbox:** actual `bluebuild build`,
   `flatpak-builder` run, live opensnitchd dial-in, the closed-window
   AskRule round-trip, and (added 2026-07-12) the `DaemonDown`/
