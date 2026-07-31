@@ -376,6 +376,12 @@ pub async fn run(config: BridgeConfig) -> Result<RunningBridge> {
                 continue;
             }
             if let ClientMessage::RecheckDiagnostics = msg {
+                // The user-driven "re-baseline": clear stored daemon alerts
+                // before re-running the report, rather than on every
+                // subscribe() — see `daemon_alerts`'s module doc for why a
+                // fresh subscribe is the wrong trigger. A problem that
+                // persists will re-alert on the daemon's next restart.
+                diagnostics_ctx_for_pump.clear_alerts();
                 let _ = snapshot_tx.send(ServerMessage::DiagnosticsReport {
                     checks: diagnostics_ctx_for_pump.report(),
                 });
