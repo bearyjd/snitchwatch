@@ -33,6 +33,7 @@ use snitchwatch_bridge::ws_server::{WsHandles, WsServer};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{broadcast, mpsc, oneshot, watch, Mutex};
 use tonic::transport::Server;
 use tracing::{error, info, warn};
@@ -248,10 +249,10 @@ pub async fn run(config: BridgeConfig) -> Result<RunningBridge> {
         filtering_paused.clone(),
     );
     // Grabbed before `.into_server()` consumes `ui_service_inner` — the
-    // daemon-down watchdog below needs this to watch `ping()`'s recency.
-    let last_ping = ui_service_inner.last_ping_handle();
+    // daemon-down watchdog below needs this to watch daemon liveness.
+    let liveness = ui_service_inner.liveness_handle();
 
-    // Diagnostics: combines daemon-reachability (`last_ping`), opensnitchd's
+    // Diagnostics: combines daemon-reachability (`liveness`), opensnitchd's
     // reported firewall status, and local kernel probes into the four-check
     // report the GUI renders. Constructed here (before `.into_server()`
     // consumes `ui_service_inner`) so `firewall_status_handle()` is still
@@ -260,7 +261,7 @@ pub async fn run(config: BridgeConfig) -> Result<RunningBridge> {
     let kernel_probe: Arc<dyn snitchwatch_bridge::diagnostics::kernel_probe::KernelProbe> =
         Arc::new(snitchwatch_bridge::diagnostics::kernel_probe::RealKernelProbe);
     let diagnostics_ctx = Arc::new(snitchwatch_bridge::diagnostics::DiagnosticsCtx::new(
-        last_ping.clone(),
+        liveness.clone(),
         firewall_status,
         kernel_probe,
     ));
@@ -274,10 +275,11 @@ pub async fn run(config: BridgeConfig) -> Result<RunningBridge> {
     let (grpc_shutdown_tx, grpc_shutdown_rx) = oneshot::channel::<()>();
 
     // Daemon-down watchdog: republishes TrayState::DaemonDown when opensnitchd
-    // stops pinging, and resyncs to the cache's real Idle/Pending(n) once
-    // pings resume. See daemon_watchdog's module doc for the timeout rationale.
+    // goes unreachable (no gRPC activity and no open Notifications stream),
+    // and resyncs to the cache's real Idle/Pending(n) once it's reachable
+    // again. See daemon_watchdog's module doc for the timeout rationale.
     let watchdog_handle = tokio::spawn(snitchwatch_bridge::daemon_watchdog::run(
-        last_ping,
+        liveness,
         tray_pub.clone(),
         cache.clone(),
         diagnostics_ctx.clone(),
@@ -287,6 +289,17 @@ pub async fn run(config: BridgeConfig) -> Result<RunningBridge> {
     tokio::spawn(async move {
         let incoming = tokio_stream::wrappers::TcpListenerStream::new(grpc_listener);
         let serve = Server::builder()
+            // Dead-peer detection: if the TCP connection to opensnitchd dies
+            // without a clean FIN/RST (network drop, host crash, VM pause),
+            // a still-pending Notifications stream would otherwise sit open
+            // forever, wedging DaemonLiveness::open_notification_streams
+            // above zero and making the daemon read as permanently alive.
+            // HTTP/2 PING frames every 5s (with a 10s reply timeout) surface
+            // that as a real stream close well inside DAEMON_DOWN_TIMEOUT
+            // (10s) — see `daemon_liveness`'s module doc for the liveness
+            // model this closes the loop on.
+            .http2_keepalive_interval(Some(Duration::from_secs(5)))
+            .http2_keepalive_timeout(Some(Duration::from_secs(10)))
             .add_service(ui_service)
             .serve_with_incoming_shutdown(incoming, async {
                 let _ = grpc_shutdown_rx.await;

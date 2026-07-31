@@ -6,6 +6,7 @@
 
 pub mod kernel_probe;
 
+use crate::daemon_liveness::DaemonLiveness;
 use crate::ws_messages::{CheckKind, CheckStatus, DiagnosticCheck};
 use kernel_probe::KernelProbe;
 use std::sync::{Arc, Mutex as StdMutex};
@@ -66,23 +67,23 @@ pub const FIREWALL_NOT_RUNNING_TROUBLESHOOTING: &str = "opensnitchd \
     enabled and not conflicting with iptables/firewalld rules already on \
     the host.";
 
-/// Combines daemon-reachability (watchdog's `last_ping` staleness),
-/// opensnitchd-reported firewall status, and local kernel probes into the
-/// full four-check `DiagnosticCheck` list the GUI renders.
+/// Combines daemon-reachability (`DaemonLiveness`), opensnitchd-reported
+/// firewall status, and local kernel probes into the full four-check
+/// `DiagnosticCheck` list the GUI renders.
 pub struct DiagnosticsCtx {
-    last_ping: Arc<StdMutex<Instant>>,
+    liveness: DaemonLiveness,
     firewall_status: Arc<StdMutex<Option<bool>>>,
     probe: Arc<dyn kernel_probe::KernelProbe>,
 }
 
 impl DiagnosticsCtx {
     pub fn new(
-        last_ping: Arc<StdMutex<Instant>>,
+        liveness: DaemonLiveness,
         firewall_status: Arc<StdMutex<Option<bool>>>,
         probe: Arc<dyn kernel_probe::KernelProbe>,
     ) -> Self {
         Self {
-            last_ping,
+            liveness,
             firewall_status,
             probe,
         }
@@ -103,15 +104,10 @@ impl DiagnosticsCtx {
     }
 
     pub fn report(&self) -> Vec<DiagnosticCheck> {
-        let last_ping = {
-            let guard = self.last_ping.lock().unwrap_or_else(|e| e.into_inner());
-            *guard
-        };
-        let daemon_status = if crate::daemon_watchdog::is_daemon_down(
-            last_ping,
-            Instant::now(),
-            crate::daemon_watchdog::DAEMON_DOWN_TIMEOUT,
-        ) {
+        let daemon_status = if self
+            .liveness
+            .is_down(Instant::now(), crate::daemon_watchdog::DAEMON_DOWN_TIMEOUT)
+        {
             CheckStatus::Failed {
                 detail: DAEMON_UNREACHABLE_TROUBLESHOOTING.to_string(),
             }
@@ -195,11 +191,11 @@ mod tests {
 
     #[test]
     fn report_reflects_daemon_reachable_and_firewall_running() {
-        let last_ping = Arc::new(StdMutex::new(Instant::now()));
+        let liveness = DaemonLiveness::new();
         let firewall_status = Arc::new(StdMutex::new(Some(true)));
         let probe: Arc<dyn kernel_probe::KernelProbe> =
             Arc::new(kernel_probe::testing::FakeKernelProbe::all_ok());
-        let ctx = DiagnosticsCtx::new(last_ping, firewall_status, probe);
+        let ctx = DiagnosticsCtx::new(liveness, firewall_status, probe);
 
         let checks = ctx.report();
         assert_eq!(checks.len(), 4);
@@ -217,12 +213,14 @@ mod tests {
 
     #[test]
     fn report_reflects_stale_ping_as_daemon_unreachable() {
-        let stale = Instant::now() - (DAEMON_DOWN_TIMEOUT + std::time::Duration::from_secs(1));
-        let last_ping = Arc::new(StdMutex::new(stale));
+        let liveness = DaemonLiveness::new_stale_for_test(
+            Instant::now(),
+            DAEMON_DOWN_TIMEOUT + std::time::Duration::from_secs(1),
+        );
         let firewall_status = Arc::new(StdMutex::new(None));
         let probe: Arc<dyn kernel_probe::KernelProbe> =
             Arc::new(kernel_probe::testing::FakeKernelProbe::all_ok());
-        let ctx = DiagnosticsCtx::new(last_ping, firewall_status, probe);
+        let ctx = DiagnosticsCtx::new(liveness, firewall_status, probe);
 
         let checks = ctx.report();
         let daemon = checks
@@ -238,12 +236,34 @@ mod tests {
     }
 
     #[test]
+    fn report_reflects_daemon_reachable_when_stream_open_despite_stale_activity() {
+        // The idle-daemon shape this whole fix targets: no recent RPC
+        // activity, but a Notifications stream is open — still reachable.
+        let liveness = DaemonLiveness::new_stale_for_test(
+            Instant::now(),
+            DAEMON_DOWN_TIMEOUT + std::time::Duration::from_secs(1),
+        );
+        liveness.open_notification_stream();
+        let firewall_status = Arc::new(StdMutex::new(None));
+        let probe: Arc<dyn kernel_probe::KernelProbe> =
+            Arc::new(kernel_probe::testing::FakeKernelProbe::all_ok());
+        let ctx = DiagnosticsCtx::new(liveness, firewall_status, probe);
+
+        let checks = ctx.report();
+        let daemon = checks
+            .iter()
+            .find(|c| c.kind == CheckKind::DaemonReachable)
+            .unwrap();
+        assert_eq!(daemon.status, CheckStatus::Ok);
+    }
+
+    #[test]
     fn reset_firewall_status_unknown_clears_stale_known_status() {
-        let last_ping = Arc::new(StdMutex::new(Instant::now()));
+        let liveness = DaemonLiveness::new();
         let firewall_status = Arc::new(StdMutex::new(Some(true)));
         let probe: Arc<dyn kernel_probe::KernelProbe> =
             Arc::new(kernel_probe::testing::FakeKernelProbe::all_ok());
-        let ctx = DiagnosticsCtx::new(last_ping, firewall_status, probe);
+        let ctx = DiagnosticsCtx::new(liveness, firewall_status, probe);
 
         // Sanity: starts out Ok (opensnitchd previously reported it running).
         let before = ctx.report();

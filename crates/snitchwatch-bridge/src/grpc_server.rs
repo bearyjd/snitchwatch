@@ -5,6 +5,7 @@
 //! `grpc_client.rs` and `translator/downstream.rs` envelope hack.
 
 use crate::cache::connections::{ConnectionCache, Verdict};
+use crate::daemon_liveness::StreamGuard;
 use crate::notice::NoticeBus;
 use crate::translator::connection::{connection_to_row, event_to_row};
 use crate::translator::verdict::verdict_to_rule;
@@ -18,11 +19,17 @@ use snitchwatch_proto::protocol::{
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::sync::{broadcast, Mutex};
 use tokio_stream::Stream;
 use tonic::{Request, Response, Status, Streaming};
 use tracing::{info, warn};
+
+/// Re-exported so existing call sites (and anything that historically
+/// imported it from here) keep working; `daemon_watchdog`/`diagnostics` now
+/// import [`crate::daemon_liveness::DaemonLiveness`] directly instead —
+/// this gRPC service module shouldn't be a dependency of the watchdog.
+pub use crate::daemon_liveness::DaemonLiveness;
 
 /// How long a `RecentBlock` tray state stays up before reverting to
 /// whatever `Idle`/`Pending(n)` the cache actually holds. A UX default with
@@ -39,18 +46,18 @@ pub struct UiService {
     next_ask_id: Arc<AtomicU64>,
     tray_pub: Arc<TrayStatePublisher>,
     notice_bus: Arc<NoticeBus>,
-    /// Updated on every `ping()` arrival; read by
-    /// `daemon_watchdog::run` (via [`Self::last_ping_handle`]) to detect a
-    /// stale/unreachable daemon. `std::sync::Mutex`, not tokio's — this is a
-    /// plain timestamp read/write, never held across an `.await`.
-    last_ping: Arc<StdMutex<Instant>>,
+    /// Refreshed by every daemon-facing handler; read by
+    /// `daemon_watchdog::run` (via [`Self::liveness_handle`]) to detect a
+    /// stale/unreachable daemon. See [`DaemonLiveness`]'s doc comment for
+    /// why raw ping recency alone isn't enough.
+    liveness: DaemonLiveness,
     /// Guards `RecentBlock`'s revert timer against a race between two
     /// blocks in quick succession: each spawned revert only fires if this
     /// counter still matches the value it captured at spawn time, so an
     /// older block's timer never stomps a newer block's still-live display.
     block_generation: Arc<AtomicU64>,
     /// True while the user has paused interactive filtering (tray
-    /// "Pause filtering"). Unlike `last_ping`/`block_generation`, this must
+    /// "Pause filtering"). Unlike `liveness`/`block_generation`, this must
     /// be *writable* from outside `UiService` (the inbound `ClientMessage`
     /// pump toggles it) as well as readable from inside `ask_rule` — the
     /// same shape `tray_pub`/`cache` already have — so it's a genuine
@@ -78,7 +85,7 @@ impl UiService {
             next_ask_id: Arc::new(AtomicU64::new(1)),
             tray_pub,
             notice_bus,
-            last_ping: Arc::new(StdMutex::new(Instant::now())),
+            liveness: DaemonLiveness::new(),
             block_generation: Arc::new(AtomicU64::new(0)),
             filtering_paused,
             firewall_status: Arc::new(StdMutex::new(None)),
@@ -91,17 +98,17 @@ impl UiService {
         UiServer::new(self)
     }
 
-    /// Handle to the last-ping timestamp, for `daemon_watchdog::run` to
-    /// poll. Exposed as an accessor (not a `new()` parameter) so existing
-    /// call sites don't need to change.
-    pub fn last_ping_handle(&self) -> Arc<StdMutex<Instant>> {
-        self.last_ping.clone()
+    /// Handle to the daemon-liveness tracker, for `daemon_watchdog::run` and
+    /// `DiagnosticsCtx` to poll. Exposed as an accessor (not a `new()`
+    /// parameter) so existing call sites don't need to change.
+    pub fn liveness_handle(&self) -> DaemonLiveness {
+        self.liveness.clone()
     }
 
     /// Handle to the last-observed firewall status (from opensnitchd's
     /// `subscribe()` handshake), for a later diagnostics report assembler
     /// to poll. Exposed as an accessor for the same reason as
-    /// `last_ping_handle`.
+    /// `liveness_handle`.
     pub fn firewall_status_handle(&self) -> Arc<StdMutex<Option<bool>>> {
         self.firewall_status.clone()
     }
@@ -140,9 +147,9 @@ impl Ui for UiService {
         let id = req.id;
 
         // Every ping (not just ones carrying stats) counts as evidence the
-        // daemon is alive — see `daemon_watchdog`'s module doc for why this
-        // specific handler is the daemon's heartbeat.
-        *self.last_ping.lock().unwrap_or_else(|e| e.into_inner()) = Instant::now();
+        // daemon is alive — see `DaemonLiveness`'s doc comment for why this
+        // is only one of several signals the bridge treats as a heartbeat.
+        self.liveness.touch();
 
         // The daemon's periodic Ping carries `Statistics.events`: recent
         // connections it matched (and decided) against a *pre-existing*
@@ -173,6 +180,7 @@ impl Ui for UiService {
     }
 
     async fn ask_rule(&self, request: Request<Connection>) -> Result<Response<Rule>, Status> {
+        self.liveness.touch();
         let conn = request.into_inner();
         let ask_id = self.next_ask_id.fetch_add(1, Ordering::Relaxed);
 
@@ -257,6 +265,7 @@ impl Ui for UiService {
         &self,
         request: Request<ClientConfig>,
     ) -> Result<Response<ClientConfig>, Status> {
+        self.liveness.touch();
         let cfg = request.into_inner();
         info!(client = %cfg.name, version = %cfg.version, "client subscribed");
         {
@@ -270,6 +279,7 @@ impl Ui for UiService {
     }
 
     async fn post_alert(&self, request: Request<Alert>) -> Result<Response<MsgResponse>, Status> {
+        self.liveness.touch();
         let alert = request.into_inner();
         info!(id = alert.id, type_ = alert.r#type, "alert received");
         Ok(Response::new(MsgResponse { id: alert.id }))
@@ -283,9 +293,19 @@ impl Ui for UiService {
         request: Request<Streaming<NotificationReply>>,
     ) -> Result<Response<Self::NotificationsStream>, Status> {
         info!("notifications stream opened");
+        // The stream being open is itself proof of life — see
+        // `DaemonLiveness`'s doc comment for why this is the authoritative
+        // signal for an idle-but-connected daemon. `StreamGuard` ties the
+        // decrement to Drop (not just the loop's normal exit) so a panic
+        // partway through the reply loop can't wedge the counter open
+        // forever — see `StreamGuard`'s doc comment.
+        let guard = StreamGuard::open(self.liveness.clone());
+        let liveness = self.liveness.clone();
         let mut inbound = request.into_inner();
         tokio::spawn(async move {
+            let _guard = guard;
             while let Ok(Some(reply)) = inbound.message().await {
+                liveness.touch();
                 info!(
                     id = reply.id,
                     code = reply.code,
@@ -293,6 +313,8 @@ impl Ui for UiService {
                 );
             }
             warn!("notification reply stream ended");
+            // `_guard` drops here (or during an unwind, if the loop above
+            // ever panics), closing the stream.
         });
 
         let outbound = async_stream::try_stream! {
@@ -315,6 +337,9 @@ mod tests {
     use std::time::Duration;
     use tokio::sync::{broadcast, Mutex};
     use tonic::transport::Server;
+
+    // DaemonLiveness/StreamGuard's own unit tests now live in
+    // `daemon_liveness.rs`, next to the type they test.
 
     async fn spawn_test_service() -> std::net::SocketAddr {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
