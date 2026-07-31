@@ -5,6 +5,7 @@
 //! `grpc_client.rs` and `translator/downstream.rs` envelope hack.
 
 use crate::cache::connections::{ConnectionCache, Verdict};
+use crate::daemon_liveness::StreamGuard;
 use crate::notice::NoticeBus;
 use crate::translator::connection::{connection_to_row, event_to_row};
 use crate::translator::verdict::verdict_to_rule;
@@ -16,13 +17,19 @@ use snitchwatch_proto::protocol::{
     PingRequest, Rule,
 };
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::sync::{broadcast, Mutex};
 use tokio_stream::Stream;
 use tonic::{Request, Response, Status, Streaming};
 use tracing::{info, warn};
+
+/// Re-exported so existing call sites (and anything that historically
+/// imported it from here) keep working; `daemon_watchdog`/`diagnostics` now
+/// import [`crate::daemon_liveness::DaemonLiveness`] directly instead —
+/// this gRPC service module shouldn't be a dependency of the watchdog.
+pub use crate::daemon_liveness::DaemonLiveness;
 
 /// How long a `RecentBlock` tray state stays up before reverting to
 /// whatever `Idle`/`Pending(n)` the cache actually holds. A UX default with
@@ -30,89 +37,6 @@ use tracing::{info, warn};
 /// at the tray tooltip, short enough not to hide a still-accurate `Pending`
 /// count for long) — easy to tune later, not a measured value.
 const RECENT_BLOCK_TTL: Duration = Duration::from_secs(5);
-
-/// Tracks whether opensnitchd is alive from the bridge's point of view.
-///
-/// opensnitchd's poller only sends `Ping` when it has new stats events
-/// (`vendor/opensnitch/daemon/ui/client.go:329`,
-/// `daemon/statistics/stats.go:266`) — an idle daemon stays connected but
-/// silent, so ping recency alone false-positives `DaemonDown`. Liveness is
-/// therefore *any* inbound daemon-facing gRPC activity (`last_activity`),
-/// with the long-lived `Notifications` stream's open/closed state as the
-/// authoritative signal: an open stream is proof of life regardless of
-/// `last_activity` staleness — see [`Self::is_down`].
-#[derive(Clone)]
-pub struct DaemonLiveness {
-    last_activity: Arc<StdMutex<Instant>>,
-    open_notification_streams: Arc<AtomicUsize>,
-}
-
-impl DaemonLiveness {
-    pub fn new() -> Self {
-        Self {
-            last_activity: Arc::new(StdMutex::new(Instant::now())),
-            open_notification_streams: Arc::new(AtomicUsize::new(0)),
-        }
-    }
-
-    /// Record inbound gRPC activity from the daemon. Called by every
-    /// daemon-facing handler (`ping`, `ask_rule`, `subscribe`, `post_alert`,
-    /// `notifications` open + each inbound reply).
-    pub fn touch(&self) {
-        *self.last_activity.lock().unwrap_or_else(|e| e.into_inner()) = Instant::now();
-    }
-
-    /// A `Notifications` stream just opened. Also counts as activity.
-    /// `pub(crate)` (not private) so `diagnostics::tests` can exercise the
-    /// "stream open despite stale activity" scenario directly.
-    pub(crate) fn open_notification_stream(&self) {
-        self.open_notification_streams
-            .fetch_add(1, Ordering::SeqCst);
-        self.touch();
-    }
-
-    /// The daemon's side of a `Notifications` stream closed (its reply loop
-    /// ended).
-    pub(crate) fn close_notification_stream(&self) {
-        self.open_notification_streams
-            .fetch_sub(1, Ordering::SeqCst);
-    }
-
-    /// Down iff no `Notifications` stream is open AND `last_activity` is
-    /// older than `timeout`. An open stream means alive regardless of
-    /// staleness — exactly the idle-daemon shape a real opensnitchd
-    /// produces. The staleness fallback covers a daemon that never opens
-    /// the stream at all.
-    pub fn is_down(&self, now: Instant, timeout: Duration) -> bool {
-        if self.open_notification_streams.load(Ordering::SeqCst) > 0 {
-            return false;
-        }
-        let last = *self.last_activity.lock().unwrap_or_else(|e| e.into_inner());
-        now.duration_since(last) > timeout
-    }
-
-    /// Test-only: construct with `last_activity` set to `now - age`. Takes
-    /// `now` explicitly (rather than calling `Instant::now()` internally)
-    /// so callers can reuse the exact same instant they pass to
-    /// [`Self::is_down`] — avoiding sub-millisecond drift between two
-    /// separate `Instant::now()` calls that would make boundary-condition
-    /// tests flaky. Lets plain synchronous unit tests (no tokio runtime /
-    /// paused clock) exercise the staleness branch of [`Self::is_down`]
-    /// without needing async time control.
-    #[cfg(test)]
-    pub(crate) fn new_stale_for_test(now: Instant, age: Duration) -> Self {
-        Self {
-            last_activity: Arc::new(StdMutex::new(now - age)),
-            open_notification_streams: Arc::new(AtomicUsize::new(0)),
-        }
-    }
-}
-
-impl Default for DaemonLiveness {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 /// Bridge-side gRPC server state. Handed to `UiServer::new` for tonic.
 #[derive(Clone)]
@@ -371,11 +295,15 @@ impl Ui for UiService {
         info!("notifications stream opened");
         // The stream being open is itself proof of life — see
         // `DaemonLiveness`'s doc comment for why this is the authoritative
-        // signal for an idle-but-connected daemon.
-        self.liveness.open_notification_stream();
+        // signal for an idle-but-connected daemon. `StreamGuard` ties the
+        // decrement to Drop (not just the loop's normal exit) so a panic
+        // partway through the reply loop can't wedge the counter open
+        // forever — see `StreamGuard`'s doc comment.
+        let guard = StreamGuard::open(self.liveness.clone());
         let liveness = self.liveness.clone();
         let mut inbound = request.into_inner();
         tokio::spawn(async move {
+            let _guard = guard;
             while let Ok(Some(reply)) = inbound.message().await {
                 liveness.touch();
                 info!(
@@ -385,9 +313,8 @@ impl Ui for UiService {
                 );
             }
             warn!("notification reply stream ended");
-            // The daemon's side of the stream closed — this is the
-            // decrement half of the open/close pair above.
-            liveness.close_notification_stream();
+            // `_guard` drops here (or during an unwind, if the loop above
+            // ever panics), closing the stream.
         });
 
         let outbound = async_stream::try_stream! {
@@ -406,59 +333,13 @@ impl Ui for UiService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::daemon_watchdog::DAEMON_DOWN_TIMEOUT;
     use snitchwatch_proto::protocol::ui_client::UiClient;
     use std::time::Duration;
     use tokio::sync::{broadcast, Mutex};
     use tonic::transport::Server;
 
-    #[test]
-    fn fresh_activity_is_alive() {
-        let liveness = DaemonLiveness::new();
-        assert!(!liveness.is_down(Instant::now(), DAEMON_DOWN_TIMEOUT));
-    }
-
-    #[test]
-    fn stale_and_no_stream_is_down() {
-        let now = Instant::now();
-        let liveness =
-            DaemonLiveness::new_stale_for_test(now, DAEMON_DOWN_TIMEOUT + Duration::from_secs(1));
-        assert!(liveness.is_down(now, DAEMON_DOWN_TIMEOUT));
-    }
-
-    #[test]
-    fn stale_but_stream_open_is_alive() {
-        let now = Instant::now();
-        let liveness =
-            DaemonLiveness::new_stale_for_test(now, DAEMON_DOWN_TIMEOUT + Duration::from_secs(1));
-        liveness.open_notification_stream();
-        assert!(!liveness.is_down(now, DAEMON_DOWN_TIMEOUT));
-    }
-
-    #[test]
-    fn closing_the_only_open_stream_restores_staleness_check() {
-        // Opening touches `last_activity`, so right after open+close it's
-        // still fresh — not yet down.
-        let opened_at = Instant::now();
-        let liveness = DaemonLiveness::new();
-        liveness.open_notification_stream();
-        liveness.close_notification_stream();
-        assert!(!liveness.is_down(opened_at, DAEMON_DOWN_TIMEOUT));
-
-        // Once that same (now-closed) activity ages past the timeout with
-        // no stream open and no further activity, the staleness check
-        // applies again.
-        let later = opened_at + DAEMON_DOWN_TIMEOUT + Duration::from_secs(1);
-        assert!(liveness.is_down(later, DAEMON_DOWN_TIMEOUT));
-    }
-
-    #[test]
-    fn not_down_exactly_at_the_boundary() {
-        let now = Instant::now();
-        let liveness = DaemonLiveness::new_stale_for_test(now, DAEMON_DOWN_TIMEOUT);
-        // Strictly-greater-than semantics: exactly-at-timeout is not yet down.
-        assert!(!liveness.is_down(now, DAEMON_DOWN_TIMEOUT));
-    }
+    // DaemonLiveness/StreamGuard's own unit tests now live in
+    // `daemon_liveness.rs`, next to the type they test.
 
     async fn spawn_test_service() -> std::net::SocketAddr {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

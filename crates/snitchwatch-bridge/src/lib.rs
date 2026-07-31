@@ -9,6 +9,7 @@
 pub mod auth;
 pub mod blocklists;
 pub mod cache;
+pub mod daemon_liveness;
 pub mod daemon_watchdog;
 pub mod diagnostics;
 pub mod error;

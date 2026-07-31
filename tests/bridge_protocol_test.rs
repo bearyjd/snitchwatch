@@ -276,7 +276,7 @@ async fn idle_daemon_with_open_notifications_stream_stays_reachable() {
         ws_socket_path: socket_dir.path().join("bridge.sock"),
         cache_capacity: 1024,
     };
-    let bridge = run(cfg).await.expect("bridge run failed");
+    let mut bridge = run(cfg).await.expect("bridge run failed");
 
     let mut ws = connect_stream(&bridge.ws_socket_path, bridge.ws_token.as_str()).await;
 
@@ -286,12 +286,22 @@ async fn idle_daemon_with_open_notifications_stream_stays_reachable() {
     let mut mock = MockOpensnitchd::connect(bridge.grpc_addr).await.unwrap();
     let (_reply_tx, _count_rx) = mock.open_notifications().await.unwrap();
 
+    // Mark the current value seen (Idle, from bridge startup) so a later
+    // `has_changed()` reflects only transitions from here on — asserting
+    // the *final* value with `borrow()` alone can't catch a transient
+    // DaemonDown->Idle flap that self-corrects before we check.
+    bridge.tray_rx.borrow_and_update();
+
     // Sleep well past the timeout, across several watchdog ticks, with
     // zero pings.
     tokio::time::sleep(DAEMON_DOWN_TIMEOUT + Duration::from_secs(3)).await;
 
-    // The tray must never have flipped to DaemonDown.
-    assert_eq!(*bridge.tray_rx.borrow(), TrayState::Idle);
+    // The tray must never have changed at all while the idle daemon held
+    // the Notifications stream open — not just "ended up Idle again".
+    assert!(
+        !bridge.tray_rx.has_changed().unwrap(),
+        "tray state changed while idle daemon held stream open"
+    );
 
     // A fresh diagnostics report must still claim the daemon reachable.
     ws.send(Message::Text(
@@ -353,7 +363,7 @@ async fn notifications_stream_close_triggers_down_transition_within_one_tick() {
     // stays open, proving (as in the previous test) that staleness alone
     // doesn't trip the watchdog here.
     tokio::time::sleep(DAEMON_DOWN_TIMEOUT + Duration::from_secs(3)).await;
-    assert_eq!(*bridge.tray_rx.borrow(), TrayState::Idle);
+    assert_eq!(*bridge.tray_rx.borrow_and_update(), TrayState::Idle);
 
     let mut broadcast_rx = bridge.broadcast_tx.subscribe();
 
@@ -362,8 +372,13 @@ async fn notifications_stream_close_triggers_down_transition_within_one_tick() {
     drop(reply_tx);
 
     // A single watchdog tick should be enough — no further ping-staleness
-    // wait is needed since last_activity is already stale.
-    bridge.tray_rx.changed().await.unwrap();
+    // wait is needed since last_activity is already stale. Bounded by an
+    // explicit timeout so a regression here fails the test instead of
+    // hanging CI.
+    tokio::time::timeout(Duration::from_secs(10), bridge.tray_rx.changed())
+        .await
+        .expect("tray never transitioned after Notifications stream closed")
+        .unwrap();
     assert_eq!(*bridge.tray_rx.borrow(), TrayState::DaemonDown);
 
     let msg = tokio::time::timeout(Duration::from_secs(3), broadcast_rx.recv())

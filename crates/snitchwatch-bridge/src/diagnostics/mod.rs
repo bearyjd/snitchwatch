@@ -6,7 +6,7 @@
 
 pub mod kernel_probe;
 
-use crate::grpc_server::DaemonLiveness;
+use crate::daemon_liveness::DaemonLiveness;
 use crate::ws_messages::{CheckKind, CheckStatus, DiagnosticCheck};
 use kernel_probe::KernelProbe;
 use std::sync::{Arc, Mutex as StdMutex};

@@ -33,6 +33,7 @@ use snitchwatch_bridge::ws_server::{WsHandles, WsServer};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{broadcast, mpsc, oneshot, watch, Mutex};
 use tonic::transport::Server;
 use tracing::{error, info, warn};
@@ -288,6 +289,17 @@ pub async fn run(config: BridgeConfig) -> Result<RunningBridge> {
     tokio::spawn(async move {
         let incoming = tokio_stream::wrappers::TcpListenerStream::new(grpc_listener);
         let serve = Server::builder()
+            // Dead-peer detection: if the TCP connection to opensnitchd dies
+            // without a clean FIN/RST (network drop, host crash, VM pause),
+            // a still-pending Notifications stream would otherwise sit open
+            // forever, wedging DaemonLiveness::open_notification_streams
+            // above zero and making the daemon read as permanently alive.
+            // HTTP/2 PING frames every 5s (with a 10s reply timeout) surface
+            // that as a real stream close well inside DAEMON_DOWN_TIMEOUT
+            // (10s) — see `daemon_liveness`'s module doc for the liveness
+            // model this closes the loop on.
+            .http2_keepalive_interval(Some(Duration::from_secs(5)))
+            .http2_keepalive_timeout(Some(Duration::from_secs(10)))
             .add_service(ui_service)
             .serve_with_incoming_shutdown(incoming, async {
                 let _ = grpc_shutdown_rx.await;

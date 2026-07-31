@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, Mutex as TokioMutex};
 
 use crate::cache::connections::ConnectionCache;
-use crate::grpc_server::DaemonLiveness;
+use crate::daemon_liveness::DaemonLiveness;
 use crate::tray_state::{TrayState, TrayStatePublisher};
 
 /// 10x the ~1s ping cadence observed in `vendor/opensnitch/daemon/ui/client.go`
