@@ -265,7 +265,7 @@ pub fn sanitize_for_display(input: &str, max_len: usize) -> String {
             out.push('…');
             break;
         }
-        if c.is_control() {
+        if c.is_control() || is_display_hazard(c) {
             continue;
         }
         match c {
@@ -277,6 +277,30 @@ pub fn sanitize_for_display(input: &str, max_len: usize) -> String {
         count += 1;
     }
     out
+}
+
+/// Unicode characters `char::is_control()` (category Cc only) doesn't
+/// catch, but that still let attacker-controlled text visually lie about
+/// itself once rendered in a notification body or log — issue #14 security
+/// review round 2, LOW. Bidi format controls (category Cf) can reorder or
+/// hide surrounding text: e.g. a hostname containing U+202E
+/// RIGHT-TO-LEFT OVERRIDE can make the *displayed* text read as a
+/// different, more trustworthy-looking domain than the bytes actually are.
+/// The zero-width/invisible-joiner controls (also Cf) can hide characters
+/// entirely or defeat naive substring-based review. The line/paragraph
+/// separators (category Zl/Zp) can inject a visual line break a
+/// control-char-only strip wouldn't catch, splitting a notification body
+/// across lines the caller didn't intend.
+fn is_display_hazard(c: char) -> bool {
+    matches!(c,
+        '\u{200B}'..='\u{200F}' // zero-width space/ZWNJ/ZWJ, LRM, RLM
+        | '\u{202A}'..='\u{202E}' // LRE, RLE, PDF, LRO, RLO
+        | '\u{2060}'..='\u{2064}' // word joiner, invisible operators
+        | '\u{2066}'..='\u{2069}' // LRI, RLI, FSI, PDI
+        | '\u{FEFF}' // BOM / zero-width no-break space
+        | '\u{2028}' // LINE SEPARATOR
+        | '\u{2029}' // PARAGRAPH SEPARATOR
+    )
 }
 
 fn simple_operator(operand: &str, data: &str) -> Operator {
@@ -1146,5 +1170,31 @@ mod tests {
     #[test]
     fn sanitize_for_display_leaves_ordinary_hostnames_untouched() {
         assert_eq!(sanitize_for_display("github.com", 64), "github.com");
+    }
+
+    #[test]
+    fn sanitize_for_display_strips_rtl_override() {
+        // U+202E RIGHT-TO-LEFT OVERRIDE can make attacker-controlled bytes
+        // *render* as a different, more trustworthy-looking string than
+        // what they actually are — `char::is_control()` alone doesn't
+        // catch it (it's category Cf, not Cc).
+        let out = sanitize_for_display("evil\u{202E}moc.elpmaxe", 64);
+        assert!(
+            !out.contains('\u{202E}'),
+            "RTL override must not survive: {out:?}"
+        );
+        assert_eq!(out, "evilmoc.elpmaxe");
+    }
+
+    #[test]
+    fn sanitize_for_display_strips_zero_width_characters() {
+        // U+200B ZERO WIDTH SPACE can hide characters entirely or defeat
+        // naive substring-based review; also Cf, not Cc.
+        let out = sanitize_for_display("ev\u{200B}il.example", 64);
+        assert!(
+            !out.contains('\u{200B}'),
+            "zero-width space must not survive: {out:?}"
+        );
+        assert_eq!(out, "evil.example");
     }
 }

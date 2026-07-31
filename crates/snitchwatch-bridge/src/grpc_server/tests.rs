@@ -350,6 +350,100 @@ async fn ask_rule_returns_deny_rule_when_resolved_with_deny() {
 }
 
 #[tokio::test]
+async fn deny_scope_narrowed_notice_sanitizes_attacker_chosen_process_name() {
+    // Issue #14 security review round 2 follow-up: `row.process` (the
+    // basename of `process_path`) is daemon-attested *existence* only — a
+    // local user still fully controls the path/basename text itself (e.g.
+    // executing `/tmp/<b>evil</b>\x1b[31m`). It must be sanitized the same
+    // way `dst_host` is before reaching the `DenyScopeNarrowed` notice body.
+    let cache = Arc::new(Mutex::new(ConnectionCache::new(64)));
+    let (tx, _rx) = broadcast::channel::<ServerMessage>(16);
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let tray_pub = Arc::new(crate::tray_state::TrayStatePublisher::new());
+    let notice_bus = Arc::new(crate::notice::NoticeBus::new());
+    let mut notice_rx = notice_bus.subscribe();
+    let svc = UiService::new(
+        cache.clone(),
+        tx,
+        tray_pub,
+        notice_bus,
+        Arc::new(AtomicBool::new(false)),
+    )
+    .into_server();
+    tokio::spawn(async move {
+        Server::builder()
+            .add_service(svc)
+            .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+            .await
+            .ok();
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let channel = tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
+        .unwrap()
+        .connect()
+        .await
+        .unwrap();
+    let mut client = UiClient::new(channel);
+
+    let ask_handle = tokio::spawn(async move {
+        client
+            .ask_rule(Connection {
+                protocol: "tcp".into(),
+                // "shop.co.uk" degrades AnyHostOnDomain (co.uk is a
+                // 2-label eTLD) — guarantees a DenyScopeNarrowed notice.
+                dst_host: "shop.co.uk".into(),
+                dst_ip: "1.2.3.4".into(),
+                dst_port: 443,
+                process_path: "/tmp/<b>evil</b>\x1b[31m".into(),
+                ..Default::default()
+            })
+            .await
+    });
+
+    let row_id = ask_row_id(1);
+    for _ in 0..50 {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        if cache
+            .lock()
+            .await
+            .resolve(
+                &row_id,
+                Verdict::Deny,
+                VerdictDuration::Once,
+                VerdictScope::AnyHostOnDomain,
+            )
+            .is_ok()
+        {
+            break;
+        }
+    }
+    let _ = ask_handle.await.unwrap().unwrap();
+
+    // The bus also carries the earlier `Pending` notice for this same ask —
+    // skip past it to find the `DenyScopeNarrowed` one.
+    let what = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match notice_rx.recv().await.expect("notice_bus closed") {
+                crate::notice::Notice::DenyScopeNarrowed { what, .. } => return what,
+                _ => continue,
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for DenyScopeNarrowed notice");
+
+    assert!(!what.contains('<'), "markup must not survive: {what:?}");
+    assert!(!what.contains('>'), "markup must not survive: {what:?}");
+    assert!(
+        !what.contains('\x1b'),
+        "ANSI escape must not survive: {what:?}"
+    );
+}
+
+#[tokio::test]
 async fn two_concurrent_ask_rules_get_distinct_ask_ids() {
     let cache = Arc::new(Mutex::new(ConnectionCache::new(64)));
     let (tx, mut rx) = broadcast::channel::<ServerMessage>(16);
