@@ -2729,6 +2729,7 @@ name = "mock-opensnitchd"
 version = "0.1.0"
 dependencies = [
  "prost",
+ "regex",
  "snitchwatch-bridge",
  "snitchwatch-proto",
  "thiserror 1.0.69",
@@ -3546,9 +3547,9 @@ dependencies = [
 
 [[package]]
 name = "psl"
-version = "2.1.203"
+version = "2.1.223"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "76c0777260d32b76a8c3c197646707085d37e79d63b5872a29192c8d4f60f50b"
+checksum = "c0dedad316e05de220cbf3fd8bfb69f3df8755dde2d7d479211827b595168a93"
 dependencies = [
  "psl-types",
 ]
@@ -4574,6 +4575,7 @@ dependencies = [
  "rust-embed",
  "serde",
  "serde_json",
+ "sha2",
  "snitchwatch-proto",
  "tempfile",
  "thiserror 1.0.69",

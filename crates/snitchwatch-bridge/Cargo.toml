@@ -25,6 +25,7 @@ tokio-stream = { workspace = true }
 rusqlite = { workspace = true }
 reqwest = { workspace = true }
 addr = { workspace = true }
+sha2 = { workspace = true }
 chrono = { workspace = true }
 async-trait = { workspace = true }
 rand = { workspace = true }

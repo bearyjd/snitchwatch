@@ -52,7 +52,7 @@ pub fn apply(
         ClientMessage::SetVerdict {
             row_id,
             verdict,
-            scope: _,
+            scope,
             duration,
             remember: legacy_remember,
         } => {
@@ -63,7 +63,7 @@ pub fn apply(
             let duration =
                 crate::ws_messages::effective_verdict_duration(duration, legacy_remember);
             let remember = duration.remembers();
-            cache.resolve(&row_id, v, duration)?;
+            cache.resolve(&row_id, v, duration, scope)?;
             Ok(UpstreamEffect::VerdictApplied {
                 row_id,
                 verdict: v,

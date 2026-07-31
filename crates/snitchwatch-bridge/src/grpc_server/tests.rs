@@ -206,7 +206,7 @@ async fn subscribe_echoes_config() {
 
 use crate::cache::connections::Verdict;
 use crate::translator::connection::ask_row_id;
-use crate::ws_messages::VerdictDuration;
+use crate::ws_messages::{VerdictDuration, VerdictScope};
 
 #[tokio::test]
 async fn ask_rule_blocks_until_cache_resolves_with_allow() {
@@ -267,7 +267,12 @@ async fn ask_rule_blocks_until_cache_resolves_with_allow() {
     cache
         .lock()
         .await
-        .resolve(&row_id, Verdict::Allow, VerdictDuration::Once)
+        .resolve(
+            &row_id,
+            Verdict::Allow,
+            VerdictDuration::Once,
+            VerdictScope::ThisHost,
+        )
         .unwrap();
 
     let rule = ask_handle.await.unwrap().unwrap().into_inner();
@@ -328,7 +333,12 @@ async fn ask_rule_returns_deny_rule_when_resolved_with_deny() {
         if cache
             .lock()
             .await
-            .resolve(&row_id, Verdict::Deny, VerdictDuration::Once)
+            .resolve(
+                &row_id,
+                Verdict::Deny,
+                VerdictDuration::Once,
+                VerdictScope::ThisHost,
+            )
             .is_ok()
         {
             break;
@@ -337,6 +347,100 @@ async fn ask_rule_returns_deny_rule_when_resolved_with_deny() {
 
     let rule = ask_handle.await.unwrap().unwrap().into_inner();
     assert_eq!(rule.action, "deny");
+}
+
+#[tokio::test]
+async fn deny_scope_narrowed_notice_sanitizes_attacker_chosen_process_name() {
+    // Issue #14 security review round 2 follow-up: `row.process` (the
+    // basename of `process_path`) is daemon-attested *existence* only — a
+    // local user still fully controls the path/basename text itself (e.g.
+    // executing `/tmp/<b>evil</b>\x1b[31m`). It must be sanitized the same
+    // way `dst_host` is before reaching the `DenyScopeNarrowed` notice body.
+    let cache = Arc::new(Mutex::new(ConnectionCache::new(64)));
+    let (tx, _rx) = broadcast::channel::<ServerMessage>(16);
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let tray_pub = Arc::new(crate::tray_state::TrayStatePublisher::new());
+    let notice_bus = Arc::new(crate::notice::NoticeBus::new());
+    let mut notice_rx = notice_bus.subscribe();
+    let svc = UiService::new(
+        cache.clone(),
+        tx,
+        tray_pub,
+        notice_bus,
+        Arc::new(AtomicBool::new(false)),
+    )
+    .into_server();
+    tokio::spawn(async move {
+        Server::builder()
+            .add_service(svc)
+            .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+            .await
+            .ok();
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let channel = tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
+        .unwrap()
+        .connect()
+        .await
+        .unwrap();
+    let mut client = UiClient::new(channel);
+
+    let ask_handle = tokio::spawn(async move {
+        client
+            .ask_rule(Connection {
+                protocol: "tcp".into(),
+                // "shop.co.uk" degrades AnyHostOnDomain (co.uk is a
+                // 2-label eTLD) — guarantees a DenyScopeNarrowed notice.
+                dst_host: "shop.co.uk".into(),
+                dst_ip: "1.2.3.4".into(),
+                dst_port: 443,
+                process_path: "/tmp/<b>evil</b>\x1b[31m".into(),
+                ..Default::default()
+            })
+            .await
+    });
+
+    let row_id = ask_row_id(1);
+    for _ in 0..50 {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        if cache
+            .lock()
+            .await
+            .resolve(
+                &row_id,
+                Verdict::Deny,
+                VerdictDuration::Once,
+                VerdictScope::AnyHostOnDomain,
+            )
+            .is_ok()
+        {
+            break;
+        }
+    }
+    let _ = ask_handle.await.unwrap().unwrap();
+
+    // The bus also carries the earlier `Pending` notice for this same ask —
+    // skip past it to find the `DenyScopeNarrowed` one.
+    let what = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match notice_rx.recv().await.expect("notice_bus closed") {
+                crate::notice::Notice::DenyScopeNarrowed { what, .. } => return what,
+                _ => continue,
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for DenyScopeNarrowed notice");
+
+    assert!(!what.contains('<'), "markup must not survive: {what:?}");
+    assert!(!what.contains('>'), "markup must not survive: {what:?}");
+    assert!(
+        !what.contains('\x1b'),
+        "ANSI escape must not survive: {what:?}"
+    );
 }
 
 #[tokio::test]
@@ -393,20 +497,24 @@ async fn two_concurrent_ask_rules_get_distinct_ask_ids() {
     assert!(seen.contains(&ask_row_id(1)));
     assert!(seen.contains(&ask_row_id(2)));
 
-    let _ = cache
-        .lock()
-        .await
-        .resolve(&ask_row_id(1), Verdict::Deny, VerdictDuration::Once);
-    let _ = cache
-        .lock()
-        .await
-        .resolve(&ask_row_id(2), Verdict::Deny, VerdictDuration::Once);
+    let _ = cache.lock().await.resolve(
+        &ask_row_id(1),
+        Verdict::Deny,
+        VerdictDuration::Once,
+        VerdictScope::ThisHost,
+    );
+    let _ = cache.lock().await.resolve(
+        &ask_row_id(2),
+        Verdict::Deny,
+        VerdictDuration::Once,
+        VerdictScope::ThisHost,
+    );
 }
 
 #[tokio::test(start_paused = true)]
 async fn ask_rule_deny_publishes_recent_block_then_reverts_to_idle() {
     use crate::translator::connection::ask_row_id;
-    use crate::ws_messages::VerdictDuration;
+    use crate::ws_messages::{VerdictDuration, VerdictScope};
 
     let tray_pub = Arc::new(crate::tray_state::TrayStatePublisher::new());
     let cache = Arc::new(Mutex::new(ConnectionCache::with_tray_publisher(
@@ -445,7 +553,12 @@ async fn ask_rule_deny_publishes_recent_block_then_reverts_to_idle() {
     cache
         .lock()
         .await
-        .resolve(&ask_row_id(1), Verdict::Deny, VerdictDuration::Once)
+        .resolve(
+            &ask_row_id(1),
+            Verdict::Deny,
+            VerdictDuration::Once,
+            VerdictScope::ThisHost,
+        )
         .unwrap();
     ask_handle.await.unwrap().unwrap();
 
@@ -465,7 +578,7 @@ async fn ask_rule_deny_publishes_recent_block_then_reverts_to_idle() {
 #[tokio::test(start_paused = true)]
 async fn second_deny_within_ttl_supersedes_first_blocks_revert_timer() {
     use crate::translator::connection::ask_row_id;
-    use crate::ws_messages::VerdictDuration;
+    use crate::ws_messages::{VerdictDuration, VerdictScope};
 
     let tray_pub = Arc::new(crate::tray_state::TrayStatePublisher::new());
     let cache = Arc::new(Mutex::new(ConnectionCache::with_tray_publisher(
@@ -497,7 +610,12 @@ async fn second_deny_within_ttl_supersedes_first_blocks_revert_timer() {
     cache
         .lock()
         .await
-        .resolve(&ask_row_id(1), Verdict::Deny, VerdictDuration::Once)
+        .resolve(
+            &ask_row_id(1),
+            Verdict::Deny,
+            VerdictDuration::Once,
+            VerdictScope::ThisHost,
+        )
         .unwrap();
     ask1.await.unwrap().unwrap();
     tray_rx.changed().await.unwrap();
@@ -518,7 +636,12 @@ async fn second_deny_within_ttl_supersedes_first_blocks_revert_timer() {
     cache
         .lock()
         .await
-        .resolve(&ask_row_id(2), Verdict::Deny, VerdictDuration::Once)
+        .resolve(
+            &ask_row_id(2),
+            Verdict::Deny,
+            VerdictDuration::Once,
+            VerdictScope::ThisHost,
+        )
         .unwrap();
     ask2.await.unwrap().unwrap();
     tray_rx.changed().await.unwrap();
@@ -613,7 +736,12 @@ async fn ask_rule_prompts_normally_when_not_paused() {
         if cache
             .lock()
             .await
-            .resolve(&ask_row_id(1), Verdict::Allow, VerdictDuration::Once)
+            .resolve(
+                &ask_row_id(1),
+                Verdict::Allow,
+                VerdictDuration::Once,
+                VerdictScope::ThisHost,
+            )
             .is_ok()
         {
             break;

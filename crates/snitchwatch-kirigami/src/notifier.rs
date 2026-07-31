@@ -17,6 +17,7 @@ enum NoticeKey {
     PendingForRow(u64),
     DaemonAway,
     FilterPauseExpired,
+    DenyScopeNarrowedForRow(u64),
 }
 
 impl From<&Notice> for NoticeKey {
@@ -25,6 +26,7 @@ impl From<&Notice> for NoticeKey {
             Notice::Pending { row_id, .. } => NoticeKey::PendingForRow(*row_id),
             Notice::DaemonAway => NoticeKey::DaemonAway,
             Notice::FilterPauseExpired => NoticeKey::FilterPauseExpired,
+            Notice::DenyScopeNarrowed { row_id, .. } => NoticeKey::DenyScopeNarrowedForRow(*row_id),
         }
     }
 }

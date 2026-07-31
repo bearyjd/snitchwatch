@@ -65,11 +65,24 @@ was a mis-diagnosis — the failure was rootless-container permissions;
 under root, ebpf loads fine on 6.19 (see issue #6's post-close comment).
 The shipped config keeps upstream's `ProcMonitorMethod: ebpf` (PR #10
 briefly shipped `proc`; reverted). Also verified live along the way:
-sustained interception + a real verdict round-trip (a `tailscaled`
-connection asked, answered allow over WS, accepted). Remaining
+sustained interception under a real daemon + eBPF process monitoring.
+
+**Correction (2026-07-31): the "verdict round-trip" claim above was
+over-claimed — filed as issue #14.** A `tailscaled` connection was asked and
+a `setVerdict` was sent back over WS promptly, but the daemon never actually
+*applied* it: every real `AskRule` ended in `DeadlineExceeded` +
+`Invalid rule received, applying default action`. Root cause: the bridge's
+`verdict_to_rule` always set `operator: None` on the reply `Rule`, which
+`vendor/opensnitch/daemon/rule/rule.go`'s `Deserialize` hard-rejects — so no
+verdict from this bridge has ever been accepted by a real daemon. Fixed by
+populating a real `Operator` per the verdict's scope (`ThisHost`/
+`AnyHostOnDomain`/`AnyHost`) and by hardening `MockOpensnitchd::ask_rule` to
+apply the daemon's real ~120s deadline and validate the returned `Rule`
+shape, so this class of bug can't pass the sandbox suite silently again.
+Live re-verification against a real daemon is still outstanding. Remaining
 real-hardware items are listed in the phase2 plan's acceptance section —
-mostly GUI-visual checks and the sustained-interception/queue-rules
-question.
+mostly GUI-visual checks, the sustained-interception/queue-rules question,
+and re-verifying the verdict round-trip now that issue #14 is fixed.
 
 **What's actually left:**
 1. **Real Bazzite hardware verification** — a bluebuild image build, a

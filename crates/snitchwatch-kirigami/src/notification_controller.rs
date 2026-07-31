@@ -201,6 +201,11 @@ impl qobject::NotificationController {
                 "Your pause timer expired.".to_string(),
                 false,
             ),
+            BridgeNotice::DenyScopeNarrowed { what, reason, .. } => (
+                "Snitchwatch — block narrowed",
+                format!("Blocked {what} for this host only — {reason}."),
+                false,
+            ),
         };
 
         let qt_thread = self.qt_thread();

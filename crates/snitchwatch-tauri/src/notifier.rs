@@ -16,6 +16,7 @@ enum NoticeKey {
     PendingForRow(u64),
     DaemonAway,
     FilterPauseExpired,
+    DenyScopeNarrowedForRow(u64),
 }
 
 impl From<&Notice> for NoticeKey {
@@ -24,6 +25,7 @@ impl From<&Notice> for NoticeKey {
             Notice::Pending { row_id, .. } => NoticeKey::PendingForRow(*row_id),
             Notice::DaemonAway => NoticeKey::DaemonAway,
             Notice::FilterPauseExpired => NoticeKey::FilterPauseExpired,
+            Notice::DenyScopeNarrowed { row_id, .. } => NoticeKey::DenyScopeNarrowedForRow(*row_id),
         }
     }
 }
@@ -100,6 +102,10 @@ impl Notifier {
             Notice::FilterPauseExpired => (
                 "Snitchwatch — filtering resumed",
                 "Your pause timer expired.".into(),
+            ),
+            Notice::DenyScopeNarrowed { what, reason, .. } => (
+                "Snitchwatch — block narrowed",
+                format!("Blocked {what} for this host only — {reason}."),
             ),
         };
         if let Err(err) = notify_rust::Notification::new()

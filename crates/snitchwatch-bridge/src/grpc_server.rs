@@ -256,6 +256,7 @@ impl Ui for UiService {
             return Ok(Response::new(verdict_to_rule(
                 Verdict::Allow,
                 VerdictDuration::Once,
+                crate::ws_messages::VerdictScope::ThisHost,
                 &conn,
                 now_secs,
             )));
@@ -266,6 +267,25 @@ impl Ui for UiService {
         // reused for RecentBlock's tooltip if this resolves to a Deny,
         // rather than re-deriving the same process/host display logic.
         let what = format!("{} → {}", row.process, row.dst_host);
+        // Also captured before the move — both `row.process` and
+        // `row.dst_host` are attacker-influenced (`row.process` is the
+        // basename of `process_path`: daemon-attested *existence*, but a
+        // local user still picks the path/basename text itself, e.g.
+        // `/tmp/<b>evil</b>` or a binary named with an ANSI escape — not the
+        // "safe, daemon-attested" class `translator::verdict`'s module doc
+        // means by `process_path` being trusted; only its *authenticity*
+        // as "this really is what ran" is trusted, not its byte content).
+        // So this display-bound copy of `what` sanitizes both halves before
+        // it can reach a notification body or the WS protocol; the raw
+        // `what` above stays as-is only for the pre-existing tray
+        // `RecentBlock` tooltip. Issue #14 security review round 2,
+        // MEDIUM-1 (host) and its follow-up (process).
+        let safe_what = format!(
+            "{} → {}",
+            crate::translator::verdict::sanitize_for_display(&row.process, 64),
+            crate::translator::verdict::sanitize_for_display(&row.dst_host, 64)
+        );
+        let row_id = row.id.clone();
         let verdict_rx = {
             let mut cache = self.cache.lock().await;
             cache.insert_pending(row.clone())
@@ -290,6 +310,45 @@ impl Ui for UiService {
 
         if resolution.verdict == Verdict::Deny {
             self.publish_recent_block(what);
+
+            // FIX 2 (issue #14 security review): a narrowed Deny
+            // under-blocks relative to what the pending-decision dialog
+            // offered, so the client must be told — not left to assume the
+            // wider block applied. `degradation.describe()` is always a
+            // fixed, safe string (see `ScopeDegradation`'s doc comment) —
+            // only `safe_what` (the process/host summary) needed
+            // display-boundary sanitization.
+            if let Some(degradation) = crate::translator::verdict::scope_degradation(
+                resolution.scope,
+                resolution.verdict,
+                &conn,
+            ) {
+                let reason = degradation.describe().to_string();
+
+                // Round 2 of the issue #14 security review (HIGH): this
+                // MUST reach the WS client as a real protocol message, not
+                // only the desktop `Notice` bus below — that bus is
+                // consumed solely by the desktop notifiers, so a headless
+                // `bridge-cli`, an unattended GUI, or a session with no
+                // D-Bus notification server previously got no signal at
+                // all that the block had been narrowed.
+                if self.broadcast.receiver_count() > 0 {
+                    let msg = ServerMessage::DenyScopeNarrowed {
+                        row_id: row_id.clone(),
+                        reason: reason.clone(),
+                    };
+                    if let Err(e) = self.broadcast.send(msg) {
+                        warn!(error = %e, "deny-scope-narrowed broadcast send failed");
+                    }
+                }
+
+                self.notice_bus
+                    .send(crate::notice::Notice::DenyScopeNarrowed {
+                        row_id: ask_id,
+                        what: safe_what,
+                        reason,
+                    });
+            }
         }
 
         let now_secs = std::time::SystemTime::now()
@@ -299,6 +358,7 @@ impl Ui for UiService {
         Ok(Response::new(verdict_to_rule(
             resolution.verdict,
             resolution.duration,
+            resolution.scope,
             &conn,
             now_secs,
         )))
