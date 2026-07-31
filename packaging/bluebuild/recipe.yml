@@ -47,11 +47,13 @@ modules:
   # 2. Drop our hardened daemon config into place. This overrides upstream's
   #    `DefaultAction: allow` (fail-open) with `DefaultAction: deny`
   #    (fail-closed) and points `Server.Address` at the bridge's default bind.
-  #    It also ships `ProcMonitorMethod: proc` (not upstream's `ebpf`): the
-  #    v1.8.0 RPM's bundled eBPF module fails to load on Bazzite's current
-  #    kernel (6.19: "unable to load eBPF module (opensnitch.o)", verified
-  #    live — issue #6). Revisit `ebpf` when an opensnitch release supports
-  #    the shipped kernel. See files/system/etc/opensnitchd/default-config.json.
+  #    It keeps upstream's `ProcMonitorMethod: ebpf`. (A 2026-07-31 note
+  #    here briefly shipped `proc`, citing an eBPF module-load failure on
+  #    kernel 6.19 — re-verification showed that failure was a *rootless
+  #    container permissions* artifact, not kernel incompatibility; under
+  #    root, as the baked daemon runs, ebpf loads fine on 6.19. See issue
+  #    #6's post-close correction comment.)
+  #    See files/system/etc/opensnitchd/default-config.json.
   - type: files
     files:
       - source: system

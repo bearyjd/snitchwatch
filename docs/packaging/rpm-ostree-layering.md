@@ -31,10 +31,14 @@ rpm-ostree install ./opensnitch-1.8.0-1.x86_64.rpm
 systemctl reboot
 ```
 
-Known caveat on kernels ≥ ~6.19: the RPM's bundled eBPF module
-(`opensnitch.o`) may fail to load (see issue #6). If
-`/var/log/opensnitchd.log` shows `unable to load eBPF module`, set
-`"ProcMonitorMethod": "proc"` in `/etc/opensnitchd/default-config.json`.
+If `/var/log/opensnitchd.log` shows `unable to load eBPF module`, check
+*how the daemon is running* before blaming the kernel: that message is
+also produced by a permissions failure (verified live 2026-07-31 — a
+rootless container hit it on a kernel where root loaded the module fine;
+see issue #6's post-close correction). As a root systemd service, ebpf is
+expected to work; `"ProcMonitorMethod": "proc"` in
+`/etc/opensnitchd/default-config.json` remains the fallback if it
+genuinely doesn't on your kernel.
 
 After the reboot, confirm it layered:
 

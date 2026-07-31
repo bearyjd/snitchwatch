@@ -136,8 +136,9 @@ cp vendor/opensnitch/daemon/data/system-fw.json \
    ~/.cache/snitchwatch-verify/etc-opensnitchd/
 curl -sL -o ~/.cache/snitchwatch-verify/etc-opensnitchd/opensnitch.rpm \
   https://github.com/evilsocket/opensnitch/releases/download/v1.8.0/opensnitch-1.8.0-1.x86_64.rpm
-# The shipped config already sets "ProcMonitorMethod": "proc" — the v1.8.0
-# RPM's eBPF module fails to load on kernels ≥ ~6.19 (issue #6).
+# The shipped config uses upstream's "ProcMonitorMethod": "ebpf" — it loads
+# fine under a root daemon; a rootless run fails it with a misleading
+# "kernel might not be compatible" message (issue #6, post-close correction).
 
 sudo podman run -d --name opensnitchd-dev \
     --privileged --network=host --pid=host \
@@ -320,27 +321,31 @@ Two independent ways to force it:
   → diagnostics overlay).** `RealKernelProbe::btf_vmlinux_exists` only stats
   `/sys/kernel/btf/vmlinux` for existence, so it can't be faked by hiding the
   path (bind-mounting `/dev/null` over it leaves the path existing and the
-  check passing) — and on a kernel ≥6.19 that genuinely has BTF, the probe
-  alone can't produce a failure here at all. But a live daemon on such a
-  kernel can: opensnitchd v1.8.0's bundled eBPF module fails to load on
-  kernel 6.19+ regardless of BTF presence, and it reports that failure itself
-  via `PostAlert` (`vendor/opensnitch/daemon/main.go:645`, as
+  check passing) — and on a kernel that genuinely has BTF, the probe alone
+  can't produce a failure here at all. But a live daemon can report its own
+  eBPF failure via `PostAlert` (`vendor/opensnitch/daemon/main.go:645`, as
   `Alert_GENERIC` + free text — see `daemon_alerts`'s module doc for why
   it's never a tagged `PROC_MONITOR` alert on a real daemon), which the
-  bridge now text-classifies and overlays onto `EbpfSupport`
+  bridge text-classifies and overlays onto `EbpfSupport`
   (`DaemonAlertStore` + `DiagnosticsCtx::report()`'s
-  `classify_generic_alert_text` in `diagnostics/mod.rs`). To exercise it for
-  real: set `ProcMonitorMethod: ebpf` in opensnitchd's config on a host
-  running kernel ≥6.19, restart `opensnitchd-dev`, and confirm the daemon's
-  own startup alert surfaces as a failed `ebpf_support` check — with the
-  daemon's own alert text visible in the troubleshooting detail. Since this
-  host's kernel genuinely has BTF, expect the *self-consistent*
-  `EBPF_DAEMON_REPORTED_TROUBLESHOOTING` copy ("BTF is present on this
-  kernel, but opensnitchd still failed...") here, not
-  `EBPF_TROUBLESHOOTING`'s "kernel doesn't expose BTF" claim — that copy
-  is reserved for when the local probe *also* fails. (On a kernel where the
-  module loads fine, this path is a no-op — use the nftables path above
-  instead, or don't expect a failure here.)
+  `classify_generic_alert_text` in `diagnostics/mod.rs`).
+
+  **Correction (2026-07-31, issue #6 post-close comment):** an earlier
+  version of this step claimed the v1.8.0 module fails to load on kernels
+  ≥6.19 — that was a *rootless-container permissions* artifact (upstream's
+  "kernel might not be compatible" message masks it); under a root daemon,
+  ebpf loads fine on 6.19. To force the daemon-alert path live, run the
+  `opensnitchd-dev` container **rootless** (drop the `sudo` from Step 3's
+  `podman run`) — its eBPF init then genuinely fails with the same
+  `GENERIC` alert a real kernel-incompat would produce — and confirm the
+  alert surfaces as a failed `ebpf_support` check with the daemon's own
+  text in the detail. Since this host's kernel has BTF, expect the
+  *self-consistent* `EBPF_DAEMON_REPORTED_TROUBLESHOOTING` copy ("BTF is
+  present on this kernel, but opensnitchd still failed..."), not
+  `EBPF_TROUBLESHOOTING`'s "kernel doesn't expose BTF" claim — that copy is
+  reserved for when the local probe *also* fails. (Under a root daemon on
+  this hardware the path is a no-op — the module loads; use the nftables
+  path above for a root-daemon scenario.)
 
 **Pass condition — this is the finding the whole-branch review flagged and
 a follow-up fix addressed (see PR #3):** since `opensnitchd` itself never
@@ -370,8 +375,8 @@ restoring the host; don't click it again until you've confirmed the text.
 
 ```bash
 sudo mv "$(command -v nft).bak" "$(dirname "$(command -v nft)")/nft" 2>/dev/null  # if renamed
-# If ProcMonitorMethod was changed to ebpf, set it back to its prior value
-# (proc, unless you'd deliberately overridden it) and restart opensnitchd-dev.
+# If the rootless-daemon forcing method was used, remove that container and
+# restart the normal root `opensnitchd-dev` from Step 3.
 ```
 
 Unlike Step 6b's daemon-down/recovery cycle, restarting `opensnitchd-dev`
