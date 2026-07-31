@@ -63,7 +63,9 @@ impl DaemonLiveness {
     }
 
     /// A `Notifications` stream just opened. Also counts as activity.
-    fn open_notification_stream(&self) {
+    /// `pub(crate)` (not private) so `diagnostics::tests` can exercise the
+    /// "stream open despite stale activity" scenario directly.
+    pub(crate) fn open_notification_stream(&self) {
         self.open_notification_streams
             .fetch_add(1, Ordering::SeqCst);
         self.touch();
@@ -71,7 +73,7 @@ impl DaemonLiveness {
 
     /// The daemon's side of a `Notifications` stream closed (its reply loop
     /// ended).
-    fn close_notification_stream(&self) {
+    pub(crate) fn close_notification_stream(&self) {
         self.open_notification_streams
             .fetch_sub(1, Ordering::SeqCst);
     }

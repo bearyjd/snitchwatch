@@ -248,10 +248,10 @@ pub async fn run(config: BridgeConfig) -> Result<RunningBridge> {
         filtering_paused.clone(),
     );
     // Grabbed before `.into_server()` consumes `ui_service_inner` — the
-    // daemon-down watchdog below needs this to watch `ping()`'s recency.
-    let last_ping = ui_service_inner.last_ping_handle();
+    // daemon-down watchdog below needs this to watch daemon liveness.
+    let liveness = ui_service_inner.liveness_handle();
 
-    // Diagnostics: combines daemon-reachability (`last_ping`), opensnitchd's
+    // Diagnostics: combines daemon-reachability (`liveness`), opensnitchd's
     // reported firewall status, and local kernel probes into the four-check
     // report the GUI renders. Constructed here (before `.into_server()`
     // consumes `ui_service_inner`) so `firewall_status_handle()` is still
@@ -260,7 +260,7 @@ pub async fn run(config: BridgeConfig) -> Result<RunningBridge> {
     let kernel_probe: Arc<dyn snitchwatch_bridge::diagnostics::kernel_probe::KernelProbe> =
         Arc::new(snitchwatch_bridge::diagnostics::kernel_probe::RealKernelProbe);
     let diagnostics_ctx = Arc::new(snitchwatch_bridge::diagnostics::DiagnosticsCtx::new(
-        last_ping.clone(),
+        liveness.clone(),
         firewall_status,
         kernel_probe,
     ));
@@ -274,10 +274,11 @@ pub async fn run(config: BridgeConfig) -> Result<RunningBridge> {
     let (grpc_shutdown_tx, grpc_shutdown_rx) = oneshot::channel::<()>();
 
     // Daemon-down watchdog: republishes TrayState::DaemonDown when opensnitchd
-    // stops pinging, and resyncs to the cache's real Idle/Pending(n) once
-    // pings resume. See daemon_watchdog's module doc for the timeout rationale.
+    // goes unreachable (no gRPC activity and no open Notifications stream),
+    // and resyncs to the cache's real Idle/Pending(n) once it's reachable
+    // again. See daemon_watchdog's module doc for the timeout rationale.
     let watchdog_handle = tokio::spawn(snitchwatch_bridge::daemon_watchdog::run(
-        last_ping,
+        liveness,
         tray_pub.clone(),
         cache.clone(),
         diagnostics_ctx.clone(),
