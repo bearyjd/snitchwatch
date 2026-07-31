@@ -120,13 +120,46 @@ real opensnitchd" section — this is the one step in this runbook where a
 real daemon is intentionally in the loop, since that's the whole point of
 this verification):
 
+**Corrected 2026-07-31 (see issue #7):** `docker.io/evilsocket/opensnitch`
+does not exist, and no current opensnitch container image is published.
+Build the container from a stock Fedora image plus the upstream v1.8.0
+release RPM (matches the vendored submodule pin). Two hard requirements
+found live: **root podman** (rootless gets `operation not permitted` on
+nfqueue/conntrack even with `--privileged`), and `rpm --noscripts` (the
+RPM's `%post` calls `systemctl`, absent in containers):
+
 ```bash
-podman run -d --rm \
-    --name opensnitchd-dev \
+mkdir -p ~/.cache/snitchwatch-verify/etc-opensnitchd/rules
+cp packaging/bluebuild/files/system/etc/opensnitchd/default-config.json \
+   ~/.cache/snitchwatch-verify/etc-opensnitchd/
+cp vendor/opensnitch/daemon/data/system-fw.json \
+   ~/.cache/snitchwatch-verify/etc-opensnitchd/
+curl -sL -o ~/.cache/snitchwatch-verify/etc-opensnitchd/opensnitch.rpm \
+  https://github.com/evilsocket/opensnitch/releases/download/v1.8.0/opensnitch-1.8.0-1.x86_64.rpm
+# On kernels ≥ ~6.19 the RPM's eBPF module fails to load (issue #6) — use proc:
+sed -i 's/"ProcMonitorMethod": "ebpf"/"ProcMonitorMethod": "proc"/' \
+  ~/.cache/snitchwatch-verify/etc-opensnitchd/default-config.json
+
+sudo podman run -d --name opensnitchd-dev \
     --privileged --network=host --pid=host \
-    --cap-add=NET_ADMIN,SYS_ADMIN,BPF \
-    docker.io/evilsocket/opensnitch:latest
+    -v ~/.cache/snitchwatch-verify/etc-opensnitchd:/etc/opensnitchd:Z \
+    registry.fedoraproject.org/fedora:43 \
+    sh -c 'dnf install -y libnetfilter_queue nftables info \
+             && rpm -ivh --noscripts /etc/opensnitchd/opensnitch.rpm \
+             && exec /usr/bin/opensnitchd \
+                  -config-file /etc/opensnitchd/default-config.json \
+                  -rules-path /etc/opensnitchd/rules'
 ```
+
+For an unattended run, consider `DefaultAction: allow` in the copied config
+so an unanswered prompt can never block live traffic; the shipped deny
+default is Step 1's image concern, not this step's dial-in concern.
+
+**Known false-DaemonDown caveat (issue #5):** a healthy idle daemon sends
+no `Ping` RPCs (upstream only pings when new stats events exist), so the
+tray/diagnostics may claim the daemon is down while it is connected. Until
+issue #5 is fixed, generate steady traffic while judging Step 5/6 pass
+conditions.
 
 Confirm `opensnitchd`'s `Server.Address` in its `default-config.json` points
 at `127.0.0.1:50051` (matching `SNITCHWATCH_GRPC_BIND` in the systemd unit),

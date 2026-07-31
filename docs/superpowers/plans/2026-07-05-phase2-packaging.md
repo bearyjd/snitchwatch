@@ -97,6 +97,27 @@ fixed target (the bridge-cli otherwise defaults to an ephemeral port).
 - [x] rpm-ostree layering walkthrough documented end-to-end.
 - [x] README updated with both install paths as "batteries-included" vs
   "lightweight/DIY".
+- [ ] **Partially verified on real hardware 2026-07-31** (Bazzite host
+  "tower", bridge as real systemd `--user` unit, real opensnitchd v1.8.0
+  from the upstream release RPM in a root podman container):
+  - [x] **Live opensnitchd dial-in** — daemon subscribed to the bridge's
+    gRPC on `127.0.0.1:50051` (`client subscribed client=tower`), and
+    reconnected automatically after a bridge restart.
+  - [x] **AskRule → WS delivery** — a real intercepted connection
+    (browser DNS query) arrived at an authenticated WS client over the
+    Unix socket as an `insertConnectionRows` ask row, with no GUI process
+    running (this also exercises Step 4's no-GUI channel shape).
+  - [x] **Step 6 diagnostics protocol** — `recheckDiagnostics` →
+    `diagnosticsReport` round-trips live; kernel checks ran against the
+    real host.
+  - [ ] **Verdict round-trip, sustained interception, tray states,
+    daemon-recovery rebroadcast** — blocked on findings filed as issues
+    #5 (daemon only Pings when new stats events exist → false DaemonDown
+    on idle systems; `firewall_running` staleness), #6 (EbpfSupport check
+    blind to real eBPF module-load failure, observed on kernel 6.19), and
+    #7 (opensnitch absent from Fedora/Bazzite repos → recipe/layering/
+    runbook install paths were wrong; docs corrected, recipe fix pending).
+    Re-run Steps 3/5/6 after #5's fix lands.
 - [ ] **Not verifiable in the CI sandbox:** actual `bluebuild build`,
   `flatpak-builder` run, live opensnitchd dial-in, the closed-window
   AskRule round-trip, and (added 2026-07-12) the `DaemonDown`/

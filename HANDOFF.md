@@ -39,6 +39,20 @@ artifact validation), and `kirigami` (builds/lints/tests
 `snitchwatch-kirigami` in a Fedora container, since KF6 Kirigami packages
 don't exist in Ubuntu's repos yet). All green as of the last commit.
 
+**Update (2026-07-31): first real-hardware verification ran.** Live
+opensnitchd v1.8.0 dial-in, AskRule→WS delivery, and the diagnostics
+protocol are all confirmed working on a real Bazzite host — and the run
+surfaced three real product findings, filed as issues #5 (daemon only
+Pings when it has new stats events → the watchdog false-positives
+DaemonDown on idle systems; blocks Step 5/6b pass conditions), #6
+(EbpfSupport check can't see real eBPF module-load failure), and #7
+(opensnitch isn't in Fedora/Bazzite repos — the recipe's install step and
+both install docs were wrong; docs corrected, bluebuild recipe fix
+pending). Detailed results:
+`docs/superpowers/plans/2026-07-05-phase2-packaging.md` acceptance
+section. **Issue #5 is now the top blocker** — fix it before re-running
+Steps 5/6.
+
 **What's actually left:**
 1. **Real Bazzite hardware verification** — a bluebuild image build, a
    Flatpak build, a live `opensnitchd` dial-in, the closed-window
