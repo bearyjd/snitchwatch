@@ -389,3 +389,106 @@ async fn notifications_stream_close_triggers_down_transition_within_one_tick() {
 
     bridge.shutdown();
 }
+
+/// The load-bearing test for issue #6: a real opensnitchd's own `PostAlert`
+/// RPC is the only signal that surfaces a daemon-internal failure (eBPF
+/// module load, in this case) a host-side kernel probe can't see — verified
+/// live 2026-07-31 where the probe reported BTF present while opensnitchd
+/// still failed to load its bundled eBPF module. Proves: (a) a PROC_MONITOR
+/// error alert pushes an *unsolicited* `diagnosticsReport` with
+/// `ebpf_support: failed` carrying the daemon's own alert text, without the
+/// GUI having to poll/recheck; (b) a fresh `subscribe()` (a new daemon
+/// session) clears the stored alert, and a subsequent recheck reports
+/// `ebpf_support: ok` again (this sandbox's kernel genuinely exposes BTF, so
+/// the local probe alone yields `ok` once the alert stops overriding it).
+#[tokio::test]
+async fn proc_monitor_alert_fails_ebpf_check_then_clears_on_resubscribe() {
+    let socket_dir = tempfile::tempdir().unwrap();
+    let cfg = BridgeConfig {
+        grpc_bind: "127.0.0.1:0".parse().unwrap(),
+        ws_socket_path: socket_dir.path().join("bridge.sock"),
+        cache_capacity: 1024,
+    };
+    let bridge = run(cfg).await.expect("bridge run failed");
+
+    let mut ws = connect_stream(&bridge.ws_socket_path, bridge.ws_token.as_str()).await;
+
+    let mut mock = MockOpensnitchd::connect(bridge.grpc_addr).await.unwrap();
+
+    const ALERT_TEXT: &str = "eBPF module failed to load: kernel not compatible";
+    mock.post_alert_text(
+        snitchwatch_proto::protocol::alert::Type::Error,
+        snitchwatch_proto::protocol::alert::What::ProcMonitor,
+        ALERT_TEXT,
+    )
+    .await
+    .expect("post_alert failed");
+
+    // (a) Unsolicited: no requestSnapshot/recheck sent — post_alert itself
+    // must push the fresh report.
+    let checks = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match ws.next().await {
+                Some(Ok(Message::Text(t))) => {
+                    let v: serde_json::Value = serde_json::from_str(&t).unwrap();
+                    if v.get("action").and_then(|a| a.as_str()) == Some("diagnosticsReport") {
+                        return v["checks"].as_array().unwrap().clone();
+                    }
+                }
+                Some(Ok(_)) => {}
+                Some(Err(e)) => panic!("ws recv error: {e}"),
+                None => panic!("ws stream ended early"),
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for the unsolicited diagnosticsReport");
+
+    let ebpf = checks
+        .iter()
+        .find(|c| c["kind"] == "ebpf_support")
+        .expect("no ebpf_support check in report");
+    assert_eq!(ebpf["status"]["status"], "failed");
+    assert!(
+        ebpf["status"]["detail"]
+            .as_str()
+            .unwrap()
+            .contains(ALERT_TEXT),
+        "expected ebpf_support detail to carry the daemon's alert text, got: {ebpf}"
+    );
+
+    // (b) A new daemon session (fresh subscribe) clears the stored alert.
+    mock.subscribe("opensnitchd-resubscribe").await.unwrap();
+
+    ws.send(Message::Text(
+        json!({ "action": "requestSnapshot" }).to_string(),
+    ))
+    .await
+    .expect("send requestSnapshot failed");
+
+    let mut saw_ebpf_ok = false;
+    for _ in 0..20 {
+        let Some(Ok(Message::Text(text))) = tokio::time::timeout(Duration::from_secs(3), ws.next())
+            .await
+            .expect("timed out waiting for a WS message")
+        else {
+            continue;
+        };
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        if v.get("action").and_then(|a| a.as_str()) == Some("diagnosticsReport") {
+            let checks = v["checks"].as_array().unwrap();
+            let ebpf = checks
+                .iter()
+                .find(|c| c["kind"] == "ebpf_support")
+                .expect("no ebpf_support check in recheck report");
+            saw_ebpf_ok = ebpf["status"]["status"] == "ok";
+            break;
+        }
+    }
+    assert!(
+        saw_ebpf_ok,
+        "expected ebpf_support: ok after re-subscribe cleared the stored alert"
+    );
+
+    bridge.shutdown();
+}
