@@ -5,7 +5,9 @@
 //! `grpc_client.rs` and `translator/downstream.rs` envelope hack.
 
 use crate::cache::connections::{ConnectionCache, Verdict};
+use crate::daemon_alerts::DaemonAlertStore;
 use crate::daemon_liveness::StreamGuard;
+use crate::diagnostics::DiagnosticsCtx;
 use crate::notice::NoticeBus;
 use crate::translator::connection::{connection_to_row, event_to_row};
 use crate::translator::verdict::verdict_to_rule;
@@ -18,7 +20,7 @@ use snitchwatch_proto::protocol::{
 };
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::Duration;
 use tokio::sync::{broadcast, Mutex};
 use tokio_stream::Stream;
@@ -69,6 +71,25 @@ pub struct UiService {
     /// assembler (via [`Self::firewall_status_handle`]) alongside the local
     /// kernel checks. `None` until the daemon has subscribed at least once.
     firewall_status: Arc<StdMutex<Option<bool>>>,
+    /// Most recent ERROR/WARNING alert per `Alert.What`, recorded by
+    /// `post_alert` and overlaid by `DiagnosticsCtx::report()` onto the
+    /// existing checks (see `daemon_alerts` module doc for the issue #6
+    /// rationale). Cleared on every `subscribe()`.
+    alert_store: Arc<DaemonAlertStore>,
+    /// Late-bound handle to the full diagnostics assembler, so `post_alert`
+    /// can push a fresh `DiagnosticsReport` the moment a daemon alert
+    /// arrives, rather than waiting for the next poll/recheck.
+    ///
+    /// This can't be a constructor parameter: `DiagnosticsCtx::new` needs
+    /// `firewall_status_handle()`/`alert_store_handle()` from an already-
+    /// constructed `UiService`, so building it first isn't possible without
+    /// either duplicating that state outside `UiService` or breaking every
+    /// existing test call site that only expects the five original
+    /// constructor args. `snitchwatch-bridge-cli::run` fills this in via
+    /// [`Self::diagnostics_ctx_slot`] once `DiagnosticsCtx` exists; unset
+    /// (e.g. in most unit tests here) means `post_alert` still records the
+    /// alert but skips the push broadcast.
+    diagnostics_ctx: Arc<OnceLock<Arc<DiagnosticsCtx>>>,
 }
 
 impl UiService {
@@ -89,6 +110,8 @@ impl UiService {
             block_generation: Arc::new(AtomicU64::new(0)),
             filtering_paused,
             firewall_status: Arc::new(StdMutex::new(None)),
+            alert_store: Arc::new(DaemonAlertStore::new()),
+            diagnostics_ctx: Arc::new(OnceLock::new()),
         }
     }
 
@@ -111,6 +134,23 @@ impl UiService {
     /// `liveness_handle`.
     pub fn firewall_status_handle(&self) -> Arc<StdMutex<Option<bool>>> {
         self.firewall_status.clone()
+    }
+
+    /// Handle to the daemon-alert store, for `DiagnosticsCtx::new` to overlay
+    /// onto its checks. Exposed as an accessor for the same reason as
+    /// `firewall_status_handle`.
+    pub fn alert_store_handle(&self) -> Arc<DaemonAlertStore> {
+        self.alert_store.clone()
+    }
+
+    /// Late-binds the diagnostics assembler `post_alert` pushes a fresh
+    /// report through. Callable exactly once per `UiService`; a second call
+    /// is a no-op (mirrors `OnceLock::set`'s own semantics) since only one
+    /// `DiagnosticsCtx` is ever constructed per bridge run. See
+    /// [`Self::diagnostics_ctx`]'s doc comment for why this is late-bound
+    /// rather than a constructor parameter.
+    pub fn set_diagnostics_ctx(&self, ctx: Arc<DiagnosticsCtx>) {
+        let _ = self.diagnostics_ctx.set(ctx);
     }
 
     /// Publish `TrayState::RecentBlock` and schedule its own revert after
@@ -275,6 +315,11 @@ impl Ui for UiService {
                 .unwrap_or_else(|e| e.into_inner());
             *guard = Some(cfg.is_firewall_running);
         }
+        // A new daemon session starts clean — any ERROR/WARNING alert from a
+        // prior run (possibly since fixed by a restart) must not linger on
+        // the diagnostics page. See `daemon_alerts::DaemonAlertStore`'s doc
+        // comment.
+        self.alert_store.clear();
         Ok(Response::new(cfg))
     }
 
@@ -282,6 +327,31 @@ impl Ui for UiService {
         self.liveness.touch();
         let alert = request.into_inner();
         info!(id = alert.id, type_ = alert.r#type, "alert received");
+
+        let what = snitchwatch_proto::protocol::alert::What::try_from(alert.what)
+            .unwrap_or(snitchwatch_proto::protocol::alert::What::Generic);
+        let text = match &alert.data {
+            Some(snitchwatch_proto::protocol::alert::Data::Text(text)) => Some(text.clone()),
+            _ => None,
+        };
+        if let Some(text) = text {
+            self.alert_store.record(what, alert.r#type, text);
+            // Push a fresh report immediately so the GUI's diagnostics
+            // banner reacts without waiting for a manual recheck. Recording
+            // above already happened even if no `DiagnosticsCtx` is wired up
+            // yet (e.g. most unit tests here) — only the push is skipped.
+            if let Some(ctx) = self.diagnostics_ctx.get() {
+                if self.broadcast.receiver_count() > 0 {
+                    let msg = ServerMessage::DiagnosticsReport {
+                        checks: ctx.report(),
+                    };
+                    if let Err(e) = self.broadcast.send(msg) {
+                        warn!(error = %e, "post_alert: broadcast send failed");
+                    }
+                }
+            }
+        }
+
         Ok(Response::new(MsgResponse { id: alert.id }))
     }
 
@@ -956,5 +1026,133 @@ mod tests {
 
         let rule = ask_handle.await.unwrap().unwrap().into_inner();
         assert_eq!(rule.action, "allow");
+    }
+
+    fn text_alert(
+        what: snitchwatch_proto::protocol::alert::What,
+        r#type: snitchwatch_proto::protocol::alert::Type,
+        text: &str,
+    ) -> Alert {
+        Alert {
+            id: 1,
+            r#type: r#type as i32,
+            action: 0,
+            priority: 0,
+            what: what as i32,
+            data: Some(snitchwatch_proto::protocol::alert::Data::Text(
+                text.to_string(),
+            )),
+        }
+    }
+
+    #[tokio::test]
+    async fn post_alert_records_error_into_alert_store() {
+        use snitchwatch_proto::protocol::alert;
+
+        let cache = Arc::new(Mutex::new(ConnectionCache::new(64)));
+        let (tx, _rx) = broadcast::channel::<ServerMessage>(16);
+        let tray_pub = Arc::new(crate::tray_state::TrayStatePublisher::new());
+        let notice_bus = Arc::new(crate::notice::NoticeBus::new());
+        let filtering_paused = Arc::new(AtomicBool::new(false));
+        let svc = UiService::new(cache, tx, tray_pub, notice_bus, filtering_paused);
+
+        let alert = text_alert(
+            alert::What::ProcMonitor,
+            alert::Type::Error,
+            "eBPF module failed to load",
+        );
+        svc.post_alert(Request::new(alert)).await.unwrap();
+
+        let stored = svc.alert_store_handle().get(alert::What::ProcMonitor);
+        assert_eq!(
+            stored.map(|s| s.text),
+            Some("eBPF module failed to load".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn post_alert_with_wired_diagnostics_ctx_broadcasts_fresh_report() {
+        use crate::diagnostics::kernel_probe::testing::FakeKernelProbe;
+        use crate::diagnostics::DiagnosticsCtx;
+        use snitchwatch_proto::protocol::alert;
+
+        let cache = Arc::new(Mutex::new(ConnectionCache::new(64)));
+        let (tx, mut rx) = broadcast::channel::<ServerMessage>(16);
+        let tray_pub = Arc::new(crate::tray_state::TrayStatePublisher::new());
+        let notice_bus = Arc::new(crate::notice::NoticeBus::new());
+        let filtering_paused = Arc::new(AtomicBool::new(false));
+        let svc = UiService::new(cache, tx, tray_pub, notice_bus, filtering_paused);
+
+        let probe: Arc<dyn crate::diagnostics::kernel_probe::KernelProbe> =
+            Arc::new(FakeKernelProbe::all_ok());
+        let ctx = Arc::new(DiagnosticsCtx::new(
+            svc.liveness_handle(),
+            svc.firewall_status_handle(),
+            probe,
+        ));
+        svc.set_diagnostics_ctx(ctx);
+
+        let alert = text_alert(
+            alert::What::Firewall,
+            alert::Type::Error,
+            "nftables backend unavailable",
+        );
+        svc.post_alert(Request::new(alert)).await.unwrap();
+
+        let broadcasted = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("post_alert did not broadcast a diagnostics report")
+            .expect("broadcast error");
+        assert!(matches!(
+            broadcasted,
+            ServerMessage::DiagnosticsReport { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn post_alert_without_wired_diagnostics_ctx_does_not_broadcast() {
+        use snitchwatch_proto::protocol::alert;
+
+        let cache = Arc::new(Mutex::new(ConnectionCache::new(64)));
+        let (tx, mut rx) = broadcast::channel::<ServerMessage>(16);
+        let tray_pub = Arc::new(crate::tray_state::TrayStatePublisher::new());
+        let notice_bus = Arc::new(crate::notice::NoticeBus::new());
+        let filtering_paused = Arc::new(AtomicBool::new(false));
+        let svc = UiService::new(cache, tx, tray_pub, notice_bus, filtering_paused);
+
+        let alert = text_alert(alert::What::Firewall, alert::Type::Error, "nft down");
+        svc.post_alert(Request::new(alert)).await.unwrap();
+
+        // No DiagnosticsCtx wired up: recording happens, but nothing is
+        // broadcast to a receiver that would otherwise hang waiting for it.
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn subscribe_clears_previously_stored_alerts() {
+        use snitchwatch_proto::protocol::alert;
+
+        let cache = Arc::new(Mutex::new(ConnectionCache::new(64)));
+        let (tx, _rx) = broadcast::channel::<ServerMessage>(16);
+        let tray_pub = Arc::new(crate::tray_state::TrayStatePublisher::new());
+        let notice_bus = Arc::new(crate::notice::NoticeBus::new());
+        let filtering_paused = Arc::new(AtomicBool::new(false));
+        let svc = UiService::new(cache, tx, tray_pub, notice_bus, filtering_paused);
+
+        let alert = text_alert(alert::What::ProcMonitor, alert::Type::Error, "boom");
+        svc.post_alert(Request::new(alert)).await.unwrap();
+        assert!(svc
+            .alert_store_handle()
+            .get(alert::What::ProcMonitor)
+            .is_some());
+
+        svc.subscribe(Request::new(ClientConfig::default()))
+            .await
+            .unwrap();
+
+        assert!(svc
+            .alert_store_handle()
+            .get(alert::What::ProcMonitor)
+            .is_none());
     }
 }
