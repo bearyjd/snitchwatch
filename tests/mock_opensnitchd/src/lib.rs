@@ -24,22 +24,48 @@ use tonic::transport::{Channel, Endpoint};
 /// surfaces as a *failure* instead of hanging indefinitely — see issue #14.
 pub const ASK_RULE_DEADLINE: Duration = Duration::from_secs(120);
 
+/// Parses and clamps a raw `SNITCHWATCH_MOCK_ASK_RULE_DEADLINE_MS` value
+/// against [`ASK_RULE_DEADLINE`] — a pure function so the clamp logic is
+/// unit-testable without touching process env state. Issue #14 security
+/// review round 2, MEDIUM-3: an earlier version of this override applied the
+/// parsed value unconditionally, so
+/// `SNITCHWATCH_MOCK_ASK_RULE_DEADLINE_MS=18446744073709551615` (`u64::MAX`)
+/// produced a ~584-million-year timeout — the deadline could be effectively
+/// disabled, not just shrunk. `.min(ASK_RULE_DEADLINE)` means the override
+/// can only ever make the deadline *shorter* than the real daemon value,
+/// never longer.
+fn clamp_deadline_override(raw: Option<&str>) -> Duration {
+    match raw.and_then(|s| s.parse::<u64>().ok()) {
+        Some(ms) => Duration::from_millis(ms).min(ASK_RULE_DEADLINE),
+        None => ASK_RULE_DEADLINE,
+    }
+}
+
 /// Test-time override for [`ASK_RULE_DEADLINE`], so a genuine hang fails a
 /// test suite in well under a minute instead of 120s. Set
 /// `SNITCHWATCH_MOCK_ASK_RULE_DEADLINE_MS` (e.g. via `just test`'s
-/// environment, or per-test with `std::env::set_var` before calling
-/// [`MockOpensnitchd::ask_rule`]) to a millisecond value to shrink it;
-/// unset means "use the real 120s value everywhere" — chosen over
-/// unconditionally shrinking the constant so this crate still documents
-/// (and, without the env var, actually exercises) the real daemon behavior.
+/// environment) to a millisecond value to shrink it — clamped by
+/// [`clamp_deadline_override`] so it can only shrink, never grow past the
+/// real 120s. Unset means "use the real 120s value everywhere" — chosen
+/// over unconditionally shrinking the constant so this crate still
+/// documents (and, without the env var, actually exercises) the real
+/// daemon behavior.
+///
+/// Reads the env var exactly **once** per process, cached in a
+/// [`std::sync::OnceLock`] — issue #14 security review round 2, MEDIUM-3:
+/// an earlier version called `std::env::var` fresh on every `ask_rule`
+/// call, and a test mutated it with `std::env::remove_var` inside a
+/// multi-threaded test binary, racing any concurrent `ask_rule` call on
+/// another thread. `std::env::set_var`/`remove_var` are unsound to call
+/// from multiple threads in current Rust regardless; reading once and
+/// caching sidesteps needing to call them at all in the common case where
+/// nothing overrides this.
 fn ask_rule_deadline() -> Duration {
-    match std::env::var("SNITCHWATCH_MOCK_ASK_RULE_DEADLINE_MS") {
-        Ok(ms) => match ms.parse::<u64>() {
-            Ok(ms) => Duration::from_millis(ms),
-            Err(_) => ASK_RULE_DEADLINE,
-        },
-        Err(_) => ASK_RULE_DEADLINE,
-    }
+    static DEADLINE: std::sync::OnceLock<Duration> = std::sync::OnceLock::new();
+    *DEADLINE.get_or_init(|| {
+        let raw = std::env::var("SNITCHWATCH_MOCK_ASK_RULE_DEADLINE_MS").ok();
+        clamp_deadline_override(raw.as_deref())
+    })
 }
 
 /// Errors the mock can surface to tests.
@@ -246,12 +272,68 @@ const KNOWN_OPERATOR_TYPES: &[&str] = &["simple", "regexp", "complex", "list", "
 /// state (alias cache, loaded blocklists) this mock has no access to, and
 /// this bridge never emits those types for an `AskRule` reply, so they're
 /// only checked for a known type, not fully compiled.
+/// The `operator.operand` vocabulary the daemon recognizes
+/// (`vendor/opensnitch/daemon/rule/operator.go`'s `Operand` consts,
+/// lines 31-56). `process.env.` is a *prefix* (`OpProcessEnvPrefix`), not an
+/// exact value — `process.env.PATH` is a valid operand — so it's checked
+/// separately in [`is_known_operand`], not listed here verbatim.
+const KNOWN_OPERANDS: &[&str] = &[
+    "true",
+    "process.id",
+    "process.path",
+    "process.parent.path",
+    "process.command",
+    "process.hash.md5",
+    "process.hash.sha1",
+    "user.id",
+    "user.name",
+    "source.ip",
+    "source.port",
+    "dest.ip",
+    "dest.host",
+    "dest.port",
+    "dest.network",
+    "source.network",
+    "protocol",
+    "iface.in",
+    "iface.out",
+    "list",
+    "lists.domains",
+    "lists.domains_regexp",
+    "lists.ips",
+    "lists.nets",
+    "lists.hash.md5",
+];
+
+fn is_known_operand(operand: &str) -> bool {
+    KNOWN_OPERANDS.contains(&operand) || operand.starts_with("process.env.")
+}
+
+/// Issue #14 security review round 2, LOW: `Operator.Compile()`
+/// (`operator.go:109-214`) doesn't actually validate `Operand` against this
+/// vocabulary for every `Type` — for `Simple`, `Compile` sets its callback
+/// unconditionally regardless of what `Operand` says. An unknown/typo'd
+/// operand still "compiles" successfully; the daemon only discovers the
+/// problem when a *later*, separate operand-to-connection-field dispatch
+/// (outside `operator.go`) falls through to nothing for the value, so the
+/// rule silently never matches and every connection through it falls
+/// through to `DefaultAction` — structurally the same false-pass class as
+/// issue #14 itself (a `Rule` that "looks" accepted but never actually
+/// applies). This check is stricter than `Compile()` on purpose, as a test-
+/// time canary for that failure mode, mirroring [`validate_rule_name`]'s
+/// FIX-1-canary role.
 #[allow(clippy::result_large_err)]
 fn validate_operator_compiles(op: &snitchwatch_proto::protocol::Operator) -> Result<(), MockError> {
     if !KNOWN_OPERATOR_TYPES.contains(&op.r#type.as_str()) {
         return Err(MockError::InvalidRule(format!(
             "unknown operator type: `{}`",
             op.r#type
+        )));
+    }
+    if !is_known_operand(&op.operand) {
+        return Err(MockError::InvalidRule(format!(
+            "unknown operator operand: `{}`",
+            op.operand
         )));
     }
 
@@ -485,8 +567,64 @@ mod tests {
     }
 
     #[test]
-    fn ask_rule_deadline_defaults_to_the_real_120s_value() {
-        std::env::remove_var("SNITCHWATCH_MOCK_ASK_RULE_DEADLINE_MS");
-        assert_eq!(ask_rule_deadline(), ASK_RULE_DEADLINE);
+    fn ask_rule_deadline_returns_the_real_value_or_less() {
+        // Doesn't touch env state (see `ask_rule_deadline`'s doc comment on
+        // why: `OnceLock`-cached, and `set_var`/`remove_var` are unsound to
+        // call from a multi-threaded test binary). Whatever this process's
+        // env happened to have at first call, the deadline can never exceed
+        // the real value.
+        assert!(ask_rule_deadline() <= ASK_RULE_DEADLINE);
+    }
+
+    // -- clamp_deadline_override / FIX MEDIUM-3 (issue #14 security review) --
+
+    #[test]
+    fn deadline_override_defaults_to_real_value_when_unset() {
+        assert_eq!(clamp_deadline_override(None), ASK_RULE_DEADLINE);
+    }
+
+    #[test]
+    fn deadline_override_shrinks_when_smaller() {
+        assert_eq!(
+            clamp_deadline_override(Some("500")),
+            Duration::from_millis(500)
+        );
+    }
+
+    #[test]
+    fn deadline_override_cannot_exceed_the_real_deadline() {
+        // u64::MAX ms is ~584 million years — must clamp down to the real
+        // 120s value, not disable the deadline.
+        assert_eq!(
+            clamp_deadline_override(Some(&u64::MAX.to_string())),
+            ASK_RULE_DEADLINE
+        );
+    }
+
+    #[test]
+    fn deadline_override_ignores_unparseable_values() {
+        assert_eq!(
+            clamp_deadline_override(Some("not-a-number")),
+            ASK_RULE_DEADLINE
+        );
+    }
+
+    // -- is_known_operand / LOW (issue #14 security review) ---------------
+
+    #[test]
+    fn validate_rule_shape_rejects_unknown_operand() {
+        let mut rule = valid_rule();
+        rule.operator.as_mut().unwrap().operand = "dest.hostt".to_string(); // typo
+        let err = validate_rule_shape(&rule).unwrap_err();
+        assert!(
+            matches!(err, MockError::InvalidRule(msg) if msg.contains("unknown operator operand"))
+        );
+    }
+
+    #[test]
+    fn validate_rule_shape_accepts_process_env_prefixed_operand() {
+        let mut rule = valid_rule();
+        rule.operator.as_mut().unwrap().operand = "process.env.PATH".to_string();
+        assert!(validate_rule_shape(&rule).is_ok());
     }
 }
