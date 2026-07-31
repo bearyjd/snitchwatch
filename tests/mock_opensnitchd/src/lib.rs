@@ -16,6 +16,13 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tonic::transport::{Channel, Endpoint};
 
+/// The real daemon's `AskRule` deadline
+/// (`vendor/opensnitch/daemon/ui/client.go:366`, `context.WithTimeout(...,
+/// time.Second*120)`). `ask_rule` applies the same deadline so a bridge that
+/// never resolves a pending verdict surfaces as a test failure instead of
+/// hanging the test suite indefinitely — see issue #14.
+pub const ASK_RULE_DEADLINE: Duration = Duration::from_secs(120);
+
 /// Errors the mock can surface to tests.
 #[derive(Debug, thiserror::Error)]
 pub enum MockError {
@@ -23,6 +30,15 @@ pub enum MockError {
     Connect(#[from] tonic::transport::Error),
     #[error("rpc failed: {0}")]
     Rpc(#[from] tonic::Status),
+    #[error("ask_rule timed out after {0:?} (real daemon deadline: vendor/opensnitch/daemon/ui/client.go:366)")]
+    AskRuleTimedOut(Duration),
+    /// Mirrors `vendor/opensnitch/daemon/rule/rule.go`'s `Deserialize`: the
+    /// real daemon rejects a `Rule` shaped like this outright and falls
+    /// through to `DefaultAction` rather than applying the verdict. A bridge
+    /// that returns a rule shaped like this passes no differently than one
+    /// that hangs — both mean the user's verdict was silently discarded.
+    #[error("bridge returned a Rule the daemon would reject: {0}")]
+    InvalidRule(String),
 }
 
 /// Mock opensnitchd as a gRPC client.
@@ -88,8 +104,20 @@ impl MockOpensnitchd {
     }
 
     /// Send a single AskRule unary RPC and wait for the bridge's `Rule` reply.
+    ///
+    /// Applies the real daemon's ~120s deadline ([`ASK_RULE_DEADLINE`]) so a
+    /// bridge that never resolves the pending oneshot fails the test loudly
+    /// instead of hanging forever, and validates the returned `Rule` the way
+    /// `vendor/opensnitch/daemon/rule/rule.go`'s `Deserialize` does — see
+    /// issue #14, where a bridge that always sent `operator: None` passed
+    /// every mock-driven round-trip test while failing 100% of the time
+    /// against a real daemon.
     pub async fn ask_rule(&mut self, conn: Connection) -> Result<Rule, MockError> {
-        let rule = self.client.ask_rule(conn).await?.into_inner();
+        let rule = tokio::time::timeout(ASK_RULE_DEADLINE, self.client.ask_rule(conn))
+            .await
+            .map_err(|_elapsed| MockError::AskRuleTimedOut(ASK_RULE_DEADLINE))??
+            .into_inner();
+        validate_rule_shape(&rule)?;
         Ok(rule)
     }
 
@@ -142,6 +170,33 @@ impl MockOpensnitchd {
 
         Ok((reply_tx, count_rx))
     }
+}
+
+/// Reject the class of malformed `Rule` the real daemon's `rule.Deserialize`
+/// rejects (`vendor/opensnitch/daemon/rule/rule.go:85-89`): `operator: None`
+/// ("Deserialize rule, Operator nil" → "invalid operator"), or an operator
+/// with an empty `type`/`operand`. A real daemon that rejects the reply
+/// falls through to `DefaultAction` instead of applying the verdict — see
+/// issue #14.
+// `MockError::Rpc(tonic::Status)` is already the large variant driving this;
+// the crate's public `MockError`-returning methods (`ask_rule`, `ping`, ...)
+// are exempted from this lint as public API, so this private helper needs
+// the same allowance rather than boxing just for its own sake.
+#[allow(clippy::result_large_err)]
+fn validate_rule_shape(rule: &Rule) -> Result<(), MockError> {
+    let operator = rule
+        .operator
+        .as_ref()
+        .ok_or_else(|| MockError::InvalidRule("operator is None".to_string()))?;
+    if operator.r#type.is_empty() {
+        return Err(MockError::InvalidRule("operator.type is empty".to_string()));
+    }
+    if operator.operand.is_empty() {
+        return Err(MockError::InvalidRule(
+            "operator.operand is empty".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
