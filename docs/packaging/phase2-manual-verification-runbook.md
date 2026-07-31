@@ -136,9 +136,8 @@ cp vendor/opensnitch/daemon/data/system-fw.json \
    ~/.cache/snitchwatch-verify/etc-opensnitchd/
 curl -sL -o ~/.cache/snitchwatch-verify/etc-opensnitchd/opensnitch.rpm \
   https://github.com/evilsocket/opensnitch/releases/download/v1.8.0/opensnitch-1.8.0-1.x86_64.rpm
-# On kernels ≥ ~6.19 the RPM's eBPF module fails to load (issue #6) — use proc:
-sed -i 's/"ProcMonitorMethod": "ebpf"/"ProcMonitorMethod": "proc"/' \
-  ~/.cache/snitchwatch-verify/etc-opensnitchd/default-config.json
+# The shipped config already sets "ProcMonitorMethod": "proc" — the v1.8.0
+# RPM's eBPF module fails to load on kernels ≥ ~6.19 (issue #6).
 
 sudo podman run -d --name opensnitchd-dev \
     --privileged --network=host --pid=host \

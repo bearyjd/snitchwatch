@@ -27,18 +27,31 @@ base-image: ghcr.io/ublue-os/bazzite
 image-version: stable
 
 modules:
-  # 1. Layer opensnitchd into the base image. opensnitch is already packaged
-  #    for Fedora, so this is a plain package install — no COPR or custom RPM
-  #    needed. `opensnitch` pulls in the daemon; the GUI (`opensnitch-ui`) is
-  #    deliberately NOT installed, since Snitchwatch replaces it.
+  # 1. Layer opensnitchd into the base image. Corrected 2026-07-31 (issue
+  #    #7): opensnitch is NOT packaged in Fedora's repos or Bazzite's COPR
+  #    set — `rpm-ostree install opensnitch` fails with "No match for
+  #    argument" (verified live on a Bazzite host and a clean fedora:43
+  #    container). Install the upstream GitHub release RPM by URL instead,
+  #    pinned to v1.8.0 to match this repo's vendored submodule. The GUI
+  #    (`opensnitch-ui`) is deliberately NOT installed, since Snitchwatch
+  #    replaces it. `info` is an explicit RPM dependency; `nftables` and
+  #    `libnetfilter_queue` are interception deps (present in Bazzite,
+  #    declared for safety — idempotent).
   - type: rpm-ostree
     install:
-      - opensnitch
+      - info
+      - nftables
+      - libnetfilter_queue
+      - https://github.com/evilsocket/opensnitch/releases/download/v1.8.0/opensnitch-1.8.0-1.x86_64.rpm
 
   # 2. Drop our hardened daemon config into place. This overrides upstream's
   #    `DefaultAction: allow` (fail-open) with `DefaultAction: deny`
   #    (fail-closed) and points `Server.Address` at the bridge's default bind.
-  #    See files/system/etc/opensnitchd/default-config.json.
+  #    It also ships `ProcMonitorMethod: proc` (not upstream's `ebpf`): the
+  #    v1.8.0 RPM's bundled eBPF module fails to load on Bazzite's current
+  #    kernel (6.19: "unable to load eBPF module (opensnitch.o)", verified
+  #    live — issue #6). Revisit `ebpf` when an opensnitch release supports
+  #    the shipped kernel. See files/system/etc/opensnitchd/default-config.json.
   - type: files
     files:
       - source: system
