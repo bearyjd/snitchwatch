@@ -98,6 +98,17 @@ pub fn interests_diagnostics(msg: &ServerMessage) -> bool {
     matches!(msg, ServerMessage::DiagnosticsReport { .. })
 }
 
+/// True when `msg` reports that a `Deny` verdict's requested scope was
+/// silently narrowed (issue #14 security review round 2, HIGH — see
+/// `ServerMessage::DenyScopeNarrowed`'s doc comment). No dedicated QML
+/// model/toast consumes this yet — this predicate exists for parity with
+/// every other `ServerMessage` variant having a named `interests_*` route
+/// here, so a future in-app banner feature has the routing decision
+/// already made rather than needing to rediscover the convention.
+pub fn interests_deny_scope_narrowed(msg: &ServerMessage) -> bool {
+    matches!(msg, ServerMessage::DenyScopeNarrowed { .. })
+}
+
 /// Serialize an outbound `ServerMessage` to the JSON the models'
 /// `applyServerMessageJson` invokable consumes.
 pub fn encode_server(msg: &ServerMessage) -> Result<String, serde_json::Error> {
@@ -357,6 +368,21 @@ mod tests {
 
         let other_msg = ServerMessage::ClearConnectionRows;
         assert!(!interests_diagnostics(&other_msg));
+    }
+
+    #[test]
+    fn deny_scope_narrowed_routes_only_to_itself() {
+        let msg = ServerMessage::DenyScopeNarrowed {
+            row_id: "ask-1".into(),
+            reason: "the destination is a bare IP address, not a hostname".into(),
+        };
+        assert!(interests_deny_scope_narrowed(&msg));
+        assert!(!interests_diagnostics(&msg));
+        assert!(!interests_connections(&msg));
+
+        assert!(!interests_deny_scope_narrowed(
+            &ServerMessage::ClearConnectionRows
+        ));
     }
 
     #[test]

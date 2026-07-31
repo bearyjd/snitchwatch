@@ -127,6 +127,27 @@ pub enum ServerMessage {
     GlobalSettings {
         settings: serde_json::Value,
     },
+    /// A `Deny` verdict's requested scope couldn't be honored and was
+    /// silently narrowed to an exact-host match — see
+    /// `translator::verdict::ScopeDegradation` and issue #14's security
+    /// review FIX 2/HIGH. Unlike the other variants here, this is a
+    /// Snitchwatch-specific protocol extension, not one of the 22
+    /// `handleServerCommand` cases upstream LS's `app.js` knows about (see
+    /// this enum's doc comment) — a client that doesn't recognize it can
+    /// safely ignore it.
+    ///
+    /// Sent alongside (not instead of) the desktop `Notice::
+    /// DenyScopeNarrowed`: the desktop notice alone is silent for a
+    /// headless `bridge-cli`, an unattended GUI, or any session with no
+    /// D-Bus notification server, which is exactly the defect FIX 2
+    /// existed to close (round 2 of the security review, HIGH). `reason`
+    /// is always [`crate::translator::verdict::ScopeDegradation::describe`]'s
+    /// fixed text — never built from connection data, so it needs no
+    /// display-boundary sanitization on the way out.
+    DenyScopeNarrowed {
+        row_id: String,
+        reason: String,
+    },
 }
 
 /// Client → server messages. These come from the UI's `sendAction(type, payload)`
@@ -436,6 +457,26 @@ mod tests {
             !json.contains("matchedRule"),
             "matchedRule must be omitted when None, so old web-frontend consumers are unaffected: {json}"
         );
+
+        let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, msg);
+    }
+
+    #[test]
+    fn deny_scope_narrowed_round_trips_via_json() {
+        // Issue #14 security review round 2, HIGH: this must be a real
+        // wire-protocol message the WS client actually receives, not just a
+        // desktop-notification side channel.
+        let msg = ServerMessage::DenyScopeNarrowed {
+            row_id: "ask-7".to_string(),
+            reason: "the destination host has no subdomain that can be safely wildcarded below \
+                     its public suffix"
+                .to_string(),
+        };
+
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains(r#""action":"denyScopeNarrowed""#));
+        assert!(json.contains(r#""rowId":"ask-7""#));
 
         let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, msg);

@@ -70,12 +70,28 @@ pub fn verdict_action_str(verdict: Verdict) -> &'static str {
 ///
 /// Maps any byte outside `[A-Za-z0-9.-]` to `_` (in particular, `/` — the
 /// only thing a single path component actually needs neutralized to block
-/// traversal), trims leading/trailing `.`/`-`, and — so distinct hostile
-/// inputs never collide onto the same rule name — falls back to a stable
-/// hash of the raw bytes when the sanitized result would be empty or
-/// unreasonably long.
+/// traversal) and trims leading/trailing `.`/`-` for readability, but that
+/// alone is many-to-one (`_dmarc.example.com`, `/dmarc.example.com`, and
+/// `%dmarc.example.com` would all sanitize to the same string; so would
+/// `evil.com`, `evil.com.`, and `evil.com--`). Since the daemon's
+/// `addUserRule`/`Add` key persisted rules by this exact name
+/// (`vendor/opensnitch/daemon/rule/loader.go`) and always-on-disk rules
+/// persist across restarts, a collision here would let one host's saved
+/// `Deny`/`Always` rule silently overwrite another's on a later verdict —
+/// round 2 of the issue #14 security review flagged this as MEDIUM-2.
+/// So injectivity can't rely on the cleaned text alone: a SHA-256 digest
+/// of the **raw, unsanitized** bytes is always appended (SHA-256, not
+/// `std::collections::hash_map::DefaultHasher` — the old fallback-only
+/// version of this function used `DefaultHasher`, which is both
+/// non-cryptographic, SipHash-1-3 with an all-zero key, not collision-
+/// resistant, and explicitly documented as unstable across Rust releases,
+/// so a saved rule's name wasn't even reproducible after a toolchain
+/// bump).
 fn sanitize_host_for_rule_name(raw: &str) -> String {
-    const MAX_LEN: usize = 64;
+    // Leaves room for the always-appended `-<16 hex chars>` digest suffix;
+    // purely cosmetic (the daemon has no documented rule-name length
+    // limit), not a security boundary.
+    const MAX_BASE_LEN: usize = 48;
 
     let cleaned: String = raw
         .chars()
@@ -88,15 +104,26 @@ fn sanitize_host_for_rule_name(raw: &str) -> String {
         })
         .collect();
     let trimmed = cleaned.trim_matches(|c| c == '.' || c == '-');
-
-    if trimmed.is_empty() || trimmed.len() > MAX_LEN {
-        use std::hash::{Hash, Hasher};
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        raw.hash(&mut hasher);
-        format!("host-{:016x}", hasher.finish())
+    // `cleaned` is guaranteed all single-byte ASCII (every char is either
+    // passed through only when `is_ascii_alphanumeric()`/`.`/`-`, or
+    // replaced with `_`), so byte-slicing at any length is safe — no
+    // UTF-8 char-boundary panic risk.
+    let base = if trimmed.is_empty() {
+        "host"
     } else {
-        trimmed.to_string()
+        &trimmed[..trimmed.len().min(MAX_BASE_LEN)]
+    };
+
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(raw.as_bytes());
+    let digest = hasher.finalize();
+    let mut digest_hex = String::with_capacity(16);
+    for byte in digest.iter().take(8) {
+        digest_hex.push_str(&format!("{byte:02x}"));
     }
+
+    format!("{base}-{digest_hex}")
 }
 
 /// Build the synthetic once-off rule name the bridge hands back to
@@ -133,7 +160,7 @@ pub fn verdict_to_rule(
         conn.dst_host.as_str()
     };
 
-    let (operator, _degradation_reason) = build_operator_checked(scope, conn);
+    let (operator, _degradation) = build_operator_checked(scope, conn);
 
     Rule {
         created: now_secs,
@@ -148,6 +175,58 @@ pub fn verdict_to_rule(
     }
 }
 
+/// Why a `Deny` verdict's requested scope couldn't be honored and
+/// [`build_operator_checked`] silently degraded to an exact-host/process-
+/// path fallback — see [`scope_degradation`].
+///
+/// Deliberately carries **no** attacker-controlled data. An earlier version
+/// of this type was a raw `String` built with `format!("host \`{host}\`
+/// ...")`, interpolating `conn.dst_host` directly — round 2 of the issue
+/// #14 security review (MEDIUM-1) flagged that this string then flowed,
+/// unsanitized, into a desktop-notification body (freedesktop notification
+/// bodies render a markup subset: `<b>`, `<i>`, `<a href>`, `<img src>`,
+/// on GNOME/KDE) and into `bridge-cli`'s terminal logs (ANSI/terminal
+/// escape sequences), with no length cap. Before this branch, no
+/// attacker-controlled string reached a notification body at all.
+/// [`Self::describe`] returns a fixed `&'static str` per variant — nothing
+/// here is ever built with `format!` from connection data. Where a UI
+/// genuinely needs to show the offending host (not required by any current
+/// consumer), it must go through [`sanitize_for_display`] at that specific
+/// display boundary, not be embedded here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScopeDegradation {
+    /// The connection carries no resolved hostname (`dst_host` is empty).
+    NoHostRecorded,
+    /// `dst_host` is a bare IP address, not a hostname.
+    BareIpAddress,
+    /// `dst_host` failed [`is_valid_hostname_shape`] or DNS-name parsing.
+    InvalidHostnameShape,
+    /// `dst_host` has no label beyond its own registrable domain (eTLD+1) —
+    /// see [`any_host_on_domain_operator_checked`]'s doc comment.
+    AtOrAboveRegistrableDomain,
+    /// `conn.process_path` is empty.
+    ProcessPathUnavailable,
+}
+
+impl ScopeDegradation {
+    /// A fixed, safe-to-display description — never built from connection
+    /// data. See this enum's doc comment.
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::NoHostRecorded => "no destination host was recorded for this connection",
+            Self::BareIpAddress => "the destination is a bare IP address, not a hostname",
+            Self::InvalidHostnameShape => "the destination hostname failed validation",
+            Self::AtOrAboveRegistrableDomain => {
+                "the destination host has no subdomain that can be safely wildcarded below its \
+                 public suffix"
+            }
+            Self::ProcessPathUnavailable => {
+                "the process path was not available for this connection"
+            }
+        }
+    }
+}
+
 /// Non-`None` exactly when `scope` couldn't be honored as requested and
 /// [`build_operator_checked`] silently degraded to an exact-host/process-path
 /// fallback. Only meaningful for `Deny` — see issue #14 security review
@@ -157,15 +236,47 @@ pub fn verdict_to_rule(
 /// the pending-decision dialog offered. The caller (the gRPC `ask_rule`
 /// handler) uses this to tell the client the block was scoped down, rather
 /// than let the UI imply the wider block succeeded.
-pub fn scope_degradation_reason(
+pub fn scope_degradation(
     scope: VerdictScope,
     verdict: Verdict,
     conn: &Connection,
-) -> Option<String> {
+) -> Option<ScopeDegradation> {
     if verdict != Verdict::Deny {
         return None;
     }
     build_operator_checked(scope, conn).1
+}
+
+/// Sanitize an attacker-controlled string before it's shown in a desktop
+/// notification body or sent to the WS client as protocol text — issue #14
+/// security review round 2, MEDIUM-1. See [`ScopeDegradation`]'s doc
+/// comment for why this exists. Strips control characters (including the
+/// ANSI `ESC` byte, newlines, carriage returns — bridge-cli logs apply
+/// terminal escape sequences), HTML-entity-escapes the markup
+/// metacharacters `<`/`>`/`&` (so a literal `<b>` in a hostname displays as
+/// the text `<b>` rather than being interpreted as bold by a freedesktop
+/// notification daemon), and caps the result to `max_len` **characters**
+/// (not bytes — truncating mid-codepoint would corrupt multi-byte UTF-8).
+pub fn sanitize_for_display(input: &str, max_len: usize) -> String {
+    let mut out = String::new();
+    let mut count = 0usize;
+    for c in input.chars() {
+        if count >= max_len {
+            out.push('…');
+            break;
+        }
+        if c.is_control() {
+            continue;
+        }
+        match c {
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '&' => out.push_str("&amp;"),
+            other => out.push(other),
+        }
+        count += 1;
+    }
+    out
 }
 
 fn simple_operator(operand: &str, data: &str) -> Operator {
@@ -226,7 +337,7 @@ fn is_valid_hostname_shape(host: &str) -> bool {
 /// this scope doesn't leave the bare parent domain reachable).
 ///
 /// Returns the reason a degradation happened (if any) alongside the
-/// operator — see [`scope_degradation_reason`].
+/// operator — see [`scope_degradation`].
 ///
 /// Degrades to [`this_host_operator`] whenever the wildcard can't be built
 /// safely:
@@ -248,25 +359,56 @@ fn is_valid_hostname_shape(host: &str) -> bool {
 ///     a security defect either way (over-allow or a deny that silently
 ///     covers far more than the user saw), so this function never emits a
 ///     pattern that isn't scoped to a real, registrable parent domain.
-fn any_host_on_domain_operator_checked(conn: &Connection) -> (Operator, Option<String>) {
-    let host = conn.dst_host.as_str();
+fn any_host_on_domain_operator_checked(conn: &Connection) -> (Operator, Option<ScopeDegradation>) {
+    let raw_host = conn.dst_host.as_str();
 
-    if host.is_empty() {
+    if raw_host.is_empty() {
         return (
             this_host_operator(conn),
-            Some("no destination host recorded for this connection".to_string()),
+            Some(ScopeDegradation::NoHostRecorded),
         );
     }
-    if host.parse::<IpAddr>().is_ok() {
+    if raw_host.parse::<IpAddr>().is_ok() {
         return (
             this_host_operator(conn),
-            Some("destination is a bare IP address, not a hostname".to_string()),
+            Some(ScopeDegradation::BareIpAddress),
         );
     }
+
+    // CRITICAL (issue #14 security review round 2): lowercase ONCE, here,
+    // and use this value for every subsequent step — shape validation, the
+    // PSL lookup, AND the emitted pattern's parent-domain split. `psl`
+    // matches suffix labels as raw lowercase bytes
+    // (`psl-2.1.223/src/list.rs`), and neither `addr::parse_dns_name` nor
+    // `psl` lowercases its input. `is_valid_hostname_shape`'s charset
+    // permits `A-Z`, so an uppercase host (`USER.GITHUB.IO`) used to reach
+    // the PSL lookup unchanged, miss every real suffix entry (which are all
+    // stored lowercase), fall through to the PSL's default rule (suffix =
+    // last label only), and `.prefix()` would incorrectly return `Some` —
+    // passing the gate this function exists to enforce and producing
+    // `^(?:[^.]+\.)*github\.io$` for a Deny that was supposed to stay
+    // scoped to `user.github.io`. The daemon then lowercases both the
+    // pattern (operator.go:146-148) and the value it matches against (same
+    // lines) at rule-compile/match time — so in production this pattern
+    // would have matched every GitHub Pages site. Any local process can
+    // trigger this via `getaddrinfo("USER.GITHUB.IO")` (DNS's 0x20
+    // encoding preserves case). Precedent for lowercasing hostile hostname
+    // input once at the boundary: `blocklists/materializer.rs:94`.
+    //
+    // Simple `dest.host`/`dest.ip` operators ([`this_host_operator`],
+    // used both as this function's own fallback and directly for
+    // `ThisHost` scope) are NOT affected by this class of bug: the daemon
+    // compares them case-insensitively (`operator.go:225-226`,
+    // `strings.EqualFold`) regardless of what case we send, so they're
+    // left using `conn.dst_host`'s original case rather than this
+    // lowercased copy.
+    let host = raw_host.to_ascii_lowercase();
+    let host = host.as_str();
+
     if !is_valid_hostname_shape(host) {
         return (
             this_host_operator(conn),
-            Some(format!("hostname `{host}` failed shape validation")),
+            Some(ScopeDegradation::InvalidHostnameShape),
         );
     }
 
@@ -281,7 +423,7 @@ fn any_host_on_domain_operator_checked(conn: &Connection) -> (Operator, Option<S
         Err(_) => {
             return (
                 this_host_operator(conn),
-                Some(format!("hostname `{host}` failed DNS-name parsing")),
+                Some(ScopeDegradation::InvalidHostnameShape),
             )
         }
     };
@@ -290,21 +432,21 @@ fn any_host_on_domain_operator_checked(conn: &Connection) -> (Operator, Option<S
     // safely wildcard away. This is what correctly rejects `example.com`
     // (registrable domain = itself), `shop.co.uk` (`co.uk` is the eTLD,
     // `shop.co.uk` is the eTLD+1 = itself), and `user.github.io`
-    // (`github.io` is the eTLD, `user.github.io` is the eTLD+1 = itself).
+    // (`github.io` is the eTLD, `user.github.io` is the eTLD+1 = itself) —
+    // now correctly even when the daemon-observed host arrives uppercase.
     if parsed.prefix().is_none() {
-        let root = parsed.root().unwrap_or(host);
         return (
             this_host_operator(conn),
-            Some(format!(
-                "host `{host}` is already at its registrable domain `{root}` — \
-                 wildcarding would match every host under a public suffix"
-            )),
+            Some(ScopeDegradation::AtOrAboveRegistrableDomain),
         );
     }
 
     // Safe to wildcard: host has at least one label beyond its registrable
     // domain, so dropping only the leftmost label never reaches (or goes
-    // above) the registrable owner's boundary.
+    // above) the registrable owner's boundary. `host` (the lowercased
+    // copy) is what gets split here, not `raw_host` — the whole point of
+    // lowercasing once at the top is that every downstream step, including
+    // this one, sees a consistent value.
     let labels: Vec<&str> = host.split('.').collect();
     let parent_domain = labels[1..].join(".");
     let pattern = format!(r"^(?:[^.]+\.)*{}$", regex::escape(&parent_domain));
@@ -328,7 +470,7 @@ fn any_host_on_domain_operator_checked(conn: &Connection) -> (Operator, Option<S
 ///
 /// `conn.process_path` is daemon-attested (`/proc/<pid>/exe`), NOT hostile
 /// input like `dst_host` — see module doc.
-fn any_host_operator_checked(conn: &Connection) -> (Operator, Option<String>) {
+fn any_host_operator_checked(conn: &Connection) -> (Operator, Option<ScopeDegradation>) {
     if conn.process_path.is_empty() {
         tracing::warn!(
             dst_host = %conn.dst_host,
@@ -338,7 +480,7 @@ fn any_host_operator_checked(conn: &Connection) -> (Operator, Option<String>) {
         );
         return (
             this_host_operator(conn),
-            Some("process path unavailable for this connection".to_string()),
+            Some(ScopeDegradation::ProcessPathUnavailable),
         );
     }
     (
@@ -347,7 +489,10 @@ fn any_host_operator_checked(conn: &Connection) -> (Operator, Option<String>) {
     )
 }
 
-fn build_operator_checked(scope: VerdictScope, conn: &Connection) -> (Operator, Option<String>) {
+fn build_operator_checked(
+    scope: VerdictScope,
+    conn: &Connection,
+) -> (Operator, Option<ScopeDegradation>) {
     match scope {
         VerdictScope::ThisHost => (this_host_operator(conn), None),
         VerdictScope::AnyHostOnDomain => any_host_on_domain_operator_checked(conn),
@@ -729,13 +874,101 @@ mod tests {
         assert_eq!(op.data, "user.github.io");
     }
 
+    // -- CRITICAL: uppercase must not bypass the PSL gate (round 2) -------
+
+    #[test]
+    fn any_host_on_domain_scope_degrades_for_uppercase_private_suffix_host() {
+        // Before the fix, `psl`'s suffix lookup missed every real entry on
+        // uppercase input, fell through to the default "last label only"
+        // rule, and `.prefix()` incorrectly returned `Some` — this would
+        // have wildcarded to `^(?:[^.]+\.)*github\.io$`, matching every
+        // GitHub Pages site.
+        let mut conn = sample_connection();
+        conn.dst_host = "USER.GITHUB.IO".to_string();
+        let rule = verdict_to_rule(
+            Verdict::Allow,
+            VerdictDuration::Once,
+            VerdictScope::AnyHostOnDomain,
+            &conn,
+            0,
+        );
+        let op = rule.operator.unwrap();
+        assert_eq!(op.r#type, "simple", "must degrade, not wildcard");
+    }
+
+    #[test]
+    fn any_host_on_domain_scope_degrades_for_uppercase_two_label_etld_host() {
+        let mut conn = sample_connection();
+        conn.dst_host = "SHOP.CO.UK".to_string();
+        let rule = verdict_to_rule(
+            Verdict::Allow,
+            VerdictDuration::Once,
+            VerdictScope::AnyHostOnDomain,
+            &conn,
+            0,
+        );
+        let op = rule.operator.unwrap();
+        assert_eq!(op.r#type, "simple", "must degrade, not wildcard");
+    }
+
+    #[test]
+    fn any_host_on_domain_scope_wildcards_mixed_case_host_correctly() {
+        // A mixed-case host that legitimately has a subdomain beyond its
+        // registrable domain must still wildcard — the fix must not
+        // over-correct into degrading every non-lowercase host.
+        let mut conn = sample_connection();
+        conn.dst_host = "Www.Example.Com".to_string();
+        let rule = verdict_to_rule(
+            Verdict::Allow,
+            VerdictDuration::Once,
+            VerdictScope::AnyHostOnDomain,
+            &conn,
+            0,
+        );
+        let op = rule.operator.unwrap();
+        assert_eq!(op.r#type, "regexp");
+        assert_eq!(op.data, r"^(?:[^.]+\.)*example\.com$");
+    }
+
+    #[test]
+    fn any_host_on_domain_scope_wildcards_uppercase_multi_label_etld_correctly() {
+        let mut conn = sample_connection();
+        conn.dst_host = "WWW.EXAMPLE.CO.UK".to_string();
+        let rule = verdict_to_rule(
+            Verdict::Allow,
+            VerdictDuration::Once,
+            VerdictScope::AnyHostOnDomain,
+            &conn,
+            0,
+        );
+        let op = rule.operator.unwrap();
+        assert_eq!(op.r#type, "regexp");
+        assert_eq!(op.data, r"^(?:[^.]+\.)*example\.co\.uk$");
+    }
+
+    #[test]
+    fn deny_verdict_degradation_is_surfaced_for_uppercase_bypass_host() {
+        // Before the fix this returned None (the bypass meant no
+        // degradation was ever detected), so the FIX 2 guarantee — a Deny
+        // never silently narrows without telling the caller — didn't
+        // actually hold for this input. Confirms it does now.
+        let mut conn = sample_connection();
+        conn.dst_host = "USER.GITHUB.IO".to_string();
+        let reason = scope_degradation(VerdictScope::AnyHostOnDomain, Verdict::Deny, &conn);
+        assert!(
+            reason.is_some(),
+            "uppercase bypass must still be caught and surfaced for Deny"
+        );
+        assert_eq!(reason, Some(ScopeDegradation::AtOrAboveRegistrableDomain));
+    }
+
     // -- FIX 2: Deny must never silently narrow ---------------------------
 
     #[test]
     fn allow_verdict_degradation_is_silent() {
         let mut conn = sample_connection();
         conn.dst_host = "shop.co.uk".to_string(); // would degrade
-        let reason = scope_degradation_reason(VerdictScope::AnyHostOnDomain, Verdict::Allow, &conn);
+        let reason = scope_degradation(VerdictScope::AnyHostOnDomain, Verdict::Allow, &conn);
         assert!(
             reason.is_none(),
             "Allow degradation must not be surfaced (fail-safe narrowing)"
@@ -746,7 +979,7 @@ mod tests {
     fn deny_verdict_degradation_is_surfaced() {
         let mut conn = sample_connection();
         conn.dst_host = "shop.co.uk".to_string(); // would degrade
-        let reason = scope_degradation_reason(VerdictScope::AnyHostOnDomain, Verdict::Deny, &conn);
+        let reason = scope_degradation(VerdictScope::AnyHostOnDomain, Verdict::Deny, &conn);
         assert!(
             reason.is_some(),
             "Deny degradation must be surfaced — silent under-blocking is a defect"
@@ -756,7 +989,7 @@ mod tests {
     #[test]
     fn deny_verdict_with_no_degradation_reports_none() {
         let conn = sample_connection(); // ThisHost never degrades
-        let reason = scope_degradation_reason(VerdictScope::ThisHost, Verdict::Deny, &conn);
+        let reason = scope_degradation(VerdictScope::ThisHost, Verdict::Deny, &conn);
         assert!(reason.is_none());
     }
 
@@ -764,7 +997,7 @@ mod tests {
     fn deny_verdict_any_host_degradation_is_surfaced_when_process_path_empty() {
         let mut conn = sample_connection();
         conn.process_path = String::new();
-        let reason = scope_degradation_reason(VerdictScope::AnyHost, Verdict::Deny, &conn);
+        let reason = scope_degradation(VerdictScope::AnyHost, Verdict::Deny, &conn);
         assert!(reason.is_some());
     }
 
@@ -808,6 +1041,37 @@ mod tests {
         assert_ne!(a, b, "distinct hostile inputs must not collide");
     }
 
+    // -- MEDIUM-2 (issue #14 security review round 2): sanitization must be
+    // injective, or a persisted Deny/Always rule for one host could be
+    // silently overwritten by a later verdict for a colliding host. -------
+
+    #[test]
+    fn rule_name_for_distinguishes_hosts_that_collide_under_character_mapping_alone() {
+        // "_dmarc.example.com", "/dmarc.example.com", and
+        // "%dmarc.example.com" all sanitize to the identical string under
+        // character-mapping alone (both `/` and `%` map to `_`, same as a
+        // literal leading `_`) — the always-appended raw-input digest is
+        // what actually distinguishes them.
+        let a = rule_name_for(Verdict::Deny, "_dmarc.example.com", 443);
+        let b = rule_name_for(Verdict::Deny, "/dmarc.example.com", 443);
+        let c = rule_name_for(Verdict::Deny, "%dmarc.example.com", 443);
+        assert_ne!(a, b);
+        assert_ne!(b, c);
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn rule_name_for_distinguishes_dot_dash_variants_that_trim_identically() {
+        // "evil.com", "evil.com.", and "evil.com--" all trim to the same
+        // "evil.com" under leading/trailing `.`/`-` trimming alone.
+        let a = rule_name_for(Verdict::Deny, "evil.com", 443);
+        let b = rule_name_for(Verdict::Deny, "evil.com.", 443);
+        let c = rule_name_for(Verdict::Deny, "evil.com--", 443);
+        assert_ne!(a, b);
+        assert_ne!(b, c);
+        assert_ne!(a, c);
+    }
+
     #[test]
     fn any_host_scope_matches_on_process_path() {
         let rule = verdict_to_rule(
@@ -840,5 +1104,47 @@ mod tests {
         assert_ne!(op.operand, "process.path");
         assert_eq!(op.operand, "dest.host");
         assert_eq!(op.data, "github.com");
+    }
+
+    // -- sanitize_for_display / MEDIUM-1 (issue #14 security review round 2) --
+
+    #[test]
+    fn sanitize_for_display_neutralizes_markup_metacharacters() {
+        let out = sanitize_for_display("<b>evil.example</b>", 64);
+        assert!(!out.contains('<'));
+        assert!(!out.contains('>'));
+        assert_eq!(out, "&lt;b&gt;evil.example&lt;/b&gt;");
+    }
+
+    #[test]
+    fn sanitize_for_display_strips_ansi_escape_sequences() {
+        let out = sanitize_for_display("evil\x1b[31mred\x1b[0m.example", 64);
+        assert!(!out.contains('\x1b'), "ESC byte must not survive: {out:?}");
+        assert_eq!(out, "evil[31mred[0m.example");
+    }
+
+    #[test]
+    fn sanitize_for_display_strips_newlines_and_control_chars() {
+        let out = sanitize_for_display("evil.example\nInjected: fake line\r\n", 64);
+        assert!(!out.contains('\n'));
+        assert!(!out.contains('\r'));
+        assert_eq!(out, "evil.exampleInjected: fake line");
+    }
+
+    #[test]
+    fn sanitize_for_display_caps_length_by_characters_not_bytes() {
+        let long_host = "a".repeat(500);
+        let out = sanitize_for_display(&long_host, 64);
+        assert!(
+            out.chars().count() <= 65,
+            "expected <= 64 chars plus the truncation marker, got {}",
+            out.chars().count()
+        );
+        assert!(out.ends_with('…'));
+    }
+
+    #[test]
+    fn sanitize_for_display_leaves_ordinary_hostnames_untouched() {
+        assert_eq!(sanitize_for_display("github.com", 64), "github.com");
     }
 }

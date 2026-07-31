@@ -18,11 +18,22 @@ pub enum Notice {
     FilterPauseExpired,
     /// A `Deny` verdict's requested scope (`AnyHostOnDomain`/`AnyHost`)
     /// couldn't be honored and silently narrowed to an exact-host match —
-    /// see `translator::verdict::scope_degradation_reason` and issue #14's
+    /// see `translator::verdict::scope_degradation` and issue #14's
     /// security review FIX 2. Unlike a narrowed `Allow` (fail-safe, silent
     /// by design), a narrowed `Deny` under-blocks relative to what the
-    /// pending-decision dialog offered, so the client must be told rather
-    /// than left to assume the wider block applied.
+    /// pending-decision dialog offered.
+    ///
+    /// This alone does NOT satisfy "the client must be told": this bus is
+    /// consumed only by the desktop notifiers below (`notify-rust`), so a
+    /// headless `bridge-cli`, an unattended GUI, or any session with no
+    /// D-Bus notification server gets no signal from this variant at all.
+    /// The actual client-facing signal is
+    /// `ws_messages::ServerMessage::DenyScopeNarrowed`, broadcast alongside
+    /// this one from `grpc_server::UiService::ask_rule` — round 2 of the
+    /// issue #14 security review (HIGH) found an earlier version of this
+    /// fix relied on this desktop notice alone. `what`/`reason` here are
+    /// display-boundary-sanitized before construction — see
+    /// `translator::verdict::sanitize_for_display`/`ScopeDegradation`.
     DenyScopeNarrowed {
         row_id: u64,
         what: String,

@@ -301,10 +301,12 @@ mod tests {
             VerdictScope::ThisHost,
         )
         .unwrap();
-        assert_eq!(
-            c.rows()[0].matched_rule.as_deref(),
-            Some("snitchwatch-deny-h-443")
-        );
+        // Rule names now always carry an appended raw-input digest (issue
+        // #14 security review round 2, MEDIUM-2), so compute the expected
+        // value via the same single-source-of-truth function rather than
+        // hardcoding the hash.
+        let expected = crate::translator::verdict::rule_name_for(Verdict::Deny, "h", 443);
+        assert_eq!(c.rows()[0].matched_rule.as_deref(), Some(expected.as_str()));
     }
 
     #[test]
