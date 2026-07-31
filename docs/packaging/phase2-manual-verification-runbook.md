@@ -324,16 +324,23 @@ Two independent ways to force it:
   alone can't produce a failure here at all. But a live daemon on such a
   kernel can: opensnitchd v1.8.0's bundled eBPF module fails to load on
   kernel 6.19+ regardless of BTF presence, and it reports that failure itself
-  via `PostAlert` (`vendor/opensnitch/daemon/main.go:176,187,645`), which the
-  bridge now overlays onto `EbpfSupport` (`DaemonAlertStore` +
-  `DiagnosticsCtx::report()` in `diagnostics/mod.rs`). To exercise it for
+  via `PostAlert` (`vendor/opensnitch/daemon/main.go:645`, as
+  `Alert_GENERIC` + free text — see `daemon_alerts`'s module doc for why
+  it's never a tagged `PROC_MONITOR` alert on a real daemon), which the
+  bridge now text-classifies and overlays onto `EbpfSupport`
+  (`DaemonAlertStore` + `DiagnosticsCtx::report()`'s
+  `classify_generic_alert_text` in `diagnostics/mod.rs`). To exercise it for
   real: set `ProcMonitorMethod: ebpf` in opensnitchd's config on a host
   running kernel ≥6.19, restart `opensnitchd-dev`, and confirm the daemon's
   own startup alert surfaces as a failed `ebpf_support` check — with the
-  daemon's own alert text visible in the troubleshooting detail, not just the
-  generic `EBPF_TROUBLESHOOTING` copy. (On a kernel where the module loads
-  fine, this path is a no-op — use the nftables path above instead, or don't
-  expect a failure here.)
+  daemon's own alert text visible in the troubleshooting detail. Since this
+  host's kernel genuinely has BTF, expect the *self-consistent*
+  `EBPF_DAEMON_REPORTED_TROUBLESHOOTING` copy ("BTF is present on this
+  kernel, but opensnitchd still failed...") here, not
+  `EBPF_TROUBLESHOOTING`'s "kernel doesn't expose BTF" claim — that copy
+  is reserved for when the local probe *also* fails. (On a kernel where the
+  module loads fine, this path is a no-op — use the nftables path above
+  instead, or don't expect a failure here.)
 
 **Pass condition — this is the finding the whole-branch review flagged and
 a follow-up fix addressed (see PR #3):** since `opensnitchd` itself never
@@ -349,10 +356,15 @@ it as expected behavior.
 
 Then click "Recheck" anyway and confirm the page's failed check shows the
 correct troubleshooting text: `NFTABLES_TROUBLESHOOTING` for the PATH-rename
-path, or `EBPF_TROUBLESHOOTING` *with the daemon's own alert text appended*
-for the `ProcMonitorMethod: ebpf` path (`diagnostics/mod.rs`'s overlay always
-appends "opensnitchd reports: ..." — a bare `EBPF_TROUBLESHOOTING` with no
-appended daemon text there would mean the overlay isn't firing).
+path (unaffected by the daemon-alert overlay — the daemon doesn't emit a
+firewall-shaped alert in this scenario), or `EBPF_DAEMON_REPORTED_TROUBLESHOOTING`
+*with the daemon's own alert text appended* for the `ProcMonitorMethod: ebpf`
+path. The appended text always has the shape `opensnitchd reports (error|warning,
+<age> ago): <daemon's message>` — a bare troubleshooting string with no
+`opensnitchd reports (...)` suffix means the overlay isn't firing.
+**Important — clicking "Recheck" here also clears the stored alert** (see
+below), so this is your last chance to see the overlaid text before
+restoring the host; don't click it again until you've confirmed the text.
 
 **Restore the host** before moving on:
 
@@ -361,6 +373,15 @@ sudo mv "$(command -v nft).bak" "$(dirname "$(command -v nft)")/nft" 2>/dev/null
 # If ProcMonitorMethod was changed to ebpf, set it back to its prior value
 # (proc, unless you'd deliberately overridden it) and restart opensnitchd-dev.
 ```
+
+Unlike Step 6b's daemon-down/recovery cycle, restarting `opensnitchd-dev`
+alone does **not** clear a previously-surfaced daemon alert: `subscribe()`
+deliberately does not clear `DaemonAlertStore` (see `daemon_alerts`'s
+module doc — clearing on every reconnect both erased still-true alerts and
+raced the daemon's own queued-alert flush). After restoring the config and
+restarting the daemon, click "Recheck" once more (or wait for the next
+automatic recheck) to clear the stale overlay and confirm `ebpf_support`
+returns to whatever the local probe alone reports on this host.
 
 **If any of 6a-6c fail:** first confirm Step 5's tray-tooltip baseline
 already works on this host — if that's broken, the Daemon Health feature
