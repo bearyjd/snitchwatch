@@ -18,10 +18,29 @@ use tonic::transport::{Channel, Endpoint};
 
 /// The real daemon's `AskRule` deadline
 /// (`vendor/opensnitch/daemon/ui/client.go:366`, `context.WithTimeout(...,
-/// time.Second*120)`). `ask_rule` applies the same deadline so a bridge that
-/// never resolves a pending verdict surfaces as a test failure instead of
-/// hanging the test suite indefinitely — see issue #14.
+/// time.Second*120)` — confirmed 120s, not the ~15s issue #14 originally
+/// guessed). This is the documented real value and stays the default;
+/// `ask_rule` applies it so a bridge that never resolves a pending verdict
+/// surfaces as a *failure* instead of hanging indefinitely — see issue #14.
 pub const ASK_RULE_DEADLINE: Duration = Duration::from_secs(120);
+
+/// Test-time override for [`ASK_RULE_DEADLINE`], so a genuine hang fails a
+/// test suite in well under a minute instead of 120s. Set
+/// `SNITCHWATCH_MOCK_ASK_RULE_DEADLINE_MS` (e.g. via `just test`'s
+/// environment, or per-test with `std::env::set_var` before calling
+/// [`MockOpensnitchd::ask_rule`]) to a millisecond value to shrink it;
+/// unset means "use the real 120s value everywhere" — chosen over
+/// unconditionally shrinking the constant so this crate still documents
+/// (and, without the env var, actually exercises) the real daemon behavior.
+fn ask_rule_deadline() -> Duration {
+    match std::env::var("SNITCHWATCH_MOCK_ASK_RULE_DEADLINE_MS") {
+        Ok(ms) => match ms.parse::<u64>() {
+            Ok(ms) => Duration::from_millis(ms),
+            Err(_) => ASK_RULE_DEADLINE,
+        },
+        Err(_) => ASK_RULE_DEADLINE,
+    }
+}
 
 /// Errors the mock can surface to tests.
 #[derive(Debug, thiserror::Error)]
@@ -113,9 +132,10 @@ impl MockOpensnitchd {
     /// every mock-driven round-trip test while failing 100% of the time
     /// against a real daemon.
     pub async fn ask_rule(&mut self, conn: Connection) -> Result<Rule, MockError> {
-        let rule = tokio::time::timeout(ASK_RULE_DEADLINE, self.client.ask_rule(conn))
+        let deadline = ask_rule_deadline();
+        let rule = tokio::time::timeout(deadline, self.client.ask_rule(conn))
             .await
-            .map_err(|_elapsed| MockError::AskRuleTimedOut(ASK_RULE_DEADLINE))??
+            .map_err(|_elapsed| MockError::AskRuleTimedOut(deadline))??
             .into_inner();
         validate_rule_shape(&rule)?;
         Ok(rule)
@@ -172,29 +192,143 @@ impl MockOpensnitchd {
     }
 }
 
-/// Reject the class of malformed `Rule` the real daemon's `rule.Deserialize`
-/// rejects (`vendor/opensnitch/daemon/rule/rule.go:85-89`): `operator: None`
-/// ("Deserialize rule, Operator nil" → "invalid operator"), or an operator
-/// with an empty `type`/`operand`. A real daemon that rejects the reply
-/// falls through to `DefaultAction` instead of applying the verdict — see
-/// issue #14.
+/// Reject the class of malformed `Rule` a real daemon rejects — mirroring
+/// its ACTUAL acceptance path, not just `rule.Deserialize`. Two prior
+/// versions of this function only checked `Deserialize`
+/// (`vendor/opensnitch/daemon/rule/rule.go:85-89`, `operator: None` only),
+/// but real rejection mostly happens later, in `Operator.Compile()`
+/// (`vendor/opensnitch/daemon/rule/operator.go:109-214`, called from
+/// `loader.go:408` when the daemon loads/applies the rule) — `Deserialize`'s
+/// own `NewOperator` call never errors. See issue #14 security review FIX 4.
+///
+/// Checks, in the order the daemon would effectively hit them:
+///   1. `operator: None` (`Deserialize`, rule.go:85-89).
+///   2. Unknown `operator.type` (`Compile`, operator.go:207 — the final
+///      `else` branch, "Unknown Operator type").
+///   3. A `regexp`-typed operator whose `data` doesn't compile
+///      (`Compile`, operator.go:146-149) — lowercased first when
+///      `sensitive == false`, exactly as the daemon does, since case
+///      matters for what actually gets handed to `regexp.Compile`.
+///   4. `rule.duration` that's neither a named duration (`once`,
+///      `until restart`, `always`) nor `time.ParseDuration`-parseable
+///      (`loader.go:326` `isTemporary`, `loader.go:441`
+///      `scheduleTemporaryRule`'s `time.ParseDuration` call).
+///   5. An unsafe/empty rule name (`loader.go:162`) — this is a
+///      bridge-side contract stricter than what the daemon itself enforces
+///      (it has no such check at all, which is exactly issue #14 security
+///      review FIX 1's finding), kept here as a regression canary: this
+///      check is what would have caught FIX 1 at test time.
 // `MockError::Rpc(tonic::Status)` is already the large variant driving this;
 // the crate's public `MockError`-returning methods (`ask_rule`, `ping`, ...)
 // are exempted from this lint as public API, so this private helper needs
 // the same allowance rather than boxing just for its own sake.
 #[allow(clippy::result_large_err)]
 fn validate_rule_shape(rule: &Rule) -> Result<(), MockError> {
+    validate_rule_name(&rule.name)?;
+    validate_duration(&rule.duration)?;
+
     let operator = rule
         .operator
         .as_ref()
         .ok_or_else(|| MockError::InvalidRule("operator is None".to_string()))?;
-    if operator.r#type.is_empty() {
-        return Err(MockError::InvalidRule("operator.type is empty".to_string()));
+    validate_operator_compiles(operator)?;
+    Ok(())
+}
+
+/// The `operator.type` vocabulary the daemon actually recognizes
+/// (`vendor/opensnitch/daemon/rule/operator.go`'s `Type` consts: `Simple`,
+/// `Regexp`, `Complex`, `List`, `Network`, `Lists`).
+const KNOWN_OPERATOR_TYPES: &[&str] = &["simple", "regexp", "complex", "list", "network", "lists"];
+
+/// Mirrors `Operator.Compile()` (operator.go:109-214) for the subset this
+/// bridge actually emits (`simple`/`regexp` — see `translator::verdict`).
+/// Not a full port: `network`/`lists` compilation depends on daemon-local
+/// state (alias cache, loaded blocklists) this mock has no access to, and
+/// this bridge never emits those types for an `AskRule` reply, so they're
+/// only checked for a known type, not fully compiled.
+#[allow(clippy::result_large_err)]
+fn validate_operator_compiles(op: &snitchwatch_proto::protocol::Operator) -> Result<(), MockError> {
+    if !KNOWN_OPERATOR_TYPES.contains(&op.r#type.as_str()) {
+        return Err(MockError::InvalidRule(format!(
+            "unknown operator type: `{}`",
+            op.r#type
+        )));
     }
-    if operator.operand.is_empty() {
-        return Err(MockError::InvalidRule(
-            "operator.operand is empty".to_string(),
-        ));
+
+    if op.r#type == "regexp" {
+        // operator.go:146-148: lowercased before compiling when
+        // Sensitive == false — case affects what actually gets compiled.
+        let data = if op.sensitive {
+            op.data.clone()
+        } else {
+            op.data.to_lowercase()
+        };
+        if let Err(e) = regex::Regex::new(&data) {
+            return Err(MockError::InvalidRule(format!(
+                "operator.data does not compile as a regexp: {e}"
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+/// The daemon's three named `Rule.duration` values
+/// (`vendor/opensnitch/daemon/rule/rule.go:31-34`).
+const NAMED_DURATIONS: &[&str] = &["once", "until restart", "always"];
+
+#[allow(clippy::result_large_err)]
+fn validate_duration(duration: &str) -> Result<(), MockError> {
+    if NAMED_DURATIONS.contains(&duration) {
+        return Ok(());
+    }
+    if looks_like_go_duration(duration) {
+        return Ok(());
+    }
+    Err(MockError::InvalidRule(format!(
+        "duration `{duration}` is neither a named duration ({NAMED_DURATIONS:?}) nor \
+         Go-duration-parseable"
+    )))
+}
+
+/// Approximates Go's `time.ParseDuration` grammar closely enough to catch
+/// the malformed-duration class of bug: optional sign, then one or more
+/// `<number><unit>` segments (`ns`/`us`/`µs`/`ms`/`s`/`m`/`h`), or the bare
+/// literal `0` (which Go's parser special-cases as valid with no unit). This
+/// is NOT a byte-for-byte port of Go's parser — it doesn't need to be, only
+/// to reject/accept the same shapes this bridge could plausibly produce or
+/// regress into.
+fn looks_like_go_duration(s: &str) -> bool {
+    let unsigned = s.strip_prefix(['+', '-']).unwrap_or(s);
+    if unsigned.is_empty() {
+        return false;
+    }
+    if unsigned == "0" {
+        return true;
+    }
+    static GO_DURATION_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = GO_DURATION_RE.get_or_init(|| {
+        regex::Regex::new(r"^([0-9]+(\.[0-9]*)?(ns|us|µs|ms|s|m|h))+$").expect("valid regex")
+    });
+    re.is_match(unsigned)
+}
+
+/// Regression canary for issue #14 security review FIX 1: the daemon has NO
+/// rule-name validation of its own (it writes `Rule.name` verbatim to
+/// `<rules-dir>/<name>.json`, root-owned — see `validate_rule_shape`'s doc),
+/// so this bridge-side check is stricter than the real acceptance path on
+/// purpose. It exists to make a regression in
+/// `translator::verdict::sanitize_host_for_rule_name` fail a test instead of
+/// silently reintroducing a path-traversal-via-rule-name bug.
+#[allow(clippy::result_large_err)]
+fn validate_rule_name(name: &str) -> Result<(), MockError> {
+    if name.is_empty() {
+        return Err(MockError::InvalidRule("rule name is empty".to_string()));
+    }
+    if name.contains('/') {
+        return Err(MockError::InvalidRule(format!(
+            "rule name contains a path separator: `{name}`"
+        )));
     }
     Ok(())
 }
@@ -243,5 +377,116 @@ mod tests {
         let mut mock = MockOpensnitchd::connect(addr).await.unwrap();
         let echoed = mock.subscribe("opensnitchd-mock").await.unwrap();
         assert_eq!(echoed.name, "opensnitchd-mock");
+    }
+
+    // -- validate_rule_shape / FIX 4 (issue #14 security review) ---------
+
+    fn valid_operator() -> snitchwatch_proto::protocol::Operator {
+        snitchwatch_proto::protocol::Operator {
+            r#type: "simple".to_string(),
+            operand: "dest.host".to_string(),
+            data: "github.com".to_string(),
+            sensitive: false,
+            list: Vec::new(),
+        }
+    }
+
+    fn valid_rule() -> Rule {
+        Rule {
+            created: 0,
+            name: "snitchwatch-allow-github.com-443".to_string(),
+            description: String::new(),
+            enabled: true,
+            precedence: false,
+            nolog: false,
+            action: "allow".to_string(),
+            duration: "once".to_string(),
+            operator: Some(valid_operator()),
+        }
+    }
+
+    #[test]
+    fn validate_rule_shape_accepts_a_well_formed_rule() {
+        assert!(validate_rule_shape(&valid_rule()).is_ok());
+    }
+
+    #[test]
+    fn validate_rule_shape_rejects_none_operator() {
+        let mut rule = valid_rule();
+        rule.operator = None;
+        assert!(validate_rule_shape(&rule).is_err());
+    }
+
+    #[test]
+    fn validate_rule_shape_rejects_unknown_operator_type() {
+        let mut rule = valid_rule();
+        rule.operator.as_mut().unwrap().r#type = "bogus".to_string();
+        let err = validate_rule_shape(&rule).unwrap_err();
+        assert!(
+            matches!(err, MockError::InvalidRule(msg) if msg.contains("unknown operator type"))
+        );
+    }
+
+    #[test]
+    fn validate_rule_shape_rejects_uncompilable_regexp_data() {
+        let mut rule = valid_rule();
+        let op = rule.operator.as_mut().unwrap();
+        op.r#type = "regexp".to_string();
+        op.data = "(unclosed".to_string();
+        let err = validate_rule_shape(&rule).unwrap_err();
+        assert!(matches!(err, MockError::InvalidRule(msg) if msg.contains("does not compile")));
+    }
+
+    #[test]
+    fn validate_rule_shape_accepts_a_compilable_regexp() {
+        let mut rule = valid_rule();
+        let op = rule.operator.as_mut().unwrap();
+        op.r#type = "regexp".to_string();
+        op.data = r"^(?:[^.]+\.)*example\.com$".to_string();
+        assert!(validate_rule_shape(&rule).is_ok());
+    }
+
+    #[test]
+    fn validate_rule_shape_rejects_unnamed_unparseable_duration() {
+        let mut rule = valid_rule();
+        rule.duration = "not-a-duration".to_string();
+        let err = validate_rule_shape(&rule).unwrap_err();
+        assert!(matches!(err, MockError::InvalidRule(msg) if msg.contains("duration")));
+    }
+
+    #[test]
+    fn validate_rule_shape_accepts_go_duration_strings() {
+        for duration in ["5m", "30s", "1h30m", "0", "until restart", "always", "once"] {
+            let mut rule = valid_rule();
+            rule.duration = duration.to_string();
+            assert!(
+                validate_rule_shape(&rule).is_ok(),
+                "expected `{duration}` to be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_rule_shape_rejects_empty_rule_name() {
+        let mut rule = valid_rule();
+        rule.name = String::new();
+        let err = validate_rule_shape(&rule).unwrap_err();
+        assert!(matches!(err, MockError::InvalidRule(msg) if msg.contains("empty")));
+    }
+
+    #[test]
+    fn validate_rule_shape_rejects_rule_name_with_path_separator() {
+        // This is the check that would have caught issue #14 FIX 1 (path
+        // traversal via an unsanitized rule name) at test time.
+        let mut rule = valid_rule();
+        rule.name = "../../../../etc/cron.d/x".to_string();
+        let err = validate_rule_shape(&rule).unwrap_err();
+        assert!(matches!(err, MockError::InvalidRule(msg) if msg.contains("path separator")));
+    }
+
+    #[test]
+    fn ask_rule_deadline_defaults_to_the_real_120s_value() {
+        std::env::remove_var("SNITCHWATCH_MOCK_ASK_RULE_DEADLINE_MS");
+        assert_eq!(ask_rule_deadline(), ASK_RULE_DEADLINE);
     }
 }
