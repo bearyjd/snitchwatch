@@ -20,13 +20,21 @@ systemd `--user` service.
 
 ## 1. Layer the OpenSnitch daemon
 
-opensnitch is already packaged for Fedora, so this is a plain layered
-package — no COPR or custom RPM required:
+**Corrected 2026-07-31 (see issue #7):** opensnitch is *not* packaged in
+Fedora's repos or Bazzite's COPR set — `rpm-ostree install opensnitch`
+fails with "No match for argument". Layer the upstream GitHub release RPM
+instead (v1.8.0 matches this repo's vendored submodule pin):
 
 ```bash
-rpm-ostree install opensnitch
+curl -LO https://github.com/evilsocket/opensnitch/releases/download/v1.8.0/opensnitch-1.8.0-1.x86_64.rpm
+rpm-ostree install ./opensnitch-1.8.0-1.x86_64.rpm
 systemctl reboot
 ```
+
+Known caveat on kernels ≥ ~6.19: the RPM's bundled eBPF module
+(`opensnitch.o`) may fail to load (see issue #6). If
+`/var/log/opensnitchd.log` shows `unable to load eBPF module`, set
+`"ProcMonitorMethod": "proc"` in `/etc/opensnitchd/default-config.json`.
 
 After the reboot, confirm it layered:
 
