@@ -12,6 +12,9 @@
 use futures_util::{SinkExt, StreamExt};
 use mock_opensnitchd::MockOpensnitchd;
 use serde_json::json;
+use snitchwatch_bridge::daemon_watchdog::DAEMON_DOWN_TIMEOUT;
+use snitchwatch_bridge::tray_state::TrayState;
+use snitchwatch_bridge::ws_messages::ServerMessage;
 use snitchwatch_bridge_cli::{run, BridgeConfig};
 use snitchwatch_proto::protocol::Connection;
 use std::time::Duration;
@@ -250,6 +253,124 @@ async fn diagnostics_report_reflects_firewall_down_after_subscribe() {
         saw_firewall_failed,
         "expected a diagnosticsReport with a failed firewall_running check"
     );
+
+    bridge.shutdown();
+}
+
+/// The load-bearing test for issue #5: a real opensnitchd only pings when it
+/// has new stats events (see `daemon_watchdog`'s module doc), so an idle
+/// daemon stays connected but silent. Holding the `Notifications` stream
+/// open with zero pings for well past `DAEMON_DOWN_TIMEOUT` must NOT
+/// false-positive a `DaemonDown` transition, and the diagnostics report must
+/// still claim the daemon reachable.
+///
+/// Uses real wall-clock sleeps (not a paused tokio clock): this test spins
+/// up real TCP/Unix-socket IO end to end, and tokio's paused-clock
+/// auto-advance can fire a connect timeout before real IO completes when
+/// mixed with genuine sockets — see the sibling test's identical choice.
+#[tokio::test]
+async fn idle_daemon_with_open_notifications_stream_stays_reachable() {
+    let socket_dir = tempfile::tempdir().unwrap();
+    let cfg = BridgeConfig {
+        grpc_bind: "127.0.0.1:0".parse().unwrap(),
+        ws_socket_path: socket_dir.path().join("bridge.sock"),
+        cache_capacity: 1024,
+    };
+    let bridge = run(cfg).await.expect("bridge run failed");
+
+    let mut ws = connect_stream(&bridge.ws_socket_path, bridge.ws_token.as_str()).await;
+
+    // Mock opensnitchd connects and opens the Notifications stream, but
+    // never calls ping() — exactly the idle-but-connected shape observed
+    // live from a real daemon.
+    let mut mock = MockOpensnitchd::connect(bridge.grpc_addr).await.unwrap();
+    let (_reply_tx, _count_rx) = mock.open_notifications().await.unwrap();
+
+    // Sleep well past the timeout, across several watchdog ticks, with
+    // zero pings.
+    tokio::time::sleep(DAEMON_DOWN_TIMEOUT + Duration::from_secs(3)).await;
+
+    // The tray must never have flipped to DaemonDown.
+    assert_eq!(*bridge.tray_rx.borrow(), TrayState::Idle);
+
+    // A fresh diagnostics report must still claim the daemon reachable.
+    ws.send(Message::Text(
+        json!({ "action": "requestSnapshot" }).to_string(),
+    ))
+    .await
+    .expect("send requestSnapshot failed");
+
+    let mut saw_daemon_reachable_ok = false;
+    for _ in 0..20 {
+        let Some(Ok(Message::Text(text))) = tokio::time::timeout(Duration::from_secs(3), ws.next())
+            .await
+            .expect("timed out waiting for a WS message")
+        else {
+            continue;
+        };
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        if v.get("action").and_then(|a| a.as_str()) == Some("diagnosticsReport") {
+            let checks = v["checks"].as_array().unwrap();
+            saw_daemon_reachable_ok = checks
+                .iter()
+                .any(|c| c["kind"] == "daemon_reachable" && c["status"]["status"] == "ok");
+            break;
+        }
+    }
+    assert!(
+        saw_daemon_reachable_ok,
+        "expected a diagnosticsReport with daemon_reachable: ok while the \
+         Notifications stream stays open with zero pings"
+    );
+
+    bridge.shutdown();
+}
+
+/// Second half of issue #5's fix: once the daemon's side of the
+/// Notifications stream closes, the down transition must fire promptly —
+/// within one watchdog tick — rather than waiting out a fresh
+/// `DAEMON_DOWN_TIMEOUT` countdown from the close. `last_activity` was
+/// already stale (kept "alive" only by the open-stream override); closing
+/// the stream just removes that override, so the existing staleness applies
+/// immediately.
+///
+/// Real wall-clock sleeps, not a paused clock — see the previous test's doc
+/// comment for why.
+#[tokio::test]
+async fn notifications_stream_close_triggers_down_transition_within_one_tick() {
+    let socket_dir = tempfile::tempdir().unwrap();
+    let cfg = BridgeConfig {
+        grpc_bind: "127.0.0.1:0".parse().unwrap(),
+        ws_socket_path: socket_dir.path().join("bridge.sock"),
+        cache_capacity: 1024,
+    };
+    let mut bridge = run(cfg).await.expect("bridge run failed");
+
+    let mut mock = MockOpensnitchd::connect(bridge.grpc_addr).await.unwrap();
+    let (reply_tx, _count_rx) = mock.open_notifications().await.unwrap();
+
+    // Let last_activity age well past DAEMON_DOWN_TIMEOUT while the stream
+    // stays open, proving (as in the previous test) that staleness alone
+    // doesn't trip the watchdog here.
+    tokio::time::sleep(DAEMON_DOWN_TIMEOUT + Duration::from_secs(3)).await;
+    assert_eq!(*bridge.tray_rx.borrow(), TrayState::Idle);
+
+    let mut broadcast_rx = bridge.broadcast_tx.subscribe();
+
+    // Close the daemon's side of the stream (mirrors the daemon process
+    // exiting / dropping the RPC).
+    drop(reply_tx);
+
+    // A single watchdog tick should be enough — no further ping-staleness
+    // wait is needed since last_activity is already stale.
+    bridge.tray_rx.changed().await.unwrap();
+    assert_eq!(*bridge.tray_rx.borrow(), TrayState::DaemonDown);
+
+    let msg = tokio::time::timeout(Duration::from_secs(3), broadcast_rx.recv())
+        .await
+        .expect("timed out waiting for DiagnosticsReport")
+        .unwrap();
+    assert!(matches!(msg, ServerMessage::DiagnosticsReport { .. }));
 
     bridge.shutdown();
 }
