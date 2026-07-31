@@ -7,7 +7,7 @@
 //!     this is what the gRPC client task awaits before responding to AskRule
 
 use crate::tray_state::{TrayState, TrayStatePublisher};
-use crate::ws_messages::{ConnectionRow, VerdictDuration};
+use crate::ws_messages::{ConnectionRow, VerdictDuration, VerdictScope};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::oneshot;
@@ -25,13 +25,15 @@ pub enum Verdict {
 }
 
 /// What the `AskRule` gRPC handler needs to build the reply `Rule`: the
-/// allow/deny decision plus how long it should live. Carried over the same
-/// oneshot channel `Verdict` used to travel alone on — see
+/// allow/deny decision, how long it should live, and how broadly it should
+/// scope the resulting `Operator` (see `ws_messages::VerdictScope`). Carried
+/// over the same oneshot channel `Verdict` used to travel alone on — see
 /// `translator::verdict::verdict_to_rule`, the sole consumer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VerdictResolution {
     pub verdict: Verdict,
     pub duration: VerdictDuration,
+    pub scope: VerdictScope,
 }
 
 pub struct ConnectionCache {
@@ -128,13 +130,18 @@ impl ConnectionCache {
         row_id: &str,
         verdict: Verdict,
         duration: VerdictDuration,
+        scope: VerdictScope,
     ) -> Result<(), CacheError> {
         let sender = self
             .pending
             .remove(row_id)
             .ok_or_else(|| CacheError::NotPending(row_id.to_string()))?;
         // It's fine if the receiver was dropped (e.g. gRPC stream broke).
-        let _ = sender.send(VerdictResolution { verdict, duration });
+        let _ = sender.send(VerdictResolution {
+            verdict,
+            duration,
+            scope,
+        });
 
         // Update the row's action so future re-renders show it as decided,
         // and record which rule now governs this connection: the same
@@ -255,8 +262,13 @@ mod tests {
     async fn resolve_fires_oneshot_and_updates_row() {
         let mut c = ConnectionCache::new(10);
         let rx = c.insert_pending(pending_row("p1"));
-        c.resolve("p1", Verdict::Allow, VerdictDuration::Once)
-            .unwrap();
+        c.resolve(
+            "p1",
+            Verdict::Allow,
+            VerdictDuration::Once,
+            VerdictScope::ThisHost,
+        )
+        .unwrap();
         let received = rx.await.unwrap();
         assert_eq!(received.verdict, Verdict::Allow);
         assert_eq!(received.duration, VerdictDuration::Once);
@@ -267,8 +279,13 @@ mod tests {
     async fn resolve_carries_the_requested_duration() {
         let mut c = ConnectionCache::new(10);
         let rx = c.insert_pending(pending_row("p1"));
-        c.resolve("p1", Verdict::Allow, VerdictDuration::Always)
-            .unwrap();
+        c.resolve(
+            "p1",
+            Verdict::Allow,
+            VerdictDuration::Always,
+            VerdictScope::ThisHost,
+        )
+        .unwrap();
         let received = rx.await.unwrap();
         assert_eq!(received.duration, VerdictDuration::Always);
     }
@@ -277,8 +294,13 @@ mod tests {
     async fn resolve_populates_matched_rule_with_the_synthetic_rule_name() {
         let mut c = ConnectionCache::new(10);
         let _rx = c.insert_pending(pending_row("p1"));
-        c.resolve("p1", Verdict::Deny, VerdictDuration::Once)
-            .unwrap();
+        c.resolve(
+            "p1",
+            Verdict::Deny,
+            VerdictDuration::Once,
+            VerdictScope::ThisHost,
+        )
+        .unwrap();
         assert_eq!(
             c.rows()[0].matched_rule.as_deref(),
             Some("snitchwatch-deny-h-443")
@@ -289,7 +311,12 @@ mod tests {
     fn resolve_unknown_row_errors() {
         let mut c = ConnectionCache::new(10);
         let err = c
-            .resolve("nope", Verdict::Allow, VerdictDuration::Once)
+            .resolve(
+                "nope",
+                Verdict::Allow,
+                VerdictDuration::Once,
+                VerdictScope::ThisHost,
+            )
             .unwrap_err();
         assert!(matches!(err, CacheError::NotPending(_)));
     }
@@ -354,7 +381,12 @@ mod tray_state_tests {
         rx.changed().await.unwrap();
 
         cache
-            .resolve("1", Verdict::Allow, VerdictDuration::Once)
+            .resolve(
+                "1",
+                Verdict::Allow,
+                VerdictDuration::Once,
+                VerdictScope::ThisHost,
+            )
             .unwrap();
         rx.changed().await.unwrap();
         assert_eq!(*rx.borrow(), TrayState::Idle);

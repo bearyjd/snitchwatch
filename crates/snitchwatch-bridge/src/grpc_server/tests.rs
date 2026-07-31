@@ -206,7 +206,7 @@ async fn subscribe_echoes_config() {
 
 use crate::cache::connections::Verdict;
 use crate::translator::connection::ask_row_id;
-use crate::ws_messages::VerdictDuration;
+use crate::ws_messages::{VerdictDuration, VerdictScope};
 
 #[tokio::test]
 async fn ask_rule_blocks_until_cache_resolves_with_allow() {
@@ -267,7 +267,12 @@ async fn ask_rule_blocks_until_cache_resolves_with_allow() {
     cache
         .lock()
         .await
-        .resolve(&row_id, Verdict::Allow, VerdictDuration::Once)
+        .resolve(
+            &row_id,
+            Verdict::Allow,
+            VerdictDuration::Once,
+            VerdictScope::ThisHost,
+        )
         .unwrap();
 
     let rule = ask_handle.await.unwrap().unwrap().into_inner();
@@ -328,7 +333,12 @@ async fn ask_rule_returns_deny_rule_when_resolved_with_deny() {
         if cache
             .lock()
             .await
-            .resolve(&row_id, Verdict::Deny, VerdictDuration::Once)
+            .resolve(
+                &row_id,
+                Verdict::Deny,
+                VerdictDuration::Once,
+                VerdictScope::ThisHost,
+            )
             .is_ok()
         {
             break;
@@ -393,20 +403,24 @@ async fn two_concurrent_ask_rules_get_distinct_ask_ids() {
     assert!(seen.contains(&ask_row_id(1)));
     assert!(seen.contains(&ask_row_id(2)));
 
-    let _ = cache
-        .lock()
-        .await
-        .resolve(&ask_row_id(1), Verdict::Deny, VerdictDuration::Once);
-    let _ = cache
-        .lock()
-        .await
-        .resolve(&ask_row_id(2), Verdict::Deny, VerdictDuration::Once);
+    let _ = cache.lock().await.resolve(
+        &ask_row_id(1),
+        Verdict::Deny,
+        VerdictDuration::Once,
+        VerdictScope::ThisHost,
+    );
+    let _ = cache.lock().await.resolve(
+        &ask_row_id(2),
+        Verdict::Deny,
+        VerdictDuration::Once,
+        VerdictScope::ThisHost,
+    );
 }
 
 #[tokio::test(start_paused = true)]
 async fn ask_rule_deny_publishes_recent_block_then_reverts_to_idle() {
     use crate::translator::connection::ask_row_id;
-    use crate::ws_messages::VerdictDuration;
+    use crate::ws_messages::{VerdictDuration, VerdictScope};
 
     let tray_pub = Arc::new(crate::tray_state::TrayStatePublisher::new());
     let cache = Arc::new(Mutex::new(ConnectionCache::with_tray_publisher(
@@ -445,7 +459,12 @@ async fn ask_rule_deny_publishes_recent_block_then_reverts_to_idle() {
     cache
         .lock()
         .await
-        .resolve(&ask_row_id(1), Verdict::Deny, VerdictDuration::Once)
+        .resolve(
+            &ask_row_id(1),
+            Verdict::Deny,
+            VerdictDuration::Once,
+            VerdictScope::ThisHost,
+        )
         .unwrap();
     ask_handle.await.unwrap().unwrap();
 
@@ -465,7 +484,7 @@ async fn ask_rule_deny_publishes_recent_block_then_reverts_to_idle() {
 #[tokio::test(start_paused = true)]
 async fn second_deny_within_ttl_supersedes_first_blocks_revert_timer() {
     use crate::translator::connection::ask_row_id;
-    use crate::ws_messages::VerdictDuration;
+    use crate::ws_messages::{VerdictDuration, VerdictScope};
 
     let tray_pub = Arc::new(crate::tray_state::TrayStatePublisher::new());
     let cache = Arc::new(Mutex::new(ConnectionCache::with_tray_publisher(
@@ -497,7 +516,12 @@ async fn second_deny_within_ttl_supersedes_first_blocks_revert_timer() {
     cache
         .lock()
         .await
-        .resolve(&ask_row_id(1), Verdict::Deny, VerdictDuration::Once)
+        .resolve(
+            &ask_row_id(1),
+            Verdict::Deny,
+            VerdictDuration::Once,
+            VerdictScope::ThisHost,
+        )
         .unwrap();
     ask1.await.unwrap().unwrap();
     tray_rx.changed().await.unwrap();
@@ -518,7 +542,12 @@ async fn second_deny_within_ttl_supersedes_first_blocks_revert_timer() {
     cache
         .lock()
         .await
-        .resolve(&ask_row_id(2), Verdict::Deny, VerdictDuration::Once)
+        .resolve(
+            &ask_row_id(2),
+            Verdict::Deny,
+            VerdictDuration::Once,
+            VerdictScope::ThisHost,
+        )
         .unwrap();
     ask2.await.unwrap().unwrap();
     tray_rx.changed().await.unwrap();
@@ -613,7 +642,12 @@ async fn ask_rule_prompts_normally_when_not_paused() {
         if cache
             .lock()
             .await
-            .resolve(&ask_row_id(1), Verdict::Allow, VerdictDuration::Once)
+            .resolve(
+                &ask_row_id(1),
+                Verdict::Allow,
+                VerdictDuration::Once,
+                VerdictScope::ThisHost,
+            )
             .is_ok()
         {
             break;

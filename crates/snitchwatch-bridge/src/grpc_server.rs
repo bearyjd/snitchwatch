@@ -256,6 +256,7 @@ impl Ui for UiService {
             return Ok(Response::new(verdict_to_rule(
                 Verdict::Allow,
                 VerdictDuration::Once,
+                crate::ws_messages::VerdictScope::ThisHost,
                 &conn,
                 now_secs,
             )));
@@ -299,6 +300,7 @@ impl Ui for UiService {
         Ok(Response::new(verdict_to_rule(
             resolution.verdict,
             resolution.duration,
+            resolution.scope,
             &conn,
             now_secs,
         )))
