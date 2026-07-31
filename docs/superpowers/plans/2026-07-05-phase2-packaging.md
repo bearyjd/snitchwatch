@@ -120,14 +120,19 @@ fixed target (the bridge-cli otherwise defaults to an ephemeral port).
     push-style all-clear report on re-subscribe with no manual recheck.
     Idle-daemon false-DaemonDown also re-verified fixed live (all four
     checks Ok with a completely idle daemon).
-  - [ ] **Still open on the live checklist:** verdict round-trip under
-    sustained interception (plus the unexplained absence of nftables
-    queue rules during steady state — needs root-side diagnosis), the
-    GUI-visual halves of Steps 5/6 (tray icon + banner/page rendering on
-    a real compositor need human eyes), and runbook Step 6c's
-    daemon-alert path against the merged issue #6 fix (PR #11).
-    Issues #5/#6/#7 themselves are all fixed and closed (PRs #9, #11,
-    #10 respectively).
+  - [x] **Verdict round-trip under sustained interception (live, later
+    2026-07-31):** with a root daemon and `ProcMonitorMethod: ebpf`, a
+    real intercepted connection (`tailscaled → 71.191.10.17`) was asked,
+    answered allow over the WS Unix socket, and accepted. The earlier
+    "no nftables queue rules / one ask ever" observation — and issue
+    #6's "eBPF incompatible with kernel 6.19" premise — were both the
+    same *rootless-container permissions* artifact (see issue #6's
+    post-close correction comment); under root, ebpf loads and
+    interception is sustained.
+  - [ ] **Still open on the live checklist:** the GUI-visual halves of
+    Steps 5/6 (tray icon + banner/page rendering on a real compositor
+    need human eyes). Issues #5/#6/#7 are all fixed and closed
+    (PRs #9, #11, #10).
 - [ ] **Not verifiable in the CI sandbox:** actual `bluebuild build`,
   `flatpak-builder` run, live opensnitchd dial-in, the closed-window
   AskRule round-trip, and (added 2026-07-12) the `DaemonDown`/

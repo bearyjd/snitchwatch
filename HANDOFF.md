@@ -57,10 +57,16 @@ section.
 re-verified live: idle daemon reads alive, down transition now fires in
 ~2s via stream-close with a consistent report, recovery pushes an
 all-clear without a recheck), #7 via PR #10 (recipe/docs install the
-upstream v1.8.0 release RPM; shipped config uses `ProcMonitorMethod:
-proc`), #6 via PR #11 (daemon-reported alerts overlay onto the
-diagnostics checks — text-classified, since real v1.8.0 alerts are all
-`GENERIC`; alerts persist until a user-driven Recheck). Remaining
+upstream v1.8.0 release RPM), #6 via PR #11 (daemon-reported alerts
+overlay onto the diagnostics checks — text-classified, since real v1.8.0
+alerts are all `GENERIC`; alerts persist until a user-driven Recheck).
+**Correction:** issue #6's "eBPF incompatible with kernel 6.19" premise
+was a mis-diagnosis — the failure was rootless-container permissions;
+under root, ebpf loads fine on 6.19 (see issue #6's post-close comment).
+The shipped config keeps upstream's `ProcMonitorMethod: ebpf` (PR #10
+briefly shipped `proc`; reverted). Also verified live along the way:
+sustained interception + a real verdict round-trip (a `tailscaled`
+connection asked, answered allow over WS, accepted). Remaining
 real-hardware items are listed in the phase2 plan's acceptance section —
 mostly GUI-visual checks and the sustained-interception/queue-rules
 question.
