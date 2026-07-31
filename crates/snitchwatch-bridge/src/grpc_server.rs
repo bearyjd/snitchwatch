@@ -5,7 +5,9 @@
 //! `grpc_client.rs` and `translator/downstream.rs` envelope hack.
 
 use crate::cache::connections::{ConnectionCache, Verdict};
+use crate::daemon_alerts::DaemonAlertStore;
 use crate::daemon_liveness::StreamGuard;
+use crate::diagnostics::DiagnosticsCtx;
 use crate::notice::NoticeBus;
 use crate::translator::connection::{connection_to_row, event_to_row};
 use crate::translator::verdict::verdict_to_rule;
@@ -18,12 +20,12 @@ use snitchwatch_proto::protocol::{
 };
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::Duration;
 use tokio::sync::{broadcast, Mutex};
 use tokio_stream::Stream;
 use tonic::{Request, Response, Status, Streaming};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 /// Re-exported so existing call sites (and anything that historically
 /// imported it from here) keep working; `daemon_watchdog`/`diagnostics` now
@@ -69,6 +71,28 @@ pub struct UiService {
     /// assembler (via [`Self::firewall_status_handle`]) alongside the local
     /// kernel checks. `None` until the daemon has subscribed at least once.
     firewall_status: Arc<StdMutex<Option<bool>>>,
+    /// Most recent ERROR/WARNING alert per `Alert.What`, recorded by
+    /// `post_alert` and overlaid by `DiagnosticsCtx::report()` onto the
+    /// existing checks (see `daemon_alerts` module doc for the issue #6
+    /// rationale). Deliberately *not* cleared on `subscribe()` — see that
+    /// module's doc comment for why; it's cleared explicitly by
+    /// `ClientMessage::RecheckDiagnostics` instead (via
+    /// `DiagnosticsCtx::clear_alerts`, in `snitchwatch-bridge-cli::run`).
+    alert_store: Arc<DaemonAlertStore>,
+    /// Late-bound handle to the full diagnostics assembler, so `post_alert`
+    /// can push a fresh `DiagnosticsReport` the moment a daemon alert
+    /// arrives, rather than waiting for the next poll/recheck.
+    ///
+    /// This can't be a constructor parameter: `DiagnosticsCtx::new` needs
+    /// `firewall_status_handle()`/`alert_store_handle()` from an already-
+    /// constructed `UiService`, so building it first isn't possible without
+    /// either duplicating that state outside `UiService` or breaking every
+    /// existing test call site that only expects the five original
+    /// constructor args. `snitchwatch-bridge-cli::run` fills this in via
+    /// [`Self::diagnostics_ctx_slot`] once `DiagnosticsCtx` exists; unset
+    /// (e.g. in most unit tests here) means `post_alert` still records the
+    /// alert but skips the push broadcast.
+    diagnostics_ctx: Arc<OnceLock<Arc<DiagnosticsCtx>>>,
 }
 
 impl UiService {
@@ -89,6 +113,8 @@ impl UiService {
             block_generation: Arc::new(AtomicU64::new(0)),
             filtering_paused,
             firewall_status: Arc::new(StdMutex::new(None)),
+            alert_store: Arc::new(DaemonAlertStore::new()),
+            diagnostics_ctx: Arc::new(OnceLock::new()),
         }
     }
 
@@ -111,6 +137,23 @@ impl UiService {
     /// `liveness_handle`.
     pub fn firewall_status_handle(&self) -> Arc<StdMutex<Option<bool>>> {
         self.firewall_status.clone()
+    }
+
+    /// Handle to the daemon-alert store, for `DiagnosticsCtx::new` to overlay
+    /// onto its checks. Exposed as an accessor for the same reason as
+    /// `firewall_status_handle`.
+    pub fn alert_store_handle(&self) -> Arc<DaemonAlertStore> {
+        self.alert_store.clone()
+    }
+
+    /// Late-binds the diagnostics assembler `post_alert` pushes a fresh
+    /// report through. Callable exactly once per `UiService`; a second call
+    /// is a no-op (mirrors `OnceLock::set`'s own semantics) since only one
+    /// `DiagnosticsCtx` is ever constructed per bridge run. See
+    /// [`Self::diagnostics_ctx`]'s doc comment for why this is late-bound
+    /// rather than a constructor parameter.
+    pub fn set_diagnostics_ctx(&self, ctx: Arc<DiagnosticsCtx>) {
+        let _ = self.diagnostics_ctx.set(ctx);
     }
 
     /// Publish `TrayState::RecentBlock` and schedule its own revert after
@@ -275,6 +318,9 @@ impl Ui for UiService {
                 .unwrap_or_else(|e| e.into_inner());
             *guard = Some(cfg.is_firewall_running);
         }
+        // Deliberately does NOT clear `alert_store` — see that field's doc
+        // comment and `daemon_alerts`'s module doc for why a fresh
+        // `subscribe()` is the wrong trigger for that.
         Ok(Response::new(cfg))
     }
 
@@ -282,6 +328,52 @@ impl Ui for UiService {
         self.liveness.touch();
         let alert = request.into_inner();
         info!(id = alert.id, type_ = alert.r#type, "alert received");
+
+        // An unrecognized `What` value used to be coerced to `Generic` —
+        // now that `Generic` is a meaningful bucket the diagnostics overlay
+        // text-classifies (see `diagnostics::classify_generic_alert_text`),
+        // silently relabeling a genuinely-unknown value as `Generic` would
+        // feed the classifier data that was never actually reported as
+        // GENERIC. Skip recording instead.
+        let Ok(what) = snitchwatch_proto::protocol::alert::What::try_from(alert.what) else {
+            debug!(
+                what = alert.what,
+                "post_alert: unrecognized What value, not recording"
+            );
+            return Ok(Response::new(MsgResponse { id: alert.id }));
+        };
+        let text = match &alert.data {
+            Some(snitchwatch_proto::protocol::alert::Data::Text(text)) => Some(text.clone()),
+            Some(_) => {
+                debug!("post_alert: dropping non-text alert payload");
+                None
+            }
+            None => None,
+        };
+        if let Some(text) = text {
+            self.alert_store.record(what, alert.r#type, text);
+            // Push a fresh report immediately so the GUI's diagnostics
+            // banner reacts without waiting for a manual recheck. Recording
+            // above already happened even if no `DiagnosticsCtx` is wired up
+            // yet (e.g. most unit tests here) — only the push is skipped.
+            if let Some(ctx) = self.diagnostics_ctx.get() {
+                // `receiver_count() > 0` is a cosmetic short-circuit, not a
+                // correctness guard: `broadcast::Sender::send` already
+                // returns `Err` (silently handled below) with zero
+                // receivers, and the alert is retained in `alert_store`
+                // either way — a client that subscribes later still gets it
+                // via the next `report()`.
+                if self.broadcast.receiver_count() > 0 {
+                    let msg = ServerMessage::DiagnosticsReport {
+                        checks: ctx.report(),
+                    };
+                    if let Err(e) = self.broadcast.send(msg) {
+                        warn!(error = %e, "post_alert: broadcast send failed");
+                    }
+                }
+            }
+        }
+
         Ok(Response::new(MsgResponse { id: alert.id }))
     }
 
@@ -331,630 +423,5 @@ impl Ui for UiService {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use snitchwatch_proto::protocol::ui_client::UiClient;
-    use std::time::Duration;
-    use tokio::sync::{broadcast, Mutex};
-    use tonic::transport::Server;
-
-    // DaemonLiveness/StreamGuard's own unit tests now live in
-    // `daemon_liveness.rs`, next to the type they test.
-
-    async fn spawn_test_service() -> std::net::SocketAddr {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-
-        let cache = Arc::new(Mutex::new(ConnectionCache::new(64)));
-        let (tx, _rx) = broadcast::channel(16);
-        let tray_pub = Arc::new(crate::tray_state::TrayStatePublisher::new());
-        let notice_bus = Arc::new(crate::notice::NoticeBus::new());
-        let svc = UiService::new(
-            cache,
-            tx,
-            tray_pub,
-            notice_bus,
-            Arc::new(AtomicBool::new(false)),
-        )
-        .into_server();
-
-        tokio::spawn(async move {
-            Server::builder()
-                .add_service(svc)
-                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
-                .await
-                .ok();
-        });
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        addr
-    }
-
-    #[tokio::test]
-    async fn ping_round_trips_id() {
-        let addr = spawn_test_service().await;
-        let channel = tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
-            .unwrap()
-            .connect()
-            .await
-            .unwrap();
-        let mut client = UiClient::new(channel);
-        let reply = client
-            .ping(PingRequest {
-                id: 99,
-                stats: None,
-            })
-            .await
-            .unwrap()
-            .into_inner();
-        assert_eq!(reply.id, 99);
-    }
-
-    #[tokio::test]
-    async fn ping_with_stats_events_inserts_decided_rows_with_matched_rule() {
-        use snitchwatch_proto::protocol::{Event, Rule as ProtoRule, Statistics};
-
-        let cache = Arc::new(Mutex::new(ConnectionCache::new(64)));
-        let (tx, mut rx) = broadcast::channel::<ServerMessage>(16);
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let tray_pub = Arc::new(crate::tray_state::TrayStatePublisher::new());
-        let notice_bus = Arc::new(crate::notice::NoticeBus::new());
-        let svc = UiService::new(
-            cache.clone(),
-            tx,
-            tray_pub,
-            notice_bus,
-            Arc::new(AtomicBool::new(false)),
-        )
-        .into_server();
-        tokio::spawn(async move {
-            Server::builder()
-                .add_service(svc)
-                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
-                .await
-                .ok();
-        });
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
-        let channel = tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
-            .unwrap()
-            .connect()
-            .await
-            .unwrap();
-        let mut client = UiClient::new(channel);
-
-        let event = Event {
-            time: "2026-07-05T00:00:00Z".to_string(),
-            connection: Some(Connection {
-                protocol: "tcp".into(),
-                dst_host: "example.com".into(),
-                dst_ip: "93.184.216.34".into(),
-                dst_port: 443,
-                process_path: "/usr/bin/curl".into(),
-                ..Default::default()
-            }),
-            rule: Some(ProtoRule {
-                created: 1_700_000_000,
-                name: "899-curl-allow-out.json".into(),
-                description: String::new(),
-                enabled: true,
-                precedence: false,
-                nolog: false,
-                action: "allow".into(),
-                duration: "always".into(),
-                operator: None,
-            }),
-            unixnano: 1_700_000_000_000_000_000,
-        };
-
-        let reply = client
-            .ping(PingRequest {
-                id: 7,
-                stats: Some(Statistics {
-                    events: vec![event],
-                    ..Default::default()
-                }),
-            })
-            .await
-            .unwrap()
-            .into_inner();
-        assert_eq!(reply.id, 7);
-
-        let broadcasted = tokio::time::timeout(Duration::from_secs(2), rx.recv())
-            .await
-            .expect("ping did not broadcast the decided row")
-            .expect("broadcast error");
-        match broadcasted {
-            ServerMessage::InsertConnectionRows { rows } => {
-                assert_eq!(rows.len(), 1);
-                assert_eq!(rows[0].dst_host, "example.com");
-                assert_eq!(rows[0].action.as_deref(), Some("allow"));
-                assert_eq!(
-                    rows[0].matched_rule.as_deref(),
-                    Some("899-curl-allow-out.json")
-                );
-            }
-            other => panic!("expected InsertConnectionRows, got {other:?}"),
-        }
-        assert_eq!(cache.lock().await.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn ping_without_stats_is_a_noop() {
-        let addr = spawn_test_service().await;
-        let channel = tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
-            .unwrap()
-            .connect()
-            .await
-            .unwrap();
-        let mut client = UiClient::new(channel);
-        let reply = client
-            .ping(PingRequest { id: 3, stats: None })
-            .await
-            .unwrap()
-            .into_inner();
-        assert_eq!(reply.id, 3);
-    }
-
-    #[tokio::test]
-    async fn subscribe_captures_firewall_status() {
-        let cache = Arc::new(Mutex::new(ConnectionCache::new(64)));
-        let (tx, _rx) = broadcast::channel::<ServerMessage>(16);
-        let tray_pub = Arc::new(crate::tray_state::TrayStatePublisher::new());
-        let notice_bus = Arc::new(crate::notice::NoticeBus::new());
-        let filtering_paused = Arc::new(AtomicBool::new(false));
-        let service = UiService::new(cache, tx, tray_pub, notice_bus, filtering_paused);
-
-        let handle = service.firewall_status_handle();
-        assert_eq!(*handle.lock().unwrap(), None);
-
-        let cfg = ClientConfig {
-            is_firewall_running: true,
-            ..Default::default()
-        };
-        let _ = service.subscribe(Request::new(cfg)).await.unwrap();
-
-        assert_eq!(*handle.lock().unwrap(), Some(true));
-    }
-
-    #[tokio::test]
-    async fn subscribe_echoes_config() {
-        let addr = spawn_test_service().await;
-        let channel = tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
-            .unwrap()
-            .connect()
-            .await
-            .unwrap();
-        let mut client = UiClient::new(channel);
-        let cfg = ClientConfig {
-            id: 1,
-            name: "opensnitchd-test".to_string(),
-            version: "1.6.0".to_string(),
-            ..Default::default()
-        };
-        let echoed = client.subscribe(cfg.clone()).await.unwrap().into_inner();
-        assert_eq!(echoed.name, cfg.name);
-        assert_eq!(echoed.version, cfg.version);
-    }
-
-    use crate::cache::connections::Verdict;
-    use crate::translator::connection::ask_row_id;
-    use crate::ws_messages::VerdictDuration;
-
-    #[tokio::test]
-    async fn ask_rule_blocks_until_cache_resolves_with_allow() {
-        let cache = Arc::new(Mutex::new(ConnectionCache::new(64)));
-        let (tx, mut rx) = broadcast::channel::<ServerMessage>(16);
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let tray_pub = Arc::new(crate::tray_state::TrayStatePublisher::new());
-        let notice_bus = Arc::new(crate::notice::NoticeBus::new());
-        let svc = UiService::new(
-            cache.clone(),
-            tx,
-            tray_pub,
-            notice_bus,
-            Arc::new(AtomicBool::new(false)),
-        )
-        .into_server();
-        tokio::spawn(async move {
-            Server::builder()
-                .add_service(svc)
-                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
-                .await
-                .ok();
-        });
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
-        let channel = tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
-            .unwrap()
-            .connect()
-            .await
-            .unwrap();
-        let mut client = UiClient::new(channel);
-
-        let ask_handle = tokio::spawn(async move {
-            client
-                .ask_rule(Connection {
-                    protocol: "tcp".into(),
-                    dst_host: "example.com".into(),
-                    dst_ip: "93.184.216.34".into(),
-                    dst_port: 443,
-                    process_path: "/usr/bin/curl".into(),
-                    ..Default::default()
-                })
-                .await
-        });
-
-        let inserted = tokio::time::timeout(Duration::from_secs(2), rx.recv())
-            .await
-            .expect("ask_rule did not broadcast")
-            .expect("broadcast error");
-        let row_id = match inserted {
-            ServerMessage::InsertConnectionRows { rows } => rows[0].id.clone(),
-            other => panic!("expected InsertConnectionRows, got {other:?}"),
-        };
-        assert_eq!(row_id, ask_row_id(1));
-
-        cache
-            .lock()
-            .await
-            .resolve(&row_id, Verdict::Allow, VerdictDuration::Once)
-            .unwrap();
-
-        let rule = ask_handle.await.unwrap().unwrap().into_inner();
-        assert_eq!(rule.action, "allow");
-        assert_eq!(rule.duration, "once");
-        assert!(!rule.name.is_empty());
-    }
-
-    #[tokio::test]
-    async fn ask_rule_returns_deny_rule_when_resolved_with_deny() {
-        let cache = Arc::new(Mutex::new(ConnectionCache::new(64)));
-        let (tx, _rx) = broadcast::channel::<ServerMessage>(16);
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let tray_pub = Arc::new(crate::tray_state::TrayStatePublisher::new());
-        let notice_bus = Arc::new(crate::notice::NoticeBus::new());
-        let svc = UiService::new(
-            cache.clone(),
-            tx,
-            tray_pub,
-            notice_bus,
-            Arc::new(AtomicBool::new(false)),
-        )
-        .into_server();
-        tokio::spawn(async move {
-            Server::builder()
-                .add_service(svc)
-                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
-                .await
-                .ok();
-        });
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
-        let channel = tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
-            .unwrap()
-            .connect()
-            .await
-            .unwrap();
-        let mut client = UiClient::new(channel);
-
-        let ask_handle = tokio::spawn(async move {
-            client
-                .ask_rule(Connection {
-                    protocol: "tcp".into(),
-                    dst_host: "tracker.example.com".into(),
-                    dst_ip: "1.2.3.4".into(),
-                    dst_port: 80,
-                    process_path: "/usr/bin/curl".into(),
-                    ..Default::default()
-                })
-                .await
-        });
-
-        let row_id = ask_row_id(1);
-        for _ in 0..50 {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-            if cache
-                .lock()
-                .await
-                .resolve(&row_id, Verdict::Deny, VerdictDuration::Once)
-                .is_ok()
-            {
-                break;
-            }
-        }
-
-        let rule = ask_handle.await.unwrap().unwrap().into_inner();
-        assert_eq!(rule.action, "deny");
-    }
-
-    #[tokio::test]
-    async fn two_concurrent_ask_rules_get_distinct_ask_ids() {
-        let cache = Arc::new(Mutex::new(ConnectionCache::new(64)));
-        let (tx, mut rx) = broadcast::channel::<ServerMessage>(16);
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let tray_pub = Arc::new(crate::tray_state::TrayStatePublisher::new());
-        let notice_bus = Arc::new(crate::notice::NoticeBus::new());
-        let svc = UiService::new(
-            cache.clone(),
-            tx,
-            tray_pub,
-            notice_bus,
-            Arc::new(AtomicBool::new(false)),
-        )
-        .into_server();
-        tokio::spawn(async move {
-            Server::builder()
-                .add_service(svc)
-                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
-                .await
-                .ok();
-        });
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
-        for _ in 0..2 {
-            let endpoint = format!("http://{addr}");
-            tokio::spawn(async move {
-                let channel = tonic::transport::Endpoint::from_shared(endpoint)
-                    .unwrap()
-                    .connect()
-                    .await
-                    .unwrap();
-                let mut client = UiClient::new(channel);
-                let _ = client.ask_rule(Connection::default()).await;
-            });
-        }
-
-        let mut seen = std::collections::HashSet::new();
-        while seen.len() < 2 {
-            let msg = tokio::time::timeout(Duration::from_secs(2), rx.recv())
-                .await
-                .expect("missed broadcast")
-                .expect("broadcast error");
-            if let ServerMessage::InsertConnectionRows { rows } = msg {
-                for r in rows {
-                    seen.insert(r.id);
-                }
-            }
-        }
-        assert!(seen.contains(&ask_row_id(1)));
-        assert!(seen.contains(&ask_row_id(2)));
-
-        let _ = cache
-            .lock()
-            .await
-            .resolve(&ask_row_id(1), Verdict::Deny, VerdictDuration::Once);
-        let _ = cache
-            .lock()
-            .await
-            .resolve(&ask_row_id(2), Verdict::Deny, VerdictDuration::Once);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn ask_rule_deny_publishes_recent_block_then_reverts_to_idle() {
-        use crate::translator::connection::ask_row_id;
-        use crate::ws_messages::VerdictDuration;
-
-        let tray_pub = Arc::new(crate::tray_state::TrayStatePublisher::new());
-        let cache = Arc::new(Mutex::new(ConnectionCache::with_tray_publisher(
-            64,
-            tray_pub.clone(),
-        )));
-        let (tx, _rx) = broadcast::channel::<ServerMessage>(16);
-        let notice_bus = Arc::new(crate::notice::NoticeBus::new());
-        let svc = UiService::new(
-            cache.clone(),
-            tx,
-            tray_pub.clone(),
-            notice_bus,
-            Arc::new(AtomicBool::new(false)),
-        );
-
-        let mut tray_rx = tray_pub.subscribe();
-
-        let svc_for_ask = svc.clone();
-        let ask_handle = tokio::spawn(async move {
-            svc_for_ask
-                .ask_rule(Request::new(Connection {
-                    protocol: "tcp".into(),
-                    dst_host: "tracker.example.com".into(),
-                    dst_ip: "1.2.3.4".into(),
-                    dst_port: 80,
-                    process_path: "/usr/bin/curl".into(),
-                    ..Default::default()
-                }))
-                .await
-        });
-
-        tray_rx.changed().await.unwrap();
-        assert_eq!(*tray_rx.borrow(), TrayState::Pending(1));
-
-        cache
-            .lock()
-            .await
-            .resolve(&ask_row_id(1), Verdict::Deny, VerdictDuration::Once)
-            .unwrap();
-        ask_handle.await.unwrap().unwrap();
-
-        tray_rx.changed().await.unwrap();
-        match &*tray_rx.borrow() {
-            TrayState::RecentBlock { what, .. } => {
-                assert!(what.contains("tracker.example.com"), "unexpected: {what}")
-            }
-            other => panic!("expected RecentBlock, got {other:?}"),
-        }
-
-        tokio::time::advance(RECENT_BLOCK_TTL + Duration::from_millis(100)).await;
-        tray_rx.changed().await.unwrap();
-        assert_eq!(*tray_rx.borrow(), TrayState::Idle);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn second_deny_within_ttl_supersedes_first_blocks_revert_timer() {
-        use crate::translator::connection::ask_row_id;
-        use crate::ws_messages::VerdictDuration;
-
-        let tray_pub = Arc::new(crate::tray_state::TrayStatePublisher::new());
-        let cache = Arc::new(Mutex::new(ConnectionCache::with_tray_publisher(
-            64,
-            tray_pub.clone(),
-        )));
-        let (tx, _rx) = broadcast::channel::<ServerMessage>(16);
-        let notice_bus = Arc::new(crate::notice::NoticeBus::new());
-        let svc = UiService::new(
-            cache.clone(),
-            tx,
-            tray_pub.clone(),
-            notice_bus,
-            Arc::new(AtomicBool::new(false)),
-        );
-        let mut tray_rx = tray_pub.subscribe();
-
-        // First block.
-        let svc1 = svc.clone();
-        let ask1 = tokio::spawn(async move {
-            svc1.ask_rule(Request::new(Connection {
-                dst_host: "first.example.com".into(),
-                process_path: "/usr/bin/curl".into(),
-                ..Default::default()
-            }))
-            .await
-        });
-        tray_rx.changed().await.unwrap();
-        cache
-            .lock()
-            .await
-            .resolve(&ask_row_id(1), Verdict::Deny, VerdictDuration::Once)
-            .unwrap();
-        ask1.await.unwrap().unwrap();
-        tray_rx.changed().await.unwrap();
-        assert!(matches!(&*tray_rx.borrow(), TrayState::RecentBlock { .. }));
-
-        // Halfway through the first block's TTL, a second block supersedes it.
-        tokio::time::advance(RECENT_BLOCK_TTL / 2).await;
-        let svc2 = svc.clone();
-        let ask2 = tokio::spawn(async move {
-            svc2.ask_rule(Request::new(Connection {
-                dst_host: "second.example.com".into(),
-                process_path: "/usr/bin/curl".into(),
-                ..Default::default()
-            }))
-            .await
-        });
-        tray_rx.changed().await.unwrap(); // Pending(1) for the second ask
-        cache
-            .lock()
-            .await
-            .resolve(&ask_row_id(2), Verdict::Deny, VerdictDuration::Once)
-            .unwrap();
-        ask2.await.unwrap().unwrap();
-        tray_rx.changed().await.unwrap();
-        match &*tray_rx.borrow() {
-            TrayState::RecentBlock { what, .. } => assert!(what.contains("second.example.com")),
-            other => panic!("expected RecentBlock(second), got {other:?}"),
-        }
-
-        // When the FIRST block's original TTL would have elapsed, its timer
-        // must be a no-op — the tray should still show the second block.
-        tokio::time::advance(RECENT_BLOCK_TTL / 2 + Duration::from_millis(50)).await;
-        assert!(
-            matches!(&*tray_rx.borrow(), TrayState::RecentBlock { what, .. } if what.contains("second.example.com")),
-            "first block's timer must not have reverted the tray"
-        );
-
-        // Only once the SECOND block's own TTL elapses does it revert.
-        tokio::time::advance(RECENT_BLOCK_TTL).await;
-        tray_rx.changed().await.unwrap();
-        assert_eq!(*tray_rx.borrow(), TrayState::Idle);
-    }
-
-    #[tokio::test]
-    async fn ask_rule_auto_allows_immediately_when_filtering_paused() {
-        let tray_pub = Arc::new(crate::tray_state::TrayStatePublisher::new());
-        let cache = Arc::new(Mutex::new(ConnectionCache::new(64)));
-        let (tx, mut rx) = broadcast::channel::<ServerMessage>(16);
-        let notice_bus = Arc::new(crate::notice::NoticeBus::new());
-        let filtering_paused = Arc::new(AtomicBool::new(true));
-        let svc = UiService::new(
-            cache.clone(),
-            tx,
-            tray_pub,
-            notice_bus,
-            filtering_paused.clone(),
-        );
-
-        // No spawn/wait needed: paused ask_rule never blocks on a oneshot.
-        let rule = svc
-            .ask_rule(Request::new(Connection {
-                dst_host: "paused.example.com".into(),
-                process_path: "/usr/bin/curl".into(),
-                ..Default::default()
-            }))
-            .await
-            .unwrap()
-            .into_inner();
-        assert_eq!(rule.action, "allow");
-
-        // No pending row was ever created.
-        assert_eq!(cache.lock().await.pending_count(), 0);
-        assert_eq!(cache.lock().await.len(), 1);
-
-        let broadcasted = tokio::time::timeout(Duration::from_secs(2), rx.recv())
-            .await
-            .expect("paused ask_rule did not broadcast the decided row")
-            .expect("broadcast error");
-        match broadcasted {
-            ServerMessage::InsertConnectionRows { rows } => {
-                assert_eq!(rows.len(), 1);
-                assert_eq!(rows[0].action.as_deref(), Some("allow"));
-            }
-            other => panic!("expected InsertConnectionRows, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn ask_rule_prompts_normally_when_not_paused() {
-        use crate::translator::connection::ask_row_id;
-
-        let tray_pub = Arc::new(crate::tray_state::TrayStatePublisher::new());
-        let cache = Arc::new(Mutex::new(ConnectionCache::new(64)));
-        let (tx, _rx) = broadcast::channel::<ServerMessage>(16);
-        let notice_bus = Arc::new(crate::notice::NoticeBus::new());
-        let filtering_paused = Arc::new(AtomicBool::new(false));
-        let svc = UiService::new(cache.clone(), tx, tray_pub, notice_bus, filtering_paused);
-
-        let ask_handle = tokio::spawn({
-            let svc = svc.clone();
-            async move {
-                svc.ask_rule(Request::new(Connection {
-                    dst_host: "normal.example.com".into(),
-                    process_path: "/usr/bin/curl".into(),
-                    ..Default::default()
-                }))
-                .await
-            }
-        });
-
-        for _ in 0..50 {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-            if cache
-                .lock()
-                .await
-                .resolve(&ask_row_id(1), Verdict::Allow, VerdictDuration::Once)
-                .is_ok()
-            {
-                break;
-            }
-        }
-
-        let rule = ask_handle.await.unwrap().unwrap().into_inner();
-        assert_eq!(rule.action, "allow");
-    }
-}
+#[path = "grpc_server/tests.rs"]
+mod tests;

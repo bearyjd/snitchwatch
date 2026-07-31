@@ -98,6 +98,30 @@ impl MockOpensnitchd {
         Ok(reply)
     }
 
+    /// Convenience wrapper around [`Self::post_alert`] for the common case
+    /// of a text-payload ERROR/WARNING alert (mirrors
+    /// `vendor/opensnitch/daemon/ui/alerts.go`'s `NewErrorAlert`/
+    /// `NewWarningAlert` shape) — used by tests exercising the daemon-alert
+    /// → diagnostics overlay (issue #6) without hand-building an `Alert`.
+    pub async fn post_alert_text(
+        &mut self,
+        r#type: snitchwatch_proto::protocol::alert::Type,
+        what: snitchwatch_proto::protocol::alert::What,
+        text: &str,
+    ) -> Result<MsgResponse, MockError> {
+        self.post_alert(Alert {
+            id: 1,
+            r#type: r#type as i32,
+            action: 0,
+            priority: 0,
+            what: what as i32,
+            data: Some(snitchwatch_proto::protocol::alert::Data::Text(
+                text.to_string(),
+            )),
+        })
+        .await
+    }
+
     /// Open the bidi `Notifications` stream.
     pub async fn open_notifications(
         &mut self,

@@ -91,6 +91,7 @@ mod tests {
             liveness.clone(),
             firewall_status,
             probe,
+            Arc::new(crate::daemon_alerts::DaemonAlertStore::new()),
         ));
 
         let watchdog = tokio::spawn(run(
@@ -153,6 +154,7 @@ mod tests {
             liveness.clone(),
             firewall_status,
             probe,
+            Arc::new(crate::daemon_alerts::DaemonAlertStore::new()),
         ));
 
         let watchdog = tokio::spawn(run(
@@ -191,6 +193,7 @@ mod tests {
             liveness.clone(),
             firewall_status,
             probe,
+            Arc::new(crate::daemon_alerts::DaemonAlertStore::new()),
         ));
 
         let handle = tokio::spawn(run(
@@ -230,6 +233,7 @@ mod tests {
             liveness.clone(),
             firewall_status,
             probe,
+            Arc::new(crate::daemon_alerts::DaemonAlertStore::new()),
         ));
 
         let handle = tokio::spawn(run(

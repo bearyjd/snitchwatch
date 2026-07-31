@@ -389,3 +389,150 @@ async fn notifications_stream_close_triggers_down_transition_within_one_tick() {
 
     bridge.shutdown();
 }
+
+/// The load-bearing test for issue #6: a real opensnitchd's own `PostAlert`
+/// RPC is the only signal that surfaces a daemon-internal failure (eBPF
+/// module load, in this case) a host-side kernel probe can't see — verified
+/// live 2026-07-31 where the probe reported BTF present while opensnitchd
+/// still failed to load its bundled eBPF module.
+///
+/// Drives the alert as `Alert_GENERIC` + free text, not a tagged
+/// `PROC_MONITOR` alert: that's the only shape a real v1.8.0 daemon actually
+/// sends (`SendWarningAlert`/`SendErrorAlert` hardcode `Alert_GENERIC` —
+/// see `daemon_alerts`'s module doc), and the diagnostics overlay must
+/// text-classify it to `ebpf_support` on its own.
+///
+/// Proves: (a) the alert pushes an *unsolicited* `diagnosticsReport` with
+/// `ebpf_support: failed` carrying the daemon's own alert text, without the
+/// GUI having to poll/recheck; (b) a fresh `subscribe()` (a new daemon
+/// session, e.g. a plain reconnect) does NOT clear the stored alert — it's
+/// still `failed` afterwards; (c) only an explicit `recheckDiagnostics`
+/// (the user-driven "re-baseline") clears it, after which the detail no
+/// longer carries the daemon's alert text (this test intentionally does
+/// NOT assert an exact `ok` status for `ebpf_support` post-clear — that
+/// depends on this host's actual BTF support, which the local probe reports
+/// independently of anything this test controls).
+#[tokio::test]
+async fn generic_alert_fails_ebpf_check_persists_across_subscribe_clears_on_recheck() {
+    let socket_dir = tempfile::tempdir().unwrap();
+    let cfg = BridgeConfig {
+        grpc_bind: "127.0.0.1:0".parse().unwrap(),
+        ws_socket_path: socket_dir.path().join("bridge.sock"),
+        cache_capacity: 1024,
+    };
+    let bridge = run(cfg).await.expect("bridge run failed");
+
+    let mut ws = connect_stream(&bridge.ws_socket_path, bridge.ws_token.as_str()).await;
+
+    let mut mock = MockOpensnitchd::connect(bridge.grpc_addr).await.unwrap();
+
+    // vendor/opensnitch/daemon/main.go:645 — the real string opensnitchd
+    // v1.8.0 sends on this exact failure.
+    const ALERT_TEXT: &str =
+        "Unable to set process monitor method via parameter: exec format error";
+    mock.post_alert_text(
+        snitchwatch_proto::protocol::alert::Type::Error,
+        snitchwatch_proto::protocol::alert::What::Generic,
+        ALERT_TEXT,
+    )
+    .await
+    .expect("post_alert failed");
+
+    // (a) Unsolicited: no requestSnapshot/recheck sent — post_alert itself
+    // must push the fresh report.
+    let checks = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match ws.next().await {
+                Some(Ok(Message::Text(t))) => {
+                    let v: serde_json::Value = serde_json::from_str(&t).unwrap();
+                    if v.get("action").and_then(|a| a.as_str()) == Some("diagnosticsReport") {
+                        return v["checks"].as_array().unwrap().clone();
+                    }
+                }
+                Some(Ok(_)) => {}
+                Some(Err(e)) => panic!("ws recv error: {e}"),
+                None => panic!("ws stream ended early"),
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for the unsolicited diagnosticsReport");
+
+    let ebpf = checks
+        .iter()
+        .find(|c| c["kind"] == "ebpf_support")
+        .expect("no ebpf_support check in report");
+    assert_eq!(ebpf["status"]["status"], "failed");
+    assert!(
+        ebpf["status"]["detail"]
+            .as_str()
+            .unwrap()
+            .contains(ALERT_TEXT),
+        "expected ebpf_support detail to carry the daemon's alert text, got: {ebpf}"
+    );
+
+    // (b) A fresh subscribe() (a plain reconnect) must NOT clear the alert.
+    mock.subscribe("opensnitchd-resubscribe").await.unwrap();
+
+    ws.send(Message::Text(
+        json!({ "action": "requestSnapshot" }).to_string(),
+    ))
+    .await
+    .expect("send requestSnapshot failed");
+
+    let still_failed = wait_for_ebpf_status(&mut ws).await;
+    assert_eq!(
+        still_failed["status"]["status"], "failed",
+        "subscribe() must not have cleared the stored alert"
+    );
+    assert!(
+        still_failed["status"]["detail"]
+            .as_str()
+            .unwrap()
+            .contains(ALERT_TEXT),
+        "alert text must still be present after a plain subscribe()"
+    );
+
+    // (c) An explicit recheckDiagnostics DOES clear it.
+    ws.send(Message::Text(
+        json!({ "action": "recheckDiagnostics" }).to_string(),
+    ))
+    .await
+    .expect("send recheckDiagnostics failed");
+
+    let cleared = wait_for_ebpf_status(&mut ws).await;
+    let detail = cleared["status"]["detail"].as_str().unwrap_or("");
+    assert!(
+        !detail.contains(ALERT_TEXT) && !detail.contains("opensnitchd reports"),
+        "expected the daemon-alert overlay gone after recheckDiagnostics, got: {cleared}"
+    );
+
+    bridge.shutdown();
+}
+
+/// Waits for the next `diagnosticsReport` WS message and returns its
+/// `ebpf_support` check entry.
+async fn wait_for_ebpf_status(ws: &mut WebSocketStream<UnixStream>) -> serde_json::Value {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match ws.next().await {
+                Some(Ok(Message::Text(t))) => {
+                    let v: serde_json::Value = serde_json::from_str(&t).unwrap();
+                    if v.get("action").and_then(|a| a.as_str()) == Some("diagnosticsReport") {
+                        let checks = v["checks"].as_array().unwrap();
+                        return checks
+                            .iter()
+                            .find(|c| c["kind"] == "ebpf_support")
+                            .expect("no ebpf_support check in report")
+                            .clone();
+                    }
+                }
+                Some(Ok(_)) => {}
+                Some(Err(e)) => panic!("ws recv error: {e}"),
+                None => panic!("ws stream ended early"),
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for a diagnosticsReport")
+}

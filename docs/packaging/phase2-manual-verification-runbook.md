@@ -307,19 +307,40 @@ transition re-broadcasts a fresh report, not just the down transition.
 **6c — Kernel prerequisite failure (the case this feature exists for).**
 This is the scenario Step 5 doesn't cover at all: `opensnitchd` reachable
 and healthy, but the host kernel can't satisfy what it's configured to use.
-Force it via the nftables check — temporarily rename `nft` off PATH (safe,
-easily reversible):
+Two independent ways to force it:
 
-```bash
-sudo mv "$(command -v nft)" "$(command -v nft).bak"
-```
+- **nftables path** — temporarily rename `nft` off PATH (safe, easily
+  reversible):
 
-(The eBPF check can't be faked this way: `RealKernelProbe::btf_vmlinux_exists`
-only stats `/sys/kernel/btf/vmlinux` for existence, so tricks like
-bind-mounting `/dev/null` over it leave the path existing and the check
-passing. Forcing a real eBPF failure would need a kernel without
-`CONFIG_DEBUG_INFO_BTF` — not worth it; the nftables path exercises the
-identical failed-check → banner → troubleshooting-text plumbing.)
+  ```bash
+  sudo mv "$(command -v nft)" "$(command -v nft).bak"
+  ```
+
+- **eBPF path, now real-hardware-testable (issue #6, fixed by the daemon-alert
+  → diagnostics overlay).** `RealKernelProbe::btf_vmlinux_exists` only stats
+  `/sys/kernel/btf/vmlinux` for existence, so it can't be faked by hiding the
+  path (bind-mounting `/dev/null` over it leaves the path existing and the
+  check passing) — and on a kernel ≥6.19 that genuinely has BTF, the probe
+  alone can't produce a failure here at all. But a live daemon on such a
+  kernel can: opensnitchd v1.8.0's bundled eBPF module fails to load on
+  kernel 6.19+ regardless of BTF presence, and it reports that failure itself
+  via `PostAlert` (`vendor/opensnitch/daemon/main.go:645`, as
+  `Alert_GENERIC` + free text — see `daemon_alerts`'s module doc for why
+  it's never a tagged `PROC_MONITOR` alert on a real daemon), which the
+  bridge now text-classifies and overlays onto `EbpfSupport`
+  (`DaemonAlertStore` + `DiagnosticsCtx::report()`'s
+  `classify_generic_alert_text` in `diagnostics/mod.rs`). To exercise it for
+  real: set `ProcMonitorMethod: ebpf` in opensnitchd's config on a host
+  running kernel ≥6.19, restart `opensnitchd-dev`, and confirm the daemon's
+  own startup alert surfaces as a failed `ebpf_support` check — with the
+  daemon's own alert text visible in the troubleshooting detail. Since this
+  host's kernel genuinely has BTF, expect the *self-consistent*
+  `EBPF_DAEMON_REPORTED_TROUBLESHOOTING` copy ("BTF is present on this
+  kernel, but opensnitchd still failed...") here, not
+  `EBPF_TROUBLESHOOTING`'s "kernel doesn't expose BTF" claim — that copy
+  is reserved for when the local probe *also* fails. (On a kernel where the
+  module loads fine, this path is a no-op — use the nftables path above
+  instead, or don't expect a failure here.)
 
 **Pass condition — this is the finding the whole-branch review flagged and
 a follow-up fix addressed (see PR #3):** since `opensnitchd` itself never
@@ -334,16 +355,33 @@ made in response to the final whole-branch review — flag it, don't treat
 it as expected behavior.
 
 Then click "Recheck" anyway and confirm the page's failed check shows the
-correct troubleshooting text (`EBPF_TROUBLESHOOTING` or
-`NFTABLES_TROUBLESHOOTING` from `diagnostics/mod.rs`, matching whichever
-you broke).
+correct troubleshooting text: `NFTABLES_TROUBLESHOOTING` for the PATH-rename
+path (unaffected by the daemon-alert overlay — the daemon doesn't emit a
+firewall-shaped alert in this scenario), or `EBPF_DAEMON_REPORTED_TROUBLESHOOTING`
+*with the daemon's own alert text appended* for the `ProcMonitorMethod: ebpf`
+path. The appended text always has the shape `opensnitchd reports (error|warning,
+<age> ago): <daemon's message>` — a bare troubleshooting string with no
+`opensnitchd reports (...)` suffix means the overlay isn't firing.
+**Important — clicking "Recheck" here also clears the stored alert** (see
+below), so this is your last chance to see the overlaid text before
+restoring the host; don't click it again until you've confirmed the text.
 
 **Restore the host** before moving on:
 
 ```bash
-sudo umount /sys/kernel/btf/vmlinux 2>/dev/null   # if the bind-mount was used
 sudo mv "$(command -v nft).bak" "$(dirname "$(command -v nft)")/nft" 2>/dev/null  # if renamed
+# If ProcMonitorMethod was changed to ebpf, set it back to its prior value
+# (proc, unless you'd deliberately overridden it) and restart opensnitchd-dev.
 ```
+
+Unlike Step 6b's daemon-down/recovery cycle, restarting `opensnitchd-dev`
+alone does **not** clear a previously-surfaced daemon alert: `subscribe()`
+deliberately does not clear `DaemonAlertStore` (see `daemon_alerts`'s
+module doc — clearing on every reconnect both erased still-true alerts and
+raced the daemon's own queued-alert flush). After restoring the config and
+restarting the daemon, click "Recheck" once more (or wait for the next
+automatic recheck) to clear the stale overlay and confirm `ebpf_support`
+returns to whatever the local probe alone reports on this host.
 
 **If any of 6a-6c fail:** first confirm Step 5's tray-tooltip baseline
 already works on this host — if that's broken, the Daemon Health feature
