@@ -50,8 +50,20 @@ DaemonDown on idle systems; blocks Step 5/6b pass conditions), #6
 both install docs were wrong; docs corrected, bluebuild recipe fix
 pending). Detailed results:
 `docs/superpowers/plans/2026-07-05-phase2-packaging.md` acceptance
-section. **Issue #5 is now the top blocker** — fix it before re-running
-Steps 5/6.
+section.
+
+**Update (later 2026-07-31): all three findings are fixed and merged** —
+#5 via PR #9 (liveness = any RPC activity + open Notifications stream;
+re-verified live: idle daemon reads alive, down transition now fires in
+~2s via stream-close with a consistent report, recovery pushes an
+all-clear without a recheck), #7 via PR #10 (recipe/docs install the
+upstream v1.8.0 release RPM; shipped config uses `ProcMonitorMethod:
+proc`), #6 via PR #11 (daemon-reported alerts overlay onto the
+diagnostics checks — text-classified, since real v1.8.0 alerts are all
+`GENERIC`; alerts persist until a user-driven Recheck). Remaining
+real-hardware items are listed in the phase2 plan's acceptance section —
+mostly GUI-visual checks and the sustained-interception/queue-rules
+question.
 
 **What's actually left:**
 1. **Real Bazzite hardware verification** — a bluebuild image build, a
