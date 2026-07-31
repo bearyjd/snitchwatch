@@ -155,11 +155,14 @@ For an unattended run, consider `DefaultAction: allow` in the copied config
 so an unanswered prompt can never block live traffic; the shipped deny
 default is Step 1's image concern, not this step's dial-in concern.
 
-**Known false-DaemonDown caveat (issue #5):** a healthy idle daemon sends
-no `Ping` RPCs (upstream only pings when new stats events exist), so the
-tray/diagnostics may claim the daemon is down while it is connected. Until
-issue #5 is fixed, generate steady traffic while judging Step 5/6 pass
-conditions.
+**False-DaemonDown caveat (issue #5) — fixed:** a healthy idle daemon sends
+no `Ping` RPCs (upstream only pings when new stats events exist). The bridge
+now treats any inbound gRPC activity plus an open `Notifications` stream as
+proof of liveness (`docs/superpowers/plans/2026-07-31-daemon-liveness-heartbeat.md`),
+so an idle-but-connected daemon reads as reachable without needing steady
+traffic. Traffic generation is still useful for judging Step 5/6's
+stats-driven rows (the connection table, traffic graphs), just no longer
+required to keep the tray/diagnostics from false-positiving.
 
 Confirm `opensnitchd`'s `Server.Address` in its `default-config.json` points
 at `127.0.0.1:50051` (matching `SNITCHWATCH_GRPC_BIND` in the systemd unit),
