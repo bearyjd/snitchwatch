@@ -1,14 +1,49 @@
-//! Bounded store of the most recent daemon-reported ERROR/WARNING alert per
-//! `Alert.What` category.
+//! Store of daemon-reported ERROR/WARNING alerts, one per `Alert.What`
+//! category, overlaid onto `DiagnosticsCtx::report()` to close the blind
+//! spot where a host-side probe can't see daemon-internal failures (issue
+//! #6).
 //!
-//! Closes the blind spot verified live 2026-07-31 (issue #6): a host-side
-//! kernel probe can say eBPF/BTF support looks fine while opensnitchd's own
-//! `PostAlert` RPC (`vendor/opensnitch/daemon/main.go:176,187,645`) reports
-//! that it actually failed to load its bundled eBPF module. The probe can't
-//! see daemon-internal failures — but the daemon tells us directly, so
-//! `grpc_server.rs`'s `post_alert` records into this store and
-//! `DiagnosticsCtx::report()` (`diagnostics/mod.rs`) overlays it onto the
-//! existing checks.
+//! ## Persistence semantics
+//!
+//! Alerts persist until explicitly cleared — there is deliberately no
+//! clear-on-`subscribe()` behavior. An earlier version of this store
+//! cleared itself on every `subscribe()` call, on the theory that a new
+//! daemon session should start clean; that turned out to be wrong for two
+//! reasons:
+//!
+//! 1. It erased still-true alerts on a reconnect that didn't actually fix
+//!    anything (the daemon just dropped and re-dialed) — a silent
+//!    false-negative on the diagnostics page.
+//! 2. It raced the daemon's own alert delivery:
+//!    `vendor/opensnitch/daemon/ui/client.go:236-243`'s `onStatusChange`
+//!    fires `go c.Subscribe()` concurrently with signalling `isConnected`,
+//!    which is what unblocks `alertsDispatcher`'s queued-alert flush — the
+//!    two goroutines race, so whether the bridge sees `subscribe()` before
+//!    or after a queued alert is undefined from here.
+//!
+//! Instead, the store is cleared explicitly by
+//! `ClientMessage::RecheckDiagnostics` (via `DiagnosticsCtx::clear_alerts`,
+//! see `snitchwatch-bridge-cli::run`) — a user-driven "re-baseline". A
+//! daemon whose problem persists will re-alert on its next restart, so a
+//! stale positive here is recoverable by waiting for that; a silently
+//! dropped real alert (the old subscribe-clear behavior's failure mode) is
+//! not.
+//!
+//! ## `Alert.What` in practice
+//!
+//! opensnitchd v1.8.0's alert *senders* almost never tag a specific `What`:
+//! `SendWarningAlert`/`SendErrorAlert` (`daemon/ui/alerts.go:64-70`) — used
+//! by every issue-#6-relevant call site (`daemon/main.go:176,187,645`,
+//! `daemon/ui/config_utils.go:82`) — hardcode `Alert_GENERIC`. The one
+//! caller that does tag a specific `What` (`daemon/main.go:307`,
+//! `Alert_KERNEL_EVENT`) sends a `Proc` payload, not `Text`, so it isn't
+//! representable by this store's text-only model. In practice, then,
+//! essentially every real alert this store ever receives is `GENERIC` plus
+//! free text, and `DiagnosticsCtx::report()`'s overlay text-classifies that
+//! free text to figure out which check it's actually about — see
+//! `classify_generic_alert_text` in `diagnostics/mod.rs`. The `What`-keyed
+//! structure here is kept as forward-compat for a future daemon version
+//! that tags alerts properly, not because it's what v1.8.0 actually sends.
 //!
 //! INFO alerts are ignored — only ERROR/WARNING carry troubleshooting
 //! weight worth surfacing on the diagnostics page.
@@ -16,6 +51,12 @@
 use snitchwatch_proto::protocol::alert;
 use std::collections::HashMap;
 use std::sync::Mutex as StdMutex;
+use std::time::Instant;
+
+/// Stored alert text is truncated to this many bytes (on a char boundary,
+/// with a trailing "…") to bound the diagnostics page's memory/rendering
+/// cost against an oversized payload from a misbehaving daemon.
+const MAX_ALERT_TEXT_BYTES: usize = 512;
 
 /// Severity of a stored alert. A narrower type than the raw proto `i32` so
 /// callers can't accidentally store an `INFO` alert.
@@ -38,19 +79,18 @@ impl AlertSeverity {
 }
 
 /// One stored alert: enough to overlay onto a `DiagnosticCheck`'s detail
-/// text.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// text, including how long ago it was reported.
+#[derive(Debug, Clone, PartialEq)]
 pub struct StoredAlert {
     pub severity: AlertSeverity,
     pub text: String,
+    pub recorded_at: Instant,
 }
 
-/// Bounded map keyed by `Alert.What`, holding the most recent ERROR/WARNING
-/// alert per category. A new alert for the same `What` overwrites the
-/// previous one — only the daemon's latest word matters for the overlay.
-/// Cleared on `subscribe()`: a new daemon session starts clean, so a stale
-/// alert from a prior run of opensnitchd can't linger on the diagnostics
-/// page after a restart that fixed it.
+/// Map keyed by `Alert.What`, holding the most recent ERROR/WARNING alert
+/// per category. A new alert for the same `What` overwrites the previous
+/// one — only the daemon's latest word matters for the overlay. See this
+/// module's doc comment for when (and why) entries are cleared.
 #[derive(Default)]
 pub struct DaemonAlertStore {
     by_what: StdMutex<HashMap<alert::What, StoredAlert>>,
@@ -63,12 +103,21 @@ impl DaemonAlertStore {
 
     /// Record an alert. A no-op for `INFO` (or any alert whose `raw_type`
     /// doesn't decode to a known severity) — only ERROR/WARNING are stored.
+    /// `text` is truncated to [`MAX_ALERT_TEXT_BYTES`] if longer.
     pub fn record(&self, what: alert::What, raw_type: i32, text: String) {
         let Some(severity) = AlertSeverity::from_proto(raw_type) else {
             return;
         };
+        let text = truncate_alert_text(text);
         let mut guard = self.by_what.lock().unwrap_or_else(|e| e.into_inner());
-        guard.insert(what, StoredAlert { severity, text });
+        guard.insert(
+            what,
+            StoredAlert {
+                severity,
+                text,
+                recorded_at: Instant::now(),
+            },
+        );
     }
 
     /// The most recently stored alert for `what`, if any.
@@ -80,7 +129,9 @@ impl DaemonAlertStore {
             .cloned()
     }
 
-    /// Drops every stored alert. Called on `subscribe()`.
+    /// Drops every stored alert. Called by `ClientMessage::RecheckDiagnostics`
+    /// (via `DiagnosticsCtx::clear_alerts`) — see this module's doc comment
+    /// for why `subscribe()` deliberately does NOT call this.
     pub fn clear(&self) {
         self.by_what
             .lock()
@@ -95,6 +146,21 @@ impl DaemonAlertStore {
             .unwrap_or_else(|e| e.into_inner())
             .clone()
     }
+}
+
+/// Truncates `text` to at most [`MAX_ALERT_TEXT_BYTES`] bytes on a char
+/// boundary, appending "…" if it was actually truncated.
+fn truncate_alert_text(text: String) -> String {
+    if text.len() <= MAX_ALERT_TEXT_BYTES {
+        return text;
+    }
+    let mut boundary = MAX_ALERT_TEXT_BYTES;
+    while !text.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    let mut truncated = text[..boundary].to_string();
+    truncated.push('…');
+    truncated
 }
 
 #[cfg(test)]
@@ -201,5 +267,43 @@ mod tests {
         let store = DaemonAlertStore::new();
         store.record(alert::What::Generic, 99, "unknown severity".to_string());
         assert!(store.snapshot().is_empty());
+    }
+
+    #[test]
+    fn recorded_at_is_set_close_to_call_time() {
+        let store = DaemonAlertStore::new();
+        let before = Instant::now();
+        store.record(
+            alert::What::Generic,
+            alert::Type::Error as i32,
+            "boom".to_string(),
+        );
+        let stored = store.get(alert::What::Generic).unwrap();
+        assert!(stored.recorded_at >= before);
+        assert!(stored.recorded_at.elapsed() < std::time::Duration::from_secs(1));
+    }
+
+    #[test]
+    fn long_alert_text_is_truncated_with_ellipsis() {
+        let store = DaemonAlertStore::new();
+        let long_text = "x".repeat(MAX_ALERT_TEXT_BYTES + 100);
+        store.record(alert::What::Generic, alert::Type::Error as i32, long_text);
+
+        let stored = store.get(alert::What::Generic).unwrap();
+        assert!(stored.text.len() <= MAX_ALERT_TEXT_BYTES + '…'.len_utf8());
+        assert!(stored.text.ends_with('…'));
+    }
+
+    #[test]
+    fn short_alert_text_is_not_truncated() {
+        let store = DaemonAlertStore::new();
+        store.record(
+            alert::What::Generic,
+            alert::Type::Error as i32,
+            "short message".to_string(),
+        );
+
+        let stored = store.get(alert::What::Generic).unwrap();
+        assert_eq!(stored.text, "short message");
     }
 }
