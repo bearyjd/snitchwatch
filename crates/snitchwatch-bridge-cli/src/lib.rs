@@ -258,13 +258,20 @@ pub async fn run(config: BridgeConfig) -> Result<RunningBridge> {
     // consumes `ui_service_inner`) so `firewall_status_handle()` is still
     // reachable.
     let firewall_status = ui_service_inner.firewall_status_handle();
+    let alert_store = ui_service_inner.alert_store_handle();
     let kernel_probe: Arc<dyn snitchwatch_bridge::diagnostics::kernel_probe::KernelProbe> =
         Arc::new(snitchwatch_bridge::diagnostics::kernel_probe::RealKernelProbe);
     let diagnostics_ctx = Arc::new(snitchwatch_bridge::diagnostics::DiagnosticsCtx::new(
         liveness.clone(),
         firewall_status,
         kernel_probe,
+        alert_store,
     ));
+    // Late-bind the assembler into `UiService` so `post_alert` can push a
+    // fresh report the moment a daemon alert arrives, not just on the next
+    // poll/recheck — see `UiService::diagnostics_ctx`'s doc comment for why
+    // this can't be a constructor parameter.
+    ui_service_inner.set_diagnostics_ctx(diagnostics_ctx.clone());
     // No startup broadcast here: no client has subscribed to `broadcast_tx`
     // yet at this point in `run()`, so a send would always be dropped. The
     // GUI's `DaemonHealthModel::start_bridge_feed` sends

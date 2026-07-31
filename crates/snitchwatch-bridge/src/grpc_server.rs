@@ -1089,6 +1089,7 @@ mod tests {
             svc.liveness_handle(),
             svc.firewall_status_handle(),
             probe,
+            svc.alert_store_handle(),
         ));
         svc.set_diagnostics_ctx(ctx);
 

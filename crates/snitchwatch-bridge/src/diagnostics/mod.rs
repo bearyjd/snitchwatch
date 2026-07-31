@@ -6,9 +6,11 @@
 
 pub mod kernel_probe;
 
+use crate::daemon_alerts::DaemonAlertStore;
 use crate::daemon_liveness::DaemonLiveness;
 use crate::ws_messages::{CheckKind, CheckStatus, DiagnosticCheck};
 use kernel_probe::KernelProbe;
+use snitchwatch_proto::protocol::alert;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Instant;
 
@@ -74,6 +76,7 @@ pub struct DiagnosticsCtx {
     liveness: DaemonLiveness,
     firewall_status: Arc<StdMutex<Option<bool>>>,
     probe: Arc<dyn kernel_probe::KernelProbe>,
+    alert_store: Arc<DaemonAlertStore>,
 }
 
 impl DiagnosticsCtx {
@@ -81,11 +84,13 @@ impl DiagnosticsCtx {
         liveness: DaemonLiveness,
         firewall_status: Arc<StdMutex<Option<bool>>>,
         probe: Arc<dyn kernel_probe::KernelProbe>,
+        alert_store: Arc<DaemonAlertStore>,
     ) -> Self {
         Self {
             liveness,
             firewall_status,
             probe,
+            alert_store,
         }
     }
 
@@ -115,7 +120,7 @@ impl DiagnosticsCtx {
             CheckStatus::Ok
         };
 
-        let firewall_status = {
+        let mut firewall_status = {
             let guard = self
                 .firewall_status
                 .lock()
@@ -128,6 +133,16 @@ impl DiagnosticsCtx {
                 None => CheckStatus::Unknown,
             }
         };
+        if let Some(alert) = self.alert_store.get(alert::What::Firewall) {
+            // The daemon's own word wins over the (possibly stale or absent)
+            // subscribe()-reported status.
+            firewall_status = CheckStatus::Failed {
+                detail: format!(
+                    "{FIREWALL_NOT_RUNNING_TROUBLESHOOTING} opensnitchd reports: {}",
+                    alert.text
+                ),
+            };
+        }
 
         let mut checks = vec![
             DiagnosticCheck {
@@ -140,6 +155,23 @@ impl DiagnosticsCtx {
             },
         ];
         checks.extend(local_checks(self.probe.as_ref()));
+
+        // PROC_MONITOR or KERNEL_EVENT alert present → EbpfSupport is
+        // Failed with the daemon's own alert text appended, even when the
+        // local BTF probe passes: the daemon's word wins over the host
+        // heuristic (issue #6 — see `daemon_alerts` module doc).
+        let ebpf_alert = self
+            .alert_store
+            .get(alert::What::ProcMonitor)
+            .or_else(|| self.alert_store.get(alert::What::KernelEvent));
+        if let Some(alert) = ebpf_alert {
+            if let Some(ebpf) = checks.iter_mut().find(|c| c.kind == CheckKind::EbpfSupport) {
+                ebpf.status = CheckStatus::Failed {
+                    detail: format!("{EBPF_TROUBLESHOOTING} opensnitchd reports: {}", alert.text),
+                };
+            }
+        }
+
         checks
     }
 }
@@ -195,7 +227,12 @@ mod tests {
         let firewall_status = Arc::new(StdMutex::new(Some(true)));
         let probe: Arc<dyn kernel_probe::KernelProbe> =
             Arc::new(kernel_probe::testing::FakeKernelProbe::all_ok());
-        let ctx = DiagnosticsCtx::new(liveness, firewall_status, probe);
+        let ctx = DiagnosticsCtx::new(
+            liveness,
+            firewall_status,
+            probe,
+            Arc::new(DaemonAlertStore::new()),
+        );
 
         let checks = ctx.report();
         assert_eq!(checks.len(), 4);
@@ -220,7 +257,12 @@ mod tests {
         let firewall_status = Arc::new(StdMutex::new(None));
         let probe: Arc<dyn kernel_probe::KernelProbe> =
             Arc::new(kernel_probe::testing::FakeKernelProbe::all_ok());
-        let ctx = DiagnosticsCtx::new(liveness, firewall_status, probe);
+        let ctx = DiagnosticsCtx::new(
+            liveness,
+            firewall_status,
+            probe,
+            Arc::new(DaemonAlertStore::new()),
+        );
 
         let checks = ctx.report();
         let daemon = checks
@@ -247,7 +289,12 @@ mod tests {
         let firewall_status = Arc::new(StdMutex::new(None));
         let probe: Arc<dyn kernel_probe::KernelProbe> =
             Arc::new(kernel_probe::testing::FakeKernelProbe::all_ok());
-        let ctx = DiagnosticsCtx::new(liveness, firewall_status, probe);
+        let ctx = DiagnosticsCtx::new(
+            liveness,
+            firewall_status,
+            probe,
+            Arc::new(DaemonAlertStore::new()),
+        );
 
         let checks = ctx.report();
         let daemon = checks
@@ -263,7 +310,12 @@ mod tests {
         let firewall_status = Arc::new(StdMutex::new(Some(true)));
         let probe: Arc<dyn kernel_probe::KernelProbe> =
             Arc::new(kernel_probe::testing::FakeKernelProbe::all_ok());
-        let ctx = DiagnosticsCtx::new(liveness, firewall_status, probe);
+        let ctx = DiagnosticsCtx::new(
+            liveness,
+            firewall_status,
+            probe,
+            Arc::new(DaemonAlertStore::new()),
+        );
 
         // Sanity: starts out Ok (opensnitchd previously reported it running).
         let before = ctx.report();
@@ -281,5 +333,101 @@ mod tests {
             .find(|c| c.kind == CheckKind::FirewallRunning)
             .unwrap();
         assert_eq!(firewall_after.status, CheckStatus::Unknown);
+    }
+
+    #[test]
+    fn proc_monitor_alert_fails_ebpf_check_even_when_probe_passes() {
+        let liveness = DaemonLiveness::new();
+        let firewall_status = Arc::new(StdMutex::new(Some(true)));
+        // The probe itself says everything's fine (BTF present) — the
+        // daemon's own alert must still win.
+        let probe: Arc<dyn kernel_probe::KernelProbe> =
+            Arc::new(kernel_probe::testing::FakeKernelProbe::all_ok());
+        let alert_store = Arc::new(DaemonAlertStore::new());
+        alert_store.record(
+            alert::What::ProcMonitor,
+            alert::Type::Error as i32,
+            "eBPF module failed to load".to_string(),
+        );
+        let ctx = DiagnosticsCtx::new(liveness, firewall_status, probe, alert_store);
+
+        let checks = ctx.report();
+        let ebpf = checks
+            .iter()
+            .find(|c| c.kind == CheckKind::EbpfSupport)
+            .unwrap();
+        match &ebpf.status {
+            CheckStatus::Failed { detail } => {
+                assert!(detail.contains("eBPF module failed to load"));
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn kernel_event_alert_also_fails_ebpf_check() {
+        let liveness = DaemonLiveness::new();
+        let firewall_status = Arc::new(StdMutex::new(Some(true)));
+        let probe: Arc<dyn kernel_probe::KernelProbe> =
+            Arc::new(kernel_probe::testing::FakeKernelProbe::all_ok());
+        let alert_store = Arc::new(DaemonAlertStore::new());
+        alert_store.record(
+            alert::What::KernelEvent,
+            alert::Type::Warning as i32,
+            "kernel event stream degraded".to_string(),
+        );
+        let ctx = DiagnosticsCtx::new(liveness, firewall_status, probe, alert_store);
+
+        let checks = ctx.report();
+        let ebpf = checks
+            .iter()
+            .find(|c| c.kind == CheckKind::EbpfSupport)
+            .unwrap();
+        assert!(matches!(ebpf.status, CheckStatus::Failed { .. }));
+    }
+
+    #[test]
+    fn firewall_alert_fails_firewall_check_even_when_subscribe_reported_running() {
+        let liveness = DaemonLiveness::new();
+        let firewall_status = Arc::new(StdMutex::new(Some(true)));
+        let probe: Arc<dyn kernel_probe::KernelProbe> =
+            Arc::new(kernel_probe::testing::FakeKernelProbe::all_ok());
+        let alert_store = Arc::new(DaemonAlertStore::new());
+        alert_store.record(
+            alert::What::Firewall,
+            alert::Type::Error as i32,
+            "nftables backend unavailable".to_string(),
+        );
+        let ctx = DiagnosticsCtx::new(liveness, firewall_status, probe, alert_store);
+
+        let checks = ctx.report();
+        let firewall = checks
+            .iter()
+            .find(|c| c.kind == CheckKind::FirewallRunning)
+            .unwrap();
+        match &firewall.status {
+            CheckStatus::Failed { detail } => {
+                assert!(detail.contains("nftables backend unavailable"));
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unrelated_alert_what_does_not_affect_any_check() {
+        let liveness = DaemonLiveness::new();
+        let firewall_status = Arc::new(StdMutex::new(Some(true)));
+        let probe: Arc<dyn kernel_probe::KernelProbe> =
+            Arc::new(kernel_probe::testing::FakeKernelProbe::all_ok());
+        let alert_store = Arc::new(DaemonAlertStore::new());
+        alert_store.record(
+            alert::What::Rule,
+            alert::Type::Error as i32,
+            "a rule matched".to_string(),
+        );
+        let ctx = DiagnosticsCtx::new(liveness, firewall_status, probe, alert_store);
+
+        let checks = ctx.report();
+        assert!(checks.iter().all(|c| c.status == CheckStatus::Ok));
     }
 }
