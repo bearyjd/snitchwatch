@@ -1,4 +1,4 @@
-# Linux App Firewall + Bazzite Security Scanner — Handoff (updated 2026-07-12)
+# Linux App Firewall + Bazzite Security Scanner — Handoff (updated 2026-08-01)
 
 > **Read this first if you're picking this repo up cold.** Everything below
 > the "Current status" section is the *original* handoff from 2026-07-04,
@@ -79,10 +79,23 @@ populating a real `Operator` per the verdict's scope (`ThisHost`/
 `AnyHostOnDomain`/`AnyHost`) and by hardening `MockOpensnitchd::ask_rule` to
 apply the daemon's real ~120s deadline and validate the returned `Rule`
 shape, so this class of bug can't pass the sandbox suite silently again.
-Live re-verification against a real daemon is still outstanding. Remaining
-real-hardware items are listed in the phase2 plan's acceptance section —
-mostly GUI-visual checks, the sustained-interception/queue-rules question,
-and re-verifying the verdict round-trip now that issue #14 is fixed.
+
+**Update (2026-08-01): the verdict round-trip is now verified live.** PR
+#16 (the issue-#14 operator fix) merged and was re-verified against the
+real daemon — it now logs `Added new rule: allow if dest.host is '<host>'`
+where it previously logged `Invalid rule received, applying default
+action`. The same session — the first time a human operated the Kirigami
+shell on real hardware — surfaced four UI defects (issues #15, #18, #19,
+#20; #17 largely retracted) and a systematic verification gap (the test
+doubles are more capable than the real daemon, and no QML test simulates a
+click). Full session detail, corrections to prior claims, environment
+gotchas, and suggested next steps:
+`docs/superpowers/HANDOFF-2026-08-01-gui-usability.md` — **read that file
+next if you're picking this up.** Issues #18/#19/#20 are blocked on
+design/product calls, not engineering. PR #21 (GUI tracing subscriber) and
+PR #22 (the session handoff doc) are also merged. Remaining real-hardware
+items are listed in the phase2 plan's acceptance section — mostly
+GUI-visual checks and the sustained-interception/queue-rules question.
 
 **What's actually left:**
 1. **Real Bazzite hardware verification** — a bluebuild image build, a
