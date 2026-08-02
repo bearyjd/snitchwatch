@@ -268,10 +268,19 @@ impl GroupTree {
     }
 
     /// Remove a row by id, pruning now-empty domain/process groups.
+    ///
+    /// Meta must be read (and cloned) *before* `remove_from_group` runs, not
+    /// removed first: `remove_from_group` looks the row back up in
+    /// `id_meta` to know which counts to subtract, so evicting the entry up
+    /// front would make every removal a silent no-op on the aggregate
+    /// counts (a real regression this fix addresses — see the
+    /// `remove_row_decrements_pending_counts` test).
     pub fn remove_row(&mut self, id: &str) {
-        if let Some(meta) = self.id_meta.remove(id) {
-            self.remove_from_group(&meta.process_key, &meta.domain_key, id);
-        }
+        let Some(meta) = self.id_meta.get(id).cloned() else {
+            return;
+        };
+        self.remove_from_group(&meta.process_key, &meta.domain_key, id);
+        self.id_meta.remove(id);
     }
 
     /// Move the identified rows to the front of their domain group (and
@@ -350,6 +359,31 @@ impl GroupTree {
     /// Number of process groups currently tracked (test/debug helper).
     pub fn process_count(&self) -> usize {
         self.process_order.len()
+    }
+
+    /// Ids of every row still pending a decision under process group
+    /// `process_key`, in display order (domain-group order, then row order
+    /// within each domain) — the batch-action seam for issue #18's
+    /// "Allow all"/"Deny all" process-header buttons. Independent of expand/
+    /// collapse state (a collapsed group's pending rows are exactly what the
+    /// batch action needs to reach) and of the active filter (a batch action
+    /// on a header should not silently skip filtered-out rows).
+    pub fn pending_row_ids(&self, process_key: &str) -> Vec<String> {
+        let Some(pg) = self.processes.get(process_key) else {
+            return Vec::new();
+        };
+        pg.domain_order
+            .iter()
+            .filter_map(|dkey| pg.domains.get(dkey))
+            .flat_map(|dg| dg.row_order.iter())
+            .filter(|id| {
+                self.id_meta
+                    .get(id.as_str())
+                    .map(|meta| meta.verdict == Verdict::Pending)
+                    .unwrap_or(false)
+            })
+            .cloned()
+            .collect()
     }
 
     /// Build the flattened, display-ready projection: process headers, then
@@ -567,6 +601,24 @@ mod tests {
     }
 
     // --- tree membership/aggregates --------------------------------------
+
+    /// Like [`row`] but with an explicit executable path, for exercising
+    /// `process_key`'s exe-path branch (the plain `row` helper always leaves
+    /// `process_path: None`, so it only ever exercises the process-name
+    /// fallback).
+    fn row_with_process_path(
+        id: &str,
+        process: &str,
+        process_path: &str,
+        host: &str,
+        ip: &str,
+        action: Option<&str>,
+    ) -> ConnectionRow {
+        ConnectionRow {
+            process_path: Some(process_path.to_string()),
+            ..row(id, process, host, ip, action)
+        }
+    }
 
     fn build(rows: &[ConnectionRow]) -> GroupTree {
         let mut t = GroupTree::new();
@@ -846,5 +898,187 @@ mod tests {
         let mut tree = build(&rows);
         tree.move_to_front(&["nope".to_string()]);
         assert_eq!(tree.process_count(), 1);
+    }
+
+    // --- pending_row_ids (issue #18 batch actions) ------------------------
+
+    #[test]
+    fn pending_row_ids_collects_only_pending_rows_under_a_process_in_display_order() {
+        // Insertion order deliberately differs from lexical id/domain order
+        // (slack.com before github.com; "c" before "a") so a regression that
+        // sorts the result rather than preserving group-then-insertion order
+        // would go undetected by a lexically-sorted assertion.
+        let rows = vec![
+            row("c", "firefox", "slack.com", "2.2.2.2", None),
+            row("a", "firefox", "github.com", "1.1.1.1", None),
+            row("b", "firefox", "github.com", "1.1.1.1", Some("allow")),
+            row("d", "chrome", "slack.com", "2.2.2.2", None),
+        ];
+        let tree = build(&rows);
+        assert_eq!(
+            tree.pending_row_ids("firefox"),
+            vec!["c".to_string(), "a".to_string()],
+            "display order: slack.com (inserted first) then github.com, not lexical"
+        );
+        assert_eq!(tree.pending_row_ids("chrome"), vec!["d".to_string()]);
+    }
+
+    #[test]
+    fn pending_row_ids_reflects_move_to_front_reordering() {
+        // Two pending rows in the same domain group, inserted "z" then "m"
+        // (lexically reversed from insertion order) so the base order is
+        // insertion order, not sorted — then move_to_front flips it.
+        let rows = vec![
+            row("z", "firefox", "github.com", "1.1.1.1", None),
+            row("m", "firefox", "github.com", "1.1.1.1", None),
+        ];
+        let mut tree = build(&rows);
+        assert_eq!(
+            tree.pending_row_ids("firefox"),
+            vec!["z".to_string(), "m".to_string()],
+            "insertion order before any move"
+        );
+        tree.move_to_front(&["m".to_string()]);
+        assert_eq!(
+            tree.pending_row_ids("firefox"),
+            vec!["m".to_string(), "z".to_string()],
+            "move_to_front must be reflected in the batch-action id order"
+        );
+    }
+
+    #[test]
+    fn pending_row_ids_uses_executable_path_as_the_process_key_when_present() {
+        let rows = vec![row_with_process_path(
+            "a",
+            "curl",
+            "/usr/bin/curl",
+            "github.com",
+            "1.1.1.1",
+            None,
+        )];
+        let tree = build(&rows);
+        // The bare process name is not a valid key once an exe path is set
+        // (see `process_key`'s doc comment: exe path disambiguates identical
+        // process names at different install locations).
+        assert!(tree.pending_row_ids("curl").is_empty());
+        assert_eq!(tree.pending_row_ids("/usr/bin/curl"), vec!["a".to_string()]);
+    }
+
+    #[test]
+    fn remove_row_decrements_pending_counts() {
+        // Regression: remove_row used to evict `id_meta` before
+        // `remove_from_group` read it back to know which counts to
+        // subtract, so `counts.pending` (the batch-button/badge source of
+        // truth) never actually decremented on removal.
+        let rows = vec![
+            row("a", "firefox", "github.com", "1.1.1.1", None),
+            row("b", "firefox", "github.com", "1.1.1.1", None),
+        ];
+        let mut tree = build(&rows);
+        let filter = ConnectionFilter::default();
+        let map = rows_map(&rows);
+        match &tree.build_projection(&map, &filter)[0] {
+            VisibleEntry::ProcessHeader { counts, .. } => assert_eq!(counts.pending, 2),
+            other => panic!("unexpected {other:?}"),
+        }
+
+        tree.remove_row("a");
+        assert_eq!(
+            tree.pending_row_ids("firefox").len(),
+            1,
+            "pending_row_ids must drop the removed row"
+        );
+        let remaining = vec![rows[1].clone()];
+        let remaining_map = rows_map(&remaining);
+        match &tree.build_projection(&remaining_map, &filter)[0] {
+            VisibleEntry::ProcessHeader { counts, .. } => {
+                assert_eq!(
+                    counts.pending, 1,
+                    "counts.pending must decrement on removal"
+                )
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pending_row_ids_len_matches_group_counts_pending_after_mixed_mutations() {
+        // Invariant test: pending_row_ids(k).len() must always agree with
+        // the aggregate counts.pending for the same group, across a mixed
+        // insert/decide/remove sequence — the two are read by different
+        // consumers (batch-action buttons vs. the header badge) and must
+        // never disagree.
+        let mut rows = vec![
+            row("a", "firefox", "github.com", "1.1.1.1", None),
+            row("b", "firefox", "github.com", "1.1.1.1", None),
+            row("c", "firefox", "slack.com", "2.2.2.2", None),
+        ];
+        let mut tree = build(&rows);
+        let assert_invariant = |tree: &GroupTree, rows: &[ConnectionRow]| {
+            let filter = ConnectionFilter::default();
+            let map = rows_map(rows);
+            let proj = tree.build_projection(&map, &filter);
+            let counts_pending = match proj.first() {
+                Some(VisibleEntry::ProcessHeader { counts, .. }) => counts.pending,
+                _ => 0,
+            };
+            assert_eq!(tree.pending_row_ids("firefox").len(), counts_pending);
+        };
+        assert_invariant(&tree, &rows);
+
+        // Decide "a".
+        rows[0].action = Some("allow".to_string());
+        tree.upsert_row(&rows[0]);
+        assert_invariant(&tree, &rows);
+
+        // Remove "b" (still pending).
+        tree.remove_row("b");
+        rows.retain(|r| r.id != "b");
+        assert_invariant(&tree, &rows);
+
+        // "c" remains pending; the invariant must still hold.
+        assert_eq!(tree.pending_row_ids("firefox"), vec!["c".to_string()]);
+    }
+
+    #[test]
+    fn pending_row_ids_compose_into_valid_batch_deny_messages() {
+        // Pins the exact token pair `submitBatchVerdict` passes per id
+        // ("deny"/"this_host"/"this_time" for "Deny all" — the same sheet
+        // defaults `submitInlineVerdict` uses) through to a well-formed
+        // `SetVerdict`, entirely Qt-free.
+        let rows = vec![
+            row("a", "firefox", "github.com", "1.1.1.1", None),
+            row("b", "firefox", "slack.com", "2.2.2.2", None),
+        ];
+        let tree = build(&rows);
+        for id in tree.pending_row_ids("firefox") {
+            let msg = crate::pending_decision::build_verdict_message(
+                &id,
+                "deny",
+                "this_host",
+                "this_time",
+            )
+            .expect("well-formed choice token must build");
+            let json = serde_json::to_value(&msg).unwrap();
+            assert_eq!(json["rowId"], id);
+            assert_eq!(json["verdict"], "deny");
+            assert_eq!(json["scope"], "this_host");
+            assert_eq!(json["duration"], "once");
+        }
+    }
+
+    #[test]
+    fn pending_row_ids_is_empty_for_unknown_or_fully_decided_process() {
+        let rows = vec![row("a", "firefox", "github.com", "1.1.1.1", Some("allow"))];
+        let tree = build(&rows);
+        assert!(tree.pending_row_ids("firefox").is_empty());
+        assert!(tree.pending_row_ids("nonexistent").is_empty());
+    }
+
+    #[test]
+    fn pending_row_ids_is_independent_of_collapse_state() {
+        let rows = vec![row("a", "firefox", "github.com", "1.1.1.1", None)];
+        let tree = build(&rows); // never expanded
+        assert_eq!(tree.pending_row_ids("firefox"), vec!["a".to_string()]);
     }
 }

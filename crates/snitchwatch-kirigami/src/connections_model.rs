@@ -198,6 +198,17 @@ pub mod qobject {
         #[qinvokable]
         #[cxx_name = "rowDetailsJson"]
         fn row_details_json(self: &ConnectionsModel, id: &QString) -> QString;
+
+        /// Issue #18 batch actions: the ids of every row still pending a
+        /// decision under process group `key`, JSON-encoded as a plain
+        /// array of strings in display order (e.g. `["r1","r2"]`). QML's
+        /// "Allow all"/"Deny all" process-header buttons parse this and
+        /// loop `PendingDecision.submit` per id. Flushes any buffered
+        /// grouped-mode messages first so the answer reflects current data
+        /// (mirrors `toggleProcessGroup`'s flush-before-read pattern).
+        #[qinvokable]
+        #[cxx_name = "pendingRowIdsForProcess"]
+        fn pending_row_ids_for_process(self: Pin<&mut ConnectionsModel>, key: &QString) -> QString;
     }
 
     // Protected base-class helpers inherited from QAbstractListModel.
@@ -757,6 +768,19 @@ impl qobject::ConnectionsModel {
         QString::from(&serde_json::to_string(&details).unwrap_or_else(|e| {
             tracing::error!(error = %e, "ConnectionsModel: row details serialize failed");
             "{}".to_string()
+        }))
+    }
+
+    /// Issue #18 batch actions: pending row ids under process group `key`,
+    /// JSON-encoded as `["id1","id2",...]`. Returns `"[]"` for an unknown
+    /// key or serialization failure rather than erroring — the QML caller
+    /// degrades to a no-op loop.
+    fn pending_row_ids_for_process(mut self: Pin<&mut Self>, key: &QString) -> QString {
+        self.as_mut().flush_grouped_messages();
+        let ids = self.grouping.pending_row_ids(&key.to_string());
+        QString::from(&serde_json::to_string(&ids).unwrap_or_else(|e| {
+            tracing::error!(error = %e, "ConnectionsModel: pending row ids serialize failed");
+            "[]".to_string()
         }))
     }
 
