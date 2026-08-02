@@ -132,7 +132,10 @@ Kirigami.ScrollablePage {
             id: grouped
             text: "Grouped"
             checked: page.model ? page.model.grouped : true
-            onToggled: page.model.setGrouped(checked)
+            // Must be the invokable, not the auto-generated `setGrouped`
+            // property setter: only setGroupedMode brackets the Qt model
+            // reset and rebuilds the grouped projection.
+            onToggled: page.model.setGroupedMode(checked)
         }
     }
 
@@ -272,11 +275,33 @@ Kirigami.ScrollablePage {
 
                 Controls.Label {
                     visible: row.isGroupHeader
-                    text: row.groupPending > 0
-                          ? (row.groupTotal + " · " + row.groupPending + " pending")
-                          : (row.groupTotal + " connection" + (row.groupTotal === 1 ? "" : "s"))
-                    color: row.groupPending > 0 ? Kirigami.Theme.neutralTextColor : Kirigami.Theme.disabledTextColor
+                    text: row.groupTotal + " connection" + (row.groupTotal === 1 ? "" : "s")
+                    color: Kirigami.Theme.disabledTextColor
                     Layout.alignment: Qt.AlignVCenter
+                }
+
+                Rectangle {
+                    // Pending-count badge. Groups are never force-expanded
+                    // for pending rows (grouping.rs module doc), so this
+                    // badge is the only signal that a collapsed group hides
+                    // undecided connections — it must read as a badge, not
+                    // as body text.
+                    visible: row.isGroupHeader && row.groupPending > 0
+                    color: Kirigami.Theme.neutralBackgroundColor
+                    border.color: Kirigami.Theme.neutralTextColor
+                    border.width: 1
+                    radius: height / 2
+                    implicitWidth: pendingBadgeLabel.implicitWidth + Kirigami.Units.largeSpacing
+                    implicitHeight: pendingBadgeLabel.implicitHeight + Kirigami.Units.smallSpacing
+                    Layout.alignment: Qt.AlignVCenter
+
+                    Controls.Label {
+                        id: pendingBadgeLabel
+                        anchors.centerIn: parent
+                        text: row.groupPending + " pending"
+                        color: Kirigami.Theme.neutralTextColor
+                        font: Kirigami.Theme.smallFont
+                    }
                 }
             }
         }
