@@ -26,8 +26,21 @@ fn scanner_binary_path() -> String {
 pub fn run_deep_scan() -> Result<String, String> {
     let pkexec = which::which("pkexec").map_err(|e| format!("pkexec not found: {e}"))?;
 
+    // Preflight the scanner binary itself. Without this, a dev build (where
+    // nothing is installed at the packaged /usr/libexec path) fails with a
+    // bare pkexec exit 127 *after* the polkit authentication prompt, and
+    // nothing tells the user the override env var exists.
+    let scanner_bin = scanner_binary_path();
+    if !std::path::Path::new(&scanner_bin).is_file() {
+        return Err(format!(
+            "scanner binary not found at {scanner_bin} — install the \
+             snitchwatch-scanner package, or point SNITCHWATCH_SCANNER_BIN \
+             at a locally built scanner-privileged binary"
+        ));
+    }
+
     let output = std::process::Command::new(pkexec)
-        .arg(scanner_binary_path())
+        .arg(scanner_bin)
         .arg("--json")
         .output()
         .map_err(|e| format!("failed to run scanner via pkexec: {e}"))?;
@@ -65,6 +78,16 @@ mod tests {
 
         std::env::set_var("SNITCHWATCH_SCANNER_BIN", "/tmp/fake-scanner");
         assert_eq!(scanner_binary_path(), "/tmp/fake-scanner");
+
+        // Preflight: with the override pointing at a nonexistent binary the
+        // error must name both the path and the override env var, *before*
+        // any pkexec/polkit prompt — unless pkexec itself is missing, which
+        // legitimately short-circuits first.
+        if which::which("pkexec").is_ok() {
+            let err = run_deep_scan().unwrap_err();
+            assert!(err.contains("/tmp/fake-scanner"), "{err}");
+            assert!(err.contains("SNITCHWATCH_SCANNER_BIN"), "{err}");
+        }
         std::env::remove_var("SNITCHWATCH_SCANNER_BIN");
     }
 
