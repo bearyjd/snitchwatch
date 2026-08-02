@@ -27,15 +27,15 @@
 //!     precedent it already sets for the filtered-flat path ("a filter is an
 //!     explicit user investigation mode... a reset is acceptable here").
 //!
-//! Design decision — pending rows always visible: rather than track
-//! "auto-expanded because a pending row arrived" as separate mutable state
-//! (which would need explicit collapse-back logic once the row is decided),
-//! [`build_projection`](GroupTree::build_projection) treats a group as
-//! effectively expanded whenever it has at least one pending descendant,
-//! regardless of the user's toggled state. This satisfies both "pending rows
-//! always visible/highlighted within their group" and "auto-expand the path
-//! to a new pending row" with one rule, and naturally lets the group return
-//! to the user's chosen collapsed state once the row is decided.
+//! Design decision — pending work is signalled, never forced open (issue
+//! #20): a group with pending descendants stays in whatever expand/collapse
+//! state the user chose; the header's pending count (rendered as a badge in
+//! `ConnectionsPage.qml`) is the signal that undecided rows are hidden
+//! beneath it. An earlier iteration force-expanded any group with a pending
+//! descendant, but on a busy system that override fired on every rebuild
+//! and made manual collapse impossible. The active filter still forces the
+//! path to a match open — a filter is an explicit user investigation mode,
+//! and a hidden match would read as "no results".
 //!
 //! Design decision — domain grouping heuristic: exact Public Suffix List
 //! handling is explicitly not required. [`registrable_domain`] uses a
@@ -399,8 +399,7 @@ impl GroupTree {
                 continue;
             }
 
-            let process_expanded =
-                self.expanded_processes.contains(pkey) || pg.counts.pending > 0 || filter_active;
+            let process_expanded = self.expanded_processes.contains(pkey) || filter_active;
             out.push(VisibleEntry::ProcessHeader {
                 key: pkey.clone(),
                 label: pg.label.clone(),
@@ -414,9 +413,7 @@ impl GroupTree {
             for (dkey, visible_ids) in visible_domains {
                 let dg = &pg.domains[dkey];
                 let composite = composite_key(pkey, dkey);
-                let domain_expanded = self.expanded_domains.contains(&composite)
-                    || dg.counts.pending > 0
-                    || filter_active;
+                let domain_expanded = self.expanded_domains.contains(&composite) || filter_active;
                 out.push(VisibleEntry::DomainHeader {
                     process_key: pkey.clone(),
                     key: dkey.clone(),
@@ -591,14 +588,16 @@ mod tests {
             row("c", "firefox", "slack.com", "2.2.2.2", Some("deny")),
             row("d", "slack", "slack.com", "2.2.2.2", Some("allow")),
         ];
-        let tree = build(&rows);
+        let mut tree = build(&rows);
         assert_eq!(tree.process_count(), 2);
+        // Pending rows no longer force expansion; open firefox explicitly so
+        // its domain headers are emitted for the grouping assertions below.
+        tree.toggle_process("firefox");
 
         let no_filter = ConnectionFilter::default();
         let map = rows_map(&rows);
         let proj = tree.build_projection(&map, &no_filter);
 
-        // firefox has a pending row (b) -> process + its domains force-expand.
         match &proj[0] {
             VisibleEntry::ProcessHeader {
                 key,
@@ -652,7 +651,7 @@ mod tests {
             let filter = ConnectionFilter::default();
             let map = rows_map(&rows);
             let proj = tree.build_projection(&map, &filter);
-            // Pending forces expansion.
+            // Pending is signalled via the header counts (the badge source).
             match &proj[0] {
                 VisibleEntry::ProcessHeader { counts, .. } => assert_eq!(counts.pending, 1),
                 other => panic!("unexpected {other:?}"),
@@ -684,6 +683,9 @@ mod tests {
         rows[0].dst_host = "slack.com".to_string();
         rows[0].dst_ip = "2.2.2.2".to_string();
         tree.upsert_row(&rows[0]);
+        // After the move (which prunes toggle state for the emptied group),
+        // expand the process so its domain headers are emitted for the assert.
+        tree.toggle_process("firefox");
 
         let filter = ConnectionFilter::default();
         let map = rows_map(&rows);
@@ -771,13 +773,29 @@ mod tests {
     }
 
     #[test]
-    fn pending_row_forces_group_expansion_even_when_collapsed() {
+    fn pending_row_stays_collapsed_and_surfaces_through_header_counts() {
         let rows = vec![row("a", "firefox", "github.com", "1.1.1.1", None)];
-        let tree = build(&rows); // never toggled expanded
+        let mut tree = build(&rows); // never toggled expanded
         let filter = ConnectionFilter::default();
         let map = rows_map(&rows);
+
         let proj = tree.build_projection(&map, &filter);
-        assert_eq!(proj.len(), 3, "pending row forces the whole path open");
+        assert_eq!(proj.len(), 1, "collapse state wins over pending rows");
+        match &proj[0] {
+            VisibleEntry::ProcessHeader {
+                expanded, counts, ..
+            } => {
+                assert!(!expanded);
+                assert_eq!(counts.pending, 1, "badge count carries the signal");
+            }
+            other => panic!("expected ProcessHeader, got {other:?}"),
+        }
+
+        // Manual expansion still reveals the pending path in full.
+        tree.toggle_process("firefox");
+        tree.toggle_domain("firefox", "github.com");
+        let proj = tree.build_projection(&map, &filter);
+        assert_eq!(proj.len(), 3, "process + domain headers + pending leaf");
     }
 
     #[test]
