@@ -885,3 +885,21 @@ async fn subscribe_does_not_clear_previously_stored_alerts() {
         .get(alert::What::ProcMonitor)
         .is_some());
 }
+
+#[test]
+fn display_summary_sanitizes_hostile_process_and_host_text() {
+    let s = display_summary(
+        "evil\u{1b}[2Jname\u{202e}",
+        "<script>bad</script>.example.com",
+    );
+    assert!(!s.contains('\u{1b}'), "ANSI escape must be stripped: {s:?}");
+    assert!(
+        !s.contains('\u{202e}'),
+        "bidi override must be stripped: {s:?}"
+    );
+    assert!(
+        !s.contains('<') && !s.contains('>'),
+        "markup escaped: {s:?}"
+    );
+    assert!(s.contains(" → "), "keeps the summary shape: {s:?}");
+}

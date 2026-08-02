@@ -263,28 +263,18 @@ impl Ui for UiService {
         }
 
         let row = connection_to_row(&conn, ask_id);
-        // Captured before `row` moves into the broadcast message below —
-        // reused for RecentBlock's tooltip if this resolves to a Deny,
-        // rather than re-deriving the same process/host display logic.
-        let what = format!("{} → {}", row.process, row.dst_host);
-        // Also captured before the move — both `row.process` and
-        // `row.dst_host` are attacker-influenced (`row.process` is the
-        // basename of `process_path`: daemon-attested *existence*, but a
-        // local user still picks the path/basename text itself, e.g.
-        // `/tmp/<b>evil</b>` or a binary named with an ANSI escape — not the
-        // "safe, daemon-attested" class `translator::verdict`'s module doc
-        // means by `process_path` being trusted; only its *authenticity*
-        // as "this really is what ran" is trusted, not its byte content).
-        // So this display-bound copy of `what` sanitizes both halves before
-        // it can reach a notification body or the WS protocol; the raw
-        // `what` above stays as-is only for the pre-existing tray
-        // `RecentBlock` tooltip. Issue #14 security review round 2,
-        // MEDIUM-1 (host) and its follow-up (process).
-        let safe_what = format!(
-            "{} → {}",
-            crate::translator::verdict::sanitize_for_display(&row.process, 64),
-            crate::translator::verdict::sanitize_for_display(&row.dst_host, 64)
-        );
+        // Captured before `row` moves into the broadcast message below.
+        // Both `row.process` and `row.dst_host` are attacker-influenced
+        // (`row.process` is the basename of `process_path`: daemon-attested
+        // *existence*, but a local user still picks the path/basename text
+        // itself, e.g. `/tmp/<b>evil</b>` or a binary named with an ANSI
+        // escape — not the "safe, daemon-attested" class
+        // `translator::verdict`'s module doc means by `process_path` being
+        // trusted; only its *authenticity* as "this really is what ran" is
+        // trusted, not its byte content). Every display-bound consumer —
+        // the WS degradation notice, notification bodies, and the tray
+        // `RecentBlock` tooltip (issue #15) — must get the sanitized form.
+        let safe_what = display_summary(&row.process, &row.dst_host);
         let row_id = row.id.clone();
         let verdict_rx = {
             let mut cache = self.cache.lock().await;
@@ -309,7 +299,7 @@ impl Ui for UiService {
             .map_err(|_canceled| Status::cancelled("verdict oneshot dropped before resolution"))?;
 
         if resolution.verdict == Verdict::Deny {
-            self.publish_recent_block(what);
+            self.publish_recent_block(safe_what.clone());
 
             // FIX 2 (issue #14 security review): a narrowed Deny
             // under-blocks relative to what the pending-decision dialog
@@ -480,6 +470,19 @@ impl Ui for UiService {
             Box::pin(outbound) as Self::NotificationsStream
         ))
     }
+}
+
+/// Display-boundary "process → host" summary for notifications and the tray
+/// `RecentBlock` tooltip. Both inputs are attacker-influenced text (see the
+/// call site in [`Ui::ask_rule`]) and must pass through
+/// [`sanitize_for_display`](crate::translator::verdict::sanitize_for_display)
+/// before reaching any UI surface.
+pub(crate) fn display_summary(process: &str, dst_host: &str) -> String {
+    format!(
+        "{} → {}",
+        crate::translator::verdict::sanitize_for_display(process, 64),
+        crate::translator::verdict::sanitize_for_display(dst_host, 64)
+    )
 }
 
 #[cfg(test)]
