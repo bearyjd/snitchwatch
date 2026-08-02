@@ -148,6 +148,11 @@ ColumnLayout {
             Layout.fillWidth: true
             textRole: "label"
             valueRole: "token"
+            // Back-reference: `model[0]`'s token ("this_host") is the
+            // default `ConnectionsPage.qml`'s inline Allow/Deny buttons
+            // hardcode (`submitInlineVerdict`) so an inline decision matches
+            // what this sheet would submit unchanged. Reordering this model
+            // or changing its first entry's token changes that default too.
             model: [
                 { label: "This host only", token: "this_host" },
                 { label: "Any host on this domain", token: "any_host_on_domain" },
@@ -172,6 +177,10 @@ ColumnLayout {
             Layout.fillWidth: true
             textRole: "label"
             valueRole: "token"
+            // Back-reference: `model[0]`'s token ("this_time") is the
+            // default `ConnectionsPage.qml`'s inline Allow/Deny buttons
+            // hardcode (`submitInlineVerdict`), same rationale as
+            // `scopeBox`'s model comment above.
             model: [
                 { label: "This time", token: "this_time" },
                 { label: "For 5 minutes", token: "for_5_minutes" },

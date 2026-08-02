@@ -49,6 +49,53 @@ Kirigami.ScrollablePage {
     // component tests (the sparkline area is simply empty then).
     property var trafficModel: null
 
+    // Issue #18: inline verdict surface for pending leaf rows and per-process
+    // batch actions on group headers. A single page-level PendingDecision
+    // instance (not one per delegate) mirrors PendingDecisionSheet.qml's
+    // signal->dispatcher hop so the pure verdict->ClientMessage mapping stays
+    // the single source of the JSON. Submits with the sheet's own defaults
+    // ("This host only" scope / "This time" duration — scopeBox/durationBox's
+    // first model entries in PendingDecisionSheet.qml) so an inline decision
+    // and a sheet decision for the same row produce the same rule.
+    PendingDecision {
+        id: inlineDecision
+    }
+    Connections {
+        target: inlineDecision
+        enabled: page.bridgeFeed !== null
+        function onVerdictSubmitted(json) {
+            page.bridgeFeed.sendClientJson(json);
+        }
+    }
+
+    // Shared submit path for both the inline row buttons and (looped) the
+    // process-header batch actions — also the entry point the interaction
+    // test drives to exercise the click -> submit -> verdict-message path
+    // without needing to synthesize a real mouse click.
+    function submitInlineVerdict(rowId, choice) {
+        inlineDecision.submit(rowId, choice, "this_host", "this_time");
+    }
+
+    // Issue #18 batch actions: parse ConnectionsModel.pendingRowIdsForProcess
+    // and submit the same verdict for every pending row under that process
+    // group. No new WS protocol — this is just N SetVerdict messages.
+    function submitBatchVerdict(processKey, choice) {
+        if (!page.model) {
+            return;
+        }
+        try {
+            const ids = JSON.parse(page.model.pendingRowIdsForProcess(processKey));
+            for (const id of ids) {
+                page.submitInlineVerdict(id, choice);
+            }
+        } catch (e) {
+            // Malformed JSON from the model would be a Rust-side bug;
+            // degrade to a no-op rather than throwing in the delegate, but
+            // don't swallow it silently.
+            console.warn("submitBatchVerdict failed:", e);
+        }
+    }
+
     // Snapshot of the row currently shown in the inspector sheet.
     property string inspectId: ""
     property string inspectProcess: ""
@@ -202,6 +249,19 @@ Kirigami.ScrollablePage {
             required property string matchedRule
             required property string matchedRuleDisplay
 
+            // Issue #18 double-submit guard: the inline/batch buttons stay
+            // visible until the round trip flips `pending` to false, so a
+            // second click before that arrives would otherwise send a
+            // second (safe but ERROR-logged, feedback-less) SetVerdict.
+            // Reset whenever this delegate instance starts representing a
+            // different row (reuseItems recycles delegates, so `rowId`
+            // changing is the reliable "this is a new row now" signal) or
+            // when the row's own pending state changes (a fresh pending
+            // arrival on the same id, or a decision landing).
+            property bool submitted: false
+            onRowIdChanged: row.submitted = false
+            onPendingChanged: row.submitted = false
+
             onClicked: {
                 if (row.isGroupHeader) {
                     if (row.depth === 0) {
@@ -301,6 +361,69 @@ Kirigami.ScrollablePage {
                         text: row.groupPending + " pending"
                         color: Kirigami.Theme.neutralTextColor
                         font: Kirigami.Theme.smallFont
+                    }
+                }
+
+                // Issue #18: per-process batch actions. Only on top-level
+                // process headers (depth 0) with at least one pending
+                // descendant — a domain header or a fully-decided process has
+                // nothing to batch-act on.
+                RowLayout {
+                    visible: row.isGroupHeader && row.depth === 0 && row.groupPending > 0
+                    spacing: Kirigami.Units.smallSpacing
+
+                    Controls.Button {
+                        flat: true
+                        enabled: !row.submitted
+                        text: "Allow all (" + row.groupPending + ")"
+                        icon.name: "dialog-ok-apply"
+                        onClicked: {
+                            row.submitted = true;
+                            page.submitBatchVerdict(row.groupKey, "allow");
+                        }
+                    }
+                    Controls.Button {
+                        flat: true
+                        enabled: !row.submitted
+                        text: "Deny all (" + row.groupPending + ")"
+                        icon.name: "edit-delete-remove"
+                        onClicked: {
+                            row.submitted = true;
+                            page.submitBatchVerdict(row.groupKey, "deny");
+                        }
+                    }
+                }
+
+                // Issue #18: inline Allow/Deny on pending leaf rows, so a
+                // decision no longer requires opening the inspector sheet.
+                // Submits with the sheet's own defaults (see the page-level
+                // PendingDecision doc comment above) so inline and
+                // sheet-driven decisions for the same row match. Disabled
+                // after one click (see `row.submitted`'s doc comment) until
+                // the round trip flips `pending` and resets the guard.
+                RowLayout {
+                    visible: !row.isGroupHeader && row.pending
+                    spacing: Kirigami.Units.smallSpacing
+
+                    Controls.Button {
+                        flat: true
+                        enabled: !row.submitted
+                        text: "Allow"
+                        icon.name: "dialog-ok-apply"
+                        onClicked: {
+                            row.submitted = true;
+                            page.submitInlineVerdict(row.rowId, "allow");
+                        }
+                    }
+                    Controls.Button {
+                        flat: true
+                        enabled: !row.submitted
+                        text: "Deny"
+                        icon.name: "edit-delete-remove"
+                        onClicked: {
+                            row.submitted = true;
+                            page.submitInlineVerdict(row.rowId, "deny");
+                        }
                     }
                 }
             }

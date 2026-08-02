@@ -57,6 +57,10 @@ cxx-qt-build = "=0.9.1"
 
 [dev-dependencies]
 tempfile = "3"
+# For inline_verdict_qml.rs's stderr-capture assertion (dup/dup2 of fd 2
+# around the QML load) — already present transitively (dns-lookup/tokio),
+# pinned directly here since the test calls it.
+libc = "0.2"
 tokio = { version = "1.40", features = ["test-util"] }
 # Live core-loop integration test (tests/live_loop.rs): drives the in-process
 # bridge with the same mock daemon the workspace-root protocol test uses.

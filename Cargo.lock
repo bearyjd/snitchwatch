@@ -4632,6 +4632,7 @@ dependencies = [
  "cxx-qt-build",
  "cxx-qt-lib",
  "dns-lookup",
+ "libc",
  "maxminddb",
  "mock-opensnitchd",
  "notify-rust",
