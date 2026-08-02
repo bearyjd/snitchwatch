@@ -147,6 +147,95 @@ async fn ping_with_stats_events_inserts_decided_rows_with_matched_rule() {
 }
 
 #[tokio::test]
+async fn ping_with_stats_broadcasts_daemon_statistics() {
+    use snitchwatch_proto::protocol::Statistics;
+
+    let cache = Arc::new(Mutex::new(ConnectionCache::new(64)));
+    let (tx, mut rx) = broadcast::channel::<ServerMessage>(16);
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let tray_pub = Arc::new(crate::tray_state::TrayStatePublisher::new());
+    let notice_bus = Arc::new(crate::notice::NoticeBus::new());
+    let svc = UiService::new(
+        cache,
+        tx,
+        tray_pub,
+        notice_bus,
+        Arc::new(AtomicBool::new(false)),
+    )
+    .into_server();
+    tokio::spawn(async move {
+        Server::builder()
+            .add_service(svc)
+            .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+            .await
+            .ok();
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let channel = tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
+        .unwrap()
+        .connect()
+        .await
+        .unwrap();
+    let mut client = UiClient::new(channel);
+
+    // No `events`, only aggregate scalars — the broadcast must not be gated
+    // on `events` being non-empty.
+    let reply = client
+        .ping(PingRequest {
+            id: 11,
+            stats: Some(Statistics {
+                daemon_version: "1.8.0".into(),
+                rules: 12,
+                uptime: 3661,
+                connections: 4200,
+                ignored: 10,
+                accepted: 4000,
+                dropped: 200,
+                rule_hits: 3900,
+                rule_misses: 300,
+                events: vec![],
+                ..Default::default()
+            }),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(reply.id, 11);
+
+    let broadcasted = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+        .await
+        .expect("ping did not broadcast daemon statistics")
+        .expect("broadcast error");
+    match broadcasted {
+        ServerMessage::DaemonStatistics {
+            daemon_version,
+            uptime,
+            rules,
+            connections,
+            ignored,
+            accepted,
+            dropped,
+            rule_hits,
+            rule_misses,
+        } => {
+            assert_eq!(daemon_version, "1.8.0");
+            assert_eq!(uptime, 3661);
+            assert_eq!(rules, 12);
+            assert_eq!(connections, 4200);
+            assert_eq!(ignored, 10);
+            assert_eq!(accepted, 4000);
+            assert_eq!(dropped, 200);
+            assert_eq!(rule_hits, 3900);
+            assert_eq!(rule_misses, 300);
+        }
+        other => panic!("expected DaemonStatistics, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn ping_without_stats_is_a_noop() {
     let addr = spawn_test_service().await;
     let channel = tonic::transport::Endpoint::from_shared(format!("http://{addr}"))

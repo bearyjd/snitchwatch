@@ -1,14 +1,24 @@
 // Traffic tab (Task 11 — view layer over TrafficModel).
 //
-// Maps from `web/js/traffic.js` (uPlot) + `web/traffic.css`. Spike verdict
-// (recorded in docs/superpowers/plans/2026-07-04-kirigami-shell-rewrite.md,
-// Task 11): neither the `QtCharts` nor `QtGraphs` QML modules are installed
-// in this environment (`qmake6 -query QT_INSTALL_QML` has no `QtCharts`/
-// `QtGraphs` directory) — there is nothing to spike against, so this renders
-// the chart on a plain QML `Canvas` instead: a couple of hundred points
-// (`TrafficStore`'s 300-second window) repainted once per second is trivial
-// for `Canvas`, and it adds zero new dependencies. See
-// `crate::traffic::ring_store`'s module docs for the full tradeoff writeup.
+// Issue #19: opensnitchd's `Connection` proto carries no byte counters, so
+// the per-connection byte-rate chart this page used to render was always
+// zero-valued and could never populate. The daemon does report rich
+// aggregate `Statistics` on every `Ping` (connections/accepted/dropped/rule
+// hits/etc.) — the bridge now forwards those as `DaemonStatistics` messages
+// (see `snitchwatch_bridge::ws_messages::ServerMessage::DaemonStatistics`),
+// and this page is rebuilt around them: a grid of stat tiles instead of the
+// old Canvas chart. `TrafficModel`'s series/rate plumbing (feeding a
+// `Canvas`-based byte-rate chart) is left in place on the Rust side for a
+// future per-connection byte source — only this page's presentation drops it.
+//
+// Staleness note: the daemon only pings when it has new connection activity
+// — `Statistics.Serialize()` returns nil with no new events since the last
+// ping (`vendor/opensnitch/daemon/statistics/stats.go:266`), and the client
+// skips the Ping RPC entirely in that case
+// (`vendor/opensnitch/daemon/client.go:337-341`). So on an idle system these
+// counters (uptime included) reflect the *last* report, not "now" — the
+// placeholder and uptime label below say so explicitly rather than implying
+// a live/fixed-cadence feed.
 import QtQuick
 import QtQuick.Layouts
 import QtQuick.Controls as Controls
@@ -22,175 +32,126 @@ Kirigami.Page {
     // Injected by the caller (main.qml) so the model's lifetime is owned there.
     property TrafficModel model
 
-    property var timestampsMs: []
-    property var bytesIn: []
-    property var bytesOut: []
+    // Static tile definitions: `key` names the TrafficModel qproperty each
+    // tile reads. This array is built once (it never reads `page.model`
+    // itself) so the Repeater's delegate set is stable across every
+    // DaemonStatistics update — only each delegate's own `text` binding
+    // (below) re-evaluates when its one property changes, not all six.
+    readonly property var tiles: [
+        { label: "Connections", key: "statConnections" },
+        { label: "Accepted", key: "statAccepted" },
+        { label: "Dropped", key: "statDropped" },
+        { label: "Rule hits", key: "statRuleHits" },
+        { label: "Rule misses", key: "statRuleMisses" },
+        { label: "Rules", key: "statRules" },
+    ]
 
-    function parseSeries() {
+    // i32 qproperties saturate at i32::MAX on the Rust side (see
+    // `traffic_model::u64_to_display_i32`) rather than wrapping — flag that
+    // display cap here too instead of silently showing a suspiciously round
+    // number.
+    readonly property int i32Max: 2147483647
+
+    function formatStatValue(key) {
         if (!page.model) {
-            return;
+            return "0";
         }
-        try {
-            const parsed = JSON.parse(page.model.seriesJson);
-            page.timestampsMs = parsed.timestampsMs || [];
-            page.bytesIn = parsed.bytesIn || [];
-            page.bytesOut = parsed.bytesOut || [];
-        } catch (e) {
-            // Malformed/empty payload — degrade to an empty chart rather
-            // than throwing (the PlaceholderMessage below covers this case).
-            page.timestampsMs = [];
-            page.bytesIn = [];
-            page.bytesOut = [];
-        }
-        chart.requestPaint();
+        const raw = page.model[key];
+        const formatted = Number(raw).toLocaleString(Qt.locale());
+        return raw === page.i32Max ? formatted + "+" : formatted;
     }
 
-    // Small axis-label-only formatter (byte-rate scaling for gridlines).
-    // The authoritative current-rate readout above the chart uses
-    // TrafficModel's Rust-side `format_rate` via currentInLabel/OutLabel;
-    // this only formats the three gridline ticks.
-    function formatAxisBytes(v) {
-        if (v <= 0) return "0";
-        if (v < 1e3) return v.toFixed(0) + "B/s";
-        if (v < 1e6) return (v / 1e3).toFixed(1) + "kB/s";
-        if (v < 1e9) return (v / 1e6).toFixed(1) + "MB/s";
-        return (v / 1e9).toFixed(1) + "GB/s";
-    }
-
-    // The model's live outbound feed is started once, in main.qml's
-    // Component.onCompleted (its lifetime spans the window, not this page) —
-    // mirrors BlocklistsPage.qml/RulesPage.qml, which likewise don't call
-    // startBridgeFeed() themselves.
-    Component.onCompleted: page.parseSeries()
-
-    Connections {
-        target: page.model
-        function onSeriesJsonChanged() {
-            page.parseSeries();
+    // Format a seconds count as "1h 2m 3s", dropping leading zero units.
+    function formatUptime(totalSeconds) {
+        if (totalSeconds <= 0) {
+            return "0s";
         }
+        const h = Math.floor(totalSeconds / 3600);
+        const m = Math.floor((totalSeconds % 3600) / 60);
+        const s = totalSeconds % 60;
+        let parts = [];
+        if (h > 0) parts.push(h + "h");
+        if (h > 0 || m > 0) parts.push(m + "m");
+        parts.push(s + "s");
+        return parts.join(" ");
     }
 
     Kirigami.PlaceholderMessage {
         anchors.centerIn: parent
         width: parent.width - (Kirigami.Units.largeSpacing * 4)
-        visible: !page.model || page.model.count === 0
+        visible: !page.model || !page.model.statsReceived
         icon.name: "office-chart-line"
-        text: "No traffic data yet"
-        explanation: "Per-second in/out byte counts will appear here once the daemon starts reporting traffic."
+        text: "Waiting for daemon statistics"
+        explanation: "opensnitchd reports aggregate connection statistics when it has new \
+                      connection activity to report, not on a fixed schedule — this page \
+                      populates once the first report arrives."
     }
 
     ColumnLayout {
         anchors.fill: parent
+        anchors.margins: Kirigami.Units.largeSpacing
         spacing: Kirigami.Units.largeSpacing
-        visible: page.model && page.model.count > 0
+        visible: page.model && page.model.statsReceived
 
-        RowLayout {
+        GridLayout {
             Layout.fillWidth: true
-            spacing: Kirigami.Units.largeSpacing
+            columns: 3
+            columnSpacing: Kirigami.Units.largeSpacing
+            rowSpacing: Kirigami.Units.largeSpacing
 
-            RowLayout {
-                spacing: Kirigami.Units.smallSpacing
-                Rectangle {
-                    width: Kirigami.Units.gridUnit * 0.5
-                    height: width
-                    radius: 2
-                    color: Kirigami.Theme.highlightColor
-                    Layout.alignment: Qt.AlignVCenter
+            Repeater {
+                model: page.tiles
+
+                delegate: Rectangle {
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: Kirigami.Units.gridUnit * 5
+                    radius: Kirigami.Units.smallSpacing
+                    color: Kirigami.Theme.alternateBackgroundColor
+                    border.color: Kirigami.Theme.disabledTextColor
+                    border.width: 1
+
+                    ColumnLayout {
+                        anchors.centerIn: parent
+                        spacing: Kirigami.Units.smallSpacing
+
+                        Controls.Label {
+                            Layout.alignment: Qt.AlignHCenter
+                            textFormat: Text.PlainText
+                            text: page.formatStatValue(modelData.key)
+                            font.pointSize: Kirigami.Theme.defaultFont.pointSize * 1.8
+                            font.bold: true
+                        }
+                        Controls.Label {
+                            Layout.alignment: Qt.AlignHCenter
+                            textFormat: Text.PlainText
+                            text: modelData.label
+                            color: Kirigami.Theme.disabledTextColor
+                        }
+                    }
                 }
-                Controls.Label {
-                    text: "In: " + (page.model ? page.model.currentInLabel : "--")
-                }
-            }
-            RowLayout {
-                spacing: Kirigami.Units.smallSpacing
-                Rectangle {
-                    width: Kirigami.Units.gridUnit * 0.5
-                    height: width
-                    radius: 2
-                    color: Kirigami.Theme.neutralTextColor
-                    Layout.alignment: Qt.AlignVCenter
-                }
-                Controls.Label {
-                    text: "Out: " + (page.model ? page.model.currentOutLabel : "--")
-                }
-            }
-            Item {
-                Layout.fillWidth: true
             }
         }
 
-        Canvas {
-            id: chart
-            Layout.fillWidth: true
+        Item {
             Layout.fillHeight: true
-            antialiasing: true
+        }
 
-            onWidthChanged: requestPaint()
-            onHeightChanged: requestPaint()
-
-            readonly property color gridColor: Kirigami.Theme.disabledTextColor
-            readonly property color axisTextColor: Kirigami.Theme.textColor
-            readonly property color inColor: Kirigami.Theme.highlightColor
-            readonly property color outColor: Kirigami.Theme.neutralTextColor
-
-            onPaint: {
-                const ctx = getContext("2d");
-                ctx.clearRect(0, 0, width, height);
-
-                const n = page.bytesIn.length;
-                if (n === 0) {
-                    return;
-                }
-
-                let maxVal = 1;
-                for (let i = 0; i < n; i++) {
-                    maxVal = Math.max(maxVal, page.bytesIn[i], page.bytesOut[i]);
-                }
-
-                const padLeft = 56;
-                const padBottom = 4;
-                const padTop = 8;
-                const padRight = 4;
-                const plotW = Math.max(1, width - padLeft - padRight);
-                const plotH = Math.max(1, height - padBottom - padTop);
-
-                ctx.strokeStyle = chart.gridColor;
-                ctx.globalAlpha = 0.35;
-                ctx.lineWidth = 1;
-                ctx.font = "10px sans-serif";
-                ctx.fillStyle = chart.axisTextColor;
-                ctx.globalAlpha = 1.0;
-                for (let g = 0; g <= 2; g++) {
-                    const frac = g / 2;
-                    const y = padTop + plotH * (1 - frac);
-                    ctx.globalAlpha = 0.35;
-                    ctx.beginPath();
-                    ctx.moveTo(padLeft, y);
-                    ctx.lineTo(padLeft + plotW, y);
-                    ctx.stroke();
-                    ctx.globalAlpha = 1.0;
-                    ctx.fillText(page.formatAxisBytes(maxVal * frac), 2, y + 3);
-                }
-
-                function plotSeries(series, color) {
-                    ctx.strokeStyle = color;
-                    ctx.lineWidth = 2;
-                    ctx.beginPath();
-                    for (let i = 0; i < n; i++) {
-                        const x = padLeft + (n === 1 ? plotW : (plotW * i) / (n - 1));
-                        const y = padTop + plotH * (1 - Math.min(1, series[i] / maxVal));
-                        if (i === 0) {
-                            ctx.moveTo(x, y);
-                        } else {
-                            ctx.lineTo(x, y);
-                        }
-                    }
-                    ctx.stroke();
-                }
-
-                plotSeries(page.bytesIn, chart.inColor);
-                plotSeries(page.bytesOut, chart.outColor);
-            }
+        Controls.Label {
+            Layout.fillWidth: true
+            Layout.alignment: Qt.AlignHCenter
+            horizontalAlignment: Text.AlignHCenter
+            textFormat: Text.PlainText
+            color: Kirigami.Theme.disabledTextColor
+            // `daemonVersion` is daemon-supplied (and, transitively,
+            // attacker-influenced on a compromised/malicious daemon) text —
+            // the bridge already sanitizes it (`sanitize_for_display`)
+            // before it reaches the wire, and `textFormat: Text.PlainText`
+            // above additionally forecloses Qt's `AutoText` rich-text
+            // heuristic from ever interpreting it as markup.
+            text: page.model
+                ? "opensnitchd " + page.model.daemonVersion
+                    + " — uptime at last report: " + page.formatUptime(page.model.uptimeSecs)
+                : ""
         }
     }
 }

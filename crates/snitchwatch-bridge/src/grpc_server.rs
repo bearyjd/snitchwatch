@@ -217,6 +217,41 @@ impl Ui for UiService {
                     }
                 }
             }
+
+            // Aggregate counters from the same `Statistics` payload (issue
+            // #19). Not gated on `new_rows` being non-empty — `stats.events`
+            // and the scalar counters are independent fields on the same
+            // message, so a `Statistics` with only scalars still broadcasts.
+            // Note the daemon itself, not this bridge, controls *whether* a
+            // `Statistics` payload is sent at all: `Serialize()` returns
+            // `nil` when it has no new events since the last ping
+            // (`vendor/opensnitch/daemon/statistics/stats.go:266`), and the
+            // client then skips the Ping RPC entirely
+            // (`vendor/opensnitch/daemon/client.go:337-341`) — so on an idle
+            // system with no new connection activity, the daemon simply
+            // doesn't ping, and these counters (uptime included) can go
+            // stale until the next one. This broadcast itself stays
+            // unconditional on `stats` being present, defensively, in case
+            // that upstream gating ever changes.
+            if self.broadcast.receiver_count() > 0 {
+                let stats_msg = ServerMessage::DaemonStatistics {
+                    daemon_version: crate::translator::verdict::sanitize_for_display(
+                        &stats.daemon_version,
+                        32,
+                    ),
+                    uptime: stats.uptime,
+                    rules: stats.rules,
+                    connections: stats.connections,
+                    ignored: stats.ignored,
+                    accepted: stats.accepted,
+                    dropped: stats.dropped,
+                    rule_hits: stats.rule_hits,
+                    rule_misses: stats.rule_misses,
+                };
+                if let Err(e) = self.broadcast.send(stats_msg) {
+                    warn!(error = %e, "ping: daemon statistics broadcast send failed");
+                }
+            }
         }
 
         Ok(Response::new(PingReply { id }))
