@@ -84,12 +84,16 @@ pub fn interests_profiles(msg: &ServerMessage) -> bool {
     )
 }
 
-/// True when `msg` carries new binned traffic samples (drives
-/// `TrafficModel`). `SetTrafficData`/`UpdateTrafficData` are deliberately
-/// excluded — see `crate::traffic::ring_store`'s module docs for why those
-/// legacy uPlot-shaped blobs aren't consumed.
+/// True when `msg` carries new binned traffic samples or daemon aggregate
+/// statistics (drives `TrafficModel`, issue #19). `SetTrafficData`/
+/// `UpdateTrafficData` are deliberately excluded — see
+/// `crate::traffic::ring_store`'s module docs for why those legacy uPlot-
+/// shaped blobs aren't consumed.
 pub fn interests_traffic(msg: &ServerMessage) -> bool {
-    matches!(msg, ServerMessage::TrafficEvents { .. })
+    matches!(
+        msg,
+        ServerMessage::TrafficEvents { .. } | ServerMessage::DaemonStatistics { .. }
+    )
 }
 
 /// True when `msg` carries daemon diagnostics report data (drives
@@ -349,6 +353,28 @@ mod tests {
         assert!(!interests_rules(&msg));
         assert!(!interests_blocklists(&msg));
         assert!(!interests_blocklist_entries(&msg));
+    }
+
+    #[test]
+    fn daemon_statistics_messages_route_only_to_traffic() {
+        let msg = ServerMessage::DaemonStatistics {
+            daemon_version: "1.8.0".into(),
+            uptime: 3661,
+            rules: 12,
+            connections: 4200,
+            ignored: 10,
+            accepted: 4000,
+            dropped: 200,
+            rule_hits: 3900,
+            rule_misses: 300,
+        };
+        assert!(interests_traffic(&msg));
+        assert!(!interests_connections(&msg));
+        assert!(!interests_rules(&msg));
+        assert!(!interests_blocklists(&msg));
+        assert!(!interests_blocklist_entries(&msg));
+        assert!(!interests_profiles(&msg));
+        assert!(!interests_diagnostics(&msg));
     }
 
     #[test]

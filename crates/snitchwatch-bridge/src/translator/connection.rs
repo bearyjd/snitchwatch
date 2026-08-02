@@ -139,6 +139,11 @@ mod tests {
         assert_eq!(row.protocol, "tcp");
         assert_eq!(row.direction, "outgoing");
         assert!(row.action.is_none(), "ask-rule rows start pending");
+        // The `Connection` proto carries no byte counters (issue #19) — this
+        // is a documented limitation of the upstream wire shape, not a
+        // desired zero value. The Traffic tab is built around daemon
+        // aggregate `Statistics` instead; see `ws_messages::ServerMessage::
+        // DaemonStatistics`.
         assert_eq!(row.bytes_sent, 0);
         assert_eq!(row.bytes_received, 0);
     }

@@ -9,9 +9,16 @@
 //!     deserialize -> ring-store-apply -> series/label property path without
 //!     aborting (a Rust panic inside the invokable would abort this test
 //!     binary), and
-//!   * `TrafficPage.qml`'s `Canvas`-based chart loads and paints against a
-//!     populated model without throwing (this is the "no `QtCharts`, no
-//!     dependency-free fallback risk" smoke this task's spike called for).
+//!   * `TrafficPage.qml` itself compiles and instantiates — issue #19
+//!     rebuilt the page around daemon aggregate stats (a stat-tile grid)
+//!     instead of the old `Canvas`-based byte-rate chart. Unlike an earlier
+//!     version of this test, `TrafficPage` is the *root* document below (the
+//!     same convention `rules_page_diagnostics_qml.rs`/
+//!     `connections_page_diagnostics_qml.rs` use), not created via a nested
+//!     `Qt.createComponent()` whose result was never asserted on — a
+//!     type/property error or failed import in `TrafficPage.qml` now nulls
+//!     the root object directly, which the `root_ok` assertion below does
+//!     check.
 //!
 //! It intentionally does NOT assert series/label content: a thrown JS error
 //! in `Component.onCompleted` does not null the root object, so QML-side
@@ -41,45 +48,60 @@ fn traffic_model_registers_and_ingest_invokable_runs() {
 
     let root_ok = Arc::new(AtomicBool::new(false));
 
-    // Instantiate the Rust model and drive a batch of TrafficEvents through
-    // it, then load the real TrafficPage.qml against it so the Canvas paint
-    // path executes for real (not a re-implemented probe QML). If the
-    // invokable panicked, the whole test binary would abort; if the type
-    // were unregistered or the page failed to compile, the root would be
-    // null.
+    // `TrafficPage` is the root document (not a nested Qt.createComponent()
+    // result whose status was never checked) — see the module doc comment.
+    // Drives a batch of TrafficEvents plus one DaemonStatistics message
+    // through the real model so both the (retained) series plumbing and the
+    // new stat-tile grid exercise for real. If an invokable panicked, the
+    // whole test binary would abort; if the type were unregistered or the
+    // page failed to compile, `root_ok` stays false.
     let qml = r#"
 import QtQuick
 import com.snitchwatch.shell
 
-QtObject {
-    property TrafficModel model: TrafficModel {}
-    property var page: null
+TrafficPage {
+    id: page
+    model: TrafficModel {
+        id: trafficModel
 
-    Component.onCompleted: {
-        const events = [];
-        for (let i = 0; i < 90; i++) {
-            events.push({
-                timestampMs: 1000000000000 + i * 1000,
-                bytesIn: 100 + i,
-                bytesOut: 50 + i
-            });
+        Component.onCompleted: {
+            const events = [];
+            for (let i = 0; i < 90; i++) {
+                events.push({
+                    timestampMs: 1000000000000 + i * 1000,
+                    bytesIn: 100 + i,
+                    bytesOut: 50 + i
+                });
+            }
+            trafficModel.applyServerMessageJson(JSON.stringify({
+                action: "trafficEvents",
+                events: events
+            }));
+
+            // Issue #19: the page now renders around daemon aggregate stats
+            // rather than the byte-rate series above — feed one so the
+            // page's stat-tile grid (not just its placeholder) exercises
+            // for real.
+            trafficModel.applyServerMessageJson(JSON.stringify({
+                action: "daemonStatistics",
+                daemonVersion: "1.8.0",
+                uptime: 3661,
+                rules: 12,
+                connections: 4200,
+                ignored: 10,
+                accepted: 4000,
+                dropped: 200,
+                ruleHits: 3900,
+                ruleMisses: 300
+            }));
+
+            // Best-effort visibility only (not load-bearing — see module docs).
+            console.log("[test] TrafficModel.count after insert =", trafficModel.count,
+                        "currentInLabel =", trafficModel.currentInLabel,
+                        "currentOutLabel =", trafficModel.currentOutLabel,
+                        "statsReceived =", trafficModel.statsReceived,
+                        "daemonVersion =", trafficModel.daemonVersion);
         }
-        model.applyServerMessageJson(JSON.stringify({
-            action: "trafficEvents",
-            events: events
-        }));
-
-        const component = Qt.createComponent("qrc:/qt/qml/com/snitchwatch/shell/qml/TrafficPage.qml");
-        if (component.status === Component.Ready) {
-            page = component.createObject(null, { model: model });
-        } else {
-            console.log("[test] TrafficPage.qml load error:", component.errorString());
-        }
-
-        // Best-effort visibility only (not load-bearing — see module docs).
-        console.log("[test] TrafficModel.count after insert =", model.count,
-                    "currentInLabel =", model.currentInLabel,
-                    "currentOutLabel =", model.currentOutLabel);
     }
 }
 "#;
@@ -102,8 +124,8 @@ QtObject {
 
     assert!(
         root_ok.load(Ordering::SeqCst),
-        "TrafficModel QML probe failed: root object was null — the type failed to register \
-         as a QML element or did not compile"
+        "TrafficPage QML probe failed: root object was null — the TrafficModel type failed to \
+         register as a QML element, or TrafficPage.qml did not compile"
     );
 
     let _ = app.as_mut();

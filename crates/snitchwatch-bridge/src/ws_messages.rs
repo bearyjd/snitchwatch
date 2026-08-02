@@ -148,6 +148,28 @@ pub enum ServerMessage {
         row_id: String,
         reason: String,
     },
+    /// Daemon-reported aggregate counters from `Statistics` on a `Ping` call
+    /// (issue #19). The `Connection` proto carries no byte counters, so the
+    /// Traffic tab is rebuilt around these daemon-side aggregates instead of
+    /// a synthesized per-connection byte stream. Deliberately omits the
+    /// `by_*` map fields (`by_proto`/`by_address`/`by_host`/`by_port`/
+    /// `by_uid`/`by_executable`) — those are per-key breakdowns with no
+    /// consumer yet, not needed for the tile-grid summary this drives. Also
+    /// omits `dns_responses` for the same reason — no tile surfaces it; add
+    /// it here if a future tile needs it. Like
+    /// `DenyScopeNarrowed`, this is a Snitchwatch-specific protocol
+    /// extension with no equivalent `handleServerCommand` case upstream.
+    DaemonStatistics {
+        daemon_version: String,
+        uptime: u64,
+        rules: u64,
+        connections: u64,
+        ignored: u64,
+        accepted: u64,
+        dropped: u64,
+        rule_hits: u64,
+        rule_misses: u64,
+    },
 }
 
 /// Client → server messages. These come from the UI's `sendAction(type, payload)`
@@ -859,5 +881,39 @@ mod filtering_pause_tests {
         assert!(json.contains("\"action\":\"recheckDiagnostics\""));
         let round_tripped: ClientMessage = serde_json::from_str(&json).unwrap();
         assert_eq!(round_tripped, msg);
+    }
+}
+
+#[cfg(test)]
+mod daemon_statistics_message_tests {
+    use super::*;
+
+    #[test]
+    fn daemon_statistics_round_trips_via_json() {
+        let msg = ServerMessage::DaemonStatistics {
+            daemon_version: "1.8.0".to_string(),
+            uptime: 3661,
+            rules: 12,
+            connections: 4200,
+            ignored: 10,
+            accepted: 4000,
+            dropped: 200,
+            rule_hits: 3900,
+            rule_misses: 300,
+        };
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["action"], "daemonStatistics");
+        assert_eq!(json["daemonVersion"], "1.8.0");
+        assert_eq!(json["uptime"], 3661);
+        assert_eq!(json["rules"], 12);
+        assert_eq!(json["connections"], 4200);
+        assert_eq!(json["ignored"], 10);
+        assert_eq!(json["accepted"], 4000);
+        assert_eq!(json["dropped"], 200);
+        assert_eq!(json["ruleHits"], 3900);
+        assert_eq!(json["ruleMisses"], 300);
+
+        let parsed: ServerMessage = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed, msg);
     }
 }
