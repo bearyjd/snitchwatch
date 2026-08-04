@@ -9,7 +9,8 @@
 
 use snitchwatch_proto::protocol::ui_client::UiClient;
 use snitchwatch_proto::protocol::{
-    Alert, ClientConfig, Connection, MsgResponse, NotificationReply, PingReply, PingRequest, Rule,
+    Alert, ClientConfig, Connection, MsgResponse, Notification, NotificationReply, PingReply,
+    PingRequest, Rule,
 };
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -197,24 +198,42 @@ impl MockOpensnitchd {
     }
 
     /// Open the bidi `Notifications` stream.
+    ///
+    /// Yields each inbound [`Notification`] whole. It previously forwarded only
+    /// `n.id` and discarded the rest, which made it impossible to assert what
+    /// the bridge actually commanded — a test could only count notifications,
+    /// not check that a rule toggle carried the right action or a rule the
+    /// daemon would accept.
+    ///
+    /// Deliberately does NOT reject invalid rules itself: the real daemon does
+    /// not close the stream over a bad rule, it fails that one rule and replies
+    /// `NotificationReplyCode_ERROR`. Tests assert daemon-acceptance explicitly
+    /// with [`validate_rule_shape`], which mirrors the daemon's real acceptance
+    /// path (`Deserialize` *and* `Operator.Compile()`).
     pub async fn open_notifications(
         &mut self,
-    ) -> Result<(mpsc::Sender<NotificationReply>, mpsc::Receiver<u64>), MockError> {
+    ) -> Result<
+        (
+            mpsc::Sender<NotificationReply>,
+            mpsc::Receiver<Notification>,
+        ),
+        MockError,
+    > {
         let (reply_tx, reply_rx) = mpsc::channel::<NotificationReply>(16);
         let outbound = tokio_stream::wrappers::ReceiverStream::new(reply_rx);
 
         let mut inbound = self.client.notifications(outbound).await?.into_inner();
 
-        let (count_tx, count_rx) = mpsc::channel::<u64>(16);
+        let (ntf_tx, ntf_rx) = mpsc::channel::<Notification>(16);
         tokio::spawn(async move {
             while let Ok(Some(n)) = inbound.message().await {
-                if count_tx.send(n.id).await.is_err() {
+                if ntf_tx.send(n).await.is_err() {
                     return;
                 }
             }
         });
 
-        Ok((reply_tx, count_rx))
+        Ok((reply_tx, ntf_rx))
     }
 }
 
@@ -249,7 +268,7 @@ impl MockOpensnitchd {
 // are exempted from this lint as public API, so this private helper needs
 // the same allowance rather than boxing just for its own sake.
 #[allow(clippy::result_large_err)]
-fn validate_rule_shape(rule: &Rule) -> Result<(), MockError> {
+pub fn validate_rule_shape(rule: &Rule) -> Result<(), MockError> {
     validate_rule_name(&rule.name)?;
     validate_duration(&rule.duration)?;
 

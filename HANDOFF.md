@@ -120,13 +120,34 @@ Important current findings:
   this explicitly. The inspector now displays destination IP and reports a
   missing PTR as `No PTR result for <ip>`; this is independent from the
   opt-in RDAP/"online research" setting.
-- The Rules page's existing enable/disable/delete controls are **not complete**:
-  their UI messages are parsed to `UpstreamEffect`, but the bridge does not
-  yet send the corresponding `CHANGE_RULE`/`DELETE_RULE` notifications down
-  opensnitchd's live Notifications stream. Upstream supports those actions
-  (`vendor/opensnitch/daemon/ui/notifications.go`), but the bridge's outbound
-  Notifications stream is deliberately `pending()` today. Do not claim rule
-  editing works until that stream is implemented and tested on hardware.
+- **Rule enable/disable/delete is now wired (2026-08-04).** The outbound
+  Notifications stream no longer parks on `pending()`: it relays from a
+  `broadcast::Sender<Notification>` exposed by
+  `UiService::notifications_handle`, and `translator::rule_notification`
+  turns `UpstreamEffect::{UpdateRule, DeleteRule, AddRule}` into
+  `CHANGE_RULE`/`DELETE_RULE`. Covered by
+  `rule_update_and_delete_reach_the_daemon_as_notifications`, verified by
+  sabotage (drop the send → the test fails with a timeout).
+
+  Three things to know before touching it:
+  - **Never send a `NONE`-typed notification.** The daemon reads
+    `ntf.Type <= Action_NONE` as "server ordered to close notifications" and
+    tears the stream down
+    (`vendor/opensnitch/daemon/ui/notifications.go:405-408`). The relay loop
+    filters it as a second line of defence.
+  - **A malformed rule fails silently on a real daemon**, which is what issue
+    #14 was: `rule.Deserialize` plus `Operator.Compile()` reject it and the
+    daemon falls back to its default action. `rule_from_wire` returns `Err`
+    rather than ever emitting `operator: None`, and the e2e test asserts the
+    outgoing rule against `mock_opensnitchd::validate_rule_shape`.
+  - **Toggles only persist for `always`-duration rules.** The daemon calls
+    `Replace(r, r.Duration == rule.Always)`, where the second argument is
+    "save to disk" — a `once`/`30s`/`until restart` rule changes in memory
+    only and reverts when the daemon restarts.
+
+  **Still unverified on hardware:** every assertion above is against the
+  in-process mock. No real `opensnitchd` has accepted one of these
+  notifications yet.
 - Remaining runtime noise: GeoLite DB absence and NetworkManager absence in
   the container are informational expected degradations; installed Kirigami
   still emits `shortHeaderMargins` and page-component placement warnings.

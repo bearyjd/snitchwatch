@@ -26,6 +26,7 @@ use snitchwatch_bridge::profiles::network_watcher;
 use snitchwatch_bridge::profiles::store::ProfileStore;
 use snitchwatch_bridge::profiles::ProfilesManager;
 use snitchwatch_bridge::translator::downstream;
+use snitchwatch_bridge::translator::rule_notification::notification_for_effect;
 use snitchwatch_bridge::translator::upstream::{self, UpstreamEffect};
 use snitchwatch_bridge::tray_state::{TrayState, TrayStatePublisher};
 use snitchwatch_bridge::ws_messages::{ClientMessage, ServerMessage};
@@ -252,6 +253,15 @@ pub async fn run(config: BridgeConfig) -> Result<RunningBridge> {
     // daemon-down watchdog below needs this to watch daemon liveness.
     let liveness = ui_service_inner.liveness_handle();
 
+    // Outbound rule commands (enable/disable/delete) for the connected daemon.
+    // Same "grab before into_server()" reason as `liveness` above.
+    let notifications_tx = ui_service_inner.notifications_handle();
+    // Echoed back by the daemon in its NotificationReply. Starts at 1: id 0 is
+    // the daemon's own HELLO reply
+    // (`vendor/opensnitch/daemon/ui/notifications.go:377`), so a 0 here would
+    // be indistinguishable from it.
+    let notification_id = Arc::new(std::sync::atomic::AtomicU64::new(1));
+
     // Diagnostics: combines daemon-reachability (`liveness`), opensnitchd's
     // reported firewall status, and local kernel probes into the four-check
     // report the GUI renders. Constructed here (before `.into_server()`
@@ -361,6 +371,8 @@ pub async fn run(config: BridgeConfig) -> Result<RunningBridge> {
     let tray_pub_for_pause = tray_pub.clone();
     let filtering_paused_for_pump = filtering_paused.clone();
     let diagnostics_ctx_for_pump = diagnostics_ctx.clone();
+    let notifications_for_pump = notifications_tx.clone();
+    let notification_id_for_pump = notification_id.clone();
     tokio::spawn(async move {
         while let Some(msg) = inbound_rx.recv().await {
             // Special-cased before is_profile_message/upstream::apply — this
@@ -452,7 +464,36 @@ pub async fn run(config: BridgeConfig) -> Result<RunningBridge> {
                     }
                     info!(%row_id, "applied verdict and broadcast row update");
                 }
-                Ok(effect) => info!(?effect, "applied upstream effect"),
+                Ok(effect) => {
+                    // Rule enable/disable/delete: translate to a daemon
+                    // notification and push it down the outbound Notifications
+                    // stream. Anything that isn't a rule edit yields `None` and
+                    // falls through to the original log line.
+                    let id =
+                        notification_id_for_pump.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    match notification_for_effect(&effect, id) {
+                        Ok(Some(notification)) => {
+                            let action = notification.r#type;
+                            match notifications_for_pump.send(notification) {
+                                Ok(receivers) => {
+                                    info!(id, action, receivers, "sent rule command to daemon")
+                                }
+                                // No daemon holding the stream open. Dropping is
+                                // correct — the daemon reloads its own rules on
+                                // connect, so there is nothing to replay.
+                                Err(_) => {
+                                    warn!(id, action, "no daemon connected; rule command dropped")
+                                }
+                            }
+                        }
+                        Ok(None) => info!(?effect, "applied upstream effect"),
+                        // A rule the daemon would reject silently (see
+                        // `rule_from_wire`). Never send it.
+                        Err(e) => {
+                            error!(error = %e, ?effect, "refusing to send malformed rule to daemon")
+                        }
+                    }
+                }
                 Err(e) => error!(error = %e, "upstream apply failed"),
             }
         }
