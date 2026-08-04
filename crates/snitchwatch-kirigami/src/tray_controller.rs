@@ -51,7 +51,7 @@ pub mod qobject {
         /// Emitted with the JSON-encoded `ClientMessage::SetFilteringPaused`
         /// for the tray menu's "Pause/Resume filtering" item. `main.qml`
         /// connects this to `bridgeFeed.sendClientJson` — the same
-        /// in-process path `PendingDecision::verdictSubmitted` uses.
+        /// in-process path `BridgeFeed::submitVerdict` uses.
         #[qsignal]
         #[cxx_name = "filteringToggleRequested"]
         fn filtering_toggle_requested(self: Pin<&mut TrayController>, json: QString);

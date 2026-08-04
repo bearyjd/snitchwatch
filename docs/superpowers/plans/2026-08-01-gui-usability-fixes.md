@@ -116,16 +116,27 @@ delegate); branch after it merges.
 
 ## Acceptance
 
-- [ ] #20: collapsing a group with pending descendants stays collapsed;
+- [x] #20: collapsing a group with pending descendants stays collapsed;
       badge shows the pending count; unit tests updated.
-- [ ] #15: `RecentBlock` tooltip text is sanitized at construction.
-- [ ] Scanner: missing binary yields an error naming the path and the env
+- [x] #15: `RecentBlock` tooltip text is sanitized at construction.
+- [x] Scanner: missing binary yields an error naming the path and the env
       override, before any polkit prompt.
-- [ ] #19: Traffic page shows live daemon aggregates from `Ping`.
-- [ ] #18: pending rows expose Allow/Deny inline; process headers expose
+- [x] #19: Traffic page shows live daemon aggregates from `Ping`.
+- [x] #18: pending rows expose Allow/Deny inline; process headers expose
       batch actions; one interaction-path test exists.
-- [ ] All batches: `just check`, `just test`, and
-      `cargo test -p snitchwatch-kirigami` (offscreen) green; CI green
-      per PR; merge on green.
+- [x] All batches: CI was green for PRs #24–#28 before merge. The focused
+      Kirigami suite passes locally with `CCACHE_DISABLE=1`, except for its
+      socket-owning live-loop test, which this managed sandbox rejects with
+      `EPERM`; the same sandbox restriction also prevents the workspace
+      socket/listener tests. This is environmental, not a product-test
+      failure.
 - [ ] Real-hardware visual re-check of #18/#19/#20 remains a human step —
       record in the phase2 runbook convention.
+      **Attempted 2026-08-02 from the managed development container:** the
+      mounted host has a live `opensnitchd` process and bridge runtime
+      artifacts, but the sandbox rejects host D-Bus and Unix-socket access
+      with `EPERM`; it cannot operate the service or observe the GUI. The
+      host also has neither the image-baked binaries nor the Flatpak
+      installed. Later host-terminal access confirmed the bridge/daemon
+      service path, but no Flatpak or compositor-visible Kirigami shell was
+      installed, so the visual re-check remains open.

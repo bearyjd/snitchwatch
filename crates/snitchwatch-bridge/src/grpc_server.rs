@@ -27,6 +27,37 @@ use tokio_stream::Stream;
 use tonic::{Request, Response, Status, Streaming};
 use tracing::{debug, info, warn};
 
+/// Convert a rule returned to opensnitchd into the tolerant wire shape the
+/// desktop Rules model consumes. Persistent interactive verdicts originate in
+/// this gRPC reply, rather than in an upstream `SetRules` push, so without
+/// this conversion the daemon saves a rule the UI never learns about.
+fn rule_to_wire(rule: &Rule) -> serde_json::Value {
+    serde_json::json!({
+        "name": rule.name,
+        "enabled": rule.enabled,
+        "action": rule.action,
+        "duration": rule.duration,
+        "description": rule.description,
+        "operator": rule.operator.as_ref().map(operator_to_wire).unwrap_or(serde_json::Value::Null),
+    })
+}
+
+fn operator_to_wire(operator: &snitchwatch_proto::protocol::Operator) -> serde_json::Value {
+    if operator.list.is_empty() {
+        serde_json::json!({
+            "type": operator.r#type,
+            "operand": operator.operand,
+            "data": operator.data,
+            "sensitive": operator.sensitive,
+        })
+    } else {
+        serde_json::json!({
+            "type": operator.r#type,
+            "operands": operator.list.iter().map(operator_to_wire).collect::<Vec<_>>(),
+        })
+    }
+}
+
 /// Re-exported so existing call sites (and anything that historically
 /// imported it from here) keep working; `daemon_watchdog`/`diagnostics` now
 /// import [`crate::daemon_liveness::DaemonLiveness`] directly instead —
@@ -380,13 +411,27 @@ impl Ui for UiService {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
-        Ok(Response::new(verdict_to_rule(
+        let rule = verdict_to_rule(
             resolution.verdict,
             resolution.duration,
             resolution.scope,
             &conn,
             now_secs,
-        )))
+        );
+
+        // A one-shot reply is deliberately absent from Rules. Every other
+        // duration is an active daemon rule, including a five-minute or
+        // until-restart rule, and must be visible/editable immediately rather
+        // than waiting for a daemon-side rule-list push that may never come.
+        if resolution.duration.remembers() && self.broadcast.receiver_count() > 0 {
+            if let Err(e) = self.broadcast.send(ServerMessage::UpdateRules {
+                rules: vec![rule_to_wire(&rule)],
+            }) {
+                warn!(error = %e, "persistent verdict rule broadcast failed");
+            }
+        }
+
+        Ok(Response::new(rule))
     }
 
     async fn subscribe(

@@ -32,6 +32,10 @@ Kirigami.ApplicationWindow {
     BridgeFeed {
         id: bridgeFeed
     }
+    // QML ids are lexical names, not properties on `root`. Components below
+    // need explicitly named root properties to inject these objects without
+    // accidentally self-binding a same-named page property.
+    property var bridgeFeedRef: bridgeFeed
 
     // Core-loop connection model (Task 6). Owned here so its lifetime spans the
     // window; pages bind to it. Its live outbound feed is started in the
@@ -39,6 +43,7 @@ Kirigami.ApplicationWindow {
     ConnectionsModel {
         id: connectionsModel
     }
+    property var connectionsModelRef: connectionsModel
 
     // Per-country geographic breakdown (Geo panel). Same lifetime/ownership
     // shape as connectionsModel; outbound feed started alongside the others
@@ -68,6 +73,7 @@ Kirigami.ApplicationWindow {
     TrafficModel {
         id: trafficModel
     }
+    property var trafficModelRef: trafficModel
 
     // Profiles tab model (switchable "At Home"/"Public Wi-Fi"/"Office"
     // firewall profiles, with network-based auto-activation on the bridge
@@ -245,9 +251,9 @@ Kirigami.ApplicationWindow {
     Component {
         id: connectionsPageComponent
         ConnectionsPage {
-            model: connectionsModel
-            bridgeFeed: bridgeFeed
-            trafficModel: trafficModel
+            model: root.connectionsModelRef
+            bridgeFeed: root.bridgeFeedRef
+            trafficModel: root.trafficModelRef
 
             // Rule-match diagnostics "Show rule" jump (Parity 4): navigate to
             // the Rules tab and open the matched rule's detail sheet

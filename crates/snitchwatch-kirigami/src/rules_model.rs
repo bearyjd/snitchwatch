@@ -5,9 +5,9 @@
 //!   * exposes the flat rule list (roles below) to `RulesPage.qml`,
 //!   * `toggleEnabled(name)` / `deleteRule(name)` are `qinvokable`s that emit
 //!     the bridge's typed `ClientMessage` (JSON) for the live feed to
-//!     forward — mirroring `BlocklistsModel::subscribe`/`unsubscribe` and
-//!     `PendingDecision::submit`'s "emit signal, no local mutation, wait for
-//!     the server round-trip" pattern. No bridge changes.
+//!     forward — mirroring `BlocklistsModel::subscribe`/`unsubscribe`'s "emit
+//!     signal, no local mutation, wait for the server round-trip" pattern. No
+//!     bridge changes.
 //!
 //! Rule list updates are low-frequency whole-list replaces/upserts (same
 //! reasoning as `BlocklistsModel`), so this wrapper brackets every applied

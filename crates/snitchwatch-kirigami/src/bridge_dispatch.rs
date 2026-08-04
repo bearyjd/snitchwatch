@@ -120,8 +120,12 @@ pub fn encode_server(msg: &ServerMessage) -> Result<String, serde_json::Error> {
 }
 
 /// Parse an inbound client-message JSON emitted by a model request signal
-/// (`verdictSubmitted` / `subscriptionRequested` / `ruleChangeRequested`) back
-/// into the typed [`ClientMessage`] the bridge's inbound pump expects.
+/// (`subscriptionRequested` / `ruleChangeRequested`) back into the typed
+/// [`ClientMessage`] the bridge's inbound pump expects.
+///
+/// Verdicts do *not* come through here: `BridgeFeed::submitVerdict` builds a
+/// typed message via [`crate::pending_decision`] and dispatches it directly,
+/// so an allow/deny never round-trips through JSON.
 pub fn decode_client(json: &str) -> Result<ClientMessage, serde_json::Error> {
     serde_json::from_str(json)
 }
@@ -425,7 +429,7 @@ mod tests {
 
     #[test]
     fn decode_client_parses_model_emitted_verdict_json() {
-        // Exactly the JSON `PendingDecision::submit` emits.
+        // Exactly the JSON `pending_decision::build_verdict_message` produces.
         let json = r#"{"action":"setVerdict","rowId":"r1","verdict":"deny","scope":"any_host","duration":"always"}"#;
         match decode_client(json).expect("decode") {
             ClientMessage::SetVerdict {

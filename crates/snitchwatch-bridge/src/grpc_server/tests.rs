@@ -298,7 +298,7 @@ use crate::translator::connection::ask_row_id;
 use crate::ws_messages::{VerdictDuration, VerdictScope};
 
 #[tokio::test]
-async fn ask_rule_blocks_until_cache_resolves_with_allow() {
+async fn persistent_allow_verdict_broadcasts_rule_for_live_clients() {
     let cache = Arc::new(Mutex::new(ConnectionCache::new(64)));
     let (tx, mut rx) = broadcast::channel::<ServerMessage>(16);
 
@@ -359,15 +359,30 @@ async fn ask_rule_blocks_until_cache_resolves_with_allow() {
         .resolve(
             &row_id,
             Verdict::Allow,
-            VerdictDuration::Once,
+            VerdictDuration::Always,
             VerdictScope::ThisHost,
         )
         .unwrap();
 
     let rule = ask_handle.await.unwrap().unwrap().into_inner();
     assert_eq!(rule.action, "allow");
-    assert_eq!(rule.duration, "once");
+    assert_eq!(rule.duration, "always");
     assert!(!rule.name.is_empty());
+
+    let update = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+        .await
+        .expect("persistent verdict did not broadcast a rule")
+        .expect("broadcast error");
+    match update {
+        ServerMessage::UpdateRules { rules } => {
+            assert_eq!(rules.len(), 1);
+            assert_eq!(rules[0]["name"], rule.name);
+            assert_eq!(rules[0]["action"], "allow");
+            assert_eq!(rules[0]["duration"], "always");
+            assert_eq!(rules[0]["operator"]["operand"], "dest.host");
+        }
+        other => panic!("expected UpdateRules, got {other:?}"),
+    }
 }
 
 #[tokio::test]

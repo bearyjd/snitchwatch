@@ -49,31 +49,29 @@ Kirigami.ScrollablePage {
     // component tests (the sparkline area is simply empty then).
     property var trafficModel: null
 
-    // Issue #18: inline verdict surface for pending leaf rows and per-process
-    // batch actions on group headers. A single page-level PendingDecision
-    // instance (not one per delegate) mirrors PendingDecisionSheet.qml's
-    // signal->dispatcher hop so the pure verdict->ClientMessage mapping stays
-    // the single source of the JSON. Submits with the sheet's own defaults
-    // ("This host only" scope / "This time" duration — scopeBox/durationBox's
-    // first model entries in PendingDecisionSheet.qml) so an inline decision
-    // and a sheet decision for the same row produce the same rule.
-    PendingDecision {
-        id: inlineDecision
-    }
-    Connections {
-        target: inlineDecision
-        enabled: page.bridgeFeed !== null
-        function onVerdictSubmitted(json) {
-            page.bridgeFeed.sendClientJson(json);
-        }
-    }
-
-    // Shared submit path for both the inline row buttons and (looped) the
-    // process-header batch actions — also the entry point the interaction
-    // test drives to exercise the click -> submit -> verdict-message path
-    // without needing to synthesize a real mouse click.
+    // Issue #18: the shared submit path for the inline row buttons and
+    // (looped) the process-header batch actions. `BridgeFeed.submitVerdict`
+    // builds and dispatches the typed verdict, so `pending_decision`'s Rust
+    // mapping stays the single source of the wire shape.
+    //
+    // Submits with the sheet's own defaults ("This host only" scope / "This
+    // time" duration — scopeBox/durationBox's first model entries in
+    // PendingDecisionSheet.qml) so an inline decision and a sheet decision for
+    // the same row produce the same rule.
+    //
+    // Also the entry point `tests/inline_verdict_qml.rs` drives, to exercise
+    // the click -> submit -> verdict-message path without synthesizing a real
+    // mouse click.
     function submitInlineVerdict(rowId, choice) {
-        inlineDecision.submit(rowId, choice, "this_host", "this_time");
+        if (page.bridgeFeed === null) {
+            // Unreachable in the running app (main.qml always injects the
+            // feed) — but the caller has already latched `row.submitted`, so
+            // a silent return here would leave a permanently un-decidable
+            // row with no trace of why. Never swallow this.
+            console.warn("submitInlineVerdict: no bridgeFeed; verdict dropped for", rowId);
+            return;
+        }
+        page.bridgeFeed.submitVerdict(rowId, choice, "this_host", "this_time");
     }
 
     // Issue #18 batch actions: parse ConnectionsModel.pendingRowIdsForProcess
@@ -212,10 +210,10 @@ Kirigami.ScrollablePage {
             page.model.setCurrentRowId(item ? item.rowId : "");
         }
 
-        delegate: Controls.ItemDelegate {
+        delegate: Item {
             id: row
             width: ListView.view ? ListView.view.width : implicitWidth
-            highlighted: ListView.isCurrentItem
+            implicitHeight: content.implicitHeight + Kirigami.Units.smallSpacing * 2
 
             required property int index
             required property string rowId
@@ -262,20 +260,57 @@ Kirigami.ScrollablePage {
             onRowIdChanged: row.submitted = false
             onPendingChanged: row.submitted = false
 
-            onClicked: {
-                if (row.isGroupHeader) {
-                    if (row.depth === 0) {
-                        page.model.toggleProcessGroup(row.groupKey);
-                    } else {
-                        page.model.toggleDomainGroup(row.groupParentKey, row.groupKey);
-                    }
+            // Single latch-and-dispatch for all 4 verdict buttons. Kept as one
+            // function so the re-entry guard can't be present on some sites
+            // and missing on others — it already was once, leaving "Allow
+            // all" able to double-submit every pending row under a process.
+            // `batch` picks the process-group action over the single-row one.
+            //
+            // These buttons used to ALSO carry a `TapHandler`, added on the
+            // theory that a nested action needs its own pointer grab. Measured
+            // with QtTest `mouseClick()` against this exact delegate shape
+            // (Item > MouseArea z:0 + content z:1 > Button): one real click
+            // fires `onClicked` AND `onTapped` — 1 each, identical across the
+            // Basic/Fusion/Material/Universal styles — while the underlying
+            // MouseArea correctly stays silent. So the TapHandler was pure
+            // double-dispatch and is gone; plain `onClicked` is sufficient.
+            function decideOnce(choice, batch) {
+                if (row.submitted) {
                     return;
                 }
-                list.currentIndex = row.index;
-                page.openInspector(row);
+                row.submitted = true;
+                if (batch) {
+                    page.submitBatchVerdict(row.groupKey, choice);
+                } else {
+                    page.submitInlineVerdict(row.rowId, choice);
+                }
             }
 
-            contentItem: RowLayout {
+            // Deliberately behind `content`: leaf/header row clicks work in
+            // the remaining space, while nested Buttons receive their own
+            // pointer events instead of being swallowed by ItemDelegate.
+            MouseArea {
+                anchors.fill: parent
+                z: 0
+                onClicked: {
+                    if (row.isGroupHeader) {
+                        if (row.depth === 0) {
+                            page.model.toggleProcessGroup(row.groupKey);
+                        } else {
+                            page.model.toggleDomainGroup(row.groupParentKey, row.groupKey);
+                        }
+                        return;
+                    }
+                    list.currentIndex = row.index;
+                    page.openInspector(row);
+                }
+            }
+
+            RowLayout {
+                id: content
+                anchors.fill: parent
+                anchors.margins: Kirigami.Units.smallSpacing
+                z: 1
                 spacing: Kirigami.Units.largeSpacing
 
                 Item {
@@ -377,27 +412,21 @@ Kirigami.ScrollablePage {
                         enabled: !row.submitted
                         text: "Allow all (" + row.groupPending + ")"
                         icon.name: "dialog-ok-apply"
-                        onClicked: {
-                            row.submitted = true;
-                            page.submitBatchVerdict(row.groupKey, "allow");
-                        }
+                        onClicked: row.decideOnce("allow", true)
                     }
                     Controls.Button {
                         flat: true
                         enabled: !row.submitted
                         text: "Deny all (" + row.groupPending + ")"
                         icon.name: "edit-delete-remove"
-                        onClicked: {
-                            row.submitted = true;
-                            page.submitBatchVerdict(row.groupKey, "deny");
-                        }
+                        onClicked: row.decideOnce("deny", true)
                     }
                 }
 
                 // Issue #18: inline Allow/Deny on pending leaf rows, so a
                 // decision no longer requires opening the inspector sheet.
                 // Submits with the sheet's own defaults (see the page-level
-                // PendingDecision doc comment above) so inline and
+                // `submitInlineVerdict` doc comment above) so inline and
                 // sheet-driven decisions for the same row match. Disabled
                 // after one click (see `row.submitted`'s doc comment) until
                 // the round trip flips `pending` and resets the guard.
@@ -410,20 +439,14 @@ Kirigami.ScrollablePage {
                         enabled: !row.submitted
                         text: "Allow"
                         icon.name: "dialog-ok-apply"
-                        onClicked: {
-                            row.submitted = true;
-                            page.submitInlineVerdict(row.rowId, "allow");
-                        }
+                        onClicked: row.decideOnce("allow", false)
                     }
                     Controls.Button {
                         flat: true
                         enabled: !row.submitted
                         text: "Deny"
                         icon.name: "edit-delete-remove"
-                        onClicked: {
-                            row.submitted = true;
-                            page.submitInlineVerdict(row.rowId, "deny");
-                        }
+                        onClicked: row.decideOnce("deny", false)
                     }
                 }
             }
@@ -468,11 +491,12 @@ Kirigami.ScrollablePage {
     // Row inspector. For a *pending* row this is where the decision prompt lives
     // (Task 7 wires the verdict actions in); for decided rows it is read-only
     // detail. Kept as an OverlaySheet so it behaves the same at every width.
-    Kirigami.OverlaySheet {
+    SizedOverlaySheet {
         id: inspector
         title: page.inspectProcess
 
         ColumnLayout {
+            Layout.preferredWidth: inspector.preferredWidth
             spacing: Kirigami.Units.largeSpacing
 
             Kirigami.FormLayout {
@@ -480,6 +504,11 @@ Kirigami.ScrollablePage {
                 Controls.Label {
                     Kirigami.FormData.label: "Host"
                     text: page.inspectHost
+                }
+                Controls.Label {
+                    Kirigami.FormData.label: "Destination IP"
+                    text: page.inspectIp.length > 0 ? page.inspectIp : "unavailable"
+                    elide: Text.ElideMiddle
                 }
                 Controls.Label {
                     Kirigami.FormData.label: "Port"

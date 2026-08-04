@@ -5,12 +5,14 @@
 //!     [`crate::bridge_runtime::status`] so `main.qml` can bind a
 //!     `Kirigami.InlineMessage` that appears only when the bridge failed to
 //!     start — the window still opens either way (no panic, no silent death).
-//!   * **Inbound dispatcher.** `sendClientJson(json)` is the single sink the
-//!     models' request signals (`verdictSubmitted` / `subscriptionRequested` /
-//!     `ruleChangeRequested`) connect to. It deserializes to a typed
-//!     `ClientMessage` and pushes it onto the bridge's inbound pump — the exact
-//!     channel a WebSocket client frame would feed, so verdict resolution and
-//!     rule effects behave identically to the WS path.
+//!   * **Inbound dispatcher.** Two QML entry points converge on one typed
+//!     `dispatch`: `sendClientJson(json)` is the sink the models' request
+//!     signals (`subscriptionRequested` / `ruleChangeRequested`) connect to
+//!     and deserializes first, while `submitVerdict(...)` builds the message
+//!     directly from stable tokens via [`crate::pending_decision`]. Both push
+//!     onto the bridge's inbound pump — the exact channel a WebSocket client
+//!     frame would feed, so verdict resolution and rule effects behave
+//!     identically to the WS path.
 //!
 //! The outbound direction (bridge → models) is *not* here: each model owns its
 //! own `startBridgeFeed()` feed task, because each must run its `RowStore`
@@ -50,6 +52,20 @@ pub mod qobject {
         #[qinvokable]
         #[cxx_name = "sendClientJson"]
         fn send_client_json(self: Pin<&mut BridgeFeed>, json: &QString);
+
+        /// Build and dispatch a verdict from stable QML tokens. Keeping this
+        /// in the feed removes the QML signal relay from the safety-critical
+        /// button path while retaining `pending_decision` as the single wire
+        /// shape/source of conservative token parsing.
+        #[qinvokable]
+        #[cxx_name = "submitVerdict"]
+        fn submit_verdict(
+            self: Pin<&mut BridgeFeed>,
+            row_id: &QString,
+            choice: &QString,
+            scope: &QString,
+            duration: &QString,
+        );
     }
 }
 
@@ -72,24 +88,49 @@ impl qobject::BridgeFeed {
 
     fn send_client_json(self: Pin<&mut Self>, json: &QString) {
         let json = json.to_string();
-        let Some(handles) = crate::bridge_runtime::handles() else {
-            tracing::warn!("BridgeFeed: bridge not running; dropping client message");
-            return;
-        };
-        let msg = match crate::bridge_dispatch::decode_client(&json) {
-            Ok(msg) => msg,
+        match crate::bridge_dispatch::decode_client(&json) {
+            Ok(msg) => dispatch(msg),
             Err(e) => {
-                tracing::warn!(error = %e, %json, "BridgeFeed: bad ClientMessage JSON, dropped");
-                return;
+                tracing::warn!(error = %e, %json, "BridgeFeed: bad ClientMessage JSON, dropped")
             }
-        };
-        // Push onto the bridge's runtime — `mpsc::Sender::send` is async, and we
-        // must never block the Qt thread waiting on the channel.
-        let tx = handles.inbound_tx();
-        handles.runtime().spawn(async move {
-            if tx.send(msg).await.is_err() {
-                tracing::warn!("BridgeFeed: inbound channel closed; client message dropped");
-            }
-        });
+        }
     }
+
+    fn submit_verdict(
+        self: Pin<&mut Self>,
+        row_id: &QString,
+        choice: &QString,
+        scope: &QString,
+        duration: &QString,
+    ) {
+        match crate::pending_decision::build_verdict_message(
+            &row_id.to_string(),
+            &choice.to_string(),
+            &scope.to_string(),
+            &duration.to_string(),
+        ) {
+            Some(msg) => dispatch(msg),
+            None => {
+                tracing::warn!(choice = %choice.to_string(), "BridgeFeed: unrecognised verdict choice")
+            }
+        }
+    }
+}
+
+/// Push a typed message onto the bridge's inbound pump — the exact channel a
+/// WebSocket client frame feeds. Both QML entry points converge here already
+/// typed, so a verdict never round-trips through JSON just to be re-parsed.
+fn dispatch(msg: snitchwatch_bridge::ws_messages::ClientMessage) {
+    let Some(handles) = crate::bridge_runtime::handles() else {
+        tracing::warn!("BridgeFeed: bridge not running; dropping client message");
+        return;
+    };
+    // Push onto the bridge's runtime — `mpsc::Sender::send` is async, and we
+    // must never block the Qt thread waiting on the channel.
+    let tx = handles.inbound_tx();
+    handles.runtime().spawn(async move {
+        if tx.send(msg).await.is_err() {
+            tracing::warn!("BridgeFeed: inbound channel closed; client message dropped");
+        }
+    });
 }

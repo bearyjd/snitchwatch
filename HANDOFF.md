@@ -97,6 +97,117 @@ PR #22 (the session handoff doc) are also merged. Remaining real-hardware
 items are listed in the phase2 plan's acceptance section — mostly
 GUI-visual checks and the sustained-interception/queue-rules question.
 
+**Update (2026-08-04): live Kirigami follow-up is in progress, uncommitted.**
+Work was performed in the user's `dev` distrobox from the canonical
+`/home/user/Documents/vibe-code/opensnitch-gui` path. `lld` was installed in
+that container; `CCACHE_DISABLE=1 just kirigami-dev` now builds without the
+cxx-qt linker warning. The running in-process bridge has been verified live:
+Allow/Deny clicks resolve pending rows and log `applied verdict and broadcast
+row update`. The working tree contains the relevant follow-up fixes and must
+be reviewed/committed as one coherent change before switching tasks.
+
+Important current findings:
+
+- The initial QML null-model/`setPendingOnly`/verdict-click failures are fixed
+  by retaining QML object references on `main.qml`'s root and passing those
+  references into dynamically-created `ConnectionsPage` instances.
+- The bridge now broadcasts `UpdateConnectionRows` after a verdict. It also
+  now broadcasts `UpdateRules` when a non-`once` verdict returns a daemon
+  rule, so `For 5 minutes`, `Until quit`, and `Forever` decisions show in the
+  Rules page immediately. This is covered by
+  `persistent_allow_verdict_broadcasts_rule_for_live_clients`.
+- `This time` intentionally creates no rule. The Rules empty state now says
+  this explicitly. The inspector now displays destination IP and reports a
+  missing PTR as `No PTR result for <ip>`; this is independent from the
+  opt-in RDAP/"online research" setting.
+- The Rules page's existing enable/disable/delete controls are **not complete**:
+  their UI messages are parsed to `UpstreamEffect`, but the bridge does not
+  yet send the corresponding `CHANGE_RULE`/`DELETE_RULE` notifications down
+  opensnitchd's live Notifications stream. Upstream supports those actions
+  (`vendor/opensnitch/daemon/ui/notifications.go`), but the bridge's outbound
+  Notifications stream is deliberately `pending()` today. Do not claim rule
+  editing works until that stream is implemented and tested on hardware.
+- Remaining runtime noise: GeoLite DB absence and NetworkManager absence in
+  the container are informational expected degradations; installed Kirigami
+  still emits `shortHeaderMargins` and page-component placement warnings.
+  Local sheets were given explicit bounds to avoid their own implicit-height
+  feedback path; re-check on hardware after the next restart. Those bounds now
+  live once in `qml/SizedOverlaySheet.qml` rather than copy-pasted per sheet —
+  when upstream Kirigami fixes the cycle, delete the bindings there only.
+- The `PendingDecision` QObject was removed: routing verdicts through
+  `BridgeFeed.submitVerdict` left it with no production QML caller, and only
+  its own probe test kept it alive. `pending_decision.rs`'s pure token-parsing
+  and `build_verdict_message` are unchanged and still the single source of the
+  verdict wire shape.
+- **Latent test defect found and fixed (2026-08-04):** the headless QML probes
+  assert "no QML JS error was logged" by redirecting fd 2 and scanning it.
+  That assertion had **never fired**: Qt on Fedora is built with journald
+  support and its default handler routes to the journal, not stderr, whenever
+  stderr is not a TTY — always true under `cargo test`. The capture came back
+  empty and the assertion passed unconditionally.
+  `tests/common/mod.rs::init_headless_qt_env` now sets
+  `QT_FORCE_STDERR_LOGGING` (not the older `QT_LOGGING_TO_CONSOLE`, which Qt
+  6.10 warns is deprecated — and which, if silently dropped by a future Qt,
+  would reintroduce exactly this bug).
+  Both verdict probes were verified by deliberate sabotage (null feed /
+  renamed invokable) and confirmed to go red. Note also that a bare `QtObject`
+  root never runs `Component.onCompleted` under `QQmlApplicationEngine` — a
+  probe must use a `Window` root driven through `exec()` or its QML body
+  silently never executes.
+- **Resolved 2026-08-04 — no compositor needed after all.** The verdict buttons
+  carried *both* a `TapHandler` and an `onClicked`, and this was previously
+  recorded as undecidable headlessly. It isn't: `qmltestrunner-qt6` and the
+  QtTest QML module ship in `qt6-qtdeclarative-devel` (already a build
+  dependency) and synthesise real `QMouseEvent`s. Measured against the exact
+  delegate shape (`Item` > `MouseArea` z:0 + content z:1 > `Button`):
+
+  | click target   | onTapped | onClicked | MouseArea |
+  |----------------|----------|-----------|-----------|
+  | verdict button | 1        | 1         | 0         |
+  | empty row area | 0        | 0         | 1         |
+
+  Identical on Basic/Fusion/Material/Universal, since click logic lives in the
+  shared `QQuickAbstractButton` base rather than in a style. So one click
+  dispatched **twice** — the double-submit was real, not hypothetical — and
+  plain `onClicked` wins the grab on its own. The `TapHandler`s are removed;
+  `decideOnce` stays as the single latch.
+
+  New coverage, both verified by deliberate sabotage:
+  `just qml-test` (`tests/qml/tst_delegate_input.qml`) pins the Qt input
+  routing this depends on, and `tests/qml_source_guards.rs` catches a
+  re-introduced `TapHandler` or a button that bypasses `decideOnce`.
+  **`qmltestrunner` cannot load `com.snitchwatch.shell`** (cxx-qt links those
+  types statically; no QML plugin is emitted), so the QML test exercises a
+  structural mirror — the source guards cover the real file.
+
+Verification completed on this uncommitted state:
+
+```bash
+CCACHE_DISABLE=1 cargo test -p snitchwatch-bridge persistent_allow_verdict_broadcasts_rule_for_live_clients
+CCACHE_DISABLE=1 cargo test -p snitchwatch-bridge-cli verdict_broadcasts_an_updated_non_pending_row
+CCACHE_DISABLE=1 cargo check -p snitchwatch-kirigami
+CCACHE_DISABLE=1 cargo test -p snitchwatch-kirigami insight::client::tests::fetch_never_calls_rdap_source_when_disabled
+git diff --check
+```
+
+Re-run after the cleanup/review pass, covering the Kirigami targets the
+`cargo check` above never compiles (it omits `--all-targets`, so it does not
+build `tests/` at all):
+
+```bash
+CCACHE_DISABLE=1 cargo clippy --all-targets -- -D warnings
+CCACHE_DISABLE=1 cargo clippy -p snitchwatch-kirigami --all-targets -- -D warnings
+CCACHE_DISABLE=1 cargo test -p snitchwatch-bridge -p snitchwatch-bridge-cli   # 293 passed
+CCACHE_DISABLE=1 QT_QPA_PLATFORM=offscreen QT_QUICK_CONTROLS_STYLE=Basic \
+  cargo test -p snitchwatch-kirigami                                          # 263 unit + integration
+cargo fmt --all --check && git diff --check
+```
+
+Run the Kirigami crate's cargo jobs **serially**. Two concurrent cargo
+invocations against the shared `target/` poison the cxx-qt build state
+(`Conflicting include_prefixes for cxx-qt!`); recover with
+`cargo clean -p cxx-qt -p cxx-qt-lib -p snitchwatch-kirigami`.
+
 **What's actually left:**
 1. **Real Bazzite hardware verification** — a bluebuild image build, a
    Flatpak build, a live `opensnitchd` dial-in, the closed-window

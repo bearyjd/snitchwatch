@@ -11,6 +11,7 @@ use cxx_qt_build::{CxxQtBuilder, QmlModule};
 fn main() {
     CxxQtBuilder::new_qml_module(QmlModule::new("com.snitchwatch.shell").qml_files([
         "qml/main.qml",
+        "qml/SizedOverlaySheet.qml",
         "qml/ConnectionsPage.qml",
         "qml/PendingDecisionSheet.qml",
         "qml/BlocklistsPage.qml",
@@ -26,7 +27,6 @@ fn main() {
     .file("src/bridge_bindings.rs")
     .file("src/bridge_feed.rs")
     .file("src/connections_model.rs")
-    .file("src/pending_decision.rs")
     .file("src/insight_model.rs")
     .file("src/blocklists_model.rs")
     .file("src/rules_model.rs")

@@ -4593,6 +4593,7 @@ name = "snitchwatch-bridge-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "mock-opensnitchd",
  "serde_json",
  "snitchwatch-bridge",
  "snitchwatch-proto",

@@ -7,8 +7,17 @@
 //! Allow/Deny buttons and the process-header "Allow all"/"Deny all" buttons
 //! call (`submitInlineVerdict` / `submitBatchVerdict`) — the same click-path
 //! entry points wired into the delegate's `onClicked` handlers. This is a
-//! click-path exercise (handler -> `PendingDecision.submit` -> the emitted
-//! `SetVerdict` JSON), not a synthesized mouse event.
+//! click-path exercise (handler -> `bridgeFeed.submitVerdict` -> recorded
+//! tokens), not a synthesized mouse event.
+//!
+//! **The probe must supply a non-null `bridgeFeed`.** `submitInlineVerdict`
+//! is wrapped in a `page.bridgeFeed !== null` guard, and `submitBatchVerdict`
+//! funnels through it, so a null feed skips the entire verdict path and
+//! leaves this test asserting nothing beyond "the page parsed." The stub
+//! below records what it receives, and the `Timer` asserts both the inline
+//! and batch paths actually arrived carrying the sheet's default
+//! scope/duration tokens — the contract `ConnectionsPage.submitInlineVerdict`
+//! documents and `pending_decision.rs` pins on the Rust side.
 //!
 //! Honoring the "QML-side JS asserts are not load-bearing" constraint, this
 //! test's Rust-side assertion works in two layers:
@@ -47,8 +56,6 @@
 //! `connections::grouping::tests::pending_row_ids_compose_into_valid_batch_deny_messages`
 //! (which pins the batch-action token pair). Run headless with
 //! `QT_QPA_PLATFORM=offscreen`.
-use std::io::{Read, Seek, SeekFrom};
-use std::os::unix::io::AsRawFd;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -57,57 +64,14 @@ use cxx_qt_lib::{QByteArray, QGuiApplication, QQmlApplicationEngine, QUrl};
 #[allow(unused_imports)]
 use snitchwatch_kirigami::bridge_bindings as _;
 
+mod common;
+use common::{capture_stderr, init_headless_qt_env};
+
 const PROBE_URL: &str = "qrc:/inline_verdict_probe.qml";
-
-/// Redirect fd 2 (stderr) into a fresh tempfile for the duration of `f`,
-/// then restore it and return everything written while redirected.
-///
-/// # Safety contract
-/// Uses raw `libc::dup`/`dup2`/`close` on the process-global fd 2. Not
-/// thread-safe against other code touching fd 2 concurrently — fine for a
-/// single-threaded `#[test]` binary invocation, same assumption
-/// `QT_QPA_PLATFORM`'s `env::set_var` calls elsewhere in this test suite
-/// already make about process-global state.
-fn capture_stderr<F: FnOnce()>(f: F) -> String {
-    let tmp = tempfile::tempfile().expect("create tempfile for stderr capture");
-    let tmp_fd = tmp.as_raw_fd();
-
-    // SAFETY: `dup`/`dup2`/`close` are called with fds this function itself
-    // owns or has just duplicated; `saved_stderr` is closed exactly once
-    // after being dup2'd back onto fd 2.
-    let saved_stderr = unsafe { libc::dup(2) };
-    assert!(saved_stderr >= 0, "libc::dup(2) failed");
-    // SAFETY: `tmp_fd` is a valid, open fd owned by `tmp` for the duration
-    // of this call.
-    let rc = unsafe { libc::dup2(tmp_fd, 2) };
-    assert!(rc >= 0, "libc::dup2(tmp_fd, 2) failed");
-
-    f();
-
-    // SAFETY: `saved_stderr` is a valid fd duplicated above; restoring it
-    // onto fd 2 and then closing the now-unneeded duplicate.
-    unsafe {
-        libc::dup2(saved_stderr, 2);
-        libc::close(saved_stderr);
-    }
-
-    let mut tmp = tmp;
-    tmp.seek(SeekFrom::Start(0))
-        .expect("seek captured-stderr tempfile");
-    let mut captured = String::new();
-    tmp.read_to_string(&mut captured)
-        .expect("read captured-stderr tempfile");
-    captured
-}
 
 #[test]
 fn inline_and_batch_verdict_click_paths_run_without_erroring() {
-    if std::env::var_os("QT_QPA_PLATFORM").is_none() {
-        std::env::set_var("QT_QPA_PLATFORM", "offscreen");
-    }
-    if std::env::var_os("QT_QUICK_CONTROLS_STYLE").is_none() {
-        std::env::set_var("QT_QUICK_CONTROLS_STYLE", "Basic");
-    }
+    init_headless_qt_env();
     // Deliberately NOT setting QT_FATAL_WARNINGS: a pre-existing upstream
     // Kirigami OverlaySheet binding-loop warning would abort the whole test
     // binary under it, unrelated to anything this test is checking.
@@ -127,13 +91,32 @@ Window {
     width: 800
     height: 600
 
+    // Recording stand-in for BridgeFeed. `ConnectionsPage.bridgeFeed` is a
+    // plain `var`, so any QObject exposing `submitVerdict` satisfies the
+    // page's null guard — and satisfying it is the whole point: with a null
+    // feed, submitInlineVerdict returns early and nothing downstream runs.
+    QtObject {
+        id: feedStub
+        property int allowCount: 0
+        property int denyCount: 0
+        property string lastScope: ""
+        property string lastDuration: ""
+
+        function submitVerdict(rowId, choice, scope, duration) {
+            if (choice === "allow") {
+                feedStub.allowCount++;
+            } else if (choice === "deny") {
+                feedStub.denyCount++;
+            }
+            feedStub.lastScope = scope;
+            feedStub.lastDuration = duration;
+        }
+    }
+
     ConnectionsPage {
         id: page
         anchors.fill: parent
-        // bridgeFeed stays null (isolated-component-test convention already
-        // used by connections_page_diagnostics_qml.rs) — the inlineDecision's
-        // Connections { enabled: page.bridgeFeed !== null } guard makes this
-        // a no-op sink rather than throwing.
+        bridgeFeed: feedStub
         model: ConnectionsModel {
             id: connModel
             Component.onCompleted: {
@@ -173,11 +156,33 @@ Window {
     // Quits the event loop once the delegate layout/polish pass (and any JS
     // errors it would surface) has had a chance to run — see the module doc
     // comment above for why pumping the loop matters here.
+    //
+    // Also where the verdict path is actually asserted. A `throw` here is
+    // reported by Qt as a JS error prefixed with this probe's URL, which the
+    // Rust-side stderr assertion below treats as a failure — so the check is
+    // load-bearing in Rust, not a QML-side assert. `finally` guarantees
+    // Qt.quit() still runs on the failing path; without it a throw would
+    // leave the event loop spinning and hang the test binary.
     Timer {
         interval: 150
         running: true
         repeat: false
-        onTriggered: Qt.quit()
+        onTriggered: {
+            try {
+                if (feedStub.allowCount < 1) {
+                    throw new Error("inline Allow never reached bridgeFeed.submitVerdict");
+                }
+                if (feedStub.denyCount < 1) {
+                    throw new Error("batch Deny never reached bridgeFeed.submitVerdict");
+                }
+                if (feedStub.lastScope !== "this_host" || feedStub.lastDuration !== "this_time") {
+                    throw new Error("verdict carried unexpected default tokens: "
+                                    + feedStub.lastScope + "/" + feedStub.lastDuration);
+                }
+            } finally {
+                Qt.quit();
+            }
+        }
     }
 }
 "#;
@@ -215,8 +220,10 @@ Window {
     assert!(
         bad_lines.is_empty(),
         "QML runtime error(s) reported against the probe URL while exercising the inline/batch \
-         verdict click paths (submitInlineVerdict / submitBatchVerdict / the new inline and \
-         batch-action buttons' bindings) — captured stderr:\n{}",
+         verdict click paths — this covers both a broken binding/handler AND the probe's own \
+         Timer assertions that the inline Allow and batch Deny actually reached \
+         bridgeFeed.submitVerdict carrying the this_host/this_time defaults. Captured \
+         stderr:\n{}",
         bad_lines.join("\n")
     );
 }

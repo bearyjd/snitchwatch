@@ -128,19 +128,20 @@ fixed target (the bridge-cli otherwise defaults to an ephemeral port).
     6.19" premise — were both the same *rootless-container permissions*
     artifact (see issue #6's post-close correction comment); under root,
     ebpf loads and interception is sustained.
-  - [ ] **Verdict round-trip — over-claimed, corrected 2026-07-31, tracked
-    as issue #14.** The same `tailscaled` ask above got a prompt
-    `setVerdict` reply over WS, but the daemon never applied it: every
-    real `AskRule` in this run actually ended in `DeadlineExceeded` +
-    `Invalid rule received, applying default action`, because the
-    bridge's `verdict_to_rule` always sent `operator: None`, which
-    `vendor/opensnitch/daemon/rule/rule.go`'s `Deserialize` hard-rejects.
-    No verdict from this bridge has ever been accepted by a real daemon.
-    Fixed in the issue #14 branch (real `Operator` per `VerdictScope`;
-    `MockOpensnitchd::ask_rule` now applies the daemon's ~120s deadline
-    and validates the returned `Rule` shape). **Still needs live
-    re-verification on real hardware** — not yet re-run against a real
-    daemon as of this correction.
+  - [x] **Verdict round-trip (live, 2026-08-01):** after PR #16 populated
+    the required `operator`, the real daemon accepted the verdict and logged
+    `Added new rule: allow if dest.host is '<host>'`. This replaces the
+    earlier failed/over-claimed 2026-07-31 observation, which had ended in
+    `Invalid rule received, applying default action`.
+  - [x] **Closed-window service recovery (live, 2026-08-02):** stopped the
+    in-process Kirigami shell, started the enabled `snitchwatch-bridge`
+    user service, and confirmed the root `opensnitchd-dev` container
+    re-subscribed to `127.0.0.1:50051` with its Notifications stream open.
+    Stopping that container broke the stream while the bridge remained
+    active; after restart it re-subscribed successfully. A fresh host-side
+    `curl` was not intercepted in this session despite the nftables queue
+    rules (daemon log: NFQUEUE send timeouts), so this entry does not
+    re-claim a new AskRule/WS verdict proof.
   - [ ] **Still open on the live checklist:** the GUI-visual halves of
     Steps 5/6 (tray icon + banner/page rendering on a real compositor
     need human eyes). Issues #5/#6/#7 are all fixed and closed
