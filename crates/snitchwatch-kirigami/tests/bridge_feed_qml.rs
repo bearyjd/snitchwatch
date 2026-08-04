@@ -37,7 +37,7 @@
 //!   2. A QML JS error (wrong invokable name/arity) does NOT null the root
 //!      object, so the stderr capture is what catches it — and that capture
 //!      only works because [`common::init_headless_qt_env`] sets
-//!      `QT_LOGGING_TO_CONSOLE`. See its doc comment.
+//!      `QT_FORCE_STDERR_LOGGING`. See its doc comment.
 //!
 //! Run headless with `QT_QPA_PLATFORM=offscreen`.
 use std::sync::atomic::{AtomicBool, Ordering};

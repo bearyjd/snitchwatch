@@ -59,14 +59,19 @@ pub fn capture_stderr<F: FnOnce()>(f: F) -> String {
 /// Set the offscreen/Basic Qt environment every probe needs, unless the
 /// caller already chose one.
 ///
-/// `QT_LOGGING_TO_CONSOLE` is **required for [`capture_stderr`] to see
+/// `QT_FORCE_STDERR_LOGGING` is **required for [`capture_stderr`] to see
 /// anything**, and is the reason this helper exists rather than each probe
-/// setting two variables inline. Qt on Fedora is built with journald support,
+/// setting the variables inline. Qt on Fedora is built with journald support,
 /// and its default message handler routes to the journal instead of stderr
 /// whenever stderr is not a TTY — which is exactly the case under
 /// `cargo test`, where it is a pipe. Without this, every `qWarning`,
 /// `qCritical`, and QML JS exception vanishes into the journal, the capture
 /// comes back empty, and any assertion built on it passes unconditionally.
+///
+/// Use `QT_FORCE_STDERR_LOGGING`, not the older `QT_LOGGING_TO_CONSOLE`: Qt
+/// 6.10 warns that the latter is deprecated. Since this variable is what
+/// keeps the stderr assertions load-bearing, a silent removal in a future Qt
+/// would reintroduce exactly the vacuous-assertion bug it was added to fix.
 pub fn init_headless_qt_env() {
     if std::env::var_os("QT_QPA_PLATFORM").is_none() {
         std::env::set_var("QT_QPA_PLATFORM", "offscreen");
@@ -74,7 +79,7 @@ pub fn init_headless_qt_env() {
     if std::env::var_os("QT_QUICK_CONTROLS_STYLE").is_none() {
         std::env::set_var("QT_QUICK_CONTROLS_STYLE", "Basic");
     }
-    if std::env::var_os("QT_LOGGING_TO_CONSOLE").is_none() {
-        std::env::set_var("QT_LOGGING_TO_CONSOLE", "1");
+    if std::env::var_os("QT_FORCE_STDERR_LOGGING").is_none() {
+        std::env::set_var("QT_FORCE_STDERR_LOGGING", "1");
     }
 }

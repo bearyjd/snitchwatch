@@ -96,7 +96,7 @@ kirigami-build:
 # Needs qt6-qtdeclarative (qmltestrunner-qt6 + the QtTest QML module), which
 # the Kirigami build already requires.
 qml-test:
-    QT_QPA_PLATFORM=offscreen QT_QUICK_CONTROLS_STYLE=Basic QT_LOGGING_TO_CONSOLE=1 \
+    QT_QPA_PLATFORM=offscreen QT_QUICK_CONTROLS_STYLE=Basic QT_FORCE_STDERR_LOGGING=1 \
         qmltestrunner-qt6 -input crates/snitchwatch-kirigami/tests/qml
 
 # Playwright smoke test for the Tauri shell (requires `npm install` in tests/tauri_smoke first)

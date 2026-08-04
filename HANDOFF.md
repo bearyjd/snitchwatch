@@ -145,7 +145,10 @@ Important current findings:
   support and its default handler routes to the journal, not stderr, whenever
   stderr is not a TTY — always true under `cargo test`. The capture came back
   empty and the assertion passed unconditionally.
-  `tests/common/mod.rs::init_headless_qt_env` now sets `QT_LOGGING_TO_CONSOLE`.
+  `tests/common/mod.rs::init_headless_qt_env` now sets
+  `QT_FORCE_STDERR_LOGGING` (not the older `QT_LOGGING_TO_CONSOLE`, which Qt
+  6.10 warns is deprecated — and which, if silently dropped by a future Qt,
+  would reintroduce exactly this bug).
   Both verdict probes were verified by deliberate sabotage (null feed /
   renamed invokable) and confirmed to go red. Note also that a bare `QtObject`
   root never runs `Component.onCompleted` under `QQmlApplicationEngine` — a
