@@ -18,9 +18,9 @@
 // toggleEnabled/deleteRule are plain qinvokables on `RulesModel`; they emit
 // `ruleChangeRequested` with a JSON-encoded `ClientMessage` for the live
 // bridge feed to forward — the same signal-out pattern
-// `BlocklistsModel.subscribe`/`unsubscribe` and `PendingDecision.submit` use
-// (no bridge changes, no local optimistic mutation — the row reflects the
-// server's next `SetRules`/`UpdateRules` push).
+// `BlocklistsModel.subscribe`/`unsubscribe` uses (no bridge changes, no local
+// optimistic mutation — the row reflects the server's next
+// `SetRules`/`UpdateRules` push).
 import QtQuick
 import QtQuick.Layouts
 import QtQuick.Controls as Controls
@@ -137,7 +137,7 @@ Kirigami.ScrollablePage {
         visible: !page.model || page.model.count === 0
         icon.name: "view-list-details"
         text: "No rules yet"
-        explanation: "Rules created from connection decisions or the Blocklists tab will appear here."
+        explanation: "Decisions set to “This time” resolve only the current request. Choose a persistent duration, or add a blocklist, to create rules shown here."
     }
 
     ListView {
@@ -240,11 +240,12 @@ Kirigami.ScrollablePage {
 
     // Rule detail + enable/disable + delete. Kept as an OverlaySheet, same as
     // BlocklistsPage's inspector, so it behaves identically at every width.
-    Kirigami.OverlaySheet {
+    SizedOverlaySheet {
         id: inspector
         title: page.inspectSource === "blocklist" ? ("blocklist: " + page.inspectBlocklistId) : page.inspectName
 
         ColumnLayout {
+            Layout.preferredWidth: inspector.preferredWidth
             spacing: Kirigami.Units.largeSpacing
 
             Kirigami.FormLayout {
@@ -342,12 +343,13 @@ Kirigami.ScrollablePage {
     // is safe to run directly from the UI thread. Every result is labelled a
     // simulation, never a live daemon verdict (see `rules::simulator` module
     // docs for exactly what operand types are and aren't reproduced).
-    Kirigami.OverlaySheet {
+    SizedOverlaySheet {
         id: simulateSheet
         title: "Simulate rule match"
+        preferredWidth: Kirigami.Units.gridUnit * 22
 
         ColumnLayout {
-            Layout.preferredWidth: Kirigami.Units.gridUnit * 22
+            Layout.preferredWidth: simulateSheet.preferredWidth
             spacing: Kirigami.Units.largeSpacing
 
             Controls.Label {

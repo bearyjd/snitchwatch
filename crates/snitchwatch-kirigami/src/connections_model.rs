@@ -203,7 +203,7 @@ pub mod qobject {
         /// decision under process group `key`, JSON-encoded as a plain
         /// array of strings in display order (e.g. `["r1","r2"]`). QML's
         /// "Allow all"/"Deny all" process-header buttons parse this and
-        /// loop `PendingDecision.submit` per id. Flushes any buffered
+        /// loop `BridgeFeed.submitVerdict` per id. Flushes any buffered
         /// grouped-mode messages first so the answer reflects current data
         /// (mirrors `toggleProcessGroup`'s flush-before-read pattern).
         #[qinvokable]

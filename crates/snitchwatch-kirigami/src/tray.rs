@@ -56,9 +56,9 @@ pub fn menu_label_token(label: &MenuLabel) -> &'static str {
 
 /// Build the JSON-encoded `ClientMessage::SetFilteringPaused` the tray menu's
 /// "Pause/Resume filtering" item sends via `BridgeFeed::sendClientJson` (the
-/// same in-process path `PendingDecision::submit` and friends use — see
+/// same in-process path `BridgeFeed::submitVerdict` and friends use — see
 /// `docs/superpowers/plans/2026-07-12-tray-filter-off.md`). Pure and
-/// infallible: unlike `PendingDecision`'s verdict-building, there's no
+/// infallible: unlike `pending_decision`'s verdict-building, there's no
 /// free-text QML input to validate here, just a bool.
 pub fn build_set_filtering_paused_json(paused: bool) -> String {
     serde_json::to_string(&ClientMessage::SetFilteringPaused { paused })

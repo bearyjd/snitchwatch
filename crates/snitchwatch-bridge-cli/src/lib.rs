@@ -428,6 +428,30 @@ pub async fn run(config: BridgeConfig) -> Result<RunningBridge> {
                     });
                     info!("re-broadcast state snapshots after feed lag");
                 }
+                Ok(UpstreamEffect::VerdictApplied { row_id, .. }) => {
+                    // `ConnectionCache::resolve` updates its authoritative row
+                    // and wakes the blocked AskRule RPC, but the cache itself
+                    // deliberately has no broadcast dependency. Fan the updated
+                    // row back out here so every live UI replaces its pending
+                    // row immediately after an Allow/Deny click.
+                    let updated_row = cache_for_upstream
+                        .lock()
+                        .await
+                        .rows()
+                        .iter()
+                        .find(|row| row.id == row_id)
+                        .cloned();
+                    if let Some(row) = updated_row {
+                        if let Err(e) = snapshot_tx
+                            .send(ServerMessage::UpdateConnectionRows { rows: vec![row] })
+                        {
+                            warn!(error = %e, "verdict update broadcast failed");
+                        }
+                    } else {
+                        error!(%row_id, "verdict applied but resolved row is absent from cache");
+                    }
+                    info!(%row_id, "applied verdict and broadcast row update");
+                }
                 Ok(effect) => info!(?effect, "applied upstream effect"),
                 Err(e) => error!(error = %e, "upstream apply failed"),
             }
@@ -494,6 +518,9 @@ pub async fn run(config: BridgeConfig) -> Result<RunningBridge> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mock_opensnitchd::MockOpensnitchd;
+    use snitchwatch_bridge::ws_messages::{VerdictAction, VerdictDuration, VerdictScope};
+    use snitchwatch_proto::protocol::Connection;
 
     #[tokio::test]
     async fn run_binds_socket_and_grpc_port_and_shutdown_works() {
@@ -537,6 +564,79 @@ mod tests {
             .await
             .expect("inbound channel closed");
 
+        bridge.shutdown();
+    }
+
+    #[tokio::test]
+    async fn verdict_broadcasts_an_updated_non_pending_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = BridgeConfig {
+            grpc_bind: "127.0.0.1:0".parse().unwrap(),
+            ws_socket_path: dir.path().join("bridge.sock"),
+            cache_capacity: 64,
+        };
+        let bridge = run(cfg).await.expect("run failed");
+        let mut rx = bridge.broadcast_tx.subscribe();
+
+        let grpc_addr = bridge.grpc_addr;
+        let ask = tokio::spawn(async move {
+            let mut daemon = MockOpensnitchd::connect(grpc_addr).await.unwrap();
+            daemon
+                .ask_rule(Connection {
+                    protocol: "tcp".into(),
+                    dst_host: "example.com".into(),
+                    dst_ip: "93.184.216.34".into(),
+                    dst_port: 443,
+                    process_path: "/usr/bin/curl".into(),
+                    ..Default::default()
+                })
+                .await
+                .unwrap()
+        });
+
+        let pending_id = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                if let ServerMessage::InsertConnectionRows { rows } =
+                    rx.recv().await.expect("broadcast channel closed")
+                {
+                    if let Some(row) = rows.into_iter().find(|row| row.action.is_none()) {
+                        break row.id;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("pending AskRule row was not broadcast");
+
+        bridge
+            .inbound_tx
+            .send(ClientMessage::SetVerdict {
+                row_id: pending_id.clone(),
+                verdict: VerdictAction::Allow,
+                scope: VerdictScope::ThisHost,
+                duration: Some(VerdictDuration::Once),
+                remember: None,
+            })
+            .await
+            .expect("inbound channel closed");
+
+        let updated = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                if let ServerMessage::UpdateConnectionRows { rows } =
+                    rx.recv().await.expect("broadcast channel closed")
+                {
+                    if let Some(row) = rows.into_iter().find(|row| row.id == pending_id) {
+                        break row;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("verdict did not broadcast a row update");
+        assert_eq!(updated.action.as_deref(), Some("allow"));
+
+        let rule = ask.await.expect("AskRule task panicked");
+        assert_eq!(rule.action, "allow");
         bridge.shutdown();
     }
 

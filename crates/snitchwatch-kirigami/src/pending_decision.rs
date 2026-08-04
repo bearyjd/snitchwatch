@@ -1,12 +1,12 @@
 //! The pending-`AskRule` decision surface (Task 7; Parity 2 duration scopes).
 //!
 //! This is the single most safety-critical interaction in the app: the user
-//! allows or denies a novel connection. The pure part of that decision —
-//! mapping the two verdict buttons (allow/deny), the host-match scope
-//! selector, and the duration selector onto the bridge's typed
-//! [`ClientMessage::SetVerdict`] — lives here as a Qt-free, unit-tested
-//! function. The cxx-qt `PendingDecision` wrapper is a thin surface QML
-//! calls; it serialises the message and emits it via a signal.
+//! allows or denies a novel connection. Mapping the two verdict buttons
+//! (allow/deny), the host-match scope selector, and the duration selector onto
+//! the bridge's typed [`ClientMessage::SetVerdict`] lives here as Qt-free,
+//! unit-tested functions with no QObject of their own. QML reaches them
+//! through `BridgeFeed::submitVerdict`, which builds the message here and
+//! hands it straight to the bridge's inbound pump.
 //!
 //! **Granular rule scopes (Parity 2):** the dialog offers four durations —
 //! "This time", "For 5 minutes", "Until quit", "Forever" — mapped onto the
@@ -20,16 +20,13 @@
 //! remaining time via a `remainingSeconds` property the bridge feed sets; this
 //! module never starts a client-side timer.
 //!
-//! **Live wiring (follow-up):** `verdictSubmitted(json)` is emitted for each
-//! decision. The bridge feed (the same consumer-side wiring `ConnectionsModel`
-//! awaits) connects it to the bridge's existing `oneshot::Sender<Verdict>`
-//! resolution path. No bridge code changes were needed for the scope/duration
-//! extension — it only builds the existing `SetVerdict` message the WS
-//! protocol already defines (now carrying a typed `duration` field instead of
-//! a plain `remember: bool`).
-
-use core::pin::Pin;
-use cxx_qt_lib::QString;
+//! **Live wiring:** `BridgeFeed::submitVerdict` calls
+//! [`build_verdict_message`] and dispatches the result onto the bridge's
+//! inbound channel, which resolves the pending `AskRule`'s
+//! `oneshot::Sender<Verdict>`. No bridge code changes were needed for the
+//! scope/duration extension — it only builds the existing `SetVerdict`
+//! message the WS protocol already defines (now carrying a typed `duration`
+//! field instead of a plain `remember: bool`).
 
 use snitchwatch_bridge::ws_messages::{
     ClientMessage, VerdictAction, VerdictDuration, VerdictScope,
@@ -39,14 +36,14 @@ use snitchwatch_bridge::ws_messages::{
 /// used to live on this enum is now the independent duration selector (see
 /// [`parse_duration`]) — Little-Snitch-parity durations aren't just binary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum VerdictChoice {
+pub(crate) enum VerdictChoice {
     Allow,
     Deny,
 }
 
 impl VerdictChoice {
     /// Parse the stable lowercase token QML sends.
-    pub fn from_token(token: &str) -> Option<Self> {
+    pub(crate) fn from_token(token: &str) -> Option<Self> {
         match token {
             "allow" => Some(Self::Allow),
             "deny" => Some(Self::Deny),
@@ -55,7 +52,7 @@ impl VerdictChoice {
     }
 
     /// The underlying allow/deny action.
-    pub fn action(self) -> VerdictAction {
+    pub(crate) fn action(self) -> VerdictAction {
         match self {
             Self::Allow => VerdictAction::Allow,
             Self::Deny => VerdictAction::Deny,
@@ -66,7 +63,7 @@ impl VerdictChoice {
 /// Parse the scope token QML sends into the bridge's [`VerdictScope`].
 /// Defaults to the most conservative scope ([`VerdictScope::ThisHost`]) for an
 /// unrecognised token rather than widening the rule unexpectedly.
-pub fn parse_scope(token: &str) -> VerdictScope {
+pub(crate) fn parse_scope(token: &str) -> VerdictScope {
     match token {
         "any_host_on_domain" => VerdictScope::AnyHostOnDomain,
         "any_host" => VerdictScope::AnyHost,
@@ -86,7 +83,7 @@ pub fn parse_scope(token: &str) -> VerdictScope {
 /// | `until_quit`      | [`VerdictDuration::UntilRestart`]|
 /// | `forever`         | [`VerdictDuration::Always`]      |
 /// | anything else     | [`VerdictDuration::Once`] (safe default) |
-pub fn parse_duration(token: &str) -> VerdictDuration {
+pub(crate) fn parse_duration(token: &str) -> VerdictDuration {
     match token {
         "for_5_minutes" => VerdictDuration::FiveMinutes,
         "until_quit" => VerdictDuration::UntilRestart,
@@ -112,72 +109,6 @@ pub fn build_verdict_message(
         duration: Some(parse_duration(duration_token)),
         remember: None,
     })
-}
-
-#[cxx_qt::bridge]
-pub mod qobject {
-    unsafe extern "C++" {
-        include!("cxx-qt-lib/qstring.h");
-        type QString = cxx_qt_lib::QString;
-    }
-
-    extern "RustQt" {
-        /// Verdict submission surface bound by `PendingDecisionSheet.qml`.
-        #[qobject]
-        #[qml_element]
-        type PendingDecision = super::PendingDecisionRust;
-
-        /// Emitted with the JSON-encoded `ClientMessage::SetVerdict` for each
-        /// decision. The live bridge feed connects this to the bridge's verdict
-        /// resolution path (no bridge changes — same message the WS protocol
-        /// already carries).
-        #[qsignal]
-        #[cxx_name = "verdictSubmitted"]
-        fn verdict_submitted(self: Pin<&mut PendingDecision>, json: QString);
-
-        /// Submit a decision. `choice` is `allow` / `deny`; `scope` is
-        /// `this_host` / `any_host_on_domain` / `any_host`; `duration` is
-        /// `this_time` / `for_5_minutes` / `until_quit` / `forever`.
-        /// Malformed input is logged and dropped (never sends a wrong
-        /// verdict).
-        #[qinvokable]
-        fn submit(
-            self: Pin<&mut PendingDecision>,
-            row_id: &QString,
-            choice: &QString,
-            scope: &QString,
-            duration: &QString,
-        );
-    }
-}
-
-/// Rust-side state for [`qobject::PendingDecision`] (stateless — the timeout is
-/// server-side, so this holds nothing).
-#[derive(Default)]
-pub struct PendingDecisionRust;
-
-impl qobject::PendingDecision {
-    fn submit(
-        self: Pin<&mut Self>,
-        row_id: &QString,
-        choice: &QString,
-        scope: &QString,
-        duration: &QString,
-    ) {
-        let row_id = row_id.to_string();
-        let choice = choice.to_string();
-        let scope = scope.to_string();
-        let duration = duration.to_string();
-        match build_verdict_message(&row_id, &choice, &scope, &duration) {
-            Some(msg) => match serde_json::to_string(&msg) {
-                Ok(json) => self.verdict_submitted(QString::from(&json)),
-                Err(e) => tracing::error!(error = %e, "PendingDecision: verdict serialize failed"),
-            },
-            None => {
-                tracing::warn!(%choice, "PendingDecision: unrecognised verdict choice, ignored")
-            }
-        }
-    }
 }
 
 #[cfg(test)]

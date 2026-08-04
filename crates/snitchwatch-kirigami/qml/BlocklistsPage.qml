@@ -7,11 +7,10 @@
 //
 // Subscribe/unsubscribe are plain qinvokables on `BlocklistsModel`
 // (`subscribe(url)` / `unsubscribe(id)`); they emit `subscriptionRequested`
-// with a JSON-encoded `ClientMessage` for the live bridge feed to forward, the
-// same signal-out pattern `PendingDecision.submit` uses for verdicts — no
+// with a JSON-encoded `ClientMessage` for the live bridge feed to forward — no
 // bridge changes, and consuming that signal into the bridge's live request
 // path is the same kind of consumer-side follow-up already noted for
-// `ConnectionsModel`'s and `PendingDecision`'s live wiring.
+// `ConnectionsModel`'s live wiring.
 //
 // Status display (last-updated, fetch-failed) reads the bridge's `FetchStatus`
 // as already projected into `BlocklistsModel`'s `status` / `lastUpdated` /
@@ -158,11 +157,12 @@ Kirigami.ScrollablePage {
 
     // Subscription detail + entries. Kept as an OverlaySheet, same as
     // ConnectionsPage's inspector, so it behaves identically at every width.
-    Kirigami.OverlaySheet {
+    SizedOverlaySheet {
         id: inspector
         title: page.inspectDisplayName
 
         ColumnLayout {
+            Layout.preferredWidth: inspector.preferredWidth
             spacing: Kirigami.Units.largeSpacing
 
             Kirigami.FormLayout {

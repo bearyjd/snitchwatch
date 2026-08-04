@@ -14,7 +14,7 @@
 //! **Never on the safety-critical path**: `lookup()` always returns
 //! immediately — it either applies a cached result synchronously or spawns
 //! the network work and returns. Nothing here is ever awaited by the verdict
-//! submission path (`PendingDecision::submit`), so a hung/offline lookup can
+//! submission path (`BridgeFeed::submitVerdict`), so a hung/offline lookup can
 //! never delay or block an Allow/Deny decision.
 
 use core::pin::Pin;

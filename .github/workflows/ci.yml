@@ -187,3 +187,17 @@ jobs:
           QT_QPA_PLATFORM: offscreen
           QT_QUICK_CONTROLS_STYLE: Basic
         run: cargo test -p snitchwatch-kirigami --locked
+
+      # Qt-level input routing, via qmltestrunner. Synthesises real mouse
+      # events, which the cxx-qt harness above cannot do (cxx-qt-lib exposes no
+      # way to post a QMouseEvent), so this is the only layer that exercises a
+      # Button's handlers through Qt's actual pointer pipeline.
+      #
+      # qmltestrunner-qt6 and the QtTest QML module both ship in
+      # qt6-qtdeclarative-devel, already installed above — no new dependency.
+      - name: qmltestrunner (QML input routing)
+        env:
+          QT_QPA_PLATFORM: offscreen
+          QT_QUICK_CONTROLS_STYLE: Basic
+          QT_LOGGING_TO_CONSOLE: "1"
+        run: qmltestrunner-qt6 -input crates/snitchwatch-kirigami/tests/qml

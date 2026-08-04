@@ -24,7 +24,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::sync::watch;
-use tracing::warn;
+use tracing::{info, warn};
 
 const NM_POLL_INTERVAL: Duration = Duration::from_secs(3);
 /// How long after poll-loop start a closed watch channel is still attributed
@@ -177,7 +177,7 @@ pub async fn connect_watcher() -> Arc<dyn NetworkWatcher> {
         Ok(w) => w,
         Err(e) => {
             if !LOGGED_UNAVAILABLE_ONCE.swap(true, Ordering::SeqCst) {
-                warn!(
+                info!(
                     error = %e,
                     "profiles: NetworkManager unavailable; auto-activation disabled (manual-only)"
                 );

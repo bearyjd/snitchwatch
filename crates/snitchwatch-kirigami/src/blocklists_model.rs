@@ -5,8 +5,8 @@
 //! unit-tested without Qt. These are the thin cxx-qt wrappers:
 //!   * `BlocklistsModel` exposes the subscription master list, plus
 //!     subscribe/unsubscribe invokables that emit the bridge's typed
-//!     `ClientMessage` (JSON) for the live feed to forward — mirroring
-//!     `PendingDecision`'s pattern, no bridge changes.
+//!     `ClientMessage` (JSON) for the live feed to forward — no local
+//!     optimistic mutation, no bridge changes.
 //!   * `BlocklistEntriesModel` exposes the per-subscription entry (host) list.
 //!
 //! Blocklist updates are low-frequency whole-list replaces, so both wrappers

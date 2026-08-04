@@ -82,6 +82,23 @@ kirigami-dev:
 kirigami-build:
     cargo build -p snitchwatch-kirigami --release
 
+# Qt-level input-routing tests for the Kirigami shell, via qmltestrunner.
+#
+# These synthesise REAL mouse events (QtTest `mouseClick()`), which the
+# cxx-qt test harness cannot do — cxx-qt-lib exposes no way to post a
+# QMouseEvent, so `cargo test` can only call QML functions directly.
+#
+# They test structural mirrors of the delegates, NOT the real pages:
+# qmltestrunner cannot load `com.snitchwatch.shell` because cxx-qt links
+# those types statically into each binary rather than shipping a QML plugin.
+# `tests/qml_source_guards.rs` covers the real files.
+#
+# Needs qt6-qtdeclarative (qmltestrunner-qt6 + the QtTest QML module), which
+# the Kirigami build already requires.
+qml-test:
+    QT_QPA_PLATFORM=offscreen QT_QUICK_CONTROLS_STYLE=Basic QT_LOGGING_TO_CONSOLE=1 \
+        qmltestrunner-qt6 -input crates/snitchwatch-kirigami/tests/qml
+
 # Playwright smoke test for the Tauri shell (requires `npm install` in tests/tauri_smoke first)
 tauri-smoke:
     cd tests/tauri_smoke && npx playwright test

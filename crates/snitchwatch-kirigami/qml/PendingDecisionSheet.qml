@@ -53,27 +53,11 @@ ColumnLayout {
     // Emitted after a verdict is submitted so the container can close/advance.
     signal decided()
 
-    // Rust submission surface (pure verdict->ClientMessage mapping lives there).
-    PendingDecision {
-        id: decision
-    }
-
     // Reverse-DNS + RDAP lookup surface (Parity 2). Qt-free fetch/cache logic
     // lives in `insight::client`; this QObject only dispatches it async and
     // never blocks `lookup()`'s caller.
     PendingInsight {
         id: insight
-    }
-
-    // Route the emitted SetVerdict JSON to the bridge inbound (Task 13). Kept as
-    // a signal->dispatcher hop (not a direct call in submit()) so the pure
-    // verdict->ClientMessage mapping stays the single source of the JSON.
-    Connections {
-        target: decision
-        enabled: sheet.bridgeFeed !== null
-        function onVerdictSubmitted(json) {
-            sheet.bridgeFeed.sendClientJson(json);
-        }
     }
 
     // Kick off the best-effort insight lookup whenever the target IP changes
@@ -210,7 +194,9 @@ ColumnLayout {
             Kirigami.FormData.label: "Reverse DNS"
             text: insight.loading
                   ? "Looking up…"
-                  : (insight.hostname.length > 0 ? insight.hostname : "unavailable")
+                  : (insight.hostname.length > 0
+                     ? insight.hostname
+                     : "No PTR result for " + sheet.remoteIp)
         }
         Controls.Label {
             Kirigami.FormData.label: "Organization"
@@ -324,7 +310,15 @@ ColumnLayout {
     }
 
     function submit(action) {
-        decision.submit(sheet.rowId, action, scopeBox.currentValue, durationBox.currentValue);
+        if (sheet.bridgeFeed !== null) {
+            sheet.bridgeFeed.submitVerdict(
+                sheet.rowId, action, scopeBox.currentValue, durationBox.currentValue);
+        } else {
+            // Unreachable in the running app; logged rather than dropped
+            // silently so a mis-wired container can't lose a decision without
+            // a trace. `decided()` still fires so the sheet closes either way.
+            console.warn("PendingDecisionSheet: no bridgeFeed; verdict dropped for", sheet.rowId);
+        }
         sheet.decided();
     }
 }

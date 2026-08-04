@@ -142,11 +142,12 @@ Kirigami.ScrollablePage {
     // Profile detail + rename + matcher editor + activate/deactivate/delete.
     // Kept as an OverlaySheet, same as BlocklistsPage/RulesPage's inspectors,
     // so it behaves identically at every width.
-    Kirigami.OverlaySheet {
+    SizedOverlaySheet {
         id: inspector
         title: page.inspectName
 
         ColumnLayout {
+            Layout.preferredWidth: inspector.preferredWidth
             spacing: Kirigami.Units.largeSpacing
 
             Kirigami.FormLayout {
