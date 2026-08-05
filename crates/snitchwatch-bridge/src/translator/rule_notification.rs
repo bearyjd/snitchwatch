@@ -149,6 +149,33 @@ mod tests {
         assert!(notification_for_effect(&effect, 3).is_err());
     }
 
+    /// The daemon's CHANGE_RULE handler does a wholesale `Replace`, so every
+    /// field the wire shape drops is a field a toggle silently clears. For
+    /// `precedence` that changes which rule wins for unrelated traffic — an
+    /// invisible security-relevant side effect of an "enable/disable" click.
+    ///
+    /// Guards the bridge half of that round trip; `rules::row_store`'s
+    /// `toggling_preserves_precedence_and_nolog_through_the_wire` guards the
+    /// Rules-model half.
+    #[test]
+    fn precedence_and_nolog_survive_into_the_notification() {
+        let mut rule = wire_rule("010-priority-allow", true);
+        rule["precedence"] = serde_json::Value::Bool(true);
+        rule["nolog"] = serde_json::Value::Bool(true);
+
+        let effect = UpstreamEffect::UpdateRule {
+            rule_id: "010-priority-allow".to_string(),
+            rule,
+        };
+        let ntf = notification_for_effect(&effect, 9).unwrap().unwrap();
+
+        assert!(
+            ntf.rules[0].precedence,
+            "precedence must reach the daemon; dropping it silently reorders rule evaluation"
+        );
+        assert!(ntf.rules[0].nolog, "nolog must reach the daemon");
+    }
+
     #[test]
     fn empty_delete_id_is_rejected() {
         let effect = UpstreamEffect::DeleteRule {

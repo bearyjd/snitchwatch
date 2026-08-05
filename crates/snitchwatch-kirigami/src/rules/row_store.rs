@@ -59,6 +59,20 @@ pub struct Rule {
     pub duration: String,
     pub description: String,
     pub operator: serde_json::Value,
+    /// opensnitchd's `Rule.precedence` — this rule is evaluated ahead of
+    /// non-precedence rules, i.e. it can decide traffic another rule would
+    /// otherwise match.
+    ///
+    /// Carried here purely so it survives a round trip. `toggleEnabled` sends
+    /// the whole rule back as a `CHANGE_RULE`, and the daemon's handler does a
+    /// wholesale `Replace` — so a field this struct drops is a field the next
+    /// toggle silently clears on the daemon. For `precedence` that would
+    /// quietly change which rule wins for unrelated traffic. Nothing in the UI
+    /// edits it; it is round-trip ballast on purpose.
+    pub precedence: bool,
+    /// opensnitchd's `Rule.nolog` — suppress logging for matches of this rule.
+    /// Same round-trip-ballast rationale as [`Self::precedence`].
+    pub nolog: bool,
 }
 
 /// Where a rule originated: authored directly by the user, or materialized
@@ -290,6 +304,8 @@ mod tests {
             duration: "always".to_string(),
             description: String::new(),
             operator: serde_json::json!({"operand": "dest.host", "data": "example.com"}),
+            precedence: false,
+            nolog: false,
         }
     }
 
@@ -461,6 +477,51 @@ mod tests {
         assert_eq!(toggled["enabled"], false);
         assert_eq!(toggled["name"], "899-firefox");
         assert_eq!(toggled["action"], "allow");
+    }
+
+    /// A toggle is sent to the daemon as a `CHANGE_RULE` carrying the whole
+    /// rule, and the daemon's handler does a wholesale `Replace`. So any field
+    /// this store drops on ingest is a field the next toggle silently clears on
+    /// the daemon — and for `precedence` that quietly changes which rule wins
+    /// for traffic the user wasn't touching.
+    ///
+    /// This is a real regression: `precedence`/`nolog` were absent from this
+    /// struct when the CHANGE_RULE path was first wired, so every toggle reset
+    /// them to false.
+    #[test]
+    fn toggling_preserves_precedence_and_nolog_through_the_wire() {
+        let mut s = RulesStore::new();
+        s.apply(&ServerMessage::SetRules {
+            rules: vec![serde_json::json!({
+                "name": "010-priority-allow",
+                "enabled": true,
+                "action": "allow",
+                "duration": "always",
+                "description": "",
+                "operator": {"operand": "dest.host", "data": "example.com"},
+                "precedence": true,
+                "nolog": true,
+            })],
+        });
+
+        // Ingest must not drop them...
+        let ingested = s.find_by_name("010-priority-allow").expect("rule known");
+        assert!(ingested.precedence, "precedence lost on SetRules ingest");
+        assert!(ingested.nolog, "nolog lost on SetRules ingest");
+
+        // ...and the JSON sent back to the daemon must still carry them.
+        let toggled = s
+            .toggled_rule_json("010-priority-allow")
+            .expect("rule known");
+        assert_eq!(toggled["enabled"], false, "the toggle itself must apply");
+        assert_eq!(
+            toggled["precedence"], true,
+            "toggling a rule must not clear its precedence on the daemon"
+        );
+        assert_eq!(
+            toggled["nolog"], true,
+            "toggling a rule must not clear its nolog flag on the daemon"
+        );
     }
 
     #[test]

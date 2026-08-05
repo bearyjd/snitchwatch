@@ -397,3 +397,14 @@ cargo fmt --all --check && git diff --check
 - **GOTCHA 3 in full:** `Replace(r, r.Duration == rule.Always)` — the second argument
   is "save to disk". A toggle on a `once`/`5m`/`until restart` rule changes the
   in-memory rule only.
+- **What this plan missed, found during review:** `Replace` is *wholesale*, so any
+  field the wire shape drops is a field a toggle silently clears on the daemon. The
+  plan's "Files to Change" table did not include
+  `snitchwatch-kirigami/src/rules/row_store.rs`, whose `Rule` struct carried neither
+  `precedence` nor `nolog` — so the first implementation reset both on every toggle.
+  `precedence` decides whether a rule is evaluated ahead of others, meaning an
+  "enable/disable" click could quietly change which rule wins for unrelated traffic.
+  Fixed by carrying both fields end to end (`rule_to_wire` -> store -> `rule_from_wire`)
+  with a regression test on each half. **Lesson for the next plan touching this path:
+  enumerate every proto field and decide explicitly whether it round-trips**, rather
+  than inferring the wire shape from what the UI happens to display.

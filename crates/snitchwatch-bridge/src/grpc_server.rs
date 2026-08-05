@@ -39,6 +39,13 @@ fn rule_to_wire(rule: &Rule) -> serde_json::Value {
         "duration": rule.duration,
         "description": rule.description,
         "operator": rule.operator.as_ref().map(operator_to_wire).unwrap_or(serde_json::Value::Null),
+        // Round-trip ballast, not display data: the Rules model sends the whole
+        // rule back as a CHANGE_RULE and the daemon does a wholesale `Replace`,
+        // so any field omitted here is a field the next toggle silently clears
+        // on the daemon. Dropping `precedence` would quietly change which rule
+        // wins for unrelated traffic. See `rule_from_wire`, which reads both.
+        "precedence": rule.precedence,
+        "nolog": rule.nolog,
     })
 }
 
