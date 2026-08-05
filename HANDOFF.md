@@ -6,6 +6,44 @@
 > was decided and why, but stale as a status report. Trust this section for
 > "what's true today."
 
+## Start here (2026-08-05, latest)
+
+**PR #32 merged — issue #17's mitigation is shipped, `main` is clean and in sync at
+`92b6a21`.** CI green on all 4 jobs (`check`/`test`/`package-check`/`kirigami`, real
+GitHub Actions). Full arc, oldest to newest:
+
+1. Ran the deliberate experiment issue #17 asked for against the real (non-disposable —
+   it actively firewalls the real host desktop's live traffic) `opensnitchd-dev`
+   container. Root cause: `ui.Client.isAsking` in
+   `vendor/opensnitch/daemon/ui/client.go:62` is a single global `bool`, not
+   per-connection — while any one `AskRule` is in flight (up to 120s), every other new
+   connection silently gets `DefaultAction` applied, invisible to all four of
+   Snitchwatch's diagnostic checks. Not the originally-reported nftables-flush
+   scenario (that stays retracted).
+2. Filed the real fix upstream — it's out of this repo's reach, `vendor/opensnitch` is
+   read-only: [evilsocket/opensnitch#1644](https://github.com/evilsocket/opensnitch/issues/1644).
+3. Shipped the Snitchwatch-side mitigation (this repo can't detect or close the gap,
+   only narrow it): `pendingExposureBanner` in `main.qml`, appears once the oldest
+   *actively* pending decision (excluding permanently-stuck rows past opensnitchd's own
+   120s timeout — the bridge has no reaper for those) has been outstanding ≥10s and
+   <120s. Backed by `ConnectionsModel.oldestPendingAgeSecs`/`refreshPendingAge()` and a
+   fixed `connection_to_row` (was shipping `started_at_ms: 0` for every pending row).
+   Full design: `docs/superpowers/plans/2026-08-05-pending-decision-exposure-warning.md`.
+4. Hardened through an independent `code-reviewer` pass (all findings addressed) plus
+   **3 rounds of adversarial `codex review`** against a second model — each round found
+   one real, fixable bug in the mitigation's own logic (a stuck row masking a later
+   genuinely-active one; the poll timer never stopping once a row got permanently
+   stuck; the banner text assuming `DefaultAction: allow` when this repo's *own shipped
+   packaging config* overrides opensnitchd's fail-open default to `deny` — so the real
+   effect during the exposure window is "silently denied," not "silently allowed").
+   Final Codex pass came back clean.
+
+**Not yet done: a real-hardware manual check** of the banner (leave a decision
+unanswered past 10s on a live daemon, confirm it appears/disappears correctly) — same
+standing caveat as every other UI change in this file. Everything else — unit tests
+(271 in `snitchwatch-kirigami` alone), QML integration tests, sabotage-verified source
+guards, `just check`/`just test` — is green.
+
 ## Start here (2026-08-05, later)
 
 **issue #17's experiment ran — real, distinct root cause found, not the nftables-flush scenario.**
