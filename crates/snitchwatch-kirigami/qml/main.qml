@@ -297,11 +297,16 @@ Kirigami.ApplicationWindow {
     // state (age < threshold) where this timer's ticks matter most, and a Qt
     // child-of-invisible-item is not guaranteed to keep behaving identically
     // across every InlineMessage implementation. Only runs while something
-    // is actually pending, so a healthy idle app (the common case for a
-    // firewall UI sitting in the tray) never wakes for this.
+    // is *actively* pending (Codex review: gating on pendingCount > 0 alone
+    // ticks forever once a stuck/expired row exists — see
+    // oldest_pending_started_at_ms's doc comment in row_store.rs — since a
+    // stuck row never resolves and never expires from pendingCount either;
+    // oldestPendingAgeSecs is already -1 in exactly that case, so gating on
+    // it here stops the wakeups once the real exposure window closes,
+    // regardless of whether the stuck row itself is ever cleaned up).
     Timer {
         interval: 1000
-        running: root.connectionsModelRef.pendingCount > 0
+        running: root.connectionsModelRef.oldestPendingAgeSecs >= 0
         repeat: true
         onTriggered: root.connectionsModelRef.refreshPendingAge()
     }

@@ -140,11 +140,14 @@ fn pending_exposure_banner_stays_wired_to_oldest_pending_age() {
          ever changes, update this guard to match it, not just main.qml."
     );
     assert!(
-        code.contains("running: root.connectionsModelRef.pendingCount > 0")
+        code.contains("running: root.connectionsModelRef.oldestPendingAgeSecs >= 0")
             && code.contains("repeat: true")
             && code.contains("root.connectionsModelRef.refreshPendingAge()"),
         "main.qml's pending-age poll Timer is no longer wired the way the banner needs: \
-         running only while something is pending, repeating, and calling \
+         running only while something is ACTIVELY pending (oldestPendingAgeSecs >= 0, not \
+         merely pendingCount > 0 — a Codex review finding: gating on pendingCount alone \
+         ticks forever once a permanently-stuck/expired row exists, since such a row never \
+         resolves and never leaves pendingCount either), repeating, and calling \
          refreshPendingAge() each tick — oldestPendingAgeSecs would go stale between \
          bridge messages otherwise, since elapsed wall-clock time advances with nothing \
          to trigger a recompute."
