@@ -282,11 +282,23 @@ Kirigami.ApplicationWindow {
         readonly property int pendingAgeSecs: root.connectionsModelRef.oldestPendingAgeSecs
         readonly property int pendingCount: root.connectionsModelRef.pendingCount
         visible: pendingAgeSecs >= pendingAgeThresholdSecs && pendingAgeSecs < pendingAgeCeilingSecs
+        // Deliberately does not say "silently allowed": that's only true
+        // under DefaultAction: allow, opensnitchd's own fail-open default.
+        // This repo's shipped packaging config overrides that to
+        // DefaultAction: deny (fail-closed — packaging/bluebuild/files/
+        // system/etc/opensnitchd/default-config.json, CLAUDE.md's settled
+        // decision #5), so on the actual shipped product the real effect is
+        // "silently denied" (a legitimate connection blackholed with no
+        // signal) — arguably worse, not better. Neither direction is
+        // hardcoded here since the configured default isn't threaded to the
+        // UI (Codex review finding); "allowed or denied" stays accurate
+        // regardless of DefaultAction.
         text: (pendingCount > 1
                 ? (pendingCount + " decisions are pending (oldest " + pendingAgeSecs + "s)")
                 : ("A decision has been pending for " + pendingAgeSecs + "s"))
-            + ". Until you respond, other new connections may be silently allowed — this is a"
-            + " known opensnitchd limitation, not a Snitchwatch bug."
+            + ". Until you respond, other new connections may be silently allowed or denied"
+            + " without your review — this is a known opensnitchd limitation, not a"
+            + " Snitchwatch bug."
     }
 
     // Keeps ConnectionsModel.oldestPendingAgeSecs (and therefore
