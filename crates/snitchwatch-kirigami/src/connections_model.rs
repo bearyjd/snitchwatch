@@ -95,6 +95,17 @@ pub mod qobject {
         /// Total rows in the store regardless of filter — lets the view tell
         /// "no connections yet" apart from "no rows match the filter".
         #[qproperty(i32, total_count, cxx_name = "totalCount")]
+        /// Seconds the longest-pending row has been awaiting a decision, or
+        /// `-1` when nothing is pending (mirrors `remainingSeconds`'s -1
+        /// sentinel convention in `PendingDecisionSheet.qml`). Drives the
+        /// pending-decision-exposure warning banner: while any one `AskRule`
+        /// is outstanding, opensnitchd silently defaults every *other*
+        /// concurrent connection (see
+        /// docs/superpowers/plans/2026-08-05-pending-decision-exposure-warning.md).
+        /// Recomputed on every store mutation and on each `refreshPendingAge`
+        /// call — QML must poll the latter on a timer, since elapsed time
+        /// advances with no new message to trigger recomputation.
+        #[qproperty(i32, oldest_pending_age_secs, cxx_name = "oldestPendingAgeSecs")]
         /// Whether the view is currently in grouped (Process -> Domain ->
         /// connection) mode as opposed to the flat list. Defaults to `true`
         /// per the design spec ("defaulting to grouped"). Toggle via the
@@ -209,6 +220,13 @@ pub mod qobject {
         #[qinvokable]
         #[cxx_name = "pendingRowIdsForProcess"]
         fn pending_row_ids_for_process(self: Pin<&mut ConnectionsModel>, key: &QString) -> QString;
+
+        /// Recompute `oldestPendingAgeSecs` against the current wall clock.
+        /// Call this from a QML `Timer` tick (elapsed time changes with no
+        /// new bridge message to trigger a recompute otherwise).
+        #[qinvokable]
+        #[cxx_name = "refreshPendingAge"]
+        fn refresh_pending_age(self: Pin<&mut ConnectionsModel>);
     }
 
     // Protected base-class helpers inherited from QAbstractListModel.
@@ -271,6 +289,25 @@ pub mod qobject {
 /// ~6 resets/sec worst case instead of one per message.
 const GROUPED_FLUSH_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(150);
 
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// Seconds since `oldest_pending_started_at_ms`, or `-1` when nothing is
+/// pending. Qt-free and unit-tested below; the Qt-facing call sites just
+/// supply `store.oldest_pending_started_at_ms()` and `now_ms()`.
+fn pending_age_secs(oldest_pending_started_at_ms: Option<i64>, now_ms: i64) -> i32 {
+    match oldest_pending_started_at_ms {
+        // Saturate rather than go negative if clock skew or a future
+        // timestamp ever put `started_at_ms` ahead of `now_ms`.
+        Some(started) => ((now_ms - started).max(0) / 1000) as i32,
+        None => -1,
+    }
+}
+
 /// Ids that arrive *pending* anywhere in a batch of buffered messages —
 /// the flush-time input to the auto-select policy (Qt-free, tested below).
 fn collect_new_pending_ids(msgs: &[ServerMessage]) -> Vec<String> {
@@ -330,6 +367,9 @@ pub struct ConnectionsModelRust {
     count: i32,
     pending_count: i32,
     total_count: i32,
+    /// Backing field for the `oldestPendingAgeSecs` qproperty. See its doc
+    /// comment in the `#[cxx_qt::bridge]` block.
+    oldest_pending_age_secs: i32,
     /// Id of the row the user currently has selected (empty = none). Fed from
     /// QML via `setCurrentRowId`; consulted by the auto-select policy.
     current_row_id: String,
@@ -351,6 +391,7 @@ impl Default for ConnectionsModelRust {
             count: 0,
             pending_count: 0,
             total_count: 0,
+            oldest_pending_age_secs: -1,
             current_row_id: String::new(),
             pending_grouped_msgs: Vec::new(),
             grouped_flush_scheduled: false,
@@ -937,6 +978,12 @@ impl qobject::ConnectionsModel {
         self.as_mut().set_count(visible);
         self.as_mut().set_total_count(total);
         self.as_mut().set_pending_count(pending);
+        self.as_mut().refresh_pending_age();
+    }
+
+    fn refresh_pending_age(mut self: Pin<&mut Self>) {
+        let age = pending_age_secs(self.store.oldest_pending_started_at_ms(), now_ms());
+        self.as_mut().set_oldest_pending_age_secs(age);
     }
 }
 
@@ -1056,6 +1103,22 @@ mod tests {
             started_at_ms: 0,
             matched_rule: None,
         }
+    }
+
+    #[test]
+    fn pending_age_secs_is_sentinel_when_nothing_pending() {
+        assert_eq!(pending_age_secs(None, 10_000), -1);
+    }
+
+    #[test]
+    fn pending_age_secs_computes_elapsed_seconds() {
+        assert_eq!(pending_age_secs(Some(1_000), 14_500), 13);
+    }
+
+    #[test]
+    fn pending_age_secs_saturates_at_zero_for_clock_skew() {
+        // started_at_ms ahead of now_ms (e.g. clock skew) must never go negative.
+        assert_eq!(pending_age_secs(Some(5_000), 1_000), 0);
     }
 
     #[test]

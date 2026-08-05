@@ -141,6 +141,22 @@ impl RowStore {
         self.rows.iter().find(|r| r.id == id)
     }
 
+    /// `started_at_ms` of the longest-pending row still awaiting a decision,
+    /// across the whole store (independent of the active filter — mirrors
+    /// `pending_count`'s scope). `None` when nothing is pending. Feeds the
+    /// pending-decision-exposure warning (see
+    /// docs/superpowers/plans/2026-08-05-pending-decision-exposure-warning.md):
+    /// while any one `AskRule` is outstanding, opensnitchd silently defaults
+    /// every *other* concurrent connection, so the oldest pending row is what
+    /// determines how long that exposure window has been open.
+    pub fn oldest_pending_started_at_ms(&self) -> Option<i64> {
+        self.rows
+            .iter()
+            .filter(|r| r.action.is_none())
+            .map(|r| r.started_at_ms)
+            .min()
+    }
+
     /// Number of rows in `incoming` that [`insert_rows`](Self::insert_rows)
     /// will actually append as *new* rows: ids not already present in the store
     /// **and** not already seen earlier within this same batch.
@@ -768,6 +784,25 @@ mod tests {
         s.insert_rows(vec![row("c", None)]);
         s.recompute_visible();
         assert_eq!(s.visible_len(), 2);
+    }
+
+    #[test]
+    fn oldest_pending_started_at_ms_is_none_when_nothing_pending() {
+        let mut s = RowStore::new();
+        s.insert_rows(vec![row("a", Some("allow"))]);
+        assert_eq!(s.oldest_pending_started_at_ms(), None);
+    }
+
+    #[test]
+    fn oldest_pending_started_at_ms_picks_the_earliest_pending_row() {
+        let mut s = RowStore::new();
+        let mut newer = row("a", None);
+        newer.started_at_ms = 2_000;
+        let mut older = row("b", None);
+        older.started_at_ms = 1_000;
+        let decided = row("c", Some("deny")); // started_at_ms: 0, must be ignored
+        s.insert_rows(vec![newer, older, decided]);
+        assert_eq!(s.oldest_pending_started_at_ms(), Some(1_000));
     }
 
     #[test]

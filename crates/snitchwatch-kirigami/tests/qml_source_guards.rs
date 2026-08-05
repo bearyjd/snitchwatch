@@ -15,6 +15,7 @@
 //! gets a cheap guard rather than no guard.
 
 const CONNECTIONS_PAGE: &str = include_str!("../qml/ConnectionsPage.qml");
+const MAIN_QML: &str = include_str!("../qml/main.qml");
 
 /// Drop whole-line `//` comments so a guard can't trip over prose that merely
 /// *names* the thing it forbids — the doc comments below deliberately discuss
@@ -96,5 +97,32 @@ fn pending_badge_does_not_fill_with_neutral_background_color() {
          the pending-count badge's \"N pending\" label unreadable (issue #31). Use \
          a border-only outline instead of relying on the two neutral roles to \
          contrast."
+    );
+}
+
+/// Issue #17 / evilsocket/opensnitch#1644 mitigation: the pending-decision-
+/// exposure banner must stay wired to `oldestPendingAgeSecs`, and the poll
+/// `Timer` that keeps it live (elapsed wall-clock time changes with no new
+/// bridge message to trigger a recompute) must keep calling
+/// `refreshPendingAge()`. Either binding silently detaching would leave the
+/// banner permanently hidden (or frozen at whatever value it last saw) with
+/// no test-visible symptom otherwise — see
+/// docs/superpowers/plans/2026-08-05-pending-decision-exposure-warning.md.
+#[test]
+fn pending_exposure_banner_stays_wired_to_oldest_pending_age() {
+    let code = code_lines(MAIN_QML);
+    assert!(
+        code.contains(
+            "visible: root.connectionsModelRef.oldestPendingAgeSecs >= pendingAgeThresholdSecs"
+        ),
+        "main.qml's pendingExposureBanner is no longer visible-bound to \
+         connectionsModel.oldestPendingAgeSecs — the banner would stop reflecting \
+         real pending-decision age."
+    );
+    assert!(
+        code.contains("root.connectionsModelRef.refreshPendingAge()"),
+        "main.qml no longer polls refreshPendingAge() on a timer — \
+         oldestPendingAgeSecs would go stale between bridge messages, since \
+         elapsed wall-clock time advances with nothing to trigger a recompute."
     );
 }

@@ -247,6 +247,42 @@ Kirigami.ApplicationWindow {
         ]
     }
 
+    // Pending-decision-exposure warning — distinct from both banners above:
+    // this covers neither the bridge nor opensnitchd being unhealthy, but a
+    // known *upstream* opensnitchd limitation (evilsocket/opensnitch#1644):
+    // its AskRule dispatch serializes on a single global flag, so while any
+    // one decision is outstanding, every other new connection silently gets
+    // the daemon's DefaultAction applied with no signal Snitchwatch can
+    // observe. This banner only narrows the exposure window (by prompting
+    // the user to respond) — it cannot detect or close it. See
+    // docs/superpowers/plans/2026-08-05-pending-decision-exposure-warning.md.
+    Kirigami.InlineMessage {
+        id: pendingExposureBanner
+        z: 999
+        anchors {
+            top: daemonHealthBanner.visible ? daemonHealthBanner.bottom
+                : (bridgeBanner.visible ? bridgeBanner.bottom : parent.top)
+            left: parent.left
+            right: parent.right
+            margins: Kirigami.Units.smallSpacing
+        }
+        type: Kirigami.MessageType.Warning
+        readonly property int pendingAgeThresholdSecs: 10
+        visible: root.connectionsModelRef.oldestPendingAgeSecs >= pendingAgeThresholdSecs
+        text: "A decision has been pending for " + root.connectionsModelRef.oldestPendingAgeSecs
+            + "s. Until you respond, other new connections may be silently allowed — this is a"
+            + " known opensnitchd limitation, not a Snitchwatch bug."
+
+        // oldestPendingAgeSecs only changes automatically on the next bridge
+        // message; elapsed wall-clock time otherwise needs an explicit poke.
+        Timer {
+            interval: 1000
+            running: true
+            repeat: true
+            onTriggered: root.connectionsModelRef.refreshPendingAge()
+        }
+    }
+
     // Page components, swapped into pageStack by the drawer actions below.
     Component {
         id: connectionsPageComponent
