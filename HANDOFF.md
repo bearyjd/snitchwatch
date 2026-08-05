@@ -6,6 +6,24 @@
 > was decided and why, but stale as a status report. Trust this section for
 > "what's true today."
 
+## Start here (2026-08-05, later)
+
+**issue #17's experiment ran — real, distinct root cause found, not the nftables-flush scenario.**
+`ui.Client.isAsking` in `vendor/opensnitch/daemon/ui/client.go:62` is a single global
+`bool`, not per-connection. While any one connection's `AskRule` is in flight (up to a
+120s timeout), every other new connection during that window silently gets
+`DefaultAction` applied — no ask, no visible signal beyond a `Debug`-level log line
+invisible at the shipped `LogLevel: 2`. All four of Snitchwatch's diagnostic checks stay
+green throughout (daemon alive, nftables/eBPF fine, process resolution fine) — this is a
+concurrency bug in opensnitchd itself, not a Snitchwatch bridge issue, and not sub-second.
+Live-verified against the real `opensnitchd-dev` container (which, notably, is not a
+disposable sandbox — it actively firewalls the real host desktop's live traffic).
+Full writeup posted to
+[issue #17](https://github.com/bearyjd/snitchwatch/issues/17#issuecomment-5195785371).
+No code changed yet — this needs a design decision (upstream fix vs. a new Snitchwatch-side
+diagnostic) before implementation. No host nftables were touched; a debug `LogLevel` toggle
+on the container's `default-config.json` was made and reverted via its own fsnotify watcher.
+
 ## Start here (2026-08-05)
 
 `main` is clean, CI green, nothing uncommitted, `origin/main` in sync at
