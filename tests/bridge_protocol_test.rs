@@ -536,3 +536,113 @@ async fn wait_for_ebpf_status(ws: &mut WebSocketStream<UnixStream>) -> serde_jso
     .await
     .expect("timed out waiting for a diagnosticsReport")
 }
+
+/// Rule enable/disable/delete must actually reach the daemon.
+///
+/// Before this path existed the bridge produced `UpstreamEffect::UpdateRule`
+/// and `DeleteRule` and then dropped them: the outbound `Notifications` stream
+/// was parked on `std::future::pending()`, so nothing was ever sent. The Rules
+/// page's controls were wired end to end right up to the bridge and stopped
+/// there.
+///
+/// Asserts the daemon-visible result, not just "a notification arrived":
+///   * the action is `CHANGE_RULE` / `DELETE_RULE`,
+///   * the toggled `enabled` value survives (the entire point of the command),
+///   * the rule passes `validate_rule_shape`, which mirrors the daemon's real
+///     acceptance path — `Deserialize` *and* `Operator.Compile()`. A rule that
+///     fails it is silently discarded by a real daemon, which is what issue #14
+///     was, and would make this feature look like it works while doing nothing.
+///   * the type is never `NONE`, which would order the daemon to close the
+///     stream (`vendor/opensnitch/daemon/ui/notifications.go:405-408`).
+#[tokio::test]
+async fn rule_update_and_delete_reach_the_daemon_as_notifications() {
+    use snitchwatch_bridge::ws_messages::ClientMessage;
+    use snitchwatch_proto::protocol::Action;
+
+    let socket_dir = tempfile::tempdir().unwrap();
+    let cfg = BridgeConfig {
+        grpc_bind: "127.0.0.1:0".parse().unwrap(),
+        ws_socket_path: socket_dir.path().join("bridge.sock"),
+        cache_capacity: 64,
+    };
+    let bridge = run(cfg).await.expect("bridge run failed");
+
+    // The stream must be open *before* the effect is sent: the bridge
+    // broadcasts to whoever is subscribed and replays nothing.
+    let mut mock = MockOpensnitchd::connect(bridge.grpc_addr).await.unwrap();
+    let (_reply_tx, mut notifications) = mock.open_notifications().await.unwrap();
+
+    // Shaped exactly like `RulesStore::toggled_rule_json` output: the full
+    // rule with `enabled` already flipped to the desired value.
+    let toggled = json!({
+        "name": "899-firefox-allow-out",
+        "enabled": false,
+        "action": "allow",
+        "duration": "always",
+        "description": "",
+        "operator": {
+            "type": "simple",
+            "operand": "dest.host",
+            "data": "example.com",
+            "sensitive": false,
+        },
+    });
+
+    bridge
+        .inbound_tx
+        .send(ClientMessage::UpdateRule {
+            rule_id: "899-firefox-allow-out".to_string(),
+            rule: toggled,
+        })
+        .await
+        .expect("inbound channel closed");
+
+    let change = tokio::time::timeout(Duration::from_secs(5), notifications.recv())
+        .await
+        .expect("no CHANGE_RULE notification reached the daemon")
+        .expect("notification stream closed");
+
+    assert_eq!(
+        change.r#type,
+        Action::ChangeRule as i32,
+        "rule toggle must arrive as CHANGE_RULE"
+    );
+    assert_ne!(
+        change.r#type,
+        Action::None as i32,
+        "a NONE-typed notification would close the daemon's stream"
+    );
+    assert_ne!(change.id, 0, "id 0 collides with the daemon's HELLO reply");
+    assert_eq!(change.rules.len(), 1);
+    assert_eq!(change.rules[0].name, "899-firefox-allow-out");
+    assert!(
+        !change.rules[0].enabled,
+        "the toggled `enabled` value must survive to the daemon"
+    );
+    mock_opensnitchd::validate_rule_shape(&change.rules[0])
+        .expect("a real daemon would silently reject this rule");
+
+    // Delete needs only the name (notifications.go:132).
+    bridge
+        .inbound_tx
+        .send(ClientMessage::DeleteRule {
+            rule_id: "899-firefox-allow-out".to_string(),
+        })
+        .await
+        .expect("inbound channel closed");
+
+    let delete = tokio::time::timeout(Duration::from_secs(5), notifications.recv())
+        .await
+        .expect("no DELETE_RULE notification reached the daemon")
+        .expect("notification stream closed");
+
+    assert_eq!(delete.r#type, Action::DeleteRule as i32);
+    assert_eq!(delete.rules.len(), 1);
+    assert_eq!(delete.rules[0].name, "899-firefox-allow-out");
+    assert!(
+        delete.id > change.id,
+        "notification ids must increase so daemon replies can be correlated"
+    );
+
+    bridge.shutdown();
+}

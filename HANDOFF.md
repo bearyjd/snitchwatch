@@ -120,13 +120,92 @@ Important current findings:
   this explicitly. The inspector now displays destination IP and reports a
   missing PTR as `No PTR result for <ip>`; this is independent from the
   opt-in RDAP/"online research" setting.
-- The Rules page's existing enable/disable/delete controls are **not complete**:
-  their UI messages are parsed to `UpstreamEffect`, but the bridge does not
-  yet send the corresponding `CHANGE_RULE`/`DELETE_RULE` notifications down
-  opensnitchd's live Notifications stream. Upstream supports those actions
-  (`vendor/opensnitch/daemon/ui/notifications.go`), but the bridge's outbound
-  Notifications stream is deliberately `pending()` today. Do not claim rule
-  editing works until that stream is implemented and tested on hardware.
+- **Rule enable/disable/delete is now wired (2026-08-04).** The outbound
+  Notifications stream no longer parks on `pending()`: it relays from a
+  `broadcast::Sender<Notification>` exposed by
+  `UiService::notifications_handle`, and `translator::rule_notification`
+  turns `UpstreamEffect::{UpdateRule, DeleteRule, AddRule}` into
+  `CHANGE_RULE`/`DELETE_RULE`. Covered by
+  `rule_update_and_delete_reach_the_daemon_as_notifications`, verified by
+  sabotage (drop the send → the test fails with a timeout).
+
+  Three things to know before touching it:
+  - **Never send a `NONE`-typed notification.** The daemon reads
+    `ntf.Type <= Action_NONE` as "server ordered to close notifications" and
+    tears the stream down
+    (`vendor/opensnitch/daemon/ui/notifications.go:405-408`). The relay loop
+    filters it as a second line of defence.
+  - **A malformed rule fails silently on a real daemon**, which is what issue
+    #14 was: `rule.Deserialize` plus `Operator.Compile()` reject it and the
+    daemon falls back to its default action. `rule_from_wire` returns `Err`
+    rather than ever emitting `operator: None`, and the e2e test asserts the
+    outgoing rule against `mock_opensnitchd::validate_rule_shape`.
+  - **Toggles only persist for `always`-duration rules.** The daemon calls
+    `Replace(r, r.Duration == rule.Always)`, where the second argument is
+    "save to disk" — a `once`/`30s`/`until restart` rule changes in memory
+    only and reverts when the daemon restarts.
+
+  **Live-verified against a real daemon (2026-08-05).** Not just mock-driven —
+  a real `opensnitchd` (v1.6.x, running in the root `opensnitchd-dev` podman
+  container, `DefaultAction: allow`, dialing `127.0.0.1:50051`) accepted and
+  applied a `CHANGE_RULE`. Reproduce with:
+
+  ```bash
+  RUST_LOG=info cargo run -p snitchwatch-bridge-cli --example live_rule_change -- \
+    000-allow-localhost /path/to/rule.json
+  ```
+
+  Evidence from that run:
+
+  ```
+  client subscribed client=tower version=6.19.11-ogc1.1.fc44.x86_64
+  notifications stream opened
+  notification reply from daemon id=0 code=0     <- HELLO (hence ids start at 1)
+  sent rule command to daemon id=1 action=10 receivers=1   <- 10 = CHANGE_RULE
+  notification reply from daemon id=1 code=0     <- 0 = OK: accepted, not rejected
+  ```
+
+  `code=0` is the signal issue #14 never got: a real daemon confirming it
+  deserialized and applied the rule rather than silently falling back to
+  `DefaultAction`. The daemon also rewrote `000-allow-localhost.json` on disk
+  with `created`/`updated` stamped at the exact send time, confirming
+  `Replace(r, save=true)` for an `always`-duration rule.
+
+  **That run also proved the `precedence`/`nolog` fix in production.** The real
+  `000-allow-localhost` rule carries `precedence: true` and `nolog: true`; both
+  survived the round trip byte-for-byte. Before the fix the bridge would have
+  written `false` for each, silently stripping priority evaluation from the
+  rule governing all localhost traffic.
+
+  **`DELETE_RULE` also live-verified (2026-08-05).** Exercised against the same
+  daemon using a throwaway rule (`zzz-snitchwatch-delete-probe`: `allow` on
+  `*.invalid`, `zzz-` prefix so it sorts last and can shadow nothing):
+
+  ```
+  sent rule command to daemon id=1 action=9 receivers=1   <- 9 = DELETE_RULE
+  notification reply from daemon id=1 code=0              <- accepted
+  ```
+
+  The probe's `.json` was gone from `/etc/opensnitchd/rules` afterwards, and
+  `000-allow-localhost.json` was untouched. Reproduce with
+  `--example live_rule_change -- delete <rule-name>`; **create a throwaway rule
+  first, never point it at a real one.**
+
+  **GUI visual check done on a real Wayland compositor (2026-08-05).** The
+  shell was run against the live daemon (`SNITCHWATCH_GRPC_BIND=127.0.0.1:50051`)
+  and rendered a genuine intercepted `syncthing` connection: process group row,
+  "1 connection", and issue #18's `Allow all (1)` / `Deny all (1)` batch buttons
+  with correct counts.
+
+  **Bug found, not yet fixed — the pending badge is unreadable off Plasma.**
+  `ConnectionsPage.qml:385-398` paints the badge `neutralBackgroundColor` with
+  `neutralTextColor` text; under Fusion both resolve to the same orange, so the
+  pill renders solid orange with the "N pending" text invisible. `main.rs:39-43`
+  only forces a style under `offscreen`, so a real session inherits the platform
+  default — Breeze on Plasma (likely fine, unverified: `org.kde.desktop` is not
+  installed in the dev container) but Fusion/Basic elsewhere, including a
+  Flatpak without `kf6-qqc2-desktop-style`. Pre-existing, unrelated to the
+  notifications work; worth its own issue.
 - Remaining runtime noise: GeoLite DB absence and NetworkManager absence in
   the container are informational expected degradations; installed Kirigami
   still emits `shortHeaderMargins` and page-component placement warnings.

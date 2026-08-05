@@ -15,8 +15,8 @@ use crate::tray_state::{TrayState, TrayStatePublisher};
 use crate::ws_messages::{ServerMessage, VerdictDuration};
 use snitchwatch_proto::protocol::ui_server::{Ui, UiServer};
 use snitchwatch_proto::protocol::{
-    Alert, ClientConfig, Connection, MsgResponse, Notification, NotificationReply, PingReply,
-    PingRequest, Rule,
+    Action, Alert, ClientConfig, Connection, MsgResponse, Notification, NotificationReply,
+    PingReply, PingRequest, Rule,
 };
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -39,6 +39,13 @@ fn rule_to_wire(rule: &Rule) -> serde_json::Value {
         "duration": rule.duration,
         "description": rule.description,
         "operator": rule.operator.as_ref().map(operator_to_wire).unwrap_or(serde_json::Value::Null),
+        // Round-trip ballast, not display data: the Rules model sends the whole
+        // rule back as a CHANGE_RULE and the daemon does a wholesale `Replace`,
+        // so any field omitted here is a field the next toggle silently clears
+        // on the daemon. Dropping `precedence` would quietly change which rule
+        // wins for unrelated traffic. See `rule_from_wire`, which reads both.
+        "precedence": rule.precedence,
+        "nolog": rule.nolog,
     })
 }
 
@@ -58,6 +65,105 @@ fn operator_to_wire(operator: &snitchwatch_proto::protocol::Operator) -> serde_j
     }
 }
 
+/// Inverse of [`rule_to_wire`]: parse the wire rule shape the Rules model
+/// emits (see `snitchwatch-kirigami`'s `rules::row_store::Rule`) back into the
+/// proto [`Rule`] opensnitchd expects in a `CHANGE_RULE` notification.
+///
+/// **Returns `Err` rather than ever producing `operator: None`.** The daemon
+/// runs every notified rule through `rule.Deserialize`
+/// (`vendor/opensnitch/daemon/rule/rule.go:85-89`, which hard-rejects a null
+/// operator) and then `Operator.Compile()`
+/// (`vendor/opensnitch/daemon/rule/operator.go:109-214`, which rejects unknown
+/// operator types and uncompilable regexps). A rejected rule doesn't error
+/// visibly — the daemon just falls back to its default action. That silent
+/// failure is exactly what issue #14 was, so malformed input dies here instead.
+///
+/// `created` is left at 0 (the daemon stamps its own). `precedence`/`nolog` are
+/// read when present and default to `false`; see this module's
+/// `rule_from_wire` tests for the round-trip guarantee.
+pub(crate) fn rule_from_wire(v: &serde_json::Value) -> Result<Rule, String> {
+    let obj = v.as_object().ok_or("rule must be a JSON object")?;
+    let name = obj
+        .get("name")
+        .and_then(|x| x.as_str())
+        .filter(|s| !s.is_empty())
+        .ok_or("rule.name missing or empty")?;
+    let action = obj
+        .get("action")
+        .and_then(|x| x.as_str())
+        .filter(|s| !s.is_empty())
+        .ok_or("rule.action missing or empty")?;
+    let operator = obj.get("operator").ok_or("rule.operator missing")?;
+    if operator.is_null() {
+        return Err("rule.operator is null; the daemon would reject this rule".to_string());
+    }
+
+    Ok(Rule {
+        created: 0,
+        name: name.to_string(),
+        description: str_field(obj, "description"),
+        enabled: bool_field(obj, "enabled"),
+        precedence: bool_field(obj, "precedence"),
+        nolog: bool_field(obj, "nolog"),
+        action: action.to_string(),
+        duration: obj
+            .get("duration")
+            .and_then(|x| x.as_str())
+            .filter(|s| !s.is_empty())
+            .ok_or("rule.duration missing or empty")?
+            .to_string(),
+        operator: Some(operator_from_wire(operator)?),
+    })
+}
+
+/// Inverse of [`operator_to_wire`], mirroring its two branches: an `operands`
+/// array means a list operator, anything else is a leaf.
+fn operator_from_wire(
+    v: &serde_json::Value,
+) -> Result<snitchwatch_proto::protocol::Operator, String> {
+    let obj = v.as_object().ok_or("operator must be a JSON object")?;
+    let op_type = obj
+        .get("type")
+        .and_then(|x| x.as_str())
+        .filter(|s| !s.is_empty())
+        .ok_or("operator.type missing or empty")?
+        .to_string();
+
+    match obj.get("operands").and_then(|x| x.as_array()) {
+        Some(operands) => Ok(snitchwatch_proto::protocol::Operator {
+            r#type: op_type,
+            list: operands
+                .iter()
+                .map(operator_from_wire)
+                .collect::<Result<Vec<_>, _>>()?,
+            ..Default::default()
+        }),
+        None => Ok(snitchwatch_proto::protocol::Operator {
+            r#type: op_type,
+            operand: obj
+                .get("operand")
+                .and_then(|x| x.as_str())
+                .filter(|s| !s.is_empty())
+                .ok_or("operator.operand missing or empty")?
+                .to_string(),
+            data: str_field(obj, "data"),
+            sensitive: bool_field(obj, "sensitive"),
+            list: Vec::new(),
+        }),
+    }
+}
+
+fn str_field(obj: &serde_json::Map<String, serde_json::Value>, key: &str) -> String {
+    obj.get(key)
+        .and_then(|x| x.as_str())
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn bool_field(obj: &serde_json::Map<String, serde_json::Value>, key: &str) -> bool {
+    obj.get(key).and_then(|x| x.as_bool()).unwrap_or(false)
+}
+
 /// Re-exported so existing call sites (and anything that historically
 /// imported it from here) keep working; `daemon_watchdog`/`diagnostics` now
 /// import [`crate::daemon_liveness::DaemonLiveness`] directly instead —
@@ -70,6 +176,12 @@ pub use crate::daemon_liveness::DaemonLiveness;
 /// at the tray tooltip, short enough not to hide a still-accurate `Pending`
 /// count for long) — easy to tune later, not a measured value.
 const RECENT_BLOCK_TTL: Duration = Duration::from_secs(5);
+
+/// Buffer for outbound daemon notifications. Rule toggles/deletes are
+/// user-paced (one click each), so this only needs to absorb a burst faster
+/// than the daemon drains it — e.g. a batch delete. A lagging receiver is
+/// logged and skips ahead rather than killing the stream.
+const NOTIFICATION_CHANNEL_CAPACITY: usize = 64;
 
 /// Bridge-side gRPC server state. Handed to `UiServer::new` for tonic.
 #[derive(Clone)]
@@ -124,6 +236,20 @@ pub struct UiService {
     /// (e.g. in most unit tests here) means `post_alert` still records the
     /// alert but skips the push broadcast.
     diagnostics_ctx: Arc<OnceLock<Arc<DiagnosticsCtx>>>,
+    /// Outbound commands for whichever daemon currently holds the
+    /// `Notifications` stream open (rule enable/disable/delete today).
+    ///
+    /// `broadcast`, not `mpsc`, for two reasons: a daemon that drops and
+    /// redials simply resubscribes and starts receiving again, and a send with
+    /// nobody listening is a benign `Err` rather than a channel that fills up
+    /// and wedges the caller. Nothing is replayed — a notification sent while
+    /// no daemon is connected is dropped, which is correct: the daemon reloads
+    /// its own rules on connect.
+    ///
+    /// Created here rather than taken as a `new()` parameter for the same
+    /// reason as [`Self::diagnostics_ctx`] — see its doc comment. Producers
+    /// get it via [`Self::notifications_handle`].
+    notifications: broadcast::Sender<Notification>,
 }
 
 impl UiService {
@@ -146,7 +272,15 @@ impl UiService {
             firewall_status: Arc::new(StdMutex::new(None)),
             alert_store: Arc::new(DaemonAlertStore::new()),
             diagnostics_ctx: Arc::new(OnceLock::new()),
+            notifications: broadcast::channel(NOTIFICATION_CHANNEL_CAPACITY).0,
         }
+    }
+
+    /// Sender for outbound daemon commands (see [`Self::notifications`]).
+    /// Exposed as an accessor, not a `new()` parameter, so the seven existing
+    /// call sites don't change — same rationale as [`Self::liveness_handle`].
+    pub fn notifications_handle(&self) -> broadcast::Sender<Notification> {
+        self.notifications.clone()
     }
 
     /// Convenience: wrap into a tonic `UiServer<UiService>` ready for
@@ -539,11 +673,46 @@ impl Ui for UiService {
             // ever panics), closing the stream.
         });
 
+        // Relay outbound commands (rule enable/disable/delete) to this daemon.
+        //
+        // NEVER yield `Notification::default()`. Its `type` is `Action::None`
+        // (0), and the daemon treats `ntf.Type <= Action_NONE` as "server
+        // ordered to close notifications" and tears the stream down
+        // (`vendor/opensnitch/daemon/ui/notifications.go:405-408`). The
+        // placeholder this replaced would have done exactly that. Producers go
+        // through `notifications_handle()`, and `Action::None` is filtered here
+        // as a second line of defence.
+        let mut rx = self.notifications.subscribe();
         let outbound = async_stream::try_stream! {
-            // Hold the stream open with no commands until M3+ wires up
-            // config-push from the GUI side.
-            let () = std::future::pending().await;
-            yield Notification::default();
+            loop {
+                match rx.recv().await {
+                    Ok(notification) => {
+                        if notification.r#type == Action::None as i32 {
+                            warn!(
+                                id = notification.id,
+                                "refusing to send a NONE-typed notification; it would close \
+                                 the daemon's stream"
+                            );
+                            continue;
+                        }
+                        debug!(
+                            id = notification.id,
+                            action = notification.r#type,
+                            rules = notification.rules.len(),
+                            "sending notification to daemon"
+                        );
+                        yield notification;
+                    }
+                    // A slow daemon missed messages. Skipping is right: each
+                    // notification is an independent command, and the daemon's
+                    // own rule state is authoritative on its next push.
+                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                        warn!(skipped, "notification receiver lagged; commands dropped");
+                    }
+                    // Sender gone (bridge shutting down): end the stream.
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
         };
 
         Ok(Response::new(
