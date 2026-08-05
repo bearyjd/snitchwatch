@@ -145,9 +145,40 @@ Important current findings:
     "save to disk" — a `once`/`30s`/`until restart` rule changes in memory
     only and reverts when the daemon restarts.
 
-  **Still unverified on hardware:** every assertion above is against the
-  in-process mock. No real `opensnitchd` has accepted one of these
-  notifications yet.
+  **Live-verified against a real daemon (2026-08-05).** Not just mock-driven —
+  a real `opensnitchd` (v1.6.x, running in the root `opensnitchd-dev` podman
+  container, `DefaultAction: allow`, dialing `127.0.0.1:50051`) accepted and
+  applied a `CHANGE_RULE`. Reproduce with:
+
+  ```bash
+  RUST_LOG=info cargo run -p snitchwatch-bridge-cli --example live_rule_change -- \
+    000-allow-localhost /path/to/rule.json
+  ```
+
+  Evidence from that run:
+
+  ```
+  client subscribed client=tower version=6.19.11-ogc1.1.fc44.x86_64
+  notifications stream opened
+  notification reply from daemon id=0 code=0     <- HELLO (hence ids start at 1)
+  sent rule command to daemon id=1 action=10 receivers=1   <- 10 = CHANGE_RULE
+  notification reply from daemon id=1 code=0     <- 0 = OK: accepted, not rejected
+  ```
+
+  `code=0` is the signal issue #14 never got: a real daemon confirming it
+  deserialized and applied the rule rather than silently falling back to
+  `DefaultAction`. The daemon also rewrote `000-allow-localhost.json` on disk
+  with `created`/`updated` stamped at the exact send time, confirming
+  `Replace(r, save=true)` for an `always`-duration rule.
+
+  **That run also proved the `precedence`/`nolog` fix in production.** The real
+  `000-allow-localhost` rule carries `precedence: true` and `nolog: true`; both
+  survived the round trip byte-for-byte. Before the fix the bridge would have
+  written `false` for each, silently stripping priority evaluation from the
+  rule governing all localhost traffic.
+
+  Still open: a live check of `DELETE_RULE` (not exercised — it destroys a
+  rule), and the GUI-visual half on a real compositor.
 - Remaining runtime noise: GeoLite DB absence and NetworkManager absence in
   the container are informational expected degradations; installed Kirigami
   still emits `shortHeaderMargins` and page-component placement warnings.
