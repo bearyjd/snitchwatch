@@ -297,8 +297,9 @@ fn now_ms() -> i64 {
 }
 
 /// Seconds since `oldest_pending_started_at_ms`, or `-1` when nothing is
-/// pending. Qt-free and unit-tested below; the Qt-facing call sites just
-/// supply `store.oldest_pending_started_at_ms()` and `now_ms()`.
+/// actively pending. Qt-free and unit-tested below; the Qt-facing call site
+/// just supplies `store.oldest_pending_started_at_ms(now)` and that same
+/// `now`.
 fn pending_age_secs(oldest_pending_started_at_ms: Option<i64>, now_ms: i64) -> i32 {
     match oldest_pending_started_at_ms {
         // Saturate rather than go negative if clock skew or a future
@@ -982,7 +983,8 @@ impl qobject::ConnectionsModel {
     }
 
     fn refresh_pending_age(mut self: Pin<&mut Self>) {
-        let age = pending_age_secs(self.store.oldest_pending_started_at_ms(), now_ms());
+        let now = now_ms();
+        let age = pending_age_secs(self.store.oldest_pending_started_at_ms(now), now);
         self.as_mut().set_oldest_pending_age_secs(age);
     }
 }
