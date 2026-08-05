@@ -80,3 +80,21 @@ fn verdict_buttons_all_dispatch_through_the_single_guard() {
          from the batch handlers."
     );
 }
+
+/// Issue #31: the pending-count badge used to fill with `neutralBackgroundColor`
+/// under a `neutralTextColor` label. Under the Fusion/Basic QQC2 styles those two
+/// roles resolve to the identical orange, so the "N pending" text vanished into
+/// its own fill (Breeze happened to give the background role a pale tint, which
+/// is why this went unnoticed on Plasma). Fixed by dropping the fill in favor of
+/// a border-only outline — this guard stops the fill from coming back.
+#[test]
+fn pending_badge_does_not_fill_with_neutral_background_color() {
+    assert!(
+        !code_lines(CONNECTIONS_PAGE).contains("neutralBackgroundColor"),
+        "ConnectionsPage.qml reintroduced neutralBackgroundColor as a fill. Under \
+         Fusion/Basic this resolves to the same color as neutralTextColor, making \
+         the pending-count badge's \"N pending\" label unreadable (issue #31). Use \
+         a border-only outline instead of relying on the two neutral roles to \
+         contrast."
+    );
+}

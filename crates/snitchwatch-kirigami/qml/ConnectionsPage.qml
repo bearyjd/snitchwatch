@@ -381,8 +381,16 @@ Kirigami.ScrollablePage {
                     // badge is the only signal that a collapsed group hides
                     // undecided connections — it must read as a badge, not
                     // as body text.
+                    //
+                    // Issue #31: this used to fill with neutralBackgroundColor
+                    // under a neutralTextColor label. Under Fusion/Basic those
+                    // two roles resolve to the identical orange, so the label
+                    // vanished into its own fill. Border-only sidesteps the
+                    // pairing entirely — neutralTextColor is already used bare
+                    // (no fill) elsewhere on this page, e.g. the verdict Label
+                    // above, so it's proven to read against the row background.
                     visible: row.isGroupHeader && row.groupPending > 0
-                    color: Kirigami.Theme.neutralBackgroundColor
+                    color: "transparent"
                     border.color: Kirigami.Theme.neutralTextColor
                     border.width: 1
                     radius: height / 2

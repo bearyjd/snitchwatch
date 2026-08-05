@@ -11,10 +11,19 @@
 `main` is clean, CI green, nothing uncommitted. Last merges: PR #29 (shell
 cleanup + test hardening) and PR #30 (rule enable/disable/delete).
 
-**Only open item: [issue #31](https://github.com/bearyjd/snitchwatch/issues/31)**
-— the pending-count badge renders orange-on-orange outside Plasma. Not
-verified under Breeze (`org.kde.desktop` is not installed in the dev
-container), so confirm that first before deciding scope.
+**Update (2026-08-05): [issue #31](https://github.com/bearyjd/snitchwatch/issues/31)
+fixed, not yet committed.** `ConnectionsPage.qml:378-400`'s pending-count
+badge dropped its `neutralBackgroundColor` fill in favor of a border-only
+outline — `neutralTextColor` was already proven to read directly against the
+row background elsewhere on the page (the verdict `Label`), so this sidesteps
+the fill/text pairing that collapsed to identical orange under Fusion/Basic
+entirely, rather than depending on a Breeze-only fix. A source guard
+(`pending_badge_does_not_fill_with_neutral_background_color` in
+`tests/qml_source_guards.rs`) pins it, verified red/green by sabotage. Full
+`just check`/`just test`/kirigami suite all green. Still not verified live
+under real Breeze — low-risk given the fix no longer depends on style-specific
+color resolution, but worth a real-Plasma glance if one's handy. Not yet
+committed; nothing else open from this run.
 
 **Live-verification is possible from this machine — do not assume otherwise.**
 Three things were wrongly recorded as "needs real hardware" and each turned out
