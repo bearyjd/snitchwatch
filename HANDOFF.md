@@ -8,22 +8,40 @@
 
 ## Start here (2026-08-05)
 
-`main` is clean, CI green, nothing uncommitted. Last merges: PR #29 (shell
-cleanup + test hardening) and PR #30 (rule enable/disable/delete).
+`main` is clean, CI green, nothing uncommitted, `origin/main` in sync at
+`ea72a12`. Last merges: PR #29 (shell cleanup + test hardening), PR #30
+(rule enable/disable/delete), and `ea72a12` (issue #31 fix, direct to main).
 
 **Update (2026-08-05): [issue #31](https://github.com/bearyjd/snitchwatch/issues/31)
-fixed, not yet committed.** `ConnectionsPage.qml:378-400`'s pending-count
-badge dropped its `neutralBackgroundColor` fill in favor of a border-only
-outline — `neutralTextColor` was already proven to read directly against the
-row background elsewhere on the page (the verdict `Label`), so this sidesteps
-the fill/text pairing that collapsed to identical orange under Fusion/Basic
+fixed, pushed, closed.** `ConnectionsPage.qml:378-400`'s pending-count badge
+dropped its `neutralBackgroundColor` fill in favor of a border-only outline —
+`neutralTextColor` was already proven to read directly against the row
+background elsewhere on the page (the verdict `Label`), so this sidesteps the
+fill/text pairing that collapsed to identical orange under Fusion/Basic
 entirely, rather than depending on a Breeze-only fix. A source guard
 (`pending_badge_does_not_fill_with_neutral_background_color` in
 `tests/qml_source_guards.rs`) pins it, verified red/green by sabotage. Full
 `just check`/`just test`/kirigami suite all green. Still not verified live
 under real Breeze — low-risk given the fix no longer depends on style-specific
-color resolution, but worth a real-Plasma glance if one's handy. Not yet
-committed; nothing else open from this run.
+color resolution, but worth a real-Plasma glance if one's handy.
+
+**Update (2026-08-05): issue-tracker hygiene pass.** A sweep of open GitHub
+issues plus TODO/"not yet filed" markers across the repo found exactly one
+stale item: [issue #17](https://github.com/bearyjd/snitchwatch/issues/17)
+still carried its original alarming title ("interception silently lapses")
+even though its own same-day comment had retracted the central claim as a
+measurement error (a broken `grep 'queue num'` pattern that never matches
+opensnitchd v1.8.0's real rule text). Retitled/rescoped in place per that
+comment's own suggestion — now tracks the one durable open question: whether
+diagnostics can miss a real non-interception state beyond the by-design
+sub-second `QueueBypass` reconnect window. Nobody has run the
+attach/detach-the-queue-reader experiment needed to answer that yet; that's
+the next real step if someone picks #17 up. Issues #15/#18/#19/#20 (listed
+as open in `docs/superpowers/HANDOFF-2026-08-01-gui-usability.md`) are all
+already closed — that doc's "open issues" section is stale, trust `gh issue
+list` over it. That doc's "not yet filed" scanner-binary-path note is also
+stale: already fixed by `e03b243` (preflight check + `SNITCHWATCH_SCANNER_BIN`
+hint in the error message). **#17 is now the only open issue.**
 
 **Live-verification is possible from this machine — do not assume otherwise.**
 Three things were wrongly recorded as "needs real hardware" and each turned out
@@ -161,7 +179,9 @@ The in-process bridge is verified live: Allow/Deny clicks resolve pending rows
 and log `applied verdict and broadcast row update`.
 
 **Only open item from this run: issue #31** (pending-count badge renders
-orange-on-orange outside Plasma). Everything else below is closed.
+orange-on-orange outside Plasma). Everything else below is closed. *(Fixed,
+pushed, and closed as of the later 2026-08-05 update above — see "Start
+here.")*
 
 Important current findings:
 
