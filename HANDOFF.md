@@ -177,8 +177,35 @@ Important current findings:
   written `false` for each, silently stripping priority evaluation from the
   rule governing all localhost traffic.
 
-  Still open: a live check of `DELETE_RULE` (not exercised — it destroys a
-  rule), and the GUI-visual half on a real compositor.
+  **`DELETE_RULE` also live-verified (2026-08-05).** Exercised against the same
+  daemon using a throwaway rule (`zzz-snitchwatch-delete-probe`: `allow` on
+  `*.invalid`, `zzz-` prefix so it sorts last and can shadow nothing):
+
+  ```
+  sent rule command to daemon id=1 action=9 receivers=1   <- 9 = DELETE_RULE
+  notification reply from daemon id=1 code=0              <- accepted
+  ```
+
+  The probe's `.json` was gone from `/etc/opensnitchd/rules` afterwards, and
+  `000-allow-localhost.json` was untouched. Reproduce with
+  `--example live_rule_change -- delete <rule-name>`; **create a throwaway rule
+  first, never point it at a real one.**
+
+  **GUI visual check done on a real Wayland compositor (2026-08-05).** The
+  shell was run against the live daemon (`SNITCHWATCH_GRPC_BIND=127.0.0.1:50051`)
+  and rendered a genuine intercepted `syncthing` connection: process group row,
+  "1 connection", and issue #18's `Allow all (1)` / `Deny all (1)` batch buttons
+  with correct counts.
+
+  **Bug found, not yet fixed — the pending badge is unreadable off Plasma.**
+  `ConnectionsPage.qml:385-398` paints the badge `neutralBackgroundColor` with
+  `neutralTextColor` text; under Fusion both resolve to the same orange, so the
+  pill renders solid orange with the "N pending" text invisible. `main.rs:39-43`
+  only forces a style under `offscreen`, so a real session inherits the platform
+  default — Breeze on Plasma (likely fine, unverified: `org.kde.desktop` is not
+  installed in the dev container) but Fusion/Basic elsewhere, including a
+  Flatpak without `kf6-qqc2-desktop-style`. Pre-existing, unrelated to the
+  notifications work; worth its own issue.
 - Remaining runtime noise: GeoLite DB absence and NetworkManager absence in
   the container are informational expected degradations; installed Kirigami
   still emits `shortHeaderMargins` and page-component placement warnings.

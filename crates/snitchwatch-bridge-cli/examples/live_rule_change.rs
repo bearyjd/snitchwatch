@@ -11,7 +11,7 @@
 //!
 //! ```bash
 //! # opensnitchd must be running and configured to dial 127.0.0.1:50051
-//! RUST_LOG=info cargo run -p snitchwatch-bridge-cli --example live_rule_change -- <rule-name>
+//! RUST_LOG=info cargo run -p snitchwatch-bridge-cli --example live_rule_change -- change <rule-name> <file>
 //! ```
 //!
 //! It re-sends an existing rule **unchanged**, so a successful run mutates
@@ -37,14 +37,27 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let mut args = std::env::args().skip(1);
-    let rule_name = args.next().unwrap_or_else(|| "000-allow-localhost".into());
+    let verb = args.next().unwrap_or_default();
+    let rule_name = args.next().unwrap_or_default();
     let rule_path = args.next();
 
-    // Read the rule the daemon already has, so we send back byte-equivalent
-    // content and the "did it apply?" question isn't confounded by a real edit.
-    let rule: serde_json::Value = match rule_path {
-        Some(p) => serde_json::from_str(&std::fs::read_to_string(&p)?)?,
-        None => anyhow::bail!("usage: live_rule_change <rule-name> <rule-json-file>"),
+    if rule_name.is_empty() || !matches!(verb.as_str(), "change" | "delete") {
+        anyhow::bail!(
+            "usage:\n  \
+             live_rule_change change <rule-name> <rule-json-file>\n  \
+             live_rule_change delete <rule-name>\n\n\
+             `delete` destroys the named rule on the daemon — point it at a \
+             throwaway rule, never a real one."
+        );
+    }
+
+    // For `change`: read the rule the daemon already has, so we send back
+    // byte-equivalent content and "did it apply?" isn't confounded by a real
+    // edit. Unused for `delete`, which needs only the name.
+    let rule: Option<serde_json::Value> = match (verb.as_str(), rule_path) {
+        ("change", Some(p)) => Some(serde_json::from_str(&std::fs::read_to_string(&p)?)?),
+        ("change", None) => anyhow::bail!("`change` needs a rule-json-file argument"),
+        _ => None,
     };
 
     let tmp = std::env::temp_dir().join("snitchwatch-live");
@@ -63,14 +76,20 @@ async fn main() -> anyhow::Result<()> {
     // open the Notifications stream before we push a command into it.
     tokio::time::sleep(Duration::from_secs(10)).await;
 
-    tracing::info!(%rule_name, "sending CHANGE_RULE with unchanged content");
-    bridge
-        .inbound_tx
-        .send(ClientMessage::UpdateRule {
-            rule_id: rule_name,
-            rule,
-        })
-        .await?;
+    let message = match rule {
+        Some(rule) => {
+            tracing::info!(%rule_name, "sending CHANGE_RULE with unchanged content");
+            ClientMessage::UpdateRule {
+                rule_id: rule_name,
+                rule,
+            }
+        }
+        None => {
+            tracing::warn!(%rule_name, "sending DELETE_RULE — this destroys the rule");
+            ClientMessage::DeleteRule { rule_id: rule_name }
+        }
+    };
+    bridge.inbound_tx.send(message).await?;
 
     // Long enough for the daemon to deserialize, Replace, and reply.
     tokio::time::sleep(Duration::from_secs(6)).await;
