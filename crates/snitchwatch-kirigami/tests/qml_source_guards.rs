@@ -101,28 +101,52 @@ fn pending_badge_does_not_fill_with_neutral_background_color() {
 }
 
 /// Issue #17 / evilsocket/opensnitch#1644 mitigation: the pending-decision-
-/// exposure banner must stay wired to `oldestPendingAgeSecs`, and the poll
-/// `Timer` that keeps it live (elapsed wall-clock time changes with no new
-/// bridge message to trigger a recompute) must keep calling
-/// `refreshPendingAge()`. Either binding silently detaching would leave the
-/// banner permanently hidden (or frozen at whatever value it last saw) with
-/// no test-visible symptom otherwise — see
+/// exposure banner must stay wired to `oldestPendingAgeSecs`, bounded below
+/// by the response-latency threshold AND above by opensnitchd's own 120s
+/// AskRule timeout (past that, the exposure window is already closed —
+/// see the ceiling's doc comment in `main.qml`), and the poll `Timer` that
+/// keeps it live (elapsed wall-clock time changes with no new bridge
+/// message to trigger a recompute) must keep calling `refreshPendingAge()`
+/// on a real repeating cadence, only while something is actually pending.
+/// Any of these silently detaching would leave the banner permanently
+/// hidden, frozen at a stale value, or (for the missing ceiling) stuck on
+/// forever making a claim that's gone false — with no other test-visible
+/// symptom. See
 /// docs/superpowers/plans/2026-08-05-pending-decision-exposure-warning.md.
+///
+/// Matches on operands separately (not the whole `visible:` line as one
+/// string) so a `qmlformat` rewrap doesn't trip this over cosmetic-only
+/// changes.
 #[test]
 fn pending_exposure_banner_stays_wired_to_oldest_pending_age() {
     let code = code_lines(MAIN_QML);
     assert!(
-        code.contains(
-            "visible: root.connectionsModelRef.oldestPendingAgeSecs >= pendingAgeThresholdSecs"
-        ),
-        "main.qml's pendingExposureBanner is no longer visible-bound to \
-         connectionsModel.oldestPendingAgeSecs — the banner would stop reflecting \
-         real pending-decision age."
+        code.contains("pendingAgeSecs >= pendingAgeThresholdSecs")
+            && code.contains("pendingAgeSecs < pendingAgeCeilingSecs"),
+        "main.qml's pendingExposureBanner is no longer bounded by both \
+         [pendingAgeThresholdSecs, pendingAgeCeilingSecs) — either it stopped \
+         reflecting real pending-decision age, or lost the upper bound that stops it \
+         warning forever past opensnitchd's own 120s AskRule timeout."
     );
     assert!(
-        code.contains("root.connectionsModelRef.refreshPendingAge()"),
-        "main.qml no longer polls refreshPendingAge() on a timer — \
-         oldestPendingAgeSecs would go stale between bridge messages, since \
-         elapsed wall-clock time advances with nothing to trigger a recompute."
+        code.contains("pendingAgeThresholdSecs: 10"),
+        "pendingExposureBanner's response-latency threshold changed — if intentional, \
+         update this guard to match the new value."
+    );
+    assert!(
+        code.contains("pendingAgeCeilingSecs: 120"),
+        "pendingExposureBanner's ceiling no longer matches opensnitchd's 120s AskRule \
+         timeout (vendor/opensnitch/daemon/ui/client.go:366) — if that upstream timeout \
+         ever changes, update this guard to match it, not just main.qml."
+    );
+    assert!(
+        code.contains("running: root.connectionsModelRef.pendingCount > 0")
+            && code.contains("repeat: true")
+            && code.contains("root.connectionsModelRef.refreshPendingAge()"),
+        "main.qml's pending-age poll Timer is no longer wired the way the banner needs: \
+         running only while something is pending, repeating, and calling \
+         refreshPendingAge() each tick — oldestPendingAgeSecs would go stale between \
+         bridge messages otherwise, since elapsed wall-clock time advances with nothing \
+         to trigger a recompute."
     );
 }

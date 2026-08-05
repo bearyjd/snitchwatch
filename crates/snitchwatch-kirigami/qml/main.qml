@@ -268,19 +268,42 @@ Kirigami.ApplicationWindow {
         }
         type: Kirigami.MessageType.Warning
         readonly property int pendingAgeThresholdSecs: 10
-        visible: root.connectionsModelRef.oldestPendingAgeSecs >= pendingAgeThresholdSecs
-        text: "A decision has been pending for " + root.connectionsModelRef.oldestPendingAgeSecs
-            + "s. Until you respond, other new connections may be silently allowed — this is a"
+        // opensnitchd caps a single AskRule at 120s and unconditionally
+        // clears isAsking once that fires (vendor/opensnitch/daemon/ui/
+        // client.go:366, main.go:458-459) — past that, the exposure window
+        // this banner warns about is already closed even though the row can
+        // stay "pending" in Snitchwatch's own cache indefinitely (the bridge
+        // has no timeout on its side of ask_rule and no reaper for a
+        // cancelled/dropped verdict oneshot). Without this ceiling the
+        // banner would count up forever and its claim would go from true to
+        // false with no visible change — worse than no banner, since it
+        // trains the user to ignore a real warning.
+        readonly property int pendingAgeCeilingSecs: 120
+        readonly property int pendingAgeSecs: root.connectionsModelRef.oldestPendingAgeSecs
+        readonly property int pendingCount: root.connectionsModelRef.pendingCount
+        visible: pendingAgeSecs >= pendingAgeThresholdSecs && pendingAgeSecs < pendingAgeCeilingSecs
+        text: (pendingCount > 1
+                ? (pendingCount + " decisions are pending (oldest " + pendingAgeSecs + "s)")
+                : ("A decision has been pending for " + pendingAgeSecs + "s"))
+            + ". Until you respond, other new connections may be silently allowed — this is a"
             + " known opensnitchd limitation, not a Snitchwatch bug."
+    }
 
-        // oldestPendingAgeSecs only changes automatically on the next bridge
-        // message; elapsed wall-clock time otherwise needs an explicit poke.
-        Timer {
-            interval: 1000
-            running: true
-            repeat: true
-            onTriggered: root.connectionsModelRef.refreshPendingAge()
-        }
+    // Keeps ConnectionsModel.oldestPendingAgeSecs (and therefore
+    // pendingExposureBanner above) live: that property only changes
+    // automatically on the next bridge message, so elapsed wall-clock time
+    // otherwise needs an explicit poke. Declared at window scope, not as a
+    // child of the banner it drives — the banner is invisible in exactly the
+    // state (age < threshold) where this timer's ticks matter most, and a Qt
+    // child-of-invisible-item is not guaranteed to keep behaving identically
+    // across every InlineMessage implementation. Only runs while something
+    // is actually pending, so a healthy idle app (the common case for a
+    // firewall UI sitting in the tray) never wakes for this.
+    Timer {
+        interval: 1000
+        running: root.connectionsModelRef.pendingCount > 0
+        repeat: true
+        onTriggered: root.connectionsModelRef.refreshPendingAge()
     }
 
     // Page components, swapped into pageStack by the drawer actions below.
