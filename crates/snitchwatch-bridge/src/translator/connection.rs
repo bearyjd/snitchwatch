@@ -19,6 +19,13 @@ pub fn ask_row_id(notification_id: u64) -> String {
     format!("{ASK_ROW_PREFIX}{notification_id}")
 }
 
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 pub fn connection_to_row(conn: &Connection, notification_id: u64) -> ConnectionRow {
     let process = if conn.process_path.is_empty() {
         "<unknown>".to_string()
@@ -54,7 +61,13 @@ pub fn connection_to_row(conn: &Connection, notification_id: u64) -> ConnectionR
         action: None,
         bytes_sent: 0,
         bytes_received: 0,
-        started_at_ms: 0,
+        // The moment this row was built, i.e. the moment the connection
+        // became pending — `event_to_row` immediately overwrites this with
+        // the daemon's own `event.unixnano` for already-decided rows, so
+        // this default only ever surfaces for genuinely-pending AskRule
+        // rows, where it anchors the pending-decision-exposure warning
+        // (see docs/superpowers/plans/2026-08-05-pending-decision-exposure-warning.md).
+        started_at_ms: now_ms(),
         // An AskRule row is, by construction, a connection opensnitchd found
         // no existing rule for (that's exactly why it's asking) — there is no
         // matched rule yet. `ConnectionCache::resolve` fills this in once the
@@ -177,6 +190,18 @@ mod tests {
     fn ask_rows_start_with_no_matched_rule() {
         let row = connection_to_row(&sample_connection(), 1);
         assert!(row.matched_rule.is_none());
+    }
+
+    #[test]
+    fn ask_rows_are_stamped_with_the_current_time() {
+        let before = now_ms();
+        let row = connection_to_row(&sample_connection(), 1);
+        let after = now_ms();
+        assert!(
+            row.started_at_ms >= before && row.started_at_ms <= after,
+            "expected started_at_ms in [{before}, {after}], got {}",
+            row.started_at_ms
+        );
     }
 
     fn sample_rule(name: &str, action: &str) -> snitchwatch_proto::protocol::Rule {

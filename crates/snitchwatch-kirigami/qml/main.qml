@@ -247,6 +247,82 @@ Kirigami.ApplicationWindow {
         ]
     }
 
+    // Pending-decision-exposure warning — distinct from both banners above:
+    // this covers neither the bridge nor opensnitchd being unhealthy, but a
+    // known *upstream* opensnitchd limitation (evilsocket/opensnitch#1644):
+    // its AskRule dispatch serializes on a single global flag, so while any
+    // one decision is outstanding, every other new connection silently gets
+    // the daemon's DefaultAction applied with no signal Snitchwatch can
+    // observe. This banner only narrows the exposure window (by prompting
+    // the user to respond) — it cannot detect or close it. See
+    // docs/superpowers/plans/2026-08-05-pending-decision-exposure-warning.md.
+    Kirigami.InlineMessage {
+        id: pendingExposureBanner
+        z: 999
+        anchors {
+            top: daemonHealthBanner.visible ? daemonHealthBanner.bottom
+                : (bridgeBanner.visible ? bridgeBanner.bottom : parent.top)
+            left: parent.left
+            right: parent.right
+            margins: Kirigami.Units.smallSpacing
+        }
+        type: Kirigami.MessageType.Warning
+        readonly property int pendingAgeThresholdSecs: 10
+        // opensnitchd caps a single AskRule at 120s and unconditionally
+        // clears isAsking once that fires (vendor/opensnitch/daemon/ui/
+        // client.go:366, main.go:458-459) — past that, the exposure window
+        // this banner warns about is already closed even though the row can
+        // stay "pending" in Snitchwatch's own cache indefinitely (the bridge
+        // has no timeout on its side of ask_rule and no reaper for a
+        // cancelled/dropped verdict oneshot). Without this ceiling the
+        // banner would count up forever and its claim would go from true to
+        // false with no visible change — worse than no banner, since it
+        // trains the user to ignore a real warning.
+        readonly property int pendingAgeCeilingSecs: 120
+        readonly property int pendingAgeSecs: root.connectionsModelRef.oldestPendingAgeSecs
+        readonly property int pendingCount: root.connectionsModelRef.pendingCount
+        visible: pendingAgeSecs >= pendingAgeThresholdSecs && pendingAgeSecs < pendingAgeCeilingSecs
+        // Deliberately does not say "silently allowed": that's only true
+        // under DefaultAction: allow, opensnitchd's own fail-open default.
+        // This repo's shipped packaging config overrides that to
+        // DefaultAction: deny (fail-closed — packaging/bluebuild/files/
+        // system/etc/opensnitchd/default-config.json, CLAUDE.md's settled
+        // decision #5), so on the actual shipped product the real effect is
+        // "silently denied" (a legitimate connection blackholed with no
+        // signal) — arguably worse, not better. Neither direction is
+        // hardcoded here since the configured default isn't threaded to the
+        // UI (Codex review finding); "allowed or denied" stays accurate
+        // regardless of DefaultAction.
+        text: (pendingCount > 1
+                ? (pendingCount + " decisions are pending (oldest " + pendingAgeSecs + "s)")
+                : ("A decision has been pending for " + pendingAgeSecs + "s"))
+            + ". Until you respond, other new connections may be silently allowed or denied"
+            + " without your review — this is a known opensnitchd limitation, not a"
+            + " Snitchwatch bug."
+    }
+
+    // Keeps ConnectionsModel.oldestPendingAgeSecs (and therefore
+    // pendingExposureBanner above) live: that property only changes
+    // automatically on the next bridge message, so elapsed wall-clock time
+    // otherwise needs an explicit poke. Declared at window scope, not as a
+    // child of the banner it drives — the banner is invisible in exactly the
+    // state (age < threshold) where this timer's ticks matter most, and a Qt
+    // child-of-invisible-item is not guaranteed to keep behaving identically
+    // across every InlineMessage implementation. Only runs while something
+    // is *actively* pending (Codex review: gating on pendingCount > 0 alone
+    // ticks forever once a stuck/expired row exists — see
+    // oldest_pending_started_at_ms's doc comment in row_store.rs — since a
+    // stuck row never resolves and never expires from pendingCount either;
+    // oldestPendingAgeSecs is already -1 in exactly that case, so gating on
+    // it here stops the wakeups once the real exposure window closes,
+    // regardless of whether the stuck row itself is ever cleaned up).
+    Timer {
+        interval: 1000
+        running: root.connectionsModelRef.oldestPendingAgeSecs >= 0
+        repeat: true
+        onTriggered: root.connectionsModelRef.refreshPendingAge()
+    }
+
     // Page components, swapped into pageStack by the drawer actions below.
     Component {
         id: connectionsPageComponent

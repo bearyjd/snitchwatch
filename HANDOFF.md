@@ -20,9 +20,27 @@ Live-verified against the real `opensnitchd-dev` container (which, notably, is n
 disposable sandbox — it actively firewalls the real host desktop's live traffic).
 Full writeup posted to
 [issue #17](https://github.com/bearyjd/snitchwatch/issues/17#issuecomment-5195785371).
-No code changed yet — this needs a design decision (upstream fix vs. a new Snitchwatch-side
-diagnostic) before implementation. No host nftables were touched; a debug `LogLevel` toggle
-on the container's `default-config.json` was made and reverted via its own fsnotify watcher.
+No host nftables were touched; a debug `LogLevel` toggle on the container's
+`default-config.json` was made and reverted via its own fsnotify watcher.
+
+**Update (2026-08-05, still later): mitigation implemented, real fix filed upstream.**
+The daemon-side bug is out of this repo's reach (`vendor/opensnitch` is read-only) —
+filed as [evilsocket/opensnitch#1644](https://github.com/evilsocket/opensnitch/issues/1644).
+On the Snitchwatch side, per
+`docs/superpowers/plans/2026-08-05-pending-decision-exposure-warning.md`: a warning
+banner (`pendingExposureBanner` in `main.qml`, mirroring the existing
+`daemonHealthBanner` pattern) now appears once the oldest pending decision has been
+outstanding ≥10s, driven by a new `ConnectionsModel.oldestPendingAgeSecs` property.
+**This is a mitigation, not a fix** — it narrows the exposure window by prompting
+faster user response; it cannot detect or close it, since connections opensnitchd
+silently defaults never reach the bridge at all. Also fixed in passing:
+`connection_to_row` (the constructor for a pending `AskRule` row) was shipping
+`started_at_ms: 0` for every pending row — a pre-existing gap, now stamped with the
+real wall-clock time the row became pending, which the new banner's age computation
+depends on. `just check`/`just test` both green;
+`cargo test -p snitchwatch-kirigami` (269 unit tests + all QML integration tests,
+including a sabotage-verified new QML source guard) green. Not yet verified on real
+hardware — same caveat as everything else in this section.
 
 ## Start here (2026-08-05)
 

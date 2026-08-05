@@ -141,6 +141,42 @@ impl RowStore {
         self.rows.iter().find(|r| r.id == id)
     }
 
+    /// opensnitchd caps a single `AskRule` at 120s and unconditionally clears
+    /// its serialization flag once that fires (`vendor/opensnitch/daemon/ui/
+    /// client.go:366`). The bridge has no timeout of its own on `ask_rule`
+    /// and no reaper for a cancelled/dropped verdict oneshot
+    /// (`grpc_server.rs`), so a row whose `AskRule` already timed out
+    /// upstream can stay "pending" in this store indefinitely. Excluded from
+    /// [`oldest_pending_started_at_ms`] for exactly that reason — see its
+    /// doc comment.
+    const ASK_RULE_TIMEOUT_MS: i64 = 120_000;
+
+    /// `started_at_ms` of the longest-*actively*-pending row still awaiting a
+    /// decision, across the whole store (independent of the active filter —
+    /// mirrors `pending_count`'s scope). `None` when nothing is actively
+    /// pending. Feeds the pending-decision-exposure warning (see
+    /// docs/superpowers/plans/2026-08-05-pending-decision-exposure-warning.md):
+    /// while any one `AskRule` is outstanding, opensnitchd silently defaults
+    /// every *other* concurrent connection, so the oldest pending row is what
+    /// determines how long that exposure window has been open.
+    ///
+    /// Deliberately excludes rows older than [`Self::ASK_RULE_TIMEOUT_MS`]
+    /// (opensnitchd's own `AskRule` deadline): a naive "just take the oldest
+    /// pending row" picks up a permanently-stuck row whose *real* exposure
+    /// window already closed upstream, which — because that row's age
+    /// exceeds the caller's ceiling check too — hides the warning entirely
+    /// for a second, genuinely active pending row that arrives afterward.
+    /// `now_ms` is caller-supplied (not `SystemTime::now()`) to keep this
+    /// method pure and Qt-free/unit-testable, matching the rest of this file.
+    pub fn oldest_pending_started_at_ms(&self, now_ms: i64) -> Option<i64> {
+        self.rows
+            .iter()
+            .filter(|r| r.action.is_none())
+            .map(|r| r.started_at_ms)
+            .filter(|&started| now_ms - started < Self::ASK_RULE_TIMEOUT_MS)
+            .min()
+    }
+
     /// Number of rows in `incoming` that [`insert_rows`](Self::insert_rows)
     /// will actually append as *new* rows: ids not already present in the store
     /// **and** not already seen earlier within this same batch.
@@ -768,6 +804,59 @@ mod tests {
         s.insert_rows(vec![row("c", None)]);
         s.recompute_visible();
         assert_eq!(s.visible_len(), 2);
+    }
+
+    #[test]
+    fn oldest_pending_started_at_ms_is_none_when_nothing_pending() {
+        let mut s = RowStore::new();
+        s.insert_rows(vec![row("a", Some("allow"))]);
+        assert_eq!(s.oldest_pending_started_at_ms(10_000), None);
+    }
+
+    #[test]
+    fn oldest_pending_started_at_ms_picks_the_earliest_pending_row() {
+        let mut s = RowStore::new();
+        let mut newer = row("a", None);
+        newer.started_at_ms = 2_000;
+        let mut older = row("b", None);
+        older.started_at_ms = 1_000;
+        let decided = row("c", Some("deny")); // started_at_ms: 0, must be ignored
+        s.insert_rows(vec![newer, older, decided]);
+        assert_eq!(s.oldest_pending_started_at_ms(10_000), Some(1_000));
+    }
+
+    /// Codex review finding (P1): a naive "just take the oldest pending row"
+    /// picks up a permanently-stuck row whose AskRule already timed out
+    /// upstream at opensnitchd's own 120s deadline — the bridge has no
+    /// reaper for a cancelled verdict oneshot, so that row can stay
+    /// "pending" forever. Its age then exceeds the caller's ceiling check
+    /// too, hiding the pending-decision-exposure warning entirely for a
+    /// second, genuinely active row that arrives afterward. This must
+    /// select the fresh row, not the stuck one.
+    #[test]
+    fn oldest_pending_started_at_ms_ignores_rows_past_the_ask_rule_timeout() {
+        let mut s = RowStore::new();
+        let now = 10 * RowStore::ASK_RULE_TIMEOUT_MS;
+        let mut expired = row("stuck", None);
+        expired.started_at_ms = now - RowStore::ASK_RULE_TIMEOUT_MS - 1; // just past 120s
+        let mut fresh = row("active", None);
+        fresh.started_at_ms = now - 5_000; // 5s old, genuinely active
+        s.insert_rows(vec![expired, fresh]);
+        assert_eq!(
+            s.oldest_pending_started_at_ms(now),
+            Some(now - 5_000),
+            "must pick the fresh active row, not the permanently-stuck expired one"
+        );
+    }
+
+    #[test]
+    fn oldest_pending_started_at_ms_is_none_when_all_pending_rows_are_expired() {
+        let mut s = RowStore::new();
+        let now = 10 * RowStore::ASK_RULE_TIMEOUT_MS;
+        let mut expired = row("stuck", None);
+        expired.started_at_ms = now - RowStore::ASK_RULE_TIMEOUT_MS - 1;
+        s.insert_rows(vec![expired]);
+        assert_eq!(s.oldest_pending_started_at_ms(now), None);
     }
 
     #[test]
