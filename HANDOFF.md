@@ -1,10 +1,52 @@
-# Linux App Firewall + Bazzite Security Scanner — Handoff (updated 2026-08-01)
+# Linux App Firewall + Bazzite Security Scanner — Handoff (updated 2026-08-05)
 
 > **Read this first if you're picking this repo up cold.** Everything below
 > the "Current status" section is the *original* handoff from 2026-07-04,
 > kept for history/decision rationale — it is accurate as a record of what
 > was decided and why, but stale as a status report. Trust this section for
 > "what's true today."
+
+## Start here (2026-08-05)
+
+`main` is clean, CI green, nothing uncommitted. Last merges: PR #29 (shell
+cleanup + test hardening) and PR #30 (rule enable/disable/delete).
+
+**Only open item: [issue #31](https://github.com/bearyjd/snitchwatch/issues/31)**
+— the pending-count badge renders orange-on-orange outside Plasma. Not
+verified under Breeze (`org.kde.desktop` is not installed in the dev
+container), so confirm that first before deciding scope.
+
+**Live-verification is possible from this machine — do not assume otherwise.**
+Three things were wrongly recorded as "needs real hardware" and each turned out
+to be reachable locally:
+
+- A real `opensnitchd` runs in the root `opensnitchd-dev` podman container
+  (`distrobox-host-exec sudo -n podman ...`), dialing `127.0.0.1:50051`, with
+  `DefaultAction: allow` (fail-open, so a bridge that stalls cannot lock the
+  network out). Drive it with
+  `cargo run -p snitchwatch-bridge-cli --example live_rule_change`.
+- A real Wayland compositor is reachable (`WAYLAND_DISPLAY=wayland-0`), and the
+  host has `spectacle` for screenshots. The Kirigami shell runs against it.
+- `qmltestrunner-qt6` + the QtTest QML module are installed, so QML input
+  routing can be measured with real synthesized clicks (`just qml-test`).
+
+**Testing traps that cost real time here — read before writing a test:**
+
+1. Qt routes logging to **journald**, not stderr, whenever stderr is not a TTY
+   (always true under `cargo test`). `tests/common::init_headless_qt_env` sets
+   `QT_FORCE_STDERR_LOGGING` to fix it. Without that, every stderr-based QML
+   assertion passes *vacuously*.
+2. A bare `QtObject` root under `QQmlApplicationEngine` reports a non-null root
+   but **never runs `Component.onCompleted`** — probes need a `Window` root
+   driven through `exec()`, or the whole test body silently never executes.
+3. **Verify each new assertion by deliberately breaking the specific thing it
+   asserts.** Four tests in this repo have passed while proving nothing. Two
+   sabotage attempts were themselves mis-aimed (one produced a compile error,
+   one hit the wrong half of a round trip) — and a mis-aimed negative control
+   is indistinguishable from a passing one.
+4. Run Kirigami cargo jobs **serially**. Concurrent invocations poison the
+   shared cxx-qt build state (`Conflicting include_prefixes`); recover with
+   `cargo clean -p cxx-qt -p cxx-qt-lib -p snitchwatch-kirigami`.
 
 ## Current status (2026-07-12)
 
@@ -97,14 +139,20 @@ PR #22 (the session handoff doc) are also merged. Remaining real-hardware
 items are listed in the phase2 plan's acceptance section — mostly
 GUI-visual checks and the sustained-interception/queue-rules question.
 
-**Update (2026-08-04): live Kirigami follow-up is in progress, uncommitted.**
+**Update (2026-08-05): all of the below is MERGED. Nothing is uncommitted.**
+Shipped as PR #29 (`0e3d573`..) and PR #30 (`bfc088f`); `main` is clean and in
+sync. The notes in this section are kept as the record of what landed and why —
+read them as history plus live-verified facts, not as pending work.
+
 Work was performed in the user's `dev` distrobox from the canonical
-`/home/user/Documents/vibe-code/opensnitch-gui` path. `lld` was installed in
-that container; `CCACHE_DISABLE=1 just kirigami-dev` now builds without the
-cxx-qt linker warning. The running in-process bridge has been verified live:
-Allow/Deny clicks resolve pending rows and log `applied verdict and broadcast
-row update`. The working tree contains the relevant follow-up fixes and must
-be reviewed/committed as one coherent change before switching tasks.
+`/var/home/user/Documents/vibe-code/opensnitch-gui` path (that spelling
+matters — see the cxx-qt path-aliasing note). `lld` is installed there;
+`CCACHE_DISABLE=1 just kirigami-dev` builds without the cxx-qt linker warning.
+The in-process bridge is verified live: Allow/Deny clicks resolve pending rows
+and log `applied verdict and broadcast row update`.
+
+**Only open item from this run: issue #31** (pending-count badge renders
+orange-on-orange outside Plasma). Everything else below is closed.
 
 Important current findings:
 
@@ -259,7 +307,8 @@ Important current findings:
   types statically; no QML plugin is emitted), so the QML test exercises a
   structural mirror — the source guards cover the real file.
 
-Verification completed on this uncommitted state:
+Verification run at the time (kept for the command reference; all of it is now
+covered by CI on `main`):
 
 ```bash
 CCACHE_DISABLE=1 cargo test -p snitchwatch-bridge persistent_allow_verdict_broadcasts_rule_for_live_clients
