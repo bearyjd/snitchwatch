@@ -38,11 +38,22 @@ GitHub Actions). Full arc, oldest to newest:
    effect during the exposure window is "silently denied," not "silently allowed").
    Final Codex pass came back clean.
 
-**Not yet done: a real-hardware manual check** of the banner (leave a decision
-unanswered past 10s on a live daemon, confirm it appears/disappears correctly) — same
-standing caveat as every other UI change in this file. Everything else — unit tests
-(271 in `snitchwatch-kirigami` alone), QML integration tests, sabotage-verified source
-guards, `just check`/`just test` — is green.
+**Update (2026-08-06): real-hardware check done, all three Codex-review fixes confirmed
+live.** Ran the actual Kirigami shell against the real `opensnitchd` daemon (the one
+firewalling the real host desktop), with the pending-exposure banner temporarily
+instrumented with local, uncommitted `console.warn` tracing (reverted after). Generated
+a genuine outbound connection; the daemon queued a real `AskRule`. Observed, in order:
+banner became visible at exactly `pendingAgeSecs=10` with the correct dynamic text;
+`oldestPendingAgeSecs` jumped straight to `-1` and the banner disappeared at
+opensnitchd's real ~120s `AskRule` timeout instead of counting up forever (the P1 fix,
+confirmed under real timing); the poll timer immediately resumed ticking for a fresh
+pending connection rather than staying dead (the P2 fix). All three Codex-review fixes
+verified under real conditions, not just the offscreen test suite. Working tree was
+left clean — no debug tracing committed.
+
+Everything is green: unit tests (271 in `snitchwatch-kirigami` alone), QML integration
+tests, sabotage-verified source guards, `just check`/`just test`, and now a real-hardware
+pass. Nothing outstanding on this thread.
 
 ## Start here (2026-08-05, later)
 
