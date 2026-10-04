@@ -2,7 +2,7 @@
 name = "snitchwatch-tauri"
 version = "0.1.0"
 edition = "2021"
-license = "GPL-2.0"
+license = "GPL-3.0-or-later"
 description = "Snitchwatch desktop shell — Tauri 2 wrapper around the bridge."
 
 [[bin]]

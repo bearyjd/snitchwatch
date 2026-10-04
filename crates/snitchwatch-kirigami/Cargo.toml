@@ -15,7 +15,7 @@
 name = "snitchwatch-kirigami"
 version = "0.1.0"
 edition = "2021"
-license = "GPL-2.0"
+license = "GPL-3.0-or-later"
 description = "Snitchwatch desktop shell — Qt6/QML + Kirigami native UI on cxx-qt."
 
 [lib]
