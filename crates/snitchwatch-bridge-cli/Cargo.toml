@@ -12,8 +12,15 @@ path = "src/lib.rs"
 name = "snitchwatch-bridge-cli"
 path = "src/main.rs"
 
+[features]
+default = ["web-ui"]
+# Passes through to snitchwatch-bridge's `web-ui` (the embedded web frontend).
+# The release tarball builds with `--no-default-features`; see that crate's
+# Cargo.toml for why.
+web-ui = ["snitchwatch-bridge/web-ui"]
+
 [dependencies]
-snitchwatch-bridge = { path = "../snitchwatch-bridge" }
+snitchwatch-bridge = { path = "../snitchwatch-bridge", default-features = false }
 snitchwatch-proto = { path = "../snitchwatch-proto" }
 tokio = { workspace = true }
 tokio-stream = "0.1"

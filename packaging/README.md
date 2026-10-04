@@ -75,6 +75,22 @@ flatpak run org.flatpak.Builder --user --install --force-clean \
   build-dir packaging/flatpak/org.snitchwatch.Snitchwatch.yml
 ```
 
+## Pre-built bridge tarball (image-baked bridge)
+
+`packaging/release/` builds `snitchwatch-bridge-cli` plus
+`systemd/snitchwatch-bridge.service` into a deterministic, sha256-pinned
+release tarball inside the digest-pinned Fedora 44 image in
+`release/pins.env`. `.github/workflows/release.yml` runs it on `v*` tags and
+creates a draft GitHub release. It lets an image bake the bridge in
+(`/usr/bin` + `/usr/lib/systemd/user`, enabled with
+`systemctl --global enable`) instead of installing it per user. Consumer
+contract: [`../docs/packaging/bridge-release-artifact.md`](../docs/packaging/bridge-release-artifact.md).
+
+```bash
+just release-bridge-repro                       # build + reproducibility check → dist/
+just release-verify dist/snitchwatch-bridge-<version>-x86_64.tar.gz <sha256>  # SHA256= from the build
+```
+
 For the lightweight path's step-by-step (including installing the bridge user
 service and end-to-end verification), follow
 [`../docs/packaging/rpm-ostree-layering.md`](../docs/packaging/rpm-ostree-layering.md).

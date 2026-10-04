@@ -255,6 +255,17 @@ namespace can't reach host loopback anyway, and that grant would open full
 internet access rather than scoped loopback). See
 [`packaging/README.md`](packaging/README.md) for the full architecture.
 
+### Pre-built bridge for immutable images
+
+Tagged releases (`v*`) publish the bridge as a sha256-pinned tarball —
+`snitchwatch-bridge-<version>-x86_64.tar.gz` (binary, systemd user unit,
+MANIFEST) — built in a digest-pinned Fedora 44 container and rebuilt byte-identically from a second path before publishing, for a
+bootc/bluebuild image to install at build time and enable with
+`systemctl --global enable snitchwatch-bridge.service`. Contract, install
+snippet and smoke-test assertions:
+[`docs/packaging/bridge-release-artifact.md`](docs/packaging/bridge-release-artifact.md).
+Build one locally with `just release-bridge` (podman).
+
 ### Fail-closed by default
 
 Upstream OpenSnitch ships `DefaultAction: allow`, so the daemon silently
@@ -308,4 +319,12 @@ and, at most, a design system with Component A — see `CLAUDE.md`'s
 
 ## License
 
-GPL-2.0
+Snitchwatch's own code is **GPL-3.0-or-later** — see [`LICENSE`](LICENSE).
+GPL-3.0 rather than GPL-2.0 because the shipped binaries combine it with
+GPL-3.0 OpenSnitch protocol code (`vendor/opensnitch/proto/ui.proto`),
+Apache-2.0 crates (e.g. `prost`, `ring`) and, for the Kirigami shell, Qt6
+under LGPL-3.0 — none of which a GPL-2.0-only program can combine with.
+
+Third-party code keeps its own license: `vendor/opensnitch` is GPL-3.0, and
+the vendored `web/` UI is Objective Development's **GPL-2.0-only** code (see
+[`web/VENDORED.md`](web/VENDORED.md)).

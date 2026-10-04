@@ -1,4 +1,4 @@
-# Linux App Firewall + Bazzite Security Scanner — Handoff (updated 2026-08-05)
+# Linux App Firewall + Bazzite Security Scanner — Handoff (updated 2026-10-03)
 
 > **Read this first if you're picking this repo up cold.** Everything below
 > the "Current status" section is the *original* handoff from 2026-07-04,
@@ -6,7 +6,55 @@
 > was decided and why, but stale as a status report. Trust this section for
 > "what's true today."
 
-## Start here (2026-08-05, latest)
+## Start here (2026-10-03, latest)
+
+**Branch `feat/bridge-release-artifact` (uncommitted at time of writing): release
+pipeline for a sha256-pinned bridge tarball** — phase B step 1 of the bazzite-tower
+plan (OpenSnitch daemon + Snitchwatch GUI + deny-by-default on a Fedora 44 bootc
+image). Plan + owner decisions A–H:
+`docs/superpowers/plans/2026-10-03-bridge-release-artifact.md`; consumer contract:
+`docs/packaging/bridge-release-artifact.md`.
+
+- `packaging/release/` builds `snitchwatch-bridge-cli` in a digest-pinned
+  `fedora:44` container (pins in `pins.env`, toolchain versions asserted), packs a
+  deterministic tarball (binary + user unit + MANIFEST.json + SHA256SUMS +
+  attributions), rebuilds it from a second path and requires identical bytes,
+  then verifies `ldd`, `--help`/`--version`, `systemd-analyze verify --user` and
+  `systemctl --global enable` in a throwaway container. `.github/workflows/release.yml`
+  does the same on `v*` tags, attests provenance and creates a **draft** release.
+  Local: `just release-bridge-repro`, `just release-verify <tarball> <sha256>`.
+- Binary change (decision A): `--help`/`--version` exit before any I/O; the
+  no-argument path is unchanged. Unit change (decision B): `ConditionUser=!@system`.
+- `just package-check`'s unit verify had been **failing silently** in CI (the
+  `|| echo "systemd-analyze not available"` fallback swallowed "ExecStart not
+  executable"; locally a `~/.config` drop-in shadowed the unit). Now
+  `packaging/release/verify-unit.sh` verifies a renamed copy for real.
+- clippy 1.98's `result_large_err` broke `-D warnings` on untouched code
+  (tonic-generated stubs, `mock_opensnitchd`); lint-only allows added.
+- **Decision G resolved:** Snitchwatch's own code is **GPL-3.0-or-later** (repo-root
+  `LICENSE`, Cargo fields, Flatpak metainfo; asserted by `packaging_shape.rs`).
+- **Decision I resolved:** the vendored `web/` UI is upstream **GPL-2.0-only**
+  (`web/VENDORED.md` wrongly said "or-later"; corrected), so release builds drop it:
+  new `web-ui` Cargo feature (default on — dev/Tauri/tests unchanged), release
+  build `--no-default-features` (`/`, `/assets/*` → 404); `verify` rejects a binary
+  that embeds it.
+- **Security review → issue #35 (pre-existing, open):** whoever binds
+  `127.0.0.1:50051` first controls root opensnitchd, incl. persistent
+  `CHANGE_CONFIG`. Needs gRPC over a per-user Unix socket. Blocks bazzite-tower's
+  deny-by-default claim, not this artifact.
+- **L1:** `h2`/`rustls`/`rustls-webpki` bumped for RUSTSEC advisories; `release.yml`
+  gains an `audit-bridge` RustSec gate scoped to the crates the release build compiles.
+- **Owner TODO (repo settings, not code):** tag ruleset on `refs/tags/v*`, branch
+  protection on `main`, immutable releases, required reviewers on the `release`
+  environment — none are set today.
+- **Open — issue #34:** the Kirigami shell's in-process bridge clobbers the bridge
+  service's token + socket (and fails on `:50051`). Blocks shipping the GUI next to
+  the enabled unit; not this artifact.
+- Not built (report only): a Kirigami artifact — needs F44 Qt6/KF6 devel packages
+  (Qt 6.11.2, kf6-kirigami 6.30.0), rebuilds whenever the image's Qt minor moves,
+  and is blocked on #34 and on settled decision #3 (GUI ships as a Flatpak).
+
+## Previously (2026-08-05)
 
 **PR #32 merged — issue #17's mitigation is shipped, `main` is clean and in sync at
 `92b6a21`.** CI green on all 4 jobs (`check`/`test`/`package-check`/`kirigami`, real

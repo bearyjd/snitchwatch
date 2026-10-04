@@ -93,6 +93,11 @@ pub struct MockOpensnitchd {
     client: UiClient<Channel>,
 }
 
+// Same `MockError::Rpc(tonic::Status)` large variant as `validate_rule_shape`
+// below. Older clippy exempted these public methods (avoid-breaking-exported-
+// api); clippy 1.98 flags them, so allow it here rather than boxing a test
+// double's error type.
+#[allow(clippy::result_large_err)]
 impl MockOpensnitchd {
     /// Dial the bridge at `addr`. Caller is responsible for ensuring the
     /// bridge has bound its gRPC port (use `RunningBridge::grpc_addr`).

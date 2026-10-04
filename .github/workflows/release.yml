@@ -1,0 +1,329 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  # Manual runs build, verify and upload the artifact only; the publish job
+  # below never runs for them (see its `if:`), so a dry run can't create a
+  # release even when started from a tag ref.
+  workflow_dispatch:
+
+# Read-only by default; the publish job is the only one that widens this.
+permissions:
+  contents: read
+
+# One run per ref. Never cancel a run in progress: a half-finished release
+# is worse than a queued one.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+# Publishes the Snitchwatch bridge (snitchwatch-bridge-cli + its systemd user
+# unit) as a pre-built, sha256-pinned tarball plus a `.sha256` file, so an
+# immutable bootc image (bazzite-tower) can fetch a release asset by exact
+# version at image build time, check the pinned hash, and extract it without
+# running scriptlets. The tarball layout, MANIFEST.json schema and download
+# URL pattern are the consumer contract documented in
+# docs/packaging/bridge-release-artifact.md.
+#
+# build-bridge job: runs inside a digest-pinned Fedora 44 container, not on
+# bare ubuntu-latest, so the binary is built against the same glibc/ABI line
+# as the bazzite-tower (Fedora 44 based) bootc image that will run it, with the
+# Fedora 44 rust/cargo/gcc/protobuf RPMs as the toolchain. The digest in
+# `container.image` below must equal SW_BUILDER_IMAGE in
+# packaging/release/pins.env, which is the source of truth for it and for the
+# toolchain versions the build script asserts; crates/snitchwatch-bridge/
+# tests/release_shape.rs fails if the two drift apart, so bump them together.
+# The job also rebuilds from a second checkout path and byte-compares the two
+# tarballs, and installs the result into this throwaway container to run the
+# same unit checks a real image build relies on. The sha256 build-bridge.sh
+# reports is passed on to those checks, so they verify the exact tarball the
+# build produced.
+#
+# publish job: tag pushes only. It is the ONLY job with `contents: write`
+# (plus `id-token`/`attestations: write` for the provenance attestation); the
+# workflow-level default and the build job are read-only. It runs no repo code
+# (no checkout). First it refuses to continue if the tag moved or a release
+# for it already exists, then it checks the hash of the artifact the build job
+# produced, attests it, and creates a DRAFT release.
+jobs:
+  build-bridge:
+    runs-on: ubuntu-latest
+    # A hung build or dnf mirror must not hold the runner for GitHub's
+    # six-hour default.
+    timeout-minutes: 90
+    container:
+      image: registry.fedoraproject.org/fedora:44@sha256:e1656bc110fc33e855f7a02e4420c21066428bc7a0277160d40ee125ef8a1c65
+    # bash for every `run:` step so they all get `-eo pipefail`.
+    defaults:
+      run:
+        shell: bash
+    # Read by build-bridge.sh and repro-check.sh. SW_RELEASE_TAG non-empty
+    # switches the build to release mode (tag must equal v<version>, clean
+    # tree, LICENSE present); manual runs from a branch leave it empty.
+    # SW_GIT_SHA is set by the "Resolve the commit to build" step below.
+    env:
+      SW_RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+    # The peeled commit this job built, for publish's tag-moved guard.
+    outputs:
+      commit: ${{ steps.commit.outputs.sha }}
+    steps:
+      # git: actions/checkout needs it inside the container to fetch the
+      # vendor/opensnitch submodule (without git it falls back to a tarball
+      # download, which has no submodules). Not provided by the Fedora base
+      # image.
+      - name: Install git
+        run: dnf -y install git
+
+      # vendor/opensnitch must actually be checked out: snitchwatch-proto's
+      # build.rs compiles vendor/opensnitch/proto/ui.proto, and the build
+      # script asserts the submodule commit against pins.env. No credentials
+      # are needed after checkout, so none are left in .git/config.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: true
+          persist-credentials: false
+
+      # For an annotated or signed tag push, github.sha can be the tag OBJECT,
+      # not the commit. Peel it here (the checkout fetched the tag), so
+      # build-bridge.sh's "SW_GIT_SHA must equal HEAD" check and publish's
+      # tag guard compare commits with commits. Fails closed if it can't peel.
+      - name: Resolve the commit to build
+        id: commit
+        run: |
+          # safe.directory: the checkout is owned by another uid in the container.
+          sha="$(git -c safe.directory='*' rev-parse --verify "${GITHUB_SHA}^{commit}")"
+          echo "SW_GIT_SHA=$sha" >> "$GITHUB_ENV"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+      # The one dnf dependency list lives in install-deps.sh (container only).
+      # Release builds intentionally do not use a cargo cache: every release
+      # is a fresh, from-scratch build so the reproducibility check below
+      # means something.
+      - name: Install build dependencies
+        run: bash packaging/release/install-deps.sh
+
+      # OUT_DIR is built from $GITHUB_WORKSPACE (the in-container path, e.g.
+      # /__w/<repo>/<repo>) rather than `${{ github.workspace }}`, which in a
+      # container job expands to the *host* path and doesn't exist here.
+      #
+      # build-bridge.sh ends its stdout with `TARBALL=<path>` and
+      # `SHA256=<hex>`. Both are captured here (the log still streams to
+      # stderr) and the hash is re-checked against the file, so the steps below
+      # are pinned to exactly the tarball this build produced. Both values are
+      # produced by this job's own build, never by anything from outside it.
+      - name: Build bridge tarball
+        id: build
+        run: |
+          export OUT_DIR="$GITHUB_WORKSPACE/dist"
+          out="$(bash packaging/release/build-bridge.sh | tee /dev/stderr)"
+          tarball="$(sed -n 's/^TARBALL=//p' <<<"$out" | tail -n 1)"
+          sha256="$(sed -n 's/^SHA256=//p' <<<"$out" | tail -n 1)"
+          if [ ! -f "$tarball" ]; then
+            echo "build-bridge.sh reported no existing tarball: '$tarball'" >&2
+            exit 1
+          fi
+          if ! [[ "$sha256" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "build-bridge.sh reported no sha256: '$sha256'" >&2
+            exit 1
+          fi
+          echo "$sha256  $tarball" | sha256sum -c --strict -
+          echo "path=$tarball" >> "$GITHUB_OUTPUT"
+          echo "sha256=$sha256" >> "$GITHUB_OUTPUT"
+
+      # Rebuilds from a copy of the checkout at a different absolute path and
+      # fails unless the two tarballs are byte-identical.
+      - name: Check reproducibility
+        env:
+          TARBALL: ${{ steps.build.outputs.path }}
+        run: bash packaging/release/repro-check.sh "$TARBALL"
+
+      # check-install.sh writes to /usr and /etc, so it refuses to run unless
+      # told this container is disposable (it also looks for a container
+      # marker file). It is: the job's container is discarded afterwards.
+      - name: Check install (throwaway container)
+        env:
+          SW_THROWAWAY_CONTAINER: '1'
+          TARBALL: ${{ steps.build.outputs.path }}
+          SHA256: ${{ steps.build.outputs.sha256 }}
+        run: bash packaging/release/check-install.sh "$TARBALL" "$SHA256"
+
+      - name: Upload tarball and checksum
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: snitchwatch-bridge
+          path: |
+            dist/snitchwatch-bridge-*.tar.gz
+            dist/snitchwatch-bridge-*.tar.gz.sha256
+          if-no-files-found: error
+
+  # RustSec gate for the shipped binary only. `cargo audit` reports on the
+  # whole Cargo.lock, which also holds the Tauri/Kirigami shells' deps;
+  # audit_gate.py fails only on vulnerabilities in the crates the release
+  # build actually compiles (`cargo tree -p snitchwatch-bridge-cli
+  # --no-default-features`), and fails closed on a missing/malformed report.
+  # Read-only like build-bridge; runs in parallel with it.
+  audit-bridge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install cargo-audit
+        run: cargo install --locked cargo-audit@0.22.2
+
+      # audit_gate.py resolves the release dependency set with `cargo tree
+      # --offline`, so the crates must be on disk first.
+      - name: Fetch crates for the release target
+        run: cargo fetch --locked --target x86_64-unknown-linux-gnu
+
+      # `cargo audit` exits non-zero whenever anything in the lockfile has an
+      # advisory; the gate below makes the release decision from its JSON.
+      - name: Audit the shipped dependency set
+        run: |
+          cargo audit --json > "$RUNNER_TEMP/audit.json" || true
+          python3 packaging/release/audit_gate.py --repo . --audit-json "$RUNNER_TEMP/audit.json"
+
+  # `github.event_name == 'push'` as well as the tag check: a manual run
+  # started from a tag ref also has ref_type == 'tag', and manual runs must
+  # never publish.
+  publish:
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs: [build-bridge, audit-bridge]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Lets the repo owner require a manual approval before anything is
+    # attested or released: create an Environment named `release` under
+    # Settings > Environments and add required reviewers there. Until it is
+    # configured, GitHub just creates the environment and the job runs
+    # without a gate.
+    environment: release
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # Runs before anything is attested or created, and fails closed. Both
+      # checks use only env vars (no `${{ }}` inside `run:`).
+      #  (a) the tag still points at the commit the build job built: a tag
+      #      deleted and re-pushed (or moved) after the build started must not
+      #      get an attestation for a commit it no longer names. The full
+      #      `refs/tags/` form can't resolve to a same-named branch, and the
+      #      commits API peels annotated tags to the commit.
+      #  (b) no release or draft for the tag exists yet: a re-run must not
+      #      create a second draft or a second attestation. --paginate runs
+      #      --jq once per page, so the filter prints matching release ids and
+      #      the list must be empty (drafts are listed because this token has
+      #      contents: write).
+      - name: Guard tag and release state
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          BUILT_COMMIT: ${{ needs.build-bridge.outputs.commit }}
+        run: |
+          if ! [[ "$BUILT_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "build-bridge did not report the commit it built: '$BUILT_COMMIT'" >&2
+            exit 1
+          fi
+          if ! [[ "$TAG" =~ ^v[0-9A-Za-z._+-]+$ ]]; then
+            echo "refusing odd-looking tag name: '$TAG'" >&2
+            exit 1
+          fi
+          tag_sha="$(gh api "repos/$GITHUB_REPOSITORY/commits/refs/tags/$TAG" --jq .sha)"
+          if [ "$tag_sha" != "$BUILT_COMMIT" ]; then
+            echo "tag $TAG now points at '$tag_sha', but this run built $BUILT_COMMIT" >&2
+            exit 1
+          fi
+          existing="$(gh api "repos/$GITHUB_REPOSITORY/releases" --paginate \
+            --jq '.[] | select(.tag_name == env.TAG) | .id')"
+          if [ -n "$existing" ]; then
+            echo "a release or draft for $TAG already exists (id: $existing); delete it first" >&2
+            exit 1
+          fi
+
+      # upload-artifact v7 / download-artifact v8 are the paired releases
+      # (both 2026-02-26); the artifact name must match the upload above.
+      - name: Download tarball and checksum
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: snitchwatch-bridge
+          path: dist
+
+      # Re-check the hash after the artifact hop: sha256sum -c fails if the
+      # tarball differs from the .sha256 the build job wrote next to it.
+      - name: Verify checksum and locate tarball
+        id: tarball
+        working-directory: dist
+        run: |
+          shopt -s nullglob
+          tarballs=(snitchwatch-bridge-*.tar.gz)
+          if [ "${#tarballs[@]}" -ne 1 ]; then
+            echo "expected exactly one tarball in dist/, found ${#tarballs[@]}" >&2
+            exit 1
+          fi
+          sha256sum -c "${tarballs[0]}.sha256"
+          echo "name=${tarballs[0]}" >> "$GITHUB_OUTPUT"
+
+      # Consumers verify with the strict `gh attestation verify` form in the
+      # release notes below.
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/${{ steps.tarball.outputs.name }}
+
+      - name: Write release notes
+        env:
+          TAG: ${{ github.ref_name }}
+          TARBALL: ${{ steps.tarball.outputs.name }}
+        run: |
+          fence='```'
+          sha_line=$(cat "dist/$TARBALL.sha256")
+          cat > "$RUNNER_TEMP/release-notes.md" <<EOF
+          Pre-built Snitchwatch bridge (snitchwatch-bridge-cli plus its systemd user unit) for x86_64, built in a digest-pinned Fedora 44 container and rebuilt byte-identically from a second checkout path in the same job; the exact toolchain is recorded in MANIFEST.json.
+
+          sha256 (also attached as \`$TARBALL.sha256\`):
+
+          $fence
+          $sha_line
+          $fence
+
+          Download URL (only resolves once this draft is published):
+
+          https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/$TARBALL
+
+          Verify the build provenance attestation:
+
+          $fence
+          gh attestation verify $TARBALL --repo $GITHUB_REPOSITORY --signer-workflow $GITHUB_REPOSITORY/.github/workflows/release.yml --source-ref refs/tags/$TAG --deny-self-hosted-runners
+          $fence
+
+          Pin the sha256 in your image build only after this attestation check passes; MANIFEST.json, SHA256SUMS and the .sha256 file are integrity checks, not authentication.
+
+          Layout and consumer contract: docs/packaging/bridge-release-artifact.md
+          EOF
+
+      # A DRAFT on purpose: the maintainer reviews the notes and assets and
+      # publishes by hand. The download URL only works after that. --verify-tag
+      # aborts if the tag isn't already on the remote.
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          TARBALL: ${{ steps.tarball.outputs.name }}
+        run: |
+          gh release create "$TAG" \
+            "dist/$TARBALL" \
+            "dist/$TARBALL.sha256" \
+            --draft \
+            --verify-tag \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Snitchwatch bridge $TAG" \
+            --notes-file "$RUNNER_TEMP/release-notes.md"

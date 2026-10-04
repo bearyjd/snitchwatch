@@ -52,7 +52,23 @@ missing-browser error, run the `-install` target first — it is not a code
 regression.
 
 `just package-check` validates packaging artifacts (YAML/JSON/systemd unit
-syntax) without needing a Bazzite host.
+syntax) without needing a Bazzite host. Its unit check
+(`packaging/release/verify-unit.sh`) verifies a *renamed* copy of the unit,
+because a dev machine's `~/.config/systemd/user/snitchwatch-bridge.service`
+(+ drop-ins) would otherwise shadow the file under test.
+
+The bridge release tarball (`docs/packaging/bridge-release-artifact.md`) is
+built by `packaging/release/*.sh` inside the digest-pinned Fedora 44 image
+from `packaging/release/pins.env`: `just release-bridge-repro` (build +
+byte-identical rebuild) and `just release-verify <tarball> <sha256>` (podman, verified
+2026-10-03). `.github/workflows/release.yml` runs the same scripts on `v*`
+tags and only ever creates **draft** releases. Never run
+`snitchwatch-bridge-cli` without `--help`/`--version` outside an isolated
+`XDG_RUNTIME_DIR`: it starts a bridge and replaces any running bridge's
+socket + token (issue #34's mechanism). The same goes for tests:
+`crates/snitchwatch-tauri/tests/bridge_runtime_starts.rs` used to do exactly
+this on every `cargo test` (found 2026-10-03, now points `XDG_RUNTIME_DIR` at a
+tempdir) — any new test that spawns a bridge must isolate the runtime dir too.
 
 `.github/workflows/ci.yml` runs four jobs on push to `main` and on PRs:
 - `check`/`test` — `cargo check`/`clippy -D warnings`/`test`, **scoped to

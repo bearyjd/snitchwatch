@@ -15,11 +15,14 @@
 //!
 //! Only `/stream` requires the handshake token — `/`, `/assets/*`, and the
 //! SPA fallback only serve static frontend assets (no firewall-rule-writing
-//! messages flow through them), so they stay unauthenticated.
+//! messages flow through them), so they stay unauthenticated. Those static
+//! routes exist only with the `web-ui` feature (on by default); without it —
+//! the release tarball's build — every path but `/stream` is a plain 404.
 
 use crate::auth::Token;
 use crate::blocklists::BlocklistsManager;
 use crate::profiles::ProfilesManager;
+#[cfg(feature = "web-ui")]
 use crate::web_assets::{serve_asset, serve_fallback, serve_index};
 use crate::ws_messages::{ClientMessage, ServerMessage};
 use anyhow::Context;
@@ -115,6 +118,20 @@ impl WsServer {
         Ok(listener)
     }
 
+    /// The HTTP surface: the token-gated `/stream` WebSocket, plus — only
+    /// with the `web-ui` feature — the embedded static frontend (`/`,
+    /// `/assets/*`, SPA fallback). Without the feature, every other path is a
+    /// plain 404.
+    fn router(state: AppState) -> Router {
+        let app = Router::new().route("/stream", get(ws_handler));
+        #[cfg(feature = "web-ui")]
+        let app = app
+            .route("/", get(serve_index))
+            .route("/assets/*path", get(serve_asset))
+            .fallback(serve_fallback);
+        app.with_state(state)
+    }
+
     /// Serve the router over `listener`.
     ///
     /// `axum::serve` in axum 0.7 only accepts a `tokio::net::TcpListener`,
@@ -129,12 +146,7 @@ impl WsServer {
             handles: self.handles,
             token: self.token,
         };
-        let app = Router::new()
-            .route("/stream", get(ws_handler))
-            .route("/", get(serve_index))
-            .route("/assets/*path", get(serve_asset))
-            .fallback(serve_fallback)
-            .with_state(state);
+        let app = Self::router(state);
 
         loop {
             let (stream, _peer_addr) = listener.accept().await?;
@@ -577,6 +589,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "web-ui")]
     #[tokio::test]
     async fn server_serves_index_html_at_root_after_handshake_token_gate() {
         use axum::body::to_bytes;
@@ -589,12 +602,7 @@ mod tests {
             token: Token::generate(),
         };
 
-        let app = Router::new()
-            .route("/stream", get(ws_handler))
-            .route("/", get(serve_index))
-            .route("/assets/*path", get(serve_asset))
-            .fallback(serve_fallback)
-            .with_state(state);
+        let app = WsServer::router(state);
 
         let response = app
             .oneshot(
@@ -610,6 +618,7 @@ mod tests {
         assert!(std::str::from_utf8(&body).unwrap().contains("Snitchwatch"));
     }
 
+    #[cfg(feature = "web-ui")]
     #[tokio::test]
     async fn server_serves_asset_js_unauthenticated() {
         use axum::http::Request;
@@ -620,12 +629,7 @@ mod tests {
             handles,
             token: Token::generate(),
         };
-        let app = Router::new()
-            .route("/stream", get(ws_handler))
-            .route("/", get(serve_index))
-            .route("/assets/*path", get(serve_asset))
-            .fallback(serve_fallback)
-            .with_state(state);
+        let app = WsServer::router(state);
 
         let response = app
             .oneshot(
@@ -637,5 +641,35 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), 200);
+    }
+
+    /// The release tarball's build (`--no-default-features`): no embedded
+    /// frontend, so the static routes and the SPA fallback are all 404s.
+    #[cfg(not(feature = "web-ui"))]
+    #[tokio::test]
+    async fn without_web_ui_static_routes_are_not_served() {
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        for uri in ["/", "/assets/js/app.js", "/some/spa/route"] {
+            let state = AppState {
+                handles: default_handles(),
+                token: Token::generate(),
+            };
+            let response = WsServer::router(state)
+                .oneshot(
+                    Request::builder()
+                        .uri(uri)
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                404,
+                "{uri} must not be served without web-ui"
+            );
+        }
     }
 }

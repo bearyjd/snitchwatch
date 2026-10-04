@@ -9,6 +9,11 @@ Documentation=https://github.com/bearyjd/snitchwatch
 # whether the GUI is open, so the daemon's fail-closed default is only ever
 # reached on a genuine bridge outage, not on "user closed the window".
 After=graphical-session.target
+# Once this unit is enabled globally (`systemctl --global enable`, as an image
+# build does) it would otherwise start in every user manager, including those
+# of system accounts such as a display-manager greeter, and whichever bridge
+# starts first holds 127.0.0.1:50051. Only real (non-system) users get one.
+ConditionUser=!@system
 
 [Service]
 Type=simple

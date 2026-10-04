@@ -46,6 +46,9 @@ pub enum BlocklistEvent {
 /// [`materializer`](crate::blocklists::materializer)'s "Legacy band migration"
 /// note. The `refresh_removes_legacy_band_rules` test exercises a sink that
 /// honors this contract end-to-end.
+// clippy 1.99's `double_must_use` fires on async_trait's generated
+// `#[must_use]` methods (they return an already-must_use boxed future).
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait RuleSink: Send + Sync + 'static {
     async fn replace_blocklist_rules(

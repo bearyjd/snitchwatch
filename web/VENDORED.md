@@ -3,7 +3,11 @@
 **Upstream:** https://github.com/obdev/littlesnitch-linux
 **Commit:** f4c2ce2dc51d811505844f5ca5509fd2a50fc97f
 **Fetched:** 2026-04-10T10:13:08+02:00
-**License:** GPL-2.0-or-later
+**License:** GPL-2.0-only — upstream's README says "distributed under the GNU General
+Public License, Version 2" (no "or later"; text in upstream `LICENSE-GPL2.txt`) and
+every file carries `SPDX-License-Identifier: GPL-2.0`. Corrected 2026-10-03 (this line
+previously said GPL-2.0-or-later). Snitchwatch's own code is GPL-3.0-or-later
+(repo-root `LICENSE`); this directory keeps upstream's license.
 **Path inside upstream:** `webroot/`
 
 ## What we capture
@@ -26,7 +30,8 @@ git diff                            # confirm only the rebrand strings flip
 
 - Anything outside `webroot/` (build scripts, app shell, etc.). We replace those with our own bridge.
 - Unit tests — upstream tests target the LS data layer, not ours.
-- License files — GPL-2.0 obligations are tracked at the repo root in `LICENSE`.
+- License files — upstream's `LICENSE-GPL2.txt` is not vendored here. The repo-root
+  `LICENSE` is Snitchwatch's own GPL-3.0-or-later text, not this directory's license.
 
 ## Snapshot file list
 

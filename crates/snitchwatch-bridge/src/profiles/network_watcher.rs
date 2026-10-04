@@ -38,6 +38,9 @@ const NM_ACTIVE_CONNECTION_INTERFACE: &str = "org.freedesktop.NetworkManager.Con
 /// Source of the current network identity, and a way to be notified when it
 /// changes. Implementations must never panic and must degrade to reporting
 /// `None` (no known active connection) rather than erroring once started.
+// clippy 1.99's `double_must_use` fires on async_trait's generated
+// `#[must_use]` methods (they return an already-must_use boxed future).
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait NetworkWatcher: Send + Sync + 'static {
     /// The current network identity (NetworkManager's active-connection

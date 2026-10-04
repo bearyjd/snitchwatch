@@ -103,8 +103,12 @@ jobs:
         with:
           submodules: true
 
+      # clippy: package-check lints the release tarball's feature set
+      # (--no-default-features, plan decision I), which no other job builds.
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2

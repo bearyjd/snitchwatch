@@ -98,6 +98,94 @@ fn bridge_user_unit_pins_stable_grpc_bind_and_is_a_user_service() {
     );
 }
 
+/// Split a systemd unit into `(section header, active lines)` pairs, in file
+/// order. Comments (`#`/`;`) and blank lines are dropped, so assertions made on
+/// the result can't be satisfied (or tripped) by prose in a comment.
+fn unit_sections(body: &str) -> Vec<(String, Vec<String>)> {
+    let mut sections: Vec<(String, Vec<String>)> = Vec::new();
+    for line in body.lines().map(str::trim) {
+        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+            continue;
+        }
+        if line.starts_with('[') && line.ends_with(']') {
+            sections.push((line.to_string(), Vec::new()));
+        } else {
+            let (_, lines) = sections
+                .last_mut()
+                .unwrap_or_else(|| panic!("unit line outside any section: `{line}`"));
+            lines.push(line.to_string());
+        }
+    }
+    sections
+}
+
+/// The active lines of every section called `header` (e.g. `[Unit]`).
+fn section_lines(sections: &[(String, Vec<String>)], header: &str) -> Vec<String> {
+    sections
+        .iter()
+        .filter(|(name, _)| name == header)
+        .flat_map(|(_, lines)| lines.iter().cloned())
+        .collect()
+}
+
+#[test]
+fn unit_section_splitter_ignores_comments_and_attributes_lines_to_sections() {
+    let sections = unit_sections(
+        "# header comment\n[Unit]\nA=1\n; also a comment\n\n[Service]\n  B=2  \n# C=3\n[Install]\nD=4\n",
+    );
+    assert_eq!(section_lines(&sections, "[Unit]"), ["A=1"]);
+    assert_eq!(section_lines(&sections, "[Service]"), ["B=2"]);
+    assert_eq!(section_lines(&sections, "[Install]"), ["D=4"]);
+    assert!(section_lines(&sections, "[Missing]").is_empty());
+}
+
+/// The release artifact installs this exact file to
+/// `/usr/lib/systemd/user/` in an immutable image and enables it with
+/// `systemctl --global enable`, so it must not depend on anything under a
+/// user's home and must not start for system accounts.
+#[test]
+fn bridge_user_unit_matches_the_image_baked_contract() {
+    let body = read("packaging/systemd/snitchwatch-bridge.service");
+    let sections = unit_sections(&body);
+
+    let exec_starts: Vec<String> = section_lines(&sections, "[Service]")
+        .into_iter()
+        .filter(|line| line.starts_with("ExecStart"))
+        .collect();
+    assert_eq!(
+        exec_starts,
+        ["ExecStart=/usr/bin/snitchwatch-bridge-cli"],
+        "[Service] must have exactly one ExecStart, at the image-baked path"
+    );
+
+    for (header, lines) in &sections {
+        for line in lines {
+            for forbidden in ["%h", "~", ".local"] {
+                assert!(
+                    !line.contains(forbidden),
+                    "{header} line `{line}` contains `{forbidden}`: an image-baked \
+                     unit must not reference a home directory"
+                );
+            }
+        }
+    }
+
+    assert!(
+        section_lines(&sections, "[Unit]")
+            .iter()
+            .any(|line| line == "ConditionUser=!@system"),
+        "[Unit] must carry `ConditionUser=!@system` so a globally-enabled unit \
+         never starts for system accounts (e.g. a display-manager greeter)\nbody:\n{body}"
+    );
+
+    assert!(
+        section_lines(&sections, "[Install]")
+            .iter()
+            .any(|line| line == "WantedBy=default.target"),
+        "[Install] must carry `WantedBy=default.target`\nbody:\n{body}"
+    );
+}
+
 #[test]
 fn bluebuild_recipe_installs_and_enables_opensnitchd() {
     let body = read("packaging/bluebuild/recipe.yml");
@@ -114,4 +202,52 @@ fn bluebuild_recipe_installs_and_enables_opensnitchd() {
             "bluebuild recipe missing `{needle}`\nbody:\n{body}"
         );
     }
+}
+
+/// The one license every Snitchwatch-owned declaration must agree on (plan
+/// decision G, 2026-10-03). GPL-3.0 because the shipped binaries combine our
+/// code with GPL-3.0 `ui.proto`-generated code, Apache-2.0-only crates and
+/// (Kirigami) LGPL-3.0 Qt, none of which GPL-2.0-only can combine with.
+const PROJECT_LICENSE: &str = "GPL-3.0-or-later";
+
+/// `license = "…"` values (ignoring `license.workspace = true`) in a Cargo.toml.
+fn cargo_license_values(rel: &str) -> Vec<String> {
+    read(rel)
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("license = "))
+        .map(|value| value.trim().trim_matches('"').to_string())
+        .collect()
+}
+
+#[test]
+fn project_license_is_declared_consistently() {
+    let license = read("LICENSE");
+    assert!(
+        license.contains("GNU GENERAL PUBLIC LICENSE")
+            && license.contains("Version 3, 29 June 2007"),
+        "repo-root LICENSE must be the GPL-3.0 text (it ships in the release tarball)"
+    );
+
+    assert_eq!(
+        cargo_license_values("Cargo.toml"),
+        vec![PROJECT_LICENSE],
+        "[workspace.package] license"
+    );
+    // Crates that don't inherit the workspace field must still match it.
+    for rel in [
+        "crates/snitchwatch-tauri/Cargo.toml",
+        "crates/snitchwatch-kirigami/Cargo.toml",
+    ] {
+        for value in cargo_license_values(rel) {
+            assert_eq!(value, PROJECT_LICENSE, "{rel} license");
+        }
+    }
+
+    let metainfo = read("packaging/flatpak/org.snitchwatch.Snitchwatch.metainfo.xml");
+    assert!(
+        metainfo.contains(&format!(
+            "<project_license>{PROJECT_LICENSE}</project_license>"
+        )),
+        "Flatpak metainfo project_license must be {PROJECT_LICENSE}"
+    );
 }
