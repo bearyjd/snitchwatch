@@ -15,8 +15,8 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 axum = { workspace = true }
 tokio-tungstenite = { workspace = true }
-rust-embed = { version = "8", features = ["interpolate-folder-path"] }
-mime_guess = "2"
+rust-embed = { version = "8", features = ["interpolate-folder-path"], optional = true }
+mime_guess = { version = "2", optional = true }
 futures-util = { workspace = true }
 regex = { workspace = true }
 anyhow = { workspace = true }
@@ -36,6 +36,16 @@ zbus = { workspace = true }
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio", "server", "server-auto"] }
 tower = { version = "0.5", features = ["util"] }
+
+[features]
+default = ["web-ui"]
+# Embed and serve the vendored `web/` frontend on `/`, `/assets/*` and the SPA
+# fallback. On by default (dev builds, the Tauri shell, tests). The release
+# tarball builds without it: `web/` is Objective Development's GPL-2.0-only
+# code, which can't share an executable with this crate's GPL-3.0 and
+# Apache-2.0-only inputs (docs/superpowers/plans/2026-10-03-bridge-release-
+# artifact.md, decision I). Nothing in the image deployment uses those routes.
+web-ui = ["dep:rust-embed", "dep:mime_guess"]
 
 [dev-dependencies]
 proptest = { workspace = true }

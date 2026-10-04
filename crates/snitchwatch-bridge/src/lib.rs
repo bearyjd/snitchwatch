@@ -20,6 +20,7 @@ pub mod notice;
 pub mod profiles;
 pub mod translator;
 pub mod tray_state;
+#[cfg(feature = "web-ui")]
 pub mod web_assets;
 pub mod ws_messages;
 pub mod ws_server;
