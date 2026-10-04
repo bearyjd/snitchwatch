@@ -671,3 +671,31 @@ fn build_job_peels_the_pushed_ref_to_a_commit() {
         "the commit must be resolved before the build runs"
     );
 }
+
+/// The MANIFEST records the builder container's full `rpm -qa`, so the CI
+/// build must install exactly what the local `just release-*` recipes install
+/// (install-deps.sh, no weak deps). A bare `dnf install` here pulled 8 extra
+/// weak-dependency packages and made the CI tarball's MANIFEST differ from a
+/// local build of the same commit.
+#[test]
+fn every_dnf_install_skips_weak_deps() {
+    let workflow = read(WORKFLOW);
+    let deps = read("packaging/release/install-deps.sh");
+    for (file, body) in [(WORKFLOW, &workflow), ("install-deps.sh", &deps)] {
+        let installs: Vec<&str> = code_lines(body)
+            .into_iter()
+            .filter(|l| l.contains("dnf ") && l.contains(" install"))
+            .collect();
+        assert!(
+            !installs.is_empty(),
+            "{file} should install packages with dnf"
+        );
+        for line in installs {
+            assert!(
+                line.contains("--setopt=install_weak_deps=False"),
+                "{file}: `{}` must pass --setopt=install_weak_deps=False",
+                line.trim()
+            );
+        }
+    }
+}

@@ -71,9 +71,12 @@ jobs:
       # git: actions/checkout needs it inside the container to fetch the
       # vendor/opensnitch submodule (without git it falls back to a tarball
       # download, which has no submodules). Not provided by the Fedora base
-      # image.
+      # image. No weak deps, exactly like install-deps.sh: the MANIFEST records
+      # the container's full `rpm -qa`, so any extra package here would make
+      # this tarball differ from a local `just release-bridge` of the same
+      # commit (the first dispatch run pulled 8 weak deps of git and did).
       - name: Install git
-        run: dnf -y install git
+        run: dnf -y --setopt=install_weak_deps=False install git
 
       # vendor/opensnitch must actually be checked out: snitchwatch-proto's
       # build.rs compiles vendor/opensnitch/proto/ui.proto, and the build
