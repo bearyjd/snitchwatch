@@ -14,6 +14,8 @@
 //! 4. Inbound WebSocket `ClientMessage`s go through `upstream::apply`, which
 //!    mutates the cache (resolving pending rows by firing the oneshot).
 
+pub mod cli;
+
 use anyhow::{Context, Result};
 use snitchwatch_bridge::auth::{self, Token};
 use snitchwatch_bridge::blocklists::store::BlocklistStore;

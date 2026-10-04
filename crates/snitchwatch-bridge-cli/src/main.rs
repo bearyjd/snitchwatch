@@ -2,7 +2,13 @@
 //! opensnitchd dials in to) and a WebSocket server for the GUI front-end.
 //!
 //! Usage:
-//!   snitchwatch-bridge-cli
+//!   snitchwatch-bridge-cli [-h | --help] [-V | --version]
+//!
+//! `--help` and `--version` print and exit 0 *before* the async runtime,
+//! tracing, or any socket/token/bind exist: `main` is synchronous and classifies
+//! argv first, and only builds the tokio runtime for a real bridge start. A
+//! closed stdout (`--help | head -c0`) is not an error. Every other argument is
+//! ignored.
 //!
 //! Env vars (all optional):
 //!   SNITCHWATCH_GRPC_BIND   gRPC bind address (default: 127.0.0.1:0)
@@ -23,12 +29,48 @@
 //! All of the orchestration logic lives in `snitchwatch_bridge_cli::run` so
 //! integration tests can exercise it without spawning a subprocess.
 
-use anyhow::Result;
+use std::io::{ErrorKind, Write};
+
+use anyhow::{Context, Result};
+use snitchwatch_bridge_cli::cli::{self, EarlyExit};
 use snitchwatch_bridge_cli::{run, BridgeConfig};
 use tracing::info;
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    // Before anything else — before the async runtime, tracing, or any
+    // socket/token/bind: these flags must never touch the socket, the token
+    // file, or the gRPC port (a bridge may already be running with them).
+    if let Some(early) = cli::early_exit(std::env::args_os()) {
+        return match print_early_exit(early) {
+            // The reader went away (`--help | head -c0`): nothing left to say.
+            Err(e) if e.kind() != ErrorKind::BrokenPipe => {
+                Err(anyhow::Error::new(e).context("failed to write to stdout"))
+            }
+            _ => Ok(()),
+        };
+    }
+
+    // The same runtime `#[tokio::main]` would build.
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("failed to build the tokio runtime")?
+        .block_on(run_bridge())
+}
+
+/// Write the `--help` / `--version` text to stdout. Not `print!`: that panics
+/// on a closed pipe (Rust ignores SIGPIPE, so the write fails with EPIPE).
+fn print_early_exit(early: EarlyExit) -> std::io::Result<()> {
+    let text = match early {
+        EarlyExit::Help => cli::usage(),
+        EarlyExit::Version => format!("{}\n", cli::version_line()),
+    };
+    let mut stdout = std::io::stdout().lock();
+    stdout.write_all(text.as_bytes())?;
+    stdout.flush()
+}
+
+async fn run_bridge() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
