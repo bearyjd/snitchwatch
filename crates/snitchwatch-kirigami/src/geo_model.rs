@@ -198,18 +198,23 @@ impl qobject::GeoModel {
         };
         let qt_thread = self.qt_thread();
         let resolver = self.resolver.clone();
+        let session_handles = handles.clone();
         crate::bridge_dispatch::spawn_feed(
             &handles,
             "GeoModel",
             crate::bridge_dispatch::interests_geo,
-            move |msg, json| {
+            move |connection_id, msg, json| {
                 // Resolve every row's destination IP here, off the Qt
                 // thread — this is the actual GeoIP database read.
                 // `resolver` shares its cache with the Qt-thread-side
                 // `GeoStore`, so the queued apply below only ever hits
                 // the now-warm cache.
                 warm_resolver_cache(&resolver, msg);
+                let session_handles = session_handles.clone();
                 let _ = qt_thread.queue(move |qobject| {
+                    if !session_handles.is_current_session(connection_id) {
+                        return;
+                    }
                     qobject.apply_server_message_json(&QString::from(&json));
                 });
             },

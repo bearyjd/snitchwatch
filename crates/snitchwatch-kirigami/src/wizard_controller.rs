@@ -8,7 +8,7 @@
 //! the QML-facing surface: an async `probe()` re-detect and a `startUnit()`
 //! action, both off the UI thread.
 //!
-//! `probe()`/`startUnit()` prefer the in-process bridge's own Tokio runtime
+//! `probe()`/`startUnit()` use the bridge client's Tokio runtime
 //! (`bridge_runtime::handles()`), spawning onto it exactly like
 //! `TrafficModel::start_bridge_feed` does, and queuing the result back via
 //! `CxxQtThread` (Task 1's async-signal-emission pattern). If the bridge

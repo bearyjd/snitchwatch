@@ -1,5 +1,5 @@
-//! Qt-free routing + (de)serialization glue between the in-process bridge and
-//! the QML models (Task 13 live wiring).
+//! Qt-free routing + (de)serialization glue between the external bridge
+//! service client and the QML models (Task 13 live wiring).
 //!
 //! The live feed spawns one Tokio task per receiving model, each subscribed to
 //! the bridge's `broadcast::Receiver<ServerMessage>`. Every task sees *every*
@@ -15,6 +15,7 @@
 //! handles (see the `*::row_store` modules); they are pure functions over
 //! [`ServerMessage`] and unit-tested here without any Qt dependency.
 
+use crate::bridge_runtime::ReceivedServerMessage;
 use snitchwatch_bridge::ws_messages::{ClientMessage, ServerMessage};
 
 /// True when `msg` mutates the connection list (drives `ConnectionsModel`).
@@ -143,24 +144,25 @@ pub fn decode_client(json: &str) -> Result<ClientMessage, serde_json::Error> {
 /// stateful snapshot+delta streams, so silently skipping deltas would leave
 /// the model stale until the next natural snapshot — which for connections
 /// never comes. Exits when either channel closes.
-pub async fn run_feed<F>(
-    mut rx: tokio::sync::broadcast::Receiver<ServerMessage>,
-    inbound: tokio::sync::mpsc::Sender<ClientMessage>,
+pub async fn run_feed<F, R>(
+    mut rx: tokio::sync::broadcast::Receiver<ReceivedServerMessage>,
+    request_snapshot: R,
     label: &'static str,
     interest: fn(&ServerMessage) -> bool,
     deliver: F,
 ) where
-    F: Fn(&ServerMessage, String) + Send + 'static,
+    F: Fn(u64, &ServerMessage, String) + Send + 'static,
+    R: Fn() -> bool + Send + 'static,
 {
     use tokio::sync::broadcast::error::RecvError;
     loop {
         match rx.recv().await {
-            Ok(msg) => {
-                if !interest(&msg) {
+            Ok(received) => {
+                if !interest(&received.message) {
                     continue;
                 }
-                match encode_server(&msg) {
-                    Ok(json) => deliver(&msg, json),
+                match encode_server(&received.message) {
+                    Ok(json) => deliver(received.connection_id, &received.message, json),
                     Err(e) => tracing::warn!(feed = label, error = %e, "feed: encode failed"),
                 }
             }
@@ -170,7 +172,7 @@ pub async fn run_feed<F>(
                     skipped = n,
                     "feed lagged behind bridge; requesting snapshot resync"
                 );
-                if inbound.send(ClientMessage::RequestSnapshot).await.is_err() {
+                if !request_snapshot() {
                     break;
                 }
             }
@@ -188,13 +190,35 @@ pub fn spawn_feed<F>(
     interest: fn(&ServerMessage) -> bool,
     deliver: F,
 ) where
-    F: Fn(&ServerMessage, String) + Send + 'static,
+    F: Fn(u64, &ServerMessage, String) + Send + 'static,
 {
     let rx = handles.subscribe();
-    let inbound = handles.inbound_tx();
-    handles
-        .runtime()
-        .spawn(run_feed(rx, inbound, label, interest, deliver));
+    // Subscribe before asking for a snapshot. The client runtime also requests
+    // one on WebSocket connect, but that early broadcast can precede QML feed
+    // creation. Each feed therefore requests a resync; the last QML feed to
+    // subscribe also covers every feed created before it.
+    handles.runtime().spawn(run_feed(
+        rx,
+        {
+            let handles = handles.clone();
+            move || handles.try_send(ClientMessage::RequestSnapshot).is_ok()
+        },
+        label,
+        interest,
+        move |connection_id, message, json| deliver(connection_id, message, json),
+    ));
+    let snapshot_handles = handles.clone();
+    handles.runtime().spawn(async move {
+        if snapshot_handles
+            .try_send(ClientMessage::RequestSnapshot)
+            .is_err()
+        {
+            tracing::warn!(
+                feed = label,
+                "feed: bridge client stopped before snapshot request"
+            );
+        }
+    });
 }
 
 #[cfg(test)]
@@ -498,15 +522,15 @@ mod tests {
     #[tokio::test]
     async fn run_feed_delivers_only_messages_its_predicate_routes() {
         let (btx, brx) = tokio::sync::broadcast::channel(16);
-        let (itx, _irx) = tokio::sync::mpsc::channel(4);
         let (dtx, mut drx) = tokio::sync::mpsc::unbounded_channel();
 
         let feed = tokio::spawn(run_feed(
             brx,
-            itx,
+            || true,
             "test-rules",
             interests_rules,
-            move |msg, json| {
+            move |connection_id, msg, json| {
+                assert_eq!(connection_id, 7, "feed preserves the source session");
                 assert!(
                     interests_rules(msg),
                     "deliver must only see routed messages"
@@ -515,10 +539,21 @@ mod tests {
             },
         ));
 
-        btx.send(ServerMessage::SetRules { rules: vec![] }).unwrap();
-        btx.send(ServerMessage::ClearConnectionRows).unwrap(); // filtered out
-        btx.send(ServerMessage::UpdateRules { rules: vec![] })
-            .unwrap();
+        btx.send(ReceivedServerMessage {
+            connection_id: 7,
+            message: ServerMessage::SetRules { rules: vec![] },
+        })
+        .unwrap();
+        btx.send(ReceivedServerMessage {
+            connection_id: 7,
+            message: ServerMessage::ClearConnectionRows,
+        })
+        .unwrap(); // filtered out
+        btx.send(ReceivedServerMessage {
+            connection_id: 7,
+            message: ServerMessage::UpdateRules { rules: vec![] },
+        })
+        .unwrap();
 
         let first = tokio::time::timeout(std::time::Duration::from_secs(1), drx.recv())
             .await
@@ -551,16 +586,28 @@ mod tests {
         let (btx, brx) = tokio::sync::broadcast::channel(1);
         let (itx, mut irx) = tokio::sync::mpsc::channel(4);
 
-        btx.send(ServerMessage::ClearConnectionRows).unwrap();
-        btx.send(ServerMessage::ClearConnectionRows).unwrap();
-        btx.send(ServerMessage::ClearConnectionRows).unwrap();
+        btx.send(ReceivedServerMessage {
+            connection_id: 1,
+            message: ServerMessage::ClearConnectionRows,
+        })
+        .unwrap();
+        btx.send(ReceivedServerMessage {
+            connection_id: 1,
+            message: ServerMessage::ClearConnectionRows,
+        })
+        .unwrap();
+        btx.send(ReceivedServerMessage {
+            connection_id: 1,
+            message: ServerMessage::ClearConnectionRows,
+        })
+        .unwrap();
 
         tokio::spawn(run_feed(
             brx,
-            itx,
+            move || itx.try_send(ClientMessage::RequestSnapshot).is_ok(),
             "test-lag",
             interests_connections,
-            |_msg, _json| {},
+            |_connection_id, _msg, _json| {},
         ));
 
         let resync = tokio::time::timeout(std::time::Duration::from_secs(1), irx.recv())

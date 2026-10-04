@@ -118,12 +118,17 @@ impl qobject::DaemonHealthModel {
             return;
         };
         let qt_thread = self.qt_thread();
+        let session_handles = handles.clone();
         crate::bridge_dispatch::spawn_feed(
             &handles,
             "DaemonHealthModel",
             crate::bridge_dispatch::interests_diagnostics,
-            move |_msg, json| {
+            move |connection_id, _msg, json| {
+                let session_handles = session_handles.clone();
                 let _ = qt_thread.queue(move |qobject| {
+                    if !session_handles.is_current_session(connection_id) {
+                        return;
+                    }
                     qobject.apply_server_message_json(&QString::from(&json));
                 });
             },
@@ -135,12 +140,11 @@ impl qobject::DaemonHealthModel {
         // late subscribers, so that report is otherwise lost forever. Pull
         // the current state immediately so a kernel-prerequisite problem
         // still surfaces without the user having to click "Recheck".
-        let inbound = handles.inbound_tx();
-        handles.runtime().spawn(async move {
-            let _ = inbound
-                .send(snitchwatch_bridge::ws_messages::ClientMessage::RecheckDiagnostics)
-                .await;
-        });
+        if let Err(error) =
+            handles.try_send(snitchwatch_bridge::ws_messages::ClientMessage::RecheckDiagnostics)
+        {
+            tracing::warn!(error = %error, "DaemonHealthModel: initial diagnostics recheck ignored");
+        }
     }
 
     fn recheck(self: Pin<&mut Self>) {
@@ -148,12 +152,11 @@ impl qobject::DaemonHealthModel {
             tracing::warn!("DaemonHealthModel: bridge not running; recheck ignored");
             return;
         };
-        let inbound = handles.inbound_tx();
-        handles.runtime().spawn(async move {
-            let _ = inbound
-                .send(snitchwatch_bridge::ws_messages::ClientMessage::RecheckDiagnostics)
-                .await;
-        });
+        if let Err(error) =
+            handles.try_send(snitchwatch_bridge::ws_messages::ClientMessage::RecheckDiagnostics)
+        {
+            tracing::warn!(error = %error, "DaemonHealthModel: diagnostics recheck ignored");
+        }
     }
 }
 

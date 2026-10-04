@@ -226,12 +226,17 @@ impl qobject::BlocklistsModel {
             return;
         };
         let qt_thread = self.qt_thread();
+        let session_handles = handles.clone();
         crate::bridge_dispatch::spawn_feed(
             &handles,
             "BlocklistsModel",
             crate::bridge_dispatch::interests_blocklists,
-            move |_msg, json| {
+            move |connection_id, _msg, json| {
+                let session_handles = session_handles.clone();
                 let _ = qt_thread.queue(move |qobject| {
+                    if !session_handles.is_current_session(connection_id) {
+                        return;
+                    }
                     qobject.apply_server_message_json(&QString::from(&json));
                 });
             },
@@ -325,12 +330,17 @@ impl qobject::BlocklistEntriesModel {
             return;
         };
         let qt_thread = self.qt_thread();
+        let session_handles = handles.clone();
         crate::bridge_dispatch::spawn_feed(
             &handles,
             "BlocklistEntriesModel",
             crate::bridge_dispatch::interests_blocklist_entries,
-            move |_msg, json| {
+            move |connection_id, _msg, json| {
+                let session_handles = session_handles.clone();
                 let _ = qt_thread.queue(move |qobject| {
+                    if !session_handles.is_current_session(connection_id) {
+                        return;
+                    }
                     qobject.apply_server_message_json(&QString::from(&json));
                 });
             },

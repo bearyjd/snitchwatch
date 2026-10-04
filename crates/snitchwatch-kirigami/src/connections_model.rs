@@ -12,9 +12,8 @@
 //! Live wiring — a Tokio task subscribing to the bridge's typed
 //! `broadcast::Receiver<ServerMessage>` and calling `qt_thread.queue(|m|
 //! m.apply_server_message(...))` per the Task 1 async pattern — attaches via
-//! [`qobject::ConnectionsModel::apply_server_message`]. Exposing that receiver
-//! from `RunningBridge` is a small consumer-side follow-up (the bridge's WS
-//! protocol itself is unchanged, per the plan's non-goals).
+//! [`qobject::ConnectionsModel::apply_server_message`]. The reconnecting
+//! external-service client exposes the same typed receiver to this model.
 
 use core::pin::Pin;
 use std::collections::HashMap;
@@ -506,12 +505,17 @@ impl qobject::ConnectionsModel {
             return;
         };
         let qt_thread = self.qt_thread();
+        let session_handles = handles.clone();
         crate::bridge_dispatch::spawn_feed(
             &handles,
             "ConnectionsModel",
             crate::bridge_dispatch::interests_connections,
-            move |_msg, json| {
+            move |connection_id, _msg, json| {
+                let session_handles = session_handles.clone();
                 let _ = qt_thread.queue(move |qobject| {
+                    if !session_handles.is_current_session(connection_id) {
+                        return;
+                    }
                     qobject.apply_server_message_json(&QString::from(&json));
                 });
             },

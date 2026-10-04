@@ -26,11 +26,20 @@ Kirigami.ApplicationWindow {
     }
 
     // Live-wiring hub (Task 13). Owns the app-level bridge status surface and is
-    // the single inbound sink the models' request signals feed. The in-process
-    // bridge itself is started in `main.rs` before this QML loads; `refresh()`
-    // (below) just reflects its outcome.
+    // the single inbound sink the models' request signals feed. The external
+    // bridge client is started in `main.rs` before this QML loads; `refresh()`
+    // reflects its reconnecting service state.
     BridgeFeed {
         id: bridgeFeed
+    }
+    // The service can restart independently of this GUI. Polling is cheap
+    // (one mutex-backed string read) and makes the existing banner accurately
+    // report both disconnects and reconnects without adding a Qt event bridge.
+    Timer {
+        interval: 1000
+        running: true
+        repeat: true
+        onTriggered: bridgeFeed.refresh()
     }
     // QML ids are lexical names, not properties on `root`. Components below
     // need explicitly named root properties to inject these objects without

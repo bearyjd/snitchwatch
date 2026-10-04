@@ -3,8 +3,8 @@
 //! Boots a `QGuiApplication`, registers the cxx-qt QML module (linked in via
 //! the library target), and loads the Kirigami `ApplicationWindow` entry
 //! point. This is the native replacement for `snitchwatch-tauri`'s
-//! WebKitGTK-webview shell; it consumes `snitchwatch-bridge`'s typed Rust APIs
-//! directly rather than round-tripping JSON over a WebSocket to itself.
+//! WebKitGTK-webview shell; it consumes the separately managed bridge service
+//! over its authenticated Unix-domain WebSocket.
 
 // Pull the cxx-qt bridge in through the library target so the bin and any
 // integration tests share the same generated code path — this keeps the
@@ -42,15 +42,15 @@ fn main() {
         std::env::set_var("QT_QUICK_CONTROLS_STYLE", "Basic");
     }
 
-    // Start the in-process bridge before loading QML so the models' live feeds
+    // Start the bridge *client* before loading QML so the models' live feeds
     // find it already running when their `Component.onCompleted` fires. Startup
     // failure is non-fatal: the window still opens and the error is surfaced in
     // the UI via the `BridgeFeed` status property (bound to a Kirigami
     // InlineMessage in main.qml). Never panic here — a failed bridge must
     // degrade to a visible status, not a dead window.
     match bridge_runtime::ensure_started() {
-        (true, msg) => tracing::info!(status = %msg, "in-process bridge started"),
-        (false, msg) => tracing::error!(status = %msg, "in-process bridge unavailable"),
+        (true, msg) => tracing::info!(status = %msg, "bridge client started"),
+        (false, msg) => tracing::error!(status = %msg, "bridge client unavailable"),
     }
 
     let mut app = QGuiApplication::new();

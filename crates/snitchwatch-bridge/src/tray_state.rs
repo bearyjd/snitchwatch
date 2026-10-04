@@ -4,10 +4,11 @@
 //! Tauri shell subscribes to `TrayStatePublisher::subscribe()` and re-renders
 //! on every change. Headless tests can assert transitions without Tauri.
 
+use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tokio::sync::watch;
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TrayState {
     #[default]
     Idle,

@@ -118,10 +118,16 @@ impl qobject::NotificationController {
         // per notice.
         let gate = Arc::new(Mutex::new(CooldownGate::new()));
 
-        handles.runtime().spawn(async move {
+        // Take an owned runtime handle before moving `handles` into the task.
+        // Borrowing it for `runtime()` and moving it in the same expression
+        // would leave the borrow live through `spawn`.
+        let runtime = handles.runtime().clone();
+        runtime.spawn(async move {
             loop {
                 match notice_rx.recv().await {
-                    Ok(notice) => {
+                    Ok(received) => {
+                        let connection_id = received.connection_id;
+                        let notice = received.notice;
                         if matches!(notice, BridgeNotice::Pending { .. }) {
                             // Grace period: only actually consider dispatching
                             // once the row has been pending for 5s. Spawned
@@ -130,16 +136,22 @@ impl qobject::NotificationController {
                             // observing DaemonAway/FilterPauseExpired meanwhile.
                             let qt_thread = qt_thread.clone();
                             let gate = gate.clone();
+                            let session_handles = handles.clone();
                             tokio::spawn(async move {
                                 tokio::time::sleep(PENDING_GRACE_PERIOD).await;
                                 let _ = qt_thread.queue(move |qobject| {
-                                    qobject.maybe_dispatch(notice, gate);
+                                    if session_handles.is_current_session(connection_id) {
+                                        qobject.maybe_dispatch(notice, gate);
+                                    }
                                 });
                             });
                         } else {
                             let gate = gate.clone();
+                            let session_handles = handles.clone();
                             let _ = qt_thread.queue(move |qobject| {
-                                qobject.maybe_dispatch(notice, gate);
+                                if session_handles.is_current_session(connection_id) {
+                                    qobject.maybe_dispatch(notice, gate);
+                                }
                             });
                         }
                     }

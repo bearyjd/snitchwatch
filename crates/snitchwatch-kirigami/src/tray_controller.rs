@@ -101,18 +101,27 @@ impl qobject::TrayController {
         // subsequent change — mirrors the Tauri shell's `Tray::install`,
         // which rendered `TrayState::Idle` up front before its watch loop.
         let initial = rx.borrow().clone();
+        let initial_handles = handles.clone();
         let _ = qt_thread.queue(move |qobject| {
-            qobject.apply_tray_state(initial);
+            if initial_handles.is_current_session(initial.connection_id) {
+                qobject.apply_tray_state(initial.state);
+            }
         });
 
-        handles.runtime().spawn(async move {
+        // Keep the session guard owned by the task; obtain the runtime handle
+        // first so this does not borrow and move `handles` simultaneously.
+        let runtime = handles.runtime().clone();
+        runtime.spawn(async move {
             loop {
                 if rx.changed().await.is_err() {
                     break;
                 }
-                let state = rx.borrow().clone();
+                let received = rx.borrow().clone();
+                let session_handles = handles.clone();
                 let _ = qt_thread.queue(move |qobject| {
-                    qobject.apply_tray_state(state);
+                    if session_handles.is_current_session(received.connection_id) {
+                        qobject.apply_tray_state(received.state);
+                    }
                 });
             }
         });

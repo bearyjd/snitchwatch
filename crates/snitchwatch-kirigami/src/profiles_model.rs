@@ -248,12 +248,17 @@ impl qobject::ProfilesModel {
             return;
         };
         let qt_thread = self.qt_thread();
+        let session_handles = handles.clone();
         crate::bridge_dispatch::spawn_feed(
             &handles,
             "ProfilesModel",
             crate::bridge_dispatch::interests_profiles,
-            move |_msg, json| {
+            move |connection_id, _msg, json| {
+                let session_handles = session_handles.clone();
                 let _ = qt_thread.queue(move |qobject| {
+                    if !session_handles.is_current_session(connection_id) {
+                        return;
+                    }
                     qobject.apply_server_message_json(&QString::from(&json));
                 });
             },
