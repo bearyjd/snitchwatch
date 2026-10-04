@@ -25,3 +25,12 @@ crates/snitchwatch-tauri/gen/
 .superpowers/
 .claude/settings.local.json
 .claude/agent-memory/
+
+# Bridge release tarballs from packaging/release/build-bridge.sh (default OUT_DIR)
+/dist/
+
+# Python bytecode (packaging/release/bridge_artifact.py)
+__pycache__/
+
+# gstack/Codex review scratch output (never project source)
+.gstack/
