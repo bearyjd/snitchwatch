@@ -8,10 +8,13 @@
 
 ## Start here (2026-10-03, latest)
 
-**Branch `feat/bridge-release-artifact` (uncommitted at time of writing): release
-pipeline for a sha256-pinned bridge tarball** — phase B step 1 of the bazzite-tower
-plan (OpenSnitch daemon + Snitchwatch GUI + deny-by-default on a Fedora 44 bootc
-image). Plan + owner decisions A–H:
+**PR #36 merged (`35899bb`): release pipeline for a sha256-pinned bridge
+tarball** — phase B step 1 of the bazzite-tower plan (OpenSnitch daemon +
+Snitchwatch GUI + deny-by-default on a Fedora 44 bootc image). CI green on all 4
+jobs. Clean local test build of `3505590`: sha256
+`8870639e56dd0ee2f54787f2b97dfe2b4df150e87c17f773eba3fdabce7576c1` (`dirty:
+false`; a `v*` tag build differs — the MANIFEST records the tag). Next: first
+`workflow_dispatch` of `Release`, then tag `v0.1.0`. Plan + owner decisions A–I:
 `docs/superpowers/plans/2026-10-03-bridge-release-artifact.md`; consumer contract:
 `docs/packaging/bridge-release-artifact.md`.
 
@@ -44,9 +47,13 @@ image). Plan + owner decisions A–H:
   deny-by-default claim, not this artifact.
 - **L1:** `h2`/`rustls`/`rustls-webpki` bumped for RUSTSEC advisories; `release.yml`
   gains an `audit-bridge` RustSec gate scoped to the crates the release build compiles.
-- **Owner TODO (repo settings, not code):** tag ruleset on `refs/tags/v*`, branch
-  protection on `main`, immutable releases, required reviewers on the `release`
-  environment — none are set today.
+- **Repo settings applied 2026-10-03** (rulesets 24437251/-52/-57/-58):
+  only admins create `v*` tags; `v*` tags can't be updated/deleted/force-moved
+  by anyone (disable that ruleset to redo a bad tag); `main` can't be deleted or
+  force-pushed; `main` changes need a PR with `check`/`test`/`package-check`/
+  `kirigami` green (admins can bypass, so direct doc pushes still work);
+  immutable releases on; `release` environment requires bearyjd's approval
+  (self-approval allowed) and only `v*` tags may deploy to it.
 - **Open — issue #34:** the Kirigami shell's in-process bridge clobbers the bridge
   service's token + socket (and fails on `:50051`). Blocks shipping the GUI next to
   the enabled unit; not this artifact.
