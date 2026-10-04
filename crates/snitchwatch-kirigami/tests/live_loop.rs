@@ -51,7 +51,7 @@ async fn verdict_round_trips_through_the_external_websocket_glue() {
     .await
     .unwrap();
 
-    let grpc_addr = bridge.grpc_addr;
+    let grpc_addr = bridge.grpc_endpoint.tcp_addr().unwrap();
     let ask = tokio::spawn(async move {
         let mut mock = MockOpensnitchd::connect(grpc_addr).await.unwrap();
         mock.ask_rule(Connection {

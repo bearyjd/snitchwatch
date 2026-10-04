@@ -14,6 +14,7 @@
 //! 4. Inbound WebSocket `ClientMessage`s go through `upstream::apply`, which
 //!    mutates the cache (resolving pending rows by firing the oneshot).
 
+pub mod activation;
 pub mod cli;
 
 use anyhow::{Context, Result};
@@ -35,8 +36,11 @@ use snitchwatch_bridge::ws_messages::{ClientMessage, ServerMessage};
 use snitchwatch_bridge::ws_server::{WsHandles, WsServer};
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context as TaskContext, Poll};
 use std::time::Duration;
+use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{broadcast, mpsc, oneshot, watch, Mutex};
 use tonic::transport::Server;
 use tracing::{error, info, warn};
@@ -45,6 +49,49 @@ use tracing::{error, info, warn};
 /// `snitchwatch-kirigami::traffic::ring_store::DEFAULT_WINDOW_SECONDS` (the
 /// consumer side of the same underlying `TrafficBinner`).
 const TRAFFIC_WINDOW_SECONDS: usize = 300;
+
+/// The actual daemon endpoint. System mode never has a TCP address.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GrpcEndpoint {
+    Tcp(SocketAddr),
+    Unix(PathBuf),
+}
+
+impl GrpcEndpoint {
+    pub fn tcp_addr(&self) -> Option<SocketAddr> {
+        match self {
+            Self::Tcp(addr) => Some(*addr),
+            Self::Unix(_) => None,
+        }
+    }
+}
+
+/// Check kernel credentials before tonic sees a daemon connection. Rejected
+/// clients are dropped and accepting continues, including after lookup errors.
+struct RootUnixIncoming(UnixListener);
+
+impl tokio_stream::Stream for RootUnixIncoming {
+    type Item = std::io::Result<UnixStream>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Option<Self::Item>> {
+        // Bound each poll so a flood of rejected clients cannot starve shutdown.
+        for _ in 0..32 {
+            match self.0.poll_accept(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(error)) => return Poll::Ready(Some(Err(error))),
+                Poll::Ready(Ok((stream, _))) => match stream.peer_cred() {
+                    Ok(cred) if cred.uid() == 0 => return Poll::Ready(Some(Ok(stream))),
+                    Ok(cred) => warn!(uid = cred.uid(), "rejected non-root daemon peer"),
+                    Err(error) => {
+                        warn!(%error, "rejected daemon peer with unavailable credentials")
+                    }
+                },
+            }
+        }
+        cx.waker().wake_by_ref();
+        Poll::Pending
+    }
+}
 
 /// True for every `ClientMessage` variant `ProfilesManager` owns handling of.
 /// Kept as a free function (rather than inlined into the pump's `match`) so
@@ -100,13 +147,13 @@ impl BridgeConfig {
 pub struct RunningBridge {
     /// Unix domain socket path the WS server is listening on.
     pub ws_socket_path: PathBuf,
-    /// Path to the token file written alongside the socket (mode 0600).
+    /// Token file path (mode 0600 in legacy mode, 0640 in system mode).
     pub ws_token_path: PathBuf,
     /// The handshake token itself, so in-process callers (e.g. the Tauri
     /// shell, tests) don't have to re-read it from disk.
     pub ws_token: Token,
-    /// Actual bound gRPC address (so callers who passed `:0` can discover it).
-    pub grpc_addr: SocketAddr,
+    /// Actual daemon endpoint (TCP in legacy mode, Unix in system mode).
+    pub grpc_endpoint: GrpcEndpoint,
     /// Outbound `ServerMessage` broadcast sender. In-process consumers (the
     /// native Kirigami shell) call `.subscribe()` here to receive the exact
     /// stream the WebSocket server fans out to browser clients — no WS
@@ -148,7 +195,57 @@ impl RunningBridge {
 /// Both the WebSocket server and the gRPC `Ui` server are bound and accepting
 /// connections by the time this returns. opensnitchd can dial in immediately.
 pub async fn run(config: BridgeConfig) -> Result<RunningBridge> {
-    info!(?config, "starting snitchwatch-bridge");
+    let grpc_listener = tokio::net::TcpListener::bind(config.grpc_bind)
+        .await
+        .with_context(|| format!("failed to bind gRPC listener on {}", config.grpc_bind))?;
+    let endpoint = GrpcEndpoint::Tcp(grpc_listener.local_addr()?);
+    run_with_incoming(
+        config,
+        endpoint,
+        tokio_stream::wrappers::TcpListenerStream::new(grpc_listener),
+        None,
+        None,
+    )
+    .await
+}
+
+/// Start exclusively on service-manager-owned sockets. Never binds, removes,
+/// or changes permissions on either socket or its parent directory.
+pub async fn run_system(listeners: activation::ActivatedListeners) -> Result<RunningBridge> {
+    activation::validate_paths(&listeners)?;
+    let config = BridgeConfig {
+        grpc_bind: "127.0.0.1:0".parse().expect("literal address"),
+        ws_socket_path: PathBuf::from(activation::GUI_SOCKET_PATH),
+        cache_capacity: 10_000,
+    };
+    run_with_incoming(
+        config,
+        GrpcEndpoint::Unix(PathBuf::from(activation::GRPC_SOCKET_PATH)),
+        RootUnixIncoming(listeners.grpc),
+        Some(listeners.gui),
+        Some(PathBuf::from(activation::TOKEN_PATH)),
+    )
+    .await
+}
+
+async fn run_with_incoming<I, IO>(
+    config: BridgeConfig,
+    grpc_endpoint: GrpcEndpoint,
+    incoming: I,
+    activated_ws: Option<UnixListener>,
+    system_token_path: Option<PathBuf>,
+) -> Result<RunningBridge>
+where
+    I: tokio_stream::Stream<Item = std::io::Result<IO>> + Send + 'static,
+    IO: tokio::io::AsyncRead
+        + tokio::io::AsyncWrite
+        + tonic::transport::server::Connected
+        + Unpin
+        + Send
+        + 'static,
+    IO::ConnectInfo: Clone + Send + Sync + 'static,
+{
+    info!(?grpc_endpoint, ws_socket = %config.ws_socket_path.display(), cache_capacity = config.cache_capacity, "starting snitchwatch-bridge");
 
     // Channels between the WS server and the orchestrator.
     let (broadcast_tx, _) = broadcast::channel::<ServerMessage>(256);
@@ -194,12 +291,19 @@ pub async fn run(config: BridgeConfig) -> Result<RunningBridge> {
     // environment, but can read a file under the same
     // `$XDG_RUNTIME_DIR/snitchwatch/` the socket lives under).
     let token = Token::generate();
-    let ws_token_path = config
-        .ws_socket_path
-        .parent()
-        .map(|p| p.join("token"))
-        .unwrap_or_else(|| PathBuf::from("token"));
-    auth::write_token_file(&token, &ws_token_path).context("failed to write token file")?;
+    let ws_token_path = system_token_path.clone().unwrap_or_else(|| {
+        config
+            .ws_socket_path
+            .parent()
+            .map(|p| p.join("token"))
+            .unwrap_or_else(|| PathBuf::from("token"))
+    });
+    if system_token_path.is_some() {
+        auth::write_system_token_file(&token, &ws_token_path)
+            .context("failed to write system token file")?;
+    } else {
+        auth::write_token_file(&token, &ws_token_path).context("failed to write token file")?;
+    }
 
     let ws_handles = WsHandles {
         broadcast: broadcast_tx.clone(),
@@ -208,10 +312,13 @@ pub async fn run(config: BridgeConfig) -> Result<RunningBridge> {
         profiles: profiles_mgr.clone(),
     };
     let ws_server = WsServer::new(config.ws_socket_path.clone(), token.clone(), ws_handles);
-    let ws_listener = ws_server
-        .bind()
-        .await
-        .context("failed to bind WebSocket unix socket")?;
+    let ws_listener = match activated_ws {
+        Some(listener) => listener,
+        None => ws_server
+            .bind()
+            .await
+            .context("failed to bind WebSocket unix socket")?,
+    };
     let (ws_shutdown_tx, ws_shutdown_rx) = oneshot::channel::<()>();
 
     tokio::spawn(async move {
@@ -228,13 +335,6 @@ pub async fn run(config: BridgeConfig) -> Result<RunningBridge> {
     });
 
     // --- gRPC Ui server -----------------------------------------------------
-    let grpc_listener = tokio::net::TcpListener::bind(config.grpc_bind)
-        .await
-        .with_context(|| format!("failed to bind gRPC listener on {}", config.grpc_bind))?;
-    let grpc_addr = grpc_listener
-        .local_addr()
-        .context("gRPC listener has no local address")?;
-
     let notice_bus = Arc::new(NoticeBus::new());
     let tray_rx = tray_pub.subscribe();
     let notice_rx = notice_bus.subscribe();
@@ -340,7 +440,6 @@ pub async fn run(config: BridgeConfig) -> Result<RunningBridge> {
     ));
 
     tokio::spawn(async move {
-        let incoming = tokio_stream::wrappers::TcpListenerStream::new(grpc_listener);
         let serve = Server::builder()
             // Dead-peer detection: if the TCP connection to opensnitchd dies
             // without a clean FIN/RST (network drop, host crash, VM pause),
@@ -585,7 +684,7 @@ pub async fn run(config: BridgeConfig) -> Result<RunningBridge> {
         ws_socket_path: config.ws_socket_path,
         ws_token_path,
         ws_token: token,
-        grpc_addr,
+        grpc_endpoint,
         broadcast_tx,
         inbound_tx,
         tray_rx,
@@ -599,9 +698,371 @@ pub async fn run(config: BridgeConfig) -> Result<RunningBridge> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures_util::{SinkExt, StreamExt};
     use mock_opensnitchd::MockOpensnitchd;
     use snitchwatch_bridge::ws_messages::{VerdictAction, VerdictDuration, VerdictScope};
     use snitchwatch_proto::protocol::Connection;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    use tokio_tungstenite::tungstenite::Message;
+
+    #[test]
+    fn system_permissions_peer_helper() {
+        let Some(dir) = std::env::var_os("SNITCHWATCH_TEST_PERMISSION_DIR") else {
+            return;
+        };
+        let dir = PathBuf::from(dir);
+        let token_path = dir.join("auth/token");
+        let role = std::env::var("SNITCHWATCH_TEST_PERMISSION_ROLE").unwrap();
+        if role == "service" || role == "service-mismatch" {
+            assert_eq!(unsafe { libc::geteuid() }, 65531);
+            assert_eq!(unsafe { libc::getegid() }, 65531);
+            if role == "service-mismatch" {
+                let original = auth::read_token_file(&token_path).unwrap();
+                for _ in 0..2 {
+                    let error =
+                        auth::write_system_token_file(&Token::generate(), &token_path).unwrap_err();
+                    assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+                    assert!(error
+                        .to_string()
+                        .contains("system token group did not inherit auth directory group"));
+                    assert!(original.matches(auth::read_token_file(&token_path).unwrap().as_str()));
+                    assert!(!dir
+                        .join(format!("auth/.token.{}.tmp", std::process::id()))
+                        .exists());
+                }
+                return;
+            }
+            auth::write_system_token_file(&Token::generate(), &token_path).unwrap();
+            let metadata = std::fs::metadata(&token_path).unwrap();
+            assert_eq!(
+                (metadata.uid(), metadata.gid(), metadata.mode() & 0o777),
+                (65531, 65533, 0o640)
+            );
+            return;
+        }
+        let member = role == "member";
+        let gui = std::os::unix::net::UnixStream::connect(dir.join("bridge.sock"));
+        let token = auth::read_token_file(&token_path);
+        if member {
+            assert!(gui.is_ok(), "UI-group member must be able to connect");
+            assert_eq!(token.unwrap().as_str().len(), 64);
+        } else {
+            assert_eq!(
+                gui.unwrap_err().kind(),
+                std::io::ErrorKind::PermissionDenied
+            );
+            assert_eq!(
+                token.unwrap_err().kind(),
+                std::io::ErrorKind::PermissionDenied
+            );
+        }
+        let daemon = std::os::unix::net::UnixStream::connect(dir.join("opensnitchd.sock"));
+        assert_eq!(
+            daemon.unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        for path in [
+            dir.join("bridge.sock"),
+            dir.join("opensnitchd.sock"),
+            token_path,
+        ] {
+            assert_eq!(
+                std::fs::remove_file(path).unwrap_err().kind(),
+                std::io::ErrorKind::PermissionDenied
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn service_token_and_socket_permissions_enforce_the_ui_group_across_identities() {
+        use std::os::unix::process::CommandExt;
+        if unsafe { libc::geteuid() } != 0 {
+            eprintln!("run this test as root to verify distinct service/UI identities");
+            return;
+        }
+        // Match /run's native tmpfs semantics. Some rootless development
+        // overlays report setgid directories but do not inherit their group.
+        let dir = tempfile::tempdir_in("/tmp").unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o711)).unwrap();
+        let gui_path = dir.path().join("bridge.sock");
+        let daemon_path = dir.path().join("opensnitchd.sock");
+        let _gui = UnixListener::bind(&gui_path).unwrap();
+        let _daemon = UnixListener::bind(&daemon_path).unwrap();
+        let auth_dir = dir.path().join("auth");
+        std::fs::create_dir(&auth_dir).unwrap();
+        for (path, uid, gid, mode) in [
+            (&gui_path, 0, 65533, 0o660),
+            (&daemon_path, 0, 0, 0o600),
+            (&auth_dir, 65531, 65533, 0o2750),
+        ] {
+            use std::os::unix::ffi::OsStrExt;
+            let path_c = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+            assert_eq!(unsafe { libc::chown(path_c.as_ptr(), uid, gid) }, 0);
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+        }
+        assert_eq!(
+            std::fs::metadata(&auth_dir).unwrap().mode() & 0o7777,
+            0o2750
+        );
+        for (role, uid, gid) in [
+            ("service", 65531, 65531),
+            ("member", 65534, 65533),
+            ("nonmember", 65532, 65532),
+            ("service-mismatch", 65531, 65531),
+        ] {
+            if role == "service-mismatch" {
+                std::fs::set_permissions(&auth_dir, std::fs::Permissions::from_mode(0o750))
+                    .unwrap();
+            }
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+            child
+                .args([
+                    "--exact",
+                    "tests::system_permissions_peer_helper",
+                    "--nocapture",
+                ])
+                .env("SNITCHWATCH_TEST_PERMISSION_DIR", dir.path())
+                .env("SNITCHWATCH_TEST_PERMISSION_ROLE", role);
+            // Only async-signal-safe credential syscalls in the forked child.
+            // Clear inherited groups before dropping root, so no membership
+            // from the container runner can invalidate the negative checks.
+            unsafe {
+                child.pre_exec(move || {
+                    if libc::setgroups(0, std::ptr::null()) != 0
+                        || libc::setgid(gid) != 0
+                        || libc::setuid(uid) != 0
+                    {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+            assert!(
+                child.status().unwrap().success(),
+                "{role} permission checks failed"
+            );
+            if role == "service-mismatch" {
+                std::fs::set_permissions(&auth_dir, std::fs::Permissions::from_mode(0o2750))
+                    .unwrap();
+            }
+        }
+        let token = std::fs::metadata(auth_dir.join("token")).unwrap();
+        assert_eq!(
+            (token.uid(), token.gid(), token.mode() & 0o777),
+            (65531, 65533, 0o640)
+        );
+        assert_eq!(
+            std::fs::metadata(&auth_dir).unwrap().mode() & 0o7777,
+            0o2750
+        );
+        assert_eq!(std::fs::metadata(&gui_path).unwrap().mode() & 0o777, 0o660);
+        assert_eq!(
+            std::fs::metadata(&daemon_path).unwrap().mode() & 0o777,
+            0o600
+        );
+    }
+
+    // This helper runs in a fresh process so credentials can be changed safely,
+    // without mutating the credentials of a running multithreaded test suite.
+    #[test]
+    fn non_root_daemon_peer_helper() {
+        use std::io::Read;
+        let Some(path) = std::env::var_os("SNITCHWATCH_TEST_PEER_SOCKET") else {
+            return;
+        };
+        assert_ne!(unsafe { libc::geteuid() }, 0);
+        let mut stream = std::os::unix::net::UnixStream::connect(path).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        assert_eq!(
+            stream.read(&mut [0u8; 1]).unwrap(),
+            0,
+            "non-root peer must be disconnected"
+        );
+    }
+
+    #[tokio::test]
+    async fn root_unix_incoming_rejects_non_root_and_keeps_accepting_every_peer() {
+        use std::os::unix::process::CommandExt;
+        if unsafe { libc::geteuid() } != 0 {
+            eprintln!("run this test as root to verify both credential classes");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
+        let path = dir.path().join("grpc.sock");
+        let mut incoming = RootUnixIncoming(UnixListener::bind(&path).unwrap());
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o777)).unwrap();
+        for _ in 0..2 {
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "tests::non_root_daemon_peer_helper",
+                    "--nocapture",
+                ])
+                .env("SNITCHWATCH_TEST_PEER_SOCKET", &path)
+                .uid(65534)
+                .gid(65534)
+                .spawn()
+                .unwrap();
+            assert!(
+                tokio::time::timeout(Duration::from_millis(200), incoming.next())
+                    .await
+                    .is_err()
+            );
+            assert!(child.wait().unwrap().success());
+            let _root = UnixStream::connect(&path).await.unwrap();
+            let accepted = tokio::time::timeout(Duration::from_secs(2), incoming.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert_eq!(accepted.peer_cred().unwrap().uid(), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn activated_unix_ask_rule_roundtrip_preserves_socket_ownership_and_modes() {
+        if unsafe { libc::geteuid() } != 0 {
+            eprintln!("run this test as root to exercise the authorized daemon peer");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let gui_path = dir.path().join("bridge.sock");
+        let grpc_path = dir.path().join("opensnitchd.sock");
+        let gui_listener = UnixListener::bind(&gui_path).unwrap();
+        let grpc_listener = UnixListener::bind(&grpc_path).unwrap();
+        std::fs::set_permissions(&gui_path, std::fs::Permissions::from_mode(0o660)).unwrap();
+        std::fs::set_permissions(&grpc_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let auth_dir = dir.path().join("auth");
+        std::fs::create_dir(&auth_dir).unwrap();
+        std::fs::set_permissions(&auth_dir, std::fs::Permissions::from_mode(0o2750)).unwrap();
+        let before_gui = std::fs::metadata(&gui_path).unwrap();
+        let before_grpc = std::fs::metadata(&grpc_path).unwrap();
+        let before_dir = std::fs::metadata(dir.path()).unwrap();
+        let token_path = auth_dir.join("token");
+        let config = BridgeConfig {
+            grpc_bind: "127.0.0.1:0".parse().unwrap(),
+            ws_socket_path: gui_path.clone(),
+            cache_capacity: 64,
+        };
+        let bridge = run_with_incoming(
+            config,
+            GrpcEndpoint::Unix(grpc_path.clone()),
+            RootUnixIncoming(grpc_listener),
+            Some(gui_listener),
+            Some(token_path.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(bridge.grpc_endpoint, GrpcEndpoint::Unix(grpc_path.clone()));
+        assert!(bridge.grpc_endpoint.tcp_addr().is_none());
+        assert_eq!(
+            std::fs::metadata(&token_path).unwrap().mode() & 0o777,
+            0o640
+        );
+        assert_eq!(
+            std::fs::metadata(&token_path).unwrap().gid(),
+            std::fs::metadata(&auth_dir).unwrap().gid()
+        );
+        assert_eq!(
+            std::fs::metadata(&auth_dir).unwrap().mode() & 0o7777,
+            0o2750
+        );
+
+        let stream = UnixStream::connect(&gui_path).await.unwrap();
+        let (mut gui, _) = tokio_tungstenite::client_async("ws://localhost/stream", stream)
+            .await
+            .unwrap();
+        let token = auth::read_token_file(&token_path).unwrap();
+        gui.send(Message::Text(token.as_str().to_owned()))
+            .await
+            .unwrap();
+        let ack = tokio::time::timeout(Duration::from_secs(2), gui.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(ack, Message::Text(ref text) if matches!(serde_json::from_str::<ServerMessage>(text), Ok(ServerMessage::Authenticated)))
+        );
+
+        let channel = tonic::transport::Endpoint::from_static("http://localhost")
+            .connect_with_connector(tower::service_fn(move |_| {
+                let path = grpc_path.clone();
+                async move {
+                    UnixStream::connect(path)
+                        .await
+                        .map(hyper_util::rt::TokioIo::new)
+                }
+            }))
+            .await
+            .unwrap();
+        let ask = tokio::spawn(async move {
+            snitchwatch_proto::protocol::ui_client::UiClient::new(channel)
+                .ask_rule(Connection {
+                    protocol: "tcp".into(),
+                    dst_host: "example.com".into(),
+                    dst_ip: "93.184.216.34".into(),
+                    dst_port: 443,
+                    process_path: "/usr/bin/curl".into(),
+                    ..Default::default()
+                })
+                .await
+                .unwrap()
+                .into_inner()
+        });
+        let pending_id = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if let Message::Text(text) = gui.next().await.unwrap().unwrap() {
+                    if let Ok(ServerMessage::InsertConnectionRows { rows }) =
+                        serde_json::from_str(&text)
+                    {
+                        if let Some(row) = rows.into_iter().find(|row| row.action.is_none()) {
+                            break row.id;
+                        }
+                    }
+                }
+            }
+        })
+        .await
+        .unwrap();
+        let verdict = ClientMessage::SetVerdict {
+            row_id: pending_id,
+            verdict: VerdictAction::Allow,
+            scope: VerdictScope::ThisHost,
+            duration: Some(VerdictDuration::Once),
+            remember: None,
+        };
+        gui.send(Message::Text(serde_json::to_string(&verdict).unwrap()))
+            .await
+            .unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(3), ask)
+                .await
+                .unwrap()
+                .unwrap()
+                .action,
+            "allow"
+        );
+        bridge.shutdown();
+        tokio::task::yield_now().await;
+        for (path, before) in [
+            (&gui_path, before_gui),
+            (&dir.path().join("opensnitchd.sock"), before_grpc),
+        ] {
+            let after = std::fs::metadata(path).unwrap();
+            assert_eq!(
+                (after.ino(), after.mode(), after.uid(), after.gid()),
+                (before.ino(), before.mode(), before.uid(), before.gid())
+            );
+        }
+        assert_eq!(
+            std::fs::metadata(dir.path()).unwrap().mode(),
+            before_dir.mode()
+        );
+    }
 
     #[tokio::test]
     async fn run_binds_socket_and_grpc_port_and_shutdown_works() {
@@ -614,7 +1075,7 @@ mod tests {
         let bridge = run(cfg).await.expect("run failed");
         assert!(bridge.ws_socket_path.exists());
         assert!(bridge.ws_token_path.exists());
-        assert!(bridge.grpc_addr.port() != 0);
+        assert!(bridge.grpc_endpoint.tcp_addr().unwrap().port() != 0);
         bridge.shutdown();
     }
 
@@ -659,7 +1120,7 @@ mod tests {
         let bridge = run(cfg).await.expect("run failed");
         let mut rx = bridge.broadcast_tx.subscribe();
 
-        let grpc_addr = bridge.grpc_addr;
+        let grpc_addr = bridge.grpc_endpoint.tcp_addr().unwrap();
         let ask = tokio::spawn(async move {
             let mut daemon = MockOpensnitchd::connect(grpc_addr).await.unwrap();
             daemon

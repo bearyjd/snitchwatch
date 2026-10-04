@@ -36,6 +36,7 @@ zbus = { workspace = true }
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio", "server", "server-auto"] }
 tower = { version = "0.5", features = ["util"] }
+libc = "0.2"
 
 [features]
 default = ["web-ui"]

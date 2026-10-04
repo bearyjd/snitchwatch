@@ -19,6 +19,8 @@ use tokio_tungstenite::tungstenite::Message;
 
 const RECONNECT_DELAY: Duration = Duration::from_secs(1);
 const AUTHENTICATION_ACK_TIMEOUT: Duration = Duration::from_secs(5);
+const SYSTEM_SOCKET_PATH: &str = "/run/snitchwatch/bridge.sock";
+const SYSTEM_TOKEN_PATH: &str = "/run/snitchwatch-auth/token";
 
 /// Cheaply-clonable typed channels for model feeds and UI actions.
 #[derive(Clone)]
@@ -150,12 +152,39 @@ enum Outcome {
 static STARTED: OnceLock<Outcome> = OnceLock::new();
 
 fn socket_path() -> PathBuf {
-    std::env::var_os("SNITCHWATCH_WS_SOCKET")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| snitchwatch_bridge::auth::runtime_dir().join("bridge.sock"))
+    resolve_socket_path(
+        std::env::var_os("SNITCHWATCH_WS_SOCKET"),
+        std::env::var_os("SNITCHWATCH_SYSTEM_BRIDGE").as_deref() == Some(std::ffi::OsStr::new("1")),
+        &snitchwatch_bridge::auth::runtime_dir(),
+    )
+}
+
+fn resolve_socket_path(
+    override_path: Option<std::ffi::OsString>,
+    system_mode: bool,
+    legacy_dir: &std::path::Path,
+) -> PathBuf {
+    match override_path {
+        Some(path) => PathBuf::from(path),
+        None if system_mode => PathBuf::from(SYSTEM_SOCKET_PATH),
+        None => legacy_dir.join("bridge.sock"),
+    }
 }
 
 fn token_path(socket_path: &std::path::Path) -> PathBuf {
+    resolve_token_path(socket_path, std::env::var_os("SNITCHWATCH_WS_TOKEN_PATH"))
+}
+
+fn resolve_token_path(
+    socket_path: &std::path::Path,
+    override_path: Option<std::ffi::OsString>,
+) -> PathBuf {
+    if let Some(path) = override_path {
+        return PathBuf::from(path);
+    }
+    if socket_path == std::path::Path::new(SYSTEM_SOCKET_PATH) {
+        return PathBuf::from(SYSTEM_TOKEN_PATH);
+    }
     socket_path
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."))
@@ -444,6 +473,44 @@ pub use snitchwatch_bridge::tray_state::TrayState as BridgeTrayState;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn system_and_custom_socket_token_paths_match_the_service_layout() {
+        let legacy_dir = std::path::Path::new("/tmp/legacy-runtime/snitchwatch");
+        assert_eq!(
+            resolve_socket_path(None, false, legacy_dir),
+            legacy_dir.join("bridge.sock")
+        );
+        assert_eq!(
+            resolve_socket_path(None, true, legacy_dir),
+            PathBuf::from(SYSTEM_SOCKET_PATH)
+        );
+        for system_mode in [false, true] {
+            assert_eq!(
+                resolve_socket_path(Some("/tmp/explicit.sock".into()), system_mode, legacy_dir),
+                PathBuf::from("/tmp/explicit.sock")
+            );
+        }
+        assert_eq!(
+            resolve_token_path(std::path::Path::new(SYSTEM_SOCKET_PATH), None),
+            PathBuf::from(SYSTEM_TOKEN_PATH)
+        );
+        assert_eq!(
+            resolve_token_path(std::path::Path::new("/tmp/custom/bridge.sock"), None),
+            PathBuf::from("/tmp/custom/token")
+        );
+        assert_eq!(
+            resolve_token_path(std::path::Path::new("bridge.sock"), None),
+            PathBuf::from("token")
+        );
+        assert_eq!(
+            resolve_token_path(
+                std::path::Path::new(SYSTEM_SOCKET_PATH),
+                Some("/tmp/explicit-token".into())
+            ),
+            PathBuf::from("/tmp/explicit-token")
+        );
+    }
 
     async fn accept_authenticated_snapshot(
         listener: &tokio::net::UnixListener,

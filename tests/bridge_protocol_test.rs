@@ -57,7 +57,7 @@ async fn ask_rule_round_trip_unary() {
     let mut ws = connect_stream(&bridge.ws_socket_path, bridge.ws_token.as_str()).await;
 
     // 3. Spawn an opensnitchd mock client and fire AskRule in the background.
-    let grpc_addr = bridge.grpc_addr;
+    let grpc_addr = bridge.grpc_endpoint.tcp_addr().unwrap();
     let ask_handle = tokio::spawn(async move {
         let mut mock = MockOpensnitchd::connect(grpc_addr).await.unwrap();
         mock.ask_rule(Connection {
@@ -152,7 +152,7 @@ async fn deny_round_trip_unary() {
 
     let mut ws = connect_stream(&bridge.ws_socket_path, bridge.ws_token.as_str()).await;
 
-    let grpc_addr = bridge.grpc_addr;
+    let grpc_addr = bridge.grpc_endpoint.tcp_addr().unwrap();
     let ask_handle = tokio::spawn(async move {
         let mut mock = MockOpensnitchd::connect(grpc_addr).await.unwrap();
         mock.ask_rule(Connection {
@@ -211,7 +211,7 @@ async fn diagnostics_report_reflects_firewall_down_after_subscribe() {
 
     let mut ws = connect_stream(&bridge.ws_socket_path, bridge.ws_token.as_str()).await;
 
-    let grpc_addr = bridge.grpc_addr;
+    let grpc_addr = bridge.grpc_endpoint.tcp_addr().unwrap();
     let subscribe_handle = tokio::spawn(async move {
         let mut mock = MockOpensnitchd::connect(grpc_addr).await.unwrap();
         mock.subscribe_with_config(snitchwatch_proto::protocol::ClientConfig {
@@ -283,7 +283,9 @@ async fn idle_daemon_with_open_notifications_stream_stays_reachable() {
     // Mock opensnitchd connects and opens the Notifications stream, but
     // never calls ping() — exactly the idle-but-connected shape observed
     // live from a real daemon.
-    let mut mock = MockOpensnitchd::connect(bridge.grpc_addr).await.unwrap();
+    let mut mock = MockOpensnitchd::connect(bridge.grpc_endpoint.tcp_addr().unwrap())
+        .await
+        .unwrap();
     let (_reply_tx, _count_rx) = mock.open_notifications().await.unwrap();
 
     // Mark the current value seen (Idle, from bridge startup) so a later
@@ -356,7 +358,9 @@ async fn notifications_stream_close_triggers_down_transition_within_one_tick() {
     };
     let mut bridge = run(cfg).await.expect("bridge run failed");
 
-    let mut mock = MockOpensnitchd::connect(bridge.grpc_addr).await.unwrap();
+    let mut mock = MockOpensnitchd::connect(bridge.grpc_endpoint.tcp_addr().unwrap())
+        .await
+        .unwrap();
     let (reply_tx, _count_rx) = mock.open_notifications().await.unwrap();
 
     // Let last_activity age well past DAEMON_DOWN_TIMEOUT while the stream
@@ -424,7 +428,9 @@ async fn generic_alert_fails_ebpf_check_persists_across_subscribe_clears_on_rech
 
     let mut ws = connect_stream(&bridge.ws_socket_path, bridge.ws_token.as_str()).await;
 
-    let mut mock = MockOpensnitchd::connect(bridge.grpc_addr).await.unwrap();
+    let mut mock = MockOpensnitchd::connect(bridge.grpc_endpoint.tcp_addr().unwrap())
+        .await
+        .unwrap();
 
     // vendor/opensnitch/daemon/main.go:645 — the real string opensnitchd
     // v1.8.0 sends on this exact failure.
@@ -569,7 +575,9 @@ async fn rule_update_and_delete_reach_the_daemon_as_notifications() {
 
     // The stream must be open *before* the effect is sent: the bridge
     // broadcasts to whoever is subscribed and replays nothing.
-    let mut mock = MockOpensnitchd::connect(bridge.grpc_addr).await.unwrap();
+    let mut mock = MockOpensnitchd::connect(bridge.grpc_endpoint.tcp_addr().unwrap())
+        .await
+        .unwrap();
     let (_reply_tx, mut notifications) = mock.open_notifications().await.unwrap();
 
     // Shaped exactly like `RulesStore::toggled_rule_json` output: the full

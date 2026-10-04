@@ -42,6 +42,7 @@ fn isolated_command(dir: &Path, args: &[&str]) -> Command {
         .current_dir(dir)
         .env("SNITCHWATCH_WS_SOCKET", "./bridge.sock")
         .env("SNITCHWATCH_GRPC_BIND", "127.0.0.1:0")
+        .env_remove("SNITCHWATCH_SYSTEM_BRIDGE")
         .env("XDG_RUNTIME_DIR", dir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -128,6 +129,9 @@ fn assert_prints_usage(flag: &str) {
     for needle in [
         "SNITCHWATCH_GRPC_BIND",
         "SNITCHWATCH_WS_SOCKET",
+        "SNITCHWATCH_SYSTEM_BRIDGE=1",
+        "SNITCHWATCH_WS_TOKEN_PATH",
+        "GRPC_SOCKET_PATH=",
         "GRPC_LISTEN_ADDR=",
     ] {
         assert!(
@@ -142,6 +146,45 @@ fn assert_prints_usage(flag: &str) {
 #[test]
 fn long_help_prints_usage_without_io() {
     assert_prints_usage("--help");
+}
+
+#[test]
+fn system_mode_missing_activation_fails_without_legacy_socket_or_token() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = isolated_command(dir.path(), &[])
+        .env("SNITCHWATCH_SYSTEM_BRIDGE", "1")
+        .env(
+            "SNITCHWATCH_GRPC_BIND",
+            "invalid-address-ignored-in-system-mode",
+        )
+        .env_remove("LISTEN_PID")
+        .env_remove("LISTEN_FDS")
+        .env_remove("LISTEN_FDNAMES")
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("system socket activation failed"));
+    assert!(!dir.path().join("bridge.sock").exists());
+    assert!(!dir.path().join("token").exists());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!stdout.contains("GRPC_LISTEN_ADDR="));
+}
+
+#[test]
+fn invalid_system_mode_fails_without_falling_back_to_tcp() {
+    let dir = tempfile::tempdir().unwrap();
+    for mode in ["true", "0", ""] {
+        let out = isolated_command(dir.path(), &[])
+            .env("SNITCHWATCH_SYSTEM_BRIDGE", mode)
+            .output()
+            .unwrap();
+        assert!(!out.status.success());
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("SNITCHWATCH_SYSTEM_BRIDGE must be 1")
+        );
+        assert!(!dir.path().join("bridge.sock").exists());
+        assert!(!dir.path().join("token").exists());
+    }
 }
 
 #[test]

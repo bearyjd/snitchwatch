@@ -20,8 +20,9 @@
 
 use rand::RngCore;
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 /// Number of random bytes in a generated token, before hex-encoding.
@@ -102,6 +103,48 @@ pub fn write_token_file(token: &Token, path: &Path) -> io::Result<()> {
     fs::write(path, token.as_str())?;
     fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
     Ok(())
+}
+
+/// Atomically replace the system bridge token without touching its service-owned
+/// parent directory. The caller's setgid runtime directory supplies the UI
+/// group; `O_NOFOLLOW`/`create_new` prevent following an attacker-made entry.
+pub fn write_system_token_file(token: &Token, path: &Path) -> io::Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "token has no parent"))?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "token has no filename"))?;
+    let temp = parent.join(format!(
+        ".{}.{}.tmp",
+        name.to_string_lossy(),
+        std::process::id()
+    ));
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o640)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&temp)?;
+    let result = (|| {
+        if file.metadata()?.gid() != fs::metadata(parent)?.gid() {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "system token group did not inherit auth directory group",
+            ));
+        }
+        file.set_permissions(fs::Permissions::from_mode(0o640))?;
+        file.write_all(token.as_str().as_bytes())?;
+        file.sync_all()?;
+        fs::rename(&temp, path)
+    })();
+    if result.is_err() {
+        drop(file);
+        // create_new above proves this temporary entry belongs to this write.
+        // Preserve any existing published token when initialization fails.
+        let _ = fs::remove_file(&temp);
+    }
+    result
 }
 
 /// Read a previously written token file back (trims trailing whitespace/
