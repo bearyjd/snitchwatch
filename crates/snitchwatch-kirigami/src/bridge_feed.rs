@@ -125,13 +125,49 @@ fn dispatch(msg: snitchwatch_bridge::ws_messages::ClientMessage) {
         tracing::warn!("BridgeFeed: bridge not running; dropping client message");
         return;
     };
+    if let Err(error) = dispatch_to(&handles, msg) {
+        tracing::warn!(error = %error, "BridgeFeed: client mutation dropped");
+    }
+}
+
+pub(crate) fn dispatch_to(
+    handles: &crate::bridge_runtime::BridgeHandles,
+    mut msg: snitchwatch_bridge::ws_messages::ClientMessage,
+) -> Result<(), crate::bridge_runtime::SendClientMessageError> {
     // A verdict or configuration change applies to the service instance that
     // supplied the UI state. Never queue it across a disconnect: a restarted
     // bridge may have different pending rows, rules, or profile state.
     // Do not await on the Qt thread. `try_send` also rejects a saturated
     // channel instead of retaining a mutation long enough to cross a service
     // restart.
-    if let Err(error) = handles.try_send(msg) {
-        tracing::warn!(error = %error, "BridgeFeed: client mutation dropped");
+    if let snitchwatch_bridge::ws_messages::ClientMessage::SetVerdict { row_id, .. } = &mut msg {
+        let Some((session, wire_id)) = split_session_row_id(row_id) else {
+            return Err(crate::bridge_runtime::SendClientMessageError::StaleSession);
+        };
+        *row_id = wire_id.to_owned();
+        handles.try_send_for_session(session, msg)
+    } else {
+        handles.try_send(msg)
+    }
+}
+
+/// Local-only row identity. Never transmitted to the service.
+fn split_session_row_id(id: &str) -> Option<(u64, &str)> {
+    let (session, wire_id) = id.split_once(':')?;
+    let session = session.parse::<u64>().ok().filter(|id| *id != 0)?;
+    (!wire_id.is_empty()).then_some((session, wire_id))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn local_row_identity_retains_origin_even_when_wire_ids_are_reused() {
+        assert_eq!(split_session_row_id("1:7"), Some((1, "7")));
+        assert_eq!(split_session_row_id("2:7"), Some((2, "7")));
+        for id in ["7", "0:7", "invalid:7", "2:"] {
+            assert_eq!(split_session_row_id(id), None);
+        }
     }
 }

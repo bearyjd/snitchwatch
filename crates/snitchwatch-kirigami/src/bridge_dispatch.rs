@@ -15,7 +15,7 @@
 //! handles (see the `*::row_store` modules); they are pure functions over
 //! [`ServerMessage`] and unit-tested here without any Qt dependency.
 
-use crate::bridge_runtime::ReceivedServerMessage;
+use crate::bridge_runtime::{ReceivedServerMessage, SendClientMessageError};
 use snitchwatch_bridge::ws_messages::{ClientMessage, ServerMessage};
 
 /// True when `msg` mutates the connection list (drives `ConnectionsModel`).
@@ -143,7 +143,10 @@ pub fn decode_client(json: &str) -> Result<ClientMessage, serde_json::Error> {
 /// re-broadcast full snapshots ([`ClientMessage::RequestSnapshot`]): these are
 /// stateful snapshot+delta streams, so silently skipping deltas would leave
 /// the model stale until the next natural snapshot — which for connections
-/// never comes. Exits when either channel closes.
+/// never comes. A snapshot is also requested after subscription. Transient
+/// disconnects or a full request queue keep the feed alive and retry the
+/// snapshot until accepted. Exits when the broadcast closes or the client
+/// runtime has stopped.
 pub async fn run_feed<F, R>(
     mut rx: tokio::sync::broadcast::Receiver<ReceivedServerMessage>,
     request_snapshot: R,
@@ -152,11 +155,26 @@ pub async fn run_feed<F, R>(
     deliver: F,
 ) where
     F: Fn(u64, &ServerMessage, String) + Send + 'static,
-    R: Fn() -> bool + Send + 'static,
+    R: Fn() -> Result<(), SendClientMessageError> + Send + 'static,
 {
     use tokio::sync::broadcast::error::RecvError;
+    let mut resync_pending = true;
+    let mut retry = tokio::time::interval(std::time::Duration::from_millis(100));
+    retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
-        match rx.recv().await {
+        tokio::select! {
+            _ = retry.tick(), if resync_pending => {
+                match request_snapshot() {
+                    Ok(()) => resync_pending = false,
+                    Err(
+                        SendClientMessageError::Disconnected
+                        | SendClientMessageError::Full
+                        | SendClientMessageError::StaleSession,
+                    ) => {}
+                    Err(SendClientMessageError::Stopped) => break,
+                }
+            }
+            received = rx.recv() => match received {
             Ok(received) => {
                 if !interest(&received.message) {
                     continue;
@@ -172,11 +190,11 @@ pub async fn run_feed<F, R>(
                     skipped = n,
                     "feed lagged behind bridge; requesting snapshot resync"
                 );
-                if !request_snapshot() {
-                    break;
-                }
+                resync_pending = true;
+                retry.reset_immediately();
             }
             Err(RecvError::Closed) => break,
+        }
         }
     }
 }
@@ -201,24 +219,12 @@ pub fn spawn_feed<F>(
         rx,
         {
             let handles = handles.clone();
-            move || handles.try_send(ClientMessage::RequestSnapshot).is_ok()
+            move || handles.try_send(ClientMessage::RequestSnapshot)
         },
         label,
         interest,
         move |connection_id, message, json| deliver(connection_id, message, json),
     ));
-    let snapshot_handles = handles.clone();
-    handles.runtime().spawn(async move {
-        if snapshot_handles
-            .try_send(ClientMessage::RequestSnapshot)
-            .is_err()
-        {
-            tracing::warn!(
-                feed = label,
-                "feed: bridge client stopped before snapshot request"
-            );
-        }
-    });
 }
 
 #[cfg(test)]
@@ -526,7 +532,7 @@ mod tests {
 
         let feed = tokio::spawn(run_feed(
             brx,
-            || true,
+            || Ok(()),
             "test-rules",
             interests_rules,
             move |connection_id, msg, json| {
@@ -581,39 +587,167 @@ mod tests {
 
     #[tokio::test]
     async fn run_feed_requests_snapshot_resync_after_lagging() {
-        // Capacity-1 broadcast: overrunning it before the consumer task starts
-        // guarantees the first recv() observes Lagged.
+        // Capacity-1 broadcast: overrunning it without yielding guarantees
+        // the next recv() observes Lagged.
         let (btx, brx) = tokio::sync::broadcast::channel(1);
         let (itx, mut irx) = tokio::sync::mpsc::channel(4);
 
-        btx.send(ReceivedServerMessage {
-            connection_id: 1,
-            message: ServerMessage::ClearConnectionRows,
-        })
-        .unwrap();
-        btx.send(ReceivedServerMessage {
-            connection_id: 1,
-            message: ServerMessage::ClearConnectionRows,
-        })
-        .unwrap();
-        btx.send(ReceivedServerMessage {
-            connection_id: 1,
-            message: ServerMessage::ClearConnectionRows,
-        })
-        .unwrap();
-
-        tokio::spawn(run_feed(
+        let feed = tokio::spawn(run_feed(
             brx,
-            move || itx.try_send(ClientMessage::RequestSnapshot).is_ok(),
+            move || {
+                itx.try_send(ClientMessage::RequestSnapshot)
+                    .map_err(|_| SendClientMessageError::Full)
+            },
             "test-lag",
             interests_connections,
             |_connection_id, _msg, _json| {},
         ));
 
+        assert_eq!(irx.recv().await.unwrap(), ClientMessage::RequestSnapshot);
+        for _ in 0..3 {
+            btx.send(ReceivedServerMessage {
+                connection_id: 1,
+                message: ServerMessage::ClearConnectionRows,
+            })
+            .unwrap();
+        }
         let resync = tokio::time::timeout(std::time::Duration::from_secs(1), irx.recv())
             .await
             .expect("no snapshot request after lag")
             .expect("inbound channel closed");
         assert_eq!(resync, ClientMessage::RequestSnapshot);
+        drop(btx);
+        feed.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn run_feed_retries_initial_snapshot_when_disconnected() {
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        };
+        let (btx, brx) = tokio::sync::broadcast::channel(16);
+        let connected = Arc::new(AtomicBool::new(false));
+        let request_connected = connected.clone();
+        let (atx, mut arx) = tokio::sync::mpsc::unbounded_channel();
+        let (dtx, mut drx) = tokio::sync::mpsc::unbounded_channel();
+        let feed = tokio::spawn(run_feed(
+            brx,
+            move || {
+                let result = if request_connected.load(Ordering::SeqCst) {
+                    Ok(())
+                } else {
+                    Err(SendClientMessageError::Disconnected)
+                };
+                atx.send(result).unwrap();
+                result
+            },
+            "test-reconnect",
+            interests_connections,
+            move |session, _, _| {
+                dtx.send(session).unwrap();
+            },
+        ));
+        assert_eq!(
+            arx.recv().await.unwrap(),
+            Err(SendClientMessageError::Disconnected)
+        );
+        connected.store(true, Ordering::SeqCst);
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), arx.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+            Ok(())
+        );
+        btx.send(ReceivedServerMessage {
+            connection_id: 2,
+            message: ServerMessage::ClearConnectionRows,
+        })
+        .unwrap();
+        assert_eq!(drx.recv().await.unwrap(), 2);
+        drop(btx);
+        feed.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn run_feed_survives_transient_snapshot_rejection_after_lag() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        for failure in [
+            SendClientMessageError::Full,
+            SendClientMessageError::Disconnected,
+        ] {
+            let (btx, brx) = tokio::sync::broadcast::channel(1);
+            let (atx, mut arx) = tokio::sync::mpsc::unbounded_channel();
+            let (dtx, mut drx) = tokio::sync::mpsc::unbounded_channel();
+            let attempts = AtomicUsize::new(0);
+            let feed = tokio::spawn(run_feed(
+                brx,
+                move || {
+                    let result = if attempts.fetch_add(1, Ordering::SeqCst) == 1 {
+                        Err(failure)
+                    } else {
+                        Ok(())
+                    };
+                    atx.send(result).unwrap();
+                    result
+                },
+                "test-transient-lag",
+                interests_connections,
+                move |session, _, _| {
+                    dtx.send(session).unwrap();
+                },
+            ));
+            assert_eq!(arx.recv().await.unwrap(), Ok(()));
+            // No await between sends: the single-thread test executor cannot
+            // poll the feed before the buffer overruns.
+            for _ in 0..3 {
+                btx.send(ReceivedServerMessage {
+                    connection_id: 1,
+                    message: ServerMessage::ClearConnectionRows,
+                })
+                .unwrap();
+            }
+            assert_eq!(arx.recv().await.unwrap(), Err(failure));
+            assert_eq!(
+                tokio::time::timeout(std::time::Duration::from_secs(1), arx.recv())
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                Ok(())
+            );
+            while drx.try_recv().is_ok() {}
+            btx.send(ReceivedServerMessage {
+                connection_id: 2,
+                message: ServerMessage::ClearConnectionRows,
+            })
+            .unwrap();
+            assert_eq!(
+                tokio::time::timeout(std::time::Duration::from_secs(1), drx.recv())
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                2
+            );
+            drop(btx);
+            feed.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn run_feed_exits_when_snapshot_client_has_stopped() {
+        let (_btx, brx) = tokio::sync::broadcast::channel(1);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            run_feed(
+                brx,
+                || Err(SendClientMessageError::Stopped),
+                "test-stopped",
+                interests_connections,
+                |_, _, _| {},
+            ),
+        )
+        .await
+        .expect("stopped client must release its feed");
     }
 }

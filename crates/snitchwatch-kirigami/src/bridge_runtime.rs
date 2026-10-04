@@ -68,6 +68,7 @@ struct ConnectionState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SendClientMessageError {
     Disconnected,
+    StaleSession,
     Full,
     Stopped,
 }
@@ -76,6 +77,7 @@ impl std::fmt::Display for SendClientMessageError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::Disconnected => "bridge disconnected",
+            Self::StaleSession => "action belongs to an older bridge session",
             Self::Full => "bridge request queue full",
             Self::Stopped => "bridge client stopped",
         })
@@ -113,12 +115,33 @@ impl BridgeHandles {
     /// action accepted just before loss can never be replayed to a replacement
     /// bridge service.
     pub fn try_send(&self, message: ClientMessage) -> Result<(), SendClientMessageError> {
+        self.try_send_with_session(None, message)
+    }
+
+    /// Preserve the originating row's session through the final queue admission.
+    /// Checking and enqueueing under the same lock closes the reconnect race.
+    pub fn try_send_for_session(
+        &self,
+        connection_id: u64,
+        message: ClientMessage,
+    ) -> Result<(), SendClientMessageError> {
+        self.try_send_with_session(Some(connection_id), message)
+    }
+
+    fn try_send_with_session(
+        &self,
+        expected_session: Option<u64>,
+        message: ClientMessage,
+    ) -> Result<(), SendClientMessageError> {
         let connection = self
             .connection
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if !connection.connected {
             return Err(SendClientMessageError::Disconnected);
+        }
+        if expected_session.is_some_and(|id| id != connection.connection_id) {
+            return Err(SendClientMessageError::StaleSession);
         }
         self.inbound_tx
             .try_send(QueuedClientMessage {
@@ -554,6 +577,31 @@ mod tests {
         // diagnostics request above is gone rather than replayed here.
         mark_connected(&connection);
         assert!(handles.is_current_session(2));
+        let verdict = |row_id| {
+            crate::pending_decision::build_verdict_message(row_id, "deny", "this_host", "this_time")
+                .unwrap()
+        };
+        // Both generic JSON and typed QML submissions converge on dispatch_to.
+        // Held-open dialogs retain 1:1 even after new service rows reuse ID 1.
+        assert_eq!(
+            crate::bridge_feed::dispatch_to(&handles, verdict("1:1")),
+            Err(SendClientMessageError::StaleSession)
+        );
+        assert_eq!(
+            crate::bridge_feed::dispatch_to(&handles, verdict("1")),
+            Err(SendClientMessageError::StaleSession)
+        );
+        assert!(matches!(
+            inbound_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        crate::bridge_feed::dispatch_to(&handles, verdict("2:1"))
+            .expect("new snapshot's identical wire row ID remains actionable");
+        let fresh_verdict = inbound_rx.recv().await.unwrap();
+        assert_eq!(fresh_verdict.connection_id, 2);
+        assert!(
+            matches!(fresh_verdict.message, ClientMessage::SetVerdict { row_id, .. } if row_id == "1")
+        );
         assert!(
             !handles.is_current_session(1),
             "a reconnect must not make the prior session current again"
