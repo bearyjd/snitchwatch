@@ -47,6 +47,9 @@ impl InsightResult {
 
 /// The two network lookups the insight panel needs, behind a trait so tests
 /// never touch a real network — see `insight::client::tests`' `FakeSource`.
+// clippy 1.99's `double_must_use` fires on async_trait's generated
+// `#[must_use]` methods (they return an already-must_use boxed future).
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait InsightSource: Send + Sync {
     /// Reverse-DNS (PTR) lookup. `None` on any failure (NXDOMAIN, timeout,

@@ -51,6 +51,9 @@ pub enum ProfileEvent {
 /// profile activation additionally needs to *clear* the previously active
 /// profile's band, and giving it its own name keeps that call site
 /// unambiguous about which band is being replaced.
+// clippy 1.99's `double_must_use` fires on async_trait's generated
+// `#[must_use]` methods (they return an already-must_use boxed future).
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait ProfileRuleSink: Send + Sync + 'static {
     async fn replace_profile_rules(

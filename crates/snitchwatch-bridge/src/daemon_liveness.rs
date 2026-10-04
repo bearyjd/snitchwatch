@@ -66,6 +66,10 @@ impl DaemonLiveness {
     /// "alive". `StreamGuard` normally makes open/close pairing automatic,
     /// but this stays defense-in-depth for any other caller.
     pub(crate) fn close_notification_stream(&self) {
+        // Rust 1.99 renames `fetch_update` to `try_update` and deprecates the
+        // old name; `try_update` doesn't exist in 1.98 (the release builder's
+        // pinned toolchain), so keep the old name until that pin moves.
+        #[allow(deprecated)]
         let previous = self
             .open_notification_streams
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
