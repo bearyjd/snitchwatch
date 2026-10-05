@@ -5,6 +5,9 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::notice::Notice;
+use crate::tray_state::TrayState;
+
 /// Which readiness/connectivity property a diagnostic check covers.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -42,6 +45,15 @@ pub struct DiagnosticCheck {
     rename_all_fields = "camelCase"
 )]
 pub enum ServerMessage {
+    /// Explicit acknowledgement that the first WebSocket frame contained the
+    /// current service token. This is sent directly to the just-authenticated
+    /// client before any broadcast traffic, so external clients must not
+    /// consider a socket usable merely because writing the token succeeded.
+    ///
+    /// This is an additive Snitchwatch extension. Legacy web clients ignore
+    /// its unknown `action` exactly as they do the other native-shell
+    /// extensions below.
+    Authenticated,
     InsertConnectionRows {
         rows: Vec<ConnectionRow>,
     },
@@ -169,6 +181,19 @@ pub enum ServerMessage {
         dropped: u64,
         rule_hits: u64,
         rule_misses: u64,
+    },
+    /// Current bridge-owned tray state. This additive extension lets native
+    /// shells consume the separately managed bridge without recreating its
+    /// in-process state publishers. Older WebSocket clients can ignore this
+    /// unknown action.
+    TrayState {
+        state: TrayState,
+    },
+    /// A bridge-owned desktop notification event. It is forwarded over the
+    /// authenticated WebSocket so external shells retain their established
+    /// notification controller input without starting another bridge.
+    Notice {
+        notice: Notice,
     },
 }
 
@@ -485,6 +510,17 @@ mod tests {
     }
 
     #[test]
+    fn authenticated_ack_is_a_backward_compatible_wire_extension() {
+        let message = ServerMessage::Authenticated;
+        let json = serde_json::to_string(&message).unwrap();
+        assert_eq!(json, r#"{"action":"authenticated"}"#);
+        assert_eq!(
+            serde_json::from_str::<ServerMessage>(&json).unwrap(),
+            message
+        );
+    }
+
+    #[test]
     fn deny_scope_narrowed_round_trips_via_json() {
         // Issue #14 security review round 2, HIGH: this must be a real
         // wire-protocol message the WS client actually receives, not just a
@@ -502,6 +538,56 @@ mod tests {
 
         let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, msg);
+    }
+
+    #[test]
+    fn shell_state_extensions_round_trip_via_json() {
+        let tray = ServerMessage::TrayState {
+            state: TrayState::Pending(3),
+        };
+        let notice = ServerMessage::Notice {
+            notice: Notice::Pending {
+                row_id: 42,
+                process: "firefox".into(),
+            },
+        };
+
+        for message in [tray, notice] {
+            let json = serde_json::to_string(&message).unwrap();
+            let decoded: ServerMessage = serde_json::from_str(&json).unwrap();
+            assert_eq!(decoded, message);
+        }
+    }
+
+    #[test]
+    fn legacy_web_dispatcher_ignores_shell_only_wire_extensions() {
+        // The bundled legacy web client has an explicit default branch for
+        // unknown server actions. Keep the extension discriminators absent
+        // from its known-action switch: authenticated native shells consume
+        // them, while old web clients continue their normal message loop.
+        let legacy_dispatcher = include_str!("../../../web/js/app.js");
+        assert!(legacy_dispatcher.contains("function handleServerCommand(messageArray)"));
+        assert!(legacy_dispatcher
+            .contains("default:\n          console.warn(\"Unknown msg from server\""));
+
+        for message in [
+            ServerMessage::Authenticated,
+            ServerMessage::TrayState {
+                state: TrayState::Idle,
+            },
+            ServerMessage::Notice {
+                notice: Notice::DaemonAway,
+            },
+        ] {
+            let action = serde_json::to_value(message).unwrap()["action"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            assert!(
+                !legacy_dispatcher.contains(&format!("case \"{action}\"")),
+                "legacy web client must treat {action} as an ignorable unknown action"
+            );
+        }
     }
 
     #[test]

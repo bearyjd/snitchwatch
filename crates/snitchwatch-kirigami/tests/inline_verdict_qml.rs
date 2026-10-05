@@ -150,6 +150,28 @@ Window {
                 ]
             }));
             page.submitBatchVerdict("curl", "deny");
+            // A displayed old header can survive until a replacement snapshot
+            // flushes. Its captured session must not select new IDs with the
+            // same wire value/process; a fresh header remains actionable.
+            connModel.applyServerMessageJson(JSON.stringify({action: "clearConnectionRows"}));
+            connModel.applyServerMessageJson(JSON.stringify({
+                action: "insertConnectionRows",
+                rows: [
+                    { id: "2:1", process: "curl", processPath: null, dstHost: "example.com",
+                      dstIp: "2.2.2.2", dstPort: 443, protocol: "tcp", direction: "outgoing",
+                      action: null, bytesSent: 0, bytesReceived: 0, startedAtMs: 0,
+                      matchedRule: null }
+                ]
+            }));
+            const beforeStaleBatch = feedStub.denyCount;
+            page.submitBatchVerdict("curl", "deny", "1:");
+            if (feedStub.denyCount !== beforeStaleBatch) {
+                throw new Error("old batch header targeted a replacement session row");
+            }
+            page.submitBatchVerdict("curl", "deny", "2:");
+            if (feedStub.denyCount !== beforeStaleBatch + 1) {
+                throw new Error("fresh batch header could not target its session row");
+            }
         }
     }
 

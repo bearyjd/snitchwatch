@@ -208,6 +208,24 @@ async fn handle_socket(socket: WebSocket, handles: WsHandles, token: Token) {
         return;
     }
 
+    // A successful write of the token does not prove to a client that the
+    // server accepted it: the peer could close immediately after reading it.
+    // Send an explicit, per-connection acknowledgement before subscribing to
+    // broadcast traffic, making it the first server frame after a successful
+    // handshake.
+    let authenticated = match serde_json::to_string(&ServerMessage::Authenticated) {
+        Ok(message) => message,
+        Err(error) => {
+            error!(error = %error, "failed to serialize authentication acknowledgement");
+            let _ = sender.send(Message::Close(None)).await;
+            return;
+        }
+    };
+    if sender.send(Message::Text(authenticated)).await.is_err() {
+        debug!("WS client disconnected before authentication acknowledgement");
+        return;
+    }
+
     let mut broadcast_rx = handles.broadcast.subscribe();
 
     // Outbound task: forward broadcast messages to this client.
@@ -548,6 +566,20 @@ mod tests {
         ws.send(TMessage::Text(token.as_str().to_string()))
             .await
             .unwrap();
+
+        // The acknowledgement is deliberately the first server frame. A
+        // client must wait for this rather than assuming its token write was
+        // accepted.
+        let acknowledgement = tokio::time::timeout(std::time::Duration::from_secs(2), ws.next())
+            .await
+            .expect("should receive authentication acknowledgement")
+            .expect("stream should not end")
+            .expect("frame should not error");
+        assert!(matches!(
+            acknowledgement,
+            TMessage::Text(ref text)
+                if matches!(serde_json::from_str(text), Ok(ServerMessage::Authenticated))
+        ));
 
         // 2. Now a real ClientMessage should reach `handles.inbound`.
         let verdict = serde_json::json!({

@@ -4,11 +4,12 @@
 //! each entry to `notify-rust`. Headless tests use the receiver directly and
 //! never touch D-Bus.
 
+use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
 const BUS_CAPACITY: usize = 64;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Notice {
     Pending {
         row_id: u64,

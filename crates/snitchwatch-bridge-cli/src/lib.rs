@@ -239,6 +239,40 @@ pub async fn run(config: BridgeConfig) -> Result<RunningBridge> {
     let tray_rx = tray_pub.subscribe();
     let notice_rx = notice_bus.subscribe();
 
+    // External shells receive the same tray and desktop-notice inputs as
+    // in-process shells. These are additive WebSocket actions, so older
+    // clients remain compatible by ignoring actions they do not understand.
+    // Subscribe before spawning the pumps; snapshots below cover the current
+    // tray value for a client that connects after a state transition.
+    {
+        let mut tray_events = tray_pub.subscribe();
+        let tray_events_tx = broadcast_tx.clone();
+        tokio::spawn(async move {
+            while tray_events.changed().await.is_ok() {
+                let _ = tray_events_tx.send(ServerMessage::TrayState {
+                    state: tray_events.borrow().clone(),
+                });
+            }
+        });
+    }
+    {
+        let mut notice_events = notice_bus.subscribe();
+        let notice_events_tx = broadcast_tx.clone();
+        tokio::spawn(async move {
+            loop {
+                match notice_events.recv().await {
+                    Ok(notice) => {
+                        let _ = notice_events_tx.send(ServerMessage::Notice { notice });
+                    }
+                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                        warn!(skipped, "notice relay lagged behind bridge");
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+    }
+
     // Shared with the inbound pump below (SetFilteringPaused toggles it) and
     // read by UiService::ask_rule on every call. Resets to unpaused on every
     // bridge start, matching every other in-memory bridge state.
@@ -248,7 +282,7 @@ pub async fn run(config: BridgeConfig) -> Result<RunningBridge> {
         cache.clone(),
         broadcast_tx.clone(),
         tray_pub.clone(),
-        notice_bus,
+        notice_bus.clone(),
         filtering_paused.clone(),
     );
     // Grabbed before `.into_server()` consumes `ui_service_inner` — the
@@ -371,6 +405,7 @@ pub async fn run(config: BridgeConfig) -> Result<RunningBridge> {
     let blocklists_for_upstream = blocklists_mgr;
     let snapshot_tx = broadcast_tx.clone();
     let tray_pub_for_pause = tray_pub.clone();
+    let tray_pub_for_snapshot = tray_pub.clone();
     let filtering_paused_for_pump = filtering_paused.clone();
     let diagnostics_ctx_for_pump = diagnostics_ctx.clone();
     let notifications_for_pump = notifications_tx.clone();
@@ -439,6 +474,9 @@ pub async fn run(config: BridgeConfig) -> Result<RunningBridge> {
                     }
                     let _ = snapshot_tx.send(ServerMessage::DiagnosticsReport {
                         checks: diagnostics_ctx_for_pump.report(),
+                    });
+                    let _ = snapshot_tx.send(ServerMessage::TrayState {
+                        state: tray_pub_for_snapshot.subscribe().borrow().clone(),
                     });
                     info!("re-broadcast state snapshots after feed lag");
                 }
@@ -701,14 +739,17 @@ mod tests {
             .expect("inbound channel closed");
 
         // Expected snapshot sequence for an empty bridge: a connections clear
-        // (no insert — the cache is empty), then blocklists, then profiles.
+        // (no insert — the cache is empty), then blocklists, profiles, and
+        // the current tray value. The latter lets a GUI that subscribed after
+        // a state transition render the service-owned shell state correctly.
         // Ignore unrelated interleavings (e.g. traffic pump output) but bound
         // the wait so a missing snapshot fails rather than hangs.
         let mut saw_clear = false;
         let mut saw_blocklists = false;
         let mut saw_profiles = false;
+        let mut saw_tray = false;
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
-        while !(saw_clear && saw_blocklists && saw_profiles) {
+        while !(saw_clear && saw_blocklists && saw_profiles && saw_tray) {
             let msg = tokio::time::timeout_at(deadline, rx.recv())
                 .await
                 .expect("snapshot messages not re-broadcast within timeout")
@@ -717,6 +758,9 @@ mod tests {
                 ServerMessage::ClearConnectionRows => saw_clear = true,
                 ServerMessage::SetBlocklists { .. } => saw_blocklists = true,
                 ServerMessage::SetProfiles { .. } => saw_profiles = true,
+                ServerMessage::TrayState {
+                    state: TrayState::Idle,
+                } => saw_tray = true,
                 _ => {}
             }
         }

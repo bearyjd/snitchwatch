@@ -3,8 +3,8 @@
 //! Two responsibilities, both thin:
 //!   * **Status surface.** `ok` / `statusText` reflect
 //!     [`crate::bridge_runtime::status`] so `main.qml` can bind a
-//!     `Kirigami.InlineMessage` that appears only when the bridge failed to
-//!     start — the window still opens either way (no panic, no silent death).
+//!     `Kirigami.InlineMessage` when the external service is unavailable — the
+//!     window still opens either way (no panic, no silent death).
 //!   * **Inbound dispatcher.** Two QML entry points converge on one typed
 //!     `dispatch`: `sendClientJson(json)` is the sink the models' request
 //!     signals (`subscriptionRequested` / `ruleChangeRequested`) connect to
@@ -33,8 +33,8 @@ pub mod qobject {
         /// Live-wiring hub bound by `main.qml`.
         #[qobject]
         #[qml_element]
-        /// True once the in-process bridge is running; false if it failed to
-        /// start (or has not been started, e.g. in a headless QML test).
+        /// True while the external bridge service is connected; false while it
+        /// is reconnecting (or has not been started in a headless QML test).
         #[qproperty(bool, ok)]
         /// Human-readable status line for the app-level `InlineMessage`.
         #[qproperty(QString, status_text, cxx_name = "statusText")]
@@ -42,7 +42,7 @@ pub mod qobject {
 
         /// Refresh `ok` / `statusText` from the bridge runtime's current state.
         /// Called from `main.qml`'s `Component.onCompleted`; `main` has already
-        /// run startup, so this is a pure read of the outcome.
+        /// started the client, so this is a pure read of its current state.
         #[qinvokable]
         fn refresh(self: Pin<&mut BridgeFeed>);
 
@@ -125,12 +125,49 @@ fn dispatch(msg: snitchwatch_bridge::ws_messages::ClientMessage) {
         tracing::warn!("BridgeFeed: bridge not running; dropping client message");
         return;
     };
-    // Push onto the bridge's runtime — `mpsc::Sender::send` is async, and we
-    // must never block the Qt thread waiting on the channel.
-    let tx = handles.inbound_tx();
-    handles.runtime().spawn(async move {
-        if tx.send(msg).await.is_err() {
-            tracing::warn!("BridgeFeed: inbound channel closed; client message dropped");
+    if let Err(error) = dispatch_to(&handles, msg) {
+        tracing::warn!(error = %error, "BridgeFeed: client mutation dropped");
+    }
+}
+
+pub(crate) fn dispatch_to(
+    handles: &crate::bridge_runtime::BridgeHandles,
+    mut msg: snitchwatch_bridge::ws_messages::ClientMessage,
+) -> Result<(), crate::bridge_runtime::SendClientMessageError> {
+    // A verdict or configuration change applies to the service instance that
+    // supplied the UI state. Never queue it across a disconnect: a restarted
+    // bridge may have different pending rows, rules, or profile state.
+    // Do not await on the Qt thread. `try_send` also rejects a saturated
+    // channel instead of retaining a mutation long enough to cross a service
+    // restart.
+    if let snitchwatch_bridge::ws_messages::ClientMessage::SetVerdict { row_id, .. } = &mut msg {
+        let Some((session, wire_id)) = split_session_row_id(row_id) else {
+            return Err(crate::bridge_runtime::SendClientMessageError::StaleSession);
+        };
+        *row_id = wire_id.to_owned();
+        handles.try_send_for_session(session, msg)
+    } else {
+        handles.try_send(msg)
+    }
+}
+
+/// Local-only row identity. Never transmitted to the service.
+fn split_session_row_id(id: &str) -> Option<(u64, &str)> {
+    let (session, wire_id) = id.split_once(':')?;
+    let session = session.parse::<u64>().ok().filter(|id| *id != 0)?;
+    (!wire_id.is_empty()).then_some((session, wire_id))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn local_row_identity_retains_origin_even_when_wire_ids_are_reused() {
+        assert_eq!(split_session_row_id("1:7"), Some((1, "7")));
+        assert_eq!(split_session_row_id("2:7"), Some((2, "7")));
+        for id in ["7", "0:7", "invalid:7", "2:"] {
+            assert_eq!(split_session_row_id(id), None);
         }
-    });
+    }
 }

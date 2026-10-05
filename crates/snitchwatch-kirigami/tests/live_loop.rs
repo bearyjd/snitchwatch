@@ -1,5 +1,5 @@
 //! Live core-loop integration test (code-review item 5): a mock opensnitchd
-//! dials the in-process bridge and fires `AskRule`; the pending row flows
+//! dials a separately running bridge and fires `AskRule`; the pending row flows
 //! through exactly the glue the Kirigami shell runs below QML — the feed's
 //! routing predicate + JSON encoding (`bridge_dispatch`), a `RowStore` apply
 //! (what `ConnectionsModel` does on the Qt thread), and the decision dialog's
@@ -8,22 +8,25 @@
 //!
 //! Complements the workspace-root `tests/bridge_protocol_test.rs`, which
 //! proves the same loop over the *WebSocket* transport; this test proves the
-//! native shell's in-process path (`RunningBridge::{broadcast_tx,inbound_tx}`)
-//! with the shell's own Qt-free components in the middle. No Qt objects are
+//! native shell's external WebSocket path with the shell's own Qt-free
+//! components in the middle. No Qt objects are
 //! instantiated, so it runs fully headless.
 
 use std::time::Duration;
 
+use futures_util::{SinkExt, StreamExt};
 use mock_opensnitchd::MockOpensnitchd;
-use snitchwatch_bridge::ws_messages::ServerMessage;
+use snitchwatch_bridge::ws_messages::{ClientMessage, ServerMessage};
 use snitchwatch_bridge_cli::{run, BridgeConfig};
 use snitchwatch_kirigami::bridge_dispatch::{decode_client, encode_server, interests_connections};
 use snitchwatch_kirigami::connections::row_store::RowStore;
 use snitchwatch_kirigami::pending_decision::build_verdict_message;
 use snitchwatch_proto::protocol::Connection;
+use tokio::net::UnixStream;
+use tokio_tungstenite::{client_async, tungstenite::Message};
 
 #[tokio::test]
-async fn verdict_round_trips_through_the_in_process_glue() {
+async fn verdict_round_trips_through_the_external_websocket_glue() {
     let _ = tracing_subscriber::fmt::try_init();
 
     let dir = tempfile::tempdir().unwrap();
@@ -32,11 +35,21 @@ async fn verdict_round_trips_through_the_in_process_glue() {
         ws_socket_path: dir.path().join("bridge.sock"),
         cache_capacity: 64,
     };
-    let bridge = run(cfg).await.expect("bridge run failed");
+    let bridge = run(cfg.clone()).await.expect("bridge run failed");
 
-    // Subscribe BEFORE AskRule fires so the broadcast can't be missed — the
-    // same ordering `startBridgeFeed` guarantees by subscribing at startup.
-    let mut rx = bridge.broadcast_tx.subscribe();
+    // The production client reads the service-owned token and authenticates
+    // before requesting its initial snapshot; it never writes either file.
+    let token = snitchwatch_bridge::auth::read_token_file(&bridge.ws_token_path).unwrap();
+    let stream = UnixStream::connect(&cfg.ws_socket_path).await.unwrap();
+    let (mut ws, _) = client_async("ws://localhost/stream", stream).await.unwrap();
+    ws.send(Message::Text(token.as_str().to_owned()))
+        .await
+        .unwrap();
+    ws.send(Message::Text(
+        serde_json::to_string(&ClientMessage::RequestSnapshot).unwrap(),
+    ))
+    .await
+    .unwrap();
 
     let grpc_addr = bridge.grpc_addr;
     let ask = tokio::spawn(async move {
@@ -59,7 +72,15 @@ async fn verdict_round_trips_through_the_in_process_glue() {
     let mut store = RowStore::default();
     let row_id = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            let msg = rx.recv().await.expect("broadcast closed");
+            let msg = match ws
+                .next()
+                .await
+                .expect("websocket closed")
+                .expect("websocket error")
+            {
+                Message::Text(text) => serde_json::from_str(&text).expect("server message decode"),
+                other => panic!("unexpected websocket frame: {other:?}"),
+            };
             if !interests_connections(&msg) {
                 continue;
             }
@@ -94,11 +115,9 @@ async fn verdict_round_trips_through_the_in_process_glue() {
         build_verdict_message(&row_id, "allow", "this_host", "this_time").expect("verdict build");
     let json = serde_json::to_string(&verdict).expect("verdict serialize");
     let decoded = decode_client(&json).expect("verdict decode");
-    bridge
-        .inbound_tx
-        .send(decoded)
+    ws.send(Message::Text(serde_json::to_string(&decoded).unwrap()))
         .await
-        .expect("inbound channel closed");
+        .unwrap();
 
     // The daemon's blocked AskRule unary resolves with the allow rule.
     let rule = tokio::time::timeout(Duration::from_secs(5), ask)
