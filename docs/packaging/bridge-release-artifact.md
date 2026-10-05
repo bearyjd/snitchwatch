@@ -149,12 +149,18 @@ test "$(/usr/bin/snitchwatch-bridge-cli --version)" = "snitchwatch-bridge-cli $S
 XDG_RUNTIME_DIR="$(mktemp -d)" systemd-analyze verify --user \
   /usr/lib/systemd/user/snitchwatch-bridge.service
 grep -qx 'ConditionUser=!@system' /usr/lib/systemd/user/snitchwatch-bridge.service
-# the unit's gRPC bind must be what the daemon dials, and the daemon fails closed
+# the unit's gRPC bind must be what the daemon dials; retain the current allow default
 grep -q 'SNITCHWATCH_GRPC_BIND=127.0.0.1:50051' /usr/lib/systemd/user/snitchwatch-bridge.service
-jq -e '.Server.Address == "127.0.0.1:50051" and .DefaultAction == "deny"' \
+jq -e '.Server.Address == "127.0.0.1:50051" and .DefaultAction == "allow"' \
   /etc/opensnitchd/default-config.json
 test ! -e /usr/bin/opensnitch-ui   # upstream GUI would fight the bridge for the daemon
 ```
+
+Keep Bazzite's `DefaultAction` at `allow` with the current loopback gRPC
+transport. Before considering deny-by-default, complete
+[#35](https://github.com/bearyjd/snitchwatch/issues/35): migrate the root daemon
+to an authenticated per-user Unix-domain transport. This bridge release does not
+change that transport or the daemon configuration.
 
 ## Cutting a release (maintainer)
 
@@ -209,12 +215,20 @@ Byte-reproducibility is claimed only inside the pinned builder image with the
 toolchain recorded in the MANIFEST (Fedora's zlib-ng, gcc and glibc-devel all
 affect the bytes).
 
+## GUI compatibility
+
+Kirigami's external decision client (PR #38) connects to the installed bridge
+service over its token-authenticated Unix-domain WebSocket. It requires the
+`Authenticated` server acknowledgement introduced by that PR, which is intended
+for bridge v0.1.1 (currently in preparation, not published). The published bridge
+v0.1.0 lacks this acknowledgement and cannot serve the new client: the GUI stays
+unavailable and retries instead of reporting an authenticated connection. Upgrade
+the bridge service and GUI together. The GUI no longer starts an in-process bridge
+or replaces the service's socket/token, resolving
+[#34](https://github.com/bearyjd/snitchwatch/issues/34).
+
 ## Known limitations
 
-- **The Kirigami GUI's in-process bridge collides with this service**
-  ([#34](https://github.com/bearyjd/snitchwatch/issues/34)): both use
-  `127.0.0.1:50051` and `$XDG_RUNTIME_DIR/snitchwatch/`. Don't ship the GUI
-  next to the enabled unit until #34 is resolved.
 - Concurrent logins of several real users race for `127.0.0.1:50051`; only
   the first user's bridge binds it.
 - A per-user `~/.config/systemd/user/snitchwatch-bridge.service` (e.g. from the
