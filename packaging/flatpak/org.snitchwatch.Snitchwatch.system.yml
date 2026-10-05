@@ -90,7 +90,7 @@ finish-args:
   # GUI-owned config/state/data (autostart toggle, crash log, etc.).
   - --persist=.local/share/snitchwatch
   - --filesystem=xdg-config/snitchwatch:create
-  - --filesystem=xdg-state/snitchwatch:create
+  - --persist=.local/state/snitchwatch
 
 modules:
   - name: snitchwatch-kirigami
@@ -107,6 +107,7 @@ modules:
           /app/share/applications/org.snitchwatch.Snitchwatch.desktop
       - install -Dm644 packaging/flatpak/org.snitchwatch.Snitchwatch.metainfo.xml
           /app/share/metainfo/org.snitchwatch.Snitchwatch.metainfo.xml
+      - install -Dm644 web/icons/snitchwatch.svg /app/share/icons/hicolor/scalable/apps/org.snitchwatch.Snitchwatch.svg
       # No web/ install step: the Kirigami shell compiles its QML in via a
       # qrc resource (see crates/snitchwatch-kirigami/build.rs's QmlModule),
       # it does not serve web/ over HTTP into a webview the way

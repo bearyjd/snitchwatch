@@ -39,9 +39,25 @@ packaging/system/stage.sh /path/to/image-root \
 
 The staged overlay supplies sysusers, tmpfiles, one system service, and two
 socket units. Enable the two `.socket` units in the image/preset; do not
-enable the service directly. `opensnitchd` must be configured with
-`Server.Address: unix:///run/snitchwatch/opensnitchd.sock` before the default
-action is changed to deny.
+enable the service directly. For OpenSnitch 1.8.0, configure
+`Server.Address: unix:opensnitchd.sock` and give `opensnitch.service` this
+drop-in so the relative socket address resolves inside the protected runtime
+directory, after systemd has created the listener:
+
+```ini
+# /etc/systemd/system/opensnitch.service.d/snitchwatch-system-bridge.conf
+[Unit]
+Requires=snitchwatch-system-bridge-grpc.socket
+After=snitchwatch-system-bridge-grpc.socket
+
+[Service]
+WorkingDirectory=/run/snitchwatch
+```
+
+The absolute `unix:///run/snitchwatch/opensnitchd.sock` URI does not work with
+OpenSnitch 1.8.0's address parsing. Verify the daemon connects through the
+relative address and working directory before changing the default action to
+deny.
 
 ## GUI profile, migration, and verification
 
