@@ -36,7 +36,7 @@
 ---
 app-id: org.snitchwatch.Snitchwatch
 runtime: org.kde.Platform
-runtime-version: "6.9"
+runtime-version: "6.11"
 sdk: org.kde.Sdk
 sdk-extensions:
   - org.freedesktop.Sdk.Extension.rust-stable
@@ -97,7 +97,7 @@ modules:
       # CMakeLists.txt exporting to an external C++ build system. The KDE SDK
       # provides the Qt6 build tools (moc, rcc, qmlcachegen) cxx-qt-build
       # shells out to.
-      # GCC 14 supports mold directly. Append its selection after inherited SDK
+      # GCC supports mold directly. Append its selection after inherited SDK
       # Rust flags, preserving optimization, relro/now and every other SDK flag.
       # The extension supplies mold but no ld.mold name: add a build-only
       # symlink and GCC search path, without installing a compiler adapter.

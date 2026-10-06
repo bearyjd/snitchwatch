@@ -1,15 +1,16 @@
 # GUI Flatpak builds
 
-Both profiles build the Kirigami GUI from source with KDE SDK 6.9 and its
+Both profiles build the Kirigami GUI from source with KDE SDK 6.11 and its
 `org.freedesktop.Sdk.Extension.rust-stable` extension. The system profile
 uses read-only `/run/snitchwatch` and `/run/snitchwatch-auth` mounts; the
 primary profile retains the existing per-user transport. They share an
 app-id, so select one profile for each deployment.
 
-Guest installation during the October 5 validation reported the retained KDE
-6.9 runtime as end-of-life. The successful clean build establishes compilation
-for those pinned inputs. Before publishing, select a supported SDK/runtime,
-record its exact commits, and repeat build and runtime validation.
+The October 5 validation retained KDE 6.9 and reported it as end-of-life.
+Both manifests now intentionally select supported stable KDE 6.11 with its
+25.08 Rust extension. Record exact SDK/runtime/extension commits and repeat
+clean build and default KDE startup validation before publication. Historical
+6.9 conditional GUI results remain separate from those new release gates.
 
 The declared compiler inputs currently support **x86_64 only**. The manifests
 download protoc 29.3 from the official protobuf release and verify its
@@ -25,7 +26,7 @@ the SDK's existing optimization and hardening flags. An unexpected
 those flags. This uses GCC's supported linker selection rather than an
 external compiler adapter. The pinned SDK must contain GCC 12.1 or newer
 and the Rust extension's mold executable. See [GCC link options](https://gcc.gnu.org/onlinedocs/gcc/Link-Options.html),
-[mold 2.40.4 usage](https://github.com/rui314/mold/blob/v2.40.4/README.md#how-to-use),
+[SDK mold usage](https://github.com/rui314/mold#how-to-use),
 and [CXX-Qt linking](https://kdab.github.io/cxx-qt/book/internals/build-system.html).
 
 ## Generate and verify Cargo inputs
