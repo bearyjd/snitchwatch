@@ -312,8 +312,9 @@ async fn persistent_allow_verdict_broadcasts_rule_for_live_clients() {
         tray_pub,
         notice_bus,
         Arc::new(AtomicBool::new(false)),
-    )
-    .into_server();
+    );
+    let _gui_session = svc.client_presence().authenticated_session();
+    let svc = svc.into_server();
     tokio::spawn(async move {
         Server::builder()
             .add_service(svc)
@@ -400,8 +401,9 @@ async fn ask_rule_returns_deny_rule_when_resolved_with_deny() {
         tray_pub,
         notice_bus,
         Arc::new(AtomicBool::new(false)),
-    )
-    .into_server();
+    );
+    let _gui_session = svc.client_presence().authenticated_session();
+    let svc = svc.into_server();
     tokio::spawn(async move {
         Server::builder()
             .add_service(svc)
@@ -474,8 +476,9 @@ async fn deny_scope_narrowed_notice_sanitizes_attacker_chosen_process_name() {
         tray_pub,
         notice_bus,
         Arc::new(AtomicBool::new(false)),
-    )
-    .into_server();
+    );
+    let _gui_session = svc.client_presence().authenticated_session();
+    let svc = svc.into_server();
     tokio::spawn(async move {
         Server::builder()
             .add_service(svc)
@@ -562,8 +565,9 @@ async fn two_concurrent_ask_rules_get_distinct_ask_ids() {
         tray_pub,
         notice_bus,
         Arc::new(AtomicBool::new(false)),
-    )
-    .into_server();
+    );
+    let _gui_session = svc.client_presence().authenticated_session();
+    let svc = svc.into_server();
     tokio::spawn(async move {
         Server::builder()
             .add_service(svc)
@@ -634,6 +638,7 @@ async fn ask_rule_deny_publishes_recent_block_then_reverts_to_idle() {
         notice_bus,
         Arc::new(AtomicBool::new(false)),
     );
+    let _gui_session = svc.client_presence().authenticated_session();
 
     let mut tray_rx = tray_pub.subscribe();
 
@@ -698,6 +703,7 @@ async fn second_deny_within_ttl_supersedes_first_blocks_revert_timer() {
         notice_bus,
         Arc::new(AtomicBool::new(false)),
     );
+    let _gui_session = svc.client_presence().authenticated_session();
     let mut tray_rx = tray_pub.subscribe();
 
     // First block.
@@ -822,6 +828,7 @@ async fn ask_rule_prompts_normally_when_not_paused() {
     let notice_bus = Arc::new(crate::notice::NoticeBus::new());
     let filtering_paused = Arc::new(AtomicBool::new(false));
     let svc = UiService::new(cache.clone(), tx, tray_pub, notice_bus, filtering_paused);
+    let _gui_session = svc.client_presence().authenticated_session();
 
     let ask_handle = tokio::spawn({
         let svc = svc.clone();
@@ -1006,4 +1013,259 @@ fn display_summary_sanitizes_hostile_process_and_host_text() {
         "markup escaped: {s:?}"
     );
     assert!(s.contains(" → "), "keeps the summary shape: {s:?}");
+}
+
+// Lifecycle fixtures keep internal subscribers separate from GUI leases.
+fn lifecycle_service() -> (
+    UiService,
+    Arc<Mutex<ConnectionCache>>,
+    broadcast::Receiver<ServerMessage>,
+) {
+    let cache = Arc::new(Mutex::new(ConnectionCache::new(64)));
+    let (tx, rx) = broadcast::channel(64);
+    let svc = UiService::new(
+        cache.clone(),
+        tx,
+        Arc::new(TrayStatePublisher::new()),
+        Arc::new(NoticeBus::new()),
+        Arc::new(AtomicBool::new(false)),
+    );
+    (svc, cache, rx)
+}
+
+async fn lifecycle_pending(rx: &mut broadcast::Receiver<ServerMessage>) -> String {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let ServerMessage::InsertConnectionRows { rows } = rx.recv().await.unwrap() {
+                return rows[0].id.clone();
+            }
+        }
+    })
+    .await
+    .unwrap()
+}
+
+async fn lifecycle_removed(rx: &mut broadcast::Receiver<ServerMessage>, id: &str) {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match rx.recv().await.unwrap() {
+                ServerMessage::RemoveConnectionRows { ids }
+                    if ids.iter().any(|removed| removed == id) =>
+                {
+                    return
+                }
+                ServerMessage::UpdateRules { .. } | ServerMessage::UpdateConnectionRows { .. } => {
+                    panic!("cancelled Ask produced a verdict side effect")
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn no_gui_returns_unavailable_even_with_internal_broadcast_receiver() {
+    let (svc, cache, mut rx) = lifecycle_service();
+    let status = svc
+        .ask_rule(Request::new(Connection::default()))
+        .await
+        .unwrap_err();
+    assert_eq!(status.code(), tonic::Code::Unavailable);
+    assert!(cache.lock().await.is_empty());
+    assert!(rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn admission_loss_before_insertion_is_latched_across_reconnect() {
+    let (svc, cache, mut rx) = lifecycle_service();
+    let lease = svc.client_presence().authenticated_session();
+    let cache_lock = cache.lock().await;
+    let mut ask = Box::pin(svc.ask_rule(Request::new(Connection::default())));
+    assert!(futures_util::poll!(&mut ask).is_pending());
+    drop(lease);
+    let _reconnected = svc.client_presence().authenticated_session();
+    drop(cache_lock);
+    let status = ask.await.unwrap_err();
+    assert_eq!(status.code(), tonic::Code::Unavailable);
+    assert!(cache.lock().await.is_empty());
+    assert!(
+        rx.try_recv().is_err(),
+        "lost admission must not publish a prompt"
+    );
+}
+
+#[tokio::test]
+async fn last_disconnect_cancels_old_ask_despite_reconnect_and_late_verdict() {
+    let (svc, cache, mut rx) = lifecycle_service();
+    let lease = svc.client_presence().authenticated_session();
+    let ask_svc = svc.clone();
+    let ask =
+        tokio::spawn(async move { ask_svc.ask_rule(Request::new(Connection::default())).await });
+    let id = lifecycle_pending(&mut rx).await;
+    drop(lease);
+    let _new_client = svc.client_presence().authenticated_session();
+    let status = tokio::time::timeout(Duration::from_secs(2), ask)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(status.code(), tonic::Code::Unavailable);
+    lifecycle_removed(&mut rx, &id).await;
+    let mut cache = cache.lock().await;
+    assert_eq!(cache.pending_count(), 0);
+    assert!(cache.is_empty());
+    assert!(cache
+        .resolve(
+            &id,
+            Verdict::Allow,
+            VerdictDuration::Always,
+            crate::ws_messages::VerdictScope::AnyHost
+        )
+        .is_err());
+    assert!(cache.is_empty());
+    assert!(rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn rpc_future_drop_under_cache_contention_rejects_verdict_and_cleans_row() {
+    let (svc, cache, mut rx) = lifecycle_service();
+    let _lease = svc.client_presence().authenticated_session();
+    let ask = tokio::spawn(async move { svc.ask_rule(Request::new(Connection::default())).await });
+    let id = lifecycle_pending(&mut rx).await;
+    let mut locked = cache.lock().await;
+    ask.abort();
+    assert!(ask.await.unwrap_err().is_cancelled());
+    // The receiver has dropped, while the cleanup task is blocked by us.
+    assert!(locked
+        .resolve(
+            &id,
+            Verdict::Allow,
+            VerdictDuration::Always,
+            crate::ws_messages::VerdictScope::ThisHost
+        )
+        .is_err());
+    assert!(locked.is_empty());
+    drop(locked);
+    lifecycle_removed(&mut rx, &id).await;
+    tokio::task::yield_now().await;
+    assert_eq!(cache.lock().await.pending_count(), 0);
+    assert!(rx.try_recv().is_err(), "cleanup must not duplicate removal");
+}
+
+#[tokio::test]
+async fn tonic_client_abort_removes_real_server_pending_request() {
+    let (svc, cache, mut rx) = lifecycle_service();
+    let _lease = svc.client_presence().authenticated_session();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(
+        Server::builder()
+            .add_service(svc.into_server())
+            .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener)),
+    );
+    let mut client = UiClient::connect(format!("http://{address}"))
+        .await
+        .unwrap();
+    let mut ask_client = client.clone();
+    let ask = tokio::spawn(async move { ask_client.ask_rule(Connection::default()).await });
+    let id = lifecycle_pending(&mut rx).await;
+    ask.abort();
+    assert!(ask.await.unwrap_err().is_cancelled());
+    lifecycle_removed(&mut rx, &id).await;
+    assert!(cache.lock().await.is_empty());
+    assert_eq!(cache.lock().await.pending_count(), 0);
+    assert_eq!(
+        client
+            .ping(PingRequest {
+                id: 17,
+                stats: None
+            })
+            .await
+            .unwrap()
+            .into_inner()
+            .id,
+        17
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn verdict_that_wins_before_last_disconnect_is_preserved() {
+    let (svc, cache, mut rx) = lifecycle_service();
+    let lease = svc.client_presence().authenticated_session();
+    let ask_svc = svc.clone();
+    let ask =
+        tokio::spawn(async move { ask_svc.ask_rule(Request::new(Connection::default())).await });
+    let id = lifecycle_pending(&mut rx).await;
+    cache
+        .lock()
+        .await
+        .resolve(
+            &id,
+            Verdict::Allow,
+            VerdictDuration::Once,
+            crate::ws_messages::VerdictScope::ThisHost,
+        )
+        .unwrap();
+    drop(lease);
+    let rule = tokio::time::timeout(Duration::from_secs(2), ask)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap()
+        .into_inner();
+    assert_eq!(rule.action, "allow");
+    let cache = cache.lock().await;
+    assert_eq!(cache.pending_count(), 0);
+    assert_eq!(cache.rows()[0].action.as_deref(), Some("allow"));
+    assert!(rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn tonic_request_deadline_cleans_pending_with_silent_authenticated_gui() {
+    let (svc, cache, mut rx) = lifecycle_service();
+    let _lease = svc.client_presence().authenticated_session();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(
+        Server::builder()
+            .add_service(svc.into_server())
+            .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener)),
+    );
+    let mut client = UiClient::connect(format!("http://{address}"))
+        .await
+        .unwrap();
+    let mut timed_client = client.clone();
+    let ask = tokio::spawn(async move {
+        let mut request = Request::new(Connection::default());
+        request.set_timeout(Duration::from_millis(100));
+        timed_client.ask_rule(request).await
+    });
+    let id = lifecycle_pending(&mut rx).await;
+    let error = tokio::time::timeout(Duration::from_secs(2), ask)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+    assert!(matches!(
+        error.code(),
+        tonic::Code::Cancelled | tonic::Code::DeadlineExceeded
+    ));
+    lifecycle_removed(&mut rx, &id).await;
+    assert!(cache.lock().await.is_empty());
+    assert_eq!(
+        client
+            .ping(PingRequest {
+                id: 18,
+                stats: None
+            })
+            .await
+            .unwrap()
+            .into_inner()
+            .id,
+        18
+    );
+    server.abort();
 }

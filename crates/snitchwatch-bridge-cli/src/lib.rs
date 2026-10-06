@@ -305,8 +305,10 @@ where
         auth::write_token_file(&token, &ws_token_path).context("failed to write token file")?;
     }
 
+    let client_presence = snitchwatch_bridge::client_presence::ClientPresence::default();
     let ws_handles = WsHandles {
         broadcast: broadcast_tx.clone(),
+        presence: client_presence.clone(),
         inbound: inbound_tx.clone(),
         blocklists: blocklists_mgr.clone(),
         profiles: profiles_mgr.clone(),
@@ -384,7 +386,8 @@ where
         tray_pub.clone(),
         notice_bus.clone(),
         filtering_paused.clone(),
-    );
+    )
+    .with_client_presence(client_presence);
     // Grabbed before `.into_server()` consumes `ui_service_inner` — the
     // daemon-down watchdog below needs this to watch daemon liveness.
     let liveness = ui_service_inner.liveness_handle();
@@ -1119,6 +1122,19 @@ mod tests {
         };
         let bridge = run(cfg).await.expect("run failed");
         let mut rx = bridge.broadcast_tx.subscribe();
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+        let transport = tokio::net::UnixStream::connect(&bridge.ws_socket_path)
+            .await
+            .unwrap();
+        let (mut gui, _) = tokio_tungstenite::client_async("ws://localhost/stream", transport)
+            .await
+            .unwrap();
+        gui.send(Message::Text(bridge.ws_token.as_str().into()))
+            .await
+            .unwrap();
+        let ack = gui.next().await.unwrap().unwrap();
+        assert!(matches!(ack, Message::Text(ref text) if text.contains("authenticated")));
 
         let grpc_addr = bridge.grpc_endpoint.tcp_addr().unwrap();
         let ask = tokio::spawn(async move {

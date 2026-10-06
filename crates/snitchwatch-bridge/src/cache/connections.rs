@@ -6,11 +6,12 @@
 //!   - Each pending row owns a oneshot::Sender that resolves to the verdict;
 //!     this is what the gRPC client task awaits before responding to AskRule
 
+use crate::client_presence::Admission;
 use crate::tray_state::{TrayState, TrayStatePublisher};
 use crate::ws_messages::{ConnectionRow, VerdictDuration, VerdictScope};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::oneshot;
+use tokio::sync::{broadcast, oneshot};
 
 #[derive(Debug)]
 pub struct PendingHandle {
@@ -36,9 +37,15 @@ pub struct VerdictResolution {
     pub scope: VerdictScope,
 }
 
+struct PendingEntry {
+    sender: oneshot::Sender<VerdictResolution>,
+    admission: Option<Admission>,
+    cancellations: Option<broadcast::Sender<crate::ws_messages::ServerMessage>>,
+}
+
 pub struct ConnectionCache {
     rows: Vec<ConnectionRow>,
-    pending: HashMap<String, oneshot::Sender<VerdictResolution>>,
+    pending: HashMap<String, PendingEntry>,
     capacity: usize,
     tray: Option<Arc<TrayStatePublisher>>,
 }
@@ -113,10 +120,37 @@ impl ConnectionCache {
     /// channel. The gRPC client task awaits this receiver before responding
     /// to the AskRule call.
     pub fn insert_pending(&mut self, row: ConnectionRow) -> oneshot::Receiver<VerdictResolution> {
+        self.insert_pending_inner(row, None, None)
+    }
+
+    pub(crate) fn insert_admitted(
+        &mut self,
+        row: ConnectionRow,
+        admission: Admission,
+        cancellations: broadcast::Sender<crate::ws_messages::ServerMessage>,
+    ) -> Option<oneshot::Receiver<VerdictResolution>> {
+        admission
+            .clone()
+            .while_current(|| self.insert_pending_inner(row, Some(admission), Some(cancellations)))
+    }
+
+    fn insert_pending_inner(
+        &mut self,
+        row: ConnectionRow,
+        admission: Option<Admission>,
+        cancellations: Option<broadcast::Sender<crate::ws_messages::ServerMessage>>,
+    ) -> oneshot::Receiver<VerdictResolution> {
         debug_assert!(row.action.is_none(), "pending rows must have action=None");
         let id = row.id.clone();
         let (tx, rx) = oneshot::channel();
-        self.pending.insert(id, tx);
+        self.pending.insert(
+            id,
+            PendingEntry {
+                sender: tx,
+                admission,
+                cancellations,
+            },
+        );
         self.rows.push(row);
         self.evict_if_needed();
         self.republish_pending_count();
@@ -132,16 +166,32 @@ impl ConnectionCache {
         duration: VerdictDuration,
         scope: VerdictScope,
     ) -> Result<(), CacheError> {
-        let sender = self
+        let entry = self
             .pending
             .remove(row_id)
             .ok_or_else(|| CacheError::NotPending(row_id.to_string()))?;
-        // It's fine if the receiver was dropped (e.g. gRPC stream broke).
-        let _ = sender.send(VerdictResolution {
+        let cancellations = entry.cancellations;
+        let resolution = VerdictResolution {
             verdict,
             duration,
             scope,
-        });
+        };
+        let settle = || {
+            if entry.sender.send(resolution).is_err() {
+                return false;
+            }
+            true
+        };
+        let delivered = match entry.admission {
+            Some(admission) => admission.while_current(settle).unwrap_or(false),
+            None => settle(),
+        };
+        if !delivered {
+            self.rows.retain(|row| row.id != row_id);
+            Self::publish_cancellation(cancellations, row_id);
+            self.republish_pending_count();
+            return Err(CacheError::NotPending(row_id.to_string()));
+        }
 
         // Update the row's action so future re-renders show it as decided,
         // and record which rule now governs this connection: the same
@@ -164,6 +214,28 @@ impl ConnectionCache {
         };
         self.republish_pending_count();
         result
+    }
+
+    /// Cancel only unresolved prompts; a verdict that already won is preserved.
+    pub fn cancel_pending(&mut self, row_id: &str) -> bool {
+        let Some(entry) = self.pending.remove(row_id) else {
+            return false;
+        };
+        Self::publish_cancellation(entry.cancellations, row_id);
+        self.rows.retain(|row| row.id != row_id);
+        self.republish_pending_count();
+        true
+    }
+
+    fn publish_cancellation(
+        broadcast: Option<broadcast::Sender<crate::ws_messages::ServerMessage>>,
+        row_id: &str,
+    ) {
+        if let Some(broadcast) = broadcast {
+            let _ = broadcast.send(crate::ws_messages::ServerMessage::RemoveConnectionRows {
+                ids: vec![row_id.to_owned()],
+            });
+        }
     }
 
     pub fn pending_ids(&self) -> Vec<String> {
@@ -307,6 +379,56 @@ mod tests {
         // hardcoding the hash.
         let expected = crate::translator::verdict::rule_name_for(Verdict::Deny, "h", 443);
         assert_eq!(c.rows()[0].matched_rule.as_deref(), Some(expected.as_str()));
+    }
+
+    #[test]
+    fn disconnect_and_verdict_race_settles_exactly_once() {
+        for _ in 0..64 {
+            let presence = crate::client_presence::ClientPresence::default();
+            let lease = presence.authenticated_session();
+            let (tx, mut messages) = broadcast::channel(8);
+            let mut cache = ConnectionCache::new(8);
+            let receiver = cache
+                .insert_admitted(pending_row("race"), presence.admit().unwrap(), tx)
+                .unwrap();
+            let cache = Arc::new(std::sync::Mutex::new(cache));
+            let barrier = Arc::new(std::sync::Barrier::new(2));
+            let loss_barrier = barrier.clone();
+            let loss = std::thread::spawn(move || {
+                loss_barrier.wait();
+                drop(lease);
+            });
+            barrier.wait();
+            let outcome = cache.lock().unwrap().resolve(
+                "race",
+                Verdict::Allow,
+                VerdictDuration::Always,
+                VerdictScope::ThisHost,
+            );
+            loss.join().unwrap();
+            let mut cache = cache.lock().unwrap();
+            assert_eq!(cache.pending_count(), 0);
+            assert!(!cache.cancel_pending("race"));
+            assert!(cache
+                .resolve(
+                    "race",
+                    Verdict::Deny,
+                    VerdictDuration::Always,
+                    VerdictScope::AnyHost
+                )
+                .is_err());
+            if outcome.is_ok() {
+                assert_eq!(cache.rows()[0].action.as_deref(), Some("allow"));
+                assert_eq!(receiver.blocking_recv().unwrap().verdict, Verdict::Allow);
+                assert!(messages.try_recv().is_err());
+            } else {
+                assert!(cache.is_empty());
+                assert!(receiver.blocking_recv().is_err());
+                assert!(matches!(messages.try_recv().unwrap(),
+                    crate::ws_messages::ServerMessage::RemoveConnectionRows { ids } if ids == ["race"]));
+                assert!(messages.try_recv().is_err());
+            }
+        }
     }
 
     #[test]

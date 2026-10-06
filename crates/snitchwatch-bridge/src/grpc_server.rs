@@ -5,6 +5,7 @@
 //! `grpc_client.rs` and `translator/downstream.rs` envelope hack.
 
 use crate::cache::connections::{ConnectionCache, Verdict};
+use crate::client_presence::ClientPresence;
 use crate::daemon_alerts::DaemonAlertStore;
 use crate::daemon_liveness::StreamGuard;
 use crate::diagnostics::DiagnosticsCtx;
@@ -209,6 +210,7 @@ pub struct UiService {
     /// constructor parameter, not internal-only state. See
     /// `docs/superpowers/plans/2026-07-12-tray-filter-off.md`.
     filtering_paused: Arc<AtomicBool>,
+    client_presence: ClientPresence,
     /// Set on every `subscribe()` call from opensnitchd's `is_firewall_running`
     /// field on its `ClientConfig`; read by a later diagnostics report
     /// assembler (via [`Self::firewall_status_handle`]) alongside the local
@@ -252,6 +254,28 @@ pub struct UiService {
     notifications: broadcast::Sender<Notification>,
 }
 
+/// Future-drop cleanup also runs for tonic transport cancellation. A closed
+/// receiver makes late verdicts fail even while asynchronous cleanup waits
+/// for the cache mutex; a settled verdict is never removed.
+struct PendingCleanup {
+    cache: Arc<Mutex<ConnectionCache>>,
+    row_id: String,
+}
+
+impl Drop for PendingCleanup {
+    fn drop(&mut self) {
+        if let Ok(mut cache) = self.cache.try_lock() {
+            cache.cancel_pending(&self.row_id);
+        } else {
+            let cache = self.cache.clone();
+            let row_id = self.row_id.clone();
+            tokio::spawn(async move {
+                cache.lock().await.cancel_pending(&row_id);
+            });
+        }
+    }
+}
+
 impl UiService {
     pub fn new(
         cache: Arc<Mutex<ConnectionCache>>,
@@ -269,11 +293,21 @@ impl UiService {
             liveness: DaemonLiveness::new(),
             block_generation: Arc::new(AtomicU64::new(0)),
             filtering_paused,
+            client_presence: ClientPresence::default(),
             firewall_status: Arc::new(StdMutex::new(None)),
             alert_store: Arc::new(DaemonAlertStore::new()),
             diagnostics_ctx: Arc::new(OnceLock::new()),
             notifications: broadcast::channel(NOTIFICATION_CHANNEL_CAPACITY).0,
         }
+    }
+
+    pub fn with_client_presence(mut self, presence: ClientPresence) -> Self {
+        self.client_presence = presence;
+        self
+    }
+
+    pub fn client_presence(&self) -> ClientPresence {
+        self.client_presence.clone()
     }
 
     /// Sender for outbound daemon commands (see [`Self::notifications`]).
@@ -462,6 +496,10 @@ impl Ui for UiService {
             )));
         }
 
+        let mut admission = self
+            .client_presence
+            .admit()
+            .ok_or_else(|| Status::unavailable("no authenticated GUI session"))?;
         let row = connection_to_row(&conn, ask_id);
         // Captured before `row` moves into the broadcast message below.
         // Both `row.process` and `row.dst_host` are attacker-influenced
@@ -478,25 +516,40 @@ impl Ui for UiService {
         let row_id = row.id.clone();
         let verdict_rx = {
             let mut cache = self.cache.lock().await;
-            cache.insert_pending(row.clone())
+            let receiver = cache
+                .insert_admitted(row.clone(), admission.clone(), self.broadcast.clone())
+                .ok_or_else(|| {
+                    Status::unavailable("authenticated GUI session lost before admission")
+                })?;
+            // Publish insertion under the settlement mutex so cancellation
+            // cannot publish removal first and leave a stale prompt behind.
+            let _ = self
+                .broadcast
+                .send(ServerMessage::InsertConnectionRows { rows: vec![row] });
+            self.notice_bus.send(crate::notice::Notice::Pending {
+                row_id: ask_id,
+                process: conn.process_path.clone(),
+            });
+            receiver
         };
+        let _pending_cleanup = PendingCleanup {
+            cache: self.cache.clone(),
+            row_id: row_id.clone(),
+        };
+        // Declared after cleanup so cancellation drops the receiver first.
+        let mut verdict_rx = verdict_rx;
 
-        if self.broadcast.receiver_count() > 0 {
-            let msg = ServerMessage::InsertConnectionRows { rows: vec![row] };
-            if let Err(e) = self.broadcast.send(msg) {
-                warn!(error = %e, "broadcast send failed");
+        let resolution = tokio::select! {
+            resolution = &mut verdict_rx => resolution,
+            _ = admission.lost() => {
+                if self.cache.lock().await.cancel_pending(&row_id) {
+                    return Err(Status::unavailable("last authenticated GUI session disconnected"));
+                }
+                // A verdict serialized before the loss already settled this Ask.
+                verdict_rx.await
             }
         }
-
-        // Notify desktop (Tauri shell shows a notification bubble).
-        self.notice_bus.send(crate::notice::Notice::Pending {
-            row_id: ask_id,
-            process: conn.process_path.clone(),
-        });
-
-        let resolution = verdict_rx
-            .await
-            .map_err(|_canceled| Status::cancelled("verdict oneshot dropped before resolution"))?;
+        .map_err(|_| Status::unavailable("pending Ask cancelled before resolution"))?;
 
         if resolution.verdict == Verdict::Deny {
             self.publish_recent_block(safe_what.clone());

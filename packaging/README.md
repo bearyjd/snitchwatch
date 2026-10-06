@@ -70,12 +70,17 @@ correct artifacts and their syntax is validated in CI (YAML/JSON parse +
 # Batteries-included image (needs the bluebuild CLI + podman/buildah):
 bluebuild build packaging/bluebuild/recipe.yml
 
-# GUI Flatpak (needs flatpak-builder + the KDE runtime, org.kde.Platform):
-python3 flatpak-cargo-generator.py Cargo.lock \
-  -o packaging/flatpak/generated-cargo-sources.json
-flatpak run org.flatpak.Builder --user --install --force-clean \
+# GUI Flatpak (prepare pinned Cargo inputs as documented in flatpak/README.md):
+python3 packaging/flatpak/generate-cargo-sources.py \
+  --generator /path/to/preparation/flatpak-cargo-generator.py
+flatpak-builder --user --disable-cache \
   build-dir packaging/flatpak/org.snitchwatch.Snitchwatch.yml
 ```
+
+See [`flatpak/README.md`](flatpak/README.md) for the pinned generator,
+declared build-only protoc/mold inputs, clean build procedure and evidence
+requirements. The build command above exports locally and does not install
+or launch the GUI.
 
 ## Pre-built bridge tarball (image-baked bridge)
 

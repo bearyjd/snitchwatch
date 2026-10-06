@@ -25,6 +25,55 @@ any member that can connect to the GUI socket can read it. The socket's group
 mode is the authorization boundary; a future protocol revision can remove the
 token handshake in system mode.
 
+## Unattended requests
+
+The reviewed follow-up tracks authenticated external WebSocket sessions,
+registered after token validation and a successful authentication
+acknowledgement. Internal broadcast subscribers do not establish GUI presence.
+An unpaused Ask without an authenticated session returns gRPC `Unavailable`
+before creating a pending row, so OpenSnitch applies its own configured default
+action. The bridge does not duplicate policy or translate reject into deny.
+
+When the last client disconnects, existing pending requests are canceled even
+if a new client immediately reconnects. RPC cancellation removes its pending
+row and broadcasts removal; late verdicts cannot create a rule or history
+entry. Paused auto-allow remains unchanged. An authenticated but silent GUI
+still uses the daemon's existing RPC deadline.
+
+These runtime changes are reviewed uncommitted work on base `2690109`; they
+are not in the existing published release. Disposable-VM no-GUI and
+last-external-client checks, a fresh headless boot, and synthetic protected-IPC
+RPC cancellation passed with `DefaultAction: allow` and enforcing SELinux.
+Conditional runtime and authorization checks passed on the exact new artifacts;
+default KDE startup
+also exited with `QWidget: Cannot create a QWidget without QApplication`
+(the GUI uses `QGuiApplication`). The reviewed bundle rendered with guest-only
+Wayland, software Qt Quick, Basic controls and generic platform-theme overrides;
+the exact sole GUI's disconnect then completed real daemon/curl fallback within
+76 ms of kill initiation and returned pending to zero within 75 ms. Those
+conditional tests do not establish a default startup fix. This startup defect
+and OpenSnitch 1.8.0's observed `nfq_close` shutdown crash remain unresolved
+rollout gates.
+
+In that conditional environment, independently reviewed rendered Allow
+completed the exact daemon/curl request in 521 ms with a matching allowed row
+and zero pending; the observer sent no verdict. The same GUI also survived
+bridge restart/token change and authenticated again. Those results are separate
+from the helper-only token-rotation timing.
+
+The reviewed GUI binary also rejected a nonmember's token access in a bounded
+probe. Both tested accounts had read-only IPC/auth mounts, with denied mutation
+attempts. Resolved, pending and interrupted daemon-stop samples were captured;
+the pending sample retained both queue watchdog warnings and an unsuccessful
+`nfq_close` message despite exit zero. The final resolved stop after actual GUI
+Allow also retained one queue watchdog warning, the `nfq_close` message and an
+nftables netlink `operation not permitted` error despite no live Ask.
+These results do not resolve the known
+daemon shutdown race. The retained KDE 6.9 runtime also produced an end-of-life
+warning at guest installation; a supported SDK/runtime needs build and runtime
+validation before release.
+
+
 ## Stage into an image
 
 Use `packaging/system/stage.sh`, not a live installer. It validates a
@@ -68,6 +117,18 @@ alternative `packaging/flatpak/org.snitchwatch.Snitchwatch.system.yml` profile;
 it has the same app-id and therefore replaces rather than coinstalls with the
 legacy profile. It grants read-only `/run/snitchwatch` and
 `/run/snitchwatch-auth`, and sets `SNITCHWATCH_SYSTEM_BRIDGE=1` for the GUI.
+
+The reviewed manifests declare checksum-pinned protoc 29.3 and the Rust SDK
+extension's mold linker, with compiler and debug tooling removed before export.
+Both profiles retain their existing runtime permissions. See
+[`../../packaging/flatpak/README.md`](../../packaging/flatpak/README.md) for
+pinned Cargo-source generation and clean build preparation. An isolated x86_64
+system-profile source build passed with Qt 6.9.3 and Rust 1.89.0 from reviewed
+snapshot SHA-256 `851f3a5647c373fe88477b0dddb63b5bc980084611f1d0b934f5ae82dd50cf07`.
+That snapshot includes the reviewed uncommitted runtime/tool changes; it does
+not establish release publication or immutable image installation. Guest
+installation reported the retained KDE 6.9 runtime as end-of-life; rebuild and
+repeat release validation with a supported SDK/runtime before publication.
 
 For a native GUI launch instead, select the same profile explicitly:
 
