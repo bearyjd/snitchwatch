@@ -77,13 +77,18 @@ Kirigami.ScrollablePage {
     // Issue #18 batch actions: parse ConnectionsModel.pendingRowIdsForProcess
     // and submit the same verdict for every pending row under that process
     // group. No new WS protocol — this is just N SetVerdict messages.
-    function submitBatchVerdict(processKey, choice) {
+    function submitBatchVerdict(processKey, choice, sourceSession) {
         if (!page.model) {
             return;
         }
         try {
             const ids = JSON.parse(page.model.pendingRowIdsForProcess(processKey));
             for (const id of ids) {
+                // The synchronous model flush may have installed a replacement
+                // service's snapshot since this header was displayed.
+                if (sourceSession && !id.startsWith(sourceSession)) {
+                    continue;
+                }
                 page.submitInlineVerdict(id, choice);
             }
         } catch (e) {
@@ -217,6 +222,7 @@ Kirigami.ScrollablePage {
 
             required property int index
             required property string rowId
+            required property string sourceSession
             required property string process
             required property string host
             required property int port
@@ -280,7 +286,7 @@ Kirigami.ScrollablePage {
                 }
                 row.submitted = true;
                 if (batch) {
-                    page.submitBatchVerdict(row.groupKey, choice);
+                    page.submitBatchVerdict(row.groupKey, choice, row.sourceSession);
                 } else {
                     page.submitInlineVerdict(row.rowId, choice);
                 }

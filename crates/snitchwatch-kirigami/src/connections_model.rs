@@ -61,6 +61,7 @@ const ROLE_MATCHED_RULE: i32 = 18;
 /// `connections::row_store::matched_rule_display`'s doc comment for exactly
 /// what it shows for pending / no-rule-name rows.
 const ROLE_MATCHED_RULE_DISPLAY: i32 = 19;
+const ROLE_SOURCE_SESSION: i32 = 20;
 
 #[cxx_qt::bridge]
 pub mod qobject {
@@ -323,6 +324,47 @@ fn collect_new_pending_ids(msgs: &[ServerMessage]) -> Vec<String> {
         .collect()
 }
 
+/// QML keeps these opaque IDs in delegates and held-open dialogs. Qualifying
+/// before storage makes every verdict retain its originating service session.
+fn qualify_connection_ids(msg: &mut ServerMessage, connection_id: u64) {
+    let qualify = |id: &mut String| *id = format!("{connection_id}:{id}");
+    match msg {
+        ServerMessage::InsertConnectionRows { rows }
+        | ServerMessage::UpdateConnectionRows { rows } => {
+            for row in rows {
+                qualify(&mut row.id);
+            }
+        }
+        ServerMessage::RemoveConnectionRows { ids } | ServerMessage::MoveConnetionRows { ids } => {
+            for id in ids {
+                qualify(id);
+            }
+        }
+        _ => {}
+    }
+}
+
+struct BufferedConnectionMessage {
+    // None is reserved for explicit injection in headless/model tests.
+    connection_id: Option<u64>,
+    message: ServerMessage,
+}
+
+fn take_current_grouped_messages(
+    buffered: Vec<BufferedConnectionMessage>,
+    is_current: impl Fn(u64) -> bool,
+) -> Vec<ServerMessage> {
+    buffered
+        .into_iter()
+        .filter_map(|entry| {
+            entry
+                .connection_id
+                .is_none_or(&is_current)
+                .then_some(entry.message)
+        })
+        .collect()
+}
+
 /// Mirror one message's delta into the Process->Domain group tree, Qt-free
 /// and incremental (see `connections::grouping` module docs) — shared by the
 /// immediate and debounced apply paths.
@@ -373,10 +415,11 @@ pub struct ConnectionsModelRust {
     /// Id of the row the user currently has selected (empty = none). Fed from
     /// QML via `setCurrentRowId`; consulted by the auto-select policy.
     current_row_id: String,
+    source_session: Option<u64>,
     /// Grouped-mode debounce buffer: messages received but not yet applied.
     /// Only used when the bridge runtime is available to schedule the flush;
     /// see `apply_server_message`. Never touched in flat mode.
-    pending_grouped_msgs: Vec<ServerMessage>,
+    pending_grouped_msgs: Vec<BufferedConnectionMessage>,
     /// Whether a debounced flush is already scheduled for the buffer above.
     grouped_flush_scheduled: bool,
 }
@@ -393,6 +436,7 @@ impl Default for ConnectionsModelRust {
             total_count: 0,
             oldest_pending_age_secs: -1,
             current_row_id: String::new(),
+            source_session: None,
             pending_grouped_msgs: Vec::new(),
             grouped_flush_scheduled: false,
         }
@@ -409,6 +453,14 @@ impl qobject::ConnectionsModel {
     }
 
     unsafe fn data(&self, index: &QModelIndex, role: i32) -> QVariant {
+        if role == ROLE_SOURCE_SESSION {
+            return QVariant::from(&QString::from(
+                &self
+                    .source_session
+                    .map(|id| format!("{id}:"))
+                    .unwrap_or_default(),
+            ));
+        }
         if self.grouped {
             let Some(entry) = self.grouped_projection.get(index.row() as usize) else {
                 return QVariant::default();
@@ -451,6 +503,7 @@ impl qobject::ConnectionsModel {
     fn role_names(&self) -> QHash<QHashPair_i32_QByteArray> {
         let mut roles = QHash::<QHashPair_i32_QByteArray>::default();
         roles.insert(ROLE_ID, QByteArray::from("rowId"));
+        roles.insert(ROLE_SOURCE_SESSION, QByteArray::from("sourceSession"));
         roles.insert(ROLE_PROCESS, QByteArray::from("process"));
         roles.insert(ROLE_HOST, QByteArray::from("host"));
         roles.insert(ROLE_PORT, QByteArray::from("port"));
@@ -510,13 +563,15 @@ impl qobject::ConnectionsModel {
             &handles,
             "ConnectionsModel",
             crate::bridge_dispatch::interests_connections,
-            move |connection_id, _msg, json| {
+            move |connection_id, msg, _json| {
+                let mut msg = msg.clone();
+                qualify_connection_ids(&mut msg, connection_id);
                 let session_handles = session_handles.clone();
                 let _ = qt_thread.queue(move |qobject| {
                     if !session_handles.is_current_session(connection_id) {
                         return;
                     }
-                    qobject.apply_server_message_json(&QString::from(&json));
+                    qobject.apply_message_for_session(msg, Some(connection_id));
                 });
             },
         );
@@ -532,11 +587,22 @@ impl qobject::ConnectionsModel {
     /// (flat mode, headless tests, bridge-less operation) the message applies
     /// immediately via [`Self::apply_now`].
     pub fn apply_server_message(mut self: Pin<&mut Self>, msg: ServerMessage) {
+        self.as_mut().apply_message_for_session(msg, None);
+    }
+
+    fn apply_message_for_session(
+        mut self: Pin<&mut Self>,
+        msg: ServerMessage,
+        connection_id: Option<u64>,
+    ) {
         if self.grouped {
             if let Some(handles) = crate::bridge_runtime::handles() {
                 let schedule = {
                     let mut rust = self.as_mut().rust_mut();
-                    rust.pending_grouped_msgs.push(msg);
+                    rust.pending_grouped_msgs.push(BufferedConnectionMessage {
+                        connection_id,
+                        message: msg,
+                    });
                     if rust.grouped_flush_scheduled {
                         false
                     } else {
@@ -554,6 +620,7 @@ impl qobject::ConnectionsModel {
                 return;
             }
         }
+        self.as_mut().rust_mut().source_session = connection_id;
         self.apply_now(msg);
     }
 
@@ -562,11 +629,28 @@ impl qobject::ConnectionsModel {
     /// over every pending row that arrived in the batch and re-anchor the
     /// user's selection (a reset clears the view's `currentIndex`).
     fn flush_grouped_messages(mut self: Pin<&mut Self>) {
-        let msgs = {
+        let buffered = {
             let mut rust = self.as_mut().rust_mut();
             rust.grouped_flush_scheduled = false;
             std::mem::take(&mut rust.pending_grouped_msgs)
         };
+        // Every flush path (timer, regroup, filter, batch action) reaches this
+        // guard after the final Qt queue hop. Never revive an old session.
+        let handles = crate::bridge_runtime::handles();
+        // All retained authenticated messages belong to the current session.
+        let source_session = buffered
+            .iter()
+            .filter_map(|entry| entry.connection_id)
+            .find(|id| {
+                handles
+                    .as_ref()
+                    .is_some_and(|handles| handles.is_current_session(*id))
+            });
+        let msgs = take_current_grouped_messages(buffered, |id| {
+            handles
+                .as_ref()
+                .is_some_and(|handles| handles.is_current_session(id))
+        });
         if msgs.is_empty() {
             return;
         }
@@ -578,6 +662,7 @@ impl qobject::ConnectionsModel {
         }
         {
             let mut rust = self.as_mut().rust_mut();
+            rust.source_session = source_session;
             for msg in msgs {
                 mirror_into_grouping(&mut rust, &msg);
                 rust.store.apply(msg);
@@ -1092,6 +1177,62 @@ fn grouped_entry_data(entry: &VisibleEntry, role: i32, store: &RowStore) -> QVar
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn grouped_flush_discards_disconnected_and_replaced_sessions() {
+        let buffer = || {
+            vec![
+                BufferedConnectionMessage {
+                    connection_id: Some(1),
+                    message: ServerMessage::ClearConnectionRows,
+                },
+                BufferedConnectionMessage {
+                    connection_id: Some(2),
+                    message: ServerMessage::InsertConnectionRows {
+                        rows: vec![row("2:1", None)],
+                    },
+                },
+            ]
+        };
+        assert!(take_current_grouped_messages(buffer(), |_| false).is_empty());
+        let current = take_current_grouped_messages(buffer(), |id| id == 2);
+        assert_eq!(current.len(), 1);
+        assert!(
+            matches!(&current[0], ServerMessage::InsertConnectionRows { rows } if rows[0].id == "2:1")
+        );
+    }
+
+    #[test]
+    fn row_identity_and_all_connection_deltas_preserve_source_session() {
+        let mut insert = ServerMessage::InsertConnectionRows {
+            rows: vec![row("1", None)],
+        };
+        qualify_connection_ids(&mut insert, 7);
+        let mut store = RowStore::default();
+        store.apply(insert);
+        assert!(store.row_by_id("7:1").is_some());
+        assert!(store.row_by_id("1").is_none());
+        let mut update = ServerMessage::UpdateConnectionRows {
+            rows: vec![row("1", Some("allow"))],
+        };
+        qualify_connection_ids(&mut update, 7);
+        store.apply(update);
+        assert_eq!(
+            store.row_by_id("7:1").unwrap().action.as_deref(),
+            Some("allow")
+        );
+        let mut moved = ServerMessage::MoveConnetionRows {
+            ids: vec!["1".into()],
+        };
+        qualify_connection_ids(&mut moved, 7);
+        assert!(matches!(&moved, ServerMessage::MoveConnetionRows { ids } if ids == &["7:1"]));
+        let mut remove = ServerMessage::RemoveConnectionRows {
+            ids: vec!["1".into()],
+        };
+        qualify_connection_ids(&mut remove, 7);
+        store.apply(remove);
+        assert!(store.row_by_id("7:1").is_none());
+    }
 
     fn row(id: &str, action: Option<&str>) -> ConnectionRow {
         ConnectionRow {

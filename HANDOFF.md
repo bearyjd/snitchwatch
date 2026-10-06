@@ -1,4 +1,4 @@
-# Linux App Firewall + Bazzite Security Scanner — Handoff (updated 2026-10-03)
+# Linux App Firewall + Bazzite Security Scanner — Handoff (updated 2026-10-04)
 
 > **Read this first if you're picking this repo up cold.** Everything below
 > the "Current status" section is the *original* handoff from 2026-07-04,
@@ -6,7 +6,34 @@
 > was decided and why, but stale as a status report. Trust this section for
 > "what's true today."
 
-## Start here (2026-10-03, latest)
+## Start here (2026-10-04, latest)
+
+**PR #38 merged (`7d1ba97`): Kirigami now connects to the external,
+token-authenticated bridge service.** Main CI run `37249292846` passed all four
+jobs. The client waits for authentication acknowledgement, requests snapshots
+after reconnecting, and rejects actions and buffered updates from stale sessions.
+It does not start the bridge, bind OpenSnitch gRPC, or replace the service's socket
+or token. This resolves issue #34's GUI/service collision.
+
+- **Published bridge v0.1.0:** artifact sha256
+  `af5851d84f56d2d080902ff49131999f9d3c5dab2907751a868a0b0fd2687285`.
+  Release: <https://github.com/bearyjd/snitchwatch/releases/tag/v0.1.0>.
+- **Bridge v0.1.1 preparation is in progress; it is not published.** The workspace
+  version is bumped to `0.1.1`; explicit Kirigami/Tauri versions remain unchanged.
+  Release build, reproducibility/installation verification, tag and publication
+  are pending.
+- **Deployment compatibility:** the new GUI requires the bridge's
+  `Authenticated` acknowledgement introduced by PR #38 and intended for v0.1.1.
+  Bridge v0.1.0 cannot serve this client; upgrade the service and GUI together.
+- **Next GUI packaging work:** verify Flatpak's protoc and vendored source inputs,
+  and remove the GUI build's unnecessary default `web-ui` feature before shipping
+  a GUI artifact. This is separate from the bridge-only release preparation.
+- **Issue #35 remains a separate security migration:** replace the root daemon's
+  `127.0.0.1:50051` transport with a per-user Unix socket before considering
+  deny-by-default. Bazzite's `DefaultAction` remains `allow`; this release
+  preparation does not change daemon configuration.
+
+## Previously (2026-10-03)
 
 **PR #36 merged (`35899bb`): release pipeline for a sha256-pinned bridge
 tarball** — phase B step 1 of the bazzite-tower plan (OpenSnitch daemon +

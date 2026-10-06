@@ -1,6 +1,6 @@
 //! Snitchwatch Kirigami shell — desktop entry point.
 //!
-//! Boots a `QGuiApplication`, registers the cxx-qt QML module (linked in via
+//! Boots a `QApplication`, registers the cxx-qt QML module (linked in via
 //! the library target), and loads the Kirigami `ApplicationWindow` entry
 //! point. This is the native replacement for `snitchwatch-tauri`'s
 //! WebKitGTK-webview shell; it consumes the separately managed bridge service
@@ -14,8 +14,8 @@
 #[allow(unused_imports)]
 use snitchwatch_kirigami::bridge_bindings as _;
 
-use cxx_qt_lib::{QGuiApplication, QQmlApplicationEngine, QString, QUrl};
-use snitchwatch_kirigami::bridge_runtime;
+use cxx_qt_lib::{QQmlApplicationEngine, QString, QUrl};
+use snitchwatch_kirigami::{application, bridge_runtime};
 
 fn main() {
     // Without this, every `tracing::info!`/`tracing::error!` call in this
@@ -32,7 +32,7 @@ fn main() {
         .init();
 
     // Kirigami's usual `org.kde.desktop` style needs a real Plasma session and
-    // hangs under `QT_QPA_PLATFORM=offscreen`; `Basic` is the QApplication-free
+    // hangs under `QT_QPA_PLATFORM=offscreen`; `Basic` is the lightweight
     // style that completes headless (matches the spike + tests). Only default
     // it when the operator hasn't chosen a style, so a real desktop session
     // still gets native Plasma styling.
@@ -53,7 +53,7 @@ fn main() {
         (false, msg) => tracing::error!(status = %msg, "bridge client unavailable"),
     }
 
-    let mut app = QGuiApplication::new();
+    let mut app = application::new();
     let mut engine = QQmlApplicationEngine::new();
 
     if let Some(app) = app.as_mut() {

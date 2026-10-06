@@ -26,6 +26,13 @@ path = "src/lib.rs"
 name = "snitchwatch-kirigami"
 path = "src/main.rs"
 
+# QApplication must be constructed on the process main thread, not a Rust
+# test-harness worker. This smoke target is intentionally a single process.
+[[test]]
+name = "application_widgets"
+path = "tests/application_widgets.rs"
+harness = false
+
 [dependencies]
 snitchwatch-bridge = { path = "../snitchwatch-bridge", default-features = false }
 cxx = "=1.0.194"
