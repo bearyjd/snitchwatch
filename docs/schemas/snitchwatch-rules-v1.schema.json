@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/bearyjd/snitchwatch/docs/schemas/snitchwatch-rules-v1.schema.json",
+  "title": "Snitchwatch rules document, version 1",
+  "description": "Rule export/import file (roadmap P2.7). Published for outside tools; the bridge's Rust validator (crates/snitchwatch-bridge/src/rule_io.rs and rule_policy) is authoritative and stricter: it also checks regexps, CIDRs, ports, IDs, condition pairing, reserved names and match-all rules. Fixtures: tests/fixtures/rules-io/.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "version", "rules"],
+  "properties": {
+    "format": { "const": "snitchwatch.rules" },
+    "version": { "const": 1 },
+    "exportedAtUnixMs": { "type": "integer", "minimum": 0 },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": { "daemonVersion": { "type": "string" } }
+    },
+    "rules": {
+      "type": "array",
+      "maxItems": 10000,
+      "items": { "$ref": "#/$defs/rule" }
+    }
+  },
+  "$defs": {
+    "rule": {
+      "type": "object",
+      "required": ["name", "enabled", "action", "duration", "operator"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "not": { "pattern": "^(z00-blocklist:|900-blocklist:|snitchwatch-default-|000-snitchwatch-)|[/\\\\]" }
+        },
+        "enabled": { "type": "boolean" },
+        "action": { "enum": ["allow", "deny", "reject"] },
+        "duration": { "enum": ["always", "until restart"] },
+        "description": { "type": "string", "maxLength": 16384 },
+        "precedence": { "type": "boolean" },
+        "nolog": { "type": "boolean" },
+        "operator": {
+          "oneOf": [
+            { "$ref": "#/$defs/leaf" },
+            {
+              "type": "object",
+              "required": ["type", "operands"],
+              "properties": {
+                "type": { "const": "list" },
+                "operands": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 64,
+                  "items": { "$ref": "#/$defs/leaf" }
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "leaf": {
+      "type": "object",
+      "required": ["type", "operand"],
+      "not": { "required": ["operands"] },
+      "properties": {
+        "type": { "enum": ["simple", "regexp", "network"] },
+        "operand": {
+          "anyOf": [
+            {
+              "enum": [
+                "true", "process.path", "process.parent.path", "process.command",
+                "process.id", "user.id", "user.name", "source.ip", "source.port",
+                "source.network", "dest.ip", "dest.host", "dest.port", "dest.network",
+                "protocol", "iface.in", "iface.out"
+              ]
+            },
+            { "type": "string", "pattern": "^process\\.env\\.[A-Za-z_][A-Za-z0-9_]*$" }
+          ]
+        },
+        "data": { "type": "string", "maxLength": 16384 },
+        "sensitive": { "type": "boolean" }
+      }
+    }
+  }
+}

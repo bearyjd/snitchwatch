@@ -47,7 +47,9 @@ pub(crate) fn rule_to_wire(rule: &Rule) -> serde_json::Value {
     })
 }
 
-fn operator_to_wire(operator: &snitchwatch_proto::protocol::Operator) -> serde_json::Value {
+pub(crate) fn operator_to_wire(
+    operator: &snitchwatch_proto::protocol::Operator,
+) -> serde_json::Value {
     if operator.list.is_empty() {
         serde_json::json!({
             "type": operator.r#type,

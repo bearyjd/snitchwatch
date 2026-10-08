@@ -1,0 +1,32 @@
+{
+  "format": "snitchwatch.rules",
+  "version": 1,
+  "exportedAtUnixMs": 1791400000000,
+  "source": { "daemonVersion": "1.8.0" },
+  "rules": [
+    {
+      "name": "000-lan-printer",
+      "enabled": false,
+      "action": "reject",
+      "duration": "until restart",
+      "description": "",
+      "precedence": true,
+      "nolog": true,
+      "operator": { "type": "network", "operand": "dest.network", "data": "192.168.1.0/24", "sensitive": false }
+    },
+    {
+      "name": "300-ssh-as-me",
+      "enabled": true,
+      "action": "allow",
+      "duration": "always",
+      "operator": {
+        "type": "list",
+        "operands": [
+          { "type": "simple", "operand": "user.id", "data": "1000" },
+          { "type": "simple", "operand": "process.path", "data": "/usr/bin/ssh", "sensitive": true },
+          { "type": "simple", "operand": "protocol", "data": "tcp" }
+        ]
+      }
+    }
+  ]
+}

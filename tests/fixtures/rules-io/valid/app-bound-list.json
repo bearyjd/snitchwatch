@@ -1,0 +1,25 @@
+{
+  "format": "snitchwatch.rules",
+  "version": 1,
+  "exportedAtUnixMs": 1791400000000,
+  "source": {},
+  "rules": [
+    {
+      "name": "200-curl-allow-example",
+      "enabled": true,
+      "action": "allow",
+      "duration": "always",
+      "description": "curl may reach example.com over https",
+      "precedence": false,
+      "nolog": false,
+      "operator": {
+        "type": "list",
+        "operands": [
+          { "type": "simple", "operand": "process.path", "data": "/usr/bin/curl", "sensitive": true },
+          { "type": "regexp", "operand": "dest.host", "data": "^(?:[^.]+\\.)*example\\.com$", "sensitive": false },
+          { "type": "simple", "operand": "dest.port", "data": "443", "sensitive": false }
+        ]
+      }
+    }
+  ]
+}

@@ -34,6 +34,7 @@ pub mod profiles_model;
 pub mod prompt_slot_status;
 pub(crate) mod prompt_slot_text;
 pub mod rules;
+pub mod rules_io_controller;
 pub mod rules_model;
 pub mod scanner;
 pub mod scanner_controller;

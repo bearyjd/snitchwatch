@@ -269,6 +269,17 @@ impl DaemonCommands {
         self.ready.subscribe()
     }
 
+    /// How the daemon reaches this bridge.
+    pub fn transport(&self) -> DaemonTransport {
+        lock(&self.inner).transport
+    }
+
+    /// Coalesce the `SetRules` broadcasts of confirmed commands until the
+    /// hold drops (a rule import, P2.7); see [`RulesSync::hold_publishes`].
+    pub fn hold_rule_publishes(&self) -> crate::cache::rules::PublishHold {
+        self.rules.hold_publishes()
+    }
+
     /// Register a newly opened `Notifications` stream. The receiver yields
     /// the commands addressed to it and ends when the stream is closed.
     pub fn open_stream(&self, conn: ConnKey) -> (StreamRegistration, mpsc::Receiver<Notification>) {

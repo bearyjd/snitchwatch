@@ -39,6 +39,12 @@ pub const PACKAGED_RULE_NAME_PREFIX: &str = "000-snitchwatch-";
 /// (`docs/superpowers/plans/2026-10-08-packaged-bridge-fetch-rule.md`).
 pub const PACKAGED_FETCH_RULE_NAME: &str = "000-snitchwatch-bridge-fetch";
 
+/// Name prefix reserved for the curated default rules Snitchwatch will
+/// install and reconcile itself (prompt-slot plan, part D). Rules a GUI or a
+/// file supplies may not use it, so they can't pose as, or be reconciled
+/// away as, one of those.
+pub const CURATED_DEFAULT_RULE_NAME_PREFIX: &str = "snitchwatch-default-";
+
 /// Whether `name` is under a blocklist prefix only the bridge may use.
 pub fn is_reserved_blocklist_name(name: &str) -> bool {
     name.starts_with(BLOCKLIST_RULE_NAME_PREFIX)
@@ -50,9 +56,18 @@ pub fn is_reserved_packaged_name(name: &str) -> bool {
     name.starts_with(PACKAGED_RULE_NAME_PREFIX)
 }
 
-/// Whether `name` is under any prefix a GUI may not add, change or delete.
+/// Whether `name` is under the prefix of the curated defaults.
+pub fn is_reserved_curated_name(name: &str) -> bool {
+    name.starts_with(CURATED_DEFAULT_RULE_NAME_PREFIX)
+}
+
+/// Whether `name` is under any prefix a GUI may not add, change or delete
+/// (blocklists, packaged rules, curated defaults). `DaemonCommands::send`
+/// refuses every command for such a name.
 pub fn is_reserved_name(name: &str) -> bool {
-    is_reserved_blocklist_name(name) || is_reserved_packaged_name(name)
+    is_reserved_blocklist_name(name)
+        || is_reserved_packaged_name(name)
+        || is_reserved_curated_name(name)
 }
 
 /// Reject a rule name that could escape the daemon's rules directory or

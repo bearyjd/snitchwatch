@@ -46,7 +46,13 @@ use snitchwatch_proto::protocol::{Operator, Rule};
 
 use crate::cache::rules::{MAX_OPERATOR_LIST_LEN, MAX_RULE_FIELD_BYTES};
 
+mod narrowing;
+mod profile;
 mod regexp;
+
+pub use narrowing::binds_to_programs;
+
+pub use profile::{validate_user_rule, PolicyProfile, RuleProblem};
 
 /// Why a GUI may not change a daemon rule whose operator fails
 /// [`validate_operator`] (a `lists` blocklist rule, a network alias such as
@@ -73,6 +79,13 @@ pub const PACKAGED_FETCH_RULE_REASON: &str =
 pub const PACKAGED_RULE_REASON: &str =
     "Uses a name reserved for rules built into Snitchwatch, so Snitchwatch doesn't change or \
      delete it.";
+
+/// Why a GUI may not change or delete a rule under the curated-defaults
+/// prefix ([`crate::rule_name::CURATED_DEFAULT_RULE_NAME_PREFIX`]). No such
+/// rules exist before prompt-slot D, so this says what is true today: the
+/// name is reserved.
+pub const CURATED_MANAGED_REASON: &str = "This name is reserved for Snitchwatch's own rules, so \
+     Snitchwatch won't change or delete it. The rule still applies.";
 
 /// Operands whose value the daemon passes as a `net.IP`; only the `network`
 /// type can compare one.
@@ -146,6 +159,9 @@ pub fn read_only_reason(rule: &Rule) -> Option<&'static str> {
     }
     if crate::rule_name::is_reserved_packaged_name(&rule.name) {
         return Some(PACKAGED_RULE_REASON);
+    }
+    if crate::rule_name::is_reserved_curated_name(&rule.name) {
+        return Some(CURATED_MANAGED_REASON);
     }
     if crate::rule_name::validate_rule_name(&rule.name).is_err() {
         return Some(crate::rule_wire::READ_ONLY_REASON);
@@ -317,3 +333,9 @@ fn validate_cidr(data: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod profile_tests;
+
+#[cfg(test)]
+mod schema_tests;
