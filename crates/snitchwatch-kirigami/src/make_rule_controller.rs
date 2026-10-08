@@ -43,6 +43,11 @@ pub mod qobject {
         #[qproperty(i32, no_answer_after_ms, cxx_name = "noAnswerAfterMs")]
         type MakeRuleController = super::MakeRuleControllerRust;
 
+        /// A request ended, for row `row_id`, saying `status`. The sheet
+        /// shows it as a notice when that row isn't on screen.
+        #[qsignal]
+        fn finished(self: Pin<&mut MakeRuleController>, row_id: QString, status: QString);
+
         /// Feed the bridge's `RuleCommandResult`s to this controller.
         #[qinvokable]
         #[cxx_name = "startBridgeFeed"]
@@ -145,7 +150,8 @@ impl qobject::MakeRuleController {
         self.as_mut().set_row_id(QString::from(&row_id));
         self.as_mut().set_created(done.created);
         self.as_mut().set_busy(false);
-        self.set_status_text(QString::from(&done.status));
+        self.as_mut().set_status_text(QString::from(&done.status));
+        self.finished(QString::from(&row_id), QString::from(&done.status));
     }
 
     fn apply_server_message_json(self: Pin<&mut Self>, json: &QString) {

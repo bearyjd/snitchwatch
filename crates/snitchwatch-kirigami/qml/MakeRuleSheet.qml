@@ -41,7 +41,20 @@ ColumnLayout {
     property alias alsoListedNote: alsoListedNote
     property alias busyElsewhereNote: busyElsewhereNote
 
+    // A request's outcome while its row isn't on screen (the inspector closed,
+    // or shows another row): ConnectionsPage shows it as a passive notice.
+    signal explained(string text)
+
     onRowIdChanged: form.visible = false
+
+    Connections {
+        target: controller
+        function onFinished(rowId, status) {
+            if (!sheet.visible || rowId !== sheet.rowId) {
+                sheet.explained(status);
+            }
+        }
+    }
 
     MakeRuleController {
         id: controller

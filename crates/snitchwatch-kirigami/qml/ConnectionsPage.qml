@@ -788,6 +788,7 @@ Kirigami.ScrollablePage {
                 model: page.model
                 bindableProcessPath: page.inspectBindableProcessPath
                 alsoListedByDefault: page.inspectAlsoListedByDefault
+                onExplained: text => page.showPassiveNotice(text)
                 blockedForFiveMinutes: page.inspectMatchedRule.length > 0
             }
         }

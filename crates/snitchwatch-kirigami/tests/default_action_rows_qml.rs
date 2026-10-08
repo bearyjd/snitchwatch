@@ -52,7 +52,10 @@ Controls.ApplicationWindow {
     property var failures: []
     property int phase: 0
 
-    function showPassiveNotification(message, timeout) {}
+    property var shown: []
+    function showPassiveNotification(message, timeout) {
+        probeWindow.shown.push(message);
+    }
 
     QtObject {
         id: feedStub
@@ -256,6 +259,12 @@ Controls.ApplicationWindow {
                                       "after a silence: busy " + controller.busy + " '"
                                       + controller.statusText + "'");
                     controller.noAnswerAfterMs = 30000;
+                    // That request's row wasn't on screen, so its outcome came as a
+                    // notice; the on-screen row's outcomes didn't.
+                    probeWindow.check(JSON.stringify(probeWindow.shown) === JSON.stringify([
+                        "No answer from the firewall in time. The rule may have been "
+                        + "created; check the Rules page."
+                    ]), "notices " + JSON.stringify(probeWindow.shown));
                     for (const d of probeWindow.delegates()) {
                         if (d.isGroupHeader && d.depth === 0 && !d.expanded) {
                             connModel.toggleProcessGroup(d.groupKey);
