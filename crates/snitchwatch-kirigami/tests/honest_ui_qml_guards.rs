@@ -341,13 +341,14 @@ fn pending_decision_sheet_labels_showing_remote_data_are_plain_text() {
 /// goes into an InlineMessage — only string literals joined by `+` do.
 ///
 /// Scope: the pages this branch edited (the decision prompt, Connections,
-/// Blocklists, Profiles, Rules). Not covered, because their strings are
-/// generated locally from fixed phrases rather than taken from the daemon, a
-/// program or a subscription, and moving them is a larger restructure:
-/// `main.qml`'s three window banners (`bridgeFeed.statusText`,
-/// `daemonHealthModel.statusSummary`, the pending-age count),
-/// `DaemonHealthPage.qml` (`statusSummary`), `DiagnosticsPage.qml`
-/// (`coexistenceDetail`) and `ScannerPage.qml` (`errorText`).
+/// Blocklists, Profiles, Rules). Not yet covered (issue #51 follow-up):
+/// `main.qml`'s three window banners (`bridgeFeed.statusText`, which carries
+/// the bridge runtime's own error message; `daemonHealthModel.statusSummary`;
+/// the pending-age count), `DaemonHealthPage.qml` (`statusSummary`),
+/// `DiagnosticsPage.qml` (`coexistenceDetail`) and `ScannerPage.qml`
+/// (`errorText`, which includes the scanner's stderr and binary path). Most
+/// are built from local checks, but `statusText` and `errorText` embed
+/// externally produced text, so they need the same Label treatment.
 #[test]
 fn inline_messages_carry_only_fixed_text() {
     let mut checked = 0;

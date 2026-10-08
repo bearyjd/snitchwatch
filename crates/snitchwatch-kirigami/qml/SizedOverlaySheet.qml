@@ -85,6 +85,9 @@ Kirigami.OverlaySheet {
             contentItem: Controls.Label {
                 textFormat: Text.PlainText
                 wrapMode: Text.Wrap
+                // The style's own tooltip text uses the tooltip palette, not
+                // the window one a bare Label defaults to.
+                color: palette.toolTipText
                 text: sheet.title
             }
         }
