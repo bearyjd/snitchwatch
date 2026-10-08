@@ -15,6 +15,7 @@ use super::*;
 struct Sink {
     accept: AtomicBool,
     unavailable: AtomicBool,
+    no_hosts: AtomicBool,
     pushes: AtomicUsize,
     reinstalls: AtomicUsize,
     verified: AtomicBool,
@@ -26,6 +27,8 @@ impl Sink {
             Err(NotInstalled::daemon_unavailable("didn't answer"))
         } else if self.accept.load(Ordering::SeqCst) {
             Ok(())
+        } else if self.no_hosts.load(Ordering::SeqCst) {
+            Err(NotInstalled::new(NO_HOSTS_REASON))
         } else {
             Err(NotInstalled::new("The firewall service refused the rule"))
         }
@@ -118,7 +121,7 @@ async fn a_refused_list_is_retried_after_15_minutes_then_an_hour_then_four() {
     assert!(f
         .reason()
         .starts_with("The firewall service refused the rule"));
-    assert!(f.reason().contains("about 15 minutes"), "{}", f.reason());
+    assert!(f.reason().ends_with("about 15 minutes."), "{}", f.reason());
 
     f.advance(14);
     f.tick().await;
@@ -126,7 +129,7 @@ async fn a_refused_list_is_retried_after_15_minutes_then_an_hour_then_four() {
     f.advance(2);
     f.tick().await;
     assert_eq!(f.pushes(), 2);
-    assert!(f.reason().contains("about 1 hour"), "{}", f.reason());
+    assert!(f.reason().ends_with("about 1 hour."), "{}", f.reason());
 
     f.advance(59);
     f.tick().await;
@@ -134,7 +137,7 @@ async fn a_refused_list_is_retried_after_15_minutes_then_an_hour_then_four() {
     f.advance(2);
     f.tick().await;
     assert_eq!(f.pushes(), 3);
-    assert!(f.reason().contains("about 4 hours"), "{}", f.reason());
+    assert!(f.reason().ends_with("about 4 hours."), "{}", f.reason());
 
     f.advance(239);
     f.tick().await;
@@ -221,6 +224,36 @@ async fn a_refused_list_is_not_read_from_the_store_while_it_backs_off() {
     f.advance(15);
     f.tick().await;
     assert_eq!(f.sink.reinstalls.load(Ordering::SeqCst), 1);
+}
+
+/// Retrying a list with nothing a rule can match changes nothing until its
+/// next download, so it gets no schedule and no "try again" promise.
+#[tokio::test]
+async fn a_list_with_no_blockable_hosts_is_not_scheduled_for_a_retry() {
+    let f = Fixture::new();
+    f.sink.no_hosts.store(true, Ordering::SeqCst);
+    f.mgr.reconcile().await;
+    assert_eq!(f.reason(), NO_HOSTS_REASON);
+    assert!(f.mgr.refusal_state("ads").is_none());
+}
+
+/// A list whose last try went unanswered isn't "refused" any more, so the
+/// next tick tries it even inside the old schedule.
+#[tokio::test]
+async fn a_list_the_daemon_stopped_answering_for_is_tried_by_the_next_tick() {
+    let f = Fixture::new();
+    f.mgr.reconcile().await;
+    assert!(f.mgr.refusal_state("ads").is_some());
+    f.sink.unavailable.store(true, Ordering::SeqCst);
+    f.mgr.reconcile().await;
+    assert!(matches!(
+        f.mgr.enforcement("ads"),
+        Enforcement::Unconfirmed { .. }
+    ));
+    let before = f.pushes();
+    f.advance(1); // well inside the 15 minutes
+    f.tick().await;
+    assert_eq!(f.pushes(), before + 1);
 }
 
 #[tokio::test]

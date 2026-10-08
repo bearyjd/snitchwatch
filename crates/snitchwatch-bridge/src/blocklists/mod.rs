@@ -433,4 +433,7 @@ mod cap_tests;
 mod entries_tests;
 
 #[cfg(test)]
+mod release_tests;
+
+#[cfg(test)]
 mod leftover_manager_tests;

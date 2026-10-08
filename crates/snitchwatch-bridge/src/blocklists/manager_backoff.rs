@@ -2,8 +2,9 @@
 //! every 15-minute refresh tick, each retry re-reading the whole list from the
 //! store. After the first refusal a tick leaves it alone for 15 minutes, after
 //! the second for an hour, and after every one after that for four hours. A
-//! new daemon rule list, a new download or a success starts over; a daemon
-//! that doesn't answer is not a refusal and is retried every tick. The reason
+//! new daemon rule list or a new download is tried at once, whatever the
+//! schedule says, and a success starts the schedule over; a daemon that
+//! doesn't answer is not a refusal and is retried every tick. The reason
 //! shown to the user says when the next try is.
 
 use chrono::{DateTime, Utc};

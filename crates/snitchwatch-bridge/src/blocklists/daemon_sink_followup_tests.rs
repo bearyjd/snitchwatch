@@ -209,3 +209,70 @@ async fn removing_for_good_still_takes_the_files_with_the_rules() {
     sink.remove_blocklist_rules(ADS).await.unwrap();
     assert!(!h.dir.list_dir(&IdComponent::from_id(ADS)).exists());
 }
+
+/// The default grace is what keeps the files: nothing here shortens it.
+#[tokio::test]
+async fn a_released_directory_survives_the_orphan_purge_with_the_default_grace() {
+    let h = Harness::new().connect(Daemon::Accept, Vec::new());
+    let sink = h.sink();
+    sink.replace_blocklist_rules(ADS, hosts(&["a.example"]))
+        .await
+        .unwrap();
+    sink.release_blocklist_rules(ADS).await.unwrap();
+    sink.remove_orphans(&[]).await;
+    assert!(h.dir.list_dir(&IdComponent::from_id(ADS)).exists());
+}
+
+/// A list is "released" only while it is unsubscribed: writing it again
+/// (a resubscribe) ends that, so a later purge that doesn't keep it takes its
+/// directory at once.
+#[tokio::test]
+async fn writing_a_list_again_ends_its_release() {
+    let h = Harness::new().connect(Daemon::Accept, Vec::new());
+    let sink = h.sink().with_release_grace(Duration::from_secs(3600));
+    sink.replace_blocklist_rules(ADS, hosts(&["a.example"]))
+        .await
+        .unwrap();
+    sink.release_blocklist_rules(ADS).await.unwrap();
+    sink.replace_blocklist_rules(ADS, hosts(&["a.example"]))
+        .await
+        .unwrap();
+    sink.remove_orphans(&[]).await;
+    assert!(!h.dir.list_dir(&IdComponent::from_id(ADS)).exists());
+}
+
+/// Likewise a purge that keeps the list: the release is over.
+#[tokio::test]
+async fn a_purge_that_keeps_a_list_ends_its_release() {
+    let h = Harness::new().connect(Daemon::Accept, Vec::new());
+    let sink = h.sink().with_release_grace(Duration::from_secs(3600));
+    sink.replace_blocklist_rules(ADS, hosts(&["a.example"]))
+        .await
+        .unwrap();
+    sink.release_blocklist_rules(ADS).await.unwrap();
+    sink.remove_orphans(&[ADS.to_string()]).await;
+    sink.remove_orphans(&[]).await;
+    assert!(!h.dir.list_dir(&IdComponent::from_id(ADS)).exists());
+}
+
+/// With the daemon's rules unknown there is no cache to read the list's rule
+/// names from, so both kinds are deleted by name.
+#[tokio::test]
+async fn releasing_with_the_daemons_rules_unknown_deletes_both_kinds_by_name() {
+    let h = Harness::new().connect(Daemon::Accept, Vec::new());
+    let sink = h.sink();
+    sink.replace_blocklist_rules(ADS, hosts(&["a.example"]))
+        .await
+        .unwrap();
+    h.rules.cache().lock().unwrap().set_unknown();
+    assert!(!sink.daemon_rules_known());
+    let installs = h.seen().len();
+    sink.release_blocklist_rules(ADS).await.unwrap();
+    let names: Vec<_> = h
+        .seen()
+        .split_off(installs)
+        .iter()
+        .map(|s| kind_of(&s.command))
+        .collect();
+    assert_eq!(names, vec![delete(&domains_rule()), delete(&ips_rule())]);
+}
