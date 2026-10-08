@@ -4571,6 +4571,7 @@ dependencies = [
  "prost",
  "rand 0.8.5",
  "regex",
+ "regex-syntax",
  "reqwest 0.12.28",
  "rusqlite",
  "rust-embed",

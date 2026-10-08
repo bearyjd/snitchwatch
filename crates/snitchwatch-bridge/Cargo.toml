@@ -19,6 +19,7 @@ rust-embed = { version = "8", features = ["interpolate-folder-path"], optional =
 mime_guess = { version = "2", optional = true }
 futures-util = { workspace = true }
 regex = { workspace = true }
+regex-syntax = { workspace = true }
 anyhow = { workspace = true }
 async-stream = { workspace = true }
 tokio-stream = { workspace = true }

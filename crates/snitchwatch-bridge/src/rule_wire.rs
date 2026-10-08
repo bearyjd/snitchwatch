@@ -41,6 +41,9 @@ pub(crate) fn rule_to_wire(rule: &Rule) -> serde_json::Value {
         "displayName": crate::translator::verdict::strip_display_hazards(&rule.name),
         // `null` for every rule a GUI may edit.
         "readOnlyReason": crate::rule_policy::read_only_reason(rule),
+        // Separate from `readOnlyReason`: a rule read-only only for its
+        // conditions can still be deleted by name.
+        "deletable": crate::rule_policy::deletable(rule),
     })
 }
 
@@ -127,14 +130,31 @@ fn operator_from_wire(
         .to_string();
 
     match obj.get("operands").and_then(|x| x.as_array()) {
-        Some(operands) => Ok(snitchwatch_proto::protocol::Operator {
-            r#type: op_type,
-            list: operands
+        Some(operands) => {
+            // A GUI controls the size: bound it before converting anything.
+            // `rule_policy::validate_operator` checks the result again.
+            let max = crate::cache::rules::MAX_OPERATOR_LIST_LEN;
+            if operands.len() > max {
+                return Err(format!(
+                    "a list operator has {} members; the limit is {max}",
+                    operands.len()
+                ));
+            }
+            if operands
                 .iter()
-                .map(operator_from_wire)
-                .collect::<Result<Vec<_>, _>>()?,
-            ..Default::default()
-        }),
+                .any(|m| m.get("operands").and_then(|x| x.as_array()).is_some())
+            {
+                return Err("a list can't contain a list".to_string());
+            }
+            Ok(snitchwatch_proto::protocol::Operator {
+                r#type: op_type,
+                list: operands
+                    .iter()
+                    .map(operator_from_wire)
+                    .collect::<Result<Vec<_>, _>>()?,
+                ..Default::default()
+            })
+        }
         None => Ok(snitchwatch_proto::protocol::Operator {
             r#type: op_type,
             operand: obj
@@ -198,5 +218,42 @@ mod tests {
     fn display_name_drops_bidi_and_zero_width_characters() {
         let wire = rule_to_wire(&named("evil\u{202e}txt\u{200b}.exe"));
         assert_eq!(wire["displayName"], "eviltxt.exe");
+    }
+
+    /// A GUI controls the list's size: it is checked before any member is
+    /// converted, so a huge or nested list costs nothing.
+    #[test]
+    fn list_size_and_nesting_are_checked_before_members_are_converted() {
+        let wire = |operator: serde_json::Value| {
+            serde_json::json!({
+                "name": "899-x", "action": "deny", "duration": "always", "operator": operator,
+            })
+        };
+        // Members that aren't even objects: the size is what's reported.
+        let too_many =
+            vec![serde_json::Value::Null; crate::cache::rules::MAX_OPERATOR_LIST_LEN + 1];
+        let err = rule_from_wire(&wire(
+            serde_json::json!({ "type": "list", "operands": too_many }),
+        ))
+        .unwrap_err();
+        assert!(err.contains("64"), "{err}");
+
+        let nested = serde_json::json!({
+            "type": "list",
+            "operands": [
+                { "type": "list", "operands": [null] },
+            ],
+        });
+        let err = rule_from_wire(&wire(nested)).unwrap_err();
+        assert!(err.contains("list can't contain a list"), "{err}");
+
+        // `"operands": null` is not a list, as in the conversion itself.
+        let null_operands = serde_json::json!({
+            "type": "list",
+            "operands": [
+                { "type": "simple", "operand": "process.path", "data": "/x", "operands": null },
+            ],
+        });
+        assert!(rule_from_wire(&wire(null_operands)).is_ok());
     }
 }
