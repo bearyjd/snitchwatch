@@ -19,6 +19,7 @@ const SIMULATOR_SHEET: &str = include_str!("../qml/RuleSimulatorSheet.qml");
 const IMPORT_SHEET: &str = include_str!("../qml/RulesImportSheet.qml");
 const EDITOR_SHEET: &str = include_str!("../qml/RuleEditorSheet.qml");
 const PENDING_SHEET: &str = include_str!("../qml/PendingDecisionSheet.qml");
+const MAKE_RULE_SHEET: &str = include_str!("../qml/MakeRuleSheet.qml");
 const CONNECTIONS_PAGE: &str = include_str!("../qml/ConnectionsPage.qml");
 const MAIN_QML: &str = include_str!("../qml/main.qml");
 const SIZED_SHEET: &str = include_str!("../qml/SizedOverlaySheet.qml");
@@ -63,6 +64,14 @@ const ALL_QML: &[(&str, &str)] = &[
     ("RuleEditorSheet.qml", EDITOR_SHEET),
     ("RuleSimulatorSheet.qml", SIMULATOR_SHEET),
     ("RulesImportSheet.qml", IMPORT_SHEET),
+    (
+        "RulesEmptyPlaceholder.qml",
+        include_str!("../qml/RulesEmptyPlaceholder.qml"),
+    ),
+    (
+        "RulesInsightsText.qml",
+        include_str!("../qml/RulesInsightsText.qml"),
+    ),
     ("RulesPage.qml", RULES_PAGE),
     ("ScannerPage.qml", include_str!("../qml/ScannerPage.qml")),
     ("SizedOverlaySheet.qml", SIZED_SHEET),
@@ -247,8 +256,10 @@ fn rules_page_labels_showing_rule_data_are_plain_text() {
             "page.inspectNotEditable",
             // P2.1: the editor's last result (bridge reasons).
             "ruleEditorController.statusText",
+            // P2.6: a finding names the covering rule, which is rule data.
+            "row.shadowText",
         ],
-        11,
+        12,
     );
 }
 
@@ -319,6 +330,7 @@ fn the_empty_rules_placeholder_follows_what_is_not_listed() {
     let code = code_lines(RULES_PAGE);
     assert!(code.contains("visible: page.showsEmptyPlaceholder"));
     assert!(code.contains("&& !page.showsNotShown"));
+    assert!(code.contains("RulesEmptyPlaceholder {\n            parent: list"));
 }
 
 /// The Simulate sheet shows rule names and operands from the daemon, and
@@ -359,6 +371,63 @@ fn connections_page_labels_showing_connection_data_are_plain_text() {
             "page.inspectMatchedRuleDisplay",
         ],
         10,
+    );
+}
+
+/// M1 (PR #108 security review): "Make a rule…" never claims the rule exists
+/// by itself. Its only outcome text is `MakeRuleController`'s, which says
+/// "created" only for the bridge's Ok result, shown as plain text.
+#[test]
+fn make_rule_sheet_says_only_what_the_bridge_answered() {
+    let code = code_lines(MAKE_RULE_SHEET);
+    for claim in ["created", "was sent", "sent to"] {
+        assert!(
+            !code.contains(claim),
+            "MakeRuleSheet.qml says `{claim}` itself; only MakeRuleController's result may"
+        );
+    }
+    assert!(has_line(
+        &code,
+        "readonly property string result: controller.rowId === sheet.rowId ? controller.statusText : \"\""
+    ));
+    let label = blocks(&code, "Controls.Label {")
+        .into_iter()
+        .find(|block| has_line(block, "objectName: \"makeRuleResult\""))
+        .expect("the result label");
+    assert!(has_line(&label, "textFormat: Text.PlainText"), "{label}");
+    assert!(has_line(&label, "text: sheet.result"), "{label}");
+}
+
+/// E3 (PR #108 review): a put-off row's inspector says the firewall may list
+/// the same connection again. One fixed sentence, plain text, shown only
+/// where the row model says so (ConnectionsPage passes `rowDetailsJson`'s
+/// `alsoListedByDefault` in).
+#[test]
+fn the_two_rows_hint_is_one_fixed_plain_text_line() {
+    assert!(has_line(
+        &code_lines(CONNECTIONS_PAGE),
+        "alsoListedByDefault: page.inspectAlsoListedByDefault"
+    ));
+    let code = code_lines(MAKE_RULE_SHEET);
+    let hints: Vec<String> = blocks(&code, "Controls.Label {")
+        .into_iter()
+        .filter(|block| has_line(block, "id: alsoListedNote"))
+        .collect();
+    assert_eq!(hints.len(), 1, "expected one two-rows hint label");
+    let hint = &hints[0];
+    assert!(has_line(hint, "textFormat: Text.PlainText"), "{hint}");
+    assert!(
+        has_line(hint, "visible: sheet.alsoListedByDefault"),
+        "{hint}"
+    );
+    let binding = text_binding(hint).expect("the hint has a text");
+    assert!(is_fixed_text(&binding), "{binding}");
+    // The literals joined, as the label renders them.
+    let shown: String = binding.split('"').skip(1).step_by(2).collect();
+    assert_eq!(
+        shown,
+        "The firewall may also list this connection, and its retries, separately as decided \
+         by its default action."
     );
 }
 

@@ -22,6 +22,8 @@ fn main() {
             "qml/MakeRuleSheet.qml",
             "qml/BlocklistsPage.qml",
             "qml/RulesPage.qml",
+            "qml/RulesInsightsText.qml",
+            "qml/RulesEmptyPlaceholder.qml",
             "qml/RuleSimulatorSheet.qml",
             "qml/RulesImportSheet.qml",
             "qml/RuleEditorSheet.qml",
@@ -43,6 +45,7 @@ fn main() {
         .file("src/rules_model.rs")
         .file("src/rules_io_controller.rs")
         .file("src/rule_editor_controller.rs")
+        .file("src/make_rule_controller.rs")
         .file("src/profiles_model.rs")
         .file("src/traffic_model.rs")
         .file("src/wizard_controller.rs")

@@ -12,15 +12,28 @@
 //! ([`RuleHits::last_gap_unix_ms`]) instead of pretending to be complete.
 //!
 //! **Finding the losses.** Within one daemon run, the global `rule_hits`
-//! counter grows by exactly one for each event the daemon appends
+//! counter grows by exactly one for each rule event the daemon appends
 //! (`stats.go` `onConnection`; a `nolog` rule adds to neither, `main.go`
-//! `onPacket`). So between two pings, `missing = Δrule_hits − events.len()`
-//! is every event that never arrived, however it was lost: dropped at the
-//! cap (a missed connection at the cap drops one too), emptied before a
-//! failed ping (`client.go` `ping`), appended between `Serialize`'s unlock
-//! and `emptyStats`, or sent while the bridge was away. The first ping of a
-//! bridge run only sets the baseline: the counter also covers the time
-//! before counting began. A gap is noted when:
+//! `onPacket`). So between two pings, `missing = Δrule_hits − received` is
+//! every rule event that never arrived, however it was lost: dropped at the
+//! cap (on stock v1.8.0 a missed connection at the cap drops one too; on the
+//! fork a miss without an event doesn't, and nothing here depends on which),
+//! emptied before a failed ping (`client.go` `ping`), appended between
+//! `Serialize`'s unlock and `emptyStats`, or sent while the bridge was away.
+//! The first ping of a bridge run only sets the baseline: the counter also
+//! covers the time before counting began.
+//!
+//! `received` is every event of the ping except default-action ones. Stock
+//! v1.8.0 appends no event for a connection no rule matched. The
+//! bazzite-tower fork (its PR #89) appends one with a marked synthetic rule
+//! ([`is_default_action_rule`], E3, plan
+//! `2026-10-08-default-applied-events.md`), and it grows `rule_misses`, not
+//! `rule_hits`, so counting it would make every default-applied connection
+//! look like a lost event. A marked event takes a slot at the cap too: a
+//! rule event it pushes out still shows as `missing`, and a marked event
+//! pushed out decides no rule's count, so it is no gap. `rule_misses` is not
+//! checked against the marked events: it also counts retransmits and other
+//! unanswered packets. A gap is noted when:
 //!
 //! - `missing` is above 0 (events were lost);
 //! - the counter went down, or grew by less than the events (`missing`
@@ -28,6 +41,10 @@
 //!   it restarted, and what happened in between is unknown. The counts are
 //!   **kept**;
 //! - the counts were restored from a file (the bridge was down meanwhile);
+//! - a counted rule left a committed snapshot without a confirmed
+//!   `DELETE_RULE` or an expiry of ours (those drop its count first, and are
+//!   no gap): it may come back with its old `created` and no count, so
+//!   nothing from before is trusted ([`RuleHits::adopt_snapshot`]);
 //! - a bound below was hit, or a rule name was too long to keep.
 //!
 //! **Which map an event lands in.** An event whose rule the bridge's rule
@@ -36,7 +53,7 @@
 //! rule the cache doesn't know yet, or any event while the cache is
 //! `Unknown` (between a daemon stream closing and the next snapshot). A
 //! committed snapshot moves the side entries it names into the main map and
-//! forgets the rest, and drops main-map names it lacks. A confirmed
+//! forgets the rest, and drops main-map names it lacks (a gap, above). A confirmed
 //! `DELETE_RULE` drops that name, and so does a temporary rule that expired
 //! (`RulesCache::prune_expired`, or a remembered verdict that replaces it
 //! before the prune: prompt rules are named deterministically, so a re-made
@@ -56,6 +73,7 @@ use std::collections::BTreeMap;
 use snitchwatch_proto::protocol::Event;
 
 use crate::cache::rules::MAX_SNAPSHOT_RULES;
+use crate::daemon_contract::is_default_action_rule;
 use crate::ws_messages::RuleHitWire;
 
 /// Most names waiting for a snapshot at once.
@@ -122,10 +140,16 @@ impl RuleHits {
             self.since_unix_ms = Some(now_ms);
             self.touch();
         }
-        if self.missed_events(events.len(), uptime, rule_hits) {
+        let received = events
+            .iter()
+            .filter(|event| !event.rule.as_ref().is_some_and(is_default_action_rule))
+            .count();
+        if self.missed_events(received, uptime, rule_hits) {
             self.note_gap(now_ms);
         }
         for event in events {
+            // An empty name is no rule to count, a default-action event's
+            // included.
             let Some(rule) = event.rule.as_ref().filter(|rule| !rule.name.is_empty()) else {
                 continue;
             };
@@ -146,8 +170,9 @@ impl RuleHits {
     }
 
     /// Whether a ping that brought `received` events (all of them, with a
-    /// rule or not) shows events that never arrived, or a daemon restart;
-    /// see the module doc. Moves the baselines to this ping.
+    /// rule or not, except default-action ones) shows events that never
+    /// arrived, or a daemon restart; see the module doc. Moves the baselines
+    /// to this ping.
     fn missed_events(&mut self, received: usize, uptime: u64, rule_hits: u64) -> bool {
         let restarted = self.last_uptime.is_some_and(|previous| uptime < previous);
         let missed = self.last_rule_hits.is_some_and(|previous| {
@@ -197,6 +222,12 @@ impl RuleHits {
         let before = self.main.len();
         self.main.retain(|name, _| known(name));
         let mut changed = self.main.len() != before;
+        if changed {
+            // A counted rule left the list, and with it its hits. Were it to
+            // come back (with its old `created`) it would look as if it had
+            // never been hit: nothing from before this moment is trusted.
+            self.note_gap(now_ms);
+        }
         let waiting = std::mem::take(&mut self.side);
         let restored = std::mem::take(&mut self.restored);
         for (name, stat) in waiting.into_iter().chain(restored) {

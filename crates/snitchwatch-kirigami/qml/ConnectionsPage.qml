@@ -86,11 +86,12 @@ Kirigami.ScrollablePage {
         : (page.inspectPending ? "pending"
            : page.inspectOutcomeText !== "" ? page.inspectOutcomeText : page.inspectVerdict)
     // Prompt-slot plan Part C, copied from the row like the rest: when the
-    // bridge answers it (-1: never), a put-off row's label, whether it was put
-    // off ("Make a rule…"), and whether its session takes "Decide later".
+    // bridge answers it (-1: never), a put-off row's label, whether "Make a
+    // rule…" is offered (put off, or decided by the firewall's default
+    // action, E3), and whether its session takes "Decide later".
     property real inspectDeadlineMs: -1
     property string inspectOutcomeText: ""
-    property bool inspectDeferred: false
+    property bool inspectMakeRuleOffered: false
     property bool inspectDecideLater: false
     // Parity 2 (pending-decision insight panel) — pulled from
     // `ConnectionsModel.rowDetailsJson` alongside the rest of the inspector
@@ -100,6 +101,8 @@ Kirigami.ScrollablePage {
     // Issue #44: whether an answer for this row's program can be remembered
     // (`rowDetailsJson`'s `bindableProcessPath`); false until known.
     property bool inspectBindableProcessPath: false
+    // E3: `rowDetailsJson`'s `alsoListedByDefault` (the two-rows hint).
+    property bool inspectAlsoListedByDefault: false
     // Whether the inspected row's bridge advertised app-bound rules
     // (`InlineVerdicts.rowAppBoundRules`); false until known.
     property bool inspectAppBoundRules: false
@@ -306,12 +309,13 @@ Kirigami.ScrollablePage {
             // The bridge allowed this row once because filtering was paused
             // (issue #78). Always false on headers.
             required property bool answeredWhilePaused
-            // Prompt-slot plan Part C: a put-off row's label (empty
-            // otherwise), when the bridge answers a pending one (-1: never),
-            // and whether it was put off.
+            // Prompt-slot plan Part C: a put-off or default-decided row's
+            // label (empty otherwise), when the bridge answers a pending one
+            // (-1: never), and whether "Make a rule…" is offered (put off,
+            // or decided by the firewall's default action).
             required property string outcomeText
             required property real answerDeadlineMs
-            required property bool deferred
+            required property bool makeRuleOffered
 
             // Issue #18 double-submit guard: the inline/batch buttons stay
             // visible until the round trip flips `pending` to false, so a
@@ -635,7 +639,7 @@ Kirigami.ScrollablePage {
         page.inspectMatchedRuleDisplay = row.matchedRuleDisplay;
         page.inspectDeadlineMs = row.answerDeadlineMs > 0 ? row.answerDeadlineMs : -1;
         page.inspectOutcomeText = row.outcomeText || "";
-        page.inspectDeferred = row.deferred === true;
+        page.inspectMakeRuleOffered = row.makeRuleOffered === true;
         page.applyRowDetails(row.rowId);
         page.inspectAppBoundRules = verdictHelper.rowAppBoundRules(row.rowId);
         page.inspectDecideLater = verdictHelper.rowDecideLater(row.rowId);
@@ -651,6 +655,7 @@ Kirigami.ScrollablePage {
     function applyRowDetails(id) {
         page.inspectIp = "";
         page.inspectBindableProcessPath = false;
+        page.inspectAlsoListedByDefault = false;
         if (!page.model) {
             return;
         }
@@ -658,6 +663,7 @@ Kirigami.ScrollablePage {
             const details = JSON.parse(page.model.rowDetailsJson(id));
             page.inspectIp = details.dstIp || "";
             page.inspectBindableProcessPath = details.bindableProcessPath === true;
+            page.inspectAlsoListedByDefault = details.alsoListedByDefault === true;
         } catch (e) {
             // Leave the defaults above.
         }
@@ -772,14 +778,16 @@ Kirigami.ScrollablePage {
                 onExplained: text => page.showPassiveNotice(text)
             }
 
-            // Part C: a put-off connection can still get a rule.
+            // Part C: a put-off connection can still get a rule, and so can
+            // one the firewall's default action decided (E3).
             MakeRuleSheet {
                 id: makeRuleSheet
                 Layout.fillWidth: true
-                visible: page.inspectDeferred
+                visible: page.inspectMakeRuleOffered
                 rowId: page.inspectId
                 model: page.model
                 bindableProcessPath: page.inspectBindableProcessPath
+                alsoListedByDefault: page.inspectAlsoListedByDefault
                 blockedForFiveMinutes: page.inspectMatchedRule.length > 0
             }
         }

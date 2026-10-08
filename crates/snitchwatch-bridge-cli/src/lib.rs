@@ -1595,6 +1595,7 @@ mod tests {
             auto_answer: None,
             answer_deadline_ms: None,
             deferred: false,
+            decided_by_default: false,
         };
         bridge
             .broadcast_tx

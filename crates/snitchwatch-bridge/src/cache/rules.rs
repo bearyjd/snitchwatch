@@ -303,6 +303,15 @@ impl RulesCache {
     }
 }
 
+/// The time of day in Unix seconds: `i64::MAX` if it does not fit, 0 for a
+/// clock before 1970.
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+        .unwrap_or(0)
+}
+
 /// The timer the daemon starts for `rule` at `start`, if it is temporary
 /// (`loader.go` `isTemporary`: not `once`, `until restart` or `always`).
 /// Approximate: a duration that isn't a `\d+[smh]` sequence has none.
@@ -413,13 +422,6 @@ pub fn publish_rules(cache: &StdMutex<RulesCache>, broadcast: &broadcast::Sender
     let rules = cache.snapshot_wire().unwrap_or_default();
     let _ = broadcast.send(ServerMessage::SetRules { rules });
     let _ = broadcast.send(cache.not_shown());
-}
-
-fn now_secs() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
 }
 
 /// Whether a daemon rule fits the per-field limits. Imported rules use the

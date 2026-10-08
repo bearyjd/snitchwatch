@@ -127,6 +127,32 @@ fn a_new_snapshot_without_a_rule_drops_its_count() {
     assert_eq!(counts(&hits), vec![pair("a", 1)]);
 }
 
+/// A rule that leaves a committed snapshot loses its count. If it returns
+/// (a file put back, with its old `created`), it would start again at 0 with
+/// nothing to say that its earlier hits are gone, and the Rules page could
+/// call it unused at once. So the loss is a gap: nothing before it is trusted.
+#[test]
+fn a_rule_that_leaves_a_snapshot_loses_its_count_and_that_is_a_gap() {
+    let mut hits = RuleHits::default();
+    rec(&mut hits, &[ev("a", 1), ev("b", 2)], &["a", "b"]);
+    assert_eq!(hits.last_gap_unix_ms(), None);
+    hits.adopt_snapshot(NOW + 5, |n| n == "a");
+    assert_eq!(counts(&hits), vec![pair("a", 1)]);
+    assert_eq!(hits.last_gap_unix_ms(), Some(NOW + 5));
+}
+
+#[test]
+fn a_snapshot_that_keeps_every_counted_rule_is_no_gap() {
+    let mut hits = RuleHits::default();
+    rec(&mut hits, &[ev("a", 1)], &["a"]);
+    hits.adopt_snapshot(NOW + 5, |_| true);
+    assert_eq!(hits.last_gap_unix_ms(), None);
+    // A name that was only waiting (never counted) isn't lost history.
+    rec(&mut hits, &[ev("once", 2)], &[]);
+    hits.adopt_snapshot(NOW + 6, |n| n == "a");
+    assert_eq!(hits.last_gap_unix_ms(), None);
+}
+
 #[test]
 fn forgetting_a_rule_drops_its_count_wherever_it_is() {
     let mut hits = RuleHits::default();
@@ -470,4 +496,83 @@ fn a_hit_time_too_far_ahead_is_taken_as_now() {
     let wire = hits.wire_hits();
     assert_eq!(wire[0].last_hit_unix_ms, NOW, "far ahead");
     assert_eq!(wire[1].last_hit_unix_ms, NOW + MAX_FUTURE_SKEW_MS / 2);
+}
+
+// E3 (plan `2026-10-08-default-applied-events.md`): the bazzite-tower fork
+// reports each connection that got the daemon's `DefaultAction` as an event
+// whose synthetic rule is named "" and described by the marker. It grows
+// `rule_misses`, never `rule_hits`.
+
+fn marked(unixnano: i64) -> Event {
+    Event {
+        rule: Some(Rule {
+            name: String::new(),
+            description: crate::daemon_contract::DEFAULT_ACTION_MARKER.to_string(),
+            action: "deny".to_string(),
+            duration: "once".to_string(),
+            enabled: true,
+            ..Default::default()
+        }),
+        unixnano,
+        ..Default::default()
+    }
+}
+
+#[test]
+fn default_applied_events_are_not_lost_rule_hits() {
+    let mut hits = RuleHits::default();
+    at(&mut hits, &[ev("a", 1), marked(2)], 10, NOW);
+    // Only marked events: the counter stays.
+    at(&mut hits, &[marked(3), marked(4)], 10, NOW + 1_000);
+    // A mix: the counter grows by the rule events only.
+    at(
+        &mut hits,
+        &[marked(5), ev("a", 6), marked(7), ev("b", 8)],
+        12,
+        NOW + 2_000,
+    );
+    assert!(!hits.is_lossy(), "gap at {:?}", hits.last_gap_unix_ms());
+    assert_eq!(counts(&hits), vec![pair("a", 2), pair("b", 1)]);
+}
+
+#[test]
+fn a_real_gap_is_still_found_among_default_applied_events() {
+    let mut hits = RuleHits::default();
+    at(&mut hits, &[ev("a", 1)], 10, NOW);
+    // Three rule hits happened; one arrived, beside two marked events.
+    at(&mut hits, &[marked(2), ev("a", 3), marked(4)], 13, NOW + 5);
+    assert_eq!(hits.last_gap_unix_ms(), Some(NOW + 5));
+}
+
+#[test]
+fn a_default_applied_event_counts_for_no_rule() {
+    let mut hits = RuleHits::default();
+    // Even with every name known, "" included.
+    at(&mut hits, &[marked(1), marked(2)], 0, NOW);
+    assert!(counts(&hits).is_empty());
+    hits.adopt_snapshot(NOW, |_| true);
+    assert!(counts(&hits).is_empty(), "nothing waits on the side either");
+}
+
+#[test]
+fn a_named_rule_with_the_marker_description_is_an_ordinary_hit() {
+    let mut named = marked(2);
+    named.rule.as_mut().unwrap().name = "copied".to_string();
+    let mut hits = RuleHits::default();
+    at(&mut hits, &[ev("a", 1)], 10, NOW);
+    // It grew `rule_hits`, so it is received, and it counts.
+    at(&mut hits, &[named], 11, NOW + 1_000);
+    assert!(!hits.is_lossy(), "gap at {:?}", hits.last_gap_unix_ms());
+    assert_eq!(counts(&hits), vec![pair("a", 1), pair("copied", 1)]);
+}
+
+#[test]
+fn an_unmarked_event_named_empty_is_a_rule_hit_received() {
+    // Stock v1.8.0 can load a hand-written rule named "": it grows
+    // `rule_hits` and is counted in the arithmetic, though not by name.
+    let mut hits = RuleHits::default();
+    at(&mut hits, &[ev("a", 1)], 10, NOW);
+    at(&mut hits, &[ev("", 2), ev("a", 3)], 12, NOW + 1_000);
+    assert!(!hits.is_lossy(), "gap at {:?}", hits.last_gap_unix_ms());
+    assert_eq!(counts(&hits), vec![pair("a", 2)]);
 }

@@ -45,6 +45,16 @@ fn info(view: &RuleHitsView) -> serde_json::Value {
     serde_json::from_str(&view.info_json()).unwrap()
 }
 
+/// The page words "unused" and "no gap noticed since" from this one number.
+#[test]
+fn the_summary_carries_the_unused_window_for_the_pages_wording() {
+    use crate::rules::insights::hit_badge::UNUSED_WINDOW_MS;
+    let mut view = RuleHitsView::default();
+    assert_eq!(info(&view)["unusedWindowMs"], UNUSED_WINDOW_MS);
+    view.apply(&hits_message(Some(1_000), &[]));
+    assert_eq!(info(&view)["unusedWindowMs"], UNUSED_WINDOW_MS);
+}
+
 #[test]
 fn before_any_message_nothing_is_counted_or_claimed() {
     let view = RuleHitsView::default();
