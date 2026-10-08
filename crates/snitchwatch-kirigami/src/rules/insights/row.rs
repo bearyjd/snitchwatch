@@ -9,7 +9,7 @@ use crate::rules::row_store::Rule;
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct RowInsights {
-    /// `unused`, `missed`, `since`, `sinceMissed`, or empty.
+    /// `unused`, `since`, `sinceMissed` (a gap of unknown time), or empty.
     pub hit_badge_kind: &'static str,
     /// The time a `since` badge counts from, in Unix milliseconds; else 0.
     pub hit_badge_ms: f64,
@@ -31,7 +31,6 @@ pub fn row_insights(
     match hit_badge(rule, hits, now_ms, UNUSED_WINDOW_MS) {
         None => {}
         Some(HitBadge::Unused) => row.hit_badge_kind = "unused",
-        Some(HitBadge::MissedSome) => row.hit_badge_kind = "missed",
         Some(HitBadge::Since {
             since_unix_ms,
             lossy,

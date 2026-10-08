@@ -1,9 +1,9 @@
 //! P2.6 Part 2: the Rules tab's badges and findings are honest.
 //!
-//! - a zero-count rule is "Unused" only with saved counts that cover 14 days
-//!   and no gap in them; unsaved counts, a short period or a young rule give
-//!   "No hits since <time>", and a gap in the window says hits may have been
-//!   missed; a `nolog` rule is "not counted";
+//! - a zero-count rule is "Unused" only with saved counts and 14 days since
+//!   the latest of counting began, the rule was created and the bridge's last
+//!   gap; unsaved counts, a shorter period or a young rule give "No hits since
+//!   <time>" (from the start of that period); a `nolog` rule is "not counted";
 //! - "Analyze rules" marks a rule another rule shadows, names that rule and
 //!   links to it; the marks go away (and say so) when the rules change;
 //! - more than 2,000 enabled rules are not analysed, and say so;
@@ -209,19 +209,22 @@ Window {
         probeWindow.counts(5, true, false, null);
         probeWindow.check(probeWindow.text(2, "hitsLabel").startsWith("No hits since "),
                           "short period: '" + probeWindow.text(2, "hitsLabel") + "'");
-        // A gap inside the window.
+        // A gap inside the window: only the time after it counts, so the
+        // rule has been counted for 2 days, not 14.
         probeWindow.counts(30, true, true, 2);
         probeWindow.check(probeWindow.text(2, "hitsLabel") ===
-            "No hits counted in the last 14 days, but some may have been missed",
+            "No hits since " + page.formatTime(probeWindow.now - 2 * probeWindow.day),
             "gap: '" + probeWindow.text(2, "hitsLabel") + "'");
-        // An old gap outside the window doesn't stop "unused".
+        // An old gap (a restart weeks ago) leaves a long enough period.
         probeWindow.counts(60, true, true, 20);
         probeWindow.check(probeWindow.text(2, "hitsLabel") === unused,
                           "old gap: '" + probeWindow.text(2, "hitsLabel") + "'");
-        // Unsaved and lossy: says hits may be missing.
-        probeWindow.counts(30, false, true, 1);
-        probeWindow.check(probeWindow.text(2, "hitsLabel").endsWith("; some may have been missed"),
-                          "lossy since: '" + probeWindow.text(2, "hitsLabel") + "'");
+        // A gap of unknown time leaves no period to trust.
+        probeWindow.counts(30, true, true, null);
+        probeWindow.check(probeWindow.text(2, "hitsLabel") ===
+            "No hits since " + page.formatTime(probeWindow.now - 30 * probeWindow.day)
+            + "; some may have been missed",
+            "unknown gap: '" + probeWindow.text(2, "hitsLabel") + "'");
 
         probeWindow.counts(30, true, false, null);
         probeWindow.check(probeWindow.plain("hitsLabel", "row"), "hits label is not PlainText");

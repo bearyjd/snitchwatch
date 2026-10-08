@@ -200,8 +200,23 @@ Window {
                                  "state directory <b>/x</b>: gone", []);
                 const lossy = probeWindow.headerLabel("hitsSummary");
                 probeWindow.check(lossy.indexOf("approximate.") > 0
-                                  && lossy.indexOf("Some hits may be missing (last noticed ") > 0,
+                                  && lossy.indexOf(" Hits may be missing before ") > 0
+                                  && lossy.indexOf("No gap noticed since") < 0,
                                   "lossy summary: '" + lossy + "'");
+                // A gap long past is still dated, and says nothing has been
+                // noticed since. One of unknown time is not dated.
+                probeWindow.hits(T, true, Date.now() - 30 * 86400000, true, "", []);
+                const old = probeWindow.headerLabel("hitsSummary");
+                probeWindow.check(old.indexOf(" Hits may be missing before ") > 0
+                                  && old.endsWith(" No gap noticed since."),
+                                  "old gap summary: '" + old + "'");
+                probeWindow.hits(T, true, null, true, "", []);
+                const undated = probeWindow.headerLabel("hitsSummary");
+                probeWindow.check(undated.endsWith(" Some hits may be missing.")
+                                  && undated.indexOf("before") < 0,
+                                  "undated gap summary: '" + undated + "'");
+                probeWindow.hits(T, true, T + 60000, false,
+                                 "state directory <b>/x</b>: gone", []);
                 probeWindow.check(probeWindow.headerLabel("hitsStorage") ===
                     "Hit counts are not saved across restarts: state directory <b>/x</b>: gone",
                     "storage text: '" + probeWindow.headerLabel("hitsStorage") + "'");

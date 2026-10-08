@@ -61,14 +61,32 @@ fn the_badge_kinds_name_what_the_row_may_claim() {
     let mut rule = allow("a", host("example.com"));
     rule.created = (NOW - 40 * DAY) / 1000;
     let idle = AnalysisState::default();
-    let kind = |persistent, lossy| {
-        let row = row_insights(&rule, &counting(persistent, lossy), &idle, NOW);
+    let kind = |view: &RuleHitsView| {
+        let row = row_insights(&rule, view, &idle, NOW);
         (row.hit_badge_kind, row.hit_badge_ms)
     };
-    assert_eq!(kind(true, false), ("unused", 0.0));
-    assert_eq!(kind(true, true), ("missed", 0.0));
-    assert_eq!(kind(false, false), ("since", (NOW - 30 * DAY) as f64));
-    assert_eq!(kind(false, true), ("sinceMissed", (NOW - 30 * DAY) as f64));
+    assert_eq!(kind(&counting(true, false)), ("unused", 0.0));
+    // A gap a day ago: the period that counts begins there.
+    assert_eq!(kind(&counting(true, true)), ("since", (NOW - DAY) as f64));
+    assert_eq!(
+        kind(&counting(false, false)),
+        ("since", (NOW - 30 * DAY) as f64)
+    );
+    assert_eq!(kind(&counting(false, true)), ("since", (NOW - DAY) as f64));
+    // A gap of unknown time: counting since the start, and hits may be missing.
+    let mut unknown_gap = RuleHitsView::default();
+    unknown_gap.apply(&ServerMessage::RuleHits {
+        since_unix_ms: Some(NOW - 30 * DAY),
+        lossy: true,
+        last_gap_unix_ms: None,
+        storage: StorageStatus {
+            persistent: true,
+            reason: None,
+            unreadable: false,
+        },
+        hits: vec![],
+    });
+    assert_eq!(kind(&unknown_gap), ("sinceMissed", (NOW - 30 * DAY) as f64));
 }
 
 #[test]

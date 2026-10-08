@@ -33,9 +33,10 @@
 // survive a restart. Every label is PlainText.
 //
 // Rule insights (P2.6 Part 2): a zero-count rule gets a badge. "Unused" is
-// claimed only when the counts are saved across restarts, counting and the
-// rule's age cover 14 days, and no gap in the counting overlaps them (else it
-// is "No hits since <time>", or says hits may have been missed). "Analyze
+// claimed only when the counts are saved across restarts and the period they
+// can be trusted in (since counting began, the rule was created, and the
+// bridge's last gap, whichever is latest) is 14 days; otherwise it is
+// "No hits since <time>", from the start of that period. "Analyze
 // rules" finds rules that can never decide a connection because another one
 // covers them: "Redundant", "Never applies", or only "May be shadowed" when the
 // proof leans on the regular-expression engine. It checks only conditions
@@ -124,9 +125,16 @@ Kirigami.ScrollablePage {
         let text = "Hits counted by Snitchwatch since " + page.formatTime(info.sinceMs)
             + "; approximate.";
         if (info.lossy) {
-            text += " Some hits may be missing"
-                + (info.lastGapMs > 0 ? " (last noticed " + page.formatTime(info.lastGapMs) + ")" : "")
-                + ".";
+            // The gap is a moment, not a state: hits before it may be missing,
+            // and a long-past one says nothing is known since.
+            if (info.lastGapMs > 0) {
+                text += " Hits may be missing before " + page.formatTime(info.lastGapMs) + ".";
+                if (Date.now() - info.lastGapMs >= 14 * 86400000) {
+                    text += " No gap noticed since.";
+                }
+            } else {
+                text += " Some hits may be missing.";
+            }
         }
         return text;
     }
@@ -145,8 +153,6 @@ Kirigami.ScrollablePage {
             switch (badgeKind) {
             case "unused":
                 return "Unused: no hits counted in the last 14 days";
-            case "missed":
-                return "No hits counted in the last 14 days, but some may have been missed";
             case "since":
                 return "No hits since " + page.formatTime(badgeMs);
             case "sinceMissed":

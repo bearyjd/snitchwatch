@@ -158,12 +158,14 @@ Functions are cited by name.
      `Unknown` and publishes an empty `SetRules` every time the daemon
      stream closes, which happens on every daemon restart or reconnect.
      Pruning on it would wipe all counts.
-   - **`lossy`** is set when a batch length is **≥ `max_events - 1`**
-     (`max_events` from `daemon_config`, else 150).
-     - Conservative: a batch of exactly `max_events - 1` with no loss also
-       sets it. That is the price of catching the missed-connection drop
-       (Findings).
-     - It never clears for the session.
+   - **`lossy`** records that events may be missing: a *gap* is noted
+     whenever the daemon's own `rule_hits` counter shows more events than
+     the pings carried, on a daemon restart, and when counts are restored
+     after the bridge was down (see "Part 1 as built", which replaced the
+     earlier `max_events - 1` batch-size heuristic). It stays set, and
+     `lastGapUnixMs` says when the latest gap was noticed, so a GUI can say
+     "hits may be missing *before* <time>" instead of showing a banner that
+     never ends.
    - **Bounds.** At most `MAX_SNAPSHOT_RULES` entries in the main map. A
      rename starts at zero.
    - **Persistence** is owner question N1, **decided yes (owner,
@@ -246,8 +248,10 @@ the design above, this is what shipped):
   session (an older bridge never sends one), nor before counting starts.
   `nolog` rules read "Not counted: this rule doesn't log", never 0. The
   header says "Hits counted by Snitchwatch since <time>; approximate.", adds
-  "Some hits may be missing (last noticed <time>)." when `lossy`, and says
-  when the counts are not saved. Every label is PlainText. A count update
+  "Hits may be missing before <time>." when `lossy` (the time of the last
+  gap, with "No gap noticed since." once that is 14 days back, or "Some hits
+  may be missing." for a gap of unknown time), and says when the counts are
+  not saved. Every label is PlainText. A count update
   refreshes only the count roles (`dataChanged`), never a model reset.
 
 ### Part 2: unused and shadowed (Kirigami, Qt-free `rules/insights.rs`)
@@ -257,13 +261,17 @@ the design above, this is what shipped):
    false for `nolog` rules ("Not counted: this rule doesn't log").
    `RulesPage.qml` gets "Hits" and "Last used" columns, with a tooltip
    "Counted by Snitchwatch since <time>; approximate" plus "may be
-   missing some" when `lossy`.
+   missing some" when `lossy`. (As built, the page shows the count and
+   the badge on each row and one header line; see "Part 1 as built" and
+   "Part 2 as built".)
 4. **Unused:** `unused(store, hits, now, window) -> Vec<name>`. A rule
    qualifies when it is:
    - enabled;
    - not `nolog`;
    - of duration `always` or `until restart`;
-   - observed for at least `window` (14 days; see N2 under Owner questions);
+   - observed for at least `window` (14 days; see N2 under Owner questions),
+     counted from the latest of counting began, the rule was created and
+     the bridge's last gap ("Part 2 as built");
    - with a count of 0.
 
    Without persistence (N1 = no), the badge reads "No hits since <time>"
@@ -313,16 +321,19 @@ the design above, this is what shipped):
   copied. The wire rule gains a display-only `created` (Unix seconds, 0 =
   unknown), because "unused" needs the rule's age.
 - **Badges** (`hit_badge`, N2). An eligible rule (enabled, logs, `always` or
-  `until restart`, not read-only, not a blocklist, not `000-snitchwatch-`)
-  with a count of 0 is **Unused** only when the counts are saved across
-  restarts, counting and the rule's age (`created`; unknown age never counts)
-  cover 14 days, and no gap overlaps the window. The bridge reports only its
-  latest gap, so overlap is `last_gap >= now - 14 days` (a gap of unknown time
-  counts as inside). With a gap inside, the badge says "No hits counted in the
-  last 14 days, but some may have been missed". Otherwise (not saved, a shorter
-  period, a young rule) it is "No hits since <time>", plus "; some may have
-  been missed" when lossy. Known limit: when a rule was last *enabled* is
-  unknown, so a rule enabled recently reads as unused if it is old enough.
+  `until restart`, not read-only, not a blocklist, not `000-snitchwatch-`,
+  a name the bridge can count) with a count of 0 gets a badge. The period
+  its zero is trusted over starts at the **latest of**: when counting began,
+  when the rule was created (`created`; unknown age is never "unused"), and
+  the bridge's **last gap**. It is **Unused** only when the counts are saved
+  across restarts and that period is at least 14 days; otherwise it is "No
+  hits since <start of that period>", which is the gap time when the gap is
+  the latest. A gap of unknown time leaves no trusted period: "No hits
+  since <counting start>; some may have been missed". So one bridge restart
+  (which records a gap) delays "unused" by 14 days instead of ruling it out
+  for good, and an old gap costs nothing. Known limit: when a rule was last
+  *enabled* is unknown, so a rule enabled recently reads as unused if it
+  is old enough.
 - **Findings** (`shadow`, run by "Analyze rules" on a worker thread, at most
   2 000 enabled rules). Same scan as the simulator and `FindFirstMatch`.
   `B` is shadowed by `A` when `A` covers it and: `A` is a stop rule (deny,
@@ -397,11 +408,12 @@ the design above, this is what shipped):
   next snapshot commit.
 - **Before the cache is synced,** counts are held in the side map. They
   are adopted at the commit whose snapshot contains the name.
-- **`lossy`:**
-  - a batch of `max_events - 1` sets it, because a missed connection at
-    the cap drops an event first;
-  - a batch of `max_events` sets it;
-  - a batch of `max_events - 2` doesn't.
+- **Gaps** (as built, replacing the `max_events - 1` batch-size tests):
+  - a ping whose `rule_hits` grew by more than its events carried notes a
+    gap, and one that accounts for every event doesn't;
+  - a counter drop or an `uptime` drop notes one; the first ping of a run
+    only sets the baseline;
+  - restoring from the file notes one.
 - **Counts survive a reconnect.** `a:3`, then `RulesSync::withdraw`
   (cache `Unknown`, empty `SetRules`), then a re-commit containing `a`:
   `a` is still 3, and hits during the `Unknown` gap are added on adoption.

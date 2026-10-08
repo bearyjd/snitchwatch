@@ -262,8 +262,10 @@ past 2,000,000 hosts in total (in subscription order) get no rule.
   says so. A count belongs to a rule's name: editing a rule keeps it, and a
   deleted or expired rule loses it.
   A rule with no counted hits gets a badge: "Unused" only when the counts
-  are saved, cover 14 days, have no gap in them and the rule is at least 14
-  days old; otherwise "No hits since <time>". "Analyze rules" marks rules that
+  are saved and 14 days have passed since the latest of when counting began,
+  when the rule was created and the bridge's last gap in the counting (a
+  restart, say); otherwise "No hits since <time>", from that moment. The
+  header says "Hits may be missing before <time>" for the last gap. "Analyze rules" marks rules that
   can never decide a connection because another one covers them ("Redundant",
   "Never applies", or "May be shadowed" when the proof rests on a regular
   expression). It checks only conditions Snitchwatch can compare exactly, so

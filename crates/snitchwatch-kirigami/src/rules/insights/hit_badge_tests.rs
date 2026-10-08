@@ -158,30 +158,80 @@ fn counts_that_are_not_saved_never_say_unused() {
     );
 }
 
+/// The period that counts starts at the bridge's last gap: hits lost before
+/// it say nothing about the time after it.
 #[test]
-fn a_gap_inside_the_window_means_hits_may_have_been_missed() {
+fn only_the_period_after_the_last_gap_counts() {
     let mut counts = Counts::healthy();
     counts.lossy = true;
     counts.last_gap = Some(NOW - 3 * DAY);
-    assert_eq!(badge(&aged("b", 40), &counts), Some(HitBadge::MissedSome));
+    assert_eq!(
+        badge(&aged("b", 40), &counts),
+        Some(HitBadge::Since {
+            since_unix_ms: NOW - 3 * DAY,
+            lossy: false
+        }),
+        "no hits since the gap, and nothing missed since then"
+    );
     assert_eq!(
         unused(&[aged("b", 40)], &counts.view(), NOW, W),
         Vec::<String>::new()
     );
-    // The edge of the window.
+    // Exactly the window after the gap is enough; a moment less is not.
     counts.last_gap = Some(NOW - W);
-    assert_eq!(badge(&aged("b", 40), &counts), Some(HitBadge::MissedSome));
-    // An older gap can't have hidden a hit inside the window.
+    assert_eq!(badge(&aged("b", 40), &counts), Some(HitBadge::Unused));
+    counts.last_gap = Some(NOW - W + 1);
+    assert!(matches!(
+        badge(&aged("b", 40), &counts),
+        Some(HitBadge::Since { .. })
+    ));
+    // A gap long ago (one bridge restart, weeks back) costs nothing.
     counts.last_gap = Some(NOW - W - 1);
     assert_eq!(badge(&aged("b", 40), &counts), Some(HitBadge::Unused));
 }
 
 #[test]
-fn a_gap_of_unknown_time_counts_as_inside_the_window() {
+fn the_period_starts_at_the_latest_of_counting_the_rule_and_the_gap() {
+    let mut counts = Counts::healthy();
+    counts.lossy = true;
+    // The gap is older than the rule: the rule's age decides.
+    counts.last_gap = Some(NOW - 30 * DAY);
+    assert_eq!(
+        badge(&aged("b", 5), &counts),
+        Some(HitBadge::Since {
+            since_unix_ms: NOW - 5 * DAY,
+            lossy: false
+        })
+    );
+    // The gap is older than counting began (it can't be, but be safe).
+    counts.since = Some(NOW - 2 * DAY);
+    counts.last_gap = Some(NOW - 10 * DAY);
+    assert_eq!(
+        badge(&aged("b", 40), &counts),
+        Some(HitBadge::Since {
+            since_unix_ms: NOW - 2 * DAY,
+            lossy: false
+        })
+    );
+}
+
+/// Without knowing when, there is no period to trust.
+#[test]
+fn a_gap_of_unknown_time_leaves_no_trusted_period() {
     let mut counts = Counts::healthy();
     counts.lossy = true;
     counts.last_gap = None;
-    assert_eq!(badge(&aged("b", 40), &counts), Some(HitBadge::MissedSome));
+    assert_eq!(
+        badge(&aged("b", 40), &counts),
+        Some(HitBadge::Since {
+            since_unix_ms: NOW - 30 * DAY,
+            lossy: true
+        })
+    );
+    assert_eq!(
+        unused(&[aged("b", 40)], &counts.view(), NOW, W),
+        Vec::<String>::new()
+    );
 }
 
 #[test]
@@ -214,16 +264,17 @@ fn a_rule_of_unknown_age_is_never_called_unused() {
 }
 
 #[test]
-fn a_lossy_no_hits_since_says_so() {
+fn unsaved_counts_after_a_gap_say_no_hits_since_the_gap() {
     let mut counts = Counts::healthy();
+    counts.persistent = false;
     counts.since = Some(NOW - 2 * DAY);
     counts.lossy = true;
     counts.last_gap = Some(NOW - DAY);
     assert_eq!(
         badge(&aged("b", 40), &counts),
         Some(HitBadge::Since {
-            since_unix_ms: NOW - 2 * DAY,
-            lossy: true
+            since_unix_ms: NOW - DAY,
+            lossy: false
         })
     );
 }

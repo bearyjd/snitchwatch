@@ -4,19 +4,26 @@
 //! "this rule had a fair chance to be hit for 14 days and wasn't":
 //!
 //! - the rule is enabled, logs (`nolog` rules never produce events), is
-//!   permanent (`always` or `until restart`), and isn't managed elsewhere;
+//!   permanent (`always` or `until restart`), has a name the bridge can count,
+//!   and isn't managed elsewhere;
 //! - its count is 0;
 //! - the counts are **saved across restarts** (without that, "unused" would be
-//!   a fact about this session only), and counting plus the rule's own age
-//!   cover the whole window. The rule's age is its `created` time; a rule of
-//!   unknown age is never called unused;
-//! - **no gap** in the counting overlaps the window. The bridge reports only
-//!   its latest gap, so a gap inside the window is `last_gap >= now - window`
-//!   (a gap of unknown time counts as inside). Then the badge says hits may
-//!   have been missed instead.
+//!   a fact about this session only);
+//! - the **period it was fairly counted in** is at least 14 days. That period
+//!   starts at the latest of: when counting began, when the rule was created
+//!   (its `created` time; a rule of unknown age is never called unused), and
+//!   the bridge's **last gap** (a restart, a daemon restart, a burst past the
+//!   daemon's event cap: moments hits may have been lost before). A gap of
+//!   unknown time leaves no period to trust.
 //!
 //! Every other eligible zero-count rule gets only "No hits since <time>": the
-//! time counting (or the rule) began, with a note when hits may be missing.
+//! start of that same period, which is the last gap when that is the latest of
+//! the three. (A gap of unknown time keeps the counting start and adds that
+//! hits may have been missed.)
+//!
+//! Because the period starts after the last gap, one bridge restart delays
+//! "unused" by 14 days instead of ruling it out for good, and an old gap
+//! costs nothing.
 //!
 //! One thing the badge cannot know: when the rule was last *enabled*. A rule
 //! turned on yesterday shows as unused if it has been created for 14 days. The
@@ -31,11 +38,11 @@ pub const UNUSED_WINDOW_MS: i64 = 14 * 24 * 60 * 60 * 1000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HitBadge {
-    /// No hits counted over the whole window, with nothing known to be missed.
+    /// No hits counted over a trusted period of at least the window.
     Unused,
-    /// No hits counted over the window, but hits may have been missed in it.
-    MissedSome,
-    /// No hits counted since `since_unix_ms` (not yet long enough to say more).
+    /// No hits counted since `since_unix_ms`, the start of the trusted
+    /// period (not yet long enough to say more). `lossy` only for a gap of
+    /// unknown time: hits may have been missed, and the period is unknown.
     Since { since_unix_ms: i64, lossy: bool },
 }
 
@@ -59,23 +66,26 @@ pub fn hit_badge(
         return None;
     }
     let created_ms = (rule.created > 0).then(|| rule.created.saturating_mul(1000));
-    let observed_from =
-        created_ms.map_or(counting.since_unix_ms, |c| c.max(counting.since_unix_ms));
-    let covers_window = created_ms.is_some() && now_ms.saturating_sub(observed_from) >= window_ms;
-    if !(counting.persistent && covers_window) {
-        return Some(HitBadge::Since {
-            since_unix_ms: observed_from,
-            lossy: counting.lossy,
-        });
-    }
-    let gap_in_window = (counting.lossy || counting.last_gap_unix_ms.is_some())
-        && counting
-            .last_gap_unix_ms
-            .is_none_or(|gap| gap >= now_ms.saturating_sub(window_ms));
-    Some(if gap_in_window {
-        HitBadge::MissedSome
-    } else {
+    let unknown_gap = counting.lossy && counting.last_gap_unix_ms.is_none();
+    // The trusted period starts at the latest of the three.
+    let from = [
+        Some(counting.since_unix_ms),
+        created_ms,
+        counting.last_gap_unix_ms,
+    ]
+    .into_iter()
+    .flatten()
+    .max()
+    .unwrap_or(counting.since_unix_ms);
+    let long_enough =
+        created_ms.is_some() && !unknown_gap && now_ms.saturating_sub(from) >= window_ms;
+    Some(if counting.persistent && long_enough {
         HitBadge::Unused
+    } else {
+        HitBadge::Since {
+            since_unix_ms: from,
+            lossy: unknown_gap,
+        }
     })
 }
 
