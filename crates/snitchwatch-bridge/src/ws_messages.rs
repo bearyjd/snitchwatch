@@ -198,7 +198,10 @@ pub enum ServerMessage {
     /// Whether filtering is paused and when the pause ends on its own
     /// (issue #47). Sent on every pause change and in every snapshot, so a
     /// GUI that connects mid-pause learns the end time. An additive
-    /// extension: older clients ignore the unknown action.
+    /// extension: the legacy web client ignores unknown actions, and the
+    /// Kirigami shell skips frames it can't parse. A Kirigami build from
+    /// before #47 does not: it drops the connection on any unknown action and
+    /// reconnects, so it can't be paired with a bridge that sends this.
     FilterPauseState {
         paused: bool,
         #[serde(default)]

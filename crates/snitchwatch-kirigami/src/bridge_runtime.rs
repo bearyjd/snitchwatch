@@ -368,17 +368,24 @@ async fn connect_and_relay(
                 None => return Ok(()),
             },
             incoming = ws.next() => match incoming {
-                Some(Ok(Message::Text(text))) => {
-                    let message: ServerMessage = serde_json::from_str(&text)?;
-                    forward_shell_message(
-                        &message,
-                        connection_id,
-                        &shell.tray_tx,
-                        &shell.notice_tx,
-                        &shell.pause_tx,
-                    );
-                    let _ = broadcast_tx.send(ReceivedServerMessage { connection_id, message });
-                }
+                Some(Ok(Message::Text(text))) => match serde_json::from_str::<ServerMessage>(&text) {
+                    Ok(message) => {
+                        forward_shell_message(
+                            &message,
+                            connection_id,
+                            &shell.tray_tx,
+                            &shell.notice_tx,
+                            &shell.pause_tx,
+                        );
+                        let _ = broadcast_tx.send(ReceivedServerMessage { connection_id, message });
+                    }
+                    // A newer bridge may send actions this client doesn't
+                    // know. Skip them: dropping the connection would reconnect
+                    // forever, cancelling pending prompts each time.
+                    Err(error) => {
+                        tracing::warn!(%error, "skipping a bridge message this client can't parse");
+                    }
+                },
                 Some(Ok(Message::Close(_))) | None => anyhow::bail!("bridge closed the WebSocket"),
                 Some(Ok(Message::Ping(payload))) => ws.send(Message::Pong(payload)).await?,
                 Some(Ok(_)) => {},
@@ -848,6 +855,87 @@ mod tests {
         drop(inbound_tx);
         client.abort();
         bridge.shutdown();
+    }
+
+    #[tokio::test]
+    async fn a_server_message_this_client_cannot_parse_is_skipped() {
+        // Code review M1 on #47: a bridge newer than this client may send an
+        // action it doesn't know. Dropping the connection for it would make
+        // the client reconnect forever, cancelling pending prompts each time.
+        let dir = tempfile::tempdir().unwrap();
+        let socket_path = dir.path().join("bridge.sock");
+        let token = snitchwatch_bridge::auth::Token::generate();
+        snitchwatch_bridge::auth::write_token_file(&token, &dir.path().join("token")).unwrap();
+        let listener = tokio::net::UnixListener::bind(&socket_path).unwrap();
+        let server =
+            tokio::spawn(async move { accept_authenticated_snapshot_on(&listener, &token).await });
+
+        let (broadcast_tx, _) = broadcast::channel(4);
+        let (inbound_tx, mut inbound_rx) = mpsc::channel(1);
+        let (tray_tx, mut tray_rx) = watch::channel(ReceivedTrayState {
+            connection_id: 0,
+            state: BridgeTrayState::Idle,
+        });
+        let (notice_tx, _) = broadcast::channel(1);
+        let status = Arc::new(Mutex::new(String::new()));
+        let connection = Arc::new(Mutex::new(ConnectionState::default()));
+        let client = tokio::spawn(async move {
+            connect_and_relay(
+                &socket_path,
+                &broadcast_tx,
+                &mut inbound_rx,
+                &status,
+                &ShellFeeds {
+                    tray_tx,
+                    notice_tx,
+                    pause_tx: pause_channel().0,
+                },
+                &connection,
+            )
+            .await
+        });
+
+        let mut ws = server.await.unwrap();
+        for frame in [
+            r#"{"action":"someFutureAction","detail":1}"#.to_string(),
+            serde_json::to_string(&ServerMessage::TrayState {
+                state: BridgeTrayState::Pending(4),
+            })
+            .unwrap(),
+        ] {
+            ws.send(Message::Text(frame)).await.unwrap();
+        }
+        tokio::time::timeout(Duration::from_secs(2), tray_rx.changed())
+            .await
+            .expect("the frame after the unknown one never arrived")
+            .unwrap();
+        assert_eq!(tray_rx.borrow().connection_id, 1);
+        assert_eq!(tray_rx.borrow().state, BridgeTrayState::Pending(4));
+        assert!(!client.is_finished(), "the client dropped the connection");
+
+        drop(inbound_tx);
+        client.await.unwrap().unwrap();
+    }
+
+    /// Accept one client, check its token, acknowledge it and take its
+    /// snapshot request; hand back the server side of the socket.
+    async fn accept_authenticated_snapshot_on(
+        listener: &tokio::net::UnixListener,
+        token: &snitchwatch_bridge::auth::Token,
+    ) -> tokio_tungstenite::WebSocketStream<tokio::net::UnixStream> {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let presented = ws.next().await.unwrap().unwrap().into_text().unwrap();
+        assert!(token.matches(&presented));
+        ws.send(Message::Text(
+            serde_json::to_string(&ServerMessage::Authenticated).unwrap(),
+        ))
+        .await
+        .unwrap();
+        let snapshot: ClientMessage =
+            serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap()).unwrap();
+        assert_eq!(snapshot, ClientMessage::RequestSnapshot);
+        ws
     }
 
     #[tokio::test]
