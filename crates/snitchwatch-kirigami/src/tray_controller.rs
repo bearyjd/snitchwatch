@@ -16,7 +16,7 @@ use cxx_qt_lib::{QDateTime, QString, QTimeZone};
 
 use crate::bridge_runtime::{BridgePauseState, BridgeTrayState};
 use crate::tray::{
-    build_set_filtering_paused_json, derive_menu_label, derive_tooltip, menu_label_token,
+    build_set_filtering_paused_json, derive_menu_label, derive_tooltip_with_slot, menu_label_token,
 };
 
 #[cxx_qt::bridge]
@@ -82,6 +82,9 @@ pub struct TrayControllerRust {
     paused_until: QString,
     tray_state: BridgeTrayState,
     pause_state: BridgePauseState,
+    /// A prompt holds the daemon's single slot in the live session (issue
+    /// #78; `PromptSlot` messages).
+    slot_held: bool,
 }
 
 impl Default for TrayControllerRust {
@@ -92,6 +95,7 @@ impl Default for TrayControllerRust {
             paused_until: QString::default(),
             tray_state: BridgeTrayState::Idle,
             pause_state: BridgePauseState::NOT_PAUSED,
+            slot_held: false,
         }
     }
 }
@@ -127,6 +131,25 @@ impl qobject::TrayController {
         // Each change is applied only if it still belongs to the live bridge
         // session when the queued Qt callback runs.
         let runtime = handles.runtime().clone();
+        if let Some(mut slot_rx) = crate::bridge_runtime::prompt_slot_rx() {
+            let slot_thread = qt_thread.clone();
+            let slot_handles = handles.clone();
+            runtime.spawn(async move {
+                loop {
+                    let received = slot_rx.borrow_and_update().clone();
+                    let session_handles = slot_handles.clone();
+                    let _ = slot_thread.queue(move |mut qobject| {
+                        if session_handles.is_current_session(received.connection_id) {
+                            qobject.as_mut().rust_mut().slot_held = received.holder.is_some();
+                            qobject.refresh();
+                        }
+                    });
+                    if slot_rx.changed().await.is_err() {
+                        break;
+                    }
+                }
+            });
+        }
         let tray_thread = qt_thread.clone();
         let tray_handles = handles.clone();
         runtime.spawn(async move {
@@ -179,7 +202,12 @@ impl qobject::TrayController {
             (true, Some(ms)) => local_hh_mm(ms),
             _ => String::new(),
         };
-        let tooltip = derive_tooltip(&self.rust().tray_state, &pause, &until);
+        let tooltip = derive_tooltip_with_slot(
+            &self.rust().tray_state,
+            &pause,
+            &until,
+            self.rust().slot_held,
+        );
         let label = derive_menu_label(&self.rust().tray_state, &pause);
         self.as_mut().set_tooltip(QString::from(&tooltip));
         self.as_mut()

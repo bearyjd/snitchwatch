@@ -287,6 +287,7 @@ async fn client_loop_forwards_authenticated_snapshot_to_the_qml_feed() {
             tray_tx,
             notice_tx,
             pause_tx: pause_channel().0,
+            slot_tx: watch::channel(ReceivedPromptSlot::default()).0,
         },
         connection.clone(),
     ));
@@ -367,6 +368,7 @@ async fn a_server_message_this_client_cannot_parse_is_skipped() {
                 tray_tx,
                 notice_tx,
                 pause_tx: pause_channel().0,
+                slot_tx: watch::channel(ReceivedPromptSlot::default()).0,
             },
             &connection,
         )
@@ -474,6 +476,7 @@ async fn app_bound_rules_follow_each_sessions_acknowledgement() {
             tray_tx,
             notice_tx,
             pause_tx: pause_channel().0,
+            slot_tx: watch::channel(ReceivedPromptSlot::default()).0,
         },
         connection.clone(),
     ));
@@ -569,6 +572,7 @@ async fn client_stays_pending_until_service_acknowledges_the_token() {
                 tray_tx,
                 notice_tx,
                 pause_tx: pause_channel().0,
+                slot_tx: watch::channel(ReceivedPromptSlot::default()).0,
             },
             &client_connection,
         )
@@ -638,6 +642,7 @@ async fn client_loop_reconnects_after_service_socket_and_token_rotation() {
             tray_tx,
             notice_tx,
             pause_tx: pause_channel().0,
+            slot_tx: watch::channel(ReceivedPromptSlot::default()).0,
         },
         connection.clone(),
     ));
@@ -717,6 +722,7 @@ async fn client_loop_recovers_from_missing_and_stale_tokens() {
             tray_tx,
             notice_tx,
             pause_tx: pause_channel().0,
+            slot_tx: watch::channel(ReceivedPromptSlot::default()).0,
         },
         connection,
     ));

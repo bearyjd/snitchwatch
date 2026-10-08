@@ -38,6 +38,30 @@ pub fn derive_tooltip(state: &TrayState, pause: &PauseState, paused_until: &str)
     }
 }
 
+/// [`derive_tooltip`], plus issue #78: while paused, a prompt holding the
+/// daemon's single slot means the pause usually lets nothing else through,
+/// and the tooltip says so. Fixed text only (the tooltip renders rich text).
+pub fn derive_tooltip_with_slot(
+    state: &TrayState,
+    pause: &PauseState,
+    paused_until: &str,
+    slot_held: bool,
+) -> String {
+    let shows_pause = !matches!(state, TrayState::DaemonDown | TrayState::RecentBlock { .. });
+    if slot_held && shows_pause && is_paused(state, pause) {
+        let until = if paused_until.is_empty() {
+            String::new()
+        } else {
+            format!(" until {paused_until}")
+        };
+        return format!(
+            "Snitchwatch — filtering paused{until}. {}",
+            crate::prompt_slot_text::PAUSED_WHILE_WAITING
+        );
+    }
+    derive_tooltip(state, pause, paused_until)
+}
+
 #[derive(Debug, PartialEq, Eq)]
 #[allow(dead_code)]
 pub enum MenuLabel {
@@ -285,5 +309,37 @@ mod tests {
             !main_qml.contains("Labs.Menu{"),
             "main.qml declares a menu of its own"
         );
+    }
+
+    /// Issue #78: paused with a prompt holding the slot, the tooltip says the
+    /// pause usually lets nothing else through. Otherwise it is unchanged.
+    #[test]
+    fn a_pause_with_a_waiting_prompt_says_so() {
+        let tooltip = derive_tooltip_with_slot(&TrayState::FilterOff, &PAUSED, "14:30", true);
+        assert_eq!(
+            tooltip,
+            format!(
+                "Snitchwatch — filtering paused until 14:30. {}",
+                crate::prompt_slot_text::PAUSED_WHILE_WAITING
+            )
+        );
+        assert_eq!(
+            derive_tooltip_with_slot(&TrayState::FilterOff, &PAUSED, "", true),
+            format!(
+                "Snitchwatch — filtering paused. {}",
+                crate::prompt_slot_text::PAUSED_WHILE_WAITING
+            )
+        );
+        for (state, pause, slot_held) in [
+            (TrayState::FilterOff, PAUSED, false),
+            (TrayState::Pending(1), NOT_PAUSED, true),
+            (TrayState::DaemonDown, PAUSED, true),
+        ] {
+            assert_eq!(
+                derive_tooltip_with_slot(&state, &pause, "14:30", slot_held),
+                derive_tooltip(&state, &pause, "14:30"),
+                "{state:?} {slot_held}"
+            );
+        }
     }
 }
