@@ -163,6 +163,7 @@ SizedOverlaySheet {
         Controls.Label {
             Layout.fillWidth: true
             visible: sheet.prefilled
+            textFormat: Text.PlainText
             wrapMode: Text.Wrap
             font: Kirigami.Theme.smallFont
             text: "Started from the connection you chose. What it doesn't say was left blank, which means unknown."

@@ -17,6 +17,7 @@ use cxx_qt_lib::{QByteArray, QGuiApplication, QQmlApplicationEngine, QUrl};
 
 #[allow(unused_imports)]
 use snitchwatch_kirigami::bridge_bindings as _;
+use snitchwatch_kirigami::rules::simulator::DAEMON_PROTOCOLS;
 
 mod common;
 use common::{capture_stderr, init_headless_qt_env};
@@ -31,6 +32,8 @@ fn the_inspector_prefills_the_simulator_and_unknowns_stay_unknown() {
     let mut engine = QQmlApplicationEngine::new();
     let root_ok = Arc::new(AtomicBool::new(false));
 
+    // The sheet keeps its own copy of the daemon's protocol names; the probe
+    // checks it against the Rust list (the placeholder below).
     let qml = r#"
 import QtQuick
 import QtQuick.Window
@@ -122,7 +125,9 @@ Window {
                     action: "insertConnectionRows",
                     rows: [
                         probeWindow.connection("r1", "/usr/bin/curl", "github.com", "140.82.112.3", 443, "tcp"),
-                        probeWindow.connection("r2", null, "", "10.0.0.5", 53, "udp"),
+                        // A bare-IP connection as the bridge's `connection_to_row` makes it:
+                        // the daemon's DstHost is empty, so dstHost carries the IP.
+                        probeWindow.connection("r2", null, "10.0.0.5", "10.0.0.5", 53, "udp"),
                         probeWindow.connection("r3", "/usr/bin/dig", "", "", 53, "udplite6"),
                         probeWindow.connection("r4", "/usr/bin/x", "x.example", "1.2.3.4", 80, "gre")
                     ]
@@ -137,6 +142,18 @@ Window {
                 }));
                 probeWindow.expect(connections.simulationPrefillJson("nope") === "{}",
                     "an unknown row should prefill nothing");
+
+                // The sheet offers exactly the protocol names the daemon gives
+                // a connection (`DAEMON_PROTOCOLS`), after "unknown".
+                probeWindow.expect(JSON.stringify(sheet.protocolNames) === '__DAEMON_PROTOCOLS__',
+                    "protocolNames: " + JSON.stringify(sheet.protocolNames));
+                const protocolBox = probeWindow.field("simProtocol");
+                probeWindow.expect(protocolBox.count === sheet.protocolNames.length + 1,
+                    "protocol entries: " + protocolBox.count);
+                for (let i = 0; i < sheet.protocolNames.length; i++) {
+                    probeWindow.expect(protocolBox.indexOfValue(sheet.protocolNames[i]) === i + 1,
+                        "protocol not offered: " + sheet.protocolNames[i]);
+                }
 
                 // Something typed earlier must not survive into the next prefill.
                 sheet.open();
@@ -166,11 +183,15 @@ Window {
                     "uid should be unknown: " + sheet.simulateUnevaluated);
 
                 // A row with no process path: unknown, not an empty path.
-                probeWindow.simulateRow({ id: "r2", process: "curl", dstHost: "",
+                probeWindow.simulateRow({ id: "r2", process: "curl", dstHost: "10.0.0.5",
                                           dstPort: 53, protocol: "udp" });
                 probeWindow.expect(probeWindow.field("simProcessPath").text === "",
                     "the process name leaked into the path");
                 probeWindow.expect(probeWindow.field("simDestIp").text === "10.0.0.5", "r2 ip");
+                // The IP is the row's fallback for a missing host, not the
+                // host: the daemon's DstHost for a bare IP is "".
+                probeWindow.expect(probeWindow.field("simHost").text === "",
+                    "r2 host: " + probeWindow.field("simHost").text);
                 probeWindow.expect(probeWindow.field("simProtocol").currentValue === "udp", "r2 protocol");
                 sheet.runSimulation();
                 probeWindow.expect(sheet.simulateMatchedRule === "",
@@ -216,7 +237,11 @@ Window {
         }
     }
 }
-"#;
+"#
+    .replace(
+        "__DAEMON_PROTOCOLS__",
+        &serde_json::to_string(&DAEMON_PROTOCOLS).expect("protocol names serialize"),
+    );
 
     let guard = engine.as_mut().map(|engine| {
         let root_ok = root_ok.clone();
@@ -228,7 +253,7 @@ Window {
 
     let captured = capture_stderr(|| {
         if let Some(engine) = engine.as_mut() {
-            engine.load_data(&QByteArray::from(qml), &QUrl::from(PROBE_URL));
+            engine.load_data(&QByteArray::from(qml.as_str()), &QUrl::from(PROBE_URL));
         }
         // Without a root object nothing calls Qt.quit(): skip the loop and
         // let the assertion below report the load failure instead of hanging.
