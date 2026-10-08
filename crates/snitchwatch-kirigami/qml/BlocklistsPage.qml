@@ -217,6 +217,11 @@ Kirigami.ScrollablePage {
         page.inspectEnforcementReason = row.enforcementReason;
         page.inspectLastUpdated = row.lastUpdated;
         page.inspectLastFailureReason = row.lastFailureReason;
+        // Entries are never pushed (a whole list in one message overflowed
+        // GUI clients, issue #45): ask for the first page.
+        if (page.model) {
+            page.model.requestEntries(row.listId, 0);
+        }
         inspector.open();
     }
 
@@ -268,7 +273,8 @@ Kirigami.ScrollablePage {
                 }
                 Controls.Label {
                     Kirigami.FormData.label: "Last failure"
-                    visible: page.inspectStatus === "failed" && page.inspectLastFailureReason.length > 0
+                    visible: (page.inspectStatus === "failed" || page.inspectStatus === "refused")
+                        && page.inspectLastFailureReason.length > 0
                     textFormat: Text.PlainText
                     text: page.inspectLastFailureReason
                     color: Kirigami.Theme.negativeTextColor
@@ -286,15 +292,14 @@ Kirigami.ScrollablePage {
             }
 
             // The entries model holds at most one subscription's hosts at a
-            // time (fed by the live bridge feed's SetBlocklistEntries
-            // message). Show them when they match what's being inspected;
-            // otherwise this subscription's entries haven't been pushed yet.
+            // time, loaded a page at a time on request (openInspector, "Show
+            // more"). Show them when they match what's being inspected.
             Kirigami.PlaceholderMessage {
                 Layout.fillWidth: true
                 visible: !page.entriesModel || page.entriesModel.subscriptionId !== page.inspectId
                 icon.name: "view-refresh"
                 text: "Entries not loaded"
-                explanation: "Waiting for the live feed to push this subscription's host list."
+                explanation: "Waiting for Snitchwatch's background service to send this list's hosts."
             }
 
             ListView {
@@ -310,6 +315,23 @@ Kirigami.ScrollablePage {
                     textFormat: Text.PlainText
                     text: host
                 }
+            }
+
+            Controls.Label {
+                visible: page.entriesModel && page.entriesModel.subscriptionId === page.inspectId
+                text: page.entriesModel
+                    ? "Showing " + page.entriesModel.count + " of " + page.entriesModel.total + " hosts"
+                    : ""
+                opacity: 0.7
+            }
+
+            Controls.Button {
+                Layout.fillWidth: true
+                visible: page.entriesModel && page.entriesModel.subscriptionId === page.inspectId
+                    && page.entriesModel.hasMore
+                text: "Show more"
+                icon.name: "go-down"
+                onClicked: page.model.requestEntries(page.inspectId, page.entriesModel.count)
             }
 
             Controls.Button {

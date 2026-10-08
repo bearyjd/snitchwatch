@@ -300,6 +300,21 @@ fn profiles_page_warns_it_is_not_enforced() {
     assert_preview_banner("ProfilesPage.qml", PROFILES_PAGE);
 }
 
+/// Issue #45 (S2): the bridge never pushes a whole entry list (it overflowed
+/// GUI clients), so the inspector must ask for the first page when it opens.
+#[test]
+fn blocklists_inspector_requests_entries_when_it_opens() {
+    let code = code_lines(BLOCKLISTS_PAGE);
+    let open = &code[code
+        .find("function openInspector(row) {")
+        .expect("openInspector moved")..];
+    let body = &open[..open.find("\n    }").unwrap_or(open.len())];
+    assert!(
+        body.contains("page.model.requestEntries(row.listId, 0)"),
+        "openInspector must request the first entries page:\n{body}"
+    );
+}
+
 /// The empty-state copy sits right under the banner, so it must not promise
 /// what the banner disclaims.
 #[test]

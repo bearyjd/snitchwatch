@@ -107,11 +107,21 @@ pub mod qobject {
         #[qinvokable]
         fn unsubscribe(self: Pin<&mut BlocklistsModel>, id: &QString);
 
+        /// Ask for a page of a list's hosts from `offset` (emits
+        /// RequestBlocklistEntries). Entries are never pushed unasked.
+        #[qinvokable]
+        #[cxx_name = "requestEntries"]
+        fn request_entries(self: Pin<&mut BlocklistsModel>, id: &QString, offset: i32);
+
         /// Per-subscription entry (host) list, bound by the detail view.
+        /// `total` is the list's full entry count; `hasMore` is true while
+        /// fewer than `total` hosts are loaded.
         #[qobject]
         #[qml_element]
         #[base = QAbstractListModel]
         #[qproperty(i32, count)]
+        #[qproperty(i32, total)]
+        #[qproperty(bool, has_more, cxx_name = "hasMore")]
         #[qproperty(QString, subscription_id, cxx_name = "subscriptionId")]
         type BlocklistEntriesModel = super::BlocklistEntriesModelRust;
 
@@ -245,6 +255,14 @@ impl qobject::BlocklistsModel {
         self.emit_client(ClientMessage::UnsubscribeBlocklist { id: id.to_string() });
     }
 
+    fn request_entries(self: Pin<&mut Self>, id: &QString, offset: i32) {
+        self.emit_client(ClientMessage::RequestBlocklistEntries {
+            subscription_id: id.to_string(),
+            offset: u64::try_from(offset).unwrap_or(0),
+            limit: None,
+        });
+    }
+
     fn start_bridge_feed(self: Pin<&mut Self>) {
         let Some(handles) = crate::bridge_runtime::handles() else {
             tracing::warn!("BlocklistsModel: bridge not running; live feed disabled");
@@ -308,6 +326,8 @@ impl qobject::BlocklistsModel {
 pub struct BlocklistEntriesModelRust {
     store: EntriesStore,
     count: i32,
+    total: i32,
+    has_more: bool,
     subscription_id: QString,
 }
 
@@ -349,6 +369,8 @@ impl qobject::BlocklistEntriesModel {
         }
         if changed {
             self.as_mut().set_count(0);
+            self.as_mut().set_total(0);
+            self.as_mut().set_has_more(false);
             self.as_mut().set_subscription_id(QString::default());
         }
     }
@@ -388,8 +410,12 @@ impl qobject::BlocklistEntriesModel {
         }
         if changed {
             let n = self.store.len() as i32;
+            let total = i32::try_from(self.store.total()).unwrap_or(i32::MAX);
+            let has_more = self.store.has_more();
             let sub = QString::from(self.store.subscription_id());
             self.as_mut().set_count(n);
+            self.as_mut().set_total(total);
+            self.as_mut().set_has_more(has_more);
             self.as_mut().set_subscription_id(sub);
         }
     }

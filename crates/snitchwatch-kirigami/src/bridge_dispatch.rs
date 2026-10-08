@@ -340,6 +340,8 @@ mod tests {
             entries: vec![BlocklistEntry {
                 host: "doubleclick.net".into(),
             }],
+            offset: 0,
+            total: 1,
         };
         assert!(interests_blocklist_entries(&msg));
         assert!(!interests_blocklists(&msg));

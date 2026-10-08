@@ -32,6 +32,7 @@ pub fn status_label(status: &str) -> String {
         "ok" => "Downloaded".to_string(),
         "pending" => "Downloading".to_string(),
         "failed" => "Download failed".to_string(),
+        "refused" => "Not downloaded".to_string(),
         other => other.to_string(),
     }
 }
@@ -131,12 +132,14 @@ impl SubscriptionsStore {
 }
 
 /// The entries (hosts) of the currently displayed subscription (the detail
-/// list). Only the entries for `subscription_id` are held at a time — the WS
-/// `setBlocklistEntries` message carries one subscription's entries per send.
+/// list). Only the entries for `subscription_id` are held at a time. The
+/// bridge sends them a page at a time, on request (issue #45); `total` is the
+/// subscription's full entry count.
 #[derive(Debug, Default)]
 pub struct EntriesStore {
     subscription_id: String,
     hosts: Vec<String>,
+    total: u64,
 }
 
 impl EntriesStore {
@@ -164,15 +167,39 @@ impl EntriesStore {
         self.hosts.get(index).map(String::as_str)
     }
 
+    /// The subscription's full entry count (not just the loaded pages).
+    pub fn total(&self) -> u64 {
+        self.total
+    }
+
+    /// Whether more pages can be requested.
+    pub fn has_more(&self) -> bool {
+        (self.hosts.len() as u64) < self.total
+    }
+
     /// Apply one bridge message. Returns `true` if the entry list changed.
+    /// A page at offset 0 replaces the list; the next page of the same list
+    /// appends; any other page is ignored.
     pub fn apply(&mut self, msg: &ServerMessage) -> bool {
         match msg {
             ServerMessage::SetBlocklistEntries {
                 subscription_id,
                 entries,
+                offset,
+                total,
             } => {
-                self.subscription_id = subscription_id.clone();
-                self.hosts = entries.iter().map(|e| e.host.clone()).collect();
+                let hosts = entries.iter().map(|e| e.host.clone());
+                if *offset == 0 {
+                    self.subscription_id = subscription_id.clone();
+                    self.hosts = hosts.collect();
+                } else if *subscription_id == self.subscription_id
+                    && *offset == self.hosts.len() as u64
+                {
+                    self.hosts.extend(hosts);
+                } else {
+                    return false;
+                }
+                self.total = *total;
                 true
             }
             _ => false,
@@ -186,6 +213,7 @@ impl EntriesStore {
         }
         self.subscription_id.clear();
         self.hosts.clear();
+        self.total = 0;
         true
     }
 }
@@ -365,6 +393,8 @@ mod tests {
                     host: "tracker.example".to_string(),
                 },
             ],
+            offset: 0,
+            total: 2,
         }));
         assert_eq!(e.subscription_id(), "a");
         assert_eq!(e.len(), 2);
@@ -376,6 +406,8 @@ mod tests {
             entries: vec![BlocklistEntry {
                 host: "b1.example".to_string(),
             }],
+            offset: 0,
+            total: 1,
         }));
         assert_eq!(e.subscription_id(), "b");
         assert_eq!(e.hosts(), &["b1.example".to_string()]);
@@ -389,6 +421,8 @@ mod tests {
             entries: vec![BlocklistEntry {
                 host: "x.example".to_string(),
             }],
+            offset: 0,
+            total: 1,
         });
         assert!(e.clear());
         assert!(e.is_empty());
@@ -401,5 +435,47 @@ mod tests {
     fn entries_store_ignores_unrelated_messages() {
         let mut e = EntriesStore::new();
         assert!(!e.apply(&ServerMessage::ClearConnectionRows));
+    }
+
+    fn page(id: &str, hosts: &[&str], offset: u64, total: u64) -> ServerMessage {
+        ServerMessage::SetBlocklistEntries {
+            subscription_id: id.to_string(),
+            entries: hosts
+                .iter()
+                .map(|h| BlocklistEntry {
+                    host: h.to_string(),
+                })
+                .collect(),
+            offset,
+            total,
+        }
+    }
+
+    /// Issue #45 (S2): entries arrive a page at a time; the next page of the
+    /// same list appends, anything out of sequence is ignored.
+    #[test]
+    fn entry_pages_append_in_sequence() {
+        let mut e = EntriesStore::new();
+        assert!(e.apply(&page("a", &["1.x", "2.x"], 0, 5)));
+        assert_eq!(e.total(), 5);
+        assert!(e.has_more());
+        assert!(e.apply(&page("a", &["3.x", "4.x"], 2, 5)));
+        assert_eq!(e.len(), 4);
+        // A stale or duplicate page is ignored.
+        assert!(!e.apply(&page("a", &["3.x", "4.x"], 2, 5)));
+        assert!(!e.apply(&page("b", &["9.x"], 1, 5)));
+        assert!(e.apply(&page("a", &["5.x"], 4, 5)));
+        assert!(!e.has_more());
+        assert_eq!(e.hosts().len(), 5);
+        // A first page replaces whatever was shown.
+        assert!(e.apply(&page("b", &["b.x"], 0, 1)));
+        assert_eq!(e.subscription_id(), "b");
+        assert_eq!(e.hosts(), &["b.x".to_string()]);
+    }
+
+    /// L10: a refused URL never reads as a failed download.
+    #[test]
+    fn a_refused_url_is_labelled_not_downloaded() {
+        assert_eq!(status_label("refused"), "Not downloaded");
     }
 }
