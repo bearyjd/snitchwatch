@@ -29,6 +29,14 @@ use common::{capture_stderr, init_headless_qt_env};
 
 const PROBE_URL: &str = "qrc:/tray_menu_probe.qml";
 const MARKER: &str = "TRAY_ACTION ";
+const STATE_MARKER: &str = "TRAY_STATE ";
+
+/// The pause/resume items, by objectName, in menu order.
+const PAUSE_ITEMS: [(&str, u64); 3] = [
+    ("pauseFor300", 300),
+    ("pauseFor1800", 1800),
+    ("pauseFor3600", 3600),
+];
 
 #[test]
 fn every_tray_pause_item_sends_its_timed_pause() {
@@ -67,12 +75,35 @@ Window {
         }
     }
 
+    // Every item, as the tray would render it, plus whether any item opens
+    // a submenu (the nested-menu form the Plasma tray failed to export).
+    function snapshot(label) {
+        return {
+            label: label,
+            submenus: trayMenu.items.filter(i => i.subMenu !== null).length,
+            items: trayMenu.items.filter(i => i.objectName !== "").map(i => ({
+                name: i.objectName,
+                visible: i.visible,
+                enabled: i.enabled,
+                text: i.text
+            }))
+        };
+    }
+
     Timer {
         interval: 50
         running: true
         repeat: false
         onTriggered: {
             try {
+                // The menu exists from startup, before the first bridge state
+                // ("default"); the tray may never re-read a visibility flip.
+                for (const [label, until] of [["default", ""], ["pause_filtering", ""],
+                                              ["resume_filtering", "14:30"], ["reconnect", ""]]) {
+                    controller.menuLabel = label;
+                    controller.pausedUntil = until;
+                    console.warn("TRAY_STATE " + JSON.stringify(probeWindow.snapshot(label)));
+                }
                 for (const name of ["pauseFor300", "pauseFor1800", "pauseFor3600", "resumeFiltering"]) {
                     const item = trayMenu.items.find(i => i.objectName === name);
                     if (item === undefined) {
@@ -116,13 +147,17 @@ Window {
 
     let errors: Vec<&str> = captured
         .lines()
-        .filter(|line| line.contains(PROBE_URL) && !line.contains(MARKER))
+        .filter(|line| {
+            line.contains(PROBE_URL) && !line.contains(MARKER) && !line.contains(STATE_MARKER)
+        })
         .collect();
     assert!(
         errors.is_empty(),
         "QML errors while driving the tray menu:\n{}",
         errors.join("\n")
     );
+
+    assert_menu_states(&captured);
 
     let sent: Vec<String> = captured
         .lines()
@@ -135,8 +170,10 @@ Window {
                 .unwrap_or_else(|e| panic!("tray item sent {json:?}, not a ClientMessage: {e}"))
         })
         .collect();
-    let expected: Vec<ClientMessage> = [Some(300), Some(1800), Some(3600), None]
-        .into_iter()
+    let expected: Vec<ClientMessage> = PAUSE_ITEMS
+        .iter()
+        .map(|&(_, secs)| Some(secs))
+        .chain([None])
         .map(|duration_secs| ClientMessage::SetFilteringPaused {
             paused: duration_secs.is_some(),
             duration_secs,
@@ -150,4 +187,51 @@ Window {
     );
 
     let _ = app.as_mut();
+}
+
+/// Every pause and resume item is always visible and flat; `enabled` and the
+/// Resume text follow the bridge state. A live `visible` flip may never reach
+/// an already-exported StatusNotifierItem menu, so nothing may depend on one.
+fn assert_menu_states(captured: &str) {
+    let states: Vec<serde_json::Value> = captured
+        .lines()
+        .filter_map(|line| line.split_once(STATE_MARKER).map(|(_, rest)| rest))
+        .map(|json| serde_json::from_str(json).expect("probe state is JSON"))
+        .collect();
+    assert_eq!(
+        states.len(),
+        4,
+        "probe reported {} states; stderr:\n{captured}",
+        states.len()
+    );
+
+    for state in &states {
+        let label = state["label"].as_str().unwrap();
+        assert_eq!(state["submenus"], 0, "{label}: the tray menu has a submenu");
+        let item = |name: &str| {
+            state["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|i| i["name"] == name)
+                .unwrap_or_else(|| panic!("{label}: no item {name}"))
+                .clone()
+        };
+        let (can_pause, resume_text, can_resume) = match label {
+            "pause_filtering" => (true, "Resume filtering", false),
+            "resume_filtering" => (false, "Resume filtering (until 14:30)", true),
+            // Not connected yet, or the daemon is unreachable.
+            "default" | "reconnect" => (false, "Resume filtering", false),
+            other => panic!("unexpected state {other}"),
+        };
+        for (name, _) in PAUSE_ITEMS {
+            let pause = item(name);
+            assert_eq!(pause["visible"], true, "{label}: {name} hidden");
+            assert_eq!(pause["enabled"], can_pause, "{label}: {name} enabled");
+        }
+        let resume = item("resumeFiltering");
+        assert_eq!(resume["visible"], true, "{label}: Resume hidden");
+        assert_eq!(resume["enabled"], can_resume, "{label}: Resume enabled");
+        assert_eq!(resume["text"], resume_text, "{label}: Resume text");
+    }
 }

@@ -2,10 +2,16 @@
 //
 // Flat on purpose: Plasma's dbusmenu export rendered a nested Labs.Menu as a
 // bare "Pause filtering" entry with no submenu, and activating it did nothing
-// (VM run r6). Every pause length is therefore its own top-level item, wired
+// (VM run r6). A possible second cause: on a Labs.Menu, `visible` means "the
+// popup is open", so the old submenu's `visible:` binding never meant "show
+// this entry". Every pause length is therefore its own top-level item, wired
 // straight to TrayController.pauseFor — the bridge accepts only these three
-// lengths and ends every pause on its own (issue #47). Guarded by
-// tray.rs's `tray_menu_is_flat` and driven end to end by
+// lengths and ends every pause on its own (issue #47).
+//
+// Every item is always visible and gated with `enabled:` instead. Whether a
+// live `visible` flip reaches a menu the tray has already exported is
+// unverified, and the menu is built before the first bridge state arrives,
+// when nothing could be offered yet. Driven end to end by
 // tests/tray_menu_qml.rs; the objectNames are what that probe triggers.
 import QtQuick
 import Qt.labs.platform as Labs
@@ -18,8 +24,8 @@ Labs.Menu {
     // The main window, for Show/Hide. Must provide raiseAndActivate().
     required property var window
 
-    // Pause items only while filtering can be paused, Resume only while it
-    // is paused; "reconnect" (DaemonDown) and "default" offer neither.
+    // Pause only while filtering can be paused, Resume only while it is
+    // paused; "reconnect" (DaemonDown) and "default" offer neither.
     readonly property bool canPause: controller.menuLabel === "pause_filtering"
     readonly property bool canResume: controller.menuLabel === "resume_filtering"
 
@@ -28,26 +34,29 @@ Labs.Menu {
         onTriggered: trayMenu.window.visible ? trayMenu.window.hide() : trayMenu.window.raiseAndActivate()
     }
     Labs.MenuItem {
+        separator: true
+    }
+    Labs.MenuItem {
         objectName: "pauseFor300"
-        visible: trayMenu.canPause
+        enabled: trayMenu.canPause
         text: "Pause for 5 minutes"
         onTriggered: trayMenu.controller.pauseFor(300)
     }
     Labs.MenuItem {
         objectName: "pauseFor1800"
-        visible: trayMenu.canPause
+        enabled: trayMenu.canPause
         text: "Pause for 30 minutes"
         onTriggered: trayMenu.controller.pauseFor(1800)
     }
     Labs.MenuItem {
         objectName: "pauseFor3600"
-        visible: trayMenu.canPause
+        enabled: trayMenu.canPause
         text: "Pause for 1 hour"
         onTriggered: trayMenu.controller.pauseFor(3600)
     }
     Labs.MenuItem {
         objectName: "resumeFiltering"
-        visible: trayMenu.canResume
+        enabled: trayMenu.canResume
         text: trayMenu.controller.pausedUntil
             ? "Resume filtering (until " + trayMenu.controller.pausedUntil + ")"
             : "Resume filtering"
