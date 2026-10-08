@@ -471,16 +471,12 @@ impl Ui for UiService {
             .admit()
             .ok_or_else(|| Status::unavailable("no authenticated GUI session"))?;
 
-        // Filtering paused (tray "Pause filtering"): auto-allow without
-        // prompting. opensnitchd's own DefaultAction stays untouched — only
-        // the bridge's own decision policy changes, so a genuine bridge
-        // outage (this process crashing, not merely being paused) still
-        // hits the daemon's fail-closed default. See
-        // docs/superpowers/plans/2026-07-12-tray-filter-off.md. The deadline
-        // is checked here, so an expired pause stops auto-allowing even
-        // before the expiry task clears it, and only a pause set by this
-        // admission's GUI-session generation applies, checked under the
-        // presence lock (issue #47).
+        // Filtering paused (tray "Pause filtering"): auto-allow (Once)
+        // without prompting; the daemon's DefaultAction is untouched, so a
+        // crashed bridge still hits it (plans/2026-07-12-tray-filter-off.md).
+        // `applies_to` checks the deadline (an expired pause stops at once)
+        // and that this admission's GUI-session generation set the pause,
+        // under the presence lock (issue #47).
         if self.filter_pause.applies_to(&admission) {
             let row = connection_to_row(&conn, ask_id);
             let mut decided_row = row.clone();
