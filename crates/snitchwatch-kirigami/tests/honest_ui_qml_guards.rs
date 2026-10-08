@@ -11,6 +11,7 @@
 
 const BLOCKLISTS_PAGE: &str = include_str!("../qml/BlocklistsPage.qml");
 const PROFILES_PAGE: &str = include_str!("../qml/ProfilesPage.qml");
+const RULES_PAGE: &str = include_str!("../qml/RulesPage.qml");
 const PENDING_SHEET: &str = include_str!("../qml/PendingDecisionSheet.qml");
 const CONNECTIONS_PAGE: &str = include_str!("../qml/ConnectionsPage.qml");
 const MAIN_QML: &str = include_str!("../qml/main.qml");
@@ -23,6 +24,38 @@ fn code_lines(source: &str) -> String {
         .filter(|line| !line.trim_start().starts_with("//"))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Every `Controls.Label { ... }` body in `source`, found by brace counting
+/// (braces inside double-quoted strings are ignored). Good enough for the flat,
+/// one-property-per-line style these pages are written in.
+fn label_blocks(source: &str) -> Vec<String> {
+    const OPEN: &str = "Controls.Label {";
+    let mut blocks = Vec::new();
+    let mut rest = source;
+    while let Some(start) = rest.find(OPEN) {
+        let body_start = start + OPEN.len();
+        let mut depth = 1usize;
+        let mut in_string = false;
+        let mut end = rest.len();
+        for (i, ch) in rest[body_start..].char_indices() {
+            match ch {
+                '"' => in_string = !in_string,
+                '{' if !in_string => depth += 1,
+                '}' if !in_string => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = body_start + i;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        blocks.push(rest[body_start..end].to_string());
+        rest = &rest[end..];
+    }
+    blocks
 }
 
 /// The banner must be an `InlineMessage` of type Warning, shown
@@ -65,6 +98,74 @@ fn blocklists_page_warns_it_is_not_enforced() {
 #[test]
 fn profiles_page_warns_it_is_not_enforced() {
     assert_preview_banner("ProfilesPage.qml", PROFILES_PAGE);
+}
+
+/// Issue #51: `Controls.Label` defaults to `Text.AutoText`, which renders
+/// anything that looks like HTML as rich text. Rule names, operator data and
+/// blocklist ids come from the daemon / subscription URLs, so every label that
+/// shows them must opt into `Text.PlainText`.
+#[test]
+fn rules_page_labels_showing_rule_data_are_plain_text() {
+    // Expressions that carry rule-derived strings. Numeric / static ones
+    // (`row.precedence`, `row.enabled`, `sourceLabel(...)`) are intentionally
+    // absent.
+    const RULE_DATA: &[&str] = &[
+        "row.name",
+        "row.operatorSummary",
+        "row.ruleAction",
+        "row.blocklistId",
+        "page.inspectName",
+        "page.inspectSource",
+        "page.inspectAction",
+        "page.inspectDuration",
+        "page.inspectOperatorSummary",
+        "page.simulateMatchedRule",
+        "page.simulateAction",
+        "page.simulateUnsupported",
+    ];
+
+    let code = code_lines(RULES_PAGE);
+    let mut checked = 0;
+    for block in label_blocks(&code) {
+        let shows_rule_data = block
+            .lines()
+            .filter(|l| l.contains("text:") || l.trim_start().starts_with('+'))
+            .any(|l| RULE_DATA.iter().any(|d| l.contains(d)));
+        if !shows_rule_data {
+            continue;
+        }
+        checked += 1;
+        assert!(
+            block.contains("textFormat: Text.PlainText"),
+            "RulesPage.qml label shows rule data without `textFormat: Text.PlainText`:\n{block}"
+        );
+    }
+    assert!(
+        checked >= 11,
+        "expected at least 11 rule-data labels in RulesPage.qml (row name/summary/action, \
+         inspector name/source/action/duration/target, simulator matched/action/unsupported), \
+         found {checked} — did the guard's matcher drift from the page?"
+    );
+}
+
+/// The inspector sheet's title is the rule name. `Kirigami.OverlaySheet`
+/// draws `title` with its own default `Kirigami.Heading` (AutoText, no way to
+/// set `textFormat` through `title:`), so RulesPage supplies its own heading
+/// via `header:` — otherwise a rule named `<b>x</b>` renders as markup there
+/// even though every `Controls.Label` below it is plain text.
+#[test]
+fn rules_page_inspector_title_is_plain_text() {
+    let code = code_lines(RULES_PAGE);
+    let start = code
+        .find("header: Kirigami.Heading {")
+        .expect("RulesPage.qml's inspector lost its PlainText header override");
+    let header = &code[start..];
+    let header = &header[..header.find("\n        }").unwrap_or(header.len())];
+    assert!(
+        header.contains("textFormat: Text.PlainText") && header.contains("inspector.title"),
+        "RulesPage.qml's inspector header must render `inspector.title` with \
+         `textFormat: Text.PlainText`:\n{header}"
+    );
 }
 
 /// Issue #49: the bridge hardcodes per-connection bytes to 0 and opensnitchd
