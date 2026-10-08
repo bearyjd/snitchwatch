@@ -35,8 +35,8 @@ fn qml_explanations_match_the_bridges_refusal_sentence() {
             include_str!("../qml/PendingDecisionSheet.qml"),
         ),
         (
-            "ConnectionsPage.qml",
-            include_str!("../qml/ConnectionsPage.qml"),
+            "InlineVerdicts.qml",
+            include_str!("../qml/InlineVerdicts.qml"),
         ),
     ] {
         assert!(

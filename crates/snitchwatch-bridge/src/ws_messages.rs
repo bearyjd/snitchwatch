@@ -53,7 +53,17 @@ pub enum ServerMessage {
     /// This is an additive Snitchwatch extension. Legacy web clients ignore
     /// its unknown `action` exactly as they do the other native-shell
     /// extensions below.
-    Authenticated,
+    ///
+    /// `capabilities` lists the optional features this bridge supports
+    /// (`crate::bridge_capabilities`, e.g. `"appBoundRules"`). It is omitted
+    /// when empty, and older bridges never send it, so a client must treat a
+    /// missing list as empty and ignore strings it doesn't know. Clients that
+    /// decode this as a unit variant (v0.1.1) still accept it: serde ignores
+    /// the extra field.
+    Authenticated {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        capabilities: Vec<String>,
+    },
     InsertConnectionRows {
         rows: Vec<ConnectionRow>,
     },
@@ -388,8 +398,8 @@ pub enum VerdictScope {
 }
 
 /// How long a verdict's resulting rule should live, per the Little-Snitch-
-/// parity duration selector on the pending-decision dialog ("This time" /
-/// "For 5 minutes" / "Until quit" / "Forever").
+/// parity duration selector on the Kirigami shell's pending-decision dialog
+/// ("This time" / "For 5 minutes" / "Until firewall restarts" / "Forever").
 ///
 /// Maps onto opensnitchd's native `Rule.duration` semantics
 /// (`vendor/opensnitch/daemon/rule/rule.go`): the daemon defines three named
@@ -402,14 +412,15 @@ pub enum VerdictScope {
 /// |-------------------|-----------------|------------------------|
 /// | This time         | `once`          | `"once"`               |
 /// | For 5 minutes     | `five_minutes`  | `"5m"`                 |
-/// | Until quit        | `until_restart` | `"until restart"`      |
+/// | Until firewall restarts | `until_restart` | `"until restart"` |
 /// | Forever           | `always`        | `"always"`             |
 ///
-/// "Until quit" is documented to the user as "until the process exits", but
-/// opensnitchd has no per-process rule lifetime — the closest native
-/// equivalent is "until restart" (the rule survives until the daemon itself
-/// restarts). This is the one lossy mapping in the table above; there is no
-/// tighter daemon primitive to bind it to.
+/// The third option used to read "Until quit", though opensnitchd has no
+/// per-process rule lifetime: "until restart" keeps the rule until the daemon
+/// itself restarts, so Kirigami now labels it for that (its QML token is still
+/// `until_quit`). The Tauri shell and the vendored web UI keep their labels as
+/// they are: neither offers a duration selector (they send the legacy
+/// `remember` instead).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum VerdictDuration {
@@ -606,7 +617,9 @@ mod tests {
 
     #[test]
     fn authenticated_ack_is_a_backward_compatible_wire_extension() {
-        let message = ServerMessage::Authenticated;
+        let message = ServerMessage::Authenticated {
+            capabilities: Vec::new(),
+        };
         let json = serde_json::to_string(&message).unwrap();
         assert_eq!(json, r#"{"action":"authenticated"}"#);
         assert_eq!(
@@ -666,7 +679,9 @@ mod tests {
             .contains("default:\n          console.warn(\"Unknown msg from server\""));
 
         for message in [
-            ServerMessage::Authenticated,
+            ServerMessage::Authenticated {
+                capabilities: crate::bridge_capabilities::advertised(),
+            },
             ServerMessage::TrayState {
                 state: TrayState::Idle,
             },

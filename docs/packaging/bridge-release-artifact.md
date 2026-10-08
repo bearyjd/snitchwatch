@@ -227,6 +227,20 @@ the bridge service and GUI together. The GUI no longer starts an in-process brid
 or replaces the service's socket/token, resolving
 [#34](https://github.com/bearyjd/snitchwatch/issues/34).
 
+**Capabilities.** Bridges after v0.1.1 add an optional `capabilities` list to
+that acknowledgement, for example
+`{"action":"authenticated","capabilities":["appBoundRules"]}`. Clients must
+treat a missing list as empty and ignore strings they don't know. v0.1.1
+clients, which decode the acknowledgement without the field, still accept it.
+
+| Capability | Meaning |
+|---|---|
+| `appBoundRules` | "This host" verdicts with a remembered duration are bound to the asking program (`process.path` AND `dest.host`/`dest.ip`). Older bridges, including v0.1.1, build host-only rules that cover every app. |
+
+Without `appBoundRules`, Kirigami's inline **Deny** sends a once-only answer
+and says the bridge is too old to block just that program. Otherwise one
+inline Deny would block every app from that host until the firewall restarts.
+
 ## Known limitations
 
 - Concurrent logins of several real users race for `127.0.0.1:50051`; only

@@ -58,7 +58,10 @@ async fn accept_authenticated_snapshot(
         "client must re-read the current service token"
     );
     ws.send(Message::Text(
-        serde_json::to_string(&ServerMessage::Authenticated).unwrap(),
+        serde_json::to_string(&ServerMessage::Authenticated {
+            capabilities: Vec::new(),
+        })
+        .unwrap(),
     ))
     .await
     .expect("authentication acknowledgement writes");
@@ -149,6 +152,34 @@ fn pause_channel() -> (
     })
 }
 
+/// `BridgeFeed.appBoundRulesFor` (inline-Deny plan, version skew): only a row
+/// of the live session whose bridge advertised app-bound rules may get a
+/// remembered inline Deny. An always-true answer would fail open on old
+/// bridges.
+#[tokio::test]
+async fn app_bound_rules_for_row_answers_only_for_the_live_capable_session() {
+    let (broadcast_tx, _) = broadcast::channel(1);
+    let (inbound_tx, mut inbound_rx) = mpsc::channel(4);
+    let connection = Arc::new(Mutex::new(ConnectionState::default()));
+    let handles = BridgeHandles {
+        broadcast_tx,
+        inbound_tx,
+        runtime: Handle::current(),
+        connection: connection.clone(),
+    };
+    let for_row = crate::bridge_feed::app_bound_rules_for_row;
+
+    mark_connected(&connection, true);
+    assert!(for_row(Some(&handles), "1:7"));
+    for row_id in ["2:7", "7", "0:7"] {
+        assert!(!for_row(Some(&handles), row_id), "{row_id}");
+    }
+    assert!(!for_row(None, "1:7"), "no runtime");
+
+    disconnect_and_discard(&connection, &mut inbound_rx);
+    assert!(!for_row(Some(&handles), "1:7"), "after a disconnect");
+}
+
 #[tokio::test]
 async fn disconnect_discards_queued_actions_and_rejects_new_ones() {
     let (broadcast_tx, _) = broadcast::channel(1);
@@ -161,7 +192,7 @@ async fn disconnect_discards_queued_actions_and_rejects_new_ones() {
         connection: connection.clone(),
     };
 
-    mark_connected(&connection);
+    mark_connected(&connection, false);
     handles
         .try_send(ClientMessage::RecheckDiagnostics)
         .expect("the live session accepts a recheck");
@@ -183,7 +214,7 @@ async fn disconnect_discards_queued_actions_and_rejects_new_ones() {
 
     // A subsequent bridge session gets its own connection id. The stale
     // diagnostics request above is gone rather than replayed here.
-    mark_connected(&connection);
+    mark_connected(&connection, false);
     assert!(handles.is_current_session(2));
     let verdict = |row_id| {
         crate::pending_decision::build_verdict_message(row_id, "deny", "this_host", "this_time")
@@ -365,24 +396,122 @@ async fn a_server_message_this_client_cannot_parse_is_skipped() {
 }
 
 /// Accept one client, check its token, acknowledge it and take its
-/// snapshot request; hand back the server side of the socket.
+/// snapshot request; hand back the server side of the socket. The literal
+/// bare acknowledgement every bridge before capabilities sent.
 async fn accept_authenticated_snapshot_on(
     listener: &tokio::net::UnixListener,
     token: &snitchwatch_bridge::auth::Token,
+) -> tokio_tungstenite::WebSocketStream<tokio::net::UnixStream> {
+    accept_with_ack(listener, token, r#"{"action":"authenticated"}"#).await
+}
+
+/// [`accept_authenticated_snapshot_on`] with the acknowledgement frame given.
+async fn accept_with_ack(
+    listener: &tokio::net::UnixListener,
+    token: &snitchwatch_bridge::auth::Token,
+    ack: &str,
 ) -> tokio_tungstenite::WebSocketStream<tokio::net::UnixStream> {
     let (stream, _) = listener.accept().await.unwrap();
     let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
     let presented = ws.next().await.unwrap().unwrap().into_text().unwrap();
     assert!(token.matches(&presented));
-    ws.send(Message::Text(
-        serde_json::to_string(&ServerMessage::Authenticated).unwrap(),
-    ))
-    .await
-    .unwrap();
+    ws.send(Message::Text(ack.to_string())).await.unwrap();
     let snapshot: ClientMessage =
         serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap()).unwrap();
     assert_eq!(snapshot, ClientMessage::RequestSnapshot);
     ws
+}
+
+/// Waits until `connection_id` is (or, with `live == false`, is no longer)
+/// the live session.
+async fn wait_for_session(connection: &Mutex<ConnectionState>, connection_id: u64, live: bool) {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while is_current_connection(connection, connection_id) != live {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("session state did not change");
+}
+
+/// Inline-Deny plan, version skew: a bridge older than #50/#71 builds "This
+/// host" rules for every app. Only a session whose own acknowledgement
+/// advertised app-bound rules may get a remembered inline Deny; a reconnect to
+/// an older bridge (the literal bare acknowledgement) must not inherit it.
+#[tokio::test]
+async fn app_bound_rules_follow_each_sessions_acknowledgement() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket_path = dir.path().join("bridge.sock");
+    let token_path = dir.path().join("token");
+    let first_token = snitchwatch_bridge::auth::Token::generate();
+    snitchwatch_bridge::auth::write_token_file(&first_token, &token_path).unwrap();
+    let first_listener = tokio::net::UnixListener::bind(&socket_path).unwrap();
+    let capable_ack = serde_json::to_string(&ServerMessage::Authenticated {
+        capabilities: snitchwatch_bridge::bridge_capabilities::advertised(),
+    })
+    .unwrap();
+    let (stop_first_tx, stop_first_rx) = tokio::sync::oneshot::channel::<()>();
+    let first_server = tokio::spawn(async move {
+        let ws = accept_with_ack(&first_listener, &first_token, &capable_ack).await;
+        let _ = stop_first_rx.await;
+        drop(ws);
+    });
+
+    let (broadcast_tx, _) = broadcast::channel(4);
+    let (inbound_tx, inbound_rx) = mpsc::channel(1);
+    let (tray_tx, _) = watch::channel(ReceivedTrayState {
+        connection_id: 0,
+        state: BridgeTrayState::Idle,
+    });
+    let (notice_tx, _) = broadcast::channel(1);
+    let connection = Arc::new(Mutex::new(ConnectionState::default()));
+    let client = tokio::spawn(client_loop(
+        socket_path.clone(),
+        broadcast_tx,
+        inbound_rx,
+        Arc::new(Mutex::new(String::new())),
+        ShellFeeds {
+            tray_tx,
+            notice_tx,
+            pause_tx: pause_channel().0,
+        },
+        connection.clone(),
+    ));
+
+    wait_for_session(&connection, 1, true).await;
+    assert!(advertises_app_bound_rules(&connection, 1));
+    assert!(
+        !advertises_app_bound_rules(&connection, 2),
+        "only the advertising session"
+    );
+
+    stop_first_tx.send(()).unwrap();
+    first_server.await.unwrap();
+    wait_for_session(&connection, 1, false).await;
+    assert!(!advertises_app_bound_rules(&connection, 1));
+    assert!(
+        !connection.lock().unwrap().app_bound_rules,
+        "a disconnect clears the flag itself"
+    );
+
+    std::fs::remove_file(&socket_path).unwrap();
+    let second_token = snitchwatch_bridge::auth::Token::generate();
+    snitchwatch_bridge::auth::write_token_file(&second_token, &token_path).unwrap();
+    let second_listener = tokio::net::UnixListener::bind(&socket_path).unwrap();
+    let second_server = tokio::spawn(async move {
+        let _ws = accept_authenticated_snapshot_on(&second_listener, &second_token).await;
+        std::future::pending::<()>().await;
+    });
+
+    wait_for_session(&connection, 2, true).await;
+    assert!(
+        !advertises_app_bound_rules(&connection, 2),
+        "an older bridge's bare acknowledgement advertises nothing"
+    );
+
+    drop(inbound_tx);
+    client.abort();
+    second_server.abort();
 }
 
 #[tokio::test]
@@ -405,7 +534,10 @@ async fn client_stays_pending_until_service_acknowledges_the_token() {
 
         release_ack_rx.await.unwrap();
         ws.send(Message::Text(
-            serde_json::to_string(&ServerMessage::Authenticated).unwrap(),
+            serde_json::to_string(&ServerMessage::Authenticated {
+                capabilities: Vec::new(),
+            })
+            .unwrap(),
         ))
         .await
         .unwrap();

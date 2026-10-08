@@ -48,6 +48,18 @@ ColumnLayout {
     property bool bindableProcessPath: false
     // Exposed for the headless probe (tests/verdict_not_remembered_qml.rs).
     property alias durationSelector: durationBox
+    // Whether the row's bridge advertised app-bound rules
+    // (`ConnectionsPage.rowAppBoundRules`). Without them a remembered "This
+    // host only" answer covers every app, so the sheet doesn't suggest one.
+    property bool appBoundRules: false
+    // Whether the one-time-Deny hint under the Duration box shows: only where
+    // a longer Deny would be bound to this program. The Allow/Deny buttons
+    // submit at once, so there is no selected action to key on: it follows
+    // the duration, and its text names Deny.
+    readonly property bool showDenyOnceHint: sheet.bindableProcessPath && sheet.appBoundRules
+        && durationBox.currentValue === "this_time"
+    // Exposed for the headless probe (tests/inline_verdict_qml.rs).
+    property alias denyOnceHint: denyOnceHintLabel
 
     // Live-wiring hub (Task 13), injected from ConnectionsPage. When set, a
     // submitted verdict's JSON is routed to the bridge's inbound pump. Null in
@@ -101,11 +113,11 @@ ColumnLayout {
             Layout.fillWidth: true
             textRole: "label"
             valueRole: "token"
-            // Back-reference: `model[0]`'s token ("this_host") is the
-            // default `ConnectionsPage.qml`'s inline Allow/Deny buttons
-            // hardcode (`submitInlineVerdict`) so an inline decision matches
-            // what this sheet would submit unchanged. Reordering this model
-            // or changing its first entry's token changes that default too.
+            // Back-reference: `model[0]`'s token ("this_host") is the scope
+            // the Connections page's inline Allow/Deny buttons hardcode
+            // (`InlineVerdicts.send`) so an inline decision has the scope this
+            // sheet would submit unchanged. Reordering this model or changing
+            // its first entry's token changes that default too.
             model: [
                 { label: "This host only", token: "this_host" },
                 { label: "Any host on this domain", token: "any_host_on_domain" },
@@ -117,8 +129,9 @@ ColumnLayout {
     // Granular rule scopes (Parity 2): how long the resulting rule should
     // live. Maps onto the bridge's `VerdictDuration` — see
     // `pending_decision.rs`'s doc comment for the full duration-mapping
-    // table, including the one lossy case ("Until quit" -> daemon
-    // "until restart").
+    // table. The `until_quit` token is daemon "until restart", so it is
+    // labelled "Until firewall restarts": opensnitchd has no notion of an app
+    // quitting.
     RowLayout {
         Layout.fillWidth: true
         Controls.Label {
@@ -130,19 +143,33 @@ ColumnLayout {
             Layout.fillWidth: true
             textRole: "label"
             valueRole: "token"
-            // Back-reference: `model[0]`'s token ("this_time") is the
-            // default `ConnectionsPage.qml`'s inline Allow/Deny buttons
-            // hardcode (`submitInlineVerdict`), same rationale as
-            // `scopeBox`'s model comment above.
+            // Back-reference: `model[0]`'s token ("this_time") is what
+            // `ConnectionsPage.qml`'s inline Allow sends, and `until_quit` is
+            // what its inline Deny sends for a program it can bind a rule to,
+            // on a bridge that advertised app-bound rules (`inline_deny.rs`).
             model: sheet.bindableProcessPath
                 ? [
                     { label: "This time", token: "this_time" },
                     { label: "For 5 minutes", token: "for_5_minutes" },
-                    { label: "Until quit", token: "until_quit" },
+                    { label: "Until firewall restarts", token: "until_quit" },
                     { label: "Forever", token: "forever" }
                 ]
                 : [{ label: "This time", token: "this_time" }]
         }
+    }
+
+    // A one-time Deny isn't stored by the daemon: it drops only the packet
+    // that asked, and most apps retry within a second or two (see
+    // `showDenyOnceHint`).
+    Controls.Label {
+        id: denyOnceHintLabel
+        Layout.fillWidth: true
+        visible: sheet.showDenyOnceHint
+        wrapMode: Text.Wrap
+        opacity: 0.7
+        font: Kirigami.Theme.smallFont
+        textFormat: Text.PlainText
+        text: "A one-time Deny blocks only this attempt; most apps retry within seconds."
     }
 
     // Issue #44: why only "This time" is offered. The bridge's

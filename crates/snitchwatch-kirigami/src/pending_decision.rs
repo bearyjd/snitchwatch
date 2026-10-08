@@ -9,11 +9,15 @@
 //! hands it straight to the bridge's inbound pump.
 //!
 //! **Granular rule scopes (Parity 2):** the dialog offers four durations —
-//! "This time", "For 5 minutes", "Until quit", "Forever" — mapped onto the
-//! bridge's [`VerdictDuration`], which in turn maps onto opensnitchd's native
-//! `Rule.duration` vocabulary. See [`VerdictDuration`]'s doc comment for the
-//! full mapping table, including the one lossy case ("Until quit" -> daemon
-//! "until restart", since opensnitchd has no per-process rule lifetime).
+//! "This time", "For 5 minutes", "Until firewall restarts", "Forever" —
+//! mapped onto the bridge's [`VerdictDuration`], which in turn maps onto
+//! opensnitchd's native `Rule.duration` vocabulary. See [`VerdictDuration`]'s
+//! doc comment for the full mapping table. The third option's QML token is
+//! still `until_quit` (daemon "until restart"); it is labelled for what the
+//! daemon does, since opensnitchd has no per-process rule lifetime.
+//!
+//! **Inline buttons:** the Connections page's row and process-header buttons
+//! skip the sheet; `crate::inline_deny` picks their duration.
 //!
 //! **Timeout ownership:** the auto-action countdown stays server-side (the
 //! bridge's `AskRule` pending machinery owns it). The QML sheet only *displays*

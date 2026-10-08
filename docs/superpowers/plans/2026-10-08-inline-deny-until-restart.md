@@ -36,6 +36,56 @@ protocol change and no new daemon notification.
   restarts". This is the honest-UI rule: the daemon has no notion of
   "quit". Wording only; the token stays `until_quit`.
 
+## Review amendment (2026-10-08): version skew
+
+Code review found a HIGH gap in the design above. Bridges older than
+#50/#71 build "This host" rules host-only, not app-bound. That includes the
+published v0.1.1 (`9fdb336`) and the #39 system-bridge head (`5c2b44a`). See
+`build_operator_checked` in those versions.
+
+The GUI couldn't tell which bridge it had, because
+`ServerMessage::Authenticated` was a bare unit variant. Against such a
+bridge, one inline Deny would store an **all-apps** deny until restart,
+while the tooltip said "Blocks this program".
+
+**Decision: a fail-safe capability handshake.**
+
+- **Bridge.** `Authenticated { capabilities }` is an additive field. It is
+  omitted when empty, and a missing list means empty. The bridge advertises
+  `"appBoundRules"` (`bridge_capabilities.rs`).
+  - v0.1.1 clients decode the acknowledgement as a unit variant. serde
+    ignores the extra field, and a test proves it with a v0.1.1-shaped
+    decoder.
+  - New clients read an old bridge's bare `{"action":"authenticated"}` as no
+    capabilities.
+  - This is documented in `docs/packaging/bridge-release-artifact.md`
+    (GUI compatibility).
+- **Kirigami runtime.** The flag is stored per bridge session, under the
+  same lock as the connection id. It is set from each acknowledgement and
+  cleared on disconnect.
+  - `BridgeFeed.appBoundRulesFor(rowId)` answers for the session the row
+    came from.
+  - It is asked at click time, not polled, so a reconnect to an older bridge
+    never inherits the flag.
+- **Inline Deny.** `inline_deny.rs` sends `until_quit` only when **both**
+  hold:
+  - the row's program path is bindable;
+  - its session advertised `appBoundRules`.
+
+  Otherwise it sends a once-only Deny and a passive notification. The
+  program comes first, because it is true on any bridge:
+  - unbindable program: the #44 sentence;
+  - old bridge: "This firewall bridge is too old to block just this program,
+    so Deny applies to this connection only."
+
+  The row Deny and "Deny all" tooltips and `Accessible.description` give the
+  same answer. "Deny all" uses its first pending row; groups are keyed by
+  path.
+- **Sheet hint (D2).** It also requires a bindable path and the capability.
+- **Known, not fixed here.** Against an old bridge, the sheet's explicit
+  "This host only" plus "Until firewall restarts" or "Forever" still stores
+  a host-only rule. That behaviour predates this plan.
+
 ## Citation convention
 
 - `main:` means `4b3ba52`.

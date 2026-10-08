@@ -80,6 +80,10 @@ struct QueuedClientMessage {
 struct ConnectionState {
     connected: bool,
     connection_id: u64,
+    /// Whether this connection's bridge advertised
+    /// `bridge_capabilities::APP_BOUND_RULES` in its acknowledgement. Set
+    /// with `connection_id`, cleared on disconnect.
+    app_bound_rules: bool,
 }
 
 /// Why a UI request was not handed to the currently connected service.
@@ -112,6 +116,13 @@ impl BridgeHandles {
     /// before a queued model mutation.
     pub fn is_current_session(&self, connection_id: u64) -> bool {
         is_current_connection(&self.connection, connection_id)
+    }
+
+    /// True only while `connection_id` is the live session and its bridge
+    /// advertised app-bound rules. The inline Deny is remembered only then
+    /// (`crate::inline_deny`).
+    pub fn advertises_app_bound_rules(&self, connection_id: u64) -> bool {
+        advertises_app_bound_rules(&self.connection, connection_id)
     }
 
     pub fn runtime(&self) -> &Handle {
@@ -343,7 +354,7 @@ async fn connect_and_relay(
     // service explicitly confirms it accepted this service-generation token.
     // A service restart can otherwise make a stale token look connected until
     // the next read happens to fail.
-    await_authentication_ack(&mut ws).await?;
+    let capabilities = await_authentication_ack(&mut ws).await?;
 
     // The service owns all state. Request it for every freshly authenticated
     // connection so a restart cannot leave models showing the previous
@@ -352,7 +363,12 @@ async fn connect_and_relay(
         &ClientMessage::RequestSnapshot,
     )?))
     .await?;
-    let connection_id = mark_connected(connection);
+    let connection_id = mark_connected(
+        connection,
+        capabilities
+            .iter()
+            .any(|c| c == snitchwatch_bridge::bridge_capabilities::APP_BOUND_RULES),
+    );
     set_status(status, "Connected to bridge service");
     tracing::info!(socket = %socket_path.display(), "connected to bridge service");
 
@@ -395,9 +411,11 @@ async fn connect_and_relay(
     }
 }
 
+/// Returns the capabilities the bridge advertised (empty for bridges that
+/// predate them).
 async fn await_authentication_ack(
     ws: &mut tokio_tungstenite::WebSocketStream<UnixStream>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Vec<String>> {
     loop {
         let incoming = tokio::time::timeout(AUTHENTICATION_ACK_TIMEOUT, ws.next())
             .await
@@ -406,7 +424,7 @@ async fn await_authentication_ack(
             })?;
         match incoming {
             Some(Ok(Message::Text(text))) => match serde_json::from_str::<ServerMessage>(&text)? {
-                ServerMessage::Authenticated => return Ok(()),
+                ServerMessage::Authenticated { capabilities } => return Ok(capabilities),
                 other => anyhow::bail!(
                     "bridge sent {:?} before authentication acknowledgement",
                     other
@@ -422,13 +440,24 @@ async fn await_authentication_ack(
     }
 }
 
-fn mark_connected(connection: &Mutex<ConnectionState>) -> u64 {
+fn mark_connected(connection: &Mutex<ConnectionState>, app_bound_rules: bool) -> u64 {
     let mut state = connection
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     state.connection_id = state.connection_id.wrapping_add(1);
     state.connected = true;
+    state.app_bound_rules = app_bound_rules;
     state.connection_id
+}
+
+/// Whether `connection_id` is the live session and its bridge advertised
+/// app-bound rules (inline-Deny plan). Read under the same lock that bumps the
+/// id, so a reconnect to an older bridge never inherits the flag.
+fn advertises_app_bound_rules(connection: &Mutex<ConnectionState>, connection_id: u64) -> bool {
+    let state = connection
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    state.connected && state.connection_id == connection_id && state.app_bound_rules
 }
 
 fn is_current_connection(connection: &Mutex<ConnectionState>, connection_id: u64) -> bool {
@@ -446,10 +475,13 @@ fn disconnect_and_discard(
     connection: &Mutex<ConnectionState>,
     inbound_rx: &mut mpsc::Receiver<QueuedClientMessage>,
 ) {
-    connection
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .connected = false;
+    {
+        let mut state = connection
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.connected = false;
+        state.app_bound_rules = false;
+    }
     while inbound_rx.try_recv().is_ok() {}
 }
 

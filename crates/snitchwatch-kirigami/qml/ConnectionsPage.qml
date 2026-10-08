@@ -44,54 +44,27 @@ Kirigami.ScrollablePage {
     // inbound pump. Null in isolated component tests (the sheet no-ops then).
     property var bridgeFeed: null
 
-    // Issue #18: the shared submit path for the inline row buttons and
-    // (looped) the process-header batch actions. `BridgeFeed.submitVerdict`
-    // builds and dispatches the typed verdict, so `pending_decision`'s Rust
-    // mapping stays the single source of the wire shape.
-    //
-    // Submits with the sheet's own defaults ("This host only" scope / "This
-    // time" duration — scopeBox/durationBox's first model entries in
-    // PendingDecisionSheet.qml) so an inline decision and a sheet decision for
-    // the same row produce the same rule.
-    //
-    // Also the entry point `tests/inline_verdict_qml.rs` drives, to exercise
-    // the click -> submit -> verdict-message path without synthesizing a real
-    // mouse click.
+    // The inline row and process-header buttons: what they send and what
+    // they say (plan 2026-10-08-inline-deny-until-restart.md).
+    InlineVerdicts {
+        id: verdictHelper
+        model: page.model
+        bridgeFeed: page.bridgeFeed
+        onExplained: text => page.showPassiveNotice(text)
+    }
+    // Exposed for the headless probe (tests/inline_verdict_qml.rs).
+    property alias inlineVerdicts: verdictHelper
+
+    // Issue #18: a row's inline Allow/Deny. Also the entry point
+    // `tests/inline_verdict_qml.rs` drives, to exercise the click -> submit ->
+    // verdict-message path without synthesizing a real mouse click.
     function submitInlineVerdict(rowId, choice) {
-        if (page.bridgeFeed === null) {
-            // Unreachable in the running app (main.qml always injects the
-            // feed) — but the caller has already latched `row.submitted`, so
-            // a silent return here would leave a permanently un-decidable
-            // row with no trace of why. Never swallow this.
-            console.warn("submitInlineVerdict: no bridgeFeed; verdict dropped for", rowId);
-            return;
-        }
-        page.bridgeFeed.submitVerdict(rowId, choice, "this_host", "this_time");
+        verdictHelper.submit(rowId, choice);
     }
 
-    // Issue #18 batch actions: parse ConnectionsModel.pendingRowIdsForProcess
-    // and submit the same verdict for every pending row under that process
-    // group. No new WS protocol — this is just N SetVerdict messages.
+    // Issue #18: a process header's "Allow all"/"Deny all".
     function submitBatchVerdict(processKey, choice, sourceSession) {
-        if (!page.model) {
-            return;
-        }
-        try {
-            const ids = JSON.parse(page.model.pendingRowIdsForProcess(processKey));
-            for (const id of ids) {
-                // The synchronous model flush may have installed a replacement
-                // service's snapshot since this header was displayed.
-                if (sourceSession && !id.startsWith(sourceSession)) {
-                    continue;
-                }
-                page.submitInlineVerdict(id, choice);
-            }
-        } catch (e) {
-            // Malformed JSON from the model would be a Rust-side bug;
-            // degrade to a no-op rather than throwing in the delegate, but
-            // don't swallow it silently.
-            console.warn("submitBatchVerdict failed:", e);
-        }
+        verdictHelper.submitBatch(processKey, choice, sourceSession);
     }
 
     // Snapshot of the row currently shown in the inspector sheet.
@@ -119,8 +92,13 @@ Kirigami.ScrollablePage {
     // Issue #44: whether an answer for this row's program can be remembered
     // (`rowDetailsJson`'s `bindableProcessPath`); false until known.
     property bool inspectBindableProcessPath: false
-    // Exposed for the headless probe (tests/verdict_not_remembered_qml.rs).
+    // Whether the inspected row's bridge advertised app-bound rules
+    // (`InlineVerdicts.rowAppBoundRules`); false until known.
+    property bool inspectAppBoundRules: false
+    // Exposed for the headless probes (tests/verdict_not_remembered_qml.rs,
+    // tests/inline_verdict_qml.rs).
     property alias decisionSheet: pendingSheet
+    property alias connectionList: list
     // Raw matched-rule name (empty when unknown/not applicable — drives the
     // "Show rule" button's visibility) and its friendly display string (never
     // blank — see `connections::row_store::matched_rule_display`).
@@ -201,14 +179,15 @@ Kirigami.ScrollablePage {
     }
 
     // Issue #44: the bridge answered a remembered verdict for this connection
-    // only. Fixed text — the bridge's `RuleRefusal::describe` sentence (a test
-    // keeps them equal) — never the wire `reason`.
+    // only. Fixed text, never the wire `reason`.
     function showVerdictNotRemembered() {
+        page.showPassiveNotice(verdictHelper.notRememberedSentence);
+    }
+
+    function showPassiveNotice(text) {
         const win = Controls.ApplicationWindow.window;
         if (win && typeof win.showPassiveNotification === "function") {
-            win.showPassiveNotification(
-                "Snitchwatch couldn't identify this program's file, so this answer applies only to this connection.",
-                "long");
+            win.showPassiveNotification(text, "long");
         }
     }
 
@@ -321,6 +300,17 @@ Kirigami.ScrollablePage {
             property bool submitted: false
             onRowIdChanged: row.submitted = false
             onPendingChanged: row.submitted = false
+
+            // What this row's Deny, or this header's "Deny all", does: the
+            // buttons' tooltip and accessible description. Empty where the
+            // button is hidden, so other delegates never look it up.
+            readonly property string denyText: !row.isGroupHeader && row.pending
+                ? verdictHelper.denyText(row.rowId) : ""
+            readonly property string denyAllText: row.isGroupHeader && row.depth === 0
+                && row.groupPending > 0 ? verdictHelper.denyAllText(row.groupKey) : ""
+            // Exposed for the headless probe (tests/inline_verdict_qml.rs).
+            property alias denyButton: rowDenyButton
+            property alias denyAllButton: batchDenyButton
 
             // Single latch-and-dispatch for all 4 verdict buttons. Kept as one
             // function so the re-entry guard can't be present on some sites
@@ -490,21 +480,36 @@ Kirigami.ScrollablePage {
                         onClicked: row.decideOnce("allow", true)
                     }
                     Controls.Button {
+                        id: batchDenyButton
                         flat: true
                         enabled: !row.submitted
                         text: "Deny all (" + row.groupPending + ")"
                         icon.name: "edit-delete-remove"
                         onClicked: row.decideOnce("deny", true)
+                        Accessible.description: row.denyAllText
+
+                        // How long these Denies last (see the row Deny's
+                        // tooltip below).
+                        Controls.ToolTip {
+                            visible: batchDenyButton.hovered
+                            delay: Kirigami.Units.toolTipDelay
+                            contentItem: Controls.Label {
+                                textFormat: Text.PlainText
+                                wrapMode: Text.Wrap
+                                color: palette.toolTipText
+                                text: row.denyAllText
+                            }
+                        }
                     }
                 }
 
                 // Issue #18: inline Allow/Deny on pending leaf rows, so a
                 // decision no longer requires opening the inspector sheet.
-                // Submits with the sheet's own defaults (see the page-level
-                // `submitInlineVerdict` doc comment above) so inline and
-                // sheet-driven decisions for the same row match. Disabled
-                // after one click (see `row.submitted`'s doc comment) until
-                // the round trip flips `pending` and resets the guard.
+                // Allow submits the sheet's defaults; Deny remembers until the
+                // firewall restarts where it can (see InlineVerdicts.qml).
+                // Disabled after one
+                // click (see `row.submitted`'s doc comment) until the round
+                // trip flips `pending` and resets the guard.
                 RowLayout {
                     visible: !row.isGroupHeader && row.pending
                     spacing: Kirigami.Units.smallSpacing
@@ -517,11 +522,29 @@ Kirigami.ScrollablePage {
                         onClicked: row.decideOnce("allow", false)
                     }
                     Controls.Button {
+                        id: rowDenyButton
                         flat: true
                         enabled: !row.submitted
                         text: "Deny"
                         icon.name: "edit-delete-remove"
                         onClicked: row.decideOnce("deny", false)
+                        Accessible.description: row.denyText
+
+                        // How long this Deny lasts. An explicit PlainText
+                        // contentItem, never the attached `ToolTip.text`
+                        // (issue #51).
+                        Controls.ToolTip {
+                            visible: rowDenyButton.hovered
+                            delay: Kirigami.Units.toolTipDelay
+                            contentItem: Controls.Label {
+                                textFormat: Text.PlainText
+                                wrapMode: Text.Wrap
+                                // The style's own tooltip text uses the
+                                // tooltip palette, not the window one.
+                                color: palette.toolTipText
+                                text: row.denyText
+                            }
+                        }
                     }
                 }
             }
@@ -570,6 +593,7 @@ Kirigami.ScrollablePage {
         page.inspectMatchedRule = row.matchedRule;
         page.inspectMatchedRuleDisplay = row.matchedRuleDisplay;
         page.applyRowDetails(row.rowId);
+        page.inspectAppBoundRules = verdictHelper.rowAppBoundRules(row.rowId);
         // The row may be a stale pending one, and with the connection already
         // down no `ok` change follows to catch it.
         page.recheckInspectedRow();
@@ -684,6 +708,7 @@ Kirigami.ScrollablePage {
                 host: page.inspectHost
                 remoteIp: page.inspectIp
                 bindableProcessPath: page.inspectBindableProcessPath
+                appBoundRules: page.inspectAppBoundRules
                 bridgeFeed: page.bridgeFeed
                 onDecided: inspector.close()
             }

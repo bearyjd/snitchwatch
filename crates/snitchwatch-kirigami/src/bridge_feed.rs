@@ -60,7 +60,10 @@ pub mod qobject {
         /// Build and dispatch a verdict from stable QML tokens. Keeping this
         /// in the feed removes the QML signal relay from the safety-critical
         /// button path while retaining `pending_decision` as the single wire
-        /// shape/source of conservative token parsing.
+        /// shape/source of conservative token parsing. Returns whether it was
+        /// queued for the row's live bridge session (false after a
+        /// disconnect, for a stale row, or without a bridge), so the page can
+        /// say a Deny wasn't sent rather than guess why it wasn't remembered.
         #[qinvokable]
         #[cxx_name = "submitVerdict"]
         fn submit_verdict(
@@ -69,7 +72,16 @@ pub mod qobject {
             choice: &QString,
             scope: &QString,
             duration: &QString,
-        );
+        ) -> bool;
+
+        /// Whether the bridge session row `row_id` came from advertised
+        /// app-bound rules and is still the live session — read at click
+        /// time, not polled, so a reconnect to an older bridge can't be
+        /// mistaken for a capable one. False headless or for a malformed id.
+        /// Gates the remembered inline Deny (`crate::inline_deny`).
+        #[qinvokable]
+        #[cxx_name = "appBoundRulesFor"]
+        fn app_bound_rules_for(self: &BridgeFeed, row_id: &QString) -> bool;
 
         /// Issue #44: the bridge answered a remembered verdict for this
         /// connection only, because it couldn't identify the program's file.
@@ -105,10 +117,19 @@ impl qobject::BridgeFeed {
         self.as_mut().set_status_text(QString::from(&msg));
     }
 
+    fn app_bound_rules_for(&self, row_id: &QString) -> bool {
+        app_bound_rules_for_row(
+            crate::bridge_runtime::handles().as_ref(),
+            &row_id.to_string(),
+        )
+    }
+
     fn send_client_json(self: Pin<&mut Self>, json: &QString) {
         let json = json.to_string();
         match crate::bridge_dispatch::decode_client(&json) {
-            Ok(msg) => dispatch(msg),
+            Ok(msg) => {
+                dispatch(msg);
+            }
             Err(e) => {
                 tracing::warn!(error = %e, %json, "BridgeFeed: bad ClientMessage JSON, dropped")
             }
@@ -121,7 +142,7 @@ impl qobject::BridgeFeed {
         choice: &QString,
         scope: &QString,
         duration: &QString,
-    ) {
+    ) -> bool {
         match crate::pending_decision::build_verdict_message(
             &row_id.to_string(),
             &choice.to_string(),
@@ -130,7 +151,8 @@ impl qobject::BridgeFeed {
         ) {
             Some(msg) => dispatch(msg),
             None => {
-                tracing::warn!(choice = %choice.to_string(), "BridgeFeed: unrecognised verdict choice")
+                tracing::warn!(choice = %choice.to_string(), "BridgeFeed: unrecognised verdict choice");
+                false
             }
         }
     }
@@ -183,13 +205,18 @@ fn verdict_not_remembered_row(connection_id: u64, msg: &ServerMessage) -> Option
 /// Push a typed message onto the bridge's inbound pump — the exact channel a
 /// WebSocket client frame feeds. Both QML entry points converge here already
 /// typed, so a verdict never round-trips through JSON just to be re-parsed.
-fn dispatch(msg: snitchwatch_bridge::ws_messages::ClientMessage) {
+/// Returns whether the message was queued.
+fn dispatch(msg: snitchwatch_bridge::ws_messages::ClientMessage) -> bool {
     let Some(handles) = crate::bridge_runtime::handles() else {
         tracing::warn!("BridgeFeed: bridge not running; dropping client message");
-        return;
+        return false;
     };
-    if let Err(error) = dispatch_to(&handles, msg) {
-        tracing::warn!(error = %error, "BridgeFeed: client mutation dropped");
+    match dispatch_to(&handles, msg) {
+        Ok(()) => true,
+        Err(error) => {
+            tracing::warn!(error = %error, "BridgeFeed: client mutation dropped");
+            false
+        }
     }
 }
 
@@ -211,6 +238,19 @@ pub(crate) fn dispatch_to(
         handles.try_send_for_session(session, msg)
     } else {
         handles.try_send(msg)
+    }
+}
+
+/// Whether row `row_id`'s bridge session is live and advertised app-bound
+/// rules (`appBoundRulesFor`). False without a runtime or for an id that
+/// names no session: the inline Deny then stays once-only.
+pub(crate) fn app_bound_rules_for_row(
+    handles: Option<&crate::bridge_runtime::BridgeHandles>,
+    row_id: &str,
+) -> bool {
+    match (handles, split_session_row_id(row_id)) {
+        (Some(handles), Some((session, _))) => handles.advertises_app_bound_rules(session),
+        _ => false,
     }
 }
 
