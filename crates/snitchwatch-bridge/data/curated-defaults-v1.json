@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "id": "networkmanager-connectivity-check",
+      "path": "/usr/bin/NetworkManager",
+      "host": "fedoraproject.org",
+      "port": 80,
+      "protocol": "tcp",
+      "why": "NetworkManager checks that this network reaches the internet, and spots a sign-in page such as a hotel's, by loading a test page from fedoraproject.org.",
+      "evidence": "bazzite-tower r10: idle and after update, /usr/bin/NetworkManager to fedoraproject.org port 80 over tcp and tcp6"
+    },
+    {
+      "id": "chronyc-local",
+      "path": "/usr/bin/chronyc",
+      "loopback": true,
+      "port": 323,
+      "protocol": "udp",
+      "why": "chronyc asks the local time service (chronyd) how it is doing. It only talks to this computer.",
+      "evidence": "bazzite-tower r10: idle and after update, /usr/bin/chronyc to 127.0.0.1 and ::1 port 323 over udp and udp6"
+    },
+    {
+      "id": "flatpak-flathub",
+      "path": "/usr/bin/flatpak",
+      "host": "dl.flathub.org",
+      "port": 443,
+      "protocol": "tcp",
+      "why": "Flatpak downloads app updates and app information from Flathub.",
+      "evidence": "bazzite-tower r10: after flatpak update --appstream, /usr/bin/flatpak to dl.flathub.org port 443 over tcp6 (held, so the update timed out)"
+    }
+  ]
+}

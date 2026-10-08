@@ -14,6 +14,7 @@ use qml_guard_support::*;
 
 const BLOCKLISTS_PAGE: &str = include_str!("../qml/BlocklistsPage.qml");
 const PROFILES_PAGE: &str = include_str!("../qml/ProfilesPage.qml");
+const RECOMMENDED_PAGE: &str = include_str!("../qml/RecommendedRulesPage.qml");
 const RULES_PAGE: &str = include_str!("../qml/RulesPage.qml");
 const SIMULATOR_SHEET: &str = include_str!("../qml/RuleSimulatorSheet.qml");
 const IMPORT_SHEET: &str = include_str!("../qml/RulesImportSheet.qml");
@@ -64,9 +65,14 @@ const ALL_QML: &[(&str, &str)] = &[
         "PromptSlotBanner.qml",
         include_str!("../qml/PromptSlotBanner.qml"),
     ),
+    ("RecommendedRulesPage.qml", RECOMMENDED_PAGE),
     ("RuleEditorSheet.qml", EDITOR_SHEET),
     ("RuleSimulatorSheet.qml", SIMULATOR_SHEET),
     ("RulesImportSheet.qml", IMPORT_SHEET),
+    (
+        "RulesInsightsText.qml",
+        include_str!("../qml/RulesInsightsText.qml"),
+    ),
     ("RulesPage.qml", RULES_PAGE),
     ("ScannerPage.qml", include_str!("../qml/ScannerPage.qml")),
     ("SizedOverlaySheet.qml", SIZED_SHEET),
@@ -245,8 +251,10 @@ fn rules_page_labels_showing_rule_data_are_plain_text() {
             "page.inspectNotEditable",
             // P2.1: the editor's last result (bridge reasons).
             "ruleEditorController.statusText",
+            // P2.6: a finding names the covering rule, which is rule data.
+            "row.shadowText",
         ],
-        11,
+        12,
     );
 }
 
@@ -533,9 +541,29 @@ fn blocklists_page_labels_showing_subscription_data_are_plain_text() {
             "page.inspectLastUpdated",
             "page.inspectLastFailureReason",
             "page.storageReason",
+            "page.leftoverReason",
             "text: host",
         ],
-        12,
+        13,
+    );
+}
+
+/// Prompt-slot D: each entry's program, what it allows, why, its status and
+/// problem, and the bridge's reasons are the bridge's text.
+#[test]
+fn recommended_rules_page_labels_showing_bridge_text_are_plain_text() {
+    assert_data_labels_plain_text(
+        "RecommendedRulesPage.qml",
+        RECOMMENDED_PAGE,
+        &[
+            "row.program",
+            "row.allows",
+            "row.why",
+            "row.statusText",
+            "row.problem",
+            "page.unavailableReason",
+        ],
+        6,
     );
 }
 
@@ -577,6 +605,7 @@ fn inline_messages_carry_only_fixed_text() {
         ("ConnectionsPage.qml", CONNECTIONS_PAGE),
         ("BlocklistsPage.qml", BLOCKLISTS_PAGE),
         ("ProfilesPage.qml", PROFILES_PAGE),
+        ("RecommendedRulesPage.qml", RECOMMENDED_PAGE),
         ("RulesPage.qml", RULES_PAGE),
         ("RuleSimulatorSheet.qml", SIMULATOR_SHEET),
         ("RulesImportSheet.qml", IMPORT_SHEET),
@@ -597,6 +626,27 @@ fn inline_messages_carry_only_fixed_text() {
         checked >= 3,
         "expected the decision-prompt, Blocklists and Profiles InlineMessages, found {checked}"
     );
+}
+
+/// A per-user service reaches the firewall service over the legacy TCP
+/// connection, where nothing is offered to remove (any local process could
+/// pose as the daemon). Its banner says so in fixed text, since there is no
+/// other sign on the page.
+#[test]
+fn the_per_user_banner_says_leftover_rules_cant_be_checked_from_here() {
+    let code = code_lines(BLOCKLISTS_PAGE);
+    let banner = blocks(&code, "Kirigami.InlineMessage {")
+        .into_iter()
+        .find(|block| block.contains("objectName: \"perUserBanner\""))
+        .expect("the per-user banner");
+    let text = text_binding(&banner).unwrap_or_default();
+    assert!(is_fixed_text(&text), "the banner text is fixed:\n{text}");
+    for part in [
+        "rules a system-wide Snitchwatch service left in the firewall can't be checked ",
+        "or removed from here; start the system-wide service to remove them.",
+    ] {
+        assert!(text.contains(part), "banner lacks '{part}':\n{text}");
+    }
 }
 
 #[test]
@@ -690,6 +740,7 @@ fn overlay_sheet_titles_are_plain_text() {
         ("ConnectionsPage.qml", CONNECTIONS_PAGE),
         ("BlocklistsPage.qml", BLOCKLISTS_PAGE),
         ("ProfilesPage.qml", PROFILES_PAGE),
+        ("RecommendedRulesPage.qml", RECOMMENDED_PAGE),
         ("RulesPage.qml", RULES_PAGE),
         ("RuleSimulatorSheet.qml", SIMULATOR_SHEET),
         ("RulesImportSheet.qml", IMPORT_SHEET),

@@ -219,17 +219,52 @@ pub(crate) async fn act_and_confirm(
         row_settled(&mut updates, connection_id, wire_id),
     )
     .await;
+    // At INFO, so a VM run tells "never applied" (timed out) from the rest.
     match settled {
         Ok(Some(Some(row)))
             if row.action.as_deref() == Some(ours)
                 && !row.deferred
                 && row.auto_answer.is_none() =>
         {
+            tracing::info!(
+                connection_id,
+                wire_id,
+                "the bridge applied the notification's answer"
+            );
             outcome
         }
-        Ok(Some(Some(_))) => ActionOutcome::AlreadyAnswered,
-        Ok(Some(None)) => ActionOutcome::NoLongerWaiting,
-        Ok(None) | Err(_) => outcome,
+        Ok(Some(Some(row))) => {
+            tracing::info!(
+                connection_id,
+                wire_id,
+                action = ?row.action,
+                deferred = row.deferred,
+                auto_answer = ?row.auto_answer,
+                "the row was settled another way first"
+            );
+            ActionOutcome::AlreadyAnswered
+        }
+        Ok(Some(None)) => {
+            tracing::info!(connection_id, wire_id, "the row was withdrawn");
+            ActionOutcome::NoLongerWaiting
+        }
+        Ok(None) => {
+            tracing::info!(
+                connection_id,
+                wire_id,
+                "the bridge feed ended before the row settled"
+            );
+            outcome
+        }
+        Err(_) => {
+            tracing::info!(
+                connection_id,
+                wire_id,
+                wait = ?CONFIRM_WAIT,
+                "no row update from the bridge after the notification's answer"
+            );
+            outcome
+        }
     }
 }
 

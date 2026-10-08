@@ -152,7 +152,9 @@ jobs:
       # git: needed for actions/checkout's own git operations inside the
       # container (not provided by the fedora:43 base image). dbus-daemon:
       # /usr/bin/dbus-daemon, for notification_signals' private-bus tests,
-      # which fail rather than skip without it on CI. Everything else here
+      # which fail rather than skip without it on CI. xdg-dbus-proxy: for
+      # the test that runs a notice through the Flatpak's filtering proxy,
+      # which likewise fails rather than skips on CI. Everything else here
       # mirrors this repo's dev sandbox's confirmed-working package set (see
       # this job's header comment).
       - name: Install system prerequisites
@@ -162,6 +164,7 @@ jobs:
             gcc gcc-c++ make \
             protobuf-compiler \
             dbus-daemon \
+            xdg-dbus-proxy \
             qt6-qtbase-devel \
             qt6-qtdeclarative-devel \
             qt6-qttools-devel \
@@ -190,7 +193,8 @@ jobs:
       # under offscreen (see main.rs's own comment); Basic is the
       # QApplication-free style the test suite already targets.
       # CI: set here too, not just by the runner, so the private D-Bus tests
-      # fail instead of skipping if dbus-daemon is ever missing.
+      # fail instead of skipping if dbus-daemon or xdg-dbus-proxy is ever
+      # missing.
       - name: cargo test -p snitchwatch-kirigami (headless)
         env:
           QT_QPA_PLATFORM: offscreen

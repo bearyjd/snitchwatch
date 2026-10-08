@@ -17,15 +17,21 @@
 pub mod activation;
 mod busy;
 pub mod cli;
+pub mod curated_storage;
 mod profile_actions;
 pub mod profile_storage;
+mod relays;
 mod replier;
 mod rule_commands;
+mod rule_effect;
 pub mod rule_hits_storage;
 mod rules_import;
 pub mod storage;
 #[cfg(test)]
 mod test_daemon;
+
+use activation::RootUnixIncoming;
+use profile_storage::is_profile_message;
 
 pub use storage::{
     resolve_storage, BridgeMode, EphemeralReason, RunOptions, Storage, PER_USER_REASON,
@@ -36,10 +42,8 @@ use snitchwatch_bridge::auth::{self, Token};
 use snitchwatch_bridge::blocklists::worker::{BlocklistTasks, DEFAULT_REFRESH_TICK};
 use snitchwatch_bridge::cache::connections::ConnectionCache;
 use snitchwatch_bridge::cache::rule_hits_handle::RuleHitsHandle;
-use snitchwatch_bridge::cache::rules::{
-    prune_expired_rules_every, publish_rules, settle_rule_command,
-};
-use snitchwatch_bridge::cache::traffic_tracker::TrafficTracker;
+use snitchwatch_bridge::cache::rules::{prune_expired_rules_every, publish_rules};
+use snitchwatch_bridge::curated::manager::CuratedDefaults;
 use snitchwatch_bridge::daemon_commands::DaemonTransport;
 use snitchwatch_bridge::deferred_answers::ANSWER_TIMEOUT;
 use snitchwatch_bridge::filter_pause::{FilterPause, PauseRequest};
@@ -47,26 +51,18 @@ use snitchwatch_bridge::grpc_server::UiService;
 use snitchwatch_bridge::notice::{Notice, NoticeBus};
 use snitchwatch_bridge::profiles::network_watcher;
 use snitchwatch_bridge::translator::downstream;
-use snitchwatch_bridge::translator::rule_notification::notification_for_effect;
 use snitchwatch_bridge::translator::upstream::{self, UpstreamEffect};
 use snitchwatch_bridge::tray_state::{TrayState, TrayStatePublisher};
 use snitchwatch_bridge::ws_messages::{ClientMessage, ServerMessage};
 use snitchwatch_bridge::ws_server::{WsHandles, WsServer};
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context as TaskContext, Poll};
 use std::time::Duration;
-use tokio::net::{UnixListener, UnixStream};
+use tokio::net::UnixListener;
 use tokio::sync::{broadcast, mpsc, oneshot, watch, Mutex};
 use tonic::transport::Server;
 use tracing::{error, info, warn};
-
-/// Rolling window kept by the traffic pump's [`TrafficTracker`], matching
-/// `snitchwatch-kirigami::traffic::ring_store::DEFAULT_WINDOW_SECONDS` (the
-/// consumer side of the same underlying `TrafficBinner`).
-const TRAFFIC_WINDOW_SECONDS: usize = 300;
 
 /// How long a rule command waits for the daemon's reply before the GUI's
 /// optimistic change is rolled back (#48).
@@ -89,65 +85,6 @@ impl GrpcEndpoint {
             Self::Unix(_) => None,
         }
     }
-}
-
-/// Check kernel credentials before tonic sees a daemon connection. Rejected
-/// clients are dropped and accepting continues, including after lookup errors.
-struct RootUnixIncoming(UnixListener);
-
-impl tokio_stream::Stream for RootUnixIncoming {
-    type Item = std::io::Result<UnixStream>;
-
-    fn poll_next(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Option<Self::Item>> {
-        // Bound each poll so a flood of rejected clients cannot starve shutdown.
-        for _ in 0..32 {
-            match self.0.poll_accept(cx) {
-                Poll::Pending => return Poll::Pending,
-                Poll::Ready(Err(error)) => return Poll::Ready(Some(Err(error))),
-                Poll::Ready(Ok((stream, _))) => match stream.peer_cred() {
-                    Ok(cred) if cred.uid() == 0 => return Poll::Ready(Some(Ok(stream))),
-                    Ok(cred) => warn!(uid = cred.uid(), "rejected non-root daemon peer"),
-                    Err(error) => {
-                        warn!(%error, "rejected daemon peer with unavailable credentials")
-                    }
-                },
-            }
-        }
-        cx.waker().wake_by_ref();
-        Poll::Pending
-    }
-}
-
-/// True for every `ClientMessage` variant `ProfilesManager` owns handling of.
-/// Kept as a free function (rather than inlined into the pump's `match`) so
-/// it reads as one clear routing decision at the call site.
-fn is_profile_message(msg: &ClientMessage) -> bool {
-    matches!(
-        msg,
-        ClientMessage::CreateProfile { .. }
-            | ClientMessage::UpdateProfile { .. }
-            | ClientMessage::DeleteProfile { .. }
-            | ClientMessage::ActivateProfile { .. }
-            | ClientMessage::DeactivateProfile
-            | ClientMessage::AddProfileRule { .. }
-            | ClientMessage::RemoveProfileRule { .. }
-    )
-}
-
-/// After any pause change, show the current pause state everywhere: on the
-/// tray (through the cache, which publishes `FilterOff` while a pause is
-/// active) and to every GUI (`FilterPauseState`, issue #47). Read and sent
-/// under the cache lock, so announcements from the pump, the expiry task and
-/// the last-loss clear reach GUIs in the order they happened, and the last
-/// one always matches the last change.
-async fn announce_pause_state(
-    filter_pause: &FilterPause,
-    cache: &Mutex<ConnectionCache>,
-    broadcast_tx: &broadcast::Sender<ServerMessage>,
-) {
-    let cache = cache.lock().await;
-    cache.resync_tray_state();
-    let _ = broadcast_tx.send(filter_pause.state().to_message());
 }
 
 /// Runtime configuration for [`run`].
@@ -238,6 +175,10 @@ pub struct RunningBridge {
     /// broadcasts and saves them in between.
     rule_hits: RuleHitsHandle,
     rule_hits_ticker: tokio::task::JoinHandle<()>,
+    /// The recommended rules' reconcile loop (prompt-slot D), and their
+    /// choices, saved once more at shutdown.
+    curated_handle: tokio::task::JoinHandle<()>,
+    curated: CuratedDefaults,
 }
 
 impl RunningBridge {
@@ -255,6 +196,8 @@ impl RunningBridge {
         self.pause_expiry_handle.abort();
         self.pause_clear_handle.abort();
         self.blocklist_tasks.abort();
+        self.curated_handle.abort();
+        self.curated.save_now();
         for task in &self.profile_tasks {
             task.abort();
         }
@@ -406,6 +349,14 @@ where
     // Taken before the gRPC server starts, so no rules snapshot is missed.
     let rules_synced = ui_service_inner.rules_synced();
     let profile_rules_synced = ui_service_inner.rules_synced();
+    let curated_synced = rules_synced.clone();
+    // The recommended background-service rules (prompt-slot D).
+    let curated = CuratedDefaults::new(
+        ui_service_inner.daemon_commands(),
+        ui_service_inner.rules_handle(),
+        broadcast_tx.clone(),
+    );
+    curated_storage::configure(&curated, &options.storage, options.mode);
 
     // --- BlocklistsManager: persisted and enforced only when `Persistent` ---
     // The profile store opens in the same state directory but tracks its
@@ -485,6 +436,7 @@ where
         DEFAULT_REFRESH_TICK,
         Some(rules_synced),
     );
+    let curated_handle = curated.spawn(curated_synced);
     let (ws_shutdown_tx, ws_shutdown_rx) = oneshot::channel::<()>();
 
     tokio::spawn(async move {
@@ -504,77 +456,15 @@ where
     let tray_rx = tray_pub.subscribe();
     let notice_rx = notice_bus.subscribe();
 
-    // External shells receive the same tray and desktop-notice inputs as
-    // in-process shells. These are additive WebSocket actions, so older
-    // clients remain compatible by ignoring actions they do not understand.
-    // Subscribe before spawning the pumps; snapshots below cover the current
-    // tray value for a client that connects after a state transition.
-    {
-        let mut tray_events = tray_pub.subscribe();
-        let tray_events_tx = broadcast_tx.clone();
-        tokio::spawn(async move {
-            while tray_events.changed().await.is_ok() {
-                let _ = tray_events_tx.send(ServerMessage::TrayState {
-                    state: tray_events.borrow().clone(),
-                });
-            }
-        });
-    }
-    {
-        let mut notice_events = notice_bus.subscribe();
-        let notice_events_tx = broadcast_tx.clone();
-        tokio::spawn(async move {
-            loop {
-                match notice_events.recv().await {
-                    Ok(notice) => {
-                        let _ = notice_events_tx.send(ServerMessage::Notice { notice });
-                    }
-                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                        warn!(skipped, "notice relay lagged behind bridge");
-                    }
-                    Err(broadcast::error::RecvError::Closed) => break,
-                }
-            }
-        });
-    }
-
-    // The filtering pause (issue #47) resets to unpaused on every bridge
-    // start, matching every other in-memory bridge state. It ends at the
-    // earliest of its deadline, an explicit resume, or the last
-    // authenticated GUI session ending.
-    let pause_clear_handle = {
-        let filter_pause = filter_pause.clone();
-        let cache = cache.clone();
-        let broadcast_tx = broadcast_tx.clone();
-        tokio::spawn(
-            snitchwatch_bridge::client_presence::clear_pause_on_last_session_loss(
-                client_presence.session_losses(),
-                filter_pause.clone(),
-                move || {
-                    let filter_pause = filter_pause.clone();
-                    let cache = cache.clone();
-                    let broadcast_tx = broadcast_tx.clone();
-                    async move { announce_pause_state(&filter_pause, &cache, &broadcast_tx).await }
-                },
-            ),
-        )
-    };
-    let pause_expiry_handle = {
-        let filter_pause = filter_pause.clone();
-        let cache = cache.clone();
-        let broadcast_tx = broadcast_tx.clone();
-        let notice_bus = notice_bus.clone();
-        tokio::spawn(snitchwatch_bridge::filter_pause::expire_pause_on_deadline(
-            filter_pause.clone(),
-            move || {
-                notice_bus.send(Notice::FilterPauseExpired);
-                let filter_pause = filter_pause.clone();
-                let cache = cache.clone();
-                let broadcast_tx = broadcast_tx.clone();
-                async move { announce_pause_state(&filter_pause, &cache, &broadcast_tx).await }
-            },
-        ))
-    };
+    // Subscribe before spawning the relays (see `relays::spawn_tray_and_notice_relays`).
+    relays::spawn_tray_and_notice_relays(&tray_pub, &notice_bus, &broadcast_tx);
+    let (pause_clear_handle, pause_expiry_handle) = relays::spawn_pause_tasks(
+        &client_presence,
+        &filter_pause,
+        &cache,
+        &broadcast_tx,
+        &notice_bus,
+    );
 
     // Grabbed before `.into_server()` consumes `ui_service_inner` — the
     // daemon-down watchdog below needs this to watch daemon liveness.
@@ -602,7 +492,8 @@ where
         rules.clone(),
         broadcast_tx.clone(),
         busy_names.clone(),
-    );
+    )
+    .with_curated(curated.clone());
     tokio::spawn(prune_expired_rules_every(
         RULE_EXPIRY_TICK,
         Arc::downgrade(&rules),
@@ -679,37 +570,7 @@ where
         }
     });
 
-    // --- Profile events → SetProfiles / ProfileChanged broadcasts -----------
-    // Mirrors `snitchwatch_bridge::blocklists::spawn_event_pump`: the
-    // manager owns no knowledge of the WS wire format, so this is where its
-    // internal `ProfileEvent`s become the typed `ServerMessage`s every
-    // consumer (WS clients, the in-process Kirigami shell) sees.
-    {
-        let profiles_for_events = profiles_mgr.clone();
-        let mut profile_rx = profiles_mgr.subscribe();
-        let bc_tx = broadcast_tx.clone();
-        tokio::spawn(async move {
-            use snitchwatch_bridge::profiles::ProfileEvent as Evt;
-            use snitchwatch_bridge::translator::downstream::{
-                build_profile_changed, build_set_profiles,
-            };
-            while let Ok(evt) = profile_rx.recv().await {
-                match evt {
-                    Evt::ProfilesChanged => {
-                        if let Ok(m) = build_set_profiles(&profiles_for_events).await {
-                            let _ = bc_tx.send(m);
-                        }
-                    }
-                    Evt::ActiveProfileChanged { profile_id } => {
-                        let _ = bc_tx.send(build_profile_changed(profile_id));
-                        if let Ok(m) = build_set_profiles(&profiles_for_events).await {
-                            let _ = bc_tx.send(m);
-                        }
-                    }
-                }
-            }
-        });
-    }
+    relays::spawn_profile_event_relay(&profiles_mgr, &broadcast_tx);
 
     // --- Upstream pump: WS client messages → cache (→ oneshot resolve) -------
     // Profile-related messages are routed to `ProfilesManager` directly
@@ -726,6 +587,7 @@ where
     let commands_for_pump = daemon_commands;
     let rules_for_pump = rules.clone();
     let blocklist_worker = blocklist_tasks.worker.clone();
+    let curated_for_pump = curated.clone();
     tokio::spawn(async move {
         while let Some(msg) = inbound_rx.recv().await {
             // Blocklist messages go to the single blocklist worker; queueing
@@ -737,6 +599,9 @@ where
                 continue;
             };
             let Some(msg) = rule_commands.try_route(msg) else {
+                continue;
+            };
+            let Some(msg) = curated_for_pump.try_route(msg) else {
                 continue;
             };
             // Special-cased before is_profile_message/upstream::apply — this
@@ -769,8 +634,12 @@ where
                 .await;
                 // Always, even for an ignored or rejected request, so every
                 // GUI and the tray show the state that is actually in effect.
-                announce_pause_state(&filter_pause_for_pump, &cache_for_upstream, &snapshot_tx)
-                    .await;
+                relays::announce_pause_state(
+                    &filter_pause_for_pump,
+                    &cache_for_upstream,
+                    &snapshot_tx,
+                )
+                .await;
                 continue;
             }
             if let ClientMessage::DecideLater { row_id } = &msg {
@@ -825,6 +694,9 @@ where
                     match downstream::build_set_blocklists(&blocklists_for_upstream).await {
                         Ok(m) => {
                             let _ = snapshot_tx.send(m);
+                            let _ = snapshot_tx.send(downstream::build_set_blocklist_leftovers(
+                                &blocklists_for_upstream,
+                            ));
                         }
                         Err(e) => warn!(error = %e, "snapshot: blocklists rebuild failed"),
                     }
@@ -843,6 +715,7 @@ where
                     });
                     prompt_slot_for_pump.announce(&snapshot_tx);
                     rule_hits_for_pump.announce(&snapshot_tx);
+                    curated_for_pump.announce();
                     // Including `paused: false`: a GUI that was away when a
                     // pause ended learns it here. Sent under the cache lock,
                     // like every other pause announcement, so it can't
@@ -878,109 +751,14 @@ where
                     info!(%row_id, "applied verdict and broadcast row update");
                 }
                 Ok(effect) => {
-                    // Rule enable/disable/delete: translate to a daemon
-                    // notification and send it down the outbound Notifications
-                    // stream(s); `DaemonCommands::send` assigns the id. The
-                    // rules cache follows the daemon's OK in reply order; a
-                    // spawned waiter re-broadcasts the unchanged list on any
-                    // other outcome, so the pump never blocks (#48). Anything
-                    // that isn't a rule edit yields `None` and falls through
-                    // to the original log line.
-                    match notification_for_effect(&effect, 0) {
-                        Ok(Some(notification)) => {
-                            let action = notification.r#type;
-                            match commands_for_pump.send(notification) {
-                                Ok(pending) => {
-                                    info!(id = pending.id(), action, "sent rule command to daemon");
-                                    tokio::spawn(settle_rule_command(
-                                        pending,
-                                        rules_for_pump.clone(),
-                                        snapshot_tx.clone(),
-                                        RULE_COMMAND_TIMEOUT,
-                                    ));
-                                }
-                                // No daemon stream took it. Dropping is
-                                // correct — the daemon reloads its own rules on
-                                // connect, so there is nothing to replay. The
-                                // list is re-sent to undo the GUI's optimistic
-                                // change.
-                                Err(e) => {
-                                    warn!(action, error = %e, "rule command dropped");
-                                    publish_rules(&rules_for_pump, &snapshot_tx);
-                                }
-                            }
-                        }
-                        Ok(None) => info!(?effect, "applied upstream effect"),
-                        // A rule the daemon would reject silently (see
-                        // `rule_from_wire`). Never send it, and re-send the
-                        // list to undo the GUI's optimistic change. The rule
-                        // body and name are GUI/daemon-supplied text: log only
-                        // the request kind and the name's length.
-                        Err(e) => {
-                            let (kind, name_len) = match &effect {
-                                UpstreamEffect::AddRule { rule } => (
-                                    "add",
-                                    rule.get("name")
-                                        .and_then(|n| n.as_str())
-                                        .map_or(0, str::len),
-                                ),
-                                UpstreamEffect::UpdateRule { rule_id, .. } => {
-                                    ("update", rule_id.len())
-                                }
-                                UpstreamEffect::DeleteRule { rule_id } => ("delete", rule_id.len()),
-                                _ => ("other", 0),
-                            };
-                            error!(error = %e, kind, name_len, "refusing to send malformed rule to daemon");
-                            publish_rules(&rules_for_pump, &snapshot_tx);
-                        }
-                    }
+                    rule_effect::send(&effect, &commands_for_pump, &rules_for_pump, &snapshot_tx);
                 }
                 Err(e) => error!(error = %e, "upstream apply failed"),
             }
         }
     });
 
-    // --- Traffic pump: connection-row byte counters → binned TrafficEvents --
-    // Additive: subscribes to the same outbound broadcast every other
-    // consumer uses and folds each connection-row batch's byte counters
-    // through `TrafficTracker` (wrapping the existing, already-tested
-    // `TrafficBinner`), re-broadcasting the result as `TrafficEvents` — the
-    // one typed traffic variant the native Kirigami shell's `TrafficModel`
-    // consumes (`bridge_dispatch::interests_traffic`). Never touches the
-    // legacy `SetTrafficData`/`UpdateTrafficData` variants.
-    let mut traffic_rx = broadcast_tx.subscribe();
-    let traffic_tx = broadcast_tx.clone();
-    tokio::spawn(async move {
-        let mut tracker = TrafficTracker::new(TRAFFIC_WINDOW_SECONDS);
-        loop {
-            let msg = match traffic_rx.recv().await {
-                Ok(msg) => msg,
-                Err(broadcast::error::RecvError::Lagged(n)) => {
-                    warn!(skipped = n, "traffic pump lagged behind broadcast");
-                    continue;
-                }
-                Err(broadcast::error::RecvError::Closed) => break,
-            };
-            let rows = match &msg {
-                ServerMessage::InsertConnectionRows { rows } => rows,
-                ServerMessage::UpdateConnectionRows { rows } => rows,
-                _ => continue,
-            };
-            if rows.is_empty() {
-                continue;
-            }
-            let now_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as i64)
-                .unwrap_or(0);
-            let events = tracker.record_rows(now_ms, rows);
-            if traffic_tx.receiver_count() > 0 {
-                if let Err(e) = traffic_tx.send(ServerMessage::TrafficEvents { events }) {
-                    warn!(error = %e, "traffic pump: broadcast send failed");
-                }
-            }
-        }
-    });
+    relays::spawn_traffic_pump(&broadcast_tx);
 
     Ok(RunningBridge {
         ws_socket_path: config.ws_socket_path,
@@ -1003,910 +781,17 @@ where
         profile_tasks,
         rule_hits,
         rule_hits_ticker,
+        curated_handle,
+        curated,
     })
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use futures_util::{SinkExt, StreamExt};
-    use mock_opensnitchd::MockOpensnitchd;
-    use snitchwatch_bridge::ws_messages::{VerdictAction, VerdictDuration, VerdictScope};
-    use snitchwatch_proto::protocol::Connection;
-    use std::os::unix::fs::{MetadataExt, PermissionsExt};
-    use tokio_tungstenite::tungstenite::Message;
+#[path = "lib_tests.rs"]
+mod tests;
 
-    #[test]
-    fn system_permissions_peer_helper() {
-        let Some(dir) = std::env::var_os("SNITCHWATCH_TEST_PERMISSION_DIR") else {
-            return;
-        };
-        let dir = PathBuf::from(dir);
-        let token_path = dir.join("auth/token");
-        let role = std::env::var("SNITCHWATCH_TEST_PERMISSION_ROLE").unwrap();
-        if role == "service" || role == "service-mismatch" {
-            assert_eq!(unsafe { libc::geteuid() }, 65531);
-            assert_eq!(unsafe { libc::getegid() }, 65531);
-            if role == "service-mismatch" {
-                let original = auth::read_token_file(&token_path).unwrap();
-                for _ in 0..2 {
-                    let error =
-                        auth::write_system_token_file(&Token::generate(), &token_path).unwrap_err();
-                    assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
-                    assert!(error
-                        .to_string()
-                        .contains("system token group did not inherit auth directory group"));
-                    assert!(original.matches(auth::read_token_file(&token_path).unwrap().as_str()));
-                    assert!(!dir
-                        .join(format!("auth/.token.{}.tmp", std::process::id()))
-                        .exists());
-                }
-                return;
-            }
-            auth::write_system_token_file(&Token::generate(), &token_path).unwrap();
-            let metadata = std::fs::metadata(&token_path).unwrap();
-            assert_eq!(
-                (metadata.uid(), metadata.gid(), metadata.mode() & 0o777),
-                (65531, 65533, 0o640)
-            );
-            return;
-        }
-        let member = role == "member";
-        let gui = std::os::unix::net::UnixStream::connect(dir.join("bridge.sock"));
-        let token = auth::read_token_file(&token_path);
-        if member {
-            assert!(gui.is_ok(), "UI-group member must be able to connect");
-            assert_eq!(token.unwrap().as_str().len(), 64);
-        } else {
-            assert_eq!(
-                gui.unwrap_err().kind(),
-                std::io::ErrorKind::PermissionDenied
-            );
-            assert_eq!(
-                token.unwrap_err().kind(),
-                std::io::ErrorKind::PermissionDenied
-            );
-        }
-        let daemon = std::os::unix::net::UnixStream::connect(dir.join("opensnitchd.sock"));
-        assert_eq!(
-            daemon.unwrap_err().kind(),
-            std::io::ErrorKind::PermissionDenied
-        );
-        for path in [
-            dir.join("bridge.sock"),
-            dir.join("opensnitchd.sock"),
-            token_path,
-        ] {
-            assert_eq!(
-                std::fs::remove_file(path).unwrap_err().kind(),
-                std::io::ErrorKind::PermissionDenied
-            );
-        }
-    }
+#[cfg(test)]
+mod pause_tests;
 
-    #[tokio::test]
-    async fn service_token_and_socket_permissions_enforce_the_ui_group_across_identities() {
-        use std::os::unix::process::CommandExt;
-        if unsafe { libc::geteuid() } != 0 {
-            eprintln!("run this test as root to verify distinct service/UI identities");
-            return;
-        }
-        // Match /run's native tmpfs semantics. Some rootless development
-        // overlays report setgid directories but do not inherit their group.
-        let dir = tempfile::tempdir_in("/tmp").unwrap();
-        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o711)).unwrap();
-        let gui_path = dir.path().join("bridge.sock");
-        let daemon_path = dir.path().join("opensnitchd.sock");
-        let _gui = UnixListener::bind(&gui_path).unwrap();
-        let _daemon = UnixListener::bind(&daemon_path).unwrap();
-        let auth_dir = dir.path().join("auth");
-        std::fs::create_dir(&auth_dir).unwrap();
-        for (path, uid, gid, mode) in [
-            (&gui_path, 0, 65533, 0o660),
-            (&daemon_path, 0, 0, 0o600),
-            (&auth_dir, 65531, 65533, 0o2750),
-        ] {
-            use std::os::unix::ffi::OsStrExt;
-            let path_c = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
-            assert_eq!(unsafe { libc::chown(path_c.as_ptr(), uid, gid) }, 0);
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
-        }
-        assert_eq!(
-            std::fs::metadata(&auth_dir).unwrap().mode() & 0o7777,
-            0o2750
-        );
-        for (role, uid, gid) in [
-            ("service", 65531, 65531),
-            ("member", 65534, 65533),
-            ("nonmember", 65532, 65532),
-            ("service-mismatch", 65531, 65531),
-        ] {
-            if role == "service-mismatch" {
-                std::fs::set_permissions(&auth_dir, std::fs::Permissions::from_mode(0o750))
-                    .unwrap();
-            }
-            let mut child = std::process::Command::new(std::env::current_exe().unwrap());
-            child
-                .args([
-                    "--exact",
-                    "tests::system_permissions_peer_helper",
-                    "--nocapture",
-                ])
-                .env("SNITCHWATCH_TEST_PERMISSION_DIR", dir.path())
-                .env("SNITCHWATCH_TEST_PERMISSION_ROLE", role);
-            // Only async-signal-safe credential syscalls in the forked child.
-            // Clear inherited groups before dropping root, so no membership
-            // from the container runner can invalidate the negative checks.
-            unsafe {
-                child.pre_exec(move || {
-                    if libc::setgroups(0, std::ptr::null()) != 0
-                        || libc::setgid(gid) != 0
-                        || libc::setuid(uid) != 0
-                    {
-                        return Err(std::io::Error::last_os_error());
-                    }
-                    Ok(())
-                });
-            }
-            assert!(
-                child.status().unwrap().success(),
-                "{role} permission checks failed"
-            );
-            if role == "service-mismatch" {
-                std::fs::set_permissions(&auth_dir, std::fs::Permissions::from_mode(0o2750))
-                    .unwrap();
-            }
-        }
-        let token = std::fs::metadata(auth_dir.join("token")).unwrap();
-        assert_eq!(
-            (token.uid(), token.gid(), token.mode() & 0o777),
-            (65531, 65533, 0o640)
-        );
-        assert_eq!(
-            std::fs::metadata(&auth_dir).unwrap().mode() & 0o7777,
-            0o2750
-        );
-        assert_eq!(std::fs::metadata(&gui_path).unwrap().mode() & 0o777, 0o660);
-        assert_eq!(
-            std::fs::metadata(&daemon_path).unwrap().mode() & 0o777,
-            0o600
-        );
-    }
-
-    // This helper runs in a fresh process so credentials can be changed safely,
-    // without mutating the credentials of a running multithreaded test suite.
-    #[test]
-    fn non_root_daemon_peer_helper() {
-        use std::io::Read;
-        let Some(path) = std::env::var_os("SNITCHWATCH_TEST_PEER_SOCKET") else {
-            return;
-        };
-        assert_ne!(unsafe { libc::geteuid() }, 0);
-        let mut stream = std::os::unix::net::UnixStream::connect(path).unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(3)))
-            .unwrap();
-        assert_eq!(
-            stream.read(&mut [0u8; 1]).unwrap(),
-            0,
-            "non-root peer must be disconnected"
-        );
-    }
-
-    #[tokio::test]
-    async fn root_unix_incoming_rejects_non_root_and_keeps_accepting_every_peer() {
-        use std::os::unix::process::CommandExt;
-        if unsafe { libc::geteuid() } != 0 {
-            eprintln!("run this test as root to verify both credential classes");
-            return;
-        }
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
-        let path = dir.path().join("grpc.sock");
-        let mut incoming = RootUnixIncoming(UnixListener::bind(&path).unwrap());
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o777)).unwrap();
-        for _ in 0..2 {
-            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "tests::non_root_daemon_peer_helper",
-                    "--nocapture",
-                ])
-                .env("SNITCHWATCH_TEST_PEER_SOCKET", &path)
-                .uid(65534)
-                .gid(65534)
-                .spawn()
-                .unwrap();
-            assert!(
-                tokio::time::timeout(Duration::from_millis(200), incoming.next())
-                    .await
-                    .is_err()
-            );
-            assert!(child.wait().unwrap().success());
-            let _root = UnixStream::connect(&path).await.unwrap();
-            let accepted = tokio::time::timeout(Duration::from_secs(2), incoming.next())
-                .await
-                .unwrap()
-                .unwrap()
-                .unwrap();
-            assert_eq!(accepted.peer_cred().unwrap().uid(), 0);
-        }
-    }
-
-    #[tokio::test]
-    async fn activated_unix_ask_rule_roundtrip_preserves_socket_ownership_and_modes() {
-        if unsafe { libc::geteuid() } != 0 {
-            eprintln!("run this test as root to exercise the authorized daemon peer");
-            return;
-        }
-        let dir = tempfile::tempdir().unwrap();
-        let gui_path = dir.path().join("bridge.sock");
-        let grpc_path = dir.path().join("opensnitchd.sock");
-        let gui_listener = UnixListener::bind(&gui_path).unwrap();
-        let grpc_listener = UnixListener::bind(&grpc_path).unwrap();
-        std::fs::set_permissions(&gui_path, std::fs::Permissions::from_mode(0o660)).unwrap();
-        std::fs::set_permissions(&grpc_path, std::fs::Permissions::from_mode(0o600)).unwrap();
-        let auth_dir = dir.path().join("auth");
-        std::fs::create_dir(&auth_dir).unwrap();
-        std::fs::set_permissions(&auth_dir, std::fs::Permissions::from_mode(0o2750)).unwrap();
-        let before_gui = std::fs::metadata(&gui_path).unwrap();
-        let before_grpc = std::fs::metadata(&grpc_path).unwrap();
-        let before_dir = std::fs::metadata(dir.path()).unwrap();
-        let token_path = auth_dir.join("token");
-        let config = BridgeConfig {
-            grpc_bind: "127.0.0.1:0".parse().unwrap(),
-            ws_socket_path: gui_path.clone(),
-            cache_capacity: 64,
-        };
-        let bridge = run_with_incoming(
-            config,
-            GrpcEndpoint::Unix(grpc_path.clone()),
-            RootUnixIncoming(grpc_listener),
-            Some(gui_listener),
-            Some(token_path.clone()),
-            RunOptions::in_process(),
-            ANSWER_TIMEOUT,
-        )
-        .await
-        .unwrap();
-        assert_eq!(bridge.grpc_endpoint, GrpcEndpoint::Unix(grpc_path.clone()));
-        assert!(bridge.grpc_endpoint.tcp_addr().is_none());
-        assert_eq!(
-            std::fs::metadata(&token_path).unwrap().mode() & 0o777,
-            0o640
-        );
-        assert_eq!(
-            std::fs::metadata(&token_path).unwrap().gid(),
-            std::fs::metadata(&auth_dir).unwrap().gid()
-        );
-        assert_eq!(
-            std::fs::metadata(&auth_dir).unwrap().mode() & 0o7777,
-            0o2750
-        );
-
-        let stream = UnixStream::connect(&gui_path).await.unwrap();
-        let (mut gui, _) = tokio_tungstenite::client_async("ws://localhost/stream", stream)
-            .await
-            .unwrap();
-        let token = auth::read_token_file(&token_path).unwrap();
-        gui.send(Message::Text(token.as_str().to_owned()))
-            .await
-            .unwrap();
-        let ack = tokio::time::timeout(Duration::from_secs(2), gui.next())
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        assert!(
-            matches!(ack, Message::Text(ref text) if matches!(serde_json::from_str::<ServerMessage>(text), Ok(ServerMessage::Authenticated { .. })))
-        );
-
-        let channel = tonic::transport::Endpoint::from_static("http://localhost")
-            .connect_with_connector(tower::service_fn(move |_| {
-                let path = grpc_path.clone();
-                async move {
-                    UnixStream::connect(path)
-                        .await
-                        .map(hyper_util::rt::TokioIo::new)
-                }
-            }))
-            .await
-            .unwrap();
-        let ask = tokio::spawn(async move {
-            snitchwatch_proto::protocol::ui_client::UiClient::new(channel)
-                .ask_rule(Connection {
-                    protocol: "tcp".into(),
-                    dst_host: "example.com".into(),
-                    dst_ip: "93.184.216.34".into(),
-                    dst_port: 443,
-                    process_path: "/usr/bin/curl".into(),
-                    ..Default::default()
-                })
-                .await
-                .unwrap()
-                .into_inner()
-        });
-        let pending_id = tokio::time::timeout(Duration::from_secs(3), async {
-            loop {
-                if let Message::Text(text) = gui.next().await.unwrap().unwrap() {
-                    if let Ok(ServerMessage::InsertConnectionRows { rows }) =
-                        serde_json::from_str(&text)
-                    {
-                        if let Some(row) = rows.into_iter().find(|row| row.action.is_none()) {
-                            break row.id;
-                        }
-                    }
-                }
-            }
-        })
-        .await
-        .unwrap();
-        let verdict = ClientMessage::SetVerdict {
-            row_id: pending_id,
-            verdict: VerdictAction::Allow,
-            scope: VerdictScope::ThisHost,
-            duration: Some(VerdictDuration::Once),
-            remember: None,
-        };
-        gui.send(Message::Text(serde_json::to_string(&verdict).unwrap()))
-            .await
-            .unwrap();
-        assert_eq!(
-            tokio::time::timeout(Duration::from_secs(3), ask)
-                .await
-                .unwrap()
-                .unwrap()
-                .action,
-            "allow"
-        );
-        bridge.shutdown();
-        tokio::task::yield_now().await;
-        for (path, before) in [
-            (&gui_path, before_gui),
-            (&dir.path().join("opensnitchd.sock"), before_grpc),
-        ] {
-            let after = std::fs::metadata(path).unwrap();
-            assert_eq!(
-                (after.ino(), after.mode(), after.uid(), after.gid()),
-                (before.ino(), before.mode(), before.uid(), before.gid())
-            );
-        }
-        assert_eq!(
-            std::fs::metadata(dir.path()).unwrap().mode(),
-            before_dir.mode()
-        );
-    }
-
-    #[tokio::test]
-    async fn run_binds_socket_and_grpc_port_and_shutdown_works() {
-        let dir = tempfile::tempdir().unwrap();
-        let cfg = BridgeConfig {
-            grpc_bind: "127.0.0.1:0".parse().unwrap(),
-            ws_socket_path: dir.path().join("bridge.sock"),
-            cache_capacity: 64,
-        };
-        let bridge = run(cfg).await.expect("run failed");
-        assert!(bridge.ws_socket_path.exists());
-        assert!(bridge.ws_token_path.exists());
-        assert!(bridge.grpc_endpoint.tcp_addr().unwrap().port() != 0);
-        bridge.shutdown();
-    }
-
-    #[tokio::test]
-    async fn exposes_in_process_broadcast_and_inbound_handles() {
-        let dir = tempfile::tempdir().unwrap();
-        let cfg = BridgeConfig {
-            grpc_bind: "127.0.0.1:0".parse().unwrap(),
-            ws_socket_path: dir.path().join("bridge.sock"),
-            cache_capacity: 64,
-        };
-        let bridge = run(cfg).await.expect("run failed");
-
-        // Outbound: a subscriber gets the exact ServerMessage the bridge fans out.
-        let mut rx = bridge.broadcast_tx.subscribe();
-        let msg = ServerMessage::ClearConnectionRows;
-        bridge.broadcast_tx.send(msg.clone()).unwrap();
-        let got = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
-            .await
-            .expect("no broadcast within timeout")
-            .expect("broadcast channel closed");
-        assert_eq!(got, msg);
-
-        // Inbound: a UI-origin ClientMessage is accepted onto the upstream pump.
-        bridge
-            .inbound_tx
-            .send(ClientMessage::Undo)
-            .await
-            .expect("inbound channel closed");
-
-        bridge.shutdown();
-    }
-
-    #[tokio::test]
-    async fn verdict_broadcasts_an_updated_non_pending_row() {
-        let dir = tempfile::tempdir().unwrap();
-        let cfg = BridgeConfig {
-            grpc_bind: "127.0.0.1:0".parse().unwrap(),
-            ws_socket_path: dir.path().join("bridge.sock"),
-            cache_capacity: 64,
-        };
-        let bridge = run(cfg).await.expect("run failed");
-        let mut rx = bridge.broadcast_tx.subscribe();
-        use futures_util::{SinkExt, StreamExt};
-        use tokio_tungstenite::tungstenite::Message;
-        let transport = tokio::net::UnixStream::connect(&bridge.ws_socket_path)
-            .await
-            .unwrap();
-        let (mut gui, _) = tokio_tungstenite::client_async("ws://localhost/stream", transport)
-            .await
-            .unwrap();
-        gui.send(Message::Text(bridge.ws_token.as_str().into()))
-            .await
-            .unwrap();
-        let ack = gui.next().await.unwrap().unwrap();
-        assert!(matches!(ack, Message::Text(ref text) if text.contains("authenticated")));
-
-        let grpc_addr = bridge.grpc_endpoint.tcp_addr().unwrap();
-        let ask = tokio::spawn(async move {
-            let mut daemon = MockOpensnitchd::connect(grpc_addr).await.unwrap();
-            daemon
-                .ask_rule(Connection {
-                    protocol: "tcp".into(),
-                    dst_host: "example.com".into(),
-                    dst_ip: "93.184.216.34".into(),
-                    dst_port: 443,
-                    process_path: "/usr/bin/curl".into(),
-                    ..Default::default()
-                })
-                .await
-                .unwrap()
-        });
-
-        let pending_id = tokio::time::timeout(std::time::Duration::from_secs(3), async {
-            loop {
-                if let ServerMessage::InsertConnectionRows { rows } =
-                    rx.recv().await.expect("broadcast channel closed")
-                {
-                    if let Some(row) = rows.into_iter().find(|row| row.action.is_none()) {
-                        break row.id;
-                    }
-                }
-            }
-        })
-        .await
-        .expect("pending AskRule row was not broadcast");
-
-        bridge
-            .inbound_tx
-            .send(ClientMessage::SetVerdict {
-                row_id: pending_id.clone(),
-                verdict: VerdictAction::Allow,
-                scope: VerdictScope::ThisHost,
-                duration: Some(VerdictDuration::Once),
-                remember: None,
-            })
-            .await
-            .expect("inbound channel closed");
-
-        let updated = tokio::time::timeout(std::time::Duration::from_secs(3), async {
-            loop {
-                if let ServerMessage::UpdateConnectionRows { rows } =
-                    rx.recv().await.expect("broadcast channel closed")
-                {
-                    if let Some(row) = rows.into_iter().find(|row| row.id == pending_id) {
-                        break row;
-                    }
-                }
-            }
-        })
-        .await
-        .expect("verdict did not broadcast a row update");
-        assert_eq!(updated.action.as_deref(), Some("allow"));
-
-        let rule = ask.await.expect("AskRule task panicked");
-        assert_eq!(rule.action, "allow");
-        bridge.shutdown();
-    }
-
-    #[tokio::test]
-    async fn request_snapshot_rebroadcasts_bridge_owned_state() {
-        let dir = tempfile::tempdir().unwrap();
-        let cfg = BridgeConfig {
-            grpc_bind: "127.0.0.1:0".parse().unwrap(),
-            ws_socket_path: dir.path().join("bridge.sock"),
-            cache_capacity: 64,
-        };
-        let bridge = run(cfg).await.expect("run failed");
-        let mut rx = bridge.broadcast_tx.subscribe();
-
-        bridge
-            .inbound_tx
-            .send(ClientMessage::RequestSnapshot)
-            .await
-            .expect("inbound channel closed");
-
-        // Expected snapshot sequence for an empty bridge: a connections clear
-        // (no insert — the cache is empty), then blocklists, profiles, and
-        // the current tray value. The latter lets a GUI that subscribed after
-        // a state transition render the service-owned shell state correctly.
-        // Ignore unrelated interleavings (e.g. traffic pump output) but bound
-        // the wait so a missing snapshot fails rather than hangs.
-        let mut saw_clear = false;
-        let mut saw_blocklists = false;
-        let mut saw_profiles = false;
-        let mut saw_tray = false;
-        let mut saw_pause = false;
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
-        while !(saw_clear && saw_blocklists && saw_profiles && saw_tray && saw_pause) {
-            let msg = tokio::time::timeout_at(deadline, rx.recv())
-                .await
-                .expect("snapshot messages not re-broadcast within timeout")
-                .expect("broadcast channel closed");
-            match msg {
-                ServerMessage::ClearConnectionRows => saw_clear = true,
-                ServerMessage::SetBlocklists { .. } => saw_blocklists = true,
-                ServerMessage::SetProfiles { .. } => saw_profiles = true,
-                ServerMessage::TrayState {
-                    state: TrayState::Idle,
-                } => saw_tray = true,
-                // A GUI that was away when a pause ended learns it here.
-                ServerMessage::FilterPauseState {
-                    paused: false,
-                    expires_at_unix_ms: None,
-                } => saw_pause = true,
-                _ => {}
-            }
-        }
-        bridge.shutdown();
-    }
-
-    #[tokio::test]
-    async fn synthetic_connection_activity_is_rebroadcast_as_traffic_events() {
-        use snitchwatch_bridge::ws_messages::ConnectionRow;
-
-        let dir = tempfile::tempdir().unwrap();
-        let cfg = BridgeConfig {
-            grpc_bind: "127.0.0.1:0".parse().unwrap(),
-            ws_socket_path: dir.path().join("bridge.sock"),
-            cache_capacity: 64,
-        };
-        let bridge = run(cfg).await.expect("run failed");
-        let mut rx = bridge.broadcast_tx.subscribe();
-
-        // Simulate what `UiService::ask_rule` broadcasts on a real connection
-        // (a synthetic row with non-zero byte counters, since production
-        // `ask_rule` rows start at zero — this exercises the pump's mapping
-        // end-to-end regardless of what today's actual producer sends).
-        let row = ConnectionRow {
-            id: "ask-1".into(),
-            process: "curl".into(),
-            process_path: Some("/usr/bin/curl".into()),
-            dst_host: "example.com".into(),
-            dst_ip: "93.184.216.34".into(),
-            dst_port: 443,
-            protocol: "tcp".into(),
-            direction: "outgoing".into(),
-            action: None,
-            bytes_sent: 1234,
-            bytes_received: 5678,
-            started_at_ms: 0,
-            matched_rule: None,
-            auto_answer: None,
-            answer_deadline_ms: None,
-            deferred: false,
-            decided_by_default: false,
-        };
-        bridge
-            .broadcast_tx
-            .send(ServerMessage::InsertConnectionRows {
-                rows: vec![row.clone()],
-            })
-            .expect("broadcast send failed");
-
-        // First: the original InsertConnectionRows, echoed to every subscriber
-        // (including this test's own, exactly like a browser WS client).
-        let first = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
-            .await
-            .expect("no broadcast within timeout")
-            .expect("broadcast channel closed");
-        assert_eq!(
-            first,
-            ServerMessage::InsertConnectionRows { rows: vec![row] }
-        );
-
-        // Second: the traffic pump's derived TrafficEvents, mapping
-        // bytes_sent -> bytesOut and bytes_received -> bytesIn.
-        let second = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
-            .await
-            .expect("no TrafficEvents broadcast within timeout")
-            .expect("broadcast channel closed");
-        match second {
-            ServerMessage::TrafficEvents { events } => {
-                assert_eq!(events.len(), 1);
-                assert_eq!(events[0].bytes_in, 5678);
-                assert_eq!(events[0].bytes_out, 1234);
-            }
-            other => panic!("expected TrafficEvents, got {other:?}"),
-        }
-
-        bridge.shutdown();
-    }
-
-    #[tokio::test]
-    async fn pause_request_without_an_authenticated_gui_is_ignored() {
-        // A pause still queued when its GUI disconnected arrives with no
-        // session; it must not re-arm the pause for the next GUI (#47).
-        let dir = tempfile::tempdir().unwrap();
-        let cfg = BridgeConfig {
-            grpc_bind: "127.0.0.1:0".parse().unwrap(),
-            ws_socket_path: dir.path().join("bridge.sock"),
-            cache_capacity: 64,
-        };
-        let mut bridge = run(cfg).await.expect("run failed");
-
-        bridge
-            .inbound_tx
-            .send(set_filtering_paused(true, Some(1800)))
-            .await
-            .expect("inbound channel closed");
-        // The pump always publishes a tray state for a pause request, so
-        // wait for it: an applied pause would show FilterOff.
-        tokio::time::timeout(Duration::from_secs(5), bridge.tray_rx.changed())
-            .await
-            .expect("pump did not handle the pause request")
-            .unwrap();
-        assert_ne!(*bridge.tray_rx.borrow(), TrayState::FilterOff);
-        // A GUI arriving afterwards must not inherit a pause. (A GUI that
-        // registers before the pump runs is covered by the sender-generation
-        // stamp; see `client_presence`'s tests.)
-        let _gui = bridge.client_presence.authenticated_session();
-        assert!(
-            tokio::time::timeout(Duration::from_millis(200), bridge.tray_rx.changed())
-                .await
-                .is_err(),
-            "nothing should re-publish FilterOff"
-        );
-        assert_ne!(*bridge.tray_rx.borrow(), TrayState::FilterOff);
-
-        bridge.shutdown();
-    }
-
-    fn set_filtering_paused(paused: bool, duration_secs: Option<u64>) -> ClientMessage {
-        ClientMessage::SetFilteringPaused {
-            paused,
-            duration_secs,
-            sender_generation: None,
-            sender_uid: None,
-        }
-    }
-
-    fn unix_ms_now() -> u64 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64
-    }
-
-    async fn test_bridge(dir: &tempfile::TempDir) -> RunningBridge {
-        run(BridgeConfig {
-            grpc_bind: "127.0.0.1:0".parse().unwrap(),
-            ws_socket_path: dir.path().join("bridge.sock"),
-            cache_capacity: 64,
-        })
-        .await
-        .expect("run failed")
-    }
-
-    /// Wait for the next `FilterPauseState` broadcast, skipping unrelated
-    /// messages and counting `FilterPauseExpired` notices on the way.
-    async fn next_pause_state(
-        rx: &mut broadcast::Receiver<ServerMessage>,
-        expiry_notices: &mut usize,
-    ) -> (bool, Option<u64>) {
-        loop {
-            match rx.recv().await.expect("broadcast channel closed") {
-                ServerMessage::FilterPauseState {
-                    paused,
-                    expires_at_unix_ms,
-                } => return (paused, expires_at_unix_ms),
-                ServerMessage::Notice {
-                    notice: Notice::FilterPauseExpired,
-                } => *expiry_notices += 1,
-                _ => {}
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn set_filtering_paused_toggles_tray_state() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut bridge = test_bridge(&dir).await;
-        let mut rx = bridge.broadcast_tx.subscribe();
-        let mut expiry_notices = 0;
-        // A pause only takes effect while a GUI is authenticated (#47).
-        let _gui = bridge.client_presence.authenticated_session();
-
-        let before = unix_ms_now();
-        bridge
-            .inbound_tx
-            .send(set_filtering_paused(true, Some(1800)))
-            .await
-            .expect("inbound channel closed");
-        bridge.tray_rx.changed().await.unwrap();
-        assert_eq!(*bridge.tray_rx.borrow(), TrayState::FilterOff);
-        let (paused, expires_at) = tokio::time::timeout(
-            Duration::from_secs(5),
-            next_pause_state(&mut rx, &mut expiry_notices),
-        )
-        .await
-        .expect("pause state was not broadcast");
-        assert!(paused);
-        let expires_at = expires_at.expect("a pause carries its end time");
-        assert!(
-            (before + 1_800_000..=unix_ms_now() + 1_800_000).contains(&expires_at),
-            "a 30-minute pause must end 30 minutes from now, got {expires_at}"
-        );
-
-        bridge
-            .inbound_tx
-            .send(set_filtering_paused(false, None))
-            .await
-            .expect("inbound channel closed");
-        bridge.tray_rx.changed().await.unwrap();
-        assert_eq!(*bridge.tray_rx.borrow(), TrayState::Idle);
-        let resumed = tokio::time::timeout(
-            Duration::from_secs(5),
-            next_pause_state(&mut rx, &mut expiry_notices),
-        )
-        .await
-        .expect("resume was not broadcast");
-        assert_eq!(resumed, (false, None));
-        assert_eq!(expiry_notices, 0);
-
-        bridge.shutdown();
-    }
-
-    #[tokio::test]
-    async fn a_snapshot_mid_pause_reports_the_pause_and_its_end() {
-        // A GUI that connects mid-pause learns the state and the end time.
-        let dir = tempfile::tempdir().unwrap();
-        let bridge = test_bridge(&dir).await;
-        let mut rx = bridge.broadcast_tx.subscribe();
-        let mut expiry_notices = 0;
-        let _gui = bridge.client_presence.authenticated_session();
-        bridge
-            .inbound_tx
-            .send(set_filtering_paused(true, Some(1800)))
-            .await
-            .expect("inbound channel closed");
-        let (_, announced_end) = tokio::time::timeout(
-            Duration::from_secs(5),
-            next_pause_state(&mut rx, &mut expiry_notices),
-        )
-        .await
-        .expect("pause state was not broadcast");
-        let announced_end = announced_end.expect("a pause carries its end time");
-
-        bridge
-            .inbound_tx
-            .send(ClientMessage::RequestSnapshot)
-            .await
-            .expect("inbound channel closed");
-        let (paused, snapshot_end) = tokio::time::timeout(
-            Duration::from_secs(5),
-            next_pause_state(&mut rx, &mut expiry_notices),
-        )
-        .await
-        .expect("the snapshot carried no pause state");
-        assert!(paused);
-        let snapshot_end = snapshot_end.expect("a pause carries its end time");
-        assert!(
-            snapshot_end.abs_diff(announced_end) < 1_000,
-            "snapshot end {snapshot_end} drifted from {announced_end}"
-        );
-        assert!(
-            snapshot_end > unix_ms_now() + 1_790_000,
-            "most of the 30 minutes remain"
-        );
-        bridge.shutdown();
-    }
-
-    #[tokio::test]
-    async fn legacy_pause_without_a_duration_expires_after_five_minutes() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut bridge = test_bridge(&dir).await;
-        let mut rx = bridge.broadcast_tx.subscribe();
-        let mut expiry_notices = 0;
-        let _gui = bridge.client_presence.authenticated_session();
-
-        // The bridge started on real time; from here on the test drives the
-        // clock (auto-advancing whenever the runtime is idle).
-        tokio::time::pause();
-        let start = tokio::time::Instant::now();
-        bridge
-            .inbound_tx
-            .send(set_filtering_paused(true, None))
-            .await
-            .expect("inbound channel closed");
-        let (paused, _) = tokio::time::timeout(
-            Duration::from_secs(5),
-            next_pause_state(&mut rx, &mut expiry_notices),
-        )
-        .await
-        .expect("pause state was not broadcast");
-        assert!(paused, "an old client's pause must still work");
-        assert_eq!(*bridge.tray_rx.borrow_and_update(), TrayState::FilterOff);
-
-        let (paused, expires_at) = tokio::time::timeout(
-            Duration::from_secs(600),
-            next_pause_state(&mut rx, &mut expiry_notices),
-        )
-        .await
-        .expect("the pause never expired");
-        let elapsed = start.elapsed();
-        assert_eq!((paused, expires_at), (false, None));
-        assert!(
-            (Duration::from_secs(300)..=Duration::from_secs(301)).contains(&elapsed),
-            "legacy pause ended after {elapsed:?}, not 300 s"
-        );
-        assert_eq!(*bridge.tray_rx.borrow(), TrayState::Idle);
-
-        // The expiry notice is relayed separately; collect it, and make sure
-        // there is exactly one.
-        tokio::time::sleep(Duration::from_secs(10)).await;
-        while let Ok(msg) = rx.try_recv() {
-            if let ServerMessage::Notice {
-                notice: Notice::FilterPauseExpired,
-            } = msg
-            {
-                expiry_notices += 1;
-            }
-        }
-        assert_eq!(expiry_notices, 1);
-        bridge.shutdown();
-    }
-
-    #[tokio::test]
-    async fn losing_the_last_gui_clears_the_pause_without_an_expiry_notice() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut bridge = test_bridge(&dir).await;
-        let mut rx = bridge.broadcast_tx.subscribe();
-        let mut expiry_notices = 0;
-        let gui = bridge.client_presence.authenticated_session();
-
-        bridge
-            .inbound_tx
-            .send(set_filtering_paused(true, Some(3600)))
-            .await
-            .expect("inbound channel closed");
-        let (paused, _) = tokio::time::timeout(
-            Duration::from_secs(5),
-            next_pause_state(&mut rx, &mut expiry_notices),
-        )
-        .await
-        .expect("pause state was not broadcast");
-        assert!(paused);
-
-        drop(gui);
-        let cleared = tokio::time::timeout(
-            Duration::from_secs(5),
-            next_pause_state(&mut rx, &mut expiry_notices),
-        )
-        .await
-        .expect("clearing the pause was not broadcast");
-        assert_eq!(cleared, (false, None));
-        assert_eq!(*bridge.tray_rx.borrow_and_update(), TrayState::Idle);
-
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        while let Ok(msg) = rx.try_recv() {
-            if let ServerMessage::Notice {
-                notice: Notice::FilterPauseExpired,
-            } = msg
-            {
-                expiry_notices += 1;
-            }
-        }
-        assert_eq!(expiry_notices, 0, "no GUI is left to show an expiry");
-        bridge.shutdown();
-    }
-}
+#[cfg(test)]
+mod leftover_unix_tests;

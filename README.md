@@ -221,13 +221,39 @@ past 2,000,000 hosts in total (in subscription order) get no rule.
   rule(s) or already holds them unchanged; anything else (no daemon, a
   refusal, no state directory, a per-user bridge) reads "Not enforced" or
   "Not confirmed yet" with the reason, and the page warns while any list
-  does. Refused or unanswered lists are retried on every refresh tick and
-  daemon reconnect.
+  does. Unanswered lists are retried on every refresh tick and daemon
+  reconnect. A list the daemon *refuses* is left alone for 15 minutes after
+  the first refusal, 1 hour after the second and 4 hours after every one
+  after that (a refresh tick a minute early still counts; a reconnect or a
+  new rules snapshot tries it again at once), and its reason says when it
+  will be tried again. The schedule is kept in memory only, so a restart
+  tries every refused list at its first pass.
   "Rule installed" still isn't proof the daemon loaded the hosts: check
   `sudo grep "domains loaded" /var/log/opensnitchd.log` (the shipped config
   logs there, not to the journal).
 - These rules are read-only on the Rules page ("Managed on the Blocklists
   page"); no GUI can add, change or delete a rule named `z00-blocklist:…`.
+- Unsubscribing deletes the list's rules at once but keeps its files for at
+  least five minutes (until the first clean-up after that, and for no more
+  than 32 lists at a time): opensnitchd reloads a path at most every 30
+  seconds and treats a missing file as an empty list, so subscribing again
+  right away finds the files in place. If the rule delete is refused, or the
+  firewall service doesn't answer (it is asked once, not twice), the files go
+  at once.
+- If a system-wide service can't manage blocklist rules (no state directory,
+  or saved subscriptions it can't read) but the firewall still holds
+  `z00-blocklist:…` rules Snitchwatch made, the Blocklists page counts them
+  and offers, after asking, to remove them. When the cause is saved
+  subscriptions it can't read, it says the rules are probably lists you
+  still subscribe to, that Snitchwatch checks its saved blocklists only when
+  it starts, and that removing them turns that blocking off (back on only if
+  they can be read after a restart; off for good if they are damaged). A
+  removal the firewall service refuses or stops answering is shown under the
+  button, with how many rules went first. Rules it didn't make are never
+  touched. A per-user service reaches the firewall service over the legacy
+  TCP connection, where any local process can pose as the daemon (see #35):
+  it offers nothing there, and its page says rules a system-wide service left
+  can't be checked or removed from it.
 
 - Subscriptions persist in `blocklists.sqlite3` (mode 0600) under the state
   directory: `$STATE_DIRECTORY` (set by both systemd units), else
@@ -265,15 +291,53 @@ past 2,000,000 hosts in total (in subscription order) get no rule.
   that still exist in the daemon's first rule list after a restart keep
   theirs; without a state directory they are kept in memory and the page
   says so. A count belongs to a rule's name: editing a rule keeps it, and a
-  deleted or expired rule loses it.
+  deleted or expired rule loses it. Switching profiles deletes the old
+  profile's `850-profile:` rules and installs the new one's: that is not a
+  gap (nothing else's count is affected), and a rule that comes back counts
+  from zero and from the time it came back.
+  One limit: a rule with no counted hits that leaves the list and comes
+  back from outside Snitchwatch (a rule file restored, say) with its old
+  creation time leaves no gap, so after more than 14 days away it reads "Unused"
+  at once. Only a rule that had counted hits records a gap when it goes.
+  A rule with no counted hits gets a badge: "Unused" only when the counts
+  are saved and 14 days have passed since the latest of when counting began,
+  when the rule was created and the bridge's last gap in the counting (a
+  restart, say); otherwise "No hits since <time>", from that moment. The
+  header says "Hits may be missing before <time>" for the last gap. A rule
+  edited or re-enabled counts as new (the daemon restamps it), and a counted
+  rule that leaves the daemon's rule list records a gap. "Analyze rules" marks
+  rules that can never decide a connection because another one matches
+  everything they do and takes precedence ("Never decides", or "May never
+  decide" when the proof rests on a regular expression). It names that rule and
+  says nothing about what the connections get instead, since a third rule can
+  decide some of them. It checks only conditions Snitchwatch can compare
+  exactly, so no mark is not a guarantee, and it never changes a rule.
 - The bridge fetches only `https://` URLs, including every redirect, and
   never a loopback, link-local, carrier-grade NAT or other reserved address
   (LAN addresses, RFC 1918 and ULA, are allowed: owner decision,
   2026-10-08). There is no `http://` or `file://`
   path, so a local plain-HTTP fixture server can't be subscribed to.
 - Lists are capped at 64 MiB and 1,000,000 hosts, and at 32 subscriptions.
+  The bridge also saves at most 4,000,000 hosts across all lists (twice the
+  enforcement limit above, so lists past it can still be browsed), and that
+  is a hard bound. Like the enforcement limit it goes to the earliest
+  subscriptions: a download that would take the lists up to and including it
+  past the limit is refused with the reason shown, and the list keeps its
+  earlier hosts; when the lists before one already fill the limit it is not
+  downloaded at all. A list refused this way waits its normal refresh
+  interval (or until a list before it is removed) instead of being fetched
+  every hour. When an earlier list grows, or a store from before the limit
+  existed is over it, the later lists that no longer fit have their saved
+  hosts cleared (after every save, and at start), with the reason shown: they
+  are past the enforcement limit too, so they block nothing already and only
+  browsing their hosts is lost. (During a save the total can pass the limit
+  by that list's size, at most 1,000,000 hosts.)
   Hosts are sent to GUIs a page at a time, on request
-  (`requestBlocklistEntries`), never as a whole list.
+  (`requestBlocklistEntries`), never as a whole list. A page goes only to the
+  connection that asked for it; it echoes the request's `requestId` (1 to 64
+  ASCII letters, digits or `-`; anything else is treated as absent) and
+  carries the list's `lastUpdatedIso8601`, so a GUI that sees two pages of
+  one list from different downloads starts over rather than mix them.
 
 To exercise blocklists without the network, use the fixture-fetcher tests:
 

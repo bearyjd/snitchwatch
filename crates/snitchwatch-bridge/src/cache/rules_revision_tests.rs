@@ -148,6 +148,17 @@ fn held_publishes_coalesce_into_one_set_rules() {
     assert!(matches!(rx.try_recv(), Ok(ServerMessage::SetRules { .. })));
 }
 
+/// PR #105 re-review: a hold whose commands all failed publishes nothing,
+/// or a listener that wakes on `SetRules` and retries would loop.
+#[test]
+fn a_hold_with_no_confirmed_change_publishes_nothing() {
+    let (tx, mut rx) = broadcast::channel(8);
+    let sync = RulesSync::new(tx);
+    lock(&sync.cache).replace_all(Vec::new());
+    drop(sync.hold_publishes());
+    assert!(rx.try_recv().is_err(), "published with nothing confirmed");
+}
+
 /// A daemon rule over the field limits is left out of the list, but its
 /// name and size are kept: an import must not overwrite it unseen (P2.7
 /// review M1), and the snapshot-size estimate must count it (M3).

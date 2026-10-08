@@ -11,34 +11,42 @@ use std::path::Path;
 use std::sync::Mutex as StdMutex;
 use tokio::sync::broadcast;
 
-const ADS: &str = "ads-0123456789abcdef";
+pub(in crate::blocklists) const ADS: &str = "ads-0123456789abcdef";
 
 #[derive(Clone)]
-enum Daemon {
+pub(in crate::blocklists) enum Daemon {
     Accept,
     Refuse(&'static str),
+    /// Refuses `CHANGE_RULE` (an install), accepts `DELETE_RULE`.
+    RefuseChange(&'static str),
+    /// Refuses `DELETE_RULE`, accepts `CHANGE_RULE`.
+    RefuseDelete(&'static str),
+    /// Answers `OK` to this many commands, then stops answering.
+    AcceptThenSilent(usize),
     Silent,
 }
 
 /// What the scripted daemon saw: the command, and whether the rule's list
 /// file (CHANGE) or list directory (DELETE) existed when it arrived.
 #[derive(Clone, Debug)]
-struct Seen {
-    command: Notification,
-    path_existed: bool,
+pub(in crate::blocklists) struct Seen {
+    pub(in crate::blocklists) command: Notification,
+    pub(in crate::blocklists) path_existed: bool,
 }
 
-struct Harness {
+pub(in crate::blocklists) struct Harness {
     _state: tempfile::TempDir,
-    dir: ListDir,
-    commands: DaemonCommands,
-    rules: RulesSync,
+    pub(in crate::blocklists) dir: ListDir,
+    pub(in crate::blocklists) commands: DaemonCommands,
+    pub(in crate::blocklists) rules: RulesSync,
     seen: Arc<StdMutex<Vec<Seen>>>,
+    /// How the scripted daemon answers; [`Harness::set_daemon`] changes it.
+    mode: Arc<StdMutex<Daemon>>,
     _stream: Option<StreamRegistration>,
 }
 
 impl Harness {
-    fn new() -> Self {
+    pub(in crate::blocklists) fn new() -> Self {
         let state = tempfile::tempdir().unwrap();
         let dir = ListDir::open(&state.path().canonicalize().unwrap()).unwrap();
         let rules = RulesSync::new(broadcast::channel(64).0);
@@ -48,20 +56,29 @@ impl Harness {
             commands: DaemonCommands::new(DaemonTransport::Unix, rules.clone()),
             rules,
             seen: Arc::default(),
+            mode: Arc::new(StdMutex::new(Daemon::Accept)),
             _stream: None,
         }
     }
 
+    /// Change how the connected daemon answers from now on.
+    pub(in crate::blocklists) fn set_daemon(&self, daemon: Daemon) {
+        *self.mode.lock().unwrap() = daemon;
+    }
+
     /// Connect a daemon whose rule snapshot is `snapshot`.
-    fn connect(mut self, daemon: Daemon, snapshot: Vec<Rule>) -> Self {
+    pub(in crate::blocklists) fn connect(mut self, daemon: Daemon, snapshot: Vec<Rule>) -> Self {
         self.rules.stage(None, snapshot);
         let (stream, mut rx) = self.commands.open_stream(None);
         let stream_id = stream.id();
         self.commands.on_reply(stream_id, &reply(0, Ok(())));
         let commands = self.commands.clone();
         let seen = self.seen.clone();
+        *self.mode.lock().unwrap() = daemon;
+        let mode = self.mode.clone();
         let root = self.dir.root().to_path_buf();
         tokio::spawn(async move {
+            let mut answered = 0usize;
             while let Some(command) = rx.recv().await {
                 let rule = &command.rules[0];
                 let path_existed = match &rule.operator {
@@ -75,11 +92,29 @@ impl Harness {
                     command: command.clone(),
                     path_existed,
                 });
-                match &daemon {
+                let answer = mode.lock().unwrap().clone();
+                match answer {
                     Daemon::Accept => commands.on_reply(stream_id, &reply(command.id, Ok(()))),
                     Daemon::Refuse(text) => {
                         commands.on_reply(stream_id, &reply(command.id, Err(text)))
                     }
+                    Daemon::RefuseChange(text) if command.r#type == Action::ChangeRule as i32 => {
+                        commands.on_reply(stream_id, &reply(command.id, Err(text)))
+                    }
+                    Daemon::RefuseChange(_) => {
+                        commands.on_reply(stream_id, &reply(command.id, Ok(())))
+                    }
+                    Daemon::RefuseDelete(text) if command.r#type == Action::DeleteRule as i32 => {
+                        commands.on_reply(stream_id, &reply(command.id, Err(text)))
+                    }
+                    Daemon::RefuseDelete(_) => {
+                        commands.on_reply(stream_id, &reply(command.id, Ok(())))
+                    }
+                    Daemon::AcceptThenSilent(n) if answered < n => {
+                        answered += 1;
+                        commands.on_reply(stream_id, &reply(command.id, Ok(())))
+                    }
+                    Daemon::AcceptThenSilent(_) => false,
                     Daemon::Silent => false,
                 };
             }
@@ -90,7 +125,7 @@ impl Harness {
 
     /// A new bridge run over the same list directory: fresh commands, rules
     /// cache and confirmations.
-    fn restart(self) -> Self {
+    pub(in crate::blocklists) fn restart(self) -> Self {
         let rules = RulesSync::new(broadcast::channel(64).0);
         Self {
             _state: self._state,
@@ -98,12 +133,13 @@ impl Harness {
             commands: DaemonCommands::new(DaemonTransport::Unix, rules.clone()),
             rules,
             seen: Arc::default(),
+            mode: self.mode,
             _stream: None,
         }
     }
 
     /// The rule the bridge installs for `id`'s `kind`.
-    fn bridge_rule(&self, id: &str, kind: ListKind) -> Rule {
+    pub(in crate::blocklists) fn bridge_rule(&self, id: &str, kind: ListKind) -> Rule {
         let list = IdComponent::from_id(id);
         crate::blocklists::materializer::materialize_list_rule(
             &list,
@@ -113,16 +149,16 @@ impl Harness {
         .into()
     }
 
-    fn sink(&self) -> DaemonRuleSink {
+    pub(in crate::blocklists) fn sink(&self) -> DaemonRuleSink {
         DaemonRuleSink::new(self.dir.clone(), self.commands.clone(), self.rules.cache())
             .with_timeout(Duration::from_millis(300))
     }
 
-    fn seen(&self) -> Vec<Seen> {
+    pub(in crate::blocklists) fn seen(&self) -> Vec<Seen> {
         self.seen.lock().unwrap().clone()
     }
 
-    fn cached(&self) -> Option<Vec<String>> {
+    pub(in crate::blocklists) fn cached(&self) -> Option<Vec<String>> {
         self.rules
             .cache()
             .lock()
@@ -143,24 +179,24 @@ fn reply(id: u64, outcome: Result<(), &str>) -> NotificationReply {
     }
 }
 
-fn hosts(list: &[&str]) -> Vec<String> {
+pub(in crate::blocklists) fn hosts(list: &[&str]) -> Vec<String> {
     list.iter().map(|s| s.to_string()).collect()
 }
 
-fn kind_of(n: &Notification) -> (i32, String) {
+pub(in crate::blocklists) fn kind_of(n: &Notification) -> (i32, String) {
     (n.r#type, n.rules[0].name.clone())
 }
 
-fn change(name: &str) -> (i32, String) {
+pub(in crate::blocklists) fn change(name: &str) -> (i32, String) {
     (Action::ChangeRule as i32, name.to_string())
 }
 
-fn delete(name: &str) -> (i32, String) {
+pub(in crate::blocklists) fn delete(name: &str) -> (i32, String) {
     (Action::DeleteRule as i32, name.to_string())
 }
 
 /// A per-host rule as earlier builds named and tagged them.
-fn legacy_rule(name: &str) -> Rule {
+pub(in crate::blocklists) fn legacy_rule(name: &str) -> Rule {
     Rule {
         description: r#"{"snitchwatch":{"source":"blocklist","list_id":"x","entry":"x.example"}}"#
             .into(),
@@ -168,7 +204,7 @@ fn legacy_rule(name: &str) -> Rule {
     }
 }
 
-fn user_rule(name: &str) -> Rule {
+pub(in crate::blocklists) fn user_rule(name: &str) -> Rule {
     Rule {
         name: name.into(),
         enabled: true,

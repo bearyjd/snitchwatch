@@ -158,12 +158,14 @@ Functions are cited by name.
      `Unknown` and publishes an empty `SetRules` every time the daemon
      stream closes, which happens on every daemon restart or reconnect.
      Pruning on it would wipe all counts.
-   - **`lossy`** is set when a batch length is **≥ `max_events - 1`**
-     (`max_events` from `daemon_config`, else 150).
-     - Conservative: a batch of exactly `max_events - 1` with no loss also
-       sets it. That is the price of catching the missed-connection drop
-       (Findings).
-     - It never clears for the session.
+   - **`lossy`** records that events may be missing: a *gap* is noted
+     whenever the daemon's own `rule_hits` counter shows more events than
+     the pings carried, on a daemon restart, and when counts are restored
+     after the bridge was down (see "Part 1 as built", which replaced the
+     earlier `max_events - 1` batch-size heuristic). It stays set, and
+     `lastGapUnixMs` says when the latest gap was noticed, so a GUI can say
+     "hits may be missing *before* <time>" instead of showing a banner that
+     never ends.
    - **Bounds.** At most `MAX_SNAPSHOT_RULES` entries in the main map. A
      rename starts at zero.
    - **Persistence** is owner question N1, **decided yes (owner,
@@ -246,8 +248,10 @@ the design above, this is what shipped):
   session (an older bridge never sends one), nor before counting starts.
   `nolog` rules read "Not counted: this rule doesn't log", never 0. The
   header says "Hits counted by Snitchwatch since <time>; approximate.", adds
-  "Some hits may be missing (last noticed <time>)." when `lossy`, and says
-  when the counts are not saved. Every label is PlainText. A count update
+  "Hits may be missing before <time>." when `lossy` (the time of the last
+  gap, with "No gap noticed since." once that is 14 days back, or "Some hits
+  may be missing." for a gap of unknown time), and says when the counts are
+  not saved. Every label is PlainText. A count update
   refreshes only the count roles (`dataChanged`), never a model reset.
 
 ### Part 2: unused and shadowed (Kirigami, Qt-free `rules/insights.rs`)
@@ -257,13 +261,17 @@ the design above, this is what shipped):
    false for `nolog` rules ("Not counted: this rule doesn't log").
    `RulesPage.qml` gets "Hits" and "Last used" columns, with a tooltip
    "Counted by Snitchwatch since <time>; approximate" plus "may be
-   missing some" when `lossy`.
+   missing some" when `lossy`. (As built, the page shows the count and
+   the badge on each row and one header line; see "Part 1 as built" and
+   "Part 2 as built".)
 4. **Unused:** `unused(store, hits, now, window) -> Vec<name>`. A rule
    qualifies when it is:
    - enabled;
    - not `nolog`;
    - of duration `always` or `until restart`;
-   - observed for at least `window` (14 days; see N2 under Owner questions);
+   - observed for at least `window` (14 days; see N2 under Owner questions),
+     counted from the latest of counting began, the rule was created and
+     the bridge's last gap ("Part 2 as built");
    - with a count of 0.
 
    Without persistence (N1 = no), the badge reads "No hits since <time>"
@@ -294,15 +302,79 @@ the design above, this is what shipped):
        it.
      - A stop rule **B** never decides when an *earlier* stop rule A
        covers it.
-   - **Findings:**
-     - "Redundant: <A> already decides these connections the same way"
-       when the actions match;
-     - "Never applies: <A> decides first" when they differ.
+   - **Findings** (as built: one claim, see "Part 2 as built"):
+     - "Never decides: <A> matches every connection this rule does and
+       takes precedence";
+     - the earlier "Redundant ... the same way" / "Never applies ... decides
+       first" split was dropped: only "B never decides" is proven, not who
+       decides or with what verdict.
 
      Each finding names A and links to its row.
    - **Cost.** O(n²) over enabled rules. Run it on demand ("Analyze
      rules" button) on a worker thread, and cap it at 2 000 enabled rules
      with a "too many rules to analyze" message. #48 allows 10 000 rules.
+
+**Part 2 as built** (branch `feat/rule-insights-badges`, on Part 1):
+
+- **Files.** `rules/insights.rs` with `atoms.rs` (conditions as a
+  conjunction, and what implies what), `shadow.rs` (the analysis),
+  `hit_badge.rs`, `state.rs` (the analysis lifecycle) and `row.rs` (what a
+  row shows). The simulator's `operator`/`compare` helpers are shared, not
+  copied. The wire rule gains a display-only `created` (Unix seconds, 0 =
+  unknown), because "unused" needs the rule's age.
+- **Badges** (`hit_badge`, N2). An eligible rule (enabled, logs, `always` or
+  `until restart`, not read-only, not a blocklist, not `000-snitchwatch-`,
+  a name the bridge can count) with a count of 0 gets a badge. The period
+  its zero is trusted over starts at the **latest of**: when counting began,
+  when the rule was created (`created`; unknown age is never "unused"), and
+  the bridge's **last gap**. It is **Unused** only when the counts are saved
+  across restarts and that period is at least 14 days; otherwise it is "No
+  hits since <start of that period>", which is the gap time when the gap is
+  the latest. A gap of unknown time leaves no trusted period: "No hits
+  since <counting start>; some may have been missed". So one bridge restart
+  (which records a gap) delays "unused" by 14 days instead of ruling it out
+  for good, and an old gap costs nothing. Known limit: when a rule was last
+  *enabled* is unknown, so a rule enabled recently reads as unused if it
+  is old enough.
+- **Findings** (`shadow`, run by "Analyze rules" on a worker thread, at most
+  2 000 enabled rules). Same scan as the simulator and `FindFirstMatch`.
+  `B` is shadowed by `A` when `A` covers it and: `A` is a stop rule (deny,
+  reject, `precedence`) at any position and `B` is not; or both are stop
+  rules and `A` is earlier; or both are non-stop and `A` is later. `A` must be
+  enabled, **`always`** (a timed or `until restart` rule ends, and so does the
+  shadowing) and made only of modelled conditions. A proof from exact
+  comparisons is "Never decides: A matches every connection this rule does
+  and takes precedence"; a proof that uses the simulator's regular-expression
+  engine is only "May never decide: A appears to ...". **Only that is
+  claimed**: not who decides those connections, and never "the same way". A
+  third rule matching only some of them (a precedence allow on the same host
+  and one port) can decide those, and so can a stop rule earlier than `A`; the
+  review's example, `100-b allow x`, `200-a allow x`, `300-d deny x`, names
+  `300-d` for both allows. **Which rule is named:** for a non-stop `B`, the
+  earliest covering stop rule (it ends the scan for every connection `B`
+  matches), else the last covering non-stop rule (what replaces `B`); for a
+  stop `B`, the earliest covering stop rule. Not modelled, so never covering:
+  `lists.*`, `process.hash.*`, `user.name`, `iface.*`, `process.env.*`,
+  `process.parent.path`, aliases (they are whatever the daemon host's alias
+  file says; only an identical alias implies itself), IPv6 networks, nested
+  or empty lists. Two proof details found while writing it: an insensitive
+  literal is not covered by a regexp when it contains an `s` or a non-ASCII
+  letter (Go folds U+017F with `s` but `ToLower` leaves it); and an
+  insensitive literal never implies a sensitive condition.
+- **Staleness.** A result belongs to the rule list it was computed from; a
+  list change (or one during the run) drops the findings, tells the run to
+  stop, and says "The rules changed after the analysis. Choose Analyze rules to
+  run it again." Asking again clears the rows at once.
+- **Age and counts across edits (review).** The daemon rebuilds a rule from
+  every `CHANGE_RULE` and stamps `Created` with the time of the change, so the
+  bridge's cache does the same for a permanent rule (`always`, `until
+  restart`) the GUI edits or re-enables; a timed rule keeps its cached
+  `created` (its expiry timer keeps its schedule). Without that, a 40-day-old
+  rule just edited read "unused for 14 days". A counted rule that leaves a
+  committed snapshot loses its count and records a gap, so it cannot return
+  with its old `created` and no history and read "unused" at once.
+- **Wording.** Every label is PlainText. Nothing says a rule was or will be
+  removed, disabled or changed.
 
 ### Part 3: the simulator for every operand (Kirigami, Qt-free)
 
@@ -354,11 +426,12 @@ the design above, this is what shipped):
   next snapshot commit.
 - **Before the cache is synced,** counts are held in the side map. They
   are adopted at the commit whose snapshot contains the name.
-- **`lossy`:**
-  - a batch of `max_events - 1` sets it, because a missed connection at
-    the cap drops an event first;
-  - a batch of `max_events` sets it;
-  - a batch of `max_events - 2` doesn't.
+- **Gaps** (as built, replacing the `max_events - 1` batch-size tests):
+  - a ping whose `rule_hits` grew by more than its events carried notes a
+    gap, and one that accounts for every event doesn't;
+  - a counter drop or an `uptime` drop notes one; the first ping of a run
+    only sets the baseline;
+  - restoring from the file notes one.
 - **Counts survive a reconnect.** `a:3`, then `RulesSync::withdraw`
   (cache `Unknown`, empty `SetRules`), then a re-commit containing `a`:
   `a` is still 3, and hits during the `Unknown` gap are added on adoption.
@@ -420,8 +493,8 @@ Tower VM checks:
    shows about 20 and "Last used" is current.
 2. **`nolog`.** A `nolog` rule shows "Not counted".
 3. **Shadowing.** Add a host-wide deny for `example.com` and an app-bound
-   allow for curl → `example.com`. The allow is reported "Never applies"
-   because of the deny, and `curl` is indeed blocked.
+   allow for curl → `example.com`. The allow is reported "Never decides"
+   with the deny named, and `curl` is indeed blocked.
 
 ## Risks
 

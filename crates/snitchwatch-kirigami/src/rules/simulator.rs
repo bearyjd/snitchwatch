@@ -75,10 +75,10 @@ use serde::Serialize;
 use self::operator::{evaluate, parse, Gap, Truth};
 use super::row_store::{Rule, RulesStore};
 
-mod compare;
+pub(in crate::rules) mod compare;
 mod form;
 mod network;
-mod operator;
+pub(in crate::rules) mod operator;
 mod prefill;
 mod re2;
 #[cfg(test)]
@@ -177,13 +177,13 @@ pub struct SimulationResult {
 /// Whether a matching rule ends the scan (`FindFirstMatch`): `reject`,
 /// `deny` or `precedence`. The action is compared as opensnitchd does,
 /// exactly.
-fn stops_scan(rule: &Rule) -> bool {
+pub(in crate::rules) fn stops_scan(rule: &Rule) -> bool {
     rule.precedence || rule.action == "deny" || rule.action == "reject"
 }
 
 /// The verdict opensnitchd applies for a matching rule: `acceptOrDeny`
 /// accepts only for exactly `allow` and drops anything else.
-fn daemon_action(rule: &Rule) -> &'static str {
+pub(in crate::rules) fn daemon_action(rule: &Rule) -> &'static str {
     if rule.action == "allow" {
         "allow"
     } else {

@@ -127,6 +127,32 @@ fn a_new_snapshot_without_a_rule_drops_its_count() {
     assert_eq!(counts(&hits), vec![pair("a", 1)]);
 }
 
+/// A rule that leaves a committed snapshot loses its count. If it returns
+/// (a file put back, with its old `created`), it would start again at 0 with
+/// nothing to say that its earlier hits are gone, and the Rules page could
+/// call it unused at once. So the loss is a gap: nothing before it is trusted.
+#[test]
+fn a_rule_that_leaves_a_snapshot_loses_its_count_and_that_is_a_gap() {
+    let mut hits = RuleHits::default();
+    rec(&mut hits, &[ev("a", 1), ev("b", 2)], &["a", "b"]);
+    assert_eq!(hits.last_gap_unix_ms(), None);
+    hits.adopt_snapshot(NOW + 5, |n| n == "a");
+    assert_eq!(counts(&hits), vec![pair("a", 1)]);
+    assert_eq!(hits.last_gap_unix_ms(), Some(NOW + 5));
+}
+
+#[test]
+fn a_snapshot_that_keeps_every_counted_rule_is_no_gap() {
+    let mut hits = RuleHits::default();
+    rec(&mut hits, &[ev("a", 1)], &["a"]);
+    hits.adopt_snapshot(NOW + 5, |_| true);
+    assert_eq!(hits.last_gap_unix_ms(), None);
+    // A name that was only waiting (never counted) isn't lost history.
+    rec(&mut hits, &[ev("once", 2)], &[]);
+    hits.adopt_snapshot(NOW + 6, |n| n == "a");
+    assert_eq!(hits.last_gap_unix_ms(), None);
+}
+
 #[test]
 fn forgetting_a_rule_drops_its_count_wherever_it_is() {
     let mut hits = RuleHits::default();

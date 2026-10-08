@@ -11,6 +11,7 @@ pub mod blocklists;
 pub mod bridge_capabilities;
 pub mod cache;
 pub mod client_presence;
+pub mod curated;
 pub mod daemon_alerts;
 pub mod daemon_commands;
 pub mod daemon_config;
@@ -32,6 +33,7 @@ pub mod rule_name;
 pub mod rule_policy;
 pub mod rule_wire;
 pub mod sqlite_file;
+pub(crate) mod state_file;
 pub mod translator;
 pub mod tray_state;
 #[cfg(feature = "web-ui")]

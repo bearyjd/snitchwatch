@@ -83,6 +83,7 @@ pub fn apply(
         ClientMessage::GlobalSettings { .. }
         | ClientMessage::SubscribeBlocklist { .. }
         | ClientMessage::UnsubscribeBlocklist { .. }
+        | ClientMessage::RemoveLeftoverBlocklistRules
         | ClientMessage::RequestBlocklistEntries { .. }
         | ClientMessage::CreateProfile { .. }
         | ClientMessage::UpdateProfile { .. }
@@ -101,7 +102,10 @@ pub fn apply(
         | ClientMessage::ApplyRulesImport { .. }
         // Intercepted by the pump too: it needs the daemon's settings
         // (`deferred_answers::decide_later`).
-        | ClientMessage::DecideLater { .. } => Ok(UpstreamEffect::None),
+        | ClientMessage::DecideLater { .. }
+        // Routed to the curated defaults' worker before this point.
+        | ClientMessage::SetCuratedDefaults { .. }
+        | ClientMessage::RemoveCuratedDefault { .. } => Ok(UpstreamEffect::None),
     }
 }
 

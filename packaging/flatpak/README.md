@@ -84,3 +84,36 @@ standard export strip can remove it. Verify hardening on the exported executable
 and inspect final permissions. A finish/export of an existing GUI binary does not
 establish a clean source build. Build/export alone also does not establish
 guest runtime acceptance or production rollout readiness.
+
+## GUI logs from a Flatpak run
+
+The GUI logs to stderr. `SNITCHWATCH_LOG` (else `RUST_LOG`, else `info`)
+sets the `tracing` filter. When `SNITCHWATCH_LOG` is set, the log also goes
+to `gui.log` in the app's state directory:
+`~/.var/app/org.snitchwatch.Snitchwatch/.local/state/snitchwatch/gui.log`.
+
+- Each start keeps the previous run's log as `gui.log.1` and starts
+  `gui.log` empty, so a restart to reproduce a bug keeps the evidence.
+- Both are owner-only (0600, in a directory created 0700). A `gui.log`
+  that is a symlink, FIFO, another user's file or a hard link is refused,
+  and the GUI logs to stderr only.
+- WebSocket frames are never logged, whatever the filter: `tungstenite`
+  and `tokio_tungstenite` are capped at `info`, because they log every
+  frame's payload at `trace`, and the first frame to the bridge is its
+  handshake token. Even so, treat a debug log as private.
+
+```bash
+systemd-run --user --unit=snitchwatch-gui-dbg \
+  flatpak run --user --log-session-bus \
+    --env=SNITCHWATCH_LOG=snitchwatch_kirigami=debug,zbus=info,info \
+    org.snitchwatch.Snitchwatch
+```
+
+`flatpak run` moves itself into `app-flatpak-org.snitchwatch.Snitchwatch-*.scope`
+before starting the app, so journald files the app's stderr (and
+`--log-session-bus`'s proxy log) under that scope, not under
+`snitchwatch-gui-dbg.service`:
+
+```bash
+journalctl --user -u 'app-flatpak-org.snitchwatch.Snitchwatch-*' --since -10min
+```

@@ -35,6 +35,11 @@ pub fn rule_to_wire(rule: &Rule) -> serde_json::Value {
         // wins for unrelated traffic. See `rule_from_wire`, which reads both.
         "precedence": rule.precedence,
         "nolog": rule.nolog,
+        // Display only (never read back: `rule_from_wire` leaves it 0): when
+        // the rule was created, in Unix seconds, or 0 when the daemon doesn't
+        // know. Lets the Rules page tell a rule that has had no chance to be
+        // used from one that is unused.
+        "created": rule.created,
         // Display only: `name` stays exact because commands identify the
         // rule by it, while daemon-sourced names may carry bidi overrides or
         // zero-width characters that make a row read as a different rule.
@@ -44,6 +49,9 @@ pub fn rule_to_wire(rule: &Rule) -> serde_json::Value {
         // Separate from `readOnlyReason`: a rule read-only only for its
         // conditions can still be deleted by name.
         "deletable": crate::rule_policy::deletable(rule),
+        // Whether a GUI may turn it on or off: a recommended rule is
+        // read-only but can still be toggled.
+        "toggleable": crate::rule_policy::toggleable(rule),
     })
 }
 
@@ -214,6 +222,19 @@ mod tests {
         }
         let editable = rule_to_wire(&named("899-firefox-allow-out"));
         assert!(editable["readOnlyReason"].is_null());
+    }
+
+    /// The Rules page needs a rule's age to say "unused" honestly (a rule
+    /// created yesterday has had no 14 days to be used). Display data only:
+    /// the bridge never reads it back, the daemon stamps its own.
+    #[test]
+    fn the_wire_rule_carries_when_it_was_created_and_never_reads_it_back() {
+        let mut rule = named("899-firefox-allow-out");
+        rule.created = 1_800_000_000;
+        let wire = rule_to_wire(&rule);
+        assert_eq!(wire["created"], 1_800_000_000);
+        assert_eq!(rule_from_wire(&wire).unwrap().created, 0);
+        assert_eq!(rule_to_wire(&named("x"))["created"], 0, "0 means unknown");
     }
 
     #[test]

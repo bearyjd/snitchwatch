@@ -23,6 +23,10 @@
 //! `Notice::Pending` is not dispatched immediately. A 5-second delay timer is
 //! started instead; if the main window is still not active when it fires,
 //! *then* the cooldown-gated notification goes out with a "Review" action.
+//! If the window is active then, it is looked at again every second while
+//! the row waits, so hiding the window later still posts the notice (r11
+//! issue A: a new prompt raises the window, `main.qml` Task 7, so it is
+//! usually active when the grace period ends).
 //! `DaemonAway`/`FilterPauseExpired` are not window-gated (matches the
 //! original `notifier.rs`, which never gated on window visibility for those).
 //! Neither is `VerdictNotRemembered` (issue #44): `ConnectionsPage.qml`'s
@@ -58,6 +62,20 @@ use snitchwatch_bridge::translator::process_binding::RuleRefusal;
 /// Per the design spec: a pending row is only worth a fallback desktop
 /// notification once it has been waiting this long with the window hidden.
 const PENDING_GRACE_PERIOD: Duration = Duration::from_secs(5);
+/// How often a waiting prompt whose notice is held back by the active
+/// window is looked at again, so hiding the window later still posts it.
+const WINDOW_RECHECK: Duration = Duration::from_secs(1);
+
+/// One look, on the Qt thread, at a waiting prompt's notice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingLook {
+    /// The window is active: the prompt is in front of the user there.
+    WindowActive,
+    /// Posted, or held back by the cooldown: nothing more to do.
+    Done,
+    /// The row no longer waits in its session: nothing to post.
+    Gone,
+}
 
 #[cxx_qt::bridge]
 pub mod qobject {
@@ -93,6 +111,12 @@ pub mod qobject {
         #[qinvokable]
         #[cxx_name = "startBridgeFeed"]
         fn start_bridge_feed(self: Pin<&mut NotificationController>);
+
+        /// Logs, at INFO, that a new prompt raises the window (`main.qml`,
+        /// Task 7) and how the window was before, for diagnosing a run.
+        #[qinvokable]
+        #[cxx_name = "noteRaise"]
+        fn note_raise(self: &NotificationController, was_visible: bool, was_active: bool);
     }
 
     impl cxx_qt::Threading for NotificationController {}
@@ -127,6 +151,15 @@ impl qobject::NotificationController {
         let gate = Arc::new(Mutex::new(CooldownGate::new()));
         let runtime = handles.runtime().clone();
         runtime.spawn(relay_notices(notice_rx, handles, self.qt_thread(), gate));
+    }
+
+    fn note_raise(&self, was_visible: bool, was_active: bool) {
+        tracing::info!(
+            was_visible,
+            was_active,
+            "a new prompt raises the main window (Task 7); its notice is posted only while \
+             the window isn't active"
+        );
     }
 }
 
@@ -167,50 +200,150 @@ fn relay(
         notice,
     } = received;
     let (handles, qt_thread, gate) = (handles.clone(), qt_thread.clone(), gate.clone());
-    if !matches!(notice, BridgeNotice::Pending { .. }) {
+    let BridgeNotice::Pending { row_id, .. } = notice else {
         let _ = qt_thread.queue(move |qobject| {
             if handles.is_current_session(connection_id) {
                 qobject.maybe_dispatch(notice, gate, None);
             }
         });
         return;
-    }
+    };
     tokio::spawn(async move {
-        tokio::time::sleep(PENDING_GRACE_PERIOD).await;
-        let _ = qt_thread.queue(move |qobject| {
-            if let Some(target) = PendingTarget::of(&handles, connection_id, &notice) {
-                qobject.maybe_dispatch(notice, gate, Some(target));
+        let look = || {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            let (handles, notice, gate) = (handles.clone(), notice.clone(), gate.clone());
+            let queued = qt_thread.queue(move |qobject| {
+                let look = match PendingTarget::of(&handles, connection_id, &notice) {
+                    Some(target) => qobject.maybe_dispatch(notice, gate, Some(target)),
+                    None => PendingLook::Gone,
+                };
+                let _ = tx.send(look);
+            });
+            async move {
+                match queued {
+                    Ok(()) => rx.await.unwrap_or(PendingLook::Gone),
+                    Err(_) => PendingLook::Gone,
+                }
             }
-        });
+        };
+        post_once_the_window_is_not_active(connection_id, row_id, look).await;
     });
+}
+
+/// r11 issue A: a prompt raises the window (`main.qml`, Task 7), so after
+/// the grace period the window is usually active and no notice is posted.
+/// That used to be the only look, so closing the window later, with the
+/// prompt still waiting, never posted one. Now, after the grace period,
+/// `look` is asked every [`WINDOW_RECHECK`] while the window is active,
+/// until the notice is posted or its row stops waiting.
+async fn post_once_the_window_is_not_active<F, Fut>(session: u64, row_id: u64, mut look: F)
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = PendingLook>,
+{
+    tokio::time::sleep(PENDING_GRACE_PERIOD).await;
+    let mut held_back = false;
+    loop {
+        match look().await {
+            PendingLook::WindowActive => {
+                if !held_back {
+                    tracing::info!(
+                        session,
+                        row_id,
+                        "pending notice held back: the window is active; it is posted if the \
+                         window is hidden or loses focus while the prompt still waits"
+                    );
+                    held_back = true;
+                }
+                tokio::time::sleep(WINDOW_RECHECK).await;
+            }
+            PendingLook::Done => return,
+            PendingLook::Gone => {
+                tracing::info!(
+                    session,
+                    row_id,
+                    held_back,
+                    "no pending notice: the prompt no longer waits"
+                );
+                return;
+            }
+        }
+    }
+}
+
+/// Whether a notice may go out now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Gate {
+    Post,
+    /// A Pending notice while the window is active.
+    WindowActive,
+    /// The same notice went out within the cooldown.
+    CooledDown,
+}
+
+/// A Pending notice doesn't go out while the window is active, and no
+/// notice goes out twice within the cooldown. The cooldown is taken only
+/// when it goes out, so a notice held back by the window can go later.
+fn may_post(
+    notice: &BridgeNotice,
+    window_active: bool,
+    gate: &Mutex<CooldownGate>,
+    now: Instant,
+) -> Gate {
+    if matches!(notice, BridgeNotice::Pending { .. }) && window_active {
+        return Gate::WindowActive;
+    }
+    let fires = gate
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .should_fire(notice, now);
+    if fires {
+        Gate::Post
+    } else {
+        Gate::CooledDown
+    }
+}
+
+/// A notice's kind and row, for a log line. Never its program, path, host
+/// or text: those are connection details.
+fn notice_label(notice: &BridgeNotice) -> (&'static str, Option<u64>) {
+    match notice {
+        BridgeNotice::Pending { row_id, .. } => ("pending", Some(*row_id)),
+        BridgeNotice::DaemonAway => ("daemon_away", None),
+        BridgeNotice::FilterPauseExpired => ("filter_pause_expired", None),
+        BridgeNotice::DenyScopeNarrowed { row_id, .. } => ("deny_scope_narrowed", Some(*row_id)),
+        BridgeNotice::VerdictNotRemembered { row_id } => ("verdict_not_remembered", Some(*row_id)),
+        BridgeNotice::PromptSlotSummary { row_id, .. } => ("prompt_slot_summary", Some(*row_id)),
+    }
 }
 
 impl qobject::NotificationController {
     /// Runs on the Qt thread (queued from the feed task above). Applies the
-    /// window-hidden gate (Pending only) and the cooldown gate, then hands
-    /// off to [`Self::dispatch`] if both allow it.
+    /// window gate (Pending only) and the cooldown gate ([`may_post`]),
+    /// then posts the notice if both allow it.
     fn maybe_dispatch(
         mut self: Pin<&mut Self>,
         notice: BridgeNotice,
         gate: Arc<Mutex<CooldownGate>>,
         target: Option<PendingTarget>,
-    ) {
-        if matches!(notice, BridgeNotice::Pending { .. }) && *self.window_active() {
-            // Window came back to the front during the grace period — the
-            // in-app pending-count handler (Task 7) already surfaced this,
-            // no fallback notification needed.
-            return;
-        }
-        let allow = gate
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .should_fire(&notice, Instant::now());
-        if !allow {
-            return;
-        }
-        match target {
-            Some(target) => self.as_mut().dispatch_pending(target),
-            None => dispatch(notice),
+    ) -> PendingLook {
+        match may_post(&notice, *self.window_active(), &gate, Instant::now()) {
+            Gate::WindowActive => PendingLook::WindowActive,
+            Gate::CooledDown => {
+                let (kind, row_id) = notice_label(&notice);
+                tracing::info!(kind, ?row_id, "notice held back by its cooldown");
+                PendingLook::Done
+            }
+            Gate::Post => {
+                match target {
+                    Some(target) => {
+                        tracing::info!("posting the pending notice: the window isn't active");
+                        self.as_mut().dispatch_pending(target);
+                    }
+                    None => dispatch(notice),
+                }
+                PendingLook::Done
+            }
         }
     }
 
@@ -301,6 +434,90 @@ mod tests {
             "While that prompt was open, the firewall applied its default action 2 times \
              (retries count again)."
         );
+    }
+
+    /// r11 issue A: a Pending notice held back because the window is
+    /// active doesn't take its cooldown, so it can go out once the window
+    /// isn't active, once. Other notices aren't held back by the window.
+    #[test]
+    fn a_notice_held_back_by_the_window_can_go_later() {
+        let gate = Mutex::new(CooldownGate::new());
+        let pending = BridgeNotice::Pending {
+            row_id: 3,
+            process: "curl".into(),
+        };
+        let t0 = Instant::now();
+        let at = |secs| t0 + Duration::from_secs(secs);
+        assert_eq!(may_post(&pending, true, &gate, at(0)), Gate::WindowActive);
+        assert_eq!(may_post(&pending, true, &gate, at(1)), Gate::WindowActive);
+        assert_eq!(may_post(&pending, false, &gate, at(2)), Gate::Post);
+        assert_eq!(may_post(&pending, false, &gate, at(3)), Gate::CooledDown);
+        assert_eq!(
+            may_post(&BridgeNotice::DaemonAway, true, &gate, at(3)),
+            Gate::Post
+        );
+    }
+
+    /// The looks a prompt's notice gets, at what time after the prompt.
+    async fn looks(script: Vec<PendingLook>) -> Vec<Duration> {
+        let start = tokio::time::Instant::now();
+        let times = Arc::new(Mutex::new(Vec::new()));
+        let seen = times.clone();
+        let mut script = script.into_iter();
+        post_once_the_window_is_not_active(1, 3, move || {
+            seen.lock().unwrap().push(start.elapsed());
+            let look = script.next().expect("looked again after the end");
+            async move { look }
+        })
+        .await;
+        let times = times.lock().unwrap().clone();
+        times
+    }
+
+    /// r11 issue A: the prompt raised the window, so the window was active
+    /// when the grace period ended; it was closed later, with the prompt
+    /// still waiting. The notice goes out then, not never.
+    #[tokio::test(start_paused = true)]
+    async fn hiding_the_window_later_still_posts_the_notice() {
+        use PendingLook::{Done, Gone, WindowActive};
+        let secs = |list: &[u64]| -> Vec<Duration> {
+            list.iter().map(|secs| Duration::from_secs(*secs)).collect()
+        };
+        // Posted at the end of the grace period, as before.
+        assert_eq!(looks(vec![Done]).await, secs(&[5]));
+        // Held back by the active window, then posted once it isn't.
+        assert_eq!(
+            looks(vec![WindowActive, WindowActive, WindowActive, Done]).await,
+            secs(&[5, 6, 7, 8])
+        );
+        // Answered in the window: no more looks once the row stops waiting.
+        assert_eq!(looks(vec![WindowActive, Gone]).await, secs(&[5, 6]));
+    }
+
+    /// PR #112 review L1: a notice is logged by kind and row only.
+    #[test]
+    fn a_notice_is_logged_without_its_connection_details() {
+        let cases = [
+            (
+                BridgeNotice::Pending {
+                    row_id: 3,
+                    process: "/tmp/x/curl".into(),
+                },
+                ("pending", Some(3)),
+            ),
+            (
+                BridgeNotice::DenyScopeNarrowed {
+                    row_id: 4,
+                    what: "/usr/bin/curl → example.com".into(),
+                    reason: "no program file".into(),
+                },
+                ("deny_scope_narrowed", Some(4)),
+            ),
+            (BridgeNotice::DaemonAway, ("daemon_away", None)),
+        ];
+        for (notice, label) in cases {
+            assert_eq!(notice_label(&notice), label);
+        }
     }
 
     /// A Pending notice never goes out as plain text: only through

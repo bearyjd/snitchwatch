@@ -3,6 +3,7 @@
 //! `ws_server::serve_with_blocklists` test helper.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::sync::broadcast::{self, error::RecvError};
 use tokio::task::JoinHandle;
@@ -10,7 +11,7 @@ use tracing::warn;
 
 use crate::blocklists::{BlocklistEvent, BlocklistsManager};
 use crate::translator::downstream;
-use crate::ws_messages::ServerMessage;
+use crate::ws_messages::{ReplyTo, ServerMessage};
 
 /// Rebroadcast every manager event as the `ServerMessage`s GUIs consume. Runs
 /// until aborted. Subscribes before returning, so no event emitted after this
@@ -52,13 +53,19 @@ async fn publish(
             subscription_id,
             offset,
             limit,
+            request_id,
+            reply,
         } => {
-            match downstream::build_blocklist_entries_page(mgr, &subscription_id, offset, limit)
-                .await
+            match downstream::build_blocklist_entries_page(
+                mgr,
+                &subscription_id,
+                offset,
+                limit,
+                request_id,
+            )
+            .await
             {
-                Ok(m) => {
-                    let _ = tx.send(m);
-                }
+                Ok(page) => send_page(page, reply, tx).await,
                 Err(e) => warn!(error = %e, ?subscription_id, "blocklist entries page failed"),
             }
         }
@@ -78,10 +85,41 @@ async fn publish(
     }
 }
 
+/// How long a page may wait for room on its connection's queue.
+const PAGE_WAIT: Duration = Duration::from_secs(2);
+
+/// A page goes to the connection that asked for it and to no other (issue
+/// #67); a request with no connection is answered on the broadcast. A GUI
+/// that stopped reading is waited on once, then its pages are dropped without
+/// waiting, so it can't stall the pump for everyone else.
+async fn send_page(
+    page: ServerMessage,
+    reply: Option<ReplyTo>,
+    broadcast: &broadcast::Sender<ServerMessage>,
+) {
+    let Some(reply) = reply else {
+        let _ = broadcast.send(page);
+        return;
+    };
+    if reply.stalled() {
+        // Without waiting; one that fits means the GUI reads again.
+        if reply.try_send(page) {
+            reply.clear_stalled();
+        }
+    } else if tokio::time::timeout(PAGE_WAIT, reply.send(page))
+        .await
+        .is_err()
+    {
+        warn!("a GUI isn't reading its blocklist pages; no longer waiting for it");
+        reply.mark_stalled();
+    }
+}
+
 async fn publish_set_blocklists(mgr: &BlocklistsManager, tx: &broadcast::Sender<ServerMessage>) {
     match downstream::build_set_blocklists(mgr).await {
         Ok(m) => {
             let _ = tx.send(m);
+            let _ = tx.send(downstream::build_set_blocklist_leftovers(mgr));
         }
         Err(e) => warn!(error = %e, "blocklist summary rebuild failed"),
     }
@@ -148,5 +186,34 @@ mod tests {
             }
             other => panic!("expected SetBlocklistDetails, got {other:?}"),
         }
+    }
+
+    fn page() -> ServerMessage {
+        ServerMessage::SetBlocklistEntries {
+            subscription_id: "a".into(),
+            entries: Vec::new(),
+            offset: 0,
+            total: 0,
+            request_id: None,
+            last_updated_iso8601: None,
+        }
+    }
+
+    /// A GUI that stops reading is waited on once; when it reads again its
+    /// pages are waited on again, not dropped for the life of the connection.
+    #[tokio::test(start_paused = true)]
+    async fn a_gui_that_reads_again_is_no_longer_a_stalled_one() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let reply = ReplyTo::new(tx);
+        let (broadcast_tx, _keep) = broadcast::channel(4);
+        send_page(page(), Some(reply.clone()), &broadcast_tx).await; // fills the queue
+        assert!(!reply.stalled());
+        send_page(page(), Some(reply.clone()), &broadcast_tx).await; // waits, then gives up
+        assert!(reply.stalled(), "nobody read the first page");
+
+        assert!(rx.recv().await.is_some(), "the GUI reads again");
+        send_page(page(), Some(reply.clone()), &broadcast_tx).await; // fits at once
+        assert!(!reply.stalled(), "a page that fit ends the stall");
+        assert!(rx.try_recv().is_ok());
     }
 }

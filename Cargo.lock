@@ -2730,6 +2730,7 @@ version = "0.1.1"
 dependencies = [
  "prost",
  "regex",
+ "serde_json",
  "snitchwatch-bridge",
  "snitchwatch-proto",
  "tempfile",
@@ -4646,6 +4647,7 @@ dependencies = [
  "dns-lookup",
  "futures-util",
  "libc",
+ "log",
  "maxminddb",
  "mock-opensnitchd",
  "notify-rust",
@@ -4660,6 +4662,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "tracing",
+ "tracing-log",
  "tracing-subscriber",
  "which 6.0.3",
  "zbus 5.14.0",

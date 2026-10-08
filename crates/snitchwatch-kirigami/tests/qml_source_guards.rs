@@ -153,3 +153,27 @@ fn pending_exposure_banner_stays_wired_to_oldest_pending_age() {
          to trigger a recompute."
     );
 }
+
+/// r11 issue A: a new prompt logs, through `NotificationController`, that it
+/// raises the window, before raising it. No harness fires `main.qml`'s
+/// pending-count handler, and a misspelled invokable would only throw at run
+/// time, so the QML call and the Rust `cxx_name` are pinned together here.
+#[test]
+fn the_prompt_raise_is_logged_through_the_controller() {
+    let controller = include_str!("../src/notification_controller.rs");
+    assert!(
+        controller.contains("#[cxx_name = \"noteRaise\"]"),
+        "NotificationController no longer exposes noteRaise"
+    );
+    let main = code_lines(MAIN_QML);
+    let logged = main
+        .find("notificationController.noteRaise(root.visible, root.active);")
+        .expect("main.qml no longer logs the prompt raise");
+    let raised = main[logged..]
+        .find("root.raiseAndActivate();")
+        .expect("the raise no longer follows the log");
+    assert!(
+        !main[logged..logged + raised].contains('}'),
+        "the log and the raise are no longer in the same branch"
+    );
+}
