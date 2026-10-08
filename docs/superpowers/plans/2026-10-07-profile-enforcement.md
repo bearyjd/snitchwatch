@@ -232,6 +232,17 @@ Built as designed above; where it differs from steps 4–11:
 - **"In place" follows the daemon's echo:** a list operand spelled either
   way and a non-case-sensitive pattern compared lowercased, as `Compile`
   stores it, so a pass after a snapshot sends nothing.
+- **Where it applies:** the system bridge, also when its profile store fell
+  back to memory (design step 5 said with a saved store only). Such a
+  bridge starts with no active profile, so its first pass removes the
+  rules an earlier run installed; otherwise the page would say profiles
+  aren't applied while those still were. The per-user bridge applies none.
+- **After a restart** the active profile's rules start pending, so the
+  first pass records them installed when the snapshot holds them, and
+  sends nothing.
+- **#82 as read here:** a saved manual choice holds while its network is
+  observed; with no manual choice saved, the first network reading after a
+  restart is a change like any other and auto-switch decides.
 - **Switching installs first, then deletes.** No moment without the new
   profile's denies; an old allow that lingers still loses to any deny.
 - **Not removed, replaced:** the "Preview: not applied" banner becomes an
