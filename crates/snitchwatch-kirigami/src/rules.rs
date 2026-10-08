@@ -23,6 +23,7 @@
 
 pub mod accounts;
 pub mod all_apps;
+pub mod deciding;
 pub mod editor;
 pub mod editor_view;
 pub mod hits;

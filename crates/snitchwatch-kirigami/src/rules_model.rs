@@ -45,6 +45,8 @@ const ROLE_HITS_COUNTED: i32 = 13;
 const ROLE_HIT_COUNT: i32 = 14;
 const ROLE_LAST_HIT_MS: i32 = 15;
 const ROLE_HITS_NOTE: i32 = 16;
+/// How the rule takes part in the daemon's decision (issue #102).
+const ROLE_HOW_IT_DECIDES: i32 = 17;
 
 #[cxx_qt::bridge]
 pub mod qobject {
@@ -220,6 +222,9 @@ impl qobject::RulesModel {
             }
             ROLE_HITS_COUNTED..=ROLE_HITS_NOTE => self.hits_data(rule, role),
             ROLE_ENABLED => QVariant::from(&rule.enabled),
+            ROLE_HOW_IT_DECIDES => {
+                QVariant::from(&QString::from(crate::rules::deciding::how_it_decides(rule)))
+            }
             ROLE_ACTION => QVariant::from(&QString::from(rule.normalized_action())),
             ROLE_DURATION => QVariant::from(&QString::from(&rule.duration)),
             ROLE_OPERATOR_SUMMARY => QVariant::from(&QString::from(&rule.operator_summary())),
@@ -268,6 +273,7 @@ impl qobject::RulesModel {
         roles.insert(ROLE_HIT_COUNT, QByteArray::from("hitCount"));
         roles.insert(ROLE_LAST_HIT_MS, QByteArray::from("lastHitMs"));
         roles.insert(ROLE_HITS_NOTE, QByteArray::from("hitsNote"));
+        roles.insert(ROLE_HOW_IT_DECIDES, QByteArray::from("howItDecides"));
         roles
     }
 

@@ -525,6 +525,18 @@ fn editor_sheet_labels_are_all_plain_text_and_checkboxes_carry_no_text() {
     }
 }
 
+/// Issue #102: only deny, reject and decide-first rules stop opensnitchd's
+/// check, so the inspector never says "first match wins" of every rule.
+#[test]
+fn the_rule_inspector_says_how_each_rule_decides() {
+    let code = code_lines(RULES_PAGE);
+    assert!(
+        !code.contains("first match wins"),
+        "RulesPage.qml claims first match wins"
+    );
+    assert!(code.contains("page.inspectHowItDecides"));
+}
+
 /// The Simulate sheet shows rule names and operands from the daemon, and
 /// lines the simulator built from them.
 #[test]

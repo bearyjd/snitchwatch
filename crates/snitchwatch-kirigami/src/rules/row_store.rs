@@ -320,6 +320,8 @@ struct FoundRule<'a> {
     precedence: usize,
     source: &'static str,
     blocklist_id: String,
+    /// How it takes part in the daemon's decision (issue #102).
+    how_it_decides: &'static str,
 }
 
 /// Look up `name` in `store` and, if found, serialize it to the JSON shape
@@ -345,6 +347,7 @@ pub fn found_rule_json(store: &RulesStore, name: &str) -> Option<String> {
         precedence: idx,
         source,
         blocklist_id,
+        how_it_decides: super::deciding::how_it_decides(rule),
     };
     serde_json::to_string(&found).ok()
 }

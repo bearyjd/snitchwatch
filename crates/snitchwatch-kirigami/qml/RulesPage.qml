@@ -74,6 +74,8 @@ Kirigami.ScrollablePage {
     property string inspectDuration: ""
     property string inspectOperatorSummary: ""
     property int inspectPrecedence: 0
+    // How the rule takes part in the daemon's decision (issue #102).
+    property string inspectHowItDecides: ""
     property string inspectSource: "user"
     property string inspectBlocklistId: ""
     property bool confirmingDelete: false
@@ -205,6 +207,7 @@ Kirigami.ScrollablePage {
         page.inspectDuration = rule.duration;
         page.inspectOperatorSummary = rule.operatorSummary;
         page.inspectPrecedence = rule.precedence;
+        page.inspectHowItDecides = rule.howItDecides;
         page.inspectSource = rule.source;
         page.inspectBlocklistId = rule.blocklistId;
         page.checkEditable();
@@ -412,6 +415,7 @@ Kirigami.ScrollablePage {
             required property real hitCount
             required property real lastHitMs
             required property string hitsNote
+            required property string howItDecides
 
             onClicked: {
                 list.currentIndex = row.index;
@@ -530,6 +534,7 @@ Kirigami.ScrollablePage {
         page.inspectDuration = row.duration;
         page.inspectOperatorSummary = row.operatorSummary;
         page.inspectPrecedence = row.precedence;
+        page.inspectHowItDecides = row.howItDecides;
         page.inspectSource = row.source;
         page.inspectBlocklistId = row.blocklistId;
         page.checkEditable();
@@ -578,10 +583,17 @@ Kirigami.ScrollablePage {
                     text: page.inspectOperatorSummary
                     wrapMode: Text.Wrap
                 }
+                // Issue #102: only deny, reject and decide-first rules stop
+                // the daemon's check; an allow decides only if none matches.
                 Controls.Label {
+                    objectName: "inspectHowItDecides"
                     Kirigami.FormData.label: "Precedence"
-                    text: "Position " + (page.inspectPrecedence + 1) + " of " + (page.model ? page.model.count : 0)
-                          + " — evaluated in this order, first match wins"
+                    Layout.fillWidth: true
+                    textFormat: Text.PlainText
+                    wrapMode: Text.Wrap
+                    text: "Position " + (page.inspectPrecedence + 1) + " of "
+                          + (page.model ? page.model.count : 0) + " in the order the firewall "
+                          + "checks rules. " + page.inspectHowItDecides
                 }
                 Controls.Switch {
                     id: inspectEnabledSwitch

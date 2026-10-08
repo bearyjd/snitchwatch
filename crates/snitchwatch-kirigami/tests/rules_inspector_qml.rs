@@ -101,6 +101,9 @@ Window {
                 probeWindow.setRules([probeWindow.curl(true)]);
                 expect(page.openRuleByName("899-curl"), "rule not found");
                 expect(page.inspectorSheet.opened, "inspector did not open");
+                // Issue #102: an allow without precedence doesn't win first.
+                expect(page.inspectHowItDecides.indexOf("Allows only if") === 0,
+                       "how it decides: " + page.inspectHowItDecides);
 
                 // Refused (or timed out): the bridge re-sends the old value.
                 probeWindow.click(sw);
