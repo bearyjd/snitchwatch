@@ -411,6 +411,11 @@ async fn exposes_in_process_broadcast_and_inbound_handles() {
     bridge.shutdown();
 }
 
+/// How long each step of the verdict round trip may take: generous, because
+/// the bridge, a mock daemon and a WebSocket client all start up here, and a
+/// loaded machine took over three seconds for the first of them.
+const STEP: std::time::Duration = std::time::Duration::from_secs(10);
+
 #[tokio::test]
 async fn verdict_broadcasts_an_updated_non_pending_row() {
     let dir = tempfile::tempdir().unwrap();
@@ -434,10 +439,15 @@ async fn verdict_broadcasts_an_updated_non_pending_row() {
         .unwrap();
     let ack = gui.next().await.unwrap().unwrap();
     assert!(matches!(ack, Message::Text(ref text) if text.contains("authenticated")));
+    // A prompt only waits for a person while a GUI session is live: hold one
+    // explicitly, as the pause tests do, so the row below is pending whatever
+    // the timing of the connection above.
+    let _gui_session = bridge.client_presence.authenticated_session();
 
+    // The mock daemon connects before anything is timed.
     let grpc_addr = bridge.grpc_endpoint.tcp_addr().unwrap();
-    let ask = tokio::spawn(async move {
-        let mut daemon = MockOpensnitchd::connect(grpc_addr).await.unwrap();
+    let mut daemon = MockOpensnitchd::connect(grpc_addr).await.unwrap();
+    let mut ask = tokio::spawn(async move {
         daemon
             .ask_rule(Connection {
                 protocol: "tcp".into(),
@@ -448,10 +458,10 @@ async fn verdict_broadcasts_an_updated_non_pending_row() {
                 ..Default::default()
             })
             .await
-            .unwrap()
     });
 
-    let pending_id = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+    // The row, or the AskRule call ending first (an error says why).
+    let pending_row = async {
         loop {
             if let ServerMessage::InsertConnectionRows { rows } =
                 rx.recv().await.expect("broadcast channel closed")
@@ -461,9 +471,11 @@ async fn verdict_broadcasts_an_updated_non_pending_row() {
                 }
             }
         }
-    })
-    .await
-    .expect("pending AskRule row was not broadcast");
+    };
+    let pending_id = tokio::select! {
+        id = tokio::time::timeout(STEP, pending_row) => id.expect("pending AskRule row was not broadcast"),
+        ended = &mut ask => panic!("AskRule ended before its row was broadcast: {ended:?}"),
+    };
 
     bridge
         .inbound_tx
@@ -477,7 +489,7 @@ async fn verdict_broadcasts_an_updated_non_pending_row() {
         .await
         .expect("inbound channel closed");
 
-    let updated = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+    let updated = tokio::time::timeout(STEP, async {
         loop {
             if let ServerMessage::UpdateConnectionRows { rows } =
                 rx.recv().await.expect("broadcast channel closed")
@@ -492,7 +504,11 @@ async fn verdict_broadcasts_an_updated_non_pending_row() {
     .expect("verdict did not broadcast a row update");
     assert_eq!(updated.action.as_deref(), Some("allow"));
 
-    let rule = ask.await.expect("AskRule task panicked");
+    let rule = tokio::time::timeout(STEP, ask)
+        .await
+        .expect("AskRule did not return after the verdict")
+        .expect("AskRule task panicked")
+        .expect("AskRule failed");
     assert_eq!(rule.action, "allow");
     bridge.shutdown();
 }
