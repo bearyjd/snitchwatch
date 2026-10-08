@@ -2,12 +2,18 @@
 
 **Date:** 2026-10-08
 **Roadmap:** P2.1 in `docs/superpowers/specs/2026-10-07-competitive-feature-roadmap.md`
-**Baseline:** `main` @ `d9d1bfe` plus #48.
-**Blocked on:**
-- #48 merging (P0.2). The editor edits the full daemon rule list, needs
-  `DaemonCommands` reply outcomes, and builds on #48's `Rule.precedence`
-  / `nolog` round-trip and read-only rows.
-- `rule_policy.rs`, which this plan creates if P2.7 hasn't landed it yet.
+**Baseline:** `main` @ `4b3ba52`. #48 has merged, bringing:
+- the full rule list;
+- `DaemonCommands` reply outcomes;
+- the `Rule.precedence`/`nolog` round-trip;
+- read-only rows.
+
+**Blocked on:** the security PR (branch `fix/rule-operator-validation`),
+which creates `rule_policy.rs` with `validate_operator` (pairing, `list`
+shape and nesting, `lists.*` refusal) and applies it in `rule_from_wire`.
+- This plan **reuses** it.
+- It adds `PolicyProfile::Editor`, plus `validate_user_rule` if P2.7
+  hasn't landed it yet.
 
 **Unblocks:** #46 Part 2 (profile enforcement reuses the draft model and
 policy).
@@ -17,11 +23,10 @@ policy).
 
 ## Citation convention
 
-- `main:` means `d9d1bfe`.
-- `#48:` means branch `fix/48-show-all-rules` @ `ebdd21d` (about to merge;
-  re-check names after it does).
-  - `rule_to_wire`/`rule_from_wire` are in `rule_wire.rs` there.
-  - On `main` they are in `grpc_server.rs`.
+- `main:` means `4b3ba52`.
+- #48 is merged, so its names are cited as `main:`.
+  `rule_to_wire`/`rule_from_wire` are in `rule_wire.rs`, and
+  `rule_to_wire` emits `displayName`/`readOnlyReason`.
 - `vendor:` means opensnitch v1.8.0.
 - `tower:` means bazzite-tower PR #81. Its daemon accepts only
   `CHANGE_RULE`/`DELETE_RULE` and refuses `lists.*` until #45 PR B.
@@ -57,7 +62,7 @@ policy).
 
 ## Findings
 
-**Bridge (`main` / #48):**
+**Bridge (`main`):**
 - **The messages exist.** `ws_messages.rs` has `ClientMessage::AddRule
   { rule }`, `UpdateRule { rule_id, rule }` and `DeleteRule { rule_id }`.
   `translator/upstream.rs` `apply` maps them to `UpstreamEffect`.
@@ -69,8 +74,11 @@ policy).
     `rule.name` differs from `rule_id` **creates a second rule and leaves
     the old one**: a silent rename bug if any client sent it.
   - `DeleteRule` validates the name (`rule_name::validate_rule_name`).
-- **`rule_from_wire` checks only structure plus the name.** See
-  `2026-10-08-rule-import-export.md` Findings for what it doesn't check.
+- **`rule_wire.rs` `rule_from_wire`** checks structure plus the name.
+  - After the security PR, it also runs `validate_operator` on GUI-sourced
+    rules.
+  - It still doesn't check vocabulary, durations, regexps or CIDRs; see
+    `2026-10-08-rule-import-export.md` Findings.
 - **The #48 pump** sends through `DaemonCommands` and spawns a 5 s
   waiter.
   - On `OK`, the cache is updated (`apply_confirmed`) and `SetRules` is
@@ -80,14 +88,23 @@ policy).
   - **No per-request result reaches the GUI.** An editor can't show
     "rejected: bad regexp".
 - **`DaemonCommands::send`** allows only `{ChangeRule, DeleteRule}`.
-- **Toggles reuse `UpdateRule`.** On #48, `rules_model.rs` `set_enabled`
-  sends `UpdateRule` with the whole rule
-  (`RulesStore::rule_json_with_enabled`), and `delete_rule` honours
-  `is_deletable`.
-  - **A stricter policy on every `UpdateRule` would break toggling
-    existing rules** that contain hash or `lists.*` operands (stock UI,
-    or #45's own rules).
-- **Durations.** #48 `cache/rules.rs` `parse_duration_secs` accepts
+- **Toggles reuse `UpdateRule`.** `rules_model.rs` `set_enabled` sends
+  `UpdateRule` with the whole rule (`RulesStore::rule_json_with_enabled`),
+  and `delete_rule` honours `is_deletable`.
+  - **An `Editor`-profile check on every `UpdateRule` would break toggling
+    existing rules** that the profile refuses: hash operands, relative
+    `process.path`, odd durations, from the stock UI.
+  - Toggling a `lists.*` rule from the GUI is already refused by the
+    security PR's `validate_operator` in `rule_from_wire`. That is its
+    decision; this plan doesn't change it.
+  - **But a "same operator" `UpdateRule` can still change `duration`,
+    `action`, `precedence`, `nolog` or `description`.** So the toggle
+    exemption must compare every field except `enabled`, not just the
+    operator.
+- **List operand spelling differs by source.** Daemon-sourced `list`
+  operators carry `operand: "list"`; wire-parsed ones carry `""`. Compare
+  only after normalising.
+- **Durations.** `cache/rules.rs` `parse_duration_secs` accepts
   `\d+[smh]` sequences (`30s`, `5m`, `1h30m`). Anything else never expires
   in the cache.
 
@@ -109,7 +126,7 @@ policy).
   - `regexp` lowercases unless `sensitive`;
   - `process.hash.*` is always true with checksums off.
 
-**Kirigami (#48):**
+**Kirigami (`main`):**
 - `RulesPage.qml` has an inspector, toggle, delete and read-only rows,
   but no create or edit.
 - `rules/row_store.rs` `Rule` round-trips `precedence`/`nolog` and
@@ -120,24 +137,34 @@ policy).
 
 ### Bridge
 
-1. **`rule_policy.rs`** is shared with P2.7; whichever lands first creates
-   it. See `2026-10-08-rule-import-export.md` Design step 1.
-   - **What the `Editor` profile adds over `Import`:**
-     - durations `always`, `until restart` and the
-       `parse_duration_secs` grammar (make it `pub(crate)` and reuse it),
-       with at least 10 s and at most 365 days;
+1. **Policy.** `rule_policy.rs` comes from the security PR
+   (`validate_operator`). P2.7 adds `validate_user_rule` and the `Import`
+   profile; if P2.7 hasn't landed yet, this plan adds them.
+   - **The `Editor` profile:** `validate_operator` first (pairing, `list`
+     shape and nesting, `lists.*`), then everything `Import` checks
+     (vocabulary, hash refusal, regexp/CIDR/alias, ports, caps, the
+     bridge-owned name prefixes `z00-blocklist:`/`900-blocklist:`/
+     `snitchwatch-default-`), plus:
+     - durations `always`, `until restart` and the `parse_duration_secs`
+       grammar (make it `pub(crate)` and reuse it), with at least 10 s and
+       at most 365 days;
      - a `simple` `process.path` must be absolute (owner question E2);
-     - `protocol` must be a short lowercase token
-       (`[a-z0-9]{1,16}`).
+     - `protocol` must be a short lowercase token (`[a-z0-9]{1,16}`).
    - **When it applies:**
      - **every `AddRule`;**
-     - **an `UpdateRule` whose operator differs from the cached rule of
-       the same name** (#48 cache), or that has no cached rule.
-     - A toggle keeps the operator byte-identical, so it gets today's
-       structural checks only. You can keep what exists, but you can't
-       author new hash or `lists.*` conditions.
-     - **Where:** in the pump, before `notification_for_effect`, because
-       that is where the cache is reachable.
+     - **every `UpdateRule` that is not a pure toggle.**
+   - **A pure toggle** is an `UpdateRule` for a name in #48's cache where
+     every field **except `enabled`** equals the cached rule, after
+     normalising every `list` operator's operand to `"list"` on both
+     sides. The fields are `name`, `action`, `duration`, `precedence`,
+     `nolog`, `description` and the whole operator tree. Pure toggles get
+     only `rule_from_wire`'s checks, including `validate_operator`.
+     - Anything else, including a same-operator change of `duration`,
+       `action` or `precedence`, gets the full `Editor` profile.
+     - You can keep what exists, but you can't author or alter around a
+       hash condition.
+   - **Where:** in the pump, before `notification_for_effect`, because
+     that is where the cache is reachable.
 2. **Command results.**
    - `AddRule`/`UpdateRule`/`DeleteRule` gain an additive
      `#[serde(default, skip_serializing_if = "Option::is_none")] request_id: Option<String>`
@@ -153,8 +180,8 @@ policy).
      - `noDaemon`.
    - Toggles from older GUIs omit `request_id` and behave exactly as on
      #48.
-3. **Rename** (`UpdateRule` with `rule_id != rule.name`; owner question
-   E1):
+3. **Rename** (`UpdateRule` with `rule_id != rule.name`; E1, decided
+   below):
    - **Today** this silently duplicates. Make it an explicit two-step in
      the waiter task:
      1. `CHANGE_RULE` the new name;
@@ -180,9 +207,20 @@ policy).
      become a `list` with `operand: "list"`. That is the shape #50 builds.
    - **`to_wire()`** produces exactly #48's wire shape.
    - **`from_wire(&Rule) -> Result<RuleDraft, NotEditable(reason)>`**
-     refuses nested lists, `lists.*`, hash operands, `complex`, and
-     unknown operands. Those rows keep toggle/delete and show "Edit isn't
-     available for this rule: <reason>".
+     refuses:
+     - anything `validate_operator` refuses: bad pairings, empty or
+       oversized lists, nested lists, `lists.*`;
+     - hash operands, `complex`, and unknown operands.
+
+     Those rows keep toggle/delete and show "Edit isn't available for this
+     rule: <reason>".
+   - **Match kind is restricted per operand,** so the builder can't
+     express a pairing `validate_operator` would refuse:
+     - `dest.network`/`source.network` offer **only** `Network` (a CIDR or
+       alias);
+     - every other operand offers `Exact` or `Pattern`, never `Network`;
+     - `true` and `list` are never offered: two or more conditions build
+       the `list`.
    - **`suggest_name(&draft)`** follows the `rule_name_for` style
      (`snitchwatch-<action>-<target>-<8 hex>`), and always passes
      `validate_rule_name`.
@@ -202,7 +240,7 @@ policy).
    - **Condition builder:**
      - an operand picker (grouped Process / Destination / Source /
        Network);
-     - the match kind;
+     - the match kind, limited to what the chosen operand allows (step 4);
      - the value;
      - a case-sensitivity switch, defaulting to **on** for
        `process.path`/`process.parent.path`, which mirrors #50's
@@ -239,13 +277,27 @@ policy).
   - a relative `simple` `process.path` refused;
   - a regexp `process.path` accepted;
   - every refusal reason is fixed text.
-- **Pump** (bridge-cli `lib.rs` tests, `MockOpensnitchd` via #48
-  readiness):
-  - `AddRule` with `lists.domains` → `RuleCommandResult{refused}`; the
-    mock receives **nothing**;
-  - `UpdateRule` toggling a cached rule that has `lists.domains`, operator
-    unchanged → sent as today;
-  - `UpdateRule` changing that operator → refused;
+- **Pairing reaches the editor path.** One `AddRule` per
+  `validate_operator` rule; each gives `RuleCommandResult{refused}`, and
+  the mock receives nothing:
+  - `network` + `dest.ip`;
+  - `simple` + `dest.network`;
+  - operand `list` with type `simple`;
+  - an empty `list`;
+  - a 65-member `list`;
+  - a nested `list`;
+  - `true` as `regexp`;
+  - `lists.domains`.
+- **Pump** (bridge-cli `lib.rs` tests, `MockOpensnitchd` via #48's
+  `daemon_stream_ready().wait_for(|g| *g >= 1)`):
+  - a pure toggle of a cached rule with a `process.hash.md5` condition (a
+    stock-UI rule) is sent as today;
+  - **the same rule with only `enabled` flipped but `operand: ""` instead
+    of `"list"`** is still a pure toggle;
+  - **the same operator, a changed `duration`** (e.g. `always` → `"1.5h"`)
+    is not a toggle → refused by the `Editor` profile;
+  - **the same operator, a changed `action` or `precedence`** is not a
+    toggle → policy-checked;
   - `ok` / `rejected` (daemon text sanitized and capped) / `timeout` /
     `noDaemon` each produce one result carrying the right `request_id`;
   - without `request_id`, no `RuleCommandResult`, which is #48's
@@ -263,7 +315,9 @@ policy).
 - **Round trip.** `to_wire` → `from_wire` for each supported operand and
   match kind; a single condition is a leaf, two make a `list`.
 - **`from_wire` refusals:** a nested list, `lists.nets`,
-  `process.hash.sha1`, `complex`.
+  `process.hash.sha1`, `complex`, `network` + `dest.ip`.
+- **Match kinds per operand:** `dest.network` offers only `Network`;
+  `dest.ip` offers no `Network`; `true`/`list` are never offered.
 - **`suggest_name`** passes `validate_rule_name` for hostile hosts (reuse
   `rule_name_for`'s hostile-input cases).
 - **Warnings.** The no-process warning appears exactly when no
@@ -301,8 +355,9 @@ Tower VM checks:
 
 - **Rename isn't atomic** (see step 3). A crash between the steps leaves
   both rules. Each is visible and deletable.
-- **Toggling a rule whose operator the cache doesn't match exactly** is
-  treated as an authored change, so it is policy-checked. This can refuse
+- **Toggling a rule whose cached copy differs in any field but `enabled`**
+  is treated as an authored change, so it is policy-checked. For example,
+  the daemon renamed it with `-2`, or the cache is stale. This can refuse
   a toggle of an odd legacy rule. The refusal reason says so; the rule
   stays deletable.
 - **Regex dialects differ** (Go RE2 vs the Rust `regex` crate). The
@@ -318,19 +373,21 @@ Tower VM checks:
   - `ConnectionsPage.qml` inspector, with the inline-Deny and prompt-slot
     plans.
 
+## Decided here (was E1 and E3)
+
+- **E1. Rename: allowed,** as the two-step `CHANGE_RULE` new →
+  `DELETE_RULE` old, with the partial-failure message (step 3). A fixed
+  name plus "Duplicate…" is the same two steps done by hand, with worse
+  error handling.
+- **E3. `precedence`/`nolog` are in v1,** under an "Advanced" expander
+  with the warnings above. They already round-trip (#48), so hiding them
+  would only hide what existing rules do.
+
 ## OWNER QUESTIONS
 
-- **E1. Renaming.** Options:
-  - (a) allow it, as the two-step `CHANGE_RULE` new → `DELETE_RULE` old,
-    with the partial-failure message;
-  - (b) the name is fixed, and "Duplicate…" makes a copy under a new
-    name.
-
-  **Recommendation: (a).** (b) is the same two steps done by hand, with
-  worse error handling.
 - **E2. `process.path` in hand-written rules.** #44 settled "absolute
   paths only" for *prompt* rules. Options for the editor:
-  - (a) exact match must be absolute, and a pattern is allowed with a
+  - (a) an exact match must be absolute, and a pattern is allowed with a
     warning;
   - (b) absolute only, with no patterns;
   - (c) anything.
@@ -338,7 +395,3 @@ Tower VM checks:
   **Recommendation: (a).** Patterns are how power users cover per-user
   installs (Steam under `~`), and they're explicit authoring, not a
   daemon fallback value.
-- **E3. Expose `precedence` and `nolog` in v1?**
-  **Recommendation:** yes, under an "Advanced" expander with the warnings
-  above. They round-trip already (#48), so hiding them only hides what
-  existing rules do.

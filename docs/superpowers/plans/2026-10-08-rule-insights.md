@@ -2,12 +2,13 @@
 
 **Date:** 2026-10-08
 **Roadmap:** P2.6 in `docs/superpowers/specs/2026-10-07-competitive-feature-roadmap.md`
-**Baseline:** `main` @ `d9d1bfe` plus #48.
-**Blocked on:**
-- #48, for Parts 1 and 2. Hits are only useful against the full rule
-  list, and pruning keys by cached names.
-- Nothing, for Part 3 (the simulator, Kirigami-only). It uses #48's
-  `Rule.precedence` once that merges.
+**Baseline:** `main` @ `4b3ba52` (#48 merged).
+**Blocked on:** nothing, for any part.
+- Parts 1–2 needed #48's full rule list and cached names, and it has
+  merged.
+- Part 3 (the simulator, Kirigami-only) can use #48's `Rule.precedence`
+  now.
+- Only N1's persistence waits, on #45 PR A's state directory.
 
 **Size:** M, as three PRs:
 1. Bridge hit counts and the protocol (S–M).
@@ -16,9 +17,8 @@
 
 ## Citation convention
 
-- `main:` means `d9d1bfe`.
-- `#48:` means branch `fix/48-show-all-rules` @ `ebdd21d` (about to merge;
-  re-check names after it does).
+- `main:` means `4b3ba52`.
+- #48 is merged, so its names are cited as `main:`.
 - `vendor:` means opensnitch v1.8.0.
 
 Functions are cited by name.
@@ -57,6 +57,14 @@ Functions are cited by name.
 - **Batch size.** Events are capped at `maxEvents`, dropping the oldest:
   250 from `Stats.MaxEvents` in both the vendor and the packaging
   `default-config.json`, and 150 as the code default.
+  - **Ordering matters.** In `onConnection`, the drop-oldest step
+    (`if nEvents == s.maxEvents { s.Events = s.Events[1:] }`) runs
+    **before** the `if wasMissed { return }` early return.
+  - So a *missed* connection at the cap drops an event without adding
+    one, and a batch that has lost events can end at `maxEvents - 1`.
+  - Once a batch reaches the cap, it never falls below `maxEvents - 1`
+    before `Serialize` empties it. So "lost events" implies "final length
+    ≥ `maxEvents - 1`", but not the reverse.
 - **Events are a per-ping batch.**
   - `Serialize` empties them (`defer emptyStats`) *before* knowing
     whether the Ping RPC succeeds.
@@ -88,8 +96,8 @@ Functions are cited by name.
   dest.port, protocol`, plus `list` and `true`. Everything else is
   "unsupported → non-matching".
 - **Precedence is stubbed.** `is_precedence` returns `false`, because the
-  Kirigami `Rule` had no `precedence`. #48 adds `Rule.precedence`
-  (`rules/row_store.rs`), so the stub can go.
+  Kirigami `Rule` had no `precedence`. #48 has merged `Rule.precedence`
+  (`rules/row_store.rs`), so the stub can go now.
 - `normalized_action` folds `reject` to `deny`. That is correct for
   evaluation, since reject also stops the scan.
 - **Inputs.** `SimulationInput` has only `{process_path, dest_host,
@@ -109,7 +117,7 @@ Functions are cited by name.
 | `process.command` | args joined with `" "` | input field |
 | `process.id` | pid, decimal | input field |
 | `process.env.NAME` | that variable, `""` if unset | input map |
-| `process.hash.md5`/`sha1` | **always true when checksums are off**; an empty hash also matches (`hashCmp`) | mirrors the daemon, with a loud warning |
+| `process.hash.md5`/`sha1` | **always true when checksums are off**. With checksums **on**, `ret` starts `true` and is overwritten only while iterating the process's checksums, so **a process with no checksums still matches** (`operator.go` `Match`, hash branch). An empty hash also matches (`hashCmp`) | mirrors the daemon, with a loud warning |
 | `user.id` | uid, decimal | input field |
 | `user.name` | resolved to a uid **at compile time on the daemon host** (`user.Lookup`) | unsupported, with that reason |
 | `source.ip` / `source.port` / `dest.ip` / `dest.port` | string compare | input fields |
@@ -149,8 +157,12 @@ Functions are cited by name.
      `Unknown` and publishes an empty `SetRules` every time the daemon
      stream closes, which happens on every daemon restart or reconnect.
      Pruning on it would wipe all counts.
-   - **`lossy`** is set when a batch length reaches `max_events` (from
-     `daemon_config`, else 150). It never clears for the session.
+   - **`lossy`** is set when a batch length is **≥ `max_events - 1`**
+     (`max_events` from `daemon_config`, else 150).
+     - Conservative: a batch of exactly `max_events - 1` with no loss also
+       sets it. That is the price of catching the missed-connection drop
+       (Findings).
+     - It never clears for the session.
    - **Bounds.** At most `MAX_SNAPSHOT_RULES` entries in the main map. A
      rename starts at zero.
    - **Persistence** is owner question N1. If yes, save a JSON file in
@@ -175,7 +187,7 @@ Functions are cited by name.
    - enabled;
    - not `nolog`;
    - of duration `always` or `until restart`;
-   - observed for at least `window` (owner N2);
+   - observed for at least `window` (14 days; see N2 under Owner questions);
    - with a count of 0.
 
    Without persistence (N1 = no), the badge reads "No hits since <time>"
@@ -234,9 +246,13 @@ Functions are cited by name.
    - **`network` / CIDR** uses `std::net` plus prefix math (no new
      crate). Aliases are embedded, with a test pinning them to the
      vendored JSON.
-   - **Hash operands with `checksums_enabled` false or unknown** match,
-     as the daemon does. The result carries "Hash conditions match every
-     program while checksums are off" (or "…may…" when unknown).
+   - **Hash operands**, mirroring the daemon:
+     - with `checksums_enabled` false or unknown: they match. The result
+       carries "Hash conditions match every program while checksums are
+       off" (or "…may…" when unknown);
+     - with checksums on: they compare against the input's `checksums`,
+       but **an empty `checksums` map matches** too. The result carries "A
+       program with no recorded checksum matches hash conditions".
    - **`user.name` and `lists.*`** stay unsupported, each with its own
      reason string.
 8. **Fix `is_precedence`** to read #48's `Rule.precedence`.
@@ -258,8 +274,11 @@ Functions are cited by name.
   next snapshot commit.
 - **Before the cache is synced,** counts are held in the side map. They
   are adopted at the commit whose snapshot contains the name.
-- **`lossy`.** A batch of exactly `max_events` sets it. A batch of
-  `max_events - 1` doesn't.
+- **`lossy`:**
+  - a batch of `max_events - 1` sets it, because a missed connection at
+    the cap drops an event first;
+  - a batch of `max_events` sets it;
+  - a batch of `max_events - 2` doesn't.
 - **Counts survive a reconnect.** `a:3`, then `RulesSync::withdraw`
   (cache `Unknown`, empty `SetRules`), then a re-commit containing `a`:
   `a` is still 3, and hits during the `Unknown` gap are added on adoption.
@@ -297,8 +316,11 @@ Functions are cited by name.
 - `parent.path` matches a grandparent;
 - `process.command` joins args with spaces;
 - `process.env.HOME` unset compares as `""`;
-- **hash:** checksums off → match, with the warning; on → compares;
-  unknown → match, with "may";
+- **hash:**
+  - checksums off → match, with the warning;
+  - on, with a checksum → compares (a match and a mismatch case);
+  - **on, with no checksums for the process → match**, with its warning;
+  - unknown → match, with "may";
 - `user.name` → unsupported with its reason;
 - an unknown input → unevaluated, never a match;
 - **precedence:** a precedence allow stops the scan before a later deny
@@ -343,10 +365,15 @@ Tower VM checks:
 
 ## OWNER QUESTIONS
 
-- **N1. Persist hit counts across bridge restarts** before P3.1 lands?
+- **N1 (borderline). Persist hit counts across bridge restarts** before
+  P3.1 lands?
   The cost is a small JSON file in the bridge state directory, after #45
   PR A adds the resolver. The benefit is that "unused" can mean more than
   "since this boot". **Recommendation: yes.**
-- **N2. The "unused" window.** Options: 7, 14 or 30 days with zero
-  counted hits. **Recommendation: 14 days,** shown only when N1 = yes;
-  otherwise the badge is only "No hits since <time>".
+
+**Decided here (was N2).** The "unused" window is **14 days** with zero
+counted hits, shown only if N1 = yes; otherwise the badge is only "No hits
+since <time>".
+- 7 days misses weekly jobs.
+- 30 days hides stale rules for a month.
+- Without persistence, "unused" can't honestly span a restart.

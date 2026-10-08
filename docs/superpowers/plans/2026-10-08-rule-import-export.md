@@ -2,20 +2,19 @@
 
 **Date:** 2026-10-08
 **Roadmap:** P2.7 in `docs/superpowers/specs/2026-10-07-competitive-feature-roadmap.md`
-**Baseline:** `main` @ `d9d1bfe` plus #48.
-**Blocked on:** #48 merging. Import needs its `RulesCache` to diff against
-and `DaemonCommands` to learn each rule's outcome.
+**Baseline:** `main` @ `4b3ba52` (#48 merged: `RulesCache`,
+`DaemonCommands`, `rule_wire.rs`).
+**Blocked on:** the security PR (branch `fix/rule-operator-validation`),
+which creates `rule_policy.rs` with `validate_operator`. This plan
+**reuses** it and adds only an import profile layer on top.
 **Size:** S–M. One bridge PR (policy, document, protocol, apply) and one
 Kirigami PR (file dialogs, preview sheet).
 
 ## Citation convention
 
-- `main:` means `d9d1bfe`.
-- `#48:` means branch `fix/48-show-all-rules` @ `ebdd21d`, a squashed
-  rebase onto `main` that is about to merge. **Re-check every `#48:` name
-  after it merges.**
-  - On #48, `rule_to_wire`/`rule_from_wire` live in `rule_wire.rs`.
-  - On `main`, they are in `grpc_server.rs`.
+- `main:` means `4b3ba52`.
+- #48 is merged, so its names are cited as `main:`.
+  `rule_to_wire`/`rule_from_wire` live in `rule_wire.rs`.
 - `vendor:` means opensnitch v1.8.0.
 - `tower:` means bazzite-tower PR #81. Its daemon accepts only
   `CHANGE_RULE`/`DELETE_RULE` from the UI and refuses `lists.*` operands,
@@ -34,22 +33,38 @@ Kirigami PR (file dialogs, preview sheet).
 3. The daemon only ever sees `CHANGE_RULE`, one rule per notification.
    Import never sends `DELETE_RULE`.
 
+## Decided here (was owner questions X1–X4)
+
+- **X1. Export contents:** `always` + `until restart` user rules only,
+  with counts of what was left out. Bridge-owned rules are left out (the
+  `z00-blocklist:`, `900-blocklist:` and `snitchwatch-default-` prefixes),
+  and so are temporaries.
+  - Blocklist and curated rules come back from their own sources.
+  - Temporaries would expire on a different schedule after import.
+- **X2. A same-name rule in the file:** replace, ticked by default, except
+  loosening ones (see step 5's default ticks). This mirrors the daemon's
+  `Replace` semantics and keeps loosening changes opt-in.
+- **X3. No "replace all" in v1.** Deleting a deny can unblock traffic for
+  every app (#44 Part B's reason for no bulk delete).
+- **X4. opensnitchd on-disk rule files: v1.1.** Same policy, with one rule
+  per file wrapped into a v1 document.
+
 ## Out of scope
 
 - **"Replace all" import,** which would delete rules missing from the
-  file. That is owner question X3.
+  file (X3).
 - **Blocklist subscriptions and profiles.** Their stores only persist
   after #45 PR A and #46 Part 1. The v1 envelope rejects unknown keys, so
   v2 can add them cleanly.
 - **Automatic or scheduled backups,** and the CLI (P5.1). `rule_io.rs` is
   written so the CLI can reuse it.
 - **Importing opensnitchd's on-disk rule files,** which is what the stock
-  UI exports (owner question X4).
+  UI exports (X4: v1.1).
 - **Hash and `lists.*` operands** (see Design step 1).
 
 ## Findings
 
-**#48: the rules cache**
+**The rules cache (`main:cache/rules.rs`)**
 - `cache/rules.rs` `RulesCache` is `Unknown | Synced(BTreeMap<String, Rule>)`.
   - `snapshot_wire()` returns the rules name-sorted, through
     `rule_to_wire`.
@@ -63,24 +78,42 @@ Kirigami PR (file dialogs, preview sheet).
     the Rules page at the next reconnect. **Import must use the same
     caps.**
 - `RulesSync::synced()` bumps only on snapshot commits. There is no
-  counter for "anything changed". The stale-preview check (Design step 3)
-  needs one.
+  counter for "anything changed", and the stale-preview check (Design
+  step 3) needs one.
+  - It must live **in `RulesCache` itself**, not `RulesSync`:
+    `prune_expired_rules_every` locks the cache directly and calls
+    `RulesCache::prune_expired`, bypassing `RulesSync`.
 
-**#48: rule shape and validation**
-- `rule_wire.rs` `rule_from_wire` checks:
+**Rule shape and validation (`main:rule_wire.rs`)**
+- `rule_from_wire` checks:
   - the name with `rule_name::validate_rule_name`;
   - that `action`/`duration` are non-empty;
   - that `operator` is present and non-null, and each leaf operand is
     non-empty.
 
   It does **not** check the action or duration vocabulary, the operand
-  vocabulary, `lists.*`, regexps or CIDRs.
-- `rule_to_wire` adds the display-only fields `displayName` and (via the
-  cache) `readOnlyReason`. Those must not go into an export.
+  vocabulary, regexps or CIDRs.
+  - The security PR adds `rule_policy::validate_operator` to it for
+    GUI-sourced rules: pairing, `list` shape and nesting, and `lists.*`
+    refusal.
+- `rule_to_wire` itself emits the display-only fields `displayName` and
+  `readOnlyReason` (from `validate_rule_name`). Those must not go into an
+  export.
+- **List operand spelling differs by source.**
+  - Rules from the daemon carry `operand: "list"` on a `list` operator,
+    because `Compile` overwrites it.
+  - Rules parsed from the wire by `operator_from_wire` carry `""`.
+  - Compare only after normalising, or every app-bound rule previews as
+    `Replace`.
 
-**#48: daemon commands**
-- `daemon_commands.rs` `DaemonCommands::send` allows only
-  `{ChangeRule, DeleteRule}` (`ALLOWED_ACTIONS`).
+**Daemon commands (`main:daemon_commands.rs`)**
+- `DaemonCommands::send` allows only `{ChangeRule, DeleteRule}`
+  (`ALLOWED_ACTIONS`) and validates rule names at the send point.
+  `SendError` has four variants:
+  - `NotAllowed`;
+  - `InvalidRuleName`;
+  - `NoDaemon`;
+  - `NotQueued`: no stream could queue the command.
 - Each stream queue holds `STREAM_QUEUE_CAPACITY = 64` and is fed with
   `try_send`. **A full queue drops the command for that stream.** A bulk
   apply must pace itself.
@@ -122,44 +155,63 @@ Kirigami PR (file dialogs, preview sheet).
 - `ws_messages.rs` `ClientMessage`/`ServerMessage` are internally tagged
   action enums. New variants are additive, and older clients ignore
   unknown actions.
-- `ws_server.rs` sets no explicit message-size limit (tokio-tungstenite
-  defaults), so import adds its own cap.
+- **Message size.** `ws_server.rs` `pump_authenticated` parses every text
+  frame with `serde_json::from_str::<ClientMessage>` and sets no explicit
+  size limit; the tokio-tungstenite defaults apply. An oversized document
+  is therefore fully parsed into a `serde_json::Value` before any
+  import-level check. The size cap must run **before** that parse.
 
 ## Design
 
-1. **`rule_policy.rs`** (new, bridge crate, pure).
-   - **Ownership.** It is shared with P2.1 (`2026-10-08-rule-editor.md`)
-     and doc 2's curated defaults. **The first of P2.7/P2.1 to land
-     creates it; the other extends it.**
-   - **API:**
+1. **Policy: reuse `rule_policy.rs`, add an import profile.**
+   - **Ownership.** The security PR creates `rule_policy.rs` with
+     `validate_operator`, which checks:
+     - **pairing:**
+       - type `network` ⇔ operand `dest.network`/`source.network`;
+       - operand `list` ⇔ type `list`;
+       - `true` only as `simple`;
+     - **`list` shape:** 1–64 members, no nested `list`;
+     - **refusal** of `lists.*` at any depth.
+
+     **This plan reuses it** and doesn't redefine any of those rules.
+   - **Why pairing, not separate allowlists.** A wrong pairing can crash
+     the root daemon:
+     - `network` + `dest.ip`, or `simple` + `dest.network`, panic on a type
+       assertion in the compare callback (`Match` dispatches on the
+       operand). The result is a crash loop and fail-open through
+       `QueueBypass`;
+     - operand `list` with a non-`list` type, or an empty list, matches
+       everything;
+     - a nested list arrives empty (`Deserialize` copies one level) and so
+       also matches everything.
+   - **What P2.7 adds** (the profile layer):
      `validate_user_rule(rule: &Rule, profile: PolicyProfile) -> Result<(), Vec<RuleProblem>>`.
+     It calls `validate_operator` first, then the profile checks.
      `RuleProblem { path: String /* e.g. "operator.list[1].operand", built from field names and indices only */, reason: &'static str }`.
      **Fixed reasons only:** never echo file text (the `rule_name.rs`
      pattern).
-   - **Checks:**
-     - **Name:** `validate_rule_name`. Refuse the prefixes the bridge owns:
-       `z00-blocklist:` and the legacy `900-blocklist:` (#45).
+   - **`PolicyProfile::Import` checks:**
+     - **Name:** `validate_rule_name`. Refuse the bridge-owned prefixes
+       `z00-blocklist:`, the legacy `900-blocklist:`, and
+       `snitchwatch-default-` (prompt-slot D).
      - **Action:** `allow`, `deny` or `reject`.
-     - **Duration** (`PolicyProfile::Import`): `always` or `until restart`.
-       `once` never persists, and temporaries would expire (owner
-       question X1). The editor profile also allows the grammar #48's
-       `prune_expired` parses.
-     - **Operator tree:**
-       - `type` must be `simple`, `regexp`, `network` or `list`. `lists`
-         and `complex` are refused.
-       - `operand` must be one of: `true`, `list`, `process.path`,
-         `process.parent.path`, `process.command`, `process.id`,
-         `process.env.<NAME>`, `user.id`, `user.name`, `source.ip`,
-         `source.port`, `source.network`, `dest.ip`, `dest.host`,
-         `dest.port`, `dest.network`, `protocol`, `iface.in`,
-         `iface.out`.
-       - **Refused:** `process.hash.md5`/`process.hash.sha1` (match-all,
-         see Findings; checksum flows are P4.1) and every `lists.*` at
-         any depth. The tower daemon refuses `lists.*`, and only #45's
-         materializer may author list rules.
+     - **Duration:** `always` or `until restart` (X1).
+     - **Operand vocabulary:** `true`, `list`, `process.path`,
+       `process.parent.path`, `process.command`, `process.id`,
+       `process.env.<NAME>`, `user.id`, `user.name`, `source.ip`,
+       `source.port`, `source.network`, `dest.ip`, `dest.host`,
+       `dest.port`, `dest.network`, `protocol`, `iface.in`, `iface.out`.
+       Refuse `process.hash.md5`/`sha1`: they match every binary while
+       checksums are off, and even with checksums on, a process with no
+       checksums matches (`operator.go` `Match`, hash branch). Checksum
+       flows are P4.1.
+     - **Type:** `simple`, `regexp`, `network` or `list`. `lists` and
+       `complex` are refused. `regexp` is allowed only on string-subject
+       operands, because a network operand passes `net.IP` to the
+       `reCmp` string assertion.
      - **Regexps** compile with the `regex` crate. That only approximates
-       Go RE2; the daemon remains authoritative and its `ERROR` is
-       reported per rule.
+       Go RE2; the daemon stays authoritative and its `ERROR` is reported
+       per rule.
      - **`network` data** is a CIDR, or one of the vendored alias keys. A
        test pins the alias list against
        `vendor:daemon/data/network_aliases.json`.
@@ -188,8 +240,15 @@ Kirigami PR (file dialogs, preview sheet).
        A `version` other than 1 is refused with "This file was made by a
        newer Snitchwatch."
      - **Caps:** at most `MAX_SNAPSHOT_RULES` rules and at most 8 MiB of
-       JSON. The GUI checks size before parsing; the bridge checks both
-       again on receipt.
+       JSON.
+       - The GUI checks the size before reading the file.
+       - The bridge checks the byte length of the WS text frame in
+         `ws_server.rs` `pump_authenticated`, **before**
+         `from_str::<ClientMessage>`. It drops and logs any frame over
+         8 MiB + 64 KiB envelope slack. It also sets
+         `WebSocketUpgrade::max_message_size` to the same bound in
+         `ws_handler`, so tungstenite refuses the frame while reading it.
+       - The rule count is checked again after parsing.
      - **Duplicate names** inside one file: both copies are refused.
    - **Schema.** `docs/schemas/snitchwatch-rules-v1.schema.json` is
      published for outside tools. Fixtures under
@@ -200,12 +259,15 @@ Kirigami PR (file dialogs, preview sheet).
      - `Unknown` → `ExportUnavailable` ("Rules haven't loaded from the
        firewall yet").
      - **Left out:** `once` rules, temporary rules, rules the bridge owns
-       (the `z00-blocklist:`/`900-blocklist:` prefixes), and rules whose
-       names fail `validate_rule_name` (#48's read-only rows: they could
-       never be imported back).
+       (the `z00-blocklist:`/`900-blocklist:`/`snitchwatch-default-`
+       prefixes), and rules whose names fail `validate_rule_name` (#48's
+       read-only rows: they could never be imported back).
      - Left-out counts are returned beside the document, so the GUI can
        say "N rules not exported, and why".
-   - **`preview(doc, cache) -> ImportPreview`,** one item per rule:
+   - **`preview(doc, cache) -> ImportPreview`,** one item per rule.
+     **Normalise before comparing:** set every `list` operator's operand to
+     `"list"` on both sides (see Findings), then compare all fields.
+     Items:
      - `Add`;
      - `Replace { changed_fields }` (same name, different content);
      - `Unchanged`;
@@ -235,9 +297,15 @@ Kirigami PR (file dialogs, preview sheet).
        preview expires after 10 min.
      - **What it holds:** the validated rules and the cache revision at
        preview time.
-     - **New `RulesSync::revision()`:** a counter bumped on every cache
-       mutation (`replace_all`, `upsert`, `apply_confirmed`,
-       `prune_expired`, `withdraw`).
+     - **New revision counter inside `RulesCache`:** turn it into a struct
+       holding the existing state plus `revision: u64`, bumped by every
+       mutating method:
+       - `replace_all`, `upsert`, `remove` and `apply_confirmed`;
+       - `prune_expired` when it removed something, which covers
+         `prune_expired_rules_every`'s direct prune;
+       - the `Unknown` reset behind `RulesSync::withdraw`.
+
+       `RulesSync` and the importer read it under the same lock.
      - **Apply is refused** when the `preview_id` is unknown or expired,
        the revision moved ("Rules changed since the preview — preview
        again"), or another import is running.
@@ -253,14 +321,24 @@ Kirigami PR (file dialogs, preview sheet).
    - **Pacing.** **At most 8 in flight,** well under
      `STREAM_QUEUE_CAPACITY = 64`, which leaves room for the user's own
      toggles. Wait on each `PendingReply` (5 s, as in #48's pump).
-   - **Outcomes:**
+   - **Outcomes of `send`** (`SendError`):
+     - `NotQueued` (every stream queue full): transient. Wait for one
+       in-flight reply, then retry, at most 3 times. After that, report the
+       rule as `not_sent` ("the firewall was busy") and continue.
+     - `InvalidRuleName`: report the rule as refused, with a fixed reason,
+       and continue. The policy layer should already have refused it; this
+       is defence in depth.
+     - `NoDaemon`: stop. The remaining rules are reported as `not_sent`.
+     - `NotAllowed`: a programming error (import only builds
+       `CHANGE_RULE`). Abort the import with an `error!` log.
+   - **Outcomes of `PendingReply::wait`:**
      - `Ok`: applied. The cache is updated by #48's `apply_confirmed`;
        there is no separate write here.
      - `Rejected(text)`: rejected. The daemon text is shown through
        `translator::verdict::sanitize_for_display(…, 200)`.
      - `Timeout`: shown as "no answer".
-     - `NoDaemon`/`StreamClosed`: stop. The remaining rules are reported
-       as `not_sent`.
+     - `StreamClosed`: stop. The remaining rules are reported as
+       `not_sent`.
    - **Never `DELETE_RULE`,** and never any other action. That is
      enforced by #48's allowlist anyway.
 5. **Kirigami.**
@@ -279,8 +357,13 @@ Kirigami PR (file dialogs, preview sheet).
    - **`RulesImportSheet.qml`** (new, `SizedOverlaySheet` pattern):
      - **Sections:** Add, Replace, Unchanged (collapsed), Refused (each
        with its reasons).
-     - **Ticks:** Add and Replace are ticked by default, except a
-       `weakens` replace, which starts unticked with a warning.
+     - **Default ticks.** Add and Replace rows start ticked, **except**
+       these, which start **unticked** with a warning:
+       - a `weakens` replace;
+       - any imported **`precedence` allow**, which overrides other rules,
+         including denies;
+       - any imported **allow that applies to all apps**
+         (`appliesToAllApps`).
      - **Badges:** "Applies to all apps", "Overrides other rules"
        (precedence), "Lost when the firewall restarts" (not `always`).
      - **Apply.** "Apply N changes" (count of ticked rows), then the
@@ -290,7 +373,7 @@ Kirigami PR (file dialogs, preview sheet).
 
 ## Tests to write first
 
-**`rule_policy`** (unit):
+**`rule_policy::validate_user_rule`, `Import` profile** (unit):
 - **Refusals,** each with a fixed reason:
   - `lists.domains` at the top level;
   - `lists.nets` at depth 3 inside lists;
@@ -301,7 +384,8 @@ Kirigami PR (file dialogs, preview sheet).
   - a bad regexp and a bad CIDR;
   - the `LAN2` alias;
   - port 70000;
-  - a name with `/`, and a `z00-blocklist:` name;
+  - a name with `/`, a `z00-blocklist:` name, and a `snitchwatch-default-`
+    name;
   - a 16 KiB + 1 field, a 65-member list, depth 5.
 - **Accepts:** each allowed operand once, and the `LAN`/`MULTICAST`
   aliases.
@@ -309,6 +393,22 @@ Kirigami PR (file dialogs, preview sheet).
   pattern of `rule_name.rs` `errors_do_not_echo_the_name`).
 - **Alias pin:** the alias list equals the keys of
   `vendor:daemon/data/network_aliases.json`.
+- **Pairing reaches the import path.** One failing case per
+  `validate_operator` rule, run through `validate_user_rule(…, Import)`.
+  This pins that P2.7 calls it; the security PR owns the rule tests
+  themselves.
+
+  | Case | Expected |
+  |---|---|
+  | `network` + `dest.ip` | refused |
+  | `simple` + `dest.network` | refused |
+  | `regexp` + `source.network` | refused |
+  | operand `list` with type `simple` | refused |
+  | an empty `list` | refused |
+  | a 65-member `list` | refused |
+  | a `list` nested in a `list` | refused |
+  | `true` as `regexp` | refused |
+  | `lists.domains` | refused |
 
 **`rule_io`** (unit):
 - **Round trip.** `export` → serialize → parse → equal, with no
@@ -318,6 +418,9 @@ Kirigami PR (file dialogs, preview sheet).
   counts each.
 - **Envelope refusals:** version 2, an unknown envelope key, duplicate
   names, 10 001 rules, a document over 8 MiB.
+- **List-operand normalisation.** A cached daemon rule with
+  `operand: "list"` and the same rule from a file with `operand: ""`
+  classify as `Unchanged`.
 - **Preview classification:**
   - add, replace (the `changed_fields` list), unchanged, refused;
   - `weakens` for: deny→allow, disabling a deny, `precedence` added to an
@@ -346,10 +449,20 @@ Kirigami PR (file dialogs, preview sheet).
   replies 50 ms: never more than 8 in flight, and no "queue full" warning.
 - **Never deletes.** A preview of a document *missing* a cached rule
   sends no `DELETE_RULE`.
+- **Busy queue.** With the mock's stream queue held full, `send` returns
+  `NotQueued`. Apply retries, then reports `not_sent` "busy" and
+  continues with the next rule.
+- **Stale preview after a prune.** A temporary rule expiring through
+  `prune_expired_rules_every` between preview and apply bumps the revision,
+  and the apply is refused.
+- **Size before parse.** A WS frame over the cap is dropped by
+  `pump_authenticated` without reaching `from_str::<ClientMessage>`.
+  Check this with a counter or log assertion in the `ws_server.rs` tests.
 
 **Kirigami:**
-- Qt-free: the 8 MiB read cap, preview grouping, and default ticks
-  (`weakens` unticked).
+- Qt-free: the 8 MiB read cap, preview grouping, and default ticks.
+  Unticked: `weakens`, precedence allows, all-app allows. Ticked: other
+  adds and replaces.
 - QML smoke (offscreen): the sheet renders each section, Apply's count
   follows the ticks, and the labels are plain text.
 
@@ -384,36 +497,19 @@ Tower VM checks:
 - **An export isn't a full mirror of the daemon,** because of the
   left-out rules. The export summary says how many were left out and why.
 - **Imported deny/precedence rules affect all traffic they match.** The
-  flags and `weakens` default make that visible, not prevented.
+  flags and the unticked defaults (`weakens`, precedence allows, all-app
+  allows) make that visible, not prevented.
 - **File-conflict hot spots:**
-  - bridge-cli `run_with_incoming` (pump arms, task spawn), with #48 and
-    #45;
+  - bridge-cli `run_with_incoming` (pump arms, task spawn), with #45 and
+    P2.1;
   - `translator/upstream.rs` `apply`/`UpstreamEffect`, with P2.1;
   - `ws_messages.rs`, with every plan;
-  - `cache/rules.rs` (`within_limits` visibility, `revision`), with #48
-    follow-ups;
+  - `cache/rules.rs` (`within_limits` visibility, the `RulesCache`
+    revision), with P2.6's prune hook;
+  - `rule_policy.rs`, with the security PR (lands first) and P2.1;
+  - `ws_server.rs` `pump_authenticated`/`ws_handler` (size cap);
   - `RulesPage.qml` header, with #44 Part B, P2.6 and P2.1.
 
 ## OWNER QUESTIONS
 
-- **X1. What an export contains.** Options:
-  - (a) only `always` + `until restart` user rules, leaving out bridge-owned
-    blocklist rules and temporary rules;
-  - (b) everything the daemon holds, with temporaries re-armed on import.
-
-  **Recommendation: (a)**, with counts of what was left out. Blocklist
-  rules come back from their subscriptions; temporaries would expire.
-- **X2. A same-name rule in the file.** Options:
-  - (a) replace, ticked by default except a `weakens` replace;
-  - (b) skip by default;
-  - (c) import under a new name.
-
-  **Recommendation: (a).** It mirrors daemon `Replace` semantics and keeps
-  loosening changes opt-in.
-- **X3. A "replace all" mode** that deletes rules not in the file.
-  **Recommendation: not in v1.** Deleting a deny can unblock traffic for
-  every app (#44 Part B's reason for no bulk delete).
-- **X4. Accepting opensnitchd's on-disk rule files** (one rule per file,
-  which is what the stock UI writes). **Recommendation:** v1.1. It uses
-  the same `rule_policy`, with one rule per file wrapped into a v1
-  document.
+None. X1–X4 are decided at the top of this plan.

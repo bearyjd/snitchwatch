@@ -3,7 +3,7 @@
 **Date:** 2026-10-08
 **Issue:** none filed yet. Overnight board item 9a, an owner request
 relayed through both sessions.
-**Baseline:** `main` @ `d9d1bfe`.
+**Baseline:** `main` @ `4b3ba52` (#48 merged).
 **Hard dependency:** #44 Part A
 (`2026-10-07-app-bound-prompt-scopes-part2.md`) must merge first. See
 "Why #44 Part A first".
@@ -21,9 +21,24 @@ protocol change and no new daemon notification.
 3. **Only when `process_path` is absolute.** Otherwise the answer is
    once-only and the GUI explains why, as the #44 part 2 plan settles.
 
+## Decided here (was owner questions D1–D3)
+
+- **D1 = yes.** "Deny all (N)" gives each row the same app-bound
+  until-restart deny. It follows directly from the owner's inline-Deny
+  decision: the batch button goes through `submitInlineVerdict`, has the
+  same retransmit flaw, and a once-only batch Deny would look like it
+  blocks when it doesn't.
+- **D2 = yes.** When Deny + "This time" is selected, the sheet shows a
+  hint under the Duration box: "A one-time Deny blocks only this attempt;
+  most apps retry within seconds." It keeps the explicit choice and tells
+  the truth.
+- **D3 = yes.** The sheet's "Until quit" label becomes "Until firewall
+  restarts". This is the honest-UI rule: the daemon has no notion of
+  "quit". Wording only; the token stays `until_quit`.
+
 ## Citation convention
 
-- `main:` means `d9d1bfe`.
+- `main:` means `4b3ba52`.
 - `vendor:` means opensnitch v1.8.0.
 - `tower:` means bazzite-tower PR #81. Its system-variant daemon accepts
   only `CHANGE_RULE`/`DELETE_RULE` notifications from the UI.
@@ -67,7 +82,8 @@ Functions and tests are cited by name. Line numbers are approximate.
 - Per-retransmit deny rows in Connections (issue #55). After this change
   each retransmit matches a stored rule and produces a daemon event, so
   expect *more* such rows until #55 lands.
-- Changing the sheet's own defaults (owner questions D2 and D3).
+- Changing the sheet's default duration. D2/D3 change only a hint and a
+  label.
 - The Tauri shell and the vendored web UI. They keep sending what they
   send.
 
@@ -79,8 +95,7 @@ Functions and tests are cited by name. Line numbers are approximate.
   and sheet decisions "produce the same rule". That stops being true for
   Deny.
 - `submitBatchVerdict` loops `submitInlineVerdict`. So the process-header
-  **"Deny all (N)"** button changes too, unless this plan carves it out
-  (owner question D1).
+  **"Deny all (N)"** button changes too, which is intended (D1).
 - `pending_decision.rs` `parse_duration` maps `until_quit` to
   `UntilRestart`. **Any other string**, including a plausible
   `until_restart`, silently becomes `Once`. A test must check the parsed
@@ -139,10 +154,15 @@ this before Part A.**
      - Deny without one → `"this_time"`;
      - Allow → `"this_time"`.
    - **Bindable** means the predicate #44 Part A defines: it starts with
-     `/`. If Part A exports `translator::verdict::bindable_process_path`
-     as `pub`, call it; Kirigami already depends on `snitchwatch-bridge`
-     (`default-features = false`). Otherwise keep a local copy and a test
-     that runs the #44 path table through both.
+     `/`.
+     - Part A's `bindable_process_path` takes a proto **`&Connection`**, so
+       Kirigami can't call it on a row's `Option<String>`. Use Part A's
+       **`&str` form**, `is_bindable_process_path(path: &str)` (in the
+       in-progress `translator/process_binding.rs`).
+     - Require it to be `pub` when Part A merges. Kirigami already depends
+       on `snitchwatch-bridge` (`default-features = false`).
+     - If it isn't exported, keep a local copy plus a test that runs the
+       #44 path table through both.
 2. **Per-row lookup, so batch works too.**
    - **Store.** `connections/row_store.rs` gets
      `inline_duration_for(&self, row_id, choice) -> &'static str`. It
@@ -167,7 +187,11 @@ this before Part A.**
      `RuleRefusal::describe()` (single source).
    - **Labels.** "Deny" and "Deny all (N)" keep their text. The tooltip
      carries the duration.
-4. **No bridge change.** The bridge test below pins the reply shape so a
+4. **Sheet (D2/D3)**, in `PendingDecisionSheet.qml`:
+   - rename the `until_quit` option's label to "Until firewall restarts";
+   - add the D2 hint, a plain-text `Controls.Label` that is visible only
+     while action = Deny and duration = `this_time`.
+5. **No bridge change.** The bridge test below pins the reply shape so a
    later `verdict.rs` refactor can't quietly undo this.
 
 ### Why inline Allow stays "once"
@@ -211,8 +235,10 @@ Allow:
 - the row Deny on an absolute-path row records `this_host`/`until_quit`;
 - the row Deny on a `Kernel connection` row records `this_time`;
 - the row Allow records `this_time`;
-- the batch Deny records a per-row token;
-- the Deny tooltip text is plain text.
+- the batch Deny (D1) records a per-row token;
+- the Deny tooltip text is plain text;
+- the sheet shows "Until firewall restarts" for the `until_quit` option
+  (D3), and the D2 hint appears only for Deny + "This time".
 
 **Bridge** (`grpc_server/tests.rs`, pinning existing behaviour):
 - `inline_deny_until_restart_reply_is_app_bound_and_remembered`. The
@@ -245,15 +271,25 @@ Run at low priority (`nice -n 19`):
 
 > Tower's VM acceptance: inline Deny → `curl --retry` must fail; rule app-bound with duration "until restart"; survives the next Ask; gone after `systemctl restart opensnitch`.
 
+**This check depends on `DefaultAction`.** Run it on a
+**`DefaultAction: deny`** image (Snitchwatch's packaging config), or click
+Deny within about 1 s of the prompt appearing.
+
+Under `allow`, curl's SYN retransmit (~1 s) arrives while the prompt
+still holds the daemon's slot (`isAsking`). It gets `DefaultAction` =
+allow, so the flow is established before a slower click. The stored rule
+then blocks only *later* connections, and `curl --retry` can succeed for
+reasons unrelated to this change. See Risks.
+
 Additional VM checks:
-1. Record the image's `DefaultAction` in the evidence. The result above
-   doesn't depend on it, but the Risks below do.
+1. Record the image's `DefaultAction` and the click latency in the
+   evidence.
 2. A row whose `process_path` isn't absolute: the inline Deny replies once
    and shows the sentence. No rule appears on the Rules page.
 3. The new rule is listed on the Rules page. Deleting it there lets the
    next `curl` prompt again.
-4. "Deny all (N)" on a process header (if D1 = yes): one rule per host,
-   each app-bound.
+4. "Deny all (N)" on a process header (D1): one rule per host, each
+   app-bound.
 
 ## Risks and open questions
 
@@ -269,7 +305,8 @@ Additional VM checks:
   - Under `deny` (Snitchwatch's packaging config,
     `packaging/bluebuild/files/system/etc/opensnitchd/default-config.json`),
     that retransmit is dropped instead.
-  - Doc 2 and the Phase 1 deny-by-default decision own this.
+  - Doc 2 and the Phase 1 deny-by-default decision own this. It is also
+    why the acceptance check runs on a deny image (Verification).
 - **The daemon may rename the rule.** It stores prompt replies through
   `setUniqueName`, so a second deny for the same app/host/port before a
   restart is stored as `<name>-2`. #48's cache documents this divergence;
@@ -288,27 +325,4 @@ Additional VM checks:
 
 ## OWNER QUESTIONS
 
-- **D1. "Deny all (N)" on a process header.** It goes through the same
-  `submitInlineVerdict`. Options:
-  - (a) each row gets its own app-bound until-restart deny;
-  - (b) keep it once-only.
-
-  **Recommendation: (a).** It has the same retransmit failure, and
-  (b) leaves a button that looks like it blocks but doesn't.
-- **D2. The sheet's Deny with "This time" has the same flaw.** Options:
-  - (a) leave it;
-  - (b) add a hint under the Duration box when "This time" is selected:
-    "A one-time Deny blocks only this attempt; most apps retry within
-    seconds";
-  - (c) make Deny ignore "This time".
-
-  **Recommendation: (b).** It keeps the explicit choice and tells the
-  truth.
-- **D3. The sheet's "Until quit" label** describes a process lifetime the
-  daemon doesn't have. Options:
-  - (a) keep it;
-  - (b) rename it "Until firewall restarts" so it matches the new inline
-    tooltip.
-
-  **Recommendation: (b).** It is wording only; the token stays
-  `until_quit`.
+None. D1–D3 are decided above.

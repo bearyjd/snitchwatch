@@ -3,7 +3,8 @@
 **Date:** 2026-10-08
 **Issue:** #17 (upstream evilsocket/opensnitch#1644). Overnight board item
 9b. Roadmap P2.4 (curated defaults) is pulled forward in part.
-**Baseline:** `main` @ `d9d1bfe`. Part D also needs #48.
+**Baseline:** `main` @ `4b3ba52` (#48 merged). Part D also needs the
+security PR's `rule_policy.rs` (branch `fix/rule-operator-validation`).
 **Size:** M overall, as four bridge/UI PRs (A–D) plus a daemon-side note
 (E).
 - A and B need no owner decision beyond wording.
@@ -12,10 +13,8 @@
 
 ## Citation convention
 
-- `main:` means `d9d1bfe`.
-- `#48:` means branch `fix/48-show-all-rules` @ `ebdd21d`, a squashed
-  rebase onto `main` that is about to merge. Re-check names after it
-  merges.
+- `main:` means `4b3ba52`.
+- #48 is merged (PR #60), so its names are cited as `main:`.
 - `vendor:` means opensnitch v1.8.0.
 - `tower:` means bazzite-tower PR #81. Its system-variant daemon accepts
   only `CHANGE_RULE`/`DELETE_RULE` from the UI and refuses `lists.*`
@@ -90,10 +89,11 @@ takes it again. Meanwhile every other new connection gets `DefaultAction`:
   (`vendor:ui/opensnitch/config.py`) with its configured default action,
   which is deny out of the box (`ACTION_DENY_IDX`). It never holds the
   slot for 120 s.
-- **The bridge doesn't read the daemon's configuration.** `subscribe`
-  keeps only `is_firewall_running` from `ClientConfig`. The `config` field
-  carries the daemon's config JSON as a string (`vendor:proto/ui.proto`
-  `ClientConfig.config`), including `DefaultAction` and
+- **The bridge doesn't parse the daemon's configuration.** `subscribe`
+  records `is_firewall_running` and, since #48, stages `cfg.rules` for
+  commit on HELLO (`RulesSync::stage`). It still ignores the `config`
+  field: the daemon's config JSON as a string (`vendor:proto/ui.proto`
+  `ClientConfig.config`), which includes `DefaultAction` and
   `Stats.MaxEvents`.
 - **tower.** Nothing in A–D needs a notification beyond `CHANGE_RULE`/
   `DELETE_RULE`. `AskRule` replies are not notifications.
@@ -127,8 +127,17 @@ takes it again. Meanwhile every other new connection gets `DefaultAction`:
 ### A. Show who holds the slot and what it costs (BR + UI, S; no owner decision)
 
 1. **`PromptSlot`** (new file `crates/snitchwatch-bridge/src/prompt_slot.rs`):
-   - **State:**
-     `holder: Option<Holder { row_id, process, host, since_ms, misses_baseline: Option<u64>, last_misses: Option<u64>, last_uptime: Option<u64> }>`.
+   - **State, keyed by `row_id`:**
+     `holders: BTreeMap<RowId, Holder { process, host, since_ms, misses_baseline: Option<u64>, last_misses: Option<u64>, last_uptime: Option<u64> }>`.
+     - Normally there is at most one holder. Two concurrent Asks are rare
+       but possible: the daemon's `GetIsAsking`/`SetIsAsking` is an
+       unlocked check-then-set across workers.
+     - A single `Option` would let the second Ask overwrite the first, and
+       the first release would then clear the second.
+     - `hold(row_id, …)` inserts. `release(row_id)` removes **only that
+       entry**.
+     - The broadcast shows the oldest holder plus `holders: n` when
+       `n > 1`.
    - **Feeds:**
      - `ask_rule` marks the slot held when it inserts the pending row.
        That is the same point that sends `Notice::Pending`.
@@ -152,12 +161,13 @@ takes it again. Meanwhile every other new connection gets `DefaultAction`:
        cumulative per daemon process);
      - #48 commits a new HELLO snapshot during the hold.
    - **`defaulted_at_least()`** is
-     `last_misses.saturating_sub(misses_baseline)`. It is `None` while
-     either value is unknown, and it never underflows.
+     `last_misses.saturating_sub(misses_baseline)`, per holder. It is
+     `None` while either value is unknown, and it never underflows.
    - **Display text.** `process`/`host` go through
      `grpc_server::display_summary`, the existing sanitizer.
 2. **Protocol** (additive; older clients ignore unknown actions):
-   - `ServerMessage::PromptSlot { holder: Option<PromptSlotHolder>, defaulted_at_least: Option<u64> }`,
+   - `ServerMessage::PromptSlot { holder: Option<PromptSlotHolder>, holders: u32, defaulted_at_least: Option<u64> }`,
+     where `holder` is the oldest one and `holders` the total;
      sent on hold, release and count change;
    - included in the `RequestSnapshot` answer.
 3. **Release summary.** When a holder is released with
@@ -232,7 +242,7 @@ takes it again. Meanwhile every other new connection gets `DefaultAction`:
     - GUI loss still returns `Unavailable`.
     - The 120 s daemon deadline can no longer be reached.
 
-### D. Curated defaults for background services (data + BR, M; blocked on S3; needs #48)
+### D. Curated defaults for background services (data + BR, M; blocked on S3 and the security PR's `rule_policy.rs`)
 
 12. **Data file.** `crates/snitchwatch-bridge/data/curated-defaults-v1.json`
     lists app-bound **allow** rules. Each has:
@@ -247,13 +257,29 @@ takes it again. Meanwhile every other new connection gets `DefaultAction`:
     - a name `snitchwatch-default-<id>`;
     - the description `snitchwatch curated default v1`.
 
-    Every entry passes the shared rule policy (`rule_policy.rs`, created
-    by whichever of P2.7/P2.1 lands first).
+    Every entry passes `rule_policy::validate_operator` (the security PR)
+    and the profile layer P2.7 adds, checked by a unit test over the data
+    file.
+    - **Reserved prefix.** `snitchwatch-default-` joins `z00-blocklist:`
+      and `900-blocklist:` as a bridge-owned prefix. The P2.7/P2.1 profile
+      layers refuse it for user-authored and imported rules. P2.7's export
+      leaves it out, because those rules come back from the data file.
 13. **Installed via `CHANGE_RULE`** through #48's `DaemonCommands`,
-    reconciled like #45 PR B:
-    - an entry no longer in the file is deleted with `DELETE_RULE`;
-    - a user-edited copy (a different operator under the same name) is
-      left alone and flagged.
+    reconciled like #45 PR B.
+    - **When reconciliation runs:**
+      - after every committed rules snapshot, i.e. each `RulesSync::synced()`
+        generation bump, which #48 makes only after the snapshot's stream
+        sent HELLO. This is the same trigger as #45 PR B's reconcile;
+      - immediately when the user turns the opt-in on or off;
+      - never while the cache is `Unknown`.
+    - **What it does:**
+      - an entry missing from the daemon is installed;
+      - a name under the reserved prefix that is no longer in the file, or
+        that exists while the opt-in is off, is deleted with `DELETE_RULE`.
+        Nothing outside the prefix is ever deleted;
+      - a user-edited copy is left alone and flagged. That means same name,
+        any field other than `enabled` different after list-operand
+        normalisation.
 14. **Content.** It comes from the first-boot capture spike (roadmap §6
     item 5): on a fresh tower VM image, record every program that asks in
     the first 10 minutes after login. Known hard cases go to the owner
@@ -311,6 +337,8 @@ allowlist.
   from underflow.
 - **A new #48 HELLO commit mid-hold** also resets the baseline.
 - one `PromptSlotSummary` when > 0, none when 0 or unknown;
+- **two concurrent Asks:** releasing the first leaves the second holding,
+  and each release reports its own count;
 - `display_summary` sanitizes a hostile host, using the pattern of the
   `DenyScopeNarrowed` tests;
 - `RequestSnapshot` includes `PromptSlot`;
@@ -338,6 +366,10 @@ allowlist.
 
 **D:**
 - every curated entry passes `rule_policy` and has an absolute path;
+- every curated name starts with `snitchwatch-default-`, and the
+  P2.7/P2.1 profile layers refuse that prefix for authored rules;
+- reconcile runs on a `synced()` bump and on an opt-in toggle, and not
+  while the cache is `Unknown`;
 - reconcile with the mock daemon:
   - install sends only `CHANGE_RULE`;
   - removal sends only `DELETE_RULE`;
@@ -423,12 +455,13 @@ Tower VM checks:
 
   **Recommendation:** opt-in; system paths under `/usr` only in v1;
   host-constrained `kioworker`/Steam; no per-user regexps in v1.
-- **S4. Which daemon-side options to ask bazzite-tower for.**
-  **Recommendation:** E3 first (visibility, no behaviour change), then E2
-  after VM timing at login, and E1 as the upstream #1644 contribution.
-  E2 changes behaviour under both `DefaultAction` values, so it needs
-  your OK.
-- **S5. Answering from desktop notifications.** May the notification
-  carry Allow-once/Deny, or only "Review"?
+- **S4. May we ask bazzite-tower for E2** ("drop while busy")?
+  - E2 changes daemon behaviour under both `DefaultAction` values, which
+    is why it needs your OK.
+  - The rest needs no decision: we ask tower for E3 (visibility only, no
+    behaviour change), and offer E1 upstream as the #1644 fix.
+  - **Recommendation:** yes, after VM timing at login.
+- **S5 (borderline). Answering from desktop notifications.** May the
+  notification carry Allow-once/Deny, or only "Review"?
   **Recommendation:** Allow-once and Deny; never a remembered Allow from
   a notification.
