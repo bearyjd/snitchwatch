@@ -27,7 +27,9 @@ use cxx_qt_lib::{
 use crate::connections::filter::ConnectionFilter;
 use crate::connections::grouping::{GroupTree, VisibleEntry};
 use crate::connections::outcome::{is_pending, outcome_text};
-use crate::connections::row_store::{matched_rule_display, ModelOp, RowStore, Verdict};
+use crate::connections::row_store::{
+    matched_rule_display, matched_rule_name, ModelOp, RowStore, Verdict,
+};
 use crate::inline_deny::{self, InlineDeny};
 use crate::pending_decision::VerdictChoice;
 use snitchwatch_bridge::translator::process_binding::is_bindable_process_path;
@@ -239,10 +241,11 @@ pub mod qobject {
         #[cxx_name = "simulationPrefillJson"]
         fn simulation_prefill_json(self: &ConnectionsModel, id: &QString) -> QString;
 
-        /// "Make a rule…" for put-off row `id` (prompt-slot plan Part C):
-        /// sends the rule `crate::make_rule` builds from the sheet's tokens
-        /// to the row's bridge session. False when no rule may be made or it
-        /// wasn't queued.
+        /// "Make a rule…" for row `id` that `make_rule::offers_make_rule`
+        /// accepts (put off, or decided by the default action): sends the
+        /// rule `crate::make_rule` builds from the sheet's tokens to the
+        /// row's bridge session. False when no rule may be made or it wasn't
+        /// queued.
         #[qinvokable]
         #[cxx_name = "makeRule"]
         fn make_rule(
@@ -575,9 +578,7 @@ impl qobject::ConnectionsModel {
             | ROLE_GROUP_ALLOWED
             | ROLE_GROUP_DENIED
             | ROLE_GROUP_BLOCKLISTED => QVariant::from(&0i32),
-            ROLE_MATCHED_RULE => {
-                QVariant::from(&QString::from(row.matched_rule.as_deref().unwrap_or("")))
-            }
+            ROLE_MATCHED_RULE => QVariant::from(&QString::from(matched_rule_name(row))),
             ROLE_MATCHED_RULE_DISPLAY => QVariant::from(&QString::from(&matched_rule_display(row))),
             ROLE_ANSWERED_WHILE_PAUSED => QVariant::from(&answered_while_paused(row)),
             ROLE_OUTCOME_TEXT => QVariant::from(&QString::from(outcome_text(row))),
@@ -1336,9 +1337,7 @@ fn grouped_entry_data(entry: &VisibleEntry, role: i32, store: &RowStore) -> QVar
                 | ROLE_GROUP_ALLOWED
                 | ROLE_GROUP_DENIED
                 | ROLE_GROUP_BLOCKLISTED => QVariant::from(&0i32),
-                ROLE_MATCHED_RULE => {
-                    QVariant::from(&QString::from(row.matched_rule.as_deref().unwrap_or("")))
-                }
+                ROLE_MATCHED_RULE => QVariant::from(&QString::from(matched_rule_name(row))),
                 ROLE_MATCHED_RULE_DISPLAY => {
                     QVariant::from(&QString::from(&matched_rule_display(row)))
                 }

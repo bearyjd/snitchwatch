@@ -117,8 +117,11 @@ Controls.ApplicationWindow {
     readonly property var expected: ({
         "1:default-deny": ["Denied (the firewall's default action)",
                            "No rule: the firewall's default action (deny)", "", true],
-        "1:default-allow": ["Allowed (the firewall's default action)",
+        "1:default-allow": ["Usually allowed (the firewall's default action)",
                             "No rule: the firewall's default action (allow)", "", true],
+        // The flag wins over a stray rule name: no "Show rule", no block note.
+        "1:default-stray": ["Denied (the firewall's default action)",
+                            "No rule: the firewall's default action (deny)", "", true],
         "1:rule": ["allowed", "899-curl-allow", "899-curl-allow", false],
         "1:named-empty": ["denied", "default action", "", false]
     })
@@ -152,6 +155,9 @@ Controls.ApplicationWindow {
                                                                 decidedByDefault: true }),
                             probeWindow.row("1:default-allow", { action: "allow",
                                                                  decidedByDefault: true }),
+                            probeWindow.row("1:default-stray", { action: "deny",
+                                                                 decidedByDefault: true,
+                                                                 matchedRule: "stray" }),
                             probeWindow.row("1:rule", { action: "allow",
                                                         matchedRule: "899-curl-allow" }),
                             // An older bridge, or a stock rule file named "".
@@ -178,8 +184,9 @@ Controls.ApplicationWindow {
                                           && page.makeRuleSheet.openButton.visible === want[3],
                                           id + ": Make a rule offered " + page.makeRuleSheet.visible);
                     }
-                    // A default-decided row has no 5-minute block to warn about.
-                    page.openInspector(probeWindow.rowDelegate("1:default-deny"));
+                    // A default-decided row has no 5-minute block to warn about,
+                    // even with a stray rule name.
+                    page.openInspector(probeWindow.rowDelegate("1:default-stray"));
                     page.makeRuleSheet.openButton.clicked();
                     probeWindow.check(page.makeRuleSheet.form.visible, "the rule form didn't open");
                     probeWindow.check(!page.makeRuleSheet.blockNote.visible,

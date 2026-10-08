@@ -108,6 +108,17 @@ pub fn matched_rule_display(row: &ConnectionRow) -> String {
     }
 }
 
+/// The rule name "Show rule" and the 5-minute-block note read (the
+/// `matchedRule` role): empty when no rule decided the row
+/// (`decided_by_default`, E3), whatever `matched_rule` says, so the flag
+/// always means "decided, no rule" (PR #108 review).
+pub fn matched_rule_name(row: &ConnectionRow) -> &str {
+    if row.decided_by_default {
+        return "";
+    }
+    row.matched_rule.as_deref().unwrap_or("")
+}
+
 /// Ordered, id-addressable store of connection rows.
 ///
 /// The store always holds the *full* row list (`rows`). When `filter` is
@@ -910,6 +921,20 @@ mod tests {
         let mut r = row("a", Some("allow"));
         r.matched_rule = None;
         assert_eq!(matched_rule_display(&r), "default action");
+    }
+
+    /// The rule "Show rule" and the 5-minute-block note read: none for a row
+    /// decided by default, even with a stray name (PR #108 review).
+    #[test]
+    fn matched_rule_name_is_empty_for_a_row_decided_by_default() {
+        let mut r = row("a", Some("deny"));
+        r.matched_rule = Some("899-curl-deny".to_string());
+        assert_eq!(matched_rule_name(&r), "899-curl-deny");
+        r.decided_by_default = true;
+        assert_eq!(matched_rule_name(&r), "");
+        r.matched_rule = None;
+        r.decided_by_default = false;
+        assert_eq!(matched_rule_name(&r), "");
     }
 
     /// E3: the daemon said no rule matched. The flag wins over any name, and

@@ -407,6 +407,59 @@ fn split_session_row_id(id: &str) -> Option<(u64, &str)> {
 mod tests {
     use super::*;
 
+    /// E3: "Make a rule…" on a row the firewall's default action decided. The
+    /// row comes from the bridge's own translation of the fork's event; its
+    /// local id names its session, and the rule is the program-bound
+    /// `AddRule` the bridge accepts.
+    #[test]
+    fn make_a_rule_for_a_default_decided_event_row_goes_to_its_session() {
+        use snitchwatch_bridge::ws_messages::ClientMessage;
+        use snitchwatch_proto::protocol::{Connection, Event, Rule};
+
+        assert_eq!(split_session_row_id("1:event-123"), Some((1, "event-123")));
+        let event = Event {
+            connection: Some(Connection {
+                protocol: "tcp".into(),
+                dst_host: "example.com".into(),
+                dst_ip: "93.184.216.34".into(),
+                dst_port: 443,
+                process_path: "/usr/bin/curl".into(),
+                ..Default::default()
+            }),
+            rule: Some(Rule {
+                description: snitchwatch_bridge::daemon_contract::DEFAULT_ACTION_MARKER.into(),
+                action: "deny".into(),
+                ..Default::default()
+            }),
+            unixnano: 123,
+            ..Default::default()
+        };
+        let mut row = snitchwatch_bridge::translator::connection::event_to_row(&event).unwrap();
+        assert!(row.decided_by_default);
+        row.id = format!("1:{}", row.id);
+        let (session, wire_id) = split_session_row_id(&row.id).unwrap();
+        assert_eq!(session, 1);
+        assert!(wire_id.starts_with("event-123-"), "{wire_id}");
+
+        let msg = crate::make_rule::add_rule_message(
+            &row,
+            "deny",
+            "this_host",
+            "forever",
+            1_700_000_000_000,
+        )
+        .expect("a default-decided row gets a rule");
+        let ClientMessage::AddRule { rule, .. } = msg else {
+            panic!("expected AddRule");
+        };
+        assert_eq!(rule["action"], "deny");
+        let operator = rule["operator"].to_string();
+        assert!(
+            operator.contains("/usr/bin/curl") && operator.contains("example.com"),
+            "{operator}"
+        );
+    }
+
     #[test]
     fn local_row_identity_retains_origin_even_when_wire_ids_are_reused() {
         assert_eq!(split_session_row_id("1:7"), Some((1, "7")));
