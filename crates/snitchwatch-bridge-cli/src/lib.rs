@@ -112,15 +112,17 @@ fn is_profile_message(msg: &ClientMessage) -> bool {
 
 /// After any pause change, show the current pause state everywhere: on the
 /// tray (through the cache, which publishes `FilterOff` while a pause is
-/// active) and to every GUI (`FilterPauseState`, issue #47). The state is
-/// read at send time, so the last announcement always matches the last
-/// change.
+/// active) and to every GUI (`FilterPauseState`, issue #47). Read and sent
+/// under the cache lock, so announcements from the pump, the expiry task and
+/// the last-loss clear reach GUIs in the order they happened, and the last
+/// one always matches the last change.
 async fn announce_pause_state(
     filter_pause: &FilterPause,
     cache: &Mutex<ConnectionCache>,
     broadcast_tx: &broadcast::Sender<ServerMessage>,
 ) {
-    cache.lock().await.resync_tray_state();
+    let cache = cache.lock().await;
+    cache.resync_tray_state();
     let _ = broadcast_tx.send(filter_pause.state().to_message());
 }
 
@@ -199,6 +201,9 @@ pub struct RunningBridge {
     /// The filter-pause expiry task (`filter_pause::expire_pause_on_deadline`).
     /// Like the watchdog, it never ends on its own.
     pause_expiry_handle: tokio::task::JoinHandle<()>,
+    /// The last-loss pause clear (`clear_pause_on_last_session_loss`). It
+    /// holds the cache and broadcast sender, so stop it with the bridge.
+    pause_clear_handle: tokio::task::JoinHandle<()>,
 }
 
 impl RunningBridge {
@@ -206,6 +211,7 @@ impl RunningBridge {
     pub fn shutdown(mut self) {
         self.watchdog_handle.abort();
         self.pause_expiry_handle.abort();
+        self.pause_clear_handle.abort();
         if let Some(tx) = self.ws_shutdown_tx.take() {
             let _ = tx.send(());
         }
@@ -405,7 +411,7 @@ where
     // start, matching every other in-memory bridge state. It ends at the
     // earliest of its deadline, an explicit resume, or the last
     // authenticated GUI session ending.
-    {
+    let pause_clear_handle = {
         let filter_pause = filter_pause.clone();
         let cache = cache.clone();
         let broadcast_tx = broadcast_tx.clone();
@@ -420,8 +426,8 @@ where
                     async move { announce_pause_state(&filter_pause, &cache, &broadcast_tx).await }
                 },
             ),
-        );
-    }
+        )
+    };
     let pause_expiry_handle = {
         let filter_pause = filter_pause.clone();
         let cache = cache.clone();
@@ -663,8 +669,13 @@ where
                         state: tray_pub_for_snapshot.subscribe().borrow().clone(),
                     });
                     // Including `paused: false`: a GUI that was away when a
-                    // pause ended learns it here.
-                    let _ = snapshot_tx.send(filter_pause_for_pump.state().to_message());
+                    // pause ended learns it here. Sent under the cache lock,
+                    // like every other pause announcement, so it can't
+                    // overtake a newer one.
+                    {
+                        let _cache = cache_for_upstream.lock().await;
+                        let _ = snapshot_tx.send(filter_pause_for_pump.state().to_message());
+                    }
                     info!("re-broadcast state snapshots after feed lag");
                 }
                 Ok(UpstreamEffect::VerdictApplied { row_id, .. }) => {
@@ -783,6 +794,7 @@ where
         grpc_shutdown_tx: Some(grpc_shutdown_tx),
         watchdog_handle,
         pause_expiry_handle,
+        pause_clear_handle,
     })
 }
 
@@ -1536,6 +1548,51 @@ mod tests {
         assert_eq!(resumed, (false, None));
         assert_eq!(expiry_notices, 0);
 
+        bridge.shutdown();
+    }
+
+    #[tokio::test]
+    async fn a_snapshot_mid_pause_reports_the_pause_and_its_end() {
+        // A GUI that connects mid-pause learns the state and the end time.
+        let dir = tempfile::tempdir().unwrap();
+        let bridge = test_bridge(&dir).await;
+        let mut rx = bridge.broadcast_tx.subscribe();
+        let mut expiry_notices = 0;
+        let _gui = bridge.client_presence.authenticated_session();
+        bridge
+            .inbound_tx
+            .send(set_filtering_paused(true, Some(1800)))
+            .await
+            .expect("inbound channel closed");
+        let (_, announced_end) = tokio::time::timeout(
+            Duration::from_secs(5),
+            next_pause_state(&mut rx, &mut expiry_notices),
+        )
+        .await
+        .expect("pause state was not broadcast");
+        let announced_end = announced_end.expect("a pause carries its end time");
+
+        bridge
+            .inbound_tx
+            .send(ClientMessage::RequestSnapshot)
+            .await
+            .expect("inbound channel closed");
+        let (paused, snapshot_end) = tokio::time::timeout(
+            Duration::from_secs(5),
+            next_pause_state(&mut rx, &mut expiry_notices),
+        )
+        .await
+        .expect("the snapshot carried no pause state");
+        assert!(paused);
+        let snapshot_end = snapshot_end.expect("a pause carries its end time");
+        assert!(
+            snapshot_end.abs_diff(announced_end) < 1_000,
+            "snapshot end {snapshot_end} drifted from {announced_end}"
+        );
+        assert!(
+            snapshot_end > unix_ms_now() + 1_790_000,
+            "most of the 30 minutes remain"
+        );
         bridge.shutdown();
     }
 

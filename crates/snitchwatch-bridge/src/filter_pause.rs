@@ -32,9 +32,9 @@ pub const ALLOWED_PAUSE_SECS: [u64; 3] = [300, 1800, 3600];
 /// (`setFilteringPaused` without `durationSecs`).
 pub const LEGACY_PAUSE_SECS: u64 = 300;
 
-/// How often [`expire_pause_on_deadline`] checks the deadlines. A short tick
-/// (rather than one long sleep) also notices a deadline that passed while
-/// the machine was suspended.
+/// How often [`expire_pause_on_deadline`] checks the deadlines while a pause
+/// is set. A short tick (rather than one long sleep) also notices a deadline
+/// that passed while the machine was suspended.
 pub const EXPIRY_TICK: Duration = Duration::from_secs(1);
 
 /// A GUI's pause/resume request, decoded from `ClientMessage::SetFilteringPaused`.
@@ -106,6 +106,9 @@ type WallClock = Box<dyn Fn() -> SystemTime + Send + Sync>;
 pub struct FilterPause {
     active: Mutex<Option<Active>>,
     wall_clock: WallClock,
+    /// Wakes [`expire_pause_on_deadline`] when a pause starts, so it ticks
+    /// only while one is set.
+    started: tokio::sync::Notify,
 }
 
 impl Default for FilterPause {
@@ -124,6 +127,7 @@ impl FilterPause {
         Self {
             active: Mutex::new(None),
             wall_clock: Box::new(wall_clock),
+            started: tokio::sync::Notify::new(),
         }
     }
 
@@ -149,7 +153,13 @@ impl FilterPause {
             wall_deadline: now_wall + duration,
             owner_generation,
         });
+        self.started.notify_one();
         Ok(self.state())
+    }
+
+    /// Whether a pause is set, expired or not.
+    fn is_set(&self) -> bool {
+        self.lock().is_some()
     }
 
     /// End any pause. Reports whether there was one to clear.
@@ -247,20 +257,28 @@ fn unix_ms(at: SystemTime) -> u64 {
 
 /// Clear a pause once it expires and run `on_expired` (the bridge sends
 /// `Notice::FilterPauseExpired`, broadcasts the new state and resyncs the
-/// tray). Silent while nothing expires. Runs until aborted.
+/// tray). Ticks every [`EXPIRY_TICK`] only while a pause is set and sleeps
+/// otherwise. Runs until aborted.
 pub async fn expire_pause_on_deadline<F, Fut>(pause: Arc<FilterPause>, on_expired: F)
 where
     F: Fn() -> Fut,
     Fut: Future<Output = ()>,
 {
-    let mut tick = tokio::time::interval(EXPIRY_TICK);
-    // One check after a suspend is enough; don't replay every missed tick.
-    tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
     loop {
-        tick.tick().await;
-        if pause.take_expired() {
-            tracing::info!("filtering pause expired");
-            on_expired().await;
+        // `notify_one` keeps a permit when nobody waits, so a pause that
+        // starts between the check and the wait is not missed.
+        while !pause.is_set() {
+            pause.started.notified().await;
+        }
+        let mut tick = tokio::time::interval(EXPIRY_TICK);
+        // One check after a suspend is enough; don't replay every missed tick.
+        tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        while pause.is_set() {
+            tick.tick().await;
+            if pause.take_expired() {
+                tracing::info!("filtering pause expired");
+                on_expired().await;
+            }
         }
     }
 }
@@ -344,6 +362,14 @@ mod tests {
             before,
             "a rejected request kept the pause as is"
         );
+    }
+
+    #[test]
+    fn a_fractional_duration_is_rejected() {
+        let pause = FilterPause::new();
+        let fractional = Duration::new(300, 1);
+        assert_eq!(pause.pause(fractional, 0), Err(Rejected(fractional)));
+        assert!(!pause.is_active_now());
     }
 
     #[tokio::test(start_paused = true)]
@@ -572,6 +598,51 @@ mod tests {
         wall.advance(Duration::from_secs(60)).await;
         settle().await;
         assert_eq!(expiries.load(Ordering::SeqCst), 1);
+        task.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn expiry_loop_sleeps_while_nothing_is_paused() {
+        // Code review L5: the 1 s tick runs only while a pause is set. Every
+        // tick reads the wall clock, so a still clock-read count means no
+        // wake-ups.
+        let wall = TestWall::new();
+        let reads = Arc::new(AtomicUsize::new(0));
+        let pause = {
+            let (wall, reads) = (wall.clone(), reads.clone());
+            Arc::new(FilterPause::with_wall_clock(move || {
+                reads.fetch_add(1, Ordering::SeqCst);
+                wall.now()
+            }))
+        };
+        let (expiries, task) = spawn_expiry(&pause);
+        settle().await;
+        let idle = reads.load(Ordering::SeqCst);
+        wall.advance(Duration::from_secs(3600)).await;
+        settle().await;
+        assert_eq!(
+            reads.load(Ordering::SeqCst),
+            idle,
+            "woke with nothing paused"
+        );
+
+        pause.pause(Duration::from_secs(300), 0).unwrap();
+        wall.advance(Duration::from_secs(301)).await;
+        settle().await;
+        assert_eq!(
+            expiries.load(Ordering::SeqCst),
+            1,
+            "the pause still expires"
+        );
+
+        let after = reads.load(Ordering::SeqCst);
+        wall.advance(Duration::from_secs(3600)).await;
+        settle().await;
+        assert_eq!(
+            reads.load(Ordering::SeqCst),
+            after,
+            "kept ticking after the pause"
+        );
         task.abort();
     }
 
