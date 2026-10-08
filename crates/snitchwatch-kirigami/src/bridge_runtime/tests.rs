@@ -152,6 +152,34 @@ fn pause_channel() -> (
     })
 }
 
+/// `BridgeFeed.appBoundRulesFor` (inline-Deny plan, version skew): only a row
+/// of the live session whose bridge advertised app-bound rules may get a
+/// remembered inline Deny. An always-true answer would fail open on old
+/// bridges.
+#[tokio::test]
+async fn app_bound_rules_for_row_answers_only_for_the_live_capable_session() {
+    let (broadcast_tx, _) = broadcast::channel(1);
+    let (inbound_tx, mut inbound_rx) = mpsc::channel(4);
+    let connection = Arc::new(Mutex::new(ConnectionState::default()));
+    let handles = BridgeHandles {
+        broadcast_tx,
+        inbound_tx,
+        runtime: Handle::current(),
+        connection: connection.clone(),
+    };
+    let for_row = crate::bridge_feed::app_bound_rules_for_row;
+
+    mark_connected(&connection, true);
+    assert!(for_row(Some(&handles), "1:7"));
+    for row_id in ["2:7", "7", "0:7"] {
+        assert!(!for_row(Some(&handles), row_id), "{row_id}");
+    }
+    assert!(!for_row(None, "1:7"), "no runtime");
+
+    disconnect_and_discard(&connection, &mut inbound_rx);
+    assert!(!for_row(Some(&handles), "1:7"), "after a disconnect");
+}
+
 #[tokio::test]
 async fn disconnect_discards_queued_actions_and_rejects_new_ones() {
     let (broadcast_tx, _) = broadcast::channel(1);

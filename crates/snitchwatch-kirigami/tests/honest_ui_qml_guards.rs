@@ -31,6 +31,10 @@ const ALL_QML: &[(&str, &str)] = &[
         include_str!("../qml/DiagnosticsPage.qml"),
     ),
     ("GeoPage.qml", include_str!("../qml/GeoPage.qml")),
+    (
+        "InlineVerdicts.qml",
+        include_str!("../qml/InlineVerdicts.qml"),
+    ),
     ("main.qml", MAIN_QML),
     (
         "OnboardingPage.qml",

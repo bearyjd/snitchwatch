@@ -15,6 +15,7 @@ fn main() {
             "qml/TrayMenu.qml",
             "qml/SizedOverlaySheet.qml",
             "qml/ConnectionsPage.qml",
+            "qml/InlineVerdicts.qml",
             "qml/PendingDecisionSheet.qml",
             "qml/BlocklistsPage.qml",
             "qml/RulesPage.qml",

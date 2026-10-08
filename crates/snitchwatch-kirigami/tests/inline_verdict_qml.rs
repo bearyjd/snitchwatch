@@ -107,6 +107,10 @@ Controls.ApplicationWindow {
     readonly property string oldBridge: "This firewall bridge is too old to block just this program, so Deny applies to this connection only."
     readonly property string untilRestart: "Blocks this program from this host until the firewall restarts"
     readonly property string allUntilRestart: "Blocks this program from each of these hosts until the firewall restarts"
+    readonly property string notSent: "The connection to the background service was lost, so this Deny wasn't sent."
+    readonly property string disconnected: "The connection to the background service was lost, so Deny can't be sent."
+    // The row delegate re-checked after the feed's state flips.
+    property var absDelegate: null
     property var shown: []
     // `shown.length` after the last `expectShown`.
     property int shownMark: 0
@@ -122,13 +126,17 @@ Controls.ApplicationWindow {
     // plain `var`, so any QObject exposing `submitVerdict` satisfies the
     // page's null guard — and satisfying it is the whole point: with a null
     // feed, submitInlineVerdict returns early and nothing downstream runs.
-    // `appBound` stands for what the row's bridge session advertised.
+    // `appBound` stands for what the row's bridge session advertised, `ok`
+    // for the polled connection state, `queue` for whether a verdict could be
+    // queued (BridgeFeed.submitVerdict's result).
     QtObject {
         id: feedStub
         property int allowCount: 0
         property int denyCount: 0
         property var submitted: []
         property bool appBound: true
+        property bool ok: true
+        property bool queue: true
 
         function submitVerdict(rowId, choice, scope, duration) {
             if (choice === "allow") {
@@ -138,6 +146,7 @@ Controls.ApplicationWindow {
             }
             feedStub.submitted.push({ rowId: rowId, choice: choice, scope: scope,
                                       duration: duration });
+            return feedStub.queue;
         }
         function appBoundRulesFor(rowId) {
             return feedStub.appBound;
@@ -285,11 +294,11 @@ Controls.ApplicationWindow {
                                "kernel Deny all");
         probeWindow.expectShown([probeWindow.sentence], "a once-only Deny all (explained once)");
 
-        probeWindow.expectText(page.inlineDenyText("abs"), probeWindow.untilRestart, "abs tooltip");
-        probeWindow.expectText(page.inlineDenyText("kernel"), probeWindow.sentence, "kernel tooltip");
-        probeWindow.expectText(page.batchDenyText("/usr/bin/wget"), probeWindow.allUntilRestart,
+        probeWindow.expectText(page.inlineVerdicts.denyText("abs"), probeWindow.untilRestart, "abs tooltip");
+        probeWindow.expectText(page.inlineVerdicts.denyText("kernel"), probeWindow.sentence, "kernel tooltip");
+        probeWindow.expectText(page.inlineVerdicts.denyAllText("/usr/bin/wget"), probeWindow.allUntilRestart,
                                "wget Deny all tooltip");
-        probeWindow.expectText(page.batchDenyText("Kernel connection"), probeWindow.sentence,
+        probeWindow.expectText(page.inlineVerdicts.denyAllText("Kernel connection"), probeWindow.sentence,
                                "kernel Deny all tooltip");
 
         // D3 and D2 on the decision sheet.
@@ -329,14 +338,37 @@ Controls.ApplicationWindow {
         probeWindow.expectSent(() => page.submitInlineVerdict("kernel", "deny"),
                                ["kernel deny this_host/this_time"], "old bridge: kernel inline Deny");
         probeWindow.expectShown([probeWindow.sentence], "old bridge: the program comes first");
-        probeWindow.expectText(page.inlineDenyText("abs"), probeWindow.oldBridge,
+        probeWindow.expectText(page.inlineVerdicts.denyText("abs"), probeWindow.oldBridge,
                                "old bridge: abs tooltip");
-        probeWindow.expectText(page.batchDenyText("/usr/bin/wget"), probeWindow.oldBridge,
+        probeWindow.expectText(page.inlineVerdicts.denyAllText("/usr/bin/wget"), probeWindow.oldBridge,
                                "old bridge: wget Deny all tooltip");
         probeWindow.openOn("abs", "curl", "github.com");
         page.decisionSheet.durationSelector.currentIndex = 0;
         probeWindow.check(page.decisionSheet.showDenyOnceHint === false,
                           "old bridge: D2 hint shown");
+        feedStub.appBound = true;
+    }
+
+    // A Deny that couldn't be queued (the connection dropped) says so, not
+    // that the bridge is too old or the program unknown. A disconnected
+    // session never advertises app-bound rules.
+    function checkLostConnection() {
+        feedStub.queue = false;
+        feedStub.appBound = false;
+        probeWindow.expectSent(() => page.submitInlineVerdict("abs", "deny"),
+                               ["abs deny this_host/this_time"], "lost: abs inline Deny");
+        probeWindow.expectShown([probeWindow.notSent], "lost: abs inline Deny");
+        probeWindow.expectSent(() => page.submitBatchVerdict("/usr/bin/wget", "deny"),
+                               ["w1 deny this_host/this_time", "w2 deny this_host/this_time"],
+                               "lost: wget Deny all");
+        probeWindow.expectShown([probeWindow.notSent], "lost: wget Deny all (explained once)");
+        probeWindow.expectSent(() => page.submitInlineVerdict("kernel", "deny"),
+                               ["kernel deny this_host/this_time"], "lost: kernel inline Deny");
+        probeWindow.expectShown([probeWindow.notSent], "lost: kernel inline Deny");
+        probeWindow.expectSent(() => page.submitInlineVerdict("abs", "allow"),
+                               ["abs allow this_host/this_time"], "lost: abs inline Allow");
+        probeWindow.expectShown([], "lost: inline Allow");
+        feedStub.queue = true;
         feedStub.appBound = true;
     }
 
@@ -369,6 +401,17 @@ Controls.ApplicationWindow {
                                    probeWindow.untilRestart, "abs Deny description");
             probeWindow.expectText(kernel.denyButton.Accessible.description,
                                    probeWindow.sentence, "kernel Deny description");
+        }
+        probeWindow.absDelegate = abs;
+    }
+    // The same delegate's text follows the feed: no stale "Blocks this
+    // program" once the connection or the capability is gone.
+    function checkAbsDelegate(expected, what) {
+        probeWindow.check(probeWindow.absDelegate !== null, what + ": no abs delegate");
+        if (probeWindow.absDelegate !== null) {
+            probeWindow.expectText(probeWindow.absDelegate.denyText, expected, what + " tooltip");
+            probeWindow.expectText(probeWindow.absDelegate.denyButton.Accessible.description,
+                                   expected, what + " description");
         }
     }
 
@@ -410,13 +453,25 @@ Controls.ApplicationWindow {
                                             "path-less Deny all clicks");
                     probeWindow.checkCapableBridge();
                     probeWindow.checkOldBridge();
+                    probeWindow.checkLostConnection();
                     done = false;
                 } else if (probeWindow.phase === 2) {
                     probeWindow.checkHeaderDelegates();
                     connModel.setGroupedMode(false);
                     done = false;
-                } else {
+                } else if (probeWindow.phase === 3) {
                     probeWindow.checkRowDelegates();
+                    // The connection drops; its session is no longer capable.
+                    feedStub.appBound = false;
+                    feedStub.ok = false;
+                    done = false;
+                } else if (probeWindow.phase === 4) {
+                    probeWindow.checkAbsDelegate(probeWindow.disconnected, "disconnected");
+                    // Reconnected, to a bridge without app-bound rules.
+                    feedStub.ok = true;
+                    done = false;
+                } else {
+                    probeWindow.checkAbsDelegate(probeWindow.oldBridge, "old bridge after reconnect");
                 }
             } catch (e) {
                 probeWindow.failures.push("phase " + probeWindow.phase + " threw: " + e);

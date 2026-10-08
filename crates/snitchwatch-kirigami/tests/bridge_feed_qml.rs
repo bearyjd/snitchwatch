@@ -124,6 +124,24 @@ Window {
                     throw new Error("BridgeFeed has no verdictNotRemembered signal");
                 }
                 probeWindow.feed.verdictNotRemembered.connect(function (rowId) {});
+
+                // Inline-Deny plan (version skew). ConnectionsPage treats a
+                // missing check as "old bridge", so a rename would quietly
+                // make every inline Deny once-only; with no bridge runtime it
+                // must answer false, never fail open.
+                if (typeof probeWindow.feed.appBoundRulesFor !== "function") {
+                    throw new Error("BridgeFeed has no appBoundRulesFor");
+                }
+                if (probeWindow.feed.appBoundRulesFor("1:7") !== false) {
+                    throw new Error("appBoundRulesFor is not false without a bridge");
+                }
+                // submitVerdict says whether the verdict was queued, so the
+                // page can tell a lost connection from an old bridge. Nothing
+                // can be queued headless.
+                const queued = probeWindow.feed.submitVerdict("1:8", "deny", "this_host", "this_time");
+                if (queued !== false) {
+                    throw new Error("submitVerdict reported " + queued + " without a bridge");
+                }
             } finally {
                 Qt.quit();
             }

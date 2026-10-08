@@ -44,124 +44,27 @@ Kirigami.ScrollablePage {
     // inbound pump. Null in isolated component tests (the sheet no-ops then).
     property var bridgeFeed: null
 
-    // Issue #18: the shared submit path for the inline row buttons and
-    // (looped) the process-header batch actions. `BridgeFeed.submitVerdict`
-    // builds and dispatches the typed verdict, so `pending_decision`'s Rust
-    // mapping stays the single source of the wire shape.
-    //
-    // Scope is the sheet's default, "This host only". The duration is per row,
-    // from `ConnectionsModel.inlineDurationFor` (Rust `inline_deny.rs`, plan
-    // 2026-10-08-inline-deny-until-restart.md):
-    //   * Allow sends "This time", the sheet's default, as before.
-    //   * Deny deliberately doesn't. The daemon never stores a once-only rule,
-    //     so it would drop only the packet that asked, and the SYN the kernel
-    //     resends a second later would get through or be asked about again.
-    //     It sends "until_quit" (daemon "until restart"), a rule the bridge
-    //     binds to the program and this host, when the row's program file is
-    //     known and its bridge advertised app-bound rules. Otherwise it can
-    //     only send "This time", and says why.
-    //
-    // Returns why a Deny could only apply to this connection
-    // ("program_unknown" / "bridge_too_old"), else "" (also when nothing was
-    // sent). Leaves the explanation to the caller, so a batch explains once.
-    function sendInlineVerdict(rowId, choice) {
-        if (page.bridgeFeed === null) {
-            // Unreachable in the running app (main.qml always injects the
-            // feed) — but the caller has already latched `row.submitted`, so
-            // a silent return here would leave a permanently un-decidable
-            // row with no trace of why. Never swallow this.
-            console.warn("sendInlineVerdict: no bridgeFeed; verdict dropped for", rowId);
-            return "";
-        }
-        const appBound = page.rowAppBoundRules(rowId);
-        const duration = page.model
-            ? page.model.inlineDurationFor(rowId, choice, appBound) : "this_time";
-        page.bridgeFeed.submitVerdict(rowId, choice, "this_host", duration);
-        if (choice !== "deny" || duration !== "this_time") {
-            return "";
-        }
-        return page.model ? page.model.inlineDenyFor(rowId, appBound) : "program_unknown";
+    // The inline row and process-header buttons: what they send and what
+    // they say (plan 2026-10-08-inline-deny-until-restart.md).
+    InlineVerdicts {
+        id: verdictHelper
+        model: page.model
+        bridgeFeed: page.bridgeFeed
+        onExplained: text => page.showPassiveNotice(text)
     }
+    // Exposed for the headless probe (tests/inline_verdict_qml.rs).
+    property alias inlineVerdicts: verdictHelper
 
-    // Whether `rowId`'s bridge session advertised app-bound rules, asked at
-    // the time of use. Anything else, including a feed without the check,
-    // means no: a bridge before #50/#71 would turn an inline Deny into an
-    // all-apps rule.
-    function rowAppBoundRules(rowId) {
-        return page.bridgeFeed !== null
-            && typeof page.bridgeFeed.appBoundRulesFor === "function"
-            && page.bridgeFeed.appBoundRulesFor(rowId) === true;
-    }
-
-    // A row's inline Allow/Deny. Also the entry point
+    // Issue #18: a row's inline Allow/Deny. Also the entry point
     // `tests/inline_verdict_qml.rs` drives, to exercise the click -> submit ->
     // verdict-message path without synthesizing a real mouse click.
     function submitInlineVerdict(rowId, choice) {
-        page.explainOnceOnlyDeny(page.sendInlineVerdict(rowId, choice));
+        verdictHelper.submit(rowId, choice);
     }
 
-    // Issue #18 batch actions: parse ConnectionsModel.pendingRowIdsForProcess
-    // and submit the same choice for every pending row under that process
-    // group, each with its own inline duration. No new WS protocol — this is
-    // just N SetVerdict messages.
+    // Issue #18: a process header's "Allow all"/"Deny all".
     function submitBatchVerdict(processKey, choice, sourceSession) {
-        if (!page.model) {
-            return;
-        }
-        let onceOnly = "";
-        try {
-            const ids = JSON.parse(page.model.pendingRowIdsForProcess(processKey));
-            for (const id of ids) {
-                // The synchronous model flush may have installed a replacement
-                // service's snapshot since this header was displayed.
-                if (sourceSession && !id.startsWith(sourceSession)) {
-                    continue;
-                }
-                onceOnly = page.sendInlineVerdict(id, choice) || onceOnly;
-            }
-        } catch (e) {
-            // Malformed JSON from the model would be a Rust-side bug;
-            // degrade to a no-op rather than throwing in the delegate, but
-            // don't swallow it silently.
-            console.warn("submitBatchVerdict failed:", e);
-        }
-        page.explainOnceOnlyDeny(onceOnly);
-    }
-
-    // Why an inline Deny applies to this connection only, for each reason
-    // `inlineDenyFor` gives. Fixed text.
-    function onceOnlyDenySentence(reason) {
-        return reason === "bridge_too_old" ? page.bridgeTooOldSentence : page.notRememberedSentence;
-    }
-
-    function explainOnceOnlyDeny(reason) {
-        if (reason !== "") {
-            page.showPassiveNotice(page.onceOnlyDenySentence(reason));
-        }
-    }
-
-    // What an inline Deny does for `rowId` (`inlineDenyFor`).
-    function inlineDenyKind(rowId) {
-        return page.model
-            ? page.model.inlineDenyFor(rowId, page.rowAppBoundRules(rowId)) : "program_unknown";
-    }
-
-    // What a row's inline Deny does: its tooltip and accessible description.
-    function inlineDenyText(rowId) {
-        const deny = page.inlineDenyKind(rowId);
-        return deny === "until_restart"
-            ? "Blocks this program from this host until the firewall restarts"
-            : page.onceOnlyDenySentence(deny);
-    }
-
-    // The same for a process header's "Deny all". A group is keyed by the
-    // program's path, so its first pending row speaks for all of them.
-    function batchDenyText(processKey) {
-        const deny = page.inlineDenyKind(
-            page.model ? page.model.firstPendingRowIdForProcess(processKey) : "");
-        return deny === "until_restart"
-            ? "Blocks this program from each of these hosts until the firewall restarts"
-            : page.onceOnlyDenySentence(deny);
+        verdictHelper.submitBatch(processKey, choice, sourceSession);
     }
 
     // Snapshot of the row currently shown in the inspector sheet.
@@ -190,7 +93,7 @@ Kirigami.ScrollablePage {
     // (`rowDetailsJson`'s `bindableProcessPath`); false until known.
     property bool inspectBindableProcessPath: false
     // Whether the inspected row's bridge advertised app-bound rules
-    // (`rowAppBoundRules`); false until known.
+    // (`InlineVerdicts.rowAppBoundRules`); false until known.
     property bool inspectAppBoundRules: false
     // Exposed for the headless probes (tests/verdict_not_remembered_qml.rs,
     // tests/inline_verdict_qml.rs).
@@ -275,18 +178,10 @@ Kirigami.ScrollablePage {
         }
     }
 
-    // Issue #44: why an answer for a row's program applies only to this
-    // connection. Fixed text — the bridge's `RuleRefusal::describe` sentence
-    // (a test keeps them equal) — never the wire `reason`.
-    readonly property string notRememberedSentence: "Snitchwatch couldn't identify this program's file, so this answer applies only to this connection."
-    // Why an inline Deny applies to this connection only when the row's
-    // bridge didn't advertise app-bound rules (see `rowAppBoundRules`).
-    readonly property string bridgeTooOldSentence: "This firewall bridge is too old to block just this program, so Deny applies to this connection only."
-
     // Issue #44: the bridge answered a remembered verdict for this connection
-    // only.
+    // only. Fixed text, never the wire `reason`.
     function showVerdictNotRemembered() {
-        page.showPassiveNotice(page.notRememberedSentence);
+        page.showPassiveNotice(verdictHelper.notRememberedSentence);
     }
 
     function showPassiveNotice(text) {
@@ -410,9 +305,9 @@ Kirigami.ScrollablePage {
             // buttons' tooltip and accessible description. Empty where the
             // button is hidden, so other delegates never look it up.
             readonly property string denyText: !row.isGroupHeader && row.pending
-                ? page.inlineDenyText(row.rowId) : ""
+                ? verdictHelper.denyText(row.rowId) : ""
             readonly property string denyAllText: row.isGroupHeader && row.depth === 0
-                && row.groupPending > 0 ? page.batchDenyText(row.groupKey) : ""
+                && row.groupPending > 0 ? verdictHelper.denyAllText(row.groupKey) : ""
             // Exposed for the headless probe (tests/inline_verdict_qml.rs).
             property alias denyButton: rowDenyButton
             property alias denyAllButton: batchDenyButton
@@ -611,8 +506,8 @@ Kirigami.ScrollablePage {
                 // Issue #18: inline Allow/Deny on pending leaf rows, so a
                 // decision no longer requires opening the inspector sheet.
                 // Allow submits the sheet's defaults; Deny remembers until the
-                // firewall restarts where it can (see the page-level
-                // `sendInlineVerdict` doc comment above). Disabled after one
+                // firewall restarts where it can (see InlineVerdicts.qml).
+                // Disabled after one
                 // click (see `row.submitted`'s doc comment) until the round
                 // trip flips `pending` and resets the guard.
                 RowLayout {
@@ -698,7 +593,7 @@ Kirigami.ScrollablePage {
         page.inspectMatchedRule = row.matchedRule;
         page.inspectMatchedRuleDisplay = row.matchedRuleDisplay;
         page.applyRowDetails(row.rowId);
-        page.inspectAppBoundRules = page.rowAppBoundRules(row.rowId);
+        page.inspectAppBoundRules = verdictHelper.rowAppBoundRules(row.rowId);
         // The row may be a stale pending one, and with the connection already
         // down no `ok` change follows to catch it.
         page.recheckInspectedRow();

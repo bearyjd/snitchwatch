@@ -114,8 +114,8 @@ ColumnLayout {
             textRole: "label"
             valueRole: "token"
             // Back-reference: `model[0]`'s token ("this_host") is the scope
-            // `ConnectionsPage.qml`'s inline Allow/Deny buttons hardcode
-            // (`sendInlineVerdict`) so an inline decision has the scope this
+            // the Connections page's inline Allow/Deny buttons hardcode
+            // (`InlineVerdicts.send`) so an inline decision has the scope this
             // sheet would submit unchanged. Reordering this model or changing
             // its first entry's token changes that default too.
             model: [
