@@ -198,6 +198,17 @@ pub enum ServerMessage {
         row_id: String,
         reason: String,
     },
+    /// Who holds opensnitchd's single prompt slot: the oldest open prompt,
+    /// how many are open, and how many times the daemon applied its default
+    /// action meanwhile (`None` while unknown; retries count again, and the
+    /// figure is a lower bound). Sent on every
+    /// change and in the `RequestSnapshot` answer; a native-shell extension
+    /// legacy clients ignore. See `crate::prompt_slot`.
+    PromptSlot {
+        holder: Option<crate::prompt_slot::PromptSlotHolder>,
+        holders: u32,
+        defaulted_at_least: Option<u64>,
+    },
     /// Daemon-reported aggregate counters from `Statistics` on a `Ping` call
     /// (issue #19). The `Connection` proto carries no byte counters, so the
     /// Traffic tab is rebuilt around these daemon-side aggregates instead of
@@ -705,6 +716,7 @@ mod tests {
                 paused: false,
                 expires_at_unix_ms: None,
             },
+            crate::prompt_slot::PromptSlot::default().message(),
         ] {
             let action = serde_json::to_value(message).unwrap()["action"]
                 .as_str()

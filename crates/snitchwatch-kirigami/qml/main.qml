@@ -32,6 +32,10 @@ Kirigami.ApplicationWindow {
     BridgeFeed {
         id: bridgeFeed
     }
+    // Who holds opensnitchd's single prompt slot (PromptSlotBanner below).
+    PromptSlotStatus {
+        id: promptSlotStatus
+    }
     // The service can restart independently of this GUI. Polling is cheap
     // (one mutex-backed string read) and makes the existing banner accurately
     // report both disconnects and reconnects without adding a Qt event bridge.
@@ -39,7 +43,11 @@ Kirigami.ApplicationWindow {
         interval: 1000
         running: true
         repeat: true
-        onTriggered: bridgeFeed.refresh()
+        onTriggered: {
+            bridgeFeed.refresh();
+            // Also ticks the prompt-slot banner's wait time.
+            promptSlotStatus.refresh();
+        }
     }
     // QML ids are lexical names, not properties on `root`. Components below
     // need explicitly named root properties to inject these objects without
@@ -187,6 +195,7 @@ Kirigami.ApplicationWindow {
         wizardController.probe();
         notificationController.startBridgeFeed();
         trayController.startBridgeFeed();
+        promptSlotStatus.startBridgeFeed();
     }
 
     // Inbound routing (Task 13): model request signals carry a JSON-encoded
@@ -342,7 +351,9 @@ Kirigami.ApplicationWindow {
         readonly property int pendingAgeCeilingSecs: 120
         readonly property int pendingAgeSecs: root.connectionsModelRef.oldestPendingAgeSecs
         readonly property int pendingCount: root.connectionsModelRef.pendingCount
-        visible: pendingAgeSecs >= pendingAgeThresholdSecs && pendingAgeSecs < pendingAgeCeilingSecs
+        // A bridge that reports the prompt slot gets PromptSlotBanner instead.
+        visible: !promptSlotStatus.supported
+            && pendingAgeSecs >= pendingAgeThresholdSecs && pendingAgeSecs < pendingAgeCeilingSecs
         // Deliberately does not say "silently allowed": that's only true
         // under DefaultAction: allow, opensnitchd's own fail-open default.
         // This repo's shipped packaging config overrides that to
@@ -360,6 +371,26 @@ Kirigami.ApplicationWindow {
             + ". Until you respond, other new connections may be silently allowed or denied"
             + " without your review — this is a known opensnitchd limitation, not a"
             + " Snitchwatch bug."
+    }
+
+    // Prompt-slot plan, part A, and issue #78: which prompt holds the slot,
+    // for how long, what it costs, and that a pause can't get past it. Only
+    // from a bridge that reports it; the estimate above covers older ones.
+    PromptSlotBanner {
+        id: promptSlotBanner
+        z: 999
+        anchors {
+            top: daemonHealthBanner.visible ? daemonHealthBanner.bottom
+                : (bridgeBanner.visible ? bridgeBanner.bottom : parent.top)
+            left: parent.left
+            right: parent.right
+            margins: Kirigami.Units.smallSpacing
+        }
+        status: promptSlotStatus
+        model: root.connectionsModelRef
+        bridgeFeed: root.bridgeFeedRef
+        onExplained: text => root.showPassiveNotification(text, "long")
+        onReviewRequested: root.pageStack.replace(connectionsPageComponent)
     }
 
     // Keeps ConnectionsModel.oldestPendingAgeSecs (and therefore

@@ -14,9 +14,15 @@ use core::pin::Pin;
 use cxx_qt::{CxxQtType, Threading};
 use cxx_qt_lib::{QDateTime, QString, QTimeZone};
 
-use crate::bridge_runtime::{BridgePauseState, BridgeTrayState};
+use tokio::sync::watch;
+
+use crate::bridge_runtime::{
+    BridgeHandles, BridgePauseState, BridgeTrayState, ReceivedPauseState, ReceivedPromptSlot,
+    ReceivedTrayState,
+};
 use crate::tray::{
-    build_set_filtering_paused_json, derive_menu_label, derive_tooltip, menu_label_token,
+    build_set_filtering_paused_json, derive_menu_label, derive_tooltip_with_slot,
+    live_slot_holders, menu_label_token,
 };
 
 #[cxx_qt::bridge]
@@ -82,6 +88,10 @@ pub struct TrayControllerRust {
     paused_until: QString,
     tray_state: BridgeTrayState,
     pause_state: BridgePauseState,
+    /// How many prompts hold the daemon's single slot (issue #78;
+    /// `PromptSlot` messages), as of session `slot_session`.
+    slot_holders: u32,
+    slot_session: u64,
 }
 
 impl Default for TrayControllerRust {
@@ -92,13 +102,15 @@ impl Default for TrayControllerRust {
             paused_until: QString::default(),
             tray_state: BridgeTrayState::Idle,
             pause_state: BridgePauseState::NOT_PAUSED,
+            slot_holders: 0,
+            slot_session: 0,
         }
     }
 }
 
 impl qobject::TrayController {
     fn start_bridge_feed(self: Pin<&mut Self>) {
-        let (Some(mut tray_rx), Some(mut pause_rx), Some(handles)) = (
+        let (Some(tray_rx), Some(pause_rx), Some(handles)) = (
             crate::bridge_runtime::tray_rx(),
             crate::bridge_runtime::pause_rx(),
             crate::bridge_runtime::handles(),
@@ -126,34 +138,79 @@ impl qobject::TrayController {
 
         // Each change is applied only if it still belongs to the live bridge
         // session when the queued Qt callback runs.
-        let runtime = handles.runtime().clone();
-        let tray_thread = qt_thread.clone();
-        let tray_handles = handles.clone();
-        runtime.spawn(async move {
-            while tray_rx.changed().await.is_ok() {
-                let received = tray_rx.borrow().clone();
-                let session_handles = tray_handles.clone();
-                let _ = tray_thread.queue(move |mut qobject| {
-                    if session_handles.is_current_session(received.connection_id) {
-                        qobject.as_mut().rust_mut().tray_state = received.state;
-                        qobject.refresh();
-                    }
-                });
-            }
-        });
-        runtime.spawn(async move {
-            while pause_rx.changed().await.is_ok() {
-                let received = pause_rx.borrow().clone();
-                let session_handles = handles.clone();
-                let _ = qt_thread.queue(move |mut qobject| {
-                    if session_handles.is_current_session(received.connection_id) {
-                        qobject.as_mut().rust_mut().pause_state = received.state;
-                        qobject.refresh();
-                    }
-                });
-            }
-        });
+        if let Some(slot_rx) = crate::bridge_runtime::prompt_slot_rx() {
+            spawn_slot_feed(&handles, qt_thread.clone(), slot_rx);
+        }
+        spawn_tray_feed(&handles, qt_thread.clone(), tray_rx);
+        spawn_pause_feed(&handles, qt_thread, pause_rx);
     }
+}
+
+type TrayThread = cxx_qt::CxxQtThread<qobject::TrayController>;
+
+/// The prompt slot's holders (issue #78), from the current value on.
+fn spawn_slot_feed(
+    handles: &BridgeHandles,
+    qt_thread: TrayThread,
+    mut slot_rx: watch::Receiver<ReceivedPromptSlot>,
+) {
+    let handles = handles.clone();
+    handles.runtime().clone().spawn(async move {
+        loop {
+            let received = slot_rx.borrow_and_update().clone();
+            let session_handles = handles.clone();
+            let _ = qt_thread.queue(move |mut qobject| {
+                if session_handles.is_current_session(received.connection_id) {
+                    qobject.as_mut().rust_mut().slot_holders = received.holders;
+                    qobject.as_mut().rust_mut().slot_session = received.connection_id;
+                    qobject.refresh();
+                }
+            });
+            if slot_rx.changed().await.is_err() {
+                break;
+            }
+        }
+    });
+}
+
+fn spawn_tray_feed(
+    handles: &BridgeHandles,
+    qt_thread: TrayThread,
+    mut tray_rx: watch::Receiver<ReceivedTrayState>,
+) {
+    let handles = handles.clone();
+    handles.runtime().clone().spawn(async move {
+        while tray_rx.changed().await.is_ok() {
+            let received = tray_rx.borrow().clone();
+            let session_handles = handles.clone();
+            let _ = qt_thread.queue(move |mut qobject| {
+                if session_handles.is_current_session(received.connection_id) {
+                    qobject.as_mut().rust_mut().tray_state = received.state;
+                    qobject.refresh();
+                }
+            });
+        }
+    });
+}
+
+fn spawn_pause_feed(
+    handles: &BridgeHandles,
+    qt_thread: TrayThread,
+    mut pause_rx: watch::Receiver<ReceivedPauseState>,
+) {
+    let handles = handles.clone();
+    handles.runtime().clone().spawn(async move {
+        while pause_rx.changed().await.is_ok() {
+            let received = pause_rx.borrow().clone();
+            let session_handles = handles.clone();
+            let _ = qt_thread.queue(move |mut qobject| {
+                if session_handles.is_current_session(received.connection_id) {
+                    qobject.as_mut().rust_mut().pause_state = received.state;
+                    qobject.refresh();
+                }
+            });
+        }
+    });
 }
 
 impl qobject::TrayController {
@@ -179,7 +236,10 @@ impl qobject::TrayController {
             (true, Some(ms)) => local_hh_mm(ms),
             _ => String::new(),
         };
-        let tooltip = derive_tooltip(&self.rust().tray_state, &pause, &until);
+        let session_is_current = crate::bridge_runtime::handles()
+            .is_some_and(|handles| handles.is_current_session(self.rust().slot_session));
+        let holders = live_slot_holders(self.rust().slot_holders, session_is_current);
+        let tooltip = derive_tooltip_with_slot(&self.rust().tray_state, &pause, &until, holders);
         let label = derive_menu_label(&self.rust().tray_state, &pause);
         self.as_mut().set_tooltip(QString::from(&tooltip));
         self.as_mut()

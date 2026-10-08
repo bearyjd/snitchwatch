@@ -83,6 +83,7 @@ SizedOverlaySheet {
         for (const key in texts) {
             texts[key].text = given[key] || "";
         }
+        simHostEmpty.checked = given.destHostEmpty === true;
         simPort.value = given.destPort === undefined ? 443 : given.destPort;
         const protocol = simProtocol.indexOfValue(given.protocol || "");
         simProtocol.currentIndex = protocol >= 0 ? protocol : 0;
@@ -107,6 +108,7 @@ SizedOverlaySheet {
         const json = sheet.model.simulate(JSON.stringify({
             processPath: simProcessPath.text,
             destHost: simHost.text,
+            destHostEmpty: simHostEmpty.checked,
             destPort: simPort.value,
             protocol: simProtocol.currentValue,
             parentPaths: simParentPaths.text,
@@ -150,7 +152,7 @@ SizedOverlaySheet {
             wrapMode: Text.Wrap
             opacity: 0.7
             font: Kirigami.Theme.smallFont
-            text: "Evaluates a candidate connection against the currently cached rules, using opensnitchd's own precedence rules. This is a simulation over cached data, not a live daemon verdict. A blank field is unknown, so rules with a condition on it are reported as not evaluated instead of being guessed; the one exception is the destination host, where blank means a connection to a bare IP address."
+            text: "Evaluates a candidate connection against the currently cached rules, using opensnitchd's own precedence rules. This is a simulation over cached data, not a live daemon verdict. A blank field is unknown, so rules with a condition on it are reported as not evaluated instead of being guessed. To say a connection has no host name at all (it goes to a bare IP address), tick “No host name”."
         }
         Controls.Label {
             Layout.fillWidth: true
@@ -184,7 +186,13 @@ SizedOverlaySheet {
                 objectName: "simHost"
                 Kirigami.FormData.label: "Destination host"
                 placeholderText: "github.com"
+                enabled: !simHostEmpty.checked
                 Layout.fillWidth: true
+            }
+            Controls.CheckBox {
+                id: simHostEmpty
+                objectName: "simHostEmpty"
+                text: "No host name (a connection to a bare IP address)"
             }
             Controls.SpinBox {
                 id: simPort

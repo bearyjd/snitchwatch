@@ -57,6 +57,16 @@ pub struct ReceivedPauseState {
     pub state: BridgePauseState,
 }
 
+/// The bridge's last `PromptSlot` (prompt-slot plan, part A), session-
+/// labelled and guarded like [`ReceivedTrayState`]. Empty until one arrives.
+#[derive(Clone, Debug, Default)]
+pub struct ReceivedPromptSlot {
+    pub connection_id: u64,
+    pub holder: Option<snitchwatch_bridge::prompt_slot::PromptSlotHolder>,
+    pub holders: u32,
+    pub defaulted_at_least: Option<u64>,
+}
+
 #[derive(Clone, Debug)]
 pub struct ReceivedNotice {
     pub connection_id: u64,
@@ -64,11 +74,12 @@ pub struct ReceivedNotice {
 }
 
 /// Senders for the shell state the runtime forwards next to the model feed:
-/// tray state, desktop notices and filter-pause state.
+/// tray state, desktop notices, filter-pause state and the prompt slot.
 struct ShellFeeds {
     tray_tx: watch::Sender<ReceivedTrayState>,
     notice_tx: broadcast::Sender<ReceivedNotice>,
     pause_tx: watch::Sender<ReceivedPauseState>,
+    slot_tx: watch::Sender<ReceivedPromptSlot>,
 }
 
 struct QueuedClientMessage {
@@ -84,6 +95,8 @@ struct ConnectionState {
     /// `bridge_capabilities::APP_BOUND_RULES` in its acknowledgement. Set
     /// with `connection_id`, cleared on disconnect.
     app_bound_rules: bool,
+    /// The same for `bridge_capabilities::PROMPT_SLOT`.
+    prompt_slot: bool,
 }
 
 /// Why a UI request was not handed to the currently connected service.
@@ -123,6 +136,16 @@ impl BridgeHandles {
     /// (`crate::inline_deny`).
     pub fn advertises_app_bound_rules(&self, connection_id: u64) -> bool {
         advertises_app_bound_rules(&self.connection, connection_id)
+    }
+
+    /// Whether the live session's bridge sends `PromptSlot` messages. Without
+    /// it the GUI keeps its own estimate from pending rows.
+    pub fn advertises_prompt_slot(&self) -> bool {
+        let state = self
+            .connection
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.connected && state.prompt_slot
     }
 
     pub fn runtime(&self) -> &Handle {
@@ -190,6 +213,7 @@ struct ClientRuntime {
     tray_tx: watch::Sender<ReceivedTrayState>,
     notice_tx: broadcast::Sender<ReceivedNotice>,
     pause_tx: watch::Sender<ReceivedPauseState>,
+    slot_tx: watch::Sender<ReceivedPromptSlot>,
     // Runtime must outlive its reconnect task. The task is intentionally
     // detached: GUI shutdown drops the process and hence this runtime.
     _runtime: Runtime,
@@ -313,6 +337,7 @@ fn start_inner() -> anyhow::Result<ClientRuntime> {
         connection_id: 0,
         state: BridgePauseState::NOT_PAUSED,
     });
+    let (slot_tx, _) = watch::channel(ReceivedPromptSlot::default());
     let status = Arc::new(Mutex::new(LinkStatus::connecting()));
     let connection = Arc::new(Mutex::new(ConnectionState::default()));
     let handles = BridgeHandles {
@@ -330,6 +355,7 @@ fn start_inner() -> anyhow::Result<ClientRuntime> {
             tray_tx: tray_tx.clone(),
             notice_tx: notice_tx.clone(),
             pause_tx: pause_tx.clone(),
+            slot_tx: slot_tx.clone(),
         },
         connection,
     ));
@@ -339,6 +365,7 @@ fn start_inner() -> anyhow::Result<ClientRuntime> {
         tray_tx,
         notice_tx,
         pause_tx,
+        slot_tx,
         _runtime: runtime,
     })
 }
@@ -417,11 +444,11 @@ async fn connect_and_relay(
         &ClientMessage::RequestSnapshot,
     )?))
     .await?;
-    let connection_id = mark_connected(
+    let advertised = |name: &str| capabilities.iter().any(|c| c == name);
+    let connection_id = mark_connected_with(
         connection,
-        capabilities
-            .iter()
-            .any(|c| c == snitchwatch_bridge::bridge_capabilities::APP_BOUND_RULES),
+        advertised(snitchwatch_bridge::bridge_capabilities::APP_BOUND_RULES),
+        advertised(snitchwatch_bridge::bridge_capabilities::PROMPT_SLOT),
     );
     set_status(status, LinkState::Connected, "Connected to bridge service");
     tracing::info!(socket = %socket_path.display(), "connected to bridge service");
@@ -447,6 +474,7 @@ async fn connect_and_relay(
                             &shell.notice_tx,
                             &shell.pause_tx,
                         );
+                        forward_prompt_slot(&message, connection_id, &shell.slot_tx);
                         let _ = broadcast_tx.send(ReceivedServerMessage { connection_id, message });
                     }
                     // A newer bridge may send actions this client doesn't
@@ -494,13 +522,26 @@ async fn await_authentication_ack(
     }
 }
 
+/// A session without the prompt-slot capability, for tests.
+#[cfg(test)]
 fn mark_connected(connection: &Mutex<ConnectionState>, app_bound_rules: bool) -> u64 {
+    mark_connected_with(connection, app_bound_rules, false)
+}
+
+/// Starts a session with the capabilities its acknowledgement advertised,
+/// under the lock that bumps the id.
+fn mark_connected_with(
+    connection: &Mutex<ConnectionState>,
+    app_bound_rules: bool,
+    prompt_slot: bool,
+) -> u64 {
     let mut state = connection
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     state.connection_id = state.connection_id.wrapping_add(1);
     state.connected = true;
     state.app_bound_rules = app_bound_rules;
+    state.prompt_slot = prompt_slot;
     state.connection_id
 }
 
@@ -535,8 +576,30 @@ fn disconnect_and_discard(
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         state.connected = false;
         state.app_bound_rules = false;
+        state.prompt_slot = false;
     }
     while inbound_rx.try_recv().is_ok() {}
+}
+
+/// Keeps the session's latest `PromptSlot` (prompt-slot plan, part A).
+fn forward_prompt_slot(
+    message: &ServerMessage,
+    connection_id: u64,
+    slot_tx: &watch::Sender<ReceivedPromptSlot>,
+) {
+    if let ServerMessage::PromptSlot {
+        holder,
+        holders,
+        defaulted_at_least,
+    } = message
+    {
+        let _ = slot_tx.send_replace(ReceivedPromptSlot {
+            connection_id,
+            holder: holder.clone(),
+            holders: *holders,
+            defaulted_at_least: *defaulted_at_least,
+        });
+    }
 }
 
 fn forward_shell_message(
@@ -615,6 +678,13 @@ pub fn pause_rx() -> Option<watch::Receiver<ReceivedPauseState>> {
     }
 }
 
+pub fn prompt_slot_rx() -> Option<watch::Receiver<ReceivedPromptSlot>> {
+    match STARTED.get()? {
+        Outcome::Running(runtime) => Some(runtime.slot_tx.subscribe()),
+        Outcome::Failed(_) => None,
+    }
+}
+
 pub fn notice_rx() -> Option<broadcast::Receiver<ReceivedNotice>> {
     match STARTED.get()? {
         Outcome::Running(runtime) => Some(runtime.notice_tx.subscribe()),
@@ -652,3 +722,7 @@ mod tests;
 #[cfg(test)]
 #[path = "bridge_runtime/verdict_gate_tests.rs"]
 mod verdict_gate_tests;
+
+#[cfg(test)]
+#[path = "bridge_runtime/prompt_slot_tests.rs"]
+mod prompt_slot_tests;

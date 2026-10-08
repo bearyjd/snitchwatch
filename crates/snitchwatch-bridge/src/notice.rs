@@ -51,6 +51,24 @@ pub enum Notice {
     VerdictNotRemembered {
         row_id: u64,
     },
+    /// A prompt that held opensnitchd's single prompt slot was released, and
+    /// meanwhile the daemon applied its default action `count` times (retries
+    /// count again; `prompt_slot`). Carries no connection data.
+    PromptSlotSummary {
+        row_id: u64,
+        count: u64,
+    },
+}
+
+/// The body of a `Notice::PromptSlotSummary`. Fixed text around a count of
+/// the daemon's `rule_misses`, which counts unanswered packets: a retry, or the
+/// waiting connection's own retransmit, counts again, so it says "times".
+pub fn prompt_slot_summary_text(count: u64) -> String {
+    let times = if count == 1 { "time" } else { "times" };
+    format!(
+        "While that prompt was open, the firewall applied its default action {count} {times} \
+         (retries count again)."
+    )
 }
 
 pub struct NoticeBus {
@@ -95,6 +113,22 @@ mod tests {
         let got_b = rx_b.recv().await.unwrap();
         assert_eq!(got_a, Notice::DaemonAway);
         assert_eq!(got_b, Notice::DaemonAway);
+    }
+
+    /// The daemon's `rule_misses` counts unanswered packets, not connections:
+    /// a retry, or the waiting connection's own retransmit, counts again.
+    #[test]
+    fn the_prompt_slot_summary_counts_times_not_connections() {
+        assert_eq!(
+            prompt_slot_summary_text(1),
+            "While that prompt was open, the firewall applied its default action 1 time \
+             (retries count again)."
+        );
+        assert_eq!(
+            prompt_slot_summary_text(7),
+            "While that prompt was open, the firewall applied its default action 7 times \
+             (retries count again)."
+        );
     }
 
     #[tokio::test]
