@@ -284,7 +284,7 @@ async fn a_busy_removal_is_sent_once_the_queue_drains() {
     let state = entry_state(&curated, FLATPAK);
     assert_eq!(state.status, EntryStatus::NotRemoved);
     assert!(state.problem.unwrap().contains("busy"));
-    // The queue drains (its OKs change the rule list): asked again.
+    // The queue drains; the next pass (run here by hand) asks again.
     gate.notify_one();
     eventually("the queue to drain", || harness.seen().len() == queued).await;
     curated.reconcile().await;
