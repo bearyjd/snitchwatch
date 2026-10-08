@@ -139,7 +139,7 @@ Controls.ApplicationWindow {
         "1:to-allow": "Not answered in time: usually allowed (the firewall's default action)",
         "1:to-deny": "Not answered in time: denied (the firewall's default action)",
         "1:to-unknown": "Not answered in time: the firewall's default action",
-        "1:later-blocked": "Decided later: this program is blocked for 5 minutes",
+        "1:later-blocked": "Decided later: blocked this program for 5 minutes",
         "1:later-default": "Decided later: the firewall's default action",
         "1:later-kernel": "Decided later: usually allowed (the firewall's default action)"
     })

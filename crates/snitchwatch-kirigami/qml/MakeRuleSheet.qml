@@ -117,7 +117,7 @@ ColumnLayout {
             && sheet.model.makeRule(sheet.rowId, choice, scopeBox.currentValue,
                                     durationBox.currentValue) === true;
         sheet.result = sent
-            ? "The rule was sent to the firewall service."
+            ? "The rule was sent to the background service."
             : "The rule couldn't be sent.";
         if (sent) {
             form.visible = false;
