@@ -20,7 +20,7 @@ async fn spawn_test_service() -> std::net::SocketAddr {
         tx,
         tray_pub,
         notice_bus,
-        Arc::new(AtomicBool::new(false)),
+        Arc::new(FilterPause::new()),
     )
     .into_server();
 
@@ -71,7 +71,7 @@ async fn ping_with_stats_events_inserts_decided_rows_with_matched_rule() {
         tx,
         tray_pub,
         notice_bus,
-        Arc::new(AtomicBool::new(false)),
+        Arc::new(FilterPause::new()),
     )
     .into_server();
     tokio::spawn(async move {
@@ -162,7 +162,7 @@ async fn ping_with_stats_broadcasts_daemon_statistics() {
         tx,
         tray_pub,
         notice_bus,
-        Arc::new(AtomicBool::new(false)),
+        Arc::new(FilterPause::new()),
     )
     .into_server();
     tokio::spawn(async move {
@@ -258,8 +258,8 @@ async fn subscribe_captures_firewall_status() {
     let (tx, _rx) = broadcast::channel::<ServerMessage>(16);
     let tray_pub = Arc::new(crate::tray_state::TrayStatePublisher::new());
     let notice_bus = Arc::new(crate::notice::NoticeBus::new());
-    let filtering_paused = Arc::new(AtomicBool::new(false));
-    let service = UiService::new(cache, tx, tray_pub, notice_bus, filtering_paused);
+    let filter_pause = Arc::new(FilterPause::new());
+    let service = UiService::new(cache, tx, tray_pub, notice_bus, filter_pause);
 
     let handle = service.firewall_status_handle();
     assert_eq!(*handle.lock().unwrap(), None);
@@ -311,7 +311,7 @@ async fn persistent_allow_verdict_broadcasts_rule_for_live_clients() {
         tx,
         tray_pub,
         notice_bus,
-        Arc::new(AtomicBool::new(false)),
+        Arc::new(FilterPause::new()),
     );
     let _gui_session = svc.client_presence().authenticated_session();
     let svc = svc.into_server();
@@ -408,7 +408,7 @@ async fn ask_rule_returns_deny_rule_when_resolved_with_deny() {
         tx,
         tray_pub,
         notice_bus,
-        Arc::new(AtomicBool::new(false)),
+        Arc::new(FilterPause::new()),
     );
     let _gui_session = svc.client_presence().authenticated_session();
     let svc = svc.into_server();
@@ -483,7 +483,7 @@ async fn deny_scope_narrowed_notice_sanitizes_attacker_chosen_process_name() {
         tx,
         tray_pub,
         notice_bus,
-        Arc::new(AtomicBool::new(false)),
+        Arc::new(FilterPause::new()),
     );
     let _gui_session = svc.client_presence().authenticated_session();
     let svc = svc.into_server();
@@ -572,7 +572,7 @@ async fn two_concurrent_ask_rules_get_distinct_ask_ids() {
         tx,
         tray_pub,
         notice_bus,
-        Arc::new(AtomicBool::new(false)),
+        Arc::new(FilterPause::new()),
     );
     let _gui_session = svc.client_presence().authenticated_session();
     let svc = svc.into_server();
@@ -644,7 +644,7 @@ async fn ask_rule_deny_publishes_recent_block_then_reverts_to_idle() {
         tx,
         tray_pub.clone(),
         notice_bus,
-        Arc::new(AtomicBool::new(false)),
+        Arc::new(FilterPause::new()),
     );
     let _gui_session = svc.client_presence().authenticated_session();
 
@@ -709,7 +709,7 @@ async fn second_deny_within_ttl_supersedes_first_blocks_revert_timer() {
         tx,
         tray_pub.clone(),
         notice_bus,
-        Arc::new(AtomicBool::new(false)),
+        Arc::new(FilterPause::new()),
     );
     let _gui_session = svc.client_presence().authenticated_session();
     let mut tray_rx = tray_pub.subscribe();
@@ -782,6 +782,66 @@ async fn second_deny_within_ttl_supersedes_first_blocks_revert_timer() {
     assert_eq!(*tray_rx.borrow(), TrayState::Idle);
 }
 
+#[tokio::test(start_paused = true)]
+async fn recent_block_reverts_to_filter_off_while_paused() {
+    // Issue #47: a prompt raised before the pause and denied mid-pause shows
+    // RecentBlock, and its revert must land on FilterOff, not Idle.
+    use crate::translator::connection::ask_row_id;
+
+    let tray_pub = Arc::new(crate::tray_state::TrayStatePublisher::new());
+    let filter_pause = Arc::new(FilterPause::new());
+    let cache = Arc::new(Mutex::new(
+        ConnectionCache::with_tray_publisher(64, tray_pub.clone())
+            .with_filter_pause(filter_pause.clone()),
+    ));
+    let (tx, _rx) = broadcast::channel::<ServerMessage>(16);
+    let svc = UiService::new(
+        cache.clone(),
+        tx,
+        tray_pub.clone(),
+        Arc::new(crate::notice::NoticeBus::new()),
+        filter_pause.clone(),
+    );
+    let _gui_session = svc.client_presence().authenticated_session();
+    let mut tray_rx = tray_pub.subscribe();
+
+    let ask = tokio::spawn({
+        let svc = svc.clone();
+        async move {
+            svc.ask_rule(Request::new(Connection {
+                dst_host: "tracker.example.com".into(),
+                process_path: "/usr/bin/curl".into(),
+                ..Default::default()
+            }))
+            .await
+        }
+    });
+    tray_rx.changed().await.unwrap();
+    assert_eq!(*tray_rx.borrow(), TrayState::Pending(1));
+
+    filter_pause.pause(Duration::from_secs(300), 0).unwrap();
+    cache.lock().await.resync_tray_state();
+    cache
+        .lock()
+        .await
+        .resolve(
+            &ask_row_id(1),
+            Verdict::Deny,
+            VerdictDuration::Once,
+            VerdictScope::ThisHost,
+        )
+        .unwrap();
+    ask.await.unwrap().unwrap();
+    assert!(matches!(
+        &*tray_rx.borrow_and_update(),
+        TrayState::RecentBlock { .. }
+    ));
+
+    tokio::time::advance(RECENT_BLOCK_TTL + Duration::from_millis(100)).await;
+    tray_rx.changed().await.unwrap();
+    assert_eq!(*tray_rx.borrow(), TrayState::FilterOff);
+}
+
 #[test]
 fn process_bound_verdict_rule_survives_the_wire_round_trip() {
     // Issue #44: toggling a rule in the GUI sends its wire shape back through
@@ -821,14 +881,9 @@ async fn ask_rule_auto_allows_immediately_when_filtering_paused() {
     let cache = Arc::new(Mutex::new(ConnectionCache::new(64)));
     let (tx, mut rx) = broadcast::channel::<ServerMessage>(16);
     let notice_bus = Arc::new(crate::notice::NoticeBus::new());
-    let filtering_paused = Arc::new(AtomicBool::new(true));
-    let svc = UiService::new(
-        cache.clone(),
-        tx,
-        tray_pub,
-        notice_bus,
-        filtering_paused.clone(),
-    );
+    let filter_pause = Arc::new(FilterPause::new());
+    filter_pause.pause(Duration::from_secs(300), 0).unwrap();
+    let svc = UiService::new(cache.clone(), tx, tray_pub, notice_bus, filter_pause);
     // A pause only applies while a GUI is authenticated (see
     // `paused_bridge_without_an_authenticated_gui_defers_to_the_daemon`).
     let _gui_session = svc.client_presence().authenticated_session();
@@ -870,12 +925,14 @@ async fn paused_bridge_without_an_authenticated_gui_defers_to_the_daemon() {
     // paused system bridge would keep auto-allowing after logout.
     let cache = Arc::new(Mutex::new(ConnectionCache::new(64)));
     let (tx, mut rx) = broadcast::channel::<ServerMessage>(16);
+    let filter_pause = Arc::new(FilterPause::new());
+    filter_pause.pause(Duration::from_secs(300), 0).unwrap();
     let svc = UiService::new(
         cache.clone(),
         tx,
         Arc::new(crate::tray_state::TrayStatePublisher::new()),
         Arc::new(crate::notice::NoticeBus::new()),
-        Arc::new(AtomicBool::new(true)),
+        filter_pause,
     );
 
     let status = svc
@@ -906,8 +963,8 @@ async fn ask_rule_prompts_normally_when_not_paused() {
     let cache = Arc::new(Mutex::new(ConnectionCache::new(64)));
     let (tx, _rx) = broadcast::channel::<ServerMessage>(16);
     let notice_bus = Arc::new(crate::notice::NoticeBus::new());
-    let filtering_paused = Arc::new(AtomicBool::new(false));
-    let svc = UiService::new(cache.clone(), tx, tray_pub, notice_bus, filtering_paused);
+    let filter_pause = Arc::new(FilterPause::new());
+    let svc = UiService::new(cache.clone(), tx, tray_pub, notice_bus, filter_pause);
     let _gui_session = svc.client_presence().authenticated_session();
 
     let ask_handle = tokio::spawn({
@@ -943,6 +1000,109 @@ async fn ask_rule_prompts_normally_when_not_paused() {
     assert_eq!(rule.action, "allow");
 }
 
+#[tokio::test]
+async fn a_departed_guis_pause_does_not_auto_allow_for_the_next_gui() {
+    // Security review F1: the last-loss clear runs in its own task. A GUI that
+    // authenticates before it runs must still be prompted, not auto-allowed
+    // under the departed GUI's pause.
+    let (svc, cache, mut rx) = lifecycle_service();
+    let presence = svc.client_presence();
+    let gui_a = presence.authenticated_session();
+    crate::client_presence::apply_pause_request(
+        &presence,
+        &svc.filter_pause,
+        crate::filter_pause::PauseRequest::Pause(Duration::from_secs(300)),
+        Some(presence.current_generation()),
+        None,
+    );
+    drop(gui_a); // No clear task in this test: the gap stays open.
+    let _gui_b = presence.authenticated_session();
+    assert!(svc.filter_pause.is_active_now());
+
+    let ask = tokio::spawn({
+        let svc = svc.clone();
+        async move {
+            svc.ask_rule(Request::new(Connection {
+                dst_host: "next-gui.example.com".into(),
+                process_path: "/usr/bin/curl".into(),
+                ..Default::default()
+            }))
+            .await
+        }
+    });
+    let row_id = lifecycle_pending(&mut rx).await;
+    assert_eq!(
+        cache.lock().await.pending_count(),
+        1,
+        "GUI B was auto-allowed under GUI A's pause"
+    );
+    cache
+        .lock()
+        .await
+        .resolve(
+            &row_id,
+            Verdict::Deny,
+            VerdictDuration::Once,
+            VerdictScope::ThisHost,
+        )
+        .unwrap();
+    assert_eq!(ask.await.unwrap().unwrap().into_inner().action, "deny");
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_expired_pause_prompts_before_its_expiry_tick_runs() {
+    // Issue #47: `ask_rule` checks the deadline itself, so an expired pause
+    // stops auto-allowing even before the expiry task clears it.
+    use crate::translator::connection::ask_row_id;
+
+    let tray_pub = Arc::new(crate::tray_state::TrayStatePublisher::new());
+    let cache = Arc::new(Mutex::new(ConnectionCache::with_tray_publisher(
+        64,
+        tray_pub.clone(),
+    )));
+    let (tx, _rx) = broadcast::channel::<ServerMessage>(16);
+    let filter_pause = Arc::new(FilterPause::new());
+    let svc = UiService::new(
+        cache.clone(),
+        tx,
+        tray_pub.clone(),
+        Arc::new(crate::notice::NoticeBus::new()),
+        filter_pause.clone(),
+    );
+    let _gui_session = svc.client_presence().authenticated_session();
+    filter_pause.pause(Duration::from_secs(300), 0).unwrap();
+    tokio::time::advance(Duration::from_secs(301)).await;
+    let mut tray_rx = tray_pub.subscribe();
+
+    let ask = tokio::spawn({
+        let svc = svc.clone();
+        async move {
+            svc.ask_rule(Request::new(Connection {
+                dst_host: "after-pause.example.com".into(),
+                process_path: "/usr/bin/curl".into(),
+                ..Default::default()
+            }))
+            .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(5), tray_rx.changed())
+        .await
+        .expect("no prompt: the expired pause auto-allowed")
+        .unwrap();
+    assert_eq!(*tray_rx.borrow(), TrayState::Pending(1));
+    cache
+        .lock()
+        .await
+        .resolve(
+            &ask_row_id(1),
+            Verdict::Deny,
+            VerdictDuration::Once,
+            VerdictScope::ThisHost,
+        )
+        .unwrap();
+    assert_eq!(ask.await.unwrap().unwrap().into_inner().action, "deny");
+}
+
 fn text_alert(
     what: snitchwatch_proto::protocol::alert::What,
     r#type: snitchwatch_proto::protocol::alert::Type,
@@ -968,8 +1128,8 @@ async fn post_alert_records_error_into_alert_store() {
     let (tx, _rx) = broadcast::channel::<ServerMessage>(16);
     let tray_pub = Arc::new(crate::tray_state::TrayStatePublisher::new());
     let notice_bus = Arc::new(crate::notice::NoticeBus::new());
-    let filtering_paused = Arc::new(AtomicBool::new(false));
-    let svc = UiService::new(cache, tx, tray_pub, notice_bus, filtering_paused);
+    let filter_pause = Arc::new(FilterPause::new());
+    let svc = UiService::new(cache, tx, tray_pub, notice_bus, filter_pause);
 
     let alert = text_alert(
         alert::What::ProcMonitor,
@@ -995,8 +1155,8 @@ async fn post_alert_with_wired_diagnostics_ctx_broadcasts_fresh_report() {
     let (tx, mut rx) = broadcast::channel::<ServerMessage>(16);
     let tray_pub = Arc::new(crate::tray_state::TrayStatePublisher::new());
     let notice_bus = Arc::new(crate::notice::NoticeBus::new());
-    let filtering_paused = Arc::new(AtomicBool::new(false));
-    let svc = UiService::new(cache, tx, tray_pub, notice_bus, filtering_paused);
+    let filter_pause = Arc::new(FilterPause::new());
+    let svc = UiService::new(cache, tx, tray_pub, notice_bus, filter_pause);
 
     let probe: Arc<dyn crate::diagnostics::kernel_probe::KernelProbe> =
         Arc::new(FakeKernelProbe::all_ok());
@@ -1033,8 +1193,8 @@ async fn post_alert_without_wired_diagnostics_ctx_does_not_broadcast() {
     let (tx, mut rx) = broadcast::channel::<ServerMessage>(16);
     let tray_pub = Arc::new(crate::tray_state::TrayStatePublisher::new());
     let notice_bus = Arc::new(crate::notice::NoticeBus::new());
-    let filtering_paused = Arc::new(AtomicBool::new(false));
-    let svc = UiService::new(cache, tx, tray_pub, notice_bus, filtering_paused);
+    let filter_pause = Arc::new(FilterPause::new());
+    let svc = UiService::new(cache, tx, tray_pub, notice_bus, filter_pause);
 
     let alert = text_alert(alert::What::Firewall, alert::Type::Error, "nft down");
     svc.post_alert(Request::new(alert)).await.unwrap();
@@ -1057,8 +1217,8 @@ async fn subscribe_does_not_clear_previously_stored_alerts() {
     let (tx, _rx) = broadcast::channel::<ServerMessage>(16);
     let tray_pub = Arc::new(crate::tray_state::TrayStatePublisher::new());
     let notice_bus = Arc::new(crate::notice::NoticeBus::new());
-    let filtering_paused = Arc::new(AtomicBool::new(false));
-    let svc = UiService::new(cache, tx, tray_pub, notice_bus, filtering_paused);
+    let filter_pause = Arc::new(FilterPause::new());
+    let svc = UiService::new(cache, tx, tray_pub, notice_bus, filter_pause);
 
     let alert = text_alert(alert::What::ProcMonitor, alert::Type::Error, "boom");
     svc.post_alert(Request::new(alert)).await.unwrap();
@@ -1108,7 +1268,7 @@ fn lifecycle_service() -> (
         tx,
         Arc::new(TrayStatePublisher::new()),
         Arc::new(NoticeBus::new()),
-        Arc::new(AtomicBool::new(false)),
+        Arc::new(FilterPause::new()),
     );
     (svc, cache, rx)
 }

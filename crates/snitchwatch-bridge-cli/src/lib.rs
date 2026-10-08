@@ -23,6 +23,7 @@ use snitchwatch_bridge::blocklists::store::BlocklistStore;
 use snitchwatch_bridge::blocklists::BlocklistsManager;
 use snitchwatch_bridge::cache::connections::ConnectionCache;
 use snitchwatch_bridge::cache::traffic_tracker::TrafficTracker;
+use snitchwatch_bridge::filter_pause::{FilterPause, PauseRequest};
 use snitchwatch_bridge::grpc_server::UiService;
 use snitchwatch_bridge::notice::{Notice, NoticeBus};
 use snitchwatch_bridge::profiles::network_watcher;
@@ -109,6 +110,22 @@ fn is_profile_message(msg: &ClientMessage) -> bool {
     )
 }
 
+/// After any pause change, show the current pause state everywhere: on the
+/// tray (through the cache, which publishes `FilterOff` while a pause is
+/// active) and to every GUI (`FilterPauseState`, issue #47). Read and sent
+/// under the cache lock, so announcements from the pump, the expiry task and
+/// the last-loss clear reach GUIs in the order they happened, and the last
+/// one always matches the last change.
+async fn announce_pause_state(
+    filter_pause: &FilterPause,
+    cache: &Mutex<ConnectionCache>,
+    broadcast_tx: &broadcast::Sender<ServerMessage>,
+) {
+    let cache = cache.lock().await;
+    cache.resync_tray_state();
+    let _ = broadcast_tx.send(filter_pause.state().to_message());
+}
+
 /// Runtime configuration for [`run`].
 #[derive(Debug, Clone)]
 pub struct BridgeConfig {
@@ -181,12 +198,20 @@ pub struct RunningBridge {
     /// external state to flush on stop — unlike the WS/gRPC servers, an
     /// abort is sufficient rather than a graceful oneshot handshake.
     watchdog_handle: tokio::task::JoinHandle<()>,
+    /// The filter-pause expiry task (`filter_pause::expire_pause_on_deadline`).
+    /// Like the watchdog, it never ends on its own.
+    pause_expiry_handle: tokio::task::JoinHandle<()>,
+    /// The last-loss pause clear (`clear_pause_on_last_session_loss`). It
+    /// holds the cache and broadcast sender, so stop it with the bridge.
+    pause_clear_handle: tokio::task::JoinHandle<()>,
 }
 
 impl RunningBridge {
     /// Signal every background task to stop. Safe to call more than once.
     pub fn shutdown(mut self) {
         self.watchdog_handle.abort();
+        self.pause_expiry_handle.abort();
+        self.pause_clear_handle.abort();
         if let Some(tx) = self.ws_shutdown_tx.take() {
             let _ = tx.send(());
         }
@@ -268,10 +293,11 @@ where
     // republish `TrayState::Pending(n)`/`Idle` on every change — see
     // `cache::connections`'s `tray_state_tests` module for the existing
     // coverage this wiring already had, just never used in production.
-    let cache = Arc::new(Mutex::new(ConnectionCache::with_tray_publisher(
-        config.cache_capacity,
-        tray_pub.clone(),
-    )));
+    let filter_pause = Arc::new(FilterPause::new());
+    let cache = Arc::new(Mutex::new(
+        ConnectionCache::with_tray_publisher(config.cache_capacity, tray_pub.clone())
+            .with_filter_pause(filter_pause.clone()),
+    ));
 
     // --- BlocklistsManager (in-memory store; callers may swap in a persisted one) ---
     let blocklists_store = Arc::new(
@@ -381,33 +407,50 @@ where
         });
     }
 
-    // Shared with the inbound pump below (SetFilteringPaused toggles it) and
-    // read by UiService::ask_rule on every call. Resets to unpaused on every
-    // bridge start, matching every other in-memory bridge state.
-    let filtering_paused = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    // ...and is cleared when the last authenticated GUI leaves, so a pause
-    // doesn't carry over to the next GUI to connect (issue #47; see
-    // `apply_pause_request` for the one remaining race).
-    {
+    // The filtering pause (issue #47) resets to unpaused on every bridge
+    // start, matching every other in-memory bridge state. It ends at the
+    // earliest of its deadline, an explicit resume, or the last
+    // authenticated GUI session ending.
+    let pause_clear_handle = {
+        let filter_pause = filter_pause.clone();
         let cache = cache.clone();
+        let broadcast_tx = broadcast_tx.clone();
         tokio::spawn(
             snitchwatch_bridge::client_presence::clear_pause_on_last_session_loss(
                 client_presence.session_losses(),
-                filtering_paused.clone(),
+                filter_pause.clone(),
                 move || {
+                    let filter_pause = filter_pause.clone();
                     let cache = cache.clone();
-                    async move { cache.lock().await.resync_tray_state() }
+                    let broadcast_tx = broadcast_tx.clone();
+                    async move { announce_pause_state(&filter_pause, &cache, &broadcast_tx).await }
                 },
             ),
-        );
-    }
+        )
+    };
+    let pause_expiry_handle = {
+        let filter_pause = filter_pause.clone();
+        let cache = cache.clone();
+        let broadcast_tx = broadcast_tx.clone();
+        let notice_bus = notice_bus.clone();
+        tokio::spawn(snitchwatch_bridge::filter_pause::expire_pause_on_deadline(
+            filter_pause.clone(),
+            move || {
+                notice_bus.send(Notice::FilterPauseExpired);
+                let filter_pause = filter_pause.clone();
+                let cache = cache.clone();
+                let broadcast_tx = broadcast_tx.clone();
+                async move { announce_pause_state(&filter_pause, &cache, &broadcast_tx).await }
+            },
+        ))
+    };
 
     let ui_service_inner = UiService::new(
         cache.clone(),
         broadcast_tx.clone(),
         tray_pub.clone(),
         notice_bus.clone(),
-        filtering_paused.clone(),
+        filter_pause.clone(),
     )
     .with_client_presence(client_presence.clone());
     // Grabbed before `.into_server()` consumes `ui_service_inner` — the
@@ -528,9 +571,8 @@ where
     let profiles_for_upstream = profiles_mgr;
     let blocklists_for_upstream = blocklists_mgr;
     let snapshot_tx = broadcast_tx.clone();
-    let tray_pub_for_pause = tray_pub.clone();
     let tray_pub_for_snapshot = tray_pub.clone();
-    let filtering_paused_for_pump = filtering_paused.clone();
+    let filter_pause_for_pump = filter_pause.clone();
     let presence_for_pump = client_presence.clone();
     let diagnostics_ctx_for_pump = diagnostics_ctx.clone();
     let notifications_for_pump = notifications_tx.clone();
@@ -538,21 +580,29 @@ where
     tokio::spawn(async move {
         while let Some(msg) = inbound_rx.recv().await {
             // Special-cased before is_profile_message/upstream::apply — this
-            // toggles a shared flag + tray state, not cache state those own.
-            // See docs/superpowers/plans/2026-07-12-tray-filter-off.md.
-            if let ClientMessage::SetFilteringPaused { paused } = msg {
-                // Goes through `apply_pause_request`: a pause queued by a GUI
-                // that has since disconnected must not take effect (#47).
-                let paused = snitchwatch_bridge::client_presence::apply_pause_request(
+            // changes the shared filter pause + tray state, not cache state
+            // those own. See docs/superpowers/plans/2026-07-12-tray-filter-off.md.
+            if let ClientMessage::SetFilteringPaused {
+                paused,
+                duration_secs,
+                sender_generation,
+                sender_uid,
+            } = msg
+            {
+                // Every pause goes through `apply_pause_request` (#47): it is
+                // timed, and it applies only while its sender's GUI session
+                // generation is current.
+                snitchwatch_bridge::client_presence::apply_pause_request(
                     &presence_for_pump,
-                    &filtering_paused_for_pump,
-                    paused,
+                    &filter_pause_for_pump,
+                    PauseRequest::from_wire(paused, duration_secs),
+                    sender_generation,
+                    sender_uid,
                 );
-                if paused {
-                    tray_pub_for_pause.set(TrayState::FilterOff);
-                } else {
-                    cache_for_upstream.lock().await.resync_tray_state();
-                }
+                // Always, even for an ignored or rejected request, so every
+                // GUI and the tray show the state that is actually in effect.
+                announce_pause_state(&filter_pause_for_pump, &cache_for_upstream, &snapshot_tx)
+                    .await;
                 continue;
             }
             if let ClientMessage::RecheckDiagnostics = msg {
@@ -583,7 +633,8 @@ where
                     // A feed consumer lagged past delta messages and asked for
                     // full state. Re-broadcast the snapshots the bridge itself
                     // owns: connection rows (clear + full insert, the same
-                    // sequence a fresh view needs), blocklists, and profiles.
+                    // sequence a fresh view needs), blocklists, profiles,
+                    // diagnostics, tray and filter-pause state.
                     // Rules are excluded — the bridge holds no rule cache (see
                     // `ClientMessage::RequestSnapshot` docs).
                     let rows = cache_for_upstream.lock().await.rows().to_vec();
@@ -609,6 +660,14 @@ where
                     let _ = snapshot_tx.send(ServerMessage::TrayState {
                         state: tray_pub_for_snapshot.subscribe().borrow().clone(),
                     });
+                    // Including `paused: false`: a GUI that was away when a
+                    // pause ended learns it here. Sent under the cache lock,
+                    // like every other pause announcement, so it can't
+                    // overtake a newer one.
+                    {
+                        let _cache = cache_for_upstream.lock().await;
+                        let _ = snapshot_tx.send(filter_pause_for_pump.state().to_message());
+                    }
                     info!("re-broadcast state snapshots after feed lag");
                 }
                 Ok(UpstreamEffect::VerdictApplied { row_id, .. }) => {
@@ -726,6 +785,8 @@ where
         ws_shutdown_tx: Some(ws_shutdown_tx),
         grpc_shutdown_tx: Some(grpc_shutdown_tx),
         watchdog_handle,
+        pause_expiry_handle,
+        pause_clear_handle,
     })
 }
 
@@ -1256,8 +1317,9 @@ mod tests {
         let mut saw_blocklists = false;
         let mut saw_profiles = false;
         let mut saw_tray = false;
+        let mut saw_pause = false;
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
-        while !(saw_clear && saw_blocklists && saw_profiles && saw_tray) {
+        while !(saw_clear && saw_blocklists && saw_profiles && saw_tray && saw_pause) {
             let msg = tokio::time::timeout_at(deadline, rx.recv())
                 .await
                 .expect("snapshot messages not re-broadcast within timeout")
@@ -1269,6 +1331,11 @@ mod tests {
                 ServerMessage::TrayState {
                     state: TrayState::Idle,
                 } => saw_tray = true,
+                // A GUI that was away when a pause ended learns it here.
+                ServerMessage::FilterPauseState {
+                    paused: false,
+                    expires_at_unix_ms: None,
+                } => saw_pause = true,
                 _ => {}
             }
         }
@@ -1357,7 +1424,7 @@ mod tests {
 
         bridge
             .inbound_tx
-            .send(ClientMessage::SetFilteringPaused { paused: true })
+            .send(set_filtering_paused(true, Some(1800)))
             .await
             .expect("inbound channel closed");
         // The pump always publishes a tray state for a pause request, so
@@ -1367,8 +1434,9 @@ mod tests {
             .expect("pump did not handle the pause request")
             .unwrap();
         assert_ne!(*bridge.tray_rx.borrow(), TrayState::FilterOff);
-        // A GUI arriving afterwards must not inherit a pause. (Registering
-        // before the pump ran would be the documented remaining race.)
+        // A GUI arriving afterwards must not inherit a pause. (A GUI that
+        // registers before the pump runs is covered by the sender-generation
+        // stamp; see `client_presence`'s tests.)
         let _gui = bridge.client_presence.authenticated_session();
         assert!(
             tokio::time::timeout(Duration::from_millis(200), bridge.tray_rx.changed())
@@ -1381,34 +1449,242 @@ mod tests {
         bridge.shutdown();
     }
 
-    #[tokio::test]
-    async fn set_filtering_paused_toggles_tray_state() {
-        let dir = tempfile::tempdir().unwrap();
-        let cfg = BridgeConfig {
+    fn set_filtering_paused(paused: bool, duration_secs: Option<u64>) -> ClientMessage {
+        ClientMessage::SetFilteringPaused {
+            paused,
+            duration_secs,
+            sender_generation: None,
+            sender_uid: None,
+        }
+    }
+
+    fn unix_ms_now() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+    }
+
+    async fn test_bridge(dir: &tempfile::TempDir) -> RunningBridge {
+        run(BridgeConfig {
             grpc_bind: "127.0.0.1:0".parse().unwrap(),
             ws_socket_path: dir.path().join("bridge.sock"),
             cache_capacity: 64,
-        };
-        let mut bridge = run(cfg).await.expect("run failed");
+        })
+        .await
+        .expect("run failed")
+    }
+
+    /// Wait for the next `FilterPauseState` broadcast, skipping unrelated
+    /// messages and counting `FilterPauseExpired` notices on the way.
+    async fn next_pause_state(
+        rx: &mut broadcast::Receiver<ServerMessage>,
+        expiry_notices: &mut usize,
+    ) -> (bool, Option<u64>) {
+        loop {
+            match rx.recv().await.expect("broadcast channel closed") {
+                ServerMessage::FilterPauseState {
+                    paused,
+                    expires_at_unix_ms,
+                } => return (paused, expires_at_unix_ms),
+                ServerMessage::Notice {
+                    notice: Notice::FilterPauseExpired,
+                } => *expiry_notices += 1,
+                _ => {}
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn set_filtering_paused_toggles_tray_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut bridge = test_bridge(&dir).await;
+        let mut rx = bridge.broadcast_tx.subscribe();
+        let mut expiry_notices = 0;
         // A pause only takes effect while a GUI is authenticated (#47).
         let _gui = bridge.client_presence.authenticated_session();
 
+        let before = unix_ms_now();
         bridge
             .inbound_tx
-            .send(ClientMessage::SetFilteringPaused { paused: true })
+            .send(set_filtering_paused(true, Some(1800)))
             .await
             .expect("inbound channel closed");
         bridge.tray_rx.changed().await.unwrap();
         assert_eq!(*bridge.tray_rx.borrow(), TrayState::FilterOff);
+        let (paused, expires_at) = tokio::time::timeout(
+            Duration::from_secs(5),
+            next_pause_state(&mut rx, &mut expiry_notices),
+        )
+        .await
+        .expect("pause state was not broadcast");
+        assert!(paused);
+        let expires_at = expires_at.expect("a pause carries its end time");
+        assert!(
+            (before + 1_800_000..=unix_ms_now() + 1_800_000).contains(&expires_at),
+            "a 30-minute pause must end 30 minutes from now, got {expires_at}"
+        );
 
         bridge
             .inbound_tx
-            .send(ClientMessage::SetFilteringPaused { paused: false })
+            .send(set_filtering_paused(false, None))
             .await
             .expect("inbound channel closed");
         bridge.tray_rx.changed().await.unwrap();
         assert_eq!(*bridge.tray_rx.borrow(), TrayState::Idle);
+        let resumed = tokio::time::timeout(
+            Duration::from_secs(5),
+            next_pause_state(&mut rx, &mut expiry_notices),
+        )
+        .await
+        .expect("resume was not broadcast");
+        assert_eq!(resumed, (false, None));
+        assert_eq!(expiry_notices, 0);
 
+        bridge.shutdown();
+    }
+
+    #[tokio::test]
+    async fn a_snapshot_mid_pause_reports_the_pause_and_its_end() {
+        // A GUI that connects mid-pause learns the state and the end time.
+        let dir = tempfile::tempdir().unwrap();
+        let bridge = test_bridge(&dir).await;
+        let mut rx = bridge.broadcast_tx.subscribe();
+        let mut expiry_notices = 0;
+        let _gui = bridge.client_presence.authenticated_session();
+        bridge
+            .inbound_tx
+            .send(set_filtering_paused(true, Some(1800)))
+            .await
+            .expect("inbound channel closed");
+        let (_, announced_end) = tokio::time::timeout(
+            Duration::from_secs(5),
+            next_pause_state(&mut rx, &mut expiry_notices),
+        )
+        .await
+        .expect("pause state was not broadcast");
+        let announced_end = announced_end.expect("a pause carries its end time");
+
+        bridge
+            .inbound_tx
+            .send(ClientMessage::RequestSnapshot)
+            .await
+            .expect("inbound channel closed");
+        let (paused, snapshot_end) = tokio::time::timeout(
+            Duration::from_secs(5),
+            next_pause_state(&mut rx, &mut expiry_notices),
+        )
+        .await
+        .expect("the snapshot carried no pause state");
+        assert!(paused);
+        let snapshot_end = snapshot_end.expect("a pause carries its end time");
+        assert!(
+            snapshot_end.abs_diff(announced_end) < 1_000,
+            "snapshot end {snapshot_end} drifted from {announced_end}"
+        );
+        assert!(
+            snapshot_end > unix_ms_now() + 1_790_000,
+            "most of the 30 minutes remain"
+        );
+        bridge.shutdown();
+    }
+
+    #[tokio::test]
+    async fn legacy_pause_without_a_duration_expires_after_five_minutes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut bridge = test_bridge(&dir).await;
+        let mut rx = bridge.broadcast_tx.subscribe();
+        let mut expiry_notices = 0;
+        let _gui = bridge.client_presence.authenticated_session();
+
+        // The bridge started on real time; from here on the test drives the
+        // clock (auto-advancing whenever the runtime is idle).
+        tokio::time::pause();
+        let start = tokio::time::Instant::now();
+        bridge
+            .inbound_tx
+            .send(set_filtering_paused(true, None))
+            .await
+            .expect("inbound channel closed");
+        let (paused, _) = tokio::time::timeout(
+            Duration::from_secs(5),
+            next_pause_state(&mut rx, &mut expiry_notices),
+        )
+        .await
+        .expect("pause state was not broadcast");
+        assert!(paused, "an old client's pause must still work");
+        assert_eq!(*bridge.tray_rx.borrow_and_update(), TrayState::FilterOff);
+
+        let (paused, expires_at) = tokio::time::timeout(
+            Duration::from_secs(600),
+            next_pause_state(&mut rx, &mut expiry_notices),
+        )
+        .await
+        .expect("the pause never expired");
+        let elapsed = start.elapsed();
+        assert_eq!((paused, expires_at), (false, None));
+        assert!(
+            (Duration::from_secs(300)..=Duration::from_secs(301)).contains(&elapsed),
+            "legacy pause ended after {elapsed:?}, not 300 s"
+        );
+        assert_eq!(*bridge.tray_rx.borrow(), TrayState::Idle);
+
+        // The expiry notice is relayed separately; collect it, and make sure
+        // there is exactly one.
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        while let Ok(msg) = rx.try_recv() {
+            if let ServerMessage::Notice {
+                notice: Notice::FilterPauseExpired,
+            } = msg
+            {
+                expiry_notices += 1;
+            }
+        }
+        assert_eq!(expiry_notices, 1);
+        bridge.shutdown();
+    }
+
+    #[tokio::test]
+    async fn losing_the_last_gui_clears_the_pause_without_an_expiry_notice() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut bridge = test_bridge(&dir).await;
+        let mut rx = bridge.broadcast_tx.subscribe();
+        let mut expiry_notices = 0;
+        let gui = bridge.client_presence.authenticated_session();
+
+        bridge
+            .inbound_tx
+            .send(set_filtering_paused(true, Some(3600)))
+            .await
+            .expect("inbound channel closed");
+        let (paused, _) = tokio::time::timeout(
+            Duration::from_secs(5),
+            next_pause_state(&mut rx, &mut expiry_notices),
+        )
+        .await
+        .expect("pause state was not broadcast");
+        assert!(paused);
+
+        drop(gui);
+        let cleared = tokio::time::timeout(
+            Duration::from_secs(5),
+            next_pause_state(&mut rx, &mut expiry_notices),
+        )
+        .await
+        .expect("clearing the pause was not broadcast");
+        assert_eq!(cleared, (false, None));
+        assert_eq!(*bridge.tray_rx.borrow_and_update(), TrayState::Idle);
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        while let Ok(msg) = rx.try_recv() {
+            if let ServerMessage::Notice {
+                notice: Notice::FilterPauseExpired,
+            } = msg
+            {
+                expiry_notices += 1;
+            }
+        }
+        assert_eq!(expiry_notices, 0, "no GUI is left to show an expiry");
         bridge.shutdown();
     }
 }

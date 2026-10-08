@@ -49,10 +49,26 @@ pub struct ReceivedTrayState {
     pub state: BridgeTrayState,
 }
 
+/// Session-labelled filter-pause state (issue #47), routed and guarded the
+/// same way as [`ReceivedTrayState`].
+#[derive(Clone, Debug)]
+pub struct ReceivedPauseState {
+    pub connection_id: u64,
+    pub state: BridgePauseState,
+}
+
 #[derive(Clone, Debug)]
 pub struct ReceivedNotice {
     pub connection_id: u64,
     pub notice: BridgeNotice,
+}
+
+/// Senders for the shell state the runtime forwards next to the model feed:
+/// tray state, desktop notices and filter-pause state.
+struct ShellFeeds {
+    tray_tx: watch::Sender<ReceivedTrayState>,
+    notice_tx: broadcast::Sender<ReceivedNotice>,
+    pause_tx: watch::Sender<ReceivedPauseState>,
 }
 
 struct QueuedClientMessage {
@@ -162,6 +178,7 @@ struct ClientRuntime {
     status: Arc<Mutex<String>>,
     tray_tx: watch::Sender<ReceivedTrayState>,
     notice_tx: broadcast::Sender<ReceivedNotice>,
+    pause_tx: watch::Sender<ReceivedPauseState>,
     // Runtime must outlive its reconnect task. The task is intentionally
     // detached: GUI shutdown drops the process and hence this runtime.
     _runtime: Runtime,
@@ -231,6 +248,10 @@ fn start_inner() -> anyhow::Result<ClientRuntime> {
         state: BridgeTrayState::Idle,
     });
     let (notice_tx, _) = broadcast::channel(64);
+    let (pause_tx, _) = watch::channel(ReceivedPauseState {
+        connection_id: 0,
+        state: BridgePauseState::NOT_PAUSED,
+    });
     let status = Arc::new(Mutex::new("Connecting to bridge service…".to_string()));
     let connection = Arc::new(Mutex::new(ConnectionState::default()));
     let handles = BridgeHandles {
@@ -244,8 +265,11 @@ fn start_inner() -> anyhow::Result<ClientRuntime> {
         broadcast_tx,
         inbound_rx,
         status.clone(),
-        tray_tx.clone(),
-        notice_tx.clone(),
+        ShellFeeds {
+            tray_tx: tray_tx.clone(),
+            notice_tx: notice_tx.clone(),
+            pause_tx: pause_tx.clone(),
+        },
         connection,
     ));
     Ok(ClientRuntime {
@@ -253,6 +277,7 @@ fn start_inner() -> anyhow::Result<ClientRuntime> {
         status,
         tray_tx,
         notice_tx,
+        pause_tx,
         _runtime: runtime,
     })
 }
@@ -269,8 +294,7 @@ async fn client_loop(
     broadcast_tx: broadcast::Sender<ReceivedServerMessage>,
     mut inbound_rx: mpsc::Receiver<QueuedClientMessage>,
     status: Arc<Mutex<String>>,
-    tray_tx: watch::Sender<ReceivedTrayState>,
-    notice_tx: broadcast::Sender<ReceivedNotice>,
+    shell: ShellFeeds,
     connection: Arc<Mutex<ConnectionState>>,
 ) {
     loop {
@@ -279,8 +303,7 @@ async fn client_loop(
             &broadcast_tx,
             &mut inbound_rx,
             &status,
-            &tray_tx,
-            &notice_tx,
+            &shell,
             &connection,
         )
         .await
@@ -305,8 +328,7 @@ async fn connect_and_relay(
     broadcast_tx: &broadcast::Sender<ReceivedServerMessage>,
     inbound_rx: &mut mpsc::Receiver<QueuedClientMessage>,
     status: &Arc<Mutex<String>>,
-    tray_tx: &watch::Sender<ReceivedTrayState>,
-    notice_tx: &broadcast::Sender<ReceivedNotice>,
+    shell: &ShellFeeds,
     connection: &Arc<Mutex<ConnectionState>>,
 ) -> anyhow::Result<()> {
     let token_path = token_path(socket_path);
@@ -346,11 +368,24 @@ async fn connect_and_relay(
                 None => return Ok(()),
             },
             incoming = ws.next() => match incoming {
-                Some(Ok(Message::Text(text))) => {
-                    let message: ServerMessage = serde_json::from_str(&text)?;
-                    forward_shell_message(&message, connection_id, tray_tx, notice_tx);
-                    let _ = broadcast_tx.send(ReceivedServerMessage { connection_id, message });
-                }
+                Some(Ok(Message::Text(text))) => match serde_json::from_str::<ServerMessage>(&text) {
+                    Ok(message) => {
+                        forward_shell_message(
+                            &message,
+                            connection_id,
+                            &shell.tray_tx,
+                            &shell.notice_tx,
+                            &shell.pause_tx,
+                        );
+                        let _ = broadcast_tx.send(ReceivedServerMessage { connection_id, message });
+                    }
+                    // A newer bridge may send actions this client doesn't
+                    // know. Skip them: dropping the connection would reconnect
+                    // forever, cancelling pending prompts each time.
+                    Err(error) => {
+                        tracing::warn!(%error, "skipping a bridge message this client can't parse");
+                    }
+                },
                 Some(Ok(Message::Close(_))) | None => anyhow::bail!("bridge closed the WebSocket"),
                 Some(Ok(Message::Ping(payload))) => ws.send(Message::Pong(payload)).await?,
                 Some(Ok(_)) => {},
@@ -423,8 +458,21 @@ fn forward_shell_message(
     connection_id: u64,
     tray_tx: &watch::Sender<ReceivedTrayState>,
     notice_tx: &broadcast::Sender<ReceivedNotice>,
+    pause_tx: &watch::Sender<ReceivedPauseState>,
 ) {
     match message {
+        ServerMessage::FilterPauseState {
+            paused,
+            expires_at_unix_ms,
+        } => {
+            let _ = pause_tx.send_replace(ReceivedPauseState {
+                connection_id,
+                state: BridgePauseState {
+                    paused: *paused,
+                    expires_at_unix_ms: *expires_at_unix_ms,
+                },
+            });
+        }
         ServerMessage::TrayState { state } => {
             let _ = tray_tx.send_replace(ReceivedTrayState {
                 connection_id,
@@ -469,6 +517,13 @@ pub fn tray_rx() -> Option<watch::Receiver<ReceivedTrayState>> {
     }
 }
 
+pub fn pause_rx() -> Option<watch::Receiver<ReceivedPauseState>> {
+    match STARTED.get()? {
+        Outcome::Running(runtime) => Some(runtime.pause_tx.subscribe()),
+        Outcome::Failed(_) => None,
+    }
+}
+
 pub fn notice_rx() -> Option<broadcast::Receiver<ReceivedNotice>> {
     match STARTED.get()? {
         Outcome::Running(runtime) => Some(runtime.notice_tx.subscribe()),
@@ -490,515 +545,10 @@ fn status_of(outcome: &Outcome) -> (bool, String) {
     }
 }
 
+pub use snitchwatch_bridge::filter_pause::PauseState as BridgePauseState;
 pub use snitchwatch_bridge::notice::Notice as BridgeNotice;
 pub use snitchwatch_bridge::tray_state::TrayState as BridgeTrayState;
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn system_and_custom_socket_token_paths_match_the_service_layout() {
-        let legacy_dir = std::path::Path::new("/tmp/legacy-runtime/snitchwatch");
-        assert_eq!(
-            resolve_socket_path(None, false, legacy_dir),
-            legacy_dir.join("bridge.sock")
-        );
-        assert_eq!(
-            resolve_socket_path(None, true, legacy_dir),
-            PathBuf::from(SYSTEM_SOCKET_PATH)
-        );
-        for system_mode in [false, true] {
-            assert_eq!(
-                resolve_socket_path(Some("/tmp/explicit.sock".into()), system_mode, legacy_dir),
-                PathBuf::from("/tmp/explicit.sock")
-            );
-        }
-        assert_eq!(
-            resolve_token_path(std::path::Path::new(SYSTEM_SOCKET_PATH), None),
-            PathBuf::from(SYSTEM_TOKEN_PATH)
-        );
-        assert_eq!(
-            resolve_token_path(std::path::Path::new("/tmp/custom/bridge.sock"), None),
-            PathBuf::from("/tmp/custom/token")
-        );
-        assert_eq!(
-            resolve_token_path(std::path::Path::new("bridge.sock"), None),
-            PathBuf::from("token")
-        );
-        assert_eq!(
-            resolve_token_path(
-                std::path::Path::new(SYSTEM_SOCKET_PATH),
-                Some("/tmp/explicit-token".into())
-            ),
-            PathBuf::from("/tmp/explicit-token")
-        );
-    }
-
-    async fn accept_authenticated_snapshot(
-        listener: &tokio::net::UnixListener,
-        expected_token: &snitchwatch_bridge::auth::Token,
-    ) {
-        let (stream, _) = listener.accept().await.expect("client connects");
-        let mut ws = tokio_tungstenite::accept_async(stream)
-            .await
-            .expect("WebSocket upgrade succeeds");
-        let presented = ws
-            .next()
-            .await
-            .expect("client sends its token")
-            .expect("token frame is valid")
-            .into_text()
-            .expect("token is a text frame");
-        assert!(
-            expected_token.matches(&presented),
-            "client must re-read the current service token"
-        );
-        ws.send(Message::Text(
-            serde_json::to_string(&ServerMessage::Authenticated).unwrap(),
-        ))
-        .await
-        .expect("authentication acknowledgement writes");
-        let snapshot: ClientMessage = serde_json::from_str(
-            &ws.next()
-                .await
-                .expect("client requests a snapshot")
-                .expect("snapshot frame is valid")
-                .into_text()
-                .expect("snapshot is text"),
-        )
-        .expect("snapshot JSON parses");
-        assert_eq!(snapshot, ClientMessage::RequestSnapshot);
-    }
-
-    #[tokio::test]
-    async fn shell_messages_rehydrate_external_tray_and_notice_feeds() {
-        let (tray_tx, mut tray_rx) = watch::channel(ReceivedTrayState {
-            connection_id: 0,
-            state: BridgeTrayState::Idle,
-        });
-        let (notice_tx, mut notice_rx) = broadcast::channel(4);
-
-        forward_shell_message(
-            &ServerMessage::TrayState {
-                state: BridgeTrayState::Pending(2),
-            },
-            1,
-            &tray_tx,
-            &notice_tx,
-        );
-        tray_rx.changed().await.expect("tray sender is alive");
-        assert_eq!(tray_rx.borrow().connection_id, 1);
-        assert_eq!(tray_rx.borrow().state, BridgeTrayState::Pending(2));
-
-        let notice = BridgeNotice::Pending {
-            row_id: 17,
-            process: "firefox".into(),
-        };
-        forward_shell_message(
-            &ServerMessage::Notice {
-                notice: notice.clone(),
-            },
-            1,
-            &tray_tx,
-            &notice_tx,
-        );
-        let received = notice_rx.recv().await.unwrap();
-        assert_eq!(received.connection_id, 1);
-        assert_eq!(received.notice, notice);
-    }
-
-    #[tokio::test]
-    async fn disconnect_discards_queued_actions_and_rejects_new_ones() {
-        let (broadcast_tx, _) = broadcast::channel(1);
-        let (inbound_tx, mut inbound_rx) = mpsc::channel(4);
-        let connection = Arc::new(Mutex::new(ConnectionState::default()));
-        let handles = BridgeHandles {
-            broadcast_tx,
-            inbound_tx,
-            runtime: Handle::current(),
-            connection: connection.clone(),
-        };
-
-        mark_connected(&connection);
-        handles
-            .try_send(ClientMessage::RecheckDiagnostics)
-            .expect("the live session accepts a recheck");
-        disconnect_and_discard(&connection, &mut inbound_rx);
-
-        assert!(!handles.is_connected());
-        assert!(
-            !handles.is_current_session(1),
-            "a queued Qt callback from the disconnected session must be dropped"
-        );
-        assert!(matches!(
-            handles.try_send(ClientMessage::RecheckDiagnostics),
-            Err(SendClientMessageError::Disconnected)
-        ));
-        assert!(matches!(
-            inbound_rx.try_recv(),
-            Err(mpsc::error::TryRecvError::Empty)
-        ));
-
-        // A subsequent bridge session gets its own connection id. The stale
-        // diagnostics request above is gone rather than replayed here.
-        mark_connected(&connection);
-        assert!(handles.is_current_session(2));
-        let verdict = |row_id| {
-            crate::pending_decision::build_verdict_message(row_id, "deny", "this_host", "this_time")
-                .unwrap()
-        };
-        // Both generic JSON and typed QML submissions converge on dispatch_to.
-        // Held-open dialogs retain 1:1 even after new service rows reuse ID 1.
-        assert_eq!(
-            crate::bridge_feed::dispatch_to(&handles, verdict("1:1")),
-            Err(SendClientMessageError::StaleSession)
-        );
-        assert_eq!(
-            crate::bridge_feed::dispatch_to(&handles, verdict("1")),
-            Err(SendClientMessageError::StaleSession)
-        );
-        assert!(matches!(
-            inbound_rx.try_recv(),
-            Err(mpsc::error::TryRecvError::Empty)
-        ));
-        crate::bridge_feed::dispatch_to(&handles, verdict("2:1"))
-            .expect("new snapshot's identical wire row ID remains actionable");
-        let fresh_verdict = inbound_rx.recv().await.unwrap();
-        assert_eq!(fresh_verdict.connection_id, 2);
-        assert!(
-            matches!(fresh_verdict.message, ClientMessage::SetVerdict { row_id, .. } if row_id == "1")
-        );
-        assert!(
-            !handles.is_current_session(1),
-            "a reconnect must not make the prior session current again"
-        );
-        handles
-            .try_send(ClientMessage::RecheckDiagnostics)
-            .expect("the replacement session accepts a fresh recheck");
-        assert_eq!(
-            inbound_rx
-                .recv()
-                .await
-                .expect("fresh request queued")
-                .connection_id,
-            2
-        );
-    }
-
-    #[tokio::test]
-    async fn client_loop_forwards_authenticated_snapshot_to_the_qml_feed() {
-        let dir = tempfile::tempdir().unwrap();
-        let config = snitchwatch_bridge_cli::BridgeConfig {
-            grpc_bind: "127.0.0.1:0".parse().unwrap(),
-            ws_socket_path: dir.path().join("bridge.sock"),
-            cache_capacity: 64,
-        };
-        let bridge = snitchwatch_bridge_cli::run(config.clone())
-            .await
-            .expect("bridge starts");
-        let (shell_tx, mut shell_messages) = broadcast::channel(8);
-        let (inbound_tx, inbound_rx) = mpsc::channel(1);
-        let (tray_tx, _) = watch::channel(ReceivedTrayState {
-            connection_id: 0,
-            state: BridgeTrayState::Idle,
-        });
-        let (notice_tx, _) = broadcast::channel(1);
-        let status = Arc::new(Mutex::new(String::new()));
-        let connection = Arc::new(Mutex::new(ConnectionState::default()));
-        let client = tokio::spawn(client_loop(
-            config.ws_socket_path.clone(),
-            shell_tx,
-            inbound_rx,
-            status,
-            tray_tx,
-            notice_tx,
-            connection.clone(),
-        ));
-
-        // This verifies the production external-client path rather than only
-        // the bridge's internal broadcast. An empty authenticated service
-        // answers RequestSnapshot with messages that reach the QML-facing
-        // shell feed.
-        let mut saw_clear = false;
-        let mut saw_blocklists = false;
-        let mut saw_profiles = false;
-        let mut saw_tray = false;
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
-        while !(saw_clear && saw_blocklists && saw_profiles && saw_tray) {
-            match tokio::time::timeout_at(deadline, shell_messages.recv())
-                .await
-                .expect("client did not forward the authenticated snapshot")
-                .expect("QML-facing shell feed closed")
-            {
-                ReceivedServerMessage {
-                    connection_id: 1,
-                    message: ServerMessage::ClearConnectionRows,
-                } => saw_clear = true,
-                ReceivedServerMessage {
-                    connection_id: 1,
-                    message: ServerMessage::SetBlocklists { .. },
-                } => saw_blocklists = true,
-                ReceivedServerMessage {
-                    connection_id: 1,
-                    message: ServerMessage::SetProfiles { .. },
-                } => saw_profiles = true,
-                ReceivedServerMessage {
-                    connection_id: 1,
-                    message:
-                        ServerMessage::TrayState {
-                            state: BridgeTrayState::Idle,
-                        },
-                } => saw_tray = true,
-                _ => {}
-            }
-        }
-        assert!(is_current_connection(&connection, 1));
-
-        drop(inbound_tx);
-        client.abort();
-        bridge.shutdown();
-    }
-
-    #[tokio::test]
-    async fn client_stays_pending_until_service_acknowledges_the_token() {
-        let dir = tempfile::tempdir().unwrap();
-        let socket_path = dir.path().join("bridge.sock");
-        let token_path = dir.path().join("token");
-        let token = snitchwatch_bridge::auth::Token::generate();
-        snitchwatch_bridge::auth::write_token_file(&token, &token_path).unwrap();
-        let listener = tokio::net::UnixListener::bind(&socket_path).unwrap();
-        let (token_received_tx, token_received_rx) = tokio::sync::oneshot::channel();
-        let (release_ack_tx, release_ack_rx) = tokio::sync::oneshot::channel();
-
-        let server = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
-            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
-            let presented = ws.next().await.unwrap().unwrap().into_text().unwrap();
-            assert_eq!(presented, token.as_str());
-            token_received_tx.send(()).unwrap();
-
-            release_ack_rx.await.unwrap();
-            ws.send(Message::Text(
-                serde_json::to_string(&ServerMessage::Authenticated).unwrap(),
-            ))
-            .await
-            .unwrap();
-
-            let snapshot: ClientMessage =
-                serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap())
-                    .unwrap();
-            assert_eq!(snapshot, ClientMessage::RequestSnapshot);
-            std::future::pending::<()>().await;
-        });
-
-        let (broadcast_tx, _) = broadcast::channel(4);
-        let (inbound_tx, mut inbound_rx) = mpsc::channel(1);
-        let (tray_tx, _) = watch::channel(ReceivedTrayState {
-            connection_id: 0,
-            state: BridgeTrayState::Idle,
-        });
-        let (notice_tx, _) = broadcast::channel(1);
-        let status = Arc::new(Mutex::new(String::new()));
-        let connection = Arc::new(Mutex::new(ConnectionState::default()));
-        let client_connection = connection.clone();
-        let client_status = status.clone();
-        let client = tokio::spawn(async move {
-            connect_and_relay(
-                &socket_path,
-                &broadcast_tx,
-                &mut inbound_rx,
-                &client_status,
-                &tray_tx,
-                &notice_tx,
-                &client_connection,
-            )
-            .await
-        });
-
-        token_received_rx.await.unwrap();
-        assert!(
-            !is_current_connection(&connection, 1),
-            "sending the token alone must not expose a connected session"
-        );
-        assert_ne!(
-            status.lock().unwrap().as_str(),
-            "Connected to bridge service",
-            "the status must remain pending until the acknowledgement arrives"
-        );
-
-        release_ack_tx.send(()).unwrap();
-        tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                if is_current_connection(&connection, 1) {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("client should connect after the acknowledgement");
-
-        drop(inbound_tx);
-        client.await.unwrap().unwrap();
-        server.abort();
-    }
-
-    #[tokio::test]
-    async fn client_loop_reconnects_after_service_socket_and_token_rotation() {
-        let dir = tempfile::tempdir().unwrap();
-        let socket_path = dir.path().join("bridge.sock");
-        let token_path = dir.path().join("token");
-        let first_token = snitchwatch_bridge::auth::Token::generate();
-        snitchwatch_bridge::auth::write_token_file(&first_token, &token_path).unwrap();
-        let first_listener = tokio::net::UnixListener::bind(&socket_path).unwrap();
-
-        let (first_snapshot_tx, first_snapshot_rx) = tokio::sync::oneshot::channel();
-        let first_server = tokio::spawn(async move {
-            accept_authenticated_snapshot(&first_listener, &first_token).await;
-            first_snapshot_tx.send(()).unwrap();
-            // Dropping this listener and its WebSocket simulates the service
-            // stopping. It deliberately does not leave a usable connection.
-        });
-
-        let (broadcast_tx, _) = broadcast::channel(4);
-        let (inbound_tx, inbound_rx) = mpsc::channel(1);
-        let (tray_tx, _) = watch::channel(ReceivedTrayState {
-            connection_id: 0,
-            state: BridgeTrayState::Idle,
-        });
-        let (notice_tx, _) = broadcast::channel(1);
-        let status = Arc::new(Mutex::new(String::new()));
-        let connection = Arc::new(Mutex::new(ConnectionState::default()));
-        let client = tokio::spawn(client_loop(
-            socket_path.clone(),
-            broadcast_tx,
-            inbound_rx,
-            status,
-            tray_tx,
-            notice_tx,
-            connection.clone(),
-        ));
-
-        tokio::time::timeout(Duration::from_secs(2), first_snapshot_rx)
-            .await
-            .expect("first service generation receives a snapshot")
-            .unwrap();
-        first_server.await.unwrap();
-        std::fs::remove_file(&socket_path).unwrap();
-
-        let second_token = snitchwatch_bridge::auth::Token::generate();
-        snitchwatch_bridge::auth::write_token_file(&second_token, &token_path).unwrap();
-        let second_listener = tokio::net::UnixListener::bind(&socket_path).unwrap();
-        let (second_snapshot_tx, second_snapshot_rx) = tokio::sync::oneshot::channel();
-        let second_server = tokio::spawn(async move {
-            accept_authenticated_snapshot(&second_listener, &second_token).await;
-            second_snapshot_tx.send(()).unwrap();
-            std::future::pending::<()>().await;
-        });
-
-        tokio::time::timeout(Duration::from_secs(3), second_snapshot_rx)
-            .await
-            .expect("replacement service receives a fresh snapshot")
-            .unwrap();
-        assert!(is_current_connection(&connection, 2));
-
-        // `client_loop` is intentionally long-lived while its runtime owns
-        // it; abort the test task after proving the replacement connection.
-        drop(inbound_tx);
-        client.abort();
-        second_server.abort();
-    }
-
-    #[tokio::test]
-    async fn client_loop_recovers_from_missing_and_stale_tokens() {
-        let dir = tempfile::tempdir().unwrap();
-        let socket_path = dir.path().join("bridge.sock");
-        let token_path = dir.path().join("token");
-        let listener = tokio::net::UnixListener::bind(&socket_path).unwrap();
-        let stale_token = snitchwatch_bridge::auth::Token::generate();
-        let current_token = snitchwatch_bridge::auth::Token::generate();
-        let server_stale_token = stale_token.clone();
-        let server_current_token = current_token.clone();
-        let (stale_seen_tx, stale_seen_rx) = tokio::sync::oneshot::channel();
-        let (recovered_tx, recovered_rx) = tokio::sync::oneshot::channel();
-
-        let server = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
-            let mut stale_ws = tokio_tungstenite::accept_async(stream).await.unwrap();
-            let stale_presented = stale_ws.next().await.unwrap().unwrap().into_text().unwrap();
-            assert!(server_stale_token.matches(&stale_presented));
-            stale_seen_tx.send(()).unwrap();
-            // A real service rejects a stale token by closing before its ack.
-            stale_ws.close(None).await.unwrap();
-
-            accept_authenticated_snapshot(&listener, &server_current_token).await;
-            recovered_tx.send(()).unwrap();
-            std::future::pending::<()>().await;
-        });
-
-        let (broadcast_tx, _) = broadcast::channel(4);
-        let (inbound_tx, inbound_rx) = mpsc::channel(1);
-        let (tray_tx, _) = watch::channel(ReceivedTrayState {
-            connection_id: 0,
-            state: BridgeTrayState::Idle,
-        });
-        let (notice_tx, _) = broadcast::channel(1);
-        let status = Arc::new(Mutex::new(String::new()));
-        let connection = Arc::new(Mutex::new(ConnectionState::default()));
-        let client = tokio::spawn(client_loop(
-            socket_path,
-            broadcast_tx,
-            inbound_rx,
-            status,
-            tray_tx,
-            notice_tx,
-            connection,
-        ));
-
-        // Let the first attempt observe the absent file. Its next attempt
-        // reads this stale generation and is rejected by the service.
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        snitchwatch_bridge::auth::write_token_file(&stale_token, &token_path).unwrap();
-        tokio::time::timeout(Duration::from_secs(3), stale_seen_rx)
-            .await
-            .expect("client retries once a token appears")
-            .unwrap();
-        snitchwatch_bridge::auth::write_token_file(&current_token, &token_path).unwrap();
-
-        tokio::time::timeout(Duration::from_secs(3), recovered_rx)
-            .await
-            .expect("client recovers after token rotation")
-            .unwrap();
-        drop(inbound_tx);
-        client.abort();
-        server.abort();
-    }
-
-    #[test]
-    fn production_client_runtime_cannot_take_over_service_resources() {
-        // Keep this narrow and intentional: test only the production section,
-        // so test fixtures may still start a bridge service in-process.
-        let production = include_str!("bridge_runtime.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .unwrap();
-        for forbidden in [
-            "snitchwatch_bridge_cli::run(",
-            "UnixListener::bind(",
-            "write_token_file(",
-            "remove_file(",
-            "127.0.0.1:50051",
-        ] {
-            assert!(
-                !production.contains(forbidden),
-                "external Kirigami client must not contain {forbidden}"
-            );
-        }
-        let entrypoint = include_str!("main.rs");
-        assert!(
-            !entrypoint.contains("snitchwatch_bridge_cli"),
-            "the production binary must only start the external client runtime"
-        );
-    }
-}
+#[path = "bridge_runtime/tests.rs"]
+mod tests;

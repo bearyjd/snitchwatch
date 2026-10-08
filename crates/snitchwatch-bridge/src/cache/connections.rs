@@ -7,6 +7,7 @@
 //!     this is what the gRPC client task awaits before responding to AskRule
 
 use crate::client_presence::Admission;
+use crate::filter_pause::FilterPause;
 use crate::tray_state::{TrayState, TrayStatePublisher};
 use crate::ws_messages::{ConnectionRow, VerdictDuration, VerdictScope};
 use std::collections::HashMap;
@@ -48,6 +49,7 @@ pub struct ConnectionCache {
     pending: HashMap<String, PendingEntry>,
     capacity: usize,
     tray: Option<Arc<TrayStatePublisher>>,
+    filter_pause: Option<Arc<FilterPause>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -65,6 +67,7 @@ impl ConnectionCache {
             pending: HashMap::new(),
             capacity,
             tray: None,
+            filter_pause: None,
         }
     }
 
@@ -74,7 +77,16 @@ impl ConnectionCache {
             pending: HashMap::new(),
             capacity,
             tray: Some(tray),
+            filter_pause: None,
         }
+    }
+
+    /// Every tray republish shows `FilterOff` while this pause is active
+    /// (issue #47), so no reset path puts the tray back to Idle/Pending
+    /// mid-pause.
+    pub fn with_filter_pause(mut self, filter_pause: Arc<FilterPause>) -> Self {
+        self.filter_pause = Some(filter_pause);
+        self
     }
 
     pub fn len(&self) -> usize {
@@ -88,7 +100,13 @@ impl ConnectionCache {
     fn republish_pending_count(&self) {
         if let Some(tray) = &self.tray {
             let n = self.pending_count();
-            tray.set(if n == 0 {
+            let paused = self
+                .filter_pause
+                .as_ref()
+                .is_some_and(|pause| pause.is_active_now());
+            tray.set(if paused {
+                TrayState::FilterOff
+            } else if n == 0 {
                 TrayState::Idle
             } else {
                 TrayState::Pending(n)
@@ -96,8 +114,9 @@ impl ConnectionCache {
         }
     }
 
-    /// Publish `Idle`/`Pending(n)` (whichever actually matches the current
-    /// cache state) to the tray, regardless of what it's currently showing.
+    /// Publish `FilterOff` while a filter pause is active, otherwise
+    /// `Idle`/`Pending(n)` (whichever actually matches the current cache
+    /// state), regardless of what the tray is currently showing.
     /// Used to recover the tray's display after a transient override — the
     /// daemon-down watchdog and a `RecentBlock` timer both need "what should
     /// the tray show right now" rather than assuming `Idle`.

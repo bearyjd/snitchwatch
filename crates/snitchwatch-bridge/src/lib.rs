@@ -15,6 +15,7 @@ pub mod daemon_liveness;
 pub mod daemon_watchdog;
 pub mod diagnostics;
 pub mod error;
+pub mod filter_pause;
 pub mod grpc_client;
 pub mod grpc_server;
 pub mod notice;

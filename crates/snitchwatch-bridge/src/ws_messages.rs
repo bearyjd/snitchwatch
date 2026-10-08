@@ -195,6 +195,18 @@ pub enum ServerMessage {
     Notice {
         notice: Notice,
     },
+    /// Whether filtering is paused and when the pause ends on its own
+    /// (issue #47). Sent on every pause change and in every snapshot, so a
+    /// GUI that connects mid-pause learns the end time. An additive
+    /// extension: the legacy web client ignores unknown actions, and the
+    /// Kirigami shell skips frames it can't parse. A Kirigami build from
+    /// before #47 does not: it drops the connection on any unknown action and
+    /// reconnects, so it can't be paired with a bridge that sends this.
+    FilterPauseState {
+        paused: bool,
+        #[serde(default)]
+        expires_at_unix_ms: Option<u64>,
+    },
 }
 
 /// Client → server messages. These come from the UI's `sendAction(type, payload)`
@@ -284,8 +296,25 @@ pub enum ClientMessage {
     /// `Allow-Once` instead of prompting, so a genuine bridge outage still
     /// fails closed. See `grpc_server::UiService::ask_rule` and
     /// `docs/superpowers/plans/2026-07-12-tray-filter-off.md`.
+    ///
+    /// A pause is always timed (issue #47): `duration_secs` must be one of
+    /// `filter_pause::ALLOWED_PAUSE_SECS`, and a pause without it (from an
+    /// older client) lasts `filter_pause::LEGACY_PAUSE_SECS`.
     SetFilteringPaused {
         paused: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration_secs: Option<u64>,
+        /// The sender's GUI-session generation, stamped by `ws_server` on
+        /// every request from an authenticated WebSocket session (see
+        /// `client_presence::apply_pause_request`). Never on the wire: a
+        /// client cannot supply it. `None` for in-process senders.
+        #[serde(skip)]
+        sender_generation: Option<u64>,
+        /// The sender's uid (`SO_PEERCRED`), stamped alongside
+        /// `sender_generation` so the outcome log names who paused. Never on
+        /// the wire either.
+        #[serde(skip)]
+        sender_uid: Option<u32>,
     },
     RecheckDiagnostics,
 }
@@ -577,6 +606,10 @@ mod tests {
             },
             ServerMessage::Notice {
                 notice: Notice::DaemonAway,
+            },
+            ServerMessage::FilterPauseState {
+                paused: false,
+                expires_at_unix_ms: None,
             },
         ] {
             let action = serde_json::to_value(message).unwrap()["action"]
@@ -926,12 +959,91 @@ mod profile_message_tests {
 mod filtering_pause_tests {
     use super::*;
 
+    fn set_filtering_paused(paused: bool, duration_secs: Option<u64>) -> ClientMessage {
+        ClientMessage::SetFilteringPaused {
+            paused,
+            duration_secs,
+            sender_generation: None,
+            sender_uid: None,
+        }
+    }
+
     #[test]
     fn client_set_filtering_paused_round_trips() {
-        let msg = ClientMessage::SetFilteringPaused { paused: true };
+        let msg = set_filtering_paused(true, Some(1800));
         let json = serde_json::to_string(&msg).unwrap();
-        assert_eq!(json, r#"{"action":"setFilteringPaused","paused":true}"#);
+        assert_eq!(
+            json,
+            r#"{"action":"setFilteringPaused","paused":true,"durationSecs":1800}"#
+        );
         assert_eq!(serde_json::from_str::<ClientMessage>(&json).unwrap(), msg);
+
+        let resume = set_filtering_paused(false, None);
+        let json = serde_json::to_string(&resume).unwrap();
+        assert_eq!(json, r#"{"action":"setFilteringPaused","paused":false}"#);
+        assert_eq!(
+            serde_json::from_str::<ClientMessage>(&json).unwrap(),
+            resume
+        );
+    }
+
+    #[test]
+    fn legacy_pause_without_a_duration_still_parses() {
+        assert_eq!(
+            serde_json::from_str::<ClientMessage>(
+                r#"{"action":"setFilteringPaused","paused":true}"#
+            )
+            .unwrap(),
+            set_filtering_paused(true, None)
+        );
+    }
+
+    #[test]
+    fn a_client_cannot_supply_the_sender_generation() {
+        let parsed: ClientMessage = serde_json::from_str(
+            r#"{"action":"setFilteringPaused","paused":true,"durationSecs":300,"senderGeneration":7,"senderUid":0}"#,
+        )
+        .unwrap();
+        assert_eq!(parsed, set_filtering_paused(true, Some(300)));
+
+        let stamped = ClientMessage::SetFilteringPaused {
+            paused: true,
+            duration_secs: Some(300),
+            sender_generation: Some(7),
+            sender_uid: Some(0),
+        };
+        let json = serde_json::to_string(&stamped).unwrap();
+        assert!(
+            !json.contains("sender"),
+            "stamp leaked onto the wire: {json}"
+        );
+    }
+
+    #[test]
+    fn filter_pause_state_round_trips() {
+        let paused = ServerMessage::FilterPauseState {
+            paused: true,
+            expires_at_unix_ms: Some(1_800_000_300_000),
+        };
+        let json = serde_json::to_string(&paused).unwrap();
+        assert_eq!(
+            json,
+            r#"{"action":"filterPauseState","paused":true,"expiresAtUnixMs":1800000300000}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<ServerMessage>(&json).unwrap(),
+            paused
+        );
+
+        let not_paused = ServerMessage::FilterPauseState {
+            paused: false,
+            expires_at_unix_ms: None,
+        };
+        let json = serde_json::to_string(&not_paused).unwrap();
+        assert_eq!(
+            serde_json::from_str::<ServerMessage>(&json).unwrap(),
+            not_paused
+        );
     }
 
     #[test]

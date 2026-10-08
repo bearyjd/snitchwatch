@@ -177,6 +177,47 @@ mod tests {
         watchdog.abort();
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn watchdog_recovery_keeps_an_active_pause_on_filter_off() {
+        // Issue #47: recovering from DaemonDown must not reset the tray to
+        // Idle while filtering is paused.
+        let liveness = DaemonLiveness::new_stale_for_test(
+            Instant::now(),
+            DAEMON_DOWN_TIMEOUT + Duration::from_secs(1),
+        );
+        let tray_pub = Arc::new(TrayStatePublisher::new());
+        let filter_pause = Arc::new(crate::filter_pause::FilterPause::new());
+        filter_pause.pause(Duration::from_secs(300), 0).unwrap();
+        let cache = Arc::new(TokioMutex::new(
+            ConnectionCache::with_tray_publisher(64, tray_pub.clone())
+                .with_filter_pause(filter_pause),
+        ));
+        let mut rx = tray_pub.subscribe();
+        let (broadcast_tx, _) = tokio::sync::broadcast::channel(16);
+        let probe: Arc<dyn crate::diagnostics::kernel_probe::KernelProbe> =
+            Arc::new(crate::diagnostics::kernel_probe::testing::FakeKernelProbe::all_ok());
+        let diagnostics_ctx = Arc::new(crate::diagnostics::DiagnosticsCtx::new(
+            liveness.clone(),
+            Arc::new(StdMutex::new(None)),
+            probe,
+            Arc::new(crate::daemon_alerts::DaemonAlertStore::new()),
+        ));
+        let watchdog = tokio::spawn(run(
+            liveness.clone(),
+            tray_pub.clone(),
+            cache,
+            diagnostics_ctx,
+            broadcast_tx,
+        ));
+
+        rx.changed().await.unwrap();
+        assert_eq!(*rx.borrow(), TrayState::DaemonDown);
+        liveness.touch();
+        rx.changed().await.unwrap();
+        assert_eq!(*rx.borrow(), TrayState::FilterOff);
+        watchdog.abort();
+    }
+
     #[tokio::test]
     async fn watchdog_broadcasts_diagnostics_report_on_down_transition() {
         let liveness = DaemonLiveness::new_stale_for_test(
