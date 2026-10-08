@@ -7,8 +7,9 @@
 //!     it did, in the flat and the grouped view, and never counts as waiting;
 //!   * the inspector's Verdict and Matched rule say the same, never a blank
 //!     rule name;
-//!   * no rule action that assumes a named rule ("Show rule") and no "Make a
-//!     rule…" is offered for such a row.
+//!   * no rule action that assumes a named rule ("Show rule") is offered for
+//!     such a row, but "Make a rule…" is, as for a put-off row; a
+//!     rule-matched row still gets none.
 //!
 //! Failures are collected and thrown against the probe's URL, which the
 //! stderr capture turns into an assertion; it also catches a delegate whose
@@ -30,7 +31,7 @@ const SHELL_QML_PREFIX: &str = "qrc:/qt/qml/com/snitchwatch/shell/qml/";
 const DONE_MARKER: &str = "DEFAULT_ACTION_ROWS_PROBE_DONE";
 
 #[test]
-fn default_decided_rows_name_the_default_action_and_offer_no_rule_actions() {
+fn default_decided_rows_name_the_default_action_and_offer_make_a_rule_only() {
     init_headless_qt_env();
 
     let mut app = QGuiApplication::new();
@@ -111,14 +112,15 @@ Controls.ApplicationWindow {
         return null;
     }
 
-    // Row id -> [list label, inspector Matched rule, "Show rule" target].
+    // Row id -> [list label, inspector Matched rule, "Show rule" target,
+    // "Make a rule…" offered].
     readonly property var expected: ({
         "1:default-deny": ["Denied (the firewall's default action)",
-                           "No rule: the firewall's default action (deny)", ""],
-        "1:default-allow": ["Usually allowed (the firewall's default action)",
-                            "No rule: the firewall's default action (allow)", ""],
-        "1:rule": ["allowed", "899-curl-allow", "899-curl-allow"],
-        "1:named-empty": ["denied", "default action", ""]
+                           "No rule: the firewall's default action (deny)", "", true],
+        "1:default-allow": ["Allowed (the firewall's default action)",
+                            "No rule: the firewall's default action (allow)", "", true],
+        "1:rule": ["allowed", "899-curl-allow", "899-curl-allow", false],
+        "1:named-empty": ["denied", "default action", "", false]
     })
     function checkLabels(view) {
         for (const id of Object.keys(probeWindow.expected)) {
@@ -172,8 +174,16 @@ Controls.ApplicationWindow {
                                           id + ": Show rule for '" + page.inspectMatchedRule + "'");
                         probeWindow.check(!page.inspectPending && !page.decisionSheet.visible,
                                           id + ": offered a decision");
-                        probeWindow.check(!page.makeRuleSheet.visible, id + ": Make a rule offered");
+                        probeWindow.check(page.makeRuleSheet.visible === want[3]
+                                          && page.makeRuleSheet.openButton.visible === want[3],
+                                          id + ": Make a rule offered " + page.makeRuleSheet.visible);
                     }
+                    // A default-decided row has no 5-minute block to warn about.
+                    page.openInspector(probeWindow.rowDelegate("1:default-deny"));
+                    page.makeRuleSheet.openButton.clicked();
+                    probeWindow.check(page.makeRuleSheet.form.visible, "the rule form didn't open");
+                    probeWindow.check(!page.makeRuleSheet.blockNote.visible,
+                                      "the block note on a default-decided row");
                     connModel.setGroupedMode(true);
                 } else if (probeWindow.phase === 2) {
                     for (const d of probeWindow.delegates()) {

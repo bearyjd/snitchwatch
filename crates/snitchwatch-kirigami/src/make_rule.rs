@@ -1,6 +1,7 @@
 //! "Make a rule…" for a row whose prompt was put off (prompt-slot plan Part
-//! C, item 9): the rule the decision sheet's choices describe, sent as
-//! `AddRule` (the daemon's `CHANGE_RULE`), until the rule editor exists.
+//! C, item 9), or that the firewall's default action decided (E3): the rule
+//! the decision sheet's choices describe, sent as `AddRule` (the daemon's
+//! `CHANGE_RULE`), until the rule editor exists.
 //!
 //! The rule comes from the bridge crate's own `verdict_to_rule`, so it is
 //! bound to the program and refused for an unidentifiable one (#44) exactly
@@ -28,10 +29,17 @@ use snitchwatch_proto::protocol::Connection;
 
 use crate::pending_decision::{parse_duration, parse_scope, VerdictChoice};
 
-/// The `AddRule` for deferred `row` and the sheet's `choice`, `scope` and
-/// `duration` tokens, made at `now_ms` (Unix ms), or `None` when no rule
-/// may be made: the row wasn't put off, the duration is once-only, the
-/// choice is unknown, or the bridge can't name the program.
+/// Whether "Make a rule…" is offered for `row`: its prompt was put off, or
+/// the firewall's default action decided it (E3, plan
+/// `2026-10-08-default-applied-events.md`): a rule-matched row has its rule.
+pub(crate) fn offers_make_rule(row: &ConnectionRow) -> bool {
+    row.deferred || row.decided_by_default
+}
+
+/// The `AddRule` for `row` ([`offers_make_rule`]) and the sheet's `choice`,
+/// `scope` and `duration` tokens, made at `now_ms` (Unix ms), or `None` when
+/// no rule may be made: the row isn't offered one, the duration is
+/// once-only, the choice is unknown, or the bridge can't name the program.
 pub(crate) fn add_rule_message(
     row: &ConnectionRow,
     choice: &str,
@@ -39,7 +47,7 @@ pub(crate) fn add_rule_message(
     duration: &str,
     now_ms: i64,
 ) -> Option<ClientMessage> {
-    if !row.deferred {
+    if !offers_make_rule(row) {
         return None;
     }
     let verdict = match VerdictChoice::from_token(choice)? {
@@ -228,5 +236,44 @@ mod tests {
             ..row
         };
         assert!(add_rule_message(&answered, "deny", "this_host", "forever", 0).is_none());
+        // A rule decided it: nothing to make here.
+        let rule_matched = ConnectionRow {
+            action: Some("allow".into()),
+            matched_rule: Some("899-curl-allow".into()),
+            ..answered
+        };
+        assert!(!offers_make_rule(&rule_matched));
+        assert!(add_rule_message(&rule_matched, "deny", "this_host", "forever", 0).is_none());
+    }
+
+    /// E3: a connection the firewall's default action decided gets the same
+    /// "Make a rule…" as a put-off one, through the same checks.
+    #[test]
+    fn a_row_the_default_action_decided_can_get_a_rule_like_a_put_off_one() {
+        let by_default = ConnectionRow {
+            id: "1:event-7".into(),
+            action: Some("deny".into()),
+            deferred: false,
+            decided_by_default: true,
+            ..deferred_row(Some("/usr/bin/curl"))
+        };
+        assert!(offers_make_rule(&by_default));
+        assert!(offers_make_rule(&deferred_row(None)));
+        let rule = wire_rule(
+            add_rule_message(&by_default, "allow", "this_host", "forever", 1_700_000_000).unwrap(),
+        );
+        assert_eq!(rule["action"], "allow");
+        let text = rule["operator"].to_string();
+        assert!(
+            text.contains("process.path") && text.contains("/usr/bin/curl"),
+            "{text}"
+        );
+        // The same refusals: once-only, an unknown program.
+        assert!(add_rule_message(&by_default, "deny", "this_host", "this_time", 0).is_none());
+        let unknown = ConnectionRow {
+            process_path: None,
+            ..by_default
+        };
+        assert!(add_rule_message(&unknown, "deny", "this_host", "forever", 0).is_none());
     }
 }

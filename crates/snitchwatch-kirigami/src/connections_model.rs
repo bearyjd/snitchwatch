@@ -74,8 +74,9 @@ const ROLE_OUTCOME_TEXT: i32 = 22;
 /// When the bridge answers a pending row itself, in Unix ms; -1 if never.
 /// A `real`: epoch milliseconds overflow a QML `int`.
 const ROLE_ANSWER_DEADLINE_MS: i32 = 23;
-/// The prompt was put off, so "Make a rule…" is offered.
-const ROLE_DEFERRED: i32 = 24;
+/// "Make a rule…" is offered (`make_rule::offers_make_rule`): the prompt was
+/// put off, or the firewall's default action decided the row (E3).
+const ROLE_MAKE_RULE_OFFERED: i32 = 24;
 
 #[cxx_qt::bridge]
 pub mod qobject {
@@ -581,7 +582,7 @@ impl qobject::ConnectionsModel {
             ROLE_ANSWERED_WHILE_PAUSED => QVariant::from(&answered_while_paused(row)),
             ROLE_OUTCOME_TEXT => QVariant::from(&QString::from(outcome_text(row))),
             ROLE_ANSWER_DEADLINE_MS => QVariant::from(&answer_deadline_ms(row)),
-            ROLE_DEFERRED => QVariant::from(&row.deferred),
+            ROLE_MAKE_RULE_OFFERED => QVariant::from(&crate::make_rule::offers_make_rule(row)),
             _ => QVariant::default(),
         }
     }
@@ -621,7 +622,7 @@ impl qobject::ConnectionsModel {
             ROLE_ANSWER_DEADLINE_MS,
             QByteArray::from("answerDeadlineMs"),
         );
-        roles.insert(ROLE_DEFERRED, QByteArray::from("deferred"));
+        roles.insert(ROLE_MAKE_RULE_OFFERED, QByteArray::from("makeRuleOffered"));
         roles
     }
 
@@ -1274,7 +1275,7 @@ fn grouped_entry_data(entry: &VisibleEntry, role: i32, store: &RowStore) -> QVar
             ROLE_MATCHED_RULE | ROLE_MATCHED_RULE_DISPLAY | ROLE_OUTCOME_TEXT => {
                 QVariant::from(&QString::from(""))
             }
-            ROLE_ANSWERED_WHILE_PAUSED | ROLE_DEFERRED => QVariant::from(&false),
+            ROLE_ANSWERED_WHILE_PAUSED | ROLE_MAKE_RULE_OFFERED => QVariant::from(&false),
             ROLE_ANSWER_DEADLINE_MS => QVariant::from(&-1.0f64),
             _ => QVariant::default(),
         },
@@ -1305,7 +1306,7 @@ fn grouped_entry_data(entry: &VisibleEntry, role: i32, store: &RowStore) -> QVar
             ROLE_MATCHED_RULE | ROLE_MATCHED_RULE_DISPLAY | ROLE_OUTCOME_TEXT => {
                 QVariant::from(&QString::from(""))
             }
-            ROLE_ANSWERED_WHILE_PAUSED | ROLE_DEFERRED => QVariant::from(&false),
+            ROLE_ANSWERED_WHILE_PAUSED | ROLE_MAKE_RULE_OFFERED => QVariant::from(&false),
             ROLE_ANSWER_DEADLINE_MS => QVariant::from(&-1.0f64),
             _ => QVariant::default(),
         },
@@ -1344,7 +1345,7 @@ fn grouped_entry_data(entry: &VisibleEntry, role: i32, store: &RowStore) -> QVar
                 ROLE_ANSWERED_WHILE_PAUSED => QVariant::from(&answered_while_paused(row)),
                 ROLE_OUTCOME_TEXT => QVariant::from(&QString::from(outcome_text(row))),
                 ROLE_ANSWER_DEADLINE_MS => QVariant::from(&answer_deadline_ms(row)),
-                ROLE_DEFERRED => QVariant::from(&row.deferred),
+                ROLE_MAKE_RULE_OFFERED => QVariant::from(&crate::make_rule::offers_make_rule(row)),
                 _ => QVariant::default(),
             }
         }

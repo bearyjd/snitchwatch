@@ -12,9 +12,11 @@
 //! [`outcome_text`] is the verdict label of a deferred row, and of a row the
 //! firewall's default action decided (`decided_by_default`, E3: plan
 //! `2026-10-08-default-applied-events.md`). It is fixed text and never names
-//! an action the bridge didn't report. "Usually" stays for an allow: under
-//! nftables chain churn a requeued packet can be dropped whatever the
-//! default action (bazzite-tower's r8 note).
+//! an action the bridge didn't report. A deferred row's action is the
+//! bridge's prediction from the daemon config, so "usually" stays for its
+//! allow: under nftables chain churn a requeued packet can be dropped
+//! whatever the default action (bazzite-tower's r8 note). A default-decided
+//! row's action is the one the daemon reports it applied: no "usually".
 
 use snitchwatch_bridge::ws_messages::ConnectionRow;
 
@@ -41,7 +43,7 @@ impl Verdict {
 pub fn outcome_text(row: &ConnectionRow) -> &'static str {
     if row.decided_by_default {
         return match row.action.as_deref() {
-            Some("allow") => "Usually allowed (the firewall's default action)",
+            Some("allow") => "Allowed (the firewall's default action)",
             Some("deny") => "Denied (the firewall's default action)",
             _ => "The firewall's default action",
         };
@@ -176,9 +178,10 @@ mod tests {
             outcome_text(&by_default(Some("deny"))),
             "Denied (the firewall's default action)"
         );
+        // The daemon reports the action it applied: no "usually".
         assert_eq!(
             outcome_text(&by_default(Some("allow"))),
-            "Usually allowed (the firewall's default action)"
+            "Allowed (the firewall's default action)"
         );
         assert!(!is_pending(&by_default(Some("deny"))));
         assert_eq!(Verdict::of(&by_default(Some("deny"))), Verdict::Denied);

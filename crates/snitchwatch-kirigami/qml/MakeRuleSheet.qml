@@ -1,5 +1,6 @@
 // "Make a rule…" for a connection whose prompt was put off (prompt-slot plan
-// Part C, item 9): the decision sheet's scope and remembered durations, sent
+// Part C, item 9), or that the firewall's default action decided (E3): the
+// decision sheet's scope and remembered durations, sent
 // as one rule (ConnectionsModel.makeRule, Rust `make_rule.rs`) until the rule
 // editor exists. A once-only answer can't be given afterwards, so "This time"
 // isn't offered. Every text here is fixed.

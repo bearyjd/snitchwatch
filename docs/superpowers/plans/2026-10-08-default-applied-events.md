@@ -144,7 +144,11 @@ all use it, so the marker is defined once.
   - Process + destination + port isn't unique: the waiting connection's
     retries, and other connections of the same program, get the default
     too and produce marked events with the same fields.
-  - So nothing is merged. Owner question below.
+  - So nothing is merged.
+- **Decision (orchestrator, 2026-10-08; for the owner to review): keep
+  both rows in v1.** This is a known limitation. Folding the marked event
+  into the deferred row would need the Ask's source port and pid kept on
+  the bridge side, so an exactly matching event can be recognised.
 
 ### Kirigami
 
@@ -152,15 +156,27 @@ all use it, so the marker is defined once.
   the list's verdict label (flat and grouped) and the inspector's Verdict
   line, with no QML change:
   - "Denied (the firewall's default action)";
-  - "Usually allowed (the firewall's default action)". "Usually" follows
-    the prompt-slot rule for default-action allows (tower's r8: requeued
-    packets can drop under nftables chain churn).
+  - "Allowed (the firewall's default action)". **No "usually"**
+    (orchestrator decision, 2026-10-08): the daemon reports the action it
+    applied. "Usually allowed" stays where the bridge only predicts the
+    default from the daemon config (deferred rows, the prompt-slot texts;
+    tower's r8: requeued packets can drop under nftables chain churn).
 - **`matched_rule_display`** checks the flag first:
   - "No rule: the firewall's default action (deny)" / "(allow)";
   - it never blanks, and never infers this from `matched_rule == None`.
-- **No rule actions.** "Show rule" needs a non-empty `matchedRule`, and
-  "Make a rule…" a deferred row; a marked row has neither. A QML probe
-  pins both. No QML change.
+- **No action that assumes a named rule.** "Show rule" needs a non-empty
+  `matchedRule`, which a marked row never has.
+- **"Make a rule…" is offered, as for a deferred row** (orchestrator
+  decision, 2026-10-08): both are connections the default decided.
+  - One predicate, `make_rule::offers_make_rule` (deferred **or**
+    `decided_by_default`), gates both the Rust `add_rule_message` and the
+    sheet's visibility. All of #98's checks stay: remembered durations
+    only, a bindable program only, a rule name of its own.
+  - The model's `deferred` role, whose only use was that visibility,
+    becomes `makeRuleOffered`, computed by the same predicate.
+  - The 5-minute-block note needs a `matchedRule`, so it never shows here.
+  - Rule-matched and plain decided rows still get no "Make a rule…", and
+    neither do pending rows.
 
 ## Overlap with PR #101 (`feat/rule-insights-badges`, in flight)
 
@@ -195,13 +211,16 @@ all use it, so the marker is defined once.
    - a named rule carrying the marker description counts, and counts in
      `received`;
    - an unmarked `""` event that grew `rule_hits` is no gap.
-4. **Kirigami unit** (`connections/outcome.rs`, `connections/row_store.rs`):
-   the labels above; the flag wins over `matched_rule`.
+4. **Kirigami unit** (`connections/outcome.rs`, `connections/row_store.rs`,
+   `make_rule.rs`): the labels above; the flag wins over `matched_rule`;
+   `offers_make_rule` and `add_rule_message` accept a default-decided row
+   with the same refusals, and refuse a rule-matched one.
 5. **Kirigami QML probe** (`tests/default_action_rows_qml.rs`): a real
    `ConnectionsPage` + `ConnectionsModel` with default-decided rows:
    - the list label, flat and grouped;
    - the inspector's Verdict and Matched rule;
-   - no "Show rule", no "Make a rule…".
+   - no "Show rule"; "Make a rule…" shown for default-decided rows, with no
+     block note, and hidden on a rule-matched and an unmarked `""` row.
 6. **`mock_opensnitchd`**: `default_action_event(...)` builds the contract
    `Event`; a unit test pins its shape.
 7. **Integration** (`tests/default_applied_events_test.rs`, the
@@ -215,7 +234,9 @@ Each flipped alone, a test must fail, then reverted:
 - the name half of the predicate;
 - the description half;
 - the gap exclusion (back to `events.len()`);
-- `outcome_text` and `matched_rule_display` ignoring the flag.
+- `outcome_text` and `matched_rule_display` ignoring the flag;
+- `offers_make_rule` ignoring `decided_by_default`;
+- the default-decided allow label saying "Usually allowed" again.
 
 ## Gates
 
@@ -224,13 +245,14 @@ warnings`; `cargo test -p snitchwatch-bridge`; `mock_opensnitchd` tests;
 Kirigami tests headless (`QT_QPA_PLATFORM=offscreen
 QT_QUICK_CONTROLS_STYLE=Basic`); `cargo test` for default members.
 
-## Open question for the owner
+## Decisions taken (orchestrator, 2026-10-08; for the owner to review)
 
-- **Fold the marked event into the bridge's own deferred row?** The bridge
-  could keep the Ask's source tuple and pid server-side for deferred rows,
-  and when an exactly matching marked event arrives, fill in the deferred
-  row's action (useful when the daemon config was unreadable) instead of
-  adding a second row. Not built here.
-- **"Make a rule…" on a default-decided row?** Today it is offered only for
-  deferred rows. A default-decided connection is a natural candidate, but
-  that widens #98's gate, so it is left out.
+- **Folding a marked event into the bridge's own deferred row: not in
+  v1.** Both rows stay. Doing it later needs the Ask's source port and pid
+  kept on the bridge side, so the bridge can recognise an exactly matching
+  event and fill in the deferred row's action (useful when the daemon
+  config was unreadable).
+- **"Make a rule…" on a default-decided row: yes,** through the deferred
+  row's path and checks (see Kirigami).
+- **Wording: "Allowed (the firewall's default action)"** for a
+  default-decided allow, without "usually" (see Kirigami).
