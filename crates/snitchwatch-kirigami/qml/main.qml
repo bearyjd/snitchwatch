@@ -512,6 +512,7 @@ Kirigami.ApplicationWindow {
         function onPendingCountChanged() {
             const now = connectionsModel.pendingCount;
             if (now > root.lastPendingCount) {
+                notificationController.noteRaise(root.visible, root.active);
                 root.raiseAndActivate();
             }
             root.lastPendingCount = now;
