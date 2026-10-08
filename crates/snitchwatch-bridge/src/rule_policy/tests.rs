@@ -546,6 +546,19 @@ fn a_packaged_rule_is_read_only_with_fixed_text_and_not_deletable() {
     assert!(!PACKAGED_RULE_REASON.contains("000-"), "fixed text only");
 }
 
+/// Profile rules (issue #46 Part 2) are listed read-only, pointing at the
+/// Profiles page, and only the bridge deletes them.
+#[test]
+fn a_profile_rule_is_read_only_and_not_deletable() {
+    let rule = daemon_rule(
+        "850-profile:home:0000-r1",
+        Some(op("simple", "dest.host", "example.com")),
+    );
+    assert_eq!(read_only_reason(&rule), Some(PROFILE_MANAGED_REASON));
+    assert!(PROFILE_MANAGED_REASON.contains("Profiles page"));
+    assert!(!deletable(&rule));
+}
+
 #[test]
 fn a_daemon_user_name_rule_reported_with_its_uid_is_read_only_but_deletable() {
     let rule = daemon_rule("000-x", Some(op("simple", "user.name", "987")));

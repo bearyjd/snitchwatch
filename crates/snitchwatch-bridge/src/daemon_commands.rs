@@ -96,7 +96,8 @@ pub enum SendError {
     /// A rule name fails [`crate::rule_name::validate_rule_name`].
     InvalidRuleName,
     /// A rule name under a blocklist prefix outside
-    /// [`DaemonCommands::send_blocklist`] (issue #45), or under the prefix
+    /// [`DaemonCommands::send_blocklist`] (issue #45), under the profile
+    /// prefix outside [`DaemonCommands::send_profile`] (issue #46), or under the prefix
     /// of the rules Snitchwatch ships, which nothing sends
     /// ([`crate::rule_name::is_reserved_name`]).
     ReservedName,
@@ -575,6 +576,10 @@ mod blocklist_command;
 pub use blocklist_command::BlocklistCommand;
 mod curated_command;
 pub use curated_command::CuratedCommand;
+
+#[path = "daemon_commands/profile_command.rs"]
+mod profile_command;
+pub use profile_command::ProfileCommand;
 
 #[cfg(test)]
 #[path = "daemon_commands/tests.rs"]

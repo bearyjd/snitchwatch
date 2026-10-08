@@ -150,15 +150,18 @@ jobs:
     container: fedora:43
     steps:
       # git: needed for actions/checkout's own git operations inside the
-      # container (not provided by the fedora:43 base image). Everything
-      # else here mirrors this repo's dev sandbox's confirmed-working
-      # package set (see this job's header comment).
+      # container (not provided by the fedora:43 base image). dbus-daemon:
+      # /usr/bin/dbus-daemon, for notification_signals' private-bus tests,
+      # which fail rather than skip without it on CI. Everything else here
+      # mirrors this repo's dev sandbox's confirmed-working package set (see
+      # this job's header comment).
       - name: Install system prerequisites
         run: |
           dnf install -y \
             git \
             gcc gcc-c++ make \
             protobuf-compiler \
+            dbus-daemon \
             qt6-qtbase-devel \
             qt6-qtdeclarative-devel \
             qt6-qttools-devel \
@@ -186,10 +189,13 @@ jobs:
       # default org.kde.desktop style needs a real Plasma session and hangs
       # under offscreen (see main.rs's own comment); Basic is the
       # QApplication-free style the test suite already targets.
+      # CI: set here too, not just by the runner, so the private D-Bus tests
+      # fail instead of skipping if dbus-daemon is ever missing.
       - name: cargo test -p snitchwatch-kirigami (headless)
         env:
           QT_QPA_PLATFORM: offscreen
           QT_QUICK_CONTROLS_STYLE: Basic
+          CI: "true"
         run: cargo test -p snitchwatch-kirigami --locked
 
       # Qt-level input routing, via qmltestrunner. Synthesises real mouse

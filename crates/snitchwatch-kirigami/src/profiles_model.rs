@@ -61,6 +61,11 @@ pub mod qobject {
         #[qproperty(i32, count)]
         #[qproperty(bool, storage_persistent, cxx_name = "storagePersistent")]
         #[qproperty(QString, storage_reason, cxx_name = "storageReason")]
+        /// Whether the bridge applies the active profile's rules (#46 Part
+        /// 2); false until it says so.
+        #[qproperty(bool, applies_rules, cxx_name = "appliesRules")]
+        /// Why it doesn't, or "".
+        #[qproperty(QString, not_applied_reason, cxx_name = "notAppliedReason")]
         type ProfilesModel = super::ProfilesModelRust;
 
         /// Emitted with a JSON-encoded `ClientMessage` (`CreateProfile` /
@@ -132,6 +137,17 @@ pub mod qobject {
         #[qinvokable]
         #[cxx_name = "deactivateProfile"]
         fn deactivate_profile(self: Pin<&mut ProfilesModel>);
+
+        /// A profile's rules with their status (`profiles::rules_view`), as
+        /// a JSON array; empty for an unknown profile.
+        #[qinvokable]
+        #[cxx_name = "rulesJson"]
+        fn rules_json(self: &ProfilesModel, id: &QString) -> QString;
+
+        /// Remove one of a profile's rules (emits `RemoveProfileRule`).
+        #[qinvokable]
+        #[cxx_name = "removeRule"]
+        fn remove_rule(self: Pin<&mut ProfilesModel>, id: &QString, rule_id: &QString);
     }
 
     unsafe extern "RustQt" {
@@ -153,6 +169,8 @@ pub struct ProfilesModelRust {
     count: i32,
     storage_persistent: bool,
     storage_reason: QString,
+    applies_rules: bool,
+    not_applied_reason: QString,
 }
 
 impl qobject::ProfilesModel {
@@ -248,6 +266,22 @@ impl qobject::ProfilesModel {
         self.emit_client(ClientMessage::DeactivateProfile);
     }
 
+    fn rules_json(&self, id: &QString) -> QString {
+        let rows = self
+            .store
+            .find_by_id(&id.to_string())
+            .map(crate::profiles::rules_view::rule_rows)
+            .unwrap_or_default();
+        QString::from(&serde_json::to_string(&rows).unwrap_or_else(|_| "[]".into()))
+    }
+
+    fn remove_rule(self: Pin<&mut Self>, id: &QString, rule_id: &QString) {
+        self.emit_client(ClientMessage::RemoveProfileRule {
+            profile_id: id.to_string(),
+            rule_id: rule_id.to_string(),
+        });
+    }
+
     fn start_bridge_feed(self: Pin<&mut Self>) {
         let Some(handles) = crate::bridge_runtime::handles() else {
             tracing::warn!("ProfilesModel: bridge not running; live feed disabled");
@@ -288,9 +322,13 @@ impl qobject::ProfilesModel {
             let n = self.store.len() as i32;
             let persistent = self.store.storage_persistent();
             let reason = QString::from(self.store.storage_reason());
+            let applies = self.store.applies_rules();
+            let not_applied = QString::from(self.store.not_applied_reason());
             self.as_mut().set_count(n);
             self.as_mut().set_storage_persistent(persistent);
             self.as_mut().set_storage_reason(reason);
+            self.as_mut().set_applies_rules(applies);
+            self.as_mut().set_not_applied_reason(not_applied);
         }
     }
 

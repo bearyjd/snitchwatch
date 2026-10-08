@@ -7,9 +7,15 @@
 //! The profile store's storage is tracked apart from the blocklist store's:
 //! either can fall back to memory while the other persists, and each GUI
 //! page is told about its own. Any bridge with a `Persistent` state
-//! directory saves profiles, the per-user one too: profiles install no
-//! firewall rule (the sink is `NoopProfileRuleSink` until Part 2), so unlike
-//! blocklists there is nothing to gate on [`BridgeMode`](crate::BridgeMode).
+//! directory saves profiles, the per-user one too. Only the system bridge
+//! applies the active profile's rules to the firewall (issue #46 Part 2);
+//! the per-user one installs nothing and says why on the Profiles page. A
+//! system bridge whose saved profiles can't be read (its store fell back to
+//! memory) changes no profile rule at all: with the keep-set unknown, a
+//! purge would delete the active profile's rules, the user's denies among
+//! them (the #45 PR B lesson). It installs nothing, deletes nothing, and
+//! the page says so. A store with one unreadable row counts as unreadable
+//! as a whole: skipping the row could skip the active profile.
 //!
 //! A store that can't be opened, or opens but can't be read, falls back to
 //! memory as `Unusable("profile store: …")`, logged at `error!` and shown on
@@ -26,20 +32,55 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use snitchwatch_bridge::profiles::store::{ProfileStore, StoreError};
-use snitchwatch_bridge::profiles::ProfilesManager;
+use snitchwatch_bridge::profiles::{
+    DaemonProfileSink, NoopProfileRuleSink, ProfileRuleSink, ProfilesManager,
+};
 use tracing::{error, info};
 
-use crate::storage::{EphemeralReason, Storage};
+use crate::storage::{BridgeMode, DaemonRules, EphemeralReason, Storage};
+
+/// Why a system bridge whose saved profiles can't be read changes none.
+pub const UNREADABLE_REASON: &str = "Snitchwatch can't read its saved profiles (profiles.sqlite3 \
+     in its state folder), so it changes no profile rules: rules it installed earlier were left \
+     in place. Fix or move that file, then restart Snitchwatch's background service.";
+
+/// Why a system bridge with nowhere to save profiles changes none.
+pub const NOWHERE_REASON: &str = "Snitchwatch has no place to save profiles here, so it changes \
+     no profile rules: rules it installed earlier were left in place.";
+
+/// Why a per-user bridge applies no profile rules.
+pub const PER_USER_REASON: &str = "Profiles are applied to the firewall only by the \
+     system-wide Snitchwatch service; in this per-user setup another program could pose as the \
+     firewall service.";
 
 /// The profile database's file name inside the state directory.
 pub const PROFILE_DB_FILE: &str = "profiles.sqlite3";
 
 /// The bridge's profile manager: persisted in `<state>/profiles.sqlite3`
-/// when its store opened `Persistent` (in memory otherwise), with the
-/// default no-op rule sink.
-pub(crate) fn build_profiles_manager(storage: Storage) -> Result<Arc<ProfilesManager>> {
+/// when its store opened `Persistent` (in memory otherwise), and applying
+/// the active profile's rules through `daemon` only for the system bridge
+/// with a store it could read.
+pub(crate) fn build_profiles_manager(
+    storage: Storage,
+    mode: BridgeMode,
+    daemon: DaemonRules,
+) -> Result<Arc<ProfilesManager>> {
     let (store, storage) = open_profile_store(storage)?;
-    let manager = ProfilesManager::new(store).with_storage_status(storage.status());
+    let sink: Arc<dyn ProfileRuleSink> = match (mode, &storage) {
+        (BridgeMode::System, Storage::Persistent(_)) => {
+            Arc::new(DaemonProfileSink::new(daemon.commands, daemon.rules))
+        }
+        (BridgeMode::System, Storage::Ephemeral(EphemeralReason::Unusable(_))) => {
+            Arc::new(NoopProfileRuleSink::new(UNREADABLE_REASON))
+        }
+        (BridgeMode::System, Storage::Ephemeral(_)) => {
+            Arc::new(NoopProfileRuleSink::new(NOWHERE_REASON))
+        }
+        (BridgeMode::User, _) => Arc::new(NoopProfileRuleSink::new(PER_USER_REASON)),
+    };
+    let manager = ProfilesManager::new(store)
+        .with_storage_status(storage.status())
+        .with_rule_sink(sink);
     Ok(Arc::new(manager))
 }
 
@@ -302,16 +343,73 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 
+    fn daemon() -> DaemonRules {
+        use snitchwatch_bridge::cache::rules::RulesSync;
+        use snitchwatch_bridge::daemon_commands::{DaemonCommands, DaemonTransport};
+        let rules = RulesSync::new(tokio::sync::broadcast::channel(4).0);
+        DaemonRules {
+            commands: DaemonCommands::new(DaemonTransport::Unix, rules.clone()),
+            rules: rules.cache(),
+        }
+    }
+
+    fn build(storage: Storage, mode: BridgeMode) -> Arc<ProfilesManager> {
+        build_profiles_manager(storage, mode, daemon()).unwrap()
+    }
+
+    /// Issue #46 Part 2: only the system bridge applies profile rules, also
+    /// from a store in memory (whose first pass removes an earlier run's
+    /// rules); the per-user one says why it applies none.
+    #[test]
+    fn only_the_system_bridge_applies_profiles() {
+        let (_dir, state) = state();
+        let system = build(Storage::Persistent(state.clone()), BridgeMode::System);
+        assert_eq!(system.not_applied_reason(), None);
+        let user = build(Storage::Persistent(state), BridgeMode::User);
+        assert_eq!(user.not_applied_reason().as_deref(), Some(PER_USER_REASON));
+    }
+
+    /// PR #104 review HIGH: a system bridge whose saved profiles can't be
+    /// read must not purge: with the keep-set unknown it installs nothing
+    /// and deletes nothing, and says why (the #45 PR B lesson).
+    #[test]
+    fn a_system_bridge_that_cant_read_its_profiles_changes_no_profile_rule() {
+        let memory = build(
+            Storage::Ephemeral(EphemeralReason::InProcess),
+            BridgeMode::System,
+        );
+        assert_eq!(memory.not_applied_reason().as_deref(), Some(NOWHERE_REASON));
+        // One bad row makes the whole store unreadable (the safe choice:
+        // a skipped row could be the active profile's).
+        let (_dir, state) = state();
+        let path = state.join(PROFILE_DB_FILE);
+        ProfileStore::open(&path)
+            .unwrap()
+            .upsert_profile(&home())
+            .unwrap();
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute_batch("UPDATE profiles SET rules = 'not json';")
+            .unwrap();
+        let unreadable = build(Storage::Persistent(state), BridgeMode::System);
+        assert!(!unreadable.storage_status().persistent);
+        assert_eq!(
+            unreadable.not_applied_reason().as_deref(),
+            Some(UNREADABLE_REASON)
+        );
+        assert!(UNREADABLE_REASON.contains("left in place"));
+    }
+
     #[test]
     fn the_manager_reports_the_resolved_storage() {
         let (_dir, state) = state();
-        let persistent = build_profiles_manager(Storage::Persistent(state.clone())).unwrap();
+        let persistent = build(Storage::Persistent(state.clone()), BridgeMode::User);
         assert!(persistent.storage_status().persistent);
         assert_eq!(persistent.storage_status().reason, None);
 
         std::fs::remove_file(state.join(PROFILE_DB_FILE)).unwrap();
         std::fs::create_dir(state.join(PROFILE_DB_FILE)).unwrap();
-        let fallback = build_profiles_manager(Storage::Persistent(state)).unwrap();
+        let fallback = build(Storage::Persistent(state), BridgeMode::User);
         assert!(!fallback.storage_status().persistent);
         assert!(fallback
             .storage_status()
@@ -319,8 +417,10 @@ mod tests {
             .as_deref()
             .is_some_and(|r| r.starts_with("profile store: ")));
 
-        let in_process =
-            build_profiles_manager(Storage::Ephemeral(EphemeralReason::InProcess)).unwrap();
+        let in_process = build(
+            Storage::Ephemeral(EphemeralReason::InProcess),
+            BridgeMode::User,
+        );
         assert!(!in_process.storage_status().persistent);
         assert_eq!(in_process.storage_status().reason, None);
     }

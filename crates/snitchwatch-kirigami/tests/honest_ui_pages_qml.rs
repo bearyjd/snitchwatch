@@ -330,6 +330,23 @@ Window {
                 if (profilesPage.storageReason !== "profile store: <b>locked</b>") {
                     throw new Error("ProfilesPage: storage reason not exposed");
                 }
+                // Issue #46 Part 2: a bridge that applies profile rules swaps
+                // the warning for a note saying they are applied.
+                profilesPage.model.applyServerMessageJson(JSON.stringify({
+                    action: "setProfiles", profiles: [], storage: { persistent: true },
+                    appliesRules: true
+                }));
+                let applied = null;
+                let stillWarned = null;
+                for (let i = 0; i < profilesPage.header.children.length; i++) {
+                    const item = profilesPage.header.children[i];
+                    if (item.objectName === "appliedNote") applied = item;
+                    if (item.objectName === "notAppliedBanner") stillWarned = item;
+                }
+                if (!applied || !applied.visible || stillWarned.visible
+                        || applied.type !== Kirigami.MessageType.Information) {
+                    throw new Error("ProfilesPage: applied profiles aren't said to be applied");
+                }
                 if (rulesPage.inspectName !== longRuleName) {
                     throw new Error("RulesPage inspector did not open on the markup-named rule");
                 }

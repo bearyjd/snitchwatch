@@ -4662,6 +4662,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "which 6.0.3",
+ "zbus 5.14.0",
 ]
 
 [[package]]

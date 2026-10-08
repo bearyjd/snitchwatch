@@ -123,7 +123,7 @@ pub(crate) fn rule_from_wire(v: &serde_json::Value) -> Result<Rule, String> {
 
 /// Inverse of [`operator_to_wire`], mirroring its two branches: an `operands`
 /// array means a list operator, anything else is a leaf.
-fn operator_from_wire(
+pub(crate) fn operator_from_wire(
     v: &serde_json::Value,
 ) -> Result<snitchwatch_proto::protocol::Operator, String> {
     let obj = v.as_object().ok_or("operator must be a JSON object")?;
