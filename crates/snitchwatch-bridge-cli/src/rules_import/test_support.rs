@@ -16,6 +16,7 @@ pub(super) fn applier(daemon: &Daemon) -> Applier {
         "p".into(),
         Duration::from_secs(5),
         Duration::from_millis(10),
+        crate::busy::BusyNames::default(),
     )
 }
 

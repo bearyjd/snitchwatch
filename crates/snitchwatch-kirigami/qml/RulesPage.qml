@@ -91,6 +91,9 @@ Kirigami.ScrollablePage {
     readonly property bool showsAllAppsNotice: !!page.model && page.model.legacyHostOnlyCount > 0
     // Not `ioStatus.visible`: a child of a hidden header always reads false.
     readonly property bool showsIoStatus: rulesIo.statusText.length > 0 && !importSheet.visible
+    // The rule editor's last result once its sheet closed (P2.1).
+    readonly property bool showsEditorStatus: ruleEditorController.statusText.length > 0
+                                              && !ruleEditor.visible
 
     function actionColor(action) {
         return action === "allow" ? Kirigami.Theme.positiveTextColor : Kirigami.Theme.negativeTextColor;
@@ -287,7 +290,7 @@ Kirigami.ScrollablePage {
     // Below it, what the hit counts are (see the top of this file), then the
     // last import or export outcome.
     header: ColumnLayout {
-        visible: page.showsAllAppsNotice || page.showsIoStatus
+        visible: page.showsAllAppsNotice || page.showsIoStatus || page.showsEditorStatus
             || hitsSummaryLabel.text.length > 0 || hitsStorageLabel.text.length > 0
         spacing: 0
 
@@ -344,6 +347,16 @@ Kirigami.ScrollablePage {
             Layout.margins: Kirigami.Units.smallSpacing
             textFormat: Text.PlainText
             text: rulesIo.statusText
+            wrapMode: Text.Wrap
+        }
+        // The rule editor's last result (P2.1), plain text.
+        Controls.Label {
+            objectName: "ruleEditorStatus"
+            visible: page.showsEditorStatus
+            Layout.fillWidth: true
+            Layout.margins: Kirigami.Units.smallSpacing
+            textFormat: Text.PlainText
+            text: ruleEditorController.statusText
             wrapMode: Text.Wrap
         }
     }

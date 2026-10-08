@@ -63,6 +63,8 @@ pub(crate) struct ImportConfig {
     pub(crate) retry_delay: Duration,
     /// How long a preview may be applied.
     pub(crate) preview_ttl: Duration,
+    /// Names rule commands are changing (shared with them).
+    pub(crate) busy: crate::busy::BusyNames,
 }
 
 impl Default for ImportConfig {
@@ -71,6 +73,7 @@ impl Default for ImportConfig {
             reply_timeout: Duration::from_secs(5),
             retry_delay: Duration::from_millis(100),
             preview_ttl: Duration::from_secs(10 * 60),
+            busy: crate::busy::BusyNames::default(),
         }
     }
 }
@@ -82,12 +85,18 @@ pub(crate) struct RulesImport {
 }
 
 impl RulesImport {
+    /// `busy`: the names rule commands are changing, shared with them.
     pub(crate) fn spawn(
         commands: DaemonCommands,
         rules: SharedRulesCache,
         broadcast: broadcast::Sender<ServerMessage>,
+        busy: crate::busy::BusyNames,
     ) -> Self {
-        Self::spawn_with(commands, rules, broadcast, ImportConfig::default())
+        let config = ImportConfig {
+            busy,
+            ..ImportConfig::default()
+        };
+        Self::spawn_with(commands, rules, broadcast, config)
     }
 
     pub(crate) fn spawn_with(
@@ -369,6 +378,7 @@ impl ImportTask {
             preview_id,
             self.config.reply_timeout,
             self.config.retry_delay,
+            self.config.busy.clone(),
         );
         tokio::spawn(async move {
             // The whole guard moves in (not just its `Copy` totals field).

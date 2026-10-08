@@ -334,6 +334,9 @@ pub enum ServerMessage {
 pub enum RuleCommandOutcome {
     /// The daemon answered OK (both steps, for a rename).
     Ok,
+    /// Done, with something the user should know (a renamed rule's old
+    /// file the daemon couldn't remove).
+    OkWithNote { note: String },
     /// The daemon answered ERROR, or a rename was undone; why.
     Rejected { reason: String },
     /// The bridge didn't send it: the rule policy's problems.

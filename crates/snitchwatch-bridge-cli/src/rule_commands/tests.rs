@@ -16,6 +16,7 @@ pub(super) fn commands(daemon: &Daemon) -> RuleCommands {
         daemon.commands.clone(),
         daemon.cache.clone(),
         daemon.broadcast.clone(),
+        crate::busy::BusyNames::default(),
         Duration::from_millis(300),
     )
 }

@@ -443,6 +443,14 @@ pub fn check(draft: &RuleDraft, old: Option<&Value>) -> EditorCheck {
     result
 }
 
+fn unanchored_path_pattern(condition: &Condition) -> bool {
+    matches!(
+        condition.operand.as_str(),
+        "process.path" | "process.parent.path"
+    ) && condition.kind == MatchKind::Pattern
+        && !(condition.value.starts_with('^') && condition.value.ends_with('$'))
+}
+
 fn warnings(draft: &RuleDraft) -> Vec<String> {
     let mut out = Vec::new();
     // From the draft itself: a problem elsewhere doesn't unbind a program.
@@ -459,8 +467,16 @@ fn warnings(draft: &RuleDraft) -> Vec<String> {
         .any(|c| c.operand == "process.path" && c.kind == MatchKind::Pattern)
     {
         out.push(
-            "A program path pattern can match more programs than you mean: any program \
-             whose path matches."
+            "A program path pattern can match more programs than you mean: every program \
+             whose path fits it. ^/usr/bin/ matches every program in /usr/bin, including \
+             shells and interpreters that run other programs."
+                .into(),
+        );
+    }
+    if draft.conditions.iter().any(unanchored_path_pattern) {
+        out.push(
+            "A program path pattern without ^ at the start and $ at the end also matches \
+             longer paths that contain it: /usr/bin/curl matches /home/me/usr/bin/curl too."
                 .into(),
         );
     }

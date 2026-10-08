@@ -30,15 +30,6 @@ fn renamed() -> serde_json::Value {
     export_rule(&bound("200-new", "deny"))
 }
 
-/// The responder's answer for each (action, name).
-fn answering(daemon: &mut Daemon, answer: fn(&str, &str) -> Option<bool>) -> Seen {
-    respond_to(daemon, move |n| {
-        let (action, name) = step(n);
-        answer(action, &name).map(|ok| (ok, if ok { "" } else { "refused" }.to_string()))
-    })
-    .0
-}
-
 fn cached_names(daemon: &Daemon) -> Vec<String> {
     daemon
         .cache
@@ -54,7 +45,8 @@ fn cached_names(daemon: &Daemon) -> Vec<String> {
 #[tokio::test]
 async fn a_rename_adds_the_new_name_then_deletes_the_old_one() {
     let mut daemon = daemon(vec![bound("100-old", "deny")]);
-    let seen = answering(&mut daemon, |_, _| Some(true));
+    let model = model(&[bound("100-old", "deny")]);
+    let seen = run_model(&mut daemon, model.clone());
     let commands = commands(&daemon);
     let mut rx = daemon.broadcast.subscribe();
     commands.try_route(update("100-old", renamed(), Some("r1")));
@@ -67,82 +59,116 @@ async fn a_rename_adds_the_new_name_then_deletes_the_old_one() {
         ]
     );
     assert_eq!(cached_names(&daemon), vec!["200-new"]);
+    assert_eq!(applying(&model), vec!["200-new"]);
+    assert_eq!(files(&model), vec!["200-new"]);
 }
 
 #[tokio::test]
 async fn a_refused_new_rule_leaves_the_old_one_alone() {
     let mut daemon = daemon(vec![bound("100-old", "deny")]);
-    let seen = answering(&mut daemon, |action, _| Some(action != "change"));
+    let model = model(&[bound("100-old", "deny")]);
+    let mut broken = renamed();
+    broken["operator"]["operands"][1]["data"] = json!("broken.example");
+    model
+        .lock()
+        .unwrap()
+        .uncompilable
+        .insert("broken.example".into());
+    let seen = run_model(&mut daemon, model.clone());
     let commands = commands(&daemon);
     let mut rx = daemon.broadcast.subscribe();
-    commands.try_route(update("100-old", renamed(), Some("r1")));
+    commands.try_route(update("100-old", broken, Some("r1")));
     assert!(matches!(
         result(&mut rx).await,
         RuleCommandOutcome::Rejected { .. }
     ));
     assert_eq!(steps(&seen), vec![("change", "200-new".to_string())]);
     assert_eq!(cached_names(&daemon), vec!["100-old"]);
+    assert_eq!(applying(&model), vec!["100-old"]);
 }
 
+/// The daemon drops a rule from memory before removing its file, so an
+/// ERROR on the old rule's delete means it already stopped applying. Undoing
+/// the new rule then would leave neither; the rename stands, and the result
+/// says the old file may bring the old rule back at a restart.
 #[tokio::test]
-async fn an_old_rule_that_wont_go_is_undone_by_removing_the_new_one() {
+async fn an_old_rule_whose_file_wont_go_is_renamed_anyway() {
     let mut daemon = daemon(vec![bound("100-old", "deny")]);
-    let seen = answering(&mut daemon, |action, name| {
-        Some(!(action == "delete" && name == "100-old"))
-    });
+    let model = model(&[bound("100-old", "deny")]);
+    model.lock().unwrap().stuck_files.insert("100-old".into());
+    let seen = run_model(&mut daemon, model.clone());
     let commands = commands(&daemon);
     let mut rx = daemon.broadcast.subscribe();
     commands.try_route(update("100-old", renamed(), Some("r1")));
     match result(&mut rx).await {
-        RuleCommandOutcome::Rejected { reason } => {
-            assert!(reason.contains("Nothing changed"), "{reason}")
-        }
-        other => panic!("{other:?}"),
-    }
-    assert_eq!(
-        steps(&seen),
-        vec![
-            ("change", "200-new".to_string()),
-            ("delete", "100-old".to_string()),
-            ("delete", "200-new".to_string())
-        ]
-    );
-    assert_eq!(cached_names(&daemon), vec!["100-old"]);
-}
-
-#[tokio::test]
-async fn when_the_undo_fails_too_both_rules_exist_and_it_says_so() {
-    let mut daemon = daemon(vec![bound("100-old", "deny")]);
-    answering(&mut daemon, |action, _| Some(action == "change"));
-    let commands = commands(&daemon);
-    let mut rx = daemon.broadcast.subscribe();
-    commands.try_route(update("100-old", renamed(), Some("r1")));
-    match result(&mut rx).await {
-        RuleCommandOutcome::Unsure { reason } => {
-            assert!(reason.contains("both exist"), "{reason}")
-        }
-        other => panic!("{other:?}"),
-    }
-}
-
-/// An unanswered delete may have worked: removing the new rule then could
-/// leave neither (a deny gone), so nothing is undone and it says so.
-#[tokio::test]
-async fn an_unanswered_delete_is_not_undone() {
-    let mut daemon = daemon(vec![bound("100-old", "deny")]);
-    let seen = answering(&mut daemon, |action, _| {
-        (action == "change").then_some(true)
-    });
-    let commands = commands(&daemon);
-    let mut rx = daemon.broadcast.subscribe();
-    commands.try_route(update("100-old", renamed(), Some("r1")));
-    match result(&mut rx).await {
-        RuleCommandOutcome::Unsure { reason } => {
-            assert!(reason.contains("both may exist"), "{reason}")
+        RuleCommandOutcome::OkWithNote { note } => {
+            assert!(note.contains("may come back"), "{note}")
         }
         other => panic!("{other:?}"),
     }
     assert_eq!(steps(&seen).len(), 2, "no undo: {:?}", steps(&seen));
+    assert_eq!(applying(&model), vec!["200-new"], "a rule still applies");
+    assert_eq!(cached_names(&daemon), vec!["200-new"]);
+}
+
+/// An unanswered delete may have worked: removing the new rule then could
+/// leave neither (a deny gone), so nothing is undone, and the result says
+/// which rule decides while both may exist.
+#[tokio::test]
+async fn an_unanswered_delete_is_not_undone() {
+    let mut daemon = daemon(vec![bound("100-old", "deny")]);
+    let model = model(&[bound("100-old", "deny")]);
+    model
+        .lock()
+        .unwrap()
+        .silent
+        .insert((Action::DeleteRule as i32, "100-old".into()));
+    let seen = run_model(&mut daemon, model.clone());
+    let commands = commands(&daemon);
+    let mut rx = daemon.broadcast.subscribe();
+    commands.try_route(update("100-old", renamed(), Some("r1")));
+    match result(&mut rx).await {
+        RuleCommandOutcome::Unsure { reason } => {
+            assert!(reason.contains("both may exist"), "{reason}");
+            assert!(reason.contains("old rule decides"), "{reason}");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(steps(&seen).len(), 2, "no undo: {:?}", steps(&seen));
+}
+
+/// `FindFirstMatch`: the first matching deny, reject or decide-first rule
+/// by name wins; an allow only where nothing blocks.
+#[test]
+fn which_rule_decides_while_both_exist() {
+    let rule = |name: &str, action: &str| bound(name, action);
+    use super::rename::{deciding, BOTH_ALLOW, NEW_DECIDES, OLD_DECIDES};
+    assert_eq!(
+        deciding(&rule("100-a", "deny"), &rule("200-b", "allow")),
+        OLD_DECIDES
+    );
+    assert_eq!(
+        deciding(&rule("200-a", "allow"), &rule("100-b", "reject")),
+        NEW_DECIDES
+    );
+    assert_eq!(
+        deciding(&rule("200-a", "deny"), &rule("100-b", "deny")),
+        NEW_DECIDES
+    );
+    assert_eq!(
+        deciding(&rule("100-a", "allow"), &rule("200-b", "allow")),
+        BOTH_ALLOW
+    );
+    let first = snitchwatch_proto::protocol::Rule {
+        precedence: true,
+        ..rule("300-a", "allow")
+    };
+    assert_eq!(deciding(&first, &rule("100-b", "allow")), OLD_DECIDES);
+    let off = snitchwatch_proto::protocol::Rule {
+        enabled: false,
+        ..rule("100-a", "deny")
+    };
+    assert_eq!(deciding(&off, &rule("200-b", "allow")), NEW_DECIDES);
 }
 
 #[tokio::test]
@@ -174,17 +200,36 @@ async fn a_rename_onto_an_existing_hidden_or_reserved_name_is_refused() {
     nothing_sent(&mut daemon).await;
 }
 
-/// A deny renamed into an allow is still a change of that deny: the rename
-/// is checked against the old rule, not as a new one.
+/// A rename changes the old rule, so the old rule must be one Snitchwatch
+/// may change, and the renamed rule must pass the editor's checks.
 #[tokio::test]
-async fn a_rename_is_checked_against_the_rule_it_replaces() {
-    let mut daemon = daemon(vec![bound("100-old", "deny")]);
+async fn a_rename_needs_a_changeable_old_rule_and_a_valid_new_one() {
+    let mut locked = bound("100-locked", "deny");
+    locked.operator.as_mut().unwrap().list[1] = snitchwatch_proto::protocol::Operator {
+        r#type: "simple".into(),
+        operand: "user.name".into(),
+        data: "1000".into(),
+        ..Default::default()
+    };
+    let mut daemon = daemon(vec![bound("100-old", "deny"), locked]);
     let commands = commands(&daemon);
     let mut rx = daemon.broadcast.subscribe();
-    let mut loosened = export_rule(&bound("200-new", "allow"));
-    loosened["operator"]["operands"][0]["data"] = json!("curl");
-    commands.try_route(update("100-old", loosened, Some("r")));
-    refused(&result(&mut rx).await);
+    commands.try_route(update("100-locked", renamed(), Some("r1")));
+    let reasons = refused(&result(&mut rx).await);
+    assert!(
+        reasons
+            .iter()
+            .any(|r| r == snitchwatch_bridge::rule_policy::SHAPE_READ_ONLY_REASON),
+        "{reasons:?}"
+    );
+    let mut relative = renamed();
+    relative["operator"]["operands"][0]["data"] = json!("curl");
+    commands.try_route(update("100-old", relative, Some("r2")));
+    let reasons = refused(&result(&mut rx).await);
+    assert!(
+        reasons.iter().any(|r| r.contains("full path")),
+        "{reasons:?}"
+    );
     nothing_sent(&mut daemon).await;
 }
 

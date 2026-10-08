@@ -58,6 +58,12 @@ pub const EDITOR_DURATION_REFUSED: &str = "the duration must be always, until th
 pub const RELATIVE_PATH_REFUSED: &str = "an exact program path must be the program's full path, \
      starting with /; use a pattern to match more than one program";
 pub const PROTOCOL_REFUSED: &str = "a protocol is a short lowercase name such as tcp or udp";
+pub const EDITOR_EMPTY_HOST_REFUSED: &str = "a blank host name matches every connection that \
+     has no host name, such as every connection to a bare address; name a host, or use an IP \
+     address or network condition";
+pub const EDITOR_OPERAND_REFUSED: &str = "process ID and environment conditions can't be \
+     written here: a process ID names whatever process gets that number next, and a program \
+     sets its own environment";
 pub const PORT_REFUSED: &str = "a port must be a whole number from 0 to 65535";
 pub const ID_REFUSED: &str = "a process or user ID must be a whole number";
 pub const PROFILE_NAME_REFUSED: &str =
@@ -150,15 +156,7 @@ fn check_rule(rule: &Rule, profile: PolicyProfile, problems: &mut Vec<RuleProble
 /// The import checks for an operator `validate_operator` accepted: a leaf,
 /// or one list of leaves.
 fn check_import_operator(op: &Operator, profile: PolicyProfile, problems: &mut Vec<RuleProblem>) {
-    let leaves: Vec<(String, &Operator)> = if op.r#type == "list" {
-        op.list
-            .iter()
-            .enumerate()
-            .map(|(index, member)| (format!("operator.list[{index}]"), member))
-            .collect()
-    } else {
-        vec![("operator".to_string(), op)]
-    };
+    let leaves = leaves_of(op);
     // Members are ANDed: a list narrows as soon as one member does.
     if !leaves
         .iter()
@@ -230,10 +228,19 @@ fn editor_duration(duration: &str) -> bool {
 /// exact program path is a real program's full path (#44's rule for
 /// remembered verdicts), and a protocol is a short lowercase token.
 fn check_editor_leaf(path: &str, leaf: &Operator, problems: &mut Vec<RuleProblem>) {
-    if leaf.r#type != "simple" || leaf.data.is_empty() {
+    if leaf.operand == "process.id" || leaf.operand.starts_with("process.env.") {
+        problem(problems, &format!("{path}.operand"), EDITOR_OPERAND_REFUSED);
+    }
+    if leaf.r#type != "simple" {
         return;
     }
     let data_path = format!("{path}.data");
+    if leaf.data.is_empty() {
+        if leaf.operand == "dest.host" {
+            problem(problems, &data_path, EDITOR_EMPTY_HOST_REFUSED);
+        }
+        return;
+    }
     match leaf.operand.as_str() {
         "process.path"
             if !crate::translator::process_binding::is_bindable_process_path(&leaf.data) =>
@@ -278,6 +285,55 @@ fn check_import_leaf(path: &str, leaf: &Operator, problems: &mut Vec<RuleProblem
             problem(problems, &data_path, ID_REFUSED)
         }
         _ => {}
+    }
+}
+
+/// What stops a rule from being turned on, whatever made it (re-review M2):
+/// conditions that match every connection (`true`, a `/0` network, a
+/// pattern that matches everything, or only a process hash, which matches
+/// every program while checksums are off), an empty value, or a duration
+/// the editor wouldn't write. Turning a rule off is never checked.
+pub fn enable_problems(rule: &Rule) -> Vec<RuleProblem> {
+    let mut problems = Vec::new();
+    match &rule.operator {
+        None => problem(&mut problems, "operator", NO_CONDITIONS),
+        Some(op) => {
+            let leaves = leaves_of(op);
+            let narrows = |leaf: &Operator| {
+                super::narrowing::narrows(leaf) && !leaf.operand.starts_with("process.hash.")
+            };
+            if !leaves.iter().any(|(_, leaf)| narrows(leaf)) {
+                problem(&mut problems, "operator", MATCHES_EVERYTHING);
+            }
+            for (path, leaf) in leaves {
+                let empty = leaf.r#type == "simple" && leaf.data.is_empty();
+                let reason = match leaf.operand.as_str() {
+                    "true" => continue,
+                    "dest.host" => EDITOR_EMPTY_HOST_REFUSED,
+                    _ => EMPTY_VALUE_REFUSED,
+                };
+                if empty {
+                    problem(&mut problems, &format!("{path}.data"), reason);
+                }
+            }
+        }
+    }
+    if !editor_duration(&rule.duration) {
+        problem(&mut problems, "duration", EDITOR_DURATION_REFUSED);
+    }
+    problems
+}
+
+/// A leaf, or one list's members, each with its path.
+fn leaves_of(op: &Operator) -> Vec<(String, &Operator)> {
+    if op.r#type == "list" {
+        op.list
+            .iter()
+            .enumerate()
+            .map(|(index, member)| (format!("operator.list[{index}]"), member))
+            .collect()
+    } else {
+        vec![("operator".to_string(), op)]
     }
 }
 

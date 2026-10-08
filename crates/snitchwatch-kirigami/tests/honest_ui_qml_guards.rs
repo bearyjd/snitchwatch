@@ -462,6 +462,8 @@ fn rules_page_labels_showing_rule_data_are_plain_text() {
             "rulesIo.statusText",
             // P2.1: why the editor can't change a rule (bridge reasons).
             "page.inspectNotEditable",
+            // P2.1: the editor's last result (bridge reasons).
+            "ruleEditorController.statusText",
         ],
         11,
     );
