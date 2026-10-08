@@ -81,6 +81,24 @@ The two fields that matter, relative to upstream's defaults:
 > `/etc` overlay, not the read-only `/usr` tree), so this `install` needs no
 > `usroverlay` and survives upgrades.
 
+> **Only with the system bridge:** if you deploy the socket-activated
+> system bridge
+> ([`system-bridge-integration.md`](system-bridge-integration.md)) rather
+> than the `--user` bridge below, also install the one packaged rule. It
+> lets that bridge's `snitchwatch` account download blocklists over HTTPS:
+>
+> ```bash
+> sudo install -Dm644 \
+>   packaging/bluebuild/files/system/etc/opensnitchd/rules/000-snitchwatch-bridge-fetch.json \
+>   /etc/opensnitchd/rules/000-snitchwatch-bridge-fetch.json
+> ```
+>
+> The `--user` bridge doesn't need it, and the rule deliberately doesn't
+> match it. Install it after the `snitchwatch` account exists, or restart
+> `opensnitch.service` afterwards: the daemon skips the rule while the
+> account is missing. See
+> [`../../packaging/README.md`](../../packaging/README.md#the-packaged-fetch-rule).
+
 Restart the daemon so it picks up the new config:
 
 ```bash

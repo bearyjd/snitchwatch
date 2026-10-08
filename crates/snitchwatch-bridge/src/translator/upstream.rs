@@ -95,6 +95,10 @@ pub fn apply(
         | ClientMessage::Redo
         | ClientMessage::SetFilteringPaused { .. }
         | ClientMessage::RecheckDiagnostics
+        // Routed to bridge-cli's `rules_import` task before this point.
+        | ClientMessage::ExportRules { .. }
+        | ClientMessage::PreviewRulesImport { .. }
+        | ClientMessage::ApplyRulesImport { .. }
         // Intercepted by the pump too: it needs the daemon's settings
         // (`deferred_answers::decide_later`).
         | ClientMessage::DecideLater { .. } => Ok(UpstreamEffect::None),

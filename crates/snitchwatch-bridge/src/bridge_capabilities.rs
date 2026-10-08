@@ -18,6 +18,12 @@ pub const APP_BOUND_RULES: &str = "appBoundRules";
 /// own estimate from pending rows.
 pub const PROMPT_SLOT: &str = "promptSlot";
 
+/// A filtering pause also answers Allow once the prompts already waiting
+/// (issue #78, `crate::pause_answers`). Bridges before that leave them
+/// waiting, so a client must not promise the pause lets them through unless
+/// this is advertised.
+pub const PAUSE_ANSWERS_WAITING: &str = "pauseAnswersWaiting";
+
 /// The bridge answers a prompt nobody answers after
 /// `deferred_answers::ANSWER_TIMEOUT` (pending rows carry
 /// `answerDeadlineMs`), and accepts `ClientMessage::DecideLater`
@@ -29,6 +35,7 @@ pub fn advertised() -> Vec<String> {
     vec![
         APP_BOUND_RULES.to_string(),
         PROMPT_SLOT.to_string(),
+        PAUSE_ANSWERS_WAITING.to_string(),
         DECIDE_LATER.to_string(),
     ]
 }
@@ -64,13 +71,13 @@ mod tests {
     }
 
     #[test]
-    fn this_bridge_advertises_app_bound_rules_the_prompt_slot_and_decide_later() {
+    fn this_bridge_advertises_its_capabilities() {
         let ack: serde_json::Value = serde_json::from_str(&current_ack()).unwrap();
         assert_eq!(
             ack,
             serde_json::json!({
                 "action": "authenticated",
-                "capabilities": ["appBoundRules", "promptSlot", "decideLater"],
+                "capabilities": ["appBoundRules", "promptSlot", "pauseAnswersWaiting", "decideLater"],
             })
         );
     }

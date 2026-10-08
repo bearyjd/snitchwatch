@@ -4,7 +4,6 @@
 //! for 5 minutes, or falls back to P-a without a bindable path (S2 = P-c).
 
 use super::*;
-use crate::cache::rules::RulesCache;
 use crate::deferred_answers::{decide_later, DecidedLater, ANSWER_TIMEOUT};
 use crate::ws_messages::{AutoAnswer, ConnectionRow, VerdictDuration, VerdictScope};
 use tonic::Code;
@@ -85,8 +84,9 @@ fn assert_nothing_saved(svc: &UiService, messages: &[ServerMessage]) {
         "no rule may be saved: {messages:?}"
     );
     assert_eq!(
-        *svc.rules_handle().lock().unwrap(),
-        RulesCache::Synced(Default::default())
+        svc.rules_handle().lock().unwrap().rules(),
+        Some(&Default::default()),
+        "the rules cache is unchanged"
     );
 }
 

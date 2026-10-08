@@ -17,6 +17,7 @@
 pub mod activation;
 pub mod cli;
 pub mod profile_storage;
+mod rules_import;
 pub mod storage;
 
 pub use storage::{
@@ -548,6 +549,12 @@ where
     let daemon_commands = ui_service_inner.daemon_commands();
     let daemon_stream_ready = daemon_commands.stream_ready();
     let rules = ui_service_inner.rules_handle();
+    // Rule import/export (roadmap P2.7): its own task; the pump only routes.
+    let rules_import = rules_import::RulesImport::spawn(
+        daemon_commands.clone(),
+        rules.clone(),
+        broadcast_tx.clone(),
+    );
     tokio::spawn(prune_expired_rules_every(
         RULE_EXPIRY_TICK,
         Arc::downgrade(&rules),
@@ -674,6 +681,9 @@ where
             // Blocklist messages go to the single blocklist worker; queueing
             // never waits on a fetch (issue #45).
             let Some(msg) = blocklist_worker.try_route(msg) else {
+                continue;
+            };
+            let Some(msg) = rules_import.try_route(msg) else {
                 continue;
             };
             // Special-cased before is_profile_message/upstream::apply — this

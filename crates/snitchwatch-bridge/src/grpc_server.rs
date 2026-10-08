@@ -17,7 +17,7 @@ use crate::rule_wire::rule_to_wire;
 use crate::translator::connection::{connection_to_row, event_to_row};
 use crate::translator::verdict::{once_rule, verdict_to_rule};
 use crate::tray_state::{TrayState, TrayStatePublisher};
-use crate::ws_messages::ServerMessage;
+use crate::ws_messages::{ConnectionRow, ServerMessage};
 use snitchwatch_proto::protocol::ui_server::{Ui, UiServer};
 use snitchwatch_proto::protocol::{
     Action, Alert, ClientConfig, Connection, MsgResponse, Notification, NotificationReply,
@@ -48,7 +48,7 @@ const RECENT_BLOCK_TTL: Duration = Duration::from_secs(5);
 /// Largest daemon message decoded (tonic's own default, made explicit). The
 /// biggest is a `Subscribe` carrying the full rule list, which
 /// `cache::rules::MAX_SNAPSHOT_RULES` bounds again after decoding.
-const MAX_DAEMON_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
+pub(crate) const MAX_DAEMON_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
 
 /// Bridge-side gRPC server state. Handed to `UiServer::new` for tonic.
 #[derive(Clone)]
@@ -333,6 +333,24 @@ impl UiService {
         once_rule(resolution.verdict, resolution.scope, conn, now_secs)
     }
 
+    /// Record an Ask the pause decides on arrival (issue #78): the row is
+    /// stored already allowed and labelled `filterPaused`, and GUIs get it as
+    /// a decided row, never as a waiting prompt. The caller holds the cache
+    /// lock the pause's scan of waiting prompts takes too, and builds the
+    /// Allow once reply after releasing it.
+    fn allow_on_arrival(&self, cache: &mut ConnectionCache, row: ConnectionRow) {
+        let decided_row = crate::pause_answers::allowed_on_arrival(row);
+        cache.insert_decided(decided_row.clone());
+        if self.broadcast.receiver_count() > 0 {
+            let msg = ServerMessage::InsertConnectionRows {
+                rows: vec![decided_row],
+            };
+            if let Err(e) = self.broadcast.send(msg) {
+                warn!(error = %e, "ask_rule (paused): broadcast send failed");
+            }
+        }
+    }
+
     /// Publish `TrayState::RecentBlock` and schedule its own revert after
     /// [`RECENT_BLOCK_TTL`]. If a second block happens before the first's
     /// timer fires, the first's timer becomes a no-op (its captured
@@ -493,16 +511,8 @@ impl Ui for UiService {
             // Ask is never left waiting once a pause applies (issue #78,
             // `pause_answers`).
             if self.filter_pause.applies_to(&admission) {
-                let decided_row = crate::pause_answers::allowed_on_arrival(row);
-                cache.insert_decided(decided_row.clone());
-                if self.broadcast.receiver_count() > 0 {
-                    let msg = ServerMessage::InsertConnectionRows {
-                        rows: vec![decided_row],
-                    };
-                    if let Err(e) = self.broadcast.send(msg) {
-                        warn!(error = %e, "ask_rule (paused): broadcast send failed");
-                    }
-                }
+                self.allow_on_arrival(&mut cache, row);
+                drop(cache);
                 let now_secs = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_secs() as i64)

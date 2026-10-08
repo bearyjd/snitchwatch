@@ -1,0 +1,8 @@
+{
+  "created": "2026-01-01T00:00:00Z",
+  "name": "allow-firefox",
+  "enabled": true,
+  "action": "allow",
+  "duration": "always",
+  "operator": { "type": "simple", "operand": "process.path", "data": "/usr/bin/firefox" }
+}

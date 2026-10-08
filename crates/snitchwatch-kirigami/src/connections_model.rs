@@ -1188,13 +1188,14 @@ impl qobject::ConnectionsModel {
     }
 }
 
-/// Read one role of a grouped-projection [`VisibleEntry`] into the QVariant
-/// shape `data()` returns. `store` resolves leaf `Row` entries' full
-/// `ConnectionRow` content (the tree only tracks ids).
+/// Whether a filtering pause answered the row (issue #78).
 fn answered_while_paused(row: &ConnectionRow) -> bool {
     row.auto_answer == Some(AutoAnswer::FilterPaused)
 }
 
+/// Read one role of a grouped-projection [`VisibleEntry`] into the QVariant
+/// shape `data()` returns. `store` resolves leaf `Row` entries' full
+/// `ConnectionRow` content (the tree only tracks ids).
 fn grouped_entry_data(entry: &VisibleEntry, role: i32, store: &RowStore) -> QVariant {
     match entry {
         VisibleEntry::ProcessHeader {

@@ -256,6 +256,45 @@ pub enum ServerMessage {
         #[serde(default)]
         expires_at_unix_ms: Option<u64>,
     },
+    /// Rule import/export (roadmap P2.7, `crate::rule_io`). Additive, like
+    /// every extension above. Sent only to the requesting connection (an
+    /// in-process sender gets them on the broadcast); `request_id` echoes
+    /// the request's, and an apply's progress and result carry its
+    /// `preview_id`. The answer to `ExportRules`:
+    RulesExport {
+        request_id: String,
+        document: crate::rule_io::Document,
+        omitted: crate::rule_io::OmittedCounts,
+    },
+    RulesExportUnavailable {
+        request_id: String,
+        reason: String,
+    },
+    /// The answer to `PreviewRulesImport`: one item per rule in the file.
+    RulesImportPreview {
+        request_id: String,
+        preview_id: String,
+        items: Vec<crate::rule_io::ImportItem>,
+    },
+    /// A preview or an apply was refused as a whole (fixed text).
+    RulesImportRefused {
+        request_id: String,
+        reason: String,
+    },
+    /// One rule's outcome during `ApplyRulesImport`.
+    RulesImportProgress {
+        preview_id: String,
+        name: String,
+        outcome: crate::rule_io::ImportOutcome,
+    },
+    /// Sent once an apply ends, however it ends.
+    RulesImportResult {
+        preview_id: String,
+        applied: u32,
+        rejected: u32,
+        not_sent: u32,
+        no_answer: u32,
+    },
 }
 
 /// Client → server messages. These come from the UI's `sendAction(type, payload)`
@@ -384,6 +423,60 @@ pub enum ClientMessage {
     DecideLater {
         row_id: String,
     },
+    /// Rule import/export (roadmap P2.7); handled by bridge-cli's
+    /// `rules_import` task, never by `upstream::apply`. `request_id` is the
+    /// client's, echoed in the answer; `reply` is stamped by `ws_server`
+    /// with the sending connection and never comes from the wire.
+    ExportRules {
+        #[serde(default)]
+        request_id: String,
+        #[serde(skip)]
+        reply: Option<ReplyTo>,
+    },
+    /// Validate a rules document and preview it against the daemon's rules.
+    /// Bounded by the client message cap (`ws_server`).
+    PreviewRulesImport {
+        #[serde(default)]
+        request_id: String,
+        document: serde_json::Value,
+        #[serde(skip)]
+        reply: Option<ReplyTo>,
+    },
+    /// Apply the named rules of the pending preview (`CHANGE_RULE` only).
+    ApplyRulesImport {
+        #[serde(default)]
+        request_id: String,
+        preview_id: String,
+        include: Vec<String>,
+        #[serde(skip)]
+        reply: Option<ReplyTo>,
+    },
+}
+
+/// A channel back to one WebSocket connection, stamped on rule import and
+/// export requests by `ws_server` so their answers reach only the GUI that
+/// asked. Never serialized.
+#[derive(Clone)]
+pub struct ReplyTo(pub tokio::sync::mpsc::Sender<ServerMessage>);
+
+impl ReplyTo {
+    /// Deliver `message`, waiting for room; `false` when the connection is
+    /// gone.
+    pub async fn send(&self, message: ServerMessage) -> bool {
+        self.0.send(message).await.is_ok()
+    }
+}
+
+impl std::fmt::Debug for ReplyTo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ReplyTo")
+    }
+}
+
+impl PartialEq for ReplyTo {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.same_channel(&other.0)
+    }
 }
 
 /// Resolve [`ClientMessage::SetVerdict`]'s effective duration from the new

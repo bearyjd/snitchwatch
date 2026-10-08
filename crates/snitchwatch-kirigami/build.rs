@@ -21,6 +21,7 @@ fn main() {
             "qml/BlocklistsPage.qml",
             "qml/RulesPage.qml",
             "qml/RuleSimulatorSheet.qml",
+            "qml/RulesImportSheet.qml",
             "qml/ProfilesPage.qml",
             "qml/TrafficPage.qml",
             "qml/OnboardingPage.qml",
@@ -37,6 +38,7 @@ fn main() {
         .file("src/insight_model.rs")
         .file("src/blocklists_model.rs")
         .file("src/rules_model.rs")
+        .file("src/rules_io_controller.rs")
         .file("src/profiles_model.rs")
         .file("src/traffic_model.rs")
         .file("src/wizard_controller.rs")

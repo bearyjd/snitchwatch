@@ -131,16 +131,13 @@ impl DaemonRuleSink {
 
     /// Cached rules under a blocklist name, or `None` while Unknown.
     fn cached_blocklist_rules(&self) -> Option<Vec<Rule>> {
-        match &*self.cache() {
-            RulesCache::Unknown => None,
-            RulesCache::Synced(rules) => Some(
-                rules
-                    .values()
-                    .filter(|rule| is_reserved_blocklist_name(&rule.name))
-                    .cloned()
-                    .collect(),
-            ),
-        }
+        self.cache().rules().map(|rules| {
+            rules
+                .values()
+                .filter(|rule| is_reserved_blocklist_name(&rule.name))
+                .cloned()
+                .collect()
+        })
     }
 
     /// Names of cached rules of `list` (either band) that Snitchwatch made.
@@ -162,11 +159,11 @@ impl DaemonRuleSink {
         if !self.dir.has_list(list, kind) {
             return false;
         }
-        match &*self.cache() {
-            RulesCache::Synced(rules) => rules
+        match self.cache().rules() {
+            Some(rules) => rules
                 .get(&rule.name)
                 .is_some_and(|cached| same_rule(cached, rule)),
-            RulesCache::Unknown => self
+            None => self
                 .confirmed()
                 .get(&rule.name)
                 .is_some_and(|sent| same_rule(sent, rule)),
@@ -287,7 +284,7 @@ impl DaemonRuleSink {
 #[async_trait]
 impl RuleSink for DaemonRuleSink {
     fn daemon_rules_known(&self) -> bool {
-        !matches!(&*self.cache(), RulesCache::Unknown)
+        !self.cache().is_unknown()
     }
 
     fn is_current(&self, list_id: &str) -> bool {

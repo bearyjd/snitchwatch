@@ -508,6 +508,51 @@ fn regexp_with_user_name_is_refused() {
 }
 
 #[test]
+fn a_user_name_holding_a_uid_is_refused_alone_and_in_a_list() {
+    // The daemon reports a loaded user.name rule with the uid `Compile`
+    // wrote over the name; sent back, it is looked up as a name and fails.
+    assert!(refused(leaf("simple", "user.name", "987")));
+    assert!(refused(leaf("simple", "user.name", "0")));
+    assert!(refused(list(vec![
+        process(),
+        leaf("simple", "user.name", "987")
+    ])));
+    let err = validate_operator(&op("simple", "user.name", "987")).unwrap_err();
+    assert!(!err.contains("987"), "errors never echo data: {err}");
+
+    // Names, and uids under user.id, still pass.
+    assert!(!refused(leaf("simple", "user.name", "snitchwatch")));
+    assert!(!refused(leaf("simple", "user.name", "user1")));
+    assert!(!refused(leaf("simple", "user.id", "987")));
+}
+
+/// The rules Snitchwatch ships are listed read-only with fixed text and
+/// can't be deleted, whatever their conditions.
+#[test]
+fn a_packaged_rule_is_read_only_with_fixed_text_and_not_deletable() {
+    use crate::rule_name::PACKAGED_FETCH_RULE_NAME;
+    for (name, reason) in [
+        (PACKAGED_FETCH_RULE_NAME, PACKAGED_FETCH_RULE_REASON),
+        ("000-snitchwatch-other", PACKAGED_RULE_REASON),
+    ] {
+        let rule = daemon_rule(name, Some(op("simple", "dest.host", "example.com")));
+        assert_eq!(read_only_reason(&rule), Some(reason), "{name}");
+        assert!(!deletable(&rule), "{name}");
+        let wire = rule_to_wire(&rule);
+        assert_eq!(wire["readOnlyReason"], reason);
+        assert_eq!(wire["deletable"], false);
+    }
+    assert!(!PACKAGED_RULE_REASON.contains("000-"), "fixed text only");
+}
+
+#[test]
+fn a_daemon_user_name_rule_reported_with_its_uid_is_read_only_but_deletable() {
+    let rule = daemon_rule("000-x", Some(op("simple", "user.name", "987")));
+    assert_eq!(read_only_reason(&rule), Some(SHAPE_READ_ONLY_REASON));
+    assert!(deletable(&rule));
+}
+
+#[test]
 fn a_proto_list_over_the_limit_is_refused() {
     // The wire path stops this in operator_from_wire; a proto caller
     // (a daemon rule, a later import) reaches the validator.
@@ -590,4 +635,14 @@ fn a_shape_only_refusal_stays_deletable_but_a_bad_name_does_not() {
 
     let editable = daemon_rule("899-ok", Some(op("simple", "dest.host", "example.com")));
     assert_eq!(rule_to_wire(&editable)["deletable"], true);
+}
+
+#[test]
+fn a_curated_default_rule_is_read_only_and_not_deletable() {
+    let curated = daemon_rule(
+        "snitchwatch-default-steam",
+        Some(op("simple", "dest.host", "steam.example")),
+    );
+    assert_eq!(read_only_reason(&curated), Some(CURATED_MANAGED_REASON));
+    assert!(!deletable(&curated));
 }

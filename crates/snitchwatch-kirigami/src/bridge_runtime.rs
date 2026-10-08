@@ -97,6 +97,8 @@ struct ConnectionState {
     app_bound_rules: bool,
     /// The same for `bridge_capabilities::PROMPT_SLOT`.
     prompt_slot: bool,
+    /// The same for `bridge_capabilities::PAUSE_ANSWERS_WAITING`.
+    pause_answers_waiting: bool,
 }
 
 /// Why a UI request was not handed to the currently connected service.
@@ -146,6 +148,17 @@ impl BridgeHandles {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         state.connected && state.prompt_slot
+    }
+
+    /// Whether the live session's bridge answers the prompts already waiting
+    /// when filtering is paused (issue #78). Without it the tray must not
+    /// promise that.
+    pub fn advertises_pause_answers_waiting(&self) -> bool {
+        let state = self
+            .connection
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.connected && state.pause_answers_waiting
     }
 
     pub fn runtime(&self) -> &Handle {
@@ -449,6 +462,7 @@ async fn connect_and_relay(
         connection,
         advertised(snitchwatch_bridge::bridge_capabilities::APP_BOUND_RULES),
         advertised(snitchwatch_bridge::bridge_capabilities::PROMPT_SLOT),
+        advertised(snitchwatch_bridge::bridge_capabilities::PAUSE_ANSWERS_WAITING),
     );
     set_status(status, LinkState::Connected, "Connected to bridge service");
     tracing::info!(socket = %socket_path.display(), "connected to bridge service");
@@ -522,10 +536,10 @@ async fn await_authentication_ack(
     }
 }
 
-/// A session without the prompt-slot capability, for tests.
+/// A session without the prompt-slot or pause-answers capability, for tests.
 #[cfg(test)]
 fn mark_connected(connection: &Mutex<ConnectionState>, app_bound_rules: bool) -> u64 {
-    mark_connected_with(connection, app_bound_rules, false)
+    mark_connected_with(connection, app_bound_rules, false, false)
 }
 
 /// Starts a session with the capabilities its acknowledgement advertised,
@@ -534,6 +548,7 @@ fn mark_connected_with(
     connection: &Mutex<ConnectionState>,
     app_bound_rules: bool,
     prompt_slot: bool,
+    pause_answers_waiting: bool,
 ) -> u64 {
     let mut state = connection
         .lock()
@@ -542,6 +557,7 @@ fn mark_connected_with(
     state.connected = true;
     state.app_bound_rules = app_bound_rules;
     state.prompt_slot = prompt_slot;
+    state.pause_answers_waiting = pause_answers_waiting;
     state.connection_id
 }
 
@@ -577,6 +593,7 @@ fn disconnect_and_discard(
         state.connected = false;
         state.app_bound_rules = false;
         state.prompt_slot = false;
+        state.pause_answers_waiting = false;
     }
     while inbound_rx.try_recv().is_ok() {}
 }
@@ -726,3 +743,7 @@ mod verdict_gate_tests;
 #[cfg(test)]
 #[path = "bridge_runtime/prompt_slot_tests.rs"]
 mod prompt_slot_tests;
+
+#[cfg(test)]
+#[path = "bridge_runtime/pause_answers_tests.rs"]
+mod pause_answers_tests;
