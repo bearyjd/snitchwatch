@@ -1,18 +1,23 @@
-//! The curated defaults at run time: the user's choices, reconcile on every
-//! rule-list change and every change of choice, and what every GUI is told
-//! (prompt-slot plan Part D, item 13).
+//! The curated defaults at run time: the user's choices, reconcile when the
+//! rule list or a choice changes, and what every GUI is told (prompt-slot
+//! plan Part D, item 13).
 //!
 //! - Commands go through [`DaemonCommands::send_curated`] and count only on
 //!   the daemon's `OK`: an entry reads "Installed" only after it, and its
 //!   copy is recorded then.
 //! - Reconcile runs one pass at a time on the worker task, on a known rule
-//!   list only (never while the rules cache is `Unknown`). It wakes on a
-//!   change of choice, a committed snapshot, and every `SetRules` /
-//!   `UpdateRules` (a withdrawn list, a late `OK`, a toggle on the Rules
-//!   page).
+//!   list only (never while the rules cache is `Unknown`). The worker wakes
+//!   on a change of choice, a committed snapshot and every `SetRules` /
+//!   `UpdateRules`, but runs a pass only when something a pass reads
+//!   changed ([`PassKey`]): the rule list's revision, its known/withdrawn
+//!   state, the daemon stream, the choices, inertness, or a removal asked
+//!   for (PR #105 re-review: no hot loop).
+//! - A command that fails (refused, not sent, no answer) is not sent again
+//!   for that entry until its choice changes or the daemon reconnects with
+//!   a new rule list ([`Failure`]). A late `OK` updates the status.
 //! - The inbound pump only updates memory: the choices file is written by
-//!   the worker, off the async threads, before any command that depends on
-//!   it.
+//!   the worker, off the async threads, one save at a time, before any
+//!   command that depends on it.
 //! - **Inert** (code review H1): the per-user bridge, a bridge without
 //!   saved settings, choices that can't be read, and choices that can't be
 //!   saved all leave the firewall as it is: no command is sent, no choice
@@ -33,6 +38,7 @@ use super::wire::CuratedDefaultSummary;
 use super::{entries, CuratedEntry};
 use crate::cache::rules::SharedRulesCache;
 use crate::daemon_commands::{CommandError, CuratedCommand, DaemonCommands, SendError};
+use crate::rule_name::CURATED_DEFAULT_RULE_NAME_PREFIX;
 use crate::ws_messages::{ClientMessage, ServerMessage, StorageStatus};
 
 /// How long a curated rule command waits for the daemon's reply.
@@ -41,8 +47,9 @@ pub const COMMAND_TIMEOUT: Duration = Duration::from_secs(15);
 /// Why nothing changes when the saved choices can't be read.
 pub const UNREADABLE_REASON: &str = "Snitchwatch can't read its saved choices for recommended \
      rules (curated-defaults.json in its state folder), so it adds and removes none: rules \
-     already in the firewall were left in place. Fix or move that file, then restart \
-     Snitchwatch's background service.";
+     already in the firewall were left in place. Repairing the file restores your choices. \
+     Without it, Snitchwatch starts with no choices: recommended rules already in the firewall \
+     stay as they are until you turn each one on or off.";
 
 /// Why nothing changes once the choices couldn't be saved.
 pub const SAVE_FAILED_REASON: &str = "Snitchwatch couldn't save its choices for recommended \
@@ -62,12 +69,18 @@ struct Inner {
     wake: Notify,
     /// The last message sent: reconcile tells GUIs only of a change.
     last: Mutex<Option<ServerMessage>>,
+    /// One save at a time; holds the last version written, so an older
+    /// snapshot never replaces a newer one (code review LOW-1).
+    saver: Mutex<u64>,
 }
 
 struct State {
     choices: Choices,
     statuses: BTreeMap<String, EntryStatus>,
     problems: BTreeMap<String, &'static str>,
+    /// Commands that failed, by entry id: not sent again until the entry's
+    /// choice changes or the daemon reconnects.
+    failures: BTreeMap<String, Failure>,
     /// Entries the user confirmed removing (edited copies, M2).
     removals: BTreeSet<String>,
     file: Option<PathBuf>,
@@ -77,6 +90,26 @@ struct State {
     /// Bumped on every change of `choices`; `saved` is the last one saved.
     version: u64,
     saved: u64,
+}
+
+/// A failed command for an entry, and when it failed.
+#[derive(Debug, Clone, Copy)]
+struct Failure {
+    /// The daemon stream's generation (`DaemonCommands::stream_ready`).
+    generation: u64,
+    status: EntryStatus,
+    problem: &'static str,
+}
+
+/// What a reconcile pass reads; a pass runs only when it changed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PassKey {
+    revision: u64,
+    known: bool,
+    generation: u64,
+    version: u64,
+    inert: bool,
+    removals: bool,
 }
 
 fn lock(state: &Mutex<State>) -> MutexGuard<'_, State> {
@@ -99,6 +132,7 @@ impl CuratedDefaults {
                     choices: Choices::default(),
                     statuses: BTreeMap::new(),
                     problems: BTreeMap::new(),
+                    failures: BTreeMap::new(),
                     removals: BTreeSet::new(),
                     file: None,
                     storage: StorageStatus {
@@ -112,6 +146,7 @@ impl CuratedDefaults {
                 }),
                 wake: Notify::new(),
                 last: Mutex::new(None),
+                saver: Mutex::new(0),
             }),
         }
     }
@@ -154,6 +189,11 @@ impl CuratedDefaults {
         lock(&self.inner.state).inert = Some(reason.to_string());
     }
 
+    /// Whether this bridge changes no recommended rules.
+    pub fn is_inert(&self) -> bool {
+        lock(&self.inner.state).inert.is_some()
+    }
+
     /// A GUI's request, if it is one for the curated defaults: taken in
     /// memory and reconciled on the worker. Never waits, never writes.
     pub fn try_route(&self, msg: ClientMessage) -> Option<ClientMessage> {
@@ -178,6 +218,8 @@ impl CuratedDefaults {
                     } else {
                         choices.disable(&entry.id)
                     };
+                    // A new choice: a command that failed may be tried again.
+                    state.failures.remove(&entry.id);
                 }
                 keep(&mut state, choices);
                 true
@@ -195,6 +237,7 @@ impl CuratedDefaults {
         let mut state = lock(&self.inner.state);
         if state.inert.is_none() && entries().iter().any(|entry| entry.id == id) {
             state.removals.insert(id.to_string());
+            state.failures.remove(id);
             drop(state);
             self.inner.wake.notify_one();
         }
@@ -241,16 +284,47 @@ impl CuratedDefaults {
         self.inner.last.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    fn generation(&self) -> u64 {
+        *self.inner.commands.stream_ready().borrow()
+    }
+
+    fn pass_key(&self) -> PassKey {
+        let (revision, known) = {
+            let cache = self.inner.rules.lock().unwrap_or_else(|e| e.into_inner());
+            (cache.revision(), !cache.is_unknown())
+        };
+        let generation = self.generation();
+        let state = lock(&self.inner.state);
+        PassKey {
+            revision,
+            known,
+            generation,
+            version: state.version,
+            inert: state.inert.is_some(),
+            removals: !state.removals.is_empty(),
+        }
+    }
+
     /// Reconcile on a change of choice, a committed snapshot (`synced`,
-    /// taken before the gRPC server starts) and any rule-list broadcast.
+    /// taken before the gRPC server starts) and any rule-list broadcast,
+    /// when a pass's inputs changed.
     pub fn spawn(&self, mut synced: watch::Receiver<u64>) -> tokio::task::JoinHandle<()> {
         let this = self.clone();
         // GUIs get the starting state with their snapshot.
         *self.last() = Some(self.message());
         let mut lists = self.inner.broadcast.subscribe();
         tokio::spawn(async move {
+            let mut last_pass: Option<PassKey> = None;
             loop {
-                this.reconcile().await;
+                let key = this.pass_key();
+                if last_pass.as_ref() != Some(&key) {
+                    this.reconcile().await;
+                    last_pass = Some(key);
+                    // Something changed during the pass: look again.
+                    if last_pass.as_ref() != Some(&this.pass_key()) {
+                        continue;
+                    }
+                }
                 loop {
                     tokio::select! {
                         () = this.inner.wake.notified() => break,
@@ -266,6 +340,14 @@ impl CuratedDefaults {
                         },
                     }
                 }
+                // Merge whatever else is queued into this one look.
+                loop {
+                    match lists.try_recv() {
+                        Ok(_) | Err(broadcast::error::TryRecvError::Lagged(_)) => {}
+                        Err(broadcast::error::TryRecvError::Empty) => break,
+                        Err(broadcast::error::TryRecvError::Closed) => return,
+                    }
+                }
             }
         })
     }
@@ -279,6 +361,8 @@ impl CuratedDefaults {
             cache.rules().cloned().map(|rules| (rules, left_out))
         };
         let Some((rules, left_out)) = daemon else {
+            // A removal asked for under the old list doesn't carry over.
+            lock(&self.inner.state).removals.clear();
             self.announce_changed();
             return;
         };
@@ -286,6 +370,7 @@ impl CuratedDefaults {
             rules: &rules,
             left_out: &left_out,
         };
+        let generation = self.generation();
         let (actions, removals) = {
             let mut state = lock(&self.inner.state);
             state.problems.clear();
@@ -297,7 +382,8 @@ impl CuratedDefaults {
                 let planned = plan(entries(), daemon, &state.choices);
                 state.statuses = planned.statuses;
                 keep(&mut state, planned.choices);
-                (planned.actions, std::mem::take(&mut state.removals))
+                let actions = without_failed(&mut state, planned.actions, generation);
+                (actions, std::mem::take(&mut state.removals))
             }
         };
         self.save_if_changed().await;
@@ -305,13 +391,13 @@ impl CuratedDefaults {
         if actions.is_empty() && removals.is_empty() {
             return;
         }
-        // One rule-list broadcast for the pass, like a rule import.
+        // One rule-list broadcast for the pass (if any command changed it).
         let _hold = self.inner.commands.hold_rule_publishes();
         for id in removals {
             if self.is_inert() {
                 break;
             }
-            self.remove(&id, daemon).await;
+            self.remove(&id, daemon, generation).await;
             self.save_if_changed().await;
             self.announce_changed();
         }
@@ -319,19 +405,15 @@ impl CuratedDefaults {
             if !self.still_wanted(&action) {
                 continue;
             }
-            self.apply(action).await;
+            self.apply(action, generation).await;
             self.save_if_changed().await;
             self.announce_changed();
         }
     }
 
-    /// Whether this bridge changes no recommended rules (see [`Self::set_unavailable`]).
-    pub fn is_inert(&self) -> bool {
-        lock(&self.inner.state).inert.is_some()
-    }
-
     /// Whether the user still wants `action` (a choice may change while
-    /// earlier commands of the pass wait for the daemon).
+    /// earlier commands of the pass wait for the daemon), and, for an
+    /// install, whether the daemon still lacks the rule.
     fn still_wanted(&self, action: &CuratedAction) -> bool {
         let state = lock(&self.inner.state);
         if state.inert.is_some() {
@@ -339,7 +421,10 @@ impl CuratedDefaults {
         }
         match action {
             CuratedAction::Install(id) => {
-                state.choices.enabled.contains(id) && !state.choices.deleted_by_user.contains(id)
+                let wanted = state.choices.enabled.contains(id)
+                    && !state.choices.deleted_by_user.contains(id);
+                drop(state);
+                wanted && self.still_missing(&format!("{CURATED_DEFAULT_RULE_NAME_PREFIX}{id}"))
             }
             CuratedAction::Delete { id, .. } => {
                 !state.choices.enabled.contains(id) || !entries().iter().any(|e| &e.id == id)
@@ -347,8 +432,16 @@ impl CuratedDefaults {
         }
     }
 
-    async fn apply(&self, action: CuratedAction) {
-        match action {
+    /// The live list still lacks `name` (code review LOW-7): a copy that
+    /// arrived since the pass began is adopted next pass, not overwritten.
+    fn still_missing(&self, name: &str) -> bool {
+        let cache = self.inner.rules.lock().unwrap_or_else(|e| e.into_inner());
+        cache.rules().is_some_and(|rules| !rules.contains_key(name))
+            && !cache.left_out().contains_key(name)
+    }
+
+    async fn apply(&self, action: CuratedAction, generation: u64) {
+        let (id, outcome, done) = match action {
             CuratedAction::Install(id) => {
                 let Some(entry) = entries().iter().find(|entry| entry.id == id) else {
                     return;
@@ -356,38 +449,41 @@ impl CuratedDefaults {
                 let outcome = self
                     .send(CuratedCommand::install(entry), Refusal::Add)
                     .await;
-                let mut state = lock(&self.inner.state);
-                match outcome {
-                    Ok(()) => {
-                        info!(entry = %id, "installed a recommended rule");
-                        let choices = state.choices.installed(&id, &entry.rule());
-                        keep(&mut state, choices);
-                        state.statuses.insert(id, EntryStatus::Installed);
-                    }
-                    Err(problem) => {
-                        state.statuses.insert(id.clone(), EntryStatus::NotInstalled);
-                        state.problems.insert(id, problem);
-                    }
+                if outcome.is_ok() {
+                    info!(entry = %id, "installed a recommended rule");
                 }
+                (id, outcome, Done::Install(Box::new(entry.rule())))
             }
             CuratedAction::Delete { id, name } => {
                 let Some(command) = CuratedCommand::delete(&name) else {
                     return;
                 };
                 let outcome = self.send(command, Refusal::Remove).await;
-                let mut state = lock(&self.inner.state);
-                match outcome {
-                    Ok(()) => {
-                        info!(entry = %id, "deleted a recommended rule");
-                        let choices = state.choices.removed(&id);
-                        keep(&mut state, choices);
-                        state.statuses.insert(id, EntryStatus::Off);
-                    }
-                    Err(problem) => {
-                        state.statuses.insert(id.clone(), EntryStatus::NotRemoved);
-                        state.problems.insert(id, problem);
-                    }
+                if outcome.is_ok() {
+                    info!(entry = %id, "deleted a recommended rule");
                 }
+                (id, outcome, Done::Delete)
+            }
+        };
+        let mut state = lock(&self.inner.state);
+        match outcome {
+            Ok(()) => {
+                let (choices, status) = match done {
+                    Done::Install(rule) => {
+                        (state.choices.installed(&id, &rule), EntryStatus::Installed)
+                    }
+                    Done::Delete => (state.choices.removed(&id), EntryStatus::Off),
+                };
+                keep(&mut state, choices);
+                state.failures.remove(&id);
+                state.statuses.insert(id, status);
+            }
+            Err(problem) => {
+                let status = match done {
+                    Done::Install(_) => EntryStatus::NotInstalled,
+                    Done::Delete => EntryStatus::NotRemoved,
+                };
+                fail(&mut state, &id, status, problem, generation);
             }
         }
     }
@@ -395,7 +491,7 @@ impl CuratedDefaults {
     /// Remove an edited (or unreadable) copy the user confirmed removing,
     /// under exactly that entry's reserved name; an unedited copy is turned
     /// off instead, so nothing is sent for it.
-    async fn remove(&self, id: &str, daemon: DaemonRules<'_>) {
+    async fn remove(&self, id: &str, daemon: DaemonRules<'_>, generation: u64) {
         let Some(entry) = entries().iter().find(|entry| entry.id == id) else {
             return;
         };
@@ -426,12 +522,7 @@ impl CuratedDefaults {
                 keep(&mut state, choices);
                 state.statuses.insert(id.to_string(), status);
             }
-            Err(problem) => {
-                state
-                    .statuses
-                    .insert(id.to_string(), EntryStatus::NotRemoved);
-                state.problems.insert(id.to_string(), problem);
-            }
+            Err(problem) => fail(&mut state, id, EntryStatus::NotRemoved, problem, generation),
         }
     }
 
@@ -448,25 +539,35 @@ impl CuratedDefaults {
     /// Write the choices if they changed, on a blocking thread. A failure
     /// makes the bridge inert: it must not act on choices it can't keep.
     async fn save_if_changed(&self) {
-        let job = {
-            let state = lock(&self.inner.state);
-            match (
-                &state.file,
-                state.inert.is_none() && state.version != state.saved,
-            ) {
-                (Some(file), true) => Some((file.clone(), state.choices.clone(), state.version)),
-                _ => None,
-            }
-        };
-        let Some((file, choices, version)) = job else {
+        let Some(job) = self.save_job() else {
             return;
         };
-        let saved = tokio::task::spawn_blocking(move || store::save(&file, &choices))
+        let inner = self.inner.clone();
+        let saved = tokio::task::spawn_blocking(move || save_in_order(&inner, job))
             .await
             .unwrap_or_else(|e| Err(std::io::Error::other(e.to_string())));
+        self.saved(saved);
+    }
+
+    fn save_job(&self) -> Option<SaveJob> {
+        let state = lock(&self.inner.state);
+        match (
+            &state.file,
+            state.inert.is_none() && state.version != state.saved,
+        ) {
+            (Some(file), true) => Some(SaveJob {
+                file: file.clone(),
+                choices: state.choices.clone(),
+                version: state.version,
+            }),
+            _ => None,
+        }
+    }
+
+    fn saved(&self, saved: std::io::Result<u64>) {
         let mut state = lock(&self.inner.state);
         match saved {
-            Ok(()) => state.saved = state.saved.max(version),
+            Ok(version) => state.saved = state.saved.max(version),
             Err(error) => {
                 error!(%error, "curated defaults: choices not saved; changing nothing");
                 state.file = None;
@@ -480,16 +581,37 @@ impl CuratedDefaults {
         }
     }
 
-    /// Save what changed now, blocking (bridge shutdown).
+    /// Save what changed now, blocking (bridge shutdown); never under the
+    /// state lock, and never over a newer save.
     pub fn save_now(&self) {
-        let state = lock(&self.inner.state);
-        if let (Some(file), None, true) = (&state.file, &state.inert, state.version != state.saved)
-        {
-            if let Err(error) = store::save(file, &state.choices) {
-                error!(%error, "curated defaults: choices not saved at shutdown");
-            }
+        if let Some(job) = self.save_job() {
+            let saved = save_in_order(&self.inner, job);
+            self.saved(saved);
         }
     }
+}
+
+/// What a confirmed command records.
+enum Done {
+    Install(Box<snitchwatch_proto::protocol::Rule>),
+    Delete,
+}
+
+struct SaveJob {
+    file: PathBuf,
+    choices: Choices,
+    version: u64,
+}
+
+/// Save `job` unless a newer version is already written; one at a time.
+fn save_in_order(inner: &Inner, job: SaveJob) -> std::io::Result<u64> {
+    let mut written = inner.saver.lock().unwrap_or_else(|e| e.into_inner());
+    if *written >= job.version {
+        return Ok(*written);
+    }
+    store::save(&job.file, &job.choices)?;
+    *written = job.version;
+    Ok(job.version)
 }
 
 /// Take `choices`, if they changed; the worker saves them.
@@ -500,8 +622,53 @@ fn keep(state: &mut State, choices: Choices) {
     }
 }
 
+/// Record a failed command for `id`.
+fn fail(state: &mut State, id: &str, status: EntryStatus, problem: &'static str, generation: u64) {
+    state.statuses.insert(id.to_string(), status);
+    state.problems.insert(id.to_string(), problem);
+    state.failures.insert(
+        id.to_string(),
+        Failure {
+            generation,
+            status,
+            problem,
+        },
+    );
+}
+
+/// The planned actions, less those that failed for the same entry on the
+/// same daemon stream (shown as failed again); an entry with nothing to do
+/// forgets its failure.
+fn without_failed(
+    state: &mut State,
+    actions: Vec<CuratedAction>,
+    generation: u64,
+) -> Vec<CuratedAction> {
+    let acted: BTreeSet<String> = actions.iter().map(action_id).collect();
+    state
+        .failures
+        .retain(|id, failure| acted.contains(id) && failure.generation == generation);
+    let mut kept = Vec::new();
+    for action in actions {
+        let id = action_id(&action);
+        match state.failures.get(&id).copied() {
+            Some(failure) => {
+                state.statuses.insert(id.clone(), failure.status);
+                state.problems.insert(id, failure.problem);
+            }
+            None => kept.push(action),
+        }
+    }
+    kept
+}
+
+fn action_id(action: &CuratedAction) -> String {
+    match action {
+        CuratedAction::Install(id) | CuratedAction::Delete { id, .. } => id.clone(),
+    }
+}
+
 fn summary(entry: &CuratedEntry, state: &State, rules_known: bool) -> CuratedDefaultSummary {
-    let on = state.choices.enabled.contains(&entry.id);
     let status = if rules_known {
         state
             .statuses
@@ -511,6 +678,8 @@ fn summary(entry: &CuratedEntry, state: &State, rules_known: bool) -> CuratedDef
     } else {
         EntryStatus::Waiting
     };
+    // An undecided entry already in the firewall reads as on: it is active.
+    let on = state.choices.enabled.contains(&entry.id) || status == EntryStatus::InFirewall;
     CuratedDefaultSummary {
         id: entry.id.clone(),
         program: entry.path.clone(),
@@ -554,3 +723,7 @@ mod tests;
 #[cfg(test)]
 #[path = "manager_safety_tests.rs"]
 mod safety_tests;
+
+#[cfg(test)]
+#[path = "manager_loop_tests.rs"]
+mod loop_tests;

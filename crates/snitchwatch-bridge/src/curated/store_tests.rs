@@ -130,6 +130,16 @@ fn invalid_ids_and_copies_are_dropped_and_the_rest_kept() {
         ["retired"],
         "only a retired curated copy survives"
     );
+    // Re-review M2: the ids of dropped copies are kept.
+    assert_eq!(
+        loaded.installed_ids.iter().collect::<Vec<_>>(),
+        [
+            "chronyc-local",
+            "flatpak-flathub",
+            "networkmanager-connectivity-check",
+            "retired"
+        ]
+    );
     // The bridge never writes what load would drop.
     let mut crafted = Choices::default();
     crafted

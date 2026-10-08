@@ -288,7 +288,11 @@ async fn an_unavailable_bridge_changes_nothing_and_says_why() {
         unreachable!()
     };
     assert_eq!(unavailable.as_deref(), Some("Needs the system service."));
-    assert!(entries.iter().all(|e| !e.on), "the choice wasn't taken");
+    // The daemon has the rule, so it reads as on, but no choice was taken.
+    assert!(entries
+        .iter()
+        .all(|e| e.on == (e.status == EntryStatus::InFirewall)));
+    assert_eq!(curated.pass_key().version, 0, "the choice wasn't taken");
     assert!(
         store::load(&harness.file).unwrap().is_none(),
         "nothing saved"

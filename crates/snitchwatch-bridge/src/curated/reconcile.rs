@@ -9,6 +9,9 @@
 //! - Once installed, an entry that disappears was removed outside the
 //!   Recommended page. It is recorded and **not reinstalled** until the
 //!   user turns it off and on again (#62's requirement; plan item 13).
+//! - An entry the user never chose (a first run) is left as it is: an
+//!   unedited copy already in the firewall reads "In the firewall" until
+//!   the user turns it on (adopt) or off (delete).
 //! - An entry the user turned off is deleted, but only an **unedited** copy
 //!   ([`is_unedited`]). A copy someone edited is left alone and flagged,
 //!   even on opt-out; so is a copy too large for the bridge's list (left
@@ -49,8 +52,8 @@ pub enum EntryStatus {
     /// This bridge changes no recommended rules (see the message's
     /// `unavailable`), and the daemon has no rule under this name.
     Unavailable,
-    /// This bridge changes no recommended rules, and the daemon has this
-    /// entry's rule, unedited (added earlier).
+    /// The daemon has this entry's rule, unedited (added earlier), and
+    /// this bridge changes none, or the user hasn't chosen yet.
     InFirewall,
     /// Not turned on, and not in the daemon.
     Off,
@@ -124,6 +127,12 @@ pub fn plan(entries: &[CuratedEntry], daemon: DaemonRules<'_>, choices: &Choices
     next.installed.retain(|id, copy| {
         entries.iter().any(|entry| &entry.id == id) || daemon.rules.contains_key(&copy.name)
     });
+    next.installed_ids.retain(|id| {
+        entries.iter().any(|entry| &entry.id == id)
+            || daemon
+                .rules
+                .contains_key(&format!("{CURATED_DEFAULT_RULE_NAME_PREFIX}{id}"))
+    });
     Plan {
         choices: next,
         actions,
@@ -145,7 +154,9 @@ fn plan_entry(
     }
     let enabled = choices.enabled.contains(&entry.id);
     let Some(present) = daemon.rules.get(&name) else {
-        let was_installed = next.installed.remove(&entry.id).is_some();
+        let was_installed = choices.was_installed(&entry.id);
+        next.installed.remove(&entry.id);
+        next.installed_ids.remove(&entry.id);
         if !enabled {
             return EntryStatus::Off;
         }
@@ -158,6 +169,12 @@ fn plan_entry(
     };
     if !is_unedited(Some(entry), None, present) {
         return EntryStatus::EditedByYou;
+    }
+    if !enabled && !choices.disabled.contains(&entry.id) {
+        // Undecided (a first run, or a file that was moved away): an
+        // unedited copy already there is left as it is until the user
+        // turns it on (adopt) or off (delete). Re-review M1.
+        return EntryStatus::InFirewall;
     }
     // Our unedited copy (adopted if the record was lost).
     *next = next.installed(&entry.id, &entry.rule());

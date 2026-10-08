@@ -36,8 +36,15 @@ pub struct Choices {
     /// Entries the user turned on. Empty by default: nothing is on unless
     /// the user says so.
     pub enabled: BTreeSet<String>,
+    /// Entries the user turned off. An entry in neither set is undecided:
+    /// a copy already in the firewall is left as it is (re-review M1).
+    pub disabled: BTreeSet<String>,
     /// What Snitchwatch installed, by entry id.
     pub installed: BTreeMap<String, CanonicalRule>,
+    /// The ids Snitchwatch installed. Kept when a recorded copy is dropped
+    /// as invalid, so a rule removed outside is still known as one we
+    /// installed and isn't reinstalled (re-review M2).
+    pub installed_ids: BTreeSet<String>,
     /// Entries whose rule was removed outside the Recommended page, or by
     /// its Remove button.
     pub deleted_by_user: BTreeSet<String>,
@@ -51,12 +58,14 @@ impl Choices {
         if next.enabled.insert(id.to_string()) {
             next.deleted_by_user.remove(id);
         }
+        next.disabled.remove(id);
         next
     }
 
     pub fn disable(&self, id: &str) -> Self {
         let mut next = self.clone();
         next.enabled.remove(id);
+        next.disabled.insert(id.to_string());
         next
     }
 
@@ -64,6 +73,7 @@ impl Choices {
     pub fn installed(&self, id: &str, rule: &Rule) -> Self {
         let mut next = self.clone();
         next.installed.insert(id.to_string(), canonical(rule));
+        next.installed_ids.insert(id.to_string());
         next
     }
 
@@ -71,7 +81,13 @@ impl Choices {
     pub fn removed(&self, id: &str) -> Self {
         let mut next = self.clone();
         next.installed.remove(id);
+        next.installed_ids.remove(id);
         next
+    }
+
+    /// Whether Snitchwatch recorded installing `id`'s rule.
+    pub fn was_installed(&self, id: &str) -> bool {
+        self.installed_ids.contains(id) || self.installed.contains_key(id)
     }
 
     /// Record that the user had `id`'s rule removed: never reinstalled until
@@ -144,14 +160,19 @@ pub fn load(path: &Path) -> io::Result<Option<Choices>> {
         }
         other => return Err(invalid(format!("unsupported version {other}"))),
     };
-    let count = choices.enabled.len() + choices.deleted_by_user.len() + choices.installed.len();
-    if count > 3 * MAX_IDS {
+    let count = choices.enabled.len()
+        + choices.disabled.len()
+        + choices.deleted_by_user.len()
+        + choices.installed.len()
+        + choices.installed_ids.len();
+    if count > 5 * MAX_IDS {
         return Err(invalid("the file lists too many entries"));
     }
     Ok(Some(lenient(choices)))
 }
 
 fn from_v1(file: FileFormatV1) -> Choices {
+    let installed_ids_v1 = file.choices.installed.keys().cloned().collect();
     let installed = file
         .choices
         .installed
@@ -163,8 +184,10 @@ fn from_v1(file: FileFormatV1) -> Choices {
         .collect();
     Choices {
         enabled: file.choices.enabled,
+        installed_ids: installed_ids_v1,
         installed,
         deleted_by_user: file.choices.deleted_by_user,
+        ..Choices::default()
     }
 }
 
@@ -179,9 +202,19 @@ fn lenient(choices: Choices) -> Choices {
 
 fn cleaned(choices: Choices) -> Choices {
     let valid = |id: &String| super::valid_id(id);
+    // An installed id outlives a dropped copy (re-review M2).
+    let installed_ids = choices
+        .installed_ids
+        .iter()
+        .chain(choices.installed.keys())
+        .filter(|id| valid(id))
+        .cloned()
+        .collect();
     Choices {
         enabled: choices.enabled.into_iter().filter(valid).collect(),
+        disabled: choices.disabled.into_iter().filter(valid).collect(),
         deleted_by_user: choices.deleted_by_user.into_iter().filter(valid).collect(),
+        installed_ids,
         installed: choices
             .installed
             .into_iter()

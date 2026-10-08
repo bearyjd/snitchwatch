@@ -92,7 +92,9 @@ fn a_rule_deleted_outside_snitchwatch_is_never_reinstalled() {
 
 #[test]
 fn turning_an_entry_off_deletes_only_an_unedited_copy() {
-    let installed = Choices::default().installed("flatpak-flathub", &flatpak().rule());
+    let installed = Choices::default()
+        .installed("flatpak-flathub", &flatpak().rule())
+        .disable("flatpak-flathub");
     // Off, unedited (a pure toggle of `enabled` is not an edit).
     let toggled = Rule {
         enabled: false,
@@ -229,4 +231,51 @@ fn an_inert_bridge_reports_what_the_daemon_has() {
     assert_eq!(statuses["flatpak-flathub"], EntryStatus::InFirewall);
     assert_eq!(statuses[&entries()[0].id], EntryStatus::EditedByYou);
     assert_eq!(statuses["chronyc-local"], EntryStatus::Unavailable);
+}
+
+/// Re-review M1: on a first run (no choices at all) an unedited copy in the
+/// firewall is left as it is; turning it off deletes it, on adopts it.
+#[test]
+fn a_first_run_leaves_copies_in_the_firewall_alone() {
+    let rules = daemon(&[flatpak().rule()]);
+    let first = plan(entries(), &rules, &Choices::default());
+    assert!(first.actions.is_empty(), "{:?}", first.actions);
+    assert_eq!(status(&first, "flatpak-flathub"), EntryStatus::InFirewall);
+    assert!(first.choices.installed.is_empty(), "not adopted unasked");
+    let off = plan(
+        entries(),
+        &rules,
+        &Choices::default().disable("flatpak-flathub"),
+    );
+    assert_eq!(
+        off.actions,
+        [CuratedAction::Delete {
+            id: "flatpak-flathub".into(),
+            name: "snitchwatch-default-flatpak-flathub".into(),
+        }]
+    );
+    let on = plan(
+        entries(),
+        &rules,
+        &Choices::default().enable("flatpak-flathub"),
+    );
+    assert!(on.actions.is_empty());
+    assert_eq!(status(&on, "flatpak-flathub"), EntryStatus::Installed);
+    assert!(on.choices.installed.contains_key("flatpak-flathub"));
+}
+
+/// Re-review M2: an id recorded as installed whose copy was dropped still
+/// counts: its rule gone from the daemon is a removal, not a reinstall.
+#[test]
+fn an_installed_id_without_its_copy_is_still_not_reinstalled() {
+    let mut choices = Choices::default()
+        .enable("flatpak-flathub")
+        .installed("flatpak-flathub", &flatpak().rule());
+    choices.installed.clear();
+    let gone = plan(entries(), &BTreeMap::new(), &choices);
+    assert!(gone.actions.is_empty(), "reinstalled: {:?}", gone.actions);
+    assert_eq!(
+        status(&gone, "flatpak-flathub"),
+        EntryStatus::DeletedOutside
+    );
 }
