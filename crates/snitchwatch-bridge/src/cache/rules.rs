@@ -25,6 +25,7 @@
 //! holds `<name>`. #50's process-qualified names make this rare, and the next
 //! `Subscribe` corrects it.
 
+use crate::cache::rule_hits_handle::RuleHitsHandle;
 use crate::daemon_commands::{BecameCurrent, CommandError, ConnKey, PendingReply};
 use crate::rule_wire::rule_to_wire;
 use crate::ws_messages::ServerMessage;
@@ -81,6 +82,11 @@ impl RulesCache {
             }
         }
         rules.insert(rule.name.clone(), rule);
+    }
+
+    /// Whether the list is synced and has a rule of this name.
+    pub fn contains(&self, name: &str) -> bool {
+        matches!(self, Self::Synced(rules) if rules.contains_key(name))
     }
 
     /// A no-op while `Unknown`.
@@ -238,13 +244,16 @@ fn bounded_snapshot(rules: Vec<Rule>) -> Option<Vec<Rule>> {
 }
 
 /// `UiService`'s rule state: the cache, the staged snapshots, a generation
-/// bumped on every commit, and the broadcast `SetRules` goes out on.
+/// bumped on every commit, the broadcast `SetRules` goes out on, and the
+/// per-rule hit counts that follow the list (a committed snapshot and a
+/// confirmed `DELETE_RULE` prune them; [`Self::withdraw`] never does).
 #[derive(Clone)]
 pub struct RulesSync {
     cache: SharedRulesCache,
     pending: Arc<StdMutex<PendingSnapshots>>,
     synced: Arc<watch::Sender<u64>>,
     broadcast: broadcast::Sender<ServerMessage>,
+    hits: RuleHitsHandle,
 }
 
 impl RulesSync {
@@ -253,12 +262,23 @@ impl RulesSync {
             cache: SharedRulesCache::default(),
             pending: Arc::default(),
             synced: Arc::new(watch::channel(0).0),
+            hits: RuleHitsHandle::new(broadcast.clone()),
             broadcast,
         }
     }
 
     pub fn cache(&self) -> SharedRulesCache {
         self.cache.clone()
+    }
+
+    /// Per-rule hit counts (`cache::rule_hits`).
+    pub fn hits(&self) -> RuleHitsHandle {
+        self.hits.clone()
+    }
+
+    /// Counts the events of a ping that carried statistics.
+    pub fn record_hits(&self, events: &[snitchwatch_proto::protocol::Event], uptime: u64) {
+        self.hits.record(events, uptime, &self.cache);
     }
 
     /// Generation bumped each time a daemon snapshot is committed.
@@ -295,7 +315,11 @@ impl RulesSync {
             rules = rules.len(),
             "adopted the daemon's rule snapshot"
         );
-        lock(&self.cache).replace_all(rules);
+        {
+            let mut cache = lock(&self.cache);
+            cache.replace_all(rules);
+            self.hits.adopt_snapshot(&cache);
+        }
         self.publish();
         self.synced.send_modify(|generation| *generation += 1);
         true
@@ -318,7 +342,14 @@ impl RulesSync {
 
     /// A command the daemon answered `OK`, in reply order.
     pub(crate) fn apply_confirmed(&self, sent: &Notification) {
-        lock(&self.cache).apply_confirmed(sent);
+        {
+            let mut cache = lock(&self.cache);
+            cache.apply_confirmed(sent);
+            if sent.r#type == Action::DeleteRule as i32 {
+                self.hits
+                    .forget(sent.rules.iter().map(|rule| rule.name.as_str()));
+            }
+        }
         self.publish();
     }
 

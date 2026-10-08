@@ -17,6 +17,7 @@
 pub mod activation;
 pub mod cli;
 pub mod profile_storage;
+pub mod rule_hits_storage;
 pub mod storage;
 
 pub use storage::{
@@ -27,6 +28,7 @@ use anyhow::{Context, Result};
 use snitchwatch_bridge::auth::{self, Token};
 use snitchwatch_bridge::blocklists::worker::{BlocklistTasks, DEFAULT_REFRESH_TICK};
 use snitchwatch_bridge::cache::connections::ConnectionCache;
+use snitchwatch_bridge::cache::rule_hits_handle::RuleHitsHandle;
 use snitchwatch_bridge::cache::rules::{
     prune_expired_rules_every, publish_rules, settle_rule_command,
 };
@@ -222,6 +224,10 @@ pub struct RunningBridge {
     pause_clear_handle: tokio::task::JoinHandle<()>,
     /// The blocklist worker, its refresh loop and event pump (issue #45).
     blocklist_tasks: BlocklistTasks,
+    /// Per-rule hit counts, saved once more at shutdown, and the ticker that
+    /// broadcasts and saves them in between.
+    rule_hits: RuleHitsHandle,
+    rule_hits_ticker: tokio::task::JoinHandle<()>,
 }
 
 impl RunningBridge {
@@ -239,6 +245,10 @@ impl RunningBridge {
         self.pause_expiry_handle.abort();
         self.pause_clear_handle.abort();
         self.blocklist_tasks.abort();
+        // The ticker first, so no save is started behind this one; `save_now`
+        // waits for one already running.
+        self.rule_hits_ticker.abort();
+        self.rule_hits.save_now();
         if let Some(tx) = self.ws_shutdown_tx.take() {
             let _ = tx.send(());
         }
@@ -365,6 +375,9 @@ where
     // The profile store opens in the same state directory but tracks its
     // own storage status (issue #46 Part 1).
     let profiles_storage = options.storage.clone();
+    let rule_hits = ui_service_inner.rule_hits_handle();
+    rule_hits_storage::configure(&rule_hits, &options.storage);
+    let rule_hits_ticker = rule_hits.spawn_ticker();
     let daemon_rules = storage::DaemonRules {
         commands: ui_service_inner.daemon_commands(),
         rules: ui_service_inner.rules_handle(),
@@ -559,6 +572,7 @@ where
 
     // Same "grab before into_server()" reason: the snapshot answer.
     let prompt_slot_for_pump = ui_service_inner.prompt_slot_handle();
+    let rule_hits_for_pump = rule_hits.clone();
     let ui_service = ui_service_inner.into_server();
     let (grpc_shutdown_tx, grpc_shutdown_rx) = oneshot::channel::<()>();
 
@@ -735,6 +749,7 @@ where
                         state: tray_pub_for_snapshot.subscribe().borrow().clone(),
                     });
                     prompt_slot_for_pump.announce(&snapshot_tx);
+                    rule_hits_for_pump.announce(&snapshot_tx);
                     // Including `paused: false`: a GUI that was away when a
                     // pause ended learns it here. Sent under the cache lock,
                     // like every other pause announcement, so it can't
@@ -892,6 +907,8 @@ where
         pause_expiry_handle,
         pause_clear_handle,
         blocklist_tasks,
+        rule_hits,
+        rule_hits_ticker,
     })
 }
 

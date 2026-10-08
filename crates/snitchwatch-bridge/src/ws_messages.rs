@@ -256,6 +256,39 @@ pub enum ServerMessage {
         #[serde(default)]
         expires_at_unix_ms: Option<u64>,
     },
+    /// How often each daemon rule decided a connection, as Snitchwatch
+    /// counted from the `events` in the daemon's pings (P2.6 Part 1, see
+    /// `crate::cache::rule_hits`). Sent at most every 5 seconds and only
+    /// when something changed, and in every `RequestSnapshot` answer, even
+    /// before the first ping. An additive extension legacy clients ignore.
+    ///
+    /// The counts are **approximate and can be incomplete**: the daemon
+    /// reports at most `Stats.MaxEvents` matched connections per ping and
+    /// nothing while no bridge is connected, and a `nolog` rule never
+    /// reports any. `since_unix_ms` is when counting began (`None` until the
+    /// first ping that carried statistics); `last_gap_unix_ms` is when the
+    /// bridge last noticed it may have missed events, and `lossy` is true
+    /// once it has (the two are never out of step). `storage` says whether
+    /// the counts survive a bridge restart.
+    RuleHits {
+        since_unix_ms: Option<i64>,
+        lossy: bool,
+        last_gap_unix_ms: Option<i64>,
+        storage: StorageStatus,
+        hits: Vec<RuleHitWire>,
+    },
+}
+
+/// One rule's count in [`ServerMessage::RuleHits`], and in the saved hit
+/// counts file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuleHitWire {
+    /// The daemon's rule name.
+    pub name: String,
+    pub count: u64,
+    /// When the rule last decided a connection, in Unix milliseconds.
+    pub last_hit_unix_ms: i64,
 }
 
 /// Client → server messages. These come from the UI's `sendAction(type, payload)`
@@ -717,6 +750,17 @@ mod tests {
                 expires_at_unix_ms: None,
             },
             crate::prompt_slot::PromptSlot::default().message(),
+            ServerMessage::RuleHits {
+                since_unix_ms: None,
+                lossy: false,
+                last_gap_unix_ms: None,
+                storage: StorageStatus {
+                    persistent: false,
+                    reason: None,
+                    unreadable: false,
+                },
+                hits: Vec::new(),
+            },
         ] {
             let action = serde_json::to_value(message).unwrap()["action"]
                 .as_str()
@@ -1215,6 +1259,41 @@ mod filtering_pause_tests {
         assert!(
             !json.contains("sender"),
             "stamp leaked onto the wire: {json}"
+        );
+    }
+
+    #[test]
+    fn rule_hits_round_trips_with_camel_case_keys() {
+        let message = ServerMessage::RuleHits {
+            since_unix_ms: Some(1_800_000_000_000),
+            lossy: true,
+            last_gap_unix_ms: Some(1_800_000_100_000),
+            storage: StorageStatus {
+                persistent: false,
+                reason: Some("no state directory".into()),
+                unreadable: false,
+            },
+            hits: vec![RuleHitWire {
+                name: "000-allow-curl".into(),
+                count: 7,
+                last_hit_unix_ms: 1_800_000_050_000,
+            }],
+        };
+        let json = serde_json::to_value(&message).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "action": "ruleHits",
+                "sinceUnixMs": 1_800_000_000_000_i64,
+                "lossy": true,
+                "lastGapUnixMs": 1_800_000_100_000_i64,
+                "storage": {"persistent": false, "reason": "no state directory"},
+                "hits": [{"name": "000-allow-curl", "count": 7, "lastHitUnixMs": 1_800_000_050_000_i64}],
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<ServerMessage>(json).unwrap(),
+            message
         );
     }
 
