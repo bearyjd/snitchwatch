@@ -323,25 +323,10 @@ impl qobject::RuleEditorController {
     }
 
     fn start_bridge_feed(self: Pin<&mut Self>) {
-        let Some(handles) = crate::bridge_runtime::handles() else {
-            tracing::warn!("RuleEditorController: bridge not running; the editor can't save");
-            return;
-        };
-        let qt_thread = self.qt_thread();
-        let session_handles = handles.clone();
-        crate::bridge_dispatch::spawn_feed(
-            &handles,
+        crate::bridge_dispatch::spawn_result_feed(
+            self.qt_thread(),
             "RuleEditorController",
-            editor_view::interests_rule_editor,
-            move |connection_id, message, _json| {
-                let session_handles = session_handles.clone();
-                let message = message.clone();
-                let _ = qt_thread.queue(move |qobject| {
-                    if session_handles.is_current_session(connection_id) {
-                        qobject.on_message(message);
-                    }
-                });
-            },
+            Self::on_message,
         );
     }
 }
