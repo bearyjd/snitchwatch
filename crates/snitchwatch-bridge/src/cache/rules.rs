@@ -25,7 +25,7 @@
 //! holds `<name>`. #50's process-qualified names make this rare, and the next
 //! `Subscribe` corrects it.
 
-use crate::accounts::{look_up, user_name_uids, AccountLookup, KnownAccounts};
+use crate::accounts::{look_up_blocking, user_name_uids, AccountLookup, KnownAccounts};
 use crate::cache::rule_hits_handle::RuleHitsHandle;
 use crate::daemon_commands::{BecameCurrent, CommandError, ConnKey, PendingReply, StreamId};
 use crate::rule_wire::rule_to_wire;
@@ -45,6 +45,8 @@ const PENDING_SNAPSHOT_CAP: usize = 4;
 /// A staged snapshot older than this is never committed, and is evicted by
 /// the next `stage` or commit.
 const PENDING_SNAPSHOT_TTL: Duration = Duration::from_secs(30);
+/// Longest a `Subscribe` waits for account names (`RulesSync::learn_account_names`).
+const ACCOUNT_LOOKUP_WAIT: Duration = Duration::from_secs(1);
 /// A larger `Subscribe` snapshot is not staged: a partial list would mislead.
 pub const MAX_SNAPSHOT_RULES: usize = 10_000;
 /// Longest accepted string field of a daemon rule (description, action,
@@ -342,7 +344,9 @@ pub(crate) fn parse_duration_secs(duration: &str) -> Option<i64> {
 /// adopt the new stream's snapshot, and close; the new stream's own HELLO
 /// then adopts it again rather than finding nothing and leaving no list.
 /// On TCP each connection has its own key. A stream never adopts the same
-/// snapshot twice.
+/// snapshot twice. The cost: adopting it again replaces the list, so a
+/// change confirmed on the old stream between the two HELLOs drops off the
+/// list (and its hit count restarts) until the daemon's next snapshot.
 #[derive(Debug, Default)]
 pub struct PendingSnapshots {
     entries: VecDeque<Staged>,
@@ -568,18 +572,40 @@ impl RulesSync {
     }
 
     /// Look up the account names of the `user.name` uids in `rules` that
-    /// aren't known yet, on a blocking thread, so the list can show them
-    /// (`accounts`, PR #106 review M4). Before a snapshot is staged.
+    /// aren't known yet, so the list can show them (`accounts`, PR #106
+    /// review M4). Before a snapshot is staged, on a blocking thread, and
+    /// waited for at most [`ACCOUNT_LOOKUP_WAIT`]: the daemon gives
+    /// `Subscribe` 10 s and redials after that (`notifications.go`), and NSS
+    /// can be slow. Lookups that finish later are still remembered, and a
+    /// list already shown is published again with the names.
     pub async fn learn_account_names(&self, lookup: &AccountLookup, rules: &[Rule]) {
         let wanted = {
             let uids = rules.iter().flat_map(user_name_uids).collect();
-            lock(&self.cache).accounts.not_looked_up(uids)
+            lock(&self.cache).accounts.claim(uids)
         };
         if wanted.is_empty() {
             return;
         }
-        let found = look_up(lookup.clone(), wanted).await;
-        lock(&self.cache).accounts.learn(found);
+        let (lookup, cache, broadcast) =
+            (lookup.clone(), self.cache.clone(), self.broadcast.clone());
+        let learning = tokio::task::spawn_blocking(move || {
+            let found = look_up_blocking(&lookup, wanted);
+            let named = found.iter().any(|(_, name)| name.is_some());
+            let listed = {
+                let mut cache = lock(&cache);
+                cache.accounts.learn(found);
+                !cache.is_unknown()
+            };
+            if named && listed {
+                publish_rules(&cache, &broadcast);
+            }
+        });
+        if tokio::time::timeout(ACCOUNT_LOOKUP_WAIT, learning)
+            .await
+            .is_err()
+        {
+            warn!("account names are still being looked up; the list shows them when found");
+        }
     }
 
     /// Hold a `Subscribe`'s rules until its connection sends HELLO. An

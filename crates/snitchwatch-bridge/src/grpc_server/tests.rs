@@ -1808,6 +1808,73 @@ async fn a_snapshot_carries_account_names_for_its_user_name_uids() {
     assert_eq!(looked_up.lock().unwrap().len(), 2);
 }
 
+/// The daemon gives `Subscribe` 10 s (`notifications.go`) and redials if
+/// it takes longer, so slow account lookups (NSS over the network) must not
+/// hold it: the reply waits a bounded time, the snapshot is staged and
+/// committed regardless, and names that come late are cached and published
+/// then, and never looked up again.
+#[tokio::test]
+async fn slow_account_lookups_do_not_hold_up_subscribe() {
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let released = StdMutex::new(released);
+    let calls = Arc::new(StdMutex::new(0));
+    let counted = calls.clone();
+    let lookup: crate::accounts::AccountLookup = Arc::new(move |_| {
+        *counted.lock().unwrap() += 1;
+        let _ = released.lock().unwrap().recv();
+        Some("snitchwatch".to_string())
+    });
+    let (svc, _cache, mut rx) = rules_service(DaemonTransport::Unix);
+    let svc = svc.with_account_lookup(lookup);
+    let rule = Rule {
+        operator: Some(Operator {
+            r#type: "simple".into(),
+            operand: "user.name".into(),
+            data: "958".into(),
+            ..Default::default()
+        }),
+        ..daemon_rule("a")
+    };
+    let subscribed = tokio::time::timeout(
+        Duration::from_secs(5),
+        svc.subscribe(Request::new(with_rules(vec![rule.clone()]))),
+    )
+    .await;
+    assert!(subscribed.is_ok(), "Subscribe waited for the lookup");
+    let commands = svc.daemon_commands();
+    let (stream, _outbound) = commands.open_stream(None);
+    commands.on_reply(stream.id(), &hello());
+    let ServerMessage::SetRules { rules } = rx.try_recv().unwrap() else {
+        panic!("expected SetRules");
+    };
+    assert!(rules[0].get("userNames").is_none(), "not known yet");
+    // A snapshot meanwhile doesn't look the same uid up again.
+    svc.subscribe(Request::new(with_rules(vec![rule.clone()])))
+        .await
+        .unwrap();
+    assert_eq!(*calls.lock().unwrap(), 1, "looked up once");
+    release.send(()).unwrap();
+    let named = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let ServerMessage::SetRules { rules } = rx.recv().await.unwrap() {
+                if rules[0].get("userNames").is_some() {
+                    return rules;
+                }
+            }
+        }
+    })
+    .await
+    .expect("the late name was never published");
+    assert_eq!(
+        named[0]["userNames"],
+        serde_json::json!({ "958": "snitchwatch" })
+    );
+    svc.subscribe(Request::new(with_rules(vec![rule])))
+        .await
+        .unwrap();
+    assert_eq!(*calls.lock().unwrap(), 1, "and not after it was found");
+}
+
 fn over_limit_counts(rx: &mut broadcast::Receiver<ServerMessage>) -> Vec<Option<u32>> {
     std::iter::from_fn(|| rx.try_recv().ok())
         .filter_map(|m| match m {

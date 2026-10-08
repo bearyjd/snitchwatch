@@ -54,8 +54,8 @@ fn a_name_is_cleaned_and_capped() {
     assert_eq!(long.chars().count(), MAX_ACCOUNT_NAME_CHARS);
 }
 
-#[tokio::test]
-async fn lookups_run_off_the_runtime_and_only_show_clean_names() {
+#[test]
+fn lookups_only_show_clean_names() {
     let calls = Arc::new(AtomicUsize::new(0));
     let counted = calls.clone();
     let lookup: AccountLookup = Arc::new(move |uid| {
@@ -66,7 +66,7 @@ async fn lookups_run_off_the_runtime_and_only_show_clean_names() {
             _ => None,
         }
     });
-    let found = look_up(lookup, vec![958, 7, 5]).await;
+    let found = look_up_blocking(&lookup, vec![958, 7, 5]);
     assert_eq!(
         found,
         vec![(958, Some("snitchwatch".into())), (7, None), (5, None)]
@@ -79,6 +79,11 @@ fn known_accounts_are_remembered_bounded_and_named_per_rule() {
     let mut known = KnownAccounts::default();
     known.learn(vec![(958, Some("snitchwatch".into())), (5, None)]);
     assert_eq!(known.not_looked_up(BTreeSet::from([5, 958, 6])), vec![6]);
+    assert_eq!(known.claim(BTreeSet::from([6, 8])), vec![6, 8]);
+    assert!(
+        known.claim(BTreeSet::from([6, 8])).is_empty(),
+        "claimed once"
+    );
     let rule = with(leaf("user.name", "958"));
     assert_eq!(
         known.names_for(&rule),

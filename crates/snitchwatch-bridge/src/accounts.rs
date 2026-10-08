@@ -97,16 +97,12 @@ fn account_name(uid: u32) -> Option<String> {
     }
 }
 
-/// Look `uids` up with `lookup` on a blocking thread, keeping only names
-/// fit to show ([`display_name`]).
-pub async fn look_up(lookup: AccountLookup, uids: Vec<u32>) -> Vec<(u32, Option<String>)> {
-    tokio::task::spawn_blocking(move || {
-        uids.into_iter()
-            .map(|uid| (uid, lookup(uid).as_deref().and_then(display_name)))
-            .collect()
-    })
-    .await
-    .unwrap_or_default()
+/// Look `uids` up with `lookup`, keeping only names fit to show
+/// ([`display_name`]). Blocking: NSS may go over the network.
+pub fn look_up_blocking(lookup: &AccountLookup, uids: Vec<u32>) -> Vec<(u32, Option<String>)> {
+    uids.into_iter()
+        .map(|uid| (uid, lookup(uid).as_deref().and_then(display_name)))
+        .collect()
 }
 
 /// The uids looked up so far and what was found, at most
@@ -124,6 +120,15 @@ impl KnownAccounts {
             .filter(|uid| !self.names.contains_key(uid))
             .take(MAX_LOOKUPS_PER_SNAPSHOT)
             .collect()
+    }
+
+    /// Of `uids`, those not looked up yet ([`Self::not_looked_up`]), now
+    /// noted as being looked up (no name yet), so a second snapshot meanwhile
+    /// doesn't look them up again.
+    pub fn claim(&mut self, uids: BTreeSet<u32>) -> Vec<u32> {
+        let wanted = self.not_looked_up(uids);
+        self.learn(wanted.iter().map(|&uid| (uid, None)).collect());
+        wanted
     }
 
     /// Remember lookups; when full, start again rather than grow.
