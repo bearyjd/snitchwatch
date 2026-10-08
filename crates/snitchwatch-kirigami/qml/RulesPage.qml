@@ -93,6 +93,14 @@ Kirigami.ScrollablePage {
         return true;
     }
 
+    // "Simulate this connection" from the Connections inspector (main.qml routes
+    // it here): open the Simulate sheet on the fields the connection carries.
+    // `prefillJson` is `ConnectionsModel.simulationPrefillJson`.
+    function openSimulator(prefillJson) {
+        simulateSheet.prefill(JSON.parse(prefillJson));
+        simulateSheet.open();
+    }
+
     // `rule` is `selectRuleByName`'s JSON shape.
     function fillInspector(rule) {
         page.inspectName = rule.name;

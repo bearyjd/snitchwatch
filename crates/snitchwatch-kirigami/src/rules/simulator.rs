@@ -79,17 +79,19 @@ mod compare;
 mod form;
 mod network;
 mod operator;
+mod prefill;
 mod re2;
 #[cfg(test)]
 mod tests;
 
 pub use form::SimulationForm;
+pub use prefill::DAEMON_PROTOCOLS;
 
 /// The candidate connection to evaluate against the cached rule set.
 ///
-/// The destination host, port and protocol are always known (a blank host is
-/// the empty `DstHost` of a bare-IP connection). Every other field is `None`
-/// when **unknown** — not "empty" — so conditions on it are reported as not
+/// The destination host and port are always known (a blank host is the empty
+/// `DstHost` of a bare-IP connection). Every other field is `None` when
+/// **unknown** — not "empty" — so conditions on it are reported as not
 /// evaluated instead of being guessed.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SimulationInput {
@@ -99,7 +101,7 @@ pub struct SimulationInput {
     /// As opensnitchd names it: `tcp`, `tcp6`, `udp`, `udp6`, `udplite`,
     /// `sctp`, `icmp`, `icmp6`... Matched like the daemon's `protocol`
     /// operand (case-folded unless the rule is `sensitive`).
-    pub protocol: String,
+    pub protocol: Option<String>,
     /// Paths of the process's ancestors, nearest first. `Some(vec![])` is a
     /// process with no parent.
     pub parent_paths: Option<Vec<String>>,
