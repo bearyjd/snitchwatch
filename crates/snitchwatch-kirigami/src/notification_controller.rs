@@ -258,6 +258,11 @@ fn notice_text(notice: &BridgeNotice) -> (&'static str, String, bool) {
             RuleRefusal::ProcessFileUnknown.describe().to_string(),
             false,
         ),
+        BridgeNotice::PromptSlotSummary { count, .. } => (
+            "Snitchwatch — while a prompt was open",
+            snitchwatch_bridge::notice::prompt_slot_summary_text(*count),
+            false,
+        ),
     }
 }
 
@@ -272,6 +277,24 @@ mod tests {
         let (summary, body, reviewable) = notice_text(&notice);
         assert_eq!(summary, "Snitchwatch — answer not remembered");
         assert_eq!(body, RuleRefusal::ProcessFileUnknown.describe());
+        assert!(!reviewable);
+    }
+
+    /// Prompt-slot plan, part A: the release summary, fixed text around
+    /// the count, with no "Review" (the prompt is already answered).
+    #[test]
+    fn a_prompt_slot_summary_is_fixed_text() {
+        let notice = BridgeNotice::PromptSlotSummary {
+            row_id: 3,
+            count: 2,
+        };
+        let (summary, body, reviewable) = notice_text(&notice);
+        assert_eq!(summary, "Snitchwatch — while a prompt was open");
+        assert_eq!(
+            body,
+            "While that prompt was open, the firewall applied its default action 2 times \
+             (retries count again)."
+        );
         assert!(!reviewable);
     }
 }

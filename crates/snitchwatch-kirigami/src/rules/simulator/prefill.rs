@@ -2,7 +2,8 @@
 //! row.
 //!
 //! A row carries a process path (when the bridge knows it), the destination
-//! host, IP and port, and the protocol — nothing else the simulator can use.
+//! host (with a caveat, see [`daemon_dst_host`]), IP and port, and the
+//! protocol — nothing else the simulator can use.
 //! Everything it doesn't carry stays **unknown**: a blank form field, which
 //! [`SimulationForm::to_input`] turns into `None`, never an empty string that
 //! would be compared as a real value.
@@ -19,19 +20,52 @@ pub const DAEMON_PROTOCOLS: [&str; 10] = [
     "tcp", "tcp6", "udp", "udp6", "udplite", "udplite6", "sctp", "sctp6", "icmp", "icmp6",
 ];
 
+/// What a row says about the `DstHost` opensnitchd had for its connection.
+enum DaemonHost {
+    /// A host name.
+    Named(String),
+    /// None: the empty `DstHost` of a connection to a bare IP.
+    Empty,
+    /// The row can't say.
+    Unknown,
+}
+
+/// The port a DNS query goes to. For TCP and UDP the daemon copies the
+/// query's question name into `DstHost` (`conman/connection.go`,
+/// `getDomains`).
+const DNS_PORT: u16 = 53;
+
+/// Whether opensnitchd may have copied a DNS question into `DstHost`: only
+/// for TCP and UDP (`parseDirection`), so not for the protocols known not to.
+fn may_carry_a_dns_question(protocol: &str) -> bool {
+    !matches!(
+        protocol,
+        "udplite" | "udplite6" | "sctp" | "sctp6" | "icmp" | "icmp6"
+    )
+}
+
 /// The `DstHost` opensnitchd had for `row`'s connection.
 ///
 /// The bridge's `connection_to_row` (`translator/connection.rs`) puts the IP
-/// in `dst_host` when the daemon's `DstHost` is empty, which is what a bare-IP
-/// connection has (`conman/connection.go`: `DstHost: dns.HostOr(ip, "")`). A
-/// host that came from DNS is a name, never the IP literal, so `dst_host`
-/// equal to `dst_ip` is that fallback and the daemon's host is the known empty
-/// string. Copying it as is would simulate a host the daemon never had.
-fn daemon_dst_host(row: &ConnectionRow) -> String {
-    if !row.dst_ip.is_empty() && row.dst_host == row.dst_ip {
-        String::new()
+/// in `dst_host` when the daemon's `DstHost` is empty, which is what a
+/// connection to a bare IP has (`conman/connection.go`:
+/// `DstHost: dns.HostOr(ip, "")`). A name resolved from the DNS cache is never
+/// the IP literal (`dns/track.go` drops `resolved == hostname`), so `dst_host`
+/// equal to `dst_ip` is normally that stand-in and the daemon's host was the
+/// empty string.
+///
+/// The exception is a DNS query: the question name is copied into `DstHost`,
+/// and a query for an IP-literal name (`dig 1.1.1.1 @1.1.1.1`) really has
+/// `DstHost == DstIP`. The row can't tell the two apart, so on port 53 the
+/// host is unknown rather than guessed either way.
+fn daemon_dst_host(row: &ConnectionRow, protocol: &str) -> DaemonHost {
+    let ip_stands_in = !row.dst_ip.is_empty() && row.dst_host == row.dst_ip;
+    if ip_stands_in && row.dst_port == DNS_PORT && may_carry_a_dns_question(protocol) {
+        DaemonHost::Unknown
+    } else if ip_stands_in || row.dst_host.is_empty() {
+        DaemonHost::Empty
     } else {
-        row.dst_host.clone()
+        DaemonHost::Named(row.dst_host.clone())
     }
 }
 
@@ -39,10 +73,16 @@ impl SimulationForm {
     /// The form for simulating `row`: its known fields set, the rest blank.
     pub fn for_connection(row: &ConnectionRow) -> Self {
         let protocol = row.protocol.trim().to_ascii_lowercase();
+        let (dest_host, dest_host_empty) = match daemon_dst_host(row, &protocol) {
+            DaemonHost::Named(host) => (host, false),
+            DaemonHost::Empty => (String::new(), true),
+            DaemonHost::Unknown => (String::new(), false),
+        };
         Self {
             // Blank when the bridge doesn't know it; never the process name.
             process_path: row.process_path.clone().unwrap_or_default(),
-            dest_host: daemon_dst_host(row),
+            dest_host,
+            dest_host_empty,
             dest_ip: row.dst_ip.clone(),
             dest_port: i64::from(row.dst_port),
             protocol: if DAEMON_PROTOCOLS.contains(&protocol.as_str()) {
@@ -123,7 +163,7 @@ mod tests {
     fn everything_else_stays_unknown() {
         let expected = SimulationInput {
             process_path: Some("/usr/bin/curl".to_string()),
-            dest_host: "github.com".to_string(),
+            dest_host: Some("github.com".to_string()),
             dest_port: 443,
             protocol: Some("tcp".to_string()),
             dest_ip: Some("140.82.112.3".to_string()),
@@ -199,31 +239,105 @@ mod tests {
         assert_eq!(input(&loud).protocol.as_deref(), Some("tcp6"));
     }
 
+    /// A connection to `ip` on `port` with no host name from the daemon, as the
+    /// bridge's row shows it (the IP stands in for the missing host).
+    fn ip_only(ip: &str, port: u32, protocol: &str) -> ConnectionRow {
+        let row = row_of(&Connection {
+            dst_host: String::new(),
+            dst_ip: ip.to_string(),
+            dst_port: port,
+            protocol: protocol.to_string(),
+            ..Default::default()
+        });
+        assert_eq!(row.dst_host, ip, "the bridge's row, as built");
+        row
+    }
+
     #[test]
     fn a_connection_to_a_bare_ip_has_a_known_empty_host() {
         // The daemon's `DstHost` is empty (nothing resolved to that IP), and
         // the bridge's row then carries the IP in `dst_host`.
-        let bare = row_of(&Connection {
-            dst_host: String::new(),
-            dst_ip: "10.0.0.5".to_string(),
-            dst_port: 53,
-            protocol: "udp".to_string(),
-            ..Default::default()
-        });
-        assert_eq!(bare.dst_host, "10.0.0.5", "the bridge's row, as built");
+        let bare = ip_only("10.0.0.5", 443, "tcp");
+        let form = SimulationForm::for_connection(&bare);
+        assert!(form.dest_host_empty);
+        assert_eq!(form.dest_host, "");
         let input = input(&bare);
-        assert_eq!(input.dest_host, "");
+        assert_eq!(input.dest_host.as_deref(), Some(""));
         assert_eq!(input.dest_ip.as_deref(), Some("10.0.0.5"));
     }
 
     #[test]
-    fn a_bare_ip_connection_is_simulated_like_the_daemon_sees_it() {
-        let bare = row_of(&Connection {
+    fn on_port_53_the_host_is_the_dns_question_so_an_ip_in_its_place_is_unknown() {
+        // For tcp/udp to port 53 the daemon copies the DNS question name into
+        // `DstHost` (`conman/connection.go`), so a query whose name is an IP
+        // literal has `DstHost == DstIP`: indistinguishable, in the row, from
+        // the bridge's stand-in for a missing host. Not known either way.
+        for (ip, protocol) in [
+            ("10.0.0.5", "udp"),
+            ("10.0.0.5", "tcp"),
+            ("2001:db8::1", "udp6"),
+            ("2001:db8::1", "tcp6"),
+        ] {
+            let query = ip_only(ip, 53, protocol);
+            let form = SimulationForm::for_connection(&query);
+            assert!(!form.dest_host_empty, "{ip} {protocol}");
+            assert_eq!(form.dest_host, "", "{ip} {protocol}");
+            assert_eq!(input(&query).dest_host, None, "{ip} {protocol}");
+        }
+    }
+
+    #[test]
+    fn only_tcp_and_udp_carry_a_dns_question_so_other_protocols_on_53_are_bare() {
+        for protocol in ["udplite", "udplite6", "sctp", "sctp6"] {
+            let bare = ip_only("10.0.0.5", 53, protocol);
+            assert_eq!(input(&bare).dest_host.as_deref(), Some(""), "{protocol}");
+        }
+        // A protocol the daemon doesn't name could be either: unknown.
+        for protocol in ["", "gre"] {
+            let odd = ip_only("10.0.0.5", 53, protocol);
+            assert_eq!(input(&odd).dest_host, None, "{protocol:?}");
+        }
+    }
+
+    #[test]
+    fn only_port_53_makes_an_ip_in_the_host_unknown() {
+        for port in [0, 52, 54, 80, 443, 5353] {
+            let bare = ip_only("10.0.0.5", port, "tcp");
+            assert_eq!(input(&bare).dest_host.as_deref(), Some(""), "port {port}");
+        }
+    }
+
+    #[test]
+    fn a_dns_question_name_is_the_host_on_port_53() {
+        let query = row_of(&Connection {
+            dst_host: "example.com".to_string(),
             dst_ip: "10.0.0.5".to_string(),
             dst_port: 53,
             protocol: "udp".to_string(),
             ..Default::default()
         });
+        assert_eq!(input(&query).dest_host.as_deref(), Some("example.com"));
+    }
+
+    #[test]
+    fn an_unknown_host_is_not_evaluated_by_a_host_rule() {
+        let query = ip_only("1.1.1.1", 53, "udp");
+        let store = store_of_host_rules(&[("10-ip-as-host", "simple", "1.1.1.1")]);
+        let result = simulate(&store, &input(&query));
+        assert_eq!(result.matched_rule, None);
+        assert_eq!(result.unevaluated.len(), 1, "{:?}", result.unevaluated);
+        assert_eq!(result.unevaluated[0].operand, "dest.host");
+        // The same rule against a bare IP on another port: no host, no match,
+        // and nothing left unknown.
+        let other = ip_only("1.1.1.1", 443, "tcp");
+        let result = simulate(&store, &input(&other));
+        assert_eq!(result.matched_rule, None);
+        assert!(result.unevaluated.is_empty());
+    }
+
+    #[test]
+    fn a_bare_ip_connection_is_simulated_like_the_daemon_sees_it() {
+        let bare = ip_only("10.0.0.5", 443, "tcp");
         let store = store_of_host_rules(&[
             // The IP is not the host.
             ("10-ip-is-host", "simple", "10.0.0.5"),
@@ -237,7 +351,7 @@ mod tests {
     #[test]
     fn a_host_the_daemon_resolved_is_kept() {
         let named = input(&row());
-        assert_eq!(named.dest_host, "github.com");
+        assert_eq!(named.dest_host.as_deref(), Some("github.com"));
         assert_eq!(named.dest_ip.as_deref(), Some("140.82.112.3"));
     }
 
@@ -247,7 +361,7 @@ mod tests {
             dst_port: 53,
             ..Default::default()
         });
-        assert_eq!(input(&nothing).dest_host, "");
+        assert_eq!(input(&nothing).dest_host.as_deref(), Some(""));
         assert_eq!(input(&nothing).dest_ip, None);
     }
 
@@ -256,6 +370,7 @@ mod tests {
         let json = serde_json::to_value(SimulationForm::for_connection(&row())).unwrap();
         assert_eq!(json["processPath"], "/usr/bin/curl");
         assert_eq!(json["destHost"], "github.com");
+        assert_eq!(json["destHostEmpty"], false);
         assert_eq!(json["destIp"], "140.82.112.3");
         assert_eq!(json["destPort"], 443);
         assert_eq!(json["protocol"], "tcp");

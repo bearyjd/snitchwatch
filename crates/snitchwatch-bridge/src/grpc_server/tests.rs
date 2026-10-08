@@ -7,6 +7,41 @@ use tonic::transport::Server;
 // DaemonLiveness/StreamGuard's own unit tests now live in
 // `daemon_liveness.rs`, next to the type they test.
 
+/// Drains the channel: nothing but `PromptSlot` messages are left, and the
+/// last says the slot is free (a trailing held one would be a stale prompt).
+fn assert_only_a_free_slot_is_left(rx: &mut broadcast::Receiver<ServerMessage>) {
+    let left: Vec<ServerMessage> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+    assert!(
+        left.iter()
+            .all(|m| matches!(m, ServerMessage::PromptSlot { .. })),
+        "{left:?}"
+    );
+    assert!(
+        matches!(
+            left.last(),
+            Some(ServerMessage::PromptSlot {
+                holder: None,
+                holders: 0,
+                ..
+            })
+        ),
+        "{left:?}"
+    );
+}
+
+/// The next queued broadcast that isn't a `PromptSlot` (those are covered by
+/// `prompt_slot_tests.rs`).
+fn try_recv_skipping_slot(
+    rx: &mut broadcast::Receiver<ServerMessage>,
+) -> Result<ServerMessage, broadcast::error::TryRecvError> {
+    loop {
+        match rx.try_recv() {
+            Ok(ServerMessage::PromptSlot { .. }) => continue,
+            other => return other,
+        }
+    }
+}
+
 async fn spawn_test_service() -> std::net::SocketAddr {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -370,10 +405,8 @@ async fn persistent_allow_verdict_broadcasts_rule_for_live_clients() {
     assert_eq!(rule.duration, "always");
     assert!(!rule.name.is_empty());
 
-    let update = tokio::time::timeout(Duration::from_secs(2), rx.recv())
-        .await
-        .expect("persistent verdict did not broadcast a rule")
-        .expect("broadcast error");
+    let update =
+        try_recv_skipping_slot(&mut rx).expect("persistent verdict did not broadcast a rule");
     match update {
         ServerMessage::UpdateRules { rules } => {
             assert_eq!(rules.len(), 1);
@@ -1438,7 +1471,7 @@ async fn last_disconnect_cancels_old_ask_despite_reconnect_and_late_verdict() {
         )
         .is_err());
     assert!(cache.is_empty());
-    assert!(rx.try_recv().is_err());
+    assert_only_a_free_slot_is_left(&mut rx);
 }
 
 #[tokio::test]
@@ -1533,7 +1566,7 @@ async fn verdict_that_wins_before_last_disconnect_is_preserved() {
     let cache = cache.lock().await;
     assert_eq!(cache.pending_count(), 0);
     assert_eq!(cache.rows()[0].action.as_deref(), Some("allow"));
-    assert!(rx.try_recv().is_err());
+    assert_only_a_free_slot_is_left(&mut rx);
 }
 
 #[tokio::test]

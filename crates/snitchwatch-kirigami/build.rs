@@ -16,6 +16,7 @@ fn main() {
             "qml/SizedOverlaySheet.qml",
             "qml/ConnectionsPage.qml",
             "qml/InlineVerdicts.qml",
+            "qml/PromptSlotBanner.qml",
             "qml/PendingDecisionSheet.qml",
             "qml/BlocklistsPage.qml",
             "qml/RulesPage.qml",
@@ -44,6 +45,7 @@ fn main() {
         .file("src/settings_controller.rs")
         .file("src/notification_controller.rs")
         .file("src/tray_controller.rs")
+        .file("src/prompt_slot_status.rs")
         .file("src/geo_model.rs")
         .file("src/scanner_controller.rs")
         .file("src/daemon_health_model.rs");

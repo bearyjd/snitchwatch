@@ -44,6 +44,10 @@ const ALL_QML: &[(&str, &str)] = &[
     ),
     ("PendingDecisionSheet.qml", PENDING_SHEET),
     ("ProfilesPage.qml", PROFILES_PAGE),
+    (
+        "PromptSlotBanner.qml",
+        include_str!("../qml/PromptSlotBanner.qml"),
+    ),
     ("RuleSimulatorSheet.qml", SIMULATOR_SHEET),
     ("RulesImportSheet.qml", IMPORT_SHEET),
     ("RulesPage.qml", RULES_PAGE),

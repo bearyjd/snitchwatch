@@ -14,6 +14,7 @@ use super::{compare, network, SimulationInput};
 // What a leaf lacked: shown to the user as "needs <this>".
 const PROCESS_PATH: &str = "process path";
 const PROTOCOL: &str = "protocol";
+const DEST_HOST: &str = "destination host";
 const PARENT_PATHS: &str = "parent process paths";
 const COMMAND: &str = "process command line";
 const PID: &str = "process ID";
@@ -403,7 +404,7 @@ fn text_subject(operand: &str, input: &SimulationInput) -> Subject {
         "process.path" => known_or(input.process_path.as_ref(), PROCESS_PATH),
         "process.command" => known_or(input.command.as_ref(), COMMAND),
         "process.id" => known_or(input.pid, PID),
-        "dest.host" => Subject::Known(input.dest_host.clone()),
+        "dest.host" => known_or(input.dest_host.as_ref(), DEST_HOST),
         "dest.ip" => ip_subject(input.dest_ip.as_deref(), DEST_IP),
         "dest.port" => Subject::Known(input.dest_port.to_string()),
         "user.id" => known_or(input.uid, UID),

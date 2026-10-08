@@ -19,6 +19,7 @@ enum NoticeKey {
     FilterPauseExpired,
     DenyScopeNarrowedForRow(u64),
     VerdictNotRememberedForRow(u64),
+    PromptSlotSummaryForRow(u64),
 }
 
 impl From<&Notice> for NoticeKey {
@@ -31,6 +32,7 @@ impl From<&Notice> for NoticeKey {
             Notice::VerdictNotRemembered { row_id } => {
                 NoticeKey::VerdictNotRememberedForRow(*row_id)
             }
+            Notice::PromptSlotSummary { row_id, .. } => NoticeKey::PromptSlotSummaryForRow(*row_id),
         }
     }
 }
@@ -130,6 +132,10 @@ fn notice_text(notice: &Notice) -> (&'static str, String) {
             "Snitchwatch — answer not remembered",
             RuleRefusal::ProcessFileUnknown.describe().into(),
         ),
+        Notice::PromptSlotSummary { count, .. } => (
+            "Snitchwatch — while a prompt was open",
+            snitchwatch_bridge::notice::prompt_slot_summary_text(*count),
+        ),
     }
 }
 
@@ -192,5 +198,29 @@ mod tests {
         let (summary, body) = notice_text(&row_a);
         assert_eq!(summary, "Snitchwatch — answer not remembered");
         assert_eq!(body, RuleRefusal::ProcessFileUnknown.describe());
+    }
+
+    /// Prompt-slot plan, part A: one summary per released prompt.
+    #[test]
+    fn a_prompt_slot_summary_is_per_prompt_and_counts_at_least() {
+        let mut gate = CooldownGate::with_cooldown(Duration::from_secs(60));
+        let t0 = Instant::now();
+        let first = Notice::PromptSlotSummary {
+            row_id: 1,
+            count: 4,
+        };
+        let second = Notice::PromptSlotSummary {
+            row_id: 2,
+            count: 1,
+        };
+        assert!(gate.should_fire(&first, t0));
+        assert!(gate.should_fire(&second, t0));
+        assert!(!gate.should_fire(&first, t0 + Duration::from_secs(5)));
+        let (summary, body) = notice_text(&first);
+        assert_eq!(summary, "Snitchwatch — while a prompt was open");
+        assert_eq!(
+            body,
+            snitchwatch_bridge::notice::prompt_slot_summary_text(4)
+        );
     }
 }
