@@ -18,7 +18,12 @@
 //!   set operations (`&&`, `--`, `~~`), nested classes, flags other than
 //!   `i`, `m`, `s` and `U`, the `\<`/`\>`/`\b{…}` assertions, `\u`/`\U`
 //!   escapes, or `\p{name=value}` properties;
-//! - its compiled program is over 1 MiB.
+//! - it matches every host: the daemon searches unanchored, so a pattern
+//!   with no `^`/`$`/`\b` that can match the empty string (`a*`, `x?`,
+//!   `.*`) matches everywhere, and so does an anchored one such as `^` or
+//!   `^a*`, caught by probing a few hosts. `^$` (the daemon's documented
+//!   match for an empty `dest.host`) is kept;
+//! - its compiled program is over 1 MiB ("too complex").
 //!
 //! Errors are fixed text: `regex_syntax` and `regex` errors quote the
 //! pattern, which is client-supplied.
@@ -30,6 +35,7 @@ use regex_syntax::ast::{
     ClassUnicodeKind, Flag, Flags, FlagsItemKind, GroupKind, HexLiteralKind, Literal, LiteralKind,
     RepetitionKind, RepetitionRange,
 };
+use regex_syntax::hir::translate::Translator;
 
 /// Go's `regexp/syntax` refuses a larger `{n,m}` count.
 const MAX_REPEAT: u32 = 1000;
@@ -37,6 +43,14 @@ const MAX_REPEAT: u32 = 1000;
 const SIZE_LIMIT: usize = 1 << 20;
 
 const INVALID: &str = "operator data is not a valid regular expression";
+const TOO_COMPLEX: &str = "operator data is a regular expression too complex to check";
+const UNANCHORED_EMPTY: &str = "this regular expression matches every connection: it can match \
+     an empty string and has no ^, $ or \\b anchor";
+const MATCHES_EVERY_HOST: &str = "this regular expression matches every connection, even with its \
+     anchors";
+/// Hosts a pattern that matches everything matches; `^$` fails on "a",
+/// `^(|a|\.)$` on "example.com".
+const MATCH_ALL_PROBES: [&str; 4] = ["", "a", ".", "example.com"];
 const CASE_CHANGES_MEANING: &str = "a case-insensitive regular expression can't use \\D, \\S, \
      \\W, \\B or \\A: the firewall service lowercases the pattern, which changes their meaning";
 const CASE_BREAKS_CLASS: &str = "a case-insensitive regular expression can't use \\p or \\P \
@@ -55,12 +69,27 @@ pub(super) fn validate_regexp(data: &str, sensitive: bool) -> Result<(), String>
     } else {
         Cow::Owned(data.to_lowercase())
     };
-    ast::visit(&parse(&effective)?, DialectCheck).map_err(str::to_string)?;
-    regex::RegexBuilder::new(&effective)
+    let ast = parse(&effective)?;
+    ast::visit(&ast, DialectCheck).map_err(str::to_string)?;
+    let hir = Translator::new()
+        .translate(&effective, &ast)
+        .map_err(|_| INVALID.to_string())?;
+    let can_match_empty = hir.properties().minimum_len() == Some(0);
+    if can_match_empty && hir.properties().look_set().is_empty() {
+        return Err(UNANCHORED_EMPTY.to_string());
+    }
+    let compiled = regex::RegexBuilder::new(&effective)
         .size_limit(SIZE_LIMIT)
         .build()
-        .map(|_| ())
-        .map_err(|_| INVALID.to_string())
+        .map_err(|e| match e {
+            regex::Error::CompiledTooBig(_) => TOO_COMPLEX.to_string(),
+            _ => INVALID.to_string(),
+        })?;
+    // Anchored, but still everywhere: `^`, `$`, `^a*`, `(?:^|a)`.
+    if can_match_empty && MATCH_ALL_PROBES.iter().all(|host| compiled.is_match(host)) {
+        return Err(MATCHES_EVERY_HOST.to_string());
+    }
+    Ok(())
 }
 
 fn parse(pattern: &str) -> Result<Ast, String> {
@@ -233,7 +262,7 @@ mod tests {
     #[test]
     fn escapes_that_lowercasing_changes_are_refused_when_insensitive() {
         for pattern in [
-            r"^\D*$",
+            r"^\D+$",
             r"\S+",
             r"a\Wb",
             r"a\B",
@@ -274,7 +303,7 @@ mod tests {
             assert!(sensitive(pattern).is_err(), "{pattern}");
         }
         assert_eq!(sensitive("a{1000}"), Ok(()));
-        assert_eq!(sensitive("a{0,1000}"), Ok(()));
+        assert_eq!(sensitive("ba{0,1000}"), Ok(()));
     }
 
     #[test]
@@ -325,7 +354,46 @@ mod tests {
     fn a_pattern_over_the_size_limit_is_refused() {
         let pattern = "(?:[a-z]{1000}){20}";
         assert!(regex::Regex::new(pattern).is_ok(), "fits regex's default");
-        assert!(sensitive(pattern).is_err());
+        let err = sensitive(pattern).unwrap_err();
+        assert!(err.contains("too complex"), "{err}");
+    }
+
+    #[test]
+    fn an_unanchored_pattern_that_can_match_empty_is_refused() {
+        // The daemon matches unanchored: an empty match fits every host.
+        for pattern in [
+            "a*", "x?", "(|a)", ".*", "(?:)", "a{0,5}", "(?:a|b)*", "[a-z]*",
+        ] {
+            for result in [sensitive(pattern), insensitive(pattern)] {
+                let err = result.unwrap_err();
+                assert!(err.contains("no ^, $ or"), "{pattern}: {err}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_anchored_pattern_that_still_matches_every_host_is_refused() {
+        for pattern in ["^", "$", "^a*", "a*$", "(?m)^", "^.*", "^.*$", "(?:^|a)"] {
+            let err = sensitive(pattern).unwrap_err();
+            assert!(err.contains("even with its anchors"), "{pattern}: {err}");
+        }
+    }
+
+    #[test]
+    fn anchored_or_non_empty_patterns_are_kept() {
+        // `^$` is the daemon's documented match for an empty dest.host.
+        for pattern in [
+            "^$",
+            "^a*$",
+            r"\b",
+            "^a",
+            "a+",
+            "^(|a|\\.)$",
+            r"^(?:[^.]+\.)*example\.com$",
+        ] {
+            assert_eq!(sensitive(pattern), Ok(()), "{pattern}");
+            assert_eq!(insensitive(pattern), Ok(()), "{pattern}");
+        }
     }
 
     #[test]
