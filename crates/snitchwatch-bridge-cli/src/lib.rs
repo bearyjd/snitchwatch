@@ -379,6 +379,21 @@ where
     // read by UiService::ask_rule on every call. Resets to unpaused on every
     // bridge start, matching every other in-memory bridge state.
     let filtering_paused = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // ...and is cleared when the last authenticated GUI leaves, so a pause
+    // never re-arms for the next GUI to connect (issue #47).
+    {
+        let cache = cache.clone();
+        tokio::spawn(
+            snitchwatch_bridge::client_presence::clear_pause_on_last_session_loss(
+                client_presence.clone(),
+                filtering_paused.clone(),
+                move || {
+                    let cache = cache.clone();
+                    async move { cache.lock().await.resync_tray_state() }
+                },
+            ),
+        );
+    }
 
     let ui_service_inner = UiService::new(
         cache.clone(),

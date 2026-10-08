@@ -1,4 +1,6 @@
 //! Authenticated external clients, independent of internal broadcast receivers.
+use std::future::Future;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::watch;
 
@@ -37,6 +39,30 @@ impl ClientPresence {
             generation: state.loss_generation,
             losses: self.losses.subscribe(),
         })
+    }
+}
+
+/// Issue #47: clear a filtering pause whenever the last authenticated GUI
+/// session ends. A pause is that GUI user's choice; left set, it would re-arm
+/// for whichever GUI authenticates next (in system mode possibly a different
+/// `snitchwatch-ui` member) while the tray may already show Idle.
+/// `on_cleared` runs after each loss that actually cleared a pause; the bridge
+/// uses it to resync the tray. Ends when every `ClientPresence` is dropped.
+pub async fn clear_pause_on_last_session_loss<F, Fut>(
+    presence: ClientPresence,
+    paused: Arc<AtomicBool>,
+    on_cleared: F,
+) where
+    F: Fn() -> Fut,
+    Fut: Future<Output = ()>,
+{
+    let mut losses = presence.losses.subscribe();
+    drop(presence);
+    while losses.changed().await.is_ok() {
+        if paused.swap(false, Ordering::SeqCst) {
+            tracing::info!("last authenticated GUI session ended; filtering pause cleared");
+            on_cleared().await;
+        }
     }
 }
 
@@ -99,5 +125,65 @@ mod tests {
             .await
             .unwrap();
         assert!(presence.admit().unwrap().while_current(|| ()).is_some());
+    }
+
+    #[tokio::test]
+    async fn last_session_loss_clears_a_filtering_pause() {
+        let presence = ClientPresence::default();
+        let paused = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let (cleared_tx, mut cleared_rx) = tokio::sync::mpsc::unbounded_channel();
+        let first = presence.authenticated_session();
+        let second = presence.authenticated_session();
+        tokio::spawn(clear_pause_on_last_session_loss(
+            presence.clone(),
+            paused.clone(),
+            move || {
+                let cleared_tx = cleared_tx.clone();
+                async move {
+                    let _ = cleared_tx.send(());
+                }
+            },
+        ));
+        tokio::task::yield_now().await;
+
+        drop(first);
+        tokio::task::yield_now().await;
+        assert!(
+            paused.load(std::sync::atomic::Ordering::SeqCst),
+            "another GUI is still authenticated: its pause stands"
+        );
+
+        drop(second);
+        tokio::time::timeout(std::time::Duration::from_secs(1), cleared_rx.recv())
+            .await
+            .expect("pause was not cleared after the last session ended")
+            .unwrap();
+        assert!(!paused.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn last_session_loss_without_a_pause_does_not_report_a_clear() {
+        let presence = ClientPresence::default();
+        let paused = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (cleared_tx, mut cleared_rx) = tokio::sync::mpsc::unbounded_channel();
+        let session = presence.authenticated_session();
+        tokio::spawn(clear_pause_on_last_session_loss(
+            presence.clone(),
+            paused.clone(),
+            move || {
+                let cleared_tx = cleared_tx.clone();
+                async move {
+                    let _ = cleared_tx.send(());
+                }
+            },
+        ));
+        tokio::task::yield_now().await;
+        drop(session);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(200), cleared_rx.recv())
+                .await
+                .is_err(),
+            "no pause was set, so nothing should be reported cleared"
+        );
     }
 }
