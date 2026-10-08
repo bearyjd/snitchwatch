@@ -344,6 +344,24 @@ Branch `feat/prompt-slot-notification-actions`, after Part C.
     update, and says "This prompt was already answered" when the row was
     settled another way.
   - **Withdrawn.** The notification is closed once its row stops waiting.
+- **PR #100 re-review fixes.**
+  - **On-demand servers.** A server started on demand (dunst, say) takes
+    the name after the notice starts hearing owner changes, so that change
+    is already queued when the wait starts. A change now voids the notice
+    only when the server that showed it lost the name; any other change is
+    ignored. Owner changes are polled before clicks.
+  - **A voided notice is closed,** and its row still waits for the window.
+    `CloseNotification` goes to the unique name that showed it, never to
+    a new owner, whose notification with that id is somebody else's.
+  - **CI runs the private-bus tests.** The kirigami job installs
+    `dbus-daemon` and sets `CI`; with `CI` set, a missing `dbus-daemon`
+    fails these tests instead of skipping them.
+  - **Path.** A long program path keeps its start and its end
+    (`sanitize_ends_for_display`), so a padded `/tmp/x/…/firefox` still
+    shows `/tmp`. A host keeps its end only.
+  - **Invisible characters.** The display sanitizer also strips the
+    invisible characters outside Cf: the combining grapheme joiner, the
+    Hangul fillers and the variation selectors.
 
 ### C. Bridge auto-answer and "Decide later" (BR + UI, M; S1/S2 decided: P-a after 30 s, "Decide later" = P-c)
 

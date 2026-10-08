@@ -60,11 +60,20 @@ pub fn strip_display_hazards(input: &str) -> String {
 /// Since the PR #100 review it is every format character (general category
 /// Cf: soft hyphen, Arabic letter mark, tag characters, and the rest) plus
 /// those two separators. The Cf ranges are generated from Python's
-/// `unicodedata` (Unicode 16.0.0).
+/// `unicodedata` (Unicode 16.0.0). Since its re-review it is also the
+/// characters outside Cf that render as nothing: the combining grapheme
+/// joiner, the Hangul fillers and the variation selectors.
 fn is_display_hazard(c: char) -> bool {
     matches!(c,
         '\u{2028}' // LINE SEPARATOR (Zl)
         | '\u{2029}' // PARAGRAPH SEPARATOR (Zp)
+        // Invisible, but not Cf:
+        | '\u{034F}' // COMBINING GRAPHEME JOINER (Mn)
+        | '\u{115F}'..='\u{1160}' // HANGUL CHOSEONG/JUNGSEONG FILLER (Lo)
+        | '\u{3164}' // HANGUL FILLER (Lo)
+        | '\u{FFA0}' // HALFWIDTH HANGUL FILLER (Lo)
+        | '\u{FE00}'..='\u{FE0F}' // VARIATION SELECTOR-1..16 (Mn)
+        | '\u{E0100}'..='\u{E01EF}' // VARIATION SELECTOR-17..256 (Mn)
         // General category Cf, Unicode 16.0.0:
         | '\u{00AD}'
         | '\u{0600}'..='\u{0605}'
@@ -174,6 +183,41 @@ mod tests {
             assert_eq!(strip_display_hazards(&format!("a{c}b")), "ab");
         }
         for c in ['a', 'é', '中', '-', '.', ' ', '\u{2070}', '\u{FFFC}'] {
+            assert!(!is_display_hazard(c), "U+{:04X}", c as u32);
+        }
+    }
+
+    #[test]
+    fn invisible_characters_outside_cf_are_hazards_too() {
+        for c in [
+            '\u{034F}',  // COMBINING GRAPHEME JOINER
+            '\u{115F}',  // HANGUL CHOSEONG FILLER
+            '\u{1160}',  // HANGUL JUNGSEONG FILLER
+            '\u{3164}',  // HANGUL FILLER
+            '\u{FFA0}',  // HALFWIDTH HANGUL FILLER
+            '\u{FE00}',  // VARIATION SELECTOR-1
+            '\u{FE0F}',  // VARIATION SELECTOR-16
+            '\u{E0100}', // VARIATION SELECTOR-17
+            '\u{E01EF}', // VARIATION SELECTOR-256
+        ] {
+            assert!(is_display_hazard(c), "U+{:04X}", c as u32);
+            assert_eq!(
+                sanitize_for_display(&format!("a{c}b"), 64),
+                "ab",
+                "U+{:04X}",
+                c as u32
+            );
+            assert_eq!(strip_display_hazards(&format!("a{c}b")), "ab");
+        }
+        // Their neighbours are ordinary.
+        for c in [
+            '\u{034E}',
+            '\u{0350}',
+            '\u{1161}',
+            '\u{3165}',
+            '\u{FE10}',
+            '\u{E01F0}',
+        ] {
             assert!(!is_display_hazard(c), "U+{:04X}", c as u32);
         }
     }

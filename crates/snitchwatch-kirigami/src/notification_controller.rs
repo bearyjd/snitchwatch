@@ -28,11 +28,12 @@
 //! Neither is `VerdictNotRemembered` (issue #44): `ConnectionsPage.qml`'s
 //! in-app message exists only while that page is the current one.
 //!
-//! **"Review" action → raise window.** The action button, when clicked, is
-//! observed on a scratch thread (`NotificationHandle::wait_for_action`
-//! blocks) and queued back as the `reviewRequested` signal, which
-//! `main.qml` connects to the same raise/`requestActivate()` call Task 7's
-//! pending-count handler uses.
+//! **"Review" action → raise window.** The pending notice's buttons are
+//! heard on the bridge runtime, by `crate::pending_notice` through
+//! `crate::notification_signals::Notice::wait`, which trusts only the
+//! notification server. A "Review" click is queued back as the
+//! `reviewRequested` signal, which `main.qml` connects to the same
+//! raise/`requestActivate()` call Task 7's pending-count handler uses.
 //!
 //! **"Allow once" and "Deny" (prompt-slot plan Part B).** A pending notice
 //! also answers the prompt, as the inline buttons would
