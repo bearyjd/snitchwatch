@@ -81,10 +81,16 @@ Controls.ApplicationWindow {
         property string text: "holder"
     }
 
+    // The window's, as in main.qml.
+    MakeRuleController {
+        id: windowController
+    }
+
     ConnectionsPage {
         id: page
         anchors.fill: parent
         bridgeFeed: feedStub
+        makeRuleController: windowController
         model: ConnectionsModel {
             id: connModel
         }

@@ -20,6 +20,8 @@ const IMPORT_SHEET: &str = include_str!("../qml/RulesImportSheet.qml");
 const EDITOR_SHEET: &str = include_str!("../qml/RuleEditorSheet.qml");
 const PENDING_SHEET: &str = include_str!("../qml/PendingDecisionSheet.qml");
 const MAKE_RULE_SHEET: &str = include_str!("../qml/MakeRuleSheet.qml");
+const MAKE_RULE_OUTCOMES: &str = include_str!("../qml/MakeRuleOutcomes.qml");
+const MAKE_RULE_CONTROLLER_RS: &str = include_str!("../src/make_rule_controller.rs");
 const CONNECTIONS_PAGE: &str = include_str!("../qml/ConnectionsPage.qml");
 const MAIN_QML: &str = include_str!("../qml/main.qml");
 const SIZED_SHEET: &str = include_str!("../qml/SizedOverlaySheet.qml");
@@ -47,6 +49,7 @@ const ALL_QML: &[(&str, &str)] = &[
         include_str!("../qml/InlineVerdicts.qml"),
     ),
     ("main.qml", MAIN_QML),
+    ("MakeRuleOutcomes.qml", MAKE_RULE_OUTCOMES),
     (
         "MakeRuleSheet.qml",
         include_str!("../qml/MakeRuleSheet.qml"),
@@ -343,10 +346,10 @@ fn connections_page_labels_showing_connection_data_are_plain_text() {
 fn rule_command_sheets_poll_their_controller_while_busy() {
     for (name, source, running, triggered) in [
         (
-            "MakeRuleSheet.qml",
-            MAKE_RULE_SHEET,
-            "running: controller.busy",
-            "onTriggered: controller.poll()",
+            "MakeRuleOutcomes.qml",
+            MAKE_RULE_OUTCOMES,
+            "running: !!outcomes.controller && outcomes.controller.busy",
+            "onTriggered: outcomes.controller.poll()",
         ),
         (
             "RuleEditorSheet.qml",
@@ -383,9 +386,8 @@ fn make_rule_sheet_says_only_what_the_bridge_answered() {
             "MakeRuleSheet.qml says `{claim}` itself; only MakeRuleController's result may"
         );
     }
-    assert!(has_line(
-        &code,
-        "readonly property string result: controller.rowId === sheet.rowId ? controller.statusText : \"\""
+    assert!(code.contains(
+        "readonly property string result: !!sheet.controller && sheet.controller.rowId === sheet.rowId\n        ? sheet.controller.statusText : \"\""
     ));
     let label = blocks(&code, "Controls.Label {")
         .into_iter()
@@ -403,7 +405,7 @@ fn make_rule_sheet_says_only_what_the_bridge_answered() {
     assert!(
         has_line(
             &busy,
-            "visible: controller.busy && controller.rowId !== sheet.rowId"
+            "visible: form.visible && sheet.bindableProcessPath && !!sheet.controller && sheet.controller.busy && sheet.controller.rowId !== sheet.rowId"
         ),
         "{busy}"
     );
@@ -414,6 +416,52 @@ fn make_rule_sheet_says_only_what_the_bridge_answered() {
         binding.contains("Another rule is still being sent. Try again in a moment."),
         "{binding}"
     );
+}
+
+/// H1 (PR #111 review): a passive notification renders rich text, and a
+/// refusal's reason is bridge text, so the notice for an outcome off screen is
+/// one of two FIXED strings. `finished` carries no text at all; the reason
+/// stays in the sheet's plain-text result.
+#[test]
+fn make_rule_notices_are_fixed_text_only() {
+    assert!(
+        MAKE_RULE_CONTROLLER_RS.contains(
+            "fn finished(self: Pin<&mut MakeRuleController>, row_id: QString, created: bool);"
+        ),
+        "MakeRuleController.finished must carry no text"
+    );
+    let outcomes = code_lines(MAKE_RULE_OUTCOMES);
+    for line in [
+        "readonly property string createdText: \"The rule was created.\"",
+        "readonly property string notCreatedText: \"A rule couldn't be created. Open that connection to see why.\"",
+        "outcomes.notice(created ? outcomes.createdText : outcomes.notCreatedText);",
+    ] {
+        assert!(has_line(&outcomes, line), "MakeRuleOutcomes.qml lost `{line}`");
+    }
+    assert!(has_line(&outcomes, "signal notice(string text)"));
+    assert_eq!(
+        outcomes.matches(".notice(").count(),
+        1,
+        "MakeRuleOutcomes.qml emits a notice other than the fixed one"
+    );
+    for data in ["status", "reason", "statusText"] {
+        assert!(
+            !outcomes.contains(data),
+            "MakeRuleOutcomes.qml reads `{data}`: notices are fixed text only"
+        );
+    }
+    // The sheet notifies nobody, and the window passes the fixed text on.
+    let sheet = code_lines(MAKE_RULE_SHEET);
+    for forbidden in ["explained", "showPassive", "finished"] {
+        assert!(
+            !sheet.contains(forbidden),
+            "MakeRuleSheet.qml has `{forbidden}`: only MakeRuleOutcomes gives notices"
+        );
+    }
+    assert!(has_line(
+        &code_lines(MAIN_QML),
+        "onNotice: text => root.showPassiveNotification(text, \"long\")"
+    ));
 }
 
 /// E3 (PR #108 review): a put-off row's inspector says the firewall may list

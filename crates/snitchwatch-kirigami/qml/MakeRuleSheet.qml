@@ -5,7 +5,9 @@
 // editor exists. A once-only answer can't be given afterwards, so "This time"
 // isn't offered. Every text here is fixed, and what happened comes only from
 // MakeRuleController: "created" only once the bridge's result is Ok (PR #108
-// security review, M1).
+// security review, M1). The controller is the window's (main.qml), so a
+// request outlives this page; MakeRuleOutcomes.qml polls it and gives the
+// fixed off-screen notice.
 import QtQuick
 import QtQuick.Layouts
 import QtQuick.Controls as Controls
@@ -29,44 +31,25 @@ ColumnLayout {
     // stays: a matching deny wins over an allow rule, so the sheet says so
     // rather than delete it (PR #98 review).
     property bool blockedForFiveMinutes: false
+    // The window's MakeRuleController (main.qml); null in probes without one.
+    property var controller: null
     // What the last request for this row says: sending, its outcome, or that
     // it couldn't be sent. Empty for another row.
-    readonly property string result: controller.rowId === sheet.rowId ? controller.statusText : ""
+    readonly property string result: !!sheet.controller && sheet.controller.rowId === sheet.rowId
+        ? sheet.controller.statusText : ""
     // Exposed for the headless probes (tests/deferred_rows_qml.rs,
     // tests/default_action_rows_qml.rs).
     property alias openButton: openButton
     property alias form: form
     property alias blockNote: blockNoteLabel
-    property alias controller: controller
     property alias alsoListedNote: alsoListedNote
     property alias busyElsewhereNote: busyElsewhereNote
 
-    // A request's outcome while its row isn't on screen (the inspector closed,
-    // or shows another row): ConnectionsPage shows it as a passive notice.
-    signal explained(string text)
-
     onRowIdChanged: form.visible = false
 
-    Connections {
-        target: controller
-        function onFinished(rowId, status) {
-            if (!sheet.visible || rowId !== sheet.rowId) {
-                sheet.explained(status);
-            }
-        }
-    }
-
-    MakeRuleController {
-        id: controller
-        Component.onCompleted: startBridgeFeed()
-    }
-
-    // The bridge's result never came: give up after a silence.
-    Timer {
-        interval: 1000
-        repeat: true
-        running: controller.busy
-        onTriggered: controller.poll()
+    // Whether `rowId`'s outcome shows here now: the inspector is open on it.
+    function shows(rowId) {
+        return sheet.visible && sheet.rowId === rowId;
     }
 
     Controls.Label {
@@ -143,14 +126,14 @@ ColumnLayout {
             Layout.fillWidth: true
             Controls.Button {
                 Layout.fillWidth: true
-                enabled: !controller.busy
+                enabled: !!sheet.controller && !sheet.controller.busy
                 text: "Allow"
                 icon.name: "dialog-ok-apply"
                 onClicked: sheet.make("allow")
             }
             Controls.Button {
                 Layout.fillWidth: true
-                enabled: !controller.busy
+                enabled: !!sheet.controller && !sheet.controller.busy
                 text: "Deny"
                 icon.name: "edit-delete-remove"
                 onClicked: sheet.make("deny")
@@ -172,7 +155,7 @@ ColumnLayout {
         id: busyElsewhereNote
         objectName: "makeRuleBusyElsewhere"
         Layout.fillWidth: true
-        visible: controller.busy && controller.rowId !== sheet.rowId
+        visible: form.visible && sheet.bindableProcessPath && !!sheet.controller && sheet.controller.busy && sheet.controller.rowId !== sheet.rowId
         wrapMode: Text.Wrap
         opacity: 0.7
         textFormat: Text.PlainText
@@ -189,19 +172,22 @@ ColumnLayout {
     }
 
     function make(choice) {
-        const requestId = controller.begin(sheet.rowId);
+        if (!sheet.controller) {
+            return;
+        }
+        const requestId = sheet.controller.begin(sheet.rowId);
         if (requestId === "") {
             return;
         }
         if (sheet.model === null) {
-            controller.notSent("");
+            sheet.controller.notSent("");
             return;
         }
         // Empty when sent; otherwise why not.
         const problem = sheet.model.makeRule(sheet.rowId, choice, scopeBox.currentValue,
                                              durationBox.currentValue, requestId);
         if (problem !== "") {
-            controller.notSent(problem);
+            sheet.controller.notSent(problem);
             return;
         }
         form.visible = false;

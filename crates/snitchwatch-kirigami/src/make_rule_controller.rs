@@ -43,10 +43,12 @@ pub mod qobject {
         #[qproperty(i32, no_answer_after_ms, cxx_name = "noAnswerAfterMs")]
         type MakeRuleController = super::MakeRuleControllerRust;
 
-        /// A request ended, for row `row_id`, saying `status`. The sheet
-        /// shows it as a notice when that row isn't on screen.
+        /// A request about row `row_id` ended; `created` when the bridge said
+        /// Ok. No text: the reasons are bridge text and stay in the sheet's
+        /// plain-text result, and `MakeRuleOutcomes.qml` turns this into a
+        /// fixed notice when that row isn't on screen (PR #111 review, H1).
         #[qsignal]
-        fn finished(self: Pin<&mut MakeRuleController>, row_id: QString, status: QString);
+        fn finished(self: Pin<&mut MakeRuleController>, row_id: QString, created: bool);
 
         /// Feed the bridge's `RuleCommandResult`s to this controller.
         #[qinvokable]
@@ -153,7 +155,7 @@ impl qobject::MakeRuleController {
         self.as_mut().set_created(done.saved);
         self.as_mut().set_busy(false);
         self.as_mut().set_status_text(QString::from(&done.status));
-        self.finished(QString::from(&row_id), QString::from(&done.status));
+        self.finished(QString::from(&row_id), done.saved);
     }
 
     fn apply_server_message_json(self: Pin<&mut Self>, json: &QString) {
