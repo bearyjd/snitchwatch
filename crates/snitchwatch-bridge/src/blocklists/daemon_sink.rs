@@ -463,4 +463,4 @@ fn command_failure(error: CommandError) -> NotInstalled {
 
 #[cfg(test)]
 #[path = "daemon_sink_tests.rs"]
-mod tests;
+pub(in crate::blocklists) mod tests;

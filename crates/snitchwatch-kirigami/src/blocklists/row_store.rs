@@ -24,6 +24,9 @@ pub struct SubscriptionsStore {
     /// From the last `SetBlocklists`; `None` until one arrives or from an
     /// older bridge, which kept subscriptions in memory only.
     storage: Option<StorageStatus>,
+    /// Blocklist rules Snitchwatch made that nothing manages (issue #73),
+    /// from the last `SetBlocklistLeftovers`; 0 until one arrives.
+    leftover: u32,
 }
 
 /// The download result as shown to the user. `status` only says whether the
@@ -124,6 +127,12 @@ impl SubscriptionsStore {
             .unwrap_or("")
     }
 
+    /// How many blocklist rules the firewall still holds for lists this
+    /// service no longer manages (issue #73).
+    pub fn leftover_rules(&self) -> u32 {
+        self.leftover
+    }
+
     /// Apply one bridge message. Returns `true` if the subscription list
     /// changed (the model wrapper resets on `true`).
     pub fn apply(&mut self, msg: &ServerMessage) -> bool {
@@ -134,7 +143,17 @@ impl SubscriptionsStore {
             } => {
                 self.subs = blocklists.clone();
                 self.storage = storage.clone();
+                if storage.is_none() {
+                    // A bridge that predates `SetBlocklistLeftovers` says
+                    // nothing about them: don't keep an older one's count.
+                    self.leftover = 0;
+                }
                 true
+            }
+            ServerMessage::SetBlocklistLeftovers { count } => {
+                let changed = self.leftover != *count;
+                self.leftover = *count;
+                changed
             }
             ServerMessage::SetBlocklistDetails { details } => self.upsert(details.clone()),
             ServerMessage::SetBlocklistStatus {
@@ -325,6 +344,41 @@ mod tests {
             storage: None,
         }));
         assert_eq!(ids(&s), vec!["c"]);
+    }
+
+    #[test]
+    fn leftover_rules_follow_the_bridges_count() {
+        let mut s = SubscriptionsStore::new();
+        assert_eq!(s.leftover_rules(), 0);
+        assert!(s.apply(&ServerMessage::SetBlocklistLeftovers { count: 3 }));
+        assert_eq!(s.leftover_rules(), 3);
+        assert!(
+            !s.apply(&ServerMessage::SetBlocklistLeftovers { count: 3 }),
+            "the same count isn't a change"
+        );
+        // A summary from a bridge that knows about storage keeps the count.
+        s.apply(&ServerMessage::SetBlocklists {
+            blocklists: vec![],
+            storage: Some(StorageStatus {
+                persistent: true,
+                reason: None,
+                unreadable: false,
+            }),
+        });
+        assert_eq!(s.leftover_rules(), 3);
+        assert!(s.apply(&ServerMessage::SetBlocklistLeftovers { count: 0 }));
+        assert_eq!(s.leftover_rules(), 0);
+    }
+
+    #[test]
+    fn an_older_bridge_never_leaves_a_stale_leftover_count() {
+        let mut s = SubscriptionsStore::new();
+        s.apply(&ServerMessage::SetBlocklistLeftovers { count: 3 });
+        s.apply(&ServerMessage::SetBlocklists {
+            blocklists: vec![],
+            storage: None,
+        });
+        assert_eq!(s.leftover_rules(), 0);
     }
 
     #[test]

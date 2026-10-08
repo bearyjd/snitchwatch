@@ -68,6 +68,7 @@ pub fn interests_blocklists(msg: &ServerMessage) -> bool {
     matches!(
         msg,
         ServerMessage::SetBlocklists { .. }
+            | ServerMessage::SetBlocklistLeftovers { .. }
             | ServerMessage::SetBlocklistDetails { .. }
             | ServerMessage::SetBlocklistStatus { .. }
     )
@@ -356,6 +357,12 @@ mod tests {
             subscription_id: "sb".into(),
             status: "fetching".into(),
             last_failure_reason: None,
+        }));
+        assert!(interests_blocklists(
+            &ServerMessage::SetBlocklistLeftovers { count: 2 }
+        ));
+        assert!(!interests_rules(&ServerMessage::SetBlocklistLeftovers {
+            count: 2
         }));
     }
 

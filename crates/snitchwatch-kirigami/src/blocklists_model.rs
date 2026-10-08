@@ -73,6 +73,9 @@ pub mod qobject {
         #[qproperty(bool, per_user_blocklists, cxx_name = "perUserBlocklists")]
         #[qproperty(bool, any_over_limit, cxx_name = "anyOverLimit")]
         #[qproperty(bool, storage_unreadable, cxx_name = "storageUnreadable")]
+        /// Blocklist rules Snitchwatch made that this service isn't
+        /// managing (issue #73); `removeLeftoverRules()` deletes them.
+        #[qproperty(i32, leftover_rules, cxx_name = "leftoverRules")]
         type BlocklistsModel = super::BlocklistsModelRust;
 
         /// Emitted with a JSON-encoded `ClientMessage` (SubscribeBlocklist /
@@ -114,6 +117,12 @@ pub mod qobject {
         /// Unsubscribe an existing blocklist by id (emits UnsubscribeBlocklist).
         #[qinvokable]
         fn unsubscribe(self: Pin<&mut BlocklistsModel>, id: &QString);
+
+        /// Delete the leftover blocklist rules (emits
+        /// RemoveLeftoverBlocklistRules). The page asks the user first.
+        #[qinvokable]
+        #[cxx_name = "removeLeftoverRules"]
+        fn remove_leftover_rules(self: Pin<&mut BlocklistsModel>);
 
         /// Ask for a page of a list's hosts from `offset` (emits
         /// RequestBlocklistEntries). Entries are never pushed unasked.
@@ -205,6 +214,7 @@ pub struct BlocklistsModelRust {
     per_user_blocklists: bool,
     any_over_limit: bool,
     storage_unreadable: bool,
+    leftover_rules: i32,
 }
 
 impl qobject::BlocklistsModel {
@@ -274,6 +284,10 @@ impl qobject::BlocklistsModel {
         self.emit_client(ClientMessage::UnsubscribeBlocklist { id: id.to_string() });
     }
 
+    fn remove_leftover_rules(self: Pin<&mut Self>) {
+        self.emit_client(ClientMessage::RemoveLeftoverBlocklistRules);
+    }
+
     fn request_entries(self: Pin<&mut Self>, id: &QString, offset: i32) {
         self.emit_client(ClientMessage::RequestBlocklistEntries {
             subscription_id: id.to_string(),
@@ -326,6 +340,8 @@ impl qobject::BlocklistsModel {
             let per_user = self.store.per_user();
             let over_limit = self.store.any_over_limit();
             let unreadable = self.store.storage_unreadable();
+            let leftover = i32::try_from(self.store.leftover_rules()).unwrap_or(i32::MAX);
+            self.as_mut().set_leftover_rules(leftover);
             self.as_mut().set_count(n);
             self.as_mut().set_storage_persistent(persistent);
             self.as_mut().set_storage_reason(reason);

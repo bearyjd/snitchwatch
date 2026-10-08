@@ -790,6 +790,9 @@ where
                     match downstream::build_set_blocklists(&blocklists_for_upstream).await {
                         Ok(m) => {
                             let _ = snapshot_tx.send(m);
+                            let _ = snapshot_tx.send(downstream::build_set_blocklist_leftovers(
+                                &blocklists_for_upstream,
+                            ));
                         }
                         Err(e) => warn!(error = %e, "snapshot: blocklists rebuild failed"),
                     }

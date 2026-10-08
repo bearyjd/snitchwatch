@@ -100,6 +100,7 @@ impl BlocklistsManager {
     }
 
     async fn reconcile_skipping(&self, scope: ReconcileScope, skip: &[String]) {
+        self.announce_leftover_change();
         if !self.installs_rules() || !self.rule_sink.daemon_rules_known() {
             return;
         }

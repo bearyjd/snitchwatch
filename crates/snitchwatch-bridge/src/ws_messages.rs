@@ -114,6 +114,15 @@ pub enum ServerMessage {
     SetBlocklistDetails {
         details: BlocklistSummary,
     },
+    /// How many blocklist rules Snitchwatch made are still in the firewall
+    /// with nothing managing them (issue #73): this service has no state
+    /// directory, is a per-user one, or can't read its saved subscriptions.
+    /// Sent after every `SetBlocklists`; `0` clears the page's notice. The
+    /// user can remove them with `RemoveLeftoverBlocklistRules`. Additive:
+    /// older clients ignore it.
+    SetBlocklistLeftovers {
+        count: u32,
+    },
     /// One page (at most [`BLOCKLIST_ENTRIES_PAGE_MAX`] hosts, starting at
     /// `offset`) of a subscription's `total` hosts, sent only in answer to
     /// `RequestBlocklistEntries` (issue #45: a whole list in one frame
@@ -377,6 +386,9 @@ pub enum ClientMessage {
     UnsubscribeBlocklist {
         id: String,
     },
+    /// Delete the leftover blocklist rules `SetBlocklistLeftovers` counts.
+    /// Ignored while this service manages its blocklist rules.
+    RemoveLeftoverBlocklistRules,
     /// Ask for a page of a subscription's hosts; answered with
     /// `SetBlocklistEntries`. `limit` is capped at
     /// [`BLOCKLIST_ENTRIES_PAGE_MAX`].
@@ -1123,6 +1135,22 @@ mod blocklist_message_tests {
             }
             other => panic!("expected SetBlocklists, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn leftover_blocklist_rules_are_counted_and_removed_by_additive_messages() {
+        let msg = ServerMessage::SetBlocklistLeftovers { count: 3 };
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"action": "setBlocklistLeftovers", "count": 3})
+        );
+        assert_eq!(serde_json::from_value::<ServerMessage>(json).unwrap(), msg);
+        assert_eq!(
+            serde_json::from_str::<ClientMessage>(r#"{"action":"removeLeftoverBlocklistRules"}"#)
+                .unwrap(),
+            ClientMessage::RemoveLeftoverBlocklistRules
+        );
     }
 
     #[test]

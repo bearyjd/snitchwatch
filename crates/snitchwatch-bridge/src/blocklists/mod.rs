@@ -13,6 +13,7 @@ pub mod event_pump;
 pub mod fetch_guard;
 pub mod fetcher;
 pub mod format;
+pub mod leftover;
 pub mod list_dir;
 mod manager;
 pub mod materializer;
@@ -397,3 +398,6 @@ mod tests;
 
 #[cfg(test)]
 mod reconcile_tests;
+
+#[cfg(test)]
+mod leftover_manager_tests;

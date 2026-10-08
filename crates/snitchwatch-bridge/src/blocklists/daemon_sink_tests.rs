@@ -11,10 +11,10 @@ use std::path::Path;
 use std::sync::Mutex as StdMutex;
 use tokio::sync::broadcast;
 
-const ADS: &str = "ads-0123456789abcdef";
+pub(in crate::blocklists) const ADS: &str = "ads-0123456789abcdef";
 
 #[derive(Clone)]
-enum Daemon {
+pub(in crate::blocklists) enum Daemon {
     Accept,
     Refuse(&'static str),
     Silent,
@@ -23,22 +23,22 @@ enum Daemon {
 /// What the scripted daemon saw: the command, and whether the rule's list
 /// file (CHANGE) or list directory (DELETE) existed when it arrived.
 #[derive(Clone, Debug)]
-struct Seen {
-    command: Notification,
+pub(in crate::blocklists) struct Seen {
+    pub(in crate::blocklists) command: Notification,
     path_existed: bool,
 }
 
-struct Harness {
+pub(in crate::blocklists) struct Harness {
     _state: tempfile::TempDir,
-    dir: ListDir,
-    commands: DaemonCommands,
-    rules: RulesSync,
+    pub(in crate::blocklists) dir: ListDir,
+    pub(in crate::blocklists) commands: DaemonCommands,
+    pub(in crate::blocklists) rules: RulesSync,
     seen: Arc<StdMutex<Vec<Seen>>>,
     _stream: Option<StreamRegistration>,
 }
 
 impl Harness {
-    fn new() -> Self {
+    pub(in crate::blocklists) fn new() -> Self {
         let state = tempfile::tempdir().unwrap();
         let dir = ListDir::open(&state.path().canonicalize().unwrap()).unwrap();
         let rules = RulesSync::new(broadcast::channel(64).0);
@@ -53,7 +53,7 @@ impl Harness {
     }
 
     /// Connect a daemon whose rule snapshot is `snapshot`.
-    fn connect(mut self, daemon: Daemon, snapshot: Vec<Rule>) -> Self {
+    pub(in crate::blocklists) fn connect(mut self, daemon: Daemon, snapshot: Vec<Rule>) -> Self {
         self.rules.stage(None, snapshot);
         let (stream, mut rx) = self.commands.open_stream(None);
         let stream_id = stream.id();
@@ -103,7 +103,7 @@ impl Harness {
     }
 
     /// The rule the bridge installs for `id`'s `kind`.
-    fn bridge_rule(&self, id: &str, kind: ListKind) -> Rule {
+    pub(in crate::blocklists) fn bridge_rule(&self, id: &str, kind: ListKind) -> Rule {
         let list = IdComponent::from_id(id);
         crate::blocklists::materializer::materialize_list_rule(
             &list,
@@ -118,7 +118,7 @@ impl Harness {
             .with_timeout(Duration::from_millis(300))
     }
 
-    fn seen(&self) -> Vec<Seen> {
+    pub(in crate::blocklists) fn seen(&self) -> Vec<Seen> {
         self.seen.lock().unwrap().clone()
     }
 
@@ -143,24 +143,24 @@ fn reply(id: u64, outcome: Result<(), &str>) -> NotificationReply {
     }
 }
 
-fn hosts(list: &[&str]) -> Vec<String> {
+pub(in crate::blocklists) fn hosts(list: &[&str]) -> Vec<String> {
     list.iter().map(|s| s.to_string()).collect()
 }
 
-fn kind_of(n: &Notification) -> (i32, String) {
+pub(in crate::blocklists) fn kind_of(n: &Notification) -> (i32, String) {
     (n.r#type, n.rules[0].name.clone())
 }
 
-fn change(name: &str) -> (i32, String) {
+pub(in crate::blocklists) fn change(name: &str) -> (i32, String) {
     (Action::ChangeRule as i32, name.to_string())
 }
 
-fn delete(name: &str) -> (i32, String) {
+pub(in crate::blocklists) fn delete(name: &str) -> (i32, String) {
     (Action::DeleteRule as i32, name.to_string())
 }
 
 /// A per-host rule as earlier builds named and tagged them.
-fn legacy_rule(name: &str) -> Rule {
+pub(in crate::blocklists) fn legacy_rule(name: &str) -> Rule {
     Rule {
         description: r#"{"snitchwatch":{"source":"blocklist","list_id":"x","entry":"x.example"}}"#
             .into(),
@@ -168,7 +168,7 @@ fn legacy_rule(name: &str) -> Rule {
     }
 }
 
-fn user_rule(name: &str) -> Rule {
+pub(in crate::blocklists) fn user_rule(name: &str) -> Rule {
     Rule {
         name: name.into(),
         enabled: true,

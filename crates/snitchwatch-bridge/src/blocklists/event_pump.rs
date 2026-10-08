@@ -82,6 +82,7 @@ async fn publish_set_blocklists(mgr: &BlocklistsManager, tx: &broadcast::Sender<
     match downstream::build_set_blocklists(mgr).await {
         Ok(m) => {
             let _ = tx.send(m);
+            let _ = tx.send(downstream::build_set_blocklist_leftovers(mgr));
         }
         Err(e) => warn!(error = %e, "blocklist summary rebuild failed"),
     }

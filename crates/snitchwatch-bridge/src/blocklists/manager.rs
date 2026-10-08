@@ -14,6 +14,7 @@ use tracing::{error, info, warn};
 use crate::blocklists::fetcher::{
     validate_subscription_url, BlocklistFetch, FetchOutcome, HttpsFetcher, MAX_URL_LEN,
 };
+use crate::blocklists::leftover::LeftoverRules;
 use crate::blocklists::store::{BlocklistStore, FetchStatus, StoreError, Subscription};
 use crate::blocklists::{
     derive_display_name, derive_id, BlocklistEvent, Enforcement, NoopRuleSink, NotInstalled,
@@ -47,6 +48,11 @@ pub struct BlocklistsManager {
     /// Why the stored subscriptions couldn't be read at start. While set,
     /// which lists to keep is unknown, so nothing is ever purged.
     load_error: Option<String>,
+    /// Where bridge-made blocklist rules nothing manages are found and
+    /// removed (issue #73); `None` in tests that don't need it.
+    leftover: Option<LeftoverRules>,
+    /// The leftover count GUIs were last told, so a change is announced once.
+    leftover_announced: Mutex<Option<usize>>,
 }
 
 impl BlocklistsManager {
@@ -80,6 +86,8 @@ impl BlocklistsManager {
             subscriptions: Mutex::new(subscriptions),
             order: Mutex::new(order),
             load_error,
+            leftover: None,
+            leftover_announced: Mutex::new(None),
         };
         let storage = manager.storage.clone();
         manager.with_storage_status(storage)
@@ -91,6 +99,12 @@ impl BlocklistsManager {
     /// [`daemon_sink::DaemonRuleSink`]: crate::blocklists::daemon_sink::DaemonRuleSink
     pub fn with_rule_sink(mut self, sink: Arc<dyn RuleSink>) -> Self {
         self.rule_sink = sink;
+        self
+    }
+
+    /// Where leftover rules are read and removed (issue #73).
+    pub fn with_leftover_rules(mut self, leftover: LeftoverRules) -> Self {
+        self.leftover = Some(leftover);
         self
     }
 
@@ -175,6 +189,60 @@ impl BlocklistsManager {
 
     fn installs_rules(&self) -> bool {
         self.unavailable_reason().is_none()
+    }
+
+    /// How many blocklist rules Snitchwatch made are in the firewall with
+    /// nothing managing them (issue #73): `Some` only when this bridge
+    /// installs no rules (no state directory, a per-user service, an
+    /// unreadable store), the daemon's rule list is known, and there are
+    /// some. With a working sink, rules of lists no longer subscribed are
+    /// deleted on their own.
+    pub fn leftover_count(&self) -> Option<usize> {
+        if self.installs_rules() {
+            return None;
+        }
+        let names = self.leftover.as_ref()?.names()?;
+        (!names.is_empty()).then_some(names.len())
+    }
+
+    /// Delete the leftover rules, because the user asked. Does nothing while
+    /// this bridge manages its rules. Tells GUIs what is left.
+    pub async fn remove_leftover_rules(&self) {
+        if self.installs_rules() {
+            warn!("asked to remove leftover blocklist rules while managing them; ignored");
+            return;
+        }
+        let Some(leftover) = &self.leftover else {
+            return;
+        };
+        match leftover.remove_all().await {
+            Ok(done) => info!(
+                removed = done.removed,
+                refused = done.refused,
+                "removed leftover blocklist rules"
+            ),
+            Err(e) => warn!(reason = %e.reason, "couldn't remove leftover blocklist rules"),
+        }
+        *self.leftover_announced() = self.leftover_count();
+        let _ = self.bus.send(BlocklistEvent::SubscriptionsChanged);
+    }
+
+    fn leftover_announced(&self) -> MutexGuard<'_, Option<usize>> {
+        self.leftover_announced
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Send the subscriptions again if the leftover count changed since GUIs
+    /// were last told.
+    pub(super) fn announce_leftover_change(&self) {
+        let now = self.leftover_count();
+        let mut told = self.leftover_announced();
+        if *told != now {
+            *told = now;
+            drop(told);
+            let _ = self.bus.send(BlocklistEvent::SubscriptionsChanged);
+        }
     }
 
     /// Record a sink outcome (the caller tells GUIs).

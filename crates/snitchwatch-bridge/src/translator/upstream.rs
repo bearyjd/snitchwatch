@@ -83,6 +83,7 @@ pub fn apply(
         ClientMessage::GlobalSettings { .. }
         | ClientMessage::SubscribeBlocklist { .. }
         | ClientMessage::UnsubscribeBlocklist { .. }
+        | ClientMessage::RemoveLeftoverBlocklistRules
         | ClientMessage::RequestBlocklistEntries { .. }
         | ClientMessage::CreateProfile { .. }
         | ClientMessage::UpdateProfile { .. }

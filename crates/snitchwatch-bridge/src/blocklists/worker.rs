@@ -60,6 +60,8 @@ pub enum BlocklistJob {
     RefreshMore {
         tried: Vec<String>,
     },
+    /// The user asked to delete the leftover blocklist rules (issue #73).
+    RemoveLeftovers,
 }
 
 impl BlocklistJob {
@@ -68,6 +70,7 @@ impl BlocklistJob {
         match self {
             BlocklistJob::Subscribe { .. } => "subscribe",
             BlocklistJob::RefreshDue | BlocklistJob::RefreshMore { .. } => "refresh-due",
+            BlocklistJob::RemoveLeftovers => "remove-leftovers",
         }
     }
 }
@@ -231,6 +234,10 @@ impl BlocklistWorker {
                 self.unsubscribe(id);
                 None
             }
+            ClientMessage::RemoveLeftoverBlocklistRules => {
+                self.enqueue(BlocklistJob::RemoveLeftovers);
+                None
+            }
             ClientMessage::RequestBlocklistEntries {
                 subscription_id,
                 offset,
@@ -277,6 +284,7 @@ async fn run_job(
             }
             lane.request_reconcile(ReconcileScope::CleanUp);
         }
+        BlocklistJob::RemoveLeftovers => mgr.remove_leftover_rules().await,
         BlocklistJob::RefreshDue => refresh_tick(mgr, Vec::new(), requeue).await,
         BlocklistJob::RefreshMore { tried } => refresh_tick(mgr, tried, requeue).await,
     }

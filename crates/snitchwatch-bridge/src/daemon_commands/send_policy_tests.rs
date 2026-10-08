@@ -209,6 +209,37 @@ async fn an_internal_blocklist_command_is_sent_and_its_ok_reaches_the_rules_cach
     assert_eq!(rx.try_recv().unwrap().r#type, Action::DeleteRule as i32);
 }
 
+/// Issue #73: a bridge with no state directory (or an unreadable store) has no
+/// list root to pin, but must still be able to delete the blocklist rules it
+/// once made. A delete names no path, so it needs no root; an install does.
+#[tokio::test]
+async fn a_blocklist_delete_needs_no_pinned_root_but_an_install_does() {
+    let state = tempfile::tempdir().unwrap();
+    let dir = ListDir::open(&state.path().canonicalize().unwrap()).unwrap();
+    let (commands, rules) = fixture();
+    rules.stage(None, Vec::new());
+    let (_stream, mut rx) = current_stream(&commands);
+    let list = IdComponent::from_id("ads-0123456789abcdef");
+
+    assert_eq!(
+        commands
+            .send_blocklist(BlocklistCommand::install(&list, ListKind::Domains, &dir))
+            .err(),
+        Some(SendError::RefusedOperator),
+        "no root pinned"
+    );
+    assert!(rx.try_recv().is_err());
+
+    let delete = BlocklistCommand::delete("z00-blocklist:ads-0123456789abcdef:domains").unwrap();
+    assert!(commands.send_blocklist(delete).is_ok());
+    let sent = rx.try_recv().unwrap();
+    assert_eq!(sent.r#type, Action::DeleteRule as i32);
+    assert_eq!(
+        sent.rules[0].name,
+        "z00-blocklist:ads-0123456789abcdef:domains"
+    );
+}
+
 /// Curated default rules (`snitchwatch-default-`) are Snitchwatch's own:
 /// no GUI command and no import may add, change or delete one (P2.7 review).
 #[tokio::test]
