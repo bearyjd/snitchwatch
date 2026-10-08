@@ -323,10 +323,11 @@ impl qobject::RuleEditorController {
     }
 
     fn start_bridge_feed(self: Pin<&mut Self>) {
-        crate::bridge_dispatch::spawn_result_feed(
+        crate::result_feed::spawn_result_feed(
             self.qt_thread(),
             "RuleEditorController",
             Self::on_message,
+            false,
         );
     }
 }

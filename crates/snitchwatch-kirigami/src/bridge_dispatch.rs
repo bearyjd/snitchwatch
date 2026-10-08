@@ -213,141 +213,26 @@ pub fn spawn_feed<F>(
 ) where
     F: Fn(u64, &ServerMessage, String) + Send + 'static,
 {
-    spawn_feed_with(handles, label, interest, true, deliver);
-}
-
-/// [`spawn_feed`] that asks for a snapshot only when `resync`. A feed of
-/// results alone ([`spawn_result_feed`]) keeps no state a snapshot could
-/// restore, so it asks for none.
-pub fn spawn_feed_with<F>(
-    handles: &crate::bridge_runtime::BridgeHandles,
-    label: &'static str,
-    interest: fn(&ServerMessage) -> bool,
-    resync: bool,
-    deliver: F,
-) where
-    F: Fn(u64, &ServerMessage, String) + Send + 'static,
-{
     let rx = handles.subscribe();
     // Subscribe before asking for a snapshot. The client runtime also requests
     // one on WebSocket connect, but that early broadcast can precede QML feed
     // creation. Each feed therefore requests a resync; the last QML feed to
     // subscribe also covers every feed created before it.
-    let snapshots = handles.clone();
     handles.runtime().spawn(run_feed(
         rx,
-        request_snapshot_if(resync, move || {
-            snapshots.try_send(ClientMessage::RequestSnapshot)
-        }),
+        {
+            let handles = handles.clone();
+            move || handles.try_send(ClientMessage::RequestSnapshot)
+        },
         label,
         interest,
         move |connection_id, message, json| deliver(connection_id, message, json),
     ));
 }
 
-/// How a feed asks for a snapshot: `send`, or nothing at all (reported as
-/// done, so [`run_feed`] stops trying) when not `resync`.
-fn request_snapshot_if<S>(
-    resync: bool,
-    send: S,
-) -> impl Fn() -> Result<(), SendClientMessageError> + Send + 'static
-where
-    S: Fn() -> Result<(), SendClientMessageError> + Send + 'static,
-{
-    move || if resync { send() } else { Ok(()) }
-}
-
-/// Feed the bridge's `RuleCommandResult`s to `on_message`, on the Qt thread
-/// of the object `qt_thread` belongs to (the rule editor's and "Make a
-/// rule…"'s controllers), and only from the live bridge session. Asks for
-/// no snapshot. False without a bridge runtime.
-pub fn spawn_result_feed<T>(
-    qt_thread: cxx_qt::CxxQtThread<T>,
-    label: &'static str,
-    on_message: fn(std::pin::Pin<&mut T>, ServerMessage),
-) -> bool
-where
-    T: cxx_qt::Threading + 'static,
-{
-    let Some(handles) = crate::bridge_runtime::handles() else {
-        tracing::warn!(feed = label, "bridge not running; no rule command results");
-        return false;
-    };
-    let session_handles = handles.clone();
-    spawn_feed_with(
-        &handles,
-        label,
-        crate::rules::editor_view::interests_rule_editor,
-        false,
-        move |connection_id, message, _json| {
-            let session_handles = session_handles.clone();
-            let message = message.clone();
-            let _ = qt_thread.queue(move |qobject| {
-                from_current_session(
-                    |id| session_handles.is_current_session(id),
-                    connection_id,
-                    message,
-                    |message| on_message(qobject, message),
-                );
-            });
-        },
-    );
-    true
-}
-
-/// Runs `deliver` only for a message from the live bridge session
-/// (`is_current`): a result from an older session answers a request whose
-/// wait already ended when that session went away.
-fn from_current_session<M>(
-    is_current: impl Fn(u64) -> bool,
-    connection_id: u64,
-    message: M,
-    deliver: impl FnOnce(M),
-) {
-    if is_current(connection_id) {
-        deliver(message);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The rule-command result feeds' session filter (PR #108 follow-up).
-    #[test]
-    fn a_result_from_another_session_is_not_delivered() {
-        let delivered = std::cell::RefCell::new(Vec::new());
-        let is_current = |id| id == 2;
-        from_current_session(is_current, 1, "old", |m| delivered.borrow_mut().push(m));
-        from_current_session(is_current, 2, "live", |m| delivered.borrow_mut().push(m));
-        assert_eq!(*delivered.borrow(), vec!["live"]);
-    }
-
-    /// A results-only feed asks for no snapshot; every other feed does.
-    #[tokio::test]
-    async fn a_feed_without_resync_requests_no_snapshot() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        use std::sync::Arc;
-        for (resync, wanted) in [(false, 0), (true, 1)] {
-            let (btx, brx) = tokio::sync::broadcast::channel(4);
-            let asked = Arc::new(AtomicUsize::new(0));
-            let counter = asked.clone();
-            let feed = tokio::spawn(run_feed(
-                brx,
-                request_snapshot_if(resync, move || {
-                    counter.fetch_add(1, Ordering::SeqCst);
-                    Ok(())
-                }),
-                "test-results",
-                crate::rules::editor_view::interests_rule_editor,
-                |_, _, _| {},
-            ));
-            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-            drop(btx);
-            let _ = feed.await;
-            assert_eq!(asked.load(Ordering::SeqCst), wanted, "resync {resync}");
-        }
-    }
     use snitchwatch_bridge::ws_messages::{
         BlocklistEntry, BlocklistSummary, ConnectionRow, TrafficEvent, VerdictAction,
         VerdictDuration, VerdictScope,
