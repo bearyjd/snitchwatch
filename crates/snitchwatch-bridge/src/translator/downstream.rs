@@ -46,6 +46,7 @@ fn enforcement_wire(enforcement: Enforcement) -> (String, Option<String>) {
         Enforcement::Pending => (ENFORCEMENT_PENDING.to_string(), None),
         Enforcement::RuleInstalled { .. } => (ENFORCEMENT_RULE_INSTALLED.to_string(), None),
         Enforcement::NotEnforced { reason } => (ENFORCEMENT_NOT_ENFORCED.to_string(), Some(reason)),
+        Enforcement::Unconfirmed { reason } => (ENFORCEMENT_PENDING.to_string(), Some(reason)),
     }
 }
 

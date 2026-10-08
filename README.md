@@ -211,7 +211,7 @@ writes under `<state>/blocklists/<id>/` (directories 0700, files 0600; the
 path contract is in `crates/snitchwatch-bridge/src/blocklists/list_dir.rs`).
 **The blocklist wins:** a matching deny beats every allow that isn't a
 `precedence` rule. Hosts match by exact name, not subdomains. IPs on local,
-private, CGNAT, multicast or reserved networks are never blocked, and lists
+private, CGNAT, benchmarking, multicast or reserved networks are never blocked, and lists
 past 2,000,000 hosts in total (in subscription order) get no rule.
 
 - A per-user bridge saves subscriptions but installs **no** blocklist rule:

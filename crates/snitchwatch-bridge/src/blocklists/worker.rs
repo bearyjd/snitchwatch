@@ -17,9 +17,11 @@
 //! Reconciles (issue #45 PR B) take the same lane as one coalescing request
 //! of the widest [`ReconcileScope`] asked for: `Full` after each committed
 //! daemon rules snapshot ([`BlocklistTasks::spawn`]'s `rules_synced`) and
-//! each refresh tick (so refused or timed-out lists are retried), `CleanUp`
-//! after each subscribe or unsubscribe. However many requests pile up, one
-//! pass runs, after any pending unsubscribes.
+//! each unsubscribe (it may free room under the total size limit), `CleanUp`
+//! after each subscribe. However many requests pile up, one pass runs, after
+//! any pending unsubscribes. A refresh tick runs its own single full pass
+//! once its downloads are done, retrying lists the daemon refused or didn't
+//! answer for, except those the tick's downloads just tried.
 
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -31,6 +33,7 @@ use tokio::task::JoinHandle;
 use tracing::warn;
 
 use crate::blocklists::fetcher::validate_subscription_url;
+use crate::blocklists::store::FetchStatus;
 use crate::blocklists::{spawn_event_pump, BlocklistsManager, ReconcileScope};
 use crate::translator::upstream::handle_blocklist_action;
 use crate::ws_messages::{ClientMessage, ServerMessage, BLOCKLIST_ENTRIES_PAGE_MAX};
@@ -48,8 +51,15 @@ pub enum BlocklistJob {
     Subscribe {
         url: String,
     },
-    /// Refresh the first due list, then requeue while more are due.
+    /// A refresh tick: refresh the first due list, then requeue
+    /// [`RefreshMore`](Self::RefreshMore) while more are due; once none
+    /// are, one full reconcile.
     RefreshDue,
+    /// The rest of a refresh tick. `tried`: lists its downloads already
+    /// installed or had refused, which its reconcile doesn't try again.
+    RefreshMore {
+        tried: Vec<String>,
+    },
 }
 
 impl BlocklistJob {
@@ -57,7 +67,7 @@ impl BlocklistJob {
     fn kind(&self) -> &'static str {
         match self {
             BlocklistJob::Subscribe { .. } => "subscribe",
-            BlocklistJob::RefreshDue => "refresh-due",
+            BlocklistJob::RefreshDue | BlocklistJob::RefreshMore { .. } => "refresh-due",
         }
     }
 }
@@ -137,7 +147,9 @@ impl BlocklistWorker {
                     {
                         warn!(error = %e, "blocklist unsubscribe failed");
                     }
-                    lane.request_reconcile(ReconcileScope::CleanUp);
+                    // A full pass: the list's hosts may have made room under
+                    // the total size limit for later lists.
+                    lane.request_reconcile(ReconcileScope::Full);
                 }
                 if let Some(scope) = lane.take_reconcile() {
                     worker_mgr.reconcile_with(scope).await;
@@ -265,24 +277,44 @@ async fn run_job(
             }
             lane.request_reconcile(ReconcileScope::CleanUp);
         }
-        BlocklistJob::RefreshDue => {
-            // Retries lists the daemon refused or didn't answer for, every
-            // tick, whether or not one is due for download.
-            lane.request_reconcile(ReconcileScope::Full);
-            let due = mgr.due_subscription_ids();
-            let Some(first) = due.first() else { return };
-            if let Err(e) = mgr.refresh_now(first).await {
-                warn!(id = %first, error = %e, "scheduled refresh failed");
-            }
-            if due.len() > 1 {
-                // Back of the queue: anything a GUI queued meanwhile goes first.
-                // If the queue is full, the next tick picks the rest up.
-                if let Some(tx) = requeue.upgrade() {
-                    let _ = tx.try_send(BlocklistJob::RefreshDue);
-                }
+        BlocklistJob::RefreshDue => refresh_tick(mgr, Vec::new(), requeue).await,
+        BlocklistJob::RefreshMore { tried } => refresh_tick(mgr, tried, requeue).await,
+    }
+}
+
+/// One step of a refresh tick: download the first due list, then requeue the
+/// rest at the back (anything a GUI queued meanwhile goes first). When none
+/// is left, or the queue is full (the next tick picks the rest up), one full
+/// reconcile retries lists the daemon refused or didn't answer for, except
+/// those this tick just tried.
+async fn refresh_tick(
+    mgr: &Arc<BlocklistsManager>,
+    mut tried: Vec<String>,
+    requeue: &mpsc::WeakSender<BlocklistJob>,
+) {
+    let due: Vec<String> = mgr
+        .due_subscription_ids()
+        .into_iter()
+        .filter(|id| !tried.contains(id))
+        .collect();
+    if let Some(first) = due.first() {
+        match mgr.refresh_now(first).await {
+            Ok(FetchStatus::Ok) => tried.push(first.clone()),
+            Ok(_) => {}
+            Err(e) => warn!(id = %first, error = %e, "scheduled refresh failed"),
+        }
+        if due.len() > 1 {
+            let Some(tx) = requeue.upgrade() else { return };
+            match tx.try_send(BlocklistJob::RefreshMore { tried }) {
+                Ok(()) => return,
+                Err(e) => match e.into_inner() {
+                    BlocklistJob::RefreshMore { tried: rest } => tried = rest,
+                    _ => return,
+                },
             }
         }
     }
+    mgr.reconcile_after_refresh(&tried).await;
 }
 
 /// The bridge's blocklist background tasks: the event pump, the worker, its

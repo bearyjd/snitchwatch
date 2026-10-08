@@ -121,6 +121,7 @@ fn only_an_unusable_reason_reaches_the_user() {
     assert_eq!(
         status(Storage::Persistent("/x".into())),
         StorageStatus {
+            unreadable: false,
             persistent: true,
             reason: None
         }
@@ -129,6 +130,7 @@ fn only_an_unusable_reason_reaches_the_user() {
         assert_eq!(
             status(Storage::Ephemeral(reason)),
             StorageStatus {
+                unreadable: false,
                 persistent: false,
                 reason: None
             }
@@ -137,6 +139,7 @@ fn only_an_unusable_reason_reaches_the_user() {
     assert_eq!(
         status(unusable("blocklist store: locked".into())),
         StorageStatus {
+            unreadable: false,
             persistent: false,
             reason: Some("blocklist store: locked".into())
         }

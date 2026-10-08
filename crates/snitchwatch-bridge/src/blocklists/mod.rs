@@ -68,6 +68,11 @@ pub enum Enforcement {
     NotEnforced {
         reason: String,
     },
+    /// Not known either way: the daemon's rule list is unknown or it didn't
+    /// answer. Shown as "Not confirmed yet", with the reason.
+    Unconfirmed {
+        reason: String,
+    },
 }
 
 /// Why a list is unenforced when no sink was wired in at all (in-process
@@ -77,6 +82,34 @@ pub const NO_RULE_SINK_REASON: &str = "Blocking isn't available yet";
 pub const NOT_DOWNLOADED_REASON: &str = "The list hasn't been downloaded";
 /// Enforcement reason for a downloaded list with nothing a rule can match.
 pub const NO_HOSTS_REASON: &str = "The list has no hosts Snitchwatch can block";
+/// Enforcement reason for every list while the saved subscriptions can't be
+/// read: the size limit can't count the rules already installed, so nothing
+/// is installed or removed.
+pub const UNREADABLE_STORE_REASON: &str = "Snitchwatch couldn't read its saved blocklists, so it \
+     isn't changing any blocklist rules the firewall already has.";
+/// How the reason of a list past [`AGGREGATE_MAX_HOSTS`] starts (GUIs key a
+/// warning on it).
+pub const OVER_LIMIT_REASON_PREFIX: &str = "Over the total blocklist size limit";
+/// Enforcement reason for every list of a per-user bridge (GUIs key a
+/// warning on it). Root opensnitchd would read list files any of the user's
+/// processes could replace (a FIFO hangs it; a link to `/dev/zero` exhausts
+/// its memory, and with `QueueBypass` the firewall fails open on every boot
+/// after).
+pub const PER_USER_REASON: &str = "Blocking with lists needs the system-wide Snitchwatch \
+     service; this per-user service can't keep the list files safe from other apps.";
+
+/// `2000000` as `2,000,000`.
+pub(crate) fn thousands(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
 /// Fetch status reason when a downloaded list couldn't be written.
 pub const STORE_ERROR_REASON: &str = "Couldn't save the list";
 /// Most subscriptions one bridge keeps (each can hold `format::MAX_ENTRIES`).
@@ -157,6 +190,20 @@ pub trait RuleSink: Send + Sync + 'static {
     /// committed snapshot holds each unchanged): nothing to reconcile.
     fn is_current(&self, _list_id: &str) -> bool {
         false
+    }
+
+    /// Whether `list_id`'s files were written or checked against its hosts
+    /// in this run and are still there: its rules can then be resent with
+    /// [`reinstall_blocklist_rules`](Self::reinstall_blocklist_rules),
+    /// without reading its hosts again.
+    fn files_verified(&self, _list_id: &str) -> bool {
+        false
+    }
+
+    /// Resend `list_id`'s rules over its checked files (see
+    /// [`files_verified`](Self::files_verified)).
+    async fn reinstall_blocklist_rules(&self, _list_id: &str) -> Result<(), NotInstalled> {
+        Err(NotInstalled::new(NO_RULE_SINK_REASON))
     }
 
     /// Install `hosts` for `list_id`, replacing what was there. `Ok` only

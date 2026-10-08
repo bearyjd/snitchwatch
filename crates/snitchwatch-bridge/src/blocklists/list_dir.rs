@@ -22,8 +22,10 @@
 //!   transient hidden `.<file>.tmp`, renamed over the list file.
 //! - **Lines:** `0.0.0.0 <host>\n` (`<host>`: `[a-z0-9.-]`, at most 253
 //!   bytes) in `domains.list`; `<IPv4 dotted quad>\n` in `ips.list`, never
-//!   a loopback, `0.0.0.0/8`, private, link-local, CGNAT, multicast or
-//!   reserved address ([`is_blockable_ip`]).
+//!   a loopback, `0.0.0.0/8`, private, link-local, CGNAT, `192.0.0.0/24`,
+//!   benchmarking, multicast or reserved address ([`is_blockable_ip`]).
+//!   No leftover `.<file>.tmp` stays next to a list file, and list files
+//!   are opened `O_NONBLOCK|O_NOFOLLOW`.
 //! - **Caps:** at most [`MAX_LIST_LINES`] lines and [`MAX_LIST_FILE_BYTES`]
 //!   bytes per file; at most `AGGREGATE_MAX_HOSTS` (2,000,000) hosts summed
 //!   over every installed list (later subscriptions past it get no files and
@@ -176,12 +178,17 @@ pub fn classify(hosts: Vec<String>) -> ListEntries {
 /// A list "wins" over every allow, so a hostile one must not cut the
 /// machine off from itself or its own networks (the gateway, local DNS):
 /// loopback, `0.0.0.0/8`, private (RFC 1918), link-local, CGNAT
-/// (`100.64.0.0/10`), multicast and reserved (`240.0.0.0/4`, broadcast)
-/// addresses are never blocked.
+/// (`100.64.0.0/10`), IETF protocol assignments (`192.0.0.0/24`),
+/// benchmarking (`198.18.0.0/15`), multicast and reserved (`240.0.0.0/4`,
+/// broadcast) addresses are never blocked.
 pub fn is_blockable_ip(ip: Ipv4Addr) -> bool {
-    let [first, second, ..] = ip.octets();
+    let [first, second, third, _] = ip.octets();
     let cgnat = first == 100 && (64..128).contains(&second);
+    let ietf = first == 192 && second == 0 && third == 0;
+    let benchmarking = first == 198 && (second == 18 || second == 19);
     !(ip.is_loopback()
+        || ietf
+        || benchmarking
         || first == 0
         || ip.is_private()
         || ip.is_link_local()
@@ -288,15 +295,17 @@ impl ListDir {
         for path in [&self.root, &self.list_dir(list), &dir] {
             self.ensure_private_dir(path)?;
         }
-        let mut wanted = Digest::default();
-        self.write_lines(&mut wanted, kind, entries)?;
-        if self.digest_of(&dir.join(kind.file_name())) == Some(wanted) {
-            return Ok(false);
-        }
+        // Before anything else: the daemon's `<data>/*.*` glob matches
+        // dotfiles, so a partial temp file left by a crash would be loaded.
         let temp = dir.join(format!(".{}.tmp", kind.file_name()));
         match fs::remove_file(&temp) {
             Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
             _ => {}
+        }
+        let mut wanted = Digest::default();
+        self.write_lines(&mut wanted, kind, entries)?;
+        if self.digest_of(&dir.join(kind.file_name())) == Some(wanted) {
+            return Ok(false);
         }
         let file = fs::OpenOptions::new()
             .write(true)
@@ -313,16 +322,21 @@ impl ListDir {
             return Err(e);
         }
         fs::rename(&temp, dir.join(kind.file_name()))?;
-        fs::File::open(&dir)?.sync_all()?;
+        fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+            .open(&dir)?
+            .sync_all()?;
         Ok(true)
     }
 
     /// Length and SHA-256 of an existing list file, if it is a regular
-    /// 0600 file of ours (opened without following a link).
+    /// 0600 file of ours. Opened without following a link and without
+    /// blocking, so a FIFO planted there can't hang the worker.
     fn digest_of(&self, path: &Path) -> Option<Digest> {
         let mut file = fs::OpenOptions::new()
             .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
             .open(path)
             .ok()?;
         let meta = file.metadata().ok()?;

@@ -232,24 +232,22 @@ fn has_line(block: &str, line: &str) -> bool {
 /// it goes in a PlainText label, never an InlineMessage.
 fn assert_enforcement_keyed_banners(page_name: &str, source: &str) {
     let code = code_lines(source);
-    assert!(
-        has_line(
-            &code,
-            "readonly property bool storagePersistent: page.model ? page.model.storagePersistent : false"
-        ),
-        "{page_name} must default to not persistent until the bridge says otherwise"
-    );
-    assert!(
-        has_line(
-            &code,
-            "readonly property bool anyNotEnforced: page.model ? page.model.anyNotEnforced : false"
-        ),
-        "{page_name} must take whether any list is unenforced from the model"
-    );
+    for (property, default) in [
+        ("storagePersistent", "false"),
+        ("storageUnreadable", "false"),
+        ("anyNotEnforced", "false"),
+        ("perUserBlocklists", "false"),
+        ("anyOverLimit", "false"),
+    ] {
+        let line = format!(
+            "readonly property bool {property}: page.model ? page.model.{property} : {default}"
+        );
+        assert!(has_line(&code, &line), "{page_name} must declare `{line}`");
+    }
     let header = blocks(&code, "header: ColumnLayout {");
     assert_eq!(header.len(), 1, "{page_name} lost its banner header");
     let banners = blocks(&header[0], "Kirigami.InlineMessage {");
-    assert_eq!(banners.len(), 2, "{page_name}: expected two warnings");
+    assert_eq!(banners.len(), 5, "{page_name}: expected five warnings");
     for banner in &banners {
         assert!(
             banner.contains("type: Kirigami.MessageType.Warning"),
@@ -268,23 +266,30 @@ fn assert_enforcement_keyed_banners(page_name: &str, source: &str) {
             "{page_name}: blocklists are enforced now; no banner may say they never are:\n{banner}"
         );
     }
-    let not_enforced = banners
-        .iter()
-        .find(|b| has_line(b, "visible: page.anyNotEnforced"))
-        .unwrap_or_else(|| panic!("{page_name}: no warning keyed on unenforced lists"));
+    let keyed = |visible: &str, says: &[&str]| {
+        let banner = banners
+            .iter()
+            .find(|b| has_line(b, &format!("visible: {visible}")))
+            .unwrap_or_else(|| panic!("{page_name}: no warning keyed on `{visible}`"));
+        for phrase in says {
+            assert!(
+                banner.contains(phrase),
+                "{page_name}: the `{visible}` warning must say \"{phrase}\":\n{banner}"
+            );
+        }
+    };
     // A pending list isn't known not to block, only not confirmed to.
-    assert!(
-        not_enforced.contains("confirmed") && !not_enforced.contains("not blocking anything"),
-        "{page_name}: the warning must say lists aren't confirmed as blocking:\n{not_enforced}"
+    keyed("page.anyNotEnforced", &["aren't confirmed"]);
+    keyed(
+        "page.perUserBlocklists",
+        &["system-wide", "doesn't apply blocklists"],
     );
-    let memory_only = banners
-        .iter()
-        .find(|b| has_line(b, "visible: !page.storagePersistent"))
-        .unwrap_or_else(|| panic!("{page_name}: no warning shown for memory-only storage"));
-    assert!(
-        memory_only.contains("restart"),
-        "{page_name}: the memory-only warning must say subscriptions are lost on restart"
+    keyed("page.anyOverLimit", &["2,000,000", "aren't applied"]);
+    keyed(
+        "page.storageUnreadable",
+        &["couldn't read its saved blocklists"],
     );
+    keyed("!page.storagePersistent", &["restart"]);
     let labels = blocks(&header[0], "Controls.Label {");
     let reasons: Vec<_> = labels
         .iter()
@@ -296,10 +301,8 @@ fn assert_enforcement_keyed_banners(page_name: &str, source: &str) {
         "{page_name}: expected one storage-reason label"
     );
     assert!(
-        reasons[0].contains("textFormat: Text.PlainText")
-            && reasons[0].contains("!page.storagePersistent"),
-        "{page_name}: the storage reason must be a PlainText label shown only when not \
-         persistent:\n{}",
+        reasons[0].contains("textFormat: Text.PlainText"),
+        "{page_name}: the storage reason must be a PlainText label:\n{}",
         reasons[0]
     );
     // `lists.domains` is an exact lookup: say so whenever there are lists,

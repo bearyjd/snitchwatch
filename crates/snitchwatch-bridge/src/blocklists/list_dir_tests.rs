@@ -357,6 +357,9 @@ fn ips_on_local_special_or_reserved_networks_are_dropped() {
         "0.0.0.0",
         "0.1.2.3",
         "127.0.0.53",
+        "198.18.0.1",
+        "198.19.255.255",
+        "192.0.0.8",
     ];
     let kept = [
         "203.0.113.7",
@@ -365,6 +368,8 @@ fn ips_on_local_special_or_reserved_networks_are_dropped() {
         "100.128.0.1",
         "172.15.0.1",
         "172.32.0.1",
+        "198.20.0.1",
+        "192.0.1.1",
     ];
     let entries = classify(
         dropped
@@ -424,4 +429,59 @@ fn an_unchanged_list_is_not_rewritten() {
         std::fs::read_to_string(&file).unwrap(),
         "0.0.0.0 c.example\n"
     );
+}
+
+/// Re-review N2: the daemon's `<data>/*.*` glob matches dotfiles, so a
+/// leftover partial `.domains.list.tmp` would be loaded; it is removed even
+/// when the list itself is unchanged.
+#[test]
+fn a_leftover_temp_file_is_removed_even_when_the_list_is_unchanged() {
+    let (_t, state) = state();
+    let dir = ListDir::open(&state).unwrap();
+    let id = IdComponent::from_id("ads");
+    dir.write_list(&id, ListKind::Domains, &hosts(&["a.example"]))
+        .unwrap();
+    let temp = dir
+        .kind_dir(&id, ListKind::Domains)
+        .join(".domains.list.tmp");
+    std::fs::write(&temp, "0.0.0.0 partial.example\n0.0.0.0 cut").unwrap();
+    assert!(!dir
+        .write_list(&id, ListKind::Domains, &hosts(&["a.example"]))
+        .unwrap());
+    assert!(
+        !temp.exists(),
+        "a leftover temp file stayed for the daemon to load"
+    );
+}
+
+/// Re-review N4: a FIFO in place of a list file must not hang the single
+/// blocklist worker (opening it for reading would block until a writer
+/// came); it is replaced by a regular file.
+#[test]
+fn a_fifo_in_place_of_a_list_file_never_hangs_the_writer() {
+    use std::os::unix::ffi::OsStrExt;
+    let (_t, state) = state();
+    let dir = ListDir::open(&state).unwrap();
+    let id = IdComponent::from_id("ads");
+    dir.write_list(&id, ListKind::Domains, &hosts(&["a.example"]))
+        .unwrap();
+    let file = dir.kind_dir(&id, ListKind::Domains).join("domains.list");
+    std::fs::remove_file(&file).unwrap();
+    let c_path = std::ffi::CString::new(file.as_os_str().as_bytes()).unwrap();
+    // SAFETY: a valid NUL-terminated path; mkfifo touches nothing else.
+    assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let writer = dir.clone();
+    std::thread::spawn(move || {
+        let _ = done_tx.send(writer.write_list(&id, ListKind::Domains, &hosts(&["a.example"])));
+    });
+    let outcome = done_rx.recv_timeout(std::time::Duration::from_secs(5));
+    if outcome.is_err() {
+        // Unblock the stuck reader so the test binary can exit.
+        let _ = std::fs::OpenOptions::new().write(true).open(&file);
+        panic!("writing the list hung on a FIFO");
+    }
+    assert!(outcome.unwrap().unwrap(), "the FIFO was replaced");
+    assert!(std::fs::symlink_metadata(&file).unwrap().is_file());
 }

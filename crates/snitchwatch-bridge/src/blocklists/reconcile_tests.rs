@@ -14,6 +14,8 @@ use crate::ws_messages::StorageStatus;
 struct ScriptedSink {
     unknown: bool,
     current: Vec<&'static str>,
+    verified: Vec<&'static str>,
+    reinstalls: StdMutex<Vec<String>>,
     unavailable: Option<&'static str>,
     refuse: Option<&'static str>,
     pushes: StdMutex<Vec<(String, usize)>>,
@@ -29,6 +31,15 @@ impl RuleSink for ScriptedSink {
 
     fn is_current(&self, list_id: &str) -> bool {
         self.current.contains(&list_id)
+    }
+
+    fn files_verified(&self, list_id: &str) -> bool {
+        self.verified.contains(&list_id)
+    }
+
+    async fn reinstall_blocklist_rules(&self, list_id: &str) -> Result<(), NotInstalled> {
+        self.reinstalls.lock().unwrap().push(list_id.to_string());
+        Ok(())
     }
 
     async fn replace_blocklist_rules(
@@ -141,6 +152,7 @@ async fn every_downloaded_list_not_installed_is_pushed_from_the_store() {
     // A second pass finds both current and installed: nothing to resend.
     let current = Arc::new(ScriptedSink {
         current: vec!["ads", "trackers"],
+        verified: vec!["ads", "trackers"],
         ..Default::default()
     });
     let mgr = mgr.with_rule_sink(current.clone());
@@ -148,12 +160,14 @@ async fn every_downloaded_list_not_installed_is_pushed_from_the_store() {
     assert!(pushed(&current).is_empty());
 }
 
-/// Review H1: after a restart, a list the daemon already holds unchanged
-/// (its committed snapshot, its file) is reported installed without a push.
+/// Review H1: a list the daemon already holds unchanged (its committed
+/// snapshot, its file checked in this run) is reported installed without
+/// a push.
 #[tokio::test]
 async fn a_list_already_current_on_the_daemon_is_installed_without_a_push() {
     let sink = Arc::new(ScriptedSink {
         current: vec!["ads"],
+        verified: vec!["ads"],
         ..Default::default()
     });
     let mgr = manager(sink.clone(), &["ads"]);
@@ -175,9 +189,10 @@ async fn an_unavailable_daemon_stops_the_pass_without_deleting_anything() {
     mgr.reconcile().await;
     assert_eq!(pushed(&sink).len(), 1);
     assert!(sink.orphan_passes.lock().unwrap().is_empty());
+    // Not known to be unenforced: "Not confirmed yet", with the reason.
     assert_eq!(
         mgr.enforcement("ads"),
-        Enforcement::NotEnforced {
+        Enforcement::Unconfirmed {
             reason: "The firewall service didn't answer".into()
         }
     );
@@ -243,6 +258,7 @@ async fn an_unreadable_store_deletes_nothing_and_says_so() {
     let mgr = BlocklistsManager::new(Arc::new(BlocklistStore::open(&path).unwrap()))
         .with_rule_sink(sink.clone())
         .with_storage_status(StorageStatus {
+            unreadable: false,
             persistent: true,
             reason: None,
         });
@@ -251,14 +267,32 @@ async fn an_unreadable_store_deletes_nothing_and_says_so() {
         sink.orphan_passes.lock().unwrap().is_empty(),
         "rules were purged"
     );
+    // Its own state: still the persistent store, but unreadable.
     let status = mgr.storage_status();
-    assert!(!status.persistent);
+    assert!(status.unreadable && status.persistent, "{status:?}");
     assert!(
         status
             .reason
             .as_deref()
             .is_some_and(|r| r.starts_with("Couldn't read the saved blocklists")),
         "{status:?}"
+    );
+
+    // Re-review N3: nor is anything new installed (the size limit can't
+    // count the rules already there).
+    let mgr = mgr.with_fetcher(Arc::new(super::test_helpers::FixtureFetcher::default()));
+    let id = mgr
+        .add_subscription(&super::test_helpers::fixture_url("domains-tiny.txt"))
+        .await
+        .unwrap();
+    assert_eq!(mgr.refresh_now(&id).await.unwrap(), FetchStatus::Ok);
+    mgr.reconcile().await;
+    assert!(pushed(&sink).is_empty());
+    assert_eq!(
+        mgr.enforcement(&id),
+        Enforcement::NotEnforced {
+            reason: UNREADABLE_STORE_REASON.into()
+        }
     );
 }
 
@@ -288,12 +322,18 @@ async fn lists_past_the_total_size_limit_get_no_rule_in_subscription_order() {
     let mut removed = sink.removed.lock().unwrap().clone();
     removed.sort();
     assert_eq!(removed, vec!["aa-second", "mm-third"]);
-    for id in ["aa-second", "mm-third"] {
+    for (id, total) in [("aa-second", "2,100,000"), ("mm-third", "2,500,000")] {
         match mgr.enforcement(id) {
-            Enforcement::NotEnforced { reason } => assert!(
-                reason.starts_with("over the total blocklist size limit"),
-                "{id}: {reason}"
-            ),
+            Enforcement::NotEnforced { reason } => {
+                assert!(
+                    reason.starts_with(OVER_LIMIT_REASON_PREFIX),
+                    "{id}: {reason}"
+                );
+                assert!(
+                    reason.contains(total) && reason.contains("2,000,000"),
+                    "{reason}"
+                );
+            }
             other => panic!("{id}: {other:?}"),
         }
     }
@@ -321,7 +361,7 @@ async fn a_download_past_the_total_size_limit_is_not_pushed() {
     assert!(pushed(&sink).is_empty());
     assert!(matches!(
         mgr.enforcement("tiny"),
-        Enforcement::NotEnforced { reason } if reason.starts_with("over the total blocklist size limit")
+        Enforcement::NotEnforced { reason } if reason.starts_with(OVER_LIMIT_REASON_PREFIX)
     ));
 }
 
@@ -363,4 +403,70 @@ async fn every_refresh_reaches_the_sink_even_when_unchanged() {
     mgr.refresh_now("tiny").await.unwrap();
     mgr.refresh_now("tiny").await.unwrap();
     assert_eq!(pushed(&sink).len(), 2);
+}
+
+/// Re-review N1: the first full pass of a run re-checks the files of lists
+/// already in place against the store (the sink rewrites only a file that
+/// differs and resends nothing in place).
+#[tokio::test]
+async fn the_first_full_pass_checks_the_files_of_lists_already_in_place() {
+    let sink = Arc::new(ScriptedSink {
+        current: vec!["ads"],
+        ..Default::default()
+    });
+    let mgr = manager(sink.clone(), &["ads"]);
+    mgr.reconcile().await;
+    assert_eq!(pushed(&sink), vec![("ads".to_string(), 2)]);
+    assert!(matches!(
+        mgr.enforcement("ads"),
+        Enforcement::RuleInstalled { .. }
+    ));
+}
+
+/// Code re-review: once a list's files were checked in this run, a retry
+/// resends only its rule, without reading its rows again.
+#[tokio::test]
+async fn a_list_with_checked_files_only_has_its_rule_resent() {
+    let sink = Arc::new(ScriptedSink {
+        verified: vec!["ads"],
+        ..Default::default()
+    });
+    let mgr = manager(sink.clone(), &["ads"]);
+    mgr.reconcile().await;
+    assert!(pushed(&sink).is_empty());
+    assert_eq!(*sink.reinstalls.lock().unwrap(), vec!["ads".to_string()]);
+}
+
+/// Code re-review: the size limit is checked before a list's rows are
+/// read: an over-limit list whose rows can't even be read says it is over
+/// the limit.
+#[tokio::test]
+async fn the_size_limit_is_checked_before_reading_a_lists_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("blocklists.sqlite3");
+    let store = BlocklistStore::open(&path).unwrap();
+    for (id, count) in [("first", AGGREGATE_MAX_HOSTS as i64), ("second", 2)] {
+        store.upsert_subscription(&subscription(id, count)).unwrap();
+        store
+            .replace_entries(id, &["a.example", "b.example"])
+            .unwrap();
+        store.upsert_subscription(&subscription(id, count)).unwrap();
+    }
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .execute(
+            "UPDATE entries SET host = X'FF' \
+             WHERE subscription_id = 'second' AND host = 'a.example'",
+            [],
+        )
+        .unwrap();
+    let sink = Arc::new(ScriptedSink::default());
+    let mgr = BlocklistsManager::new(Arc::new(store)).with_rule_sink(sink.clone());
+    mgr.reconcile().await;
+    match mgr.enforcement("second") {
+        Enforcement::NotEnforced { reason } => {
+            assert!(reason.starts_with(OVER_LIMIT_REASON_PREFIX), "{reason}")
+        }
+        other => panic!("{other:?}"),
+    }
 }

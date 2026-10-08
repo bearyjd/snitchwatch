@@ -162,6 +162,7 @@ async fn subscriptions_persist_across_a_restart() {
     assert_eq!(
         storage,
         Some(StorageStatus {
+            unreadable: false,
             persistent: true,
             reason: None
         })
@@ -275,6 +276,7 @@ async fn set_blocklists_reports_the_resolved_storage() {
     assert_eq!(
         storage,
         Some(StorageStatus {
+            unreadable: false,
             persistent: false,
             reason: None
         }),
@@ -322,6 +324,7 @@ async fn set_blocklists_reports_the_resolved_storage() {
     assert_eq!(
         storage,
         Some(StorageStatus {
+            unreadable: false,
             persistent: false,
             reason: Some("unexpected state directory /x".into())
         })

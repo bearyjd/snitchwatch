@@ -17,8 +17,8 @@ use crate::blocklists::fetcher::{
 use crate::blocklists::store::{BlocklistStore, FetchStatus, StoreError, Subscription};
 use crate::blocklists::{
     derive_display_name, derive_id, BlocklistEvent, Enforcement, NoopRuleSink, NotInstalled,
-    ReconcileScope, RuleSink, AGGREGATE_MAX_HOSTS, FAILED_RETRY_SECS, MAX_SUBSCRIPTIONS,
-    NOT_DOWNLOADED_REASON, STORE_ERROR_REASON,
+    RuleSink, FAILED_RETRY_SECS, MAX_SUBSCRIPTIONS, NOT_DOWNLOADED_REASON, STORE_ERROR_REASON,
+    UNREADABLE_STORE_REASON,
 };
 use crate::ws_messages::{StorageStatus, BLOCKLIST_ENTRIES_PAGE_MAX};
 
@@ -72,6 +72,7 @@ impl BlocklistsManager {
             fetcher: Arc::new(HttpsFetcher::new()),
             rule_sink: Arc::new(NoopRuleSink::default()),
             storage: StorageStatus {
+                unreadable: false,
                 persistent: false,
                 reason: None,
             },
@@ -106,11 +107,9 @@ impl BlocklistsManager {
     pub fn with_storage_status(mut self, storage: StorageStatus) -> Self {
         self.storage = match &self.load_error {
             Some(e) => StorageStatus {
-                persistent: false,
-                reason: Some(format!(
-                    "Couldn't read the saved blocklists ({e}); their firewall rules are left as \
-                     they are"
-                )),
+                unreadable: true,
+                persistent: storage.persistent,
+                reason: Some(format!("Couldn't read the saved blocklists: {e}")),
             },
             None => storage,
         };
@@ -142,60 +141,10 @@ impl BlocklistsManager {
         self.cache().contains_key(id)
     }
 
-    /// Every subscription in the order it was subscribed.
-    fn subscriptions_in_order(&self) -> Vec<Subscription> {
-        let order = self.order().clone();
-        let cache = self.cache();
-        let mut subs: Vec<Subscription> = order
-            .iter()
-            .filter_map(|id| cache.get(id).cloned())
-            .collect();
-        subs.extend(cache.values().filter(|s| !order.contains(&s.id)).cloned());
-        subs
-    }
-
-    /// `Some(reason)` when `id` and the lists subscribed before it hold more
-    /// than [`AGGREGATE_MAX_HOSTS`] hosts.
-    fn over_aggregate_cap(&self, id: &str) -> Option<String> {
-        let mut total: u64 = 0;
-        for sub in self.subscriptions_in_order() {
-            total = total.saturating_add(u64::try_from(sub.entry_count).unwrap_or(0));
-            if sub.id == id {
-                return (total > AGGREGATE_MAX_HOSTS).then(|| {
-                    format!(
-                        "over the total blocklist size limit: this list and the ones subscribed \
-                         before it hold {total} hosts; Snitchwatch installs at most \
-                         {AGGREGATE_MAX_HOSTS}"
-                    )
-                });
-            }
-        }
-        None
-    }
-
     fn order(&self) -> MutexGuard<'_, Vec<String>> {
         self.order
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
-    /// Install `hosts` for `id`, or, past the total size limit, remove what
-    /// it had and say why.
-    async fn install(&self, id: &str, hosts: Vec<String>) -> Result<(), NotInstalled> {
-        match self.over_aggregate_cap(id) {
-            Some(reason) => {
-                drop(hosts);
-                let removed = self.rule_sink.remove_blocklist_rules(id).await;
-                if let Err(e) = &removed {
-                    warn!(%id, reason = %e.reason, "couldn't remove an over-limit list's rules");
-                }
-                Err(NotInstalled {
-                    reason,
-                    daemon_unavailable: removed.is_err_and(|e| e.daemon_unavailable),
-                })
-            }
-            None => self.rule_sink.replace_blocklist_rules(id, hosts).await,
-        }
     }
 
     /// The subscription's enforcement state. Without a sink that installs
@@ -209,20 +158,35 @@ impl BlocklistsManager {
     }
 
     fn default_enforcement(&self) -> Enforcement {
-        match self.rule_sink.unavailable_reason() {
+        match self.unavailable_reason() {
             Some(reason) => Enforcement::NotEnforced { reason },
             None => Enforcement::Pending,
         }
     }
 
+    /// Why nothing is installed: an unreadable store (the size limit can't
+    /// count the rules already there), or a sink that installs nothing.
+    fn unavailable_reason(&self) -> Option<String> {
+        if self.load_error.is_some() {
+            return Some(UNREADABLE_STORE_REASON.to_string());
+        }
+        self.rule_sink.unavailable_reason()
+    }
+
     fn installs_rules(&self) -> bool {
-        self.rule_sink.unavailable_reason().is_none()
+        self.unavailable_reason().is_none()
     }
 
     /// Record a sink outcome (the caller tells GUIs).
     fn record_install(&self, id: &str, outcome: &Result<(), NotInstalled>) {
         let enforcement = match outcome {
             Ok(()) => Enforcement::RuleInstalled { at: Utc::now() },
+            Err(e) if e.daemon_unavailable => {
+                warn!(%id, reason = %e.reason, "blocklist not confirmed");
+                Enforcement::Unconfirmed {
+                    reason: e.reason.clone(),
+                }
+            }
             Err(e) => {
                 warn!(%id, reason = %e.reason, "blocklist not enforced");
                 Enforcement::NotEnforced {
@@ -345,65 +309,6 @@ impl BlocklistsManager {
             }
         }
         Ok(())
-    }
-
-    /// [`reconcile_with`](Self::reconcile_with) a full pass.
-    pub async fn reconcile(&self) {
-        self.reconcile_with(ReconcileScope::Full).await;
-    }
-
-    /// Bring the daemon in line with the subscriptions (issue #45 PR B), in
-    /// subscription order: a list already in place is reported installed;
-    /// one past [`AGGREGATE_MAX_HOSTS`] has its rules removed; any other
-    /// downloaded list is installed (a [`ReconcileScope::CleanUp`] pass skips
-    /// lists already tried in this run). Then rules and files of lists no
-    /// longer subscribed are deleted, unless the stored subscriptions
-    /// couldn't be read. Does nothing while the daemon's rule list is
-    /// unknown, and stops at the first list the daemon can't be reached for.
-    pub async fn reconcile_with(&self, scope: ReconcileScope) {
-        if !self.installs_rules() || !self.rule_sink.daemon_rules_known() {
-            return;
-        }
-        for sub in self.subscriptions_in_order() {
-            if sub.last_fetched_at.is_none() {
-                continue;
-            }
-            let before = self.enforcement(&sub.id);
-            let current =
-                self.over_aggregate_cap(&sub.id).is_none() && self.rule_sink.is_current(&sub.id);
-            let outcome = if current {
-                Ok(())
-            } else if scope == ReconcileScope::CleanUp && before != Enforcement::Pending {
-                continue;
-            } else {
-                let id = sub.id.clone();
-                match self.with_store(move |s| s.list_entries(&id)).await {
-                    Ok(hosts) => self.install(&sub.id, hosts).await,
-                    Err(e) => {
-                        error!(id = %sub.id, error = %e, "couldn't read a stored blocklist");
-                        Err(NotInstalled::new(STORE_ERROR_REASON))
-                    }
-                }
-            };
-            let stop = matches!(&outcome, Err(e) if e.daemon_unavailable);
-            if current && matches!(before, Enforcement::RuleInstalled { .. }) {
-                continue;
-            }
-            self.record_install(&sub.id, &outcome);
-            if self.enforcement(&sub.id) != before {
-                let _ = self.bus.send(BlocklistEvent::StatusChanged {
-                    subscription_id: sub.id.clone(),
-                });
-            }
-            if stop {
-                return;
-            }
-        }
-        if self.load_error.is_some() || !self.rule_sink.daemon_rules_known() {
-            return;
-        }
-        let keep: Vec<String> = self.cache().keys().cloned().collect();
-        self.rule_sink.remove_orphans(&keep).await;
     }
 
     /// Ask the event pump for a page of `id`'s hosts (at most
@@ -570,3 +475,6 @@ fn is_due(sub: &Subscription, now: DateTime<Utc>) -> bool {
         None => (now - attempt).num_seconds() >= FAILED_RETRY_SECS.min(sub.refresh_interval_secs),
     }
 }
+
+#[path = "manager_reconcile.rs"]
+mod reconcile;

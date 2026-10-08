@@ -50,8 +50,13 @@ Kirigami.ScrollablePage {
     // older bridge all mean "kept in memory only".
     readonly property bool storagePersistent: page.model ? page.model.storagePersistent : false
     readonly property string storageReason: page.model ? page.model.storageReason : ""
-    // Some list isn't "Rule installed" (issue #45); each row says why.
+    // Some list isn't "Rule installed" (issue #45); each row says why. The
+    // definite cases (a per-user service, the total size limit) and an
+    // unreadable store get their own plain warnings.
     readonly property bool anyNotEnforced: page.model ? page.model.anyNotEnforced : false
+    readonly property bool perUserBlocklists: page.model ? page.model.perUserBlocklists : false
+    readonly property bool anyOverLimit: page.model ? page.model.anyOverLimit : false
+    readonly property bool storageUnreadable: page.model ? page.model.storageUnreadable : false
 
     function statusColor(status) {
         switch (status) {
@@ -90,15 +95,40 @@ Kirigami.ScrollablePage {
 
     // Issue #45: each list becomes a firewall rule that blocks its hosts for
     // every app, but only a row reading "Rule installed" is one the firewall
-    // service accepted. While any list isn't, a warning says so (each row's
-    // details say why). Subscriptions persist only when Snitchwatch's
-    // background service has a state directory; without one, a second
-    // warning says they are lost on restart. Neither is dismissable (no
-    // close button, no actions). The storage problem's reason is data, so it
-    // goes in a PlainText label, never in an InlineMessage (issue #51).
+    // service accepted (or already held). Fixed-text warnings, none
+    // dismissable (no close button, no actions): an unreadable store; a
+    // per-user service, which applies no blocklists; lists over the total
+    // size limit; any other list not confirmed (each row's details say why);
+    // and subscriptions kept in memory only, lost on restart. The storage
+    // problem's reason is data, so it goes in a PlainText label, never in an
+    // InlineMessage (issue #51).
     header: ColumnLayout {
         spacing: 0
 
+        Kirigami.InlineMessage {
+            objectName: "unreadableStoreBanner"
+            Layout.fillWidth: true
+            type: Kirigami.MessageType.Warning
+            visible: page.storageUnreadable
+            text: "Snitchwatch couldn't read its saved blocklists, so it isn't changing any "
+                + "blocklist rules the firewall already has."
+        }
+        Kirigami.InlineMessage {
+            objectName: "perUserBanner"
+            Layout.fillWidth: true
+            type: Kirigami.MessageType.Warning
+            visible: page.perUserBlocklists
+            text: "This Snitchwatch service runs for your user only, so it doesn't apply blocklists "
+                + "to the firewall. That needs the system-wide Snitchwatch service."
+        }
+        Kirigami.InlineMessage {
+            objectName: "overLimitBanner"
+            Layout.fillWidth: true
+            type: Kirigami.MessageType.Warning
+            visible: page.anyOverLimit
+            text: "Some blocklists are over the total size limit of 2,000,000 hosts, so they "
+                + "aren't applied to the firewall. Remove a list to make room."
+        }
         Kirigami.InlineMessage {
             objectName: "notEnforcedBanner"
             Layout.fillWidth: true
@@ -127,10 +157,10 @@ Kirigami.ScrollablePage {
         Controls.Label {
             Layout.fillWidth: true
             Layout.margins: Kirigami.Units.smallSpacing
-            visible: !page.storagePersistent && page.storageReason.length > 0
+            visible: page.storageReason.length > 0
             textFormat: Text.PlainText
             wrapMode: Text.Wrap
-            text: "Subscriptions could not be saved: " + page.storageReason
+            text: "Details: " + page.storageReason
         }
     }
 

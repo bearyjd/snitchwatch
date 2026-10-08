@@ -203,7 +203,7 @@ Window {
                 throw new Error(name + ": banner is dismissable");
             }
         }
-        if (notEnforced.text.indexOf("confirmed") < 0) {
+        if (notEnforced.text.indexOf("aren't confirmed") < 0) {
             throw new Error(name + ": warning does not say lists aren't confirmed as blocking");
         }
         if (memoryOnly.text.indexOf("restart") < 0) {
@@ -269,6 +269,22 @@ Window {
                     action: "setBlocklists", blocklists: [list("rule_installed")], storage: persistent
                 }));
                 checkBlocklistsBanners(blocklistsPage, true, false);
+                // An unreadable store: its own warning, not "memory only".
+                blocklistsPage.model.applyServerMessageJson(JSON.stringify({
+                    action: "setBlocklists", blocklists: [],
+                    storage: { persistent: true, unreadable: true, reason: "x" }
+                }));
+                checkBlocklistsBanners(blocklistsPage, true, false);
+                let unreadable = null;
+                for (let i = 0; i < blocklistsPage.header.children.length; i++) {
+                    const item = blocklistsPage.header.children[i];
+                    if (item.objectName === "unreadableStoreBanner") {
+                        unreadable = item;
+                    }
+                }
+                if (!unreadable || unreadable.visible !== true) {
+                    throw new Error("BlocklistsPage: no warning for an unreadable store");
+                }
                 blocklistsPage.model.applyServerMessageJson(JSON.stringify({
                     action: "setBlocklists", blocklists: [],
                     storage: { persistent: false, reason: "blocklist store: <b>locked</b>" }

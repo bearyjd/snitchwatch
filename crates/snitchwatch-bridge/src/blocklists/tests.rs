@@ -317,6 +317,7 @@ async fn the_production_fetcher_never_reads_a_stored_file_url() {
 fn storage_status_defaults_to_not_persistent() {
     assert!(!manager().storage_status().persistent);
     let persistent = StorageStatus {
+        unreadable: false,
         persistent: true,
         reason: None,
     };

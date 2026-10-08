@@ -59,6 +59,11 @@ pub struct DaemonRuleSink {
     timeout: Duration,
     /// Rules the daemon answered `OK` to in this run, by name, as sent.
     confirmed: StdMutex<HashMap<String, Rule>>,
+    /// Lists whose files were written or checked against their hosts in
+    /// this run, with the kinds they hold.
+    verified: StdMutex<HashMap<IdComponent, Vec<ListKind>>>,
+    /// Blocklist-named rules Snitchwatch didn't make, already logged.
+    warned: StdMutex<BTreeSet<String>>,
 }
 
 impl DaemonRuleSink {
@@ -77,7 +82,34 @@ impl DaemonRuleSink {
             rules,
             timeout: BLOCKLIST_COMMAND_TIMEOUT,
             confirmed: StdMutex::default(),
+            verified: StdMutex::default(),
+            warned: StdMutex::default(),
         }
+    }
+
+    fn verified(&self) -> MutexGuard<'_, HashMap<IdComponent, Vec<ListKind>>> {
+        self.verified
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// [`made_by_bridge`], warning once per name and run about a rule under
+    /// a blocklist name that Snitchwatch didn't make.
+    fn ours(&self, rule: &Rule) -> bool {
+        let made = made_by_bridge(rule);
+        let first = !made
+            && self
+                .warned
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(rule.name.clone());
+        if first {
+            warn!(
+                name_len = rule.name.len(),
+                "leaving a blocklist-named rule Snitchwatch didn't make"
+            );
+        }
+        made
     }
 
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
@@ -118,7 +150,7 @@ impl DaemonRuleSink {
             .unwrap_or_default()
             .into_iter()
             .filter(|rule| prefixes.iter().any(|p| rule.name.starts_with(p.as_str())))
-            .filter(made_by_bridge_logged)
+            .filter(|rule| self.ours(rule))
             .map(|rule| rule.name)
             .collect()
     }
@@ -207,11 +239,13 @@ impl DaemonRuleSink {
             .into_iter()
             .filter(|kind| !entries.get(*kind).is_empty())
             .collect();
-        let (list, written) = (list.clone(), kinds.clone());
+        let (writer_list, written) = (list.clone(), kinds.clone());
+        self.verified().remove(list);
         self.files(move |dir| {
-            written
-                .iter()
-                .try_for_each(|kind| dir.write_list(&list, *kind, entries.get(*kind)).map(drop))
+            written.iter().try_for_each(|kind| {
+                dir.write_list(&writer_list, *kind, entries.get(*kind))
+                    .map(drop)
+            })
         })
         .await
         .map_err(|e| {
@@ -219,6 +253,7 @@ impl DaemonRuleSink {
                 "Couldn't save the list for the firewall service: {e}"
             ))
         })?;
+        self.verified().insert(list.clone(), kinds.clone());
         Ok(kinds)
     }
 
@@ -270,6 +305,26 @@ impl RuleSink for DaemonRuleSink {
             })
     }
 
+    fn files_verified(&self, list_id: &str) -> bool {
+        let list = IdComponent::from_id(list_id);
+        let Some(kinds) = self.verified().get(&list).cloned() else {
+            return false;
+        };
+        !kinds.is_empty() && kinds.iter().all(|kind| self.dir.has_list(&list, *kind))
+    }
+
+    async fn reinstall_blocklist_rules(&self, list_id: &str) -> Result<(), NotInstalled> {
+        let list = IdComponent::from_id(list_id);
+        let kinds = self.verified().get(&list).cloned().unwrap_or_default();
+        if kinds.is_empty() {
+            return Err(NotInstalled::new(NO_HOSTS_REASON));
+        }
+        for kind in &kinds {
+            self.install(&list, *kind).await?;
+        }
+        Ok(())
+    }
+
     async fn replace_blocklist_rules(
         &self,
         list_id: &str,
@@ -300,6 +355,7 @@ impl RuleSink for DaemonRuleSink {
                 .collect()
         };
         let deleted = self.delete(names).await;
+        self.verified().remove(&list);
         // Even when the daemon is gone: a rule left behind then reads an
         // empty directory, and the next reconcile deletes it.
         self.files(move |dir| dir.remove_list(&list))
@@ -326,13 +382,14 @@ impl RuleSink for DaemonRuleSink {
                     None => true,
                 }
             })
-            .filter(made_by_bridge_logged)
+            .filter(|rule| self.ours(rule))
             .map(|rule| rule.name)
             .collect();
         if let Err(e) = self.delete(orphans).await {
             warn!(reason = %e.reason, "stopped deleting orphaned blocklist rules");
             return;
         }
+        self.verified().retain(|list, _| keep.contains(list));
         let removed = self
             .files(move |dir| {
                 for list in dir.lists()? {
@@ -361,17 +418,6 @@ pub fn made_by_bridge(rule: &Rule) -> bool {
             op.r#type == "lists" && ListKind::from_operand(&op.operand).is_some()
         });
     tagged || shaped
-}
-
-fn made_by_bridge_logged(rule: &Rule) -> bool {
-    let made = made_by_bridge(rule);
-    if !made {
-        warn!(
-            name_len = rule.name.len(),
-            "leaving a blocklist-named rule Snitchwatch didn't make"
-        );
-    }
-    made
 }
 
 /// The fields that decide what a rule does; `created` and `description`

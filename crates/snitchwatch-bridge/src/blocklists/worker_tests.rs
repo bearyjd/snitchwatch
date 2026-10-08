@@ -408,3 +408,123 @@ async fn a_refresh_tick_triggers_a_full_reconcile() {
     .await;
     handle.abort();
 }
+
+/// Refuses every install; counts installs and reconcile passes.
+#[derive(Default)]
+struct RefusingCounter {
+    installs: AtomicUsize,
+    passes: AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl crate::blocklists::RuleSink for RefusingCounter {
+    async fn replace_blocklist_rules(
+        &self,
+        _list_id: &str,
+        _hosts: Vec<String>,
+    ) -> Result<(), crate::blocklists::NotInstalled> {
+        self.installs.fetch_add(1, Ordering::SeqCst);
+        Err(crate::blocklists::NotInstalled::new("refused"))
+    }
+
+    async fn remove_orphans(&self, _keep: &[String]) {
+        self.passes.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+fn manager_over(
+    sink: Arc<dyn crate::blocklists::RuleSink>,
+    subs: &[Subscription],
+) -> Arc<BlocklistsManager> {
+    let store = Arc::new(BlocklistStore::open_in_memory().unwrap());
+    for sub in subs {
+        store.upsert_subscription(sub).unwrap();
+    }
+    Arc::new(
+        BlocklistsManager::new(store)
+            .with_fetcher(Arc::new(FixtureFetcher::default()))
+            .with_rule_sink(sink),
+    )
+}
+
+/// Code re-review: one refresh tick, however many lists are due, runs one
+/// full reconcile, after its downloads.
+#[tokio::test]
+async fn a_refresh_tick_with_several_due_lists_reconciles_once() {
+    let sink = Arc::new(ReconcileCounter::default());
+    let url = fixture_url("domains-tiny.txt");
+    let mgr = manager_over(
+        sink.clone(),
+        &[
+            subscription("a", &url),
+            subscription("b", &url),
+            subscription("c", &url),
+        ],
+    );
+    let (worker, handle) = BlocklistWorker::spawn(mgr.clone());
+    assert!(worker.enqueue(BlocklistJob::RefreshDue));
+    wait_for("all three downloads", || {
+        mgr.subscriptions()
+            .iter()
+            .all(|s| s.last_fetch_status == FetchStatus::Ok)
+    })
+    .await;
+    wait_for("the tick's reconcile", || {
+        sink.passes.load(Ordering::SeqCst) >= 1
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        sink.passes.load(Ordering::SeqCst),
+        1,
+        "one reconcile per tick"
+    );
+    handle.abort();
+}
+
+/// Code re-review: a list refused while it was downloaded in a refresh
+/// tick isn't tried again by the same tick's reconcile.
+#[tokio::test]
+async fn a_list_refused_during_a_refresh_tick_is_tried_once_in_it() {
+    let sink = Arc::new(RefusingCounter::default());
+    let mgr = manager_over(
+        sink.clone(),
+        &[subscription("a", &fixture_url("domains-tiny.txt"))],
+    );
+    let (worker, handle) = BlocklistWorker::spawn(mgr);
+    assert!(worker.enqueue(BlocklistJob::RefreshDue));
+    wait_for("the tick's reconcile", || {
+        sink.passes.load(Ordering::SeqCst) == 1
+    })
+    .await;
+    assert_eq!(sink.installs.load(Ordering::SeqCst), 1);
+    handle.abort();
+}
+
+/// Code re-review: an unsubscribe can free room under the total size
+/// limit, so it runs a full reconcile (which also retries refused lists).
+#[tokio::test]
+async fn an_unsubscribe_runs_a_full_reconcile() {
+    let sink = Arc::new(RefusingCounter::default());
+    let downloaded = |id: &str| Subscription {
+        last_fetched_at: Some(chrono::Utc::now()),
+        last_fetch_status: FetchStatus::Ok,
+        entry_count: 1,
+        ..subscription(id, &format!("https://example.invalid/{id}"))
+    };
+    let mgr = manager_over(sink.clone(), &[downloaded("a"), downloaded("b")]);
+    mgr.reconcile().await;
+    assert_eq!(sink.installs.load(Ordering::SeqCst), 2);
+    let (worker, handle) = BlocklistWorker::spawn(mgr);
+    worker.unsubscribe("b".to_string());
+    wait_for("the unsubscribe's reconcile", || {
+        sink.passes.load(Ordering::SeqCst) == 2
+    })
+    .await;
+    assert_eq!(
+        sink.installs.load(Ordering::SeqCst),
+        3,
+        "the refused list wasn't retried"
+    );
+    handle.abort();
+}

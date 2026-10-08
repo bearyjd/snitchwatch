@@ -12,6 +12,7 @@
 //! with a `beginResetModel`/`endResetModel`. That is always view-correct and
 //! avoids incremental-range bookkeeping that would buy nothing here.
 
+use snitchwatch_bridge::blocklists::{OVER_LIMIT_REASON_PREFIX, PER_USER_REASON};
 use snitchwatch_bridge::ws_messages::{
     BlocklistSummary, ServerMessage, StorageStatus, ENFORCEMENT_PENDING, ENFORCEMENT_RULE_INSTALLED,
 };
@@ -48,6 +49,19 @@ pub fn enforcement_label(sub: &BlocklistSummary) -> &'static str {
     }
 }
 
+fn is_per_user(sub: &BlocklistSummary) -> bool {
+    sub.enforcement != ENFORCEMENT_RULE_INSTALLED
+        && sub.enforcement_reason.as_deref() == Some(PER_USER_REASON)
+}
+
+fn is_over_limit(sub: &BlocklistSummary) -> bool {
+    sub.enforcement != ENFORCEMENT_RULE_INSTALLED
+        && sub
+            .enforcement_reason
+            .as_deref()
+            .is_some_and(|r| r.starts_with(OVER_LIMIT_REASON_PREFIX))
+}
+
 impl SubscriptionsStore {
     pub fn new() -> Self {
         Self::default()
@@ -69,13 +83,32 @@ impl SubscriptionsStore {
         self.subs.get(index)
     }
 
-    /// True while some list isn't reported "rule installed" (issue #45): the
-    /// page warns until every list's rule was accepted by the daemon. An
-    /// older bridge, which sends no enforcement, counts as not enforced.
+    /// True while some list isn't reported "rule installed" for a reason
+    /// other than [`per_user`](Self::per_user) or
+    /// [`any_over_limit`](Self::any_over_limit), which get their own plain
+    /// warnings (issue #45). An older bridge, which sends no enforcement,
+    /// counts as not enforced.
     pub fn any_not_enforced(&self) -> bool {
-        self.subs
-            .iter()
-            .any(|sub| sub.enforcement != ENFORCEMENT_RULE_INSTALLED)
+        self.subs.iter().any(|sub| {
+            sub.enforcement != ENFORCEMENT_RULE_INSTALLED
+                && !is_per_user(sub)
+                && !is_over_limit(sub)
+        })
+    }
+
+    /// Some list isn't applied because this is a per-user bridge.
+    pub fn per_user(&self) -> bool {
+        self.subs.iter().any(is_per_user)
+    }
+
+    /// Some list isn't applied because of the total size limit.
+    pub fn any_over_limit(&self) -> bool {
+        self.subs.iter().any(is_over_limit)
+    }
+
+    /// The bridge couldn't read its saved subscriptions (its own state).
+    pub fn storage_unreadable(&self) -> bool {
+        self.storage.as_ref().is_some_and(|s| s.unreadable)
     }
 
     /// True only when the bridge said its subscriptions survive a restart.
@@ -348,6 +381,7 @@ mod tests {
 
     fn persistent() -> Option<StorageStatus> {
         Some(StorageStatus {
+            unreadable: false,
             persistent: true,
             reason: None,
         })
@@ -371,6 +405,7 @@ mod tests {
         s.apply(&ServerMessage::SetBlocklists {
             blocklists: vec![],
             storage: Some(StorageStatus {
+                unreadable: false,
                 persistent: false,
                 reason: Some("blocklist store: disk I/O error".into()),
             }),
@@ -435,6 +470,56 @@ mod tests {
             storage: None,
         });
         assert!(!s.any_not_enforced());
+    }
+
+    /// Code re-review: the definite cases get their own plain warning, so
+    /// the generic "aren't confirmed" one covers only the rest.
+    #[test]
+    fn per_user_and_over_limit_lists_are_told_apart_from_unconfirmed_ones() {
+        use snitchwatch_bridge::blocklists::{OVER_LIMIT_REASON_PREFIX, PER_USER_REASON};
+        let row = |id: &str, enforcement: &str, reason: Option<String>| {
+            let mut row = summary(id, "ok", 10);
+            row.enforcement = enforcement.to_string();
+            row.enforcement_reason = reason;
+            row
+        };
+        let mut s = SubscriptionsStore::new();
+        s.apply(&ServerMessage::SetBlocklists {
+            blocklists: vec![
+                row("a", ENFORCEMENT_NOT_ENFORCED, Some(PER_USER_REASON.into())),
+                row(
+                    "b",
+                    ENFORCEMENT_NOT_ENFORCED,
+                    Some(format!("{OVER_LIMIT_REASON_PREFIX}: 2,100,000 hosts")),
+                ),
+            ],
+            storage: None,
+        });
+        assert!(s.per_user() && s.any_over_limit());
+        assert!(!s.any_not_enforced(), "only definite cases");
+        s.apply(&ServerMessage::SetBlocklists {
+            blocklists: vec![row("c", ENFORCEMENT_PENDING, Some("not connected".into()))],
+            storage: None,
+        });
+        assert!(!s.per_user() && !s.any_over_limit());
+        assert!(s.any_not_enforced());
+    }
+
+    /// Code re-review: an unreadable store is its own state, not "kept in
+    /// memory only".
+    #[test]
+    fn an_unreadable_store_is_its_own_state() {
+        let mut s = SubscriptionsStore::new();
+        assert!(!s.storage_unreadable());
+        s.apply(&ServerMessage::SetBlocklists {
+            blocklists: vec![],
+            storage: Some(StorageStatus {
+                persistent: true,
+                reason: Some("Couldn't read the saved blocklists: x".into()),
+                unreadable: true,
+            }),
+        });
+        assert!(s.storage_unreadable() && s.storage_persistent());
     }
 
     #[test]

@@ -579,3 +579,73 @@ async fn a_rule_found_in_the_snapshot_stays_confirmed_while_the_list_is_unknown(
         .unwrap();
     assert!(h.seen().is_empty(), "{:?}", h.seen());
 }
+
+/// Re-review N1: a list file that is wrong on disk is repaired from the
+/// store on the first pass of a run, without resending a rule the daemon
+/// already holds; afterwards only the rule is resent when it goes missing.
+#[tokio::test]
+async fn a_wrong_list_file_is_repaired_and_a_missing_rule_resent_without_rewriting() {
+    let h = Harness::new().connect(Daemon::Accept, Vec::new());
+    h.sink()
+        .replace_blocklist_rules(ADS, hosts(&["a.example"]))
+        .await
+        .unwrap();
+    let list = IdComponent::from_id(ADS);
+    let file = h
+        .dir
+        .kind_dir(&list, ListKind::Domains)
+        .join("domains.list");
+    std::fs::write(&file, "0.0.0.0 tampered.example\n").unwrap();
+    let snapshot = vec![h.bridge_rule(ADS, ListKind::Domains)];
+
+    let h = h.restart().connect(Daemon::Accept, snapshot);
+    let sink = h.sink();
+    assert!(
+        !sink.files_verified(ADS),
+        "a new run hasn't checked the files"
+    );
+    sink.replace_blocklist_rules(ADS, hosts(&["a.example"]))
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        "0.0.0.0 a.example\n"
+    );
+    assert!(h.seen().is_empty(), "the rule in place was resent");
+    assert!(sink.files_verified(ADS));
+}
+
+/// Code re-review: with the list's files already checked in this run, a
+/// rule the daemon no longer holds is resent alone; the file is neither
+/// re-read from the store nor rewritten.
+#[tokio::test]
+async fn a_missing_rule_is_resent_without_touching_its_checked_file() {
+    use std::os::unix::fs::MetadataExt;
+    let h = Harness::new().connect(Daemon::Accept, Vec::new());
+    let sink = h.sink();
+    sink.replace_blocklist_rules(ADS, hosts(&["a.example"]))
+        .await
+        .unwrap();
+    let list = IdComponent::from_id(ADS);
+    let file = h
+        .dir
+        .kind_dir(&list, ListKind::Domains)
+        .join("domains.list");
+    let inode = std::fs::metadata(&file).unwrap().ino();
+    h.rules
+        .cache()
+        .lock()
+        .unwrap()
+        .remove(&format!("z00-blocklist:{ADS}:domains"));
+    assert!(sink.files_verified(ADS));
+    assert!(!sink.is_current(ADS));
+    sink.reinstall_blocklist_rules(ADS).await.unwrap();
+    let seen = h.seen();
+    assert_eq!(seen.len(), 2);
+    assert_eq!(
+        kind_of(&seen[1].command),
+        change(&format!("z00-blocklist:{ADS}:domains"))
+    );
+    assert_eq!(std::fs::metadata(&file).unwrap().ino(), inode);
+    assert!(sink.is_current(ADS));
+}

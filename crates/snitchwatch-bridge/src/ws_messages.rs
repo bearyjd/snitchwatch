@@ -544,9 +544,15 @@ pub struct StorageStatus {
     /// True only when subscriptions are saved in a state directory and
     /// survive a restart.
     pub persistent: bool,
-    /// Why storage is not persistent, when it was configured but unusable.
+    /// Why storage is not persistent, when it was configured but unusable,
+    /// or, with `unreadable`, why the saved subscriptions couldn't be read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// The saved subscriptions couldn't be read (issue #45): Snitchwatch
+    /// leaves the firewall's blocklist rules as they are and installs
+    /// nothing. Its own state, apart from `persistent`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unreadable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -880,6 +886,7 @@ mod blocklist_message_tests {
                 enforcement_reason: Some("no rule sink yet".into()),
             }],
             storage: Some(StorageStatus {
+                unreadable: false,
                 persistent: false,
                 reason: Some("blocklist store: disk full".into()),
             }),

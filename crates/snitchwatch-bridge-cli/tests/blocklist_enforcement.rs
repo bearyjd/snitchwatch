@@ -13,7 +13,7 @@ use mock_opensnitchd::MockOpensnitchd;
 use snitchwatch_bridge::blocklists::fetcher::{process_body, BlocklistFetch, FetchOutcome};
 use snitchwatch_bridge::rule_policy::BLOCKLIST_MANAGED_REASON;
 use snitchwatch_bridge::ws_messages::{
-    BlocklistSummary, ClientMessage, ServerMessage, ENFORCEMENT_NOT_ENFORCED,
+    BlocklistSummary, ClientMessage, ServerMessage, ENFORCEMENT_NOT_ENFORCED, ENFORCEMENT_PENDING,
     ENFORCEMENT_RULE_INSTALLED,
 };
 use snitchwatch_bridge_cli::{
@@ -297,8 +297,9 @@ async fn a_daemon_that_connects_later_gets_the_rule_from_the_reconcile() {
     let mut setup = start(true).await;
     let (bridge, rx) = (&setup.bridge, &mut setup.rx);
     subscribe(bridge).await;
+    // Not known either way: "Not confirmed yet", with the reason.
     let list = list_until(rx, "not connected", |l| {
-        l.enforcement == ENFORCEMENT_NOT_ENFORCED
+        l.enforcement == ENFORCEMENT_PENDING && l.enforcement_reason.is_some()
     })
     .await;
     assert!(
@@ -362,4 +363,83 @@ async fn a_per_user_bridge_installs_no_file_or_rule() {
     assert!(!lists_root(&state).exists());
     assert!(state.join("blocklists.sqlite3").is_file(), "still saved");
     setup.bridge.shutdown();
+}
+
+/// Start a system bridge on an existing state directory.
+async fn start_on(state: &Path, sockets: &Path) -> RunningBridge {
+    run_with_options(
+        BridgeConfig {
+            grpc_bind: "127.0.0.1:0".parse().unwrap(),
+            ws_socket_path: sockets.join("bridge.sock"),
+            cache_capacity: 64,
+        },
+        RunOptions {
+            storage: Storage::Persistent(state.to_path_buf()),
+            blocklist_fetcher: Some(Arc::new(Fetcher)),
+            mode: BridgeMode::System,
+        },
+    )
+    .await
+    .unwrap()
+}
+
+/// A restarted bridge whose daemon's rule snapshot already holds the list's
+/// rules unchanged reports them installed and sends no `CHANGE_RULE` (and
+/// rewrites no list file).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_restart_against_an_identical_daemon_snapshot_sends_no_rule() {
+    use std::os::unix::fs::MetadataExt;
+    let state_dir = tempfile::tempdir().unwrap();
+    let state = state_dir.path().canonicalize().unwrap();
+    let first_sockets = tempfile::tempdir().unwrap();
+    let bridge = start_on(&state, first_sockets.path()).await;
+    let mut rx = bridge.broadcast_tx.subscribe();
+    let (daemon, mut seen) = connect_daemon(&bridge, ListsPolicy::Accept).await;
+    subscribe(&bridge).await;
+    let installed: Vec<_> = vec![
+        next_command(&mut seen).await.rules[0].clone(),
+        next_command(&mut seen).await.rules[0].clone(),
+    ];
+    let list = list_until(&mut rx, "rule installed", |l| {
+        l.enforcement == ENFORCEMENT_RULE_INSTALLED
+    })
+    .await;
+    let file = lists_root(&state)
+        .join(&list.id)
+        .join("domains/domains.list");
+    let inode = std::fs::metadata(&file).unwrap().ino();
+    bridge.shutdown();
+    drop(daemon);
+
+    let second_sockets = tempfile::tempdir().unwrap();
+    let bridge = start_on(&state, second_sockets.path()).await;
+    let mut rx = bridge.broadcast_tx.subscribe();
+    let mut daemon = MockOpensnitchd::connect(bridge.grpc_endpoint.tcp_addr().unwrap())
+        .await
+        .unwrap();
+    daemon
+        .subscribe_with_config(snitchwatch_proto::protocol::ClientConfig {
+            name: "mock".into(),
+            rules: installed,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let (replies, inbound) = daemon.open_notifications().await.unwrap();
+    let mut seen = spawn_responder(ListsPolicy::Accept, replies, inbound);
+    list_until(&mut rx, "installed after the restart", |l| {
+        l.enforcement == ENFORCEMENT_RULE_INSTALLED
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        seen.try_recv().is_err(),
+        "a rule was resent after the restart"
+    );
+    assert_eq!(
+        std::fs::metadata(&file).unwrap().ino(),
+        inode,
+        "the list was rewritten"
+    );
+    bridge.shutdown();
 }

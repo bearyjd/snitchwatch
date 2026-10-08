@@ -37,12 +37,9 @@ use tracing::{error, info, warn};
 pub const SYSTEM_STATE_DIR: &str = "/var/lib/snitchwatch";
 /// The blocklist database's file name inside the state directory.
 pub const BLOCKLIST_DB_FILE: &str = "blocklists.sqlite3";
-/// Why a per-user bridge installs no blocklist rule. Root opensnitchd would
-/// read list files that any of the user's processes could replace (a FIFO
-/// hangs it; a link to `/dev/zero` exhausts its memory, and with
-/// `QueueBypass` the firewall fails open on every boot after).
-pub const PER_USER_REASON: &str = "Blocking with lists needs the system-wide Snitchwatch \
-     service; this per-user service can't keep the list files safe from other apps.";
+/// Why a per-user bridge installs no blocklist rule (defined with the other
+/// blocklist reasons, which GUIs key warnings on).
+pub use snitchwatch_bridge::blocklists::PER_USER_REASON;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EphemeralReason {
@@ -76,14 +73,17 @@ impl Storage {
     pub fn status(&self) -> StorageStatus {
         match self {
             Storage::Persistent(_) => StorageStatus {
+                unreadable: false,
                 persistent: true,
                 reason: None,
             },
             Storage::Ephemeral(EphemeralReason::Unusable(reason)) => StorageStatus {
+                unreadable: false,
                 persistent: false,
                 reason: Some(reason.clone()),
             },
             Storage::Ephemeral(_) => StorageStatus {
+                unreadable: false,
                 persistent: false,
                 reason: None,
             },
