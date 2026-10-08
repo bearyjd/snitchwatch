@@ -72,6 +72,23 @@ pub struct RulesCache {
     /// How many rules the daemon's last snapshot had when it was over
     /// [`MAX_SNAPSHOT_RULES`] and so not read at all (issue #61).
     over_limit_total: Option<usize>,
+    /// When the daemon's timer removes each temporary rule; see [`Expiry`].
+    expiries: BTreeMap<String, Expiry>,
+}
+
+/// The daemon timer that will remove a temporary rule (PR #106 review M2),
+/// kept apart from `created`, which is the daemon's own stamp of the rule's
+/// last change. `replaceUserRule` starts a timer each time it stores the
+/// rule enabled; when one fires, `scheduleTemporaryRule` removes the rule
+/// if its duration is still the one the timer was set for (turned off or
+/// not), and does nothing otherwise. So the first timer to fire with the
+/// rule's current duration removes it. Only that one is kept: a timer of
+/// another duration is forgotten, which can only keep a row listed longer
+/// than the daemon keeps the rule, never hide an active rule early.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Expiry {
+    duration: String,
+    at: i64,
 }
 
 /// A `Subscribe` snapshot within the limits, and what it left out.
@@ -116,10 +133,24 @@ impl RulesCache {
         self.left_out = left_out;
     }
 
+    /// Adopt a daemon snapshot. An enabled temporary rule's timer is taken
+    /// to have started at its `created` (the daemon's stamp of its last
+    /// change, when the timer started); a disabled one is given none, since
+    /// whether one still runs isn't known.
     pub fn replace_all(&mut self, rules: Vec<Rule>) {
+        self.expiries = rules
+            .iter()
+            .filter(|rule| rule.enabled && rule.created > 0)
+            .filter_map(|rule| Some((rule.name.clone(), timer_from(rule, rule.created)?)))
+            .collect();
         self.rules = Some(rules.into_iter().map(|r| (r.name.clone(), r)).collect());
         self.over_limit_total = None;
         self.revision += 1;
+    }
+
+    /// When the daemon's timer will remove `name`, if one will.
+    pub fn expiry_of(&self, name: &str) -> Option<i64> {
+        self.expiries.get(name).map(|expiry| expiry.at)
     }
 
     /// What the GUI's list leaves out (issue #61): rules over the size
@@ -137,27 +168,38 @@ impl RulesCache {
     /// Forget the list (its stream is gone). A no-op while `Unknown`.
     pub fn set_unknown(&mut self) {
         self.left_out.clear();
+        self.expiries.clear();
         if self.rules.take().is_some() {
             self.revision += 1;
         }
     }
 
-    /// Insert or replace by name. When the rule is already cached and the
-    /// incoming `created` is 0 (every GUI toggle goes through
-    /// `rule_from_wire`, which zeroes it), the cached `created` is kept if
-    /// the duration is the same: the daemon's original expiry timer still
-    /// fires on the original schedule. A changed duration has a new clock
-    /// from now for an enabled rule, and none for a disabled one
-    /// (`scheduleTemporaryRule`, issue #61). A no-op while `Unknown`: one
-    /// rule is not the full list.
-    pub fn upsert(&mut self, mut rule: Rule) {
+    /// Insert or replace by name, now. See [`Self::upsert_at`].
+    pub fn upsert(&mut self, rule: Rule) {
+        self.upsert_at(rule, now_secs());
+    }
+
+    /// Insert or replace by name, as the daemon stores a change at
+    /// `now_secs` (PR #106 review M2). `created` is the daemon's stamp,
+    /// which it makes anew on every change (`rule.Create` from each
+    /// `CHANGE_RULE`): a rule without one (every GUI change goes through
+    /// `rule_from_wire`, which zeroes it) is stamped `now_secs`. Its
+    /// [`Expiry`]: a running timer of the same duration still removes it
+    /// first; otherwise an enabled temporary rule starts one now, and any
+    /// other has none. A no-op while `Unknown`: one rule is not the full
+    /// list.
+    pub fn upsert_at(&mut self, mut rule: Rule, now_secs: i64) {
         let Some(rules) = &mut self.rules else { return };
         if rule.created == 0 {
-            match rules.get(&rule.name) {
-                Some(cached) if cached.duration == rule.duration => rule.created = cached.created,
-                Some(_) if rule.enabled => rule.created = now_secs(),
-                _ => {}
-            }
+            rule.created = now_secs;
+        }
+        let running = self
+            .expiries
+            .remove(&rule.name)
+            .filter(|kept| kept.duration == rule.duration && kept.at > now_secs);
+        let timer = running.or_else(|| rule.enabled.then(|| timer_from(&rule, now_secs)).flatten());
+        if let Some(timer) = timer {
+            self.expiries.insert(rule.name.clone(), timer);
         }
         self.left_out.remove(&rule.name);
         rules.insert(rule.name.clone(), rule);
@@ -172,6 +214,7 @@ impl RulesCache {
     /// A no-op while `Unknown`.
     pub fn remove(&mut self, name: &str) {
         let removed = self.rules.as_mut().and_then(|rules| rules.remove(name));
+        self.expiries.remove(name);
         let was_left_out = self.rules.is_some() && self.left_out.remove(name).is_some();
         if removed.is_some() || was_left_out {
             self.revision += 1;
@@ -186,19 +229,21 @@ impl RulesCache {
             .map(|rules| rules.values().map(rule_to_wire).collect())
     }
 
-    /// Drop temporary rules whose `created + duration` has passed. Returns
-    /// the names removed, in name order.
+    /// Drop temporary rules whose daemon timer ([`Expiry`]) has fired.
+    /// Returns the names removed, in name order.
     pub fn prune_expired(&mut self, now_secs: i64) -> Vec<String> {
         let Some(rules) = &mut self.rules else {
             return Vec::new();
         };
-        let expired: Vec<String> = rules
-            .values()
-            .filter(|rule| expires_at(rule).is_some_and(|at| at <= now_secs))
-            .map(|rule| rule.name.clone())
+        let expired: Vec<String> = self
+            .expiries
+            .iter()
+            .filter(|(_, expiry)| expiry.at <= now_secs)
+            .map(|(name, _)| name.clone())
             .collect();
         for name in &expired {
             rules.remove(name);
+            self.expiries.remove(name);
         }
         self.revision += u64::from(!expired.is_empty());
         expired
@@ -207,9 +252,14 @@ impl RulesCache {
     /// Apply a command the daemon answered `OK`: `CHANGE_RULE` upserts its
     /// rules, `DELETE_RULE` removes them by name.
     pub fn apply_confirmed(&mut self, sent: &Notification) {
+        self.apply_confirmed_at(sent, now_secs());
+    }
+
+    /// [`apply_confirmed`](Self::apply_confirmed) at a given time.
+    pub fn apply_confirmed_at(&mut self, sent: &Notification, now_secs: i64) {
         if sent.r#type == Action::ChangeRule as i32 {
             for rule in &sent.rules {
-                self.upsert(rule.clone());
+                self.upsert_at(rule.clone(), now_secs);
             }
         } else if sent.r#type == Action::DeleteRule as i32 {
             for rule in &sent.rules {
@@ -219,15 +269,17 @@ impl RulesCache {
     }
 }
 
-/// When a temporary rule (`loader.go` `isTemporary`: not `once`,
-/// `until restart` or `always`) expires. Approximate: `created == 0` or a
-/// duration that isn't a `\d+[smh]` sequence never expires.
-fn expires_at(rule: &Rule) -> Option<i64> {
-    if rule.created == 0 || matches!(rule.duration.as_str(), "once" | "until restart" | "always") {
+/// The timer the daemon starts for `rule` at `start`, if it is temporary
+/// (`loader.go` `isTemporary`: not `once`, `until restart` or `always`).
+/// Approximate: a duration that isn't a `\d+[smh]` sequence has none.
+fn timer_from(rule: &Rule, start: i64) -> Option<Expiry> {
+    if matches!(rule.duration.as_str(), "once" | "until restart" | "always") {
         return None;
     }
-    rule.created
-        .checked_add(parse_duration_secs(&rule.duration)?)
+    Some(Expiry {
+        duration: rule.duration.clone(),
+        at: start.checked_add(parse_duration_secs(&rule.duration)?)?,
+    })
 }
 
 pub(crate) fn parse_duration_secs(duration: &str) -> Option<i64> {
@@ -432,9 +484,7 @@ impl RulesSync {
             return;
         }
         let replaces_expired = cache
-            .rules()
-            .and_then(|rules| rules.get(&rule.name))
-            .and_then(expires_at)
+            .expiry_of(&rule.name)
             .is_some_and(|at| at <= rule.created);
         if replaces_expired {
             self.hits.forget([rule.name.as_str()]);

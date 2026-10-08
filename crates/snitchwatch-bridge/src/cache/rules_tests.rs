@@ -66,17 +66,22 @@ fn upsert_and_remove_do_nothing_while_unknown() {
     assert!(cache.is_unknown());
 }
 
+/// `created` is the daemon's stamp, which it makes anew on every change
+/// (`rule.Create` from each `CHANGE_RULE`): a change without one is stamped
+/// with its time, and a stamp a rule brings is kept (PR #106 review M2).
 #[test]
-fn upsert_keeps_the_cached_created_only_when_the_incoming_one_is_zero() {
-    let mut cache = synced(vec![rule("a", "5m", T)]);
-    cache.upsert(rule("a", "5m", 0));
+fn a_change_is_stamped_with_its_time_as_the_daemon_stamps_it() {
+    let mut cache = synced(vec![rule("a", "5m", T - 100), rule("p", "always", 1)]);
+    cache.upsert_at(rule("a", "5m", 0), T);
     assert_eq!(get(&cache, "a").created, T);
-    cache.upsert(rule("a", "5m", T + 10));
+    cache.upsert_at(rule("p", "always", 0), T + 1);
+    assert_eq!(get(&cache, "p").created, T + 1);
+    cache.upsert_at(rule("a", "5m", T + 10), T + 20);
     assert_eq!(get(&cache, "a").created, T + 10);
-    cache.upsert(rule("new", "always", 0));
-    assert_eq!(names(&cache), vec!["a", "new"]);
+    cache.upsert_at(rule("new", "always", 0), T);
+    assert_eq!(names(&cache), vec!["a", "new", "p"]);
     cache.remove("a");
-    assert_eq!(names(&cache), vec!["new"]);
+    assert_eq!(names(&cache), vec!["new", "p"]);
 }
 
 #[test]
@@ -113,18 +118,19 @@ fn durations_parse_as_digit_unit_sequences() {
 }
 
 /// The daemon's original timer deletes a toggled temporary rule on its
-/// original schedule (`scheduleTemporaryRule`), so the cache must too.
+/// original schedule (`scheduleTemporaryRule`), so the cache must too,
+/// although the toggle restamps `created`.
 #[test]
 fn a_toggled_temporary_rule_keeps_its_original_expiry() {
     let mut cache = synced(vec![rule("a", "5m", T)]);
     let mut toggled = rule_from_wire(&rule_to_wire(get(&cache, "a"))).unwrap();
     assert_eq!(toggled.created, 0, "rule_from_wire zeroes created");
     toggled.enabled = false;
-    cache.upsert(toggled);
+    cache.upsert_at(toggled, T + 30);
 
     assert!(cache.prune_expired(T + 31).is_empty());
     assert!(!get(&cache, "a").enabled);
-    assert_eq!(get(&cache, "a").created, T);
+    assert_eq!(get(&cache, "a").created, T + 30);
 
     assert_eq!(cache.prune_expired(T + 301), vec!["a"]);
     assert_eq!(names(&cache), Vec::<String>::new());
@@ -168,13 +174,17 @@ fn apply_confirmed_upserts_changes_and_removes_deletes() {
     let mut cache = synced(vec![rule("a", "5m", T), rule("b", "always", T)]);
     let mut toggled = rule("a", "5m", 0);
     toggled.enabled = false;
-    cache.apply_confirmed(&Notification {
-        r#type: Action::ChangeRule as i32,
-        rules: vec![toggled],
-        ..Default::default()
-    });
+    cache.apply_confirmed_at(
+        &Notification {
+            r#type: Action::ChangeRule as i32,
+            rules: vec![toggled],
+            ..Default::default()
+        },
+        T + 5,
+    );
     assert!(!get(&cache, "a").enabled);
-    assert_eq!(get(&cache, "a").created, T);
+    assert_eq!(get(&cache, "a").created, T + 5);
+    assert_eq!(cache.expiry_of("a"), Some(T + 300));
 
     cache.apply_confirmed(&Notification {
         r#type: Action::DeleteRule as i32,
@@ -316,7 +326,10 @@ async fn the_expiry_tick_prunes_and_publishes_then_ends_with_the_cache() {
         RuleHitsHandle::new(tx),
     ));
 
-    match rx.recv().await.unwrap() {
+    let published = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .expect("nothing was pruned");
+    match published.unwrap() {
         ServerMessage::SetRules { rules } => {
             assert_eq!(rules.len(), 1);
             assert_eq!(rules[0]["name"], "kept");
@@ -401,25 +414,73 @@ fn what_the_list_leaves_out_is_published_with_it() {
     assert_eq!(not_shown(published(&mut rx)), Some((0, None)));
 }
 
-/// A rule whose duration changed has a new clock (`scheduleTemporaryRule`),
-/// so the old `created` doesn't carry over: the cache must not prune a rule
-/// edited from 5 minutes to an hour after the first 5.
+fn change(rule: Rule) -> Notification {
+    Notification {
+        r#type: Action::ChangeRule as i32,
+        rules: vec![rule],
+        ..Default::default()
+    }
+}
+
+fn changed(name: &str, duration: &str, enabled: bool) -> Rule {
+    Rule {
+        enabled,
+        ..rule(name, duration, 0)
+    }
+}
+
+/// PR #106 review M1/M2, the daemon's timers (`replaceUserRule`,
+/// `scheduleTemporaryRule`): turning a rule off keeps its timer, which still
+/// removes it; a new duration while off has none; turning it on starts one.
+/// Each confirmed change is also the rule's new `created`.
 #[test]
-fn a_changed_duration_does_not_keep_the_old_clock() {
-    let mut cache = synced(vec![rule("a", "5m", T)]);
-    cache.upsert(rule("a", "1h", 0));
-    let created = get(&cache, "a").created;
-    assert_ne!(created, T, "the old clock carried over");
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64;
-    assert!((now - created).abs() < 5, "a new clock: {created}");
-    let mut off = rule("b", "1h", 0);
+fn off_new_duration_on_expires_on_the_last_timer_and_stamps_each_change() {
+    let mut cache = synced(vec![rule("a", "5m", T - 100)]);
+    cache.apply_confirmed_at(&change(changed("a", "5m", false)), T);
+    assert_eq!(get(&cache, "a").created, T);
+    assert_eq!(cache.expiry_of("a"), Some(T + 200), "its timer still runs");
+    cache.apply_confirmed_at(&change(changed("a", "1h", false)), T + 10);
+    assert_eq!(cache.expiry_of("a"), None, "no timer of this duration");
+    assert!(cache.prune_expired(T + 250).is_empty());
+    cache.apply_confirmed_at(&change(changed("a", "1h", true)), T + 20);
+    assert_eq!(get(&cache, "a").created, T + 20);
+    assert!(cache.prune_expired(T + 20 + 3599).is_empty());
+    assert_eq!(cache.prune_expired(T + 20 + 3600), vec!["a"]);
+    assert_eq!(cache.expiry_of("a"), None);
+}
+
+/// A new enabled temporary rule (the rule editor's) expires on its own
+/// timer; one added off has none.
+#[test]
+fn a_new_timed_rule_expires_only_when_it_is_on() {
+    let mut cache = synced(Vec::new());
+    cache.apply_confirmed_at(&change(changed("on", "5m", true)), T);
+    cache.apply_confirmed_at(&change(changed("off", "5m", false)), T);
+    assert_eq!(cache.prune_expired(T + 300), vec!["on"]);
+    assert_eq!(names(&cache), vec!["off"]);
+}
+
+/// A timer that already fired is gone: a rule made again under the same
+/// name (a prompt answered again) runs on a new one.
+#[test]
+fn a_rule_made_again_after_its_timer_fired_gets_a_new_one() {
+    let mut cache = synced(vec![rule("a", "5m", T - 400)]);
+    cache.upsert_at(rule("a", "5m", T), T);
+    assert_eq!(cache.expiry_of("a"), Some(T + 300));
+}
+
+/// After a resync `created` says when the rule last changed, not whether a
+/// timer runs: a rule listed off gets none from the list, so turning it on
+/// starts one from then (a row left a little long is safer than an active
+/// rule hidden early).
+#[test]
+fn a_rule_listed_off_has_no_timer_until_it_is_turned_on() {
+    let mut off = rule("a", "5m", T - 240);
     off.enabled = false;
-    let mut cache = synced(vec![rule("b", "5m", T)]);
-    cache.upsert(off);
-    assert_eq!(get(&cache, "b").created, 0, "a disabled rule has no clock");
+    let mut cache = synced(vec![off]);
+    assert_eq!(cache.expiry_of("a"), None);
+    cache.apply_confirmed_at(&change(changed("a", "5m", true)), T);
+    assert_eq!(cache.expiry_of("a"), Some(T + 300));
 }
 
 /// The stage/commit race (#61): a commit adopts the newest snapshot staged

@@ -111,13 +111,14 @@ async fn only_an_enabled_timed_rule_gets_an_expiry_stamp() {
     });
     commands.try_route(add(disabled.clone(), Some("a")));
     assert_eq!(result(&mut rx).await, RuleCommandOutcome::Ok);
-    assert_eq!(seen.lock().unwrap()[0].rules[0].created, 0);
+    assert_eq!(daemon.cache.lock().unwrap().expiry_of("100-x"), None);
 
     disabled["enabled"] = json!(true);
     commands.try_route(update("100-x", disabled.clone(), Some("b")));
     assert_eq!(result(&mut rx).await, RuleCommandOutcome::Ok);
-    let stamped = seen.lock().unwrap()[1].rules[0].created;
-    assert!((now() - stamped).abs() < 5, "turned on: {stamped}");
+    let expiry = daemon.cache.lock().unwrap().expiry_of("100-x").unwrap();
+    assert!((now() + 300 - expiry).abs() < 5, "turned on: {expiry}");
+    assert_eq!(seen.lock().unwrap().len(), 2);
 }
 
 /// After a resync every rule's `created` is the daemon's, which says
@@ -139,9 +140,10 @@ async fn turning_a_timed_rule_on_stamps_it_now_even_after_a_resync() {
     let mut rx = daemon.broadcast.subscribe();
     commands.try_route(update("100-x", switched(&rule, true), Some("a")));
     assert_eq!(result(&mut rx).await, RuleCommandOutcome::Ok);
-    let sent = seen.lock().unwrap()[0].rules[0].created;
-    assert!((now() - sent).abs() < 5, "stamped now: {sent}");
+    assert_eq!(seen.lock().unwrap().len(), 1);
     let mut cache = daemon.cache.lock().unwrap();
+    let created = cache.rules().unwrap()["100-x"].created;
+    assert!((now() - created).abs() < 5, "stamped now: {created}");
     assert!(
         cache.prune_expired(now() + 2 * 60).is_empty(),
         "still listed two minutes on"
