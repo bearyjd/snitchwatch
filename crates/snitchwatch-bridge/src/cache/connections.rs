@@ -50,6 +50,9 @@ pub struct ConnectionCache {
     capacity: usize,
     tray: Option<Arc<TrayStatePublisher>>,
     filter_pause: Option<Arc<FilterPause>>,
+    /// Set by the daemon watchdog (issue #58): every republish keeps the
+    /// tray on `DaemonDown` while it is.
+    daemon_down: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -68,6 +71,7 @@ impl ConnectionCache {
             capacity,
             tray: None,
             filter_pause: None,
+            daemon_down: false,
         }
     }
 
@@ -78,6 +82,7 @@ impl ConnectionCache {
             capacity,
             tray: Some(tray),
             filter_pause: None,
+            daemon_down: false,
         }
     }
 
@@ -97,29 +102,33 @@ impl ConnectionCache {
         self.pending.len()
     }
 
+    /// What the tray should show now: [`TrayState::derive`] over the daemon
+    /// state, the pause and the pending prompts.
+    pub fn tray_state(&self) -> TrayState {
+        let paused = self
+            .filter_pause
+            .as_ref()
+            .is_some_and(|pause| pause.is_active_now());
+        TrayState::derive(self.daemon_down, paused, self.pending_count())
+    }
+
+    /// Record the watchdog's daemon state (issue #58). The watchdog publishes
+    /// the resulting [`Self::tray_state`] itself.
+    pub fn set_daemon_down(&mut self, down: bool) {
+        self.daemon_down = down;
+    }
+
     fn republish_pending_count(&self) {
         if let Some(tray) = &self.tray {
-            let n = self.pending_count();
-            let paused = self
-                .filter_pause
-                .as_ref()
-                .is_some_and(|pause| pause.is_active_now());
-            tray.set(if paused {
-                TrayState::FilterOff
-            } else if n == 0 {
-                TrayState::Idle
-            } else {
-                TrayState::Pending(n)
-            });
+            tray.set(self.tray_state());
         }
     }
 
-    /// Publish `FilterOff` while a filter pause is active, otherwise
-    /// `Idle`/`Pending(n)` (whichever actually matches the current cache
-    /// state), regardless of what the tray is currently showing.
-    /// Used to recover the tray's display after a transient override — the
-    /// daemon-down watchdog and a `RecentBlock` timer both need "what should
-    /// the tray show right now" rather than assuming `Idle`.
+    /// Publish [`Self::tray_state`], regardless of what the tray is currently
+    /// showing. Used to recover the tray's display after a transient
+    /// override — the daemon-down watchdog and a `RecentBlock` timer both
+    /// need "what should the tray show right now" rather than assuming
+    /// `Idle`.
     pub fn resync_tray_state(&self) {
         self.republish_pending_count();
     }
@@ -554,5 +563,73 @@ mod tray_state_tests {
             .unwrap();
         rx.changed().await.unwrap();
         assert_eq!(*rx.borrow(), TrayState::Idle);
+    }
+
+    fn paused_tray_cache() -> (
+        ConnectionCache,
+        Arc<FilterPause>,
+        tokio::sync::watch::Receiver<TrayState>,
+    ) {
+        let tray = Arc::new(TrayStatePublisher::new());
+        let rx = tray.subscribe();
+        let pause = Arc::new(FilterPause::new());
+        let cache = ConnectionCache::with_tray_publisher(64, tray).with_filter_pause(pause.clone());
+        (cache, pause, rx)
+    }
+
+    /// Issue #58: while the daemon is down no resync shows anything else: not
+    /// a prompt arriving, resolved or cancelled, a recent-block revert, or a
+    /// pause starting or ending.
+    #[test]
+    fn every_resync_keeps_daemon_down_while_the_daemon_is_down() {
+        let (mut cache, pause, rx) = paused_tray_cache();
+        cache.set_daemon_down(true);
+        cache.resync_tray_state();
+        assert_eq!(*rx.borrow(), TrayState::DaemonDown);
+
+        let _first = cache.insert_pending(pending_row("1"));
+        assert_eq!(*rx.borrow(), TrayState::DaemonDown, "a prompt arriving");
+        let _second = cache.insert_pending(pending_row("2"));
+        cache
+            .resolve(
+                "1",
+                Verdict::Allow,
+                VerdictDuration::Once,
+                VerdictScope::ThisHost,
+            )
+            .unwrap();
+        assert_eq!(*rx.borrow(), TrayState::DaemonDown, "a prompt resolved");
+        assert!(cache.cancel_pending("2"));
+        assert_eq!(*rx.borrow(), TrayState::DaemonDown, "a prompt cancelled");
+        cache.resync_tray_state();
+        assert_eq!(*rx.borrow(), TrayState::DaemonDown, "a recent-block revert");
+        pause.pause(std::time::Duration::from_secs(300), 0).unwrap();
+        cache.resync_tray_state();
+        assert_eq!(*rx.borrow(), TrayState::DaemonDown, "a pause starting");
+        pause.resume();
+        cache.resync_tray_state();
+        assert_eq!(*rx.borrow(), TrayState::DaemonDown, "a pause ending");
+    }
+
+    #[test]
+    fn the_daemon_coming_back_shows_what_the_other_inputs_call_for() {
+        let (mut cache, pause, rx) = paused_tray_cache();
+        cache.set_daemon_down(true);
+        let _prompt = cache.insert_pending(pending_row("1"));
+        cache.set_daemon_down(false);
+        cache.resync_tray_state();
+        assert_eq!(*rx.borrow(), TrayState::Pending(1));
+
+        pause.pause(std::time::Duration::from_secs(300), 0).unwrap();
+        cache.set_daemon_down(true);
+        cache.resync_tray_state();
+        assert_eq!(*rx.borrow(), TrayState::DaemonDown);
+        cache.set_daemon_down(false);
+        cache.resync_tray_state();
+        assert_eq!(
+            *rx.borrow(),
+            TrayState::FilterOff,
+            "the pause outranks the prompt"
+        );
     }
 }
