@@ -232,3 +232,19 @@ fn a_message_that_was_not_queued_says_why() {
         assert_eq!(not_sent_text(error), NOT_CONNECTED, "{error:?}");
     }
 }
+
+#[test]
+fn request_ids_are_valid_distinct_and_prefixed() {
+    let (edit, make) = (next_request_id("edit"), next_request_id("make"));
+    assert!(
+        edit.starts_with("edit-") && make.starts_with("make-"),
+        "{edit} {make}"
+    );
+    assert_ne!(edit, next_request_id("edit"));
+    for id in [&edit, &make] {
+        assert!(
+            snitchwatch_bridge::ws_messages::valid_request_id(id),
+            "{id}"
+        );
+    }
+}

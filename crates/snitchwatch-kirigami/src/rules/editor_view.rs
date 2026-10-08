@@ -6,6 +6,7 @@
 use serde::Serialize;
 use serde_json::Value;
 use snitchwatch_bridge::ws_messages::{ClientMessage, RuleCommandOutcome, ServerMessage};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use super::editor::{plain_problems, EditorCheck, RuleDraft};
@@ -178,7 +179,19 @@ impl Pending {
     }
 }
 
-/// The live feed's filter for the editor.
+/// The live feed's filter for the editor and "Make a rule…": results only.
 pub fn interests_rule_editor(message: &ServerMessage) -> bool {
     matches!(message, ServerMessage::RuleCommandResult { .. })
+}
+
+/// A new request id, `<prefix>-<pid>-<n>`, unique in this process (the
+/// editor's are `edit-…`, "Make a rule…"'s `make-…`). Valid for the bridge
+/// for a short ASCII `prefix`.
+pub fn next_request_id(prefix: &str) -> String {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    format!(
+        "{prefix}-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    )
 }

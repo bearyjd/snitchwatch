@@ -12,10 +12,10 @@
 use core::pin::Pin;
 use cxx_qt::{CxxQtType, Threading};
 use cxx_qt_lib::QString;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::make_rule::{Finished, MakeRuleWait, NOT_SENT, NO_ANSWER_AFTER, SENDING};
+use crate::rules::editor_view;
 use snitchwatch_bridge::ws_messages::ServerMessage;
 
 #[cxx_qt::bridge]
@@ -100,26 +100,12 @@ impl Default for MakeRuleControllerRust {
     }
 }
 
-fn next_request_id() -> String {
-    static NEXT: AtomicU64 = AtomicU64::new(1);
-    format!(
-        "make-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    )
-}
-
-/// Only results, the same filter as the rule editor's feed.
-fn interests_make_rule(message: &ServerMessage) -> bool {
-    matches!(message, ServerMessage::RuleCommandResult { .. })
-}
-
 impl qobject::MakeRuleController {
     fn begin(mut self: Pin<&mut Self>, row_id: &QString) -> QString {
         if self.busy {
             return QString::from("");
         }
-        let request_id = next_request_id();
+        let request_id = editor_view::next_request_id("make");
         self.as_mut()
             .rust_mut()
             .wait
@@ -194,7 +180,7 @@ impl qobject::MakeRuleController {
         crate::bridge_dispatch::spawn_feed(
             &handles,
             "MakeRuleController",
-            interests_make_rule,
+            editor_view::interests_rule_editor,
             move |connection_id, message, _json| {
                 let session_handles = session_handles.clone();
                 let message = message.clone();
@@ -205,31 +191,5 @@ impl qobject::MakeRuleController {
                 });
             },
         );
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn request_ids_are_valid_and_distinct() {
-        let (a, b) = (next_request_id(), next_request_id());
-        assert_ne!(a, b);
-        for id in [&a, &b] {
-            assert!(
-                snitchwatch_bridge::ws_messages::valid_request_id(id),
-                "{id}"
-            );
-        }
-    }
-
-    #[test]
-    fn the_feed_takes_only_results() {
-        assert!(interests_make_rule(&ServerMessage::RuleCommandResult {
-            request_id: "make-1".into(),
-            outcome: snitchwatch_bridge::ws_messages::RuleCommandOutcome::Ok,
-        }));
-        assert!(!interests_make_rule(&ServerMessage::ClearConnectionRows));
     }
 }

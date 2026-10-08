@@ -13,7 +13,6 @@ use core::pin::Pin;
 use cxx_qt::{CxxQtType, Threading};
 use cxx_qt_lib::QString;
 use serde_json::Value;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use crate::rules::editor::{self, RuleDraft};
@@ -136,15 +135,6 @@ pub struct RuleEditorControllerRust {
     /// The cached rule being edited, for the cautions.
     old: Option<Value>,
     pending: editor_view::Pending,
-}
-
-fn next_request_id() -> String {
-    static NEXT: AtomicU64 = AtomicU64::new(1);
-    format!(
-        "edit-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    )
 }
 
 fn send(message: ClientMessage) -> Result<(), &'static str> {
@@ -276,7 +266,7 @@ impl qobject::RuleEditorController {
             self.set_status(reason);
             return false;
         }
-        let request_id = next_request_id();
+        let request_id = editor_view::next_request_id("edit");
         let editing = self.editing_name.to_string();
         let profile = self.profile_id.to_string();
         let message = if profile.is_empty() {
