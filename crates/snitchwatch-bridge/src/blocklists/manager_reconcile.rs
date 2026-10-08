@@ -65,7 +65,10 @@ impl BlocklistsManager {
                 drop(hosts);
                 self.remove_over_limit(id, reason).await
             }
-            None => self.rule_sink.replace_blocklist_rules(id, hosts).await,
+            None => {
+                let outcome = self.rule_sink.replace_blocklist_rules(id, hosts).await;
+                self.track_install(id, outcome)
+            }
         }
     }
 
@@ -90,16 +93,20 @@ impl BlocklistsManager {
     /// rule list is unknown, and stops at the first list the daemon can't be
     /// reached for.
     pub async fn reconcile_with(&self, scope: ReconcileScope) {
-        self.reconcile_skipping(scope, &[]).await;
+        self.reconcile_skipping(scope, &[], false).await;
     }
 
     /// A full pass after a refresh tick: lists in `tried` were installed (or
-    /// refused) by the tick's downloads and aren't tried again by it.
+    /// refused) by the tick's downloads and aren't tried again by it, and a
+    /// list the daemon refused is left alone until its backoff
+    /// ([`REFUSAL_BACKOFF_MINUTES`](crate::blocklists::REFUSAL_BACKOFF_MINUTES))
+    /// is over.
     pub async fn reconcile_after_refresh(&self, tried: &[String]) {
-        self.reconcile_skipping(ReconcileScope::Full, tried).await;
+        self.reconcile_skipping(ReconcileScope::Full, tried, true)
+            .await;
     }
 
-    async fn reconcile_skipping(&self, scope: ReconcileScope, skip: &[String]) {
+    async fn reconcile_skipping(&self, scope: ReconcileScope, skip: &[String], backoff: bool) {
         self.announce_leftover_change();
         if !self.installs_rules() || !self.rule_sink.daemon_rules_known() {
             return;
@@ -109,7 +116,7 @@ impl BlocklistsManager {
                 continue;
             }
             let before = self.enforcement(&sub.id);
-            let Some(outcome) = self.reconcile_one(&sub, scope, &before).await else {
+            let Some(outcome) = self.reconcile_one(&sub, scope, &before, backoff).await else {
                 continue;
             };
             let stop = matches!(&outcome, Err(e) if e.daemon_unavailable);
@@ -136,6 +143,7 @@ impl BlocklistsManager {
         sub: &Subscription,
         scope: ReconcileScope,
         before: &Enforcement,
+        backoff: bool,
     ) -> Option<Result<(), NotInstalled>> {
         let id = sub.id.as_str();
         if let Some(reason) = self.over_aggregate_cap(id) {
@@ -152,8 +160,12 @@ impl BlocklistsManager {
         if scope == ReconcileScope::CleanUp && tried {
             return None;
         }
+        if backoff && matches!(before, Enforcement::NotEnforced { .. }) && self.backing_off(id) {
+            return None;
+        }
         if checked {
-            return Some(self.rule_sink.reinstall_blocklist_rules(id).await);
+            let outcome = self.rule_sink.reinstall_blocklist_rules(id).await;
+            return Some(self.track_install(id, outcome));
         }
         let owned = id.to_string();
         Some(

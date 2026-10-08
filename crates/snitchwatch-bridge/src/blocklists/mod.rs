@@ -136,6 +136,10 @@ pub enum ReconcileScope {
 /// A list whose last download failed is retried after this long (or its own
 /// refresh interval, if shorter), not on every scheduler tick.
 pub const FAILED_RETRY_SECS: i64 = 60 * 60;
+/// How long, in minutes, a refresh tick leaves a list the daemon refused
+/// alone: after the first refusal, the second, and every one after (issue
+/// #73). A new daemon rule list or a new download tries again at once.
+pub const REFUSAL_BACKOFF_MINUTES: [i64; 3] = [15, 60, 240];
 /// Why a sink didn't install a list's rules. Shown to the user.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NotInstalled {
@@ -398,6 +402,9 @@ mod tests;
 
 #[cfg(test)]
 mod reconcile_tests;
+
+#[cfg(test)]
+mod backoff_tests;
 
 #[cfg(test)]
 mod leftover_manager_tests;

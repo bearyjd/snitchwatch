@@ -53,7 +53,14 @@ pub struct BlocklistsManager {
     leftover: Option<LeftoverRules>,
     /// The leftover count GUIs were last told, so a change is announced once.
     leftover_announced: Mutex<Option<usize>>,
+    /// Lists the daemon refused: how often in a row, and when a refresh tick
+    /// may try again (issue #73).
+    refusals: Mutex<HashMap<String, backoff::Refusal>>,
+    /// The time of day, replaceable in tests.
+    clock: Clock,
 }
+
+type Clock = Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>;
 
 impl BlocklistsManager {
     pub fn new(store: Arc<BlocklistStore>) -> Self {
@@ -88,6 +95,8 @@ impl BlocklistsManager {
             load_error,
             leftover: None,
             leftover_announced: Mutex::new(None),
+            refusals: Mutex::new(HashMap::new()),
+            clock: Arc::new(Utc::now),
         };
         let storage = manager.storage.clone();
         manager.with_storage_status(storage)
@@ -99,6 +108,13 @@ impl BlocklistsManager {
     /// [`daemon_sink::DaemonRuleSink`]: crate::blocklists::daemon_sink::DaemonRuleSink
     pub fn with_rule_sink(mut self, sink: Arc<dyn RuleSink>) -> Self {
         self.rule_sink = sink;
+        self
+    }
+
+    /// Replace the clock refusal backoff reads. Tests only.
+    #[cfg(test)]
+    pub(crate) fn with_clock(mut self, clock: Clock) -> Self {
+        self.clock = clock;
         self
     }
 
@@ -370,6 +386,7 @@ impl BlocklistsManager {
         self.cache().remove(id);
         self.order().retain(|other| other != id);
         self.enforcement_map().remove(id);
+        self.forget_refusals(id);
         let _ = self.bus.send(BlocklistEvent::SubscriptionsChanged);
         if self.installs_rules() {
             if let Err(e) = self.rule_sink.remove_blocklist_rules(id).await {
@@ -544,5 +561,7 @@ fn is_due(sub: &Subscription, now: DateTime<Utc>) -> bool {
     }
 }
 
+#[path = "manager_backoff.rs"]
+mod backoff;
 #[path = "manager_reconcile.rs"]
 mod reconcile;
