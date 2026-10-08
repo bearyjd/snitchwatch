@@ -107,11 +107,9 @@ tauri-smoke:
 tauri-smoke-install:
     cd tests/tauri_smoke && npm install && npx playwright install firefox
 
-# Serve test fixtures over HTTP for manual blocklist subscription smoke testing.
-blocklist-fixture-server:
-    cd tests/fixtures/blocklists && python3 -m http.server 8731
-
-# Run only the blocklist test suite.
+# Run only the blocklist test suite. Offline: lists come from fixture
+# fetchers and local TLS servers, never the network (the bridge fetches only
+# https from non-local addresses, so there is no plain-HTTP fixture server).
 test-blocklists:
     cargo test -p snitchwatch-bridge blocklists -- --nocapture
     cargo test -p snitchwatch-bridge --test blocklists_e2e -- --nocapture

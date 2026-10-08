@@ -202,34 +202,34 @@ just reached from this shell's own **Settings & Diagnostics** page instead.
 
 ## M4 — Subscribe to a blocklist
 
-Snitchwatch ships its own blocklist subscription manager. To smoke-test it
-end-to-end against the local fixture set:
+Snitchwatch ships its own blocklist subscription manager. Today it downloads
+and stores lists, but **installs no deny rules in opensnitchd yet** (issue #45
+PR B): the Blocklists page says "Blocking isn't available yet" on every list.
 
-```bash
-just blocklist-fixture-server &       # serves tests/fixtures/blocklists/ on :8731
-cargo run -p snitchwatch-bridge-cli   # bridge boots its WS socket under $XDG_RUNTIME_DIR/snitchwatch/
-```
+- Subscriptions persist in `blocklists.sqlite3` (mode 0600) under the state
+  directory: `$STATE_DIRECTORY` (set by both systemd units), else
+  `SNITCHWATCH_STATE_DIR`. With neither, they are kept in memory only and the
+  page says so.
+- The bridge fetches only `https://` URLs, including every redirect, and
+  never a loopback, link-local, carrier-grade NAT or other reserved address
+  (LAN addresses are allowed for now). There is no `http://` or `file://`
+  path, so a local plain-HTTP fixture server can't be subscribed to.
+- Lists are capped at 64 MiB and 1,000,000 hosts, and at 32 subscriptions.
+  Hosts are sent to GUIs a page at a time, on request
+  (`requestBlocklistEntries`), never as a whole list.
 
-In another terminal, send a `subscribeBlocklist` action over the WS (token
-first, per the Unix-socket handshake described above):
-
-```bash
-TOKEN=$(cat "$XDG_RUNTIME_DIR/snitchwatch/token")
-{ printf '%s\n' "$TOKEN"; printf '%s\n' '{"action":"subscribeBlocklist","url":"http://127.0.0.1:8731/domains-tiny.txt"}'; cat; } \
-    | websocat ws-c:unix:"$XDG_RUNTIME_DIR/snitchwatch/bridge.sock":/stream
-```
-
-You should immediately see two server messages: `setBlocklists` (with the new
-subscription) and `setBlocklistEntries` (with the parsed hosts). The bridge
-also pushes 5 deny rules into opensnitchd in the `900-blocklist:domains-tiny:`
-band — visible via `opensnitchd-cli list-rules` if you have a real daemon
-attached.
-
-To run the blocklist test suite in isolation:
+To exercise blocklists without the network, use the fixture-fetcher tests:
 
 ```bash
 just test-blocklists
 ```
+
+They inject a test `BlocklistFetch` (see
+`crates/snitchwatch-bridge/tests/blocklists_e2e.rs`, and
+`crates/snitchwatch-bridge-cli/tests/blocklist_wiring.rs` for a whole bridge
+started with `run_with_options`). The same approach works for a hand-driven
+bridge in an `examples/` binary. The shipped binary never takes a fetcher or
+extra trust roots: there is no test hook to switch on in production.
 
 ## Install on Bazzite (M5 / Phase 2 packaging)
 
