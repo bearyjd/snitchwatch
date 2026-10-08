@@ -231,16 +231,23 @@ mod tests {
         );
     }
 
+    /// Read a QML source at test time, so a missing file fails the test
+    /// rather than the whole crate's build.
+    fn qml_source(name: &str) -> String {
+        let path = format!("{}/qml/{name}", env!("CARGO_MANIFEST_DIR"));
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"))
+    }
+
     #[test]
     fn tray_menu_offers_exactly_the_allowed_pause_durations() {
         // Timed only (issue #47): no untimed toggle, and every offered
         // duration is one the bridge accepts.
-        let main_qml = include_str!("../qml/main.qml");
+        let tray_menu = qml_source("TrayMenu.qml");
         assert!(
-            !main_qml.contains("toggleFiltering"),
+            !tray_menu.contains("toggleFiltering"),
             "untimed pause toggle is back"
         );
-        let offered: Vec<u64> = main_qml
+        let offered: Vec<u64> = tray_menu
             .split("pauseFor(")
             .skip(1)
             .map(|rest| rest[..rest.find(')').unwrap()].trim().parse().unwrap())
@@ -248,6 +255,25 @@ mod tests {
         assert_eq!(
             offered,
             snitchwatch_bridge::filter_pause::ALLOWED_PAUSE_SECS.to_vec()
+        );
+    }
+
+    #[test]
+    fn tray_menu_is_flat() {
+        // Plasma's StatusNotifierItem tray (dbusmenu) showed a nested
+        // `Labs.Menu` as a bare "Pause filtering" entry with no submenu,
+        // and activating it did nothing (VM run r6). Every pause length
+        // must be its own top-level item: the menu's root is the only
+        // `Labs.Menu`, and `main.qml` declares none of its own.
+        let tray_menu = qml_source("TrayMenu.qml");
+        assert_eq!(
+            tray_menu.matches("Labs.Menu {").count(),
+            1,
+            "TrayMenu.qml nests a submenu"
+        );
+        assert!(
+            !qml_source("main.qml").contains("Labs.Menu {"),
+            "main.qml declares a tray menu (or submenu) outside TrayMenu.qml"
         );
     }
 }
