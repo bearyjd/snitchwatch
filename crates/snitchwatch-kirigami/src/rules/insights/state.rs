@@ -15,7 +15,8 @@ use std::sync::Arc;
 
 use serde::Serialize;
 
-use super::shadow::{Analysis, Finding, FindingKind, MAX_ANALYZED_RULES};
+use super::shadow::{analyze_until, Analysis, Finding, FindingKind, MAX_ANALYZED_RULES};
+use crate::rules::row_store::Rule;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -28,6 +29,15 @@ pub enum Phase {
     TooMany,
     /// The rule list changed since the last (or the running) analysis.
     Stale,
+}
+
+impl Run {
+    /// What the worker thread does: analyse `rules`, or give up with `None`
+    /// once the rule list has changed. The generation goes back with the
+    /// result, for [`AnalysisState::finish`].
+    pub fn execute(&self, rules: &[Rule]) -> Option<(u64, Analysis)> {
+        analyze_until(rules, &self.cancel).map(|analysis| (self.generation, analysis))
+    }
 }
 
 #[derive(Debug)]

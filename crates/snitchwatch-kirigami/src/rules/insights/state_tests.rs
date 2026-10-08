@@ -165,3 +165,26 @@ fn a_finish_nobody_is_waiting_for_changes_nothing() {
     assert!(state.finding("a").is_some());
     assert!(state.finding("b").is_none());
 }
+
+#[test]
+fn a_cancelled_run_gives_up_and_a_live_one_answers_for_its_generation() {
+    use super::testkit::{allow, deny, host};
+    use std::sync::atomic::Ordering;
+    let rules = [
+        allow("100-a", host("example.com")),
+        deny("200-d", host("example.com")),
+    ];
+    let mut state = AnalysisState::default();
+    let run = state.start().unwrap();
+    let (generation, analysis) = run.execute(&rules).expect("nothing cancelled it");
+    assert_eq!(generation, run.generation);
+    state.finish(generation, analysis);
+    assert!(state.finding("100-a").is_some());
+
+    let run = state.start().unwrap();
+    run.cancel.store(true, Ordering::Relaxed);
+    assert!(
+        run.execute(&rules).is_none(),
+        "a cancelled run answers nothing"
+    );
+}

@@ -506,12 +506,10 @@ impl qobject::RulesModel {
         let qt_thread = self.qt_thread();
         std::thread::spawn(move || {
             // `None`: the rule list changed meanwhile and nobody wants this.
-            let Some(analysis) = crate::rules::insights::shadow::analyze_until(&rules, &run.cancel)
-            else {
+            let Some((generation, analysis)) = run.execute(&rules) else {
                 return;
             };
-            let _ =
-                qt_thread.queue(move |qobject| qobject.finish_analysis(run.generation, analysis));
+            let _ = qt_thread.queue(move |qobject| qobject.finish_analysis(generation, analysis));
         });
     }
 
