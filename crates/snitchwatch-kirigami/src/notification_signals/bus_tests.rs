@@ -93,11 +93,24 @@ impl PrivateBus {
     /// A fake notification server. It takes the name with zbus' default
     /// flags, so a later one replaces it.
     pub(crate) async fn notification_server(&self) -> Connection {
+        self.serve(FakeServer::default()).await
+    }
+
+    /// A fake notification server that never answers `CloseNotification`.
+    pub(crate) async fn notification_server_stuck_on_close(&self) -> Connection {
+        self.serve(FakeServer {
+            stuck_on_close: true,
+            ..FakeServer::default()
+        })
+        .await
+    }
+
+    async fn serve(&self, server: FakeServer) -> Connection {
         zbus::connection::Builder::address(self.address.as_str())
             .unwrap()
             .name(SERVER)
             .unwrap()
-            .serve_at(PATH, FakeServer::default())
+            .serve_at(PATH, server)
             .unwrap()
             .build()
             .await
@@ -201,6 +214,8 @@ struct FakeServer {
     notified: u32,
     closed: Vec<u32>,
     last: Option<Notified>,
+    /// Never answer `CloseNotification` (it then holds the interface).
+    stuck_on_close: bool,
 }
 
 /// What one `Notify` carried besides its text and actions.
@@ -234,8 +249,11 @@ impl FakeServer {
         7
     }
 
-    fn close_notification(&mut self, id: u32) {
+    async fn close_notification(&mut self, id: u32) {
         self.closed.push(id);
+        if self.stuck_on_close {
+            std::future::pending::<()>().await;
+        }
     }
 }
 

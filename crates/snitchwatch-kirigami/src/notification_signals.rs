@@ -304,20 +304,32 @@ fn voids(change: Option<&NameOwnerChanged>, owner: &UniqueName<'_>) -> bool {
     }
 }
 
+/// How long a `CloseNotification` may take before it is given up on.
+pub(crate) const CLOSE_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Ask notification server `server` (a unique name) to close notification
-/// `id`. Best effort.
+/// `id`. Best effort, and given up after [`CLOSE_WAIT`]: a server that
+/// doesn't answer mustn't hold up whoever waits on this.
 async fn close_on(conn: &Connection, server: &UniqueName<'_>, id: u32) {
-    if let Err(error) = conn
-        .call_method(
-            Some(server.as_str()),
-            PATH,
-            Some(INTERFACE),
-            "CloseNotification",
-            &(id,),
-        )
-        .await
-    {
-        tracing::info!(%error, id, %server, "closing the notification failed");
+    let body = (id,);
+    let call = conn.call_method(
+        Some(server.as_str()),
+        PATH,
+        Some(INTERFACE),
+        "CloseNotification",
+        &body,
+    );
+    match tokio::time::timeout(CLOSE_WAIT, call).await {
+        Ok(Ok(_)) => {}
+        Ok(Err(error)) => {
+            tracing::info!(%error, id, %server, "closing the notification failed")
+        }
+        Err(_) => tracing::info!(
+            id,
+            %server,
+            wait = ?CLOSE_WAIT,
+            "the notification server didn't answer CloseNotification; given up"
+        ),
     }
 }
 

@@ -479,3 +479,62 @@ async fn a_click_on_the_notification_answers_and_closes_it() {
         .unwrap();
     assert_eq!(closed(&server).await, [7]);
 }
+
+/// PR #112 review L2: the clicked notice is closed alongside the answer, so
+/// a server that never answers `CloseNotification` doesn't delay it, and
+/// the close is given up after `CLOSE_WAIT`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_server_that_never_closes_doesnt_delay_the_answer() {
+    use crate::notification_signals::bus_tests::{notified, server_clicks, PrivateBus};
+    use crate::notification_signals::CLOSE_WAIT;
+    use crate::pending_notice::{show_and_answer, PendingTarget};
+
+    let Some(bus) = PrivateBus::start() else {
+        return;
+    };
+    let server = bus.notification_server_stuck_on_close().await;
+    let listener = bus.connect().await;
+    let (handles, connection, mut inbound_rx) = handles_and_queue();
+    let session = mark_connected(&connection, true);
+    insert(
+        &connection,
+        session,
+        vec![row("ask-1", Some("/usr/bin/curl"))],
+    );
+    let notice = BridgeNotice::Pending {
+        row_id: 1,
+        process: "curl".into(),
+    };
+    let target = PendingTarget::of(&handles, session, &notice).expect("still waiting");
+    let shown = tokio::spawn(async move { show_and_answer(&listener, target, || {}).await });
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while notified(&server).await == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the notice was never shown"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    server_clicks(&server, "allow-once").await;
+    tokio::time::timeout(CLOSE_WAIT / 2, inbound_rx.recv())
+        .await
+        .expect("the answer waited on CloseNotification")
+        .expect("the answer was queued");
+    handles
+        .broadcast_tx
+        .send(ReceivedServerMessage {
+            connection_id: session,
+            message: ServerMessage::UpdateConnectionRows {
+                rows: vec![ConnectionRow {
+                    action: Some("allow".into()),
+                    ..row("ask-1", Some("/usr/bin/curl"))
+                }],
+            },
+        })
+        .unwrap();
+    tokio::time::timeout(CLOSE_WAIT * 3, shown)
+        .await
+        .expect("a stuck CloseNotification held the notice forever")
+        .unwrap();
+}

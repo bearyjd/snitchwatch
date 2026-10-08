@@ -86,9 +86,11 @@ pub(crate) async fn show_and_answer(
     );
     match notice.wait(&KEYS, row_stops_waiting(&target)).await {
         WaitEnd::Action(key) => {
-            // Resident: the server keeps it after the click.
-            notice.close().await;
-            on_action(&target, key, on_review).await;
+            // Resident: the server keeps it after the click, so it is
+            // closed here, alongside the answer rather than before it: a
+            // slow `CloseNotification` mustn't delay the answer (PR #112
+            // review L2), nor the answer the close.
+            tokio::join!(on_action(&target, key, on_review), notice.close());
         }
         // A new server voids the notice's buttons, so it goes; the row
         // still waits, to be answered in the window.
