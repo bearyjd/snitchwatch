@@ -185,8 +185,12 @@ the design above, this is what shipped):
   `daemon_config.rs`: gaps come from the daemon's own counter (below), so
   nothing here reads `ClientConfig.config`, and the prompt-slot plan's step
   10 creates that file.
-  Hooks: `RulesSync::commit` and a confirmed `DELETE_RULE` in
-  `apply_confirmed`; nothing on `withdraw`. The Kirigami side is
+  Hooks: `RulesSync::commit`, a confirmed `DELETE_RULE` in
+  `apply_confirmed`, and an expired temporary rule (the 30 s
+  `prune_expired_rules_every` tick, which now returns the pruned names, and
+  `RulesSync::upsert` when a remembered verdict replaces an expired rule
+  before that tick: prompt-rule names are deterministic, so a re-made rule
+  would otherwise inherit the old count); nothing on `withdraw`. The Kirigami side is
   `rules/hits.rs` plus three lines of `RulesModel` and `RulesPage.qml`.
 - **`lossy` is a gap record, and it is saved.** The wire message carries
   `lossy` and `lastGapUnixMs` (the two never disagree), because "never

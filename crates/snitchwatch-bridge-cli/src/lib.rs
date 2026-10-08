@@ -549,6 +549,7 @@ where
         RULE_EXPIRY_TICK,
         Arc::downgrade(&rules),
         broadcast_tx.clone(),
+        ui_service_inner.rule_hits_handle(),
     ));
 
     // Diagnostics: combines daemon-reachability (`liveness`), opensnitchd's

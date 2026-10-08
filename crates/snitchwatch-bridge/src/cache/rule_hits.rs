@@ -37,8 +37,11 @@
 //! `Unknown` (between a daemon stream closing and the next snapshot). A
 //! committed snapshot moves the side entries it names into the main map and
 //! forgets the rest, and drops main-map names it lacks. A confirmed
-//! `DELETE_RULE` drops that name. **Nothing prunes on `withdraw`**: it runs on
-//! every daemon reconnect and would wipe every count.
+//! `DELETE_RULE` drops that name, and so does a temporary rule that expired
+//! (`RulesCache::prune_expired`, or a remembered verdict that replaces it
+//! before the prune: prompt rules are named deterministically, so a re-made
+//! rule would otherwise inherit the old count). **Nothing prunes on
+//! `withdraw`**: it runs on every daemon reconnect and would wipe every count.
 //!
 //! Counts restored from the saved file wait the same way (`restored`) until
 //! the first committed snapshot says which of them still exist. Until then

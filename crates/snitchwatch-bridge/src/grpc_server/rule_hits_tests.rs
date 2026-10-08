@@ -312,3 +312,92 @@ async fn a_daemon_restart_marks_the_counts_incomplete_and_keeps_them() {
     assert!(lossy(&svc));
     assert_eq!(hits(&svc), vec![pair("a", 5)]);
 }
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64
+}
+
+/// A five-minute rule created `created`, named like a remembered verdict.
+fn temporary(name: &str, created: i64) -> Rule {
+    Rule {
+        duration: "5m".to_string(),
+        created,
+        ..rule(name)
+    }
+}
+
+/// `Subscribe` with exactly these rules, then HELLO.
+async fn connect_with(svc: &UiService, rules: Vec<Rule>) -> Daemon {
+    svc.subscribe(Request::new(ClientConfig {
+        rules,
+        ..Default::default()
+    }))
+    .await
+    .unwrap();
+    let (stream, outbound) = svc.daemon_commands().open_stream(None);
+    svc.daemon_commands().on_reply(stream.id(), &hello());
+    Daemon {
+        stream,
+        _outbound: outbound,
+    }
+}
+
+#[tokio::test]
+async fn an_expired_temporary_rule_loses_its_count_on_the_wire_and_in_the_file() {
+    let (svc, _rx) = service();
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("rule_hits.json");
+    svc.rule_hits_handle().attach_file(file.clone());
+    let _stream = connect_with(&svc, vec![temporary("tmp", now_secs() - 301), rule("a")]).await;
+    ping(&svc, vec![event("tmp"), event("tmp"), event("a")], 10, 3).await;
+    assert_eq!(hits(&svc), vec![pair("a", 1), pair("tmp", 2)]);
+
+    let tick = tokio::spawn(crate::cache::rules::prune_expired_rules_every(
+        std::time::Duration::from_secs(30),
+        Arc::downgrade(&svc.rules_handle()),
+        svc.broadcast.clone(),
+        svc.rule_hits_handle(),
+    ));
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while hits(&svc).len() != 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the expired rule's count was never dropped");
+    tick.abort();
+    assert_eq!(hits(&svc), vec![pair("a", 1)]);
+
+    svc.rule_hits_handle().save_now();
+    let saved = crate::cache::rule_hits_file::load(&file).unwrap().unwrap();
+    let names: Vec<_> = saved.hits.iter().map(|h| h.name.as_str()).collect();
+    assert_eq!(names, vec!["a"], "and not in the file either");
+}
+
+#[tokio::test]
+async fn a_rule_re_prompted_before_the_expiry_tick_starts_at_zero() {
+    // `rule_name_for` is deterministic, so the new rule has the old name.
+    let (svc, _rx) = service();
+    let created = now_secs() - 301;
+    let _stream = connect_with(&svc, vec![temporary("tmp", created)]).await;
+    ping(&svc, vec![event("tmp"), event("tmp")], 10, 2).await;
+    assert_eq!(hits(&svc), vec![pair("tmp", 2)]);
+
+    svc.rules.upsert(temporary("tmp", now_secs()));
+    assert_eq!(hits(&svc), Vec::new(), "a new rule, not the expired one");
+    ping(&svc, vec![event("tmp")], 11, 3).await;
+    assert_eq!(hits(&svc), vec![pair("tmp", 1)]);
+}
+
+#[tokio::test]
+async fn a_remembered_verdict_over_a_live_rule_keeps_its_count() {
+    let (svc, _rx) = service();
+    let created = now_secs() - 60;
+    let _stream = connect_with(&svc, vec![temporary("tmp", created)]).await;
+    ping(&svc, vec![event("tmp"), event("tmp")], 10, 2).await;
+    svc.rules.upsert(temporary("tmp", now_secs()));
+    assert_eq!(hits(&svc), vec![pair("tmp", 2)]);
+}
