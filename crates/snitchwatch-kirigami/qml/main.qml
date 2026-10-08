@@ -279,13 +279,15 @@ Kirigami.ApplicationWindow {
         // opensnitchd caps a single AskRule at 120s and unconditionally
         // clears isAsking once that fires (vendor/opensnitch/daemon/ui/
         // client.go:366, main.go:458-459) — past that, the exposure window
-        // this banner warns about is already closed even though the row can
-        // stay "pending" in Snitchwatch's own cache indefinitely (the bridge
-        // has no timeout on its side of ask_rule and no reaper for a
-        // cancelled/dropped verdict oneshot). Without this ceiling the
-        // banner would count up forever and its claim would go from true to
-        // false with no visible change — worse than no banner, since it
-        // trains the user to ignore a real warning.
+        // this banner warns about is already closed even though a row can
+        // stay "pending" in Snitchwatch's own cache indefinitely on a bridge
+        // older than #39 (such as the published v0.1.1 tarball), which has no
+        // reaper for a cancelled/dropped verdict oneshot. Newer bridges remove
+        // the row when the ask is cancelled; this ceiling stays for the older
+        // ones. Without this ceiling the banner would count up forever and
+        // its claim would go from true to false with no visible change —
+        // worse than no banner, since it trains the user to ignore a real
+        // warning.
         readonly property int pendingAgeCeilingSecs: 120
         readonly property int pendingAgeSecs: root.connectionsModelRef.oldestPendingAgeSecs
         readonly property int pendingCount: root.connectionsModelRef.pendingCount
