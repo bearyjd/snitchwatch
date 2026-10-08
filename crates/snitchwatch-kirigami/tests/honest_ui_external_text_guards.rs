@@ -128,6 +128,7 @@ fn text_binding(block: &str) -> Option<String> {
 ///   * a `PlaceholderMessage`'s `text` or `explanation`, which have no format
 ///     hook at all;
 ///   * a `ToolTip.text`, which the style draws with an AutoText label.
+///
 /// (`Kirigami.InlineMessage` is covered by its own test below.)
 fn violations(name: &str, source: &str, exprs: &[&str]) -> Vec<String> {
     let code = code_lines(source);
