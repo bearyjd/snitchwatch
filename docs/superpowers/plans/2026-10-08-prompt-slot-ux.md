@@ -245,6 +245,38 @@ issue #78.
   - Review opens the Connections page, whose auto-select picks the row; it
     doesn't open the inspector.
 
+#### Issue #78 as implemented (2026-10-08): a pause answers what is waiting
+
+Branch `feat/78-pause-answers-waiting`, stacked on
+`feat/prompt-slot-visibility`; owner decision: option 1.
+- **Bridge-side, so it works tray-only.** After every `SetFilteringPaused`
+  the pump calls `pause_answers::answer_waiting`, then
+  `announce_pause_state`.
+  - It answers each pending Ask the pause applies to
+    (`FilterPause::applies_to`: admitted under the pausing GUI session's
+    generation, which is still current).
+  - It answers through `ConnectionCache::resolve(Allow, Once, ThisHost)`,
+    the call a GUI's Allow once goes through. Nothing is saved and no
+    `UpdateRules` is sent.
+  - The answered rows go out as `UpdateConnectionRows`. Each Ask's reply
+    releases its slot hold, so the banner and tray follow.
+- **Label.** `ConnectionRow.autoAnswer: "filterPaused"`, additive. A reason
+  this build doesn't know parses as `Unknown`, so a newer bridge can't
+  break the row.
+  - Kirigami's `answeredWhilePaused` role makes the row's verdict label read
+    "Allowed once (filtering was paused)" (PlainText).
+  - Asks that arrive during the pause get the same label. The text is true
+    for them too.
+- **No gap.** `ask_rule` now chooses between prompting and the pause's
+  allow under the cache lock (the check used to run before taking it). The
+  scan holds that lock too, and runs after the pause is set. Either the
+  scan sees the pending row, or the row's insertion sees the pause.
+  - #86's warning stays as the fallback.
+  - The warning can flash for a moment between `FilterPauseState` and the
+    Asks' slot releases. That is a flicker, not a waiting prompt.
+- **Menu.** Each pause item reads, e.g., "Pause for 5 minutes (also lets
+  waiting connections through once)".
+
 ### B. Answer from the notification (UI, S; owner question S5 confirms)
 
 5. `notification_controller.rs` `dispatch` adds "Allow once" and "Deny"

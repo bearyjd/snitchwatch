@@ -31,11 +31,25 @@ const PROBE_URL: &str = "qrc:/tray_menu_probe.qml";
 const MARKER: &str = "TRAY_ACTION ";
 const STATE_MARKER: &str = "TRAY_STATE ";
 
-/// The pause/resume items, by objectName, in menu order.
-const PAUSE_ITEMS: [(&str, u64); 3] = [
-    ("pauseFor300", 300),
-    ("pauseFor1800", 1800),
-    ("pauseFor3600", 3600),
+/// The pause items, by objectName, in menu order, with their duration and
+/// text. A pause also lets the prompts already waiting through once (issue
+/// #78), and each item says so.
+const PAUSE_ITEMS: [(&str, u64, &str); 3] = [
+    (
+        "pauseFor300",
+        300,
+        "Pause for 5 minutes (also lets waiting connections through once)",
+    ),
+    (
+        "pauseFor1800",
+        1800,
+        "Pause for 30 minutes (also lets waiting connections through once)",
+    ),
+    (
+        "pauseFor3600",
+        3600,
+        "Pause for 1 hour (also lets waiting connections through once)",
+    ),
 ];
 
 #[test]
@@ -172,7 +186,7 @@ Window {
         .collect();
     let expected: Vec<ClientMessage> = PAUSE_ITEMS
         .iter()
-        .map(|&(_, secs)| Some(secs))
+        .map(|&(_, secs, _)| Some(secs))
         .chain([None])
         .map(|duration_secs| ClientMessage::SetFilteringPaused {
             paused: duration_secs.is_some(),
@@ -224,8 +238,9 @@ fn assert_menu_states(captured: &str) {
             "default" | "reconnect" => (false, "Resume filtering", false),
             other => panic!("unexpected state {other}"),
         };
-        for (name, _) in PAUSE_ITEMS {
+        for (name, _, text) in PAUSE_ITEMS {
             let pause = item(name);
+            assert_eq!(pause["text"], text, "{label}: {name} text");
             assert_eq!(pause["visible"], true, "{label}: {name} hidden");
             assert_eq!(pause["enabled"], can_pause, "{label}: {name} enabled");
         }

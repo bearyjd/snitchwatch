@@ -30,7 +30,7 @@ use crate::connections::row_store::{matched_rule_display, ModelOp, RowStore, Ver
 use crate::inline_deny::{self, InlineDeny};
 use crate::pending_decision::VerdictChoice;
 use snitchwatch_bridge::translator::process_binding::is_bindable_process_path;
-use snitchwatch_bridge::ws_messages::{ConnectionRow, ServerMessage};
+use snitchwatch_bridge::ws_messages::{AutoAnswer, ConnectionRow, ServerMessage};
 
 // Role ids exposed to the QML delegate. Flat-mode leaf rows use 0-6; the
 // grouping layer (Little-Snitch-parity Process->Domain view) adds 7+. None
@@ -65,6 +65,8 @@ const ROLE_MATCHED_RULE: i32 = 18;
 /// what it shows for pending / no-rule-name rows.
 const ROLE_MATCHED_RULE_DISPLAY: i32 = 19;
 const ROLE_SOURCE_SESSION: i32 = 20;
+/// The bridge allowed this row once because filtering was paused (#78).
+const ROLE_ANSWERED_WHILE_PAUSED: i32 = 21;
 
 #[cxx_qt::bridge]
 pub mod qobject {
@@ -553,6 +555,7 @@ impl qobject::ConnectionsModel {
                 QVariant::from(&QString::from(row.matched_rule.as_deref().unwrap_or("")))
             }
             ROLE_MATCHED_RULE_DISPLAY => QVariant::from(&QString::from(&matched_rule_display(row))),
+            ROLE_ANSWERED_WHILE_PAUSED => QVariant::from(&answered_while_paused(row)),
             _ => QVariant::default(),
         }
     }
@@ -582,6 +585,10 @@ impl qobject::ConnectionsModel {
         roles.insert(
             ROLE_MATCHED_RULE_DISPLAY,
             QByteArray::from("matchedRuleDisplay"),
+        );
+        roles.insert(
+            ROLE_ANSWERED_WHILE_PAUSED,
+            QByteArray::from("answeredWhilePaused"),
         );
         roles
     }
@@ -1184,6 +1191,10 @@ impl qobject::ConnectionsModel {
 /// Read one role of a grouped-projection [`VisibleEntry`] into the QVariant
 /// shape `data()` returns. `store` resolves leaf `Row` entries' full
 /// `ConnectionRow` content (the tree only tracks ids).
+fn answered_while_paused(row: &ConnectionRow) -> bool {
+    row.auto_answer == Some(AutoAnswer::FilterPaused)
+}
+
 fn grouped_entry_data(entry: &VisibleEntry, role: i32, store: &RowStore) -> QVariant {
     match entry {
         VisibleEntry::ProcessHeader {
@@ -1210,6 +1221,7 @@ fn grouped_entry_data(entry: &VisibleEntry, role: i32, store: &RowStore) -> QVar
             ROLE_GROUP_DENIED => QVariant::from(&(counts.denied as i32)),
             ROLE_GROUP_BLOCKLISTED => QVariant::from(&(counts.blocklisted as i32)),
             ROLE_MATCHED_RULE | ROLE_MATCHED_RULE_DISPLAY => QVariant::from(&QString::from("")),
+            ROLE_ANSWERED_WHILE_PAUSED => QVariant::from(&false),
             _ => QVariant::default(),
         },
         VisibleEntry::DomainHeader {
@@ -1237,6 +1249,7 @@ fn grouped_entry_data(entry: &VisibleEntry, role: i32, store: &RowStore) -> QVar
             ROLE_GROUP_DENIED => QVariant::from(&(counts.denied as i32)),
             ROLE_GROUP_BLOCKLISTED => QVariant::from(&(counts.blocklisted as i32)),
             ROLE_MATCHED_RULE | ROLE_MATCHED_RULE_DISPLAY => QVariant::from(&QString::from("")),
+            ROLE_ANSWERED_WHILE_PAUSED => QVariant::from(&false),
             _ => QVariant::default(),
         },
         VisibleEntry::Row { id, .. } => {
@@ -1271,6 +1284,7 @@ fn grouped_entry_data(entry: &VisibleEntry, role: i32, store: &RowStore) -> QVar
                 ROLE_MATCHED_RULE_DISPLAY => {
                     QVariant::from(&QString::from(&matched_rule_display(row)))
                 }
+                ROLE_ANSWERED_WHILE_PAUSED => QVariant::from(&answered_while_paused(row)),
                 _ => QVariant::default(),
             }
         }
@@ -1352,6 +1366,7 @@ mod tests {
             bytes_received: 0,
             started_at_ms: 0,
             matched_rule: None,
+            auto_answer: None,
         }
     }
 

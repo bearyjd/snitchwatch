@@ -672,6 +672,14 @@ where
                     sender_generation,
                     sender_uid,
                 );
+                // A pause also lets the prompts already waiting through,
+                // Allow once (issue #78). A no-op unless a pause applies.
+                snitchwatch_bridge::pause_answers::answer_waiting(
+                    &filter_pause_for_pump,
+                    &cache_for_upstream,
+                    &snapshot_tx,
+                )
+                .await;
                 // Always, even for an ignored or rejected request, so every
                 // GUI and the tray show the state that is actually in effect.
                 announce_pause_state(&filter_pause_for_pump, &cache_for_upstream, &snapshot_tx)
@@ -1479,6 +1487,7 @@ mod tests {
             bytes_received: 5678,
             started_at_ms: 0,
             matched_rule: None,
+            auto_answer: None,
         };
         bridge
             .broadcast_tx

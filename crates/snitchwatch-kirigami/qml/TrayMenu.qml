@@ -13,6 +13,9 @@
 // unverified, and the menu is built before the first bridge state arrives,
 // when nothing could be offered yet. Driven end to end by
 // tests/tray_menu_qml.rs; the objectNames are what that probe triggers.
+//
+// A pause also lets the connections already waiting for an answer through,
+// Allow once (issue #78), so each pause item says so.
 import QtQuick
 import Qt.labs.platform as Labs
 import com.snitchwatch.shell
@@ -39,19 +42,19 @@ Labs.Menu {
     Labs.MenuItem {
         objectName: "pauseFor300"
         enabled: trayMenu.canPause
-        text: "Pause for 5 minutes"
+        text: "Pause for 5 minutes (also lets waiting connections through once)"
         onTriggered: trayMenu.controller.pauseFor(300)
     }
     Labs.MenuItem {
         objectName: "pauseFor1800"
         enabled: trayMenu.canPause
-        text: "Pause for 30 minutes"
+        text: "Pause for 30 minutes (also lets waiting connections through once)"
         onTriggered: trayMenu.controller.pauseFor(1800)
     }
     Labs.MenuItem {
         objectName: "pauseFor3600"
         enabled: trayMenu.canPause
-        text: "Pause for 1 hour"
+        text: "Pause for 1 hour (also lets waiting connections through once)"
         onTriggered: trayMenu.controller.pauseFor(3600)
     }
     Labs.MenuItem {
