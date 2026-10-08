@@ -25,7 +25,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use snitchwatch_bridge::rule_name::is_reserved_profile_name;
+use snitchwatch_bridge::rule_name::{is_reserved_curated_name, is_reserved_profile_name};
 use snitchwatch_bridge::ws_messages::ServerMessage;
 
 /// The `z00-blocklist:<list_id>:<kind>` filename band a subscribed
@@ -122,6 +122,12 @@ pub enum RuleSource {
     /// same test the bridge makes it read-only by, so the label and the
     /// read-only reason ("Managed on the Profiles page") always agree.
     Profile,
+    /// A recommended background-service rule (prompt-slot D): under the
+    /// curated-defaults prefix and one the bridge lets a GUI turn on or off,
+    /// the same test that gives it its read-only reason ("A recommended
+    /// background-service rule"). Another rule under that prefix is only a
+    /// reserved name, and stays a user rule.
+    Recommended,
     Blocklist {
         list_id: String,
     },
@@ -164,6 +170,9 @@ impl Rule {
                 list_id: rest.split(':').next().unwrap_or("").to_string(),
             },
             None if is_reserved_profile_name(&self.name) => RuleSource::Profile,
+            None if is_reserved_curated_name(&self.name) && self.toggleable == Some(true) => {
+                RuleSource::Recommended
+            }
             None => RuleSource::User,
         }
     }
@@ -378,11 +387,8 @@ struct FoundRule<'a> {
 pub fn found_rule_json(store: &RulesStore, name: &str) -> Option<String> {
     let idx = store.index_of(name)?;
     let rule = store.row(idx)?;
-    let (source, blocklist_id) = match rule.source() {
-        RuleSource::User => ("user", String::new()),
-        RuleSource::Profile => ("profile", String::new()),
-        RuleSource::Blocklist { list_id } => ("blocklist", list_id),
-    };
+    let from = rule.source();
+    let (source, blocklist_id) = (from.key(), from.blocklist_id());
     let found = FoundRule {
         name: &rule.name,
         display_name: rule.shown_name(),

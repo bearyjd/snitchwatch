@@ -10,6 +10,7 @@ use super::row_store::{RuleSource, RulesStore};
 
 pub const USER_RULES: &str = "User rules";
 pub const PROFILE_RULES: &str = "Profile rules";
+pub const RECOMMENDED_RULES: &str = "Recommended rules";
 pub const BLOCKLIST_RULES: &str = "Blocklist rules";
 
 impl RuleSource {
@@ -18,7 +19,27 @@ impl RuleSource {
         match self {
             RuleSource::User => USER_RULES,
             RuleSource::Profile => PROFILE_RULES,
+            RuleSource::Recommended => RECOMMENDED_RULES,
             RuleSource::Blocklist { .. } => BLOCKLIST_RULES,
+        }
+    }
+
+    /// The source as the page's `source` role and the "Show rule" JSON
+    /// carry it; QML compares only `"blocklist"`.
+    pub fn key(&self) -> &'static str {
+        match self {
+            RuleSource::User => "user",
+            RuleSource::Profile => "profile",
+            RuleSource::Recommended => "recommended",
+            RuleSource::Blocklist { .. } => "blocklist",
+        }
+    }
+
+    /// The blocklist's id, or "" for any other source.
+    pub fn blocklist_id(&self) -> String {
+        match self {
+            RuleSource::Blocklist { list_id } => list_id.clone(),
+            _ => String::new(),
         }
     }
 }
@@ -84,6 +105,31 @@ mod tests {
         assert_eq!(parsed["source"], "profile");
         assert_eq!(parsed["sourceLabel"], PROFILE_RULES);
         assert_eq!(parsed["blocklistId"], "");
+    }
+
+    /// A recommended background-service rule (prompt-slot D) has its own
+    /// heading; another rule under that reserved prefix is a user rule, as
+    /// its read-only reason (a reserved name) says.
+    #[test]
+    fn recommended_rules_are_labelled_as_such() {
+        let mut s = RulesStore::new();
+        let wire = |name: &str, toggleable: bool| {
+            serde_json::json!({ "name": name, "enabled": true, "action": "allow",
+                                "toggleable": toggleable })
+        };
+        s.apply(&ServerMessage::SetRules {
+            rules: vec![
+                wire("snitchwatch-default-ntp", true),
+                wire("snitchwatch-default-squatter", false),
+            ],
+        });
+        let sources: Vec<_> = (0..s.len()).map(|i| s.row(i).unwrap().source()).collect();
+        assert_eq!(sources, [RuleSource::Recommended, RuleSource::User]);
+        assert_eq!(section_label(&s, 0).unwrap(), RECOMMENDED_RULES);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&found_rule_json(&s, "snitchwatch-default-ntp").unwrap()).unwrap();
+        assert_eq!(parsed["source"], "recommended");
+        assert_eq!(parsed["sourceLabel"], RECOMMENDED_RULES);
     }
 
     /// The list is in check order, so user rules can come back after the

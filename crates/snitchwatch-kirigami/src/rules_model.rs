@@ -24,7 +24,7 @@ use crate::rules::hits::{RowHits, RuleHitsView};
 use crate::rules::insights::row::row_insights;
 use crate::rules::insights::shadow::Analysis;
 use crate::rules::insights::state::AnalysisState;
-use crate::rules::row_store::{RuleSource, RulesStore};
+use crate::rules::row_store::RulesStore;
 use crate::rules::simulator::SimulationForm;
 use snitchwatch_bridge::ws_messages::{ClientMessage, ServerMessage};
 
@@ -276,21 +276,8 @@ impl qobject::RulesModel {
             ROLE_DURATION => QVariant::from(&QString::from(&rule.duration)),
             ROLE_OPERATOR_SUMMARY => QVariant::from(&QString::from(&rule.operator_summary())),
             ROLE_PRECEDENCE => QVariant::from(&(row as i32)),
-            ROLE_SOURCE => {
-                let source = match rule.source() {
-                    RuleSource::User => "user",
-                    RuleSource::Profile => "profile",
-                    RuleSource::Blocklist { .. } => "blocklist",
-                };
-                QVariant::from(&QString::from(source))
-            }
-            ROLE_BLOCKLIST_ID => {
-                let id = match rule.source() {
-                    RuleSource::User | RuleSource::Profile => String::new(),
-                    RuleSource::Blocklist { list_id } => list_id,
-                };
-                QVariant::from(&QString::from(&id))
-            }
+            ROLE_SOURCE => QVariant::from(&QString::from(rule.source().key())),
+            ROLE_BLOCKLIST_ID => QVariant::from(&QString::from(&rule.source().blocklist_id())),
             _ => QVariant::default(),
         }
     }
