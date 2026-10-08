@@ -12,6 +12,7 @@ use super::*;
 
 mod hashes;
 mod operands;
+mod regexp_corpus;
 mod regexps;
 
 // ---- builders -------------------------------------------------------------

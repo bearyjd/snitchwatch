@@ -24,7 +24,6 @@ const DEST_IP: &str = "destination IP";
 const IFACE_IN: &str = "inbound interface";
 const IFACE_OUT: &str = "outbound interface";
 const CHECKSUM_MD5: &str = "program's MD5 checksum";
-const CHECKSUM_SHA1: &str = "program's SHA1 checksum";
 const CHECKSUMS_ON: &str = "whether checksums are on";
 
 // Why an operand can't be simulated at all.
@@ -42,6 +41,8 @@ const REGEX_ENGINE: &str = "this regular expression compiled in opensnitchd (Go 
      syntax differs from what the simulator's engine accepts, so it can't be evaluated here";
 const REGEX_TOO_LARGE: &str = "this regular expression is too large for the simulator to compile \
      (opensnitchd accepted it), so it can't be evaluated here";
+const REGEX_CLASS: &str = "this regular expression uses a character-class form the simulator \
+     doesn't model, so it can't be evaluated here";
 const UNKNOWN_TYPE: &str = "a condition type opensnitchd 1.8.0 doesn't load";
 const LEGACY_SHAPE: &str = "a legacy rule shape the simulator doesn't read";
 const UNREADABLE: &str = "the condition's shape isn't recognised";
@@ -358,6 +359,7 @@ impl Matcher {
                 .map_err(|e| match e {
                     compare::RegexpError::TooLarge => REGEX_TOO_LARGE,
                     compare::RegexpError::Syntax => REGEX_ENGINE,
+                    compare::RegexpError::ClassForm => REGEX_CLASS,
                 }),
             Kind::Network | Kind::Lists => Err(BAD_PAIRING),
         }
@@ -484,22 +486,17 @@ fn hash_with_checksum_setting_unknown(leaf: &Leaf, input: &SimulationInput) -> O
 }
 
 /// `ret` starts `true` and is overwritten only while iterating the process's
-/// checksums — **every** algorithm's value, whatever the operand's — so a
-/// process with none still matches. A mismatch against the values given
-/// decides only if the value for the operand's own algorithm was among them;
-/// otherwise the one that wasn't given could still match. (v1.8.0 only ever
-/// computes the MD5 — `Loader.HasChecksums`, which would add the SHA1 for a
-/// `process.hash.sha1` rule, has no caller in the vendored tree — but a
-/// patched daemon may differ, so a SHA1 is asked for rather than assumed
-/// absent.)
+/// checksums — **every** value it has, whatever algorithm the operand names —
+/// so a process with none still matches.
+///
+/// opensnitchd v1.8.0 only ever computes the MD5: `EnableChecksums`
+/// (loader.go:70-75) adds it, and `HasChecksums` (loader.go:77-86), which would
+/// add the SHA1 for a `process.hash.sha1` rule, has no caller anywhere in the
+/// vendored tree. So every `process.hash.*` condition's data is compared with
+/// the MD5 (operator.go:384-395), and the MD5 is the one input needed.
 fn hash_with_checksums_on(leaf: &Leaf, input: &SimulationInput) -> Outcome {
-    let (algorithm, missing) = if leaf.operand == "process.hash.sha1" {
-        ("sha1", CHECKSUM_SHA1)
-    } else {
-        ("md5", CHECKSUM_MD5)
-    };
     let Some(checksums) = &input.checksums else {
-        return Outcome::unevaluated(&leaf.operand, missing);
+        return Outcome::unevaluated(&leaf.operand, CHECKSUM_MD5);
     };
     if checksums.is_empty() {
         return Outcome::yes_with(HASH_NONE_RECORDED);
@@ -512,13 +509,7 @@ fn hash_with_checksums_on(leaf: &Leaf, input: &SimulationInput) -> Outcome {
         // `hashCmp`'s fake match for an empty hash.
         return Outcome::yes_with(HASH_NONE_RECORDED);
     }
-    if checksums.values().any(|sum| matcher.matches_hash(sum)) {
-        Outcome::definite(Truth::Yes)
-    } else if checksums.contains_key(algorithm) {
-        Outcome::definite(Truth::No)
-    } else {
-        Outcome::unevaluated(&leaf.operand, missing)
-    }
+    Outcome::from_bool(checksums.values().any(|sum| matcher.matches_hash(sum)))
 }
 
 /// `dest.network` / `source.network`: `Match` passes a `net.IP`, which only

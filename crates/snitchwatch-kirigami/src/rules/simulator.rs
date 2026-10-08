@@ -43,7 +43,8 @@
 //! program with no checksum matches them even with checksums on — which is why
 //! such a verdict carries a warning. While it isn't known whether checksums
 //! are on, a hash condition is decided only if both answers agree (off always
-//! matches), so it is never a match by default.
+//! matches), so it is never a match by default. v1.8.0 only ever computes the
+//! MD5, so every hash condition, `sha1` ones included, is compared with it.
 //!
 //! ## Unknown inputs and operands that can't be simulated
 //!
@@ -56,9 +57,12 @@
 //! Some conditions can't be simulated at all, each with its own reason:
 //! `user.name` (opensnitchd resolves it to a uid on the daemon host when the
 //! rule loads), `lists.*` (the list files live on the daemon host), a list
-//! nested in a list, and a regular expression the `regex` crate can't compile
-//! although RE2 did (every cached enabled rule compiled under RE2, so that is
-//! an engine difference, never "can't match"). They are reported in [`SimulationResult::unsupported_operands`], never as a
+//! nested in a list, a regular expression with a character class outside the
+//! allowlist in [`re2`] (a dash that isn't a range between two letters or
+//! digits, an escaped character, a bracket, non-ASCII...), and a regular
+//! expression the `regex` crate can't compile although RE2 did (every cached
+//! enabled rule compiled under RE2, so that is an engine difference, never
+//! "can't match"). They are reported in [`SimulationResult::unsupported_operands`], never as a
 //! match.
 //!
 //! Every result is a [`SimulationResult`] — a simulation over cached data, not

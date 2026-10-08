@@ -80,8 +80,7 @@ SizedOverlaySheet {
             ifaceIn: simIfaceIn.text,
             ifaceOut: simIfaceOut.text,
             checksums: simChecksums.modes[simChecksums.currentIndex],
-            md5: simMd5.text,
-            sha1: simSha1.text
+            md5: simMd5.text
         }));
         if (!json) return;
         const result = JSON.parse(json);
@@ -118,7 +117,7 @@ SizedOverlaySheet {
             wrapMode: Text.Wrap
             opacity: 0.7
             font: Kirigami.Theme.smallFont
-            text: "Regular expressions are matched the way opensnitchd's Go engine (RE2) does, as closely as this simulator can; a pattern it can't read is reported as not simulated."
+            text: "Regular expressions are matched the way opensnitchd's Go engine (RE2) does, as closely as this simulator can. A pattern it can't read, including one with a character class that has punctuation or a literal dash in it, is reported as not simulated."
         }
 
         Kirigami.FormLayout {
@@ -257,19 +256,12 @@ SizedOverlaySheet {
                     Kirigami.FormData.label: "Checksums"
                     // Parallel to `modes`, which is what the simulator reads.
                     readonly property var modes: ["unknown", "off", "on", "on-none"]
-                    model: ["Unknown", "Off", "On, program's checksums below",
+                    model: ["Unknown", "Off", "On, program's MD5 below",
                             "On, program has none recorded"]
                 }
                 Controls.TextField {
                     id: simMd5
                     Kirigami.FormData.label: "Program MD5"
-                    placeholderText: "Leave blank if unknown"
-                    enabled: simChecksums.currentIndex === 2
-                    Layout.fillWidth: true
-                }
-                Controls.TextField {
-                    id: simSha1
-                    Kirigami.FormData.label: "Program SHA1"
                     placeholderText: "Leave blank if unknown"
                     enabled: simChecksums.currentIndex === 2
                     Layout.fillWidth: true

@@ -187,37 +187,26 @@ fn sha1_rule() -> Value {
 }
 
 #[test]
-fn a_sha1_condition_with_only_an_md5_known_is_not_evaluated() {
-    // Match compares every checksum the process has; the operand's own
-    // algorithm is not among those given, so a mismatch proves nothing.
-    let result = run(
-        sha1_rule(),
-        &with_checksums(Some(true), Some(&[("md5", "cafebabe")])),
-    );
-    assert_eq!(result.matched_rule, None);
-    assert_eq!(result.unevaluated.len(), 1, "{:?}", result.unevaluated);
-    assert_eq!(result.unevaluated[0].operand, "process.hash.sha1");
-    assert!(result.unevaluated[0].missing.contains("SHA1"));
-}
-
-#[test]
-fn a_sha1_condition_is_decided_once_the_sha1_is_known() {
-    let miss = with_checksums(Some(true), Some(&[("md5", "cafebabe"), ("sha1", "0123")]));
+fn a_sha1_condition_is_compared_with_the_md5_like_v1_8_0() {
+    // v1.8.0 only ever computes the MD5 (`EnableChecksums`, loader.go:70-75;
+    // `HasChecksums`, which would add the SHA1, has no caller), and `Match`
+    // compares every checksum the process has with the condition's data, so a
+    // sha1 condition is a comparison with the MD5.
+    let miss = with_checksums(Some(true), Some(&[("md5", "cafebabe")]));
     let result = run(sha1_rule(), &miss);
     assert_eq!(result.matched_rule, None);
-    assert!(result.unevaluated.is_empty());
+    assert!(result.unevaluated.is_empty(), "{:?}", result.unevaluated);
 
-    let hit = with_checksums(Some(true), Some(&[("sha1", "deadbeef")]));
+    let hit = with_checksums(Some(true), Some(&[("md5", "deadbeef")]));
     assert_eq!(run(sha1_rule(), &hit).matched_rule.as_deref(), Some("r"));
 }
 
 #[test]
-fn an_md5_condition_with_only_a_sha1_known_is_not_evaluated() {
-    let result = run(
-        hash_rule(),
-        &with_checksums(Some(true), Some(&[("sha1", "cafebabe")])),
-    );
-    assert_eq!(result.matched_rule, None);
-    assert_eq!(result.unevaluated.len(), 1);
-    assert!(result.unevaluated[0].missing.contains("MD5"));
+fn a_hash_condition_needs_the_md5_whichever_algorithm_it_names() {
+    for rule in [hash_rule(), sha1_rule()] {
+        let result = run(rule, &with_checksums(Some(true), None));
+        assert_eq!(result.matched_rule, None);
+        assert_eq!(result.unevaluated.len(), 1, "{:?}", result.unevaluated);
+        assert!(result.unevaluated[0].missing.contains("MD5"));
+    }
 }

@@ -39,6 +39,8 @@ pub(super) enum RegexpError {
     TooLarge,
     /// The `regex` crate doesn't accept the syntax.
     Syntax,
+    /// A character class outside what `re2` models.
+    ClassForm,
 }
 
 impl Regexp {
@@ -59,7 +61,8 @@ impl Regexp {
         } else {
             go_to_lower(pattern)
         };
-        let re = regex::RegexBuilder::new(&re2::to_regex_crate(&pattern))
+        let rewritten = re2::to_regex_crate(&pattern).map_err(|_| RegexpError::ClassForm)?;
+        let re = regex::RegexBuilder::new(&rewritten)
             .size_limit(size_limit)
             .build()
             .map_err(|e| match e {
@@ -162,6 +165,15 @@ mod tests {
         assert_eq!(too_big.err(), Some(RegexpError::TooLarge));
         assert_eq!(Regexp::compile("(", true).err(), Some(RegexpError::Syntax));
         assert!(Regexp::compile(r"\pL{1,50}", true).is_ok());
+    }
+
+    #[test]
+    fn a_class_outside_the_allowlist_is_its_own_error() {
+        assert_eq!(
+            Regexp::compile("[a-]", true).err(),
+            Some(RegexpError::ClassForm)
+        );
+        assert!(Regexp::compile("[a-z]", true).is_ok());
     }
 
     #[test]
