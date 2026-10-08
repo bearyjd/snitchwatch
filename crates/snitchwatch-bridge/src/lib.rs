@@ -19,6 +19,7 @@ pub mod grpc_client;
 pub mod grpc_server;
 pub mod notice;
 pub mod profiles;
+pub mod rule_name;
 pub mod translator;
 pub mod tray_state;
 #[cfg(feature = "web-ui")]

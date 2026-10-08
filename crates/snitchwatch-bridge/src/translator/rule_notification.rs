@@ -53,6 +53,8 @@ pub fn notification_for_effect(
             if rule_id.is_empty() {
                 return Err("DeleteRule with an empty rule id".to_string());
             }
+            // The daemon deletes `rulesDir + "/" + name + ".json"` as root.
+            crate::rule_name::validate_rule_name(rule_id)?;
             (
                 Action::DeleteRule,
                 vec![Rule {
@@ -133,6 +135,33 @@ mod tests {
         assert_eq!(ntf.rules[0].name, "z00-blocklist:ads:0001-x.example");
         // No operator needed, and requiring one would make delete impossible.
         assert!(ntf.rules[0].operator.is_none());
+    }
+
+    #[test]
+    fn a_rule_name_that_leaves_the_rules_directory_never_reaches_the_daemon() {
+        // Root opensnitchd writes `Join(rulesDir, name + ".json")` and deletes
+        // `rulesDir + "/" + name + ".json"` without validating `name`.
+        for name in ["../default-config", "../../../../etc/cron.d/x"] {
+            let update = UpstreamEffect::UpdateRule {
+                rule_id: name.to_string(),
+                rule: wire_rule(name, true),
+            };
+            assert!(
+                notification_for_effect(&update, 3).is_err(),
+                "update {name}"
+            );
+            let add = UpstreamEffect::AddRule {
+                rule: wire_rule(name, true),
+            };
+            assert!(notification_for_effect(&add, 4).is_err(), "add {name}");
+            let delete = UpstreamEffect::DeleteRule {
+                rule_id: name.to_string(),
+            };
+            assert!(
+                notification_for_effect(&delete, 5).is_err(),
+                "delete {name}"
+            );
+        }
     }
 
     #[test]

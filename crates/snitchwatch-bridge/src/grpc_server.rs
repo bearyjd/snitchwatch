@@ -87,8 +87,8 @@ pub(crate) fn rule_from_wire(v: &serde_json::Value) -> Result<Rule, String> {
     let name = obj
         .get("name")
         .and_then(|x| x.as_str())
-        .filter(|s| !s.is_empty())
-        .ok_or("rule.name missing or empty")?;
+        .ok_or("rule.name missing")?;
+    crate::rule_name::validate_rule_name(name)?;
     let action = obj
         .get("action")
         .and_then(|x| x.as_str())
