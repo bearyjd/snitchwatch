@@ -1,4 +1,6 @@
-use super::shadow::{analyze, Analysis, Finding, FindingKind, MAX_ANALYZED_RULES};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use super::shadow::{analyze, analyze_until, Analysis, Finding, FindingKind, MAX_ANALYZED_RULES};
 use super::testkit::*;
 use crate::rules::row_store::Rule;
 
@@ -9,51 +11,49 @@ fn findings(rules: &[Rule]) -> std::collections::BTreeMap<String, Finding> {
     }
 }
 
+/// The kind and the covering rule named for `name`, if it has a finding.
 fn only(rules: &[Rule], name: &str) -> Option<(FindingKind, String)> {
     findings(rules).get(name).map(|f| (f.kind, f.by.clone()))
+}
+
+/// Just who is named for `name`.
+fn named(rules: &[Rule], name: &str) -> Option<String> {
+    only(rules, name).map(|(_, by)| by)
 }
 
 fn x() -> serde_json::Value {
     host("example.com")
 }
 
+fn never(by: &str) -> Option<(FindingKind, String)> {
+    Some((FindingKind::NeverDecides, by.to_string()))
+}
+
 #[test]
 fn a_later_deny_shadows_an_earlier_allow() {
     let rules = [allow("100-allow", x()), deny("200-deny", x())];
-    assert_eq!(
-        only(&rules, "100-allow"),
-        Some((FindingKind::NeverApplies, "200-deny".into()))
-    );
+    assert_eq!(only(&rules, "100-allow"), never("200-deny"));
     assert_eq!(only(&rules, "200-deny"), None);
 }
 
 #[test]
 fn a_later_allow_shadows_an_earlier_allow_and_an_earlier_one_does_not() {
     let rules = [allow("100-first", x()), allow("200-second", x())];
-    assert_eq!(
-        only(&rules, "100-first"),
-        Some((FindingKind::Redundant, "200-second".into()))
-    );
+    assert_eq!(only(&rules, "100-first"), never("200-second"));
     assert_eq!(only(&rules, "200-second"), None, "the last allow decides");
 }
 
 #[test]
 fn an_earlier_deny_shadows_a_later_allow_and_a_later_deny_does_not_shadow_it() {
     let rules = [deny("100-deny", x()), allow("200-allow", x())];
-    assert_eq!(
-        only(&rules, "200-allow"),
-        Some((FindingKind::NeverApplies, "100-deny".into()))
-    );
+    assert_eq!(only(&rules, "200-allow"), never("100-deny"));
     assert_eq!(only(&rules, "100-deny"), None);
 }
 
 #[test]
 fn a_deny_is_shadowed_only_by_an_earlier_stop_rule() {
     let rules = [deny("100-deny", x()), deny("200-deny", x())];
-    assert_eq!(
-        only(&rules, "200-deny"),
-        Some((FindingKind::Redundant, "100-deny".into()))
-    );
+    assert_eq!(only(&rules, "200-deny"), never("100-deny"));
     assert_eq!(only(&rules, "100-deny"), None);
 }
 
@@ -62,10 +62,7 @@ fn a_precedence_allow_before_a_deny_shadows_it_and_a_deny_after_does_not_shadow_
     let mut precedence = allow("100-precedence", x());
     precedence.precedence = true;
     let rules = [precedence, deny("200-deny", x())];
-    assert_eq!(
-        only(&rules, "200-deny"),
-        Some((FindingKind::NeverApplies, "100-precedence".into()))
-    );
+    assert_eq!(only(&rules, "200-deny"), never("100-precedence"));
     assert_eq!(
         only(&rules, "100-precedence"),
         None,
@@ -79,19 +76,83 @@ fn a_precedence_allow_after_a_deny_does_not_shadow_it_either() {
     precedence.precedence = true;
     let rules = [deny("100-deny", x()), precedence];
     assert_eq!(only(&rules, "100-deny"), None);
-    assert_eq!(
-        only(&rules, "200-precedence"),
-        Some((FindingKind::NeverApplies, "100-deny".into()))
+    assert_eq!(only(&rules, "200-precedence"), never("100-deny"));
+}
+
+#[test]
+fn a_reject_stops_the_scan_like_a_deny() {
+    let rules = [allow("100-allow", x()), rule("200-reject", "reject", x())];
+    assert_eq!(only(&rules, "100-allow"), never("200-reject"));
+    let rules = [rule("100-reject", "reject", x()), deny("200-deny", x())];
+    assert_eq!(only(&rules, "200-deny"), never("100-reject"));
+}
+
+/// Only "the first never decides" is proven by the later allow; the deny
+/// after it decides these connections, so naming the allow (and calling it
+/// "the same way") would be wrong.
+#[test]
+fn a_covering_stop_rule_is_named_ahead_of_a_later_covering_allow() {
+    let rules = [allow("100-b", x()), allow("200-a", x()), deny("300-d", x())];
+    assert_eq!(only(&rules, "100-b"), never("300-d"));
+    assert_eq!(only(&rules, "200-a"), never("300-d"));
+    assert_eq!(only(&rules, "300-d"), None);
+}
+
+#[test]
+fn the_earliest_covering_stop_rule_is_named_for_an_allow() {
+    let rules = [
+        deny("050-early", x()),
+        allow("100-b", x()),
+        deny("200-late", x()),
+    ];
+    assert_eq!(named(&rules, "100-b").as_deref(), Some("050-early"));
+}
+
+#[test]
+fn without_a_stop_rule_the_last_covering_allow_is_named() {
+    let rules = [
+        allow("100-b", x()),
+        allow("150-middle", x()),
+        allow("200-last", x()),
+    ];
+    assert_eq!(named(&rules, "100-b").as_deref(), Some("200-last"));
+    assert_eq!(named(&rules, "150-middle").as_deref(), Some("200-last"));
+    assert_eq!(named(&rules, "200-last"), None);
+}
+
+#[test]
+fn the_earliest_earlier_stop_rule_is_named_for_a_stop_rule() {
+    let rules = [deny("100-a", x()), deny("200-b", x()), deny("300-c", x())];
+    assert_eq!(named(&rules, "200-b").as_deref(), Some("100-a"));
+    assert_eq!(named(&rules, "300-c").as_deref(), Some("100-a"));
+}
+
+/// A rule that matches only part of what the shadowed one does can decide
+/// those connections, so the finding must not say who decides, or that the
+/// verdict is the same.
+#[test]
+fn a_partial_rule_in_between_does_not_make_the_claim_wrong() {
+    let mut partial = allow(
+        "150-partial",
+        all_of(vec![host("example.com"), simple("dest.port", "80")]),
+    );
+    partial.precedence = true;
+    let rules = [allow("100-b", x()), partial, deny("200-d", x())];
+    let found = findings(&rules);
+    assert_eq!(found["100-b"].by, "200-d");
+    let text = found["100-b"].text();
+    assert!(!text.contains("same way"), "{text}");
+    assert!(!text.to_lowercase().contains("decides these"), "{text}");
+    assert!(
+        !found.contains_key("150-partial"),
+        "it still decides port 80"
     );
 }
 
 #[test]
 fn rules_are_ordered_by_name_whatever_order_they_arrive_in() {
     let rules = [deny("200-deny", x()), allow("100-allow", x())];
-    assert_eq!(
-        only(&rules, "100-allow"),
-        Some((FindingKind::NeverApplies, "200-deny".into()))
-    );
+    assert_eq!(only(&rules, "100-allow"), never("200-deny"));
     // Byte order: uppercase sorts before lowercase.
     let rules = [allow("a-allow", x()), deny("B-deny", x())];
     assert_eq!(
@@ -103,20 +164,14 @@ fn rules_are_ordered_by_name_whatever_order_they_arrive_in() {
 }
 
 /// Order matters between two allows (the later replaces the earlier), so the
-/// name order, not the arrival order, decides which one is redundant.
+/// name order, not the arrival order, decides which one never decides.
 #[test]
-fn which_allow_is_redundant_follows_the_name_order_not_the_arrival_order() {
+fn which_allow_never_decides_follows_the_name_order_not_the_arrival_order() {
     let rules = [allow("200-second", x()), allow("100-first", x())];
-    assert_eq!(
-        only(&rules, "100-first"),
-        Some((FindingKind::Redundant, "200-second".into()))
-    );
+    assert_eq!(only(&rules, "100-first"), never("200-second"));
     assert_eq!(only(&rules, "200-second"), None);
     let rules = [deny("200-second", x()), deny("100-first", x())];
-    assert_eq!(
-        only(&rules, "200-second"),
-        Some((FindingKind::Redundant, "100-first".into()))
-    );
+    assert_eq!(only(&rules, "200-second"), never("100-first"));
     assert_eq!(only(&rules, "100-first"), None);
 }
 
@@ -128,10 +183,7 @@ fn a_wider_rule_shadows_a_narrower_one_but_not_the_other_way() {
         all_of(vec![host("example.com"), simple("dest.port", "443")]),
     );
     let rules = [wide, narrow];
-    assert_eq!(
-        only(&rules, "200-narrow"),
-        Some((FindingKind::NeverApplies, "100-wide".into()))
-    );
+    assert_eq!(only(&rules, "200-narrow"), never("100-wide"));
     assert_eq!(only(&rules, "100-wide"), None);
 }
 
@@ -144,8 +196,7 @@ fn a_rule_that_matches_everything_shadows_all_that_follow() {
     ];
     let found = findings(&rules);
     assert_eq!(found["100-a"].by, "000-everything");
-    assert_eq!(found["100-a"].kind, FindingKind::NeverApplies);
-    assert_eq!(found["200-b"].kind, FindingKind::Redundant);
+    assert_eq!(found["200-b"].by, "000-everything");
     assert!(!found.contains_key("000-everything"));
 }
 
@@ -161,10 +212,12 @@ fn a_rule_that_does_not_last_does_not_shadow_anything() {
         );
     }
     // The shadowed rule may be temporary.
-    let mut temporary = allow("200-allow", x());
-    temporary.duration = "5m".into();
-    let rules = [deny("100-deny", x()), temporary];
-    assert!(findings(&rules).contains_key("200-allow"));
+    for duration in ["5m", "until restart"] {
+        let mut temporary = allow("200-allow", x());
+        temporary.duration = duration.into();
+        let rules = [deny("100-deny", x()), temporary];
+        assert!(findings(&rules).contains_key("200-allow"), "{duration}");
+    }
 }
 
 #[test]
@@ -196,10 +249,7 @@ fn rules_managed_elsewhere_get_no_finding_but_may_shadow_user_rules() {
     let mut managed_deny = deny("050-managed", x());
     managed_deny.read_only_reason = Some("managed".into());
     let rules = [managed_deny, allow("100-user", x())];
-    assert_eq!(
-        only(&rules, "100-user"),
-        Some((FindingKind::NeverApplies, "050-managed".into()))
-    );
+    assert_eq!(only(&rules, "100-user"), never("050-managed"));
 }
 
 #[test]
@@ -247,30 +297,18 @@ fn the_strongest_proof_wins_over_an_earlier_weaker_one() {
         ),
     ];
     let found = findings(&rules);
-    assert_eq!(found["300-literal"].kind, FindingKind::NeverApplies);
+    assert_eq!(found["300-literal"].kind, FindingKind::NeverDecides);
     assert_eq!(found["300-literal"].by, "200-exact");
     // The deny after the pattern is only possibly shadowed.
     assert_eq!(found["200-exact"].kind, FindingKind::MayBeShadowed);
 }
 
 #[test]
-fn a_rule_whose_action_the_daemon_treats_as_deny_counts_as_deny() {
+fn a_rule_whose_action_the_daemon_treats_as_deny_replaces_an_allow() {
     // Not allow/deny/reject: it doesn't stop the scan, and it drops.
     let odd = rule("200-odd", "drop", x());
     let rules = [allow("100-allow", x()), odd];
-    assert_eq!(
-        only(&rules, "100-allow"),
-        Some((FindingKind::NeverApplies, "200-odd".into()))
-    );
-}
-
-#[test]
-fn identical_rules_flag_the_earlier_stop_rule_only_once() {
-    let rules = [deny("100-a", x()), deny("200-b", x()), deny("300-c", x())];
-    let found = findings(&rules);
-    assert_eq!(found["200-b"].by, "100-a");
-    assert_eq!(found["300-c"].by, "100-a", "the earliest that covers it");
-    assert!(!found.contains_key("100-a"));
+    assert_eq!(only(&rules, "100-allow"), never("200-odd"));
 }
 
 #[test]
@@ -285,31 +323,33 @@ fn the_display_name_of_the_covering_rule_is_what_is_shown() {
 }
 
 #[test]
-fn finding_text_says_what_was_found_and_never_that_anything_was_changed() {
+fn finding_text_claims_only_that_the_rule_never_decides_and_who_takes_precedence() {
     let f = |kind| Finding {
         kind,
         by: "b".into(),
         by_display: "B rule".into(),
     };
     assert_eq!(
-        f(FindingKind::Redundant).text(),
-        "Redundant: B rule already decides these connections the same way."
-    );
-    assert_eq!(
-        f(FindingKind::NeverApplies).text(),
-        "Never applies: B rule decides these connections instead."
+        f(FindingKind::NeverDecides).text(),
+        "Never decides: B rule matches every connection this rule does and takes precedence."
     );
     assert_eq!(
         f(FindingKind::MayBeShadowed).text(),
-        "May be shadowed by B rule."
+        "May never decide: B rule appears to match every connection this rule does and take \
+         precedence."
     );
-    for kind in [
-        FindingKind::Redundant,
-        FindingKind::NeverApplies,
-        FindingKind::MayBeShadowed,
-    ] {
+    for kind in [FindingKind::NeverDecides, FindingKind::MayBeShadowed] {
         let text = f(kind).text().to_lowercase();
-        for word in ["removed", "deleted", "disabled", "changed", "fixed"] {
+        for word in [
+            "removed",
+            "deleted",
+            "disabled",
+            "changed",
+            "fixed",
+            "same way",
+            "redundant",
+            "decides these",
+        ] {
             assert!(!text.contains(word), "{text}");
         }
     }
@@ -341,4 +381,13 @@ fn too_many_enabled_rules_are_not_analyzed() {
         r
     }));
     assert!(matches!(analyze(&rules), Analysis::Done { .. }));
+}
+
+#[test]
+fn a_cancelled_analysis_stops_and_says_nothing() {
+    let rules = [allow("100-a", x()), deny("200-d", x())];
+    let cancel = AtomicBool::new(false);
+    assert!(analyze_until(&rules, &cancel).is_some());
+    cancel.store(true, Ordering::Relaxed);
+    assert_eq!(analyze_until(&rules, &cancel), None);
 }

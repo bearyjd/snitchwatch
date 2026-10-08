@@ -5,9 +5,13 @@
 //! makes its result untrue: the findings go and the state is `stale`, and the
 //! user asks again. A worker's result is taken only if it belongs to the run
 //! that is still wanted (`running`); one from a run the list outlived is
-//! dropped, even when the user has since started another.
+//! dropped, even when the user has since started another. A run the list
+//! outlived is also told to stop ([`Run::cancel`]), so asking again after
+//! every change doesn't stack threads computing answers nobody wants.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use serde::Serialize;
 
@@ -31,8 +35,8 @@ pub struct AnalysisState {
     phase: Phase,
     /// Bumped by every rule list change.
     generation: u64,
-    /// The generation of the run still wanted, if one is.
-    running: Option<u64>,
+    /// The generation of the run still wanted, if one is, and its cancel flag.
+    running: Option<(u64, Arc<AtomicBool>)>,
     enabled: usize,
     findings: BTreeMap<String, Finding>,
 }
@@ -55,38 +59,50 @@ struct Summary {
     state: Phase,
     enabled: usize,
     limit: usize,
-    redundant: usize,
-    never_applies: usize,
+    never_decides: usize,
     may_be_shadowed: usize,
+}
+
+/// A run to start: the rule list generation it is for, and the flag it
+/// should check to stop early.
+#[derive(Debug, Clone)]
+pub struct Run {
+    pub generation: u64,
+    pub cancel: Arc<AtomicBool>,
 }
 
 impl AnalysisState {
     /// The rule list changed (or was replaced). Drops the findings.
     pub fn rules_changed(&mut self) {
         self.generation += 1;
-        self.running = None;
+        if let Some((_, cancel)) = self.running.take() {
+            cancel.store(true, Ordering::Relaxed);
+        }
         self.findings.clear();
         if self.phase != Phase::Idle {
             self.phase = Phase::Stale;
         }
     }
 
-    /// The user asked. `Some(generation)` to run for, or `None` if one is
-    /// already running.
-    pub fn start(&mut self) -> Option<u64> {
+    /// The user asked. The run to start, or `None` if one is already running.
+    pub fn start(&mut self) -> Option<Run> {
         if self.phase == Phase::Running {
             return None;
         }
+        let run = Run {
+            generation: self.generation,
+            cancel: Arc::new(AtomicBool::new(false)),
+        };
         self.phase = Phase::Running;
-        self.running = Some(self.generation);
+        self.running = Some((run.generation, run.cancel.clone()));
         self.findings.clear();
-        Some(self.generation)
+        Some(run)
     }
 
     /// A worker finished the analysis it began at `generation`. A result for
     /// a run that is no longer wanted changes nothing.
     pub fn finish(&mut self, generation: u64, analysis: Analysis) {
-        if self.running != Some(generation) {
+        if self.running.as_ref().map(|(wanted, _)| *wanted) != Some(generation) {
             return;
         }
         self.running = None;
@@ -116,8 +132,7 @@ impl AnalysisState {
             state: self.phase,
             enabled: self.enabled,
             limit: MAX_ANALYZED_RULES,
-            redundant: count(FindingKind::Redundant),
-            never_applies: count(FindingKind::NeverApplies),
+            never_decides: count(FindingKind::NeverDecides),
             may_be_shadowed: count(FindingKind::MayBeShadowed),
         };
         serde_json::to_string(&summary).unwrap_or_default()

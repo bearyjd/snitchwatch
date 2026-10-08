@@ -38,10 +38,11 @@
 // bridge's last gap, whichever is latest) is 14 days; otherwise it is
 // "No hits since <time>", from the start of that period. "Analyze
 // rules" finds rules that can never decide a connection because another one
-// covers them: "Redundant", "Never applies", or only "May be shadowed" when the
-// proof leans on the regular-expression engine. It checks only conditions
-// Snitchwatch can compare exactly, so no finding is not a guarantee. Insights
-// describe; nothing here changes, disables or removes a rule.
+// matches everything they do and takes precedence ("Never decides"), or only
+// "May never decide" when the proof leans on the regular-expression engine. It
+// says nothing about what those connections get instead. It checks only
+// conditions Snitchwatch can compare exactly, so no finding is not a guarantee.
+// Insights describe; nothing here changes, disables or removes a rule.
 //
 // Names are shown via the `displayName` role (bidi overrides and zero-width
 // characters removed by the bridge); `name` stays the rule's identity.
@@ -179,12 +180,12 @@ Kirigami.ScrollablePage {
             return "Too many rules to analyze: " + info.enabled + " are enabled and the limit is "
                 + info.limit + ".";
         case "stale":
-            return "The rules changed after the analysis. Analyze again.";
+            return "The rules changed after the analysis. Choose Analyze rules to run it again.";
         case "done": {
-            const found = info.redundant + info.neverApplies + info.mayBeShadowed;
+            const found = info.neverDecides + info.mayBeShadowed;
             const caveat = " Snitchwatch checks only conditions it can compare exactly.";
             return found === 0
-                ? "No shadowed or redundant rules found." + caveat
+                ? "No rules found that can never decide a connection." + caveat
                 : found + (found === 1 ? " rule" : " rules")
                     + " may never decide a connection (marked below)." + caveat;
         }

@@ -155,6 +155,9 @@ Window {
             if (probeWindow.stage === 1 && info.state === "done") {
                 probeWindow.stage = 2;
                 probeWindow.afterAnalysis();
+            } else if (probeWindow.stage === 5 && info.state === "done") {
+                probeWindow.stage = 6;
+                probeWindow.afterRerun();
             } else if (probeWindow.stage === 3 && info.state === "tooMany") {
                 probeWindow.stage = 4;
                 probeWindow.afterTooMany(info);
@@ -242,7 +245,8 @@ Window {
     function afterAnalysis() {
         // 200-allow can never decide: 100-deny covers it and stops the scan.
         const finding = probeWindow.text(1, "shadowLabel");
-        probeWindow.check(finding === "Never applies: 100-deny decides these connections instead.",
+        probeWindow.check(finding === "Never decides: 100-deny matches every connection this rule does "
+                                 + "and takes precedence.",
                           "finding: '" + finding + "'");
         probeWindow.check(probeWindow.text(0, "shadowLabel") === "", "the deny was flagged");
         probeWindow.check(probeWindow.text(2, "shadowLabel") === "", "an unrelated rule flagged");
@@ -254,7 +258,8 @@ Window {
                           && probeWindow.plain("analysisSummary", "header"),
                           "a finding label is not PlainText");
         for (const t of [finding, summary]) {
-            for (const word of ["removed", "deleted", "disabled", "changed by", "fixed"]) {
+            for (const word of ["removed", "deleted", "disabled", "changed by", "fixed", "same way",
+                                 "redundant"]) {
                 probeWindow.check(t.toLowerCase().indexOf(word) < 0, "'" + t + "' says " + word);
             }
         }
@@ -279,15 +284,30 @@ Window {
             probeWindow.rule("500-new", "allow", "new.example", 3)
         ]);
         probeWindow.check(probeWindow.text(1, "shadowLabel") ===
-                          "Never applies: 100-deny decides these connections instead.",
+                          "Never decides: 100-deny matches every connection this rule does "
+                                 + "and takes precedence.",
                           "a finding went with an unchanged list: '"
                           + probeWindow.text(1, "shadowLabel") + "'");
 
+        // Asking again drops the last run's findings from the rows at once,
+        // before the new one finishes.
+        probeWindow.stage = 5;
+        rulesModel.analyze();
+        probeWindow.check(probeWindow.text(1, "shadowLabel") === "",
+                          "a finding stayed on its row while the analysis re-ran: '"
+                          + probeWindow.text(1, "shadowLabel") + "'");
+        probeWindow.check(probeWindow.header("analysisSummary") === "Analyzing rules...",
+                          "running summary: '" + probeWindow.header("analysisSummary") + "'");
+    }
+
+    function afterRerun() {
+        probeWindow.check(probeWindow.text(1, "shadowLabel").startsWith("Never decides: "),
+                          "no finding after the second run");
         // A changed rule list makes the findings untrue: they go, and say so.
         probeWindow.setRules([probeWindow.rule("100-deny", "deny", "example.com", 40)]);
         probeWindow.check(probeWindow.text(0, "shadowLabel") === "", "a finding survived a change");
         probeWindow.check(probeWindow.header("analysisSummary") ===
-                          "The rules changed after the analysis. Analyze again.",
+                          "The rules changed after the analysis. Choose Analyze rules to run it again.",
                           "stale summary: '" + probeWindow.header("analysisSummary") + "'");
         // The same list again changes nothing it would have to take back.
         probeWindow.setRules([

@@ -476,15 +476,22 @@ impl qobject::RulesModel {
     }
 
     fn analyze(mut self: Pin<&mut Self>) {
-        let Some(generation) = self.as_mut().rust_mut().analysis.start() else {
+        let Some(run) = self.as_mut().rust_mut().analysis.start() else {
             return;
         };
+        // Starting drops the findings of the last run.
+        self.as_mut().refresh_findings();
         self.as_mut().publish_analysis();
         let rules = self.store.rules().to_vec();
         let qt_thread = self.qt_thread();
         std::thread::spawn(move || {
-            let analysis = crate::rules::insights::shadow::analyze(&rules);
-            let _ = qt_thread.queue(move |qobject| qobject.finish_analysis(generation, analysis));
+            // `None`: the rule list changed meanwhile and nobody wants this.
+            let Some(analysis) = crate::rules::insights::shadow::analyze_until(&rules, &run.cancel)
+            else {
+                return;
+            };
+            let _ =
+                qt_thread.queue(move |qobject| qobject.finish_analysis(run.generation, analysis));
         });
     }
 
@@ -496,7 +503,6 @@ impl qobject::RulesModel {
             self.refresh_hits();
             return;
         }
-        let before = self.store.rules().to_vec();
         let changed = {
             unsafe {
                 self.as_mut().begin_reset_model();
@@ -505,7 +511,7 @@ impl qobject::RulesModel {
             // Findings are about the list they were computed from: they go
             // with it, inside the reset, so no view ever reads them against
             // a list they weren't computed from.
-            if self.store.rules() != before.as_slice() {
+            if changed {
                 self.as_mut().rust_mut().analysis.rules_changed();
             }
             unsafe {

@@ -13,7 +13,7 @@ pub struct RowInsights {
     pub hit_badge_kind: &'static str,
     /// The time a `since` badge counts from, in Unix milliseconds; else 0.
     pub hit_badge_ms: f64,
-    /// `redundant`, `neverApplies`, `maybeShadowed`, or empty.
+    /// `neverDecides`, `maybeShadowed`, or empty.
     pub shadow_kind: &'static str,
     /// Plain text, empty without a finding.
     pub shadow_text: String,
@@ -41,8 +41,7 @@ pub fn row_insights(
     }
     if let Some(finding) = analysis.finding(&rule.name) {
         row.shadow_kind = match finding.kind {
-            FindingKind::Redundant => "redundant",
-            FindingKind::NeverApplies => "neverApplies",
+            FindingKind::NeverDecides => "neverDecides",
             FindingKind::MayBeShadowed => "maybeShadowed",
         };
         row.shadow_text = finding.text();

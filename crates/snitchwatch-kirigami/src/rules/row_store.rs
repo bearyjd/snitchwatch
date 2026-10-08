@@ -241,16 +241,21 @@ impl RulesStore {
         self.rules.iter().position(|r| r.name == name)
     }
 
-    /// Apply one bridge message. Returns `true` if the rule list changed (the
-    /// model wrapper resets on `true`).
+    /// Apply one bridge message. Returns `true` if the rule list changed. The
+    /// bridge sends the whole list again after every rule command, so the
+    /// same list is common and is not a change.
     pub fn apply(&mut self, msg: &ServerMessage) -> bool {
         match msg {
             ServerMessage::SetRules { rules } => {
-                self.rules = rules
+                let rules: Vec<Rule> = rules
                     .iter()
                     .filter_map(|v| serde_json::from_value::<Rule>(v.clone()).ok())
                     .collect();
-                true
+                let changed = rules != self.rules;
+                if changed {
+                    self.rules = rules;
+                }
+                changed
             }
             ServerMessage::UpdateRules { rules } => {
                 let mut changed = false;
@@ -267,12 +272,16 @@ impl RulesStore {
 
     fn upsert(&mut self, rule: Rule) -> bool {
         match self.rules.iter_mut().find(|r| r.name == rule.name) {
+            Some(existing) if *existing == rule => false,
             Some(existing) => {
                 *existing = rule;
+                true
             }
-            None => self.rules.push(rule),
+            None => {
+                self.rules.push(rule);
+                true
+            }
         }
-        true
     }
 
     /// Whether a rule may be deleted from Snitchwatch: known and

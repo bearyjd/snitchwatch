@@ -26,7 +26,7 @@ fn counting(persistent: bool, lossy: bool) -> RuleHitsView {
 
 fn analysed(rules: &[crate::rules::row_store::Rule]) -> AnalysisState {
     let mut state = AnalysisState::default();
-    let generation = state.start().unwrap();
+    let generation = state.start().unwrap().generation;
     state.finish(generation, analyze(rules));
     state
 }
@@ -43,10 +43,10 @@ fn a_row_carries_both_its_badge_and_its_finding() {
 
     let row = row_insights(&rules[1], &hits, &state, NOW);
     assert_eq!(row.hit_badge_kind, "unused");
-    assert_eq!(row.shadow_kind, "neverApplies");
+    assert_eq!(row.shadow_kind, "neverDecides");
     assert_eq!(
         row.shadow_text,
-        "Never applies: 100-deny decides these connections instead."
+        "Never decides: 100-deny matches every connection this rule does and takes precedence."
     );
     assert_eq!(row.shadow_by, "100-deny");
 
@@ -109,10 +109,9 @@ fn each_kind_of_finding_has_its_own_row_kind() {
         let rule = rules.iter().find(|r| r.name == name).unwrap();
         row_insights(rule, &RuleHitsView::default(), &state, NOW).shadow_kind
     };
-    let same = [deny("100-a", x()), deny("200-b", x())];
-    assert_eq!(kind_of(&same, "200-b"), "redundant");
-    let differ = [deny("100-a", x()), allow("200-b", x())];
-    assert_eq!(kind_of(&differ, "200-b"), "neverApplies");
+    let exact = [deny("100-a", x()), allow("200-b", x())];
+    assert_eq!(kind_of(&exact, "200-b"), "neverDecides");
+    assert_eq!(kind_of(&exact, "100-a"), "");
     let engine = [
         deny("100-a", regexp("dest.host", r"^.*\.example\.com$")),
         allow("200-b", simple_sensitive("dest.host", "a.example.com")),
