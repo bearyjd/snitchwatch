@@ -201,9 +201,13 @@ pub mod qobject {
             domain_key: &QString,
         );
 
-        /// Parity 2 (pending-decision insight panel + mini sparkline): the
-        /// destination IP and cumulative byte counters for a single row by
-        /// id, JSON-encoded as `{"dstIp","bytesSent","bytesReceived"}`.
+        /// Parity 2 (pending-decision insight panel): the destination IP
+        /// and byte counters for a single row by id, JSON-encoded as
+        /// `{"dstIp","bytesSent","bytesReceived"}`. The shell only reads
+        /// `dstIp`: the bridge hardcodes the byte counters to 0 and opensnitchd
+        /// has no per-connection counters, so QML shows no byte readout or
+        /// sparkline (issue #49). The fields stay in the JSON for a future
+        /// real byte source.
         /// Returns `"{}"` for an unknown id (e.g. a group-header pseudo-row)
         /// rather than erroring — the inspector degrades to blank fields.
         #[qinvokable]
@@ -872,9 +876,9 @@ impl qobject::ConnectionsModel {
         }
     }
 
-    /// Parity 2: destination IP + cumulative byte counters for a single row,
-    /// for the pending-decision dialog's insight panel and "this connection"
-    /// sparkline readout.
+    /// Parity 2: destination IP (plus byte counters, currently always 0 from
+    /// the bridge and not displayed — issue #49) for a single row, for the
+    /// pending-decision dialog's insight panel.
     fn row_details_json(&self, id: &QString) -> QString {
         let id = id.to_string();
         let Some(row) = self.store.row_by_id(&id) else {
