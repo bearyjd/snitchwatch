@@ -91,6 +91,11 @@ fn normalized_action(action: &str) -> &'static str {
     }
 }
 
+/// A name `translator::verdict::rule_name_for` makes for a verdict.
+fn is_bridge_answer(name: &str) -> bool {
+    name.starts_with("snitchwatch-allow-") || name.starts_with("snitchwatch-deny-")
+}
+
 /// Translate a daemon-reported `Event` (a `Connection` paired with the `Rule`
 /// that decided it) into a *decided* `ConnectionRow` carrying that rule's
 /// name in `matched_rule`.
@@ -100,10 +105,18 @@ fn normalized_action(action: &str) -> &'static str {
 /// that matched a pre-existing rule and therefore never went through the
 /// interactive `AskRule` flow (see `grpc_server::UiService::ping`). Returns
 /// `None` when the event doesn't carry both a connection and the rule that
-/// matched it — there is nothing useful to show without both.
+/// matched it — there is nothing useful to show without both — and for the
+/// bridge's own `once` answer to an Ask (issue #102): the daemon never
+/// stores a `once` rule, so it decided only the connection the bridge was
+/// asked about, which the bridge already lists as that Ask's row (labelled,
+/// for an answer the filtering pause gave). The daemon's own `once` rules
+/// (`ui.client.*`, decided with no Ask row) are listed.
 pub fn event_to_row(event: &Event) -> Option<ConnectionRow> {
     let conn = event.connection.as_ref()?;
     let rule = event.rule.as_ref()?;
+    if rule.duration == "once" && is_bridge_answer(&rule.name) {
+        return None;
+    }
 
     let mut row = connection_to_row(conn, 0);
     row.id = format!("{EVENT_ROW_PREFIX}{}", event.unixnano);
@@ -265,6 +278,42 @@ mod tests {
             unixnano: 1,
         };
         assert!(event_to_row(&event).is_none());
+    }
+
+    /// Issue #102: a `once` rule is only ever an answer to an Ask (the
+    /// daemon never stores one), so its event is the asked connection again,
+    /// already listed as its Ask row with that row's label ("Allowed once
+    /// (filtering was paused)", say). It isn't listed a second time.
+    #[test]
+    fn an_event_decided_by_an_answer_to_an_ask_is_not_listed_again() {
+        let mut once = sample_rule("snitchwatch-allow-github.com-443-0123abcd", "allow");
+        once.duration = "once".into();
+        let event = Event {
+            time: String::new(),
+            connection: Some(sample_connection()),
+            rule: Some(once),
+            unixnano: 1,
+        };
+        assert!(event_to_row(&event).is_none());
+        let mut kept = sample_rule("snitchwatch-allow-github.com-443-0123abcd", "allow");
+        kept.duration = "until restart".into();
+        let event = Event {
+            rule: Some(kept),
+            ..event
+        };
+        assert!(
+            event_to_row(&event).is_some(),
+            "a stored rule's events are listed"
+        );
+        // The daemon's own once rules (no GUI connected, an Ask that
+        // failed) have no Ask row in the bridge: listed.
+        let mut daemons = sample_rule("ui.client.disconnected", "allow");
+        daemons.duration = "once".into();
+        let event = Event {
+            rule: Some(daemons),
+            ..event
+        };
+        assert!(event_to_row(&event).is_some());
     }
 
     #[test]
