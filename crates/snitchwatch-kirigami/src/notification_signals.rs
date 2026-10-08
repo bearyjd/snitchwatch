@@ -19,6 +19,19 @@
 //!   change that isn't that server losing the name, such as a server started
 //!   on demand taking it while the notice was being shown, is ignored (PR
 //!   #100 re-review).
+//!
+//! A notice stays answerable until its caller stops waiting (r11, Plasma
+//! 6.7.4 in a Flatpak):
+//! - it is sent `resident`, so a server keeps it, and its buttons, after the
+//!   popup times out or a button is clicked; [`Notice::close`] removes it.
+//!   (Plasma 6.3 and older otherwise close an expired popup and strip its
+//!   actions; 6.4 and later keep them for a notice with actions.)
+//! - the server saying it *expired* (`NotificationClosed` reason 1) doesn't
+//!   end the wait: a server can still show it, in a history, and send its
+//!   click later. Any other close (dismissed, closed by a call, undefined)
+//!   ends it.
+//! - it names its desktop entry, the Flatpak app id, so the server can tie
+//!   it to the app rather than guess from the sender's process.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -32,14 +45,19 @@ use zbus::{Connection, MatchRule, Message, MessageStream};
 pub(crate) const SERVER: &str = "org.freedesktop.Notifications";
 pub(crate) const PATH: &str = "/org/freedesktop/Notifications";
 pub(crate) const INTERFACE: &str = "org.freedesktop.Notifications";
+/// The app's desktop entry (its Flatpak app id), sent as the
+/// `desktop-entry` hint.
+pub(crate) const DESKTOP_ENTRY: &str = "org.snitchwatch.Snitchwatch";
+/// `NotificationClosed` reasons, from the Desktop Notifications spec.
+pub(crate) const EXPIRED: u32 = 1;
 
 /// What one message means for notification `id`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Signal {
     /// The server says the user chose this one of our action keys.
     Action(&'static str),
-    /// The server closed the notification.
-    Closed,
+    /// The server closed the notification, for this reason.
+    Closed(u32),
     /// Anything else, including any message not from the server.
     Ignore,
 }
@@ -64,14 +82,21 @@ pub(crate) fn classify(
     }
     match header.member().map(|member| member.as_str()) {
         Some("ActionInvoked") => match msg.body().deserialize::<(u32, String)>() {
-            Ok((notification, key)) if notification == id => keys
-                .iter()
-                .find(|ours| **ours == key)
-                .map_or(Signal::Ignore, |ours| Signal::Action(ours)),
+            Ok((notification, key)) if notification == id => {
+                let ours = keys.iter().find(|ours| **ours == key);
+                if ours.is_none() {
+                    tracing::info!(
+                        id,
+                        ?key,
+                        "notification server sent an action that isn't ours; ignored"
+                    );
+                }
+                ours.map_or(Signal::Ignore, |ours| Signal::Action(ours))
+            }
             _ => Signal::Ignore,
         },
         Some("NotificationClosed") => match msg.body().deserialize::<(u32, u32)>() {
-            Ok((notification, _reason)) if notification == id => Signal::Closed,
+            Ok((notification, reason)) if notification == id => Signal::Closed(reason),
             _ => Signal::Ignore,
         },
         _ => Signal::Ignore,
@@ -82,7 +107,8 @@ pub(crate) fn classify(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WaitEnd {
     Action(&'static str),
-    Closed,
+    /// The server closed it for this reason, other than expiry.
+    Closed(u32),
     /// The server that showed the notice lost the name (it went away or was
     /// replaced): the notice's actions are void.
     ServerChanged,
@@ -148,7 +174,6 @@ impl Notice {
             .iter()
             .flat_map(|(key, label)| [*key, *label])
             .collect();
-        let hints: HashMap<&str, zbus::zvariant::Value<'_>> = HashMap::new();
         let reply = conn
             .call_method(
                 Some(SERVER),
@@ -162,7 +187,7 @@ impl Notice {
                     summary,
                     body,
                     flat,
-                    hints,
+                    hints(),
                     -1i32,
                 ),
             )
@@ -170,6 +195,7 @@ impl Notice {
         let id: u32 = reply.body().deserialize()?;
         let shown_by = reply.header().sender().cloned();
         if shown_by.as_ref() != Some(&*owner) {
+            tracing::info!(id, server = %owner, ?shown_by, "notification server changed while showing a notice");
             if let Some(shown_by) = shown_by {
                 close_on(conn, &shown_by, id).await;
             }
@@ -177,6 +203,12 @@ impl Notice {
                 "the notification server changed while showing".into(),
             ));
         }
+        tracing::info!(
+            id,
+            server = %owner,
+            us = ?conn.unique_name().map(|name| name.as_str()),
+            "notice shown"
+        );
         Ok(Self {
             conn: conn.clone(),
             owner,
@@ -196,24 +228,34 @@ impl Notice {
         tokio::pin!(stop);
         loop {
             // Owner changes first, so a click queued behind one loses.
-            tokio::select! {
+            let end = tokio::select! {
                 biased;
                 change = self.owner_changes.next() => {
-                    if voids(change.as_ref(), &self.owner) {
-                        return WaitEnd::ServerChanged;
+                    if !voids(change.as_ref(), &self.owner) {
+                        continue;
                     }
+                    WaitEnd::ServerChanged
                 }
                 message = self.signals.next() => match message {
                     Some(Ok(message)) => match classify(&message, &self.owner, self.id, keys) {
-                        Signal::Action(key) => return WaitEnd::Action(key),
-                        Signal::Closed => return WaitEnd::Closed,
-                        Signal::Ignore => {}
+                        Signal::Action(key) => WaitEnd::Action(key),
+                        Signal::Closed(EXPIRED) => {
+                            tracing::info!(id = self.id, "notice expired; its buttons still count");
+                            continue;
+                        }
+                        Signal::Closed(reason) => WaitEnd::Closed(reason),
+                        Signal::Ignore => continue,
                     },
-                    Some(Err(error)) => tracing::debug!(%error, "unreadable notification signal"),
-                    None => return WaitEnd::ServerChanged,
+                    Some(Err(error)) => {
+                        tracing::debug!(%error, "unreadable notification signal");
+                        continue;
+                    }
+                    None => WaitEnd::ServerChanged,
                 },
-                _ = &mut stop => return WaitEnd::Stopped,
-            }
+                _ = &mut stop => WaitEnd::Stopped,
+            };
+            tracing::info!(id = self.id, ?end, "notice wait ended");
+            return end;
         }
     }
 
@@ -222,8 +264,17 @@ impl Notice {
     /// `org.freedesktop.Notifications` now: after a takeover, the new
     /// server's notification with this id is somebody else's.
     pub(crate) async fn close(&self) {
+        tracing::info!(id = self.id, server = %self.owner, "closing notice");
         close_on(&self.conn, &self.owner, self.id).await;
     }
+}
+
+/// `Notify`'s hints: see the module doc.
+fn hints() -> HashMap<&'static str, zbus::zvariant::Value<'static>> {
+    HashMap::from([
+        ("resident", zbus::zvariant::Value::from(true)),
+        ("desktop-entry", zbus::zvariant::Value::from(DESKTOP_ENTRY)),
+    ])
 }
 
 /// Whether a change of the server's owner voids a notice shown by `owner`:
@@ -236,9 +287,18 @@ fn voids(change: Option<&NameOwnerChanged>, owner: &UniqueName<'_>) -> bool {
         return true;
     };
     match change.args() {
-        Ok(args) => args.old_owner().as_ref() == Some(owner),
+        Ok(args) => {
+            let lost = args.old_owner().as_ref() == Some(owner);
+            tracing::info!(
+                old = ?args.old_owner().as_ref().map(|name| name.as_str()),
+                new = ?args.new_owner().as_ref().map(|name| name.as_str()),
+                voids = lost,
+                "notification server owner changed"
+            );
+            lost
+        }
         Err(error) => {
-            tracing::debug!(%error, "unreadable owner change of the notification server");
+            tracing::info!(%error, "unreadable owner change of the notification server");
             true
         }
     }
@@ -257,7 +317,7 @@ async fn close_on(conn: &Connection, server: &UniqueName<'_>, id: u32) {
         )
         .await
     {
-        tracing::debug!(%error, "closing the notification failed");
+        tracing::info!(%error, id, %server, "closing the notification failed");
     }
 }
 
@@ -346,17 +406,47 @@ mod tests {
     }
 
     #[test]
-    fn the_server_closing_our_notice_ends_the_wait() {
-        let closed = |sender, id: u32| {
+    fn the_server_closing_our_notice_says_why() {
+        let closed = |sender, id: u32, reason: u32| {
             Message::signal(PATH, INTERFACE, "NotificationClosed")
                 .unwrap()
                 .sender(sender)
                 .unwrap()
-                .build(&(id, 2u32))
+                .build(&(id, reason))
                 .unwrap()
         };
-        assert_eq!(classified(&closed(SERVER_NAME, 7)), Signal::Closed);
-        assert_eq!(classified(&closed(SERVER_NAME, 8)), Signal::Ignore);
-        assert_eq!(classified(&closed(":1.99", 7)), Signal::Ignore);
+        for reason in [EXPIRED, 2, 3, 4] {
+            assert_eq!(
+                classified(&closed(SERVER_NAME, 7, reason)),
+                Signal::Closed(reason)
+            );
+        }
+        assert_eq!(classified(&closed(SERVER_NAME, 8, 2)), Signal::Ignore);
+        assert_eq!(classified(&closed(":1.99", 7, 2)), Signal::Ignore);
+    }
+
+    /// Plasma 6.3 and older strip an expired notice's buttons unless it is
+    /// resident, and clicking a non-resident one closes it before we act.
+    #[test]
+    fn a_notice_is_resident_and_names_its_desktop_entry() {
+        let hints = hints();
+        assert_eq!(hints.len(), 2, "{hints:?}");
+        assert_eq!(hints["resident"], zbus::zvariant::Value::Bool(true));
+        assert_eq!(
+            hints["desktop-entry"],
+            zbus::zvariant::Value::from("org.snitchwatch.Snitchwatch")
+        );
+        // The desktop entry is the Flatpak's app id, in both manifests.
+        for manifest in [
+            include_str!("../../../packaging/flatpak/org.snitchwatch.Snitchwatch.yml"),
+            include_str!("../../../packaging/flatpak/org.snitchwatch.Snitchwatch.system.yml"),
+        ] {
+            assert!(
+                manifest
+                    .lines()
+                    .any(|line| line == format!("app-id: {DESKTOP_ENTRY}")),
+                "a Flatpak manifest's app-id drifted from DESKTOP_ENTRY"
+            );
+        }
     }
 }
