@@ -252,6 +252,25 @@ fn rules_managed_elsewhere_get_no_finding_but_may_shadow_user_rules() {
     assert_eq!(only(&rules, "100-user"), never("050-managed"));
 }
 
+/// A profile's rules (`850-profile:`) are installed while the profile is active
+/// and removed by the next network switch, so a user rule is never said to be
+/// shadowed by one, whichever way round the actions are.
+#[test]
+fn a_profile_rule_is_never_named_as_the_shadowing_rule() {
+    let rules = [deny("850-profile:work:r1", x()), allow("900-user", x())];
+    assert!(findings(&rules).is_empty(), "{:?}", findings(&rules));
+    let rules = [allow("100-user", x()), allow("850-profile:work:r1", x())];
+    assert!(findings(&rules).is_empty(), "{:?}", findings(&rules));
+
+    // The user's own covering rule is still named, profile rule or not.
+    let rules = [
+        deny("850-profile:work:r1", x()),
+        deny("500-user-deny", x()),
+        allow("900-user", x()),
+    ];
+    assert_eq!(only(&rules, "900-user"), never("500-user-deny"));
+}
+
 #[test]
 fn a_rule_with_a_condition_it_cannot_compare_shadows_nothing() {
     let opaque = deny(

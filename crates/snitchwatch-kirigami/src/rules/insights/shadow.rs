@@ -32,7 +32,9 @@
 //!
 //! **Only what can be proven is claimed.** `A` must be permanent (`always`:
 //! `until restart` and timed rules end, and with them the shadowing), enabled,
-//! and made of conditions [`super::atoms`] models. A proof that rests on
+//! not a profile's rule (`850-profile:`, which the next network switch
+//! removes, so it ends the shadowing too), and made of conditions
+//! [`super::atoms`] models. A proof that rests on
 //! comparisons reproduced exactly is [`FindingKind::NeverDecides`]; one that
 //! also rests on the simulator's regular-expression engine is only
 //! [`FindingKind::MayBeShadowed`], because Go's RE2 differs from it for rare
@@ -44,6 +46,8 @@
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
+
+use snitchwatch_bridge::rule_name::is_reserved_profile_name;
 
 use super::atoms::{Conjunction, Proof};
 use super::is_managed;
@@ -143,7 +147,11 @@ fn shadowed_by(position: usize, active: &[&Rule], conditions: &[Conjunction]) ->
     let shadowed_stops = stops_scan(shadowed);
     let mut covering = Vec::new();
     for (other, &candidate) in active.iter().enumerate() {
-        if other == position || candidate.duration != "always" || !conditions[other].is_modelled() {
+        if other == position
+            || candidate.duration != "always"
+            || is_reserved_profile_name(&candidate.name)
+            || !conditions[other].is_modelled()
+        {
             continue;
         }
         let stops = stops_scan(candidate);

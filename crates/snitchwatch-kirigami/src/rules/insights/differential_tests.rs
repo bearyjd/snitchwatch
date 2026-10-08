@@ -243,7 +243,8 @@ fn describe(rules: &[Rule]) -> Value {
 }
 
 /// Counts the findings by kind, after checking, for each, over the universe:
-/// - the rule called shadowed never decides;
+/// - the rule called shadowed never decides, in the whole list and against
+///   the named rule alone;
 /// - the named rule matches every connection the shadowed one matches;
 /// - and takes precedence on all of them: a stop rule names a decider that
 ///   stops the scan at or before it, and a non-stop one a decider that stops
@@ -267,6 +268,10 @@ fn check_findings(rules: &[Rule], universe: &[SimulationInput], by_kind: &mut [u
         let b = rules.iter().find(|r| &r.name == shadowed).unwrap();
         let a = rules.iter().find(|r| r.name == finding.by).unwrap();
         let a_stops = stops_scan(a);
+        // The claim is about the pair: with nothing else in the list, `b`
+        // still never decides. A third rule that happens to stop the scan
+        // first can't make the named rule look right.
+        let pair = store(&[a.clone(), b.clone()]);
         for input in universe {
             let context = || {
                 format!(
@@ -276,6 +281,13 @@ fn check_findings(rules: &[Rule], universe: &[SimulationInput], by_kind: &mut [u
                     describe(rules)
                 )
             };
+            assert_ne!(
+                decider(&pair, input).as_deref(),
+                Some(shadowed.as_str()),
+                "decides against {} alone: {}",
+                finding.by,
+                context()
+            );
             let decided_by = decider(&full, input);
             assert_ne!(
                 decided_by.as_deref(),
