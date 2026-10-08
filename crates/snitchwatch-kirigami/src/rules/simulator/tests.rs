@@ -62,7 +62,7 @@ fn store_with(rules: Vec<Value>) -> RulesStore {
 fn base() -> SimulationInput {
     SimulationInput {
         process_path: Some("/usr/bin/curl".to_string()),
-        dest_host: "example.com".to_string(),
+        dest_host: Some("example.com".to_string()),
         dest_port: 443,
         protocol: Some("tcp".to_string()),
         ..Default::default()
@@ -153,7 +153,7 @@ fn true_operand_always_matches() {
 #[test]
 fn regexp_wildcard_style_host_match() {
     let pattern = r"^[^.]*\.tracker\.example$";
-    let hit = base_with(|i| i.dest_host = "ads.tracker.example".to_string());
+    let hit = base_with(|i| i.dest_host = Some("ads.tracker.example".to_string()));
     assert!(matched(op("regexp", "dest.host", pattern), &hit));
     assert!(!matched(op("regexp", "dest.host", pattern), &base()));
 }
@@ -165,7 +165,7 @@ fn list_operator_requires_every_child_to_match() {
         simple("dest.host", "example.com"),
     ]);
     assert!(matched(operator.clone(), &base()));
-    let other_host = base_with(|i| i.dest_host = "slack.com".to_string());
+    let other_host = base_with(|i| i.dest_host = Some("slack.com".to_string()));
     assert!(!matched(operator, &other_host));
 }
 

@@ -74,7 +74,7 @@ fn a_pattern_the_simulators_engine_cannot_compile_is_unsupported_never_a_miss() 
 fn a_big_bounded_repeat_still_compiles() {
     // A hostname-shaped bounded repeat compiles and bounds the length.
     let pattern = op("regexp", "dest.host", r"^[a-z0-9]{1,253}$");
-    let host = |n: usize| base_with(|i| i.dest_host = "a".repeat(n));
+    let host = |n: usize| base_with(|i| i.dest_host = Some("a".repeat(n)));
     assert!(matched(pattern.clone(), &host(253)));
     assert!(!matched(pattern.clone(), &host(254)));
     assert!(!matched(pattern, &host(0)));
