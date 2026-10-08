@@ -639,7 +639,7 @@ Kirigami.ApplicationWindow {
                 onTriggered: root.pageStack.replace(profilesPageComponent)
             },
             Kirigami.Action {
-                text: "Recommended rules"
+                text: "Recommended background-service rules"
                 icon.name: "checkmark"
                 onTriggered: root.pageStack.replace(recommendedRulesPageComponent)
             },

@@ -18,7 +18,7 @@ import com.snitchwatch.shell
 
 Kirigami.ScrollablePage {
     id: page
-    title: "Recommended rules"
+    title: "Recommended background-service rules"
 
     // Injected by the caller (main.qml) so the model's lifetime is owned there.
     property CuratedDefaultsModel model

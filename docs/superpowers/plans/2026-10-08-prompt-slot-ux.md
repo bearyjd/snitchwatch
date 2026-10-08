@@ -482,7 +482,7 @@ Branch `feat/prompt-slot-curated-defaults`.
 - **Opt-in, per entry.** The choices live in
   `<state>/curated-defaults.json`, read and written through `state_file`
   (the hit-count file's checks: owner-only, no links, atomic replace).
-  Nothing is on by default. Kirigami has a "Recommended rules" page: a
+  Nothing is on by default. Kirigami has a "Recommended background-service rules" page: a
   switch per entry, "Turn all on" and "Turn all off", and each entry's
   program, what it allows and why, as plain text.
 - **Reconcile**, as item 13, plus:

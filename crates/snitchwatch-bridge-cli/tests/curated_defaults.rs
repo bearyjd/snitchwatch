@@ -231,3 +231,46 @@ async fn the_per_user_bridge_lists_them_but_never_installs_any() {
     nothing_sent(&mut seen).await;
     s.bridge.shutdown();
 }
+
+/// Plan D's mock-daemon case: the daemon reports Snitchwatch's copy back
+/// (still installed, nothing sent), then an edited copy, which is left
+/// alone, even on opt-out.
+#[tokio::test]
+async fn a_copy_the_user_edited_is_left_alone() {
+    let mut s = start(BridgeMode::System).await;
+    let (daemon, mut seen) = connect_daemon(&s.bridge, 1, Vec::new()).await;
+    send(&s.bridge, turn(true)).await;
+    let installed = next_command(&mut seen).await.rules[0].clone();
+    entry_until(&mut s.rx, "installed", |e, _| {
+        e.status == EntryStatus::Installed
+    })
+    .await;
+    drop((daemon, seen));
+
+    // The daemon restarts and reports our copy: nothing to do.
+    let (daemon, mut seen) = connect_daemon(&s.bridge, 2, vec![installed.clone()]).await;
+    nothing_sent(&mut seen).await;
+    while s.rx.try_recv().is_ok() {}
+    send(&s.bridge, ClientMessage::RequestSnapshot).await;
+    entry_until(&mut s.rx, "still installed", |e, _| {
+        e.status == EntryStatus::Installed
+    })
+    .await;
+    drop((daemon, seen));
+
+    // The user changed its port outside Snitchwatch.
+    let mut edited = installed;
+    edited.operator.as_mut().unwrap().list[2].data = "8443".into();
+    let (_daemon, mut seen) = connect_daemon(&s.bridge, 3, vec![edited]).await;
+    entry_until(&mut s.rx, "edited by you", |e, _| {
+        e.status == EntryStatus::EditedByYou
+    })
+    .await;
+    send(&s.bridge, turn(false)).await;
+    entry_until(&mut s.rx, "off, edit kept", |e, _| {
+        !e.on && e.status == EntryStatus::EditedByYou
+    })
+    .await;
+    nothing_sent(&mut seen).await;
+    s.bridge.shutdown();
+}
