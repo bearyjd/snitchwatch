@@ -94,12 +94,13 @@ impl CuratedStore {
     }
 
     /// "Turn all on/off": only the entries not already that way, so an
-    /// entry already on isn't asked again.
+    /// entry already on isn't asked again. "Turn all on" also keeps a rule
+    /// already in the firewall that the user hadn't chosen yet.
     pub fn request_all(&self, on: bool) -> Option<ClientMessage> {
         let ids: Vec<String> = self
             .entries
             .iter()
-            .filter(|e| e.on != on)
+            .filter(|e| e.on != on || (on && e.status == EntryStatus::InFirewall))
             .map(|e| e.id.clone())
             .collect();
         (self.usable() && !ids.is_empty()).then_some(ClientMessage::SetCuratedDefaults { ids, on })
@@ -163,6 +164,7 @@ mod tests {
                 entry("flatpak-flathub", false, EntryStatus::Off),
                 entry("chronyc-local", true, EntryStatus::Installed),
                 entry("networkmanager", true, EntryStatus::EditedByYou),
+                entry("undecided", true, EntryStatus::InFirewall),
             ],
             storage: StorageStatus {
                 persistent: true,
@@ -180,7 +182,7 @@ mod tests {
         assert!(store.request("flatpak-flathub", true).is_none());
         assert!(store.apply(1, &message(None)));
         assert!(store.received());
-        assert_eq!(store.len(), 3);
+        assert_eq!(store.len(), 4);
         assert!(!store.row(0).unwrap().on, "off unless the bridge says on");
         assert_eq!(
             store.request("flatpak-flathub", true),
@@ -200,14 +202,18 @@ mod tests {
         assert_eq!(
             store.request_all(true),
             Some(ClientMessage::SetCuratedDefaults {
-                ids: vec!["flatpak-flathub".into()],
+                ids: vec!["flatpak-flathub".into(), "undecided".into()],
                 on: true
             })
         );
         assert_eq!(
             store.request_all(false),
             Some(ClientMessage::SetCuratedDefaults {
-                ids: vec!["chronyc-local".into(), "networkmanager".into()],
+                ids: vec![
+                    "chronyc-local".into(),
+                    "networkmanager".into(),
+                    "undecided".into()
+                ],
                 on: false
             })
         );

@@ -584,7 +584,28 @@ Branch `feat/prompt-slot-curated-defaults`.
 
     The Rules page's toggle of a recommended rule is refused then too.
   - Choices are taken in memory on the inbound pump and saved by the
-    worker on a blocking thread before any command that depends on them.
+    worker on a blocking thread, one save at a time and never an older
+    version over a newer one, before any command that depends on them.
+  - **No retry loop** (PR #105 re-review HIGH). The worker runs a pass
+    only when something it reads changed: the rule list's revision, its
+    known/withdrawn state, the daemon stream, the choices, inertness, or a
+    removal asked for. A held rule list is published on release only if a
+    confirmed command changed it (all `PublishHold` users, the rule import
+    too). A command that failed (refused, not sent, no answer) is not sent
+    again for that entry until its choice changes or the daemon reconnects;
+    until then the entry keeps its failure status and text.
+  - **A first run leaves the firewall alone** (re-review M1). An entry the
+    user never chose (no choices file, e.g. one moved away) whose unedited
+    rule is already in the firewall reads "In the firewall (added
+    earlier)", with its switch on, and nothing is sent until the user turns
+    it off (deleted) or on (adopted). Only an explicit "off" deletes.
+  - The ids Snitchwatch installed are kept apart from the recorded copies,
+    so a copy dropped as invalid still marks its rule as one Snitchwatch
+    installed: gone from the daemon, it is a removal, not a reinstall
+    (re-review M2).
+  - Just before an install, the live rule list is checked again: a copy
+    that arrived since the pass began is adopted next pass, not
+    overwritten.
   - "Rule installed" only after the daemon's `OK`; the installed copy is
     recorded then. Each command is re-checked against the choices just
     before it is sent, so a choice changed mid-pass wins. A pass holds the
@@ -600,12 +621,21 @@ Branch `feat/prompt-slot-curated-defaults`.
   - A copy whose rule differs from the entry reads "The firewall's rule
     under this name differs from this description and still applies; see
     the Rules page." It is never deleted by reconcile, but has a
-    **Remove** button (review M2): after a confirmation, the bridge sends
-    `DELETE_RULE` for exactly that entry's reserved name, and records it as
-    removed. A name too large for the bridge's list (`left_out`) counts as
-    edited (security review L4).
+    **Remove** button (review M2): after a confirmation ("Remove the
+    firewall's rule under this name? It differs from this description and
+    may allow or block something else; see the Rules page."), the bridge
+    sends `DELETE_RULE` for exactly that entry's reserved name, and records
+    it as removed. A name too large for the bridge's list (`left_out`)
+    counts as edited (security review L4). A removal asked for under a
+    list that is then withdrawn is dropped.
   - A refused delete reads "The firewall service refused to remove the
-    rule." and is tried again on the next pass.
+    rule." and is tried again after the daemon reconnects or the user
+    changes that entry.
+  - Follow-up, not in this PR: a rule under the prefix for an entry no
+    longer in the list, with no recorded copy, is left alone and can't be
+    removed from the Recommended page (only from the daemon's own UI or
+    rules folder). A "No longer recommended" list with Remove would cover
+    it.
   - Not handled in v1: a later data file changing an installed entry. Its
     old copy then reads as edited and is left alone. A v2 must decide.
   - Not done: telling a removal from a race. A snapshot staged before an
@@ -622,6 +652,12 @@ Branch `feat/prompt-slot-curated-defaults`.
   { entries, storage, unavailable }`; capability `curatedDefaults`.
   Kirigami forgets a session's list when a new session starts, so a bridge
   without the capability shows "not offered".
+- **VM check (r11), for the PR:** does opensnitchd v1.8.0 refuse
+  `DELETE_RULE` for a rule whose file is already gone (`loader.go` `Delete`
+  returns the `os.Remove` error)? Either way the entry shows the result
+  and the command isn't repeated until the daemon reconnects or the user
+  changes the entry. Also: the status stays "Rule installed" across a
+  daemon restart (the canonical comparison against a real daemon's copy).
 - **Not added: a `user.id` condition.** NetworkManager's check most likely
   runs as root, but the r10 capture records no uid and this sandbox has no
   NetworkManager unit to read. r11 should record the uid; then entries

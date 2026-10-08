@@ -173,9 +173,9 @@ Kirigami.ScrollablePage {
                     Controls.Label {
                         objectName: "removeQuestion"
                         visible: row.canRemove && row.confirmingRemove
-                        text: "Remove the rule you edited? Snitchwatch deletes the firewall's rule "
-                            + "under this name and won't add it back until you turn this off and "
-                            + "on again."
+                        text: "Remove the firewall's rule under this name? It differs from this "
+                            + "description and may allow or block something else; see the Rules "
+                            + "page."
                         wrapMode: Text.Wrap
                         Layout.fillWidth: true
                     }
