@@ -23,8 +23,7 @@ pub fn config_dir() -> PathBuf {
 }
 
 pub fn autostart_path() -> PathBuf {
-    autostart_dir_from(xdg("XDG_CONFIG_HOME").as_deref(), home().as_deref())
-        .join("snitchwatch.desktop")
+    autostart_path_from(xdg("XDG_CONFIG_HOME").as_deref(), home().as_deref())
 }
 
 /// Per-user autostart entry for upstream `opensnitch-ui`, if installed —
@@ -32,13 +31,12 @@ pub fn autostart_path() -> PathBuf {
 /// opensnitch-ui" section. Same directory as our own `autostart_path()`,
 /// just the upstream project's filename.
 pub fn opensnitch_ui_autostart_path() -> PathBuf {
-    autostart_dir_from(xdg("XDG_CONFIG_HOME").as_deref(), home().as_deref())
-        .join("opensnitch_ui.desktop")
+    opensnitch_ui_autostart_path_from(xdg("XDG_CONFIG_HOME").as_deref(), home().as_deref())
 }
 
 /// Persisted preferences (`crate::settings`), e.g. the RDAP opt-in flag.
 pub fn settings_path() -> PathBuf {
-    config_dir().join("settings.json")
+    settings_path_from(xdg("XDG_CONFIG_HOME").as_deref(), home().as_deref())
 }
 
 pub fn bridge_log_path() -> PathBuf {
@@ -66,6 +64,18 @@ fn config_dir_from(xdg_config_home: Option<&str>, home: Option<&str>) -> PathBuf
 
 fn autostart_dir_from(xdg_config_home: Option<&str>, home: Option<&str>) -> PathBuf {
     xdg_dir_from(xdg_config_home, home, ".config").join("autostart")
+}
+
+fn autostart_path_from(xdg_config_home: Option<&str>, home: Option<&str>) -> PathBuf {
+    autostart_dir_from(xdg_config_home, home).join("snitchwatch.desktop")
+}
+
+fn opensnitch_ui_autostart_path_from(xdg_config_home: Option<&str>, home: Option<&str>) -> PathBuf {
+    autostart_dir_from(xdg_config_home, home).join("opensnitch_ui.desktop")
+}
+
+fn settings_path_from(xdg_config_home: Option<&str>, home: Option<&str>) -> PathBuf {
+    config_dir_from(xdg_config_home, home).join("settings.json")
 }
 
 /// An unset or empty `xdg` value is treated as unset; with no `home` either,
@@ -141,8 +151,10 @@ mod tests {
 
     #[test]
     fn autostart_entries_use_the_config_dir() {
-        let dir = autostart_dir_from(Some("/tmp/cfg"), Some("/home/alice"));
-        assert_eq!(dir, PathBuf::from("/tmp/cfg/autostart"));
+        assert_eq!(
+            autostart_dir_from(Some("/tmp/cfg"), Some("/home/alice")),
+            PathBuf::from("/tmp/cfg/autostart")
+        );
         assert_eq!(
             autostart_dir_from(None, Some("/home/alice")),
             PathBuf::from("/home/alice/.config/autostart")
@@ -150,10 +162,38 @@ mod tests {
     }
 
     #[test]
+    fn autostart_path_names_our_desktop_file() {
+        assert_eq!(
+            autostart_path_from(Some("/tmp/cfg"), Some("/home/alice")),
+            PathBuf::from("/tmp/cfg/autostart/snitchwatch.desktop")
+        );
+        assert_eq!(
+            autostart_path_from(None, Some("/home/alice")),
+            PathBuf::from("/home/alice/.config/autostart/snitchwatch.desktop")
+        );
+    }
+
+    #[test]
+    fn opensnitch_ui_autostart_path_names_the_upstream_desktop_file() {
+        assert_eq!(
+            opensnitch_ui_autostart_path_from(Some("/tmp/cfg"), Some("/home/alice")),
+            PathBuf::from("/tmp/cfg/autostart/opensnitch_ui.desktop")
+        );
+        assert_eq!(
+            opensnitch_ui_autostart_path_from(None, Some("/home/alice")),
+            PathBuf::from("/home/alice/.config/autostart/opensnitch_ui.desktop")
+        );
+    }
+
+    #[test]
     fn settings_path_uses_config_dir() {
         assert_eq!(
-            config_dir_from(Some("/tmp/cfg"), None).join("settings.json"),
+            settings_path_from(Some("/tmp/cfg"), None),
             PathBuf::from("/tmp/cfg/snitchwatch/settings.json")
+        );
+        assert_eq!(
+            settings_path_from(None, Some("/home/alice")),
+            PathBuf::from("/home/alice/.config/snitchwatch/settings.json")
         );
     }
 }
