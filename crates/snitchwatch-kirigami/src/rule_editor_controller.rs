@@ -327,7 +327,6 @@ impl qobject::RuleEditorController {
             self.qt_thread(),
             "RuleEditorController",
             Self::on_message,
-            false,
         );
     }
 }

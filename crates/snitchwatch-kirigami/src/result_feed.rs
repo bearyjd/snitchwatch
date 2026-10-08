@@ -7,7 +7,7 @@
 
 use std::pin::Pin;
 
-use snitchwatch_bridge::ws_messages::{ClientMessage, ServerMessage};
+use snitchwatch_bridge::ws_messages::ServerMessage;
 
 use crate::bridge_dispatch::run_feed;
 use crate::bridge_runtime::SendClientMessageError;
@@ -15,30 +15,25 @@ use crate::rule_commands::interests_rule_results;
 
 /// Feed the bridge's `RuleCommandResult`s to `on_message`, on the Qt thread
 /// of the object `qt_thread` belongs to, and only from the live bridge
-/// session. Asks for a snapshot first only when `resync`: a feed of results
-/// alone keeps no state a snapshot could restore, so both controllers pass
-/// `false`. False without a bridge runtime.
+/// session. It never asks for a snapshot (PR #111 review, L8: there is no
+/// flag to ask for one): a feed of results alone keeps no state a snapshot
+/// could restore. Without a bridge runtime it logs and does nothing.
 pub fn spawn_result_feed<T>(
     qt_thread: cxx_qt::CxxQtThread<T>,
     label: &'static str,
     on_message: fn(Pin<&mut T>, ServerMessage),
-    resync: bool,
-) -> bool
-where
+) where
     T: cxx_qt::Threading + 'static,
 {
     let Some(handles) = crate::bridge_runtime::handles() else {
         tracing::warn!(feed = label, "bridge not running; no rule command results");
-        return false;
+        return;
     };
     let rx = handles.subscribe();
-    let snapshots = handles.clone();
     let session_handles = handles.clone();
     handles.runtime().spawn(run_feed(
         rx,
-        request_snapshot_if(resync, move || {
-            snapshots.try_send(ClientMessage::RequestSnapshot)
-        }),
+        no_snapshot,
         label,
         interests_rule_results,
         move |connection_id, message, _json| {
@@ -54,19 +49,12 @@ where
             });
         },
     ));
-    true
 }
 
-/// How a feed asks for a snapshot: `send`, or nothing at all (reported as
-/// done, so [`run_feed`] stops trying) when not `resync`.
-fn request_snapshot_if<S>(
-    resync: bool,
-    send: S,
-) -> impl Fn() -> Result<(), SendClientMessageError> + Send + 'static
-where
-    S: Fn() -> Result<(), SendClientMessageError> + Send + 'static,
-{
-    move || if resync { send() } else { Ok(()) }
+/// A result feed's snapshot request: none, reported as done so [`run_feed`]
+/// stops trying (and asks for none after a lag either).
+fn no_snapshot() -> Result<(), SendClientMessageError> {
+    Ok(())
 }
 
 /// Runs `deliver` only for a message from the live bridge session
@@ -86,8 +74,6 @@ fn from_current_session<M>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
 
     #[test]
     fn a_result_from_another_session_is_not_delivered() {
@@ -96,29 +82,5 @@ mod tests {
         from_current_session(is_current, 1, "old", |m| delivered.borrow_mut().push(m));
         from_current_session(is_current, 2, "live", |m| delivered.borrow_mut().push(m));
         assert_eq!(*delivered.borrow(), vec!["live"]);
-    }
-
-    /// A results-only feed asks for no snapshot; with `resync` it asks once.
-    #[tokio::test]
-    async fn a_feed_without_resync_requests_no_snapshot() {
-        for (resync, wanted) in [(false, 0), (true, 1)] {
-            let (btx, brx) = tokio::sync::broadcast::channel(4);
-            let asked = Arc::new(AtomicUsize::new(0));
-            let counter = asked.clone();
-            let feed = tokio::spawn(run_feed(
-                brx,
-                request_snapshot_if(resync, move || {
-                    counter.fetch_add(1, Ordering::SeqCst);
-                    Ok(())
-                }),
-                "test-results",
-                interests_rule_results,
-                |_, _, _| {},
-            ));
-            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-            drop(btx);
-            let _ = feed.await;
-            assert_eq!(asked.load(Ordering::SeqCst), wanted, "resync {resync}");
-        }
     }
 }

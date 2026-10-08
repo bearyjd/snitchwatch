@@ -187,7 +187,6 @@ impl qobject::MakeRuleController {
             self.qt_thread(),
             "MakeRuleController",
             Self::on_message,
-            false,
         );
     }
 }

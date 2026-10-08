@@ -134,8 +134,9 @@ pub fn decode_client(json: &str) -> Result<ClientMessage, serde_json::Error> {
     serde_json::from_str(json)
 }
 
-/// The shared feed loop every model's `startBridgeFeed()` runs (Qt-free, so
-/// it's directly unit-testable below). Receives every outbound
+/// The shared feed loop every model's `startBridgeFeed()` runs, and the
+/// rule-command controllers' result feeds (`crate::result_feed`) too
+/// (Qt-free, so it's directly unit-testable below). Receives every outbound
 /// [`ServerMessage`], keeps only those `interest` routes to this model,
 /// encodes to the JSON `applyServerMessageJson` consumes, and hands
 /// `(typed message, json)` to `deliver` — the model-supplied closure that
@@ -146,7 +147,8 @@ pub fn decode_client(json: &str) -> Result<ClientMessage, serde_json::Error> {
 /// re-broadcast full snapshots ([`ClientMessage::RequestSnapshot`]): these are
 /// stateful snapshot+delta streams, so silently skipping deltas would leave
 /// the model stale until the next natural snapshot — which for connections
-/// never comes. A snapshot is also requested after subscription. Transient
+/// never comes. A snapshot is also requested after subscription. A result
+/// feed's `request_snapshot` asks for nothing: results are no state. Transient
 /// disconnects or a full request queue keep the feed alive and retry the
 /// snapshot until accepted. Exits when the broadcast closes or the client
 /// runtime has stopped.
@@ -216,8 +218,9 @@ pub fn spawn_feed<F>(
     let rx = handles.subscribe();
     // Subscribe before asking for a snapshot. The client runtime also requests
     // one on WebSocket connect, but that early broadcast can precede QML feed
-    // creation. Each feed therefore requests a resync; the last QML feed to
-    // subscribe also covers every feed created before it.
+    // creation. Each state feed therefore requests a resync; the last QML feed
+    // to subscribe also covers every feed created before it. (The result
+    // feeds, `crate::result_feed`, request none.)
     handles.runtime().spawn(run_feed(
         rx,
         {
