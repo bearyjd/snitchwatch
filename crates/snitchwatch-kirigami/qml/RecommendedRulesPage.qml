@@ -7,6 +7,8 @@
 // turns it on: the switch follows `isOn`, which only the bridge sets, and
 // a switch click only asks (`CuratedDefaultsModel.setEntry`). "Rule
 // installed" shows only after the firewall service accepted the rule.
+// Statuses are as of the firewall service's last rule list. A rule edited
+// outside Snitchwatch can be removed here, only after a confirmation.
 //
 // Every text from the bridge goes in a PlainText label; the warnings are
 // fixed text (issue #51).
@@ -25,8 +27,6 @@ Kirigami.ScrollablePage {
 
     readonly property bool received: page.model ? page.model.received : false
     readonly property string unavailableReason: page.model ? page.model.unavailableReason : ""
-    readonly property bool choicesNotSaved: page.model ? page.model.choicesNotSaved : false
-    readonly property string storageReason: page.model ? page.model.storageReason : ""
     // The switches only ask the bridge; they work while it adds these rules.
     readonly property bool usable: page.received && page.unavailableReason.length === 0
     property alias entriesList: list
@@ -41,7 +41,8 @@ Kirigami.ScrollablePage {
             visible: true
             text: "Background services on this computer that need the network. Each rule lets "
                 + "one program reach one place, and says exactly what it allows. None is on "
-                + "unless you turn it on."
+                + "unless you turn it on. What each says is as of the firewall service's last "
+                + "rule list."
         }
         Kirigami.InlineMessage {
             objectName: "notOfferedBanner"
@@ -56,8 +57,8 @@ Kirigami.ScrollablePage {
             Layout.fillWidth: true
             type: Kirigami.MessageType.Warning
             visible: page.received && page.unavailableReason.length > 0
-            text: "This Snitchwatch service doesn't add recommended rules. Nothing here can be "
-                + "turned on."
+            text: "This Snitchwatch service doesn't add or remove recommended rules. Nothing "
+                + "here can be turned on or off; rules already in the firewall stay as they are."
         }
         Controls.Label {
             objectName: "unavailableReason"
@@ -67,22 +68,6 @@ Kirigami.ScrollablePage {
             textFormat: Text.PlainText
             wrapMode: Text.Wrap
             text: page.unavailableReason
-        }
-        Kirigami.InlineMessage {
-            objectName: "notSavedBanner"
-            Layout.fillWidth: true
-            type: Kirigami.MessageType.Warning
-            visible: page.choicesNotSaved
-            text: "Your choices here couldn't be saved, so they are lost when Snitchwatch's "
-                + "background service restarts."
-        }
-        Controls.Label {
-            Layout.fillWidth: true
-            Layout.margins: Kirigami.Units.smallSpacing
-            visible: page.choicesNotSaved && page.storageReason.length > 0
-            textFormat: Text.PlainText
-            wrapMode: Text.Wrap
-            text: "Details: " + page.storageReason
         }
         RowLayout {
             Layout.margins: Kirigami.Units.smallSpacing
@@ -118,6 +103,9 @@ Kirigami.ScrollablePage {
             required property bool isOn
             required property string statusText
             required property string problem
+            required property bool canRemove
+            // Remove asks first; a model reset (the bridge's answer) ends it.
+            property bool confirmingRemove: false
 
             contentItem: RowLayout {
                 spacing: Kirigami.Units.largeSpacing
@@ -175,6 +163,37 @@ Kirigami.ScrollablePage {
                         color: Kirigami.Theme.negativeTextColor
                         font: Kirigami.Theme.smallFont
                         Layout.fillWidth: true
+                    }
+                    Controls.Button {
+                        objectName: "removeButton"
+                        visible: row.canRemove && !row.confirmingRemove
+                        text: "Remove…"
+                        onClicked: row.confirmingRemove = true
+                    }
+                    Controls.Label {
+                        objectName: "removeQuestion"
+                        visible: row.canRemove && row.confirmingRemove
+                        text: "Remove the rule you edited? Snitchwatch deletes the firewall's rule "
+                            + "under this name and won't add it back until you turn this off and "
+                            + "on again."
+                        wrapMode: Text.Wrap
+                        Layout.fillWidth: true
+                    }
+                    RowLayout {
+                        visible: row.canRemove && row.confirmingRemove
+                        Controls.Button {
+                            objectName: "removeConfirm"
+                            text: "Remove rule"
+                            onClicked: {
+                                row.confirmingRemove = false;
+                                page.model.removeEntry(row.entryId);
+                            }
+                        }
+                        Controls.Button {
+                            objectName: "removeCancel"
+                            text: "Cancel"
+                            onClicked: row.confirmingRemove = false
+                        }
                     }
                 }
             }

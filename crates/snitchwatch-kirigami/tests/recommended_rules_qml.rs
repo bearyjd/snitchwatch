@@ -6,7 +6,9 @@
 //!     asks, and the switch keeps the bridge's value until it answers.
 //!   * Each row shows exactly what its rule allows, as plain text, and its
 //!     status in fixed words.
-//!   * "Turn all on/off" asks for every entry.
+//!   * "Turn all on/off" asks only for the entries not already that way.
+//!   * Remove is offered only for a rule edited outside Snitchwatch, and
+//!     asks for a confirmation before anything is sent.
 //!   * On a bridge that never adds them, nothing can be turned on, and the
 //!     reason is shown.
 //!
@@ -111,9 +113,10 @@ Controls.ApplicationWindow {
                 curated.setAll(true);
                 expect(probeWindow.sent.length === 0, "asked before the bridge offered any");
 
-                send([entry("flatpak", false, "off"), entry("chronyc", true, "installed")]);
+                send([entry("flatpak", false, "off"), entry("chronyc", true, "installed"),
+                      entry("nm", true, "editedByYou")]);
                 expect(!find(header, "notOfferedBanner").visible, "not-offered banner stayed");
-                expect(page.entriesList.count === 2, "rows: " + page.entriesList.count);
+                expect(page.entriesList.count === 3, "rows: " + page.entriesList.count);
                 const sw = find(row(0), "entrySwitch");
                 expect(sw.enabled && !sw.checked, "an entry the bridge says is off shows on");
                 expect(find(row(1), "entrySwitch").checked, "an entry turned on shows off");
@@ -135,9 +138,26 @@ Controls.ApplicationWindow {
 
                 find(header, "allOffButton").clicked();
                 expect(probeWindow.sent.length === 2
-                       && JSON.stringify(probeWindow.sent[1].ids) === '["flatpak","chronyc"]'
+                       && JSON.stringify(probeWindow.sent[1].ids) === '["chronyc","nm"]'
                        && probeWindow.sent[1].on === false,
                        "Turn all off: " + JSON.stringify(probeWindow.sent));
+
+                // Remove: only for the edited rule, and only once confirmed.
+                expect(!find(row(1), "removeButton").visible, "Remove on an unedited rule");
+                const remove = find(row(2), "removeButton");
+                expect(remove.visible, "no Remove on an edited rule");
+                remove.clicked();
+                expect(probeWindow.sent.length === 2, "removed before the user confirmed");
+                expect(find(row(2), "removeQuestion").visible, "no confirmation question");
+                find(row(2), "removeCancel").clicked();
+                expect(probeWindow.sent.length === 2 && find(row(2), "removeButton").visible,
+                       "Cancel didn't cancel");
+                find(row(2), "removeButton").clicked();
+                find(row(2), "removeConfirm").clicked();
+                expect(probeWindow.sent.length === 3
+                       && probeWindow.sent[2].action === "removeCuratedDefault"
+                       && probeWindow.sent[2].id === "nm",
+                       "Remove: " + JSON.stringify(probeWindow.sent));
 
                 // A bridge that never adds them: nothing can be turned on.
                 send([entry("flatpak", false, "unavailable")], "Needs the system service.");
@@ -147,7 +167,8 @@ Controls.ApplicationWindow {
                 expect(!find(header, "allOnButton").visible, "Turn all on while unavailable");
                 expect(!find(row(0), "entrySwitch").enabled, "switch enabled while unavailable");
                 curated.setEntry("flatpak", true);
-                expect(probeWindow.sent.length === 2, "asked while unavailable");
+                curated.removeEntry("flatpak");
+                expect(probeWindow.sent.length === 3, "asked while unavailable");
             } finally {
                 Qt.quit();
             }

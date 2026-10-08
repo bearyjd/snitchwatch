@@ -273,7 +273,8 @@ async fn client_loop_forwards_authenticated_snapshot_to_the_qml_feed() {
         .await
         .expect("bridge starts");
     // Room for the whole snapshot (production uses 1,024): this test reads
-    // it only after the client has forwarded it.
+    // it only after the client has forwarded it, and checks each part,
+    // the recommended rules included.
     let (shell_tx, mut shell_messages) = broadcast::channel(64);
     let (inbound_tx, inbound_rx) = mpsc::channel(1);
     let (tray_tx, _) = watch::channel(ReceivedTrayState {
@@ -307,8 +308,9 @@ async fn client_loop_forwards_authenticated_snapshot_to_the_qml_feed() {
     let mut saw_profiles = false;
     let mut saw_tray = false;
     let mut saw_slot = false;
+    let mut saw_curated = false;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
-    while !(saw_clear && saw_blocklists && saw_profiles && saw_tray && saw_slot) {
+    while !(saw_clear && saw_blocklists && saw_profiles && saw_tray && saw_slot && saw_curated) {
         match tokio::time::timeout_at(deadline, shell_messages.recv())
             .await
             .expect("client did not forward the authenticated snapshot")
@@ -337,6 +339,10 @@ async fn client_loop_forwards_authenticated_snapshot_to_the_qml_feed() {
                 connection_id: 1,
                 message: ServerMessage::PromptSlot { .. },
             } => saw_slot = true,
+            ReceivedServerMessage {
+                connection_id: 1,
+                message: ServerMessage::SetCuratedDefaults { .. },
+            } => saw_curated = true,
             _ => {}
         }
     }

@@ -20,6 +20,7 @@ const ROLE_WHY: i32 = 3;
 const ROLE_ON: i32 = 4;
 const ROLE_STATUS: i32 = 5;
 const ROLE_PROBLEM: i32 = 6;
+const ROLE_CAN_REMOVE: i32 = 7;
 
 #[cxx_qt::bridge]
 pub mod qobject {
@@ -39,17 +40,16 @@ pub mod qobject {
 
     extern "RustQt" {
         /// The recommended rules, bound by `RecommendedRulesPage.qml`.
-        /// `received` is false until the bridge sends them (an older bridge
-        /// never does). `unavailableReason` is why this bridge never adds
-        /// them; `choicesNotSaved`/`storageReason` say a save failed.
+        /// `received` is false until this session's bridge sends them (an
+        /// older bridge never does). `unavailableReason` is why this bridge
+        /// changes none (the per-user bridge, or choices it can't read or
+        /// save).
         #[qobject]
         #[qml_element]
         #[base = QAbstractListModel]
         #[qproperty(i32, count)]
         #[qproperty(bool, received)]
         #[qproperty(QString, unavailable_reason, cxx_name = "unavailableReason")]
-        #[qproperty(bool, choices_not_saved, cxx_name = "choicesNotSaved")]
-        #[qproperty(QString, storage_reason, cxx_name = "storageReason")]
         type CuratedDefaultsModel = super::CuratedDefaultsModelRust;
 
         /// Emitted with a JSON-encoded `SetCuratedDefaults` request.
@@ -85,10 +85,17 @@ pub mod qobject {
         #[cxx_name = "setEntry"]
         fn set_entry(self: Pin<&mut CuratedDefaultsModel>, id: &QString, on: bool);
 
-        /// Ask to turn every listed entry on or off.
+        /// Ask to turn every listed entry on or off (only those not already
+        /// that way).
         #[qinvokable]
         #[cxx_name = "setAll"]
         fn set_all(self: Pin<&mut CuratedDefaultsModel>, on: bool);
+
+        /// Ask to remove an entry's edited rule. Call only after the user
+        /// confirmed; ignored for any entry that doesn't offer Remove.
+        #[qinvokable]
+        #[cxx_name = "removeEntry"]
+        fn remove_entry(self: Pin<&mut CuratedDefaultsModel>, id: &QString);
     }
 
     unsafe extern "RustQt" {
@@ -110,8 +117,6 @@ pub struct CuratedDefaultsModelRust {
     count: i32,
     received: bool,
     unavailable_reason: QString,
-    choices_not_saved: bool,
-    storage_reason: QString,
 }
 
 impl qobject::CuratedDefaultsModel {
@@ -132,6 +137,7 @@ impl qobject::CuratedDefaultsModel {
             ROLE_ON => QVariant::from(&entry.on),
             ROLE_STATUS => text(status_text(entry.status)),
             ROLE_PROBLEM => text(entry.problem.as_deref().unwrap_or_default()),
+            ROLE_CAN_REMOVE => QVariant::from(&self.store.can_remove(entry)),
             _ => QVariant::default(),
         }
     }
@@ -146,33 +152,38 @@ impl qobject::CuratedDefaultsModel {
         roles.insert(ROLE_ON, QByteArray::from("isOn"));
         roles.insert(ROLE_STATUS, QByteArray::from("statusText"));
         roles.insert(ROLE_PROBLEM, QByteArray::from("problem"));
+        roles.insert(ROLE_CAN_REMOVE, QByteArray::from("canRemove"));
         roles
     }
 
-    fn apply_server_message_json(mut self: Pin<&mut Self>, json: &QString) {
+    /// From QML: a message for the current session.
+    fn apply_server_message_json(self: Pin<&mut Self>, json: &QString) {
+        let session = self.store.session();
+        self.apply_session_message(session, json);
+    }
+
+    /// A message from bridge session `connection_id`; a new session starts
+    /// from an empty list.
+    fn apply_session_message(mut self: Pin<&mut Self>, connection_id: u64, json: &QString) {
         let Ok(msg) = serde_json::from_str::<ServerMessage>(&json.to_string()) else {
             tracing::warn!("CuratedDefaultsModel: bad ServerMessage JSON");
             return;
         };
-        if !matches!(msg, ServerMessage::SetCuratedDefaults { .. }) {
+        let mut next = self.store.clone();
+        if !next.apply(connection_id, &msg) {
             return;
         }
         unsafe {
             self.as_mut().begin_reset_model();
         }
-        self.as_mut().rust_mut().store.apply(&msg);
+        self.as_mut().rust_mut().store = next.clone();
         unsafe {
             self.as_mut().end_reset_model();
         }
-        let store = self.store.clone();
-        self.as_mut().set_count(store.len() as i32);
-        self.as_mut().set_received(store.received());
+        self.as_mut().set_count(next.len() as i32);
+        self.as_mut().set_received(next.received());
         self.as_mut()
-            .set_unavailable_reason(QString::from(store.unavailable_reason()));
-        self.as_mut()
-            .set_choices_not_saved(store.choices_not_saved());
-        self.as_mut()
-            .set_storage_reason(QString::from(store.storage_reason()));
+            .set_unavailable_reason(QString::from(next.unavailable_reason()));
     }
 
     fn start_bridge_feed(self: Pin<&mut Self>) {
@@ -192,20 +203,24 @@ impl qobject::CuratedDefaultsModel {
                     if !session_handles.is_current_session(connection_id) {
                         return;
                     }
-                    qobject.apply_server_message_json(&QString::from(&json));
+                    qobject.apply_session_message(connection_id, &QString::from(&json));
                 });
             },
         );
     }
 
     fn set_entry(self: Pin<&mut Self>, id: &QString, on: bool) {
-        let id = id.to_string();
-        let request = self.store.request(&[id.as_str()], on);
+        let request = self.store.request(&id.to_string(), on);
         self.emit_client(request);
     }
 
     fn set_all(self: Pin<&mut Self>, on: bool) {
-        let request = self.store.request(&self.store.ids(), on);
+        let request = self.store.request_all(on);
+        self.emit_client(request);
+    }
+
+    fn remove_entry(self: Pin<&mut Self>, id: &QString) {
+        let request = self.store.removal(&id.to_string());
         self.emit_client(request);
     }
 

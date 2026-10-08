@@ -11,36 +11,46 @@ use snitchwatch_bridge::curated::reconcile::EntryStatus;
 use snitchwatch_bridge::curated::wire::CuratedDefaultSummary;
 use snitchwatch_bridge::ws_messages::{ClientMessage, ServerMessage};
 
-/// What the page knows.
+/// What the page knows, for one bridge session.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct CuratedStore {
+    /// The session the state came from; a new session starts empty, so a
+    /// bridge without the `curatedDefaults` capability never shows an
+    /// earlier bridge's list.
+    session: u64,
     /// A `SetCuratedDefaults` has arrived: the bridge offers them.
     received: bool,
     entries: Vec<CuratedDefaultSummary>,
     unavailable: Option<String>,
-    storage_persistent: bool,
-    storage_reason: String,
 }
 
 impl CuratedStore {
-    /// Take `msg` if it is a `SetCuratedDefaults`; true if it was.
-    pub fn apply(&mut self, msg: &ServerMessage) -> bool {
-        let ServerMessage::SetCuratedDefaults {
+    /// Take `msg` from session `connection_id`; true if the state changed.
+    pub fn apply(&mut self, connection_id: u64, msg: &ServerMessage) -> bool {
+        let mut changed = false;
+        if connection_id != self.session {
+            *self = Self {
+                session: connection_id,
+                ..Self::default()
+            };
+            changed = true;
+        }
+        if let ServerMessage::SetCuratedDefaults {
             entries,
-            storage,
             unavailable,
+            ..
         } = msg
-        else {
-            return false;
-        };
-        *self = Self {
-            received: true,
-            entries: entries.clone(),
-            unavailable: unavailable.clone(),
-            storage_persistent: storage.persistent,
-            storage_reason: storage.reason.clone().unwrap_or_default(),
-        };
-        true
+        {
+            self.received = true;
+            self.entries = entries.clone();
+            self.unavailable = unavailable.clone();
+            changed = true;
+        }
+        changed
+    }
+
+    pub fn session(&self) -> u64 {
+        self.session
     }
 
     pub fn received(&self) -> bool {
@@ -59,54 +69,70 @@ impl CuratedStore {
         self.entries.get(index)
     }
 
-    /// Why this bridge never adds them; empty when it does.
+    /// Why this bridge changes no recommended rules; empty when it does.
     pub fn unavailable_reason(&self) -> &str {
         self.unavailable.as_deref().unwrap_or_default()
     }
 
-    /// The user's choices are lost on restart (and the bridge still adds
-    /// rules): the save failed after it started.
-    pub fn choices_not_saved(&self) -> bool {
-        self.received && self.unavailable.is_none() && !self.storage_persistent
+    fn usable(&self) -> bool {
+        self.received && self.unavailable.is_none()
     }
 
-    pub fn storage_reason(&self) -> &str {
-        &self.storage_reason
+    /// Whether `entry` offers Remove: a rule edited outside Snitchwatch.
+    pub fn can_remove(&self, entry: &CuratedDefaultSummary) -> bool {
+        self.usable() && entry.status == EntryStatus::EditedByYou
     }
 
-    /// The request turning `ids` on or off; `None` while the bridge hasn't
-    /// offered them or never adds them, or for an id it didn't list.
-    pub fn request(&self, ids: &[&str], on: bool) -> Option<ClientMessage> {
-        let usable = self.received && self.unavailable.is_none() && !ids.is_empty();
-        let known = ids
-            .iter()
-            .all(|id| self.entries.iter().any(|e| e.id == *id));
-        (usable && known).then(|| ClientMessage::SetCuratedDefaults {
-            ids: ids.iter().map(|id| id.to_string()).collect(),
+    /// The request turning `id` on or off; `None` while the bridge hasn't
+    /// offered them or changes none, or for an id it didn't list.
+    pub fn request(&self, id: &str, on: bool) -> Option<ClientMessage> {
+        let known = self.entries.iter().any(|e| e.id == id);
+        (self.usable() && known).then(|| ClientMessage::SetCuratedDefaults {
+            ids: vec![id.to_string()],
             on,
         })
     }
 
-    /// Every listed id, for "Turn all on/off".
-    pub fn ids(&self) -> Vec<&str> {
-        self.entries.iter().map(|e| e.id.as_str()).collect()
+    /// "Turn all on/off": only the entries not already that way, so an
+    /// entry already on isn't asked again.
+    pub fn request_all(&self, on: bool) -> Option<ClientMessage> {
+        let ids: Vec<String> = self
+            .entries
+            .iter()
+            .filter(|e| e.on != on)
+            .map(|e| e.id.clone())
+            .collect();
+        (self.usable() && !ids.is_empty()).then_some(ClientMessage::SetCuratedDefaults { ids, on })
+    }
+
+    /// The request removing `id`'s edited rule, once the user confirmed.
+    pub fn removal(&self, id: &str) -> Option<ClientMessage> {
+        self.entries
+            .iter()
+            .any(|e| e.id == id && self.can_remove(e))
+            .then(|| ClientMessage::RemoveCuratedDefault { id: id.to_string() })
     }
 }
 
-/// Where an entry stands, in one fixed sentence.
+/// Where an entry stands, in one fixed sentence, as of the firewall
+/// service's last rule list.
 pub fn status_text(status: EntryStatus) -> &'static str {
     match status {
         EntryStatus::Waiting => "Waiting for the firewall service's rule list.",
         EntryStatus::Unavailable => "Not added by this Snitchwatch service.",
+        EntryStatus::InFirewall => "In the firewall (added earlier).",
         EntryStatus::Off => "Off.",
         EntryStatus::Installing => "Adding the rule…",
         EntryStatus::Installed => "Rule installed.",
         EntryStatus::InstalledButOff => "Rule installed, but turned off on the Rules page.",
         EntryStatus::Removing => "Removing the rule…",
-        EntryStatus::EditedByYou => "Edited by you; Snitchwatch won't change it.",
+        EntryStatus::EditedByYou => {
+            "The firewall's rule under this name differs from this description and still \
+             applies; see the Rules page."
+        }
         EntryStatus::DeletedOutside => {
-            "You deleted this rule, so Snitchwatch won't add it again. Turn this off and on \
-             again to add it back."
+            "This rule was removed, so Snitchwatch won't add it again until you turn this off \
+             and on again."
         }
         EntryStatus::NotInstalled => "Not installed.",
         EntryStatus::NotRemoved => "Not removed.",
@@ -131,15 +157,16 @@ mod tests {
         }
     }
 
-    fn message(unavailable: Option<&str>, persistent: bool) -> ServerMessage {
+    fn message(unavailable: Option<&str>) -> ServerMessage {
         ServerMessage::SetCuratedDefaults {
             entries: vec![
                 entry("flatpak-flathub", false, EntryStatus::Off),
                 entry("chronyc-local", true, EntryStatus::Installed),
+                entry("networkmanager", true, EntryStatus::EditedByYou),
             ],
             storage: StorageStatus {
-                persistent,
-                reason: (!persistent).then(|| "disk full".to_string()),
+                persistent: true,
+                reason: None,
                 unreadable: false,
             },
             unavailable: unavailable.map(str::to_string),
@@ -150,35 +177,78 @@ mod tests {
     fn nothing_is_offered_until_the_bridge_says_so() {
         let mut store = CuratedStore::default();
         assert!(!store.received());
-        assert!(store.request(&["flatpak-flathub"], true).is_none());
-        assert!(!store.apply(&ServerMessage::ClearConnectionRows));
-        assert!(store.apply(&message(None, true)));
+        assert!(store.request("flatpak-flathub", true).is_none());
+        assert!(store.apply(1, &message(None)));
         assert!(store.received());
-        assert_eq!(store.len(), 2);
+        assert_eq!(store.len(), 3);
         assert!(!store.row(0).unwrap().on, "off unless the bridge says on");
         assert_eq!(
-            store.request(&["flatpak-flathub"], true),
+            store.request("flatpak-flathub", true),
             Some(ClientMessage::SetCuratedDefaults {
                 ids: vec!["flatpak-flathub".into()],
                 on: true
             })
         );
-        assert_eq!(store.ids(), ["flatpak-flathub", "chronyc-local"]);
-        assert!(store.request(&["unknown"], true).is_none());
-        assert!(store.request(&[], true).is_none());
-        assert!(!store.choices_not_saved());
+        assert!(store.request("unknown", true).is_none());
+    }
+
+    /// Code review M1: "Turn all on" asks only for entries that are off.
+    #[test]
+    fn turn_all_asks_only_for_entries_that_differ() {
+        let mut store = CuratedStore::default();
+        store.apply(1, &message(None));
+        assert_eq!(
+            store.request_all(true),
+            Some(ClientMessage::SetCuratedDefaults {
+                ids: vec!["flatpak-flathub".into()],
+                on: true
+            })
+        );
+        assert_eq!(
+            store.request_all(false),
+            Some(ClientMessage::SetCuratedDefaults {
+                ids: vec!["chronyc-local".into(), "networkmanager".into()],
+                on: false
+            })
+        );
+    }
+
+    /// Code review M2: Remove is offered for an edited rule only.
+    #[test]
+    fn only_an_edited_rule_can_be_removed() {
+        let mut store = CuratedStore::default();
+        store.apply(1, &message(None));
+        assert_eq!(
+            store.removal("networkmanager"),
+            Some(ClientMessage::RemoveCuratedDefault {
+                id: "networkmanager".into()
+            })
+        );
+        assert!(store.removal("chronyc-local").is_none());
+        assert!(store.removal("unknown").is_none());
+        store.apply(1, &message(Some("per-user")));
+        assert!(store.removal("networkmanager").is_none());
     }
 
     #[test]
-    fn a_bridge_that_never_adds_them_takes_no_request_and_says_why() {
+    fn a_bridge_that_changes_nothing_takes_no_request_and_says_why() {
         let mut store = CuratedStore::default();
-        store.apply(&message(Some("Needs the system service."), false));
+        store.apply(1, &message(Some("Needs the system service.")));
         assert_eq!(store.unavailable_reason(), "Needs the system service.");
-        assert!(store.request(&["flatpak-flathub"], true).is_none());
-        assert!(!store.choices_not_saved(), "the reason already says why");
-        store.apply(&message(None, false));
-        assert!(store.choices_not_saved());
-        assert_eq!(store.storage_reason(), "disk full");
+        assert!(store.request("flatpak-flathub", true).is_none());
+        assert!(store.request_all(true).is_none());
+    }
+
+    /// A new session starts empty: a bridge without the capability never
+    /// shows an earlier bridge's list.
+    #[test]
+    fn a_new_session_forgets_the_last_ones_list() {
+        let mut store = CuratedStore::default();
+        store.apply(1, &message(None));
+        assert!(store.apply(2, &ServerMessage::ClearConnectionRows));
+        assert!(!store.received());
+        assert!(store.is_empty());
+        assert!(!store.apply(2, &ServerMessage::ClearConnectionRows));
     }
 
     #[test]
@@ -186,6 +256,7 @@ mod tests {
         let all = [
             EntryStatus::Waiting,
             EntryStatus::Unavailable,
+            EntryStatus::InFirewall,
             EntryStatus::Off,
             EntryStatus::Installing,
             EntryStatus::Installed,
@@ -199,7 +270,7 @@ mod tests {
         ];
         let texts: std::collections::BTreeSet<&str> = all.iter().map(|s| status_text(*s)).collect();
         assert_eq!(texts.len(), all.len());
-        assert_eq!(status_text(EntryStatus::Installed), "Rule installed.");
-        assert!(status_text(EntryStatus::EditedByYou).starts_with("Edited by you"));
+        assert!(status_text(EntryStatus::EditedByYou).contains("still applies"));
+        assert!(!status_text(EntryStatus::DeletedOutside).contains("You deleted"));
     }
 }

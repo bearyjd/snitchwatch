@@ -375,9 +375,8 @@ fn recommended_rules_page_labels_showing_bridge_text_are_plain_text() {
             "row.statusText",
             "row.problem",
             "page.unavailableReason",
-            "page.storageReason",
         ],
-        7,
+        6,
     );
 }
 

@@ -497,10 +497,11 @@ Branch `feat/prompt-slot-autoanswer`.
       - an **unedited** copy under the reserved prefix that is no longer in
         the file, or that exists while the opt-in is off, is deleted with
         `DELETE_RULE`;
-      - **a user-edited copy is never deleted, not even on opt-out.** That
-        means same name, but some field other than `enabled` differs from
-        the data file after list-operand normalisation. It is left alone
-        and flagged ("Edited by you; Snitchwatch won't change it").
+      - **a user-edited copy is not deleted, not even on opt-out** (as of
+        the firewall service's last rule list). That means same name, but
+        some field other than `enabled` differs from the data file after
+        list-operand normalisation. It is left alone and flagged (see "D as
+        implemented" for the wording).
         Deleting it could silently undo a change the user chose, such as
         narrowing a curated allow's scope;
       - nothing outside the prefix is ever deleted.
@@ -538,39 +539,93 @@ Branch `feat/prompt-slot-curated-defaults`.
 
   No wildcards, no host regexps, no any-address entry.
 - **Allowlist.** `curated::check_curated_rule` takes only that shape, in
-  that order, with the description, `allow`, `always` and no precedence,
-  and then runs the `Editor` profile. It is applied to the data file (a bad
-  file offers nothing), to the saved choices, and at the send point.
+  that order, with the description, `allow`, `always` and no precedence:
+  a program under `/usr` but not `/usr/local`, a port of ASCII digits only.
+  It then runs the `Editor` profile. It is applied to the data file (a bad
+  file offers nothing; reconcile then treats recorded copies as retired),
+  and at the send point.
+- **One "unedited" check** (`curated::canonical`, PR #105 review M4).
+  `is_unedited` compares a canonical form that applies opensnitchd
+  v1.8.0's normalisations: a list's operand `list` and its `data` cleared,
+  a case-insensitive regexp lowercased, `created` and `enabled` ignored.
+  Reconcile, the Rules page's toggle, the toggle request and the send path
+  all use it. Every regexp the data file builds is already lowercase
+  (pinned by a test), since `Compile` lowercases in place.
 - **Send path.** `DaemonCommands::send_curated` with a `CuratedCommand`
-  (crate-private constructors, like `BlocklistCommand`). `send` still
-  refuses the prefix.
+  (crate-private constructors, like `BlocklistCommand`). Its `CHANGE_RULE`
+  carries exactly a list entry's rule, apart from `enabled` and `created`
+  (security review L2). `send` still refuses the prefix, and the profile
+  path (`850-profile:`, #104) and this one each refuse the other's names.
 - **Opt-in, per entry.** The choices live in
-  `<state>/curated-defaults.json`, read and written through `state_file`
-  (the hit-count file's checks: owner-only, no links, atomic replace).
-  Nothing is on by default. Kirigami has a "Recommended background-service rules" page: a
-  switch per entry, "Turn all on" and "Turn all off", and each entry's
-  program, what it allows and why, as plain text.
+  `<state>/curated-defaults.json` (version 2; version 1 is still read),
+  through `state_file` (owner-only, no links, atomic replace). A recorded
+  copy is the canonical form, and must be exactly its entry's rule; one
+  that isn't (a crafted file, or an older list) is dropped with a warning,
+  so that entry's daemon copy reads as edited. Nothing is on by default.
+  Kirigami has a "Recommended background-service rules" page: a switch per
+  entry, "Turn all on" and "Turn all off" (asking only for entries not
+  already that way), and each entry's program, what it allows and why, as
+  plain text.
 - **Reconcile**, as item 13, plus:
-  - Only the system bridge with saved settings installs, like blocklists.
-    The per-user bridge's daemon link is TCP, where an impostor's `OK`
-    would read "Installed". Without saved settings, a deletion couldn't be
-    remembered. Both list the entries, refuse requests and say why.
+  - Everything is as of the firewall service's last rule list: the cache
+    refreshes only on a reconnect (HELLO) or a confirmed command, so a rule
+    edited on disk is seen at the daemon's next reconnect.
+  - **Inert** (PR #105 review H1). The bridge changes nothing (no command,
+    no choice taken), says why, and reports only what the daemon has
+    ("In the firewall (added earlier)", "differs from this description",
+    "Not added by this Snitchwatch service") when:
+    - it is the per-user bridge (its daemon link is TCP, where an
+      impostor's `OK` would read "Installed"), or has no saved settings;
+    - its choices file can't be read (like #104's unreadable profiles,
+      with `storage.unreadable`): no file is the first run, but a
+      damaged, unknown-version, foreign-mode or linked file is never read
+      as "empty", which would have deleted every enabled rule;
+    - a save fails mid-run.
+
+    The Rules page's toggle of a recommended rule is refused then too.
+  - Choices are taken in memory on the inbound pump and saved by the
+    worker on a blocking thread before any command that depends on them.
   - "Rule installed" only after the daemon's `OK`; the installed copy is
-    recorded then.
+    recorded then. Each command is re-checked against the choices just
+    before it is sent, so a choice changed mid-pass wins. A pass holds the
+    rule-list broadcast (one `SetRules` per pass). Every `SetRules` and
+    `UpdateRules` wakes the worker, so a withdrawn list shows "Waiting" and
+    a late `OK` updates the status. An `info!` line names each entry
+    installed, deleted or removed (never the rule body).
   - A rule installed earlier and missing from a committed snapshot was
-    deleted by the user. It is recorded and not reinstalled until the user
-    turns the entry off and on again.
-  - Not handled in v1: a later data file changing an installed entry.
-    The old copy stays. A v2 must decide.
+    removed outside the page. It is recorded and not reinstalled until the
+    user turns the entry off and on again; only an off-to-on change
+    forgets the removal, so "Turn all on" doesn't (review M1). The status
+    says "This rule was removed" neutrally.
+  - A copy whose rule differs from the entry reads "The firewall's rule
+    under this name differs from this description and still applies; see
+    the Rules page." It is never deleted by reconcile, but has a
+    **Remove** button (review M2): after a confirmation, the bridge sends
+    `DELETE_RULE` for exactly that entry's reserved name, and records it as
+    removed. A name too large for the bridge's list (`left_out`) counts as
+    edited (security review L4).
+  - A refused delete reads "The firewall service refused to remove the
+    rule." and is tried again on the next pass.
+  - Not handled in v1: a later data file changing an installed entry. Its
+    old copy then reads as edited and is left alone. A v2 must decide.
+  - Not done: telling a removal from a race. A snapshot staged before an
+    install's `OK` and committed after it can read as a removal. That is
+    rare (a daemon reconnect racing an install) and fails safe: the entry
+    reads "removed" and isn't reinstalled.
 - **Pure toggles.** The Rules page can turn a shipped entry's rule on or
   off (wire field `toggleable`). The bridge sends the data file's rule,
-  never the GUI's, and only while the daemon's copy is that rule apart
-  from `enabled` (`curated::toggleable`). Adds, edits, renames and deletes
-  under the prefix stay refused. An edited copy keeps the reserved-name
-  reason.
-- **Wire.** `ClientMessage::SetCuratedDefaults { ids, on }`;
-  `ServerMessage::SetCuratedDefaults { entries, storage, unavailable }`;
-  capability `curatedDefaults`.
+  never the GUI's, and only while the daemon's copy is unedited. Adds,
+  edits, renames and deletes under the prefix stay refused. An edited copy
+  keeps the reserved-name reason.
+- **Wire.** `ClientMessage::SetCuratedDefaults { ids, on }` and
+  `RemoveCuratedDefault { id }`; `ServerMessage::SetCuratedDefaults
+  { entries, storage, unavailable }`; capability `curatedDefaults`.
+  Kirigami forgets a session's list when a new session starts, so a bridge
+  without the capability shows "not offered".
+- **Not added: a `user.id` condition.** NetworkManager's check most likely
+  runs as root, but the r10 capture records no uid and this sandbox has no
+  NetworkManager unit to read. r11 should record the uid; then entries
+  whose program always runs as a fixed system user can add it.
 - **The capture** (bazzite-tower r10, idle and after update):
 
   | Capture entry | v1 | Why |
