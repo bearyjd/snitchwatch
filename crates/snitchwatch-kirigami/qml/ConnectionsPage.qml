@@ -769,6 +769,7 @@ Kirigami.ScrollablePage {
                 decideLater: page.inspectDecideLater
                 bridgeFeed: page.bridgeFeed
                 onDecided: inspector.close()
+                onExplained: text => page.showPassiveNotice(text)
             }
 
             // Part C: a put-off connection can still get a rule.
@@ -779,6 +780,7 @@ Kirigami.ScrollablePage {
                 rowId: page.inspectId
                 model: page.model
                 bindableProcessPath: page.inspectBindableProcessPath
+                blockedForFiveMinutes: page.inspectMatchedRule.length > 0
             }
         }
     }

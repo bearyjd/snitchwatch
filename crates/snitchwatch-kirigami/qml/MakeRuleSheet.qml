@@ -17,11 +17,16 @@ ColumnLayout {
     // Whether the row's program has a file a rule can be bound to
     // (`rowDetailsJson`'s `bindableProcessPath`, issue #44).
     property bool bindableProcessPath: false
+    // Whether "Decide later" blocked the program for 5 minutes. That block
+    // stays: a matching deny wins over an allow rule, so the sheet says so
+    // rather than delete it (PR #98 review).
+    property bool blockedForFiveMinutes: false
     // What the last click did, for the label below.
     property string result: ""
     // Exposed for the headless probe (tests/deferred_rows_qml.rs).
     property alias openButton: openButton
     property alias form: form
+    property alias blockNote: blockNoteLabel
 
     onRowIdChanged: {
         form.visible = false;
@@ -102,6 +107,16 @@ ColumnLayout {
                 onClicked: sheet.make("deny")
             }
         }
+    }
+
+    Controls.Label {
+        id: blockNoteLabel
+        Layout.fillWidth: true
+        visible: form.visible && sheet.blockedForFiveMinutes
+        wrapMode: Text.Wrap
+        opacity: 0.7
+        textFormat: Text.PlainText
+        text: "This program's 5-minute block stays until it ends. Until then it wins over an Allow rule."
     }
 
     Controls.Label {

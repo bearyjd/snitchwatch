@@ -92,6 +92,8 @@ ColumnLayout {
 
     // Emitted after a verdict is submitted so the container can close/advance.
     signal decided()
+    // Why an answer wasn't sent, for the container to show (fixed text).
+    signal explained(string text)
 
     // Reverse-DNS + RDAP lookup surface (Parity 2). Qt-free fetch/cache logic
     // lives in `insight::client`; this QObject only dispatches it async and
@@ -324,7 +326,9 @@ ColumnLayout {
 
     function putOff() {
         if (sheet.bridgeFeed !== null) {
-            sheet.bridgeFeed.decideLater(sheet.rowId);
+            if (sheet.bridgeFeed.decideLater(sheet.rowId) === false) {
+                sheet.explained("The connection to the background service was lost, so Decide later wasn't sent.");
+            }
         } else {
             console.warn("PendingDecisionSheet: no bridgeFeed; Decide later dropped for", sheet.rowId);
         }
@@ -339,8 +343,12 @@ ColumnLayout {
         if (sheet.bridgeFeed !== null) {
             // `bindableProcessPath`, not `remembers`: Rust gates on this flag
             // again, and must not depend on this sheet's own gate.
-            sheet.bridgeFeed.submitVerdict(sheet.rowId, action, scopeBox.currentValue, duration,
-                                           sheet.bindableProcessPath);
+            const queued = sheet.bridgeFeed.submitVerdict(sheet.rowId, action,
+                                                          scopeBox.currentValue, duration,
+                                                          sheet.bindableProcessPath);
+            if (queued === false) {
+                sheet.explained("The connection to the background service was lost, so this answer wasn't sent.");
+            }
         } else {
             // Unreachable in the running app; logged rather than dropped
             // silently so a mis-wired container can't lose a decision without

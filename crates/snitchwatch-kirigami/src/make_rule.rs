@@ -6,6 +6,19 @@
 //! bound to the program and refused for an unidentifiable one (#44) exactly
 //! like the rule an answered prompt would have made. Only a remembered
 //! duration makes a rule; a once-only answer can't be added afterwards.
+//!
+//! Two fixes on what the row carries (PR #98 security review):
+//! - **No hostname.** The bridge shows the IP in `dst_host` when the daemon
+//!   sent no host (`translator::connection::connection_to_row`), and a
+//!   `dest.host == <ip>` rule never matches: the daemon's `DstHost` is
+//!   empty. Such a row is built with no host, so the rule matches `dest.ip`.
+//!   On port 53 `DstHost` can be a DNS question that equals the IP
+//!   (`rules/simulator/prefill.rs`); `dest.ip` still matches there.
+//! - **A name of its own.** The daemon's `CHANGE_RULE` replaces a rule of
+//!   the same name, and `rule_name_for` gives the same name to the prompt's
+//!   own rule, e.g. "Decide later"'s 5-minute block, whose expiry timer
+//!   would then delete the new rule. A made rule's name ends in
+//!   `-made-<unix ms>`.
 
 use snitchwatch_bridge::cache::connections::Verdict;
 use snitchwatch_bridge::rule_wire::rule_to_wire;
@@ -16,15 +29,15 @@ use snitchwatch_proto::protocol::Connection;
 use crate::pending_decision::{parse_duration, parse_scope, VerdictChoice};
 
 /// The `AddRule` for deferred `row` and the sheet's `choice`, `scope` and
-/// `duration` tokens, or `None` when no rule may be made: the row wasn't put
-/// off, the duration is once-only, the choice is unknown, or the bridge
-/// can't name the program.
+/// `duration` tokens, made at `now_ms` (Unix ms), or `None` when no rule
+/// may be made: the row wasn't put off, the duration is once-only, the
+/// choice is unknown, or the bridge can't name the program.
 pub(crate) fn add_rule_message(
     row: &ConnectionRow,
     choice: &str,
     scope: &str,
     duration: &str,
-    now_secs: i64,
+    now_ms: i64,
 ) -> Option<ClientMessage> {
     if !row.deferred {
         return None;
@@ -37,15 +50,24 @@ pub(crate) fn add_rule_message(
     if !duration.remembers() {
         return None;
     }
+    let ip_stands_in = !row.dst_ip.is_empty() && row.dst_host == row.dst_ip;
     let conn = Connection {
         protocol: row.protocol.clone(),
-        dst_host: row.dst_host.clone(),
+        dst_host: if ip_stands_in {
+            String::new()
+        } else {
+            row.dst_host.clone()
+        },
         dst_ip: row.dst_ip.clone(),
         dst_port: u32::from(row.dst_port),
         process_path: row.process_path.clone().unwrap_or_default(),
         ..Default::default()
     };
-    let rule = verdict_to_rule(verdict, duration, parse_scope(scope), &conn, now_secs).ok()?;
+    let made = verdict_to_rule(verdict, duration, parse_scope(scope), &conn, now_ms / 1000).ok()?;
+    let rule = snitchwatch_proto::protocol::Rule {
+        name: format!("{}-made-{now_ms}", made.name),
+        ..made
+    };
     Some(ClientMessage::AddRule {
         rule: rule_to_wire(&rule),
     })
@@ -106,6 +128,68 @@ mod tests {
             .expect("the bridge accepts the rule")
             .expect("as a CHANGE_RULE");
         assert_eq!(notification.rules.len(), 1);
+    }
+
+    fn operator_text(msg: ClientMessage) -> String {
+        wire_rule(msg)["operator"].to_string()
+    }
+
+    #[test]
+    fn a_row_with_no_hostname_makes_a_dest_ip_rule() {
+        let named = deferred_row(Some("/usr/bin/curl"));
+        let text =
+            operator_text(add_rule_message(&named, "deny", "this_host", "forever", 0).unwrap());
+        assert!(
+            text.contains("dest.host") && !text.contains("dest.ip"),
+            "{text}"
+        );
+
+        // The bridge put the IP in `dst_host`: the daemon's host was empty.
+        let ip_only = ConnectionRow {
+            dst_host: "93.184.216.34".into(),
+            ..named.clone()
+        };
+        // On port 53 it may also be a DNS question equal to the IP.
+        let dns_question = ConnectionRow {
+            dst_port: 53,
+            protocol: "udp".into(),
+            ..ip_only.clone()
+        };
+        for row in [ip_only, dns_question] {
+            for scope in ["this_host", "any_host_on_domain"] {
+                let msg = add_rule_message(&row, "deny", scope, "forever", 0).unwrap();
+                let text = operator_text(msg.clone());
+                assert!(
+                    text.contains("\"dest.ip\"") && text.contains("93.184.216.34"),
+                    "{scope}: {text}"
+                );
+                assert!(!text.contains("dest.host"), "{scope}: {text}");
+                let ClientMessage::AddRule { rule } = msg else {
+                    unreachable!()
+                };
+                notification_for_effect(&UpstreamEffect::AddRule { rule }, 1).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn a_made_rule_never_takes_the_name_of_the_prompts_own_rule() {
+        use snitchwatch_bridge::rule_name::{is_reserved_name, validate_rule_name};
+        use snitchwatch_bridge::translator::verdict::rule_name_for;
+        let row = deferred_row(Some("/usr/bin/curl"));
+        let name = |now_ms| {
+            wire_rule(add_rule_message(&row, "deny", "this_host", "forever", now_ms).unwrap())
+                ["name"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        let prompts_own = rule_name_for(Verdict::Deny, "example.com", 443, "/usr/bin/curl");
+        let made = name(1_700_000_000_123);
+        assert_eq!(made, format!("{prompts_own}-made-1700000000123"));
+        assert_ne!(name(1_700_000_000_124), made);
+        validate_rule_name(&made).unwrap();
+        assert!(!is_reserved_name(&made));
     }
 
     #[test]

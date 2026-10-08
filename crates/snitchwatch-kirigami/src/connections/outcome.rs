@@ -42,7 +42,7 @@ pub fn outcome_text(row: &ConnectionRow) -> &'static str {
     // A program blocked by "Decide later" has a rule on record; a default
     // action has none.
     if row.auto_answer.is_none() && row.matched_rule.is_some() {
-        return "Decided later: blocked this program for 5 minutes";
+        return "Decided later: blocked this program for 5 minutes on every host, even ones you allowed";
     }
     let by_nobody = row.auto_answer.is_some();
     match (by_nobody, row.action.as_deref()) {
@@ -138,7 +138,7 @@ mod tests {
         };
         assert_eq!(
             outcome_text(&blocked),
-            "Decided later: blocked this program for 5 minutes"
+            "Decided later: blocked this program for 5 minutes on every host, even ones you allowed"
         );
         assert_eq!(
             outcome_text(&row(Some("deny"), true)),
