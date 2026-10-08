@@ -218,7 +218,12 @@ Kirigami.ScrollablePage {
         page.inspectLastUpdated = row.lastUpdated;
         page.inspectLastFailureReason = row.lastFailureReason;
         // Entries are never pushed (a whole list in one message overflowed
-        // GUI clients, issue #45): ask for the first page.
+        // GUI clients, issue #45): ask for the first page. Pages are
+        // broadcast to every GUI, so the entries model first notes which
+        // list this inspector wants and ignores the rest.
+        if (page.entriesModel) {
+            page.entriesModel.expectEntries(row.listId);
+        }
         if (page.model) {
             page.model.requestEntries(row.listId, 0);
         }

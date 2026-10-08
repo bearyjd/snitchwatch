@@ -140,6 +140,9 @@ pub struct EntriesStore {
     subscription_id: String,
     hosts: Vec<String>,
     total: u64,
+    /// The list this GUI asked for. Pages are broadcast to every GUI, so a
+    /// page for any other list is someone else's and is ignored.
+    wanted: Option<String>,
 }
 
 impl EntriesStore {
@@ -177,9 +180,26 @@ impl EntriesStore {
         (self.hosts.len() as u64) < self.total
     }
 
+    /// Record that this GUI asked for `id`'s entries. Returns `true` if the
+    /// shown list changed (a different list's entries are dropped).
+    pub fn expect(&mut self, id: &str) -> bool {
+        if self.wanted.as_deref() == Some(id) {
+            return false;
+        }
+        self.wanted = Some(id.to_string());
+        if self.subscription_id == id {
+            return false;
+        }
+        self.subscription_id.clear();
+        self.hosts.clear();
+        self.total = 0;
+        true
+    }
+
     /// Apply one bridge message. Returns `true` if the entry list changed.
-    /// A page at offset 0 replaces the list; the next page of the same list
-    /// appends; any other page is ignored.
+    /// Only pages of the list this GUI asked for ([`expect`](Self::expect))
+    /// count: a page at offset 0 replaces the list, the next page appends,
+    /// any other page is ignored.
     pub fn apply(&mut self, msg: &ServerMessage) -> bool {
         match msg {
             ServerMessage::SetBlocklistEntries {
@@ -188,6 +208,9 @@ impl EntriesStore {
                 offset,
                 total,
             } => {
+                if self.wanted.as_deref() != Some(subscription_id.as_str()) {
+                    return false;
+                }
                 let hosts = entries.iter().map(|e| e.host.clone());
                 if *offset == 0 {
                     self.subscription_id = subscription_id.clone();
@@ -209,11 +232,13 @@ impl EntriesStore {
     /// Clear the detail list (e.g. when the selection is cleared).
     pub fn clear(&mut self) -> bool {
         if self.hosts.is_empty() && self.subscription_id.is_empty() {
+            self.wanted = None;
             return false;
         }
         self.subscription_id.clear();
         self.hosts.clear();
         self.total = 0;
+        self.wanted = None;
         true
     }
 }
@@ -383,6 +408,7 @@ mod tests {
     #[test]
     fn entries_store_holds_one_subscription_at_a_time() {
         let mut e = EntriesStore::new();
+        e.expect("a");
         assert!(e.apply(&ServerMessage::SetBlocklistEntries {
             subscription_id: "a".to_string(),
             entries: vec![
@@ -401,6 +427,7 @@ mod tests {
         assert_eq!(e.host(0), Some("ads.example"));
 
         // Switching subscription replaces the detail list.
+        e.expect("b");
         assert!(e.apply(&ServerMessage::SetBlocklistEntries {
             subscription_id: "b".to_string(),
             entries: vec![BlocklistEntry {
@@ -416,6 +443,7 @@ mod tests {
     #[test]
     fn entries_clear_resets_and_is_idempotent() {
         let mut e = EntriesStore::new();
+        e.expect("a");
         e.apply(&ServerMessage::SetBlocklistEntries {
             subscription_id: "a".to_string(),
             entries: vec![BlocklistEntry {
@@ -456,6 +484,7 @@ mod tests {
     #[test]
     fn entry_pages_append_in_sequence() {
         let mut e = EntriesStore::new();
+        e.expect("a");
         assert!(e.apply(&page("a", &["1.x", "2.x"], 0, 5)));
         assert_eq!(e.total(), 5);
         assert!(e.has_more());
@@ -467,10 +496,32 @@ mod tests {
         assert!(e.apply(&page("a", &["5.x"], 4, 5)));
         assert!(!e.has_more());
         assert_eq!(e.hosts().len(), 5);
-        // A first page replaces whatever was shown.
+        // A first page of the next list asked for replaces what was shown.
+        e.expect("b");
         assert!(e.apply(&page("b", &["b.x"], 0, 1)));
         assert_eq!(e.subscription_id(), "b");
         assert_eq!(e.hosts(), &["b.x".to_string()]);
+    }
+
+    /// Entry pages are broadcast to every GUI: a page another GUI asked for
+    /// must not replace this inspector's list (or blank it).
+    #[test]
+    fn pages_for_a_list_this_gui_did_not_ask_for_are_ignored() {
+        let mut e = EntriesStore::new();
+        assert!(
+            !e.apply(&page("a", &["1.x"], 0, 1)),
+            "nothing was asked for yet"
+        );
+        assert!(e.is_empty());
+        e.expect("a");
+        assert!(e.apply(&page("a", &["1.x"], 0, 1)));
+        assert!(!e.apply(&page("other", &["o.x"], 0, 1)));
+        assert_eq!(e.subscription_id(), "a");
+        assert_eq!(e.hosts(), &["1.x".to_string()]);
+        // Asking for another list drops the old one until its page arrives.
+        assert!(e.expect("b"));
+        assert!(e.is_empty());
+        assert!(!e.expect("b"), "asking again changes nothing");
     }
 
     /// L10: a refused URL never reads as a failed download.

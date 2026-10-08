@@ -309,9 +309,15 @@ fn blocklists_inspector_requests_entries_when_it_opens() {
         .find("function openInspector(row) {")
         .expect("openInspector moved")..];
     let body = &open[..open.find("\n    }").unwrap_or(open.len())];
+    let expect = body
+        .find("page.entriesModel.expectEntries(row.listId)")
+        .unwrap_or_else(|| panic!("openInspector must note which list it wants:\n{body}"));
+    let request = body
+        .find("page.model.requestEntries(row.listId, 0)")
+        .unwrap_or_else(|| panic!("openInspector must request the first entries page:\n{body}"));
     assert!(
-        body.contains("page.model.requestEntries(row.listId, 0)"),
-        "openInspector must request the first entries page:\n{body}"
+        expect < request,
+        "the wanted list must be set before its page can arrive"
     );
 }
 

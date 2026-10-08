@@ -155,6 +155,13 @@ pub mod qobject {
         #[qinvokable]
         #[cxx_name = "clearEntries"]
         fn clear_entries(self: Pin<&mut BlocklistEntriesModel>);
+
+        /// Show only `id`'s entries from now on: pages for any other list
+        /// (another GUI's requests are broadcast too) are ignored. Call
+        /// before `BlocklistsModel.requestEntries(id, 0)`.
+        #[qinvokable]
+        #[cxx_name = "expectEntries"]
+        fn expect_entries(self: Pin<&mut BlocklistEntriesModel>, id: &QString);
     }
 
     unsafe extern "RustQt" {
@@ -364,6 +371,22 @@ impl qobject::BlocklistEntriesModel {
             self.as_mut().begin_reset_model();
         }
         let changed = self.as_mut().rust_mut().store.clear();
+        unsafe {
+            self.as_mut().end_reset_model();
+        }
+        if changed {
+            self.as_mut().set_count(0);
+            self.as_mut().set_total(0);
+            self.as_mut().set_has_more(false);
+            self.as_mut().set_subscription_id(QString::default());
+        }
+    }
+
+    fn expect_entries(mut self: Pin<&mut Self>, id: &QString) {
+        unsafe {
+            self.as_mut().begin_reset_model();
+        }
+        let changed = self.as_mut().rust_mut().store.expect(&id.to_string());
         unsafe {
             self.as_mut().end_reset_model();
         }

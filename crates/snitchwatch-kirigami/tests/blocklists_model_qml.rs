@@ -62,6 +62,7 @@ QtObject {
             ],
             storage: { persistent: true }
         }));
+        entries.expectEntries("l1");
         entries.applyServerMessageJson(JSON.stringify({
             action: "setBlocklistEntries",
             subscriptionId: "l1",
