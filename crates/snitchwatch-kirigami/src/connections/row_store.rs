@@ -20,6 +20,7 @@
 use snitchwatch_bridge::ws_messages::{ConnectionRow, ServerMessage};
 
 use super::filter::ConnectionFilter;
+use crate::pending_decision::{inline_duration_token, VerdictChoice};
 
 /// A single QAbstractListModel mutation, in the exact shape Qt's
 /// begin/end row-mutation protocol needs. Indices are into the *current*
@@ -469,6 +470,16 @@ impl RowStore {
         }
     }
 
+    /// The duration token an inline `choice` sends for the row with `id`
+    /// ([`inline_duration_token`] over its `process_path`). `"this_time"` for
+    /// an unknown id: the bridge rejects a verdict for a row that is gone
+    /// anyway (#49).
+    pub(crate) fn inline_duration_for(&self, id: &str, choice: VerdictChoice) -> &'static str {
+        self.row_by_id(id).map_or("this_time", |row| {
+            inline_duration_token(choice, row.process_path.as_deref())
+        })
+    }
+
     /// Whether the row with `id` is currently pending (awaiting a decision).
     /// `None` when the id is unknown.
     pub fn is_pending(&self, id: &str) -> Option<bool> {
@@ -868,6 +879,34 @@ mod tests {
         assert_eq!(s.is_pending("a"), Some(true));
         assert_eq!(s.is_pending("b"), Some(false));
         assert_eq!(s.is_pending("nope"), None);
+    }
+
+    #[test]
+    fn inline_duration_for_looks_up_the_rows_program() {
+        let mut s = RowStore::new();
+        let mut absolute = row("abs", None);
+        absolute.process_path = Some("/usr/bin/curl".to_string());
+        let mut placeholder = row("kernel", None);
+        placeholder.process_path = Some("Kernel connection".to_string());
+        s.insert_rows(vec![absolute, placeholder]);
+
+        assert_eq!(
+            s.inline_duration_for("abs", VerdictChoice::Deny),
+            "until_quit"
+        );
+        assert_eq!(
+            s.inline_duration_for("abs", VerdictChoice::Allow),
+            "this_time"
+        );
+        assert_eq!(
+            s.inline_duration_for("kernel", VerdictChoice::Deny),
+            "this_time"
+        );
+        // The bridge rejects a verdict for a row that is gone (#49).
+        assert_eq!(
+            s.inline_duration_for("gone", VerdictChoice::Deny),
+            "this_time"
+        );
     }
 
     #[test]

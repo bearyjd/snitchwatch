@@ -49,33 +49,57 @@ Kirigami.ScrollablePage {
     // builds and dispatches the typed verdict, so `pending_decision`'s Rust
     // mapping stays the single source of the wire shape.
     //
-    // Submits with the sheet's own defaults ("This host only" scope / "This
-    // time" duration — scopeBox/durationBox's first model entries in
-    // PendingDecisionSheet.qml) so an inline decision and a sheet decision for
-    // the same row produce the same rule.
+    // Scope is the sheet's default, "This host only". The duration is per row,
+    // from `ConnectionsModel.inlineDurationFor` (`pending_decision.rs`
+    // `inline_duration_token`, plan 2026-10-08-inline-deny-until-restart.md):
+    //   * Allow sends "This time", the sheet's default, as before.
+    //   * Deny deliberately doesn't. The daemon never stores a once-only rule,
+    //     so it would drop only the packet that asked, and the SYN the kernel
+    //     resends a second later would get through or be asked about again.
+    //     For a row whose program file is known it sends "until_quit" (daemon
+    //     "until restart"), a rule the bridge binds to the program and this
+    //     host. Otherwise it can only send "This time", and says why.
     //
-    // Also the entry point `tests/inline_verdict_qml.rs` drives, to exercise
-    // the click -> submit -> verdict-message path without synthesizing a real
-    // mouse click.
-    function submitInlineVerdict(rowId, choice) {
+    // Returns the duration token sent, "" when nothing was sent. Leaves the
+    // explanation to the caller, so a batch explains once.
+    function sendInlineVerdict(rowId, choice) {
         if (page.bridgeFeed === null) {
             // Unreachable in the running app (main.qml always injects the
             // feed) — but the caller has already latched `row.submitted`, so
             // a silent return here would leave a permanently un-decidable
             // row with no trace of why. Never swallow this.
-            console.warn("submitInlineVerdict: no bridgeFeed; verdict dropped for", rowId);
-            return;
+            console.warn("sendInlineVerdict: no bridgeFeed; verdict dropped for", rowId);
+            return "";
         }
-        page.bridgeFeed.submitVerdict(rowId, choice, "this_host", "this_time");
+        const duration = page.model ? page.model.inlineDurationFor(rowId, choice) : "this_time";
+        page.bridgeFeed.submitVerdict(rowId, choice, "this_host", duration);
+        return duration;
+    }
+
+    // Whether an inline `choice` that sent `duration` was a Deny that could
+    // only apply to this connection.
+    function onceOnlyDeny(choice, duration) {
+        return choice === "deny" && duration === "this_time";
+    }
+
+    // A row's inline Allow/Deny. Also the entry point
+    // `tests/inline_verdict_qml.rs` drives, to exercise the click -> submit ->
+    // verdict-message path without synthesizing a real mouse click.
+    function submitInlineVerdict(rowId, choice) {
+        if (page.onceOnlyDeny(choice, page.sendInlineVerdict(rowId, choice))) {
+            page.showVerdictNotRemembered();
+        }
     }
 
     // Issue #18 batch actions: parse ConnectionsModel.pendingRowIdsForProcess
-    // and submit the same verdict for every pending row under that process
-    // group. No new WS protocol — this is just N SetVerdict messages.
+    // and submit the same choice for every pending row under that process
+    // group, each with its own inline duration. No new WS protocol — this is
+    // just N SetVerdict messages.
     function submitBatchVerdict(processKey, choice, sourceSession) {
         if (!page.model) {
             return;
         }
+        let onceOnly = false;
         try {
             const ids = JSON.parse(page.model.pendingRowIdsForProcess(processKey));
             for (const id of ids) {
@@ -84,7 +108,9 @@ Kirigami.ScrollablePage {
                 if (sourceSession && !id.startsWith(sourceSession)) {
                     continue;
                 }
-                page.submitInlineVerdict(id, choice);
+                if (page.onceOnlyDeny(choice, page.sendInlineVerdict(id, choice))) {
+                    onceOnly = true;
+                }
             }
         } catch (e) {
             // Malformed JSON from the model would be a Rust-side bug;
@@ -92,6 +118,16 @@ Kirigami.ScrollablePage {
             // don't swallow it silently.
             console.warn("submitBatchVerdict failed:", e);
         }
+        if (onceOnly) {
+            page.showVerdictNotRemembered();
+        }
+    }
+
+    // The row Deny button's tooltip: what an inline Deny does for `rowId`.
+    function inlineDenyToolTip(rowId) {
+        return page.model && page.model.inlineDurationFor(rowId, "deny") === "until_quit"
+            ? "Blocks this program from this host until the firewall restarts"
+            : page.notRememberedSentence;
     }
 
     // Snapshot of the row currently shown in the inspector sheet.
@@ -200,15 +236,17 @@ Kirigami.ScrollablePage {
         }
     }
 
+    // Issue #44: why an answer for a row's program applies only to this
+    // connection. Fixed text — the bridge's `RuleRefusal::describe` sentence
+    // (a test keeps them equal) — never the wire `reason`.
+    readonly property string notRememberedSentence: "Snitchwatch couldn't identify this program's file, so this answer applies only to this connection."
+
     // Issue #44: the bridge answered a remembered verdict for this connection
-    // only. Fixed text — the bridge's `RuleRefusal::describe` sentence (a test
-    // keeps them equal) — never the wire `reason`.
+    // only, or an inline Deny could only be sent for it.
     function showVerdictNotRemembered() {
         const win = Controls.ApplicationWindow.window;
         if (win && typeof win.showPassiveNotification === "function") {
-            win.showPassiveNotification(
-                "Snitchwatch couldn't identify this program's file, so this answer applies only to this connection.",
-                "long");
+            win.showPassiveNotification(page.notRememberedSentence, "long");
         }
     }
 
@@ -500,11 +538,11 @@ Kirigami.ScrollablePage {
 
                 // Issue #18: inline Allow/Deny on pending leaf rows, so a
                 // decision no longer requires opening the inspector sheet.
-                // Submits with the sheet's own defaults (see the page-level
-                // `submitInlineVerdict` doc comment above) so inline and
-                // sheet-driven decisions for the same row match. Disabled
-                // after one click (see `row.submitted`'s doc comment) until
-                // the round trip flips `pending` and resets the guard.
+                // Allow submits the sheet's defaults; Deny remembers until the
+                // firewall restarts where it can (see the page-level
+                // `sendInlineVerdict` doc comment above). Disabled after one
+                // click (see `row.submitted`'s doc comment) until the round
+                // trip flips `pending` and resets the guard.
                 RowLayout {
                     visible: !row.isGroupHeader && row.pending
                     spacing: Kirigami.Units.smallSpacing
@@ -517,11 +555,28 @@ Kirigami.ScrollablePage {
                         onClicked: row.decideOnce("allow", false)
                     }
                     Controls.Button {
+                        id: rowDenyButton
                         flat: true
                         enabled: !row.submitted
                         text: "Deny"
                         icon.name: "edit-delete-remove"
                         onClicked: row.decideOnce("deny", false)
+
+                        // How long this Deny lasts. An explicit PlainText
+                        // contentItem, never the attached `ToolTip.text`
+                        // (issue #51); looked up only while hovered.
+                        Controls.ToolTip {
+                            visible: rowDenyButton.hovered
+                            delay: Kirigami.Units.toolTipDelay
+                            contentItem: Controls.Label {
+                                textFormat: Text.PlainText
+                                wrapMode: Text.Wrap
+                                // The style's own tooltip text uses the
+                                // tooltip palette, not the window one.
+                                color: palette.toolTipText
+                                text: rowDenyButton.hovered ? page.inlineDenyToolTip(row.rowId) : ""
+                            }
+                        }
                     }
                 }
             }

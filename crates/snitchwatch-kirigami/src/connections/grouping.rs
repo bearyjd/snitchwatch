@@ -1042,28 +1042,36 @@ mod tests {
 
     #[test]
     fn pending_row_ids_compose_into_valid_batch_deny_messages() {
-        // Pins the exact token pair `submitBatchVerdict` passes per id
-        // ("deny"/"this_host"/"this_time" for "Deny all" — the same sheet
-        // defaults `submitInlineVerdict` uses) through to a well-formed
-        // `SetVerdict`, entirely Qt-free.
-        let rows = vec![
+        // Pins what `submitBatchVerdict` sends per id for "Deny all":
+        // "deny"/"this_host" plus that row's own inline duration (the same
+        // `inlineDurationFor` lookup a row's Deny uses) through to a
+        // well-formed `SetVerdict`, entirely Qt-free. A program file the
+        // bridge can bind to is denied until restart; no path, once.
+        let mut rows = vec![
             row("a", "firefox", "github.com", "1.1.1.1", None),
             row("b", "firefox", "slack.com", "2.2.2.2", None),
+            row("c", "curl", "github.com", "1.1.1.1", None),
         ];
+        rows[0].process_path = Some("/usr/bin/firefox".to_string());
+        rows[1].process_path = Some("/usr/bin/firefox".to_string());
         let tree = build(&rows);
-        for id in tree.pending_row_ids("firefox") {
-            let msg = crate::pending_decision::build_verdict_message(
-                &id,
-                "deny",
-                "this_host",
-                "this_time",
-            )
-            .expect("well-formed choice token must build");
-            let json = serde_json::to_value(&msg).unwrap();
-            assert_eq!(json["rowId"], id);
-            assert_eq!(json["verdict"], "deny");
-            assert_eq!(json["scope"], "this_host");
-            assert_eq!(json["duration"], "once");
+        let mut store = crate::connections::row_store::RowStore::new();
+        store.insert_rows(rows);
+        for (process_key, duration) in [("/usr/bin/firefox", "until_restart"), ("curl", "once")] {
+            let ids = tree.pending_row_ids(process_key);
+            assert!(!ids.is_empty(), "{process_key}");
+            for id in ids {
+                let token =
+                    store.inline_duration_for(&id, crate::pending_decision::VerdictChoice::Deny);
+                let msg =
+                    crate::pending_decision::build_verdict_message(&id, "deny", "this_host", token)
+                        .expect("well-formed choice token must build");
+                let json = serde_json::to_value(&msg).unwrap();
+                assert_eq!(json["rowId"], id);
+                assert_eq!(json["verdict"], "deny");
+                assert_eq!(json["scope"], "this_host");
+                assert_eq!(json["duration"], duration, "{id}");
+            }
         }
     }
 

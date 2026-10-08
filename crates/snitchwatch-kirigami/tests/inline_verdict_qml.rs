@@ -14,16 +14,24 @@
 //! is wrapped in a `page.bridgeFeed !== null` guard, and `submitBatchVerdict`
 //! funnels through it, so a null feed skips the entire verdict path and
 //! leaves this test asserting nothing beyond "the page parsed." The stub
-//! below records what it receives, and the `Timer` asserts both the inline
-//! and batch paths actually arrived carrying the sheet's default
-//! scope/duration tokens — the contract `ConnectionsPage.submitInlineVerdict`
-//! documents and `pending_decision.rs` pins on the Rust side.
+//! below records every call, and the `Timer` asserts what each inline and
+//! batch path sent (plan `2026-10-08-inline-deny-until-restart.md`):
+//!   * scope is always "this_host";
+//!   * Allow is always "this_time";
+//!   * Deny is "until_quit" (daemon "until restart") for a row whose program
+//!     file is an absolute path, "this_time" otherwise — and only that
+//!     once-only Deny shows the #44 passive notification, once per click
+//!     (once for a whole "Deny all");
+//!   * the row Deny tooltip says which of the two a click does;
+//!   * the decision sheet labels `until_quit` "Until firewall restarts" and
+//!     shows the one-time-Deny hint only while "This time" is selected.
 //!
 //! Honoring the "QML-side JS asserts are not load-bearing" constraint, this
 //! test's Rust-side assertion works in two layers:
 //!
-//!   1. The probe root is a real `Window { visible: true; ... }` (not a
-//!      bare, unparented `ConnectionsPage`), and the whole scene is driven
+//!   1. The probe root is a real, visible `Controls.ApplicationWindow` (not
+//!      a bare, unparented `ConnectionsPage`; it records
+//!      `showPassiveNotification` instead of drawing), and the whole scene is driven
 //!      through a real Qt event loop via `QGuiApplication::exec()` (a QML
 //!      `Timer` quits it once the click paths have run) — the offscreen QPA
 //!      platform supports this without a real display. That matters because
@@ -48,14 +56,11 @@
 //!      inside a handler, which does NOT null the root) is asserted
 //!      separately below, mirroring `connections_page_diagnostics_qml.rs`.
 //!
-//! The produced `SetVerdict` JSON's *content* — including that it carries
-//! the sheet's own default scope/duration tokens (`this_host`/`this_time`)
-//! — is asserted exhaustively and Qt-free by `pending_decision.rs`'s
-//! `build_message_serializes_to_expected_json` test (which encodes the same
-//! tokens `submitInlineVerdict` passes) and by
+//! The produced `SetVerdict` JSON's *content* for each token is asserted
+//! Qt-free by `pending_decision.rs`'s `inline_tokens_reach_the_wire_*` test
+//! and by
 //! `connections::grouping::tests::pending_row_ids_compose_into_valid_batch_deny_messages`
-//! (which pins the batch-action token pair). Run headless with
-//! `QT_QPA_PLATFORM=offscreen`.
+//! (the batch-action tokens). Run headless with `QT_QPA_PLATFORM=offscreen`.
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -82,14 +87,25 @@ fn inline_and_batch_verdict_click_paths_run_without_erroring() {
 
     let qml = r#"
 import QtQuick
-import QtQuick.Window
+import QtQuick.Controls as Controls
 import com.snitchwatch.shell
 
-Window {
+Controls.ApplicationWindow {
     id: probeWindow
     visible: true
     width: 800
     height: 600
+
+    readonly property string sentence: "Snitchwatch couldn't identify this program's file, so this answer applies only to this connection."
+    property var shown: []
+    // `shown.length` when `checkInlineDeny` starts.
+    property int shownBefore: 0
+    property var failures: []
+
+    // Kirigami.ApplicationWindow's API, recorded instead of drawn.
+    function showPassiveNotification(message, timeout) {
+        probeWindow.shown.push(message);
+    }
 
     // Recording stand-in for BridgeFeed. `ConnectionsPage.bridgeFeed` is a
     // plain `var`, so any QObject exposing `submitVerdict` satisfies the
@@ -99,8 +115,7 @@ Window {
         id: feedStub
         property int allowCount: 0
         property int denyCount: 0
-        property string lastScope: ""
-        property string lastDuration: ""
+        property var submitted: []
 
         function submitVerdict(rowId, choice, scope, duration) {
             if (choice === "allow") {
@@ -108,8 +123,8 @@ Window {
             } else if (choice === "deny") {
                 feedStub.denyCount++;
             }
-            feedStub.lastScope = scope;
-            feedStub.lastDuration = duration;
+            feedStub.submitted.push({ rowId: rowId, choice: choice, scope: scope,
+                                      duration: duration });
         }
     }
 
@@ -175,6 +190,111 @@ Window {
         }
     }
 
+    function check(ok, what) {
+        if (!ok) {
+            probeWindow.failures.push(what);
+        }
+    }
+    function row(id, process, processPath, host) {
+        return { id: id, process: process, processPath: processPath, dstHost: host,
+                 dstIp: "93.184.216.34", dstPort: 443, protocol: "tcp", direction: "outgoing",
+                 action: null, bytesSent: 0, bytesReceived: 0, startedAtMs: 0,
+                 matchedRule: null };
+    }
+    // "scope/duration" of the latest `choice` submitted for `id`.
+    function sent(id, choice) {
+        for (let i = feedStub.submitted.length - 1; i >= 0; i--) {
+            const s = feedStub.submitted[i];
+            if (s.rowId === id && s.choice === choice) {
+                return s.scope + "/" + s.duration;
+            }
+        }
+        return "(nothing submitted)";
+    }
+    function expectSent(id, choice, expected) {
+        const got = probeWindow.sent(id, choice);
+        probeWindow.check(got === expected, id + " " + choice + ": sent " + got
+                                            + ", expected " + expected);
+    }
+    // `count` notifications since `checkInlineDeny` started, all the #44 one.
+    function expectShown(count, what) {
+        probeWindow.check(probeWindow.shown.length - probeWindow.shownBefore === count
+                          && probeWindow.shown.every(m => m === probeWindow.sentence),
+                          what + ": notifications " + JSON.stringify(probeWindow.shown));
+    }
+
+    // Plan 2026-10-08-inline-deny-until-restart.md.
+    function checkInlineDeny() {
+        probeWindow.shownBefore = probeWindow.shown.length;
+        connModel.applyServerMessageJson(JSON.stringify({
+            action: "insertConnectionRows",
+            rows: [
+                probeWindow.row("abs", "curl", "/usr/bin/curl", "github.com"),
+                probeWindow.row("kernel", "kernel", "Kernel connection", "example.com"),
+                probeWindow.row("k2", "kernel", "Kernel connection", "github.com"),
+                probeWindow.row("w1", "wget", "/usr/bin/wget", "github.com"),
+                probeWindow.row("w2", "wget", "/usr/bin/wget", "example.org")
+            ]
+        }));
+        probeWindow.expectShown(0, "before any Deny");
+
+        page.submitInlineVerdict("abs", "deny");
+        probeWindow.expectSent("abs", "deny", "this_host/until_quit");
+        probeWindow.expectShown(0, "a remembered inline Deny");
+
+        page.submitInlineVerdict("kernel", "deny");
+        probeWindow.expectSent("kernel", "deny", "this_host/this_time");
+        probeWindow.expectShown(1, "a once-only inline Deny");
+
+        page.submitInlineVerdict("abs", "allow");
+        page.submitInlineVerdict("kernel", "allow");
+        probeWindow.expectSent("abs", "allow", "this_host/this_time");
+        probeWindow.expectSent("kernel", "allow", "this_host/this_time");
+        probeWindow.expectShown(1, "inline Allow");
+
+        // D1: "Deny all (N)" sends each row's own inline Deny.
+        page.submitBatchVerdict("/usr/bin/wget", "deny");
+        probeWindow.expectSent("w1", "deny", "this_host/until_quit");
+        probeWindow.expectSent("w2", "deny", "this_host/until_quit");
+        page.submitBatchVerdict("/usr/bin/wget", "allow");
+        probeWindow.expectSent("w1", "allow", "this_host/this_time");
+        probeWindow.expectSent("w2", "allow", "this_host/this_time");
+        probeWindow.expectShown(1, "a remembered Deny all / Allow all");
+        page.submitBatchVerdict("Kernel connection", "deny");
+        probeWindow.expectSent("kernel", "deny", "this_host/this_time");
+        probeWindow.expectSent("k2", "deny", "this_host/this_time");
+        probeWindow.expectShown(2, "a once-only Deny all (explained once)");
+
+        probeWindow.check(page.inlineDenyToolTip("abs")
+                          === "Blocks this program from this host until the firewall restarts",
+                          "abs tooltip: " + page.inlineDenyToolTip("abs"));
+        probeWindow.check(page.inlineDenyToolTip("kernel") === probeWindow.sentence,
+                          "kernel tooltip: " + page.inlineDenyToolTip("kernel"));
+
+        // D3 and D2 on the decision sheet.
+        page.openInspector({
+            rowId: "abs", process: "curl", host: "github.com", port: 443,
+            protocol: "tcp", verdict: "pending", pending: true,
+            matchedRule: "", matchedRuleDisplay: ""
+        });
+        const sheet = page.decisionSheet;
+        const durations = sheet.durationSelector;
+        probeWindow.check(durations.count === 4 && durations.valueAt(2) === "until_quit"
+                          && durations.textAt(2) === "Until firewall restarts",
+                          "D3: until_quit is labelled " + durations.textAt(2));
+        durations.currentIndex = 0;
+        probeWindow.check(sheet.showDenyOnceHint === true, "D2: no hint for This time");
+        probeWindow.check(sheet.denyOnceHint.text
+                          === "A one-time Deny blocks only this attempt; most apps retry within seconds."
+                          && sheet.denyOnceHint.textFormat === Text.PlainText,
+                          "D2: hint text " + sheet.denyOnceHint.text);
+        for (const i of [1, 2, 3]) {
+            durations.currentIndex = i;
+            probeWindow.check(sheet.showDenyOnceHint === false,
+                              "D2: hint shown for " + durations.currentValue);
+        }
+    }
+
     // Quits the event loop once the delegate layout/polish pass (and any JS
     // errors it would surface) has had a chance to run — see the module doc
     // comment above for why pumping the loop matters here.
@@ -197,9 +317,22 @@ Window {
                 if (feedStub.denyCount < 1) {
                     throw new Error("batch Deny never reached bridgeFeed.submitVerdict");
                 }
-                if (feedStub.lastScope !== "this_host" || feedStub.lastDuration !== "this_time") {
-                    throw new Error("verdict carried unexpected default tokens: "
-                                    + feedStub.lastScope + "/" + feedStub.lastDuration);
+                // The rows above have no program path, so every one is once,
+                // and each "Deny all" that sent one explained it once (the
+                // stale header's sent nothing).
+                for (const s of feedStub.submitted) {
+                    probeWindow.check(s.scope === "this_host" && s.duration === "this_time",
+                                      "path-less " + s.choice + " " + s.rowId + " sent "
+                                      + s.scope + "/" + s.duration);
+                }
+                probeWindow.expectShown(2, "path-less Deny all clicks");
+                try {
+                    probeWindow.checkInlineDeny();
+                } catch (e) {
+                    probeWindow.failures.push("checkInlineDeny threw: " + e);
+                }
+                if (probeWindow.failures.length > 0) {
+                    throw new Error("inline verdict probe: " + probeWindow.failures.join("; "));
                 }
             } finally {
                 Qt.quit();
@@ -243,9 +376,8 @@ Window {
         bad_lines.is_empty(),
         "QML runtime error(s) reported against the probe URL while exercising the inline/batch \
          verdict click paths — this covers both a broken binding/handler AND the probe's own \
-         Timer assertions that the inline Allow and batch Deny actually reached \
-         bridgeFeed.submitVerdict carrying the this_host/this_time defaults. Captured \
-         stderr:\n{}",
+         Timer assertions on what each inline/batch Allow and Deny sent to \
+         bridgeFeed.submitVerdict. Captured stderr:\n{}",
         bad_lines.join("\n")
     );
 }
