@@ -26,6 +26,10 @@ const ALL_QML: &[(&str, &str)] = &[
     ("BlocklistsPage.qml", BLOCKLISTS_PAGE),
     ("ConnectionsPage.qml", CONNECTIONS_PAGE),
     (
+        "DecideLaterButton.qml",
+        include_str!("../qml/DecideLaterButton.qml"),
+    ),
+    (
         "DaemonHealthPage.qml",
         include_str!("../qml/DaemonHealthPage.qml"),
     ),
@@ -39,6 +43,10 @@ const ALL_QML: &[(&str, &str)] = &[
         include_str!("../qml/InlineVerdicts.qml"),
     ),
     ("main.qml", MAIN_QML),
+    (
+        "MakeRuleSheet.qml",
+        include_str!("../qml/MakeRuleSheet.qml"),
+    ),
     (
         "OnboardingPage.qml",
         include_str!("../qml/OnboardingPage.qml"),

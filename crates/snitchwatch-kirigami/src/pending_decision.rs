@@ -19,10 +19,10 @@
 //! **Inline buttons:** the Connections page's row and process-header buttons
 //! skip the sheet; `crate::inline_deny` picks their duration.
 //!
-//! **Timeout ownership:** the auto-action countdown stays server-side (the
-//! bridge's `AskRule` pending machinery owns it). The QML sheet only *displays*
-//! remaining time via a `remainingSeconds` property the bridge feed sets; this
-//! module never starts a client-side timer.
+//! **Timeout ownership:** the bridge answers a prompt nobody answers
+//! (`snitchwatch_bridge::deferred_answers`) and reports when as the row's
+//! `answerDeadlineMs`. The QML sheet only *displays* the time left; this
+//! module never starts a timer.
 //!
 //! **Live wiring:** `BridgeFeed::submitVerdict` calls
 //! [`build_verdict_message`] and dispatches the result onto the bridge's
