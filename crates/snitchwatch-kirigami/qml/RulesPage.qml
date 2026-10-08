@@ -66,16 +66,6 @@ Kirigami.ScrollablePage {
     property alias inspectorDeleteButton: inspectDeleteButton
     property alias rulesList: list
 
-    // Simulate panel state (rule-match diagnostics' "Simulate" sheet — see
-    // `rules::simulator` module docs for exactly what semantics are
-    // reproduced). `simulateRan` distinguishes "never run" from "ran, no
-    // match" so the result section only appears after a real attempt.
-    property bool simulateRan: false
-    property string simulateMatchedRule: ""
-    property string simulateAction: ""
-    property int simulatePrecedence: -1
-    property var simulateUnsupported: []
-
     function actionColor(action) {
         return action === "allow" ? Kirigami.Theme.positiveTextColor : Kirigami.Theme.negativeTextColor;
     }
@@ -149,26 +139,6 @@ Kirigami.ScrollablePage {
         function onModelReset() {
             page.refreshInspector();
         }
-    }
-
-    // Run the rule-match simulator (Qt-free logic in `rules::simulator`)
-    // against the sheet's candidate inputs and populate the result section.
-    function runSimulation() {
-        if (!page.model) return;
-        const json = page.model.simulate(
-            simProcessPath.text,
-            simHost.text,
-            simPort.value,
-            simProtocol.currentText
-        );
-        if (!json) return;
-        const result = JSON.parse(json);
-        page.simulateMatchedRule = result.matchedRule || "";
-        page.simulateAction = result.action || "";
-        page.simulatePrecedence = (result.precedence === undefined || result.precedence === null)
-            ? -1 : result.precedence;
-        page.simulateUnsupported = result.unsupportedOperands || [];
-        page.simulateRan = true;
     }
 
     // "Simulate" panel entry point (Little-Snitch-parity rule-match
@@ -492,105 +462,9 @@ Kirigami.ScrollablePage {
         }
     }
 
-    // Rule-match simulator (Little-Snitch-parity "Simulate" panel). Pure,
-    // synchronous evaluation over already-cached rules (`RulesModel.simulate`
-    // -> `rules::simulator::simulate`) — never touches the network, so this
-    // is safe to run directly from the UI thread. Every result is labelled a
-    // simulation, never a live daemon verdict (see `rules::simulator` module
-    // docs for exactly what operand types are and aren't reproduced).
-    SizedOverlaySheet {
+    // Rule-match simulator sheet, opened by the header's "Simulate" button.
+    RuleSimulatorSheet {
         id: simulateSheet
-        title: "Simulate rule match"
-        preferredWidth: Kirigami.Units.gridUnit * 22
-
-        ColumnLayout {
-            Layout.preferredWidth: simulateSheet.preferredWidth
-            spacing: Kirigami.Units.largeSpacing
-
-            Controls.Label {
-                Layout.fillWidth: true
-                wrapMode: Text.Wrap
-                opacity: 0.7
-                font: Kirigami.Theme.smallFont
-                text: "Evaluates a candidate connection against the currently cached rules, using opensnitchd's own precedence rules. This is a simulation over cached data, not a live daemon verdict."
-            }
-
-            Kirigami.FormLayout {
-                Layout.fillWidth: true
-
-                Controls.TextField {
-                    id: simProcessPath
-                    Kirigami.FormData.label: "Process path"
-                    placeholderText: "/usr/bin/curl"
-                    Layout.fillWidth: true
-                }
-                Controls.TextField {
-                    id: simHost
-                    Kirigami.FormData.label: "Destination host"
-                    placeholderText: "github.com"
-                    Layout.fillWidth: true
-                }
-                Controls.SpinBox {
-                    id: simPort
-                    Kirigami.FormData.label: "Destination port"
-                    from: 0
-                    to: 65535
-                    value: 443
-                }
-                Controls.ComboBox {
-                    id: simProtocol
-                    Kirigami.FormData.label: "Protocol"
-                    model: ["tcp", "udp"]
-                }
-            }
-
-            Controls.Button {
-                Layout.fillWidth: true
-                text: "Run simulation"
-                icon.name: "system-run"
-                onClicked: page.runSimulation()
-            }
-
-            Kirigami.Separator {
-                Layout.fillWidth: true
-                visible: page.simulateRan
-            }
-
-            ColumnLayout {
-                Layout.fillWidth: true
-                visible: page.simulateRan
-                spacing: Kirigami.Units.smallSpacing
-
-                Controls.Label {
-                    Layout.fillWidth: true
-                    wrapMode: Text.Wrap
-                    font.bold: true
-                    textFormat: Text.PlainText
-                    text: page.simulateMatchedRule.length > 0
-                          ? ("Matched: " + page.simulateMatchedRule)
-                          : "No match — the daemon's default action would apply"
-                    color: page.simulateMatchedRule.length > 0
-                           ? page.actionColor(page.simulateAction)
-                           : Kirigami.Theme.neutralTextColor
-                }
-                Controls.Label {
-                    visible: page.simulateMatchedRule.length > 0
-                    textFormat: Text.PlainText
-                    text: "Action: " + page.simulateAction + "  ·  Position " + (page.simulatePrecedence + 1)
-                    color: page.actionColor(page.simulateAction)
-                }
-                Controls.Label {
-                    Layout.fillWidth: true
-                    visible: page.simulateUnsupported.length > 0
-                    wrapMode: Text.Wrap
-                    opacity: 0.8
-                    font: Kirigami.Theme.smallFont
-                    color: Kirigami.Theme.neutralTextColor
-                    textFormat: Text.PlainText
-                    text: "Note: this simulator doesn't evaluate " + page.simulateUnsupported.join(", ")
-                          + " — the result may not reflect real daemon behaviour for rules using them."
-                }
-            }
-        }
+        model: page.model
     }
 }

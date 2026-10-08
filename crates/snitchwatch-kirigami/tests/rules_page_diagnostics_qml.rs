@@ -1,14 +1,13 @@
 //! Integration smoke: `RulesPage.qml`'s rule-match diagnostics additions —
-//! the "Show rule" jump target (`openRuleByName`) and the Simulate panel
-//! (`runSimulation`, backed by `RulesModel::simulate` ->
-//! `rules::simulator::simulate`).
+//! the "Show rule" jump target (`openRuleByName`) and the Simulate sheet it
+//! instantiates (`RuleSimulatorSheet.qml`, exercised by
+//! `rules_simulator_advanced_qml.rs`).
 //!
 //! Scope of this test — same convention as `rules_model_qml.rs`:
 //!   * `RulesPage.qml` compiles and instantiates directly as a QML type
 //!     under `com.snitchwatch.shell` (a null root object would mean a
 //!     type/property error in the file), and
-//!   * `openRuleByName`/`runSimulation` run without a Rust panic aborting
-//!     the test binary.
+//!   * `openRuleByName` runs without a Rust panic aborting the test binary.
 //!
 //! As with the existing model smokes, a thrown JS error inside
 //! `Component.onCompleted` does not null the root object, so this does not
@@ -24,7 +23,7 @@ use cxx_qt_lib::{QByteArray, QGuiApplication, QQmlApplicationEngine, QUrl};
 use snitchwatch_kirigami::bridge_bindings as _;
 
 #[test]
-fn rules_page_open_rule_by_name_and_simulate_run_without_erroring() {
+fn rules_page_open_rule_by_name_runs_without_erroring() {
     if std::env::var_os("QT_QPA_PLATFORM").is_none() {
         std::env::set_var("QT_QPA_PLATFORM", "offscreen");
     }
@@ -60,9 +59,6 @@ RulesPage {
         // just return false, not throw).
         page.openRuleByName("899-curl-allow");
         page.openRuleByName("does-not-exist");
-        // Simulate panel, backed by the real RulesModel.simulate qinvokable.
-        page.runSimulation();
-        console.log("[test] simulateMatchedRule =", page.simulateMatchedRule);
     }
 }
 "#;
@@ -86,7 +82,7 @@ RulesPage {
     assert!(
         root_ok.load(Ordering::SeqCst),
         "RulesPage QML probe failed: root object was null — a type/property error in \
-         RulesPage.qml (openRuleByName/runSimulation/Simulate sheet)"
+         RulesPage.qml (openRuleByName/Simulate sheet)"
     );
 
     let _ = app.as_mut();
