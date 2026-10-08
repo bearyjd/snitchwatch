@@ -44,7 +44,7 @@ fail-closed `/etc/opensnitchd/default-config.json`
 ```bash
 # From a container/VM booted off the built image:
 cat /etc/opensnitchd/default-config.json | grep -E 'DefaultAction|Server'
-systemctl status opensnitchd    # should be enabled + active
+systemctl status opensnitch.service    # should be enabled + active
 ```
 
 **If it fails:** check `bluebuild`'s own error output first — most likely

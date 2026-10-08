@@ -23,10 +23,14 @@ import com.snitchwatch.shell
 
 SizedOverlaySheet {
     id: sheet
-    title: sheet.controller && sheet.controller.editingName.length > 0 ? "Edit rule" : "New rule"
+    title: sheet.forProfile ? "New rule for this profile"
+         : sheet.controller && sheet.controller.editingName.length > 0 ? "Edit rule" : "New rule"
     preferredWidth: Kirigami.Units.gridUnit * 34
 
     property RuleEditorController controller
+    // A profile's rule (issue #46): it lasts while its profile is active, is
+    // on, never decides first and is logged, so those controls are hidden.
+    readonly property bool forProfile: !!sheet.controller && sheet.controller.profileId.length > 0
     // `rules::editor::RuleDraft`.
     property var draft: ({ name: "", description: "", enabled: true, action: "deny",
                            duration: "always", precedence: false, nolog: false,
@@ -76,6 +80,11 @@ SizedOverlaySheet {
     // `formJson`: the simulator's prefill form for a connection.
     function startPrefill(formJson) {
         return !!sheet.controller && sheet.begin(sheet.controller.prefill(formJson));
+    }
+
+    // A new rule for profile `profileId` (the Profiles page).
+    function startProfileRule(profileId) {
+        return !!sheet.controller && sheet.begin(sheet.controller.newProfileRule(profileId));
     }
 
     // `editableJson`: `RulesModel.editableRuleJson`.
@@ -181,6 +190,7 @@ SizedOverlaySheet {
 
             RowLayout {
                 Kirigami.FormData.label: "Name"
+                visible: !sheet.forProfile
                 Controls.TextField {
                     objectName: "editorName"
                     Layout.fillWidth: true
@@ -210,6 +220,7 @@ SizedOverlaySheet {
             Controls.ComboBox {
                 objectName: "editorDuration"
                 Kirigami.FormData.label: "Lasts"
+                visible: !sheet.forProfile
                 model: sheet.catalogue.durations.map(function (d) { return d.label; })
                        .concat(["Custom time"])
                 currentIndex: sheet.durationIndex()
@@ -220,7 +231,7 @@ SizedOverlaySheet {
             Controls.TextField {
                 objectName: "editorCustomDuration"
                 Kirigami.FormData.label: "Time"
-                visible: sheet.customDuration
+                visible: sheet.customDuration && !sheet.forProfile
                 placeholderText: "Such as 30s, 5m or 1h30m"
                 text: sheet.draft.duration
                 onTextEdited: sheet.update({ duration: text })
@@ -228,12 +239,14 @@ SizedOverlaySheet {
             Controls.Switch {
                 objectName: "editorEnabled"
                 Kirigami.FormData.label: "On"
+                visible: !sheet.forProfile
                 checked: sheet.draft.enabled
                 onToggled: sheet.update({ enabled: checked })
             }
             Controls.TextField {
                 objectName: "editorDescription"
                 Kirigami.FormData.label: "Description"
+                visible: !sheet.forProfile
                 text: sheet.draft.description
                 onTextEdited: sheet.update({ description: text })
             }
@@ -328,13 +341,14 @@ SizedOverlaySheet {
 
         Controls.Button {
             objectName: "editorShowAdvanced"
+            visible: !sheet.forProfile
             flat: true
             text: sheet.showAdvanced ? "Hide advanced options" : "Show advanced options"
             onClicked: sheet.showAdvanced = !sheet.showAdvanced
         }
         Kirigami.FormLayout {
             Layout.fillWidth: true
-            visible: sheet.showAdvanced
+            visible: sheet.showAdvanced && !sheet.forProfile
             Controls.Switch {
                 objectName: "editorPrecedence"
                 Kirigami.FormData.label: "Decide first"

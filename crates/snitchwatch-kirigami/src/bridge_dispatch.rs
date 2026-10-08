@@ -395,10 +395,13 @@ mod tests {
                     action: "allow".into(),
                     operand: "dest.host".into(),
                     data: "nas.local".into(),
+                    ..Default::default()
                 }],
                 active: true,
             }],
             storage: None,
+            applies_rules: false,
+            not_applied_reason: None,
         };
         assert!(interests_profiles(&msg));
         assert!(!interests_connections(&msg));

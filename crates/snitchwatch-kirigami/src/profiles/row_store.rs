@@ -5,7 +5,9 @@
 //! this store reports a single "did anything change" boolean and the model
 //! wrapper brackets each apply with `beginResetModel`/`endResetModel`.
 
-use snitchwatch_bridge::ws_messages::{ProfileSummary, ServerMessage, StorageStatus};
+use snitchwatch_bridge::ws_messages::{
+    ProfileRuleWire, ProfileSummary, ServerMessage, StorageStatus,
+};
 
 /// One profile row as rendered by the Profiles tab. `network_matchers` is
 /// kept as the `Vec<String>` the wire type carries; the model wrapper joins
@@ -17,6 +19,8 @@ pub struct ProfileRow {
     pub name: String,
     pub network_matchers: Vec<String>,
     pub active: bool,
+    /// The profile's rules, with their status while it is active (#46).
+    pub rules: Vec<ProfileRuleWire>,
 }
 
 impl From<ProfileSummary> for ProfileRow {
@@ -26,6 +30,7 @@ impl From<ProfileSummary> for ProfileRow {
             name: p.name,
             network_matchers: p.network_matchers,
             active: p.active,
+            rules: p.rules,
         }
     }
 }
@@ -36,6 +41,10 @@ pub struct ProfilesStore {
     /// The last `SetProfiles.storage` (issue #46); `None` until one arrives
     /// or from an older bridge.
     storage: Option<StorageStatus>,
+    /// Whether the bridge applies the active profile's rules (#46 Part 2);
+    /// false until it says so, and from an older bridge.
+    applies_rules: bool,
+    not_applied_reason: Option<String>,
 }
 
 impl ProfilesStore {
@@ -76,13 +85,30 @@ impl ProfilesStore {
             .unwrap_or("")
     }
 
+    /// True only when the bridge said it applies profile rules.
+    pub fn applies_rules(&self) -> bool {
+        self.applies_rules
+    }
+
+    /// Why the bridge applies no profile rules, or "".
+    pub fn not_applied_reason(&self) -> &str {
+        self.not_applied_reason.as_deref().unwrap_or("")
+    }
+
     /// Apply one bridge message. Returns `true` if the profile list changed
     /// (the model wrapper resets on `true`).
     pub fn apply(&mut self, msg: &ServerMessage) -> bool {
         match msg {
-            ServerMessage::SetProfiles { profiles, storage } => {
+            ServerMessage::SetProfiles {
+                profiles,
+                storage,
+                applies_rules,
+                not_applied_reason,
+            } => {
                 self.profiles = profiles.iter().cloned().map(ProfileRow::from).collect();
                 self.storage = storage.clone();
+                self.applies_rules = *applies_rules;
+                self.not_applied_reason = not_applied_reason.clone();
                 true
             }
             ServerMessage::ProfileChanged { active_profile_id } => {
@@ -106,6 +132,15 @@ mod tests {
     use super::*;
     use snitchwatch_bridge::ws_messages::{ProfileRuleWire, StorageStatus};
 
+    fn set(profiles: Vec<ProfileSummary>, storage: Option<StorageStatus>) -> ServerMessage {
+        ServerMessage::SetProfiles {
+            profiles,
+            storage,
+            applies_rules: false,
+            not_applied_reason: None,
+        }
+    }
+
     fn summary(id: &str, name: &str, matchers: &[&str], active: bool) -> ProfileSummary {
         ProfileSummary {
             id: id.to_string(),
@@ -116,6 +151,7 @@ mod tests {
                 action: "allow".into(),
                 operand: "dest.host".into(),
                 data: "nas.local".into(),
+                ..Default::default()
             }],
             active,
         }
@@ -124,17 +160,11 @@ mod tests {
     #[test]
     fn set_profiles_replaces_the_list() {
         let mut s = ProfilesStore::new();
-        assert!(s.apply(&ServerMessage::SetProfiles {
-            profiles: vec![summary("home", "Home", &["Home*"], false)],
-            storage: None,
-        }));
+        assert!(s.apply(&set(vec![summary("home", "Home", &["Home*"], false)], None,)));
         assert_eq!(s.len(), 1);
         assert_eq!(s.row(0).unwrap().id, "home");
 
-        assert!(s.apply(&ServerMessage::SetProfiles {
-            profiles: vec![summary("office", "Office", &[], true)],
-            storage: None,
-        }));
+        assert!(s.apply(&set(vec![summary("office", "Office", &[], true)], None,)));
         assert_eq!(s.len(), 1);
         assert_eq!(s.row(0).unwrap().id, "office");
     }
@@ -142,13 +172,13 @@ mod tests {
     #[test]
     fn profile_changed_updates_active_flag_only() {
         let mut s = ProfilesStore::new();
-        s.apply(&ServerMessage::SetProfiles {
-            profiles: vec![
+        s.apply(&set(
+            vec![
                 summary("home", "Home", &["Home*"], true),
                 summary("office", "Office", &["Office*"], false),
             ],
-            storage: None,
-        });
+            None,
+        ));
         assert!(s.apply(&ServerMessage::ProfileChanged {
             active_profile_id: Some("office".into())
         }));
@@ -159,10 +189,7 @@ mod tests {
     #[test]
     fn profile_changed_none_clears_every_active_flag() {
         let mut s = ProfilesStore::new();
-        s.apply(&ServerMessage::SetProfiles {
-            profiles: vec![summary("home", "Home", &[], true)],
-            storage: None,
-        });
+        s.apply(&set(vec![summary("home", "Home", &[], true)], None));
         assert!(s.apply(&ServerMessage::ProfileChanged {
             active_profile_id: None
         }));
@@ -172,10 +199,7 @@ mod tests {
     #[test]
     fn profile_changed_is_noop_when_nothing_changes() {
         let mut s = ProfilesStore::new();
-        s.apply(&ServerMessage::SetProfiles {
-            profiles: vec![summary("home", "Home", &[], true)],
-            storage: None,
-        });
+        s.apply(&set(vec![summary("home", "Home", &[], true)], None));
         assert!(!s.apply(&ServerMessage::ProfileChanged {
             active_profile_id: Some("home".into())
         }));
@@ -196,32 +220,29 @@ mod tests {
         assert!(!s.storage_persistent());
         assert_eq!(s.storage_reason(), "");
 
-        s.apply(&ServerMessage::SetProfiles {
-            profiles: vec![],
-            storage: Some(StorageStatus {
+        s.apply(&set(
+            vec![],
+            Some(StorageStatus {
                 unreadable: false,
                 persistent: true,
                 reason: None,
             }),
-        });
+        ));
         assert!(s.storage_persistent());
 
-        s.apply(&ServerMessage::SetProfiles {
-            profiles: vec![],
-            storage: Some(StorageStatus {
+        s.apply(&set(
+            vec![],
+            Some(StorageStatus {
                 unreadable: false,
                 persistent: false,
                 reason: Some("profile store: disk I/O error".into()),
             }),
-        });
+        ));
         assert!(!s.storage_persistent());
         assert_eq!(s.storage_reason(), "profile store: disk I/O error");
 
         // An older bridge sends no storage at all.
-        s.apply(&ServerMessage::SetProfiles {
-            profiles: vec![],
-            storage: None,
-        });
+        s.apply(&set(vec![], None));
         assert!(!s.storage_persistent());
         assert_eq!(s.storage_reason(), "");
     }
@@ -229,13 +250,13 @@ mod tests {
     #[test]
     fn find_by_id_and_ids_reflect_current_list() {
         let mut s = ProfilesStore::new();
-        s.apply(&ServerMessage::SetProfiles {
-            profiles: vec![
+        s.apply(&set(
+            vec![
                 summary("home", "Home", &[], false),
                 summary("office", "Office", &[], false),
             ],
-            storage: None,
-        });
+            None,
+        ));
         assert_eq!(s.ids(), vec!["home".to_string(), "office".to_string()]);
         assert!(s.find_by_id("office").is_some());
         assert!(s.find_by_id("nope").is_none());

@@ -1,8 +1,8 @@
 //! `BridgeFeed` — the QML-facing hub for the live bridge wiring (Task 13).
 //!
 //! Two responsibilities, both thin:
-//!   * **Status surface.** `ok` / `statusText` reflect
-//!     [`crate::bridge_runtime::status`] so `main.qml` can bind a
+//!   * **Status surface.** `ok` / `statusText` / `linkState` reflect
+//!     [`crate::bridge_runtime::link_status`] so `main.qml` can bind a
 //!     `Kirigami.InlineMessage` when the external service is unavailable — the
 //!     window still opens either way (no panic, no silent death).
 //!   * **Inbound dispatcher.** Two QML entry points converge on one typed

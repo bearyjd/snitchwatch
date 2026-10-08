@@ -70,7 +70,7 @@ pub fn local_checks(probe: &dyn KernelProbe) -> Vec<DiagnosticCheck> {
 
 pub const DAEMON_UNREACHABLE_TROUBLESHOOTING: &str = "opensnitchd isn't \
     dialing in. Confirm it's installed and running (systemctl status \
-    opensnitchd), and that its Server.Address in \
+    opensnitch), and that its Server.Address in \
     /etc/opensnitchd/default-config.json matches the bridge's \
     SNITCHWATCH_GRPC_BIND (default 127.0.0.1:50051). Check \
     /var/log/opensnitchd.log for dial errors.";

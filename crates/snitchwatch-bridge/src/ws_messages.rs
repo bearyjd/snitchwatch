@@ -144,6 +144,13 @@ pub enum ServerMessage {
         /// as not persistent.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         storage: Option<StorageStatus>,
+        /// Whether this bridge installs the active profile's rules (issue
+        /// #46 Part 2). `false` from an older bridge, which never did.
+        #[serde(default)]
+        applies_rules: bool,
+        /// Why it doesn't, when it doesn't (per-user mode, no saved state).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        not_applied_reason: Option<String>,
     },
     ProfileChanged {
         active_profile_id: Option<String>,
@@ -468,9 +475,16 @@ pub enum ClientMessage {
         id: String,
     },
     DeactivateProfile,
+    /// `request_id` (optional; see [`valid_request_id`]) asks for a
+    /// [`ServerMessage::RuleCommandResult`]: refused with the profile
+    /// policy's problems, or ok (saved to the profile, not yet installed).
     AddProfileRule {
         profile_id: String,
         rule: ProfileRuleWire,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+        #[serde(skip)]
+        reply: Option<ReplyTo>,
     },
     RemoveProfileRule {
         profile_id: String,
@@ -840,13 +854,27 @@ pub struct BlocklistEntry {
 /// type here the same way `BlocklistSummary` is distinct from
 /// `blocklists::store::Subscription` — the wire shape is the stable
 /// contract, the store shape is free to evolve independently).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProfileRuleWire {
     pub id: String,
     pub action: String,
+    /// Part 1's single condition (empty when `operator` is set).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub operand: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub data: String,
+    /// The rule editor's conditions in #48's wire shape (issue #46 Part 2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator: Option<serde_json::Value>,
+    /// Bridge to GUI, while the rule's profile is active: one of the
+    /// `ENFORCEMENT_*` values ("rule_installed" only after the daemon's
+    /// correlated OK). Empty for a profile that isn't active, and from an
+    /// older bridge.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub enforcement: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enforcement_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1293,6 +1321,7 @@ mod profile_message_tests {
                 action: "allow".into(),
                 operand: "dest.host".into(),
                 data: "nas.local".into(),
+                ..Default::default()
             }],
             active,
         }
@@ -1307,8 +1336,12 @@ mod profile_message_tests {
                 persistent: false,
                 reason: Some("profile store: disk full".into()),
             }),
+            applies_rules: false,
+            not_applied_reason: Some("per-user".into()),
         };
         let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["appliesRules"], false);
+        assert_eq!(json["notAppliedReason"], "per-user");
         assert_eq!(json["action"], "setProfiles");
         assert_eq!(json["profiles"][0]["id"], "home");
         assert_eq!(json["profiles"][0]["networkMatchers"][0], "Home*");
@@ -1325,8 +1358,14 @@ mod profile_message_tests {
         let json = r#"{"action":"setProfiles","profiles":[{"id":"a","name":"A",
             "networkMatchers":[],"rules":[],"active":false}]}"#;
         match serde_json::from_str::<ServerMessage>(json).unwrap() {
-            ServerMessage::SetProfiles { profiles, storage } => {
+            ServerMessage::SetProfiles {
+                profiles,
+                storage,
+                applies_rules,
+                ..
+            } => {
                 assert_eq!(storage, None);
+                assert!(!applies_rules, "an older bridge applied no profile rules");
                 assert_eq!(profiles[0].id, "a");
             }
             other => panic!("expected SetProfiles, got {other:?}"),
@@ -1342,6 +1381,8 @@ mod profile_message_tests {
                 persistent: true,
                 reason: None,
             }),
+            applies_rules: true,
+            not_applied_reason: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
@@ -1410,7 +1451,10 @@ mod profile_message_tests {
                 action: "deny".into(),
                 operand: "dest.host".into(),
                 data: "ads.example".into(),
+                ..Default::default()
             },
+            request_id: None,
+            reply: None,
         };
         let json = serde_json::to_string(&add).unwrap();
         assert_eq!(serde_json::from_str::<ClientMessage>(&json).unwrap(), add);

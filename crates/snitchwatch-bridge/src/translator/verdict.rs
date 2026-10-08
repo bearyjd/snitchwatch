@@ -321,70 +321,7 @@ pub fn scope_degradation(
     build_operator_checked(scope, conn).1
 }
 
-/// Sanitize an attacker-controlled string before it's shown in a desktop
-/// notification body or sent to the WS client as protocol text — issue #14
-/// security review round 2, MEDIUM-1. See [`ScopeDegradation`]'s doc
-/// comment for why this exists. Strips control characters (including the
-/// ANSI `ESC` byte, newlines, carriage returns — bridge-cli logs apply
-/// terminal escape sequences), HTML-entity-escapes the markup
-/// metacharacters `<`/`>`/`&` (so a literal `<b>` in a hostname displays as
-/// the text `<b>` rather than being interpreted as bold by a freedesktop
-/// notification daemon), and caps the result to `max_len` **characters**
-/// (not bytes — truncating mid-codepoint would corrupt multi-byte UTF-8).
-pub fn sanitize_for_display(input: &str, max_len: usize) -> String {
-    let mut out = String::new();
-    let mut count = 0usize;
-    for c in input.chars() {
-        if count >= max_len {
-            out.push('…');
-            break;
-        }
-        if c.is_control() || is_display_hazard(c) {
-            continue;
-        }
-        match c {
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '&' => out.push_str("&amp;"),
-            other => out.push(other),
-        }
-        count += 1;
-    }
-    out
-}
-
-/// Unicode characters `char::is_control()` (category Cc only) doesn't
-/// catch, but that still let attacker-controlled text visually lie about
-/// itself once rendered in a notification body or log — issue #14 security
-/// review round 2, LOW. Bidi format controls (category Cf) can reorder or
-/// hide surrounding text: e.g. a hostname containing U+202E
-/// RIGHT-TO-LEFT OVERRIDE can make the *displayed* text read as a
-/// different, more trustworthy-looking domain than the bytes actually are.
-/// The zero-width/invisible-joiner controls (also Cf) can hide characters
-/// entirely or defeat naive substring-based review. The line/paragraph
-/// separators (category Zl/Zp) can inject a visual line break a
-/// control-char-only strip wouldn't catch, splitting a notification body
-/// across lines the caller didn't intend.
-/// Plain-text form of attacker-influenced text for a `Text.PlainText` label:
-/// drops control characters and [`is_display_hazard`] ones, escapes nothing.
-pub fn strip_display_hazards(input: &str) -> String {
-    input
-        .chars()
-        .filter(|&c| !c.is_control() && !is_display_hazard(c))
-        .collect()
-}
-
-fn is_display_hazard(c: char) -> bool {
-    matches!(c,
-        '\u{200B}'..='\u{200F}' // zero-width space/ZWNJ/ZWJ, LRM, RLM
-        | '\u{202A}'..='\u{202E}' // LRE, RLE, PDF, LRO, RLO
-        | '\u{2060}'..='\u{2064}' // word joiner, invisible operators
-        | '\u{2066}'..='\u{2069}' // LRI, RLI, FSI, PDI
-        | '\u{FEFF}' // BOM / zero-width no-break space
-        | '\u{2028}' // LINE SEPARATOR
-        | '\u{2029}' // PARAGRAPH SEPARATOR
-    )
-}
+pub use super::display::{sanitize_for_display, strip_display_hazards};
 
 fn simple_operator(operand: &str, data: &str) -> Operator {
     Operator {
