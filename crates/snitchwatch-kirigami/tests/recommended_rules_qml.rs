@@ -142,6 +142,19 @@ Controls.ApplicationWindow {
                        && probeWindow.sent[1].on === false,
                        "Turn all off: " + JSON.stringify(probeWindow.sent));
 
+                // Keep: only for a rule already in the firewall, not chosen yet.
+                expect(!find(row(1), "keepButton").visible, "Keep on a chosen rule");
+                send([entry("flatpak", false, "off"), entry("chronyc", true, "installed"),
+                      entry("nm", true, "editedByYou"), entry("old", true, "inFirewall")]);
+                const keep = find(row(3), "keepButton");
+                expect(keep.visible, "no Keep on an undecided rule");
+                keep.clicked();
+                expect(probeWindow.sent.length === 3
+                       && JSON.stringify(probeWindow.sent[2].ids) === '["old"]'
+                       && probeWindow.sent[2].on === true,
+                       "Keep: " + JSON.stringify(probeWindow.sent));
+                probeWindow.sent.pop();
+
                 // Remove: only for the edited rule, and only once confirmed.
                 expect(!find(row(1), "removeButton").visible, "Remove on an unedited rule");
                 const remove = find(row(2), "removeButton");

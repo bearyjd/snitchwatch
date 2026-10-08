@@ -593,12 +593,24 @@ Branch `feat/prompt-slot-curated-defaults`.
     confirmed command changed it (all `PublishHold` users, the rule import
     too). A command that failed (refused, not sent, no answer) is not sent
     again for that entry until its choice changes or the daemon reconnects;
-    until then the entry keeps its failure status and text.
+    until then the entry keeps its failure status and text. Every GUI
+    request taken (a choice, even an unchanged one, or a removal) counts
+    toward the gate, so each gets a pass, and asking again retries a failed
+    entry once (re-review 2). A full command queue (`NotQueued`, e.g.
+    during a large import) isn't remembered as a failure: the entry reads
+    "busy" and is tried at the next rule-list change. The worker also wakes
+    when a daemon stream becomes current.
+  - **A reconnect mid-pass ends the pass** (re-review 2, M1): its plan was
+    for the old list. Removals not yet sent are decided again against the
+    new list, and each delete is checked against the live copy just before
+    it is sent.
   - **A first run leaves the firewall alone** (re-review M1). An entry the
     user never chose (no choices file, e.g. one moved away) whose unedited
     rule is already in the firewall reads "In the firewall (added
-    earlier)", with its switch on, and nothing is sent until the user turns
-    it off (deleted) or on (adopted). Only an explicit "off" deletes.
+    earlier)", with its switch on (or "..., turned off on the Rules page",
+    switch off), and nothing is sent until the user turns it off (deleted)
+    or keeps it: a **Keep** button turns it on, which adopts the copy with
+    no command. Only an explicit "off" deletes.
   - The ids Snitchwatch installed are kept apart from the recorded copies,
     so a copy dropped as invalid still marks its rule as one Snitchwatch
     installed: gone from the daemon, it is a removal, not a reinstall
@@ -630,7 +642,8 @@ Branch `feat/prompt-slot-curated-defaults`.
     list that is then withdrawn is dropped.
   - A refused delete reads "The firewall service refused to remove the
     rule." and is tried again after the daemon reconnects or the user
-    changes that entry.
+    changes that entry. A refused Remove keeps that status while the copy
+    is still edited on the same daemon stream (re-review 2, M2).
   - Follow-up, not in this PR: a rule under the prefix for an entry no
     longer in the list, with no recorded copy, is left alone and can't be
     removed from the Recommended page (only from the daemon's own UI or

@@ -21,6 +21,7 @@ const ROLE_ON: i32 = 4;
 const ROLE_STATUS: i32 = 5;
 const ROLE_PROBLEM: i32 = 6;
 const ROLE_CAN_REMOVE: i32 = 7;
+const ROLE_CAN_KEEP: i32 = 8;
 
 #[cxx_qt::bridge]
 pub mod qobject {
@@ -96,6 +97,12 @@ pub mod qobject {
         #[qinvokable]
         #[cxx_name = "removeEntry"]
         fn remove_entry(self: Pin<&mut CuratedDefaultsModel>, id: &QString);
+
+        /// Keep an undecided rule already in the firewall (turn it on, so
+        /// it is adopted; nothing is sent). Ignored for any other entry.
+        #[qinvokable]
+        #[cxx_name = "keepEntry"]
+        fn keep_entry(self: Pin<&mut CuratedDefaultsModel>, id: &QString);
     }
 
     unsafe extern "RustQt" {
@@ -138,6 +145,7 @@ impl qobject::CuratedDefaultsModel {
             ROLE_STATUS => text(status_text(entry.status)),
             ROLE_PROBLEM => text(entry.problem.as_deref().unwrap_or_default()),
             ROLE_CAN_REMOVE => QVariant::from(&self.store.can_remove(entry)),
+            ROLE_CAN_KEEP => QVariant::from(&self.store.can_keep(entry)),
             _ => QVariant::default(),
         }
     }
@@ -153,6 +161,7 @@ impl qobject::CuratedDefaultsModel {
         roles.insert(ROLE_STATUS, QByteArray::from("statusText"));
         roles.insert(ROLE_PROBLEM, QByteArray::from("problem"));
         roles.insert(ROLE_CAN_REMOVE, QByteArray::from("canRemove"));
+        roles.insert(ROLE_CAN_KEEP, QByteArray::from("canKeep"));
         roles
     }
 
@@ -221,6 +230,11 @@ impl qobject::CuratedDefaultsModel {
 
     fn remove_entry(self: Pin<&mut Self>, id: &QString) {
         let request = self.store.removal(&id.to_string());
+        self.emit_client(request);
+    }
+
+    fn keep_entry(self: Pin<&mut Self>, id: &QString) {
+        let request = self.store.keeping(&id.to_string());
         self.emit_client(request);
     }
 

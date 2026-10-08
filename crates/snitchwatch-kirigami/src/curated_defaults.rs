@@ -4,8 +4,8 @@
 //!
 //! Every text the page shows is either the bridge's (each entry's program,
 //! what it allows and why, from the reviewed data file; the reasons) or a
-//! fixed sentence from here. Nothing is on unless the bridge says the user
-//! turned it on.
+//! fixed sentence from here. Nothing reads as on unless the bridge says so:
+//! the user turned it on, or its rule was already in the firewall.
 
 use snitchwatch_bridge::curated::reconcile::EntryStatus;
 use snitchwatch_bridge::curated::wire::CuratedDefaultSummary;
@@ -83,6 +83,28 @@ impl CuratedStore {
         self.usable() && entry.status == EntryStatus::EditedByYou
     }
 
+    /// Whether `entry` offers Keep: a rule already in the firewall that the
+    /// user hasn't chosen yet (the switch alone can only remove it).
+    pub fn can_keep(&self, entry: &CuratedDefaultSummary) -> bool {
+        self.usable()
+            && matches!(
+                entry.status,
+                EntryStatus::InFirewall | EntryStatus::InFirewallButOff
+            )
+    }
+
+    /// The request keeping `id`'s rule: it is turned on, so Snitchwatch
+    /// adopts the copy already there and sends nothing.
+    pub fn keeping(&self, id: &str) -> Option<ClientMessage> {
+        self.entries
+            .iter()
+            .any(|e| e.id == id && self.can_keep(e))
+            .then(|| ClientMessage::SetCuratedDefaults {
+                ids: vec![id.to_string()],
+                on: true,
+            })
+    }
+
     /// The request turning `id` on or off; `None` while the bridge hasn't
     /// offered them or changes none, or for an id it didn't list.
     pub fn request(&self, id: &str, on: bool) -> Option<ClientMessage> {
@@ -122,6 +144,9 @@ pub fn status_text(status: EntryStatus) -> &'static str {
         EntryStatus::Waiting => "Waiting for the firewall service's rule list.",
         EntryStatus::Unavailable => "Not added by this Snitchwatch service.",
         EntryStatus::InFirewall => "In the firewall (added earlier).",
+        EntryStatus::InFirewallButOff => {
+            "In the firewall (added earlier), turned off on the Rules page."
+        }
         EntryStatus::Off => "Off.",
         EntryStatus::Installing => "Adding the rule…",
         EntryStatus::Installed => "Rule installed.",
@@ -219,6 +244,24 @@ mod tests {
         );
     }
 
+    /// Re-review 2, LOW 5: Keep is offered for an undecided rule already in
+    /// the firewall, and keeping it is turning it on.
+    #[test]
+    fn only_an_undecided_rule_can_be_kept() {
+        let mut store = CuratedStore::default();
+        store.apply(1, &message(None));
+        assert_eq!(
+            store.keeping("undecided"),
+            Some(ClientMessage::SetCuratedDefaults {
+                ids: vec!["undecided".into()],
+                on: true
+            })
+        );
+        assert!(store.keeping("chronyc-local").is_none());
+        store.apply(1, &message(Some("per-user")));
+        assert!(store.keeping("undecided").is_none());
+    }
+
     /// Code review M2: Remove is offered for an edited rule only.
     #[test]
     fn only_an_edited_rule_can_be_removed() {
@@ -263,6 +306,7 @@ mod tests {
             EntryStatus::Waiting,
             EntryStatus::Unavailable,
             EntryStatus::InFirewall,
+            EntryStatus::InFirewallButOff,
             EntryStatus::Off,
             EntryStatus::Installing,
             EntryStatus::Installed,

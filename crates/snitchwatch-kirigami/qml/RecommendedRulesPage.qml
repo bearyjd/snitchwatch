@@ -40,9 +40,10 @@ Kirigami.ScrollablePage {
             type: Kirigami.MessageType.Information
             visible: true
             text: "Background services on this computer that need the network. Each rule lets "
-                + "one program reach one place, and says exactly what it allows. None is on "
-                + "unless you turn it on. What each says is as of the firewall service's last "
-                + "rule list."
+                + "one program reach one place, and says exactly what it allows. Snitchwatch "
+                + "adds none unless you turn it on; a rule already in the firewall (added "
+                + "earlier) stays as it is until you keep it or turn it off. What each says is "
+                + "as of the firewall service's last rule list."
         }
         Kirigami.InlineMessage {
             objectName: "notOfferedBanner"
@@ -104,6 +105,7 @@ Kirigami.ScrollablePage {
             required property string statusText
             required property string problem
             required property bool canRemove
+            required property bool canKeep
             // Remove asks first; a model reset (the bridge's answer) ends it.
             property bool confirmingRemove: false
 
@@ -163,6 +165,12 @@ Kirigami.ScrollablePage {
                         color: Kirigami.Theme.negativeTextColor
                         font: Kirigami.Theme.smallFont
                         Layout.fillWidth: true
+                    }
+                    Controls.Button {
+                        objectName: "keepButton"
+                        visible: row.canKeep
+                        text: "Keep"
+                        onClicked: page.model.keepEntry(row.entryId)
                     }
                     Controls.Button {
                         objectName: "removeButton"
