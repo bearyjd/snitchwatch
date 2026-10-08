@@ -540,7 +540,7 @@ Decided while implementing, against the merged code (base `1c3615c`):
   subjects of its operand (paths, commands, hosts, IPs, ports, protocols,
   IDs, interfaces, environment values), searched unanchored and lowercased
   like the daemon (`/` on a path, `.+` on a host). That probe is a
-  heuristic, not a proof. An empty `simple` value is refused on every
+  heuristic, not a proof: `\.` on a host still counts as narrowing. An empty `simple` value is refused on every
   operand except `dest.host` (`EqualFold("", "")` matches everything
   without the field; an empty host means "no host name").
 - **All-apps means not tied to programs:** only a non-empty `simple`
@@ -555,7 +555,8 @@ Decided while implementing, against the merged code (base `1c3615c`):
   on or off, changes its conditions or how long it lasts; or a replace of
   an allow that changes its conditions, turns it on, or stops its logging.
   A replace carries the rule it overwrites, and the sheet shows it. Changed
-  fields are plain words ("logging", not `nolog`).
+  fields and problem locations are plain words ("logging", not `nolog`;
+  "condition 2's value", not `operator.list[1].data`).
 - **Hidden rules and the list's size** (review M1, M3). Daemon rules the
   cache leaves out for the size limits keep their name and size; importing
   one of those names is refused. A preview is refused when the firewall's
@@ -572,10 +573,15 @@ Decided while implementing, against the merged code (base `1c3615c`):
   refused on the legacy per-user transport until #35.
 - **Answers go to the asking GUI only** (review #8): each request carries
   a `requestId` the answer echoes; progress and result carry the
-  `previewId`. `ws_server` stamps import requests with a channel back to
-  their connection; an in-process sender gets them on the broadcast.
+  `previewId`, and the GUI acts only on the answer it waits for
+  (`io_view::awaits`). `ws_server` stamps import requests with a channel
+  back to their connection; an in-process sender gets them on the
+  broadcast. A GUI that stops reading costs one 5 s wait; after that its
+  answers are dropped unwaited, so it can't hold the import (or the rule
+  list held for it) for everyone else.
 - **Reserved names:** `snitchwatch-default-` is refused at the send point
-  for every GUI command (and its rules are read-only, not deletable);
+  for every GUI command (its rules are listed read-only, "This name is
+  reserved for Snitchwatch's own rules", and not deletable);
   `000-snitchwatch-` (the packaged fetch rule's prefix, reserved at the
   send point by its own PR) is refused on import and left out of exports.
 - **Version and `enabled`:** `version: 1.0` is version 1, as in JSON Schema;

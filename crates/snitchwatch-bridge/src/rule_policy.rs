@@ -64,10 +64,12 @@ pub const SHAPE_READ_ONLY_REASON: &str = "Snitchwatch can't change this rule bec
 pub const BLOCKLIST_MANAGED_REASON: &str =
     "Managed on the Blocklists page. Subscribe to or remove the list there.";
 
-/// Why a GUI may not change or delete a curated default rule
-/// ([`crate::rule_name::CURATED_DEFAULT_RULE_NAME_PREFIX`]): Snitchwatch
-/// installs and reconciles those itself.
-pub const CURATED_MANAGED_REASON: &str = "Snitchwatch manages this rule itself.";
+/// Why a GUI may not change or delete a rule under the curated-defaults
+/// prefix ([`crate::rule_name::CURATED_DEFAULT_RULE_NAME_PREFIX`]). No such
+/// rules exist before prompt-slot D, so this says what is true today: the
+/// name is reserved.
+pub const CURATED_MANAGED_REASON: &str = "This name is reserved for Snitchwatch's own rules, so \
+     Snitchwatch won't change or delete it. The rule still applies.";
 
 /// Operands whose value the daemon passes as a `net.IP`; only the `network`
 /// type can compare one.

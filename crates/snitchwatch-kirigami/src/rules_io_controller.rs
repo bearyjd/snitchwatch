@@ -24,6 +24,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::bridge_runtime::SendClientMessageError;
+use crate::rules::io_view::Waiting;
 use crate::rules::{io, io_view};
 use snitchwatch_bridge::rule_io::{Document, OmittedCounts};
 use snitchwatch_bridge::ws_messages::{ClientMessage, ServerMessage};
@@ -123,20 +124,6 @@ pub mod qobject {
     }
 
     impl cxx_qt::Threading for RulesIoController {}
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-enum Waiting {
-    #[default]
-    Nothing,
-    /// An answer to this request id.
-    Request(String),
-    /// The progress and result of applying a preview (or the apply's
-    /// refusal).
-    Apply {
-        preview_id: String,
-        request_id: String,
-    },
 }
 
 /// A received export, until it is saved or dropped.
@@ -353,31 +340,8 @@ impl qobject::RulesIoController {
         }
     }
 
-    /// Whether `message` answers what this controller waits for.
-    fn awaited(&self, message: &ServerMessage) -> bool {
-        match (&self.waiting, message) {
-            (
-                Waiting::Request(id),
-                ServerMessage::RulesExport { request_id, .. }
-                | ServerMessage::RulesExportUnavailable { request_id, .. }
-                | ServerMessage::RulesImportPreview { request_id, .. }
-                | ServerMessage::RulesImportRefused { request_id, .. },
-            ) => request_id == id,
-            (
-                Waiting::Apply { request_id, .. },
-                ServerMessage::RulesImportRefused { request_id: id, .. },
-            ) => id == request_id,
-            (
-                Waiting::Apply { preview_id, .. },
-                ServerMessage::RulesImportProgress { preview_id: id, .. }
-                | ServerMessage::RulesImportResult { preview_id: id, .. },
-            ) => id == preview_id,
-            _ => false,
-        }
-    }
-
     fn on_message(mut self: Pin<&mut Self>, message: ServerMessage, session: Option<u64>) {
-        if !self.awaited(&message) {
+        if !io_view::awaits(&self.waiting, &message) {
             return;
         }
         self.as_mut().rust_mut().last_answer = Some(Instant::now());

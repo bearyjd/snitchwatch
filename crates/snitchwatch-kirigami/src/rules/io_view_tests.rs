@@ -230,3 +230,77 @@ fn the_controller_listens_only_to_import_and_export_messages() {
         rules: Vec::new()
     }));
 }
+
+/// Problem paths are field names; the sheet shows plain words (review H2's
+/// "no raw field names in user text").
+#[test]
+fn problem_locations_are_plain_words() {
+    let problem = |path: &str| snitchwatch_bridge::rule_policy::RuleProblem {
+        path: path.into(),
+        reason: "a reason".into(),
+    };
+    let mut refused = item("bad", ImportKind::Refused);
+    refused.problems = vec![
+        problem("operator.list[1].data"),
+        problem("operator.list[0].operand"),
+        problem("operator.data"),
+        problem("enabled"),
+        problem("duration"),
+        problem("operator"),
+        problem("rule"),
+    ];
+    assert_eq!(
+        group(&[refused]).refused[0].problems,
+        vec![
+            "a reason (condition 2's value)",
+            "a reason (condition 1)",
+            "a reason (the condition's value)",
+            "a reason (on or off)",
+            "a reason (how long it lasts)",
+            "a reason (conditions)",
+            "a reason",
+        ]
+    );
+}
+
+/// Review #8: the controller acts only on the answer it waits for.
+#[test]
+fn only_the_awaited_answer_is_taken() {
+    let request = Waiting::Request("r1".into());
+    let export = |id: &str| ServerMessage::RulesExportUnavailable {
+        request_id: id.into(),
+        reason: String::new(),
+    };
+    assert!(awaits(&request, &export("r1")));
+    assert!(!awaits(&request, &export("r2")));
+    assert!(!awaits(&Waiting::Nothing, &export("r1")));
+
+    let apply = Waiting::Apply {
+        preview_id: "p1".into(),
+        request_id: "a1".into(),
+    };
+    let progress = |id: &str| ServerMessage::RulesImportProgress {
+        preview_id: id.into(),
+        name: "x".into(),
+        outcome: ImportOutcome::Applied,
+    };
+    let result = |id: &str| ServerMessage::RulesImportResult {
+        preview_id: id.into(),
+        applied: 0,
+        rejected: 0,
+        not_sent: 0,
+        no_answer: 0,
+    };
+    let refused = |id: &str| ServerMessage::RulesImportRefused {
+        request_id: id.into(),
+        reason: String::new(),
+    };
+    assert!(awaits(&apply, &progress("p1")) && awaits(&apply, &result("p1")));
+    assert!(!awaits(&apply, &progress("p2")) && !awaits(&apply, &result("p2")));
+    assert!(awaits(&apply, &refused("a1")));
+    assert!(!awaits(&apply, &refused("a2")));
+    assert!(
+        !awaits(&request, &progress("r1")),
+        "a preview isn't an apply"
+    );
+}

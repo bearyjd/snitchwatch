@@ -319,7 +319,6 @@ async fn forward_outbound<S>(
     use futures_util::SinkExt;
     loop {
         let msg = tokio::select! {
-            biased;
             received = broadcast_rx.recv() => match received {
                 Ok(msg) => msg,
                 Err(_) => break,

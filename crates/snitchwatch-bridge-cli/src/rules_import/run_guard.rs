@@ -17,15 +17,23 @@ const REPLY_WAIT: Duration = Duration::from_secs(5);
 
 /// Where an answer goes: the connection that asked, or the broadcast for an
 /// in-process sender (which has no connection).
+/// A GUI that stops reading costs one [`REPLY_WAIT`]: after that, its
+/// answers are dropped without waiting, so an apply's progress can't stall
+/// the import (and the rule list held for it) for everyone else.
 #[derive(Clone)]
 pub(crate) struct Replier {
     reply: Option<ReplyTo>,
     broadcast: broadcast::Sender<ServerMessage>,
+    gave_up: Arc<AtomicBool>,
 }
 
 impl Replier {
     pub(crate) fn new(reply: Option<ReplyTo>, broadcast: broadcast::Sender<ServerMessage>) -> Self {
-        Self { reply, broadcast }
+        Self {
+            reply,
+            broadcast,
+            gave_up: Arc::default(),
+        }
     }
 
     #[cfg(test)]
@@ -35,10 +43,16 @@ impl Replier {
 
     pub(crate) async fn send(&self, message: ServerMessage) {
         match &self.reply {
+            Some(reply) if self.gave_up.load(Ordering::SeqCst) => {
+                let _ = reply.0.try_send(message);
+            }
             Some(reply) => match tokio::time::timeout(REPLY_WAIT, reply.send(message)).await {
                 // `Ok(false)`: the connection is gone; nobody to tell.
                 Ok(_) => {}
-                Err(_) => warn!("a GUI isn't reading its import answers; one was dropped"),
+                Err(_) => {
+                    warn!("a GUI isn't reading its import answers; no longer waiting for it");
+                    self.gave_up.store(true, Ordering::SeqCst);
+                }
             },
             None => {
                 let _ = self.broadcast.send(message);

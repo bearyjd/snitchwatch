@@ -395,3 +395,27 @@ async fn an_apply_that_ends_early_still_frees_the_task_and_reports() {
     }
     assert!(saw_rules && saw_result);
 }
+
+/// A GUI that stops reading its answers costs one wait, not one per
+/// message: an apply's progress can't stall the import (and the held rule
+/// list) for everyone else.
+#[tokio::test(start_paused = true)]
+async fn a_gui_that_stops_reading_is_given_up_on_after_one_wait() {
+    let (tx, _never_read) = mpsc::channel(1);
+    let (broadcast, _) = broadcast::channel(4);
+    let replier = Replier::new(Some(ReplyTo(tx)), broadcast);
+    let started = tokio::time::Instant::now();
+    for i in 0..50 {
+        replier
+            .send(ServerMessage::RulesImportRefused {
+                request_id: format!("r{i}"),
+                reason: String::new(),
+            })
+            .await;
+    }
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "{:?}",
+        started.elapsed()
+    );
+}

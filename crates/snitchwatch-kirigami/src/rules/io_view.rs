@@ -133,9 +133,40 @@ fn row(item: &ImportItem) -> PreviewRow {
         problems: item
             .problems
             .iter()
-            .map(|p| format!("{} ({})", p.reason, p.path))
+            .map(|p| match plain_location(&p.path) {
+                Some(place) => format!("{} ({place})", p.reason),
+                None => p.reason.clone(),
+            })
             .collect(),
     }
+}
+
+/// Where a problem is, in plain words (`None`: the whole rule).
+fn plain_location(path: &str) -> Option<String> {
+    let place = match path {
+        "rule" => return None,
+        "name" => "name".to_string(),
+        "enabled" => "on or off".to_string(),
+        "action" => "action".to_string(),
+        "duration" => "how long it lasts".to_string(),
+        "operator" => "conditions".to_string(),
+        "operator.data" => "the condition's value".to_string(),
+        "operator.operand" => "the condition".to_string(),
+        _ => match path
+            .strip_prefix("operator.list[")
+            .and_then(|r| r.split_once(']'))
+        {
+            Some((index, rest)) => {
+                let n = index.parse::<usize>().map_or(0, |i| i + 1);
+                match rest {
+                    ".data" => format!("condition {n}'s value"),
+                    _ => format!("condition {n}"),
+                }
+            }
+            None => "the rule".to_string(),
+        },
+    };
+    Some(place)
 }
 
 pub fn group(items: &[ImportItem]) -> PreviewView {
@@ -280,6 +311,45 @@ impl ProgressLog {
             return None;
         }
         serde_json::to_string(&self.results).ok()
+    }
+}
+
+/// What `RulesIoController` waits for.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Waiting {
+    #[default]
+    Nothing,
+    /// An answer to this request id.
+    Request(String),
+    /// The progress and result of applying a preview (or the apply's
+    /// refusal).
+    Apply {
+        preview_id: String,
+        request_id: String,
+    },
+}
+
+/// Whether `message` answers what `waiting` waits for: its request id, or
+/// the applying preview's progress and result.
+pub fn awaits(waiting: &Waiting, message: &ServerMessage) -> bool {
+    match (waiting, message) {
+        (
+            Waiting::Request(id),
+            ServerMessage::RulesExport { request_id, .. }
+            | ServerMessage::RulesExportUnavailable { request_id, .. }
+            | ServerMessage::RulesImportPreview { request_id, .. }
+            | ServerMessage::RulesImportRefused { request_id, .. },
+        ) => request_id == id,
+        (
+            Waiting::Apply { request_id, .. },
+            ServerMessage::RulesImportRefused { request_id: id, .. },
+        ) => id == request_id,
+        (
+            Waiting::Apply { preview_id, .. },
+            ServerMessage::RulesImportProgress { preview_id: id, .. }
+            | ServerMessage::RulesImportResult { preview_id: id, .. },
+        ) => id == preview_id,
+        _ => false,
     }
 }
 
