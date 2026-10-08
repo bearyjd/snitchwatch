@@ -45,6 +45,8 @@ async fn unreadable_choices_change_nothing_in_the_firewall() {
             (Some(UNREADABLE_REASON.to_string()), true)
         );
         curated.reconcile().await;
+        turn(&curated, FLATPAK, true);
+        assert!(!entry_state(&curated, FLATPAK).on, "a choice was taken");
         turn(&curated, FLATPAK, false);
         curated.try_route(ClientMessage::RemoveCuratedDefault { id: FLATPAK.into() });
         harness.resync(vec![flatpak_rule()]);

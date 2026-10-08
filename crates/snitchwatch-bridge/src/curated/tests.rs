@@ -197,3 +197,14 @@ fn a_program_is_an_exact_path_under_usr() {
         assert!(!usr_program(bad), "{bad:?}");
     }
 }
+
+/// The curated layer's own port check, apart from the editor's.
+#[test]
+fn a_port_is_ascii_digits_only() {
+    let mut leaves = flatpak().rule().operator.unwrap().list;
+    assert!(check_leaves(&leaves).is_ok());
+    for bad in ["+443", "0443", "443 ", "65536", "0"] {
+        leaves[2].data = bad.into();
+        assert!(check_leaves(&leaves).is_err(), "{bad:?}");
+    }
+}

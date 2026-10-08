@@ -111,3 +111,19 @@ fn every_regexp_an_entry_builds_is_already_lowercase() {
         }
     }
 }
+
+/// The normalisations themselves, on shapes the data file doesn't build.
+#[test]
+fn list_operands_and_insensitive_regexp_case_are_normalised() {
+    let mut sent = flatpak().rule();
+    sent.operator.as_mut().unwrap().operand = String::new();
+    let mut reported = flatpak().rule();
+    reported.operator.as_mut().unwrap().operand = "list".into();
+    assert_eq!(canonical(&sent), canonical(&reported));
+    let leaf = |data: &str| {
+        let mut rule = flatpak().rule();
+        rule.operator.as_mut().unwrap().list[3].data = data.into();
+        rule
+    };
+    assert_eq!(canonical(&leaf("^TCP6?$")), canonical(&leaf("^tcp6?$")));
+}
