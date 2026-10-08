@@ -250,3 +250,121 @@ async fn the_noop_sink_says_why_nothing_is_installed() {
     );
     assert_eq!(sink.not_applied_reason(), Some("per-user mode"));
 }
+
+// --- Rule hit counts across a profile switch (roadmap P2.6) -------------------
+//
+// A switch deletes the old profile's rules and installs the new one's. That is
+// the bridge's own, confirmed doing, not an unexplained loss: the departed
+// rules' counts go with them and no gap is recorded, so every other rule's
+// "Unused" window survives auto-switching between networks. A rule that comes
+// back is a new rule, stamped with the time it came back, and starts at no
+// hits.
+
+fn hit(rule: &str) -> snitchwatch_proto::protocol::Event {
+    snitchwatch_proto::protocol::Event {
+        rule: Some(Rule {
+            name: rule.to_string(),
+            ..Default::default()
+        }),
+        unixnano: 1_000_000,
+        ..Default::default()
+    }
+}
+
+/// `(last gap, [(rule, count)])` as the GUIs are told.
+fn told(h: &Harness) -> (Option<i64>, Vec<(String, u64)>) {
+    match h.rules.hits().message() {
+        crate::ws_messages::ServerMessage::RuleHits {
+            last_gap_unix_ms,
+            hits,
+            ..
+        } => (
+            last_gap_unix_ms,
+            hits.into_iter().map(|h| (h.name, h.count)).collect(),
+        ),
+        other => panic!("expected RuleHits, got {other:?}"),
+    }
+}
+
+fn created(h: &Harness, name: &str) -> Option<i64> {
+    h.rules
+        .cache()
+        .lock()
+        .unwrap()
+        .rules()
+        .and_then(|rules| rules.get(name))
+        .map(|rule| rule.created)
+}
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64
+}
+
+#[tokio::test]
+async fn switching_profiles_drops_the_old_rules_counts_without_a_gap_and_restamps_a_returning_rule()
+{
+    let h = Harness::new().connect(Daemon::Accept, vec![]);
+    let home = wanted("home", "r1", "a.example");
+    let work = wanted("work", "r1", "b.example");
+    let sink = h.sink();
+
+    let before_install = now_secs();
+    assert!(installed(&sink.apply(std::slice::from_ref(&home)).await));
+    assert!(
+        created(&h, &home.name).is_some_and(|at| at >= before_install),
+        "an installed profile rule is stamped when it arrives"
+    );
+    h.rules.record_hits(&[hit(&home.name)], 100, 1);
+    let (gap_before, counts) = told(&h);
+    assert_eq!(counts, vec![(home.name.clone(), 1)]);
+
+    // Switch to `work`: `home`'s rule is deleted, `work`'s installed.
+    assert!(installed(&sink.apply(std::slice::from_ref(&work)).await));
+    assert_eq!(created(&h, &home.name), None);
+    let (gap_after, counts) = told(&h);
+    assert!(counts.is_empty(), "the old rule's count went: {counts:?}");
+    assert_eq!(gap_after, gap_before, "a switch is not a loss of hits");
+
+    // A snapshot committed after the switch is the list the bridge already
+    // holds: nothing leaves it, so still no gap.
+    h.rules
+        .hits()
+        .adopt_snapshot(&h.rules.cache().lock().unwrap());
+    assert_eq!(told(&h).0, gap_before);
+
+    // Back to `home`: the rule is new again, stamped now, at no hits.
+    let before_return = now_secs();
+    assert!(installed(&sink.apply(std::slice::from_ref(&home)).await));
+    assert!(
+        created(&h, &home.name).is_some_and(|at| at >= before_return),
+        "a returning profile rule is stamped again"
+    );
+    let (gap_end, counts) = told(&h);
+    assert_eq!(gap_end, gap_before);
+    assert!(
+        !counts.iter().any(|(name, _)| *name == home.name),
+        "the old count did not come back: {counts:?}"
+    );
+}
+
+/// A delete the bridge could not confirm leaves the rule's fate unknown: if
+/// the next snapshot then lacks a counted rule, that is a gap.
+#[tokio::test]
+async fn a_profile_rule_that_vanishes_unconfirmed_is_a_gap() {
+    let h = Harness::new().connect(Daemon::Accept, vec![]);
+    let home = wanted("home", "r1", "a.example");
+    let sink = h.sink();
+    assert!(installed(&sink.apply(std::slice::from_ref(&home)).await));
+    h.rules.record_hits(&[hit(&home.name)], 100, 1);
+    let gap_before = told(&h).0;
+
+    // The rule leaves the list without a confirmed delete of ours.
+    h.rules.cache().lock().unwrap().remove(&home.name);
+    h.rules
+        .hits()
+        .adopt_snapshot(&h.rules.cache().lock().unwrap());
+    assert_ne!(told(&h).0, gap_before, "an unexplained loss is a gap");
+}

@@ -265,7 +265,10 @@ past 2,000,000 hosts in total (in subscription order) get no rule.
   that still exist in the daemon's first rule list after a restart keep
   theirs; without a state directory they are kept in memory and the page
   says so. A count belongs to a rule's name: editing a rule keeps it, and a
-  deleted or expired rule loses it.
+  deleted or expired rule loses it. Switching profiles deletes the old
+  profile's `850-profile:` rules and installs the new one's: that is not a
+  gap (nothing else's count is affected), and a rule that comes back counts
+  from zero and from the time it came back.
   A rule with no counted hits gets a badge: "Unused" only when the counts
   are saved and 14 days have passed since the latest of when counting began,
   when the rule was created and the bridge's last gap in the counting (a
