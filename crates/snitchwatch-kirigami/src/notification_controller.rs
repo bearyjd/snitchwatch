@@ -304,6 +304,19 @@ fn may_post(
     }
 }
 
+/// A notice's kind and row, for a log line. Never its program, path, host
+/// or text: those are connection details.
+fn notice_label(notice: &BridgeNotice) -> (&'static str, Option<u64>) {
+    match notice {
+        BridgeNotice::Pending { row_id, .. } => ("pending", Some(*row_id)),
+        BridgeNotice::DaemonAway => ("daemon_away", None),
+        BridgeNotice::FilterPauseExpired => ("filter_pause_expired", None),
+        BridgeNotice::DenyScopeNarrowed { row_id, .. } => ("deny_scope_narrowed", Some(*row_id)),
+        BridgeNotice::VerdictNotRemembered { row_id } => ("verdict_not_remembered", Some(*row_id)),
+        BridgeNotice::PromptSlotSummary { row_id, .. } => ("prompt_slot_summary", Some(*row_id)),
+    }
+}
+
 impl qobject::NotificationController {
     /// Runs on the Qt thread (queued from the feed task above). Applies the
     /// window gate (Pending only) and the cooldown gate ([`may_post`]),
@@ -317,7 +330,8 @@ impl qobject::NotificationController {
         match may_post(&notice, *self.window_active(), &gate, Instant::now()) {
             Gate::WindowActive => PendingLook::WindowActive,
             Gate::CooledDown => {
-                tracing::info!(?notice, "notice held back by its cooldown");
+                let (kind, row_id) = notice_label(&notice);
+                tracing::info!(kind, ?row_id, "notice held back by its cooldown");
                 PendingLook::Done
             }
             Gate::Post => {
@@ -478,6 +492,32 @@ mod tests {
         );
         // Answered in the window: no more looks once the row stops waiting.
         assert_eq!(looks(vec![WindowActive, Gone]).await, secs(&[5, 6]));
+    }
+
+    /// PR #112 review L1: a notice is logged by kind and row only.
+    #[test]
+    fn a_notice_is_logged_without_its_connection_details() {
+        let cases = [
+            (
+                BridgeNotice::Pending {
+                    row_id: 3,
+                    process: "/tmp/x/curl".into(),
+                },
+                ("pending", Some(3)),
+            ),
+            (
+                BridgeNotice::DenyScopeNarrowed {
+                    row_id: 4,
+                    what: "/usr/bin/curl → example.com".into(),
+                    reason: "no program file".into(),
+                },
+                ("deny_scope_narrowed", Some(4)),
+            ),
+            (BridgeNotice::DaemonAway, ("daemon_away", None)),
+        ];
+        for (notice, label) in cases {
+            assert_eq!(notice_label(&notice), label);
+        }
     }
 
     /// A Pending notice never goes out as plain text: only through
