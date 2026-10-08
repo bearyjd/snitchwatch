@@ -1,4 +1,4 @@
-# Linux App Firewall + Bazzite Security Scanner — Handoff (updated 2026-10-07)
+# Linux App Firewall + Bazzite Security Scanner — Handoff (updated 2026-10-08)
 
 > **Read this first if you're picking this repo up cold.** Everything below
 > the "Current status" section is the *original* handoff from 2026-07-04,
@@ -6,7 +6,59 @@
 > was decided and why, but stale as a status report. Trust this section for
 > "what's true today."
 
-## Start here (2026-10-07, latest)
+## 2026-10-08 overnight + owner decisions
+
+`main` is at `90a032b`. The "Previously (2026-10-07)" section below predates
+everything here (it still calls #39 a draft; #39 merged as `670f42c`).
+
+**Merged:** #68-#71 earlier (match-all rule refusals, #45 PR A blocklist
+plumbing, GUI-regexp refusal, #44 app-bound answers), then #74 (inline Deny
+blocks the program until restart), #75 (simulator evaluates every operand),
+#76 (#45 PR B: blocklists enforced), #77 (#72), #79 (#46 Part 1: profiles
+persist), #80 (#51), #81 (#58), #83 (simulator tidy) and #84 ("Simulate this
+connection" in the Connections inspector).
+**Closed:** #45, #51, #52, #58, #72.
+
+**Owner decisions, all as recommended.** Each is marked DECIDED (owner,
+2026-10-08) in its plan under `docs/superpowers/plans/`; nothing is blocked
+on the owner any more. The roll-up and the order of work are in
+`2026-10-08-post-phase0-index.md`.
+- Prompt slot S1 (`-prompt-slot-ux.md`): an unanswered prompt is answered
+  once after 30 s with the daemon's `DefaultAction`, and listed in
+  Connections.
+- S2: "Decide later" blocks that program for 5 minutes, then asks again.
+- S3: curated defaults for background services are opt-in, `/usr` paths
+  only.
+- S4: ask bazzite-tower for E2 "drop while busy" as a daemon option, off by
+  default; E3 (default-applied events) too. Both sent to tower 2026-10-08.
+- S5: desktop notifications answer with Allow once and Deny only.
+- #78: pausing auto-answers every waiting prompt with Allow once (never
+  persisted), labelled "Allowed once (filtering was paused)"; PR #86's
+  warning stays as a fallback.
+- Editor E2 (`-rule-editor.md`): exact absolute program paths by default;
+  patterns allowed with a warning.
+- Insights N1 (`-rule-insights.md`): persist rule hit counts across
+  restarts; the 14-day "unused" window applies.
+- Profile precedence (`2026-10-07-profile-enforcement.md`): stays false;
+  denies and blocklists win over profile allows.
+- Startup auto-switch (#82, same plan): persist the manual profile choice
+  with the network it was made on; auto-switch only on a real network
+  change.
+- Blocklist LAN targets (`2026-10-07-blocklist-enforcement.md`): URLs that
+  resolve to RFC 1918/ULA ranges stay allowed; loopback, link-local and the
+  other reserved ranges stay refused (`fetch_guard.rs`, no code change).
+
+**Overnight orchestrator calls, now confirmed by the owner:**
+- blocklists are enforced only by the system bridge (per-user bridges
+  install no list rule);
+- the 2,000,000-host aggregate blocklist cap (blocklist plan);
+- #72: bridges without `appBoundRules` get "This time" only for
+  host-scoped answers (`2026-10-08-sheet-old-bridge.md`);
+- the `appBoundRules` capability handshake
+  (`2026-10-08-inline-deny-until-restart.md`);
+- the simulator's regexp character-class allowlist (`-rule-insights.md`).
+
+## Previously (2026-10-07)
 
 **Bridge v0.1.1 is published** (2026-10-06 UTC, PR #40, tag `v0.1.1` →
 `9fdb336`, Release run `37392835509`): asset
