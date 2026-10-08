@@ -143,12 +143,13 @@ impl RowStore {
 
     /// opensnitchd caps a single `AskRule` at 120s and unconditionally clears
     /// its serialization flag once that fires (`vendor/opensnitch/daemon/ui/
-    /// client.go:366`). The bridge has no timeout of its own on `ask_rule`
-    /// and no reaper for a cancelled/dropped verdict oneshot
-    /// (`grpc_server.rs`), so a row whose `AskRule` already timed out
-    /// upstream can stay "pending" in this store indefinitely. Excluded from
-    /// [`oldest_pending_started_at_ms`] for exactly that reason — see its
-    /// doc comment.
+    /// client.go:366`). Bridges since #39 remove the row when that deadline
+    /// cancels the `AskRule` (`grpc_server.rs` `PendingCleanup`), but an
+    /// older bridge (the published v0.1.1 tarball) has no reaper for a
+    /// cancelled/dropped verdict oneshot, so a row whose `AskRule` already
+    /// timed out upstream can stay "pending" in this store indefinitely.
+    /// Excluded from [`oldest_pending_started_at_ms`] for exactly that
+    /// reason — see its doc comment.
     const ASK_RULE_TIMEOUT_MS: i64 = 120_000;
 
     /// `started_at_ms` of the longest-*actively*-pending row still awaiting a
@@ -827,8 +828,8 @@ mod tests {
 
     /// Codex review finding (P1): a naive "just take the oldest pending row"
     /// picks up a permanently-stuck row whose AskRule already timed out
-    /// upstream at opensnitchd's own 120s deadline — the bridge has no
-    /// reaper for a cancelled verdict oneshot, so that row can stay
+    /// upstream at opensnitchd's own 120s deadline — a bridge older than #39
+    /// has no reaper for a cancelled verdict oneshot, so that row can stay
     /// "pending" forever. Its age then exceeds the caller's ceiling check
     /// too, hiding the pending-decision-exposure warning entirely for a
     /// second, genuinely active row that arrives afterward. This must
