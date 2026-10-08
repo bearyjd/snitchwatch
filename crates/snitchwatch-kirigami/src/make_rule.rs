@@ -153,15 +153,17 @@ pub(crate) fn outcome_status(outcome: &RuleCommandOutcome) -> Finished {
 }
 
 /// The one "Make a rule…" request waiting for the bridge's result: its id,
-/// the row it is for, and when it was sent.
+/// the row it is for, the row's bridge session (from its local id), and
+/// when it was sent.
 #[derive(Debug, Default)]
 pub(crate) struct MakeRuleWait {
-    waiting: Option<(String, String, Instant)>,
+    waiting: Option<(String, String, Option<u64>, Instant)>,
 }
 
 impl MakeRuleWait {
     pub(crate) fn begin(&mut self, request_id: String, row_id: String, now: Instant) {
-        self.waiting = Some((request_id, row_id, now));
+        let session = crate::bridge_feed::split_session_row_id(&row_id).map(|(session, _)| session);
+        self.waiting = Some((request_id, row_id, session, now));
     }
 
     #[cfg(test)]
@@ -186,18 +188,26 @@ impl MakeRuleWait {
         if self.waiting.as_ref()?.0 != *request_id {
             return None;
         }
-        let (_, row_id, _) = self.waiting.take()?;
+        let (_, row_id, _, _) = self.waiting.take()?;
         Some((row_id, outcome_status(outcome)))
     }
 
     /// Gives up after `after` of silence ([`NO_ANSWER_AFTER`] outside the
-    /// probes).
-    pub(crate) fn poll(&mut self, now: Instant, after: Duration) -> Option<(String, Finished)> {
-        let (_, _, sent_at) = self.waiting.as_ref()?;
-        if now.duration_since(*sent_at) <= after {
+    /// probes), or at once when the row's bridge session isn't
+    /// `is_current` any more: a result goes only to the connection that
+    /// asked, so after a reconnect none can come.
+    pub(crate) fn poll(
+        &mut self,
+        now: Instant,
+        after: Duration,
+        is_current: impl Fn(u64) -> bool,
+    ) -> Option<(String, Finished)> {
+        let (_, _, session, sent_at) = self.waiting.as_ref()?;
+        let gone = session.is_some_and(|session| !is_current(session));
+        if !gone && now.duration_since(*sent_at) <= after {
             return None;
         }
-        let (_, row_id, _) = self.waiting.take()?;
+        let (_, row_id, _, _) = self.waiting.take()?;
         Some((row_id, Finished::not_created(NO_ANSWER.to_owned())))
     }
 }
@@ -518,13 +528,15 @@ mod tests {
         let mut wait = MakeRuleWait::default();
         wait.begin("make-1".into(), "1:ask-1".into(), now);
         assert!(
-            wait.poll(now + NO_ANSWER_AFTER, NO_ANSWER_AFTER).is_none(),
+            wait.poll(now + NO_ANSWER_AFTER, NO_ANSWER_AFTER, |_| true)
+                .is_none(),
             "not yet"
         );
         let (row, done) = wait
             .poll(
                 now + NO_ANSWER_AFTER + Duration::from_secs(1),
                 NO_ANSWER_AFTER,
+                |_| true,
             )
             .unwrap();
         assert_eq!(row, "1:ask-1");
@@ -542,9 +554,30 @@ mod tests {
         let mut wait = MakeRuleWait::default();
         wait.begin("make-1".into(), "1:ask-1".into(), now);
         let short = Duration::from_millis(50);
-        assert!(wait.poll(now + short, short).is_none());
-        let (_, done) = wait.poll(now + Duration::from_millis(51), short).unwrap();
+        assert!(wait.poll(now + short, short, |_| true).is_none());
+        let (_, done) = wait
+            .poll(now + Duration::from_millis(51), short, |_| true)
+            .unwrap();
         assert_eq!(done.status, NO_ANSWER);
+    }
+
+    /// A result goes only to the connection that asked; once the row's
+    /// bridge session is gone it can't come, so the wait ends at once.
+    #[test]
+    fn a_reconnect_ends_the_wait_at_once() {
+        let now = Instant::now();
+        let mut wait = MakeRuleWait::default();
+        wait.begin("make-1".into(), "3:ask-1".into(), now);
+        assert!(wait
+            .poll(now, NO_ANSWER_AFTER, |session| session == 3)
+            .is_none());
+        let (row, done) = wait.poll(now, NO_ANSWER_AFTER, |_| false).unwrap();
+        assert_eq!(row, "3:ask-1");
+        assert!(!done.created);
+        assert_eq!(done.status, NO_ANSWER);
+        // A row id naming no session waits for the deadline only.
+        wait.begin("make-2".into(), "probe-row".into(), now);
+        assert!(wait.poll(now, NO_ANSWER_AFTER, |_| false).is_none());
     }
 
     #[test]

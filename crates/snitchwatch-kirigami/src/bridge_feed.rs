@@ -397,7 +397,7 @@ pub(crate) fn app_bound_rules_for_row(
 }
 
 /// Local-only row identity. Never transmitted to the service.
-fn split_session_row_id(id: &str) -> Option<(u64, &str)> {
+pub(crate) fn split_session_row_id(id: &str) -> Option<(u64, &str)> {
     let (session, wire_id) = id.split_once(':')?;
     let session = session.parse::<u64>().ok().filter(|id| *id != 0)?;
     (!wire_id.is_empty()).then_some((session, wire_id))

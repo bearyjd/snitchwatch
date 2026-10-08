@@ -139,7 +139,17 @@ impl qobject::MakeRuleController {
 
     fn poll(mut self: Pin<&mut Self>) {
         let after = Duration::from_millis(u64::try_from(self.no_answer_after_ms).unwrap_or(0));
-        let gave_up = self.as_mut().rust_mut().wait.poll(Instant::now(), after);
+        let handles = crate::bridge_runtime::handles();
+        let is_current = |session| {
+            handles
+                .as_ref()
+                .is_some_and(|h| h.is_current_session(session))
+        };
+        let gave_up = self
+            .as_mut()
+            .rust_mut()
+            .wait
+            .poll(Instant::now(), after, is_current);
         if let Some((row_id, done)) = gave_up {
             self.finish(row_id, done);
         }
