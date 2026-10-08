@@ -1,8 +1,10 @@
 //! [`Notice`] on a private D-Bus bus (its own `dbus-daemon`, socket under
 //! the worktree's `target/t`): a fake notification server, our listener,
-//! and another client that tries to click for us. When `dbus-daemon` isn't
-//! installed these are skipped, loudly, except on CI (the `CI` variable is
-//! set), where they fail; the unit tests of [`classify`] run everywhere.
+//! and another client that tries to click for us; one test also puts
+//! `xdg-dbus-proxy` in between, as the Flatpak does. When `dbus-daemon` or
+//! `xdg-dbus-proxy` isn't installed these are skipped, loudly, except on CI
+//! (the `CI` variable is set), where they fail; the unit tests of
+//! [`classify`] run everywhere.
 
 use super::*;
 use std::process::{Child, Command, Stdio};
@@ -120,13 +122,17 @@ pub(crate) struct FlatpakProxy {
 }
 
 impl FlatpakProxy {
-    /// `None` (skip) when `xdg-dbus-proxy` isn't installed. Not required on
-    /// CI: it is only there to check the sandbox's filtering.
+    /// `None` (skip) when `xdg-dbus-proxy` isn't installed, except on CI
+    /// (the `CI` variable is set), where it fails, as [`PrivateBus::start`].
     pub(crate) fn start(bus: &PrivateBus) -> Option<Self> {
         let Some(proxy_bin) = ["/usr/bin/xdg-dbus-proxy", "/bin/xdg-dbus-proxy"]
             .into_iter()
             .find(|path| std::path::Path::new(path).is_file())
         else {
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "no xdg-dbus-proxy on CI: the test through the Flatpak's filter must run"
+            );
             eprintln!("SKIPPED: no xdg-dbus-proxy, so no test through the Flatpak's filter");
             return None;
         };
