@@ -42,10 +42,10 @@ pub fn notification_for_effect(
         // yet, so both add and update are CHANGE_RULE.
         UpstreamEffect::AddRule { rule } | UpstreamEffect::UpdateRule { rule, .. } => {
             if let UpstreamEffect::UpdateRule { rule_id, .. } = effect {
-                refuse_blocklist_name(rule_id)?;
+                refuse_reserved_name(rule_id)?;
             }
             let rule = crate::rule_wire::rule_from_wire(rule)?;
-            refuse_blocklist_name(&rule.name)?;
+            refuse_reserved_name(&rule.name)?;
             (Action::ChangeRule, vec![rule])
         }
         // DELETE_RULE reads only `rul.Name`
@@ -59,7 +59,7 @@ pub fn notification_for_effect(
             }
             // The daemon deletes `rulesDir + "/" + name + ".json"` as root.
             crate::rule_name::validate_rule_name(rule_id)?;
-            refuse_blocklist_name(rule_id)?;
+            refuse_reserved_name(rule_id)?;
             (
                 Action::DeleteRule,
                 vec![Rule {
@@ -79,12 +79,16 @@ pub fn notification_for_effect(
     }))
 }
 
-/// Issue #45: blocklist rules are installed and removed by the bridge only
-/// (`DaemonCommands::send` refuses them too). The error never echoes the
-/// name.
-fn refuse_blocklist_name(name: &str) -> Result<(), String> {
+/// Issue #45: blocklist rules are installed and removed by the bridge only.
+/// The rules Snitchwatch ships (`000-snitchwatch-…`) are never changed or
+/// deleted from a GUI. `DaemonCommands::send` refuses both too. The error
+/// never echoes the name.
+fn refuse_reserved_name(name: &str) -> Result<(), String> {
     if crate::rule_name::is_reserved_blocklist_name(name) {
         return Err("blocklist rules are managed on the Blocklists page".to_string());
+    }
+    if crate::rule_name::is_reserved_packaged_name(name) {
+        return Err("rules built into Snitchwatch can't be changed or deleted".to_string());
     }
     Ok(())
 }
@@ -184,6 +188,60 @@ mod tests {
             for effect in effects {
                 let err = notification_for_effect(&effect, 1).unwrap_err();
                 assert!(err.contains("Blocklists page"), "{effect:?}: {err}");
+            }
+        }
+    }
+
+    /// A GUI or an import could otherwise swap the packaged allow for a
+    /// deny, or make it temporary (the daemon then deletes its file).
+    #[test]
+    fn a_gui_can_never_add_update_rename_or_delete_a_packaged_rule() {
+        for name in [
+            crate::rule_name::PACKAGED_FETCH_RULE_NAME,
+            "000-snitchwatch-other",
+        ] {
+            let effects = [
+                (
+                    "add",
+                    UpstreamEffect::AddRule {
+                        rule: wire_rule(name, true),
+                    },
+                ),
+                (
+                    "update",
+                    UpstreamEffect::UpdateRule {
+                        rule_id: name.to_string(),
+                        rule: wire_rule(name, false),
+                    },
+                ),
+                (
+                    "rename into the prefix",
+                    UpstreamEffect::UpdateRule {
+                        rule_id: "899-firefox".to_string(),
+                        rule: wire_rule(name, true),
+                    },
+                ),
+                (
+                    "rename out of the prefix",
+                    UpstreamEffect::UpdateRule {
+                        rule_id: name.to_string(),
+                        rule: wire_rule("899-firefox", true),
+                    },
+                ),
+                (
+                    "delete",
+                    UpstreamEffect::DeleteRule {
+                        rule_id: name.to_string(),
+                    },
+                ),
+            ];
+            for (what, effect) in effects {
+                let err = notification_for_effect(&effect, 1).unwrap_err();
+                assert!(
+                    err.contains("built into Snitchwatch"),
+                    "{what} {name}: {err}"
+                );
+                assert!(!err.contains(name), "errors never echo the name: {err}");
             }
         }
     }

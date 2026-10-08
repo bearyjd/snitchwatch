@@ -27,10 +27,32 @@ pub const BLOCKLIST_RULE_NAME_PREFIX: &str = "z00-blocklist:";
 /// create one.
 pub const LEGACY_BLOCKLIST_RULE_NAME_PREFIX: &str = "900-blocklist:";
 
+/// Name prefix of the opensnitchd rules Snitchwatch ships in its packaging
+/// (`packaging/bluebuild/files/system/etc/opensnitchd/rules/`). Reserved: a
+/// GUI action or an import can't add, change or delete a rule under it.
+/// Otherwise it could swap the packaged allow for a deny (no more list
+/// downloads), or give it a temporary duration, after which the daemon
+/// deletes its file.
+pub const PACKAGED_RULE_NAME_PREFIX: &str = "000-snitchwatch-";
+
+/// The packaged rule that lets the system bridge download blocklists
+/// (`docs/superpowers/plans/2026-10-08-packaged-bridge-fetch-rule.md`).
+pub const PACKAGED_FETCH_RULE_NAME: &str = "000-snitchwatch-bridge-fetch";
+
 /// Whether `name` is under a blocklist prefix only the bridge may use.
 pub fn is_reserved_blocklist_name(name: &str) -> bool {
     name.starts_with(BLOCKLIST_RULE_NAME_PREFIX)
         || name.starts_with(LEGACY_BLOCKLIST_RULE_NAME_PREFIX)
+}
+
+/// Whether `name` is under the prefix of the rules Snitchwatch ships.
+pub fn is_reserved_packaged_name(name: &str) -> bool {
+    name.starts_with(PACKAGED_RULE_NAME_PREFIX)
+}
+
+/// Whether `name` is under any prefix a GUI may not add, change or delete.
+pub fn is_reserved_name(name: &str) -> bool {
+    is_reserved_blocklist_name(name) || is_reserved_packaged_name(name)
 }
 
 /// Reject a rule name that could escape the daemon's rules directory or
@@ -183,6 +205,25 @@ mod tests {
             validate_rule_name("...").is_ok(),
             "a single component of dots is a plain file"
         );
+    }
+
+    #[test]
+    fn the_packaged_prefix_is_reserved_and_the_bridges_own_names_are_not() {
+        assert!(is_reserved_packaged_name(PACKAGED_FETCH_RULE_NAME));
+        assert!(is_reserved_name(PACKAGED_FETCH_RULE_NAME));
+        assert!(is_reserved_name("000-snitchwatch-anything"));
+        assert!(is_reserved_name("z00-blocklist:ads:domains"));
+        assert!(!is_reserved_blocklist_name(PACKAGED_FETCH_RULE_NAME));
+        assert!(validate_rule_name(PACKAGED_FETCH_RULE_NAME).is_ok());
+        for name in [
+            "000-allow-localhost",
+            "000-snitchwatch",
+            "000-Snitchwatch-bridge-fetch",
+            rule_name_for(Verdict::Allow, "github.com", 443, "/usr/bin/curl").as_str(),
+            rule_name_for(Verdict::Deny, "example.com", 80, "").as_str(),
+        ] {
+            assert!(!is_reserved_name(name), "{name}");
+        }
     }
 
     #[test]

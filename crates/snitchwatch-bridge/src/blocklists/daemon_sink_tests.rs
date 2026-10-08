@@ -500,6 +500,28 @@ async fn the_orphan_purge_leaves_rules_snitchwatch_did_not_make() {
         .contains(&"z00-blocklist:foreign:domains".to_string()));
 }
 
+/// The fetch rule the system image ships is not the bridge's to purge,
+/// in either form the daemon may report it.
+#[tokio::test]
+async fn the_orphan_purge_leaves_the_packaged_fetch_rule() {
+    use crate::rule_wire::test_helpers::{packaged_fetch_rule, PACKAGED_FETCH_RULE_NAME};
+    for uid in [None, Some("987")] {
+        let h = Harness::new();
+        let snapshot = vec![
+            h.bridge_rule("gone", ListKind::Domains),
+            packaged_fetch_rule(uid),
+        ];
+        let h = h.connect(Daemon::Accept, snapshot);
+        h.sink().remove_orphans(&[]).await;
+        let sent: Vec<_> = h.seen().iter().map(|s| kind_of(&s.command)).collect();
+        assert_eq!(sent, vec![delete("z00-blocklist:gone:domains")]);
+        assert!(h
+            .cached()
+            .unwrap()
+            .contains(&PACKAGED_FETCH_RULE_NAME.to_string()));
+    }
+}
+
 /// Review H1: after a bridge restart, rules the daemon's committed snapshot
 /// already holds unchanged, over files that are unchanged, are neither
 /// resent nor rewritten (no restart storm of `CHANGE_RULE`s and re-reads).
