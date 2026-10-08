@@ -40,6 +40,11 @@ pub const DECIDE_LATER: &str = "decideLater";
 /// prompt-slot plan Part D).
 pub const CURATED_DEFAULTS: &str = "curatedDefaults";
 
+/// The bridge sends `SetBlocklistLeftovers` (issue #73). A bridge without it
+/// never says "none left", so a client must not keep a count an earlier
+/// bridge sent.
+pub const BLOCKLIST_LEFTOVERS: &str = "blocklistLeftovers";
+
 /// What this bridge advertises to every authenticated client.
 pub fn advertised() -> Vec<String> {
     vec![
@@ -49,6 +54,7 @@ pub fn advertised() -> Vec<String> {
         RULE_HITS.to_string(),
         DECIDE_LATER.to_string(),
         CURATED_DEFAULTS.to_string(),
+        BLOCKLIST_LEFTOVERS.to_string(),
     ]
 }
 
@@ -95,7 +101,8 @@ mod tests {
                     "pauseAnswersWaiting",
                     "ruleHits",
                     "decideLater",
-                    "curatedDefaults"
+                    "curatedDefaults",
+                    "blocklistLeftovers"
                 ],
             })
         );

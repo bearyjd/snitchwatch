@@ -18,13 +18,15 @@
 //! [`check`](BlocklistCommand::check) re-validates the shape at the send
 //! point anyway, so a later change to the constructors can't widen it, and
 //! pins `data` to the list root the sink set once with
-//! [`DaemonCommands::pin_blocklist_root`]; before that, nothing is sent.
+//! [`DaemonCommands::pin_blocklist_root`]; before that, no install is sent.
+//! A delete names no path, so it needs no root: a bridge without a state
+//! directory can still remove the blocklist rules it once made (issue #73).
 
 use std::path::{Component, Path, PathBuf};
 
 use snitchwatch_proto::protocol::{Action, Notification, Rule};
 
-use super::{DaemonCommands, PendingReply, SendError};
+use super::{DaemonCommands, Delivery, PendingReply, SendError};
 use crate::blocklists::list_dir::{IdComponent, ListDir, LISTS_DIR_NAME};
 use crate::blocklists::materializer::{list_rule_name, materialize_list_rule, ListKind};
 use crate::rule_name::{
@@ -78,7 +80,7 @@ impl BlocklistCommand {
 
     /// Exactly what the constructors build for the list root `root`, or an
     /// error.
-    fn check(&self, root: &Path) -> Result<(), SendError> {
+    fn check(&self, root: Option<&Path>) -> Result<(), SendError> {
         let [rule] = self.notification.rules.as_slice() else {
             return Err(SendError::RefusedOperator);
         };
@@ -93,6 +95,8 @@ impl BlocklistCommand {
         if self.notification.r#type != Action::ChangeRule as i32 {
             return Err(SendError::NotAllowed);
         }
+        // An install is only ever for the pinned root.
+        let root = root.ok_or(SendError::RefusedOperator)?;
         let shape_ok = rule.name.starts_with(BLOCKLIST_RULE_NAME_PREFIX)
             && rule.action == "deny"
             && rule.duration == "always"
@@ -161,14 +165,27 @@ impl DaemonCommands {
 
     /// Send a blocklist rule command. The only path a `lists` operator or a
     /// blocklist rule name may take to the daemon; see the module doc.
-    /// Nothing is sent before [`pin_blocklist_root`](Self::pin_blocklist_root).
+    /// No install is sent before [`pin_blocklist_root`](Self::pin_blocklist_root).
     pub fn send_blocklist(&self, command: BlocklistCommand) -> Result<PendingReply, SendError> {
-        let root = self
-            .blocklist_root
-            .get()
-            .ok_or(SendError::RefusedOperator)?;
-        command.check(root)?;
+        command.check(self.blocklist_root.get().map(PathBuf::as_path))?;
         self.dispatch(command.notification)
+    }
+
+    /// Send the delete of a blocklist rule that was read from the daemon's
+    /// committed rule snapshot (issue #73), to the stream that snapshot came
+    /// from and to no other. Never over the TCP transport: there any
+    /// local process can pose as the daemon, show a list of its own as the
+    /// snapshot, and have a delete of a real rule's name sent on to the
+    /// real daemon. Refused until #35 retires that transport.
+    pub fn send_leftover_delete(
+        &self,
+        command: BlocklistCommand,
+    ) -> Result<PendingReply, SendError> {
+        command.check(None)?;
+        if command.notification.r#type != Action::DeleteRule as i32 {
+            return Err(SendError::RefusedOperator);
+        }
+        self.dispatch_via(command.notification, Delivery::CommittedStream)
     }
 }
 
@@ -196,12 +213,12 @@ mod tests {
             let list = IdComponent::from_id(id);
             for kind in ListKind::ALL {
                 let command = BlocklistCommand::install(&list, kind, &dir);
-                assert_eq!(command.check(dir.root()), Ok(()));
+                assert_eq!(command.check(Some(dir.root())), Ok(()));
             }
         }
         for name in ["z00-blocklist:ads:domains", "900-blocklist:ads:0001-x"] {
             let delete = BlocklistCommand::delete(name).unwrap();
-            assert_eq!(delete.check(dir.root()), Ok(()));
+            assert_eq!(delete.check(Some(dir.root())), Ok(()));
         }
     }
 
@@ -218,10 +235,11 @@ mod tests {
     fn a_rule_for_another_root_is_refused() {
         let (_state, _dir, command) = installed();
         let (_other_state, other) = dir();
-        assert!(command.check(other.root()).is_err());
+        assert!(command.check(Some(other.root())).is_err());
         assert!(command
-            .check(Path::new("/var/lib/snitchwatch/blocklists"))
+            .check(Some(Path::new("/var/lib/snitchwatch/blocklists")))
             .is_err());
+        assert!(command.check(None).is_err(), "an install needs a root");
     }
 
     #[test]
@@ -258,17 +276,20 @@ mod tests {
         for (what, tamper) in tampers {
             let (_state, dir, mut command) = installed();
             tamper(&mut command.notification.rules[0]);
-            assert!(command.check(dir.root()).is_err(), "{what} passed");
+            assert!(command.check(Some(dir.root())).is_err(), "{what} passed");
         }
         let (_state, dir, mut command) = installed();
         command
             .notification
             .rules
             .push(command.notification.rules[0].clone());
-        assert!(command.check(dir.root()).is_err(), "two rules passed");
+        assert!(command.check(Some(dir.root())).is_err(), "two rules passed");
         let (_state, dir, mut command) = installed();
         command.notification.r#type = Action::ChangeConfig as i32;
-        assert!(command.check(dir.root()).is_err(), "CHANGE_CONFIG passed");
+        assert!(
+            command.check(Some(dir.root())).is_err(),
+            "CHANGE_CONFIG passed"
+        );
         let (_state, dir, mut command) = installed();
         let data = &mut command.notification.rules[0]
             .operator
@@ -277,8 +298,74 @@ mod tests {
             .data;
         data.push('/');
         assert!(
-            command.check(dir.root()).is_err(),
+            command.check(Some(dir.root())).is_err(),
             "a trailing slash passed"
         );
+    }
+
+    // --- send_leftover_delete (issue #73, security L1) -----------------------
+
+    use crate::cache::rules::RulesSync;
+    use crate::daemon_commands::DaemonTransport;
+    use snitchwatch_proto::protocol::{NotificationReply, NotificationReplyCode};
+    use tokio::sync::broadcast;
+
+    fn commands(transport: DaemonTransport) -> DaemonCommands {
+        DaemonCommands::new(transport, RulesSync::new(broadcast::channel(8).0))
+    }
+
+    fn hello() -> NotificationReply {
+        NotificationReply {
+            id: 0,
+            code: NotificationReplyCode::Ok as i32,
+            ..Default::default()
+        }
+    }
+
+    fn the_delete() -> BlocklistCommand {
+        BlocklistCommand::delete("z00-blocklist:ads:domains").unwrap()
+    }
+
+    /// Over TCP any local process can say HELLO and show a snapshot of its
+    /// own, so a delete read from one is never sent.
+    #[tokio::test]
+    async fn a_leftover_delete_is_never_sent_over_tcp() {
+        let commands = commands(DaemonTransport::Tcp);
+        let (stream, _rx) = commands.open_stream(None);
+        commands.on_reply(stream.id(), &hello());
+        assert!(matches!(
+            commands.send_leftover_delete(the_delete()),
+            Err(SendError::NotOnThisTransport)
+        ));
+    }
+
+    /// On the Unix socket it goes to the stream whose snapshot the cache
+    /// holds; a stream that said HELLO without one withdraws that snapshot,
+    /// and then nothing is sent at all.
+    #[tokio::test]
+    async fn a_leftover_delete_goes_only_to_the_stream_whose_snapshot_is_held() {
+        let rules = RulesSync::new(broadcast::channel(8).0);
+        let commands = DaemonCommands::new(DaemonTransport::Unix, rules.clone());
+        rules.stage(None, Vec::new());
+        let (first, mut first_rx) = commands.open_stream(None);
+        commands.on_reply(first.id(), &hello());
+        assert!(commands.send_leftover_delete(the_delete()).is_ok());
+        assert!(first_rx.try_recv().is_ok(), "the committed stream got it");
+
+        let (second, mut second_rx) = commands.open_stream(None);
+        commands.on_reply(second.id(), &hello());
+        assert!(matches!(
+            commands.send_leftover_delete(the_delete()),
+            Err(SendError::NoDaemon)
+        ));
+        assert!(second_rx.try_recv().is_err());
+        assert!(first_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn only_a_delete_can_be_sent_that_way() {
+        let (_state, _dir, install) = installed();
+        let commands = commands(DaemonTransport::Unix);
+        assert!(commands.send_leftover_delete(install).is_err());
     }
 }

@@ -481,6 +481,7 @@ async fn connect_and_relay(
     if advertised(snitchwatch_bridge::bridge_capabilities::DECIDE_LATER) {
         mark_decide_later(connection, connection_id);
     }
+    clear_unreported_leftovers(&capabilities, connection_id, broadcast_tx);
     set_status(status, LinkState::Connected, "Connected to bridge service");
     tracing::info!(socket = %socket_path.display(), "connected to bridge service");
 
@@ -788,3 +789,11 @@ mod pause_answers_tests;
 #[cfg(test)]
 #[path = "bridge_runtime/notification_action_tests.rs"]
 mod notification_action_tests;
+
+#[path = "bridge_runtime/leftover_capability.rs"]
+mod leftover_capability;
+use leftover_capability::clear_unreported_leftovers;
+
+#[cfg(test)]
+#[path = "bridge_runtime/leftover_capability_tests.rs"]
+mod leftover_capability_tests;

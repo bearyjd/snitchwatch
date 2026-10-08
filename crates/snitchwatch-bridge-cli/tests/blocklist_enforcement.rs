@@ -205,10 +205,14 @@ async fn a_subscription_installs_its_lists_rules_and_reports_them_installed() {
     setup.bridge.shutdown();
 }
 
-/// Unsubscribe deletes both rules while the list's directory still exists,
-/// and only then removes the directory.
+/// Unsubscribe deletes both rules while the list's directory still exists, and
+/// keeps the directory for a while (opensnitchd reloads a path at most every
+/// 30 s and clears a list whose file is missing, issue #73): subscribing
+/// again at once finds the files in place, and rewrites none of them.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn unsubscribing_deletes_the_rules_before_the_list_directory() {
+async fn unsubscribing_deletes_the_rules_and_a_quick_resubscribe_finds_the_files_in_place() {
+    use std::os::unix::fs::MetadataExt;
+
     let mut setup = start(true).await;
     let (state, bridge, rx) = (setup.state.clone(), &setup.bridge, &mut setup.rx);
     let mut daemon = MockOpensnitchd::connect(bridge.grpc_endpoint.tcp_addr().unwrap())
@@ -229,7 +233,11 @@ async fn unsubscribing_deletes_the_rules_before_the_list_directory() {
     })
     .await;
     let list_dir = lists_root(&state).join(&list.id);
-    assert!(list_dir.is_dir());
+    let domains_file = list_dir.join("domains").join("domains.list");
+    assert!(domains_file.is_file());
+    let inode = std::fs::metadata(&domains_file).unwrap().ino();
+    while seen.try_recv().is_ok() {}
+
     bridge
         .inbound_tx
         .send(ClientMessage::UnsubscribeBlocklist {
@@ -255,14 +263,22 @@ async fn unsubscribing_deletes_the_rules_before_the_list_directory() {
             format!("z00-blocklist:{}:ips", list.id),
         ]
     );
-    let deadline = tokio::time::Instant::now() + WAIT;
-    while list_dir.exists() {
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "the directory stayed"
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    // The reconcile after the unsubscribe has run its orphan purge by now; the
+    // files are still there.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(domains_file.is_file(), "the files went with the rules");
+
+    // Subscribing again puts the rules back over the very same files.
+    subscribe(bridge).await;
+    list_until(rx, "rule installed again", |l| {
+        l.id == list.id && l.enforcement == ENFORCEMENT_RULE_INSTALLED
+    })
+    .await;
+    assert_eq!(
+        std::fs::metadata(&domains_file).unwrap().ino(),
+        inode,
+        "the list file was rewritten"
+    );
     setup.bridge.shutdown();
 }
 

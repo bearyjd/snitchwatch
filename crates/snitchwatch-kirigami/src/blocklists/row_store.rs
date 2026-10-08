@@ -24,6 +24,13 @@ pub struct SubscriptionsStore {
     /// From the last `SetBlocklists`; `None` until one arrives or from an
     /// older bridge, which kept subscriptions in memory only.
     storage: Option<StorageStatus>,
+    /// Blocklist rules Snitchwatch made that nothing manages (issue #73),
+    /// from the last `SetBlocklistLeftovers`; 0 until one arrives.
+    leftover: u32,
+    /// `cause` of the last `SetBlocklistLeftovers`, or "" (an older bridge).
+    leftover_cause: String,
+    /// `reason` of the last `SetBlocklistLeftovers`, or "".
+    leftover_reason: String,
 }
 
 /// The download result as shown to the user. `status` only says whether the
@@ -124,6 +131,23 @@ impl SubscriptionsStore {
             .unwrap_or("")
     }
 
+    /// How many blocklist rules the firewall still holds for lists this
+    /// service no longer manages (issue #73).
+    pub fn leftover_rules(&self) -> u32 {
+        self.leftover
+    }
+
+    /// Why nothing manages them (`store_unreadable`, `no_state_dir`,
+    /// `per_user`), or "" when the bridge didn't say.
+    pub fn leftover_cause(&self) -> &str {
+        &self.leftover_cause
+    }
+
+    /// How the last removal went, when it left some, or "".
+    pub fn leftover_reason(&self) -> &str {
+        &self.leftover_reason
+    }
+
     /// Apply one bridge message. Returns `true` if the subscription list
     /// changed (the model wrapper resets on `true`).
     pub fn apply(&mut self, msg: &ServerMessage) -> bool {
@@ -134,7 +158,29 @@ impl SubscriptionsStore {
             } => {
                 self.subs = blocklists.clone();
                 self.storage = storage.clone();
+                if storage.is_none() {
+                    // A bridge that predates `SetBlocklistLeftovers` says
+                    // nothing about them: don't keep an older one's count.
+                    self.leftover = 0;
+                    self.leftover_cause.clear();
+                    self.leftover_reason.clear();
+                }
                 true
+            }
+            ServerMessage::SetBlocklistLeftovers {
+                count,
+                cause,
+                reason,
+            } => {
+                let cause = cause.clone().unwrap_or_default();
+                let reason = reason.clone().unwrap_or_default();
+                let changed = self.leftover != *count
+                    || self.leftover_cause != cause
+                    || self.leftover_reason != reason;
+                self.leftover = *count;
+                self.leftover_cause = cause;
+                self.leftover_reason = reason;
+                changed
             }
             ServerMessage::SetBlocklistDetails { details } => self.upsert(details.clone()),
             ServerMessage::SetBlocklistStatus {
@@ -173,124 +219,11 @@ impl SubscriptionsStore {
     }
 }
 
-/// The entries (hosts) of the currently displayed subscription (the detail
-/// list). Only the entries for `subscription_id` are held at a time. The
-/// bridge sends them a page at a time, on request (issue #45); `total` is the
-/// subscription's full entry count.
-#[derive(Debug, Default)]
-pub struct EntriesStore {
-    subscription_id: String,
-    hosts: Vec<String>,
-    total: u64,
-    /// The list this GUI asked for. Pages are broadcast to every GUI, so a
-    /// page for any other list is someone else's and is ignored.
-    wanted: Option<String>,
-}
-
-impl EntriesStore {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn len(&self) -> usize {
-        self.hosts.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.hosts.is_empty()
-    }
-
-    pub fn subscription_id(&self) -> &str {
-        &self.subscription_id
-    }
-
-    pub fn hosts(&self) -> &[String] {
-        &self.hosts
-    }
-
-    pub fn host(&self, index: usize) -> Option<&str> {
-        self.hosts.get(index).map(String::as_str)
-    }
-
-    /// The subscription's full entry count (not just the loaded pages).
-    pub fn total(&self) -> u64 {
-        self.total
-    }
-
-    /// Whether more pages can be requested.
-    pub fn has_more(&self) -> bool {
-        (self.hosts.len() as u64) < self.total
-    }
-
-    /// Record that this GUI asked for `id`'s entries. Returns `true` if the
-    /// shown list changed (a different list's entries are dropped).
-    pub fn expect(&mut self, id: &str) -> bool {
-        if self.wanted.as_deref() == Some(id) {
-            return false;
-        }
-        self.wanted = Some(id.to_string());
-        if self.subscription_id == id {
-            return false;
-        }
-        self.subscription_id.clear();
-        self.hosts.clear();
-        self.total = 0;
-        true
-    }
-
-    /// Apply one bridge message. Returns `true` if the entry list changed.
-    /// Only pages of the list this GUI asked for ([`expect`](Self::expect))
-    /// count: a page at offset 0 replaces the list, the next page appends,
-    /// any other page is ignored.
-    pub fn apply(&mut self, msg: &ServerMessage) -> bool {
-        match msg {
-            ServerMessage::SetBlocklistEntries {
-                subscription_id,
-                entries,
-                offset,
-                total,
-            } => {
-                if self.wanted.as_deref() != Some(subscription_id.as_str()) {
-                    return false;
-                }
-                let hosts = entries.iter().map(|e| e.host.clone());
-                if *offset == 0 {
-                    self.subscription_id = subscription_id.clone();
-                    self.hosts = hosts.collect();
-                } else if *subscription_id == self.subscription_id
-                    && *offset == self.hosts.len() as u64
-                {
-                    self.hosts.extend(hosts);
-                } else {
-                    return false;
-                }
-                self.total = *total;
-                true
-            }
-            _ => false,
-        }
-    }
-
-    /// Clear the detail list (e.g. when the selection is cleared).
-    pub fn clear(&mut self) -> bool {
-        if self.hosts.is_empty() && self.subscription_id.is_empty() {
-            self.wanted = None;
-            return false;
-        }
-        self.subscription_id.clear();
-        self.hosts.clear();
-        self.total = 0;
-        self.wanted = None;
-        true
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use snitchwatch_bridge::ws_messages::{
-        BlocklistEntry, StorageStatus, ENFORCEMENT_NOT_ENFORCED, ENFORCEMENT_PENDING,
-        ENFORCEMENT_RULE_INSTALLED,
+        StorageStatus, ENFORCEMENT_NOT_ENFORCED, ENFORCEMENT_PENDING, ENFORCEMENT_RULE_INSTALLED,
     };
 
     fn summary(id: &str, status: &str, count: i64) -> BlocklistSummary {
@@ -325,6 +258,97 @@ mod tests {
             storage: None,
         }));
         assert_eq!(ids(&s), vec!["c"]);
+    }
+
+    #[test]
+    fn leftover_rules_follow_the_bridges_count() {
+        let mut s = SubscriptionsStore::new();
+        assert_eq!(s.leftover_rules(), 0);
+        assert!(s.apply(&ServerMessage::SetBlocklistLeftovers {
+            count: 3,
+            cause: None,
+            reason: None
+        }));
+        assert_eq!(s.leftover_rules(), 3);
+        assert!(
+            !s.apply(&ServerMessage::SetBlocklistLeftovers {
+                count: 3,
+                cause: None,
+                reason: None
+            }),
+            "the same count isn't a change"
+        );
+        // A summary from a bridge that knows about storage keeps the count.
+        s.apply(&ServerMessage::SetBlocklists {
+            blocklists: vec![],
+            storage: Some(StorageStatus {
+                persistent: true,
+                reason: None,
+                unreadable: false,
+            }),
+        });
+        assert_eq!(s.leftover_rules(), 3);
+        assert!(s.apply(&ServerMessage::SetBlocklistLeftovers {
+            count: 0,
+            cause: None,
+            reason: None
+        }));
+        assert_eq!(s.leftover_rules(), 0);
+    }
+
+    #[test]
+    fn the_cause_and_the_outcome_of_a_removal_follow_the_bridge() {
+        let mut s = SubscriptionsStore::new();
+        let told =
+            |cause: Option<&str>, reason: Option<&str>| ServerMessage::SetBlocklistLeftovers {
+                count: 2,
+                cause: cause.map(str::to_string),
+                reason: reason.map(str::to_string),
+            };
+        assert!(s.apply(&told(Some("store_unreadable"), None)));
+        assert_eq!(s.leftover_cause(), "store_unreadable");
+        assert_eq!(s.leftover_reason(), "");
+        assert!(
+            s.apply(&told(Some("no_state_dir"), None)),
+            "a new cause under the same count is a change"
+        );
+        assert!(s.apply(&told(Some("store_unreadable"), None)));
+        assert!(
+            s.apply(&told(
+                Some("store_unreadable"),
+                Some("The rules were not removed.")
+            )),
+            "a new outcome under the same count is a change"
+        );
+        assert_eq!(s.leftover_reason(), "The rules were not removed.");
+        assert!(!s.apply(&told(
+            Some("store_unreadable"),
+            Some("The rules were not removed.")
+        )));
+        // An older bridge's summary clears the lot.
+        s.apply(&ServerMessage::SetBlocklists {
+            blocklists: vec![],
+            storage: None,
+        });
+        assert_eq!(
+            (s.leftover_rules(), s.leftover_cause(), s.leftover_reason()),
+            (0, "", "")
+        );
+    }
+
+    #[test]
+    fn an_older_bridge_never_leaves_a_stale_leftover_count() {
+        let mut s = SubscriptionsStore::new();
+        s.apply(&ServerMessage::SetBlocklistLeftovers {
+            count: 3,
+            cause: None,
+            reason: None,
+        });
+        s.apply(&ServerMessage::SetBlocklists {
+            blocklists: vec![],
+            storage: None,
+        });
+        assert_eq!(s.leftover_rules(), 0);
     }
 
     #[test]
@@ -526,125 +550,6 @@ mod tests {
     fn unrelated_message_does_not_change_subscriptions() {
         let mut s = SubscriptionsStore::new();
         assert!(!s.apply(&ServerMessage::ClearConnectionRows));
-    }
-
-    #[test]
-    fn entries_store_holds_one_subscription_at_a_time() {
-        let mut e = EntriesStore::new();
-        e.expect("a");
-        assert!(e.apply(&ServerMessage::SetBlocklistEntries {
-            subscription_id: "a".to_string(),
-            entries: vec![
-                BlocklistEntry {
-                    host: "ads.example".to_string(),
-                },
-                BlocklistEntry {
-                    host: "tracker.example".to_string(),
-                },
-            ],
-            offset: 0,
-            total: 2,
-        }));
-        assert_eq!(e.subscription_id(), "a");
-        assert_eq!(e.len(), 2);
-        assert_eq!(e.host(0), Some("ads.example"));
-
-        // Switching subscription replaces the detail list.
-        e.expect("b");
-        assert!(e.apply(&ServerMessage::SetBlocklistEntries {
-            subscription_id: "b".to_string(),
-            entries: vec![BlocklistEntry {
-                host: "b1.example".to_string(),
-            }],
-            offset: 0,
-            total: 1,
-        }));
-        assert_eq!(e.subscription_id(), "b");
-        assert_eq!(e.hosts(), &["b1.example".to_string()]);
-    }
-
-    #[test]
-    fn entries_clear_resets_and_is_idempotent() {
-        let mut e = EntriesStore::new();
-        e.expect("a");
-        e.apply(&ServerMessage::SetBlocklistEntries {
-            subscription_id: "a".to_string(),
-            entries: vec![BlocklistEntry {
-                host: "x.example".to_string(),
-            }],
-            offset: 0,
-            total: 1,
-        });
-        assert!(e.clear());
-        assert!(e.is_empty());
-        assert_eq!(e.subscription_id(), "");
-        // Second clear is a no-op.
-        assert!(!e.clear());
-    }
-
-    #[test]
-    fn entries_store_ignores_unrelated_messages() {
-        let mut e = EntriesStore::new();
-        assert!(!e.apply(&ServerMessage::ClearConnectionRows));
-    }
-
-    fn page(id: &str, hosts: &[&str], offset: u64, total: u64) -> ServerMessage {
-        ServerMessage::SetBlocklistEntries {
-            subscription_id: id.to_string(),
-            entries: hosts
-                .iter()
-                .map(|h| BlocklistEntry {
-                    host: h.to_string(),
-                })
-                .collect(),
-            offset,
-            total,
-        }
-    }
-
-    /// Issue #45 (S2): entries arrive a page at a time; the next page of the
-    /// same list appends, anything out of sequence is ignored.
-    #[test]
-    fn entry_pages_append_in_sequence() {
-        let mut e = EntriesStore::new();
-        e.expect("a");
-        assert!(e.apply(&page("a", &["1.x", "2.x"], 0, 5)));
-        assert_eq!(e.total(), 5);
-        assert!(e.has_more());
-        assert!(e.apply(&page("a", &["3.x", "4.x"], 2, 5)));
-        assert_eq!(e.len(), 4);
-        // A stale or duplicate page is ignored.
-        assert!(!e.apply(&page("a", &["3.x", "4.x"], 2, 5)));
-        assert!(!e.apply(&page("b", &["9.x"], 1, 5)));
-        assert!(e.apply(&page("a", &["5.x"], 4, 5)));
-        assert!(!e.has_more());
-        assert_eq!(e.hosts().len(), 5);
-        // A first page of the next list asked for replaces what was shown.
-        e.expect("b");
-        assert!(e.apply(&page("b", &["b.x"], 0, 1)));
-        assert_eq!(e.subscription_id(), "b");
-        assert_eq!(e.hosts(), &["b.x".to_string()]);
-    }
-
-    /// Entry pages are broadcast to every GUI: a page another GUI asked for
-    /// must not replace this inspector's list (or blank it).
-    #[test]
-    fn pages_for_a_list_this_gui_did_not_ask_for_are_ignored() {
-        let mut e = EntriesStore::new();
-        assert!(
-            !e.apply(&page("a", &["1.x"], 0, 1)),
-            "nothing was asked for yet"
-        );
-        assert!(e.is_empty());
-        e.expect("a");
-        assert!(e.apply(&page("a", &["1.x"], 0, 1)));
-        assert!(!e.apply(&page("other", &["o.x"], 0, 1)));
-        assert_eq!(e.subscription_id(), "a");
-        assert_eq!(e.hosts(), &["1.x".to_string()]);
-        // Asking for another list drops the old one until its page arrives.
-        assert!(e.expect("b"));
-        assert!(e.is_empty());
-        assert!(!e.expect("b"), "asking again changes nothing");
     }
 
     /// L10: a refused URL never reads as a failed download.

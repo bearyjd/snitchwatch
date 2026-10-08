@@ -13,6 +13,7 @@ pub mod event_pump;
 pub mod fetch_guard;
 pub mod fetcher;
 pub mod format;
+pub mod leftover;
 pub mod list_dir;
 mod manager;
 pub mod materializer;
@@ -49,6 +50,11 @@ pub enum BlocklistEvent {
         subscription_id: String,
         offset: u64,
         limit: u32,
+        /// Echoed on the page, so each GUI keeps only its own (issue #67).
+        request_id: Option<String>,
+        /// The connection that asked, which alone gets the page; `None` for
+        /// an in-process sender, answered on the broadcast.
+        reply: Option<crate::ws_messages::ReplyTo>,
     },
 }
 
@@ -121,6 +127,27 @@ pub const MAX_SUBSCRIPTIONS: usize = 32;
 /// would let traffic through unfiltered while it restarts. Lists past the
 /// limit, in the order they were subscribed, get no files and no rule.
 pub const AGGREGATE_MAX_HOSTS: u64 = 2_000_000;
+/// Most hosts, summed over every subscription, the bridge saves on disk
+/// (issue #67): twice [`AGGREGATE_MAX_HOSTS`], so lists past that limit can
+/// still be browsed. Every saved host repeats its list's id (up to 81
+/// bytes), so without a bound 32 lists of `format::MAX_ENTRIES` took ~5 GB
+/// of the filesystem that also holds /var/home. With this bound the worst
+/// case (81-byte ids, 253-byte hosts) is about 1.3 GB and real lists (ids
+/// ~30 bytes, hosts ~25) a few hundred MB. 4,000,000 is a judgement call, not
+/// a measured limit.
+///
+/// A hard bound, like the total size limit, it goes to the earliest
+/// subscriptions. A download that would pass it for the lists up to and
+/// including the list is refused and keeps the list's earlier hosts, like any
+/// failed download; and after every save, and at start, the lists whose hosts
+/// no longer fit after the earlier ones (an early list that grew) have their
+/// saved hosts cleared. It is never smaller than [`AGGREGATE_MAX_HOSTS`], so
+/// a cleared list is one the daemon doesn't enforce: only browsing is lost.
+pub const STORED_MAX_HOSTS: u64 = 4_000_000;
+const _: () = assert!(STORED_MAX_HOSTS >= AGGREGATE_MAX_HOSTS);
+/// How the reason of a download refused by [`STORED_MAX_HOSTS`] starts: a
+/// refresh tick keys on it to leave such a list to its normal interval.
+pub const STORAGE_LIMIT_REASON_PREFIX: &str = "Saving this list would pass the limit of";
 
 /// How much a [`BlocklistsManager::reconcile_with`] pass does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -135,6 +162,10 @@ pub enum ReconcileScope {
 /// A list whose last download failed is retried after this long (or its own
 /// refresh interval, if shorter), not on every scheduler tick.
 pub const FAILED_RETRY_SECS: i64 = 60 * 60;
+/// How long, in minutes, a refresh tick leaves a list the daemon refused
+/// alone: after the first refusal, the second, and every one after (issue
+/// #73). A new daemon rule list or a new download tries again at once.
+pub const REFUSAL_BACKOFF_MINUTES: [i64; 3] = [15, 60, 240];
 /// Why a sink didn't install a list's rules. Shown to the user.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NotInstalled {
@@ -142,6 +173,11 @@ pub struct NotInstalled {
     /// The daemon is unreachable or didn't answer: a reconcile pass stops
     /// here instead of trying every other list too.
     pub daemon_unavailable: bool,
+    /// The list's own rules went in, but an old rule or file of a kind it no
+    /// longer has couldn't be removed. Not a refusal of the list: shown as
+    /// "not confirmed", never backed off, and it doesn't stop a reconcile
+    /// pass.
+    pub cleanup_pending: bool,
 }
 
 impl NotInstalled {
@@ -149,6 +185,7 @@ impl NotInstalled {
         Self {
             reason: reason.into(),
             daemon_unavailable: false,
+            cleanup_pending: false,
         }
     }
 
@@ -156,6 +193,15 @@ impl NotInstalled {
         Self {
             reason: reason.into(),
             daemon_unavailable: true,
+            cleanup_pending: false,
+        }
+    }
+
+    pub fn cleanup_pending(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+            daemon_unavailable: false,
+            cleanup_pending: true,
         }
     }
 }
@@ -218,6 +264,32 @@ pub trait RuleSink: Send + Sync + 'static {
     /// Delete `list_id`'s rules from the daemon, then its files.
     async fn remove_blocklist_rules(&self, _list_id: &str) -> Result<(), NotInstalled> {
         Ok(())
+    }
+
+    /// A list's own rules are in place but an old rule or file of a kind it no
+    /// longer has couldn't be removed (a [`NotInstalled::cleanup_pending`]):
+    /// try just that again, not the list's rules.
+    async fn retry_cleanup(&self, _list_id: &str) -> Result<(), NotInstalled> {
+        Ok(())
+    }
+
+    /// Delete `list_id`'s files only, without asking the daemon anything: for
+    /// when it has just not answered, and waiting on it again for each of
+    /// several lists would stall the caller. A rule left in the daemon then
+    /// reads a missing list (nothing blocked) until the next reconcile
+    /// deletes it.
+    async fn remove_blocklist_files(&self, _list_id: &str) -> Result<(), NotInstalled> {
+        Ok(())
+    }
+
+    /// The list was unsubscribed: delete its rules. Its files may stay for a
+    /// while ([`DaemonRuleSink`](daemon_sink::DaemonRuleSink) keeps them for
+    /// a few minutes), so that subscribing to it again at once finds them in
+    /// place instead of making the daemon reload a list whose file went and
+    /// came back. A later [`remove_orphans`](Self::remove_orphans) removes
+    /// them. The default removes everything now.
+    async fn release_blocklist_rules(&self, list_id: &str) -> Result<(), NotInstalled> {
+        self.remove_blocklist_rules(list_id).await
     }
 
     /// Delete every blocklist rule and directory that doesn't belong to one
@@ -397,3 +469,18 @@ mod tests;
 
 #[cfg(test)]
 mod reconcile_tests;
+
+#[cfg(test)]
+mod backoff_tests;
+
+#[cfg(test)]
+mod cap_tests;
+
+#[cfg(test)]
+mod entries_tests;
+
+#[cfg(test)]
+mod release_tests;
+
+#[cfg(test)]
+mod leftover_manager_tests;

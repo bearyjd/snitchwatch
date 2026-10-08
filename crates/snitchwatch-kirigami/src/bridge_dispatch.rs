@@ -68,6 +68,7 @@ pub fn interests_blocklists(msg: &ServerMessage) -> bool {
     matches!(
         msg,
         ServerMessage::SetBlocklists { .. }
+            | ServerMessage::SetBlocklistLeftovers { .. }
             | ServerMessage::SetBlocklistDetails { .. }
             | ServerMessage::SetBlocklistStatus { .. }
     )
@@ -368,6 +369,10 @@ mod tests {
             status: "fetching".into(),
             last_failure_reason: None,
         }));
+        let leftovers: ServerMessage =
+            serde_json::from_str(r#"{"action":"setBlocklistLeftovers","count":2}"#).unwrap();
+        assert!(interests_blocklists(&leftovers));
+        assert!(!interests_rules(&leftovers));
     }
 
     #[test]
@@ -379,6 +384,8 @@ mod tests {
             }],
             offset: 0,
             total: 1,
+            request_id: None,
+            last_updated_iso8601: None,
         };
         assert!(interests_blocklist_entries(&msg));
         assert!(!interests_blocklists(&msg));

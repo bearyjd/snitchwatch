@@ -145,7 +145,7 @@ async fn shell_messages_rehydrate_external_tray_and_notice_feeds() {
     );
 }
 
-fn pause_channel() -> (
+pub(super) fn pause_channel() -> (
     watch::Sender<ReceivedPauseState>,
     watch::Receiver<ReceivedPauseState>,
 ) {
@@ -272,9 +272,9 @@ async fn client_loop_forwards_authenticated_snapshot_to_the_qml_feed() {
     let bridge = snitchwatch_bridge_cli::run(config.clone())
         .await
         .expect("bridge starts");
-    // Room for the whole snapshot (production uses 1,024): this test reads
-    // it only after the client has forwarded it, and checks each part,
-    // the recommended rules included.
+    // Room for the whole snapshot, which grows whenever the bridge adds one
+    // (production uses 1,024); each part is checked, the recommended rules
+    // included.
     let (shell_tx, mut shell_messages) = broadcast::channel(64);
     let (inbound_tx, inbound_rx) = mpsc::channel(1);
     let (tray_tx, _) = watch::channel(ReceivedTrayState {
@@ -432,7 +432,7 @@ async fn accept_authenticated_snapshot_on(
 }
 
 /// [`accept_authenticated_snapshot_on`] with the acknowledgement frame given.
-async fn accept_with_ack(
+pub(super) async fn accept_with_ack(
     listener: &tokio::net::UnixListener,
     token: &snitchwatch_bridge::auth::Token,
     ack: &str,
@@ -450,7 +450,11 @@ async fn accept_with_ack(
 
 /// Waits until `connection_id` is (or, with `live == false`, is no longer)
 /// the live session.
-async fn wait_for_session(connection: &Mutex<ConnectionState>, connection_id: u64, live: bool) {
+pub(super) async fn wait_for_session(
+    connection: &Mutex<ConnectionState>,
+    connection_id: u64,
+    live: bool,
+) {
     tokio::time::timeout(Duration::from_secs(3), async {
         while is_current_connection(connection, connection_id) != live {
             tokio::time::sleep(Duration::from_millis(5)).await;

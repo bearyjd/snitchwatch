@@ -41,6 +41,19 @@ pub async fn build_set_blocklists(mgr: &BlocklistsManager) -> anyhow::Result<Ser
     })
 }
 
+/// How many leftover blocklist rules the page should offer to remove
+/// (issue #73); `0` when there are none. Sent after every `SetBlocklists`.
+pub fn build_set_blocklist_leftovers(mgr: &BlocklistsManager) -> ServerMessage {
+    let count = mgr.leftover_count().unwrap_or(0);
+    ServerMessage::SetBlocklistLeftovers {
+        count: u32::try_from(count).unwrap_or(u32::MAX),
+        cause: (count > 0)
+            .then(|| mgr.leftover_cause().map(str::to_string))
+            .flatten(),
+        reason: mgr.leftover_outcome(),
+    }
+}
+
 fn enforcement_wire(enforcement: Enforcement) -> (String, Option<String>) {
     match enforcement {
         Enforcement::Pending => (ENFORCEMENT_PENDING.to_string(), None),
@@ -76,9 +89,11 @@ pub async fn build_blocklist_entries_page(
     subscription_id: &str,
     offset: u64,
     limit: u32,
+    request_id: Option<String>,
 ) -> anyhow::Result<ServerMessage> {
-    let (hosts, total) = mgr.entries_page(subscription_id, offset, limit).await?;
-    let entries = hosts
+    let page = mgr.entries_page(subscription_id, offset, limit).await?;
+    let entries = page
+        .hosts
         .into_iter()
         .map(|host| BlocklistEntry { host })
         .collect();
@@ -86,7 +101,9 @@ pub async fn build_blocklist_entries_page(
         subscription_id: subscription_id.to_string(),
         entries,
         offset,
-        total,
+        total: page.total,
+        request_id,
+        last_updated_iso8601: page.last_fetched_at,
     })
 }
 
@@ -266,7 +283,7 @@ mod blocklist_emission_tests {
         use crate::ws_messages::BLOCKLIST_ENTRIES_PAGE_MAX;
         let n = BLOCKLIST_ENTRIES_PAGE_MAX as usize * 2 + 5;
         let mgr = seeded_manager(&[("big", n)]);
-        let msg = build_blocklist_entries_page(&mgr, "big", 0, u32::MAX)
+        let msg = build_blocklist_entries_page(&mgr, "big", 0, u32::MAX, None)
             .await
             .unwrap();
         match msg {
@@ -275,6 +292,7 @@ mod blocklist_emission_tests {
                 entries,
                 offset,
                 total,
+                ..
             } => {
                 assert_eq!(subscription_id, "big");
                 assert_eq!(entries.len(), BLOCKLIST_ENTRIES_PAGE_MAX as usize);
@@ -283,10 +301,15 @@ mod blocklist_emission_tests {
             }
             other => panic!("expected SetBlocklistEntries, got {other:?}"),
         }
-        let last =
-            build_blocklist_entries_page(&mgr, "big", 2 * BLOCKLIST_ENTRIES_PAGE_MAX as u64, 10)
-                .await
-                .unwrap();
+        let last = build_blocklist_entries_page(
+            &mgr,
+            "big",
+            2 * BLOCKLIST_ENTRIES_PAGE_MAX as u64,
+            10,
+            None,
+        )
+        .await
+        .unwrap();
         assert!(matches!(
             last,
             ServerMessage::SetBlocklistEntries { ref entries, offset, .. }
