@@ -14,6 +14,8 @@
 // `armDelayMs` (so a double-click meant for one prompt can't answer the next
 // one that takes its place), and each holder is answered at most once.
 // "Review" opens the Connections page, whose auto-select picks the row.
+// "Decide later" (Part C) shows only while the holder's bridge session takes
+// it, under the same arming.
 import QtQuick
 import QtQuick.Layouts
 import QtQuick.Controls as Controls
@@ -50,6 +52,8 @@ ColumnLayout {
         && banner.model.isPendingRow(banner.rowId)
     // Exposed for the headless probe (tests/prompt_slot_banner_qml.rs).
     property alias label: holderLabel
+    // Whether the holder's bridge session takes "Decide later" (Part C).
+    readonly property bool decideLaterOffered: verdicts.rowDecideLater(banner.rowId)
 
     visible: banner.shown
 
@@ -88,6 +92,14 @@ ColumnLayout {
         verdicts.submit(banner.rowId, choice);
     }
 
+    function putOff() {
+        if (!banner.actionable) {
+            return;
+        }
+        banner.answeredRowId = banner.rowId;
+        verdicts.decideLater(banner.rowId);
+    }
+
     Kirigami.InlineMessage {
         Layout.fillWidth: true
         visible: true
@@ -105,6 +117,13 @@ ColumnLayout {
                 icon.name: "edit-delete-remove"
                 enabled: banner.actionable
                 onTriggered: banner.answer("deny")
+            },
+            Kirigami.Action {
+                text: "Decide later"
+                icon.name: "chronometer-pause"
+                visible: banner.decideLaterOffered
+                enabled: banner.actionable
+                onTriggered: banner.putOff()
             },
             Kirigami.Action {
                 text: "Review"

@@ -184,7 +184,7 @@ impl GeoStore {
 
     fn add_row(&mut self, row: &ConnectionRow) {
         let resolved = self.resolver.resolve(&row.dst_ip);
-        let verdict = Verdict::from_action(row.action.as_deref());
+        let verdict = Verdict::of(row);
         self.aggregates
             .entry(resolved.bucket.clone())
             .or_insert_with(|| Aggregate {

@@ -7,9 +7,9 @@
 // onto the bridge's typed `ClientMessage::SetVerdict`. This QML only collects
 // the choice.
 //
-// Timeout ownership: `remainingSeconds` is *displayed* only; the auto-action
-// countdown is owned server-side by the bridge's AskRule machinery. This
-// component never runs its own timer.
+// Timeout ownership: the bridge answers a prompt nobody answers (prompt-slot
+// plan Part C) and reports when as the row's `answerDeadlineMs`. This sheet
+// only shows the time left, with a display-only tick; it never acts on it.
 //
 // The insight panel (Parity 2) is a strictly decorative side-channel: a lookup
 // failure/timeout NEVER disables or delays the Allow/Deny buttons below. See
@@ -38,8 +38,17 @@ ColumnLayout {
     // Remote IP (Parity 2 insight panel target), from
     // `ConnectionsModel.rowDetailsJson`.
     property string remoteIp: ""
-    // Server-owned countdown to the automatic fallback action. Negative hides it.
-    property int remainingSeconds: -1
+    // When the bridge answers this prompt itself (Unix ms); -1 if it never
+    // will. `nowMs` is refreshed by the display-only tick below.
+    property real deadlineMs: -1
+    property real nowMs: Date.now()
+    // A new row's countdown starts from now, not from the last tick.
+    onDeadlineMsChanged: sheet.nowMs = Date.now()
+    readonly property int remainingSeconds: sheet.deadlineMs > 0
+        ? Math.max(0, Math.ceil((sheet.deadlineMs - sheet.nowMs) / 1000)) : -1
+    // Whether the row's bridge session takes "Decide later"
+    // (`InlineVerdicts.rowDecideLater`); false until known.
+    property bool decideLater: false
     // Issue #44: whether the bridge can remember an answer for this program
     // (`ConnectionsModel.rowDetailsJson`'s `bindableProcessPath`, the bridge's
     // own absolute-path rule). Without it only "This time" is offered: the
@@ -211,13 +220,34 @@ ColumnLayout {
         text: "This firewall bridge is too old to limit a rule to just this program, so with this scope it can only answer this connection. Update Snitchwatch's background service to remember answers."
     }
 
-    // Countdown display only — never a client-side timer.
+    Timer {
+        interval: 1000
+        repeat: true
+        triggeredOnStart: true
+        running: sheet.visible && sheet.deadlineMs > 0
+        onTriggered: sheet.nowMs = Date.now()
+    }
+
+    // The time left; the bridge, not this sheet, answers at the deadline.
     Controls.Label {
         Layout.fillWidth: true
         horizontalAlignment: Text.AlignHCenter
         opacity: 0.7
         visible: sheet.remainingSeconds >= 0
-        text: "Auto-action in " + sheet.remainingSeconds + "s"
+        textFormat: Text.PlainText
+        text: "If nobody answers within " + sheet.remainingSeconds
+            + " s, the firewall's default action applies."
+    }
+
+    // Part C on a bridge without "Decide later": nothing can put this off.
+    Controls.Label {
+        Layout.fillWidth: true
+        visible: !sheet.decideLater
+        wrapMode: Text.Wrap
+        opacity: 0.7
+        font: Kirigami.Theme.smallFont
+        textFormat: Text.PlainText
+        text: "This background service can't put a prompt off. If nobody answers, the firewall applies its default action."
     }
 
     // Insight panel (Parity 2) — best-effort research on the remote host.
@@ -284,6 +314,21 @@ ColumnLayout {
             icon.name: "edit-delete-remove"
             onClicked: sheet.submit("deny")
         }
+        DecideLaterButton {
+            Layout.fillWidth: true
+            flat: false
+            visible: sheet.decideLater
+            onClicked: sheet.putOff()
+        }
+    }
+
+    function putOff() {
+        if (sheet.bridgeFeed !== null) {
+            sheet.bridgeFeed.decideLater(sheet.rowId);
+        } else {
+            console.warn("PendingDecisionSheet: no bridgeFeed; Decide later dropped for", sheet.rowId);
+        }
+        sheet.decided();
     }
 
     function submit(action) {

@@ -65,9 +65,9 @@ fn verdict_buttons_all_dispatch_through_the_single_guard() {
     let code = code_lines(CONNECTIONS_PAGE);
     let dispatches = code.matches("onClicked: row.decideOnce(").count();
     assert_eq!(
-        dispatches, 4,
-        "expected exactly 4 verdict buttons dispatching via row.decideOnce() \
-         (inline Allow/Deny + batch Allow all/Deny all), found {dispatches}. If a \
+        dispatches, 5,
+        "expected exactly 5 verdict buttons dispatching via row.decideOnce() \
+         (inline Allow/Deny/Decide later + batch Allow all/Deny all), found {dispatches}. If a \
          button was added or removed, update this count; if one now dispatches \
          some other way, it has bypassed the re-entry guard."
     );

@@ -88,7 +88,7 @@ impl Verdict {
 ///   *something* (opensnitchd's default action), even though the bridge
 ///   doesn't have a specific rule name for it.
 pub fn matched_rule_display(row: &ConnectionRow) -> String {
-    if row.action.is_none() {
+    if super::outcome::is_pending(row) {
         return "— awaiting decision".to_string();
     }
     match row.matched_rule.as_deref() {
@@ -172,7 +172,7 @@ impl RowStore {
     pub fn oldest_pending_started_at_ms(&self, now_ms: i64) -> Option<i64> {
         self.rows
             .iter()
-            .filter(|r| r.action.is_none())
+            .filter(|r| super::outcome::is_pending(r))
             .map(|r| r.started_at_ms)
             .filter(|&started| now_ms - started < Self::ASK_RULE_TIMEOUT_MS)
             .min()
@@ -201,9 +201,7 @@ impl RowStore {
     }
 
     pub fn verdict_at(&self, index: usize) -> Option<Verdict> {
-        self.rows
-            .get(index)
-            .map(|r| Verdict::from_action(r.action.as_deref()))
+        self.rows.get(index).map(Verdict::of)
     }
 
     fn position_of(&self, id: &str) -> Option<usize> {
@@ -448,8 +446,7 @@ impl RowStore {
 
     /// Verdict at a *visible* position (post-filter).
     pub fn visible_verdict_at(&self, vis_index: usize) -> Option<Verdict> {
-        self.visible_row(vis_index)
-            .map(|r| Verdict::from_action(r.action.as_deref()))
+        self.visible_row(vis_index).map(Verdict::of)
     }
 
     /// Index (into the full store) of the row with `id`, if present.
@@ -475,7 +472,7 @@ impl RowStore {
         self.rows
             .iter()
             .find(|r| r.id == id)
-            .map(|r| r.action.is_none())
+            .map(super::outcome::is_pending)
     }
 }
 

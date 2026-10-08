@@ -62,7 +62,7 @@ impl ConnectionFilter {
 
     /// Does `row` pass this filter?
     pub fn matches(&self, row: &ConnectionRow) -> bool {
-        if self.pending_only && row.action.is_some() {
+        if self.pending_only && !super::outcome::is_pending(row) {
             return false;
         }
         let needle = self.query.trim().to_lowercase();

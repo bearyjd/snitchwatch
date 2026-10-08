@@ -18,6 +18,8 @@ fn main() {
             "qml/InlineVerdicts.qml",
             "qml/PromptSlotBanner.qml",
             "qml/PendingDecisionSheet.qml",
+            "qml/DecideLaterButton.qml",
+            "qml/MakeRuleSheet.qml",
             "qml/BlocklistsPage.qml",
             "qml/RulesPage.qml",
             "qml/RuleSimulatorSheet.qml",
