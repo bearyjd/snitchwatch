@@ -44,6 +44,7 @@
 //      `topGap`, which can position a sheet differently on a page that has a
 //      header or toolbar.
 import QtQuick
+import QtQuick.Controls as Controls
 import org.kde.kirigami as Kirigami
 
 Kirigami.OverlaySheet {
@@ -56,6 +57,44 @@ Kirigami.OverlaySheet {
     property real maxSheetHeight: Kirigami.Units.gridUnit * 32
     // Gap kept above the sheet so it never collides with the window chrome.
     property real topGap: Kirigami.Units.gridUnit * 3
+
+    // Sheet titles are usually data (process, rule, subscription or profile
+    // name). OverlaySheet draws `title` with a default header Heading whose
+    // textFormat is AutoText and can't be set through `title:`, so markup in
+    // the data would render as markup (issue #51). This is that same heading —
+    // level, alignment, elide and elided-title tooltip modelled on Kirigami's
+    // OverlaySheet template — with PlainText. The close button and padding
+    // live outside `header`, so they are unaffected.
+    //
+    // The tooltip is declared explicitly rather than via the attached
+    // `ToolTip.text` the template uses: the attached one is drawn by the
+    // style's tooltip label, which is AutoText under Basic/Fusion, so
+    // hovering a long markup-named title would render the markup (including
+    // remote `<img>` loads). Replacing `contentItem` with a PlainText Label
+    // closes that. A source guard rejects `ToolTip.text` everywhere.
+    header: Kirigami.Heading {
+        id: titleHeading
+        level: 2
+        verticalAlignment: Text.AlignVCenter
+        elide: Text.ElideRight
+        textFormat: Text.PlainText
+        text: sheet.title
+
+        Controls.ToolTip {
+            visible: titleHeading.truncated && titleHover.hovered
+            contentItem: Controls.Label {
+                textFormat: Text.PlainText
+                wrapMode: Text.Wrap
+                // The style's own tooltip text uses the tooltip palette, not
+                // the window one a bare Label defaults to.
+                color: palette.toolTipText
+                text: sheet.title
+            }
+        }
+        HoverHandler {
+            id: titleHover
+        }
+    }
 
     width: Math.min(parent ? parent.width : sheet.preferredWidth, sheet.preferredWidth)
     height: Math.min(parent ? parent.height - sheet.topGap : sheet.maxSheetHeight,

@@ -192,6 +192,7 @@ Kirigami.ScrollablePage {
                     Layout.fillWidth: true
                     spacing: 0
                     Controls.Label {
+                        textFormat: Text.PlainText
                         text: row.source === "blocklist" ? ("blocklist: " + row.blocklistId) : row.name
                         font.bold: true
                         elide: Text.ElideRight
@@ -202,6 +203,7 @@ Kirigami.ScrollablePage {
                     // Blocklists tab; repeating it here would just be noise.
                     Controls.Label {
                         visible: row.source !== "blocklist" && row.operatorSummary.length > 0
+                        textFormat: Text.PlainText
                         text: row.operatorSummary
                         opacity: 0.7
                         font: Kirigami.Theme.smallFont
@@ -217,6 +219,7 @@ Kirigami.ScrollablePage {
                 }
 
                 Controls.Label {
+                    textFormat: Text.PlainText
                     text: row.ruleAction
                     color: page.actionColor(row.ruleAction)
                     Layout.alignment: Qt.AlignVCenter
@@ -252,25 +255,30 @@ Kirigami.ScrollablePage {
                 Layout.fillWidth: true
                 Controls.Label {
                     Kirigami.FormData.label: "Name"
+                    textFormat: Text.PlainText
                     text: page.inspectName
                     elide: Text.ElideMiddle
                 }
                 Controls.Label {
                     Kirigami.FormData.label: "Source"
+                    textFormat: Text.PlainText
                     text: page.sourceLabel(page.inspectSource)
                 }
                 Controls.Label {
                     Kirigami.FormData.label: "Action"
+                    textFormat: Text.PlainText
                     text: page.inspectAction
                     color: page.actionColor(page.inspectAction)
                 }
                 Controls.Label {
                     Kirigami.FormData.label: "Duration"
+                    textFormat: Text.PlainText
                     text: page.inspectDuration
                 }
                 Controls.Label {
                     Kirigami.FormData.label: "Target"
                     visible: page.inspectOperatorSummary.length > 0
+                    textFormat: Text.PlainText
                     text: page.inspectOperatorSummary
                     wrapMode: Text.Wrap
                 }
@@ -410,6 +418,7 @@ Kirigami.ScrollablePage {
                     Layout.fillWidth: true
                     wrapMode: Text.Wrap
                     font.bold: true
+                    textFormat: Text.PlainText
                     text: page.simulateMatchedRule.length > 0
                           ? ("Matched: " + page.simulateMatchedRule)
                           : "No match — the daemon's default action would apply"
@@ -419,6 +428,7 @@ Kirigami.ScrollablePage {
                 }
                 Controls.Label {
                     visible: page.simulateMatchedRule.length > 0
+                    textFormat: Text.PlainText
                     text: "Action: " + page.simulateAction + "  ·  Position " + (page.simulatePrecedence + 1)
                     color: page.actionColor(page.simulateAction)
                 }
@@ -429,6 +439,7 @@ Kirigami.ScrollablePage {
                     opacity: 0.8
                     font: Kirigami.Theme.smallFont
                     color: Kirigami.Theme.neutralTextColor
+                    textFormat: Text.PlainText
                     text: "Note: this simulator doesn't evaluate " + page.simulateUnsupported.join(", ")
                           + " — the result may not reflect real daemon behaviour for rules using them."
                 }

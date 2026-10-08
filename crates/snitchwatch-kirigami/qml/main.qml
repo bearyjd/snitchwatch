@@ -82,7 +82,6 @@ Kirigami.ApplicationWindow {
     TrafficModel {
         id: trafficModel
     }
-    property var trafficModelRef: trafficModel
 
     // Profiles tab model (switchable "At Home"/"Public Wi-Fi"/"Office"
     // firewall profiles, with network-based auto-activation on the bridge
@@ -338,7 +337,6 @@ Kirigami.ApplicationWindow {
         ConnectionsPage {
             model: root.connectionsModelRef
             bridgeFeed: root.bridgeFeedRef
-            trafficModel: root.trafficModelRef
 
             // Rule-match diagnostics "Show rule" jump (Parity 4): navigate to
             // the Rules tab and open the matched rule's detail sheet

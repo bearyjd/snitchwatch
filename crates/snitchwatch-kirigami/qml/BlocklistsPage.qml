@@ -74,13 +74,28 @@ Kirigami.ScrollablePage {
         }
     }
 
+    // Issue #45: the shipped bridge wires a no-op rule sink and an in-memory
+    // subscription store (`snitchwatch-bridge-cli/src/lib.rs`), so a
+    // subscription here materializes no daemon rules and is forgotten on
+    // restart. Deliberately unconditional and non-dismissable (no close
+    // button, no actions) until a real sink + persisted store land — then
+    // delete this banner.
+    header: Kirigami.InlineMessage {
+        type: Kirigami.MessageType.Warning
+        visible: true
+        text: "Preview: blocklist subscriptions are shown here but are not applied to the "
+            + "firewall yet, so they do not block anything. They are also kept in memory only, "
+            + "so they are lost when Snitchwatch's background service restarts (for example "
+            + "on logout or reboot)."
+    }
+
     Kirigami.PlaceholderMessage {
         anchors.centerIn: parent
         width: parent.width - (Kirigami.Units.largeSpacing * 4)
         visible: !page.model || page.model.count === 0
         icon.name: "edit-delete"
         text: "No blocklist subscriptions yet"
-        explanation: "Subscribe to a blocklist URL above to start filtering hosts."
+        explanation: "Subscribe to a blocklist URL above to preview its host list."
     }
 
     ListView {
@@ -115,12 +130,14 @@ Kirigami.ScrollablePage {
                     Layout.fillWidth: true
                     spacing: 0
                     Controls.Label {
+                        textFormat: Text.PlainText
                         text: row.displayName
                         font.bold: true
                         elide: Text.ElideRight
                         Layout.fillWidth: true
                     }
                     Controls.Label {
+                        textFormat: Text.PlainText
                         text: row.url
                         opacity: 0.7
                         font: Kirigami.Theme.smallFont
@@ -136,6 +153,7 @@ Kirigami.ScrollablePage {
                 }
 
                 Controls.Label {
+                    textFormat: Text.PlainText
                     text: row.status
                     color: page.statusColor(row.status)
                     Layout.alignment: Qt.AlignVCenter
@@ -169,6 +187,7 @@ Kirigami.ScrollablePage {
                 Layout.fillWidth: true
                 Controls.Label {
                     Kirigami.FormData.label: "URL"
+                    textFormat: Text.PlainText
                     text: page.inspectUrl
                     elide: Text.ElideMiddle
                 }
@@ -178,17 +197,20 @@ Kirigami.ScrollablePage {
                 }
                 Controls.Label {
                     Kirigami.FormData.label: "Status"
+                    textFormat: Text.PlainText
                     text: page.inspectStatus
                     color: page.statusColor(page.inspectStatus)
                 }
                 Controls.Label {
                     Kirigami.FormData.label: "Last updated"
                     visible: page.inspectLastUpdated.length > 0
+                    textFormat: Text.PlainText
                     text: page.inspectLastUpdated
                 }
                 Controls.Label {
                     Kirigami.FormData.label: "Last failure"
                     visible: page.inspectStatus === "failed" && page.inspectLastFailureReason.length > 0
+                    textFormat: Text.PlainText
                     text: page.inspectLastFailureReason
                     color: Kirigami.Theme.negativeTextColor
                     wrapMode: Text.Wrap
@@ -226,6 +248,7 @@ Kirigami.ScrollablePage {
                 delegate: Controls.Label {
                     required property string host
                     width: ListView.view ? ListView.view.width : implicitWidth
+                    textFormat: Text.PlainText
                     text: host
                 }
             }

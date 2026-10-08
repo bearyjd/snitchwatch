@@ -44,11 +44,6 @@ Kirigami.ScrollablePage {
     // inbound pump. Null in isolated component tests (the sheet no-ops then).
     property var bridgeFeed: null
 
-    // Parity 2: the shared TrafficModel instance, threaded down to the
-    // embedded PendingDecisionSheet's mini sparkline. Null in isolated
-    // component tests (the sparkline area is simply empty then).
-    property var trafficModel: null
-
     // Issue #18: the shared submit path for the inline row buttons and
     // (looped) the process-header batch actions. `BridgeFeed.submitVerdict`
     // builds and dispatches the typed verdict, so `pending_decision`'s Rust
@@ -107,13 +102,11 @@ Kirigami.ScrollablePage {
     property string inspectProtocol: ""
     property string inspectVerdict: ""
     property bool inspectPending: false
-    // Parity 2 (pending-decision insight panel + "this connection" byte
-    // readout) — pulled from `ConnectionsModel.rowDetailsJson` alongside the
-    // rest of the inspector snapshot. `real`, not `int`: byte counters can
-    // exceed 2^31 for long-lived high-throughput connections.
+    // Parity 2 (pending-decision insight panel) — pulled from
+    // `ConnectionsModel.rowDetailsJson` alongside the rest of the inspector
+    // snapshot. Per-connection byte counters are deliberately not surfaced:
+    // the bridge reports them as a hardcoded 0 (issue #49).
     property string inspectIp: ""
-    property real inspectBytesSent: 0
-    property real inspectBytesReceived: 0
     // Raw matched-rule name (empty when unknown/not applicable — drives the
     // "Show rule" button's visibility) and its friendly display string (never
     // blank — see `connections::row_store::matched_rule_display`).
@@ -334,6 +327,7 @@ Kirigami.ScrollablePage {
 
                 Controls.Label {
                     visible: !row.isGroupHeader
+                    textFormat: Text.PlainText
                     text: page.verdictGlyph(row.verdict, row.pending)
                     color: page.verdictColor(row.verdict)
                     Layout.alignment: Qt.AlignVCenter
@@ -344,12 +338,14 @@ Kirigami.ScrollablePage {
                     Layout.fillWidth: true
                     spacing: 0
                     Controls.Label {
+                        textFormat: Text.PlainText
                         text: row.process
                         font.bold: row.pending
                         elide: Text.ElideRight
                         Layout.fillWidth: true
                     }
                     Controls.Label {
+                        textFormat: Text.PlainText
                         text: row.host + ":" + row.port + "  " + row.protocol
                         opacity: 0.7
                         font: Kirigami.Theme.smallFont
@@ -360,6 +356,7 @@ Kirigami.ScrollablePage {
 
                 Controls.Label {
                     visible: !row.isGroupHeader
+                    textFormat: Text.PlainText
                     text: row.pending ? "pending" : row.verdict
                     color: page.verdictColor(row.verdict)
                     Layout.alignment: Qt.AlignVCenter
@@ -367,6 +364,7 @@ Kirigami.ScrollablePage {
 
                 Controls.Label {
                     visible: row.isGroupHeader
+                    textFormat: Text.PlainText
                     text: row.groupLabel
                     font.bold: true
                     color: row.groupPending > 0 ? Kirigami.Theme.neutralTextColor : Kirigami.Theme.textColor
@@ -481,22 +479,17 @@ Kirigami.ScrollablePage {
         inspector.open();
     }
 
-    // Parity 2: pull the destination IP + cumulative byte counters for the
-    // insight panel and "this connection" sparkline readout. Best-effort —
-    // malformed/missing JSON degrades to blank/zero values rather than
-    // throwing, since this is a decorative side-channel, never a blocker.
+    // Parity 2: pull the destination IP for the insight panel. Best-effort —
+    // malformed/missing JSON degrades to a blank value rather than throwing,
+    // since this is a decorative side-channel, never a blocker.
     function applyRowDetails(id) {
         page.inspectIp = "";
-        page.inspectBytesSent = 0;
-        page.inspectBytesReceived = 0;
         if (!page.model) {
             return;
         }
         try {
             const details = JSON.parse(page.model.rowDetailsJson(id));
             page.inspectIp = details.dstIp || "";
-            page.inspectBytesSent = details.bytesSent || 0;
-            page.inspectBytesReceived = details.bytesReceived || 0;
         } catch (e) {
             // Leave the defaults above.
         }
@@ -517,10 +510,12 @@ Kirigami.ScrollablePage {
                 Layout.fillWidth: true
                 Controls.Label {
                     Kirigami.FormData.label: "Host"
+                    textFormat: Text.PlainText
                     text: page.inspectHost
                 }
                 Controls.Label {
                     Kirigami.FormData.label: "Destination IP"
+                    textFormat: Text.PlainText
                     text: page.inspectIp.length > 0 ? page.inspectIp : "unavailable"
                     elide: Text.ElideMiddle
                 }
@@ -530,15 +525,18 @@ Kirigami.ScrollablePage {
                 }
                 Controls.Label {
                     Kirigami.FormData.label: "Protocol"
+                    textFormat: Text.PlainText
                     text: page.inspectProtocol
                 }
                 Controls.Label {
                     Kirigami.FormData.label: "Verdict"
+                    textFormat: Text.PlainText
                     text: page.inspectPending ? "pending" : page.inspectVerdict
                     color: page.verdictColor(page.inspectVerdict)
                 }
                 Controls.Label {
                     Kirigami.FormData.label: "Matched rule"
+                    textFormat: Text.PlainText
                     text: page.inspectMatchedRuleDisplay
                     elide: Text.ElideMiddle
                 }
@@ -570,9 +568,6 @@ Kirigami.ScrollablePage {
                 process: page.inspectProcess
                 host: page.inspectHost
                 remoteIp: page.inspectIp
-                bytesSent: page.inspectBytesSent
-                bytesReceived: page.inspectBytesReceived
-                trafficModel: page.trafficModel
                 bridgeFeed: page.bridgeFeed
                 onDecided: inspector.close()
             }
