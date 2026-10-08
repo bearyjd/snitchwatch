@@ -21,6 +21,25 @@ pub enum TrayState {
     DaemonDown,
 }
 
+impl TrayState {
+    /// What the tray shows for the bridge's inputs (issue #58), by priority:
+    /// `DaemonDown` > `FilterOff` (paused) > `Pending(n)` > `Idle`. The one
+    /// place this is decided: every resync publishes it, so none can hide a
+    /// daemon outage or a pause. `RecentBlock` is a transient overlay set
+    /// directly, and its revert comes back here.
+    pub fn derive(daemon_down: bool, paused: bool, pending: usize) -> Self {
+        if daemon_down {
+            Self::DaemonDown
+        } else if paused {
+            Self::FilterOff
+        } else if pending == 0 {
+            Self::Idle
+        } else {
+            Self::Pending(pending)
+        }
+    }
+}
+
 pub struct TrayStatePublisher {
     tx: watch::Sender<TrayState>,
 }
@@ -51,6 +70,28 @@ impl Default for TrayStatePublisher {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn derive_follows_daemon_down_then_pause_then_pending_then_idle() {
+        for paused in [false, true] {
+            for pending in [0, 3] {
+                assert_eq!(
+                    TrayState::derive(true, paused, pending),
+                    TrayState::DaemonDown,
+                    "down, paused {paused}, {pending} pending"
+                );
+            }
+        }
+        for pending in [0, 3] {
+            assert_eq!(
+                TrayState::derive(false, true, pending),
+                TrayState::FilterOff,
+                "paused, {pending} pending"
+            );
+        }
+        assert_eq!(TrayState::derive(false, false, 3), TrayState::Pending(3));
+        assert_eq!(TrayState::derive(false, false, 0), TrayState::Idle);
+    }
 
     #[tokio::test]
     async fn publisher_starts_idle_and_propagates_pending_count() {

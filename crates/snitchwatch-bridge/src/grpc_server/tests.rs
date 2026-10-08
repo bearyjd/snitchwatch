@@ -875,6 +875,78 @@ async fn recent_block_reverts_to_filter_off_while_paused() {
     assert_eq!(*tray_rx.borrow(), TrayState::FilterOff);
 }
 
+#[tokio::test(start_paused = true)]
+async fn a_deny_while_the_daemon_is_down_does_not_cover_the_daemon_down_tray() {
+    // Issue #58 follow-up: a Deny that lands in a hung-daemon window used to
+    // put "Blocked: X" over DaemonDown for the whole TTL.
+    use crate::translator::connection::ask_row_id;
+
+    let tray_pub = Arc::new(crate::tray_state::TrayStatePublisher::new());
+    let cache = Arc::new(Mutex::new(ConnectionCache::with_tray_publisher(
+        64,
+        tray_pub.clone(),
+    )));
+    let (tx, _rx) = broadcast::channel::<ServerMessage>(16);
+    let svc = UiService::new(
+        cache.clone(),
+        tx,
+        tray_pub.clone(),
+        Arc::new(crate::notice::NoticeBus::new()),
+        Arc::new(FilterPause::new()),
+    );
+    let _gui_session = svc.client_presence().authenticated_session();
+    let mut tray_rx = tray_pub.subscribe();
+
+    let ask = tokio::spawn({
+        let svc = svc.clone();
+        async move {
+            svc.ask_rule(Request::new(Connection {
+                dst_host: "tracker.example.com".into(),
+                process_path: "/usr/bin/curl".into(),
+                ..Default::default()
+            }))
+            .await
+        }
+    });
+    tray_rx.changed().await.unwrap();
+    assert_eq!(*tray_rx.borrow(), TrayState::Pending(1));
+
+    // The watchdog marks the daemon down while the prompt is open.
+    {
+        let mut cache = cache.lock().await;
+        cache.set_daemon_down(true);
+        tray_pub.set(cache.tray_state());
+    }
+    assert_eq!(*tray_rx.borrow_and_update(), TrayState::DaemonDown);
+
+    cache
+        .lock()
+        .await
+        .resolve(
+            &ask_row_id(1),
+            Verdict::Deny,
+            VerdictDuration::Once,
+            VerdictScope::ThisHost,
+        )
+        .unwrap();
+    ask.await.unwrap().unwrap();
+    assert_eq!(
+        *tray_rx.borrow_and_update(),
+        TrayState::DaemonDown,
+        "the block overlay must not cover DaemonDown"
+    );
+
+    // Nothing is left to revert, and recovery lands on the derived state.
+    tokio::time::advance(RECENT_BLOCK_TTL + Duration::from_millis(100)).await;
+    assert_eq!(*tray_rx.borrow(), TrayState::DaemonDown);
+    {
+        let mut cache = cache.lock().await;
+        cache.set_daemon_down(false);
+        tray_pub.set(cache.tray_state());
+    }
+    assert_eq!(*tray_rx.borrow(), TrayState::Idle);
+}
+
 #[test]
 fn process_bound_verdict_rule_survives_the_wire_round_trip() {
     // Issue #44: toggling a rule in the GUI sends its wire shape back through

@@ -209,7 +209,7 @@ impl BridgeHandles {
 
 struct ClientRuntime {
     handles: BridgeHandles,
-    status: Arc<Mutex<String>>,
+    status: Arc<Mutex<LinkStatus>>,
     tray_tx: watch::Sender<ReceivedTrayState>,
     notice_tx: broadcast::Sender<ReceivedNotice>,
     pause_tx: watch::Sender<ReceivedPauseState>,
@@ -266,10 +266,60 @@ fn resolve_token_path(
         .join("token")
 }
 
-fn set_status(status: &Arc<Mutex<String>>, value: impl Into<String>) {
+/// Where the shell's link to the bridge service stands. The bridge banner
+/// picks its sentence from this state, never from [`LinkStatus::detail`], which
+/// carries error text and is only ever shown.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum LinkState {
+    /// Starting up, or the first attempt hasn't finished.
+    #[default]
+    Connecting,
+    Connected,
+    /// The connection was lost or couldn't be made; the client keeps trying.
+    Retrying,
+    /// The client couldn't be started at all; nothing will retry.
+    Failed,
+    /// The client finished (its sender went away); nothing will retry.
+    Stopped,
+}
+
+impl LinkState {
+    /// The word `BridgeFeed.linkState` carries to QML.
+    pub fn token(self) -> &'static str {
+        match self {
+            Self::Connecting => "connecting",
+            Self::Connected => "connected",
+            Self::Retrying => "retrying",
+            Self::Failed => "failed",
+            Self::Stopped => "stopped",
+        }
+    }
+}
+
+/// The link's [`LinkState`] and the message that goes with it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LinkStatus {
+    pub state: LinkState,
+    /// A message for the user to read, not to parse: it can carry error text.
+    pub detail: String,
+}
+
+impl LinkStatus {
+    fn connecting() -> Self {
+        Self {
+            state: LinkState::Connecting,
+            detail: "Connecting to bridge service…".to_string(),
+        }
+    }
+}
+
+fn set_status(status: &Arc<Mutex<LinkStatus>>, state: LinkState, detail: impl Into<String>) {
     *status
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = value.into();
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = LinkStatus {
+        state,
+        detail: detail.into(),
+    };
 }
 
 fn start_inner() -> anyhow::Result<ClientRuntime> {
@@ -288,7 +338,7 @@ fn start_inner() -> anyhow::Result<ClientRuntime> {
         state: BridgePauseState::NOT_PAUSED,
     });
     let (slot_tx, _) = watch::channel(ReceivedPromptSlot::default());
-    let status = Arc::new(Mutex::new("Connecting to bridge service…".to_string()));
+    let status = Arc::new(Mutex::new(LinkStatus::connecting()));
     let connection = Arc::new(Mutex::new(ConnectionState::default()));
     let handles = BridgeHandles {
         broadcast_tx: broadcast_tx.clone(),
@@ -331,7 +381,7 @@ async fn client_loop(
     socket_path: PathBuf,
     broadcast_tx: broadcast::Sender<ReceivedServerMessage>,
     mut inbound_rx: mpsc::Receiver<QueuedClientMessage>,
-    status: Arc<Mutex<String>>,
+    status: Arc<Mutex<LinkStatus>>,
     shell: ShellFeeds,
     connection: Arc<Mutex<ConnectionState>>,
 ) {
@@ -348,12 +398,16 @@ async fn client_loop(
         {
             Ok(()) => {
                 disconnect_and_discard(&connection, &mut inbound_rx);
-                set_status(&status, "Bridge client stopped");
+                set_status(&status, LinkState::Stopped, "Bridge client stopped");
                 return;
             }
             Err(error) => {
                 disconnect_and_discard(&connection, &mut inbound_rx);
-                set_status(&status, format!("Bridge unavailable: {error}"));
+                set_status(
+                    &status,
+                    LinkState::Retrying,
+                    format!("Bridge unavailable: {error}"),
+                );
                 tracing::warn!(error = %error, socket = %socket_path.display(), "bridge service connection lost; retrying");
                 tokio::time::sleep(RECONNECT_DELAY).await;
             }
@@ -365,7 +419,7 @@ async fn connect_and_relay(
     socket_path: &std::path::Path,
     broadcast_tx: &broadcast::Sender<ReceivedServerMessage>,
     inbound_rx: &mut mpsc::Receiver<QueuedClientMessage>,
-    status: &Arc<Mutex<String>>,
+    status: &Arc<Mutex<LinkStatus>>,
     shell: &ShellFeeds,
     connection: &Arc<Mutex<ConnectionState>>,
 ) -> anyhow::Result<()> {
@@ -396,7 +450,7 @@ async fn connect_and_relay(
         advertised(snitchwatch_bridge::bridge_capabilities::APP_BOUND_RULES),
         advertised(snitchwatch_bridge::bridge_capabilities::PROMPT_SLOT),
     );
-    set_status(status, "Connected to bridge service");
+    set_status(status, LinkState::Connected, "Connected to bridge service");
     tracing::info!(socket = %socket_path.display(), "connected to bridge service");
 
     loop {
@@ -605,6 +659,11 @@ pub fn status() -> Option<(bool, String)> {
     STARTED.get().map(status_of)
 }
 
+/// The link's state and message, or `None` before the runtime was started.
+pub fn link_status() -> Option<LinkStatus> {
+    STARTED.get().map(link_of)
+}
+
 pub fn tray_rx() -> Option<watch::Receiver<ReceivedTrayState>> {
     match STARTED.get()? {
         Outcome::Running(runtime) => Some(runtime.tray_tx.subscribe()),
@@ -633,18 +692,23 @@ pub fn notice_rx() -> Option<broadcast::Receiver<ReceivedNotice>> {
     }
 }
 
-fn status_of(outcome: &Outcome) -> (bool, String) {
+fn link_of(outcome: &Outcome) -> LinkStatus {
     match outcome {
-        Outcome::Running(runtime) => {
-            let message = runtime
-                .status
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .clone();
-            (message == "Connected to bridge service", message)
-        }
-        Outcome::Failed(message) => (false, format!("Bridge unavailable: {message}")),
+        Outcome::Running(runtime) => runtime
+            .status
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone(),
+        Outcome::Failed(message) => LinkStatus {
+            state: LinkState::Failed,
+            detail: format!("Bridge unavailable: {message}"),
+        },
     }
+}
+
+fn status_of(outcome: &Outcome) -> (bool, String) {
+    let link = link_of(outcome);
+    (link.state == LinkState::Connected, link.detail)
 }
 
 pub use snitchwatch_bridge::filter_pause::PauseState as BridgePauseState;
