@@ -1,67 +1,85 @@
-//! Convert an active profile's rule overrides into opensnitchd rules.
+//! Turn a profile's rules into the opensnitchd rules the bridge installs
+//! while it is active (issue #46 Part 2).
+//!
+//! [`materialize_rule`] is the one place a profile rule becomes a daemon
+//! rule, and it runs the `ProfileRule` policy on exactly what would be
+//! sent: the editor's checks plus `always`, no precedence, no nolog, a
+//! named host, a case-sensitive exact program path and the profile prefix.
+//! `AddProfileRule`, the enforcer and the rule editor's profile mode all
+//! call it, so there is no second, weaker path. A rule it refuses is not
+//! installed and keeps the policy's plain-text reasons; nothing is folded
+//! into something broader.
 //!
 //! ## Band placement
 //!
-//! Profile rule overrides are placed in a `"850-profile:"` band, which sorts
-//! before the blocklist band (`"z00-blocklist:"`, and the legacy
-//! `"900-blocklist:"`) and before low-specificity user rules. Sort order only
-//! decides which of several matching *allows* applies: opensnitchd keeps
-//! scanning after a non-precedence allow and stops at the first matching
-//! deny (`vendor:daemon/rule/loader.go` `FindFirstMatch`), so a profile
-//! allow does **not** win over a blocklist deny (issue #45: the blocklist
-//! wins). Only a `precedence: true` rule would. The
-//! `profile_band_sorts_before_blocklist_band` test asserts the sort order.
+//! Profile rules are named `850-profile:<profile>:<rule>`
+//! ([`crate::rule_name::PROFILE_RULE_NAME_PREFIX`], reserved: only the
+//! bridge sends rules under it). The band sorts before the blocklist band
+//! (`z00-blocklist:`, and the legacy `900-blocklist:`), but sort order only
+//! decides which of several matching *allows* applies: opensnitchd stops at
+//! the first matching deny (`vendor:daemon/rule/loader.go` `FindFirstMatch`)
+//! and a profile rule never has `precedence` (owner decision, 2026-10-08),
+//! so a profile allow never beats a blocklist's or the user's deny.
 //!
-//! Filename layout: `850-profile:<sanitized_id>:<seq04>-<rule_id>.json`
-//! (`.json` suffix stripped by the daemon on load, matching
-//! `blocklists::materializer`'s convention). The rule's `description` field
-//! carries a JSON tag `{"snitchwatch": {"source": "profile", "profile_id":
-//! "<id>", "rule_id": "<rule_id>"}}` so a future `ListRules` reconciliation
-//! can re-group profile-sourced rules, mirroring the blocklist tag shape.
+//! The `description` carries `{"snitchwatch": {"source": "profile",
+//! "profile_id": …, "rule_id": …}}`. With the prefix, it is how the bridge
+//! tells its own rules from anyone else's ([`made_by_bridge`]).
 
-use serde::{Deserialize, Serialize};
+use snitchwatch_proto::protocol::{Operator, Rule};
 
 use crate::profiles::store::ProfileRule;
+use crate::rule_name::{is_reserved_profile_name, PROFILE_RULE_NAME_PREFIX};
+use crate::rule_policy::{validate_user_rule, PolicyProfile, RuleProblem};
 
-/// Band prefix used for profile-materialized rules. Sorts before the current
-/// blocklist band (`"z00-blocklist:"`) and the legacy `"900-blocklist:"` band
-/// alike (`'8' < '9' < 'z'`); see the module docs for why that doesn't let a
-/// profile allow beat a blocklist deny.
-pub const PROFILE_BAND_PREFIX: &str = "850-profile:";
+/// The band prefix, under its Part 1 name.
+pub const PROFILE_BAND_PREFIX: &str = PROFILE_RULE_NAME_PREFIX;
 
-/// Plain-data shape mirroring the subset of `protocol::ui::Rule` needed to
-/// materialize a profile rule override, kept transport-agnostic like
-/// [`crate::blocklists::materializer::MaterializedRule`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MaterializedRule {
-    pub name: String,
-    pub enabled: bool,
-    pub action: String,
-    pub duration: String,
-    pub description: String,
-    pub operator: Operator,
+/// Why a saved rule whose id isn't a plain token isn't installed.
+pub const RULE_ID_UNUSABLE: &str = "this rule's id can't be used in a firewall rule name; \
+     remove the rule and add it again";
+
+/// Why the second rule with an id isn't installed.
+pub const DUPLICATE_RULE_ID: &str = "another rule in this profile has the same id";
+
+/// Longest profile rule id (`AddProfileRule`).
+pub const MAX_RULE_ID_LEN: usize = 64;
+
+/// Whether `id` is usable as a profile rule id: 1 to 64 ASCII letters,
+/// digits, `-` or `_`, so it appears unchanged in the rule's name.
+pub fn valid_rule_id(id: &str) -> bool {
+    (1..=MAX_RULE_ID_LEN).contains(&id.len())
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Operator {
-    #[serde(rename = "type")]
-    pub kind: String,
-    pub operand: String,
-    pub data: String,
+/// The daemon rule name for a profile's rule: stable, so adding, removing
+/// or replacing one rule never renames (and rewrites) the others.
+pub fn rule_name(profile_id: &str, rule_id: &str) -> String {
+    format!(
+        "{PROFILE_RULE_NAME_PREFIX}{}:{}",
+        sanitize_id(profile_id),
+        sanitize_id(rule_id)
+    )
 }
 
-/// Deterministic per-rule materialization for one profile rule override.
-pub fn materialize_rule(profile_id: &str, rule: &ProfileRule, seq: usize) -> MaterializedRule {
-    let safe_id = sanitize_id(profile_id);
-    let name = format!(
-        "{PROFILE_BAND_PREFIX}{safe_id}:{seq:04}-{}",
-        sanitize_id(&rule.id)
-    );
-    let action = if rule.action.eq_ignore_ascii_case("allow") {
-        "allow"
-    } else {
-        "deny"
-    };
+/// The daemon rule for one of `profile_id`'s rules, or why it can't be
+/// installed.
+pub fn materialize_rule(profile_id: &str, rule: &ProfileRule) -> Result<Rule, Vec<RuleProblem>> {
+    if !valid_rule_id(&rule.id) {
+        // Part 1 took any id; one that isn't a plain token could name the
+        // same rule as another.
+        return Err(vec![RuleProblem {
+            path: "id".into(),
+            reason: RULE_ID_UNUSABLE.into(),
+        }]);
+    }
+    let operator = conditions(rule).map_err(|reason| {
+        vec![RuleProblem {
+            path: "operator".into(),
+            reason,
+        }]
+    })?;
     let description = serde_json::json!({
         "snitchwatch": {
             "source": "profile",
@@ -70,27 +88,67 @@ pub fn materialize_rule(profile_id: &str, rule: &ProfileRule, seq: usize) -> Mat
         }
     })
     .to_string();
-    MaterializedRule {
-        name,
-        enabled: true,
-        action: action.to_string(),
-        duration: "always".to_string(),
+    let materialized = Rule {
+        created: 0,
+        name: rule_name(profile_id, &rule.id),
         description,
-        operator: Operator {
-            kind: "simple".to_string(),
+        enabled: true,
+        precedence: false,
+        nolog: false,
+        action: rule.action.clone(),
+        duration: "always".into(),
+        operator: Some(operator),
+    };
+    validate_user_rule(&materialized, PolicyProfile::ProfileRule)?;
+    Ok(materialized)
+}
+
+/// The rule's conditions: the editor's (`operator`, #48's wire shape), or
+/// Part 1's single `simple` condition, case-sensitive on a program path
+/// (#50; the stored rule had no way to say).
+fn conditions(rule: &ProfileRule) -> Result<Operator, String> {
+    match &rule.operator {
+        Some(wire) => crate::rule_wire::operator_from_wire(wire),
+        None => Ok(Operator {
+            r#type: "simple".into(),
             operand: rule.operand.clone(),
             data: rule.data.clone(),
-        },
+            sensitive: rule.operand == "process.path",
+            list: Vec::new(),
+        }),
     }
 }
 
-/// Materialize every rule override owned by a profile, in stored order.
-pub fn materialize_profile(profile_id: &str, rules: &[ProfileRule]) -> Vec<MaterializedRule> {
+/// Every rule of a profile with its outcome, in stored order, by rule id.
+/// A repeated id would name the same daemon rule twice: only its first rule
+/// is installed.
+pub fn materialize_profile(
+    profile_id: &str,
+    rules: &[ProfileRule],
+) -> Vec<(String, Result<Rule, Vec<RuleProblem>>)> {
+    let mut seen = std::collections::HashSet::new();
     rules
         .iter()
-        .enumerate()
-        .map(|(seq, rule)| materialize_rule(profile_id, rule, seq))
+        .map(|rule| {
+            let outcome = if seen.insert(rule.id.as_str()) {
+                materialize_rule(profile_id, rule)
+            } else {
+                Err(vec![RuleProblem {
+                    path: "id".into(),
+                    reason: DUPLICATE_RULE_ID.into(),
+                }])
+            };
+            (rule.id.clone(), outcome)
+        })
         .collect()
+}
+
+/// Whether the bridge made `rule`: under the profile prefix *and* tagged as
+/// a profile rule. Anything else under the prefix is never deleted.
+pub fn made_by_bridge(rule: &Rule) -> bool {
+    is_reserved_profile_name(&rule.name)
+        && serde_json::from_str::<serde_json::Value>(&rule.description)
+            .is_ok_and(|v| v["snitchwatch"]["source"] == "profile")
 }
 
 fn sanitize_id(id: &str) -> String {
@@ -106,89 +164,5 @@ fn sanitize_id(id: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn rule(id: &str, action: &str) -> ProfileRule {
-        ProfileRule {
-            id: id.to_string(),
-            action: action.to_string(),
-            operand: "dest.host".to_string(),
-            data: "nas.local".to_string(),
-        }
-    }
-
-    #[test]
-    fn materializes_single_rule_in_profile_band() {
-        let m = materialize_rule("home", &rule("r1", "allow"), 0);
-        assert!(
-            m.name.starts_with("850-profile:home:"),
-            "name should be in 850-profile band: {}",
-            m.name
-        );
-        assert_eq!(m.action, "allow");
-        assert!(m.enabled);
-        assert_eq!(m.duration, "always");
-    }
-
-    #[test]
-    fn unknown_action_folds_to_deny() {
-        let m = materialize_rule("home", &rule("r1", "reject"), 0);
-        assert_eq!(m.action, "deny");
-    }
-
-    #[test]
-    fn description_carries_source_tag_json() {
-        let m = materialize_rule("home", &rule("r1", "deny"), 0);
-        let parsed: serde_json::Value = serde_json::from_str(&m.description).unwrap();
-        assert_eq!(parsed["snitchwatch"]["source"], "profile");
-        assert_eq!(parsed["snitchwatch"]["profile_id"], "home");
-        assert_eq!(parsed["snitchwatch"]["rule_id"], "r1");
-    }
-
-    #[test]
-    fn names_are_distinct_for_different_seq() {
-        let a = materialize_rule("home", &rule("r1", "deny"), 1);
-        let b = materialize_rule("home", &rule("r1", "deny"), 2);
-        assert_ne!(a.name, b.name);
-    }
-
-    #[test]
-    fn profile_band_sorts_before_blocklist_band() {
-        // The profiles band sorts (lexicographically, by rule filename)
-        // before every blocklist-band filename, current "z00-" and legacy
-        // "900-" alike. (Sort order doesn't let an allow beat a deny.)
-        let profile_name = materialize_rule("home", &rule("r1", "deny"), 0).name;
-        let blocklist_name = crate::blocklists::materializer::list_rule_name(
-            &crate::blocklists::list_dir::IdComponent::from_id("ads"),
-            crate::blocklists::materializer::ListKind::Domains,
-        );
-        assert!(
-            blocklist_name.starts_with("z00-blocklist:"),
-            "blocklist rule should be in the current z00 band: {blocklist_name}"
-        );
-        assert!(
-            profile_name < blocklist_name,
-            "{profile_name} should sort before current band {blocklist_name}"
-        );
-        assert!(
-            profile_name.as_str() < "900-blocklist:ads:0000-x.example",
-            "{profile_name} should sort before the legacy 900 band too"
-        );
-    }
-
-    #[test]
-    fn ids_with_special_chars_are_sanitized_in_filename() {
-        let m = materialize_rule("ho/me:x", &rule("r/1", "deny"), 0);
-        assert!(!m.name.contains('/'), "filename must not contain slash");
-    }
-
-    #[test]
-    fn materialize_profile_preserves_order() {
-        let rules = vec![rule("r1", "deny"), rule("r2", "allow")];
-        let out = materialize_profile("home", &rules);
-        assert_eq!(out.len(), 2);
-        assert!(out[0].name.contains("0000"));
-        assert!(out[1].name.contains("0001"));
-    }
-}
+#[path = "materializer_tests.rs"]
+mod tests;

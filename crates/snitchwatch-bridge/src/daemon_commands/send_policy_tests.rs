@@ -127,6 +127,24 @@ async fn a_blocklist_rule_name_is_refused_at_send_whatever_the_command() {
     assert!(rx.try_recv().is_err(), "nothing reached the daemon");
 }
 
+/// Profile rules go through `send_profile` only (issue #46 Part 2): a GUI
+/// command under the prefix could replace a profile's deny.
+#[tokio::test]
+async fn a_profile_rule_name_is_refused_at_send_whatever_the_command() {
+    let (commands, _rules) = fixture();
+    let (_stream, mut rx) = current_stream(&commands);
+    let name = "850-profile:home:r1";
+    assert_eq!(
+        commands.send(change(name, Some(host("x.example")))).err(),
+        Some(SendError::ReservedName)
+    );
+    assert_eq!(
+        commands.send(delete(name)).err(),
+        Some(SendError::ReservedName)
+    );
+    assert!(rx.try_recv().is_err(), "nothing reached the daemon");
+}
+
 /// The rules Snitchwatch ships are never sent: an allow swapped for a deny,
 /// a temporary duration or a delete would all break list downloads.
 #[tokio::test]
@@ -225,4 +243,39 @@ async fn a_curated_default_name_is_refused_at_send() {
         );
     }
     assert!(rx.try_recv().is_err(), "nothing reached the daemon");
+}
+
+/// Profile rules have their own send path (issue #46 Part 2), and it checks
+/// what it sends: a rule the profile policy refuses never leaves.
+#[tokio::test]
+async fn send_profile_checks_what_it_sends() {
+    use crate::daemon_commands::ProfileCommand;
+    use crate::profiles::materializer::materialize_rule;
+    use crate::profiles::store::ProfileRule;
+    let (commands, _rules) = fixture();
+    let (_stream, mut rx) = current_stream(&commands);
+    let rule = materialize_rule(
+        "home",
+        &ProfileRule {
+            id: "r1".into(),
+            action: "deny".into(),
+            operand: "dest.host".into(),
+            data: "x.example".into(),
+            operator: None,
+        },
+    )
+    .unwrap();
+    let decides_first = snitchwatch_proto::protocol::Rule {
+        precedence: true,
+        ..rule.clone()
+    };
+    assert_eq!(
+        commands
+            .send_profile(ProfileCommand::install(decides_first))
+            .err(),
+        Some(SendError::RefusedOperator)
+    );
+    assert!(rx.try_recv().is_err(), "a refused rule reached the daemon");
+    assert!(commands.send_profile(ProfileCommand::install(rule)).is_ok());
+    assert!(rx.try_recv().is_ok());
 }

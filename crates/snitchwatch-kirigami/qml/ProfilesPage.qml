@@ -34,12 +34,24 @@ Kirigami.ScrollablePage {
     property string inspectMatchers: ""
     property bool inspectActive: false
     property bool confirmingDelete: false
+    // The inspected profile's rules (`profiles::rules_view`), refreshed from
+    // the model while the sheet is open.
+    property var inspectRules: []
+    // Reopen the inspector once the rule editor closes.
+    property bool returnToInspector: false
+    // Exposed for the headless probe (tests/profile_rules_qml.rs).
+    property alias inspectorSheet: inspector
+    property alias ruleEditor: ruleEditor
 
     // Where the bridge keeps profiles (`SetProfiles.storage`, issue #46). Not
     // persistent until the bridge says so: no model, no message yet, or an
     // older bridge all mean "kept in memory only".
     readonly property bool storagePersistent: page.model ? page.model.storagePersistent : false
     readonly property string storageReason: page.model ? page.model.storageReason : ""
+    // Whether the bridge applies the active profile's rules (issue #46 Part
+    // 2); not until it says so, and never for an older one.
+    readonly property bool appliesRules: page.model ? page.model.appliesRules : false
+    readonly property string notAppliedReason: page.model ? page.model.notAppliedReason : ""
 
     // New-profile creation box lives in the page header, mirroring
     // BlocklistsPage's subscribe box placement.
@@ -68,26 +80,42 @@ Kirigami.ScrollablePage {
         }
     }
 
-    // Issue #46: the shipped bridge wires a no-op profile rule sink
-    // (`NoopProfileRuleSink`), so activating a profile installs no firewall
-    // rule. The first warning is unconditional and stays until profiles are
-    // enforced and can hold rules of their own (#46 Part 2, with a rule
-    // editor). Profiles are saved only when the bridge says so
-    // (`SetProfiles.storage`); otherwise the second warning says they are
-    // lost on restart. Fixed-text warnings, none dismissable (no close
-    // button, no actions); the storage problem's reason is data, so it goes
-    // in a PlainText label, never in an InlineMessage (issue #51).
+    // Issue #46: the system Snitchwatch service applies the active profile's
+    // rules; each rule then says whether the firewall installed it. Any
+    // other service applies none, and says so in a warning keyed on
+    // `!page.appliesRules`, with its reason in a PlainText label. Profiles
+    // are saved only when the service says so (`SetProfiles.storage`);
+    // otherwise another warning says they are lost on restart. Fixed-text
+    // messages, none dismissable; data never goes in an InlineMessage
+    // (issue #51).
     header: ColumnLayout {
         spacing: 0
 
         Kirigami.InlineMessage {
+            objectName: "appliedNote"
+            Layout.fillWidth: true
+            type: Kirigami.MessageType.Information
+            visible: page.appliesRules
+            text: "Profiles are applied to the firewall: while a profile is active, Snitchwatch "
+                + "installs its rules, and each rule shows whether the firewall accepted it. "
+                + "Blocking rules and blocklists still win over a profile's allow."
+        }
+        Kirigami.InlineMessage {
             objectName: "notAppliedBanner"
             Layout.fillWidth: true
             type: Kirigami.MessageType.Warning
-            visible: true
-            text: "Preview: profiles are not applied to the firewall yet. Activating one installs "
-                + "no firewall rules, so it changes nothing that is allowed or blocked. That comes "
-                + "with a way to add rules to a profile."
+            visible: !page.appliesRules
+            text: "Profiles are not applied to the firewall here: activating one installs "
+                + "no firewall rules, so it changes nothing that is allowed or blocked."
+        }
+        Controls.Label {
+            objectName: "notAppliedReason"
+            Layout.fillWidth: true
+            Layout.margins: Kirigami.Units.smallSpacing
+            visible: !page.appliesRules && page.notAppliedReason.length > 0
+            textFormat: Text.PlainText
+            wrapMode: Text.Wrap
+            text: "Why: " + page.notAppliedReason
         }
         Kirigami.InlineMessage {
             objectName: "memoryOnlyStorageBanner"
@@ -193,7 +221,48 @@ Kirigami.ScrollablePage {
         page.inspectMatchers = row.networkMatchers;
         page.inspectActive = row.isActive;
         page.confirmingDelete = false;
+        page.refreshRules();
         inspector.open();
+    }
+
+    function refreshRules() {
+        page.inspectRules = page.model && page.inspectId
+            ? JSON.parse(page.model.rulesJson(page.inspectId)) : [];
+    }
+
+    // "Add rule…": the rule editor's profile mode, then back here.
+    function addRule() {
+        page.returnToInspector = true;
+        inspector.close();
+        if (!ruleEditor.startProfileRule(page.inspectId)) {
+            page.returnToInspector = false;
+            inspector.open();
+        }
+    }
+
+    Connections {
+        target: page.model
+        function onModelReset() {
+            page.refreshRules();
+        }
+    }
+
+    RuleEditorController {
+        id: ruleEditorController
+        Component.onCompleted: startBridgeFeed()
+    }
+    RuleEditorSheet {
+        id: ruleEditor
+        controller: ruleEditorController
+    }
+    Connections {
+        target: ruleEditor
+        function onClosed() {
+            if (!page.returnToInspector) return;
+            page.returnToInspector = false;
+            page.refreshRules();
+            inspector.open();
+        }
     }
 
     // Profile detail + rename + matcher editor + activate/deactivate/delete.
@@ -246,6 +315,87 @@ Kirigami.ScrollablePage {
                     text: page.inspectActive ? "Active" : "Inactive"
                     color: page.inspectActive ? Kirigami.Theme.positiveTextColor : Kirigami.Theme.neutralTextColor
                 }
+            }
+
+            Kirigami.Separator {
+                Layout.fillWidth: true
+            }
+
+            // The profile's rules and whether the firewall has them.
+            Controls.Label {
+                textFormat: Text.PlainText
+                text: "Rules"
+                font.bold: true
+            }
+            Controls.Label {
+                objectName: "profileNoRules"
+                Layout.fillWidth: true
+                visible: page.inspectRules.length === 0
+                textFormat: Text.PlainText
+                wrapMode: Text.Wrap
+                text: "No rules yet. Add one to make this profile change what is allowed or blocked."
+            }
+            Repeater {
+                model: page.inspectRules
+                ColumnLayout {
+                    id: ruleRow
+                    required property var modelData
+                    Layout.fillWidth: true
+                    spacing: 0
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Controls.Label {
+                            objectName: "profileRuleAction"
+                            textFormat: Text.PlainText
+                            text: ruleRow.modelData.action
+                            font.bold: true
+                        }
+                        Controls.Label {
+                            objectName: "profileRuleConditions"
+                            Layout.fillWidth: true
+                            textFormat: Text.PlainText
+                            text: ruleRow.modelData.conditions
+                            elide: Text.ElideMiddle
+                        }
+                        Controls.Button {
+                            objectName: "profileRuleRemove"
+                            icon.name: "list-remove"
+                            text: "Remove"
+                            display: Controls.AbstractButton.IconOnly
+                            onClicked: page.model.removeRule(page.inspectId, ruleRow.modelData.id)
+                        }
+                    }
+                    Controls.Label {
+                        objectName: "profileRuleStatus"
+                        textFormat: Text.PlainText
+                        text: ruleRow.modelData.status
+                        color: ruleRow.modelData.installed ? Kirigami.Theme.positiveTextColor
+                                                           : Kirigami.Theme.neutralTextColor
+                    }
+                    Controls.Label {
+                        objectName: "profileRuleReason"
+                        Layout.fillWidth: true
+                        visible: ruleRow.modelData.reason.length > 0
+                        textFormat: Text.PlainText
+                        wrapMode: Text.Wrap
+                        text: ruleRow.modelData.reason
+                    }
+                }
+            }
+            Controls.Label {
+                objectName: "profileEditorStatus"
+                Layout.fillWidth: true
+                visible: ruleEditorController.statusText.length > 0
+                textFormat: Text.PlainText
+                wrapMode: Text.Wrap
+                text: ruleEditorController.statusText
+            }
+            Controls.Button {
+                objectName: "profileAddRule"
+                Layout.fillWidth: true
+                text: "Add rule…"
+                icon.name: "list-add"
+                onClicked: page.addRule()
             }
 
             Kirigami.Separator {
