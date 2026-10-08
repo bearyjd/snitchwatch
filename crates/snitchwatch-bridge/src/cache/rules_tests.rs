@@ -82,9 +82,9 @@ fn upsert_keeps_the_cached_created_only_when_the_incoming_one_is_zero() {
 #[test]
 fn a_five_minute_rule_is_pruned_after_five_minutes() {
     let mut cache = synced(vec![rule("a", "5m", T - 301), rule("b", "5m", T - 299)]);
-    assert!(cache.prune_expired(T));
+    assert_eq!(cache.prune_expired(T), vec!["a"], "the names it removed");
     assert_eq!(names(&cache), vec!["b"]);
-    assert!(!cache.prune_expired(T), "nothing left to prune");
+    assert!(cache.prune_expired(T).is_empty(), "nothing left to prune");
 }
 
 #[test]
@@ -98,7 +98,7 @@ fn permanent_unparseable_and_undated_rules_never_expire() {
         rule("bare", "90", 1),
         rule("undated", "5m", 0),
     ]);
-    assert!(!cache.prune_expired(T));
+    assert!(cache.prune_expired(T).is_empty());
     assert_eq!(names(&cache).len(), 7);
 }
 
@@ -122,11 +122,11 @@ fn a_toggled_temporary_rule_keeps_its_original_expiry() {
     toggled.enabled = false;
     cache.upsert(toggled);
 
-    assert!(!cache.prune_expired(T + 31));
+    assert!(cache.prune_expired(T + 31).is_empty());
     assert!(!get(&cache, "a").enabled);
     assert_eq!(get(&cache, "a").created, T);
 
-    assert!(cache.prune_expired(T + 301));
+    assert_eq!(cache.prune_expired(T + 301), vec!["a"]);
     assert_eq!(names(&cache), Vec::<String>::new());
 }
 
@@ -312,7 +312,8 @@ async fn the_expiry_tick_prunes_and_publishes_then_ends_with_the_cache() {
     let tick = tokio::spawn(prune_expired_rules_every(
         Duration::from_secs(30),
         Arc::downgrade(&cache),
-        tx,
+        tx.clone(),
+        RuleHitsHandle::new(tx),
     ));
 
     match rx.recv().await.unwrap() {

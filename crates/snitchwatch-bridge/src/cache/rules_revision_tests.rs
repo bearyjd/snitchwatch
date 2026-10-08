@@ -55,7 +55,7 @@ fn every_mutation_bumps_the_revision() {
         ..Default::default()
     });
     bumped(&cache, "apply_confirmed DELETE_RULE");
-    assert!(cache.prune_expired(1_000));
+    assert!(!cache.prune_expired(1_000).is_empty());
     bumped(&cache, "prune_expired");
     cache.set_unknown();
     bumped(&cache, "set_unknown");
@@ -68,7 +68,7 @@ fn every_mutation_bumps_the_revision() {
 fn a_no_op_keeps_the_revision() {
     let mut cache = synced(vec![rule("a", "always", 1)]);
     let revision = cache.revision();
-    assert!(!cache.prune_expired(1_000), "nothing to prune");
+    assert!(cache.prune_expired(1_000).is_empty(), "nothing to prune");
     assert_eq!(cache.revision(), revision);
 
     let mut unknown = RulesCache::default();
@@ -95,7 +95,8 @@ async fn the_expiry_tick_bumps_the_revision() {
     let tick = tokio::spawn(prune_expired_rules_every(
         Duration::from_secs(30),
         Arc::downgrade(&cache),
-        tx,
+        tx.clone(),
+        RuleHitsHandle::new(tx),
     ));
     rx.recv().await.unwrap();
     assert!(lock(&cache).revision() > before);

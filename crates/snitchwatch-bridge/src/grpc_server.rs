@@ -194,6 +194,12 @@ impl UiService {
         self.rules.cache()
     }
 
+    /// Per-rule hit counts, for the state directory wiring, the snapshot
+    /// answer and shutdown.
+    pub fn rule_hits_handle(&self) -> crate::cache::rule_hits_handle::RuleHitsHandle {
+        self.rules.hits()
+    }
+
     /// Generation bumped each time a daemon rule snapshot is committed: the
     /// blocklist reconcile trigger (issue #45).
     pub fn rules_synced(&self) -> tokio::sync::watch::Receiver<u64> {
@@ -264,6 +270,8 @@ impl Ui for UiService {
                 stats.uptime,
                 *self.rules.synced().borrow(),
             );
+            self.rules
+                .record_hits(&stats.events, stats.uptime, stats.rule_hits);
             let new_rows: Vec<_> = stats.events.iter().filter_map(event_to_row).collect();
             if !new_rows.is_empty() {
                 {
@@ -637,6 +645,10 @@ mod refusal_tests;
 #[cfg(test)]
 #[path = "grpc_server/prompt_slot_tests.rs"]
 mod prompt_slot_tests;
+
+#[cfg(test)]
+#[path = "grpc_server/rule_hits_tests.rs"]
+mod rule_hits_tests;
 
 #[cfg(test)]
 #[path = "grpc_server/pause_answer_tests.rs"]
