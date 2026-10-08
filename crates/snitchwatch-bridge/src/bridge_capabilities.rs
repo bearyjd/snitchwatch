@@ -24,6 +24,11 @@ pub const PROMPT_SLOT: &str = "promptSlot";
 /// this is advertised.
 pub const PAUSE_ANSWERS_WAITING: &str = "pauseAnswersWaiting";
 
+/// The bridge sends `RuleHits` messages: per-rule hit counts derived from
+/// the daemon's pings (`crate::cache::rule_hits`). Without it a client shows
+/// no counts at all.
+pub const RULE_HITS: &str = "ruleHits";
+
 /// The bridge answers a prompt nobody answers after
 /// `deferred_answers::ANSWER_TIMEOUT` (pending rows carry
 /// `answerDeadlineMs`), and accepts `ClientMessage::DecideLater`
@@ -36,6 +41,7 @@ pub fn advertised() -> Vec<String> {
         APP_BOUND_RULES.to_string(),
         PROMPT_SLOT.to_string(),
         PAUSE_ANSWERS_WAITING.to_string(),
+        RULE_HITS.to_string(),
         DECIDE_LATER.to_string(),
     ]
 }
@@ -77,7 +83,13 @@ mod tests {
             ack,
             serde_json::json!({
                 "action": "authenticated",
-                "capabilities": ["appBoundRules", "promptSlot", "pauseAnswersWaiting", "decideLater"],
+                "capabilities": [
+                    "appBoundRules",
+                    "promptSlot",
+                    "pauseAnswersWaiting",
+                    "ruleHits",
+                    "decideLater"
+                ],
             })
         );
     }

@@ -23,6 +23,15 @@
 // Only the inspector's switch moves ahead of the bridge, and the inspector
 // re-reads its rule on every model reset (#48).
 //
+// Hit counts (P2.6 Part 1): each row says how often its rule decided a
+// connection, and the header says what those numbers are: Snitchwatch's own
+// tally of the daemon's per-ping events, since a time, approximate, and
+// possibly missing some. Nothing is shown until the bridge has sent counts
+// (an older bridge never does), a rule that doesn't log, or whose name the
+// bridge can't count, is "not counted" rather than 0, the count is a `real`
+// (a QML int stops at 2^31 - 1), and the header says when the counts don't
+// survive a restart. Every label is PlainText.
+//
 // Names are shown via the `displayName` role (bidi overrides and zero-width
 // characters removed by the bridge); `name` stays the rule's identity.
 //
@@ -85,6 +94,46 @@ Kirigami.ScrollablePage {
 
     function sourceLabel(source) {
         return source === "blocklist" ? "Blocklist rules" : "User rules";
+    }
+
+    // The model's JSON summary of the hit counts; null until the bridge has
+    // sent any.
+    readonly property var hitsInfo: !!page.model && page.model.hitsInfoJson.length > 0
+        ? JSON.parse(page.model.hitsInfoJson) : null
+
+    function formatTime(ms) {
+        return new Date(ms).toLocaleString(Qt.locale(), Locale.ShortFormat);
+    }
+
+    // Empty when this bridge sends no counts.
+    function hitsSummaryText(info) {
+        if (!info || !info.available) return "";
+        if (!info.counting) {
+            return "Hit counts start when the firewall first reports statistics.";
+        }
+        let text = "Hits counted by Snitchwatch since " + page.formatTime(info.sinceMs)
+            + "; approximate.";
+        if (info.lossy) {
+            text += " Some hits may be missing"
+                + (info.lastGapMs > 0 ? " (last noticed " + page.formatTime(info.lastGapMs) + ")" : "")
+                + ".";
+        }
+        return text;
+    }
+
+    function hitsStorageText(info) {
+        if (!info || !info.available || info.persistent) return "";
+        return info.storageReason.length > 0
+            ? "Hit counts are not saved across restarts: " + info.storageReason
+            : "Hit counts are not saved across restarts.";
+    }
+
+    function hitsRowText(counted, count, lastMs, note) {
+        if (note.length > 0) return note;
+        if (!counted) return "";
+        if (count === 0) return "No hits counted";
+        return count + (count === 1 ? " hit" : " hits")
+            + (lastMs > 0 ? ", last " + page.formatTime(lastMs) : "");
     }
 
     // Rule-match diagnostics' "Show rule" jump target (called by main.qml
@@ -198,10 +247,13 @@ Kirigami.ScrollablePage {
         }
     }
 
-    // Issue #44: only when some rules apply to every app. Fixed text; the
+    // Issue #44: when some rules apply to every app. Fixed text; the
     // count sits in a PlainText label (InlineMessage can't render data).
+    // Below it, what the hit counts are (see the top of this file), then the
+    // last import or export outcome.
     header: ColumnLayout {
         visible: page.showsAllAppsNotice || page.showsIoStatus
+            || hitsSummaryLabel.text.length > 0 || hitsStorageLabel.text.length > 0
         spacing: 0
 
         Kirigami.InlineMessage {
@@ -224,6 +276,29 @@ Kirigami.ScrollablePage {
                     ? "1 rule saved by an earlier Snitchwatch version applies to all apps"
                     : page.model.legacyHostOnlyCount
                       + " rules saved by earlier Snitchwatch versions apply to all apps"
+        }
+        Controls.Label {
+            id: hitsSummaryLabel
+            objectName: "hitsSummary"
+            visible: text.length > 0
+            Layout.fillWidth: true
+            Layout.margins: Kirigami.Units.smallSpacing
+            textFormat: Text.PlainText
+            wrapMode: Text.Wrap
+            font: Kirigami.Theme.smallFont
+            text: page.hitsSummaryText(page.hitsInfo)
+        }
+        Controls.Label {
+            id: hitsStorageLabel
+            objectName: "hitsStorage"
+            visible: text.length > 0
+            Layout.fillWidth: true
+            Layout.margins: Kirigami.Units.smallSpacing
+            textFormat: Text.PlainText
+            wrapMode: Text.Wrap
+            font: Kirigami.Theme.smallFont
+            color: Kirigami.Theme.neutralTextColor
+            text: page.hitsStorageText(page.hitsInfo)
         }
         // The last export or import outcome (P2.7), plain text.
         Controls.Label {
@@ -285,6 +360,10 @@ Kirigami.ScrollablePage {
             required property string blocklistId
             required property bool appliesToAllApps
             required property string allAppsHint
+            required property bool hitsCounted
+            required property real hitCount
+            required property real lastHitMs
+            required property string hitsNote
 
             onClicked: {
                 list.currentIndex = row.index;
@@ -320,6 +399,19 @@ Kirigami.ScrollablePage {
                         opacity: 0.7
                         font: Kirigami.Theme.smallFont
                         elide: Text.ElideMiddle
+                        Layout.fillWidth: true
+                    }
+                    // How often the rule decided a connection; see the header
+                    // for what the number means.
+                    Controls.Label {
+                        objectName: "hitsLabel"
+                        visible: text.length > 0
+                        textFormat: Text.PlainText
+                        text: page.hitsRowText(row.hitsCounted, row.hitCount, row.lastHitMs,
+                                               row.hitsNote)
+                        opacity: 0.7
+                        font: Kirigami.Theme.smallFont
+                        elide: Text.ElideRight
                         Layout.fillWidth: true
                     }
                     // Issue #44: what deleting this all-apps rule changes.
