@@ -120,45 +120,6 @@ pub struct UiService {
     answer_timeout: Duration,
 }
 
-/// Future-drop cleanup also runs for tonic transport cancellation. A closed
-/// receiver makes late verdicts fail even while asynchronous cleanup waits
-/// for the cache mutex; a settled verdict is never removed.
-struct PendingCleanup {
-    cache: Arc<Mutex<ConnectionCache>>,
-    row_id: String,
-    slot: crate::prompt_slot::PromptSlotHandle,
-    ask_id: u64,
-}
-
-impl PendingCleanup {
-    /// Marks the prompt as holding the slot. Every exit from here, a dropped
-    /// future included, releases it in `drop`.
-    fn hold(service: &UiService, row_id: String, ask_id: u64, what: String) -> Self {
-        service.prompt_slot.hold(&row_id, what);
-        Self {
-            cache: service.cache.clone(),
-            row_id,
-            slot: service.prompt_slot.clone(),
-            ask_id,
-        }
-    }
-}
-
-impl Drop for PendingCleanup {
-    fn drop(&mut self) {
-        self.slot.release(&self.row_id, self.ask_id);
-        if let Ok(mut cache) = self.cache.try_lock() {
-            cache.cancel_pending(&self.row_id);
-        } else {
-            let cache = self.cache.clone();
-            let row_id = self.row_id.clone();
-            tokio::spawn(async move {
-                cache.lock().await.cancel_pending(&row_id);
-            });
-        }
-    }
-}
-
 impl UiService {
     pub fn new(
         cache: Arc<Mutex<ConnectionCache>>,
@@ -276,118 +237,6 @@ impl UiService {
     /// rather than a constructor parameter.
     pub fn set_diagnostics_ctx(&self, ctx: Arc<DiagnosticsCtx>) {
         let _ = self.diagnostics_ctx.set(ctx);
-    }
-
-    /// The `AskRule` reply for a resolved verdict.
-    ///
-    /// A one-shot reply is deliberately absent from Rules. Every remembered
-    /// rule is an active daemon rule, including a five-minute or
-    /// until-restart rule, and must be visible/editable immediately rather
-    /// than waiting for a daemon-side rule-list push that may never come.
-    /// May diverge on the daemon's `setUniqueName`; see `cache::rules`.
-    ///
-    /// Issue #44: a remembered verdict `verdict_to_rule` refuses (no absolute
-    /// process path) is answered once instead, never cached or announced as
-    /// a rule, and every client is told why.
-    fn verdict_reply(
-        &self,
-        resolution: VerdictResolution,
-        conn: &Connection,
-        row_id: String,
-        ask_id: u64,
-        now_secs: i64,
-    ) -> Rule {
-        let refusal = match verdict_to_rule(
-            resolution.verdict,
-            resolution.duration,
-            resolution.scope,
-            conn,
-            now_secs,
-        ) {
-            Ok(rule) => {
-                if resolution.duration.remembers() {
-                    self.rules.upsert(rule.clone());
-                    if self.broadcast.receiver_count() > 0 {
-                        if let Err(e) = self.broadcast.send(ServerMessage::UpdateRules {
-                            rules: vec![rule_to_wire(&rule)],
-                        }) {
-                            warn!(error = %e, "persistent verdict rule broadcast failed");
-                        }
-                    }
-                }
-                return rule;
-            }
-            Err(refusal) => refusal,
-        };
-
-        if self.broadcast.receiver_count() > 0 {
-            if let Err(e) = self.broadcast.send(ServerMessage::VerdictNotRemembered {
-                row_id,
-                reason: refusal.describe().to_string(),
-            }) {
-                warn!(error = %e, "verdict-not-remembered broadcast send failed");
-            }
-        }
-        self.notice_bus
-            .send(crate::notice::Notice::VerdictNotRemembered { row_id: ask_id });
-        once_rule(resolution.verdict, resolution.scope, conn, now_secs)
-    }
-
-    /// Record an Ask the pause decides on arrival (issue #78): the row is
-    /// stored already allowed and labelled `filterPaused`, and GUIs get it as
-    /// a decided row, never as a waiting prompt. The caller holds the cache
-    /// lock the pause's scan of waiting prompts takes too, and builds the
-    /// Allow once reply after releasing it.
-    fn allow_on_arrival(&self, cache: &mut ConnectionCache, row: ConnectionRow) {
-        let decided_row = crate::pause_answers::allowed_on_arrival(row);
-        cache.insert_decided(decided_row.clone());
-        if self.broadcast.receiver_count() > 0 {
-            let msg = ServerMessage::InsertConnectionRows {
-                rows: vec![decided_row],
-            };
-            if let Err(e) = self.broadcast.send(msg) {
-                warn!(error = %e, "ask_rule (paused): broadcast send failed");
-            }
-        }
-    }
-
-    /// Publish `TrayState::RecentBlock` and schedule its own revert after
-    /// [`RECENT_BLOCK_TTL`]. If a second block happens before the first's
-    /// timer fires, the first's timer becomes a no-op (its captured
-    /// generation no longer matches) — the newer block's own timer owns the
-    /// eventual revert, so the tray never flickers back to a stale display
-    /// mid-block.
-    ///
-    /// Not while the daemon is down (issue #58): the overlay would cover
-    /// `DaemonDown` for the whole TTL. The check and the publish happen under
-    /// the cache lock, which is also what the daemon watchdog holds when it
-    /// marks the daemon down and publishes, so neither can interleave.
-    async fn publish_recent_block(&self, what: String) {
-        let generation = {
-            let cache = self.cache.lock().await;
-            if cache.tray_state() == TrayState::DaemonDown {
-                return;
-            }
-            // Numbered in publish order, under the lock.
-            let generation = self.block_generation.fetch_add(1, Ordering::SeqCst) + 1;
-            self.tray_pub.set(TrayState::RecentBlock {
-                what,
-                ttl: RECENT_BLOCK_TTL,
-            });
-            generation
-        };
-
-        let cache = self.cache.clone();
-        let block_generation = self.block_generation.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(RECENT_BLOCK_TTL).await;
-            if block_generation.load(Ordering::SeqCst) == generation {
-                // Revert via the cache, which already holds the same
-                // publisher and knows the actual current Idle/Pending(n)
-                // state — not a hardcoded Idle.
-                cache.lock().await.resync_tray_state();
-            }
-        });
     }
 }
 
@@ -769,6 +618,13 @@ pub(crate) fn display_summary(process: &str, dst_host: &str) -> String {
 
 #[path = "grpc_server/answer_wait.rs"]
 mod answer_wait;
+
+#[path = "grpc_server/pending_cleanup.rs"]
+mod pending_cleanup;
+use pending_cleanup::PendingCleanup;
+
+#[path = "grpc_server/replies.rs"]
+mod replies;
 
 #[cfg(test)]
 #[path = "grpc_server/tests.rs"]
