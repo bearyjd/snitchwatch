@@ -326,11 +326,10 @@ mod tests {
             ..spoof.clone()
         };
         let body = pending_body(&long_path, InlineDeny::ProgramUnknown);
-        assert!(body.starts_with("/tmp/x/d/"), "{body}");
-        assert!(
-            body.contains("…") && body.contains("/usr/lib64/firefox/firefox wants to connect to"),
-            "{body}"
-        );
+        let (program, _) = body.split_once(" wants to connect to ").unwrap();
+        assert!(program.starts_with("/tmp/x/d/"), "{body}");
+        assert!(program.ends_with("/usr/lib64/firefox/firefox"), "{body}");
+        assert_eq!(program.matches('…').count(), 1, "{body}");
         // With no path, the program name stands in.
         let nameless = PendingRow {
             process_path: None,
