@@ -96,7 +96,9 @@ pub enum SendError {
     /// A rule name fails [`crate::rule_name::validate_rule_name`].
     InvalidRuleName,
     /// A rule name under a blocklist prefix outside
-    /// [`DaemonCommands::send_blocklist`] (issue #45).
+    /// [`DaemonCommands::send_blocklist`] (issue #45), or under the prefix
+    /// of the rules Snitchwatch ships, which nothing sends
+    /// ([`crate::rule_name::is_reserved_name`]).
     ReservedName,
     /// A `CHANGE_RULE` whose operator is missing or fails
     /// [`crate::rule_policy::validate_operator`] (a `lists` operator among
@@ -116,7 +118,9 @@ impl std::fmt::Display for SendError {
             Self::InvalidRuleName => {
                 "a rule name could leave the daemon's rules directory; refused"
             }
-            Self::ReservedName => "a blocklist rule name; only blocklists may use it",
+            Self::ReservedName => {
+                "a rule name reserved for blocklists or Snitchwatch's built-in rules; refused"
+            }
             Self::RefusedOperator => "a rule condition the bridge won't send; refused",
             Self::NoDaemon => "no daemon connected",
             Self::NotQueued => "no daemon stream could queue the command",
@@ -265,6 +269,17 @@ impl DaemonCommands {
         self.ready.subscribe()
     }
 
+    /// How the daemon reaches this bridge.
+    pub fn transport(&self) -> DaemonTransport {
+        lock(&self.inner).transport
+    }
+
+    /// Coalesce the `SetRules` broadcasts of confirmed commands until the
+    /// hold drops (a rule import, P2.7); see [`RulesSync::hold_publishes`].
+    pub fn hold_rule_publishes(&self) -> crate::cache::rules::PublishHold {
+        self.rules.hold_publishes()
+    }
+
     /// Register a newly opened `Notifications` stream. The receiver yields
     /// the commands addressed to it and ends when the stream is closed.
     pub fn open_stream(&self, conn: ConnKey) -> (StreamRegistration, mpsc::Receiver<Notification>) {
@@ -368,15 +383,17 @@ impl DaemonCommands {
     /// Defense in depth for every path that builds a command (the GUI's go
     /// through `rule_wire::rule_from_wire` first): a `CHANGE_RULE`'s
     /// operator must pass [`crate::rule_policy::validate_operator`], and no
-    /// rule may carry a blocklist name. The bridge's own blocklist rules
-    /// take [`send_blocklist`](Self::send_blocklist) instead.
+    /// rule may carry a reserved name (a blocklist one, or a packaged
+    /// rule's). The bridge's own blocklist rules take
+    /// [`send_blocklist`](Self::send_blocklist) instead; packaged rules are
+    /// never sent.
     pub fn send(&self, notification: Notification) -> Result<PendingReply, SendError> {
         if notification
             .rules
             .iter()
-            .any(|rule| crate::rule_name::is_reserved_blocklist_name(&rule.name))
+            .any(|rule| crate::rule_name::is_reserved_name(&rule.name))
         {
-            warn!("refusing to send a rule command under a blocklist rule name");
+            warn!("refusing to send a rule command under a reserved rule name");
             return Err(SendError::ReservedName);
         }
         if notification.r#type == Action::ChangeRule as i32

@@ -294,6 +294,9 @@ Kirigami.ScrollablePage {
             // they aren't a single decided connection.
             required property string matchedRule
             required property string matchedRuleDisplay
+            // The bridge allowed this row once because filtering was paused
+            // (issue #78). Always false on headers.
+            required property bool answeredWhilePaused
 
             // Issue #18 double-submit guard: the inline/batch buttons stay
             // visible until the round trip flips `pending` to false, so a
@@ -415,9 +418,12 @@ Kirigami.ScrollablePage {
                 }
 
                 Controls.Label {
+                    objectName: "verdictLabel"
                     visible: !row.isGroupHeader
                     textFormat: Text.PlainText
-                    text: row.pending ? "pending" : row.verdict
+                    text: row.pending ? "pending"
+                        : row.answeredWhilePaused ? "Allowed once (filtering was paused)"
+                        : row.verdict
                     color: page.verdictColor(row.verdict)
                     Layout.alignment: Qt.AlignVCenter
                 }

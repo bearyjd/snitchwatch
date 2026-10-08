@@ -26,6 +26,11 @@
 //!   narrows, is refused. So is an empty regexp (a missing `data` arrives
 //!   as `""`), and a pattern Go's RE2 would read differently once the
 //!   daemon lowercases it (see `regexp`).
+//! - `Compile` overwrites a `simple` `user.name` leaf's data with the uid,
+//!   and the daemon reports the rule that way. Sent back, the uid is looked
+//!   up as a *name*: an enabled rule is refused, and a disabled one is
+//!   saved and then never compiles again. So a numeric `user.name` is
+//!   refused, and such a rule is listed read-only.
 //!
 //! [`validate_operator`] accepts only shapes that evaluate as written: a leaf
 //! (`simple`, `regexp`, `network`) or one `list` of 1..=64 leaves. Every
@@ -41,7 +46,13 @@ use snitchwatch_proto::protocol::{Operator, Rule};
 
 use crate::cache::rules::{MAX_OPERATOR_LIST_LEN, MAX_RULE_FIELD_BYTES};
 
+mod narrowing;
+mod profile;
 mod regexp;
+
+pub use narrowing::binds_to_programs;
+
+pub use profile::{validate_user_rule, PolicyProfile, RuleProblem};
 
 /// Why a GUI may not change a daemon rule whose operator fails
 /// [`validate_operator`] (a `lists` blocklist rule, a network alias such as
@@ -57,6 +68,24 @@ pub const SHAPE_READ_ONLY_REASON: &str = "Snitchwatch can't change this rule bec
 /// and removes those itself, from the Blocklists page (issue #45).
 pub const BLOCKLIST_MANAGED_REASON: &str =
     "Managed on the Blocklists page. Subscribe to or remove the list there.";
+
+/// Why a GUI may not change or delete the packaged fetch rule
+/// ([`crate::rule_name::PACKAGED_FETCH_RULE_NAME`]).
+pub const PACKAGED_FETCH_RULE_REASON: &str =
+    "Built into Snitchwatch: lets its background service download blocklists.";
+
+/// Why a GUI may not change or delete any other rule under the packaged
+/// prefix ([`crate::rule_name::is_reserved_packaged_name`]).
+pub const PACKAGED_RULE_REASON: &str =
+    "Uses a name reserved for rules built into Snitchwatch, so Snitchwatch doesn't change or \
+     delete it.";
+
+/// Why a GUI may not change or delete a rule under the curated-defaults
+/// prefix ([`crate::rule_name::CURATED_DEFAULT_RULE_NAME_PREFIX`]). No such
+/// rules exist before prompt-slot D, so this says what is true today: the
+/// name is reserved.
+pub const CURATED_MANAGED_REASON: &str = "This name is reserved for Snitchwatch's own rules, so \
+     Snitchwatch won't change or delete it. The rule still applies.";
 
 /// Operands whose value the daemon passes as a `net.IP`; only the `network`
 /// type can compare one.
@@ -125,6 +154,15 @@ pub fn read_only_reason(rule: &Rule) -> Option<&'static str> {
     if crate::rule_name::is_reserved_blocklist_name(&rule.name) {
         return Some(BLOCKLIST_MANAGED_REASON);
     }
+    if rule.name == crate::rule_name::PACKAGED_FETCH_RULE_NAME {
+        return Some(PACKAGED_FETCH_RULE_REASON);
+    }
+    if crate::rule_name::is_reserved_packaged_name(&rule.name) {
+        return Some(PACKAGED_RULE_REASON);
+    }
+    if crate::rule_name::is_reserved_curated_name(&rule.name) {
+        return Some(CURATED_MANAGED_REASON);
+    }
     if crate::rule_name::validate_rule_name(&rule.name).is_err() {
         return Some(crate::rule_wire::READ_ONLY_REASON);
     }
@@ -138,10 +176,10 @@ pub fn read_only_reason(rule: &Rule) -> Option<&'static str> {
 /// name (`Loader.Delete` never reads the operator), so this is the name
 /// check `notification_for_effect` applies to a `DeleteRule`: a rule
 /// read-only only for its conditions stays deletable. A blocklist rule is
-/// removed from the Blocklists page instead.
+/// removed from the Blocklists page instead, and a packaged rule not at all.
 pub fn deletable(rule: &Rule) -> bool {
     crate::rule_name::validate_rule_name(&rule.name).is_ok()
-        && !crate::rule_name::is_reserved_blocklist_name(&rule.name)
+        && !crate::rule_name::is_reserved_name(&rule.name)
 }
 
 fn validate_list(op: &Operator) -> Result<(), String> {
@@ -188,6 +226,9 @@ fn validate_leaf(op: &Operator) -> Result<(), String> {
         ));
     }
     match op.r#type.as_str() {
+        "simple" if op.operand == "user.name" && is_uid(&op.data) => {
+            Err(USER_NAME_IS_A_UID.to_string())
+        }
         "simple" => match operand_kind(&op.operand)? {
             OperandKind::True | OperandKind::Text => Ok(()),
             OperandKind::Network => Err(NETWORK_OPERAND_NEEDS_NETWORK.to_string()),
@@ -221,6 +262,9 @@ fn validate_leaf(op: &Operator) -> Result<(), String> {
 const NETWORK_OPERAND_NEEDS_NETWORK: &str =
     "the dest.network and source.network operands need the network type";
 const TRUE_NEEDS_SIMPLE: &str = "the true operand needs the simple type";
+const USER_NAME_IS_A_UID: &str = "this user.name condition holds the uid the firewall service \
+     reports once the rule is loaded; sent back, it would be looked up as a user name and the \
+     rule would stop loading";
 const LISTS_REFUSED: &str =
     "blocklist (lists) rules are managed by Snitchwatch and can't be sent from a GUI";
 
@@ -247,6 +291,12 @@ fn operand_kind(operand: &str) -> Result<OperandKind, String> {
         return Err(LISTS_REFUSED.to_string());
     }
     Err("unknown operator operand".to_string())
+}
+
+/// What `Compile` writes over a `user.name` leaf's data: a decimal uid.
+/// `useradd` refuses fully numeric names, so no real name looks like this.
+fn is_uid(data: &str) -> bool {
+    !data.is_empty() && data.bytes().all(|b| b.is_ascii_digit())
 }
 
 /// A portable environment variable name (`[A-Za-z_][A-Za-z0-9_]*`).
@@ -283,3 +333,9 @@ fn validate_cidr(data: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod profile_tests;
+
+#[cfg(test)]
+mod schema_tests;

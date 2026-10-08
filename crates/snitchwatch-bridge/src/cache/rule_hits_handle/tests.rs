@@ -18,7 +18,7 @@ fn ev(name: &str) -> Event {
 }
 
 fn synced(names: &[&str]) -> SharedRulesCache {
-    let mut cache = RulesCache::Unknown;
+    let mut cache = RulesCache::default();
     cache.replace_all(names.iter().map(|n| rule(n)).collect());
     Arc::new(StdMutex::new(cache))
 }
@@ -123,7 +123,7 @@ fn counts_use_the_rule_cache_and_adopt_at_the_commit() {
     hits.record(&[ev("a"), ev("a")], 10, &unknown);
     assert!(counts(&hits).is_empty(), "no snapshot yet");
 
-    let mut cache = RulesCache::Unknown;
+    let mut cache = RulesCache::default();
     cache.replace_all(vec![rule("a")]);
     hits.adopt_snapshot(&cache);
     assert_eq!(counts(&hits), vec![("a".to_string(), 2)]);

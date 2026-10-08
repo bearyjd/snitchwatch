@@ -13,6 +13,11 @@
 // unverified, and the menu is built before the first bridge state arrives,
 // when nothing could be offered yet. Driven end to end by
 // tests/tray_menu_qml.rs; the objectNames are what that probe triggers.
+//
+// A pause also lets the connections already waiting for an answer through,
+// Allow once (issue #78), so each pause item says so, but only while the
+// connected bridge advertises `pauseAnswersWaiting`: a bridge from before
+// that leaves them waiting, and the menu must not promise otherwise.
 import QtQuick
 import Qt.labs.platform as Labs
 import com.snitchwatch.shell
@@ -28,6 +33,10 @@ Labs.Menu {
     // paused; "reconnect" (DaemonDown) and "default" offer neither.
     readonly property bool canPause: controller.menuLabel === "pause_filtering"
     readonly property bool canResume: controller.menuLabel === "resume_filtering"
+    // What each pause item adds when the bridge answers the waiting prompts.
+    readonly property string waitingSuffix: controller.pauseAnswersWaiting
+        ? " (also lets waiting connections through once)"
+        : ""
 
     Labs.MenuItem {
         text: trayMenu.window.visible ? "Hide window" : "Show window"
@@ -39,19 +48,19 @@ Labs.Menu {
     Labs.MenuItem {
         objectName: "pauseFor300"
         enabled: trayMenu.canPause
-        text: "Pause for 5 minutes"
+        text: "Pause for 5 minutes" + trayMenu.waitingSuffix
         onTriggered: trayMenu.controller.pauseFor(300)
     }
     Labs.MenuItem {
         objectName: "pauseFor1800"
         enabled: trayMenu.canPause
-        text: "Pause for 30 minutes"
+        text: "Pause for 30 minutes" + trayMenu.waitingSuffix
         onTriggered: trayMenu.controller.pauseFor(1800)
     }
     Labs.MenuItem {
         objectName: "pauseFor3600"
         enabled: trayMenu.canPause
-        text: "Pause for 1 hour"
+        text: "Pause for 1 hour" + trayMenu.waitingSuffix
         onTriggered: trayMenu.controller.pauseFor(3600)
     }
     Labs.MenuItem {

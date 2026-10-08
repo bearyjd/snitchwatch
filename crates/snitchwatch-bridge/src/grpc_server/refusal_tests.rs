@@ -147,8 +147,8 @@ async fn a_remembered_allow_for_a_kernel_connection_is_answered_once_and_explain
         .collect();
     assert_eq!(notices, vec![&Notice::VerdictNotRemembered { row_id: 1 }]);
     assert_eq!(
-        asked.rules,
-        RulesCache::Synced(Default::default()),
+        asked.rules.rules(),
+        Some(&Default::default()),
         "a rule the daemon never stores must not enter the rules cache"
     );
 }
@@ -181,7 +181,7 @@ async fn a_remembered_any_host_deny_without_a_path_is_answered_once() {
         "the once-only deny still covers this host only: {:?}",
         asked.messages
     );
-    assert_eq!(asked.rules, RulesCache::Synced(Default::default()));
+    assert_eq!(asked.rules.rules(), Some(&Default::default()));
 }
 
 /// Control: an absolute path is still remembered, cached and announced.
@@ -202,7 +202,7 @@ async fn a_remembered_allow_with_an_absolute_path_is_still_remembered() {
         .notices
         .iter()
         .any(|n| matches!(n, Notice::VerdictNotRemembered { .. })));
-    let RulesCache::Synced(rules) = &asked.rules else {
+    let Some(rules) = asked.rules.rules() else {
         panic!("cache unsynced")
     };
     assert!(rules.contains_key(&asked.rule.name), "{rules:?}");
@@ -246,7 +246,7 @@ async fn assert_inline_deny_is_app_bound_until_restart(dst_host: &str, destinati
     assert_eq!((host.operand.as_str(), host.data.as_str()), destination);
     assert_eq!(update_rules_count(&asked), 1, "{:?}", asked.messages);
     assert!(not_remembered(&asked).is_empty(), "{:?}", asked.messages);
-    let RulesCache::Synced(rules) = &asked.rules else {
+    let Some(rules) = asked.rules.rules() else {
         panic!("cache unsynced")
     };
     assert!(rules.contains_key(&asked.rule.name), "{rules:?}");

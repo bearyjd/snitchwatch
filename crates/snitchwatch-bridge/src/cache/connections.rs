@@ -272,6 +272,28 @@ impl ConnectionCache {
         self.pending.keys().cloned().collect()
     }
 
+    /// Pending rows whose `AskRule` admission passes `keep`. Rows inserted
+    /// without an admission never do.
+    pub(crate) fn pending_admitted_where(&self, keep: impl Fn(&Admission) -> bool) -> Vec<String> {
+        self.pending
+            .iter()
+            .filter(|(_, entry)| entry.admission.as_ref().is_some_and(&keep))
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
+    /// Record why the bridge answered `row_id` itself (issue #78) and
+    /// return the updated row.
+    pub(crate) fn label_auto_answer(
+        &mut self,
+        row_id: &str,
+        why: crate::ws_messages::AutoAnswer,
+    ) -> Option<ConnectionRow> {
+        let row = self.rows.iter_mut().find(|row| row.id == row_id)?;
+        row.auto_answer = Some(why);
+        Some(row.clone())
+    }
+
     pub fn rows(&self) -> &[ConnectionRow] {
         &self.rows
     }
@@ -323,6 +345,7 @@ mod tests {
             bytes_received: 0,
             started_at_ms: 0,
             matched_rule: None,
+            auto_answer: None,
         }
     }
 
@@ -527,6 +550,7 @@ mod tray_state_tests {
             bytes_received: 0,
             started_at_ms: 0,
             matched_rule: None,
+            auto_answer: None,
         }
     }
 

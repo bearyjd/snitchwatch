@@ -3,7 +3,6 @@
 
 use super::*;
 use crate::cache::connections::Verdict;
-use crate::cache::rules::RulesCache;
 use crate::ws_messages::VerdictScope;
 use snitchwatch_proto::protocol::{Event, NotificationReplyCode, Operator, Statistics};
 use tokio::sync::broadcast;
@@ -186,9 +185,8 @@ async fn counts_survive_a_daemon_reconnect_and_gap_hits_are_added_on_adoption() 
     ping(&svc, vec![event("a"), event("a"), event("a")], 10).await;
 
     drop(stream);
-    assert_eq!(
-        svc.rules_handle().lock().unwrap().clone(),
-        RulesCache::Unknown,
+    assert!(
+        svc.rules_handle().lock().unwrap().is_unknown(),
         "the list was withdrawn"
     );
     assert_eq!(hits(&svc), vec![pair("a", 3)], "withdrawing did not prune");

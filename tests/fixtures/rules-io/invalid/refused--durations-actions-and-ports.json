@@ -1,0 +1,14 @@
+{
+  "format": "snitchwatch.rules",
+  "version": 1,
+  "rules": [
+    { "name": "100-once", "enabled": true, "action": "deny", "duration": "once",
+      "operator": { "type": "simple", "operand": "dest.host", "data": "a.example" } },
+    { "name": "101-timed", "enabled": true, "action": "deny", "duration": "5m",
+      "operator": { "type": "simple", "operand": "dest.host", "data": "a.example" } },
+    { "name": "102-drop", "enabled": true, "action": "drop", "duration": "always",
+      "operator": { "type": "simple", "operand": "dest.host", "data": "a.example" } },
+    { "name": "103-port", "enabled": true, "action": "deny", "duration": "always",
+      "operator": { "type": "simple", "operand": "dest.port", "data": "70000" } }
+  ]
+}

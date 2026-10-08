@@ -31,3 +31,10 @@ install -Dm644 "$script_dir/snitchwatch-system-bridge-gui.socket" \
   "$dest/usr/lib/systemd/system/snitchwatch-system-bridge-gui.socket"
 install -Dm644 "$script_dir/snitchwatch.conf" "$dest/usr/lib/tmpfiles.d/snitchwatch.conf"
 install -Dm644 "$script_dir/snitchwatch.conf.sysusers" "$dest/usr/lib/sysusers.d/snitchwatch.conf"
+# The one opensnitchd rule Snitchwatch ships: this account's bridge may make
+# HTTPS connections, so blocklist downloads work under DefaultAction: deny.
+# Same file as the bluebuild image's (docs/superpowers/plans/
+# 2026-10-08-packaged-bridge-fetch-rule.md).
+fetch_rule=000-snitchwatch-bridge-fetch.json
+install -Dm644 "$script_dir/../bluebuild/files/system/etc/opensnitchd/rules/$fetch_rule" \
+  "$dest/etc/opensnitchd/rules/$fetch_rule"

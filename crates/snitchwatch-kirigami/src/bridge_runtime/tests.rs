@@ -503,6 +503,10 @@ async fn app_bound_rules_follow_each_sessions_acknowledgement() {
         !advertises_app_bound_rules(&connection, 2),
         "only the advertising session"
     );
+    assert!(
+        connection.lock().unwrap().pause_answers_waiting,
+        "the capable bridge's acknowledgement advertises pauseAnswersWaiting"
+    );
 
     stop_first_tx.send(()).unwrap();
     first_server.await.unwrap();
@@ -511,6 +515,10 @@ async fn app_bound_rules_follow_each_sessions_acknowledgement() {
     assert!(
         !connection.lock().unwrap().app_bound_rules,
         "a disconnect clears the flag itself"
+    );
+    assert!(
+        !connection.lock().unwrap().pause_answers_waiting,
+        "a disconnect clears the pause flag too"
     );
 
     std::fs::remove_file(&socket_path).unwrap();
@@ -526,6 +534,10 @@ async fn app_bound_rules_follow_each_sessions_acknowledgement() {
     assert!(
         !advertises_app_bound_rules(&connection, 2),
         "an older bridge's bare acknowledgement advertises nothing"
+    );
+    assert!(
+        !connection.lock().unwrap().pause_answers_waiting,
+        "an older bridge's bare acknowledgement doesn't promise the pause answers"
     );
 
     drop(inbound_tx);

@@ -1704,7 +1704,7 @@ async fn subscribe_then_hello_commits_one_name_sorted_set_rules() {
     // `Request::new` has no remote address: the shared `None` key.
     svc.subscribe(Request::new(config)).await.unwrap();
     assert_eq!(*synced.borrow(), 0, "Subscribe alone commits nothing");
-    assert_eq!(cached(&svc), RulesCache::Unknown);
+    assert!(cached(&svc).is_unknown());
     assert!(rx.try_recv().is_err());
 
     let commands = svc.daemon_commands();
@@ -1756,7 +1756,7 @@ async fn a_subscribe_whose_connection_never_says_hello_never_replaces_the_cache(
     let (stream, _outbound) = svc.daemon_commands().open_stream(other);
     svc.daemon_commands().on_reply(stream.id(), &hello());
 
-    assert_eq!(cached(&svc), RulesCache::Unknown);
+    assert!(cached(&svc).is_unknown());
     assert!(rx.try_recv().is_err());
 }
 

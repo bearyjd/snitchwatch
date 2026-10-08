@@ -101,6 +101,14 @@ pub struct MockOpensnitchd {
 // double's error type.
 #[allow(clippy::result_large_err)]
 impl MockOpensnitchd {
+    /// Wrap a channel the caller already connected (to a bridge's Unix
+    /// socket, say, through `Endpoint::connect_with_connector`).
+    pub fn from_channel(channel: Channel) -> Self {
+        Self {
+            client: UiClient::new(channel),
+        }
+    }
+
     /// Dial the bridge at `addr`. Caller is responsible for ensuring the
     /// bridge has bound its gRPC port (use `RunningBridge::grpc_addr`).
     pub async fn connect(addr: SocketAddr) -> Result<Self, MockError> {
