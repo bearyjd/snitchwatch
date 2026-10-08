@@ -365,6 +365,7 @@ mod tests {
                 }],
                 active: true,
             }],
+            storage: None,
         };
         assert!(interests_profiles(&msg));
         assert!(!interests_connections(&msg));

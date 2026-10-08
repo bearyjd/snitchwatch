@@ -53,10 +53,14 @@ pub mod qobject {
 
     extern "RustQt" {
         /// Flat profile list, bound by `ProfilesPage.qml`.
+        /// `storagePersistent` / `storageReason` mirror the last
+        /// `SetProfiles.storage` (issue #46); false / "" until one arrives.
         #[qobject]
         #[qml_element]
         #[base = QAbstractListModel]
         #[qproperty(i32, count)]
+        #[qproperty(bool, storage_persistent, cxx_name = "storagePersistent")]
+        #[qproperty(QString, storage_reason, cxx_name = "storageReason")]
         type ProfilesModel = super::ProfilesModelRust;
 
         /// Emitted with a JSON-encoded `ClientMessage` (`CreateProfile` /
@@ -147,6 +151,8 @@ pub mod qobject {
 pub struct ProfilesModelRust {
     store: ProfilesStore,
     count: i32,
+    storage_persistent: bool,
+    storage_reason: QString,
 }
 
 impl qobject::ProfilesModel {
@@ -280,7 +286,11 @@ impl qobject::ProfilesModel {
         };
         if changed {
             let n = self.store.len() as i32;
+            let persistent = self.store.storage_persistent();
+            let reason = QString::from(self.store.storage_reason());
             self.as_mut().set_count(n);
+            self.as_mut().set_storage_persistent(persistent);
+            self.as_mut().set_storage_reason(reason);
         }
     }
 

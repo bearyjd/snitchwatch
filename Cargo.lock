@@ -4602,6 +4602,7 @@ dependencies = [
  "hyper-util",
  "libc",
  "mock-opensnitchd",
+ "rusqlite",
  "serde_json",
  "snitchwatch-bridge",
  "snitchwatch-proto",

@@ -17,10 +17,11 @@
 //!   SNITCHWATCH_SYSTEM_BRIDGE=1  Strict systemd socket activation: root-only
 //!                           daemon Unix socket and group-accessible GUI socket.
 //!   STATE_DIRECTORY         Set by systemd's `StateDirectory=`: where blocklist
-//!                           subscriptions persist (`blocklists.sqlite3`). The
-//!                           system bridge accepts only /var/lib/snitchwatch.
+//!                           subscriptions (`blocklists.sqlite3`) and profiles
+//!                           (`profiles.sqlite3`) persist. The system bridge
+//!                           accepts only /var/lib/snitchwatch.
 //!   SNITCHWATCH_STATE_DIR   Used when STATE_DIRECTORY is unset. With neither,
-//!                           subscriptions are kept in memory only.
+//!                           subscriptions and profiles are kept in memory only.
 //!
 //! On startup the CLI prints machine-parseable lines to stdout so test
 //! harnesses and wrapping processes (and the GUI shell) can discover the
