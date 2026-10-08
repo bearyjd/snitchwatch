@@ -113,7 +113,8 @@ pub struct ConnectionRow {
     /// verdict (see `translator::verdict::rule_name_for`), or the name of a
     /// pre-existing rule the daemon itself reports as having matched, via
     /// `Statistics.events[].rule.name` on a `Ping` call (see
-    /// `translator::connection::event_to_row`). Additive field: old wire
+    /// `translator::connection::event_to_row`). `None` on a
+    /// `decided_by_default` row: no rule decided it. Additive field: old wire
     /// payloads without it deserialize with `None` via `#[serde(default)]`,
     /// and it is omitted from serialized JSON when absent so existing
     /// consumers (the web frontend) that don't know about it are unaffected.
@@ -133,6 +134,13 @@ pub struct ConnectionRow {
     /// it. Additive, omitted when false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub deferred: bool,
+    /// No rule matched: the firewall's default action decided this
+    /// connection, as the daemon reported it (E3, plan
+    /// `2026-10-08-default-applied-events.md`). `action` is the action it
+    /// applied and `matched_rule` is `None`. Never inferred from a missing
+    /// `matched_rule`. Additive, omitted when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub decided_by_default: bool,
 }
 
 /// Why the bridge answered a connection without a person (issue #78).

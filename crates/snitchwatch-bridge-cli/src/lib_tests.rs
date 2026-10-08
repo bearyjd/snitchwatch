@@ -599,6 +599,7 @@ async fn synthetic_connection_activity_is_rebroadcast_as_traffic_events() {
         auto_answer: None,
         answer_deadline_ms: None,
         deferred: false,
+        decided_by_default: false,
     };
     bridge
         .broadcast_tx

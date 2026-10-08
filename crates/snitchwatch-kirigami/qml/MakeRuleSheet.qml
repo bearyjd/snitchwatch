@@ -1,12 +1,16 @@
 // "Make a rule…" for a connection whose prompt was put off (prompt-slot plan
-// Part C, item 9): the decision sheet's scope and remembered durations, sent
+// Part C, item 9), or that the firewall's default action decided (E3): the
+// decision sheet's scope and remembered durations, sent
 // as one rule (ConnectionsModel.makeRule, Rust `make_rule.rs`) until the rule
 // editor exists. A once-only answer can't be given afterwards, so "This time"
-// isn't offered. Every text here is fixed.
+// isn't offered. Every text here is fixed, and what happened comes only from
+// MakeRuleController: "created" only once the bridge's result is Ok (PR #108
+// security review, M1).
 import QtQuick
 import QtQuick.Layouts
 import QtQuick.Controls as Controls
 import org.kde.kirigami as Kirigami
+import com.snitchwatch.shell
 
 ColumnLayout {
     id: sheet
@@ -17,20 +21,49 @@ ColumnLayout {
     // Whether the row's program has a file a rule can be bound to
     // (`rowDetailsJson`'s `bindableProcessPath`, issue #44).
     property bool bindableProcessPath: false
+    // E3: whether the firewall may list this put-off connection again as
+    // decided by its default action (`outcome::may_be_listed_again`); the
+    // bridge can't match the two rows (plan 2026-10-08-default-applied-events.md).
+    property bool alsoListedByDefault: false
     // Whether "Decide later" blocked the program for 5 minutes. That block
     // stays: a matching deny wins over an allow rule, so the sheet says so
     // rather than delete it (PR #98 review).
     property bool blockedForFiveMinutes: false
-    // What the last click did, for the label below.
-    property string result: ""
-    // Exposed for the headless probe (tests/deferred_rows_qml.rs).
+    // What the last request for this row says: sending, its outcome, or that
+    // it couldn't be sent. Empty for another row.
+    readonly property string result: controller.rowId === sheet.rowId ? controller.statusText : ""
+    // Exposed for the headless probes (tests/deferred_rows_qml.rs,
+    // tests/default_action_rows_qml.rs).
     property alias openButton: openButton
     property alias form: form
     property alias blockNote: blockNoteLabel
+    property alias controller: controller
+    property alias alsoListedNote: alsoListedNote
 
-    onRowIdChanged: {
-        form.visible = false;
-        sheet.result = "";
+    onRowIdChanged: form.visible = false
+
+    MakeRuleController {
+        id: controller
+        Component.onCompleted: startBridgeFeed()
+    }
+
+    // The bridge's result never came: give up after a silence.
+    Timer {
+        interval: 1000
+        repeat: true
+        running: controller.busy
+        onTriggered: controller.poll()
+    }
+
+    Controls.Label {
+        id: alsoListedNote
+        Layout.fillWidth: true
+        visible: sheet.alsoListedByDefault
+        wrapMode: Text.Wrap
+        opacity: 0.7
+        textFormat: Text.PlainText
+        text: "The firewall may also list this connection, and its retries, separately "
+            + "as decided by its default action."
     }
 
     Controls.Button {
@@ -96,12 +129,14 @@ ColumnLayout {
             Layout.fillWidth: true
             Controls.Button {
                 Layout.fillWidth: true
+                enabled: !controller.busy
                 text: "Allow"
                 icon.name: "dialog-ok-apply"
                 onClicked: sheet.make("allow")
             }
             Controls.Button {
                 Layout.fillWidth: true
+                enabled: !controller.busy
                 text: "Deny"
                 icon.name: "edit-delete-remove"
                 onClicked: sheet.make("deny")
@@ -120,6 +155,7 @@ ColumnLayout {
     }
 
     Controls.Label {
+        objectName: "makeRuleResult"
         Layout.fillWidth: true
         visible: sheet.result.length > 0
         wrapMode: Text.Wrap
@@ -128,14 +164,17 @@ ColumnLayout {
     }
 
     function make(choice) {
+        const requestId = controller.begin(sheet.rowId);
+        if (requestId === "") {
+            return;
+        }
         const sent = sheet.model !== null
             && sheet.model.makeRule(sheet.rowId, choice, scopeBox.currentValue,
-                                    durationBox.currentValue) === true;
-        sheet.result = sent
-            ? "The rule was sent to the background service."
-            : "The rule couldn't be sent.";
-        if (sent) {
-            form.visible = false;
+                                    durationBox.currentValue, requestId) === true;
+        if (!sent) {
+            controller.notSent();
+            return;
         }
+        form.visible = false;
     }
 }

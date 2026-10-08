@@ -2,17 +2,23 @@
 //! plan Part C).
 //!
 //! A row is pending while it has no `action`, unless the bridge marked it
-//! `deferred`: a prompt nobody answered in time, or one someone chose
-//! "Decide later" for. Such a row can have no `action` either, when the
-//! daemon applied its default action and the bridge doesn't know which. So
-//! every "is it waiting?" check goes through [`is_pending`], and every
-//! verdict through [`Verdict::of`]; otherwise a put-off row would look
-//! waiting, be auto-selected and offer Allow.
+//! `deferred` (a prompt nobody answered in time, or one someone chose
+//! "Decide later" for) or `decided_by_default` (E3: the daemon reported its
+//! default action decided it, so it is decided and no rule decided it). A
+//! deferred row can have no `action` either, when the daemon applied its
+//! default action and the bridge doesn't know which. So every "is it
+//! waiting?" check goes through [`is_pending`], and every verdict through
+//! [`Verdict::of`]; otherwise such a row would look waiting, be
+//! auto-selected and offer Allow.
 //!
-//! [`outcome_text`] is the verdict label of a deferred row. It is fixed text
-//! and never names an action the bridge didn't report. "Usually" stays for
-//! an allow: under nftables chain churn a requeued packet can be dropped
-//! whatever the default action (bazzite-tower's r8 note).
+//! [`outcome_text`] is the verdict label of a deferred row, and of a row the
+//! firewall's default action decided (`decided_by_default`, E3: plan
+//! `2026-10-08-default-applied-events.md`). It is fixed text and never names
+//! an action the bridge didn't report. "Usually" stays for an allow, on both:
+//! tower's r8 saw requeued packets dropped under nftables chain churn
+//! whatever the verdict. A default-action event after an Ask timeout is
+//! exactly such a requeue, and the bridge can't tell it from a connection
+//! that got the default because the prompt slot was busy.
 
 use snitchwatch_bridge::ws_messages::ConnectionRow;
 
@@ -20,22 +26,40 @@ use super::row_store::Verdict;
 
 /// Whether `row` still waits for an answer.
 pub fn is_pending(row: &ConnectionRow) -> bool {
-    row.action.is_none() && !row.deferred
+    row.action.is_none() && !row.deferred && !row.decided_by_default
 }
 
 impl Verdict {
-    /// The verdict `row` shows. A deferred row with no known action is
-    /// decided, by something this GUI can't name: [`Verdict::Other`].
+    /// The verdict `row` shows. A deferred or default-decided row with no
+    /// known action is decided, by something this GUI can't name:
+    /// [`Verdict::Other`].
     pub fn of(row: &ConnectionRow) -> Self {
-        if row.action.is_none() && row.deferred {
+        if row.action.is_none() && (row.deferred || row.decided_by_default) {
             return Verdict::Other;
         }
         Verdict::from_action(row.action.as_deref())
     }
 }
 
-/// The verdict label of a deferred row; empty for every other row.
+/// Whether the daemon may list `row`'s connection, and its retries, again as
+/// rows decided by its default action (E3; the inspector's two-rows hint): a
+/// put-off row the default action settled, i.e. without a rule on record
+/// ("Decide later"'s 5-minute block has one). The bridge can't match the two
+/// (plan `2026-10-08-default-applied-events.md`).
+pub fn may_be_listed_again(row: &ConnectionRow) -> bool {
+    row.deferred && row.matched_rule.is_none()
+}
+
+/// The verdict label of a deferred row or a row decided by the firewall's
+/// default action; empty for every other row.
 pub fn outcome_text(row: &ConnectionRow) -> &'static str {
+    if row.decided_by_default {
+        return match row.action.as_deref() {
+            Some("allow") => "Usually allowed (the firewall's default action)",
+            Some("deny") => "Denied (the firewall's default action)",
+            _ => "The firewall's default action",
+        };
+    }
     if !row.deferred {
         return "";
     }
@@ -80,6 +104,7 @@ mod tests {
             auto_answer: None,
             answer_deadline_ms: None,
             deferred,
+            decided_by_default: false,
         }
     }
 
@@ -152,5 +177,68 @@ mod tests {
             outcome_text(&row(None, true)),
             "Decided later: the firewall's default action"
         );
+    }
+
+    /// E3: a connection the daemon reports its default action decided.
+    #[test]
+    fn a_row_decided_by_default_says_so_with_its_action() {
+        let by_default = |action| ConnectionRow {
+            decided_by_default: true,
+            ..row(action, false)
+        };
+        assert_eq!(
+            outcome_text(&by_default(Some("deny"))),
+            "Denied (the firewall's default action)"
+        );
+        // "Usually", as for a deferred row: after an Ask timeout the packet
+        // was requeued, and tower's r8 saw requeued packets dropped under
+        // nftables chain churn whatever the verdict.
+        assert_eq!(
+            outcome_text(&by_default(Some("allow"))),
+            "Usually allowed (the firewall's default action)"
+        );
+        assert!(!is_pending(&by_default(Some("deny"))));
+        assert_eq!(Verdict::of(&by_default(Some("deny"))), Verdict::Denied);
+        // A plain decided row keeps its verdict label.
+        assert_eq!(outcome_text(&row(Some("deny"), false)), "");
+    }
+
+    /// The two-rows hint (PR #108 review): a put-off row the default action
+    /// settled may have a twin the daemon reports (E3). Not a "Decide later"
+    /// block, which a rule decided, nor a default-decided row itself.
+    #[test]
+    fn only_a_put_off_row_without_a_rule_may_be_listed_again() {
+        let timed_out = ConnectionRow {
+            auto_answer: Some(AutoAnswer::NoAnswer),
+            ..row(Some("deny"), true)
+        };
+        assert!(may_be_listed_again(&timed_out));
+        assert!(
+            may_be_listed_again(&row(None, true)),
+            "Decide later, no program"
+        );
+        let blocked = ConnectionRow {
+            matched_rule: Some("deny-curl".into()),
+            ..row(Some("deny"), true)
+        };
+        assert!(!may_be_listed_again(&blocked));
+        assert!(!may_be_listed_again(&row(Some("deny"), false)));
+        let by_default = ConnectionRow {
+            decided_by_default: true,
+            ..row(Some("deny"), false)
+        };
+        assert!(!may_be_listed_again(&by_default));
+    }
+
+    /// The flag always means "decided, no rule" (PR #108 review), even on a
+    /// row without an action, which the bridge never sends.
+    #[test]
+    fn a_row_decided_by_default_is_never_pending() {
+        let by_default = ConnectionRow {
+            decided_by_default: true,
+            ..row(None, false)
+        };
+        assert!(!is_pending(&by_default));
+        assert_eq!(Verdict::of(&by_default), Verdict::Other);
     }
 }

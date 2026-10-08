@@ -20,6 +20,7 @@ fn server_message_round_trips_via_json() {
             auto_answer: None,
             answer_deadline_ms: None,
             deferred: false,
+            decided_by_default: false,
         }],
     };
 
@@ -156,6 +157,7 @@ fn connection_row_carries_matched_rule_when_decided() {
         auto_answer: None,
         answer_deadline_ms: None,
         deferred: false,
+        decided_by_default: false,
     };
     let json = serde_json::to_value(&row).unwrap();
     assert_eq!(json["matchedRule"], "899-firefox-allow-out.json");
@@ -184,6 +186,44 @@ fn connection_row_without_matched_rule_field_defaults_to_none() {
     });
     let parsed: ConnectionRow = serde_json::from_value(json).unwrap();
     assert_eq!(parsed.matched_rule, None);
+    assert!(!parsed.decided_by_default);
+}
+
+/// E3 (plan `2026-10-08-default-applied-events.md`): additive like
+/// `deferred`, absent unless set.
+#[test]
+fn decided_by_default_is_sent_only_when_set_and_has_no_rule() {
+    let row = ConnectionRow {
+        id: "event-1".to_string(),
+        process: "curl".to_string(),
+        process_path: Some("/usr/bin/curl".to_string()),
+        dst_host: "example.com".to_string(),
+        dst_ip: "93.184.216.34".to_string(),
+        dst_port: 443,
+        protocol: "tcp".to_string(),
+        direction: "outgoing".to_string(),
+        action: Some("deny".to_string()),
+        bytes_sent: 0,
+        bytes_received: 0,
+        started_at_ms: 1,
+        matched_rule: None,
+        auto_answer: None,
+        answer_deadline_ms: None,
+        deferred: false,
+        decided_by_default: true,
+    };
+    let json = serde_json::to_value(&row).unwrap();
+    assert_eq!(json["decidedByDefault"], true);
+    assert!(json.get("matchedRule").is_none(), "{json}");
+    let parsed: ConnectionRow = serde_json::from_value(json).unwrap();
+    assert_eq!(parsed, row);
+
+    let plain = ConnectionRow {
+        decided_by_default: false,
+        ..row
+    };
+    let json = serde_json::to_value(&plain).unwrap();
+    assert!(json.get("decidedByDefault").is_none(), "{json}");
 }
 
 #[test]
