@@ -442,3 +442,24 @@ fn distinct_connections_never_take_each_others_snapshot() {
         "two"
     );
 }
+
+/// PR #106 review H1: a remembered answer is announced (`UpdateRules`) only
+/// when there is a list to add it to, and under the cache lock, so it can't
+/// land in a GUI's empty list and vanish at the next `SetRules`, or race a
+/// withdrawal.
+#[test]
+fn a_remembered_answer_is_announced_only_to_a_list() {
+    let (tx, mut rx) = broadcast::channel(8);
+    let sync = RulesSync::new(tx);
+    sync.upsert(rule("snitchwatch-allow-a", "always", T));
+    assert!(published(&mut rx).is_empty(), "announced with no list");
+    lock(&sync.cache).replace_all(Vec::new());
+    sync.upsert(rule("snitchwatch-allow-a", "always", T));
+    let sent = published(&mut rx);
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert!(
+        matches!(&sent[0], ServerMessage::UpdateRules { rules }
+            if rules.len() == 1 && rules[0]["name"] == "snitchwatch-allow-a"),
+        "{sent:?}"
+    );
+}

@@ -418,12 +418,19 @@ impl RulesSync {
         self.synced.subscribe()
     }
 
-    /// A remembered prompt verdict (see [`RulesCache::upsert`]). When it
-    /// replaces a temporary rule that has expired but not yet been pruned
-    /// (names are deterministic, `verdict::rule_name_for`), it is a new rule
-    /// and its count starts again.
+    /// A remembered prompt verdict (see [`RulesCache::upsert`]), announced
+    /// to every GUI as `UpdateRules`. When it replaces a temporary rule that
+    /// has expired but not yet been pruned (names are deterministic,
+    /// `verdict::rule_name_for`), it is a new rule and its count starts
+    /// again. Only a list gets it (PR #106 review H1): with none, a GUI would
+    /// add it to its empty list and lose it at the next `SetRules`. Sent with
+    /// the cache lock held, like every list, so a withdrawal can't overtake
+    /// it.
     pub fn upsert(&self, rule: Rule) {
         let mut cache = lock(&self.cache);
+        if cache.is_unknown() {
+            return;
+        }
         let replaces_expired = cache
             .rules()
             .and_then(|rules| rules.get(&rule.name))
@@ -432,7 +439,12 @@ impl RulesSync {
         if replaces_expired {
             self.hits.forget([rule.name.as_str()]);
         }
+        let name = rule.name.clone();
         cache.upsert(rule);
+        let rules = cache.rules().and_then(|r| r.get(&name)).map(rule_to_wire);
+        let _ = self.broadcast.send(ServerMessage::UpdateRules {
+            rules: rules.into_iter().collect(),
+        });
     }
 
     /// Hold a `Subscribe`'s rules until its connection sends HELLO. An

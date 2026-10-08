@@ -13,7 +13,6 @@ use crate::daemon_liveness::StreamGuard;
 use crate::diagnostics::DiagnosticsCtx;
 use crate::filter_pause::FilterPause;
 use crate::notice::NoticeBus;
-use crate::rule_wire::rule_to_wire;
 use crate::translator::connection::{connection_to_row, event_to_row};
 use crate::translator::verdict::{once_rule, verdict_to_rule};
 use crate::tray_state::{TrayState, TrayStatePublisher};

@@ -33,14 +33,8 @@ impl UiService {
         ) {
             Ok(rule) => {
                 if resolution.duration.remembers() {
+                    // Announced only to a list (`RulesSync::upsert`).
                     self.rules.upsert(rule.clone());
-                    if self.broadcast.receiver_count() > 0 {
-                        if let Err(e) = self.broadcast.send(ServerMessage::UpdateRules {
-                            rules: vec![rule_to_wire(&rule)],
-                        }) {
-                            warn!(error = %e, "persistent verdict rule broadcast failed");
-                        }
-                    }
                 }
                 return rule;
             }

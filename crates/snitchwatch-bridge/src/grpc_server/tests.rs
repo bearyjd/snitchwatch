@@ -349,6 +349,8 @@ async fn persistent_allow_verdict_broadcasts_rule_for_live_clients() {
         Arc::new(FilterPause::new()),
     );
     let _gui_session = svc.client_presence().authenticated_session();
+    // A synced list: a remembered answer is announced only to one (H1).
+    svc.rules_handle().lock().unwrap().replace_all(Vec::new());
     let svc = svc.into_server();
     tokio::spawn(async move {
         Server::builder()
