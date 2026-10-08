@@ -14,6 +14,7 @@ use std::time::Duration;
 use futures_util::{SinkExt, StreamExt};
 use mock_opensnitchd::MockOpensnitchd;
 use snitchwatch_bridge::blocklists::fetcher::{process_body, BlocklistFetch, FetchOutcome};
+use snitchwatch_bridge::blocklists::store::BlocklistStore;
 use snitchwatch_bridge::ws_messages::{
     BlocklistSummary, ClientMessage, ServerMessage, StorageStatus, VerdictAction, VerdictDuration,
     VerdictScope, ENFORCEMENT_NOT_ENFORCED,
@@ -192,6 +193,46 @@ async fn subscriptions_persist_across_a_restart_and_get_refreshed() {
     assert_eq!(
         refreshed[0].enforcement_reason.as_deref(),
         Some("Blocking isn't available yet")
+    );
+}
+
+/// L7: the blocklist worker and refresh loop start only once nothing else
+/// can fail; a failed start leaves no task downloading in the background.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_start_runs_no_blocklist_tasks() {
+    let state_dir = tempfile::tempdir().unwrap();
+    let state = state_dir.path().canonicalize().unwrap();
+    {
+        let store = BlocklistStore::open(&state.join("blocklists.sqlite3")).unwrap();
+        let due = snitchwatch_bridge::blocklists::store::Subscription {
+            id: "due".into(),
+            url: LIST_URL.into(),
+            display_name: "due".into(),
+            format_hint: None,
+            refresh_interval_secs: 86_400,
+            last_fetched_at: None,
+            last_attempt_at: None,
+            last_fetch_status: snitchwatch_bridge::blocklists::store::FetchStatus::Pending,
+            entry_count: 0,
+        };
+        store.upsert_subscription(&due).unwrap();
+    }
+    // The socket's parent is a regular file: writing the token fails.
+    let sockets = tempfile::tempdir().unwrap();
+    let not_a_dir = sockets.path().join("file");
+    std::fs::write(&not_a_dir, b"").unwrap();
+    let fetcher = Arc::new(TestFetcher::default());
+    let started = run_with_options(
+        config(&not_a_dir),
+        options(Storage::Persistent(state), fetcher.clone()),
+    )
+    .await;
+    assert!(started.is_err(), "the bridge started without its token");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        fetcher.calls(LIST_URL),
+        0,
+        "a blocklist task outlived the failed start"
     );
 }
 

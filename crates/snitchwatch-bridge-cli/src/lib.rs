@@ -342,11 +342,6 @@ where
 
     // --- BlocklistsManager: persisted only for a `Persistent` storage ---
     let blocklists_mgr = storage::build_blocklists_manager(options)?;
-    let blocklist_tasks = BlocklistTasks::spawn(
-        blocklists_mgr.clone(),
-        broadcast_tx.clone(),
-        DEFAULT_REFRESH_TICK,
-    );
 
     // --- ProfilesManager (in-memory store; callers may swap in a persisted one) ---
     let profiles_store =
@@ -396,6 +391,13 @@ where
             .await
             .context("failed to bind WebSocket unix socket")?,
     };
+    // Spawned after the last fallible step, so a failed start leaves no
+    // blocklist worker or refresh loop running.
+    let blocklist_tasks = BlocklistTasks::spawn(
+        blocklists_mgr.clone(),
+        broadcast_tx.clone(),
+        DEFAULT_REFRESH_TICK,
+    );
     let (ws_shutdown_tx, ws_shutdown_rx) = oneshot::channel::<()>();
 
     tokio::spawn(async move {
