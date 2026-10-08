@@ -240,6 +240,37 @@ pub enum ServerMessage {
         #[serde(default)]
         expires_at_unix_ms: Option<u64>,
     },
+    /// Rule import/export (roadmap P2.7, `crate::rule_io`). Additive, like
+    /// every extension above; all are broadcast to every GUI.
+    /// The answer to `ExportRules`.
+    RulesExport {
+        document: crate::rule_io::Document,
+        omitted: crate::rule_io::OmittedCounts,
+    },
+    RulesExportUnavailable {
+        reason: String,
+    },
+    /// The answer to `PreviewRulesImport`: one item per rule in the file.
+    RulesImportPreview {
+        preview_id: String,
+        items: Vec<crate::rule_io::ImportItem>,
+    },
+    /// A preview or an apply was refused as a whole (fixed text).
+    RulesImportRefused {
+        reason: String,
+    },
+    /// One rule's outcome during `ApplyRulesImport`.
+    RulesImportProgress {
+        name: String,
+        outcome: crate::rule_io::ImportOutcome,
+    },
+    /// Sent once an apply ends.
+    RulesImportResult {
+        applied: u32,
+        rejected: u32,
+        not_sent: u32,
+        no_answer: u32,
+    },
 }
 
 /// Client → server messages. These come from the UI's `sendAction(type, payload)`
@@ -361,6 +392,19 @@ pub enum ClientMessage {
         sender_uid: Option<u32>,
     },
     RecheckDiagnostics,
+    /// Rule import/export (roadmap P2.7); handled by bridge-cli's
+    /// `rules_import` task, never by `upstream::apply`.
+    ExportRules,
+    /// Validate a rules document and preview it against the daemon's rules.
+    /// Bounded by the client message cap (`ws_server`).
+    PreviewRulesImport {
+        document: serde_json::Value,
+    },
+    /// Apply the named rules of the pending preview (`CHANGE_RULE` only).
+    ApplyRulesImport {
+        preview_id: String,
+        include: Vec<String>,
+    },
 }
 
 /// Resolve [`ClientMessage::SetVerdict`]'s effective duration from the new

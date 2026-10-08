@@ -288,6 +288,14 @@ async fn pump_authenticated<S, R>(
     let inbound = async {
         while let Some(Ok(msg)) = receiver.next().await {
             match msg {
+                // `ws_handler` sets the same bound on the transport; this
+                // holds for any stream (rule import, P2.7).
+                Message::Text(text) if text.len() > MAX_CLIENT_MESSAGE_BYTES => {
+                    warn!(
+                        bytes = text.len(),
+                        "dropping an oversized client message unparsed"
+                    )
+                }
                 Message::Text(text) => match serde_json::from_str::<ClientMessage>(&text) {
                     Ok(parsed) => {
                         let parsed = stamp_sender(parsed, generation, peer_uid);

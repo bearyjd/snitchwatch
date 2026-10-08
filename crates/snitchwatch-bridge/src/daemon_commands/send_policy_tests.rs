@@ -6,7 +6,6 @@
 use super::*;
 use crate::blocklists::list_dir::{IdComponent, ListDir};
 use crate::blocklists::materializer::ListKind;
-use crate::cache::rules::RulesCache;
 use snitchwatch_proto::protocol::{Action, Operator, Rule};
 use std::path::Path;
 use tokio::sync::broadcast;
@@ -174,11 +173,11 @@ async fn an_internal_blocklist_command_is_sent_and_its_ok_reaches_the_rules_cach
         },
     );
     pending.wait(Duration::from_secs(5)).await.unwrap();
-    match &*rules.cache().lock().unwrap() {
-        RulesCache::Synced(cached) => {
+    match rules.cache().lock().unwrap().rules() {
+        Some(cached) => {
             assert!(cached.contains_key("z00-blocklist:ads-0123456789abcdef:domains"))
         }
-        RulesCache::Unknown => panic!("cache Unknown"),
+        None => panic!("cache Unknown"),
     }
 
     let delete = BlocklistCommand::delete("z00-blocklist:ads-0123456789abcdef:domains").unwrap();

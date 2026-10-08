@@ -41,7 +41,10 @@ use snitchwatch_proto::protocol::{Operator, Rule};
 
 use crate::cache::rules::{MAX_OPERATOR_LIST_LEN, MAX_RULE_FIELD_BYTES};
 
+mod profile;
 mod regexp;
+
+pub use profile::{validate_user_rule, PolicyProfile, RuleProblem};
 
 /// Why a GUI may not change a daemon rule whose operator fails
 /// [`validate_operator`] (a `lists` blocklist rule, a network alias such as
@@ -283,3 +286,6 @@ fn validate_cidr(data: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod profile_tests;

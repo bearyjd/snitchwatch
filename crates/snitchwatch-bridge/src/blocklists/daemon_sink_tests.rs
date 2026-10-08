@@ -2,7 +2,7 @@
 //! rules cache, with a scripted daemon stream answering each command.
 
 use super::*;
-use crate::cache::rules::{RulesCache, RulesSync};
+use crate::cache::rules::RulesSync;
 use crate::daemon_commands::{DaemonTransport, StreamRegistration};
 use snitchwatch_proto::protocol::{
     Action, Notification, NotificationReply, NotificationReplyCode, Operator,
@@ -123,10 +123,12 @@ impl Harness {
     }
 
     fn cached(&self) -> Option<Vec<String>> {
-        match &*self.rules.cache().lock().unwrap() {
-            RulesCache::Unknown => None,
-            RulesCache::Synced(rules) => Some(rules.keys().cloned().collect()),
-        }
+        self.rules
+            .cache()
+            .lock()
+            .unwrap()
+            .rules()
+            .map(|rules| rules.keys().cloned().collect())
     }
 }
 

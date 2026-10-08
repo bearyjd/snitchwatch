@@ -30,6 +30,7 @@ use crate::rule_wire::rule_to_wire;
 use crate::ws_messages::ServerMessage;
 use snitchwatch_proto::protocol::{Action, Notification, Rule};
 use std::collections::{BTreeMap, VecDeque};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, MutexGuard, Weak};
 use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, watch};
@@ -49,23 +50,45 @@ pub const MAX_SNAPSHOT_RULES: usize = 10_000;
 pub const MAX_RULE_FIELD_BYTES: usize = 16 * 1024;
 /// Most members a list operator may have, and how deeply lists may nest.
 pub(crate) const MAX_OPERATOR_LIST_LEN: usize = 64;
-const MAX_OPERATOR_DEPTH: usize = 4;
+pub(crate) const MAX_OPERATOR_DEPTH: usize = 4;
 
 /// Shared handle to the cache. A std mutex: every operation is synchronous.
 pub type SharedRulesCache = Arc<StdMutex<RulesCache>>;
 
-/// `Unknown` means no daemon snapshot has been committed during this bridge
-/// run, which is different from `Synced` with zero rules.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub enum RulesCache {
-    #[default]
-    Unknown,
-    Synced(BTreeMap<String, Rule>),
+/// The bridge's copy of the daemon's rules by name: `None` ("Unknown") until
+/// a daemon snapshot is committed during this bridge run, which is different
+/// from an empty list. `revision` is bumped by every change and never reset
+/// (rule import's stale-preview check, roadmap P2.7); it lives here, not in
+/// [`RulesSync`], because [`prune_expired_rules_every`] prunes directly.
+#[derive(Debug, Clone, Default)]
+pub struct RulesCache {
+    rules: Option<BTreeMap<String, Rule>>,
+    revision: u64,
 }
 
 impl RulesCache {
+    pub fn rules(&self) -> Option<&BTreeMap<String, Rule>> {
+        self.rules.as_ref()
+    }
+
+    pub fn is_unknown(&self) -> bool {
+        self.rules.is_none()
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
     pub fn replace_all(&mut self, rules: Vec<Rule>) {
-        *self = Self::Synced(rules.into_iter().map(|r| (r.name.clone(), r)).collect());
+        self.rules = Some(rules.into_iter().map(|r| (r.name.clone(), r)).collect());
+        self.revision += 1;
+    }
+
+    /// Forget the list (its stream is gone). A no-op while `Unknown`.
+    pub fn set_unknown(&mut self) {
+        if self.rules.take().is_some() {
+            self.revision += 1;
+        }
     }
 
     /// Insert or replace by name. When the rule is already cached and the
@@ -74,19 +97,21 @@ impl RulesCache {
     /// daemon's original expiry timer still fires on the original schedule.
     /// A no-op while `Unknown`: one rule is not the full list.
     pub fn upsert(&mut self, mut rule: Rule) {
-        let Self::Synced(rules) = self else { return };
+        let Some(rules) = &mut self.rules else { return };
         if rule.created == 0 {
             if let Some(cached) = rules.get(&rule.name) {
                 rule.created = cached.created;
             }
         }
         rules.insert(rule.name.clone(), rule);
+        self.revision += 1;
     }
 
     /// A no-op while `Unknown`.
     pub fn remove(&mut self, name: &str) {
-        if let Self::Synced(rules) = self {
-            rules.remove(name);
+        let removed = self.rules.as_mut().and_then(|rules| rules.remove(name));
+        if removed.is_some() {
+            self.revision += 1;
         }
     }
 
@@ -94,21 +119,21 @@ impl RulesCache {
     /// `sort.Strings` order, `loader.go` `sortRules`), or `None` while
     /// `Unknown`.
     pub fn snapshot_wire(&self) -> Option<Vec<serde_json::Value>> {
-        match self {
-            Self::Unknown => None,
-            Self::Synced(rules) => Some(rules.values().map(rule_to_wire).collect()),
-        }
+        self.rules()
+            .map(|rules| rules.values().map(rule_to_wire).collect())
     }
 
     /// Drop temporary rules whose `created + duration` has passed. Returns
     /// whether anything was removed.
     pub fn prune_expired(&mut self, now_secs: i64) -> bool {
-        let Self::Synced(rules) = self else {
+        let Some(rules) = &mut self.rules else {
             return false;
         };
         let before = rules.len();
         rules.retain(|_, rule| expires_at(rule).is_none_or(|at| at > now_secs));
-        rules.len() != before
+        let removed = rules.len() != before;
+        self.revision += u64::from(removed);
+        removed
     }
 
     /// Apply a command the daemon answered `OK`: `CHANGE_RULE` upserts its
@@ -200,8 +225,10 @@ pub fn publish_rules(cache: &StdMutex<RulesCache>, broadcast: &broadcast::Sender
     }
 }
 
-/// Whether a daemon rule fits the per-field limits.
-fn within_limits(rule: &Rule) -> bool {
+/// Whether a daemon rule fits the per-field limits. Imported rules use the
+/// same check (`rule_policy::validate_user_rule`), so an import can't install
+/// a rule the next snapshot would leave out.
+pub(crate) fn within_limits(rule: &Rule) -> bool {
     fn operator_ok(op: &snitchwatch_proto::protocol::Operator, depth: usize) -> bool {
         depth <= MAX_OPERATOR_DEPTH
             && op.list.len() <= MAX_OPERATOR_LIST_LEN
@@ -245,6 +272,20 @@ pub struct RulesSync {
     pending: Arc<StdMutex<PendingSnapshots>>,
     synced: Arc<watch::Sender<u64>>,
     broadcast: broadcast::Sender<ServerMessage>,
+    /// Live [`PublishHold`]s; see [`RulesSync::hold_publishes`].
+    holds: Arc<AtomicUsize>,
+}
+
+/// While any is alive, confirmed commands update the cache without
+/// broadcasting `SetRules`; dropping the last one broadcasts the list once.
+pub struct PublishHold(RulesSync);
+
+impl Drop for PublishHold {
+    fn drop(&mut self) {
+        if self.0.holds.fetch_sub(1, Ordering::SeqCst) == 1 {
+            self.0.publish();
+        }
+    }
 }
 
 impl RulesSync {
@@ -254,6 +295,7 @@ impl RulesSync {
             pending: Arc::default(),
             synced: Arc::new(watch::channel(0).0),
             broadcast,
+            holds: Arc::default(),
         }
     }
 
@@ -306,10 +348,10 @@ impl RulesSync {
     /// on under another stream.
     pub(crate) fn withdraw(&self) {
         let mut cache = lock(&self.cache);
-        if *cache == RulesCache::Unknown {
+        if cache.is_unknown() {
             return;
         }
-        *cache = RulesCache::Unknown;
+        cache.set_unknown();
         info!("withdrew the daemon rule list; its stream is gone");
         let _ = self
             .broadcast
@@ -319,7 +361,17 @@ impl RulesSync {
     /// A command the daemon answered `OK`, in reply order.
     pub(crate) fn apply_confirmed(&self, sent: &Notification) {
         lock(&self.cache).apply_confirmed(sent);
-        self.publish();
+        if self.holds.load(Ordering::SeqCst) == 0 {
+            self.publish();
+        }
+    }
+
+    /// Coalesce the `SetRules` broadcasts of confirmed commands until the
+    /// returned hold drops (a rule import confirms one rule per reply; a full
+    /// list per reply would cost O(n²) serialization in every GUI).
+    pub fn hold_publishes(&self) -> PublishHold {
+        self.holds.fetch_add(1, Ordering::SeqCst);
+        PublishHold(self.clone())
     }
 
     pub fn publish(&self) {
@@ -397,7 +449,7 @@ mod tests {
     }
 
     fn synced(rules: Vec<Rule>) -> RulesCache {
-        let mut cache = RulesCache::Unknown;
+        let mut cache = RulesCache::default();
         cache.replace_all(rules);
         cache
     }
@@ -412,15 +464,12 @@ mod tests {
     }
 
     fn get<'a>(cache: &'a RulesCache, name: &str) -> &'a Rule {
-        match cache {
-            RulesCache::Synced(rules) => &rules[name],
-            RulesCache::Unknown => panic!("cache is Unknown"),
-        }
+        &cache.rules().expect("cache is Unknown")[name]
     }
 
     #[test]
     fn unknown_yields_no_snapshot_and_synced_empty_yields_an_empty_one() {
-        assert_eq!(RulesCache::Unknown.snapshot_wire(), None);
+        assert_eq!(RulesCache::default().snapshot_wire(), None);
         assert_eq!(synced(Vec::new()).snapshot_wire(), Some(Vec::new()));
     }
 
@@ -436,10 +485,10 @@ mod tests {
 
     #[test]
     fn upsert_and_remove_do_nothing_while_unknown() {
-        let mut cache = RulesCache::Unknown;
+        let mut cache = RulesCache::default();
         cache.upsert(rule("a", "always", 0));
         cache.remove("a");
-        assert_eq!(cache, RulesCache::Unknown);
+        assert!(cache.is_unknown());
     }
 
     #[test]
@@ -709,7 +758,7 @@ mod tests {
     #[tokio::test]
     async fn publish_sends_set_rules_only_when_synced() {
         let (tx, mut rx) = broadcast::channel(4);
-        let cache = StdMutex::new(RulesCache::Unknown);
+        let cache = StdMutex::new(RulesCache::default());
         publish_rules(&cache, &tx);
         assert!(rx.try_recv().is_err());
 
@@ -721,3 +770,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "rules_revision_tests.rs"]
+mod revision_tests;

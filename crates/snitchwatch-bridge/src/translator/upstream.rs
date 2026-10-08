@@ -94,7 +94,11 @@ pub fn apply(
         | ClientMessage::Undo
         | ClientMessage::Redo
         | ClientMessage::SetFilteringPaused { .. }
-        | ClientMessage::RecheckDiagnostics => Ok(UpstreamEffect::None),
+        | ClientMessage::RecheckDiagnostics
+        // Routed to bridge-cli's `rules_import` task before this point.
+        | ClientMessage::ExportRules
+        | ClientMessage::PreviewRulesImport { .. }
+        | ClientMessage::ApplyRulesImport { .. } => Ok(UpstreamEffect::None),
     }
 }
 

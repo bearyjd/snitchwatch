@@ -27,6 +27,12 @@ pub const BLOCKLIST_RULE_NAME_PREFIX: &str = "z00-blocklist:";
 /// create one.
 pub const LEGACY_BLOCKLIST_RULE_NAME_PREFIX: &str = "900-blocklist:";
 
+/// Name prefix reserved for the curated default rules Snitchwatch will
+/// install and reconcile itself (prompt-slot plan, part D). Rules a GUI or a
+/// file supplies may not use it, so they can't pose as, or be reconciled
+/// away as, one of those.
+pub const CURATED_DEFAULT_RULE_NAME_PREFIX: &str = "snitchwatch-default-";
+
 /// Whether `name` is under a blocklist prefix only the bridge may use.
 pub fn is_reserved_blocklist_name(name: &str) -> bool {
     name.starts_with(BLOCKLIST_RULE_NAME_PREFIX)

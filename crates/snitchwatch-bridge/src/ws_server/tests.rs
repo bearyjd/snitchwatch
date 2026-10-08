@@ -500,3 +500,39 @@ async fn an_oversized_client_message_is_refused() {
     let small = serde_json::json!({ "action": "undo" });
     assert!(MAX_CLIENT_MESSAGE_BYTES > small.to_string().len());
 }
+
+/// Rule import (P2.7): `pump_authenticated` checks a text frame's length
+/// before `from_str::<ClientMessage>`, even when the transport's own limit
+/// was bypassed, and the session keeps going.
+#[tokio::test]
+async fn pump_drops_an_oversized_frame_before_parsing_it() {
+    let (inbound_tx, mut inbound_rx) = mpsc::channel(16);
+    let handles = WsHandles {
+        inbound: inbound_tx,
+        ..default_handles()
+    };
+    // A well-formed ClientMessage: it would be forwarded if it were parsed.
+    let oversized = serde_json::json!({
+        "action": "previewRulesImport",
+        "document": { "pad": "a".repeat(MAX_CLIENT_MESSAGE_BYTES) },
+    })
+    .to_string();
+    assert!(oversized.len() > MAX_CLIENT_MESSAGE_BYTES);
+    let frames = futures_util::stream::iter(vec![
+        Ok(Message::Text(oversized)),
+        Ok(Message::Text(r#"{"action":"undo"}"#.to_string())),
+    ])
+    .chain(futures_util::stream::pending());
+    let sink = Box::pin(futures_util::sink::drain::<Message>());
+    let pump = tokio::spawn(pump_authenticated(sink, Box::pin(frames), handles, None));
+
+    let first = tokio::time::timeout(std::time::Duration::from_secs(2), inbound_rx.recv())
+        .await
+        .expect("the session ended")
+        .unwrap();
+    assert!(
+        matches!(first, ClientMessage::Undo),
+        "the oversized frame was parsed"
+    );
+    pump.abort();
+}
