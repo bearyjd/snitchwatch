@@ -70,7 +70,7 @@ Window {
     QtObject {
         id: feedStub
         property bool ok: true
-        function submitVerdict(rowId, choice, scope, duration) {}
+        function submitVerdict(rowId, choice, scope, duration, bindableProcessPath) {}
     }
 
     ConnectionsPage {
