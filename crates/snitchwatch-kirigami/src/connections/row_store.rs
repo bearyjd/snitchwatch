@@ -82,6 +82,9 @@ impl Verdict {
 ///   "not applicable yet".
 /// * A decided row with a known `matched_rule` shows that rule's name
 ///   verbatim (the inspector's "Show rule" action navigates to it).
+/// * A row the bridge marks `decided_by_default` (E3: the daemon reported
+///   that no rule matched) names the firewall's default action and the
+///   action it applied, whatever `matched_rule` says.
 /// * A decided row with no rule name on record (e.g. a row that predates this
 ///   field, or a decision path that doesn't yet populate it) reads "default
 ///   action" rather than blank — the connection was still decided by
@@ -90,6 +93,14 @@ impl Verdict {
 pub fn matched_rule_display(row: &ConnectionRow) -> String {
     if super::outcome::is_pending(row) {
         return "— awaiting decision".to_string();
+    }
+    if row.decided_by_default {
+        return match row.action.as_deref() {
+            Some(action @ ("allow" | "deny")) => {
+                format!("No rule: the firewall's default action ({action})")
+            }
+            _ => "No rule: the firewall's default action".to_string(),
+        };
     }
     match row.matched_rule.as_deref() {
         Some(name) if !name.trim().is_empty() => name.to_string(),
@@ -899,6 +910,29 @@ mod tests {
         let mut r = row("a", Some("allow"));
         r.matched_rule = None;
         assert_eq!(matched_rule_display(&r), "default action");
+    }
+
+    /// E3: the daemon said no rule matched. The flag wins over any name, and
+    /// the display says which action the default applied.
+    #[test]
+    fn matched_rule_display_decided_by_default_names_the_default_action() {
+        let mut r = row("a", Some("deny"));
+        r.decided_by_default = true;
+        assert_eq!(
+            matched_rule_display(&r),
+            "No rule: the firewall's default action (deny)"
+        );
+        r.action = Some("allow".to_string());
+        assert_eq!(
+            matched_rule_display(&r),
+            "No rule: the firewall's default action (allow)"
+        );
+        // Never a rule's name, even a stray one.
+        r.matched_rule = Some("stray".to_string());
+        assert_eq!(
+            matched_rule_display(&r),
+            "No rule: the firewall's default action (allow)"
+        );
     }
 
     #[test]

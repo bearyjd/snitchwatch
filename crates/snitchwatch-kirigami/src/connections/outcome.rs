@@ -9,10 +9,12 @@
 //! verdict through [`Verdict::of`]; otherwise a put-off row would look
 //! waiting, be auto-selected and offer Allow.
 //!
-//! [`outcome_text`] is the verdict label of a deferred row. It is fixed text
-//! and never names an action the bridge didn't report. "Usually" stays for
-//! an allow: under nftables chain churn a requeued packet can be dropped
-//! whatever the default action (bazzite-tower's r8 note).
+//! [`outcome_text`] is the verdict label of a deferred row, and of a row the
+//! firewall's default action decided (`decided_by_default`, E3: plan
+//! `2026-10-08-default-applied-events.md`). It is fixed text and never names
+//! an action the bridge didn't report. "Usually" stays for an allow: under
+//! nftables chain churn a requeued packet can be dropped whatever the
+//! default action (bazzite-tower's r8 note).
 
 use snitchwatch_bridge::ws_messages::ConnectionRow;
 
@@ -34,8 +36,16 @@ impl Verdict {
     }
 }
 
-/// The verdict label of a deferred row; empty for every other row.
+/// The verdict label of a deferred row or a row decided by the firewall's
+/// default action; empty for every other row.
 pub fn outcome_text(row: &ConnectionRow) -> &'static str {
+    if row.decided_by_default {
+        return match row.action.as_deref() {
+            Some("allow") => "Usually allowed (the firewall's default action)",
+            Some("deny") => "Denied (the firewall's default action)",
+            _ => "The firewall's default action",
+        };
+    }
     if !row.deferred {
         return "";
     }
@@ -153,5 +163,26 @@ mod tests {
             outcome_text(&row(None, true)),
             "Decided later: the firewall's default action"
         );
+    }
+
+    /// E3: a connection the daemon reports its default action decided.
+    #[test]
+    fn a_row_decided_by_default_says_so_with_its_action() {
+        let by_default = |action| ConnectionRow {
+            decided_by_default: true,
+            ..row(action, false)
+        };
+        assert_eq!(
+            outcome_text(&by_default(Some("deny"))),
+            "Denied (the firewall's default action)"
+        );
+        assert_eq!(
+            outcome_text(&by_default(Some("allow"))),
+            "Usually allowed (the firewall's default action)"
+        );
+        assert!(!is_pending(&by_default(Some("deny"))));
+        assert_eq!(Verdict::of(&by_default(Some("deny"))), Verdict::Denied);
+        // A plain decided row keeps its verdict label.
+        assert_eq!(outcome_text(&row(Some("deny"), false)), "");
     }
 }

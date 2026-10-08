@@ -306,9 +306,9 @@ Kirigami.ScrollablePage {
             // The bridge allowed this row once because filtering was paused
             // (issue #78). Always false on headers.
             required property bool answeredWhilePaused
-            // Prompt-slot plan Part C: a put-off row's label (empty
-            // otherwise), when the bridge answers a pending one (-1: never),
-            // and whether it was put off.
+            // Prompt-slot plan Part C: a put-off or default-decided row's
+            // label (empty otherwise), when the bridge answers a pending one
+            // (-1: never), and whether it was put off.
             required property string outcomeText
             required property real answerDeadlineMs
             required property bool deferred

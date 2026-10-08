@@ -68,8 +68,8 @@ const ROLE_MATCHED_RULE_DISPLAY: i32 = 19;
 const ROLE_SOURCE_SESSION: i32 = 20;
 /// The bridge allowed this row once because filtering was paused (#78).
 const ROLE_ANSWERED_WHILE_PAUSED: i32 = 21;
-/// A deferred row's verdict label (`connections::outcome::outcome_text`);
-/// empty otherwise. Prompt-slot plan Part C.
+/// A deferred row's verdict label (`connections::outcome::outcome_text`),
+/// or a default-decided row's (E3); empty otherwise. Prompt-slot plan Part C.
 const ROLE_OUTCOME_TEXT: i32 = 22;
 /// When the bridge answers a pending row itself, in Unix ms; -1 if never.
 /// A `real`: epoch milliseconds overflow a QML `int`.
