@@ -13,8 +13,6 @@ use snitchwatch_proto::protocol::{Operator, Rule};
 use std::collections::{BTreeMap, HashMap};
 
 pub const DUPLICATE_NAME: &str = "the file has more than one rule with this name";
-/// Longest condition value shown in full.
-const MAX_SHOWN_DATA_CHARS: usize = 200;
 
 /// What applying a previewed rule would do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -300,10 +298,9 @@ fn condition(leaf: &Operator) -> String {
     let shown = strip_display_hazards(&leaf.data);
     let hidden = shown.chars().count() != leaf.data.chars().count();
     let mut line = format!("{} {verb} ", leaf.operand);
-    line.extend(shown.chars().take(MAX_SHOWN_DATA_CHARS));
-    if shown.chars().count() > MAX_SHOWN_DATA_CHARS {
-        line.push('…');
-    }
+    // Never shortened: the tail of a pattern can be what broadens it, and
+    // the document cap already bounds the length.
+    line.push_str(&shown);
     if leaf.sensitive {
         line.push_str(" (case-sensitive)");
     }

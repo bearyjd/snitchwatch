@@ -405,6 +405,21 @@ fn preview_shows_what_will_be_installed() {
     assert!(condition.contains("hidden characters"), "{condition}");
 }
 
+/// A long condition is shown whole: a narrow-looking start could otherwise
+/// hide the part that broadens it.
+#[test]
+fn a_long_condition_is_shown_in_full() {
+    let pattern = format!("^(?:{})\\.example$|^(?:.+\\.)?evil\\.com$", "a".repeat(300));
+    let mut rule = wire(&app_bound("010-long", "allow"));
+    rule["operator"]["operands"][1] =
+        json!({ "type": "regexp", "operand": "dest.host", "data": pattern });
+    let items = previewed(document(vec![rule]), &synced(Vec::new()));
+    assert_eq!(items[0].kind, ImportKind::Add, "{items:?}");
+    let shown = &items[0].conditions[1];
+    assert!(shown.ends_with("evil\\.com$"), "{shown}");
+    assert!(shown.contains(&pattern), "{shown}");
+}
+
 // --- Fixtures -------------------------------------------------------------
 
 fn fixtures(kind: &str) -> Vec<(String, String)> {

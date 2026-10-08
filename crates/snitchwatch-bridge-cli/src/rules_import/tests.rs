@@ -482,7 +482,17 @@ async fn export_is_unavailable_until_rules_load_then_lists_them() {
 
 #[tokio::test]
 async fn apply_is_refused_for_an_unknown_preview_or_after_any_rule_change() {
-    let mut daemon = daemon(vec![host_rule("temp", "deny")]);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    // A five-minute rule the daemon created six minutes ago.
+    let temp = Rule {
+        duration: "5m".into(),
+        created: now - 360,
+        ..host_rule("temp", "deny")
+    };
+    let mut daemon = daemon(vec![temp]);
     respond(&mut daemon, |_| Some((true, String::new())));
     let import = task(&daemon, Duration::from_secs(600));
     let mut rx = daemon.broadcast.subscribe();
@@ -493,9 +503,28 @@ async fn apply_is_refused_for_an_unknown_preview_or_after_any_rule_change() {
         ServerMessage::RulesImportRefused { .. }
     ));
 
-    // A change between preview and apply (here: what the expiry tick does).
+    // The expiry tick prunes the rule between preview and apply.
     let id = preview_id(&import, &mut rx).await;
-    daemon.cache.lock().unwrap().remove("temp");
+    let tick = tokio::spawn(snitchwatch_bridge::cache::rules::prune_expired_rules_every(
+        Duration::from_millis(10),
+        Arc::downgrade(&daemon.cache),
+        daemon.broadcast.clone(),
+    ));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while daemon
+            .cache
+            .lock()
+            .unwrap()
+            .rules()
+            .unwrap()
+            .contains_key("temp")
+        {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the expiry tick never pruned the rule");
+    tick.abort();
     import.try_route(apply_message(&id));
     match next_import_message(&mut rx).await {
         ServerMessage::RulesImportRefused { reason } => assert_eq!(reason, STALE_PREVIEW),
