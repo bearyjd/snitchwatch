@@ -64,6 +64,13 @@ pub mod qobject {
         /// queued for the row's live bridge session (false after a
         /// disconnect, for a stale row, or without a bridge), so the page can
         /// say a Deny wasn't sent rather than guess why it wasn't remembered.
+        ///
+        /// `bindable_process_path` is `ConnectionsModel.rowDetailsJson(row)`'s
+        /// field of that name: whether the row's program has a file the
+        /// bridge can bind a rule to. The feed can't look it up itself (the
+        /// row store belongs to the model). Whatever `duration` asks for, a
+        /// remembered verdict goes out once-only when it is false
+        /// (`dispatch_to`).
         #[qinvokable]
         #[cxx_name = "submitVerdict"]
         fn submit_verdict(
@@ -72,6 +79,7 @@ pub mod qobject {
             choice: &QString,
             scope: &QString,
             duration: &QString,
+            bindable_process_path: bool,
         ) -> bool;
 
         /// Whether the bridge session row `row_id` came from advertised
@@ -127,8 +135,10 @@ impl qobject::BridgeFeed {
     fn send_client_json(self: Pin<&mut Self>, json: &QString) {
         let json = json.to_string();
         match crate::bridge_dispatch::decode_client(&json) {
+            // A row id in a JSON verdict names no program the caller vouches
+            // for, so a verdict that asks to be remembered goes out once-only.
             Ok(msg) => {
-                dispatch(msg);
+                dispatch(msg, false);
             }
             Err(e) => {
                 tracing::warn!(error = %e, %json, "BridgeFeed: bad ClientMessage JSON, dropped")
@@ -142,6 +152,7 @@ impl qobject::BridgeFeed {
         choice: &QString,
         scope: &QString,
         duration: &QString,
+        bindable_process_path: bool,
     ) -> bool {
         match crate::pending_decision::build_verdict_message(
             &row_id.to_string(),
@@ -149,7 +160,7 @@ impl qobject::BridgeFeed {
             &scope.to_string(),
             &duration.to_string(),
         ) {
-            Some(msg) => dispatch(msg),
+            Some(msg) => dispatch(msg, bindable_process_path),
             None => {
                 tracing::warn!(choice = %choice.to_string(), "BridgeFeed: unrecognised verdict choice");
                 false
@@ -206,12 +217,15 @@ fn verdict_not_remembered_row(connection_id: u64, msg: &ServerMessage) -> Option
 /// WebSocket client frame feeds. Both QML entry points converge here already
 /// typed, so a verdict never round-trips through JSON just to be re-parsed.
 /// Returns whether the message was queued.
-fn dispatch(msg: snitchwatch_bridge::ws_messages::ClientMessage) -> bool {
+fn dispatch(
+    msg: snitchwatch_bridge::ws_messages::ClientMessage,
+    bindable_process_path: bool,
+) -> bool {
     let Some(handles) = crate::bridge_runtime::handles() else {
         tracing::warn!("BridgeFeed: bridge not running; dropping client message");
         return false;
     };
-    match dispatch_to(&handles, msg) {
+    match dispatch_to(&handles, msg, bindable_process_path) {
         Ok(()) => true,
         Err(error) => {
             tracing::warn!(error = %error, "BridgeFeed: client mutation dropped");
@@ -223,6 +237,7 @@ fn dispatch(msg: snitchwatch_bridge::ws_messages::ClientMessage) -> bool {
 pub(crate) fn dispatch_to(
     handles: &crate::bridge_runtime::BridgeHandles,
     mut msg: snitchwatch_bridge::ws_messages::ClientMessage,
+    bindable_process_path: bool,
 ) -> Result<(), crate::bridge_runtime::SendClientMessageError> {
     // A verdict or configuration change applies to the service instance that
     // supplied the UI state. Never queue it across a disconnect: a restarted
@@ -230,6 +245,32 @@ pub(crate) fn dispatch_to(
     // Do not await on the Qt thread. `try_send` also rejects a saturated
     // channel instead of retaining a mutation long enough to cross a service
     // restart.
+    //
+    // Issues #44 and #72: whatever QML asked for, a verdict is not remembered
+    // for a program the caller says has no bindable file, nor, for a host
+    // scope, on a session without app-bound rules. Asked before `row_id` loses
+    // its session prefix below. The sheet already offers no such choice, so a
+    // downgrade here means one of its checks was bypassed (or the verdict came
+    // as JSON, which vouches for no program).
+    if let snitchwatch_bridge::ws_messages::ClientMessage::SetVerdict { row_id, .. } = &msg {
+        let app_bound_rules = app_bound_rules_for_row(Some(handles), row_id);
+        let (limited, changed) =
+            crate::pending_decision::limit_to_bridge(msg, app_bound_rules, bindable_process_path);
+        if let (
+            true,
+            snitchwatch_bridge::ws_messages::ClientMessage::SetVerdict { row_id, scope, .. },
+        ) = (changed, &limited)
+        {
+            tracing::warn!(
+                %row_id,
+                ?scope,
+                app_bound_rules,
+                bindable_process_path,
+                "BridgeFeed: a remembered verdict was sent once-only; the caller should not have asked for it"
+            );
+        }
+        msg = limited;
+    }
     if let snitchwatch_bridge::ws_messages::ClientMessage::SetVerdict { row_id, .. } = &mut msg {
         let Some((session, wire_id)) = split_session_row_id(row_id) else {
             return Err(crate::bridge_runtime::SendClientMessageError::StaleSession);

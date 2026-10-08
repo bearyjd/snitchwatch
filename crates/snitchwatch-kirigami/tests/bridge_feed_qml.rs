@@ -14,7 +14,8 @@
 //!   * the `BridgeFeed` cxx-qt wrapper registers as a QML type and
 //!     instantiates (a null root means it failed to register or compile), and
 //!   * `submitVerdict` is callable from QML with its documented four-token
-//!     signature and drives the real
+//!     signature plus the row's `bindableProcessPath` flag (a different arity
+//!     throws) and drives the real
 //!     `pending_decision::build_verdict_message` path without panicking (a
 //!     Rust panic inside the invokable aborts this test binary), and
 //!   * an unrecognised choice token is *rejected in Rust* rather than
@@ -88,17 +89,17 @@ Window {
         onTriggered: {
             try {
                 // The inline/batch default pair used by ConnectionsPage.
-                probeWindow.feed.submitVerdict("r1", "allow", "this_host", "this_time");
-                probeWindow.feed.submitVerdict("r2", "deny", "this_host", "this_time");
+                probeWindow.feed.submitVerdict("r1", "allow", "this_host", "this_time", true);
+                probeWindow.feed.submitVerdict("r2", "deny", "this_host", "this_time", true);
 
                 // Every remaining scope/duration token the sheet offers.
-                probeWindow.feed.submitVerdict("r3", "allow", "any_host_on_domain", "for_5_minutes");
-                probeWindow.feed.submitVerdict("r4", "deny", "any_host", "until_quit");
-                probeWindow.feed.submitVerdict("r5", "allow", "any_host", "forever");
+                probeWindow.feed.submitVerdict("r3", "allow", "any_host_on_domain", "for_5_minutes", true);
+                probeWindow.feed.submitVerdict("r4", "deny", "any_host", "until_quit", true);
+                probeWindow.feed.submitVerdict("r5", "allow", "any_host", "forever", false);
 
                 // Unrecognised choice: must be rejected in Rust (logged and
                 // dropped), never dispatched as some other verdict.
-                probeWindow.feed.submitVerdict("r6", "maybe", "this_host", "this_time");
+                probeWindow.feed.submitVerdict("r6", "maybe", "this_host", "this_time", true);
 
                 // The JSON sink the models' request signals use still works.
                 probeWindow.feed.sendClientJson(JSON.stringify({
@@ -138,7 +139,7 @@ Window {
                 // submitVerdict says whether the verdict was queued, so the
                 // page can tell a lost connection from an old bridge. Nothing
                 // can be queued headless.
-                const queued = probeWindow.feed.submitVerdict("1:8", "deny", "this_host", "this_time");
+                const queued = probeWindow.feed.submitVerdict("1:8", "deny", "this_host", "this_time", true);
                 if (queued !== false) {
                     throw new Error("submitVerdict reported " + queued + " without a bridge");
                 }
