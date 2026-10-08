@@ -12,12 +12,16 @@
 //!      `/usr/share/GeoIP/GeoLite2-Country.mmdb`,
 //!      `/var/lib/GeoIP/GeoLite2-Country.mmdb`.
 //!
-//! If none exist, [`discover_geoip_db`] returns `None` and the caller degrades
+//! If none exist, [`discover_with`] returns `None` and the caller degrades
 //! to the no-DB setup state — this is expected/common, not an error.
 //!
-//! The filesystem check is injected as an `exists` closure ([`discover_with`])
-//! so every branch of the priority order is unit-testable without touching
-//! the real filesystem or `/usr`, `/var`.
+//! Both the filesystem check (an `exists` closure) and the environment values
+//! (`env_override`, `home`, `xdg_data_home`) are injected into
+//! [`discover_with`], so every branch of the priority order is unit-testable
+//! without touching the real filesystem, `/usr`, `/var`, or — crucially — the
+//! process environment, which is global state that parallel tests would race
+//! on. The one place the real environment is read is
+//! [`super::resolver::discover_and_open`].
 
 use std::path::{Path, PathBuf};
 
@@ -48,10 +52,10 @@ fn candidate_paths(home: &str, xdg_data_home: Option<&str>) -> Vec<PathBuf> {
 /// simulate any candidate — including the hardcoded system paths — existing
 /// or not, without touching the real filesystem.
 ///
-/// An `env_override` that doesn't exist is not fatal: we log the fact (via
-/// the caller, see [`discover_geoip_db`]) and keep searching the rest of the
-/// priority order, since a stale/typo'd override shouldn't fully disable the
-/// panel when a database is available elsewhere.
+/// An `env_override` that doesn't exist is not fatal: we log a warning and
+/// keep searching the rest of the priority order, since a stale/typo'd
+/// override shouldn't fully disable the panel when a database is available
+/// elsewhere.
 pub fn discover_with(
     exists: impl Fn(&Path) -> bool,
     env_override: Option<&str>,
@@ -63,34 +67,15 @@ pub fn discover_with(
         if exists(&candidate) {
             return Some(candidate);
         }
+        tracing::warn!(
+            path = p,
+            "SNITCHWATCH_GEOIP_DB is set but the file does not exist; \
+             falling back to the standard search paths"
+        );
     }
     candidate_paths(home, xdg_data_home)
         .into_iter()
         .find(|p| exists(p))
-}
-
-/// Real-filesystem entry point: reads `$SNITCHWATCH_GEOIP_DB`, `$HOME`, and
-/// `$XDG_DATA_HOME` from the process environment and checks each candidate
-/// with `Path::exists`.
-pub fn discover_geoip_db() -> Option<PathBuf> {
-    let env_override = std::env::var("SNITCHWATCH_GEOIP_DB").ok();
-    if let Some(p) = env_override.as_deref() {
-        if !Path::new(p).exists() {
-            tracing::warn!(
-                path = p,
-                "SNITCHWATCH_GEOIP_DB is set but the file does not exist; \
-                 falling back to the standard search paths"
-            );
-        }
-    }
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-    let xdg_data_home = std::env::var("XDG_DATA_HOME").ok();
-    discover_with(
-        |p| p.exists(),
-        env_override.as_deref(),
-        &home,
-        xdg_data_home.as_deref(),
-    )
 }
 
 #[cfg(test)]
@@ -199,9 +184,11 @@ mod tests {
     }
 
     #[test]
-    fn discover_geoip_db_env_override_uses_real_filesystem() {
-        // Exercises the real-fs entry point end-to-end with a temp file, since
-        // every other test above only exercises the pure, injected-closure path.
+    fn env_override_is_found_on_the_real_filesystem() {
+        // Every other test above injects a fake `exists`; this one runs the
+        // production check (`Path::exists`) against a real temp file. The
+        // override is passed as a parameter, never via `set_var`, so it can't
+        // race with any other test over `SNITCHWATCH_GEOIP_DB`.
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("GeoLite2-Country.mmdb");
         std::fs::write(
@@ -210,12 +197,12 @@ mod tests {
         )
         .unwrap();
 
-        // SAFETY (test-only): serialised by `#[test]`'s default single-process
-        // execution of this function; no other test in this module reads
-        // SNITCHWATCH_GEOIP_DB, so a data race on this var is not possible.
-        std::env::set_var("SNITCHWATCH_GEOIP_DB", &db_path);
-        let found = discover_geoip_db();
-        std::env::remove_var("SNITCHWATCH_GEOIP_DB");
+        let found = discover_with(
+            |p| p.exists(),
+            db_path.to_str(),
+            "/nonexistent-home-for-tests",
+            None,
+        );
 
         assert_eq!(found, Some(db_path));
     }

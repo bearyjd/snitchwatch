@@ -98,30 +98,32 @@ mod tests {
 
     #[test]
     fn run_with_mock_produces_report_and_persists_across_runs() {
+        // Every host read goes through a `MockInspector`: the listeners,
+        // flatpak and systemd checks must never see the live machine, or any
+        // socket that opens/closes between the two scans becomes a spurious
+        // extra finding. The only real I/O left is the on-disk `scans.db`,
+        // which is exactly the persistence this test exists to prove.
         let dir = tempdir().unwrap();
-        let home = dir.path().join("home");
-        std::fs::create_dir_all(&home).unwrap();
-        std::fs::write(home.join(".bashrc"), "echo hi\n").unwrap();
-
+        let home = PathBuf::from("/home/tester");
+        let bashrc = home.join(".bashrc");
         let config = ScannerConfig {
-            home: home.clone(),
+            home,
             scans_db: dir.path().join("state/scans.db"),
         };
 
-        // First run reads the real filesystem for shell rc, so use RealSystem
-        // here to exercise the real read path end-to-end.
-        let sys = RealSystem;
-        let r1 = run_with(&sys, &config).unwrap();
+        let before = MockInspector::new().with_file(&bashrc, "echo hi\n");
+        let r1 = run_with(&before, &config).unwrap();
         assert!(r1.is_clean());
         assert!(r1
             .deferred_checks
             .iter()
             .any(|c| c.starts_with("outbound:")));
 
-        // Tamper and rescan -> a new finding, proving persistence across
-        // separate store opens.
-        std::fs::write(home.join(".bashrc"), "echo hi\nmalware\n").unwrap();
-        let r2 = run_with(&sys, &config).unwrap();
+        // Tamper and rescan with a fresh inspector (each `run_with` reopens
+        // the store from `scans_db`) -> a new finding, proving persistence
+        // across separate store opens.
+        let after = MockInspector::new().with_file(&bashrc, "echo hi\nmalware\n");
+        let r2 = run_with(&after, &config).unwrap();
         assert_eq!(r2.new.len(), 1);
         assert!(r2.new[0].path.ends_with(".bashrc"));
     }
