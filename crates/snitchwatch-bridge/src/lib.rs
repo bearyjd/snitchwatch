@@ -11,6 +11,7 @@ pub mod blocklists;
 pub mod bridge_capabilities;
 pub mod cache;
 pub mod client_presence;
+pub mod curated;
 pub mod daemon_alerts;
 pub mod daemon_commands;
 pub mod daemon_config;
