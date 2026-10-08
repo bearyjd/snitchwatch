@@ -157,6 +157,7 @@ impl ConnectionCache {
                 verdict,
                 &row.dst_host,
                 row.dst_port,
+                row.process_path.as_deref().unwrap_or(""),
             ));
             Ok(())
         } else {
@@ -305,7 +306,27 @@ mod tests {
         // #14 security review round 2, MEDIUM-2), so compute the expected
         // value via the same single-source-of-truth function rather than
         // hardcoding the hash.
-        let expected = crate::translator::verdict::rule_name_for(Verdict::Deny, "h", 443);
+        let expected = crate::translator::verdict::rule_name_for(Verdict::Deny, "h", 443, "");
+        assert_eq!(c.rows()[0].matched_rule.as_deref(), Some(expected.as_str()));
+    }
+
+    #[tokio::test]
+    async fn resolve_matched_rule_names_the_requesting_program() {
+        // Issue #44: app-bound rules carry the program in their name, so the
+        // "Show rule" jump must compute the same process-qualified name.
+        let mut c = ConnectionCache::new(10);
+        let mut row = pending_row("p1");
+        row.process_path = Some("/usr/bin/curl".to_string());
+        let _rx = c.insert_pending(row);
+        c.resolve(
+            "p1",
+            Verdict::Allow,
+            VerdictDuration::Always,
+            VerdictScope::ThisHost,
+        )
+        .unwrap();
+        let expected =
+            crate::translator::verdict::rule_name_for(Verdict::Allow, "h", 443, "/usr/bin/curl");
         assert_eq!(c.rows()[0].matched_rule.as_deref(), Some(expected.as_str()));
     }
 

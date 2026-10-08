@@ -379,7 +379,15 @@ async fn persistent_allow_verdict_broadcasts_rule_for_live_clients() {
             assert_eq!(rules[0]["name"], rule.name);
             assert_eq!(rules[0]["action"], "allow");
             assert_eq!(rules[0]["duration"], "always");
-            assert_eq!(rules[0]["operator"]["operand"], "dest.host");
+            // Issue #44: the remembered "This host" rule is bound to the
+            // asking program, end to end through the wire shape.
+            let operator = &rules[0]["operator"];
+            assert_eq!(operator["type"], "list");
+            assert_eq!(operator["operands"][0]["operand"], "process.path");
+            assert_eq!(operator["operands"][0]["data"], "/usr/bin/curl");
+            assert_eq!(operator["operands"][1]["operand"], "dest.host");
+            assert_eq!(operator["operands"][1]["data"], "example.com");
+            assert!(rule.name.contains("-pcurl-"), "got: {}", rule.name);
         }
         other => panic!("expected UpdateRules, got {other:?}"),
     }
