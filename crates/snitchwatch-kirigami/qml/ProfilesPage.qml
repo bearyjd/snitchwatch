@@ -62,6 +62,20 @@ Kirigami.ScrollablePage {
         }
     }
 
+    // Issue #46: the shipped bridge wires a no-op profile rule sink and an
+    // in-memory profile store (`snitchwatch-bridge-cli/src/lib.rs`), so
+    // activating a profile materializes no daemon rules and profiles are
+    // forgotten on restart. Deliberately unconditional and non-dismissable
+    // (no close button, no actions) until a real sink + persisted store land
+    // — then delete this banner.
+    header: Kirigami.InlineMessage {
+        type: Kirigami.MessageType.Warning
+        visible: true
+        text: "Preview: profiles are shown here but are not applied to the firewall yet, so "
+            + "activating one does not change any rules. Profiles are also kept in memory only "
+            + "and are lost when the bridge restarts."
+    }
+
     Kirigami.PlaceholderMessage {
         anchors.centerIn: parent
         width: parent.width - (Kirigami.Units.largeSpacing * 4)
