@@ -38,10 +38,12 @@ fn system_and_custom_socket_token_paths_match_the_service_layout() {
     );
 }
 
+/// Accept one client, check its token, acknowledge it and read its snapshot
+/// request. Returns the connection, which closes when the caller drops it.
 async fn accept_authenticated_snapshot(
     listener: &tokio::net::UnixListener,
     expected_token: &snitchwatch_bridge::auth::Token,
-) {
+) -> tokio_tungstenite::WebSocketStream<tokio::net::UnixStream> {
     let (stream, _) = listener.accept().await.expect("client connects");
     let mut ws = tokio_tungstenite::accept_async(stream)
         .await
@@ -75,6 +77,7 @@ async fn accept_authenticated_snapshot(
     )
     .expect("snapshot JSON parses");
     assert_eq!(snapshot, ClientMessage::RequestSnapshot);
+    ws
 }
 
 #[tokio::test]
@@ -276,7 +279,7 @@ async fn client_loop_forwards_authenticated_snapshot_to_the_qml_feed() {
         state: BridgeTrayState::Idle,
     });
     let (notice_tx, _) = broadcast::channel(1);
-    let status = Arc::new(Mutex::new(String::new()));
+    let status = Arc::new(Mutex::new(LinkStatus::default()));
     let connection = Arc::new(Mutex::new(ConnectionState::default()));
     let client = tokio::spawn(client_loop(
         config.ws_socket_path.clone(),
@@ -355,7 +358,7 @@ async fn a_server_message_this_client_cannot_parse_is_skipped() {
         state: BridgeTrayState::Idle,
     });
     let (notice_tx, _) = broadcast::channel(1);
-    let status = Arc::new(Mutex::new(String::new()));
+    let status = Arc::new(Mutex::new(LinkStatus::default()));
     let connection = Arc::new(Mutex::new(ConnectionState::default()));
     let client = tokio::spawn(async move {
         connect_and_relay(
@@ -469,7 +472,7 @@ async fn app_bound_rules_follow_each_sessions_acknowledgement() {
         socket_path.clone(),
         broadcast_tx,
         inbound_rx,
-        Arc::new(Mutex::new(String::new())),
+        Arc::new(Mutex::new(LinkStatus::default())),
         ShellFeeds {
             tray_tx,
             notice_tx,
@@ -555,7 +558,7 @@ async fn client_stays_pending_until_service_acknowledges_the_token() {
         state: BridgeTrayState::Idle,
     });
     let (notice_tx, _) = broadcast::channel(1);
-    let status = Arc::new(Mutex::new(String::new()));
+    let status = Arc::new(Mutex::new(LinkStatus::default()));
     let connection = Arc::new(Mutex::new(ConnectionState::default()));
     let client_connection = connection.clone();
     let client_status = status.clone();
@@ -581,8 +584,8 @@ async fn client_stays_pending_until_service_acknowledges_the_token() {
         "sending the token alone must not expose a connected session"
     );
     assert_ne!(
-        status.lock().unwrap().as_str(),
-        "Connected to bridge service",
+        status.lock().unwrap().state,
+        LinkState::Connected,
         "the status must remain pending until the acknowledgement arrives"
     );
 
@@ -627,7 +630,7 @@ async fn client_loop_reconnects_after_service_socket_and_token_rotation() {
         state: BridgeTrayState::Idle,
     });
     let (notice_tx, _) = broadcast::channel(1);
-    let status = Arc::new(Mutex::new(String::new()));
+    let status = Arc::new(Mutex::new(LinkStatus::default()));
     let connection = Arc::new(Mutex::new(ConnectionState::default()));
     let client = tokio::spawn(client_loop(
         socket_path.clone(),
@@ -706,7 +709,7 @@ async fn client_loop_recovers_from_missing_and_stale_tokens() {
         state: BridgeTrayState::Idle,
     });
     let (notice_tx, _) = broadcast::channel(1);
-    let status = Arc::new(Mutex::new(String::new()));
+    let status = Arc::new(Mutex::new(LinkStatus::default()));
     let connection = Arc::new(Mutex::new(ConnectionState::default()));
     let client = tokio::spawn(client_loop(
         socket_path,
@@ -765,4 +768,149 @@ fn production_client_runtime_cannot_take_over_service_resources() {
         !entrypoint.contains("snitchwatch_bridge_cli"),
         "the production binary must only start the external client runtime"
     );
+}
+
+// ---- the link state the bridge banner switches on --------------------------
+
+fn shell_feeds() -> ShellFeeds {
+    let (tray_tx, _) = watch::channel(ReceivedTrayState {
+        connection_id: 0,
+        state: BridgeTrayState::Idle,
+    });
+    let (notice_tx, _) = broadcast::channel(1);
+    ShellFeeds {
+        tray_tx,
+        notice_tx,
+        pause_tx: pause_channel().0,
+    }
+}
+
+async fn wait_for_state(status: &Arc<Mutex<LinkStatus>>, wanted: LinkState) -> LinkStatus {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let link = status.lock().unwrap().clone();
+            if link.state == wanted {
+                return link;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "the link never reached {wanted:?}; it is {:?}",
+            status.lock().unwrap()
+        )
+    })
+}
+
+#[test]
+fn link_states_have_the_fixed_tokens_the_banner_switches_on() {
+    let tokens: Vec<&str> = [
+        LinkState::Connecting,
+        LinkState::Connected,
+        LinkState::Retrying,
+        LinkState::Failed,
+        LinkState::Stopped,
+    ]
+    .into_iter()
+    .map(LinkState::token)
+    .collect();
+    assert_eq!(
+        tokens,
+        ["connecting", "connected", "retrying", "failed", "stopped"]
+    );
+}
+
+#[test]
+fn the_runtime_starts_out_connecting() {
+    let link = LinkStatus::connecting();
+    assert_eq!(link.state, LinkState::Connecting);
+    assert_eq!(LinkStatus::default().state, LinkState::Connecting);
+}
+
+#[test]
+fn a_runtime_that_could_not_start_is_failed_and_not_ok() {
+    let outcome = Outcome::Failed("no async runtime".to_string());
+    let link = link_of(&outcome);
+    assert_eq!(link.state, LinkState::Failed);
+    assert!(link.detail.contains("no async runtime"), "{link:?}");
+    assert_eq!(status_of(&outcome), (false, link.detail));
+}
+
+#[test]
+fn only_the_connected_state_is_ok() {
+    for (state, ok) in [
+        (LinkState::Connecting, false),
+        (LinkState::Connected, true),
+        (LinkState::Retrying, false),
+        (LinkState::Failed, false),
+        (LinkState::Stopped, false),
+    ] {
+        let link = LinkStatus {
+            state,
+            detail: "Connected to bridge service".to_string(),
+        };
+        assert_eq!(link.state == LinkState::Connected, ok, "{state:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_service_that_is_not_there_leaves_the_client_retrying() {
+    let dir = tempfile::tempdir().unwrap();
+    let (broadcast_tx, _) = broadcast::channel(1);
+    let (inbound_tx, inbound_rx) = mpsc::channel(1);
+    let status = Arc::new(Mutex::new(LinkStatus::connecting()));
+    let client = tokio::spawn(client_loop(
+        dir.path().join("no-such.sock"),
+        broadcast_tx,
+        inbound_rx,
+        status.clone(),
+        shell_feeds(),
+        Arc::new(Mutex::new(ConnectionState::default())),
+    ));
+
+    let link = wait_for_state(&status, LinkState::Retrying).await;
+    assert!(link.detail.starts_with("Bridge unavailable"), "{link:?}");
+    // It keeps trying: the task has not finished.
+    assert!(!client.is_finished());
+
+    drop(inbound_tx);
+    client.abort();
+}
+
+#[tokio::test]
+async fn a_connected_client_is_connected_and_stopped_once_its_sender_goes_away() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket_path = dir.path().join("bridge.sock");
+    let token = snitchwatch_bridge::auth::Token::generate();
+    snitchwatch_bridge::auth::write_token_file(&token, &dir.path().join("token")).unwrap();
+    let listener = tokio::net::UnixListener::bind(&socket_path).unwrap();
+    let server = tokio::spawn(async move {
+        // Keep the connection open: the service is up.
+        let _connection = accept_authenticated_snapshot(&listener, &token).await;
+        std::future::pending::<()>().await;
+    });
+
+    let (broadcast_tx, _) = broadcast::channel(4);
+    let (inbound_tx, inbound_rx) = mpsc::channel(1);
+    let status = Arc::new(Mutex::new(LinkStatus::connecting()));
+    let client = tokio::spawn(client_loop(
+        socket_path,
+        broadcast_tx,
+        inbound_rx,
+        status.clone(),
+        shell_feeds(),
+        Arc::new(Mutex::new(ConnectionState::default())),
+    ));
+
+    wait_for_state(&status, LinkState::Connected).await;
+    drop(inbound_tx);
+    tokio::time::timeout(Duration::from_secs(3), client)
+        .await
+        .expect("the client stops once nothing can send to it")
+        .unwrap();
+    let link = status.lock().unwrap().clone();
+    assert_eq!(link.state, LinkState::Stopped, "{link:?}");
+    server.abort();
 }

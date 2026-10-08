@@ -217,12 +217,15 @@ Kirigami.ApplicationWindow {
         }
     }
 
-    // App-level bridge status. Hidden while the bridge is healthy; shows an
-    // error banner over the current page if it failed to start. Floats above
-    // pageStack so it's visible on any tab. `statusText` carries the bridge
-    // runtime's own error message, so it sits in a PlainText label under the
-    // fixed-text message, never in it (issue #51: InlineMessage renders its
-    // text as markup).
+    // App-level bridge status. Hidden while the bridge is healthy; otherwise
+    // one fixed sentence for the link state the Rust runtime reports
+    // (`bridgeFeed.linkState`: connecting, retrying, failed or stopped), so the
+    // banner never claims the client keeps retrying while it is only starting
+    // or after it gave up. Floats above pageStack so it's visible on any tab.
+    // `statusText` carries the bridge runtime's own error message, so it sits
+    // in a PlainText label under the fixed-text message, never in it (issue
+    // #51: InlineMessage renders its text as markup), and the sentence is
+    // never chosen from it.
     ColumnLayout {
         id: bridgeBanner
         z: 999
@@ -236,10 +239,32 @@ Kirigami.ApplicationWindow {
         spacing: 0
 
         Kirigami.InlineMessage {
+            objectName: "bridgeMessage-connecting"
             Layout.fillWidth: true
-            visible: true
-            type: Kirigami.MessageType.Error
+            visible: bridgeFeed.linkState === "connecting"
+            type: Kirigami.MessageType.Information
+            text: "Snitchwatch is connecting to its background service."
+        }
+        Kirigami.InlineMessage {
+            objectName: "bridgeMessage-retrying"
+            Layout.fillWidth: true
+            visible: bridgeFeed.linkState === "retrying"
+            type: Kirigami.MessageType.Warning
             text: "Snitchwatch can't reach its background service. It keeps retrying."
+        }
+        Kirigami.InlineMessage {
+            objectName: "bridgeMessage-failed"
+            Layout.fillWidth: true
+            visible: bridgeFeed.linkState === "failed"
+            type: Kirigami.MessageType.Error
+            text: "Snitchwatch couldn't start its connection to the background service. Restart Snitchwatch to try again."
+        }
+        Kirigami.InlineMessage {
+            objectName: "bridgeMessage-stopped"
+            Layout.fillWidth: true
+            visible: bridgeFeed.linkState === "stopped"
+            type: Kirigami.MessageType.Error
+            text: "Snitchwatch's connection to its background service has ended. Restart Snitchwatch to connect again."
         }
         Rectangle {
             Layout.fillWidth: true

@@ -27,6 +27,7 @@ Kirigami.ScrollablePage {
             // Failure details from the bridge's daemon and kernel checks
             // (issue #51).
             textFormat: Text.PlainText
+            objectName: "daemonHealthTroubleshooting"
             text: page.model.troubleshootingText
         }
 

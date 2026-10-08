@@ -50,6 +50,9 @@ Window {
     ScannerController {
         id: scanner
     }
+    GeoModel {
+        id: geo
+    }
     WizardController {
         id: wizard
     }
@@ -59,6 +62,63 @@ Window {
         property string statusSummary: "Connection or kernel problem detected"
         property string troubleshootingText: probeWindow.markup
         function recheck() {}
+    }
+
+    // Every item named `name` under `item`.
+    function findAll(item, name) {
+        let found = [];
+        if (!item) return found;
+        if (item.objectName === name) found.push(item);
+        for (let i = 0; i < item.children.length; i++) {
+            found = found.concat(probeWindow.findAll(item.children[i], name));
+        }
+        return found;
+    }
+
+    // The labels that show external text, and that each page shows it as
+    // plain text: a warning-free load alone would pass without `PlainText`.
+    readonly property var externalTextLabels: [
+        "daemonHealthTroubleshooting", "autostartError", "coexistenceDetail",
+        "scannerErrorText", "scannerFindingPath", "wizardDetail", "geoDatabasePath"
+    ]
+
+    function checkPlainText() {
+        probeWindow.setExternalText();
+        for (const name of probeWindow.externalTextLabels) {
+            let labels = [];
+            for (const page of probeWindow.made) {
+                labels = labels.concat(probeWindow.findAll(page, name));
+            }
+            if (labels.length === 0) {
+                throw new Error("no label named " + name);
+            }
+            for (const label of labels) {
+                if (label.textFormat !== Text.PlainText) {
+                    throw new Error(name + " has textFormat " + label.textFormat);
+                }
+                if (label.text.indexOf(probeWindow.markup) < 0) {
+                    throw new Error(name + " does not show the markup literally: " + label.text);
+                }
+            }
+        }
+    }
+
+    // The coexistence instructions are dimmed as background text, but not
+    // while there is a conflict: that is when the user needs them.
+    function checkCoexistenceOpacity() {
+        let labels = [];
+        for (const page of probeWindow.made) {
+            labels = labels.concat(probeWindow.findAll(page, "coexistenceDetail"));
+        }
+        const label = labels[0];
+        if (label.opacity !== 1) {
+            throw new Error("conflict: the instructions are dimmed to " + label.opacity);
+        }
+        settings.coexistenceConflict = false;
+        if (label.opacity !== 0.7) {
+            throw new Error("no conflict: the detail is at " + label.opacity);
+        }
+        settings.coexistenceConflict = true;
     }
 
     function make(page, parent, props) {
@@ -88,7 +148,9 @@ Window {
             }
         }
     }
-    function populate() {
+    // Pages refresh their controllers when they load and can clear what was
+    // set before, so this runs again before the labels are checked.
+    function setExternalText() {
             settings.autostartError = probeWindow.markup;
             settings.coexistenceConflict = true;
             settings.coexistenceDetail = probeWindow.markup;
@@ -99,12 +161,17 @@ Window {
                 still_outstanding: [], resolved: [], informational: [], skipped: []
             });
             wizard.detail = probeWindow.markup;
-
+            geo.dbAvailable = false;
+            geo.dbPath = probeWindow.markup;
+    }
+    function populate() {
+        probeWindow.setExternalText();
             const area = probeWindow.contentItem;
             probeWindow.make("DaemonHealthPage.qml", area, { model: health });
             probeWindow.make("DiagnosticsPage.qml", area, { controller: settings });
             probeWindow.make("ScannerPage.qml", area, { controller: scanner });
             probeWindow.make("OnboardingPage.qml", area, { controller: wizard });
+            probeWindow.make("GeoPage.qml", area, { model: geo });
     }
     // Lets the pages lay out (and any binding warning surface) first. A
     // `throw` here is reported against the probe URL; `finally` still quits.
@@ -117,6 +184,8 @@ Window {
                 if (probeWindow.failure !== "") {
                     throw new Error("external-text probe: " + probeWindow.failure);
                 }
+                probeWindow.checkPlainText();
+                probeWindow.checkCoexistenceOpacity();
             } finally {
                 Qt.quit();
             }

@@ -44,6 +44,7 @@ Kirigami.ScrollablePage {
             }
 
             Controls.Label {
+                objectName: "autostartError"
                 Kirigami.FormData.label: "Status"
                 visible: page.controller && page.controller.autostartError.length > 0
                 textFormat: Text.PlainText
@@ -98,11 +99,14 @@ Kirigami.ScrollablePage {
         }
 
         Controls.Label {
+            objectName: "coexistenceDetail"
             Layout.fillWidth: true
             wrapMode: Text.Wrap
             textFormat: Text.PlainText
             text: page.controller ? page.controller.coexistenceDetail : ""
-            opacity: 0.7
+            // Dimmed as background text, but not when there is a conflict: the
+            // instructions are what the user needs then.
+            opacity: page.controller && page.controller.coexistenceConflict ? 1 : 0.7
         }
 
         Kirigami.Separator {

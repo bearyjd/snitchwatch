@@ -29,11 +29,20 @@ fn troubleshooting_text(checks: &[DiagnosticCheck]) -> String {
         .join("\n\n")
 }
 
+/// The only two sentences [`status_summary`] returns. The summary goes into
+/// `main.qml`'s `Kirigami.InlineMessage`, which renders its text as markup
+/// (issue #51), so it must never carry a check's detail: that text comes from
+/// the bridge's daemon and kernel probes and belongs in the PlainText
+/// troubleshooting label.
+const SUMMARY_HEALTHY: &str = "Everything looks healthy";
+const SUMMARY_PROBLEM: &str =
+    "Connection or kernel problem detected — see Daemon Health for details";
+
 fn status_summary(checks: &[DiagnosticCheck]) -> String {
     if has_problem(checks) {
-        "Connection or kernel problem detected — see Daemon Health for details".to_string()
+        SUMMARY_PROBLEM.to_string()
     } else {
-        "Everything looks healthy".to_string()
+        SUMMARY_HEALTHY.to_string()
     }
 }
 
@@ -90,7 +99,7 @@ impl Default for DaemonHealthModelRust {
     fn default() -> Self {
         Self {
             has_problem: false,
-            status_summary: QString::from("Everything looks healthy"),
+            status_summary: QString::from(SUMMARY_HEALTHY),
             troubleshooting_text: QString::default(),
         }
     }
@@ -199,5 +208,43 @@ mod tests {
         }];
         assert!(has_problem(&checks));
         assert!(troubleshooting_text(&checks).contains("no BTF"));
+    }
+
+    #[test]
+    fn the_summary_is_one_of_two_fixed_sentences_whatever_the_details_say() {
+        let markup = "<b>bold</b> <img src='https://example.invalid/x.png'> &amp;";
+        let failed = |kind| DiagnosticCheck {
+            kind,
+            status: CheckStatus::Failed {
+                detail: markup.to_string(),
+            },
+        };
+        let reports = [
+            vec![],
+            vec![DiagnosticCheck {
+                kind: CheckKind::DaemonReachable,
+                status: CheckStatus::Unknown,
+            }],
+            vec![failed(CheckKind::EbpfSupport)],
+            vec![
+                failed(CheckKind::DaemonReachable),
+                failed(CheckKind::FirewallRunning),
+                failed(CheckKind::EbpfSupport),
+                failed(CheckKind::NftablesSupport),
+            ],
+        ];
+        for checks in reports {
+            let summary = status_summary(&checks);
+            assert!(
+                summary == SUMMARY_HEALTHY || summary == SUMMARY_PROBLEM,
+                "{summary}"
+            );
+            assert!(
+                !summary.contains('<') && !summary.contains("example.invalid"),
+                "the summary carries check text: {summary}"
+            );
+        }
+        // The detail still reaches the troubleshooting text.
+        assert!(troubleshooting_text(&[failed(CheckKind::EbpfSupport)]).contains(markup));
     }
 }

@@ -51,6 +51,7 @@ Kirigami.ScrollablePage {
             Layout.rightMargin: Kirigami.Units.largeSpacing
             wrapMode: Text.Wrap
             textFormat: Text.PlainText
+            objectName: "scannerErrorText"
             text: page.controller ? page.controller.errorText : ""
         }
     }
@@ -136,6 +137,7 @@ Kirigami.ScrollablePage {
         Repeater {
             model: section.entries
             delegate: Controls.Label {
+                objectName: "scannerFindingPath"
                 Layout.fillWidth: true
                 wrapMode: Text.Wrap
                 // Host file paths: anyone can name a file to look like markup.
