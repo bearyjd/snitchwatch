@@ -71,7 +71,7 @@ impl InlineDeny {
     }
 
     /// The duration token (`pending_decision::parse_duration`) a Deny sends.
-    fn duration_token(self) -> &'static str {
+    pub(crate) fn duration_token(self) -> &'static str {
         match self {
             Self::UntilRestart => "until_quit",
             Self::ProgramUnknown | Self::BridgeTooOld => "this_time",

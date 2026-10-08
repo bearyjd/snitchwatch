@@ -33,6 +33,12 @@
 //! blocks) and queued back as the `reviewRequested` signal, which
 //! `main.qml` connects to the same raise/`requestActivate()` call Task 7's
 //! pending-count handler uses.
+//!
+//! **"Allow once" and "Deny" (prompt-slot plan Part B).** A pending notice
+//! also answers the prompt, as the inline buttons would
+//! (`crate::notification_actions`). It is shown only while its row still
+//! waits in the same session, checked after the grace period, and each
+//! action checks again. Its body is built from that row, escaped.
 
 use core::pin::Pin;
 use cxx_qt::Threading;
@@ -40,7 +46,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 
-use crate::bridge_runtime::BridgeNotice;
+use crate::bridge_runtime::{BridgeHandles, BridgeNotice, PendingRow};
+use crate::notification_actions::{
+    act, pending_body, still_waiting, NoticeAction, ALLOW_ONCE_ACTION, DENY_ACTION,
+};
 use crate::notifier::CooldownGate;
 use snitchwatch_bridge::translator::process_binding::RuleRefusal;
 
@@ -143,8 +152,12 @@ impl qobject::NotificationController {
                             tokio::spawn(async move {
                                 tokio::time::sleep(PENDING_GRACE_PERIOD).await;
                                 let _ = qt_thread.queue(move |qobject| {
-                                    if session_handles.is_current_session(connection_id) {
-                                        qobject.maybe_dispatch(notice, gate);
+                                    // Only a prompt that still waits, in this
+                                    // session (Part B).
+                                    if let Some(target) =
+                                        PendingTarget::of(&session_handles, connection_id, &notice)
+                                    {
+                                        qobject.maybe_dispatch(notice, gate, Some(target));
                                     }
                                 });
                             });
@@ -153,7 +166,7 @@ impl qobject::NotificationController {
                             let session_handles = handles.clone();
                             let _ = qt_thread.queue(move |qobject| {
                                 if session_handles.is_current_session(connection_id) {
-                                    qobject.maybe_dispatch(notice, gate);
+                                    qobject.maybe_dispatch(notice, gate, None);
                                 }
                             });
                         }
@@ -179,6 +192,7 @@ impl qobject::NotificationController {
         mut self: Pin<&mut Self>,
         notice: BridgeNotice,
         gate: Arc<Mutex<CooldownGate>>,
+        target: Option<PendingTarget>,
     ) {
         if matches!(notice, BridgeNotice::Pending { .. }) && *self.window_active() {
             // Window came back to the front during the grace period — the
@@ -193,13 +207,55 @@ impl qobject::NotificationController {
         if !allow {
             return;
         }
-        self.as_mut().dispatch(notice);
+        match target {
+            Some(target) => self.as_mut().dispatch_pending(target),
+            None => self.as_mut().dispatch(notice),
+        }
+    }
+
+    /// The pending notice: Allow once, Deny and Review. Each answer checks
+    /// that its row still waits before it sends, and anything worth saying
+    /// afterwards goes out as a fixed-text notification.
+    fn dispatch_pending(self: Pin<&mut Self>, target: PendingTarget) {
+        let qt_thread = self.qt_thread();
+        std::thread::spawn(move || {
+            let mut notification = notify_rust::Notification::new();
+            notification
+                .summary("Snitchwatch — pending decision")
+                .body(&pending_body(&target.row))
+                .icon("security-high")
+                .action(ALLOW_ONCE_ACTION, "Allow once")
+                .action(DENY_ACTION, "Deny")
+                .action(REVIEW_ACTION_ID, "Review");
+            match notification.show() {
+                Ok(handle) => handle.wait_for_action(|action| {
+                    if action == REVIEW_ACTION_ID {
+                        let _ = qt_thread.queue(|qobject| qobject.review_requested());
+                    } else if let Some(answer) = NoticeAction::from_id(action) {
+                        let outcome = act(
+                            &target.handles,
+                            target.connection_id,
+                            &target.wire_id,
+                            answer,
+                        );
+                        if let Some(text) = outcome.explanation() {
+                            show_plain("Snitchwatch — your answer", text);
+                        }
+                    }
+                }),
+                Err(err) => tracing::warn!(?err, "failed to dispatch desktop notification"),
+            }
+        });
     }
 
     /// Build and show the notification on a scratch thread (`notify-rust`'s
     /// `wait_for_action` blocks the calling thread until the notification
     /// closes), queuing `reviewRequested` back if the action fires.
     fn dispatch(self: Pin<&mut Self>, notice: BridgeNotice) {
+        if matches!(notice, BridgeNotice::Pending { .. }) {
+            // Only through `dispatch_pending`, for a row that still waits.
+            return;
+        }
         let (summary, body, reviewable) = notice_text(&notice);
 
         let qt_thread = self.qt_thread();
@@ -227,6 +283,38 @@ impl qobject::NotificationController {
                 }
             }
         });
+    }
+}
+
+/// A pending notice's row, while it still waits in the notice's session.
+struct PendingTarget {
+    handles: BridgeHandles,
+    connection_id: u64,
+    wire_id: String,
+    row: PendingRow,
+}
+
+impl PendingTarget {
+    fn of(handles: &BridgeHandles, connection_id: u64, notice: &BridgeNotice) -> Option<Self> {
+        let (wire_id, row) = still_waiting(handles, connection_id, notice)?;
+        Some(Self {
+            handles: handles.clone(),
+            connection_id,
+            wire_id,
+            row,
+        })
+    }
+}
+
+/// A notification with fixed text and no actions.
+fn show_plain(summary: &str, body: &str) {
+    if let Err(err) = notify_rust::Notification::new()
+        .summary(summary)
+        .body(body)
+        .icon("security-high")
+        .show()
+    {
+        tracing::warn!(?err, "failed to dispatch desktop notification");
     }
 }
 

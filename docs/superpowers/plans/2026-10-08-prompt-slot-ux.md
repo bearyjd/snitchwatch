@@ -298,6 +298,36 @@ Branch `feat/78-pause-answers-waiting`, after #86; owner decision: option 1.
      the inspector does since #56.
 6. **No remembered Allow from a notification.** Only Allow-once.
 
+#### B as implemented (2026-10-08): departures
+
+Branch `feat/prompt-slot-notification-actions`, after Part C.
+- **No QML in the path.** The actions run in Rust on the notification's
+  thread (`notification_actions::act`), through `bridge_feed::dispatch_to`
+  rather than `BridgeFeed.submitVerdict`. So #77's gate and the
+  session-routed send apply, with the window closed too.
+  - Deny's duration comes from `InlineDeny::decide`, the inline button's
+    rule: until restart only for a bindable program on a session with
+    app-bound rules, otherwise once.
+  - A once-only Deny follows up with the same plain sentence the page shows.
+- **Row ids.** `Notice::Pending { row_id }` is the ask id, so the row is
+  `ask_row_id(row_id)` in the notice's session.
+- **Still waiting?** The runtime keeps each session's waiting rows
+  (`bridge_runtime/pending_rows.rs`), fed by the same row messages as the
+  model. It uses the same pending test and starts empty per session.
+  - After the 5 s grace a notice is shown only if its row still waits in
+    its session. This closes #78's gap: a prompt answered by a tray-only
+    pause within 5 s is no longer announced.
+  - Every action checks again. A stale one sends nothing and says so in a
+    fixed-text notification.
+- **Body.** It is built from the waiting row, not the notice:
+  "<program> wants to connect to <host>". Both are escaped for the
+  notification markup subset by the bridge's `sanitize_for_display`, which
+  also strips control and bidi characters.
+- **No "Decide later" on the notification.** Item 8 lists it, but the owner's
+  S5 is "Allow once and Deny only". It can be added if S5 is widened.
+- **Not done:** the notification isn't withdrawn when its row is answered
+  elsewhere. Acting on it is harmless.
+
 ### C. Bridge auto-answer and "Decide later" (BR + UI, M; S1/S2 decided: P-a after 30 s, "Decide later" = P-c)
 
 7. **Auto-answer.** `ask_rule`'s `tokio::select!` gains a third arm,

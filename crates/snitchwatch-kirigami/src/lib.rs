@@ -25,6 +25,7 @@ pub(crate) mod inline_deny;
 pub mod insight;
 pub mod insight_model;
 pub mod make_rule;
+pub mod notification_actions;
 pub mod notification_controller;
 pub mod notifier;
 pub mod panic_hook;
