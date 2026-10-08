@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use cxx_qt_lib::{QByteArray, QGuiApplication, QQmlApplicationEngine, QUrl};
+use snitchwatch_bridge::ws_messages::{RuleCommandOutcome, ServerMessage};
 
 #[allow(unused_imports)]
 use snitchwatch_kirigami::bridge_bindings as _;
@@ -182,8 +183,7 @@ Window {
                     }
                 }
                 probeWindow.expect(markup >= 1, "markup-bearing labels checked: " + markup);
-                controller.applyServerMessageJson(JSON.stringify({ action: "ruleCommandResult",
-                    requestId: "someone-else", outcome: { status: "ok" } }));
+                controller.applyServerMessageJson(OTHER_RESULT_JSON);
                 probeWindow.expect(sheet.opened, "another request's result closed the sheet");
                 controller.saved();
                 probeWindow.expect(!sheet.visible, "the confirmation didn't close the sheet");
@@ -247,9 +247,21 @@ fn the_editor_opens_edits_warns_and_waits_for_the_bridge() {
         })
     });
 
+    // A real result for a request this controller never sent, built from
+    // the type so the probe can't pass on a message that fails to parse.
+    let other_result = serde_json::to_string(&ServerMessage::RuleCommandResult {
+        request_id: "someone-else".into(),
+        outcome: RuleCommandOutcome::Ok,
+    })
+    .unwrap();
+    let probe = PROBE.replace(
+        "OTHER_RESULT_JSON",
+        &serde_json::to_string(&other_result).unwrap(),
+    );
+
     let captured = capture_stderr(|| {
         if let Some(engine) = engine.as_mut() {
-            engine.load_data(&QByteArray::from(PROBE), &QUrl::from(PROBE_URL));
+            engine.load_data(&QByteArray::from(probe.as_str()), &QUrl::from(PROBE_URL));
         }
         if root_ok.load(Ordering::SeqCst) {
             if let Some(app) = app.as_mut() {

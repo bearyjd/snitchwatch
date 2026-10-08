@@ -6,6 +6,7 @@ use super::editor_view::*;
 use serde_json::json;
 use snitchwatch_bridge::rule_policy::RuleProblem;
 use snitchwatch_bridge::ws_messages::{ClientMessage, RuleCommandOutcome, ServerMessage};
+use std::time::{Duration, Instant};
 
 fn curl_draft() -> RuleDraft {
     RuleDraft {
@@ -111,16 +112,55 @@ fn each_result_says_what_happened_in_plain_words() {
     assert!(!unsure.saved && unsure.status.contains("both may exist"));
 }
 
+/// The controller's whole wait: only the awaited result finishes it, once;
+/// silence gives up after `NO_ANSWER_AFTER` without claiming a failure.
 #[test]
-fn only_the_awaited_result_counts() {
-    let result = |id: &str| ServerMessage::RuleCommandResult {
+fn only_the_awaited_result_finishes_the_wait() {
+    let result = |id: &str, outcome| ServerMessage::RuleCommandResult {
         request_id: id.into(),
-        outcome: RuleCommandOutcome::Ok,
+        outcome,
     };
-    assert!(awaits(Some("7-1"), &result("7-1")));
-    assert!(!awaits(Some("7-1"), &result("7-2")));
-    assert!(!awaits(None, &result("7-1")));
-    assert!(interests_rule_editor(&result("x")));
+    let start = Instant::now();
+    let mut pending = Pending::default();
+    assert!(!pending.is_waiting());
+    assert_eq!(
+        pending.on_message(&result("7-1", RuleCommandOutcome::Ok)),
+        None
+    );
+
+    pending.sent("7-1".into(), start);
+    assert!(pending.is_waiting());
+    assert_eq!(
+        pending.on_message(&result("7-2", RuleCommandOutcome::Ok)),
+        None
+    );
+    assert_eq!(pending.poll(start + NO_ANSWER_AFTER), None);
+    let done = pending
+        .on_message(&result("7-1", RuleCommandOutcome::NoDaemon))
+        .expect("the awaited result");
+    assert!(!done.saved && done.status.contains("nothing was sent"));
+    assert!(!pending.is_waiting());
+    assert_eq!(
+        pending.on_message(&result("7-1", RuleCommandOutcome::Ok)),
+        None
+    );
+
+    pending.sent("7-3".into(), start);
+    let saved = pending.on_message(&result("7-3", RuleCommandOutcome::Ok));
+    assert!(saved.is_some_and(|done| done.saved));
+
+    pending.sent("7-4".into(), start);
+    let gave_up = pending
+        .poll(start + NO_ANSWER_AFTER + Duration::from_secs(1))
+        .expect("gives up");
+    assert!(!gave_up.saved && gave_up.status == UNKNOWN);
+    assert!(!pending.is_waiting());
+    assert_eq!(
+        pending.on_message(&result("7-4", RuleCommandOutcome::Ok)),
+        None
+    );
+
+    assert!(interests_rule_editor(&result("x", RuleCommandOutcome::Ok)));
     assert!(!interests_rule_editor(&ServerMessage::SetRules {
         rules: vec![]
     }));

@@ -6,6 +6,7 @@
 use serde::Serialize;
 use serde_json::Value;
 use snitchwatch_bridge::ws_messages::{ClientMessage, RuleCommandOutcome, ServerMessage};
+use std::time::{Duration, Instant};
 
 use super::editor::{plain_problems, EditorCheck, RuleDraft};
 use super::row_store::RulesStore;
@@ -109,12 +110,57 @@ pub fn finished(outcome: &RuleCommandOutcome) -> Finished {
     Finished { saved, status }
 }
 
-/// Whether `message` is the result the editor is waiting for.
-pub fn awaits(waiting: Option<&str>, message: &ServerMessage) -> bool {
-    matches!(
-        (waiting, message),
-        (Some(id), ServerMessage::RuleCommandResult { request_id, .. }) if request_id == id
-    )
+/// How long to wait for a result before giving up. A rename waits for up to
+/// three daemon answers (5 s each) plus the reply, so well above that.
+pub const NO_ANSWER_AFTER: Duration = Duration::from_secs(30);
+
+/// The request the editor is waiting for, if any.
+#[derive(Debug, Default)]
+pub struct Pending {
+    waiting: Option<(String, Instant)>,
+}
+
+impl Pending {
+    /// `request_id` was sent at `now`.
+    pub fn sent(&mut self, request_id: String, now: Instant) {
+        self.waiting = Some((request_id, now));
+    }
+
+    pub fn is_waiting(&self) -> bool {
+        self.waiting.is_some()
+    }
+
+    /// The finished command, when `message` is the awaited result; the wait
+    /// ends there.
+    pub fn on_message(&mut self, message: &ServerMessage) -> Option<Finished> {
+        let ServerMessage::RuleCommandResult {
+            request_id,
+            outcome,
+        } = message
+        else {
+            return None;
+        };
+        let (awaited, _) = self.waiting.as_ref()?;
+        if awaited != request_id {
+            return None;
+        }
+        self.waiting = None;
+        Some(finished(outcome))
+    }
+
+    /// Give up after [`NO_ANSWER_AFTER`] of silence: the change may or may
+    /// not have been made.
+    pub fn poll(&mut self, now: Instant) -> Option<Finished> {
+        let (_, sent_at) = self.waiting.as_ref()?;
+        if now.duration_since(*sent_at) <= NO_ANSWER_AFTER {
+            return None;
+        }
+        self.waiting = None;
+        Some(Finished {
+            saved: false,
+            status: UNKNOWN.to_string(),
+        })
+    }
 }
 
 /// The live feed's filter for the editor.

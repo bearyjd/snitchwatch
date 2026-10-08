@@ -14,17 +14,13 @@ use cxx_qt::{CxxQtType, Threading};
 use cxx_qt_lib::QString;
 use serde_json::Value;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use crate::bridge_runtime::SendClientMessageError;
 use crate::rules::editor::{self, RuleDraft};
 use crate::rules::editor_view;
 use crate::rules::simulator::SimulationForm;
 use snitchwatch_bridge::ws_messages::{ClientMessage, ServerMessage};
-
-/// How long to wait for a result. A rename waits for up to three daemon
-/// answers (5 s each) plus the reply, so well above that.
-const NO_ANSWER_AFTER: Duration = Duration::from_secs(30);
 
 const NOT_CONNECTED: &str = "Snitchwatch isn't connected to its service, so nothing was sent.";
 const QUEUE_FULL: &str = "Snitchwatch is busy, so nothing was sent. Try again in a moment.";
@@ -127,8 +123,7 @@ pub struct RuleEditorControllerRust {
     check_json: QString,
     /// The cached rule being edited, for the cautions.
     old: Option<Value>,
-    waiting: Option<String>,
-    sent_at: Option<Instant>,
+    pending: editor_view::Pending,
 }
 
 fn next_request_id() -> String {
@@ -265,27 +260,29 @@ impl qobject::RuleEditorController {
             self.set_status(reason);
             return false;
         }
-        self.as_mut().rust_mut().waiting = Some(request_id);
-        self.as_mut().rust_mut().sent_at = Some(Instant::now());
+        self.as_mut()
+            .rust_mut()
+            .pending
+            .sent(request_id, Instant::now());
         self.as_mut().set_busy(true);
         self.set_status(SAVING);
         true
     }
 
-    fn poll(self: Pin<&mut Self>) {
-        let silent = self
-            .sent_at
-            .is_some_and(|at| at.elapsed() > NO_ANSWER_AFTER);
-        if self.busy && silent {
-            self.finish(editor_view::UNKNOWN);
+    fn poll(mut self: Pin<&mut Self>) {
+        let gave_up = self.as_mut().rust_mut().pending.poll(Instant::now());
+        if let Some(done) = gave_up {
+            self.finish(done);
         }
     }
 
-    fn finish(mut self: Pin<&mut Self>, status: &str) {
-        self.as_mut().rust_mut().waiting = None;
-        self.as_mut().rust_mut().sent_at = None;
+    /// The wait ended: say how, and close the sheet if it was saved.
+    fn finish(mut self: Pin<&mut Self>, done: editor_view::Finished) {
         self.as_mut().set_busy(false);
-        self.set_status(status);
+        self.as_mut().set_status(&done.status);
+        if done.saved {
+            self.saved();
+        }
     }
 
     fn apply_server_message_json(self: Pin<&mut Self>, json: &QString) {
@@ -296,16 +293,9 @@ impl qobject::RuleEditorController {
     }
 
     fn on_message(mut self: Pin<&mut Self>, message: ServerMessage) {
-        if !editor_view::awaits(self.waiting.as_deref(), &message) {
-            return;
-        }
-        let ServerMessage::RuleCommandResult { outcome, .. } = message else {
-            return;
-        };
-        let done = editor_view::finished(&outcome);
-        self.as_mut().finish(&done.status);
-        if done.saved {
-            self.saved();
+        let done = self.as_mut().rust_mut().pending.on_message(&message);
+        if let Some(done) = done {
+            self.finish(done);
         }
     }
 
