@@ -8,7 +8,8 @@
   merged.
 - Part 3 (the simulator, Kirigami-only) can use #48's `Rule.precedence`
   now.
-- Only N1's persistence waits, on #45 PR A's state directory.
+- Only N1's persistence (decided: yes, 2026-10-08) waits, on #45 PR A's
+  state directory.
 
 **Size:** M, as three PRs:
 1. Bridge hit counts and the protocol (S–M).
@@ -165,7 +166,8 @@ Functions are cited by name.
      - It never clears for the session.
    - **Bounds.** At most `MAX_SNAPSHOT_RULES` entries in the main map. A
      rename starts at zero.
-   - **Persistence** is owner question N1. If yes, save a JSON file in
+   - **Persistence** is owner question N1, **decided yes (owner,
+     2026-10-08)**. Save a JSON file in
      the bridge state directory (#45 PR A's resolver) every 5 min and on
      shutdown. Load it at start, but only for names that match the first
      committed snapshot.
@@ -255,6 +257,10 @@ Functions are cited by name.
        program with no recorded checksum matches hash conditions".
    - **`user.name` and `lists.*`** stay unsupported, each with its own
      reason string.
+   - **Regexp character classes** are read through a strict allowlist
+     (`rules/simulator/re2.rs`). A pattern with a class outside it is
+     reported as not simulated, never guessed. Chosen overnight (#75);
+     **confirmed (owner, 2026-10-08).**
 8. **Fix `is_precedence`** to read #48's `Rule.precedence`.
 9. **UI.**
    - The simulator panel on `RulesPage.qml` gets an "Advanced inputs"
@@ -371,9 +377,12 @@ Tower VM checks:
   PR A adds the resolver. The benefit is that "unused" can mean more than
   "since this boot". **Recommendation: yes.**
 
+  **DECIDED (owner, 2026-10-08): yes.** Persist rule hit counts across
+  restarts. The 14-day "unused" window (N2, below) applies.
+
 **Decided here (was N2).** The "unused" window is **14 days** with zero
-counted hits, shown only if N1 = yes; otherwise the badge is only "No hits
-since <time>".
+counted hits, shown only if N1 = yes (it is, as of 2026-10-08); otherwise
+the badge is only "No hits since <time>".
 - 7 days misses weekly jobs.
 - 30 days hides stale rules for a month.
 - Without persistence, "unused" can't honestly span a restart.

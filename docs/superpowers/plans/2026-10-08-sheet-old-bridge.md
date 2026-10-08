@@ -17,7 +17,7 @@ offers "Until firewall restarts" and "Forever" for those scopes. On such a
 bridge, Allow + This host + Forever lets every app reach that host forever.
 That is the original #44 bug.
 
-## Decision (orchestrator, logged for the owner): fail-safe
+## Decision (orchestrator; confirmed by the owner, 2026-10-08): fail-safe
 
 - **Persistent durations are blocked.** When the row's bridge session did
   not advertise `appBoundRules`, the sheet offers only "This time" for

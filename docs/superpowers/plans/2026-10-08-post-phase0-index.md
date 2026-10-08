@@ -60,10 +60,10 @@ No plan needs `CHANGE_CONFIG`, `TASK_START` or `RELOAD_FW_RULES`.
 | Item | Plan | Size | Depends on | Owner questions |
 |---|---|---|---|---|
 | 9a inline Deny until restart | `2026-10-08-inline-deny-until-restart.md` | S | **#44 Part A** (bridge refusal of non-absolute paths, `bindableProcessPath` role, `&str` predicate) | none (D1–D3 decided) |
-| 9b prompt slot | `2026-10-08-prompt-slot-ux.md` | M (A, B: S each; C, D: M) | A/B: #44 Part A (shared `Notice` sites) and the inline-Deny plan (shared Deny semantics). C: S1/S2 answered. D: the security PR's `rule_policy.rs`, the `snitchwatch-default-` prefix refusal (P2.7/P2.1's profile layer, or D's own check if it lands first), the capture spike, S3 | S1, S2, S3, S4 (daemon option), S5 |
+| 9b prompt slot | `2026-10-08-prompt-slot-ux.md` | M (A, B: S each; C, D: M) | A/B: #44 Part A (shared `Notice` sites) and the inline-Deny plan (shared Deny semantics). C: S1/S2 decided. D: the security PR's `rule_policy.rs`, the `snitchwatch-default-` prefix refusal (P2.7/P2.1's profile layer, or D's own check if it lands first), the capture spike (S3 is decided) | none (S1–S5 decided 2026-10-08; S4 sent to tower) |
 | P2.7 import/export | `2026-10-08-rule-import-export.md` | S–M | the security PR's `rule_policy.rs` | none (X1–X4 decided) |
-| P2.6 insights | `2026-10-08-rule-insights.md` | M (3 PRs) | none for any part now that #48 is merged. N1 persistence needs #45 PR A's state dir | N1 (N2 decided) |
-| P2.1 rule editor | `2026-10-08-rule-editor.md` | M–L | the security PR's `rule_policy.rs`; P2.7's profile layer if it lands first | E2 (E1, E3 decided) |
+| P2.6 insights | `2026-10-08-rule-insights.md` | M (3 PRs) | none for any part now that #48 is merged. N1 persistence needs #45 PR A's state dir | none (N1, N2 decided) |
+| P2.1 rule editor | `2026-10-08-rule-editor.md` | M–L | the security PR's `rule_policy.rs`; P2.7's profile layer if it lands first | none (E1–E3 decided) |
 
 Existing plans this builds on:
 - `2026-10-07-app-bound-prompt-scopes-part2.md` (#44 A/B);
@@ -75,6 +75,10 @@ Existing plans this builds on:
 
 #48 has merged (`4b3ba52`), so the "wait for #48" step is done.
 
+**Nothing is blocked on owner answers any more.** Every owner question was
+decided on 2026-10-08 (see the roll-up at the end). What is left is
+ordering and PR dependencies only.
+
 1. **#44 Part A** (existing plan). It is a hard prerequisite for inline
    Deny: without it, an `until restart` deny with an empty or placeholder
    path blocks every app, or binds to a forgeable path.
@@ -85,10 +89,12 @@ Existing plans this builds on:
      Verification).
 3. **Prompt-slot A + B** (visibility, notification actions). Land after
    #44 Part A, since both add `Notice` variants. Meanwhile:
-   - put **S1/S2/S5** to the owner;
+   - **S1/S2/S5** are decided (2026-10-08), so B and C need no more owner
+     input;
    - start the **capture spike** for D on tower's VM, once tower's
      rollout-gate timing work is done (roadmap §6 item 5);
-   - send tower the **E options** (S4).
+   - the **E options** (S4: E2 as a daemon option off by default, and E3)
+     were sent to tower on 2026-10-08.
 4. **The security PR's `rule_policy.rs`** (in flight). It gates P2.7,
    P2.1 and prompt-slot D.
 5. **P2.7 import/export.** It adds the `PolicyProfile::Import` layer
@@ -98,10 +104,10 @@ Existing plans this builds on:
    parallel; Part 2 follows Part 1.
 7. **P2.1 editor**, last of the three. It adds the `Editor` profile and
    `request_id`/`RuleCommandResult`. **#46 Part 2** follows it.
-8. **Prompt-slot C** once S1/S2 are answered (it edits `ask_rule`, so
-   rebase on #44 Part A). **Prompt-slot D** once `rule_policy.rs` exists,
-   the `snitchwatch-default-` prefix is refused for GUI-authored rules
-   (P2.7/P2.1, or D adds it), and S3 is answered.
+8. **Prompt-slot C** (S1/S2 are decided; it edits `ask_rule`, so rebase on
+   #44 Part A). **Prompt-slot D** once `rule_policy.rs` exists and the
+   `snitchwatch-default-` prefix is refused for GUI-authored rules
+   (P2.7/P2.1, or D adds it); S3 is decided.
 
 #45 PR B can land any time now. It doesn't lift the `lists.*` refusal in
 the editor or import: list rules stay authored by #45's materializer only.
@@ -166,29 +172,52 @@ field.
 
 ## OWNER QUESTIONS (roll-up)
 
-Only questions that need the owner remain. Everything else is decided in
-the plans, with rationale (list below).
+**No owner question is open.** The owner answered "all as recommended" on
+2026-10-08. Each plan's OWNER QUESTIONS section carries the same
+**DECIDED (owner, 2026-10-08)** line. Everything else was decided in the
+plans, with rationale (list below).
 
-**Open**
-- **S1** (prompt slot): silent auto-answer: on/off, the timeout, and the
-  reply. **Recommendation:** on, 30 s, daemon default (P-a).
-- **S2** (prompt slot): "Decide later" semantics.
-  **Recommendation:** block the program for 5 min (P-c).
-- **S3** (prompt slot): curated defaults: opt-in or on by default, the
-  list, `kioworker`/Steam scope, per-user path regexps.
-  **Recommendation:** opt-in; `/usr` only; host-constrained; no regexps
-  in v1.
-- **S4** (prompt slot, daemon-option part only): may we ask tower for E2
-  ("drop while busy")? It changes daemon behaviour under both
-  `DefaultAction` values. Asking tower for E3 (visibility only) and
-  contributing E1 upstream need no owner decision.
+**DECIDED (owner, 2026-10-08)**
+- **S1** (prompt slot): silent auto-answer. Options were on/off, the
+  timeout, and the reply. **Decision:** an unanswered prompt is answered
+  ONCE after 30 s with the daemon's `DefaultAction` for that connection
+  (P-a), and listed in Connections.
+- **S2** (prompt slot): "Decide later" semantics. **Decision:** it blocks
+  that program for 5 minutes, then asks again (P-c).
+- **S3** (prompt slot): curated defaults. **Decision:** opt-in, `/usr`
+  paths only (host-constrained `kioworker`/Steam, no per-user regexps in
+  v1).
+- **S4** (prompt slot, daemon-option part only): ask tower for E2 ("drop
+  while busy"). **Decision:** yes, as a daemon option **OFF by default**.
+  E3 (default-applied events) was requested too. Both were sent to tower
+  on 2026-10-08.
+- **S5** (prompt slot): answer from desktop notifications. **Decision:**
+  yes, Allow once and Deny only.
+- **#78** (prompt slot): **Decision:** pausing auto-answers every waiting
+  prompt with Allow once (same path as the button, never persisted). Rows
+  are labelled "Allowed once (filtering was paused)", and the pause menu
+  items say so. PR #86's warning stays as a fallback.
 - **E2** (editor): `process.path` patterns in hand-written rules.
-  **Recommendation:** an exact match must be absolute; a pattern is allowed
-  with a warning.
-- *Borderline* **N1** (insights): persist hit counts before P3.1.
-  **Recommendation:** yes.
-- *Borderline* **S5** (prompt slot): answer from desktop notifications.
-  **Recommendation:** Allow-once and Deny only.
+  **Decision:** exact absolute program paths by default; patterns are
+  allowed, with a warning.
+- **N1** (insights): persist hit counts across restarts. **Decision:** yes.
+  The 14-day "unused" window applies.
+- **Profile precedence** (#46 Part 2): **Decision:** stays `false`; denies
+  and blocklists win over profile allows.
+- **Startup auto-switch** (#46, issue #82): **Decision:** persist the
+  manual profile choice together with the network it was made on;
+  auto-switch only on a real network change.
+- **Blocklist fetch LAN targets** (#45): **Decision:** keep allowing URLs
+  that resolve to LAN ranges (RFC 1918 / ULA). Loopback, link-local and the
+  other reserved ranges stay refused.
+
+**Overnight orchestrator decisions, confirmed (owner, 2026-10-08)**
+- Blocklists are enforced only by the system bridge (#45).
+- The 2,000,000-host aggregate blocklist cap (#45).
+- #72: old bridges (no `appBoundRules`) get "This time" only for
+  host-scoped answers.
+- The `appBoundRules` capability handshake (#74).
+- The simulator's regexp character-class allowlist (#75).
 
 **Decided in the plans (no owner input needed)**
 - **D1 = yes.** "Deny all (N)" gets the until-restart app-bound rule. It
@@ -202,7 +231,7 @@ the plans, with rationale (list below).
 - **X2:** replace on a same name, ticked by default, except loosening ones.
 - **X3:** no "replace all" in v1.
 - **X4:** on-disk rule files in v1.1.
-- **N2:** 14 days, shown only if N1 = yes.
+- **N2:** 14 days, shown only if N1 = yes (it is, as of 2026-10-08).
 - **E1:** allow rename as a two-step.
 - **E3:** `precedence`/`nolog` in v1, under "Advanced".
 
