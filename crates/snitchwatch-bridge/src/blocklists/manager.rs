@@ -399,7 +399,7 @@ impl BlocklistsManager {
         self.forget_refusals(id);
         let _ = self.bus.send(BlocklistEvent::SubscriptionsChanged);
         if self.installs_rules() {
-            if let Err(e) = self.rule_sink.remove_blocklist_rules(id).await {
+            if let Err(e) = self.rule_sink.release_blocklist_rules(id).await {
                 warn!(%id, reason = %e.reason, "couldn't remove an unsubscribed list's rules");
             }
         }

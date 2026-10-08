@@ -27,7 +27,7 @@ pub(in crate::blocklists) enum Daemon {
 #[derive(Clone, Debug)]
 pub(in crate::blocklists) struct Seen {
     pub(in crate::blocklists) command: Notification,
-    path_existed: bool,
+    pub(in crate::blocklists) path_existed: bool,
 }
 
 pub(in crate::blocklists) struct Harness {

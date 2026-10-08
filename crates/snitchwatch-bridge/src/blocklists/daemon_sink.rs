@@ -22,7 +22,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex as StdMutex, MutexGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use snitchwatch_proto::protocol::Rule;
@@ -49,6 +49,10 @@ const RULES_UNKNOWN_REASON: &str = "Snitchwatch doesn't have the firewall servic
      once it does";
 const NOT_CONNECTED_REASON: &str =
     "The firewall service isn't connected; blocking starts once it connects";
+/// How long an unsubscribed list's files are kept before an orphan purge
+/// removes them: longer than opensnitchd's 30 s per-path reload limit, so a
+/// quick resubscribe finds its files in place (issue #73).
+pub const RELEASE_GRACE: Duration = Duration::from_secs(5 * 60);
 /// Longest daemon refusal text shown to the user, in characters.
 const MAX_DAEMON_TEXT_CHARS: usize = 200;
 
@@ -64,6 +68,10 @@ pub struct DaemonRuleSink {
     verified: StdMutex<HashMap<IdComponent, Vec<ListKind>>>,
     /// Blocklist-named rules Snitchwatch didn't make, already logged.
     warned: StdMutex<BTreeSet<String>>,
+    /// Lists unsubscribed in this run whose rules are gone but whose files are
+    /// kept, and since when ([`RELEASE_GRACE`]).
+    released: StdMutex<HashMap<IdComponent, Instant>>,
+    release_grace: Duration,
 }
 
 impl DaemonRuleSink {
@@ -84,7 +92,21 @@ impl DaemonRuleSink {
             confirmed: StdMutex::default(),
             verified: StdMutex::default(),
             warned: StdMutex::default(),
+            released: StdMutex::default(),
+            release_grace: RELEASE_GRACE,
         }
+    }
+
+    /// How long released lists keep their files. Tests.
+    pub fn with_release_grace(mut self, grace: Duration) -> Self {
+        self.release_grace = grace;
+        self
+    }
+
+    fn released(&self) -> MutexGuard<'_, HashMap<IdComponent, Instant>> {
+        self.released
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn verified(&self) -> MutexGuard<'_, HashMap<IdComponent, Vec<ListKind>>> {
@@ -227,6 +249,20 @@ impl DaemonRuleSink {
     }
 
     /// Write the non-empty kinds' files; returns those kinds.
+    /// What to delete for `list`: with the daemon's rule list known, what it
+    /// holds of ours; without it, our own two names (a delete of a missing
+    /// rule is a no-op).
+    fn rule_names_to_delete(&self, list: &IdComponent) -> BTreeSet<String> {
+        if self.daemon_rules_known() {
+            self.cached_rules_of(list).into_iter().collect()
+        } else {
+            ListKind::ALL
+                .into_iter()
+                .map(|kind| list_rule_name(list, kind))
+                .collect()
+        }
+    }
+
     async fn write_files(
         &self,
         list: &IdComponent,
@@ -331,6 +367,8 @@ impl RuleSink for DaemonRuleSink {
         hosts: Vec<String>,
     ) -> Result<(), NotInstalled> {
         let list = IdComponent::from_id(list_id);
+        // Subscribed (again): its files are wanted.
+        self.released().remove(&list);
         let kinds = self.write_files(&list, classify(hosts)).await?;
         for kind in &kinds {
             self.install(&list, *kind).await?;
@@ -342,18 +380,24 @@ impl RuleSink for DaemonRuleSink {
         Ok(())
     }
 
+    async fn release_blocklist_rules(&self, list_id: &str) -> Result<(), NotInstalled> {
+        let list = IdComponent::from_id(list_id);
+        let names = self.rule_names_to_delete(&list);
+        let deleted = self.delete(names).await;
+        self.verified().remove(&list);
+        if deleted.is_err() {
+            // A rule the daemon couldn't be told to delete must not go on
+            // blocking a list the user dropped: without its files it reads
+            // nothing, and the next reconcile deletes it.
+            return self.remove_blocklist_rules(list_id).await.and(deleted);
+        }
+        self.released().insert(list, Instant::now());
+        Ok(())
+    }
+
     async fn remove_blocklist_rules(&self, list_id: &str) -> Result<(), NotInstalled> {
         let list = IdComponent::from_id(list_id);
-        // With the daemon's list known, delete what it holds of ours; without
-        // it, our own two names (a delete of a missing rule is a no-op).
-        let names: BTreeSet<String> = if self.daemon_rules_known() {
-            self.cached_rules_of(&list).into_iter().collect()
-        } else {
-            ListKind::ALL
-                .into_iter()
-                .map(|kind| list_rule_name(&list, kind))
-                .collect()
-        };
+        let names = self.rule_names_to_delete(&list);
         let deleted = self.delete(names).await;
         self.verified().remove(&list);
         // Even when the daemon is gone: a rule left behind then reads an
@@ -390,10 +434,26 @@ impl RuleSink for DaemonRuleSink {
             return;
         }
         self.verified().retain(|list, _| keep.contains(list));
+        // Directories of lists released a moment ago stay (see `RELEASE_GRACE`);
+        // any other directory nobody subscribes to goes.
+        let now = Instant::now();
+        let grace = self.release_grace;
+        let mut kept_for_now = BTreeSet::new();
+        {
+            let mut released = self.released();
+            released.retain(|list, _| !keep.contains(list));
+            released.retain(|list, at| {
+                let waiting = now.saturating_duration_since(*at) < grace;
+                if waiting {
+                    kept_for_now.insert(list.clone());
+                }
+                waiting
+            });
+        }
         let removed = self
             .files(move |dir| {
                 for list in dir.lists()? {
-                    if !keep.contains(&list) {
+                    if !keep.contains(&list) && !kept_for_now.contains(&list) {
                         dir.remove_list(&list)?;
                     }
                 }

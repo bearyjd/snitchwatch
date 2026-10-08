@@ -225,6 +225,16 @@ pub trait RuleSink: Send + Sync + 'static {
         Ok(())
     }
 
+    /// The list was unsubscribed: delete its rules. Its files may stay for a
+    /// while ([`DaemonRuleSink`](daemon_sink::DaemonRuleSink) keeps them for
+    /// a few minutes), so that subscribing to it again at once finds them in
+    /// place instead of making the daemon reload a list whose file went and
+    /// came back. A later [`remove_orphans`](Self::remove_orphans) removes
+    /// them. The default removes everything now.
+    async fn release_blocklist_rules(&self, list_id: &str) -> Result<(), NotInstalled> {
+        self.remove_blocklist_rules(list_id).await
+    }
+
     /// Delete every blocklist rule and directory that doesn't belong to one
     /// of `keep`.
     async fn remove_orphans(&self, _keep: &[String]) {}
