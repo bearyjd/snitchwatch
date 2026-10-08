@@ -255,9 +255,12 @@ Built as designed above; where it differs from steps 4–11:
 - **Profile ids** are plain tokens of at most 64 characters, and creating a
   profile under an existing id is refused (it would have wiped the
   profile's rules and active flag, and a pass would then purge them). A
-  repeated rule id in a saved profile installs only its first rule. Only a different
-  network clears it; with no manual choice saved, the first network after a
-  restart lets auto-switch decide.
+  repeated rule id in a saved profile installs only its first rule.
+- **Manual choice (#82):** only a different network clears it; with no
+  manual choice saved, the first network after a restart lets auto-switch
+  decide. The choice is saved with the newest network reading, falling back
+  to the last settled one; a choice made with no network is adopted only in
+  the run it was made.
 - **Stable names:** `850-profile:<profile>:<rule id>`, no position, so
   adding, removing or replacing a rule never renames (rewrites) the others.
   A Part 1 rule whose id isn't a plain token is refused with a reason
@@ -278,9 +281,9 @@ Built as designed above; where it differs from steps 4–11:
 - **The Rules page's Source label** still says "User rules" for a profile
   rule (no `RuleSource::Profile`); its read-only reason says it is managed
   on the Profiles page. Follow-up.
-- **Profile ids aren't validated at `CreateProfile`** (as before): a very
-  long id makes each rule's name too long, and the rule is refused with
-  that reason rather than installed.
+- **Profile ids are validated at `CreateProfile`** (plain tokens, at most
+  64 characters, never an existing id). `CreateProfile` has no reply, so a
+  refusal is only logged; surfacing it on the Profiles page is a follow-up.
 - **Build note:** cxx-qt-build's qmlcachegen output isn't rebuilt when only
   a Rust QObject's methods change, so stale AOT code calls the wrong method
   index (a SIGSEGV in an unchanged page). Touch the QML files after

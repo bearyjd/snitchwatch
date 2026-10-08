@@ -6,7 +6,8 @@
 //!
 //! - [`ProfilesManager::activate`] / [`ProfilesManager::deactivate`] (the
 //!   Profiles page) are **manual**: the choice is saved together with the
-//!   last network that settled ([`store::ManualChoice`]).
+//!   newest network reading, falling back to the last one that settled
+//!   ([`store::ManualChoice`]).
 //! - Auto-switching ([`ProfilesManager::spawn_auto_switch`]) acts on a
 //!   network only once it has stayed the same for a few seconds
 //!   ([`tasks::NETWORK_SETTLE`]), and only when it differs from the

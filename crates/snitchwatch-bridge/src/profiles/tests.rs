@@ -352,9 +352,9 @@ async fn no_network_neither_acts_nor_clears_the_manual_choice() {
     );
 }
 
-/// The choice is saved with the last settled network, never an unsettled
-/// one or none; a choice made with no network known yet is kept by the
-/// first network that settles.
+/// The choice is saved with the newest network reading (falling back to the
+/// last settled one), never none; a choice made with no network known yet is
+/// kept by the first network that settles in the same run.
 #[tokio::test]
 async fn a_choice_is_saved_with_the_last_settled_network() {
     let mgr = manager();

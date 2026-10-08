@@ -270,7 +270,6 @@ mod tests {
     /// SQLite deletes a `-journal` or `-wal` beside an *empty* database
     /// without reading it, so a FIFO only hangs it next to one that has a
     /// table: the fixtures make one first.
-
     #[test]
     fn a_fifo_sidecar_is_refused_without_hanging() {
         for suffix in SUFFIXES {
