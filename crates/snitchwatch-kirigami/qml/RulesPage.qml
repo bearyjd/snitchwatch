@@ -32,6 +32,18 @@
 // (a QML int stops at 2^31 - 1), and the header says when the counts don't
 // survive a restart. Every label is PlainText.
 //
+// Rule insights (P2.6 Part 2): a zero-count rule gets a badge. "Unused" is
+// claimed only when the counts are saved across restarts and the period they
+// can be trusted in (since counting began, the rule was created, and the
+// bridge's last gap, whichever is latest) is 14 days; otherwise it is
+// "No hits since <time>", from the start of that period. "Analyze
+// rules" finds rules that can never decide a connection because another one
+// matches everything they do and takes precedence ("Never decides"), or only
+// "May never decide" when the proof leans on the regular-expression engine. It
+// says nothing about what those connections get instead. It checks only
+// conditions Snitchwatch can compare exactly, so no finding is not a guarantee.
+// Insights describe; nothing here changes, disables or removes a rule.
+//
 // Names are shown via the `displayName` role (bidi overrides and zero-width
 // characters removed by the bridge); `name` stays the rule's identity.
 //
@@ -109,39 +121,12 @@ Kirigami.ScrollablePage {
         ? JSON.parse(page.model.hitsInfoJson) : null
 
     function formatTime(ms) {
-        return new Date(ms).toLocaleString(Qt.locale(), Locale.ShortFormat);
+        return insightsText.formatTime(ms);
     }
 
-    // Empty when this bridge sends no counts.
-    function hitsSummaryText(info) {
-        if (!info || !info.available) return "";
-        if (!info.counting) {
-            return "Hit counts start when the firewall first reports statistics.";
-        }
-        let text = "Hits counted by Snitchwatch since " + page.formatTime(info.sinceMs)
-            + "; approximate.";
-        if (info.lossy) {
-            text += " Some hits may be missing"
-                + (info.lastGapMs > 0 ? " (last noticed " + page.formatTime(info.lastGapMs) + ")" : "")
-                + ".";
-        }
-        return text;
-    }
-
-    function hitsStorageText(info) {
-        if (!info || !info.available || info.persistent) return "";
-        return info.storageReason.length > 0
-            ? "Hit counts are not saved across restarts: " + info.storageReason
-            : "Hit counts are not saved across restarts.";
-    }
-
-    function hitsRowText(counted, count, lastMs, note) {
-        if (note.length > 0) return note;
-        if (!counted) return "";
-        if (count === 0) return "No hits counted";
-        return count + (count === 1 ? " hit" : " hits")
-            + (lastMs > 0 ? ", last " + page.formatTime(lastMs) : "");
-    }
+    // The on-demand analysis' state; null before the model has one.
+    readonly property var analysisInfo: !!page.model && page.model.analysisJson.length > 0
+        ? JSON.parse(page.model.analysisJson) : null
 
     // Rule-match diagnostics' "Show rule" jump target (called by main.qml
     // after navigating here from ConnectionsPage's inspector). Re-populates
@@ -259,6 +244,14 @@ Kirigami.ScrollablePage {
             Layout.fillWidth: true
         }
         Controls.Button {
+            objectName: "analyzeButton"
+            text: "Analyze rules"
+            icon.name: "dialog-scripts"
+            enabled: !!page.model && !!page.analysisInfo ? page.analysisInfo.state !== "running"
+                                                          : !!page.model
+            onClicked: page.model.analyze()
+        }
+        Controls.Button {
             objectName: "exportRules"
             text: "Export…"
             icon.name: "document-export"
@@ -292,6 +285,7 @@ Kirigami.ScrollablePage {
     header: ColumnLayout {
         visible: page.showsAllAppsNotice || page.showsIoStatus || page.showsEditorStatus
             || hitsSummaryLabel.text.length > 0 || hitsStorageLabel.text.length > 0
+            || analysisLabel.text.length > 0
         spacing: 0
 
         Kirigami.InlineMessage {
@@ -324,7 +318,7 @@ Kirigami.ScrollablePage {
             textFormat: Text.PlainText
             wrapMode: Text.Wrap
             font: Kirigami.Theme.smallFont
-            text: page.hitsSummaryText(page.hitsInfo)
+            text: insightsText.hitsSummaryText(page.hitsInfo)
         }
         Controls.Label {
             id: hitsStorageLabel
@@ -336,7 +330,18 @@ Kirigami.ScrollablePage {
             wrapMode: Text.Wrap
             font: Kirigami.Theme.smallFont
             color: Kirigami.Theme.neutralTextColor
-            text: page.hitsStorageText(page.hitsInfo)
+            text: insightsText.hitsStorageText(page.hitsInfo)
+        }
+        Controls.Label {
+            id: analysisLabel
+            objectName: "analysisSummary"
+            visible: text.length > 0
+            Layout.fillWidth: true
+            Layout.margins: Kirigami.Units.smallSpacing
+            textFormat: Text.PlainText
+            wrapMode: Text.Wrap
+            font: Kirigami.Theme.smallFont
+            text: insightsText.analysisText(page.analysisInfo)
         }
         // The last export or import outcome (P2.7), plain text.
         Controls.Label {
@@ -412,6 +417,11 @@ Kirigami.ScrollablePage {
             required property real hitCount
             required property real lastHitMs
             required property string hitsNote
+            required property string hitBadgeKind
+            required property real hitBadgeMs
+            required property string shadowKind
+            required property string shadowText
+            required property string shadowBy
 
             onClicked: {
                 list.currentIndex = row.index;
@@ -455,12 +465,38 @@ Kirigami.ScrollablePage {
                         objectName: "hitsLabel"
                         visible: text.length > 0
                         textFormat: Text.PlainText
-                        text: page.hitsRowText(row.hitsCounted, row.hitCount, row.lastHitMs,
-                                               row.hitsNote)
-                        opacity: 0.7
+                        text: insightsText.hitsRowText(row.hitsCounted, row.hitCount, row.lastHitMs,
+                                               row.hitsNote, row.hitBadgeKind, row.hitBadgeMs)
+                        opacity: row.hitBadgeKind === "unused" ? 1.0 : 0.7
+                        color: row.hitBadgeKind === "unused" ? Kirigami.Theme.neutralTextColor
+                                                              : Kirigami.Theme.textColor
                         font: Kirigami.Theme.smallFont
                         elide: Text.ElideRight
                         Layout.fillWidth: true
+                    }
+                    // A finding from "Analyze rules": this rule never (or may
+                    // never) decides a connection, because the named rule
+                    // matches all of them and takes precedence. The link
+                    // opens that rule.
+                    RowLayout {
+                        visible: row.shadowText.length > 0
+                        Layout.fillWidth: true
+                        Controls.Label {
+                            objectName: "shadowLabel"
+                            textFormat: Text.PlainText
+                            text: row.shadowText
+                            wrapMode: Text.Wrap
+                            font: Kirigami.Theme.smallFont
+                            color: Kirigami.Theme.neutralTextColor
+                            Layout.fillWidth: true
+                        }
+                        Controls.Button {
+                            objectName: "shadowShow"
+                            flat: true
+                            text: "Show rule"
+                            font: Kirigami.Theme.smallFont
+                            onClicked: page.openRuleByName(row.shadowBy)
+                        }
                     }
                     // Issue #44: what deleting this all-apps rule changes.
                     Controls.Label {
@@ -672,6 +708,11 @@ Kirigami.ScrollablePage {
 
     // Rule editor (P2.1): "New rule…", the inspector's Edit, and
     // `openEditor` for a connection.
+    RulesInsightsText {
+        id: insightsText
+        unusedWindowMs: page.hitsInfo ? page.hitsInfo.unusedWindowMs : 0
+    }
+
     RuleEditorController {
         id: ruleEditorController
         Component.onCompleted: startBridgeFeed()

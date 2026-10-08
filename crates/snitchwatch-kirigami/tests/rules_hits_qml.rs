@@ -3,7 +3,7 @@
 //! - nothing is shown until the bridge has sent counts, and not before
 //!   counting has started;
 //! - a rule that doesn't log is "not counted", never "0", and a rule that was
-//!   counted without a hit says "No hits counted";
+//!   counted without a hit says "No hits since <time>" (Part 2 adds "Unused");
 //! - so is a rule whose name the bridge can't count (over 256 bytes);
 //! - a count past a QML `int` is shown as it is, not capped;
 //! - the header says since when the counts run and that they are approximate,
@@ -164,7 +164,9 @@ Window {
                                   "row b: '" + probeWindow.rowText(1) + "'");
                 probeWindow.check(probeWindow.rowText(2) === "Not counted: this rule doesn't log",
                                   "nolog row: '" + probeWindow.rowText(2) + "'");
-                probeWindow.check(probeWindow.rowText(3) === "No hits counted",
+                // A rule of unknown age is never "Unused"; counted from when
+                // counting began (rules_insights_qml.rs covers the badges).
+                probeWindow.check(probeWindow.rowText(3).startsWith("No hits since "),
                                   "zero row: '" + probeWindow.rowText(3) + "'");
                 probeWindow.check(probeWindow.rowText(4).startsWith("3000000000 hits, last "),
                                   "big row: '" + probeWindow.rowText(4) + "'");
@@ -198,8 +200,23 @@ Window {
                                  "state directory <b>/x</b>: gone", []);
                 const lossy = probeWindow.headerLabel("hitsSummary");
                 probeWindow.check(lossy.indexOf("approximate.") > 0
-                                  && lossy.indexOf("Some hits may be missing (last noticed ") > 0,
+                                  && lossy.indexOf(" Hits may be missing before ") > 0
+                                  && lossy.indexOf("No gap noticed since") < 0,
                                   "lossy summary: '" + lossy + "'");
+                // A gap long past is still dated, and says nothing has been
+                // noticed since. One of unknown time is not dated.
+                probeWindow.hits(T, true, Date.now() - 30 * 86400000, true, "", []);
+                const old = probeWindow.headerLabel("hitsSummary");
+                probeWindow.check(old.indexOf(" Hits may be missing before ") > 0
+                                  && old.endsWith(" No gap noticed since."),
+                                  "old gap summary: '" + old + "'");
+                probeWindow.hits(T, true, null, true, "", []);
+                const undated = probeWindow.headerLabel("hitsSummary");
+                probeWindow.check(undated.endsWith(" Some hits may be missing.")
+                                  && undated.indexOf("before") < 0,
+                                  "undated gap summary: '" + undated + "'");
+                probeWindow.hits(T, true, T + 60000, false,
+                                 "state directory <b>/x</b>: gone", []);
                 probeWindow.check(probeWindow.headerLabel("hitsStorage") ===
                     "Hit counts are not saved across restarts: state directory <b>/x</b>: gone",
                     "storage text: '" + probeWindow.headerLabel("hitsStorage") + "'");

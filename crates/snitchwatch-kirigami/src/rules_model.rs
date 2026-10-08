@@ -21,6 +21,9 @@ use cxx_qt_lib::{
 };
 
 use crate::rules::hits::{RowHits, RuleHitsView};
+use crate::rules::insights::row::row_insights;
+use crate::rules::insights::shadow::Analysis;
+use crate::rules::insights::state::AnalysisState;
 use crate::rules::row_store::{RuleSource, RulesStore};
 use crate::rules::simulator::SimulationForm;
 use snitchwatch_bridge::ws_messages::{ClientMessage, ServerMessage};
@@ -45,6 +48,13 @@ const ROLE_HITS_COUNTED: i32 = 13;
 const ROLE_HIT_COUNT: i32 = 14;
 const ROLE_LAST_HIT_MS: i32 = 15;
 const ROLE_HITS_NOTE: i32 = 16;
+// P2.6 Part 2: unused / no-hits badges and shadowed-rule findings
+// (`rules::insights`).
+const ROLE_HIT_BADGE_KIND: i32 = 17;
+const ROLE_HIT_BADGE_MS: i32 = 18;
+const ROLE_SHADOW_KIND: i32 = 19;
+const ROLE_SHADOW_TEXT: i32 = 20;
+const ROLE_SHADOW_BY: i32 = 21;
 
 #[cxx_qt::bridge]
 pub mod qobject {
@@ -78,6 +88,10 @@ pub mod qobject {
         /// and whether the counts are saved. Empty until a `RuleHits`
         /// arrives from the live session.
         #[qproperty(QString, hits_info_json, cxx_name = "hitsInfoJson")]
+        /// The on-demand rule analysis' state as JSON
+        /// (`rules::insights::state`): `idle`, `running`, `done`, `tooMany`
+        /// or `stale`, with the count of each kind of finding.
+        #[qproperty(QString, analysis_json, cxx_name = "analysisJson")]
         type RulesModel = super::RulesModelRust;
 
         /// Emitted with a JSON-encoded `ClientMessage` (`UpdateRule` /
@@ -138,6 +152,13 @@ pub mod qobject {
         #[cxx_name = "selectRuleByName"]
         fn select_rule_by_name(self: Pin<&mut RulesModel>, name: &QString) -> QString;
 
+        /// Analyze the rules for ones that can never decide a connection
+        /// (`rules::insights::shadow`), on a worker thread. Findings show on
+        /// the rows until the rule list changes. Reads the list; changes
+        /// nothing.
+        #[qinvokable]
+        fn analyze(self: Pin<&mut RulesModel>);
+
         /// Rule-match simulator (Little-Snitch-parity "Simulate" panel on
         /// `RulesPage.qml`): evaluate a candidate connection against the
         /// currently cached rules the way opensnitchd v1.8.0 does (see
@@ -195,6 +216,8 @@ pub struct RulesModelRust {
     legacy_host_only_count: i32,
     hits: RuleHitsView,
     hits_info_json: QString,
+    analysis: AnalysisState,
+    analysis_json: QString,
 }
 
 impl qobject::RulesModel {
@@ -219,6 +242,7 @@ impl qobject::RulesModel {
                 QVariant::from(&QString::from(&rule.all_apps_hint().unwrap_or_default()))
             }
             ROLE_HITS_COUNTED..=ROLE_HITS_NOTE => self.hits_data(rule, role),
+            ROLE_HIT_BADGE_KIND..=ROLE_SHADOW_BY => self.insight_data(rule, role),
             ROLE_ENABLED => QVariant::from(&rule.enabled),
             ROLE_ACTION => QVariant::from(&QString::from(rule.normalized_action())),
             ROLE_DURATION => QVariant::from(&QString::from(&rule.duration)),
@@ -268,7 +292,28 @@ impl qobject::RulesModel {
         roles.insert(ROLE_HIT_COUNT, QByteArray::from("hitCount"));
         roles.insert(ROLE_LAST_HIT_MS, QByteArray::from("lastHitMs"));
         roles.insert(ROLE_HITS_NOTE, QByteArray::from("hitsNote"));
+        roles.insert(ROLE_HIT_BADGE_KIND, QByteArray::from("hitBadgeKind"));
+        roles.insert(ROLE_HIT_BADGE_MS, QByteArray::from("hitBadgeMs"));
+        roles.insert(ROLE_SHADOW_KIND, QByteArray::from("shadowKind"));
+        roles.insert(ROLE_SHADOW_TEXT, QByteArray::from("shadowText"));
+        roles.insert(ROLE_SHADOW_BY, QByteArray::from("shadowBy"));
         roles
+    }
+
+    /// The insight roles of one row (`rules::insights::row`).
+    fn insight_data(&self, rule: &crate::rules::row_store::Rule, role: i32) -> QVariant {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
+            .unwrap_or(0);
+        let row = row_insights(rule, &self.hits, &self.analysis, now_ms);
+        match role {
+            ROLE_HIT_BADGE_KIND => QVariant::from(&QString::from(row.hit_badge_kind)),
+            ROLE_HIT_BADGE_MS => QVariant::from(&row.hit_badge_ms),
+            ROLE_SHADOW_KIND => QVariant::from(&QString::from(row.shadow_kind)),
+            ROLE_SHADOW_TEXT => QVariant::from(&QString::from(&row.shadow_text)),
+            _ => QVariant::from(&QString::from(&row.shadow_by)),
+        }
     }
 
     /// The hit-count roles of one row. `hitsCounted` is false (and the count
@@ -411,10 +456,61 @@ impl qobject::RulesModel {
             ROLE_HIT_COUNT,
             ROLE_LAST_HIT_MS,
             ROLE_HITS_NOTE,
+            ROLE_HIT_BADGE_KIND,
+            ROLE_HIT_BADGE_MS,
         ] {
             roles.append(role);
         }
         self.as_mut().data_changed(&first, &last, &roles);
+    }
+
+    fn publish_analysis(mut self: Pin<&mut Self>) {
+        let json = QString::from(&self.analysis.summary_json());
+        self.as_mut().set_analysis_json(json);
+    }
+
+    /// The analysis finished (or went stale): show it on the rows, then say
+    /// so in the summary, so a reader of the summary never sees older rows.
+    fn finish_analysis(mut self: Pin<&mut Self>, generation: u64, analysis: Analysis) {
+        self.as_mut()
+            .rust_mut()
+            .analysis
+            .finish(generation, analysis);
+        self.as_mut().refresh_findings();
+        self.as_mut().publish_analysis();
+    }
+
+    /// Re-reads the finding roles of every row.
+    fn refresh_findings(mut self: Pin<&mut Self>) {
+        let rows = self.store.len() as i32;
+        if rows == 0 {
+            return;
+        }
+        let first = self.index(0, 0, &QModelIndex::default());
+        let last = self.index(rows - 1, 0, &QModelIndex::default());
+        let mut roles = QList::<i32>::default();
+        for role in [ROLE_SHADOW_KIND, ROLE_SHADOW_TEXT, ROLE_SHADOW_BY] {
+            roles.append(role);
+        }
+        self.as_mut().data_changed(&first, &last, &roles);
+    }
+
+    fn analyze(mut self: Pin<&mut Self>) {
+        let Some(run) = self.as_mut().rust_mut().analysis.start() else {
+            return;
+        };
+        // Starting drops the findings of the last run.
+        self.as_mut().refresh_findings();
+        self.as_mut().publish_analysis();
+        let rules = self.store.rules().to_vec();
+        let qt_thread = self.qt_thread();
+        std::thread::spawn(move || {
+            // `None`: the rule list changed meanwhile and nobody wants this.
+            let Some((generation, analysis)) = run.execute(&rules) else {
+                return;
+            };
+            let _ = qt_thread.queue(move |qobject| qobject.finish_analysis(generation, analysis));
+        });
     }
 
     pub fn apply_server_message(mut self: Pin<&mut Self>, msg: ServerMessage) {
@@ -430,11 +526,18 @@ impl qobject::RulesModel {
                 self.as_mut().begin_reset_model();
             }
             let changed = self.as_mut().rust_mut().store.apply(&msg);
+            // Findings are about the list they were computed from: they go
+            // with it, inside the reset, so no view ever reads them against
+            // a list they weren't computed from.
+            if changed {
+                self.as_mut().rust_mut().analysis.rules_changed();
+            }
             unsafe {
                 self.as_mut().end_reset_model();
             }
             changed
         };
+        self.as_mut().publish_analysis();
         if changed {
             let n = self.store.len() as i32;
             self.as_mut().set_count(n);
