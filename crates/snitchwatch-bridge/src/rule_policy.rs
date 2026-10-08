@@ -86,6 +86,12 @@ pub const SHAPE_READ_ONLY_REASON: &str = "Snitchwatch can't change this rule bec
 pub const BLOCKLIST_MANAGED_REASON: &str =
     "Managed on the Blocklists page. Subscribe to or remove the list there.";
 
+/// Why a GUI may not change or delete a rule under the profile prefix
+/// ([`crate::rule_name::is_reserved_profile_name`]): Snitchwatch installs
+/// and removes those itself while their profile is active (issue #46).
+pub const PROFILE_MANAGED_REASON: &str =
+    "Managed on the Profiles page. It applies while its profile is active.";
+
 /// Why a GUI may not change or delete the packaged fetch rule
 /// ([`crate::rule_name::PACKAGED_FETCH_RULE_NAME`]).
 pub const PACKAGED_FETCH_RULE_REASON: &str =
@@ -170,6 +176,9 @@ pub fn validate_operator(op: &Operator) -> Result<(), String> {
 pub fn read_only_reason(rule: &Rule) -> Option<&'static str> {
     if crate::rule_name::is_reserved_blocklist_name(&rule.name) {
         return Some(BLOCKLIST_MANAGED_REASON);
+    }
+    if crate::rule_name::is_reserved_profile_name(&rule.name) {
+        return Some(PROFILE_MANAGED_REASON);
     }
     if rule.name == crate::rule_name::PACKAGED_FETCH_RULE_NAME {
         return Some(PACKAGED_FETCH_RULE_REASON);
@@ -367,3 +376,6 @@ mod schema_tests;
 
 #[cfg(test)]
 mod editor_tests;
+
+#[cfg(test)]
+mod profile_rule_tests;

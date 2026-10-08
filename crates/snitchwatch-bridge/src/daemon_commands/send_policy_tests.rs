@@ -127,6 +127,24 @@ async fn a_blocklist_rule_name_is_refused_at_send_whatever_the_command() {
     assert!(rx.try_recv().is_err(), "nothing reached the daemon");
 }
 
+/// Profile rules go through `send_profile` only (issue #46 Part 2): a GUI
+/// command under the prefix could replace a profile's deny.
+#[tokio::test]
+async fn a_profile_rule_name_is_refused_at_send_whatever_the_command() {
+    let (commands, _rules) = fixture();
+    let (_stream, mut rx) = current_stream(&commands);
+    let name = "850-profile:home:0000-r1";
+    assert_eq!(
+        commands.send(change(name, Some(host("x.example")))).err(),
+        Some(SendError::ReservedName)
+    );
+    assert_eq!(
+        commands.send(delete(name)).err(),
+        Some(SendError::ReservedName)
+    );
+    assert!(rx.try_recv().is_err(), "nothing reached the daemon");
+}
+
 /// The rules Snitchwatch ships are never sent: an allow swapped for a deny,
 /// a temporary duration or a delete would all break list downloads.
 #[tokio::test]

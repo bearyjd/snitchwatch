@@ -146,6 +146,7 @@ fn every_import_refusal_holds_for_the_editor() {
         named("900-blocklist:ads:domains"),
         named("snitchwatch-default-x"),
         named("000-snitchwatch-x"),
+        named("850-profile:home:0000-r1"),
         named("a/b"),
         Rule {
             action: "drop".into(),

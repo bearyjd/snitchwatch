@@ -21,6 +21,8 @@ pub enum PolicyProfile {
     Import,
     /// A rule written or changed in the rule editor (roadmap P2.1).
     Editor,
+    /// A profile's rule as the bridge installs it (issue #46 Part 2).
+    ProfileRule,
 }
 
 /// One reason a rule is refused. `reason` is always fixed text (or
@@ -58,12 +60,25 @@ pub const RELATIVE_PATH_REFUSED: &str = "an exact program path must be the progr
 pub const PROTOCOL_REFUSED: &str = "a protocol is a short lowercase name such as tcp or udp";
 pub const PORT_REFUSED: &str = "a port must be a whole number from 0 to 65535";
 pub const ID_REFUSED: &str = "a process or user ID must be a whole number";
+pub const PROFILE_NAME_REFUSED: &str =
+    "names starting with 850-profile: belong to Snitchwatch's profile rules";
+pub const PROFILE_PREFIX_REQUIRED: &str = "a profile rule's name must start with 850-profile:";
+pub const PROFILE_DURATION_REFUSED: &str =
+    "a profile rule lasts while its profile is active, so it can't have a time of its own";
+pub const PROFILE_PRECEDENCE_REFUSED: &str = "a profile rule can't decide before other rules:      blocking rules and blocklists win over a profile";
+pub const PROFILE_NOLOG_REFUSED: &str = "a profile rule can't hide its connections";
+pub const PROFILE_EMPTY_HOST_REFUSED: &str = "an empty host name matches every connection to a      bare address; a profile rule must name a host";
+pub const PROFILE_CASE_REFUSED: &str =
+    "an exact program path in a profile rule must match upper and lower case exactly";
+pub const PROFILE_USER_NAME_REFUSED: &str = "a profile rule can't match a user by name: the      firewall stores it as a number, so Snitchwatch couldn't tell the rule is in place; use the      user ID";
 
 /// Check a whole rule for `profile`. Returns every problem found.
 pub fn validate_user_rule(rule: &Rule, profile: PolicyProfile) -> Result<(), Vec<RuleProblem>> {
     let mut problems = Vec::new();
     match profile {
-        PolicyProfile::Import | PolicyProfile::Editor => check_rule(rule, profile, &mut problems),
+        PolicyProfile::Import | PolicyProfile::Editor | PolicyProfile::ProfileRule => {
+            check_rule(rule, profile, &mut problems)
+        }
     }
     if problems.is_empty() {
         Ok(())
@@ -104,6 +119,16 @@ fn check_rule(rule: &Rule, profile: PolicyProfile, problems: &mut Vec<RuleProble
     if crate::rule_name::is_reserved_packaged_name(&rule.name) {
         problem(problems, "name", PACKAGED_NAME_REFUSED);
     }
+    let profile_name = crate::rule_name::is_reserved_profile_name(&rule.name);
+    match profile {
+        PolicyProfile::ProfileRule if !profile_name => {
+            problem(problems, "name", PROFILE_PREFIX_REQUIRED)
+        }
+        PolicyProfile::Import | PolicyProfile::Editor if profile_name => {
+            problem(problems, "name", PROFILE_NAME_REFUSED)
+        }
+        _ => {}
+    }
     if !matches!(rule.action.as_str(), "allow" | "deny" | "reject") {
         problem(problems, "action", ACTION_REFUSED);
     }
@@ -114,6 +139,7 @@ fn check_rule(rule: &Rule, profile: PolicyProfile, problems: &mut Vec<RuleProble
         PolicyProfile::Editor if !editor_duration(&rule.duration) => {
             problem(problems, "duration", EDITOR_DURATION_REFUSED)
         }
+        PolicyProfile::ProfileRule => check_profile_fields(rule, problems),
         _ => {}
     }
     if !crate::cache::rules::within_limits(rule) {
@@ -142,9 +168,49 @@ fn check_import_operator(op: &Operator, profile: PolicyProfile, problems: &mut V
     }
     for (path, leaf) in leaves {
         check_import_leaf(&path, leaf, problems);
-        if profile == PolicyProfile::Editor {
+        if profile != PolicyProfile::Import {
             check_editor_leaf(&path, leaf, problems);
         }
+        if profile == PolicyProfile::ProfileRule {
+            check_profile_leaf(&path, leaf, problems);
+        }
+    }
+}
+
+/// A profile rule lasts while its profile is active, and blocking rules
+/// win over it (owner decision: precedence stays false).
+fn check_profile_fields(rule: &Rule, problems: &mut Vec<RuleProblem>) {
+    if rule.duration != "always" {
+        problem(problems, "duration", PROFILE_DURATION_REFUSED);
+    }
+    if rule.precedence {
+        problem(problems, "precedence", PROFILE_PRECEDENCE_REFUSED);
+    }
+    if rule.nolog {
+        problem(problems, "nolog", PROFILE_NOLOG_REFUSED);
+    }
+}
+
+/// Part 1's findings for profile rules: an empty host matches every
+/// bare-address connection, a case-folded exact path is #50's bug, and a
+/// `user.name` comes back from the daemon as a number.
+fn check_profile_leaf(path: &str, leaf: &Operator, problems: &mut Vec<RuleProblem>) {
+    let simple = leaf.r#type == "simple";
+    match leaf.operand.as_str() {
+        "dest.host" if simple && leaf.data.is_empty() => problem(
+            problems,
+            &format!("{path}.data"),
+            PROFILE_EMPTY_HOST_REFUSED,
+        ),
+        "process.path" if simple && !leaf.sensitive => {
+            problem(problems, &format!("{path}.data"), PROFILE_CASE_REFUSED)
+        }
+        "user.name" => problem(
+            problems,
+            &format!("{path}.operand"),
+            PROFILE_USER_NAME_REFUSED,
+        ),
+        _ => {}
     }
 }
 
