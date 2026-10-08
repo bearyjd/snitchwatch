@@ -204,8 +204,17 @@ issue #78.
   reading.
   - A reset is `uptime` dropping or the `rules.synced()` generation
     changing.
-  - A count of 0 is shown like an unknown one: the "at least N" clause is
+  - A count of 0 is shown like an unknown one: the count sentence is
     dropped.
+- **The count is of times, not connections** (review of PR #86). The
+  daemon's `rule_misses` counts unanswered packets: a retry, or the waiting
+  connection's own SYN retransmit, counts again.
+  - The text says "the firewall applied its default action N times
+    meanwhile (retries count again)", never "at least N other connections".
+  - It is still a lower bound: counting starts at the first ping after the
+    hold.
+  - Overlapping holders count the same misses. Each release summary is true
+    of its own prompt; the summaries don't add up.
 - **"Oldest" is by hold order,** not row-id order (`ask-10` sorts before
   `ask-9`).
 - **Gating on the bridge.** The bridge advertises a `promptSlot`
@@ -219,16 +228,20 @@ issue #78.
   the firewall's default action", never that every connection prompts.
 - **Issue #78 (honesty only).** While paused with a prompt holding the
   slot, the banner and the tray tooltip add fixed text: "Filtering is
-  paused, but one connection is still waiting for your answer. Until you
-  answer it, the pause usually lets nothing else through."
-  - "Lets nothing else through" is said of the pause. That stays true under
-    either `DefaultAction`, which the bridge doesn't know.
+  paused, but a connection is still waiting for your answer. Until you
+  answer it, the pause can't reach other new connections; they usually get
+  the firewall's default action instead."
+  - With several holders it reads "N connections are still waiting".
+  - This holds under either `DefaultAction`, which the bridge doesn't know.
   - Nothing is auto-answered. #78's options 1, 2 and 4 are the owner's.
 - **UI shape.**
   - The banner is its own component, `PromptSlotBanner.qml`: a fixed-text
     InlineMessage and a PlainText label, per #51.
   - Allow once and Deny use `InlineVerdicts`. They are enabled only while
     the model holds the row as pending, and answer each holder once.
+  - They also wait until the holder has been shown for 750 ms. The timer
+    restarts on each holder change, so a double-click meant for one prompt
+    can't answer the next one.
   - Review opens the Connections page, whose auto-select picks the row; it
     doesn't open the inspector.
 

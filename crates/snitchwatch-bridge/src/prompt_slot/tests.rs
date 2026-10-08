@@ -202,3 +202,46 @@ fn observe_announces_only_a_change() {
     slot.release("ask-1", 1);
     assert!(rx.try_recv().is_err(), "a second release announces nothing");
 }
+
+/// A snapshot interleaved with a release must not send the holder after the
+/// release announced it gone (clients keep only the latest state). The
+/// release runs while the snapshot is being sent, so it can only finish
+/// after it.
+#[test]
+fn a_snapshot_is_sent_under_the_lock_so_a_racing_release_lands_after_it() {
+    let (slot, mut rx, _notices) = handle();
+    slot.hold("ask-1", "x → y".to_string());
+    let _hold = rx.try_recv().unwrap();
+
+    let mut releaser = None;
+    let mut snapshot = None;
+    slot.announce_with(|message| {
+        let releasing = slot.clone();
+        let thread = std::thread::spawn(move || releasing.release("ask-1", 1));
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert!(
+            !thread.is_finished(),
+            "a release completed while the snapshot was being sent"
+        );
+        releaser = Some(thread);
+        snapshot = Some(message);
+    });
+    releaser.unwrap().join().unwrap();
+    assert!(matches!(
+        snapshot,
+        Some(ServerMessage::PromptSlot { holders: 1, .. })
+    ));
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(ServerMessage::PromptSlot { holders: 0, .. })
+    ));
+}
+
+#[test]
+fn announce_sends_the_current_state() {
+    let (slot, _rx, _notices) = handle();
+    slot.hold("ask-1", "x → y".to_string());
+    let (tx, mut snapshot_rx) = broadcast::channel(4);
+    slot.announce(&tx);
+    assert_eq!(snapshot_rx.try_recv().unwrap(), slot.message());
+}

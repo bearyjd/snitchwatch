@@ -2,18 +2,32 @@
 //! `docs/superpowers/plans/2026-10-08-prompt-slot-ux.md`, part A, plus the
 //! honesty half of issue #78). Qt-free.
 //!
-//! **Wording.** The daemon's busy check sends every other unmatched connection
-//! to its default action while a prompt is open; tower's r8 VM saw requeued
+//! **Wording.** The daemon's busy check sends other unmatched connections to
+//! its default action while a prompt is open; tower's r8 VM saw requeued
 //! packets dropped under nftables chain churn too, so the text says
 //! "usually". The bridge doesn't know `DefaultAction`, so nothing here says
-//! "allowed" or "blocked". While filtering is paused, the pause can't reach
-//! those connections either: the sentence says the pause lets nothing else
-//! through, which holds under either default.
+//! "allowed" or "blocked". The count is the daemon's `rule_misses`, which
+//! counts unanswered packets, not connections: a retry, or the waiting
+//! connection's own retransmit, counts again, so the text counts times.
 
-/// Issue #78: filtering is paused while a prompt holds the slot. Fixed text,
-/// so the tray tooltip (rich text) may show it too.
-pub const PAUSED_WHILE_WAITING: &str = "Filtering is paused, but one connection is still \
-     waiting for your answer. Until you answer it, the pause usually lets nothing else through.";
+/// Issue #78 for `holders` prompts holding the slot while filtering is
+/// paused: the pause can't reach other new connections, which holds under
+/// either default action. Fixed text, so the tray tooltip (rich text) may
+/// show it too.
+pub fn paused_while_waiting(holders: u32) -> String {
+    if holders > 1 {
+        format!(
+            "Filtering is paused, but {holders} connections are still waiting for your answer. \
+             Until you answer them, the pause can't reach other new connections; they usually \
+             get the firewall's default action instead."
+        )
+    } else {
+        "Filtering is paused, but a connection is still waiting for your answer. Until you \
+         answer it, the pause can't reach other new connections; they usually get the \
+         firewall's default action instead."
+            .to_string()
+    }
+}
 
 /// The slot as the banner describes it.
 pub struct SlotView<'a> {
@@ -21,6 +35,7 @@ pub struct SlotView<'a> {
     pub what: &'a str,
     pub waited_secs: u64,
     pub holders: u32,
+    /// The daemon's default-action count meanwhile (`None` while unknown).
     pub defaulted_at_least: Option<u64>,
     pub paused: bool,
 }
@@ -32,29 +47,26 @@ pub fn banner_text(view: &SlotView<'_>) -> String {
         view.what,
         waited(view.waited_secs)
     );
-    if view.holders > 1 {
-        text.push_str(&format!(
-            " {} prompts are open; this is the oldest.",
-            view.holders
-        ));
-    }
-    let defaulted = view.defaulted_at_least.filter(|n| *n > 0);
     if view.paused {
         text.push(' ');
-        text.push_str(PAUSED_WHILE_WAITING);
-        if let Some(n) = defaulted {
+        text.push_str(&paused_while_waiting(view.holders));
+    } else {
+        if view.holders > 1 {
             text.push_str(&format!(
-                " At least {n} other connections got the firewall's default action so far."
+                " {} prompts are open; this is the oldest.",
+                view.holders
             ));
         }
-    } else {
         text.push_str(
-            " Until you answer, other new connections usually get the firewall's default action",
+            " Until you answer, other new connections usually get the firewall's default action.",
         );
-        if let Some(n) = defaulted {
-            text.push_str(&format!(" (at least {n} so far)"));
-        }
-        text.push('.');
+    }
+    if let Some(n) = view.defaulted_at_least.filter(|n| *n > 0) {
+        let times = if n == 1 { "time" } else { "times" };
+        text.push_str(&format!(
+            " Meanwhile the firewall applied its default action {n} {times} (retries count \
+             again)."
+        ));
     }
     text
 }
@@ -71,6 +83,10 @@ fn waited(secs: u64) -> String {
 mod tests {
     use super::*;
 
+    const WAITED: &str = "steam → <b>cdn</b>.example has been waiting for your answer for 42 s.";
+    const DEFAULTED: &str = " Until you answer, other new connections usually get the firewall's \
+                             default action.";
+
     fn view(defaulted_at_least: Option<u64>, paused: bool) -> SlotView<'static> {
         SlotView {
             what: "steam → <b>cdn</b>.example",
@@ -81,14 +97,18 @@ mod tests {
         }
     }
 
+    /// The daemon's counter counts unanswered packets, not connections.
     #[test]
-    fn the_banner_names_the_holder_and_what_waiting_costs() {
+    fn the_banner_counts_times_the_default_action_was_applied() {
         assert_eq!(
             banner_text(&view(Some(3), false)),
-            "steam → <b>cdn</b>.example has been waiting for your answer for 42 s. Until you \
-             answer, other new connections usually get the firewall's default action (at least \
-             3 so far)."
+            format!(
+                "{WAITED}{DEFAULTED} Meanwhile the firewall applied its default action 3 times \
+                 (retries count again)."
+            )
         );
+        assert!(banner_text(&view(Some(1), false))
+            .ends_with(" applied its default action 1 time (retries count again)."));
     }
 
     #[test]
@@ -96,25 +116,42 @@ mod tests {
         for count in [None, Some(0)] {
             assert_eq!(
                 banner_text(&view(count, false)),
-                "steam → <b>cdn</b>.example has been waiting for your answer for 42 s. Until \
-                 you answer, other new connections usually get the firewall's default action.",
+                format!("{WAITED}{DEFAULTED}"),
                 "{count:?}"
             );
         }
     }
 
+    /// Issue #78: true under either default action, which the bridge
+    /// doesn't know.
     #[test]
-    fn a_pause_says_it_lets_nothing_else_through() {
-        let text = banner_text(&view(Some(2), true));
-        assert!(text.contains(PAUSED_WHILE_WAITING), "{text}");
-        assert!(
-            text.ends_with(
-                "At least 2 other connections got the firewall's default action so far."
-            ),
-            "{text}"
+    fn a_pause_says_it_cant_reach_other_connections() {
+        assert_eq!(
+            paused_while_waiting(1),
+            "Filtering is paused, but a connection is still waiting for your answer. Until you \
+             answer it, the pause can't reach other new connections; they usually get the \
+             firewall's default action instead."
         );
-        assert!(!text.contains("Until you answer, other"), "{text}");
-        assert!(!banner_text(&view(None, true)).contains("At least"));
+        assert_eq!(
+            paused_while_waiting(2),
+            "Filtering is paused, but 2 connections are still waiting for your answer. Until \
+             you answer them, the pause can't reach other new connections; they usually get \
+             the firewall's default action instead."
+        );
+        assert_eq!(
+            banner_text(&view(Some(2), true)),
+            format!(
+                "{WAITED} {} Meanwhile the firewall applied its default action 2 times (retries \
+                 count again).",
+                paused_while_waiting(1)
+            )
+        );
+        let mut several = view(None, true);
+        several.holders = 3;
+        assert_eq!(
+            banner_text(&several),
+            format!("{WAITED} {}", paused_while_waiting(3))
+        );
     }
 
     #[test]

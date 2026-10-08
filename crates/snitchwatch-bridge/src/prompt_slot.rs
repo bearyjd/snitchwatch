@@ -5,8 +5,10 @@
 //! other unmatched connection usually gets the daemon's default action and
 //! never reaches the bridge. The bridge can't list those connections. It can
 //! say which prompt holds the slot, since when, and, from the daemon's
-//! cumulative `rule_misses` counter, a lower bound on how many connections
-//! were defaulted meanwhile.
+//! cumulative `rule_misses` counter, how many times the daemon applied its
+//! default action meanwhile. That counter counts unanswered packets, not
+//! connections: a retry, or the waiting connection's own SYN retransmit,
+//! counts again.
 //!
 //! **The baseline.** The daemon pings only when it has matched events, so the
 //! last reading before a hold can be minutes old (right after login, it would
@@ -16,12 +18,14 @@
 //! the daemon restarts (`uptime` drops; `rule_misses` is per daemon process)
 //! or a new rule snapshot is committed (a new HELLO): that reading becomes a
 //! fresh baseline. Misses before the baseline go uncounted, so the figure is
-//! only ever "at least N".
+//! a lower bound.
 //!
 //! **More than one holder.** The daemon's busy check is an unlocked
 //! check-then-set, so two Asks can rarely be open at once. Each holder is kept
 //! by row id and released on its own. The broadcast names the oldest (by hold
-//! order, never by row-id string order).
+//! order, never by row-id string order). Each holder counts the misses during
+//! its own hold, so overlapping holders count the same misses: each release
+//! summary is true of its own prompt, and they don't add up.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -160,8 +164,8 @@ pub fn plain_summary(process: &str, host: &str) -> String {
 const PART_MAX_CHARS: usize = 64;
 
 /// The bridge's shared prompt slot: every change is broadcast as a
-/// `PromptSlot` message, and a release that cost at least one defaulted
-/// connection sends `Notice::PromptSlotSummary`. Uses a std mutex: `release`
+/// `PromptSlot` message, and a release during which the daemon applied its
+/// default action at least once sends `Notice::PromptSlotSummary`. Uses a std mutex: `release`
 /// runs from `Drop` and never awaits.
 #[derive(Clone)]
 pub struct PromptSlotHandle {
@@ -227,6 +231,20 @@ impl PromptSlotHandle {
     /// The current state, for a `RequestSnapshot` answer.
     pub fn message(&self) -> ServerMessage {
         self.lock().message()
+    }
+
+    /// Sends the current state on `tx` (the `RequestSnapshot` answer).
+    pub fn announce(&self, tx: &broadcast::Sender<ServerMessage>) {
+        self.announce_with(|message| {
+            let _ = tx.send(message);
+        });
+    }
+
+    /// Sends under the slot lock, like every other announcement, so a release
+    /// racing the snapshot can't be overtaken by a stale holder.
+    fn announce_with(&self, send: impl FnOnce(ServerMessage)) {
+        let slot = self.lock();
+        send(slot.message());
     }
 }
 

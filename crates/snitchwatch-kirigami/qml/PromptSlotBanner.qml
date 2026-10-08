@@ -10,7 +10,9 @@
 // "Allow once" and "Deny" answer the holder with the Connections page's
 // inline semantics (InlineVerdicts.qml). They are enabled only while the model
 // holds the row as pending (the bridge announces the row before the holder,
-// and grouped mode can buffer it), and each holder is answered at most once.
+// and grouped mode can buffer it), only once a holder has been on screen for
+// `armDelayMs` (so a double-click meant for one prompt can't answer the next
+// one that takes its place), and each holder is answered at most once.
 // "Review" opens the Connections page, whose auto-select picks the row.
 import QtQuick
 import QtQuick.Layouts
@@ -33,18 +35,43 @@ ColumnLayout {
 
     // The holder this banner answered; another holder can be answered again.
     property string answeredRowId: ""
+    // How long a holder must be shown before it can be answered. Restarted
+    // whenever the holder changes or the banner reappears.
+    property int armDelayMs: 750
+    property bool armed: false
     readonly property string rowId: banner.status ? banner.status.rowId : ""
     readonly property bool shown: banner.status !== null && banner.status.supported === true
         && banner.status.held === true
         && !(banner.bridgeFeed !== null && banner.bridgeFeed.ok === false)
     // Reading `pendingCount` re-evaluates this as rows come and go.
-    readonly property bool actionable: banner.shown && banner.answeredRowId !== banner.rowId
+    readonly property bool actionable: banner.shown && banner.armed
+        && banner.answeredRowId !== banner.rowId
         && banner.model !== null && banner.model.pendingCount >= 0
         && banner.model.isPendingRow(banner.rowId)
     // Exposed for the headless probe (tests/prompt_slot_banner_qml.rs).
     property alias label: holderLabel
 
     visible: banner.shown
+
+    onRowIdChanged: banner.rearm()
+    onShownChanged: banner.rearm()
+    Component.onCompleted: banner.rearm()
+
+    function rearm() {
+        banner.armed = false;
+        if (banner.shown) {
+            armTimer.restart();
+        } else {
+            armTimer.stop();
+        }
+    }
+
+    Timer {
+        id: armTimer
+        interval: banner.armDelayMs
+        repeat: false
+        onTriggered: banner.armed = true
+    }
 
     InlineVerdicts {
         id: verdicts

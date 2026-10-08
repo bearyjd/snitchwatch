@@ -52,24 +52,22 @@ pub enum Notice {
         row_id: u64,
     },
     /// A prompt that held opensnitchd's single prompt slot was released, and
-    /// meanwhile at least `count` other connections got the firewall's
-    /// default action (`prompt_slot`). Carries no connection data.
+    /// meanwhile the daemon applied its default action `count` times (retries
+    /// count again; `prompt_slot`). Carries no connection data.
     PromptSlotSummary {
         row_id: u64,
         count: u64,
     },
 }
 
-/// The body of a `Notice::PromptSlotSummary`. Fixed text around a count.
+/// The body of a `Notice::PromptSlotSummary`. Fixed text around a count of
+/// the daemon's `rule_misses`, which counts unanswered packets: a retry, or the
+/// waiting connection's own retransmit, counts again, so it says "times".
 pub fn prompt_slot_summary_text(count: u64) -> String {
-    let noun = if count == 1 {
-        "connection"
-    } else {
-        "connections"
-    };
+    let times = if count == 1 { "time" } else { "times" };
     format!(
-        "While that prompt was open, at least {count} other {noun} got the firewall's \
-         default action."
+        "While that prompt was open, the firewall applied its default action {count} {times} \
+         (retries count again)."
     )
 }
 
@@ -117,14 +115,20 @@ mod tests {
         assert_eq!(got_b, Notice::DaemonAway);
     }
 
+    /// The daemon's `rule_misses` counts unanswered packets, not connections:
+    /// a retry, or the waiting connection's own retransmit, counts again.
     #[test]
-    fn the_prompt_slot_summary_counts_at_least() {
+    fn the_prompt_slot_summary_counts_times_not_connections() {
         assert_eq!(
             prompt_slot_summary_text(1),
-            "While that prompt was open, at least 1 other connection got the firewall's default \
-             action."
+            "While that prompt was open, the firewall applied its default action 1 time \
+             (retries count again)."
         );
-        assert!(prompt_slot_summary_text(7).contains("at least 7 other connections"));
+        assert_eq!(
+            prompt_slot_summary_text(7),
+            "While that prompt was open, the firewall applied its default action 7 times \
+             (retries count again)."
+        );
     }
 
     #[tokio::test]

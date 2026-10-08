@@ -734,7 +734,7 @@ where
                     let _ = snapshot_tx.send(ServerMessage::TrayState {
                         state: tray_pub_for_snapshot.subscribe().borrow().clone(),
                     });
-                    let _ = snapshot_tx.send(prompt_slot_for_pump.message());
+                    prompt_slot_for_pump.announce(&snapshot_tx);
                     // Including `paused: false`: a GUI that was away when a
                     // pause ended learns it here. Sent under the cache lock,
                     // like every other pause announcement, so it can't

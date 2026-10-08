@@ -3,8 +3,10 @@
 //! `BridgeFeed` and a real `ConnectionsModel`.
 //!   * It shows only for a supporting bridge, a held slot and a live feed.
 //!   * The holder's text (program and host included) is plain text.
-//!   * "Allow once" and "Deny" use the inline semantics, only while the model
-//!     holds the row as pending, and answer each holder at most once.
+//!   * "Allow once" and "Deny" use the inline semantics (scope, duration and
+//!     whether the program file is known), only while the model holds the
+//!     row as pending, only once a holder has been shown for `armDelayMs`
+//!     (a double-click can't answer the next holder), and once per holder.
 //!   * A once-only Deny's explanation reaches the window.
 //!
 //! Fails on any QML warning from the probe or the shell's QML. Run headless
@@ -86,7 +88,7 @@ Controls.ApplicationWindow {
     QtObject {
         id: statusStub
         property bool supported: true
-        property bool held: true
+        property bool held: false
         property string rowId: "1:abs"
         property string text: probeWindow.markup
     }
@@ -95,8 +97,9 @@ Controls.ApplicationWindow {
         id: feedStub
         property bool ok: true
         property var submitted: []
-        function submitVerdict(rowId, choice, scope, duration) {
-            feedStub.submitted.push(rowId + " " + choice + " " + scope + "/" + duration);
+        function submitVerdict(rowId, choice, scope, duration, bindableProcessPath) {
+            feedStub.submitted.push(rowId + " " + choice + " " + scope + "/" + duration
+                                    + " bindable=" + bindableProcessPath);
             return true;
         }
         function appBoundRulesFor(rowId) {
@@ -115,8 +118,11 @@ Controls.ApplicationWindow {
         status: statusStub
         model: connModel
         bridgeFeed: feedStub
+        armDelayMs: 200
         onExplained: text => probeWindow.explanations.push(text)
     }
+
+    property int phase: 0
 
     function check(ok, what) {
         if (!ok) {
@@ -134,66 +140,91 @@ Controls.ApplicationWindow {
         action();
         return JSON.stringify(feedStub.submitted);
     }
+    function expectSent(action, expected, what) {
+        const got = probeWindow.sent(action);
+        probeWindow.check(got === JSON.stringify(expected), what + ": sent " + got);
+    }
 
+    // Each phase runs after the banner had time to arm (300 ms > 200 ms).
     Timer {
-        interval: 50
+        interval: 300
         running: true
-        repeat: false
+        repeat: true
         onTriggered: {
+            probeWindow.phase++;
+            let done = false;
             try {
-                connModel.applyServerMessageJson(JSON.stringify({
-                    action: "insertConnectionRows",
-                    rows: [
-                        probeWindow.row("1:abs", "/usr/bin/curl"),
-                        probeWindow.row("1:abs2", "/usr/bin/wget"),
-                        probeWindow.row("1:kern", "Kernel connection")
-                    ]
-                }));
-
-                probeWindow.check(banner.shown && banner.visible, "not shown");
-                probeWindow.check(banner.label.text === probeWindow.markup
-                                  && banner.label.textFormat === Text.PlainText,
-                                  "label " + banner.label.text);
-
-                probeWindow.check(probeWindow.sent(() => banner.answer("allow"))
-                                  === JSON.stringify(["1:abs allow this_host/this_time"]),
-                                  "Allow once sent " + JSON.stringify(feedStub.submitted));
-                probeWindow.check(probeWindow.sent(() => banner.answer("deny")) === "[]",
-                                  "a second answer for the same holder was sent");
-
-                statusStub.rowId = "1:abs2";
-                probeWindow.check(probeWindow.sent(() => banner.answer("deny"))
-                                  === JSON.stringify(["1:abs2 deny this_host/until_quit"]),
-                                  "Deny sent " + JSON.stringify(feedStub.submitted));
-
-                statusStub.rowId = "1:kern";
-                banner.answer("deny");
-                probeWindow.check(probeWindow.explanations.length === 1
-                                  && probeWindow.explanations[0].indexOf("couldn't identify") >= 0,
-                                  "explanations " + JSON.stringify(probeWindow.explanations));
-
-                statusStub.rowId = "1:gone";
-                probeWindow.check(!banner.actionable, "actionable for a row the model lacks");
-                probeWindow.check(probeWindow.sent(() => banner.answer("allow")) === "[]",
-                                  "answered a row the model lacks");
-
-                statusStub.rowId = "1:abs";
-                statusStub.supported = false;
-                probeWindow.check(!banner.shown, "shown for an older bridge");
-                statusStub.supported = true;
-                statusStub.held = false;
-                probeWindow.check(!banner.shown, "shown with a free slot");
-                statusStub.held = true;
-                feedStub.ok = false;
-                probeWindow.check(!banner.shown, "shown while disconnected");
-                feedStub.ok = true;
-                probeWindow.check(banner.shown, "not shown again");
-
-                if (probeWindow.failures.length > 0) {
-                    throw new Error("prompt slot banner probe: " + probeWindow.failures.join("; "));
+                if (probeWindow.phase === 1) {
+                    connModel.applyServerMessageJson(JSON.stringify({
+                        action: "insertConnectionRows",
+                        rows: [
+                            probeWindow.row("1:abs", "/usr/bin/curl"),
+                            probeWindow.row("1:abs2", "/usr/bin/wget"),
+                            probeWindow.row("1:kern", "Kernel connection")
+                        ]
+                    }));
+                    statusStub.held = true;
+                    probeWindow.check(banner.shown && banner.visible, "not shown");
+                    probeWindow.check(banner.label.text === probeWindow.markup
+                                      && banner.label.textFormat === Text.PlainText,
+                                      "label " + banner.label.text);
+                    probeWindow.expectSent(() => banner.answer("allow"), [],
+                                           "a holder answered before it was shown long enough");
+                } else if (probeWindow.phase === 2) {
+                    probeWindow.expectSent(() => banner.answer("allow"),
+                                           ["1:abs allow this_host/this_time bindable=true"],
+                                           "Allow once");
+                    probeWindow.expectSent(() => banner.answer("deny"), [],
+                                           "a second answer for the same holder");
+                    // The next holder takes its place; a quick second click.
+                    statusStub.rowId = "1:abs2";
+                    probeWindow.expectSent(() => banner.answer("deny"), [],
+                                           "a double-click answered the next holder");
+                } else if (probeWindow.phase === 3) {
+                    probeWindow.expectSent(() => banner.answer("deny"),
+                                           ["1:abs2 deny this_host/until_quit bindable=true"],
+                                           "Deny");
+                    statusStub.rowId = "1:kern";
+                } else if (probeWindow.phase === 4) {
+                    probeWindow.expectSent(() => banner.answer("deny"),
+                                           ["1:kern deny this_host/this_time bindable=false"],
+                                           "Deny for an unidentified program");
+                    probeWindow.check(probeWindow.explanations.length === 1
+                                      && probeWindow.explanations[0].indexOf("couldn't identify") >= 0,
+                                      "explanations " + JSON.stringify(probeWindow.explanations));
+                    statusStub.rowId = "1:gone";
+                } else {
+                    probeWindow.check(!banner.actionable, "actionable for a row the model lacks");
+                    probeWindow.expectSent(() => banner.answer("allow"), [],
+                                           "answered a row the model lacks");
+                    statusStub.rowId = "1:abs";
+                    statusStub.supported = false;
+                    probeWindow.check(!banner.shown, "shown for an older bridge");
+                    statusStub.supported = true;
+                    statusStub.held = false;
+                    probeWindow.check(!banner.shown, "shown with a free slot");
+                    statusStub.held = true;
+                    feedStub.ok = false;
+                    probeWindow.check(!banner.shown, "shown while disconnected");
+                    feedStub.ok = true;
+                    probeWindow.check(banner.shown, "not shown again");
+                    probeWindow.check(!banner.actionable, "answerable as soon as it reappeared");
+                    done = true;
                 }
-            } finally {
-                Qt.quit();
+            } catch (e) {
+                probeWindow.failures.push("phase " + probeWindow.phase + " threw: " + e);
+                done = true;
+            }
+            if (done || probeWindow.failures.length > 0) {
+                stop();
+                try {
+                    if (probeWindow.failures.length > 0) {
+                        throw new Error("prompt slot banner probe: "
+                                        + probeWindow.failures.join("; "));
+                    }
+                } finally {
+                    Qt.quit();
+                }
             }
         }
     }

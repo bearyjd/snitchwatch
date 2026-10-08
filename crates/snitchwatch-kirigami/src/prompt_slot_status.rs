@@ -12,7 +12,9 @@ use core::pin::Pin;
 use cxx_qt::{CxxQtType, Threading};
 use cxx_qt_lib::QString;
 
-use crate::bridge_runtime::ReceivedPromptSlot;
+use tokio::sync::watch;
+
+use crate::bridge_runtime::{BridgeHandles, ReceivedPauseState, ReceivedPromptSlot};
 use crate::prompt_slot_text::{banner_text, SlotView};
 
 #[cxx_qt::bridge]
@@ -65,7 +67,7 @@ pub struct PromptSlotStatusRust {
 
 impl qobject::PromptSlotStatus {
     fn start_bridge_feed(self: Pin<&mut Self>) {
-        let (Some(mut slot_rx), Some(mut pause_rx), Some(handles)) = (
+        let (Some(slot_rx), Some(pause_rx), Some(handles)) = (
             crate::bridge_runtime::prompt_slot_rx(),
             crate::bridge_runtime::pause_rx(),
             crate::bridge_runtime::handles(),
@@ -87,33 +89,8 @@ impl qobject::PromptSlotStatus {
             qobject.refresh();
         });
 
-        let runtime = handles.runtime().clone();
-        let slot_thread = qt_thread.clone();
-        let slot_handles = handles.clone();
-        runtime.spawn(async move {
-            while slot_rx.changed().await.is_ok() {
-                let received = slot_rx.borrow().clone();
-                let session_handles = slot_handles.clone();
-                let _ = slot_thread.queue(move |mut qobject| {
-                    if session_handles.is_current_session(received.connection_id) {
-                        qobject.as_mut().rust_mut().slot = received;
-                        qobject.refresh();
-                    }
-                });
-            }
-        });
-        runtime.spawn(async move {
-            while pause_rx.changed().await.is_ok() {
-                let received = pause_rx.borrow().clone();
-                let session_handles = handles.clone();
-                let _ = qt_thread.queue(move |mut qobject| {
-                    if session_handles.is_current_session(received.connection_id) {
-                        qobject.as_mut().rust_mut().paused = received.state.paused;
-                        qobject.refresh();
-                    }
-                });
-            }
-        });
+        spawn_slot_feed(&handles, qt_thread.clone(), slot_rx);
+        spawn_pause_feed(&handles, qt_thread, pause_rx);
     }
 
     fn refresh(mut self: Pin<&mut Self>) {
@@ -131,6 +108,50 @@ impl qobject::PromptSlotStatus {
         self.as_mut().set_row_id(QString::from(&row_id));
         self.as_mut().set_text(QString::from(&text));
     }
+}
+
+type StatusThread = cxx_qt::CxxQtThread<qobject::PromptSlotStatus>;
+
+/// Each change applies only if it still belongs to the live session when the
+/// queued Qt callback runs.
+fn spawn_slot_feed(
+    handles: &BridgeHandles,
+    qt_thread: StatusThread,
+    mut slot_rx: watch::Receiver<ReceivedPromptSlot>,
+) {
+    let handles = handles.clone();
+    handles.runtime().clone().spawn(async move {
+        while slot_rx.changed().await.is_ok() {
+            let received = slot_rx.borrow().clone();
+            let session_handles = handles.clone();
+            let _ = qt_thread.queue(move |mut qobject| {
+                if session_handles.is_current_session(received.connection_id) {
+                    qobject.as_mut().rust_mut().slot = received;
+                    qobject.refresh();
+                }
+            });
+        }
+    });
+}
+
+fn spawn_pause_feed(
+    handles: &BridgeHandles,
+    qt_thread: StatusThread,
+    mut pause_rx: watch::Receiver<ReceivedPauseState>,
+) {
+    let handles = handles.clone();
+    handles.runtime().clone().spawn(async move {
+        while pause_rx.changed().await.is_ok() {
+            let received = pause_rx.borrow().clone();
+            let session_handles = handles.clone();
+            let _ = qt_thread.queue(move |mut qobject| {
+                if session_handles.is_current_session(received.connection_id) {
+                    qobject.as_mut().rust_mut().paused = received.state.paused;
+                    qobject.refresh();
+                }
+            });
+        }
+    });
 }
 
 /// The holder's session-qualified row id and banner text, or `None` when the
@@ -200,7 +221,7 @@ mod tests {
     fn a_pause_changes_the_text() {
         let (_, text) = shown_holder(&slot(true), true, 25_500, true).unwrap();
         assert!(
-            text.contains(crate::prompt_slot_text::PAUSED_WHILE_WAITING),
+            text.contains(&crate::prompt_slot_text::paused_while_waiting(1)),
             "{text}"
         );
     }

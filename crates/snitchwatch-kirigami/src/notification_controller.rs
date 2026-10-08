@@ -292,8 +292,8 @@ mod tests {
         assert_eq!(summary, "Snitchwatch — while a prompt was open");
         assert_eq!(
             body,
-            "While that prompt was open, at least 2 other connections got the firewall's \
-             default action."
+            "While that prompt was open, the firewall applied its default action 2 times \
+             (retries count again)."
         );
         assert!(!reviewable);
     }

@@ -199,8 +199,9 @@ pub enum ServerMessage {
         reason: String,
     },
     /// Who holds opensnitchd's single prompt slot: the oldest open prompt,
-    /// how many are open, and at least how many other connections got the
-    /// daemon's default action meanwhile (`None` while unknown). Sent on every
+    /// how many are open, and how many times the daemon applied its default
+    /// action meanwhile (`None` while unknown; retries count again, and the
+    /// figure is a lower bound). Sent on every
     /// change and in the `RequestSnapshot` answer; a native-shell extension
     /// legacy clients ignore. See `crate::prompt_slot`.
     PromptSlot {

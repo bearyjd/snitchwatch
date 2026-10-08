@@ -38,15 +38,16 @@ pub fn derive_tooltip(state: &TrayState, pause: &PauseState, paused_until: &str)
     }
 }
 
-/// [`derive_tooltip`], plus issue #78: while paused, a prompt holding the
-/// daemon's single slot means the pause usually lets nothing else through,
+/// [`derive_tooltip`], plus issue #78: while paused, prompts holding the
+/// daemon's single slot mean the pause can't reach other new connections,
 /// and the tooltip says so. Fixed text only (the tooltip renders rich text).
 pub fn derive_tooltip_with_slot(
     state: &TrayState,
     pause: &PauseState,
     paused_until: &str,
-    slot_held: bool,
+    slot_holders: u32,
 ) -> String {
+    let slot_held = slot_holders > 0;
     let shows_pause = !matches!(state, TrayState::DaemonDown | TrayState::RecentBlock { .. });
     if slot_held && shows_pause && is_paused(state, pause) {
         let until = if paused_until.is_empty() {
@@ -56,10 +57,20 @@ pub fn derive_tooltip_with_slot(
         };
         return format!(
             "Snitchwatch — filtering paused{until}. {}",
-            crate::prompt_slot_text::PAUSED_WHILE_WAITING
+            crate::prompt_slot_text::paused_while_waiting(slot_holders)
         );
     }
     derive_tooltip(state, pause, paused_until)
+}
+
+/// The prompt-slot holders the tray may speak of: the received count only
+/// while it belongs to the live session.
+pub fn live_slot_holders(holders: u32, session_is_current: bool) -> u32 {
+    if session_is_current {
+        holders
+    } else {
+        0
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -311,35 +322,44 @@ mod tests {
         );
     }
 
-    /// Issue #78: paused with a prompt holding the slot, the tooltip says the
-    /// pause usually lets nothing else through. Otherwise it is unchanged.
+    /// Issue #78: paused with prompts holding the slot, the tooltip says the
+    /// pause can't reach other new connections. Otherwise it is unchanged.
     #[test]
     fn a_pause_with_a_waiting_prompt_says_so() {
-        let tooltip = derive_tooltip_with_slot(&TrayState::FilterOff, &PAUSED, "14:30", true);
+        let tooltip = derive_tooltip_with_slot(&TrayState::FilterOff, &PAUSED, "14:30", 1);
         assert_eq!(
             tooltip,
             format!(
                 "Snitchwatch — filtering paused until 14:30. {}",
-                crate::prompt_slot_text::PAUSED_WHILE_WAITING
+                crate::prompt_slot_text::paused_while_waiting(1)
             )
         );
         assert_eq!(
-            derive_tooltip_with_slot(&TrayState::FilterOff, &PAUSED, "", true),
+            derive_tooltip_with_slot(&TrayState::FilterOff, &PAUSED, "", 2),
             format!(
                 "Snitchwatch — filtering paused. {}",
-                crate::prompt_slot_text::PAUSED_WHILE_WAITING
+                crate::prompt_slot_text::paused_while_waiting(2)
             )
         );
-        for (state, pause, slot_held) in [
-            (TrayState::FilterOff, PAUSED, false),
-            (TrayState::Pending(1), NOT_PAUSED, true),
-            (TrayState::DaemonDown, PAUSED, true),
+        for (state, pause, holders) in [
+            (TrayState::FilterOff, PAUSED, 0),
+            (TrayState::Pending(1), NOT_PAUSED, 1),
+            (TrayState::DaemonDown, PAUSED, 1),
         ] {
             assert_eq!(
-                derive_tooltip_with_slot(&state, &pause, "14:30", slot_held),
+                derive_tooltip_with_slot(&state, &pause, "14:30", holders),
                 derive_tooltip(&state, &pause, "14:30"),
-                "{state:?} {slot_held}"
+                "{state:?} {holders}"
             );
         }
+    }
+
+    /// Only the live session's prompt-slot state counts: after a
+    /// disconnect, or on an older bridge, nothing is known to be waiting.
+    #[test]
+    fn only_the_live_sessions_holders_count() {
+        assert_eq!(live_slot_holders(2, true), 2);
+        assert_eq!(live_slot_holders(2, false), 0);
+        assert_eq!(live_slot_holders(0, true), 0);
     }
 }
