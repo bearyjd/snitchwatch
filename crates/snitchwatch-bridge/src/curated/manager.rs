@@ -72,6 +72,9 @@ struct Inner {
     /// One save at a time; holds the last version written, so an older
     /// snapshot never replaces a newer one (code review LOW-1).
     saver: Mutex<u64>,
+    /// Passes run, for the tests of the pass gate.
+    #[cfg(test)]
+    passes: std::sync::atomic::AtomicU64,
 }
 
 struct State {
@@ -147,6 +150,8 @@ impl CuratedDefaults {
                 wake: Notify::new(),
                 last: Mutex::new(None),
                 saver: Mutex::new(0),
+                #[cfg(test)]
+                passes: Default::default(),
             }),
         }
     }
@@ -354,6 +359,10 @@ impl CuratedDefaults {
 
     /// One reconcile pass.
     pub async fn reconcile(&self) {
+        #[cfg(test)]
+        self.inner
+            .passes
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.save_if_changed().await;
         let daemon = {
             let cache = self.inner.rules.lock().unwrap_or_else(|e| e.into_inner());

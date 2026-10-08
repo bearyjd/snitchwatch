@@ -164,3 +164,30 @@ async fn wait_until(done: impl Fn() -> bool) {
     .await
     .expect("timed out");
 }
+
+/// The pass gate: rule-list broadcasts that change nothing a pass reads run
+/// no pass.
+#[tokio::test]
+async fn broadcasts_that_change_nothing_run_no_pass() {
+    let harness = Harness::new().connect(Daemon::Accept, Vec::new());
+    let curated = harness.curated();
+    let worker = curated.spawn(harness.rules.synced());
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let before = curated
+        .inner
+        .passes
+        .load(std::sync::atomic::Ordering::SeqCst);
+    for _ in 0..50 {
+        let _ = harness
+            .broadcast
+            .send(ServerMessage::SetRules { rules: Vec::new() });
+        tokio::task::yield_now().await;
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    worker.abort();
+    let after = curated
+        .inner
+        .passes
+        .load(std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(after, before, "{} passes for nothing", after - before);
+}
