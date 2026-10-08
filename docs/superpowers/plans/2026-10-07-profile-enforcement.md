@@ -9,6 +9,10 @@ now" banner is the honest-ui PR)
 - Part 2: #45 PR B and #48, for `DaemonCommands`, `RulesCache` and
   reconcile.
 
+**Status (2026-10-08):** Part 1 is implemented on
+`fix/46-profile-persistence` (based on `c74d8c7`, after #45 PR B). Part 2
+is not started. See "Part 1 as built" below.
+
 **Priority: lowest of the post-#39 set.** No GUI control can create a
 profile rule, so there is nothing to enforce yet. Persistence is cheap.
 Enforcement is worth doing together with the rule editor (P2.1).
@@ -59,6 +63,9 @@ approximate; go by the name.
   overrides "always win over blocklist denies" because of sort order. Under
   opensnitchd's `FindFirstMatch` and the blocklist-wins decision (#45), a
   non-precedence profile **allow** loses to any matching deny.
+  *Already corrected on `main` by #45 PR B (`c74d8c7`): the module doc and
+  `PROFILE_BAND_PREFIX` now say a profile allow does not beat a blocklist
+  deny. Part 1 left it as is.*
 
 ## Design
 
@@ -85,6 +92,36 @@ approximate; go by the name.
      - the non-persistent variant still contains "restart";
      - both contain "not applied";
      - `visible: true`, non-dismissable, and no word "bridge".
+
+### Part 1 as built (2026-10-08)
+
+Differences from the design above, and why:
+
+- **Store hardening.** `ProfileStore::open` now does what
+  `BlocklistStore::open` does: `O_NOFOLLOW` pre-open, regular file only,
+  mode 0600 (tightened if it exists), `SQLITE_OPEN_NOFOLLOW`, and a
+  `PRAGMA user_version` (1) that refuses a newer schema. Duplicated rather
+  than shared, so #45's store is untouched.
+- **Where it lives.** `snitchwatch-bridge-cli/src/profile_storage.rs`
+  (`build_profiles_manager`), not `lib.rs`. `run_with_incoming` clones
+  `options.storage` before the blocklist builder consumes `options`. No
+  `BridgeMode` gate: per-user bridges save profiles too, since nothing is
+  installed.
+- **Unreadable store.** A `profiles.sqlite3` that opens but whose profiles
+  can't be read is treated like one that can't be opened:
+  `Unusable("profile store: …")` and memory, with the file left as is. The
+  blocklist store keeps an unreadable store (`StorageStatus.unreadable`) to
+  protect installed rules; profiles have none, and `build_set_profiles`
+  reads the store directly, so keeping it would hide every profile.
+- **Banner.** Two fixed-text warnings instead of one banner with two
+  wordings, because `inline_messages_carry_only_fixed_text` (#51) forbids
+  conditional InlineMessage text:
+  - `visible: true`: "not applied to the firewall", "no firewall rules";
+  - `visible: !page.storagePersistent`: memory only, lost on restart;
+  - plus a fixed-text note, `visible: page.storagePersistent`, saying
+    profiles are saved (not in the design: the page has to say both
+    states), and the reason in a PlainText "Details:" label.
+  `assert_preview_banner` is replaced by `assert_profiles_banners`.
 
 ### Part 2: enforcement (M, after #45 PR B and P2.1's editor)
 
@@ -161,10 +198,18 @@ Manual VM check for Part 2:
 
 ## Risks and open questions
 
-- **Precedence (owner decision needed).** Should a profile **allow**
-  override blocklist and prompt denies? That needs `precedence: true`, which
-  also beats the user's own denies. The plan keeps `precedence: false`,
-  consistent with "blocklist wins", and only fixes the docs.
+- **Precedence (owner decision needed, still open after Part 1).** Should a
+  profile **allow** override blocklist and prompt denies? That needs
+  `precedence: true`, which also beats the user's own denies. The plan keeps
+  `precedence: false` (the materializer emits no precedence at all),
+  consistent with "blocklist wins", and only fixes the docs. Part 1 does not
+  touch the materializer; decide before Part 2.
+- **A saved manual pick vs. auto-switch at startup (open).** The active
+  profile now survives a restart, but the auto-switch loop's first network
+  observation after a start counts as a network change: if a *different*
+  profile's matchers match the current network, it is activated, replacing
+  a manual pick saved before the restart. The pin itself is not persisted.
+  Harmless while nothing is enforced; decide with Part 2.
 - **Rule churn.** Auto-switch on NetworkManager changes now rewrites
   firewall rules. Debounce flapping networks in Part 2.
 - **Is Part 2 worth doing before P2.1?** It would ship an enforcement path
