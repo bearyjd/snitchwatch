@@ -300,7 +300,14 @@ async fn read_only_and_hidden_rules_cannot_be_changed() {
         let mut toggled = export_rule(&bound(name, "deny"));
         toggled["enabled"] = json!(false);
         commands.try_route(update(name, toggled, Some("r")));
-        refused(&result(&mut rx).await);
+        let reasons = refused(&result(&mut rx).await);
+        if name == "200-hidden" {
+            // Said as it is: the rule exists but can't be shown.
+            assert!(
+                reasons.iter().any(|r| r.contains("too large")),
+                "{reasons:?}"
+            );
+        }
     }
     nothing_sent(&mut daemon).await;
 }
