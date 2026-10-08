@@ -18,6 +18,7 @@ use std::time::Instant;
 
 use crate::bridge_runtime::SendClientMessageError;
 use crate::rules::editor::{self, RuleDraft};
+use crate::rules::editor_profile;
 use crate::rules::editor_view;
 use crate::rules::simulator::SimulationForm;
 use snitchwatch_bridge::ws_messages::{ClientMessage, ServerMessage};
@@ -25,6 +26,10 @@ use snitchwatch_bridge::ws_messages::{ClientMessage, ServerMessage};
 const NOT_CONNECTED: &str = "Snitchwatch isn't connected to its service, so nothing was sent.";
 const QUEUE_FULL: &str = "Snitchwatch is busy, so nothing was sent. Try again in a moment.";
 const SAVING: &str = "Saving…";
+/// A profile rule is saved, not yet installed: the Profiles page shows
+/// whether the firewall has it.
+const PROFILE_SAVED: &str =
+    "Saved to the profile. Its status below says whether the firewall installed it.";
 const BAD_DRAFT: &str = "The rule couldn't be read. Close the editor and open it again.";
 
 #[cxx_qt::bridge]
@@ -46,6 +51,9 @@ pub mod qobject {
         #[qproperty(QString, editing_name, cxx_name = "editingName")]
         /// `rules::editor::EditorCheck` of the last checked draft, as JSON.
         #[qproperty(QString, check_json, cxx_name = "checkJson")]
+        /// The profile a new rule is for (issue #46); empty for a firewall
+        /// rule.
+        #[qproperty(QString, profile_id, cxx_name = "profileId")]
         type RuleEditorController = super::RuleEditorControllerRust;
 
         /// The bridge confirmed the rule; the sheet closes.
@@ -73,6 +81,12 @@ pub mod qobject {
         #[qinvokable]
         #[cxx_name = "newRule"]
         fn new_rule(self: Pin<&mut RuleEditorController>) -> QString;
+
+        /// Start a new rule for profile `profile_id` (issue #46); returns its
+        /// draft as JSON. Saving sends `AddProfileRule`.
+        #[qinvokable]
+        #[cxx_name = "newProfileRule"]
+        fn new_profile_rule(self: Pin<&mut RuleEditorController>, profile_id: &QString) -> QString;
 
         /// Start a new rule for a connection (`SimulationForm` JSON, as
         /// `ConnectionsModel.simulationPrefillJson` gives); returns its
@@ -121,6 +135,7 @@ pub struct RuleEditorControllerRust {
     status_text: QString,
     editing_name: QString,
     check_json: QString,
+    profile_id: QString,
     /// The cached rule being edited, for the cautions.
     old: Option<Value>,
     pending: editor_view::Pending,
@@ -160,13 +175,19 @@ impl qobject::RuleEditorController {
 
     fn start(mut self: Pin<&mut Self>, editing: &str, old: Option<Value>, draft: &RuleDraft) {
         self.as_mut().rust_mut().old = old;
+        self.as_mut().set_profile_id(QString::from(""));
         self.as_mut().set_editing_name(QString::from(editing));
         self.as_mut().set_status("");
         self.check_draft(draft);
     }
 
     fn check_draft(mut self: Pin<&mut Self>, draft: &RuleDraft) -> editor::EditorCheck {
-        let result = editor::check(draft, self.old.as_ref());
+        let profile = self.profile_id.to_string();
+        let result = if profile.is_empty() {
+            editor::check(draft, self.old.as_ref())
+        } else {
+            editor_profile::check_profile(draft, &profile)
+        };
         let json = serde_json::to_string(&result).unwrap_or_default();
         self.as_mut().set_check_json(QString::from(&json));
         result
@@ -187,6 +208,14 @@ impl qobject::RuleEditorController {
     fn new_rule(self: Pin<&mut Self>) -> QString {
         let draft = editor::new_draft();
         self.start("", None, &draft);
+        draft_json(&draft)
+    }
+
+    fn new_profile_rule(mut self: Pin<&mut Self>, profile_id: &QString) -> QString {
+        let draft = editor::new_draft();
+        self.as_mut().start("", None, &draft);
+        self.as_mut().set_profile_id(profile_id.clone());
+        self.check_draft(&draft);
         draft_json(&draft)
     }
 
@@ -255,7 +284,12 @@ impl qobject::RuleEditorController {
         }
         let request_id = next_request_id();
         let editing = self.editing_name.to_string();
-        let message = editor_view::submit_message(&draft, &editing, request_id.clone());
+        let profile = self.profile_id.to_string();
+        let message = if profile.is_empty() {
+            editor_view::submit_message(&draft, &editing, request_id.clone())
+        } else {
+            editor_profile::profile_message(&draft, &profile, request_id.clone())
+        };
         if let Err(reason) = send(message) {
             self.set_status(reason);
             return false;
@@ -279,7 +313,12 @@ impl qobject::RuleEditorController {
     /// The wait ended: say how, and close the sheet if it was saved.
     fn finish(mut self: Pin<&mut Self>, done: editor_view::Finished) {
         self.as_mut().set_busy(false);
-        self.as_mut().set_status(&done.status);
+        let status = if done.saved && !self.profile_id.is_empty() {
+            PROFILE_SAVED
+        } else {
+            done.status.as_str()
+        };
+        self.as_mut().set_status(status);
         if done.saved {
             self.saved();
         }
