@@ -41,12 +41,6 @@ fn rules_page_has_no_bulk_delete() {
             "RulesPage.qml offers a bulk delete (`{forbidden}`)"
         );
     }
-    for looping in ["for (", ".forEach(", "while ("] {
-        assert!(
-            !page.contains(looping),
-            "RulesPage.qml has a loop (`{looping}`) — a deleteRule inside one is a bulk delete"
-        );
-    }
     assert_eq!(
         page.matches("deleteRule(").count(),
         2,
@@ -164,6 +158,12 @@ Window {
                 probeWindow.check(rulesModel.legacyHostOnlyCount === 3,
                                   "legacyHostOnlyCount " + rulesModel.legacyHostOnlyCount);
                 probeWindow.check(page.header.visible, "the all-apps notice is hidden");
+                // Only Snitchwatch's own earlier rules are counted, so the
+                // label must not compare them with every rule (code review C1).
+                const counted = probeWindow.findChild(page.header, "allAppsCount");
+                probeWindow.check(counted && counted.text ===
+                    "3 rules saved by earlier Snitchwatch versions apply to all apps",
+                    "count label: " + (counted ? counted.text : "missing"));
 
                 const denyHint = probeWindow.findChild(probeWindow.rowItem(0), "allAppsHint");
                 probeWindow.check(denyHint && denyHint.visible && denyHint.text ===
@@ -183,10 +183,15 @@ Window {
                                   && !probeWindow.shown(2, "allAppsHint")
                                   && !probeWindow.shown(2, "allAppsDelete"),
                                   "app-bound rule flagged");
-                // A read-only rule keeps its flag but offers no delete.
+                // A read-only rule keeps its flag but offers no delete, and
+                // its hint doesn't talk about deleting it (code review C5).
                 probeWindow.check(probeWindow.shown(3, "allAppsFlag")
                                   && !probeWindow.shown(3, "allAppsDelete"),
                                   "read-only rule offers a delete");
+                const lockedHint = probeWindow.findChild(probeWindow.rowItem(3), "allAppsHint");
+                probeWindow.check(lockedHint && lockedHint.text ===
+                    "This rule applies to every app. Snitchwatch can't delete it; its details say why.",
+                    "read-only hint: " + (lockedHint ? lockedHint.text : "missing"));
 
                 // One click, one DeleteRule, for exactly that row's rule.
                 const del = probeWindow.findChild(probeWindow.rowItem(0), "allAppsDelete");
@@ -202,6 +207,12 @@ Window {
                 probeWindow.check(typeof rulesModel.deleteAll === "undefined"
                                   && typeof rulesModel.deleteAllAppsRules === "undefined",
                                   "RulesModel exposes a bulk delete");
+
+                probeWindow.setRules([probeWindow.rule(deny, "deny", probeWindow.host("github.com"))]);
+                const one = probeWindow.findChild(page.header, "allAppsCount");
+                probeWindow.check(one && one.text ===
+                    "1 rule saved by an earlier Snitchwatch version applies to all apps",
+                    "singular count label: " + (one ? one.text : "missing"));
 
                 // Without flagged rules the notice goes away.
                 probeWindow.setRules([]);

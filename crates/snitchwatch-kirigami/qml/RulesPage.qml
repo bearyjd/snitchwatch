@@ -206,12 +206,18 @@ Kirigami.ScrollablePage {
             text: "Some rules saved by earlier Snitchwatch versions apply to all apps, not only "
                 + "the app that asked. They are marked below, each with what deleting it changes."
         }
+        // Counts only Snitchwatch's own earlier rules: blocklist or
+        // hand-written rules may apply to all apps too, so no "of N".
         Controls.Label {
+            objectName: "allAppsCount"
             Layout.fillWidth: true
             Layout.margins: Kirigami.Units.smallSpacing
             textFormat: Text.PlainText
-            text: page.model ? (page.model.legacyHostOnlyCount + " of " + page.model.count
-                                + " rules apply to all apps") : ""
+            text: !page.model ? ""
+                : page.model.legacyHostOnlyCount === 1
+                    ? "1 rule saved by an earlier Snitchwatch version applies to all apps"
+                    : page.model.legacyHostOnlyCount
+                      + " rules saved by earlier Snitchwatch versions apply to all apps"
         }
     }
 

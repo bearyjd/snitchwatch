@@ -16,11 +16,14 @@
 //! an allow — including one for just this host — and other apps are asked.
 
 use super::row_store::{Rule, RulesStore};
-use snitchwatch_bridge::translator::verdict::strip_display_hazards;
+use snitchwatch_bridge::translator::verdict::sanitize_for_display;
 
 /// The description `snitchwatch_bridge::translator::verdict::verdict_to_rule`
 /// gives every interactive prompt rule (since M1.5).
 const INTERACTIVE_VERDICT_DESCRIPTION: &str = "snitchwatch interactive verdict";
+
+/// Longest destination shown in a hint (`sanitize_for_display` adds `…`).
+const MAX_TARGET_CHARS: usize = 64;
 
 impl Rule {
     /// A Snitchwatch prompt rule whose operator matches only a destination,
@@ -29,16 +32,31 @@ impl Rule {
         self.all_apps_target().is_some()
     }
 
-    /// What deleting a flagged rule changes, in plain text with the
-    /// destination's display hazards removed; `None` when not flagged.
+    /// What deleting a flagged rule changes, as plain text with the
+    /// destination sanitized for display; `None` when not flagged. A rule
+    /// Snitchwatch can't delete (the same `is_read_only` predicate
+    /// `RulesStore::is_deletable` and RulesPage's Delete button use) or a
+    /// disabled one is described as it is, never as "Deleting this ...".
     pub fn all_apps_hint(&self) -> Option<String> {
         let target = self.all_apps_target()?;
-        Some(match self.normalized_action() {
-            "allow" => format!("Deleting this makes every app ask again before reaching {target}."),
-            _ => format!(
+        let deny = self.normalized_action() != "allow";
+        Some(if self.is_read_only() {
+            "This rule applies to every app. Snitchwatch can't delete it; its details say why."
+                .to_string()
+        } else if !self.enabled && deny {
+            format!(
+                "Disabled, so it blocks nothing now. Re-enabled, it would block {target} for \
+                 every app; deleting it removes it for good."
+            )
+        } else if !self.enabled {
+            "Disabled, so it allows nothing now; deleting it removes it for good.".to_string()
+        } else if deny {
+            format!(
                 "Deleting this unblocks {target} for every app with an allow rule covering it, \
                  including rules for just this host; other apps will be asked."
-            ),
+            )
+        } else {
+            format!("Deleting this makes every app ask again before reaching {target}.")
         })
     }
 
@@ -49,7 +67,7 @@ impl Rule {
         {
             return None;
         }
-        host_only_target(&self.operator).map(|target| strip_display_hazards(&target))
+        host_only_target(&self.operator)
     }
 }
 
@@ -76,12 +94,13 @@ fn mentions_process_path(operator: &serde_json::Value) -> bool {
 }
 
 /// For a pre-#50 host scope's operator (one leaf: a `list` has type `list`),
-/// the destination it covers; `None` for any other shape.
+/// the destination it covers, sanitized for display (the host is DNS/SNI-
+/// influenced, #44 security review S2); `None` for any other shape.
 fn host_only_target(operator: &serde_json::Value) -> Option<String> {
     let field = |key: &str| operator.get(key).and_then(|v| v.as_str());
     let data = field("data").filter(|d| !d.is_empty())?;
     match (field("type")?, field("operand")?) {
-        ("simple", "dest.host" | "dest.ip") => Some(data.to_string()),
+        ("simple", "dest.host" | "dest.ip") => Some(sanitize_for_display(data, MAX_TARGET_CHARS)),
         ("regexp", "dest.host") => Some(describe_domain_pattern(data)),
         _ => None,
     }
@@ -95,6 +114,7 @@ fn describe_domain_pattern(pattern: &str) -> String {
             .strip_prefix(prefix)?
             .strip_suffix('$')
             .and_then(unescape_literal)
+            .map(|domain| sanitize_for_display(&domain, MAX_TARGET_CHARS))
     };
     if let Some(domain) = parent(r"^(?:[^.]+\.)*") {
         format!("{domain} and its subdomains")
@@ -313,6 +333,45 @@ mod tests {
             .all_apps_hint()
             .unwrap()
             .ends_with(" evilmoc.example."));
+        // Security review S2: DNS/SNI-influenced, so bounded and markup-safe
+        // like every other display boundary.
+        let long = host("l", "deny", &format!("{}.example", "a".repeat(100)));
+        let hint = long.all_apps_hint().unwrap();
+        assert!(
+            hint.contains(&format!(" {}… for every app", "a".repeat(64))),
+            "{hint}"
+        );
+        let markup = host("m", "allow", "<b>x</b>.example");
+        assert!(markup
+            .all_apps_hint()
+            .unwrap()
+            .ends_with(" &lt;b&gt;x&lt;/b&gt;.example."));
+    }
+
+    /// Code review C5: a disabled rule changes nothing now, and a read-only
+    /// one has no Delete button, so neither may say "Deleting this ...".
+    #[test]
+    fn disabled_and_read_only_rows_are_described_as_they_are() {
+        let mut disabled_deny = host("d", "deny", "github.com");
+        disabled_deny.enabled = false;
+        assert_eq!(
+            disabled_deny.all_apps_hint().unwrap(),
+            "Disabled, so it blocks nothing now. Re-enabled, it would block github.com for \
+             every app; deleting it removes it for good."
+        );
+        let mut disabled_allow = host("a", "allow", "pypi.org");
+        disabled_allow.enabled = false;
+        assert_eq!(
+            disabled_allow.all_apps_hint().unwrap(),
+            "Disabled, so it allows nothing now; deleting it removes it for good."
+        );
+        let mut locked = host("r", "deny", "github.com");
+        locked.enabled = false;
+        locked.read_only_reason = Some("Snitchwatch can't edit this rule.".into());
+        assert_eq!(
+            locked.all_apps_hint().unwrap(),
+            "This rule applies to every app. Snitchwatch can't delete it; its details say why."
+        );
     }
 
     #[test]
