@@ -230,6 +230,14 @@ pub(crate) fn dispatch_to(
     // Do not await on the Qt thread. `try_send` also rejects a saturated
     // channel instead of retaining a mutation long enough to cross a service
     // restart.
+    //
+    // Issue #72: whatever QML asked for, a session without app-bound rules
+    // never gets a remembered host-scoped verdict. Asked before `row_id`
+    // loses its session prefix below.
+    if let snitchwatch_bridge::ws_messages::ClientMessage::SetVerdict { row_id, .. } = &msg {
+        let app_bound_rules = app_bound_rules_for_row(Some(handles), row_id);
+        msg = crate::pending_decision::limit_to_bridge(msg, app_bound_rules);
+    }
     if let snitchwatch_bridge::ws_messages::ClientMessage::SetVerdict { row_id, .. } = &mut msg {
         let Some((session, wire_id)) = split_session_row_id(row_id) else {
             return Err(crate::bridge_runtime::SendClientMessageError::StaleSession);

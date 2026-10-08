@@ -33,7 +33,7 @@
 //! field instead of a plain `remember: bool`).
 
 use snitchwatch_bridge::ws_messages::{
-    ClientMessage, VerdictAction, VerdictDuration, VerdictScope,
+    effective_verdict_duration, ClientMessage, VerdictAction, VerdictDuration, VerdictScope,
 };
 
 /// The two verdict buttons on the decision sheet. The once/always axis that
@@ -113,6 +113,33 @@ pub fn build_verdict_message(
         duration: Some(parse_duration(duration_token)),
         remember: None,
     })
+}
+
+/// Issue #72: a bridge session that didn't advertise app-bound rules
+/// (`bridge_capabilities::APP_BOUND_RULES`) builds "This host only" and "Any
+/// host on this domain" rules without the program, so remembering one would
+/// cover every app. Such a verdict goes out once-only instead. "Any host"
+/// matches the program alone, even on those bridges, so it is kept, as is
+/// every verdict on a capable session.
+pub(crate) fn limit_to_bridge(msg: ClientMessage, app_bound_rules: bool) -> ClientMessage {
+    match msg {
+        ClientMessage::SetVerdict {
+            row_id,
+            verdict,
+            scope: scope @ (VerdictScope::ThisHost | VerdictScope::AnyHostOnDomain),
+            duration,
+            remember,
+        } if !app_bound_rules && effective_verdict_duration(duration, remember).remembers() => {
+            ClientMessage::SetVerdict {
+                row_id,
+                verdict,
+                scope,
+                duration: Some(VerdictDuration::Once),
+                remember: None,
+            }
+        }
+        other => other,
+    }
 }
 
 #[cfg(test)]
@@ -201,6 +228,66 @@ mod tests {
         assert_eq!(json["verdict"], "allow");
         assert_eq!(json["scope"], "this_host");
         assert_eq!(json["duration"], "once");
+    }
+
+    fn verdict(
+        scope: VerdictScope,
+        duration: Option<VerdictDuration>,
+        remember: Option<bool>,
+    ) -> ClientMessage {
+        ClientMessage::SetVerdict {
+            row_id: "1:7".to_string(),
+            verdict: VerdictAction::Allow,
+            scope,
+            duration,
+            remember,
+        }
+    }
+
+    #[test]
+    fn an_old_bridge_never_remembers_a_host_scoped_verdict() {
+        let remembered = [
+            (Some(VerdictDuration::FiveMinutes), None),
+            (Some(VerdictDuration::UntilRestart), None),
+            (Some(VerdictDuration::Always), None),
+            // The legacy pre-duration shape.
+            (None, Some(true)),
+        ];
+        for scope in [VerdictScope::ThisHost, VerdictScope::AnyHostOnDomain] {
+            for (duration, remember) in remembered {
+                assert_eq!(
+                    limit_to_bridge(verdict(scope, duration, remember), false),
+                    verdict(scope, Some(VerdictDuration::Once), None),
+                    "{scope:?} {duration:?} {remember:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn any_host_capable_bridges_and_other_messages_are_kept() {
+        let kept = [
+            (
+                verdict(VerdictScope::AnyHost, Some(VerdictDuration::Always), None),
+                false,
+            ),
+            (
+                verdict(VerdictScope::ThisHost, Some(VerdictDuration::Always), None),
+                true,
+            ),
+            (
+                verdict(VerdictScope::AnyHostOnDomain, None, Some(true)),
+                true,
+            ),
+            (
+                verdict(VerdictScope::ThisHost, Some(VerdictDuration::Once), None),
+                false,
+            ),
+            (ClientMessage::RequestSnapshot, false),
+        ];
+        for (msg, app_bound_rules) in kept {
+            assert_eq!(limit_to_bridge(msg.clone(), app_bound_rules), msg);
+        }
     }
 
     #[test]

@@ -82,6 +82,11 @@ Controls.ApplicationWindow {
         function submitVerdict(rowId, choice, scope, duration) {
             probeWindow.submitted.push({ rowId: rowId, duration: duration });
         }
+        // A bridge with app-bound rules, so the sheet's durations depend on
+        // the program alone (issue #72 covers older bridges).
+        function appBoundRulesFor(rowId) {
+            return true;
+        }
     }
 
     ConnectionsPage {
