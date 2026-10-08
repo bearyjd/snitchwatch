@@ -17,6 +17,33 @@ const CONNECTIONS_PAGE: &str = include_str!("../qml/ConnectionsPage.qml");
 const MAIN_QML: &str = include_str!("../qml/main.qml");
 const SIZED_SHEET: &str = include_str!("../qml/SizedOverlaySheet.qml");
 
+/// Every QML file the shell ships, for the guards that must hold everywhere
+/// (checked against the directory by `all_qml_files_are_covered`).
+const ALL_QML: &[(&str, &str)] = &[
+    ("BlocklistsPage.qml", BLOCKLISTS_PAGE),
+    ("ConnectionsPage.qml", CONNECTIONS_PAGE),
+    (
+        "DaemonHealthPage.qml",
+        include_str!("../qml/DaemonHealthPage.qml"),
+    ),
+    (
+        "DiagnosticsPage.qml",
+        include_str!("../qml/DiagnosticsPage.qml"),
+    ),
+    ("GeoPage.qml", include_str!("../qml/GeoPage.qml")),
+    ("main.qml", MAIN_QML),
+    (
+        "OnboardingPage.qml",
+        include_str!("../qml/OnboardingPage.qml"),
+    ),
+    ("PendingDecisionSheet.qml", PENDING_SHEET),
+    ("ProfilesPage.qml", PROFILES_PAGE),
+    ("RulesPage.qml", RULES_PAGE),
+    ("ScannerPage.qml", include_str!("../qml/ScannerPage.qml")),
+    ("SizedOverlaySheet.qml", SIZED_SHEET),
+    ("TrafficPage.qml", include_str!("../qml/TrafficPage.qml")),
+];
+
 /// Drop whole-line `//` comments so a guard can't trip over prose that merely
 /// names the thing it forbids (same helper shape as `qml_source_guards.rs`).
 fn code_lines(source: &str) -> String {
@@ -59,16 +86,18 @@ fn blocks(source: &str, open: &str) -> Vec<String> {
     found
 }
 
-/// The block's `text:` binding: the `text:` line plus any continuation lines
-/// indented deeper than it (how multi-line ternaries / `+` chains are written
-/// here), so a later `color:` line can't be mistaken for part of the text.
+/// The block's own `text:` binding: the `text:` line at the block's top
+/// property indent (so a nested child's `text:` — an action inside `actions:`,
+/// say — is never picked up) plus any continuation lines indented deeper than
+/// it (how multi-line ternaries / `+` chains are written here), so a later
+/// `color:` line can't be mistaken for part of the text.
 fn text_binding(block: &str) -> Option<String> {
     let lines: Vec<&str> = block.lines().collect();
+    let indent = |l: &str| l.len() - l.trim_start().len();
+    let base = indent(lines.iter().find(|l| !l.trim().is_empty())?);
     let start = lines
         .iter()
-        .position(|l| l.trim_start().starts_with("text:"))?;
-    let indent = |l: &str| l.len() - l.trim_start().len();
-    let base = indent(lines[start]);
+        .position(|l| indent(l) == base && l.trim_start().starts_with("text:"))?;
     let mut binding = lines[start].to_string();
     for line in &lines[start + 1..] {
         if line.trim().is_empty() || indent(line) <= base {
@@ -78,6 +107,37 @@ fn text_binding(block: &str) -> Option<String> {
         binding.push_str(line);
     }
     Some(binding)
+}
+
+/// Whether a `text:` binding is nothing but double-quoted string literals
+/// joined by `+` — no identifiers, property reads, calls or ternaries, so it
+/// cannot carry data.
+fn is_fixed_text(binding: &str) -> bool {
+    let Some(expr) = binding.trim_start().strip_prefix("text:") else {
+        return false;
+    };
+    let mut chars = expr.chars();
+    let mut literals = 0;
+    while let Some(ch) = chars.next() {
+        match ch {
+            c if c.is_whitespace() || c == '+' => {}
+            '"' => {
+                literals += 1;
+                loop {
+                    match chars.next() {
+                        Some('\\') => {
+                            chars.next();
+                        }
+                        Some('"') => break,
+                        Some(_) => {}
+                        None => return false,
+                    }
+                }
+            }
+            _ => return false,
+        }
+    }
+    literals > 0
 }
 
 /// Every `Controls.Label` whose `text:` binding mentions one of `data_exprs`
@@ -278,9 +338,19 @@ fn pending_decision_sheet_labels_showing_remote_data_are_plain_text() {
 /// (AutoText) with no `textFormat` hook, and HTML-escaping doesn't fix that:
 /// AutoText only decodes entities when it already judges the string to be
 /// markup, so an escaped `&lt;b&gt;` shows up literally. Data therefore never
-/// goes into an InlineMessage — only fixed text does.
+/// goes into an InlineMessage — only string literals joined by `+` do.
+///
+/// Scope: the pages this branch edited (the decision prompt, Connections,
+/// Blocklists, Profiles, Rules). Not covered, because their strings are
+/// generated locally from fixed phrases rather than taken from the daemon, a
+/// program or a subscription, and moving them is a larger restructure:
+/// `main.qml`'s three window banners (`bridgeFeed.statusText`,
+/// `daemonHealthModel.statusSummary`, the pending-age count),
+/// `DaemonHealthPage.qml` (`statusSummary`), `DiagnosticsPage.qml`
+/// (`coexistenceDetail`) and `ScannerPage.qml` (`errorText`).
 #[test]
 fn inline_messages_carry_only_fixed_text() {
+    let mut checked = 0;
     for (name, source) in [
         ("PendingDecisionSheet.qml", PENDING_SHEET),
         ("ConnectionsPage.qml", CONNECTIONS_PAGE),
@@ -289,17 +359,89 @@ fn inline_messages_carry_only_fixed_text() {
         ("RulesPage.qml", RULES_PAGE),
     ] {
         for block in blocks(&code_lines(source), "Kirigami.InlineMessage {") {
+            checked += 1;
             let binding = text_binding(&block).unwrap_or_default();
-            for forbidden in ["sheet.", "page.", "row.", "model."] {
-                assert!(
-                    !binding.contains(forbidden),
-                    "{name} interpolates `{forbidden}...` data into an InlineMessage's text, \
-                     which can't be rendered as plain text (issue #51). Put the data in a \
-                     `Controls.Label` with `textFormat: Text.PlainText` instead:\n{binding}"
-                );
-            }
+            assert!(
+                is_fixed_text(&binding),
+                "{name} has an InlineMessage whose text is not purely string literals joined by \
+                 `+`. InlineMessage can't render data as plain text (issue #51); put the data \
+                 in a `Controls.Label` with `textFormat: Text.PlainText` instead:\n{binding}"
+            );
         }
     }
+    assert!(
+        checked >= 3,
+        "expected the decision-prompt, Blocklists and Profiles InlineMessages, found {checked}"
+    );
+}
+
+#[test]
+fn fixed_text_matcher_accepts_literals_and_rejects_data() {
+    assert!(is_fixed_text("text: \"a\""));
+    assert!(is_fixed_text("text: \"a \\\" b\"\n    + \"c\""));
+    assert!(!is_fixed_text("text: sheet.process"));
+    assert!(!is_fixed_text("text: \"a\" + sheet.host"));
+    assert!(!is_fixed_text("text: cond ? \"a\" : \"b\""));
+    assert!(!is_fixed_text(""));
+}
+
+#[test]
+fn text_binding_ignores_nested_children() {
+    let block = "\n    type: Warning\n    actions: [\n        Kirigami.Action {\n            \
+                 text: \"nested\"\n        }\n    ]\n    text: \"own\"\n        + \"more\"\n    \
+                 visible: true\n";
+    let binding = text_binding(block).unwrap();
+    assert!(
+        binding.contains("own") && binding.contains("more"),
+        "{binding}"
+    );
+    assert!(!binding.contains("nested") && !binding.contains("visible"));
+}
+
+/// Tooltips: the style's default `ToolTip` text item (reached via the attached
+/// `ToolTip.text`) is AutoText under Basic/Fusion, so hovering an elided,
+/// markup-named title would render the markup — including remote `<img>`
+/// loads. Nothing in the shell may use the attached text; a tooltip is
+/// declared explicitly with a PlainText `contentItem`.
+#[test]
+fn tooltips_render_plain_text_only() {
+    for (name, source) in ALL_QML {
+        let code = code_lines(source);
+        for forbidden in ["ToolTip.text", "ToolTip.toolTip"] {
+            assert!(
+                !code.contains(forbidden),
+                "{name} uses `{forbidden}`, which draws through the style's AutoText tooltip \
+                 label (issue #51). Declare `Controls.ToolTip {{ contentItem: Controls.Label {{ \
+                 textFormat: Text.PlainText; ... }} }}` instead"
+            );
+        }
+        for block in blocks(&code, "ToolTip {") {
+            assert!(
+                block.contains("contentItem: Controls.Label {")
+                    && block.contains("textFormat: Text.PlainText"),
+                "{name} declares a ToolTip without a PlainText Controls.Label contentItem \
+                 (issue #51):\n{block}"
+            );
+        }
+    }
+}
+
+/// `ALL_QML` must not silently miss a QML file added later.
+#[test]
+fn all_qml_files_are_covered() {
+    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/qml");
+    let mut on_disk: Vec<String> = std::fs::read_dir(dir)
+        .expect("read qml dir")
+        .filter_map(|e| e.ok()?.file_name().into_string().ok())
+        .filter(|n| n.ends_with(".qml"))
+        .collect();
+    on_disk.sort();
+    let mut listed: Vec<String> = ALL_QML.iter().map(|(n, _)| n.to_string()).collect();
+    listed.sort();
+    assert_eq!(
+        on_disk, listed,
+        "ALL_QML in honest_ui_qml_guards.rs is out of sync with qml/"
+    );
 }
 
 /// Sheet titles are data too (process name, rule name, subscription name,

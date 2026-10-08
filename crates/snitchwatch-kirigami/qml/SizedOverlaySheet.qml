@@ -62,18 +62,32 @@ Kirigami.OverlaySheet {
     // name). OverlaySheet draws `title` with a default header Heading whose
     // textFormat is AutoText and can't be set through `title:`, so markup in
     // the data would render as markup (issue #51). This is that same heading —
-    // level, alignment, elide and elided-title tooltip copied from Kirigami's
+    // level, alignment, elide and elided-title tooltip modelled on Kirigami's
     // OverlaySheet template — with PlainText. The close button and padding
     // live outside `header`, so they are unaffected.
+    //
+    // The tooltip is declared explicitly rather than via the attached
+    // `ToolTip.text` the template uses: the attached one is drawn by the
+    // style's tooltip label, which is AutoText under Basic/Fusion, so
+    // hovering a long markup-named title would render the markup (including
+    // remote `<img>` loads). Replacing `contentItem` with a PlainText Label
+    // closes that. A source guard rejects `ToolTip.text` everywhere.
     header: Kirigami.Heading {
+        id: titleHeading
         level: 2
         verticalAlignment: Text.AlignVCenter
         elide: Text.ElideRight
         textFormat: Text.PlainText
         text: sheet.title
 
-        Controls.ToolTip.visible: truncated && titleHover.hovered
-        Controls.ToolTip.text: sheet.title
+        Controls.ToolTip {
+            visible: titleHeading.truncated && titleHover.hovered
+            contentItem: Controls.Label {
+                textFormat: Text.PlainText
+                wrapMode: Text.Wrap
+                text: sheet.title
+            }
+        }
         HoverHandler {
             id: titleHover
         }

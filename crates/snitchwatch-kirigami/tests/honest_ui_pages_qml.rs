@@ -1,7 +1,9 @@
 //! Integration smoke: the "not enforced" banners on `BlocklistsPage.qml` and
 //! `ProfilesPage.qml` (issues #45/#46) are live, visible and non-dismissable
 //! once the real pages are instantiated; every page's inspector sheet draws its
-//! title through `SizedOverlaySheet`'s PlainText header (issue #51); and the
+//! title through `SizedOverlaySheet`'s PlainText header, whose hover tooltip is
+//! an explicit ToolTip with a PlainText content item (issue #51) — including for
+//! a long, markup-named title that actually elides; and the
 //! edited `RulesPage.qml` / `ConnectionsPage.qml` (-> `PendingDecisionSheet.qml`)
 //! load and open their inspectors on markup-looking data without warnings.
 //!
@@ -49,6 +51,10 @@ Window {
     width: 1200
     height: 600
 
+    // Markup-looking AND long enough to elide in the sheet's title heading,
+    // which is the case that arms the title's hover tooltip.
+    readonly property string longRuleName: "<b>bold</b>-<img src=x>-" + "x".repeat(200)
+
     BlocklistsPage {
         id: blocklistsPage
         anchors { left: parent.left; top: parent.top; bottom: parent.bottom }
@@ -70,7 +76,7 @@ Window {
             Component.onCompleted: applyServerMessageJson(JSON.stringify({
                 action: "setRules",
                 rules: [
-                    { name: "<b>bold</b>-rule", enabled: true, action: "allow",
+                    { name: longRuleName, enabled: true, action: "allow",
                       duration: "always", description: "",
                       operator: { operand: "process.path", data: "<i>x</i>" } }
                 ]
@@ -96,9 +102,13 @@ Window {
 
     // Every inspector sheet is a SizedOverlaySheet declared directly on its
     // page; its title must be drawn by a PlainText Heading, not Kirigami's
-    // AutoText default.
-    function checkSheetTitles(page, name) {
+    // AutoText default, and the heading's hover tooltip must be an explicit
+    // ToolTip with a PlainText content item, not the style's AutoText one
+    // (reached via the attached `ToolTip.text`). `expectElided` names a title
+    // that must actually be elided, proving the tooltip scenario is live.
+    function checkSheetTitles(page, name, expectElided) {
         let sheets = 0;
+        let elided = false;
         for (let i = 0; i < page.scrollablePageData.length; i++) {
             const sheet = page.scrollablePageData[i];
             if (sheet.header === undefined || sheet.title === undefined) {
@@ -111,9 +121,30 @@ Window {
             if (sheet.header.text !== sheet.title) {
                 throw new Error(name + ": sheet header does not show its title");
             }
+            let tips = 0;
+            for (let j = 0; j < sheet.header.data.length; j++) {
+                const tip = sheet.header.data[j];
+                if (tip.contentItem === undefined || tip.delay === undefined) {
+                    continue;
+                }
+                tips++;
+                if (tip.contentItem.textFormat !== Text.PlainText
+                        || tip.contentItem.text !== sheet.title) {
+                    throw new Error(name + ": title tooltip is not a PlainText label of the title");
+                }
+            }
+            if (tips !== 1) {
+                throw new Error(name + ": expected exactly one explicit title ToolTip, found " + tips);
+            }
+            if (expectElided && sheet.title === expectElided) {
+                elided = sheet.header.truncated;
+            }
         }
         if (sheets === 0) {
             throw new Error(name + ": found no OverlaySheet to check - probe lookup drifted");
+        }
+        if (expectElided && !elided) {
+            throw new Error(name + ": the long title was not elided, so the tooltip case is not live");
         }
     }
 
@@ -149,7 +180,7 @@ Window {
         running: true
         repeat: false
         onTriggered: {
-            rulesPage.openRuleByName("<b>bold</b>-rule");
+            rulesPage.openRuleByName(longRuleName);
             connectionsPage.openInspector({
                 rowId: "r1", process: "<b>evil</b>", host: "<i>h</i>.example", port: 443,
                 protocol: "tcp", verdict: "", pending: true,
@@ -168,16 +199,16 @@ Window {
             try {
                 checkBanner(blocklistsPage, "BlocklistsPage");
                 checkBanner(profilesPage, "ProfilesPage");
-                if (rulesPage.inspectName !== "<b>bold</b>-rule") {
+                if (rulesPage.inspectName !== longRuleName) {
                     throw new Error("RulesPage inspector did not open on the markup-named rule");
                 }
                 if (connectionsPage.inspectProcess !== "<b>evil</b>") {
                     throw new Error("ConnectionsPage inspector did not open on the pending row");
                 }
-                checkSheetTitles(blocklistsPage, "BlocklistsPage");
-                checkSheetTitles(profilesPage, "ProfilesPage");
-                checkSheetTitles(rulesPage, "RulesPage");
-                checkSheetTitles(connectionsPage, "ConnectionsPage");
+                checkSheetTitles(blocklistsPage, "BlocklistsPage", "");
+                checkSheetTitles(profilesPage, "ProfilesPage", "");
+                checkSheetTitles(rulesPage, "RulesPage", longRuleName);
+                checkSheetTitles(connectionsPage, "ConnectionsPage", "");
             } finally {
                 Qt.quit();
             }
