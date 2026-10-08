@@ -409,15 +409,35 @@ Recorded where the built code differs from the design above.
   GUI never sees them. Without a `request_id`, a command behaves as on #48.
 - **A fifth outcome, `unsure { reason }`,** covers a rename whose result
   isn't known.
-- **Rename failure handling is stricter than step 3:**
-  - if the old rule's delete is refused, the new rule is deleted again and
-    the result says nothing changed;
-  - "both exist" is reported only after a second failure (that undo fails,
-    or the delete is never sent);
-  - an unanswered delete undoes nothing (deleting the new rule then could
-    leave neither, losing a deny) and says both may exist.
+- **Rename failure handling follows the daemon's real order** (PR #99
+  security review). `Loader.Delete` drops a rule from memory *before*
+  removing its file, and only the file removal can fail, so an ERROR on the
+  old rule's delete means it already stopped applying:
+  - nothing is undone (undoing left *neither* rule, the review's HIGH); the
+    old rule leaves the bridge's list, and the result (`okWithNote`) says
+    its file may bring it back when the firewall restarts;
+  - an unanswered or unsent delete leaves both (maybe), and the result says
+    which decides meanwhile (`FindFirstMatch`: the first matching deny,
+    reject or decide-first rule by name; otherwise the allow).
 
   "Neither" can't result.
+- **A refused edit can't silently lose a rule's file.** `replaceUserRule`
+  deletes an `always` rule's file before compiling a temporary
+  replacement; on ERROR the bridge sends the old rule again (which writes
+  the file back) and says so, or says it now lasts only until a restart.
+- **Turning a rule on is checked** (review M2): a disabled rule that would
+  match everything (`true`, a `/0` network, an all-matching pattern, only a
+  process hash), has an empty value, or a duration the editor wouldn't
+  write can't be turned on from Snitchwatch. Turning off is never checked.
+- **Expiry stamps follow the daemon's clock** (review M4): only an enabled
+  timed rule gets one; turning a rule on stamps it unless a clock from an
+  earlier time it was on still runs (its stamp is kept).
+- **Busy names are shared** (review M5): an add's name, a rename's names and
+  each import rule in flight are held until their replies; the editor and
+  imports refuse a busy name.
+- **The editor refuses** a blank host name (it matches every connection
+  without one) and process ID or environment conditions. Imports keep
+  both, as the import plan records.
 - **An `AddRule` never overwrites.** A name that is cached, hidden (left
   out of the cache for size) or being renamed is refused, as is a rename
   onto one. Both names of a rename stay busy until it ends.
