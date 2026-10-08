@@ -37,7 +37,8 @@ while at least one GUI is authenticated. The bridge clears it when the last
 authenticated session ends and ignores a pause request that arrives with no
 GUI attached, so a pause doesn't carry over to the next GUI. One race remains:
 a pause still queued from a GUI that just left can apply if another GUI
-authenticates first (closing it needs per-session message tagging). The bridge does not duplicate policy or translate reject into deny.
+authenticates first (stamping each pause with its sender's session
+generation would close it). The bridge does not duplicate policy or translate reject into deny.
 
 When the last client disconnects, existing pending requests are canceled even
 if a new client immediately reconnects. RPC cancellation removes its pending

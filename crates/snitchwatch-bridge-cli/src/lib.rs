@@ -170,9 +170,11 @@ pub struct RunningBridge {
     /// Receiver for desktop notifications published by the bridge.
     pub notice_rx: broadcast::Receiver<Notice>,
     /// Authenticated GUI sessions. The WS server registers each client after
-    /// its handshake; in-process callers (tests) register one directly to
-    /// exercise GUI-gated paths such as prompts and pausing.
-    pub client_presence: snitchwatch_bridge::client_presence::ClientPresence,
+    /// its handshake; tests register one directly to exercise GUI-gated paths
+    /// such as prompts and pausing. Test-only so no caller can hold a lease
+    /// that leaves the bridge permanently "attended".
+    #[cfg(test)]
+    client_presence: snitchwatch_bridge::client_presence::ClientPresence,
     ws_shutdown_tx: Option<oneshot::Sender<()>>,
     grpc_shutdown_tx: Option<oneshot::Sender<()>>,
     /// The daemon-down watchdog task (`daemon_watchdog::run`). It has no
@@ -719,6 +721,7 @@ where
         inbound_tx,
         tray_rx,
         notice_rx,
+        #[cfg(test)]
         client_presence,
         ws_shutdown_tx: Some(ws_shutdown_tx),
         grpc_shutdown_tx: Some(grpc_shutdown_tx),
@@ -1357,14 +1360,22 @@ mod tests {
             .send(ClientMessage::SetFilteringPaused { paused: true })
             .await
             .expect("inbound channel closed");
-        // Give the pump time to apply it with no session (an applied pause
-        // would show FilterOff), then let a GUI arrive: it must not inherit
-        // a pause either. Registering before the pump ran would be the
-        // documented per-session-tagging gap, not this case.
-        let _ = tokio::time::timeout(Duration::from_millis(300), bridge.tray_rx.changed()).await;
+        // The pump always publishes a tray state for a pause request, so
+        // wait for it: an applied pause would show FilterOff.
+        tokio::time::timeout(Duration::from_secs(5), bridge.tray_rx.changed())
+            .await
+            .expect("pump did not handle the pause request")
+            .unwrap();
         assert_ne!(*bridge.tray_rx.borrow(), TrayState::FilterOff);
+        // A GUI arriving afterwards must not inherit a pause. (Registering
+        // before the pump ran would be the documented remaining race.)
         let _gui = bridge.client_presence.authenticated_session();
-        let _ = tokio::time::timeout(Duration::from_millis(300), bridge.tray_rx.changed()).await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), bridge.tray_rx.changed())
+                .await
+                .is_err(),
+            "nothing should re-publish FilterOff"
+        );
         assert_ne!(*bridge.tray_rx.borrow(), TrayState::FilterOff);
 
         bridge.shutdown();

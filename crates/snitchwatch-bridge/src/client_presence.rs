@@ -78,25 +78,31 @@ pub async fn clear_pause_on_last_session_loss<F, Fut>(
 /// effect. A pause only takes effect while a GUI is authenticated: a request
 /// still queued when its sender disconnected arrives after
 /// [`clear_pause_on_last_session_loss`] already ran, so it would otherwise
-/// re-arm the pause with no GUI attached (issue #47). The flag is set
-/// *before* the presence check, so a last-session loss racing this call is
-/// caught either here or by the cleanup task.
+/// re-arm the pause with no GUI attached (issue #47). The flag is set under
+/// the presence lock (`while_current`), so it is never `true` with zero
+/// sessions: a racing last-session loss either prevents the set or follows
+/// it and is cleared by the cleanup task.
 ///
 /// Remaining gap: if another GUI authenticates before a departed GUI's
-/// queued pause is applied, the new GUI inherits that pause. Closing it
-/// needs per-session message tagging.
+/// queued pause is applied, the new GUI inherits that pause. Stamping each
+/// pause with its sender's admission generation would close it.
 pub fn apply_pause_request(
     presence: &ClientPresence,
     paused: &AtomicBool,
     requested: bool,
 ) -> bool {
-    paused.store(requested, Ordering::SeqCst);
-    if requested && presence.admit().is_none() {
+    if !requested {
         paused.store(false, Ordering::SeqCst);
-        tracing::info!("pause request ignored: no authenticated GUI session");
         return false;
     }
-    requested
+    let applied = presence
+        .admit()
+        .and_then(|admission| admission.while_current(|| paused.store(true, Ordering::SeqCst)))
+        .is_some();
+    if !applied {
+        tracing::info!("pause request ignored: no authenticated GUI session");
+    }
+    applied
 }
 
 pub struct SessionLease(ClientPresence);
