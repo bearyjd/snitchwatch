@@ -1,6 +1,7 @@
 //! Issue #44, second half: `ask_rule` answers a remembered verdict it can't
 //! bind to an absolute executable path once, keeps it out of the rules cache
-//! and `UpdateRules`, and tells every client why.
+//! and `UpdateRules`, and tells every client why. Also the controls: what it
+//! does remember for an absolute path, including the GUI's inline Deny.
 
 use super::*;
 use crate::cache::rules::RulesCache;
@@ -205,6 +206,60 @@ async fn a_remembered_allow_with_an_absolute_path_is_still_remembered() {
         panic!("cache unsynced")
     };
     assert!(rules.contains_key(&asked.rule.name), "{rules:?}");
+}
+
+/// The Kirigami shell's inline Deny for a program with an absolute path asks
+/// for `{deny, ThisHost, UntilRestart}` (plan
+/// `2026-10-08-inline-deny-until-restart.md`). Pins the reply that makes it
+/// work: a rule the daemon stores until it restarts, bound to the program and
+/// the destination, cached and announced once. A `verdict.rs` refactor must
+/// not quietly turn it back into a once-only or all-apps deny.
+async fn assert_inline_deny_is_app_bound_until_restart(dst_host: &str, destination: (&str, &str)) {
+    let asked = ask_and_resolve(
+        Connection {
+            protocol: "tcp".into(),
+            dst_host: dst_host.into(),
+            dst_ip: "140.82.112.3".into(),
+            dst_port: 443,
+            process_path: "/usr/bin/curl".into(),
+            ..Default::default()
+        },
+        Verdict::Deny,
+        VerdictDuration::UntilRestart,
+        VerdictScope::ThisHost,
+    )
+    .await;
+
+    assert_eq!(
+        (asked.rule.action.as_str(), asked.rule.duration.as_str()),
+        ("deny", "until restart")
+    );
+    let op = asked.rule.operator.as_ref().expect("operator");
+    assert_eq!(op.r#type, "list", "{op:?}");
+    assert_eq!(op.list.len(), 2, "{op:?}");
+    let (process, host) = (&op.list[0], &op.list[1]);
+    assert_eq!(
+        (process.operand.as_str(), process.data.as_str()),
+        ("process.path", "/usr/bin/curl")
+    );
+    assert!(process.sensitive, "a path matches case-sensitively");
+    assert_eq!((host.operand.as_str(), host.data.as_str()), destination);
+    assert_eq!(update_rules_count(&asked), 1, "{:?}", asked.messages);
+    assert!(not_remembered(&asked).is_empty(), "{:?}", asked.messages);
+    let RulesCache::Synced(rules) = &asked.rules else {
+        panic!("cache unsynced")
+    };
+    assert!(rules.contains_key(&asked.rule.name), "{rules:?}");
+}
+
+#[tokio::test]
+async fn inline_deny_until_restart_reply_is_app_bound_and_remembered() {
+    assert_inline_deny_is_app_bound_until_restart("github.com", ("dest.host", "github.com")).await;
+}
+
+#[tokio::test]
+async fn inline_deny_until_restart_without_a_host_binds_the_ip() {
+    assert_inline_deny_is_app_bound_until_restart("", ("dest.ip", "140.82.112.3")).await;
 }
 
 #[tokio::test]

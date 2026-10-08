@@ -211,6 +211,90 @@ async fn deny_round_trip_unary() {
     bridge.shutdown();
 }
 
+/// Plan `2026-10-08-inline-deny-until-restart.md`: the Kirigami shell's
+/// inline Deny on a row with an absolute program path, end to end. The GUI
+/// sends exactly the JSON `pending_decision::build_verdict_message` builds
+/// for it (pinned on the Kirigami side by
+/// `inline_tokens_reach_the_wire_as_until_restart_or_once`), and the daemon
+/// gets a rule it stores until it restarts, bound to the program and host, so
+/// the kernel's SYN retransmit is refused instead of asked about again.
+#[tokio::test]
+async fn ask_rule_round_trip_inline_deny_until_restart() {
+    let socket_dir = tempfile::tempdir().unwrap();
+    let bridge = run(BridgeConfig {
+        grpc_bind: "127.0.0.1:0".parse().unwrap(),
+        ws_socket_path: socket_dir.path().join("bridge.sock"),
+        cache_capacity: 1024,
+    })
+    .await
+    .expect("bridge run failed");
+    let mut ws = connect_stream(&bridge.ws_socket_path, bridge.ws_token.as_str()).await;
+
+    let grpc_addr = bridge.grpc_endpoint.tcp_addr().unwrap();
+    let ask = tokio::spawn(async move {
+        let mut mock = MockOpensnitchd::connect(grpc_addr).await.unwrap();
+        mock.ask_rule(Connection {
+            protocol: "tcp".into(),
+            dst_host: "github.com".into(),
+            dst_ip: "140.82.112.3".into(),
+            dst_port: 443,
+            process_path: "/usr/bin/curl".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+    });
+
+    let row_id = loop {
+        if let ServerMessage::InsertConnectionRows { rows } = next_server_message(&mut ws).await {
+            break rows[0].id.clone();
+        }
+    };
+    let verdict = json!({
+        "action": "setVerdict",
+        "rowId": row_id,
+        "verdict": "deny",
+        "scope": "this_host",
+        "duration": "until_restart",
+    });
+    ws.send(Message::Text(verdict.to_string())).await.unwrap();
+
+    let rule = tokio::time::timeout(Duration::from_secs(5), ask)
+        .await
+        .expect("ask_rule timed out")
+        .expect("ask_rule task panicked");
+    assert_eq!(
+        (rule.action.as_str(), rule.duration.as_str()),
+        ("deny", "until restart")
+    );
+    let op = rule.operator.as_ref().expect("operator");
+    assert_eq!(op.r#type, "list", "{op:?}");
+    let operands: Vec<_> = op
+        .list
+        .iter()
+        .map(|o| (o.operand.as_str(), o.data.as_str(), o.sensitive))
+        .collect();
+    assert_eq!(
+        operands,
+        vec![
+            ("process.path", "/usr/bin/curl", true),
+            ("dest.host", "github.com", false),
+        ]
+    );
+    mock_opensnitchd::validate_rule_shape(&rule).expect("a real daemon would reject this rule");
+
+    let announced = loop {
+        if let ServerMessage::UpdateRules { rules } = next_server_message(&mut ws).await {
+            break rules;
+        }
+    };
+    assert_eq!(announced.len(), 1, "{announced:?}");
+    assert_eq!(announced[0]["name"], rule.name);
+    assert_eq!(announced[0]["duration"], "until restart");
+
+    bridge.shutdown();
+}
+
 #[tokio::test]
 async fn diagnostics_report_reflects_firewall_down_after_subscribe() {
     let socket_dir = tempfile::tempdir().unwrap();
