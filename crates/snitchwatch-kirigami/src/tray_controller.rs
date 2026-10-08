@@ -48,6 +48,11 @@ pub mod qobject {
         /// Local end time ("HH:MM") of the active filtering pause, or empty
         /// when not paused or unknown (issue #47).
         #[qproperty(QString, paused_until, cxx_name = "pausedUntil")]
+        /// Whether the live session's bridge advertised
+        /// `pauseAnswersWaiting`: a pause also lets the prompts already
+        /// waiting through once (issue #78). The pause items promise that
+        /// only while this is true; false until a bridge says so.
+        #[qproperty(bool, pause_answers_waiting, cxx_name = "pauseAnswersWaiting")]
         type TrayController = super::TrayControllerRust;
 
         /// Start the live feed: subscribe to the bridge's tray-state and
@@ -86,6 +91,7 @@ pub struct TrayControllerRust {
     tooltip: QString,
     menu_label: QString,
     paused_until: QString,
+    pause_answers_waiting: bool,
     tray_state: BridgeTrayState,
     pause_state: BridgePauseState,
     /// How many prompts hold the daemon's single slot (issue #78;
@@ -100,6 +106,7 @@ impl Default for TrayControllerRust {
             tooltip: QString::from("Snitchwatch — filtering"),
             menu_label: QString::from("default"),
             paused_until: QString::default(),
+            pause_answers_waiting: false,
             tray_state: BridgeTrayState::Idle,
             pause_state: BridgePauseState::NOT_PAUSED,
             slot_holders: 0,
@@ -236,8 +243,13 @@ impl qobject::TrayController {
             (true, Some(ms)) => local_hh_mm(ms),
             _ => String::new(),
         };
-        let session_is_current = crate::bridge_runtime::handles()
+        let handles = crate::bridge_runtime::handles();
+        let session_is_current = handles
+            .as_ref()
             .is_some_and(|handles| handles.is_current_session(self.rust().slot_session));
+        let answers_waiting = handles
+            .as_ref()
+            .is_some_and(|handles| handles.advertises_pause_answers_waiting());
         let holders = live_slot_holders(self.rust().slot_holders, session_is_current);
         let tooltip = derive_tooltip_with_slot(&self.rust().tray_state, &pause, &until, holders);
         let label = derive_menu_label(&self.rust().tray_state, &pause);
@@ -245,6 +257,7 @@ impl qobject::TrayController {
         self.as_mut()
             .set_menu_label(QString::from(menu_label_token(&label)));
         self.as_mut().set_paused_until(QString::from(&until));
+        self.as_mut().set_pause_answers_waiting(answers_waiting);
     }
 }
 

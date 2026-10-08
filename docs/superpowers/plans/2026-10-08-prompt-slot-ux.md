@@ -277,7 +277,13 @@ Branch `feat/78-pause-answers-waiting`, after #86; owner decision: option 1.
   - The warning can flash for a moment between `FilterPauseState` and the
     Asks' slot releases. That is a flicker, not a waiting prompt.
 - **Menu.** Each pause item reads, e.g., "Pause for 5 minutes (also lets
-  waiting connections through once)".
+  waiting connections through once)", but only when the connected bridge
+  advertises the `pauseAnswersWaiting` capability
+  (`bridge_capabilities::PAUSE_ANSWERS_WAITING`, like `promptSlot`).
+  - An older bridge leaves the prompts waiting, so against it the item is
+    the plain "Pause for 5 minutes".
+  - `TrayController.pauseAnswersWaiting` carries the live session's
+    capability to `TrayMenu.qml`; it is false until a bridge says so.
 
 ### B. Answer from the notification (UI, S; owner question S5 decided: yes)
 
