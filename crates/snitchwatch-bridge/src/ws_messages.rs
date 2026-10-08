@@ -310,6 +310,10 @@ pub enum ServerMessage {
         too_large: u32,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         over_limit_total: Option<u32>,
+        /// Whether the bridge has the daemon's rule list: a GUI says it is
+        /// waiting for one rather than "no rules" (PR #106 review).
+        #[serde(default)]
+        listed: bool,
     },
     /// The outcome of an `AddRule`/`UpdateRule`/`DeleteRule` that carried a
     /// `request_id` (rule editor, P2.1), sent to the asking connection only.

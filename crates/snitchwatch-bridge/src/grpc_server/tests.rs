@@ -1755,6 +1755,59 @@ async fn an_oversized_snapshot_with_no_list_is_reported_at_once() {
     assert!(cached(&svc).is_unknown());
 }
 
+/// PR #106 review M4: the bridge names a snapshot's `user.name` uids for
+/// display, with the lookup it was given (a fake here: tests never read the
+/// host's accounts), each uid once, canonical decimal only.
+#[tokio::test]
+async fn a_snapshot_carries_account_names_for_its_user_name_uids() {
+    let looked_up = Arc::new(StdMutex::new(Vec::new()));
+    let seen = looked_up.clone();
+    let lookup: crate::accounts::AccountLookup = Arc::new(move |uid| {
+        seen.lock().unwrap().push(uid);
+        (uid == 958).then(|| "snitchwatch".to_string())
+    });
+    let (svc, _cache, mut rx) = rules_service(DaemonTransport::Unix);
+    let svc = svc.with_account_lookup(lookup);
+    let with_user = |name: &str, data: &str| Rule {
+        operator: Some(Operator {
+            r#type: "simple".into(),
+            operand: "user.name".into(),
+            data: data.into(),
+            ..Default::default()
+        }),
+        ..daemon_rule(name)
+    };
+    let rules = vec![
+        with_user("a", "958"),
+        with_user("b", "0958"),
+        with_user("c", "7"),
+    ];
+    svc.subscribe(Request::new(with_rules(rules.clone())))
+        .await
+        .unwrap();
+    let commands = svc.daemon_commands();
+    let (stream, _outbound) = commands.open_stream(None);
+    commands.on_reply(stream.id(), &hello());
+    let ServerMessage::SetRules { rules: wire } = rx.try_recv().unwrap() else {
+        panic!("expected SetRules");
+    };
+    assert_eq!(
+        wire[0]["userNames"],
+        serde_json::json!({ "958": "snitchwatch" })
+    );
+    assert!(
+        wire[1].get("userNames").is_none(),
+        "0958 isn't a uid as written"
+    );
+    assert!(wire[2].get("userNames").is_none(), "no account 7");
+    assert_eq!(*looked_up.lock().unwrap(), vec![7, 958]);
+    // The next snapshot looks nothing up again.
+    svc.subscribe(Request::new(with_rules(rules)))
+        .await
+        .unwrap();
+    assert_eq!(looked_up.lock().unwrap().len(), 2);
+}
+
 fn over_limit_counts(rx: &mut broadcast::Receiver<ServerMessage>) -> Vec<Option<u32>> {
     std::iter::from_fn(|| rx.try_recv().ok())
         .filter_map(|m| match m {

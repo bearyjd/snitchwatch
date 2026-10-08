@@ -21,7 +21,6 @@
 //!   with the other `#[cxx_qt::bridge]` files, per the same cxx-qt-build
 //!   one-directory constraint noted in [`crate::connections`]).
 
-pub mod accounts;
 pub mod all_apps;
 pub mod deciding;
 pub mod editor;
@@ -32,7 +31,10 @@ pub mod io;
 pub mod io_view;
 pub mod not_shown;
 pub mod row_store;
+pub mod sections;
 pub mod simulator;
+#[cfg(test)]
+mod user_names_tests;
 
 #[cfg(test)]
 mod editor_tests;

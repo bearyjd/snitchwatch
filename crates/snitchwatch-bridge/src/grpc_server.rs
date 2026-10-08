@@ -117,6 +117,9 @@ pub struct UiService {
     /// How long a prompt waits before the bridge answers it itself
     /// (`crate::deferred_answers`).
     answer_timeout: Duration,
+    /// Names `user.name` uids for display (`crate::accounts`); none in
+    /// tests unless one sets a fake.
+    account_lookup: Option<crate::accounts::AccountLookup>,
 }
 
 impl UiService {
@@ -148,7 +151,15 @@ impl UiService {
             prompt_slot,
             daemon_config: Default::default(),
             answer_timeout: crate::deferred_answers::ANSWER_TIMEOUT,
+            account_lookup: None,
         }
+    }
+
+    /// Name `user.name` uids for display with `lookup`
+    /// (`crate::accounts::system_lookup` in production).
+    pub fn with_account_lookup(mut self, lookup: crate::accounts::AccountLookup) -> Self {
+        self.account_lookup = Some(lookup);
+        self
     }
 
     /// Tests shorten the time a prompt waits for a person.
@@ -481,6 +492,9 @@ impl Ui for UiService {
         // Never log `cfg.config` itself: see `daemon_config`.
         self.daemon_config
             .set(crate::daemon_config::DaemonConfigView::parse(&cfg.config));
+        if let Some(lookup) = &self.account_lookup {
+            self.rules.learn_account_names(lookup, &cfg.rules).await;
+        }
         // Staged until this connection's stream says HELLO (see `cache::rules`).
         self.rules.stage(conn, cfg.rules.clone());
         {

@@ -250,31 +250,37 @@ Window {
                 probeWindow.check(rulesModel.legacyHostOnlyCount === 0 && !page.header.visible,
                                   "notice stays without flagged rules");
 
-                // A profile's rules are labelled as such (Source, sections).
-                probeWindow.check(page.sourceLabel("profile") === "Profile rules"
-                                  && page.sourceLabel("user") === "User rules"
-                                  && page.sourceLabel("blocklist") === "Blocklist rules",
-                                  "source labels");
-
                 // Issue #61: what the list leaves out is said under the title.
                 rulesModel.applyServerMessageJson(JSON.stringify({
-                    action: "rulesNotShown", tooLarge: 2 }));
+                    action: "rulesNotShown", tooLarge: 2, listed: true }));
                 const notShown = probeWindow.findChild(page.header, "rulesNotShown");
                 probeWindow.check(page.header.visible && notShown && notShown.visible
                                   && notShown.textFormat === Text.PlainText
                                   && notShown.text.indexOf("2 rules aren't listed") === 0,
                                   "not-shown label: " + (notShown ? notShown.text : "missing"));
                 rulesModel.applyServerMessageJson(JSON.stringify({
-                    action: "rulesNotShown", tooLarge: 0 }));
+                    action: "rulesNotShown", tooLarge: 0, listed: true }));
                 probeWindow.check(!page.header.visible, "the not-shown label stays");
                 // With none listed, "No rules yet" would contradict it.
                 const placeholder = probeWindow.findChild(page, "rulesEmptyPlaceholder");
                 rulesModel.applyServerMessageJson(JSON.stringify({
                     action: "setRules", rules: [] }));
-                probeWindow.check(placeholder && page.showsEmptyPlaceholder, "no placeholder");
                 rulesModel.applyServerMessageJson(JSON.stringify({
-                    action: "rulesNotShown", tooLarge: 0, overLimitTotal: 12000 }));
-                probeWindow.check(!page.showsEmptyPlaceholder, "the placeholder says no rules");
+                    action: "rulesNotShown", tooLarge: 0, listed: true }));
+                probeWindow.check(placeholder && placeholder.visible
+                                  && placeholder.text === "No rules yet", "no placeholder: "
+                                  + (placeholder ? placeholder.visible + " " + placeholder.text
+                                                 : "missing"));
+                rulesModel.applyServerMessageJson(JSON.stringify({
+                    action: "rulesNotShown", tooLarge: 0, overLimitTotal: 12000,
+                    listed: false }));
+                probeWindow.check(!placeholder.visible, "the placeholder says no rules");
+                // With no list from the firewall service: waiting, not "no rules".
+                rulesModel.applyServerMessageJson(JSON.stringify({
+                    action: "rulesNotShown", tooLarge: 0, listed: false }));
+                probeWindow.check(placeholder.visible
+                                  && placeholder.text === "Waiting for the firewall service's rules",
+                                  "waiting placeholder: " + placeholder.text);
 
                 if (probeWindow.failures.length > 0) {
                     throw new Error("all-apps probe: " + probeWindow.failures.join("; "));

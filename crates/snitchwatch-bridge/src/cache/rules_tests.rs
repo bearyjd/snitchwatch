@@ -425,30 +425,31 @@ fn what_the_list_leaves_out_is_published_with_it() {
             ServerMessage::RulesNotShown {
                 too_large,
                 over_limit_total,
-            } => Some((too_large, over_limit_total)),
+                listed,
+            } => Some((too_large, over_limit_total, listed)),
             _ => None,
         })
     };
     assert_eq!(
         not_shown(published(&mut rx)),
-        Some((0, Some(MAX_SNAPSHOT_RULES as u32 + 1)))
+        Some((0, Some(MAX_SNAPSHOT_RULES as u32 + 1), false))
     );
     lock(&sync.cache).replace_all(vec![rule("a", "always", 0)]);
     lock(&sync.cache).set_left_out([("long".to_string(), 20_000)].into());
     sync.publish();
-    assert_eq!(not_shown(published(&mut rx)), Some((1, None)));
+    assert_eq!(not_shown(published(&mut rx)), Some((1, None, true)));
     // A count is shown only with no list, and an adopted list forgets it.
     lock(&sync.cache).over_limit_total = Some(MAX_SNAPSHOT_RULES + 1);
     sync.publish();
-    assert_eq!(not_shown(published(&mut rx)), Some((1, None)));
+    assert_eq!(not_shown(published(&mut rx)), Some((1, None, true)));
     lock(&sync.cache).replace_all(Vec::new());
     lock(&sync.cache).set_unknown();
     sync.publish();
-    assert_eq!(not_shown(published(&mut rx)), Some((0, None)));
+    assert_eq!(not_shown(published(&mut rx)), Some((0, None, false)));
     // A withdrawal takes the count with it, list or not.
     lock(&sync.cache).over_limit_total = Some(MAX_SNAPSHOT_RULES + 1);
     sync.withdraw();
-    assert_eq!(not_shown(published(&mut rx)), Some((0, None)));
+    assert_eq!(not_shown(published(&mut rx)), Some((0, None, false)));
     assert_eq!(lock(&sync.cache).over_limit_total, None);
 }
 

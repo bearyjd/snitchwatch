@@ -49,6 +49,9 @@ const ROLE_HITS_NOTE: i32 = 16;
 const ROLE_HOW_IT_DECIDES: i32 = 17;
 /// The flagged row's badge (issues #44, #64).
 const ROLE_FLAG_BADGE: i32 = 18;
+/// Where the rule comes from, and its section's heading (`rules::sections`).
+const ROLE_SOURCE_LABEL: i32 = 19;
+const ROLE_SECTION_LABEL: i32 = 20;
 
 #[cxx_qt::bridge]
 pub mod qobject {
@@ -85,6 +88,10 @@ pub mod qobject {
         /// What the list leaves out, as plain text (issue #61); "" when
         /// nothing is.
         #[qproperty(QString, not_shown_text, cxx_name = "notShownText")]
+        /// Whether the bridge has the firewall service's rule list: false
+        /// until one arrives, and while the bridge has none (PR #106
+        /// review), so an empty list isn't called "No rules yet".
+        #[qproperty(bool, listed)]
         type RulesModel = super::RulesModelRust;
 
         /// Emitted with a JSON-encoded `ClientMessage` (`UpdateRule` /
@@ -203,6 +210,7 @@ pub struct RulesModelRust {
     hits: RuleHitsView,
     hits_info_json: QString,
     not_shown_text: QString,
+    listed: bool,
 }
 
 impl qobject::RulesModel {
@@ -225,6 +233,10 @@ impl qobject::RulesModel {
             // Flagged: all apps (#44), or an unidentified program (#64).
             ROLE_APPLIES_TO_ALL_APPS => QVariant::from(&rule.flagged()),
             ROLE_FLAG_BADGE => QVariant::from(&QString::from(rule.flag_badge())),
+            ROLE_SOURCE_LABEL => QVariant::from(&QString::from(rule.source().label())),
+            ROLE_SECTION_LABEL => QVariant::from(&QString::from(
+                &crate::rules::sections::section_label(&self.store, row).unwrap_or_default(),
+            )),
             ROLE_ALL_APPS_HINT => {
                 QVariant::from(&QString::from(&rule.all_apps_hint().unwrap_or_default()))
             }
@@ -284,6 +296,8 @@ impl qobject::RulesModel {
         roles.insert(ROLE_HITS_NOTE, QByteArray::from("hitsNote"));
         roles.insert(ROLE_HOW_IT_DECIDES, QByteArray::from("howItDecides"));
         roles.insert(ROLE_FLAG_BADGE, QByteArray::from("flagBadge"));
+        roles.insert(ROLE_SOURCE_LABEL, QByteArray::from("sourceLabel"));
+        roles.insert(ROLE_SECTION_LABEL, QByteArray::from("sectionLabel"));
         roles
     }
 
@@ -443,7 +457,15 @@ impl qobject::RulesModel {
         }
         if let Some(text) = crate::rules::not_shown::not_shown_text(&msg) {
             self.as_mut().set_not_shown_text(QString::from(&text));
+            if let ServerMessage::RulesNotShown { listed, .. } = msg {
+                self.as_mut().set_listed(listed);
+            }
             return;
+        }
+        if matches!(msg, ServerMessage::SetRules { .. }) {
+            // An older bridge sends a list only once it has one; a newer
+            // one follows with `RulesNotShown`, which says.
+            self.as_mut().set_listed(true);
         }
         let changed = {
             unsafe {

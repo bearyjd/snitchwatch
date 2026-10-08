@@ -14,6 +14,7 @@ pub fn not_shown_text(message: &ServerMessage) -> Option<String> {
     let ServerMessage::RulesNotShown {
         too_large,
         over_limit_total,
+        ..
     } = message
     else {
         return None;
@@ -21,8 +22,10 @@ pub fn not_shown_text(message: &ServerMessage) -> Option<String> {
     let mut parts = Vec::new();
     if let Some(total) = over_limit_total {
         parts.push(format!(
-            "The firewall service has {total} rules, more than the {MAX_SNAPSHOT_RULES} \
-             Snitchwatch reads, so none are listed. They are still in the firewall service."
+            "The firewall service has {} rules, more than the {} Snitchwatch reads, so none \
+             are listed. They are still in the firewall service.",
+            grouped(u64::from(*total)),
+            grouped(MAX_SNAPSHOT_RULES as u64),
         ));
     }
     match too_large {
@@ -33,11 +36,25 @@ pub fn not_shown_text(message: &ServerMessage) -> Option<String> {
                 .into(),
         ),
         n => parts.push(format!(
-            "{n} rules aren't listed: each is larger than Snitchwatch reads. They are still in \
-             the firewall service."
+            "{} rules aren't listed: each is larger than Snitchwatch reads. They are still in \
+             the firewall service.",
+            grouped(u64::from(*n)),
         )),
     }
     Some(parts.join(" "))
+}
+
+/// `n` with thousands separators (12,000).
+fn grouped(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, digit) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(digit);
+    }
+    out
 }
 
 #[cfg(test)]
@@ -48,6 +65,7 @@ mod tests {
         ServerMessage::RulesNotShown {
             too_large,
             over_limit_total,
+            listed: over_limit_total.is_none(),
         }
     }
 
@@ -61,9 +79,15 @@ mod tests {
         assert!(!many.contains("apply"), "a disabled rule doesn't: {many}");
         let over = not_shown_text(&message(0, Some(12_000))).unwrap();
         assert!(
-            over.contains("12000 rules") && over.contains("none are listed"),
+            over.contains("12,000 rules") && over.contains("the 10,000 Snitchwatch reads"),
             "{over}"
         );
+        assert!(over.contains("none are listed"), "{over}");
+        let many = not_shown_text(&message(1_234_567, None)).unwrap();
+        assert!(many.starts_with("1,234,567 rules aren't listed"), "{many}");
+        assert_eq!(grouped(0), "0");
+        assert_eq!(grouped(999), "999");
+        assert_eq!(grouped(1_000), "1,000");
         assert_eq!(not_shown_text(&ServerMessage::ClearConnectionRows), None);
     }
 }

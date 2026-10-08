@@ -314,6 +314,7 @@ mod tests {
         let not_shown = ServerMessage::RulesNotShown {
             too_large: 1,
             over_limit_total: None,
+            listed: true,
         };
         assert!(interests_rules(&not_shown));
         assert!(!interests_connections(&not_shown));

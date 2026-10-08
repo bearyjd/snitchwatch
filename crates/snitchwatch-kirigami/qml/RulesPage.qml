@@ -77,6 +77,7 @@ Kirigami.ScrollablePage {
     // How the rule takes part in the daemon's decision (issue #102).
     property string inspectHowItDecides: ""
     property string inspectSource: "user"
+    property string inspectSourceLabel: ""
     property string inspectBlocklistId: ""
     property bool confirmingDelete: false
     // Why the rule editor can't change the inspected rule; empty when it can.
@@ -94,21 +95,16 @@ Kirigami.ScrollablePage {
     // Not `ioStatus.visible`: a child of a hidden header always reads false.
     readonly property bool showsIoStatus: rulesIo.statusText.length > 0 && !importSheet.visible
     // The rule editor's last result once its sheet closed (P2.1).
+    readonly property bool showsEditorStatus: ruleEditorController.statusText.length > 0
+                                              && !ruleEditor.visible
     // What the list leaves out (issue #61).
     readonly property bool showsNotShown: !!page.model && page.model.notShownText.length > 0
     // "No rules yet", but not while the header says rules aren't listed.
     readonly property bool showsEmptyPlaceholder: (!page.model || page.model.count === 0)
                                                   && !page.showsNotShown
-    readonly property bool showsEditorStatus: ruleEditorController.statusText.length > 0
-                                              && !ruleEditor.visible
 
     function actionColor(action) {
         return action === "allow" ? Kirigami.Theme.positiveTextColor : Kirigami.Theme.negativeTextColor;
-    }
-
-    function sourceLabel(source) {
-        if (source === "blocklist") return "Blocklist rules";
-        return source === "profile" ? "Profile rules" : "User rules";
     }
 
     // The model's JSON summary of the hit counts; null until the bridge has
@@ -215,6 +211,7 @@ Kirigami.ScrollablePage {
         page.inspectPrecedence = rule.precedence;
         page.inspectHowItDecides = rule.howItDecides;
         page.inspectSource = rule.source;
+        page.inspectSourceLabel = rule.sourceLabel;
         page.inspectBlocklistId = rule.blocklistId;
         page.checkEditable();
     }
@@ -384,27 +381,36 @@ Kirigami.ScrollablePage {
         }
     }
 
-    Kirigami.PlaceholderMessage {
-        objectName: "rulesEmptyPlaceholder"
-        anchors.centerIn: parent
-        width: parent.width - (Kirigami.Units.largeSpacing * 4)
-        visible: page.showsEmptyPlaceholder
-        icon.name: "view-list-details"
-        text: "No rules yet"
-        explanation: "Decisions set to “This time” resolve only the current request. Choose a persistent duration, or add a blocklist, to create rules shown here."
-    }
-
     ListView {
         id: list
         model: page.model
         currentIndex: -1
         reuseItems: true
 
-        section.property: "source"
+        // In the list, not beside it: a ScrollablePage hides every child
+        // but its list (`scrollingArea.visible = false`), so a placeholder
+        // there never showed. On the list itself, so it doesn't scroll.
+        Kirigami.PlaceholderMessage {
+            objectName: "rulesEmptyPlaceholder"
+            parent: list
+            anchors.centerIn: parent
+            width: parent.width - (Kirigami.Units.largeSpacing * 4)
+            visible: page.showsEmptyPlaceholder
+            icon.name: "view-list-details"
+            // No list from the firewall service yet: not "no rules" (PR #106).
+            text: page.model && page.model.listed ? "No rules yet"
+                                                  : "Waiting for the firewall service's rules"
+            explanation: page.model && page.model.listed
+                         ? "Decisions set to “This time” resolve only the current request. Choose a persistent duration, or add a blocklist, to create rules shown here."
+                         : "They are listed once the firewall service is connected and has sent them."
+        }
+
+        // Headings from Rust, "(continued)" when a source comes back.
+        section.property: "sectionLabel"
         section.criteria: ViewSection.FullString
         section.delegate: Kirigami.ListSectionHeader {
             width: ListView.view ? ListView.view.width : implicitWidth
-            text: page.sourceLabel(section)
+            text: section
         }
 
         delegate: Controls.ItemDelegate {
@@ -438,6 +444,8 @@ Kirigami.ScrollablePage {
             required property real lastHitMs
             required property string hitsNote
             required property string howItDecides
+            required property string sourceLabel
+            required property string sectionLabel
 
             onClicked: {
                 list.currentIndex = row.index;
@@ -559,6 +567,7 @@ Kirigami.ScrollablePage {
         page.inspectPrecedence = row.precedence;
         page.inspectHowItDecides = row.howItDecides;
         page.inspectSource = row.source;
+        page.inspectSourceLabel = row.sourceLabel;
         page.inspectBlocklistId = row.blocklistId;
         page.checkEditable();
         page.confirmingDelete = false;
@@ -586,7 +595,7 @@ Kirigami.ScrollablePage {
                 Controls.Label {
                     Kirigami.FormData.label: "Source"
                     textFormat: Text.PlainText
-                    text: page.sourceLabel(page.inspectSource)
+                    text: page.inspectSourceLabel
                 }
                 Controls.Label {
                     Kirigami.FormData.label: "Action"
@@ -610,13 +619,14 @@ Kirigami.ScrollablePage {
                 // the daemon's check; an allow decides only if none matches.
                 Controls.Label {
                     objectName: "inspectHowItDecides"
-                    Kirigami.FormData.label: "Precedence"
+                    Kirigami.FormData.label: "Order"
                     Layout.fillWidth: true
                     textFormat: Text.PlainText
                     wrapMode: Text.Wrap
                     text: "Position " + (page.inspectPrecedence + 1) + " of "
                           + (page.model ? page.model.count : 0) + " in the order the firewall "
-                          + "checks rules. " + page.inspectHowItDecides
+                          + "checks rules (turned-off rules are counted, but skipped). "
+                          + page.inspectHowItDecides
                 }
                 Controls.Switch {
                     id: inspectEnabledSwitch

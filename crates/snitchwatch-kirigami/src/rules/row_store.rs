@@ -91,6 +91,13 @@ pub struct Rule {
     /// bridge that predates the field. Never sent back.
     #[serde(skip_serializing)]
     pub deletable: Option<bool>,
+    /// Set by the bridge: account names for the uids this rule's
+    /// `user.name` conditions carry (the daemon reports the uid it
+    /// resolved, #91), keyed by the uid as written. Display only (PR #106
+    /// review M4: the bridge sees the host's accounts, a sandboxed GUI may
+    /// not). Never sent back.
+    #[serde(skip_serializing)]
+    pub user_names: std::collections::BTreeMap<String, String>,
 }
 
 /// Where a rule originated: authored directly by the user, installed for a
@@ -164,11 +171,14 @@ impl Rule {
     /// operator, each child joined with `" AND "`. Returns an empty string
     /// for a shape this can't recognize rather than guessing.
     pub fn operator_summary(&self) -> String {
-        summarize_operator(&self.operator)
+        summarize_operator(&self.operator, &self.user_names)
     }
 }
 
-fn summarize_operator(value: &serde_json::Value) -> String {
+fn summarize_operator(
+    value: &serde_json::Value,
+    names: &std::collections::BTreeMap<String, String>,
+) -> String {
     let serde_json::Value::Object(map) = value else {
         return String::new();
     };
@@ -178,7 +188,7 @@ fn summarize_operator(value: &serde_json::Value) -> String {
     if map.len() == 1 {
         if let Some(inner) = map.values().next() {
             if inner.get("operand").is_some() || inner.get("operands").is_some() {
-                return summarize_operator(inner);
+                return summarize_operator(inner, names);
             }
         }
     }
@@ -186,7 +196,7 @@ fn summarize_operator(value: &serde_json::Value) -> String {
     if let Some(operands) = map.get("operands").and_then(|o| o.as_array()) {
         return operands
             .iter()
-            .map(summarize_operator)
+            .map(|member| summarize_operator(member, names))
             .filter(|s| !s.is_empty())
             .collect::<Vec<_>>()
             .join(" AND ");
@@ -196,19 +206,20 @@ fn summarize_operator(value: &serde_json::Value) -> String {
     let data = map.get("data").and_then(|v| v.as_str()).unwrap_or("");
     if operand.is_empty() && data.is_empty() {
         String::new()
-    } else if operand == "user.name" {
-        // The daemon reports the uid it resolved (#91); name it (#102).
-        format!("{operand} = {}", super::accounts::display_user_name(data))
+    } else if let Some(name) = names.get(data).filter(|_| operand == "user.name") {
+        // The daemon reports the uid it resolved (#91); the bridge names it.
+        format!("{operand} = {name} ({data})")
     } else {
         format!("{operand} = {data}")
     }
 }
 
 /// Ordered, flat list of rules backing the Rules tab. The server already
-/// sends rules in evaluation order (opensnitchd evaluates alphabetically by
-/// filename and stops at the first match — see the design doc's "Rule
-/// precedence" section), so a rule's index in this store *is* its precedence
-/// position; no separate numeric field is tracked.
+/// sends rules in the order opensnitchd checks them (by name, `sortRules`;
+/// a matching deny, reject or decide-first rule stops the check, and
+/// otherwise the last matching allow decides, see `rules::deciding`), so a
+/// rule's index in this store *is* its position in that order; no separate
+/// numeric field is tracked.
 #[derive(Debug, Default)]
 pub struct RulesStore {
     rules: Vec<Rule>,
@@ -328,6 +339,8 @@ struct FoundRule<'a> {
     /// precedence position.
     precedence: usize,
     source: &'static str,
+    /// The inspector's Source (`rules::sections`).
+    source_label: &'static str,
     blocklist_id: String,
     /// How it takes part in the daemon's decision (issue #102).
     how_it_decides: &'static str,
@@ -356,6 +369,7 @@ pub fn found_rule_json(store: &RulesStore, name: &str) -> Option<String> {
         operator_summary: rule.operator_summary(),
         precedence: idx,
         source,
+        source_label: rule.source().label(),
         blocklist_id,
         how_it_decides: super::deciding::how_it_decides(rule),
     };
@@ -379,6 +393,7 @@ mod tests {
             display_name: None,
             read_only_reason: None,
             deletable: None,
+            user_names: Default::default(),
         }
     }
 
@@ -753,25 +768,6 @@ mod tests {
         assert_eq!(parsed["source"], "blocklist");
         assert_eq!(parsed["blocklistId"], "ads");
         assert_eq!(parsed["action"], "deny");
-    }
-
-    /// A profile's rule is labelled as one, in the list and the inspector,
-    /// rather than as the user's own.
-    #[test]
-    fn profile_band_rules_are_labelled_profile_rules() {
-        let name = "850-profile:home:0001-allow-dns";
-        let r = rule(name, true, "allow");
-        assert_eq!(r.source(), RuleSource::Profile);
-        assert!(!r.is_blocklist_sourced());
-        let mut s = RulesStore::new();
-        s.apply(&ServerMessage::SetRules {
-            rules: vec![serde_json::to_value(r).unwrap()],
-        });
-        let parsed: serde_json::Value =
-            serde_json::from_str(&found_rule_json(&s, name).unwrap()).unwrap();
-        assert_eq!(parsed["source"], "profile");
-        assert_eq!(parsed["blocklistId"], "");
-        assert_eq!(rule("849-mine", true, "allow").source(), RuleSource::User);
     }
 
     #[test]

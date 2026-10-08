@@ -399,6 +399,7 @@ where
     )
     .with_client_presence(client_presence.clone())
     .with_answer_timeout(answer_timeout)
+    .with_account_lookup(snitchwatch_bridge::accounts::system_lookup())
     .with_daemon_transport(match grpc_endpoint {
         GrpcEndpoint::Tcp(_) => DaemonTransport::Tcp,
         GrpcEndpoint::Unix(_) => DaemonTransport::Unix,

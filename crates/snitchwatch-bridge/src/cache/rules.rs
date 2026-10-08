@@ -25,6 +25,7 @@
 //! holds `<name>`. #50's process-qualified names make this rare, and the next
 //! `Subscribe` corrects it.
 
+use crate::accounts::{look_up, user_name_uids, AccountLookup, KnownAccounts};
 use crate::cache::rule_hits_handle::RuleHitsHandle;
 use crate::daemon_commands::{BecameCurrent, CommandError, ConnKey, PendingReply, StreamId};
 use crate::rule_wire::rule_to_wire;
@@ -74,6 +75,9 @@ pub struct RulesCache {
     over_limit_total: Option<usize>,
     /// When the daemon's timer removes each temporary rule; see [`Expiry`].
     expiries: BTreeMap<String, Expiry>,
+    /// Account names for `user.name` uids, sent with the rules for display
+    /// (`accounts`, PR #106 review M4). Kept across lists.
+    accounts: KnownAccounts,
 }
 
 /// The daemon timer that will remove a temporary rule (PR #106 review M2),
@@ -178,6 +182,7 @@ impl RulesCache {
                 .over_limit_total
                 .filter(|_| self.is_unknown())
                 .map(|total| u32::try_from(total).unwrap_or(u32::MAX)),
+            listed: !self.is_unknown(),
         }
     }
 
@@ -242,7 +247,18 @@ impl RulesCache {
     /// `Unknown`.
     pub fn snapshot_wire(&self) -> Option<Vec<serde_json::Value>> {
         self.rules()
-            .map(|rules| rules.values().map(rule_to_wire).collect())
+            .map(|rules| rules.values().map(|rule| self.wire(rule)).collect())
+    }
+
+    /// A rule's wire shape, with the account names its `user.name` uids
+    /// have (`userNames`, display only) when any are known.
+    fn wire(&self, rule: &Rule) -> serde_json::Value {
+        let mut wire = rule_to_wire(rule);
+        let names = self.accounts.names_for(rule);
+        if !names.is_empty() {
+            wire["userNames"] = serde_json::json!(names);
+        }
+        wire
     }
 
     /// Drop temporary rules whose daemon timer ([`Expiry`]) has fired.
@@ -542,10 +558,28 @@ impl RulesSync {
         }
         let name = rule.name.clone();
         cache.upsert(rule);
-        let rules = cache.rules().and_then(|r| r.get(&name)).map(rule_to_wire);
+        let rules = cache
+            .rules()
+            .and_then(|r| r.get(&name))
+            .map(|r| cache.wire(r));
         let _ = self.broadcast.send(ServerMessage::UpdateRules {
             rules: rules.into_iter().collect(),
         });
+    }
+
+    /// Look up the account names of the `user.name` uids in `rules` that
+    /// aren't known yet, on a blocking thread, so the list can show them
+    /// (`accounts`, PR #106 review M4). Before a snapshot is staged.
+    pub async fn learn_account_names(&self, lookup: &AccountLookup, rules: &[Rule]) {
+        let wanted = {
+            let uids = rules.iter().flat_map(user_name_uids).collect();
+            lock(&self.cache).accounts.not_looked_up(uids)
+        };
+        if wanted.is_empty() {
+            return;
+        }
+        let found = look_up(lookup.clone(), wanted).await;
+        lock(&self.cache).accounts.learn(found);
     }
 
     /// Hold a `Subscribe`'s rules until its connection sends HELLO. An

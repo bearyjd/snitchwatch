@@ -213,7 +213,7 @@ fn blocklists_empty_state_does_not_promise_filtering() {
 /// anything that looks like HTML as rich text. Rule names, operator data and
 /// blocklist ids come from the daemon / subscription URLs, so every label that
 /// shows them must opt into `Text.PlainText`. Numeric / static expressions
-/// (`row.precedence`, `row.enabled`, `sourceLabel(...)`) are intentionally
+/// (`row.precedence`, `row.enabled`) are intentionally
 /// absent from the list.
 #[test]
 fn rules_page_labels_showing_rule_data_are_plain_text() {
@@ -239,6 +239,8 @@ fn rules_page_labels_showing_rule_data_are_plain_text() {
             "row.flagBadge",
             // Issue #61: what the list leaves out.
             "page.model.notShownText",
+            // The inspector's Source, from Rust (`rules::sections`).
+            "page.inspectSourceLabel",
             // P2.7: export/import outcomes, which carry bridge reasons.
             "rulesIo.statusText",
             // P2.1: why the editor can't change a rule (bridge reasons).
