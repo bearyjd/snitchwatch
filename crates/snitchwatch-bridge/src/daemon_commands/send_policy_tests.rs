@@ -244,3 +244,39 @@ async fn a_curated_default_name_is_refused_at_send() {
     }
     assert!(rx.try_recv().is_err(), "nothing reached the daemon");
 }
+
+/// Profile rules have their own send path (issue #46 Part 2), and it checks
+/// what it sends: a rule the profile policy refuses never leaves.
+#[tokio::test]
+async fn send_profile_checks_what_it_sends() {
+    use crate::daemon_commands::ProfileCommand;
+    use crate::profiles::materializer::materialize_rule;
+    use crate::profiles::store::ProfileRule;
+    let (commands, _rules) = fixture();
+    let (_stream, mut rx) = current_stream(&commands);
+    let rule = materialize_rule(
+        "home",
+        &ProfileRule {
+            id: "r1".into(),
+            action: "deny".into(),
+            operand: "dest.host".into(),
+            data: "x.example".into(),
+            operator: None,
+        },
+        0,
+    )
+    .unwrap();
+    let decides_first = snitchwatch_proto::protocol::Rule {
+        precedence: true,
+        ..rule.clone()
+    };
+    assert_eq!(
+        commands
+            .send_profile(ProfileCommand::install(decides_first))
+            .err(),
+        Some(SendError::RefusedOperator)
+    );
+    assert!(rx.try_recv().is_err(), "a refused rule reached the daemon");
+    assert!(commands.send_profile(ProfileCommand::install(rule)).is_ok());
+    assert!(rx.try_recv().is_ok());
+}

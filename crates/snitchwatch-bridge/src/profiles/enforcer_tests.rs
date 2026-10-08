@@ -36,8 +36,14 @@ impl Harness {
     }
 
     /// Connect a daemon whose rule snapshot is `snapshot`.
-    fn connect(mut self, daemon: Daemon, snapshot: Vec<Rule>) -> Self {
+    fn connect(self, daemon: Daemon, snapshot: Vec<Rule>) -> Self {
         self.rules.stage(None, snapshot);
+        self.connect_unsynced(daemon)
+    }
+
+    /// Connect a daemon that sent no rule snapshot: its stream is current,
+    /// but the rule list stays unknown.
+    fn connect_unsynced(mut self, daemon: Daemon) -> Self {
         let (stream, mut rx) = self.commands.open_stream(None);
         let stream_id = stream.id();
         self.commands.on_reply(stream_id, &reply(0, Ok(())));
@@ -191,7 +197,7 @@ async fn a_silent_daemon_stops_the_pass_and_deletes_nothing() {
 
 #[tokio::test]
 async fn nothing_is_sent_while_the_daemons_rules_are_unknown() {
-    let h = Harness::new();
+    let h = Harness::new().connect_unsynced(Daemon::Accept);
     let outcomes = h
         .sink()
         .apply(&[wanted("home", "r1", 0, "a.example")])
