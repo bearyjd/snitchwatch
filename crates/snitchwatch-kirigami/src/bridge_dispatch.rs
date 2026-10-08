@@ -358,12 +358,9 @@ mod tests {
             status: "fetching".into(),
             last_failure_reason: None,
         }));
-        assert!(interests_blocklists(
-            &ServerMessage::SetBlocklistLeftovers { count: 2 }
-        ));
-        assert!(!interests_rules(&ServerMessage::SetBlocklistLeftovers {
-            count: 2
-        }));
+        let leftovers = ServerMessage::SetBlocklistLeftovers { count: 2 };
+        assert!(interests_blocklists(&leftovers));
+        assert!(!interests_rules(&leftovers));
     }
 
     #[test]
