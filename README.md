@@ -231,7 +231,9 @@ past 2,000,000 hosts in total (in subscription order) get no rule.
 - Subscriptions persist in `blocklists.sqlite3` (mode 0600) under the state
   directory: `$STATE_DIRECTORY` (set by both systemd units), else
   `SNITCHWATCH_STATE_DIR`. With neither, they are kept in memory only and the
-  page says so.
+  page says so. Profiles and the active-profile choice persist the same way,
+  in `profiles.sqlite3` (issue #46); profiles are not applied to the
+  firewall yet, and the Profiles page says so.
 - The bridge fetches only `https://` URLs, including every redirect, and
   never a loopback, link-local, carrier-grade NAT or other reserved address
   (LAN addresses are allowed for now). There is no `http://` or `file://`
