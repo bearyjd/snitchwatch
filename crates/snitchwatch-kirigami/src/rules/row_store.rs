@@ -187,6 +187,9 @@ fn summarize_operator(value: &serde_json::Value) -> String {
     let data = map.get("data").and_then(|v| v.as_str()).unwrap_or("");
     if operand.is_empty() && data.is_empty() {
         String::new()
+    } else if operand == "user.name" {
+        // The daemon reports the uid it resolved (#91); name it (#102).
+        format!("{operand} = {}", super::accounts::display_user_name(data))
     } else {
         format!("{operand} = {data}")
     }
