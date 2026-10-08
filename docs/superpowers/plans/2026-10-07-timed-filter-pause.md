@@ -1,106 +1,112 @@
 # Timed filter pause that the tray cannot lose (issue #47)
 
-**Date:** 2026-10-07
+**Date:** 2026-10-07 (revised after #39 merged as `670f42c`)
 **Issue:** #47 (roadmap P0.5)
-**Blocked on:** draft PR #39 merging. #39 rewrites `ask_rule` and the
-bridge-cli pump. This plan assumes #39 includes the separate small fix that
-moves the "no authenticated GUI → `Unavailable`" check *before* the paused
-auto-allow branch (branch `fix/39-pause-before-gui-check`). With that fix,
-a paused bridge no longer auto-allows when no GUI is attached, which closes
-the HIGH part of #47.
-**Severity after that fix:** MEDIUM. A pause never ends, and the tray can
-show "filtering" while the pause is still on.
+**Baseline:** `main` @ `670f42c`.
+
+That merge includes #39 and four pause fixes. They closed the HIGH part of
+#47, and this plan **keeps their semantics**:
+
+| Commit | Fix |
+|---|---|
+| `467201f` | `ask_rule` admits the GUI before the pause shortcut, so a paused bridge with no GUI returns `Unavailable` |
+| `a3cdbb1` | `clear_pause_on_last_session_loss` clears the pause when the last GUI session ends |
+| `579a87c` | `apply_pause_request` ignores a pause request that arrives with no GUI attached |
+| `a2a5f3b` | The pause flag is set inside `Admission::while_current`. `RunningBridge.client_presence` is `#[cfg(test)]` |
+
+**Remaining severity:** MEDIUM. A pause has no expiry while a GUI stays
+attached, and three paths reset the tray to Idle mid-pause.
 **Size:** S–M.
 
-## Owner decision (settled)
+## Owner decision (settled) and how this plan reads it
 
 **Timed only.**
 - The tray offers 5 min, 30 min and 1 hour.
-- A pause always expires on its own and emits the existing
+- A pause always ends on its own and emits the existing
   `Notice::FilterPauseExpired`.
 - The pause is broadcast as its own state.
 - Resyncing the tray honors the pause.
 
+"Timed only" means **no indefinite pause**. It does **not** mean the timer
+is the only thing that ends a pause:
+- the last GUI session ending still clears it (`a3cdbb1`);
+- a pause request with no GUI attached is still ignored (`579a87c`).
+
 ## Citation convention
 
-- `#39:` is PR #39 at `5c2b44a`.
-- `main:` is `f65a2a4`. Files #39 does not touch have the same lines on
-  both: `daemon_watchdog.rs`, `tray_state.rs`, `notice.rs`, `ws_messages.rs`,
-  Kirigami `tray.rs`, `tray_controller.rs`, `main.qml` and
-  `notification_controller.rs`.
-
-The pause-before-GUI fix shifts the lines inside `ask_rule` by about +5,
-so the function name is always given.
+`main:` means `670f42c`. Functions and tests are cited by name. Line
+numbers are approximate pointers only, so go by the name.
 
 ## Goal
 
-1. A pause is always one of 5 min, 30 min or 1 hour, and it ends on its
-   own.
-2. When it ends, every GUI gets the expiry notice and the new pause state,
-   and prompting resumes.
-3. While paused, no code path can put the tray back to Idle or Pending.
-4. A GUI that connects mid-pause learns the pause state and the remaining
-   time.
+1. A pause is exactly 5 min, 30 min or 1 hour.
+2. It ends at the earliest of: expiry, an explicit resume, or the last
+   authenticated GUI session ending.
+3. Expiry emits `Notice::FilterPauseExpired` plus the new pause state, and
+   prompting resumes.
+4. While paused, no code path puts the tray back to Idle or Pending.
+5. A GUI that connects mid-pause learns the state and the end time.
+6. A pause request applies only if its *sender's* GUI session generation
+   is still current. This closes the race `apply_pause_request` documents.
 
 ## Out of scope
 
-- Untimed or indefinite pause. The owner has rejected it.
-- Silent-allow, learning or lockdown modes (P2.3).
+- An untimed pause.
 - Persisting a pause across bridge restarts. A restart unpauses, which
-  fails closed; keep that.
+  fails closed.
+- Learning and lockdown modes (P2.3).
 - Polkit or role gating of who may pause. In system mode, any
-  `snitchwatch-ui` member can still pause (see
-  `docs/packaging/system-bridge-integration.md` on #39). This plan only
-  logs who did it (step 6).
+  `snitchwatch-ui` member still may. This plan only logs the uid.
 
-## Findings (reset paths, #39 equivalents)
+## Findings (`main`)
 
-All tray resets eventually call `ConnectionCache::republish_pending_count`
-(`#39:crates/snitchwatch-bridge/src/cache/connections.rs:88-97`). That
-function publishes `Idle` or `Pending(n)` and ignores the pause. Its
-callers:
+**Pause plumbing today:**
+- **The flag.** `Arc<AtomicBool>` `filtering_paused`, created in
+  `run_with_incoming` (`snitchwatch-bridge-cli/src/lib.rs`, ~387).
+- **Cleared on last session loss.** The task
+  `client_presence::clear_pause_on_last_session_loss` does this, and its
+  `on_cleared` callback calls `cache.resync_tray_state()`.
+- **Pause requests.** The inbound pump's `SetFilteringPaused` arm (~544)
+  calls `client_presence::apply_pause_request`:
+  - "resume" stores `false`;
+  - "pause" stores `true` only inside
+    `presence.admit()…while_current(…)`.
+  The pump then sets `TrayState::FilterOff` or resyncs.
+- **The documented race.** `apply_pause_request`'s doc comment (and
+  `docs/packaging/system-bridge-integration.md`, "Unattended requests")
+  names it: the admission is taken when the pump *applies* the request, not
+  when the sender sent it. A pause queued by a GUI that has since left
+  applies anyway if another GUI authenticated in between.
+- **Reading the flag.** `grpc_server.rs` `ask_rule` admits first (`467201f`),
+  then reads `filtering_paused` and auto-allows `Once`/`ThisHost`.
 
-1. **Daemon watchdog recovery:**
-   `main:crates/snitchwatch-bridge/src/daemon_watchdog.rs:58-62` calls
-   `resync_tray_state()`. #39 leaves this file unchanged.
-2. **Recent-block revert timer:** `#39:grpc_server.rs:364-382`
-   (`publish_recent_block`). `resync_tray_state()` is at `:379`.
-3. **Resolving a pending row:** `#39:connections.rs:162-217` (`resolve`).
-   It republishes at `:215`, and on the undelivered path at `:192`.
-   (This was `main` `:81-99`.)
-4. **New in #39:**
-   - `cancel_pending`, `:220-228` (republish at `:226`), which handles RPC
-     cancellation and GUI loss;
-   - `insert_pending_inner`, `:156`, for a pending row inserted before the
-     pause.
+**Tray reset paths.** All of them end in
+`ConnectionCache::republish_pending_count` (`cache/connections.rs`), which
+publishes `Idle`/`Pending(n)` and ignores the pause. Its callers:
+1. `daemon_watchdog::run` on recovery (`resync_tray_state`);
+2. `UiService::publish_recent_block`'s revert timer (`resync_tray_state`);
+3. `ConnectionCache::resolve`, on success and on the undelivered path;
+4. `ConnectionCache::cancel_pending`, for RPC cancellation and GUI loss;
+5. `insert_pending_inner`;
+6. the pause-clear callback above.
 
-Other facts:
+**Message and tray constructors:**
+- `ClientMessage::SetFilteringPaused { paused }` (`ws_messages.rs`) has no
+  duration. Constructors: bridge-cli pump and tests, `translator/upstream.rs`
+  `apply`, `ws_messages.rs` tests, Kirigami
+  `tray::build_set_filtering_paused_json`. Grep
+  `SetFilteringPaused {` before editing.
+- `Notice::FilterPauseExpired` is only built in a `notice.rs` test. The
+  Kirigami `notification_controller.rs` already renders it.
+- `TrayState::FilterOff` is a unit variant of an externally tagged enum in
+  the published 0.1.1 protocol. Don't change its shape.
+- The tray menu has one toggle: `main.qml` "Pause/Resume filtering",
+  driven by `tray::derive_menu_label`.
 
-- **The flag.** Pause is a bare `Arc<AtomicBool>`, created at
-  `#39:crates/snitchwatch-bridge-cli/src/lib.rs:378-381`.
-- **Setting it.** It is set in the inbound pump at `#39:lib.rs:520-528`.
-  Pausing sets `TrayState::FilterOff` directly. Resuming calls
-  `resync_tray_state()`.
-- **Reading it.** `ask_rule` reads it in the paused branch at
-  `#39:grpc_server.rs:470-497`, which auto-allows `Once`/`ThisHost`.
-- **The message.** `ClientMessage::SetFilteringPaused { paused }`
-  (`main:crates/snitchwatch-bridge/src/ws_messages.rs:281-289`) carries no
-  duration. Every constructor:
-  - `#39:lib.rs:520`, `1327`, `1335`
-  - `translator/upstream.rs:95`
-  - `ws_messages.rs:287`, `931`
-  - Kirigami `tray.rs:64`, `132`
-- **The expiry notice.** `Notice::FilterPauseExpired` (`notice.rs:19`) is
-  only built in a test (`notice.rs:93`). The Kirigami
-  `notification_controller.rs:211` already renders it.
-- **The tray menu.** The tray offers a single toggle:
-  - `main:crates/snitchwatch-kirigami/qml/main.qml:476-487`;
-  - `derive_menu_label` at `tray.rs:35-43` maps `FilterOff` to "Resume" and
-    everything else to "Pause".
-  That is why a reset to Idle re-offers "Pause filtering".
-- **Protocol constraint.** `TrayState` (`tray_state.rs`) is externally
-  tagged, and `FilterOff` is a unit variant in the published 0.1.1
-  protocol. Don't change its shape; add a separate message instead.
+**Session identity:**
+- `ws_server.rs` `WsServer::serve` discards the peer address on accept.
+- `pump_authenticated` holds the `SessionLease` and forwards each parsed
+  `ClientMessage` with no origin.
 
 ## Design
 
@@ -110,129 +116,155 @@ Other facts:
      `Active { mono_deadline: tokio::time::Instant, wall_deadline: SystemTime, generation: u64 }`.
    - **Operations:**
      - `pause(duration) -> Result<PauseState, Rejected>`
-     - `resume() -> PauseState`
-     - `is_active(now_mono, now_wall) -> bool`
+     - `resume() -> bool`, which reports whether a pause was cleared
+     - `is_active(now_mono, now_wall)`
      - `state() -> PauseState { paused, expires_at_unix_ms }`
-   - **Clocks:** a pause is active only while *both* deadlines are in the
-     future. The monotonic clock does not advance during suspend on Linux,
-     so the wall clock ends a 1-hour pause that spans an overnight suspend.
-     The monotonic clock covers a wall clock stepped backwards.
-   - **Allowed durations:** 300, 1800 and 3600 s (constant
-     `ALLOWED_PAUSE_SECS`). Anything else is `Rejected`.
-   - **Who uses it:** `UiService::new` takes `Arc<FilterPause>` in place of
-     `Arc<AtomicBool>`, a mechanical change at 19 call sites, most of them in
-     `grpc_server/tests.rs`. The paused branch of `ask_rule` checks
-     `is_active(now)`, so an expired pause stops auto-allowing even if the
-     timer task (step 3) has not run yet.
-2. **One choke point for the tray.**
-   - `ConnectionCache` gets `with_filter_pause(Arc<FilterPause>)`.
+   - **Clocks:** a pause is active only while *both* deadlines are ahead.
+     The monotonic clock doesn't advance during suspend; the wall clock
+     covers that. The monotonic clock covers a wall clock stepped
+     backwards. Inject the wall clock for tests.
+   - **Allowed durations:** 300, 1800 and 3600 s (`ALLOWED_PAUSE_SECS`).
+     Anything else is `Rejected`.
+   - **Constructor change:** `UiService::new` takes `Arc<FilterPause>` in
+     place of `Arc<AtomicBool>`, a mechanical change at every call site
+     (`grpc_server/tests.rs`, bridge-cli, `tests/mock_opensnitchd`).
+   - **Lazy expiry:** `ask_rule` checks `is_active(now)`, so an expired
+     pause stops auto-allowing even before the expiry task runs. The
+     admit-before-pause order from `467201f` stays as it is.
+2. **Port the `client_presence` guards to `FilterPause`.** Never call
+   `pause()` from a handler directly.
+   - **`apply_pause_request(presence, &FilterPause, request, sender_generation)`.**
+     - "resume" calls `resume()`.
+     - "pause(d)" calls `pause(d)` **only inside**
+       `presence.while_generation_current(sender_generation, || …)`, a new
+       `ClientPresence` method that does the same check as
+       `Admission::while_current` against a given generation.
+     - With `sender_generation: None`, it falls back to today's
+       `presence.admit()?.while_current(…)`. That covers in-process senders
+       through `RunningBridge::inbound_tx`, which have no WS session.
+   - **`clear_pause_on_last_session_loss(losses, Arc<FilterPause>, on_cleared)`**
+     calls `resume()` on each last-session loss. If that cleared a pause,
+     `on_cleared` resyncs the tray and broadcasts the new state.
+     - There is no `FilterPauseExpired` notice here: no GUI is left to
+       show it.
+   - **Invariant kept:** the pause is never active with zero sessions. The
+     set happens under the presence lock, and a racing loss either prevents
+     it or follows it and clears it.
+3. **Close the queued-pause race** (`apply_pause_request`'s "remaining
+   gap").
+   - In `ws_server.rs` `pump_authenticated`, read the presence's current
+     `loss_generation` right after taking the `SessionLease`, through a new
+     `ClientPresence::current_generation()`. That value is stable while the
+     lease is held.
+   - Stamp it on every forwarded `SetFilteringPaused` through a new field,
+     `#[serde(skip)] sender_generation: Option<u64>`. With `skip`, a client
+     cannot supply the value; the wire format is unchanged and the field
+     deserializes as `None`.
+   - Effect: a pause from a session whose generation ended (every GUI left)
+     is ignored, even if a new GUI has authenticated since.
+   - Update `apply_pause_request`'s doc comment and the "One race remains"
+     sentence in `system-bridge-integration.md`.
+4. **One choke point for the tray.**
+   - `ConnectionCache::with_filter_pause(Arc<FilterPause>)`.
      `republish_pending_count` publishes `FilterOff` while the pause is
-     active, and otherwise `Idle`/`Pending(n)` as now. This covers every path
-     listed in Findings.
-   - `DaemonDown` (`daemon_watchdog.rs:49`) and the transient `RecentBlock`
-     still override, because they are more urgent. Their own revert paths
-     go through the cache.
-   - **Rejected alternative:** an overlay in `TrayStatePublisher`. That
-     would also change what the retiring Tauri shell sees, for no benefit.
-3. **Expiry task.** It starts in `run_with_incoming` next to the watchdog
-   and runs a 1 s interval tick. A tick is more robust across suspend than
-   one long `sleep_until`. When it sees a pause go from active to expired
-   (checked with a generation match, so a resume or re-pause in between is
-   a no-op), it:
+     active, and otherwise `Idle`/`Pending(n)`. This covers every path
+     listed in Findings, including the pause-clear callback.
+   - `DaemonDown` and the transient `RecentBlock` still override. Their
+     reverts go through the cache.
+   - The pump stops setting `FilterOff` directly and calls
+     `resync_tray_state()` after any pause change.
+5. **Expiry task.** It starts in `run_with_incoming` next to the clear task
+   and runs a 1 s interval tick, which survives suspend better than one long
+   `sleep_until`. When it sees a pause go from active to expired, with the
+   generation matching so that a resume or re-pause in between is a no-op,
+   it:
    - clears the pause;
-   - sends `Notice::FilterPauseExpired` on the `NoticeBus`, which already
-     reaches external GUIs as `ServerMessage::Notice`
-     (`#39:lib.rs:360-376`);
-   - broadcasts the new pause state;
-   - calls `cache.resync_tray_state()`.
-4. **Protocol.** All changes are additive.
-   - **Client message:** `SetFilteringPaused { paused, #[serde(default)] duration_secs: Option<u64> }`.
-   - **Pump** (`#39:lib.rs:520-528`):
-     - `paused: true` with an allowed duration calls `pause`;
-     - `paused: true` with `None` comes from an older client and gets 300 s
-       (see Risks);
-     - a disallowed value is logged and changes nothing;
-     - `paused: false` calls `resume`.
-     After any of these, the pump broadcasts the pause state and resyncs
-     the tray.
-   - **New server message:**
-     `ServerMessage::FilterPauseState { paused: bool, expires_at_unix_ms: Option<u64> }`.
-     Older clients ignore unknown actions (`#39:lib.rs:344-346`).
-   - **Snapshot:** add the message to the `RequestSnapshot` answer
-     (`#39:lib.rs:553-584`).
-   - **Docs:** update the comment at `ws_messages.rs:281-286`.
-5. **Kirigami.**
-   - **Tray state** (`tray.rs`): add `PauseView { until: Option<…> }`.
-     `derive_menu_label` gains a pause-aware variant:
+   - sends `Notice::FilterPauseExpired`, which reaches external GUIs as
+     `ServerMessage::Notice` through the existing notice relay;
+   - broadcasts the new state;
+   - resyncs the tray.
+6. **Protocol.** All changes are additive.
+   - **Client message:** `SetFilteringPaused` gains
+     `#[serde(default)] duration_secs: Option<u64>`. A pause without a
+     duration comes from an older client and gets 300 s (see Risks).
+   - **Server message:**
+     `ServerMessage::FilterPauseState { paused, expires_at_unix_ms }`.
+     Older clients ignore unknown actions (comment above the tray relay in
+     `run_with_incoming`).
+   - **Snapshot:** add the message to the `RequestSnapshot` answer.
+7. **Log who paused** (same `pump_authenticated` change as step 3).
+   - In `WsServer::serve`, capture `stream.peer_cred()` uid at accept and
+     pass it to `pump_authenticated`.
+   - Log `info!(uid, paused, duration_secs, …)` there for each
+     `SetFilteringPaused`.
+   - In-process senders log as "in-process".
+8. **Kirigami.**
+   - **Tray** (`tray.rs`):
      - not paused: a "Pause filtering" submenu with 5 min / 30 min / 1 hour;
-     - paused: "Resume filtering (until HH:MM)".
-     The tooltip shows the end time.
-     `build_set_filtering_paused_json(paused, duration_secs)`.
+     - paused: "Resume filtering (until HH:MM)", with the time in the
+       tooltip;
+     - `build_set_filtering_paused_json(paused, duration_secs)`.
    - **Controller:** `TrayController` gains a `pausedUntil` qproperty,
      `pauseFor(secs)` and `resume()`.
-   - **Routing:** route `FilterPauseState` the way #39's
-     `bridge_runtime.rs` routes `ServerMessage::TrayState`
-     (`#39:crates/snitchwatch-kirigami/src/bridge_runtime.rs:428`, into
-     `ReceivedTrayState` at `:45`). Like tray state, it must go through the
-     session-labelled stale-frame guard.
-   - **QML:** `main.qml:476-487` gets a submenu.
-6. **Log who paused** (separable; can be a follow-up PR).
-   - `#39:crates/snitchwatch-bridge/src/ws_server.rs:154` discards the peer.
-     Capture `stream.peer_cred()` uid at accept and pass it into
-     `pump_authenticated` (`:236-279`).
-   - When a parsed message is `SetFilteringPaused`, log
-     `info!(uid, paused, duration_secs, …)` there.
-   - In-process senders through `RunningBridge::inbound_tx` log as
-     "in-process".
-7. **Docs.**
-   - If the #39 fix has not already done so, correct the line "Paused
-     auto-allow remains unchanged." in `docs/packaging/system-bridge-integration.md`
-     (#39 `:40`).
-   - Note the new behavior in `HANDOFF.md`.
+   - **Routing:** route `FilterPauseState` through `bridge_runtime.rs` the
+     way `ServerMessage::TrayState` is routed, including the
+     session-labelled stale-frame guard (`ReceivedTrayState`).
+   - **QML:** submenu in `main.qml`.
 
 ## Tests to write first
 
-Bridge unit tests. Use `tokio::test(start_paused = true)` where time
-matters, and inject a wall clock into `FilterPause`.
+**Bridge unit tests** (use `tokio::test(start_paused = true)` where time
+matters):
 
-- **Durations:** `pause(300 s)` is active, then inactive after advancing
-  300 s. 0, 301 and 7200 are rejected and leave the state unchanged.
-- **Clock jumps:** a wall-clock jump past the deadline ends the pause
-  while the monotonic clock has not elapsed. A backwards wall jump does
-  not extend it.
+- **`FilterPause`:**
+  - the three allowed durations work;
+  - 0, 301 and 7200 are rejected and change nothing;
+  - a wall jump past the deadline ends the pause;
+  - a backwards wall jump doesn't extend it.
+- **`client_presence`:** port the existing tests to `FilterPause` and keep
+  them green:
+  - `a_pause_request_takes_effect_only_with_an_authenticated_gui`;
+  - `last_session_loss_clears_a_filtering_pause`;
+  - `last_session_loss_without_a_pause_does_not_report_a_clear`.
+- **New, the race:**
+  1. session A authenticates and its stamp is taken;
+  2. A disconnects (the generation advances);
+  3. session B authenticates;
+  4. A's stamped pause is applied, and is ignored.
+
+  An unstamped (`None`) request with B present still applies.
+- **Serde:** a client-supplied `senderGeneration` in JSON is ignored
+  (it deserializes as `None`). Legacy `{"paused":true}` parses with
+  `duration_secs: None`.
 - **Expiry task:**
-  - exactly one `FilterPauseExpired` notice;
-  - exactly one `FilterPauseState{paused:false}`;
+  - exactly one `FilterPauseExpired`;
+  - one `FilterPauseState{paused:false}`;
   - the tray goes back to `Idle`;
-  - a re-pause before expiry suppresses the old generation's expiry.
-- **Each reset path while paused** must publish `FilterOff`, not
-  `Idle`/`Pending`:
-  - watchdog recovery (extend the watchdog test module;
-    `daemon_watchdog.rs` tests already use a paused clock);
-  - the `RecentBlock` revert after a pre-pause pending row resolves as Deny
-    (pattern: #39 `grpc_server/tests.rs:623`
-    `ask_rule_deny_publishes_recent_block_then_reverts_to_idle`);
-  - `resolve` of a pre-pause pending row;
+  - a re-pause before expiry suppresses the old generation.
+- **Each reset path while paused** publishes `FilterOff`:
+  - watchdog recovery (extend the `daemon_watchdog` tests);
+  - the recent-block revert after a pre-pause pending row resolves as Deny
+    (pattern: `ask_rule_deny_publishes_recent_block_then_reverts_to_idle`);
+  - `resolve`;
   - `cancel_pending`.
 - **`ask_rule`:**
-  - with an expired pause whose timer has not fired yet, it prompts and
-    does not auto-allow;
-  - the existing `ask_rule_auto_allows_immediately_when_filtering_paused`
-    (#39 `tests.rs:778`) keeps passing with a GUI lease.
-- **Serde:**
-  - legacy `{"action":"setFilteringPaused","paused":true}` parses with
-    `duration_secs: None`;
-  - the new field round-trips.
-- **bridge-cli:**
-  - extend `set_filtering_paused_toggles_tray_state` (#39 `lib.rs:1316`)
-    with a duration;
-  - `RequestSnapshot` includes `FilterPauseState`;
-  - a legacy message without a duration expires after 300 s.
+  - an expired pause whose timer hasn't fired yet prompts and does not
+    auto-allow;
+  - `paused_bridge_without_an_authenticated_gui_defers_to_the_daemon` and
+    `ask_rule_auto_allows_immediately_when_filtering_paused` keep passing.
 
-Kirigami unit tests (`tray.rs` is pure):
+**bridge-cli tests** (`lib.rs` test module). They **must** register
+`bridge.client_presence.authenticated_session()` (`#[cfg(test)]` field)
+before pausing, as `set_filtering_paused_toggles_tray_state` already does:
+- extend that test with a duration;
+- `RequestSnapshot` includes `FilterPauseState`;
+- a legacy message without a duration expires after 300 s;
+- dropping the last lease clears the pause and broadcasts
+  `FilterPauseState{paused:false}` with no expiry notice.
 
+**Kirigami unit tests** (`tray.rs`, pure functions):
 - the menu model for not-paused, paused and daemon-down;
-- the tooltip with an end time;
+- the tooltip;
 - the JSON carries `durationSecs`.
 
 ## Verification
@@ -247,29 +279,30 @@ Run at low priority:
 
 Manual VM checks:
 
-1. Pause for 5 min and generate traffic: rows auto-allow. A daemon
-   restart during the pause keeps the tray on FilterOff after recovery.
-2. At expiry, a desktop notification appears and the next connection
-   prompts.
-3. Suspend the VM across a pause deadline: on resume, the pause is over
-   within 1 s.
+1. Pause for 5 min. Rows auto-allow, and a daemon restart keeps the tray on
+   FilterOff.
+2. At expiry, the next connection prompts.
+3. Close the only GUI mid-pause, then reopen it: not paused.
+4. Suspend across the deadline: the pause is over within 1 s of resume.
 
 ## Risks and open questions
 
-- **Legacy `{paused:true}` without a duration.** The plan defaults it to
-  300 s. The alternative is to reject it, which would break an unupgraded
-  tray's toggle; that is safe but confusing. Owner's call. The plan
-  assumes 300 s.
-- **Tray priority while paused.** Should `Pending(n)` from pre-pause rows
-  still show while paused? This plan shows `FilterOff`, because the pause
-  is the security-relevant state. Pending rows stay in the Connections list
-  and keep their prompts.
-- **What should end a pause.** Should the last GUI disconnecting also end
-  it? With the #39 fix, a paused bridge without a GUI already returns
-  `Unavailable`, so this is no longer a bypass. Leave it timed-only unless
-  the owner wants both.
+- **Legacy `{paused:true}` with no duration** defaults to 300 s, so an
+  unupgraded tray still works. The alternative is to reject it. Owner's
+  call. The plan assumes 300 s.
+- **Tray priority while paused.** Pre-pause `Pending(n)` rows show as
+  `FilterOff`, because the pause is the security-relevant state. The rows
+  stay in Connections.
+- **`#[serde(skip)]` on a `ClientMessage` field.** It keeps the wire
+  format, but it couples an internal stamp to the wire type. The alternative
+  is an internal envelope on the inbound mpsc, which changes the public
+  `RunningBridge::inbound_tx` type and every in-process sender. Chosen:
+  `skip`.
 - **File-conflict hot spots:**
-  - with #48: `#39:lib.rs` pump and snapshot handler, `ws_messages.rs`;
-  - with #44 part 2: `grpc_server.rs` `ask_rule`.
-  They can be developed in parallel, but merge #47 first (smaller and
-  security-relevant), then rebase.
+  - `client_presence.rs` (`apply_pause_request`,
+    `clear_pause_on_last_session_loss`) and `ws_server.rs`
+    (`pump_authenticated`, `serve`);
+  - bridge-cli `run_with_incoming` (pump arm, snapshot handler), with #48
+    and #45;
+  - `grpc_server.rs` `ask_rule`, with #44 part A;
+  - `ws_messages.rs`, with #48, #44 and #45.

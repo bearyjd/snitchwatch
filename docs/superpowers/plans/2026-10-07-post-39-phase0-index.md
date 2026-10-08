@@ -1,113 +1,114 @@
 # Post-#39 Phase 0 work: index and order
 
-**Date:** 2026-10-07
-**Scope:** the roadmap Phase 0 items (`docs/superpowers/specs/2026-10-07-competitive-feature-roadmap.md`)
-that wait for draft PR #39 to merge. They wait because they touch files
-#39 rewrites (`snitchwatch-bridge-cli/src/lib.rs`, `grpc_server.rs`,
-`cache/connections.rs`, `ws_server.rs`) or change a contract those files
-rely on.
+**Date:** 2026-10-07 (revised after #39 merged)
+**Scope:** the roadmap Phase 0 items
+(`docs/superpowers/specs/2026-10-07-competitive-feature-roadmap.md`) that
+waited for #39, because they touch files #39 rewrote or a contract those
+files rely on.
 
-**Baseline for every plan:**
-- #39 at `5c2b44a`;
-- the pending pause-before-GUI fix (branch `fix/39-pause-before-gui-check`),
-  which moves the "no authenticated GUI → `Unavailable`" check ahead of the
-  paused auto-allow branch in `ask_rule`;
-- `main` @ `f65a2a4`, including #50.
+**Baseline for every plan:** `main` @ `670f42c`, the merge of #39. It
+includes these commits:
 
-## Prerequisites
+| Commit | Change |
+|---|---|
+| `467201f` | `ask_rule` admits an authenticated GUI before the pause shortcut |
+| `a3cdbb1` | `clear_pause_on_last_session_loss` clears a pause when the last GUI session ends |
+| `579a87c` | `apply_pause_request` ignores a pause request with no GUI attached |
+| `a2a5f3b` | The pause is set inside `Admission::while_current`. `RunningBridge.client_presence` is `#[cfg(test)]` |
+| `f65a2a4` | #50, the first half of #44 |
 
-1. **#39 merged, with the pause-before-GUI fix.** It closes the HIGH half
-   of #47. It moves bazzite-tower's pinned head, so the #39 owner decides
-   when.
-2. **The honest-ui PR merged** (branch `fix/honest-ui`):
-   - "Preview — not enforced" banners on `BlocklistsPage.qml` and
-     `ProfilesPage.qml`;
-   - plain-text labels on `RulesPage.qml`;
-   - countdown and zero-byte UI hidden (the first two bullets of #49).
+**Go by function names, not line numbers.** Line numbers in these plans
+are approximate pointers as of `670f42c` and will drift. The named
+function or test is authoritative.
 
-   Several plans below edit those same QML files and its guard tests
-   (`crates/snitchwatch-kirigami/tests/honest_ui_qml_guards.rs`,
-   `honest_ui_pages_qml.rs`).
+## Prerequisite
+
+The honest-ui PR (branch `fix/honest-ui`, not yet on `origin`) must merge
+first:
+- "not applied" banners on `BlocklistsPage.qml`/`ProfilesPage.qml`;
+- plain-text labels everywhere;
+- the countdown and zero-byte UI hidden, which covers the first two bullets
+  of #49.
+
+Several plans edit those QML files and its guard tests
+(`crates/snitchwatch-kirigami/tests/honest_ui_qml_guards.rs`
+`assert_preview_banner`, `honest_ui_pages_qml.rs`).
 
 ## Plans
 
 | Issue | Plan | Size | Depends on |
 |---|---|---|---|
-| #49 (3rd bullet) | `2026-10-07-stuck-pending-rows-after-39.md`. Bridge side **already fixed by #39** (`PendingCleanup`, test `tonic_request_deadline_cleans_pending_with_silent_authenticated_gui`). Remainder: an end-to-end test, a GUI inspector fix, a VM check | S | #39, honest-ui |
-| #48 | `2026-10-07-show-all-daemon-rules.md`. `RulesCache` from `Subscribe`, `DaemonCommands` reply correlation, rules in `RequestSnapshot` | M | #39, honest-ui |
-| #47 | `2026-10-07-timed-filter-pause.md`. `FilterPause` with 5/30/60 min only, a pause-aware tray choke point, `FilterPauseState` message | S–M | #39 + pause fix |
-| #44 (2nd half) | `2026-10-07-app-bound-prompt-scopes-part2.md`. **A:** refuse remembered rules without `process_path` (once-only reply). **B:** flag pre-#50 host-only rules | S + S | A: #39 (best after #47 and #48). B: #48 |
-| #45 | `2026-10-07-blocklist-enforcement.md`. **PR A:** wire, persist, refresh, honest status. **PR B:** `lists.domains` list directory, sink, reconcile, banner removal | S–M, then M | A: #39. B: #48 |
-| #46 | `2026-10-07-profile-enforcement.md`. **Part 1:** persistence and banner wording. **Part 2:** enforcement. Lowest priority: no GUI can create profile rules yet | S, then M | Part 1: #45 PR A. Part 2: #45 PR B and the P2.1 editor |
+| #49 (3rd bullet) | `2026-10-07-stuck-pending-rows-after-39.md`. Bridge side **fixed by #39** (`PendingCleanup`; test `tonic_request_deadline_cleans_pending_with_silent_authenticated_gui`). Left: an end-to-end test, a GUI re-check of the open inspector on remove, clear and reconnect, and a VM check | S | honest-ui |
+| #48 | `2026-10-07-show-all-daemon-rules.md`. `RulesCache` from `Subscribe`, preserving `created` on toggles; `DaemonCommands` reply correlation tied to the current HELLO stream; rules in the snapshot | M | honest-ui |
+| #47 | `2026-10-07-timed-filter-pause.md`. `FilterPause` with 5/30/60 min, ported into `apply_pause_request`/`clear_pause_on_last_session_loss`; sender-generation stamp closes the queued-pause race; pause-aware tray choke point | S–M | — |
+| #44 (2nd half) | `2026-10-07-app-bound-prompt-scopes-part2.md`. **A:** no remembered rule unless `process_path` is absolute (once-only reply plus explanation). **B:** flag pre-#50 host-only rules, with one-click delete per row and an explicit unblock warning on deny rows | S + S | A: none (rebase on #47/#48). B: #48 |
+| #45 | `2026-10-07-blocklist-enforcement.md`. **PR A:** https-only bounded fetcher, a test fetch hook, a single worker, stable ids, persistence, honest status. **PR B:** `lists.domains` list directory, sink, reconcile, banner removal | S–M, then M | A: honest-ui. B: #48 |
+| #46 | `2026-10-07-profile-enforcement.md`. **Part 1:** persistence and banner wording. **Part 2:** enforcement, with `process.path` forced `sensitive: true`. Lowest priority | S, then M | Part 1: #45 PR A. Part 2: #45 PR B and the P2.1 editor |
 
 ## Recommended order
 
-1. **#49 remainder.** Smallest and independent. It can start the day #39
-   merges.
-2. **#47 and #48 in parallel; merge #47 first.**
-   - #47 is the remaining security-relevant item (MEDIUM: no expiry, tray
-     loses the pause).
-   - #48 is the foundation: #45 PR B, #44 B and #46 Part 2 all need its
-     `RulesCache` and `DaemonCommands`.
-   - Expect a trivial rebase of #48 onto #47 in the snapshot handler and
-     `ws_messages.rs`.
-3. **#45 PR A.** It can run in parallel with step 2: it only adds pump
-   routing, stores and a refresh loop. It makes subscriptions real and
-   honest ("not enforced: no rule sink") even before enforcement lands.
-4. **#44 A and #44 B.**
-   - **A** after #47 and #48: all three edit `ask_rule`.
-   - **B** right after #48: it is GUI-only.
-5. **#45 PR B**, after #48. This is the actual blocking.
-6. **#46 Part 1** (any time after #45 PR A). **#46 Part 2** together with
-   the P2.1 rule editor.
+1. **#49 remainder.** Small and independent.
+2. **#47 and #48 in parallel; merge #47 first** (security-relevant and
+   smaller). Then rebase #48; expect trivial conflicts in the pump,
+   snapshot handler and `ws_messages.rs`.
+3. **#45 PR A.** It can run alongside step 2. **It closes a security hole
+   before persistence lands:** today the fetcher accepts `file://` with no
+   cap, so a `snitchwatch-ui` member could OOM the system bridge.
+4. **#44 A** after #47 and #48, since all three edit `ask_rule`.
+   **#44 B** right after #48.
+5. **#45 PR B**, after #48.
+6. **#46 Part 1** any time after #45 PR A. **#46 Part 2** with the P2.1
+   editor.
 
-## File-conflict map
-
-Lines are #39's. Edits to the same function are the conflicts that matter.
+## File-conflict map (by function)
 
 | File (function) | #49 | #48 | #47 | #44A | #44B | #45A | #45B | #46 |
 |---|---|---|---|---|---|---|---|---|
-| `bridge-cli/src/lib.rs` `run_with_incoming` (stores, spawns) | | ✓ | ✓ | | | ✓ | ✓ | ✓ |
-| `bridge-cli/src/lib.rs` inbound pump (`:515-642`) | | ✓ rule effects | ✓ `SetFilteringPaused` | | | ✓ blocklist routing | | |
-| `bridge-cli/src/lib.rs` `RequestSnapshot` (`:553-584`) | | ✓ | ✓ | | | | | |
-| `grpc_server.rs` `ask_rule` | | ✓ cache upsert | ✓ paused branch | ✓ | | | | |
-| `grpc_server.rs` `subscribe` / `notifications` | | ✓ (adds the signals #45 B consumes) | | | | | | |
-| `cache/connections.rs` | | | ✓ `republish_pending_count` | | | | | |
-| `ws_messages.rs` | | ✓ docs | ✓ new variants | ✓ new variant | | | ✓ summary fields | ✓ |
-| `ws_server.rs` | | | ✓ peer uid (optional step) | | | ✓ event pump factored out | | |
-| `blocklists/*` | | | | | | ✓ | ✓ | |
+| bridge-cli `lib.rs` `run_with_incoming` (stores, spawns, `RunningBridge`) | | ✓ | ✓ | | | ✓ | ✓ | ✓ |
+| bridge-cli `lib.rs` inbound pump | | ✓ rule-effect arm | ✓ `SetFilteringPaused` arm | | | ✓ blocklist routing to worker | | |
+| bridge-cli `lib.rs` `SnapshotRequested` arm | | ✓ | ✓ | | | | | |
+| bridge-cli `main.rs` (state-dir resolver, `run_with_options`) | | | | | | ✓ | | ✓ |
+| `client_presence.rs` (`apply_pause_request`, `clear_pause_on_last_session_loss`, new `while_generation_current`/`current_generation`) | | | ✓ | | | | | |
+| `ws_server.rs` (`serve`, `pump_authenticated`, `serve_with_blocklists`) | | | ✓ peer uid, generation stamp | | | ✓ event pump factored out | | |
+| `grpc_server.rs` `ask_rule` | | ✓ cache upsert | ✓ `FilterPause` | ✓ | | | | |
+| `grpc_server.rs` `subscribe` / `notifications` | | ✓ (adds the signals #45B uses) | | | | | | |
+| `cache/connections.rs` `republish_pending_count` | | | ✓ | | | | | |
+| `translator/verdict.rs` | | | | ✓ | | | | |
+| `notice.rs`, tauri `notifier.rs`, kirigami `notifier.rs` / `notification_controller.rs` | | | | ✓ new `Notice` variant | | | | |
+| `ws_messages.rs` | | ✓ docs | ✓ variants and `sender_generation` | ✓ variant | | ✓ `BlocklistSummary` fields | | ✓ `SetProfiles` fields |
+| `translator/downstream.rs` | | | | | | ✓ `build_set_blocklists`/`_status` | | ✓ `build_set_profiles` |
+| `blocklists/*` (`fetcher.rs`, `mod.rs`, `materializer.rs`) | | | | | | ✓ | ✓ | |
 | `profiles/*` | | | | | | | | ✓ |
-| `tests/bridge_protocol_test.rs` | ✓ | ✓ | | | | | ✓ | |
+| `tests/bridge_protocol_test.rs`, `tests/mock_opensnitchd` | ✓ | ✓ | | ✓ | | | ✓ | |
 | QML: `ConnectionsPage` / `PendingDecisionSheet` | ✓ | | | ✓ | | | | |
 | QML: `RulesPage` | | | | | ✓ | | ✓ comment | |
-| QML: `BlocklistsPage` + guards | | | | | | ✓ wording | ✓ | |
-| QML: `ProfilesPage` + guards | | | | | | | | ✓ |
-| QML: `main.qml` tray, Kirigami `tray.rs` | | | ✓ | | | | | |
+| QML: `BlocklistsPage` and guards | | | | | | ✓ wording | ✓ | |
+| QML: `ProfilesPage` and guards | | | | | | | | ✓ |
+| QML: `main.qml` tray, Kirigami `tray.rs`/`tray_controller.rs`/`bridge_runtime.rs` | | | ✓ | | | | | |
 
-Every row above also conflicts with the honest-ui PR wherever a QML file
-is listed. That is why it is a prerequisite.
+Every QML row also conflicts with the honest-ui PR.
 
 ## Cross-cutting findings recorded in the plans
 
-- **Production never routes blocklist messages to `BlocklistsManager`.**
-  `SubscribeBlocklist` becomes `UpstreamEffect::None` (#39
-  `translator/upstream.rs:83-96`), and only the test helper
-  `serve_with_blocklists` has the event pump. #45 PR A fixes this.
-- **Outbound rule commands are fire-and-forget.** The daemon's
-  `NotificationReply` is only logged, and nothing is broadcast back after a
-  toggle or delete. #48's `DaemonCommands` fixes this, and every later
-  "enforced" status depends on it.
-- **"User rules always win" is false** under opensnitchd's evaluation
-  (`vendor:daemon/rule/loader.go:497-515`) and the owner's
-  blocklist-wins decision. #45 corrects the docs; #46 surfaces the
-  profile-allow precedence question.
-- **The bridge's own blocklist downloads go through opensnitchd.** In
-  system mode with no GUI attached they hit the default deny. This policy
-  question is shared with Phase 1's deny-by-default decision.
+- **Blocklist messages never reach the manager.** Production routes
+  `SubscribeBlocklist` to `UpstreamEffect::None`, and only a test helper
+  has the event pump (#45 PR A).
+- **The blocklist fetcher is unsafe for user-supplied URLs:** `file://`
+  with no cap, `http`, and an unbounded chunked body. #45 PR A fixes this
+  before persistence makes an OOM repeat on every restart.
+- **Outbound rule commands are fire-and-forget**, and they fan out to every
+  open daemon stream (#48).
+- **"User rules always win" is false** under opensnitchd's `FindFirstMatch`
+  and the blocklist-wins decision. #45 fixes the docs; #46 raises the
+  profile precedence question.
+- **The bridge's own blocklist downloads go through opensnitchd** and hit
+  the default deny when no GUI is attached. This is part of the Phase 1
+  policy decision.
 
 ## Verification constraint (all plans)
 
 Another session runs timing-sensitive VM tests on this host. Run cargo
-commands with `nice -n 19`, one crate at a time. Never point a test at the
-live `opensnitchd`. Any test that starts a bridge must isolate
-`XDG_RUNTIME_DIR`, and with #45, the state directory as well (CLAUDE.md).
+with `nice -n 19`, one crate at a time. Never point a test at the live
+`opensnitchd`. Any test that starts a bridge isolates `XDG_RUNTIME_DIR`,
+and with #45 also the state directory. Pass both through `Command::env` for
+subprocesses; never use `std::env::set_var` in-process.

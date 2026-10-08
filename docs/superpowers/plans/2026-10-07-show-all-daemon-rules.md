@@ -1,24 +1,19 @@
 # Show every daemon rule on the Rules page (issue #48)
 
-**Date:** 2026-10-07
+**Date:** 2026-10-07 (revised after #39 merged as `670f42c`)
 **Issue:** #48 (roadmap P0.2 in `docs/superpowers/specs/2026-10-07-competitive-feature-roadmap.md`)
-**Blocked on:** draft PR #39 merging. Its pending-cancellation work rewrites
-`grpc_server.rs` and the bridge-cli pump. Also blocked on the honest-ui PR
-(branch `fix/honest-ui`) merging, because its `textFormat: Text.PlainText`
-labels in `RulesPage.qml` must be in place before arbitrary on-disk rule
-names reach that page.
-**Size:** M. It is the foundation for #45 (blocklist reconcile), #46 and
-the #44 second half (flagging old rules).
+**Baseline:** `main` @ `670f42c`, which includes #39, the four pause fixes
+and #50.
+**Also blocked on:** the honest-ui PR (branch `fix/honest-ui`) merging. Its
+`textFormat: Text.PlainText` labels in `RulesPage.qml` must be in place
+before arbitrary on-disk rule names reach that page.
+**Size:** M. It is the foundation for #45 PR B, #46 Part 2 and #44 Part B.
 
 ## Citation convention
 
-- `#39:` is draft PR #39 at `5c2b44a`
-  (`git show origin/feat/system-bridge-sockets:<path>`).
-- `main:` is `f65a2a4`.
-- `vendor:` is `vendor/opensnitch` v1.8.0.
-
-Functions are named next to line numbers because the pending
-pause-before-GUI fix to #39 moves `ask_rule` down by about 5 lines.
+- `main:` means `670f42c`. Functions and tests are cited by name. Line
+  numbers are approximate; go by the name.
+- `vendor:` means `vendor/opensnitch` v1.8.0.
 
 ## Goal
 
@@ -32,54 +27,66 @@ makes, and a GUI that connects or reconnects receives the full list.
 - A rule editor (P2.1), rule groups (P2.5) and per-rule hit counts (P2.6).
 - Learning about changes the daemon makes on its own. v1.8.0 has no
   daemon-to-UI rule push and no "list rules" action
-  (`vendor:proto/ui.proto:169-194` `enum Action`). The only full snapshot is
-  `ClientConfig.rules` on `Subscribe`. Edits to rule files on disk
-  (`loader.go` `liveReloadWorker`) and expiry of a timed rule
-  (`loader.go:434-455` `scheduleTemporaryRule`) therefore show up only on
-  the next daemon (re)connect. Timed-rule expiry is approximated in step 1.
-- A new `RemoveRules` ServerMessage. Deletes re-send the full `SetRules`
-  instead; see step 5.
+  (`vendor:proto/ui.proto` `enum Action`). The only full snapshot is
+  `ClientConfig.rules` on `Subscribe`. Disk edits (`loader.go`
+  `liveReloadWorker`) and timed-rule expiry (`loader.go`
+  `scheduleTemporaryRule`) show up on the next daemon (re)connect. Expiry
+  is approximated in step 1.
+- A new `RemoveRules` ServerMessage. Deletes re-send the full `SetRules`.
+- Closing daemon impersonation in legacy (TCP loopback) mode. That is
+  issue #35. Step 4 only narrows it.
 
-## Findings
+## Findings (`main`)
 
-- `#39:crates/snitchwatch-bridge/src/grpc_server.rs:624-642` (`subscribe`)
-  stores only `cfg.is_firewall_running`, so `cfg.rules` is discarded. The
-  daemon fills it from `c.rules.GetAll()`
-  (`vendor:daemon/ui/notifications.go:35-61` `getClientConfig`), which
-  includes temporary rules and disabled rules.
+- `grpc_server.rs` `subscribe` stores only `cfg.is_firewall_running`, so
+  `cfg.rules` is discarded. The daemon fills it from `c.rules.GetAll()`
+  (`vendor:daemon/ui/notifications.go` `getClientConfig`), which includes
+  temporary and disabled rules.
 - The only rule broadcast is the remembered-verdict `UpdateRules` in
-  `#39:grpc_server.rs:609-619` (`ask_rule`).
-- `#39:crates/snitchwatch-bridge-cli/src/lib.rs:609-638` (inbound pump,
-  rule effects) sends CHANGE/DELETE notifications and only logs. The
-  daemon's reply is also only logged, at `#39:grpc_server.rs:714-724`
-  (`notifications` reply loop). Nothing is broadcast back to the GUI after
-  a toggle or delete.
-  - **Verify:** whether `RulesPage.qml` flips the switch optimistically. If
-    it does, the page can show a state the daemon rejected.
-- `RequestSnapshot` excludes rules on purpose ("the bridge holds no rule
-  cache"):
-  - `#39:lib.rs:553-584`, comment at `:558-559`;
-  - `main:crates/snitchwatch-bridge/src/ws_messages.rs:274-280`, which #39
-    does not change.
-- The Kirigami side already works:
-  - `RulesStore::apply` replaces the list on `SetRules` and upserts on
-    `UpdateRules` (`#39:crates/snitchwatch-kirigami/src/rules/row_store.rs:208-228`).
-  - Dispatch routes both messages (`#39:crates/snitchwatch-kirigami/src/bridge_dispatch.rs:55-58`
-    `interests_rules`).
-  - A GUI requests a snapshot after it subscribes (`bridge_dispatch.rs:140-147`
-    doc on `run_feed`).
-  - The store treats index as evaluation position (`FoundRule.precedence`
-    doc in `row_store.rs`). The daemon evaluates enabled rules in
-    `sort.Strings` order (`vendor:daemon/rule/loader.go:368-378`
-    `sortRules`), so the bridge must send rules sorted by name.
-- Daemon replies:
-  - The daemon replies `OK`/`ERROR` per notification id, with the error text
-    in `data` (`vendor:daemon/ui/notifications.go:324-340`
-    `sendNotificationReply`).
-  - On stream open it sends a HELLO reply with id 0 (`:377`, `:385`).
-  - Because it calls `Subscribe` *before* opening the stream
-    (`:345-369`), the bridge must not push commands from inside
+  `ask_rule`. Its log line is "persistent verdict rule broadcast failed".
+- The inbound pump's rule-effect arm (bridge-cli `run_with_incoming`,
+  `notification_for_effect`) sends CHANGE/DELETE notifications through the
+  raw `notifications_tx` and only logs.
+  - The daemon's replies are only logged too (`notifications` reply loop,
+    "notification reply from daemon").
+  - Nothing is broadcast back after a toggle or delete. **Verify** whether
+    `RulesPage.qml` flips the switch optimistically.
+- `RequestSnapshot` excludes rules on purpose. See the comment in the
+  pump's `SnapshotRequested` arm ("Rules are excluded — the bridge holds no
+  rule cache") and the `ClientMessage::RequestSnapshot` doc in
+  `ws_messages.rs`.
+- Kirigami already handles the messages:
+  - `RulesStore::apply` (`rules/row_store.rs`) replaces on `SetRules` and
+    upserts on `UpdateRules`;
+  - `bridge_dispatch::interests_rules` routes both;
+  - `run_feed` requests a snapshot after subscribing.
+  - The store treats index as evaluation position (the `FoundRule` doc).
+    The daemon evaluates enabled rules in `sort.Strings` order
+    (`vendor:daemon/rule/loader.go` `sortRules`), so send rules sorted by
+    name.
+- **Daemon replies:**
+  - OK/ERROR per notification id, with the error text in `data`
+    (`notifications.go` `sendNotificationReply`);
+  - a HELLO with id 0 when the stream opens (`listenForNotifications`).
+  - The daemon calls `Subscribe` **before** opening the stream
+    (`Client.Subscribe`), so the bridge must not push commands from inside
     `subscribe()`.
+- **Toggled temporary rules.**
+  - `rule_from_wire` sets `created: 0`.
+  - On a CHANGE_RULE, `replaceUserRule` schedules a *new* timer, but the
+    daemon's *original* timer still fires on the original schedule: in
+    `scheduleTemporaryRule`'s callback, the duration is unchanged, so it
+    deletes the rule. A toggled 5-minute rule therefore vanishes at its
+    original `created + 5m`.
+  - The cache must keep the original `created` across a toggle.
+- **Impersonation.**
+  - Legacy mode listens on TCP `127.0.0.1:50051`, so any local user can
+    call `Subscribe` or open a `Notifications` stream and reply to
+    commands.
+  - System mode accepts only root peers (`RootUnixIncoming` in bridge-cli).
+  - Outbound notifications fan out to *every* open stream
+    (`UiService::notifications` subscribes each stream to the same
+    broadcast).
 
 ## Design
 
@@ -89,140 +96,156 @@ makes, and a GUI that connects or reconnects receives the full list.
      distinct from `Synced` with zero rules.
    - **Operations:**
      - `replace_all(Vec<Rule>)`
-     - `upsert(Rule)`
+     - `upsert(Rule)`: when an entry exists and the incoming `created` is
+       0, it **keeps the cached `created`**. Toggles go through
+       `rule_from_wire`, which zeroes it.
      - `remove(&str)`
-     - `snapshot_wire() -> Option<Vec<serde_json::Value>>`, which is `None`
-       while `Unknown` and otherwise in name order via `rule_to_wire`
-       (`#39:grpc_server.rs:35-51`, made `pub(crate)`).
-     - `prune_expired(now_secs)`.
+     - `snapshot_wire() -> Option<Vec<Value>>`, which is `None` while
+       `Unknown`, in name order, via `rule_to_wire` (`grpc_server.rs`, made
+       `pub(crate)`)
+     - `prune_expired(now_secs)`
    - **Expiry rule:** a rule whose duration is not
-     `once`/`until restart`/`always` (`loader.go:323-325` `isTemporary`)
-     expires at `created + duration`.
-     - Parse only `\d+[smh]` sequences. That covers what the bridge emits
-       (`VerdictDuration::daemon_duration_str`) and the stock UI's presets.
-     - A duration that fails to parse never expires in the cache.
-     - This is approximate: the daemon's timer starts when it adds the rule,
-       not at `created`.
-2. **Ingest on `Subscribe`** (`#39:grpc_server.rs:624-642`).
-   - `UiService` creates the cache internally and exposes `rules_handle()`.
-     This follows the accessor pattern of `notifications_handle()` (`:313-318`)
-     so the many `UiService::new` call sites stay unchanged.
-   - `subscribe()` calls `replace_all(cfg.rules.clone())`, broadcasts
-     `SetRules`, and bumps a `watch<u64>` "rules synced" generation, which
-     #45's reconciler waits on.
+     `once`/`until restart`/`always` (`loader.go` `isTemporary`) expires at
+     `created + duration`.
+     - Parse `\d+[smh]` sequences only.
+     - A duration that fails to parse, or `created == 0`, never expires.
+     - This is approximate.
+2. **Ingest on `Subscribe`** (`grpc_server.rs` `subscribe`).
+   - `UiService` creates the cache internally and exposes `rules_handle()`
+     (the accessor pattern of `notifications_handle`).
+   - `subscribe()` records the request's connection identity as the
+     snapshot's source:
+     - TCP (legacy mode): `request.remote_addr()`.
+     - Unix (system mode): only root peers get through
+       `RootUnixIncoming`. Tonic's `UdsConnectInfo` for an unnamed client
+       socket probably carries no usable per-connection id (**verify**). If
+       it doesn't, treat every root peer as the same source. It then calls
+     `replace_all(cfg.rules)`, broadcasts `SetRules`, and bumps a
+     `watch<u64>` "rules synced" generation.
    - The echoed `ClientConfig` is unchanged.
-3. **Remembered verdicts** (`#39:grpc_server.rs:609-619`, `ask_rule`).
+3. **Remembered verdicts** (`ask_rule`).
    - `upsert(rule.clone())` before the existing `UpdateRules` broadcast.
    - **Known divergence:** the daemon adds prompt replies through
-     `addUserRule` → `setUniqueName` (`loader.go:380-387`, `332-342`), so it
-     may store the rule as `<name>-2` while the cache holds `<name>`. #50's
+     `addUserRule` → `setUniqueName`, so it may store `<name>-2`. #50's
      process-qualified names make this rare. The next `Subscribe` corrects
-     it. Document it; don't fix it.
+     it. Document it.
 4. **`DaemonCommands`** (new file `crates/snitchwatch-bridge/src/daemon_commands.rs`).
-   It replaces the raw `notifications_tx` plus `notification_id` pair in
-   `#39:lib.rs:395-402`.
-   - **Sending:** it owns the `broadcast::Sender<Notification>`, an id
-     counter that starts at 1, and a `HashMap<u64, oneshot::Sender<NotificationReply>>`
-     of waiters. `send(Notification) -> Result<PendingReply, NoDaemon>`.
-   - **Replies:** the `notifications()` reply loop (`#39:grpc_server.rs:714-724`)
-     calls `on_reply`:
-     - id 0 (HELLO) bumps a `stream_ready` `watch<u64>`;
-     - any other id resolves its waiter;
-     - when the stream ends, every outstanding waiter fails with
-       `StreamClosed`.
-   - **Waiting:** `PendingReply::wait(timeout)` returns `Ok`, `Rejected(data)`,
-     `Timeout` or `StreamClosed`.
-   - **Who uses it:** #45 and #46 use this API to tell "enforced" from "not
-     enforced".
-5. **Pump rule effects** (`#39:lib.rs:609-638`).
-   - The pump sends through `DaemonCommands` and spawns a waiter task (5 s
-     timeout), so it never blocks the pump loop.
-   - **On `Ok`:** apply the change to the cache — upsert for
-     `AddRule`/`UpdateRule` (`rule_from_wire`), `remove` for `DeleteRule` —
-     then broadcast the full `SetRules`. There is no remove variant, so the
-     full list is simplest; rule counts are small once #45 replaces
-     per-entry blocklist rules with one rule per list.
+   It replaces the raw `notifications_tx` and `notification_id` plumbing in
+   `run_with_incoming`.
+   - **Stream identity:** each `notifications()` call gets a stream id from
+     a counter. `DaemonCommands` keeps `current_stream: Option<StreamId>`.
+     A HELLO (id 0) on stream N makes N current and bumps a `stream_ready`
+     `watch<u64>`.
+   - **Outbound:** commands go **only to the current stream**. Each stream
+     filters the broadcast by stream id instead of fanning out to all
+     streams.
+   - **Replies:** a non-zero reply resolves its waiter only if it arrives
+     on the current stream. Replies from other streams are logged and
+     dropped. When the current stream ends, every outstanding waiter fails
+     with `StreamClosed` and `current_stream` is cleared.
+   - **Snapshot source:** a `Subscribe` snapshot is accepted as the cache
+     source only if it comes from the same connection as the current
+     stream, or, before any HELLO, from the first subscriber. A later
+     `Subscribe` from a different connection is logged and ignored until
+     that connection's stream sends a HELLO.
+     - This narrows impersonation in legacy TCP mode (a second local
+       "daemon" can't answer or redirect commands meant for the first) but
+       cannot close it. A spoofer that connects first, or after the real
+       daemon drops, still wins. The real fix is #35, which system mode's
+       root-only Unix socket already provides.
+   - **API:**
+     - `send(Notification) -> Result<PendingReply, NoDaemon>`;
+     - `PendingReply::wait(timeout)` returns `Ok`, `Rejected(data)`,
+       `Timeout` or `StreamClosed`.
+   - #45 and #46 use this to report whether a rule is installed.
+5. **Pump rule effects.** In the inbound pump's rule-effect arm, send
+   through `DaemonCommands` and spawn a waiter task (5 s timeout) so the pump
+   never blocks.
+   - **On `Ok`:** apply the change to the cache — upsert (keeping `created`)
+     for `AddRule`/`UpdateRule`, `remove` for `DeleteRule` — then broadcast
+     the full `SetRules`.
    - **On any `Err`:** log it, then re-broadcast `SetRules` from the
-     unchanged cache so the page shows the daemon's real state.
-   - **Validation:** a malformed rule (`notification_for_effect` returns
-     `Err`) is still refused locally, as today.
-6. **Snapshot** (`#39:lib.rs:553-584`).
-   - When `snapshot_wire()` is `Some`, `RequestSnapshot` also sends
-     `SetRules`.
-   - Rewrite the comments at `#39:lib.rs:558-559` and
-     `ws_messages.rs:274-280`.
-7. **Expiry tick.** A 30 s interval calls `prune_expired`, and broadcasts
-   `SetRules` when it removed anything.
-8. **Kirigami.** No model change. Add one store test: a `SetRules` arriving
-   after `UpdateRules` replaces the list, so a reconnect snapshot drops
-   rules that were deleted elsewhere.
+     unchanged cache.
+6. **Snapshot.** The `SnapshotRequested` arm also sends `SetRules` when
+   `snapshot_wire()` is `Some`. Rewrite its "Rules are excluded" comment and
+   the `RequestSnapshot` doc in `ws_messages.rs`.
+7. **Expiry tick.** A 30 s interval calls `prune_expired` and broadcasts
+   `SetRules` if anything was removed.
+8. **Kirigami.** No model change. Add one store test: a `SetRules` after an
+   `UpdateRules` replaces the list.
 
 ## Tests to write first
 
-Bridge unit tests (`cache/rules.rs`, `daemon_commands.rs`,
+**Bridge unit tests** (`cache/rules.rs`, `daemon_commands.rs`,
 `grpc_server/tests.rs`):
 
-- `Unknown` yields no snapshot. `Synced(empty)` yields an empty `SetRules`.
-- `replace_all` output is name-sorted.
+- `Unknown` yields no snapshot. `Synced(empty)` yields an empty
+  `SetRules`. `replace_all` output is name-sorted.
 - `rule_to_wire` → `rule_from_wire` keeps `precedence`/`nolog` and `list`
   operators.
-- A `"5m"` rule created 301 s ago is pruned. `"always"`, `"until restart"`
-  and an unparseable duration are not.
-- `on_reply`:
+- **Expiry and `created`:**
+  - a `"5m"` rule with `created = now - 301` is pruned;
+  - `always`, `until restart`, unparseable durations and `created == 0` are
+    not;
+  - **toggled temporary rule:** cache a `"5m"` rule with `created = T`,
+    upsert it through `rule_from_wire(rule_to_wire(..))` (which zeroes
+    `created`), advance 31 s, run `prune_expired`. The rule is still listed
+    and its `created` is still `T`. At `T + 301` it is pruned.
+- **Replies and streams:**
   - an OK reply resolves only its own id;
-  - an ERROR reply surfaces the text from `data`;
-  - id 0 bumps `stream_ready` without resolving anything;
+  - ERROR surfaces the text in `data`;
+  - a HELLO on stream 2 makes it current, and a later OK for a pending id
+    arriving on stream 1 is ignored (that waiter times out);
+  - commands go only to the current stream;
   - stream close fails pending waiters;
-  - `send` with no daemon returns `NoDaemon`.
-- `subscribe` with three rules broadcasts one `SetRules` holding all
-  three, in name order.
-- A remembered `ask_rule` verdict upserts the cache. A `Once` verdict does
-  not.
+  - `send` with no current stream returns `NoDaemon`.
+- **`subscribe`:**
+  - with three rules, it broadcasts one name-sorted `SetRules`;
+  - a second `Subscribe` from another connection, after a HELLO on the
+    first, does not replace the cache.
+- **`ask_rule`:** a remembered verdict upserts. `Once` does not.
 
-Protocol test (`tests/bridge_protocol_test.rs`, modelled on #39's
-`rule_update_and_delete_reach_the_daemon_as_notifications` at `:576`):
+**Protocol test** (`tests/bridge_protocol_test.rs`, modelled on
+`rule_update_and_delete_reach_the_daemon_as_notifications`):
 
-1. `MockOpensnitchd::subscribe_with_config` with two pre-existing rules.
-   An authenticated WS client sends `RequestSnapshot` and receives
+1. `MockOpensnitchd::subscribe_with_config` with two rules.
+2. An authenticated WS client sends `RequestSnapshot` and receives
    `SetRules` with both.
-2. The mock opens notifications.
-3. The client sends `UpdateRule` (disable).
-4. The mock replies OK with the same id. The client then receives
-   `SetRules` showing the rule disabled.
-5. Repeat with a `DeleteRule` and an ERROR reply. The client receives
-   `SetRules` with the rule unchanged.
+3. The mock opens notifications (sends HELLO).
+4. `UpdateRule` (disable) with the mock replying OK gives `SetRules` with
+   the rule disabled.
+5. `DeleteRule` with an ERROR reply gives `SetRules` unchanged.
 
-`MockOpensnitchd::open_notifications` already hands back a reply sender
-(`tests/mock_opensnitchd/src/lib.rs` `open_notifications`).
-
-Kirigami unit test: the `RulesStore` replacement test in step 8.
+**Kirigami:** the `RulesStore` replacement test.
 
 ## Verification
 
-Run these at low priority (`nice -n 19`), because another session runs
+Run at low priority (`nice -n 19`), because another session runs
 timing-sensitive VM tests on this host:
 
 - `cargo test -p snitchwatch-bridge`
 - `cargo test -p snitchwatch-integration-tests --test bridge_protocol`
 - `cargo clippy -p snitchwatch-bridge -p snitchwatch-bridge-cli --all-targets -- -D warnings`
-- `cargo test -p snitchwatch-kirigami rules::`, with
-  `QT_QPA_PLATFORM=offscreen`.
+- `cargo test -p snitchwatch-kirigami rules`, with
+  `QT_QPA_PLATFORM=offscreen`
 
-Manual VM check: rules created by the stock UI or written to
-`/etc/opensnitchd/rules/` appear after a bridge restart. Toggling one in
-Snitchwatch flips its JSON `enabled` field on disk.
+Manual VM check:
+
+1. Rules from the stock UI, or written to `/etc/opensnitchd/rules/`, appear
+   after a bridge restart.
+2. Toggling one flips its JSON `enabled` on disk.
+3. A toggled 5-minute rule disappears at its original expiry.
 
 ## Risks and open questions
 
-- **Staleness is inherent.** Disk edits and daemon-side expiry are only
-  seen on reconnect. Consider showing "as of last daemon connection" in a
-  later UI pass.
-- **Thousands of rules.** A full `SetRules` on every change is
-  O(rules). Pre-#45 per-entry blocklist rules could reach tens of
-  thousands, but none were ever installed in production (the sink is a
-  no-op). If a daemon does hold them, #45's reconcile deletes them.
-- **Multiple daemon streams.** These are normally one. Waiters resolve on
-  the first reply. Uncertain; no test models two daemons.
-- **File-conflict hot spots** with #47 and #45:
-  - `#39:lib.rs` snapshot handler and pump;
-  - `grpc_server.rs` (`subscribe`, `notifications`, `ask_rule`).
+- **Staleness is inherent.** Disk edits and daemon-side expiry are seen
+  only on reconnect.
+- **Large rule sets.** A full `SetRules` is O(rules). Pre-#45 per-entry
+  blocklist rules were never installed in production (no-op sink). #45's
+  reconcile deletes any that a dev daemon holds.
+- **Stream-identity correlation** is new code in a security-relevant
+  path. Get a `security-reviewer` pass on it.
+- **File-conflict hot spots:**
+  - bridge-cli `run_with_incoming` (pump, snapshot), with #47 and #45;
+  - `grpc_server.rs` (`subscribe`, `notifications`, `ask_rule`), with #47
+    and #44.

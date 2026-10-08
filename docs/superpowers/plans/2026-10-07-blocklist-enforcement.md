@@ -1,17 +1,18 @@
 # Blocklist enforcement through opensnitchd list rules (issue #45)
 
-**Date:** 2026-10-07
+**Date:** 2026-10-07 (revised after #39 merged as `670f42c`)
 **Issue:** #45 (roadmap P0.3, the "then enforce" half; the "be honest now"
 banner is the honest-ui PR)
-
+**Baseline:** `main` @ `670f42c`, which includes #39, the four pause fixes
+and #50.
 **Blocked on:**
-- draft PR #39 merging, because all wiring lives in
-  `snitchwatch-bridge-cli/src/lib.rs`, which #39 rewrites;
-- #48 (`2026-10-07-show-all-daemon-rules.md`), which supplies `RulesCache`,
-  the "rules synced" signal and `DaemonCommands` reply correlation;
-- the honest-ui PR, which adds the banner this plan removes.
+- PR A: the honest-ui PR, which adds the banner and the guard tests that
+  PR A rewords;
+- PR B: #48 (`2026-10-07-show-all-daemon-rules.md`), for `RulesCache`, the
+  "rules synced" signal and `DaemonCommands` correlation tied to the
+  current daemon stream.
 
-**Size:** M–L. Splits cleanly into two PRs (see "Delivery").
+**Size:** PR A S–M, then PR B M.
 
 ## Owner decision (settled)
 
@@ -21,318 +22,306 @@ banner is the honest-ui PR)
   list directory the bridge writes.
 - In opensnitchd, a matching deny beats every non-precedence allow:
   `FindFirstMatch` keeps scanning after an allow and returns on the first
-  deny, reject or precedence match (`vendor:daemon/rule/loader.go:497-515`).
-- Exceptions are explicit `precedence: true` allow rules. They are out of
-  scope here.
+  deny, reject or precedence match (`vendor:daemon/rule/loader.go`
+  `FindFirstMatch`, ~497-515).
+- Exceptions are explicit `precedence: true` allows. They are out of scope.
 
 ## Citation convention
 
-- `#39:` is PR #39 at `5c2b44a`.
-- `main:` is `f65a2a4`. #39 does not touch `blocklists/`,
-  `translator/downstream.rs`, `ws_messages.rs` or the QML pages, so their
-  lines are the same on both.
-- `vendor:` is opensnitch v1.8.0.
+- `main:` means `670f42c`. Functions and tests are cited by name. Line
+  numbers are approximate; go by the name.
+- `vendor:` means opensnitch v1.8.0.
 
 ## Goal
 
-1. Subscribing to a blocklist blocks its hosts for every program.
-2. Subscriptions survive bridge restarts and refresh on schedule.
-3. The page says "enforced" only after the daemon has accepted the rule
-   *and* the bridge has written the list. Every other state shows "not
-   enforced" with a reason.
-4. Both deployment modes work:
-   - per-user `snitchwatch-bridge.service`;
-   - #39's socket-activated system bridge, running as `snitchwatch`.
+1. Subscribing to a blocklist installs a daemon rule that blocks its hosts
+   for every program.
+2. Subscriptions persist and refresh on schedule, with a bounded, safe
+   fetcher.
+3. The page says "rule installed" only after the daemon accepted the rule
+   *and* the bridge wrote the list. Every other state shows "not enforced"
+   with a reason.
+4. Both deployment modes work: the per-user `snitchwatch-bridge.service`,
+   and the system bridge running as `snitchwatch`.
 
 ## Out of scope
 
-- Exception or allow-override rules (precedence).
-- Subdomain matching for ABP `||x^` entries; `lists.domains` is exact-match
-  only. A `lists.domains_regexp` variant would change this.
+- Precedence exceptions.
+- ABP subdomain semantics. `lists.domains` is exact-match.
 - IPv6 literals.
 - Curated presets (P5.2).
-- Profiles (#46). It reuses this mechanism later.
+- Profiles (#46).
+- Any URL scheme other than `https`, in production.
 
-## Findings
+## Findings (`main`)
 
-**Production wiring is missing entirely, not just the sink:**
+**Production wiring is missing entirely:**
+- `SubscribeBlocklist`/`UnsubscribeBlocklist` reach
+  `translator/upstream.rs` `apply` and become `UpstreamEffect::None`.
+- `handle_blocklist_action` has no production caller; the only mention in
+  bridge-cli is a comment.
+- The event → `SetBlocklists` broadcast pump exists only in the test helper
+  `ws_server::serve_with_blocklists`.
+- `run_with_incoming` builds both stores in-memory
+  (`BlocklistStore::open_in_memory`) with the no-op sink.
+  `BlocklistsManager::spawn_refresh_loop` has no caller.
+- `BlocklistsManager::refresh_now` sets `FetchStatus::Ok` before the sink
+  runs; a sink failure is a `warn!`.
 
-- `SubscribeBlocklist`/`UnsubscribeBlocklist` reach `upstream::apply` and
-  become `UpstreamEffect::None` (`#39:crates/snitchwatch-bridge/src/translator/upstream.rs:83-96`).
-- `handle_blocklist_action` (`:109-125`) has no production caller; on
-  #39 it appears only in a comment at `#39:lib.rs:503`.
-- The blocklist-event → `SetBlocklists` broadcast pump exists only in the
-  test helper `serve_with_blocklists` (`#39:ws_server.rs:322-369`).
-- Production uses in-memory stores and the no-op sink
-  (`#39:lib.rs:270-279`). `spawn_refresh_loop`
-  (`main:blocklists/mod.rs:178-198`) has no caller.
-- `refresh_now` sets `FetchStatus::Ok` (`mod.rs:144`) before the sink
-  runs (`:147-153`); a sink failure is only a `warn!`.
+**SECURITY: the fetcher is unsafe for user-supplied URLs**
+(`blocklists/fetcher.rs` `fetch`):
+- `file://<path>` is read with `tokio::fs::read_to_string` and **no size
+  cap**.
+- `http://` is accepted, and nothing restricts redirect schemes.
+- The 64 MiB cap is checked on `Content-Length` before the read, but
+  `resp.text()` buffers a chunked body of any size before the post-read
+  check.
 
-**The current materializer makes one `dest.host` deny per entry**
+In system mode, any `snitchwatch-ui` member can send `SubscribeBlocklist`.
+A `file:///dev/zero` subscription would OOM the bridge. Once PR A makes
+subscriptions persistent and starts the refresh loop, the bridge would OOM
+again on **every restart**.
+
+**The materializer** makes one `dest.host` deny per entry
 (`blocklists/materializer.rs` `materialize_entry`, named
-`z00-blocklist:<id>:<seq04>-<host>`). Its docs claim "user rules always
-win" (`materializer.rs:1-26, 92`). The same claim appears in:
-- `translator/specificity.rs:18, 42, 145`;
-- `profiles/materializer.rs:7, 31`;
-- `docs/superpowers/specs/2026-04-10-snitchwatch-design.md:194`.
+`z00-blocklist:<id>:<seq04>-<host>`). It claims "user rules always win".
+The same claim appears in `translator/specificity.rs`,
+`profiles/materializer.rs` and `docs/superpowers/specs/2026-04-10-snitchwatch-design.md`
+(the "locked to the 900–999 band" sentence). opensnitchd's evaluation and
+the owner decision contradict it.
 
-The daemon's evaluation contradicts it, and the owner decision settles it
-the other way. Rule *order* only matters for precedence rules.
+**`lists.domains` semantics** (`vendor:daemon/rule/operator_lists.go`;
+`operator.go` `domainsListsCmp`). These are hard constraints:
 
-**`lists.domains` semantics**
-(`vendor:daemon/rule/operator_lists.go`, `operator.go:259-271`). These are
-hard constraints:
+- `data` is a **directory**. Every file in it merges into one map
+  (`readLists`), so one rule per subscription means one directory per
+  subscription.
+- Only files matching `<dir>/*.*` load (a dot is required). Hidden files
+  are skipped (`monitorLists`, `readLists`).
+- Only `0.0.0.0 <host>` / `127.0.0.1 <host>` lines load; the host is
+  `line[8:]` (`filterDomains`). A plain domain-per-line file loads nothing,
+  silently.
+- Matching is an exact lookup on the lowercased `DstHost`. Direct-IP
+  connections (empty `DstHost`) never match.
+- The daemon polls every 4 s and re-reads every file on any change
+  (`monitorLists`).
+- `Compile()` only starts that poller (`loadLists`). A CHANGE_RULE `OK`
+  therefore does **not** prove the daemon could read the directory: under
+  `ProtectHome=`, SELinux or a wrong path it loads 0 entries with no error
+  back.
 
-- `Operator.data` is a **directory**. Every file in it merges into one map
-  (`readLists`, `:227-271`). So one rule per subscription means **one
-  directory per subscription**.
-- Only files matching `<dir>/*.*` load, so the name needs a dot. Hidden
-  files are skipped (`:25`, `:40-44`, `:241-245`).
-- Only hosts-format lines load: `0.0.0.0 <host>` or `127.0.0.1 <host>`, and
-  the host is taken from `line[8:]` (`filterDomains`, `:107-125`). A plain
-  domain-per-line file loads nothing, silently.
-- Matching is an exact map lookup on `DstHost`, lowercased when
-  `sensitive: false` (`operator.go:259-271`). Write hosts in lowercase. A
-  connection with an empty `DstHost` (a direct-IP connection) never
-  matches.
-- The daemon polls mtimes and the file count every 4 s and re-reads every
-  file on change (`monitorLists`, `:17-81`).
-- `Compile()` only starts that poller (`loadLists`, `:273-281`). A
-  CHANGE_RULE reply of `OK` therefore does **not** prove the daemon could
-  read the directory: a missing or unreadable directory loads 0 entries
-  with no error back to the UI.
-- On rule replace or delete, the daemon stops the old poller
-  (`loader.go:310-321` `cleanListsRule`).
-
-`lists.ips` (`readSimpleList`, one entry per line) can carry the IPv4
-literals the current parser already admits. `format.rs:101-112`
-`is_valid_hostname` accepts `1.2.3.4`, but such an entry can never match a
-`lists.domains` lookup.
-
-**Delivery** is the bridge's Notifications stream:
-- a notification sent while no daemon holds the stream is dropped
-  (`#39:lib.rs:619-628`);
-- the daemon subscribes *before* it opens the stream
-  (`vendor:daemon/ui/notifications.go:345-369`).
-
-So enforcement needs a **reconcile** step on each daemon connect, gated on
-#48's "rules synced" and HELLO (`stream_ready`) signals.
-
-`derive_id` (`blocklists/mod.rs:217-241`) gives ids that collide: two URLs
-ending in `/hosts` both become `hosts`, and the store upsert overwrites the
-first. Production has never persisted a subscription, so changing the id
-scheme now costs nothing.
+**Other facts:**
+- `format.rs` `is_valid_hostname` admits IPv4 literals, which can never
+  match `lists.domains`. They would fit `lists.ips` (`readSimpleList`).
+- `blocklists/mod.rs` `derive_id` collides: two URLs ending in `/hosts`
+  both get id `hosts`. Nothing has ever been persisted, so fix it before
+  PR A starts persisting ids.
+- Notifications sent while no daemon holds the stream are dropped. The
+  daemon calls `Subscribe` before it opens the stream
+  (`vendor:daemon/ui/notifications.go` `Client.Subscribe`). So PR B needs a
+  reconcile step gated on #48's signals.
 
 ## Design
 
-### 1. State directory and list layout
+### PR A: wire, persist, refresh, be honest (no daemon rules yet)
 
-The bridge resolves a state directory **only** from:
-- `$STATE_DIRECTORY`, which systemd sets for both units because both
-  declare `StateDirectory=snitchwatch`; or
-- an explicit `SNITCHWATCH_STATE_DIR` override for development.
+**A1. A safe fetcher.**
+- `build_client()` sets `https_only(true)` and
+  `redirect::Policy::limited(5)`. **Verify with a test** that reqwest also
+  rejects an `https → http` redirect under `https_only`.
+- `fetch` drops the `file://` branch. Production accepts only `https`.
+- Read the body in a streaming loop (`resp.chunk()`) with a running
+  `MAX_BODY_BYTES` cap, so a chunked or endless body stops at 64 MiB.
+- At subscribe time, `handle_blocklist_action` validates the URL with
+  `url::Url`: scheme `https`, a host present, length ≤ 2048. A bad URL
+  becomes a visible `Failed { reason }` and is never stored.
 
-It canonicalizes the path, because on Bazzite `/home` is a symlink to
-`/var/home`, and the rule's `data` must stay byte-stable for reconcile.
-Cargo tests set neither variable, so every existing test stays in-memory
-and hermetic, and none of the 23 `BridgeConfig { … }` literals change.
+**A2. A test-only fetch hook** usable from the `tests/` crates, which
+`#[cfg(test)]` doesn't reach.
+- `pub trait BlocklistFetch: Send + Sync { async fn fetch(&self, url) -> FetchOutcome }`.
+  The default implementation is the HTTPS fetcher.
+- Inject it with `BlocklistsManager::with_fetcher(Arc<dyn BlocklistFetch>)`,
+  and through bridge-cli with `run_with_options(config, RunOptions { state_dir, blocklist_fetcher })`.
+  `main.rs` never passes a fetcher.
+- The fixture fetcher (file-backed, size-capped) lives **in the test
+  files**, so production code has no file-reading fetch path at all.
+- Migrate `fetcher.rs` `parses_local_fixture_via_file_url` and
+  `crates/snitchwatch-bridge/tests/blocklists_e2e.rs` to it.
+- Alternative if trait injection proves awkward: a non-default
+  `test-fetch` Cargo feature, enabled only in dev-dependencies, plus a
+  release-verify check that the shipped binary was built without it.
 
-`run_with_incoming` takes `state_dir: Option<PathBuf>` as a parameter, the
-same way `system_token_path` already is (`#39:lib.rs:231-237`):
-- `run()` passes the env-derived value;
-- `run_system()` additionally requires it to equal `/var/lib/snitchwatch`;
-- a new `pub async fn run_with_state_dir(config, dir)` serves tests.
+**A3. One worker task.**
+- `run_with_incoming` spawns a single blocklist worker that owns an mpsc
+  queue of jobs: `Subscribe(url)`, `Unsubscribe(id)`, `RefreshDue`.
+- The pump only enqueues. It never awaits a fetch, which can take up to
+  `FETCH_TIMEOUT`, so verdicts are never stalled.
+- `spawn_refresh_loop` enqueues `RefreshDue` instead of fetching itself.
+- Effect: jobs run in order, with at most one 64 MiB fetch at a time.
+- Keep the worker's and the refresh loop's `JoinHandle`s in
+  `RunningBridge` so `shutdown` aborts them, like `watchdog_handle`.
 
-| | Per-user bridge | System bridge (#39) |
+**A4. Stable ids.** `derive_id` becomes
+`<sanitized stem>-<8 hex of SHA-256(url)>`, in this PR because this PR
+starts persisting ids.
+
+**A5. State directory.** It is resolved only in `main.rs`/`run_system`.
+`run()` and the in-process shells never read it, so every test that calls
+`run()` stays in-memory and hermetic whatever the developer's environment.
+- `main.rs` resolves `$STATE_DIRECTORY` (systemd sets it for both units,
+  each declaring `StateDirectory=snitchwatch`), then a
+  `SNITCHWATCH_STATE_DIR` override. It canonicalizes the path, because
+  `/home` is a symlink to `/var/home` on Bazzite and the rule `data` must
+  be byte-stable. It then calls `run_with_options`.
+- `run_system` requires the resolved path to equal `/var/lib/snitchwatch`.
+- Tests that spawn the binary as a subprocess set `STATE_DIRECTORY` and
+  `SNITCHWATCH_STATE_DIR` to a tempdir with `Command::env`.
+- A source-guard test asserts that only `main.rs` and `run_system` call the
+  resolver.
+- None of the 23 `BridgeConfig { … }` literals change.
+
+| | Per-user bridge | System bridge |
 |---|---|---|
-| Unit | `main:packaging/systemd/snitchwatch-bridge.service:55` `StateDirectory=snitchwatch` | `#39:packaging/system/snitchwatch-system-bridge.service:42-43` `StateDirectory=snitchwatch`, `StateDirectoryMode=0700` |
-| Resolves to | `~/.local/state/snitchwatch` (canonical `/var/home/<u>/…` on Bazzite) | `/var/lib/snitchwatch`, owner `snitchwatch:snitchwatch`, mode 0700 |
-| Writable by | the desktop user, who in this mode already controls the bridge | only `snitchwatch` (and root). `ProtectSystem=strict` still allows `StateDirectory` |
-| Readable by root `opensnitchd` | yes, through DAC override; the upstream unit has no capability limits (`vendor:daemon/data/init/opensnitchd.service`) | same |
-| SELinux | `~/.local/state` is labeled as a home type | `var_lib_t` |
-| Unit changes | none | none; `system_package_contract.rs` stays green |
+| Unit | `packaging/systemd/snitchwatch-bridge.service` `StateDirectory=snitchwatch` | `packaging/system/snitchwatch-system-bridge.service` `StateDirectory=snitchwatch`, `StateDirectoryMode=0700` |
+| Resolves to | `~/.local/state/snitchwatch` (canonical `/var/home/<u>/…`) | `/var/lib/snitchwatch`, `snitchwatch:snitchwatch`, 0700 |
+| Writable by | the desktop user, who already controls this bridge | only `snitchwatch` (and root). `ProtectSystem=strict` keeps `StateDirectory` writable, so no unit change and `system_package_contract.rs` stays green |
+| Read by root `opensnitchd` | DAC override; the upstream unit has no capability limits (`vendor:daemon/data/init/opensnitchd.service`) | same |
 
-SELinux in either mode is **unverified**. Upstream ships no policy, so
-opensnitchd is expected to run as `unconfined_service_t`. Check
-bazzite-tower for drop-ins such as `ProtectHome=`; a VM check is required.
+SELinux is **unverified**, and so is any `ProtectHome=`/`ProtectSystem=`
+drop-in that bazzite-tower adds to opensnitchd. Either would make the
+daemon load 0 entries silently. This is the main reason the success state
+is only "rule installed" (A6).
 
-Layout under `<state>`:
-- `blocklists.sqlite3`, mode 0600 (and later `profiles.sqlite3`, from
-  #46);
-- `blocklists/<id>/domains.list`, with directories at 0700 and files at
-  0600;
-- optionally `blocklists/<id>-ips/ips.list` (see step 3).
+**A6. Persistence and honest status.**
+- `BlocklistStore::open(<state>/blocklists.sqlite3)` (mode 0600) when a
+  state dir exists; in-memory otherwise.
+- `BlocklistsManager` keeps an in-memory map from id to `Enforcement`:
+  - `Pending`;
+  - `RuleInstalled { at }`: the daemon replied OK and the list file was
+    written. The UI label is **"Rule installed"**, *not* "Enforced", because
+    the daemon may still load 0 entries;
+  - `NotEnforced { reason }`.
+- Until PR B, the no-op sink reports `NotEnforced("no rule sink yet")`.
+- `BlocklistSummary` (`ws_messages.rs`) gains `enforcement` and
+  `enforcement_reason`, both `#[serde(default)]`. `translator/downstream.rs`
+  `build_set_blocklists`/`build_set_blocklist_status` fill them in.
+- `FetchStatus` keeps meaning "download result".
 
-New module `blocklists/list_dir.rs`:
-- **Write:** each write goes to `.domains.list.tmp`, which is hidden and so
-  ignored by the daemon. It is then `fsync`ed and `rename`d over the target.
-  The daemon never sees a truncated file, and the mtime change triggers a
-  reload within 4 s.
-- **Line format:** each line is exactly `0.0.0.0 <host>\n`. Hosts are
-  already validated and lowercased by `format.rs`.
-- **Ids:** the id must match `[A-Za-z0-9_-]+`; reject `.`, `..` and leading
-  dots.
-- **Remove:** `remove(id)` deletes the directory.
+**A7. Wiring.**
+- The pump routes blocklist messages to the A3 worker.
+- Factor `serve_with_blocklists`' event pump into
+  `blocklists::spawn_event_pump(mgr, broadcast_tx)` and call it from both
+  places.
 
-### 2. One rule per subscription
+**A8. GUI.**
+- Subscriptions now survive restarts. Reword the honest-ui Blocklists
+  banner: still "not applied" (until PR B), but no longer "lost when …
+  restarts".
+- Relax that page's `contains("restart")` check in
+  `honest_ui_qml_guards.rs` `assert_preview_banner`. Keep "not applied"
+  and the no-"bridge"-word rule.
+- Show the per-row enforcement state (`blocklists/row_store.rs`,
+  `BlocklistsPage.qml`).
 
-`materializer.rs` is rewritten as
-`materialize_list_rule(id, dir) -> MaterializedRule`:
-- `name`: `z00-blocklist:<id>`. Kirigami's `Rule::source()`
-  (`main:crates/snitchwatch-kirigami/src/rules/row_store.rs:92-103`) still
-  parses `list_id` from it.
+### PR B: install the rules (after #48)
+
+**B1. List directory** (`blocklists/list_dir.rs`).
+- Layout: `<state>/blocklists/<id>/domains.list`, with directories at 0700
+  and files at 0600.
+- Write to `.domains.list.tmp`, `fsync`, then `rename`. The temp file is
+  hidden, so the daemon ignores it.
+- Each line is exactly `0.0.0.0 <host>\n`.
+- Ids must match `[A-Za-z0-9_-]+`; reject leading dots.
+- Optional: IPv4 entries go to `<id>-ips/ips.list` with a second rule,
+  `z00-blocklist:<id>:ips` using `lists.ips`.
+
+**B2. One rule per subscription.** `materialize_list_rule(id, dir)`:
+- `name`: `z00-blocklist:<id>`. Kirigami `Rule::source()` still parses
+  `list_id` from it.
 - `action`: `deny`
 - `duration`: `always`
 - `precedence`: false
-- `description`: the existing JSON tag, minus `entry`.
 - `operator`: `{type: "lists", operand: "lists.domains", data: <canonical dir>, sensitive: false}`
 
-Add `sensitive` to the materializer's `Operator`, and
-`From<MaterializedRule> for protocol::Rule`.
+Also add `sensitive` to the materializer's `Operator`, and
+`From<MaterializedRule> for protocol::Rule`. Correct every "user rules
+always win" doc listed in Findings.
 
-Also:
-- `derive_id` becomes `<sanitized stem>-<8 hex of SHA-256(url)>`;
-- correct every "user rules always win" doc listed in Findings to "a
-  blocklist deny beats any non-precedence allow".
+**B3. `DaemonRuleSink`** (`blocklists/daemon_sink.rs`, implementing
+`RuleSink` with replace semantics):
+1. Write the file(s). On failure, return `NotEnforced` and send nothing.
+2. CHANGE_RULE the rule(s) through #48's `DaemonCommands` and wait 5 s.
+   Each outcome maps to its own reason: `NoDaemon`, `Rejected(text)`,
+   `Timeout`, `StreamClosed`.
+3. DELETE_RULE every cached rule that has an owned prefix and is not
+   desired. This purges legacy per-entry rules.
 
-### 3. Optional: IPv4 entries
+Unsubscribe sends DELETE first, then removes the directory.
 
-Entries that parse as `Ipv4Addr` go to `<id>-ips/ips.list` and a second
-rule, `z00-blocklist:<id>:ips`, with `lists.ips`. Do this only if it stays
-small; otherwise defer to P5.2.
+**B4. Reconcile.** It runs on each daemon connect, after #48's
+rules-synced and `stream_ready` signals, as a job on the A3 worker.
+- For each subscription with entries: rewrite the file if it is missing,
+  and push the rule if it is missing or differs.
+- Delete owned rules for ids no longer subscribed.
+- Remove orphan directories.
 
-### 4. `DaemonRuleSink`
-
-New file `blocklists/daemon_sink.rs`, implementing the existing `RuleSink`
-trait (`mod.rs:53-59`) with replace semantics.
-
-1. Write the list file(s). On failure, return
-   `Err("list directory not writable: …")` and send nothing.
-2. CHANGE_RULE the desired rule(s) through #48's `DaemonCommands` and wait
-   5 s for the reply. Each outcome becomes an `Err` with its own reason:
-   - `NoDaemon`: "daemon not connected";
-   - `Rejected(text)`: the daemon's error text;
-   - `Timeout`: a timeout reason.
-3. DELETE_RULE every rule in #48's cache that has an owned prefix
-   (`owned_blocklist_rule_name_prefixes` plus the new names) and is not in
-   the desired set. This purges legacy per-entry rules from dev daemons.
-
-Unsubscribe sends DELETE_RULE first, then removes the directory.
-
-### 5. Honest status
-
-`BlocklistsManager` keeps an in-memory `HashMap<id, Enforcement>`. It is
-runtime state, so the SQLite schema does not change.
-- `Enforcement` is `Pending`, `Enforced { at }` or `NotEnforced { reason }`,
-  set from the sink result.
-- The no-op sink reports `NotEnforced("no rule sink")`. This is what
-  in-memory/test mode and dev runs without a state directory show.
-- `BlocklistSummary` (`ws_messages.rs:434-444`) gains `enforcement` and
-  `enforcement_reason`, both `#[serde(default)]`.
-- `build_set_blocklists` and `build_set_blocklist_status`
-  (`translator/downstream.rs:11-60`) fill them in.
-- `FetchStatus` keeps meaning "download result".
-
-### 6. Reconcile
-
-A task waits on #48's rules-synced generation and the `stream_ready`
-generation, then runs on each daemon connect:
-- for each subscription with entries: rewrite the file from the store if it
-  is missing; push the rule if it is missing or differs from #48's cache;
-- delete owned rules whose id is no longer subscribed, which covers an
-  unsubscribe made while the daemon was away;
-- remove `blocklists/*` directories that have no subscription.
-
-Rules are `always`, so the daemon persists them and keeps reading the
-lists while the bridge is down.
-
-### 7. Wiring in `run_with_incoming` (`#39:lib.rs`)
-
-- **Stores** (`:270-279`): `BlocklistStore::open(<state>/blocklists.sqlite3)`
-  when a state dir exists, otherwise in-memory as today.
-  - `ProfileStore` persistence is #46's first step, not this plan's.
-    Persisting profiles makes the Profiles banner's "lost when the bridge
-    restarts" untrue, and its guard test asserts that wording, so that
-    change belongs with the banner edit in #46.
-- **Sink:** `with_rule_sink(DaemonRuleSink)`.
-- **Inbound pump** (`:515-642`): route blocklist messages to
-  `handle_blocklist_action` in a **spawned** task. The fetch can take up to
-  `FETCH_TIMEOUT` and must not stall verdicts. Unlike profile messages
-  (`:541-547`), which are awaited inline.
-- **Event pump:** factor `ws_server.rs:322-369` into
-  `blocklists::spawn_event_pump(mgr, broadcast_tx)` and call it from both
-  places.
-- **Refresh loop:** spawn `spawn_refresh_loop(15 min)` and keep its
-  `JoinHandle` in `RunningBridge` so `shutdown` aborts it, like
-  `watchdog_handle`.
-
-### 8. Kirigami
-
-- Remove the honest-ui "Preview" banner from `BlocklistsPage.qml`.
-- Update its guards: `crates/snitchwatch-kirigami/tests/honest_ui_qml_guards.rs`
-  `blocklists_page_warns_it_is_not_enforced`, and the Blocklists half of
-  `honest_ui_pages_qml.rs` `preview_banners_are_visible_and_not_dismissable`.
-  These names come from the uncommitted `fix/honest-ui` worktree; re-check
-  them after it merges.
-- **Per row:** show "Enforced" or "Not enforced: <reason>". The status column
-  is at `BlocklistsPage.qml:101-140`.
-- **Page level:** show a Warning `InlineMessage` only while some
-  subscription is not enforced.
-- Parse the new fields in `blocklists/row_store.rs`.
-- Update `RulesPage.qml:7-11`: one row per list, not per entry.
-
-## Delivery (two PRs)
-
-- **PR A (S–M):** steps 1, 5 and 7, using the no-op sink. Subscriptions
-  work, persist and refresh, and the page shows "not enforced: no rule
-  sink". This makes the page honest even if PR B slips.
-  - PR A must also reword the honest-ui Blocklists banner: subscriptions
-    become persistent, so "lost when the bridge restarts" is no longer true.
-  - It must relax `assert_preview_banner`'s `contains("restart")` check
-    for the Blocklists page (`honest_ui_qml_guards.rs`), and keep the
-    "not applied" check.
-- **PR B (M):** steps 2–4, 6 and 8, after #48.
+**B5. GUI.**
+- Remove the Blocklists banner and its guard assertions.
+- Show a page-level warning only while some subscription is not enforced.
+- Update `RulesPage.qml`'s header comment (one row per list).
 
 ## Tests to write first
 
+**PR A:**
+- **Fetcher:**
+  - `http://` and `file://` are rejected;
+  - an `https` → `http` redirect fails (local TLS test server, or
+    `wiremock`/`httpmock` if one is already in the dependency tree — check);
+  - a chunked body over 64 MiB stops at the cap without buffering more;
+  - a bad URL is never stored.
+- **Worker:**
+  - two `SubscribeBlocklist` jobs are processed in order;
+  - a `SetVerdict` sent while a slow fake fetch is in flight is applied
+    immediately;
+  - only one fetch is ever concurrent (the fake fetcher counts).
+- **`derive_id`:** two `…/hosts` URLs get distinct, stable ids.
+- **Persistence:** with `run_with_options(state_dir: tempdir, fixture fetcher)`,
+  subscribe, shut down and restart; the subscription is still there and the
+  refresh loop schedules it.
+- **Hermetic:**
+  - a source-guard test asserts that `run()`/`run_with_incoming` never read
+    `STATE_DIRECTORY`/`SNITCHWATCH_STATE_DIR`, and that only `main.rs` and
+    `run_system` call the resolver;
+  - a subprocess test of the binary with a tempdir passed through
+    `Command::env` writes `blocklists.sqlite3` only there. The subprocess
+    must also get an isolated `XDG_RUNTIME_DIR` and
+    `SNITCHWATCH_GRPC_BIND=127.0.0.1:0`; per CLAUDE.md, a bridge started
+    without them replaces the running bridge's socket and token.
+  - Never use `std::env::set_var` in-process.
+- **Status:** `enforcement: "not_enforced"` with reason "no rule sink yet".
+  The Kirigami row store parses it, and the QML guard is updated.
+
+**PR B:**
 - **`list_dir`:**
-  - the output parses back to the same set through a Rust port of
-    `filterDomains` (test helper citing `operator_lists.go:107-125`);
-  - file name contains a dot; the temp file is hidden;
-  - modes are 0700 and 0600;
-  - `.`/`..`/`a/b`/`.x` ids are rejected;
-  - the path is canonicalized.
-- **Materializer:**
-  - one rule per list, named `z00-blocklist:<id>`;
-  - the `lists` operator passes `mock_opensnitchd::validate_rule_shape`
-    (`KNOWN_OPERATOR_TYPES` includes `"lists"`);
-  - two `…/hosts` URLs get distinct ids.
+  - round-trips through a Rust port of `filterDomains` (test helper citing
+    `operator_lists.go` `filterDomains`);
+  - a dotted file name; a hidden temp file;
+  - modes 0700/0600;
+  - bad ids rejected;
+  - a canonical path.
+- **Rule shape:** passes `mock_opensnitchd::validate_rule_shape`
+  (`"lists"` is a known type).
 - **Sink** (with a fake `DaemonCommands`):
-  - OK reply means `Enforced`;
-  - `NoDaemon`, `Rejected` and `Timeout` each give `NotEnforced` with a
-    distinct reason;
+  - OK gives `RuleInstalled`;
+  - every failure gives `NotEnforced` with a distinct reason;
   - a write failure sends nothing;
-  - legacy `z00-blocklist:<id>:0001-x` rules in the cache are deleted.
-- **Manager:**
-  - enforcement is set only after the sink returns;
-  - a failed refresh keeps the previous enforcement and cache;
-  - a reopened file-backed store keeps subscriptions.
-- **Reconcile:**
-  - nothing is sent before HELLO;
-  - a missing rule is pushed;
-  - an orphan rule is deleted.
-- **bridge-cli** (`run_with_state_dir(tempdir)`, `file://` URL of
-  `tests/fixtures/blocklists/` as in `fetcher.rs` tests):
-  - `SubscribeBlocklist` through `inbound_tx` broadcasts `SetBlocklists`;
-  - a concurrent `SetVerdict` is processed while a slow fetch is in flight.
-- **Protocol** (`bridge_protocol_test.rs`): with `MockOpensnitchd`
-  subscribed and notifications open, a subscription produces one
-  CHANGE_RULE with `lists.domains`. Its `data` is under the temp state dir,
-  and that directory holds the hosts-format file. Replying OK gives
-  `enforcement: "enforced"`.
-- **Kirigami:** the row store parses `enforcement`, and the QML guard is
-  updated.
+  - legacy rules are deleted.
+- **Reconcile:** nothing is sent before HELLO; a missing rule is pushed; an
+  orphan is deleted.
+- **Protocol** (`bridge_protocol_test.rs`): the mock subscribes and opens
+  notifications. A subscription produces one CHANGE_RULE with
+  `lists.domains`, `data` under the temp state dir, and a hosts-format file
+  there. Replying OK gives `enforcement: "rule_installed"`.
 
 ## Verification
 
@@ -346,47 +335,44 @@ Run at low priority:
 
 Manual check in a disposable VM, in both modes:
 
-1. Subscribe to a small hosts list.
-2. `stat`/`ls -Z` the list file. Confirm
+1. Subscribing to `file:///dev/zero` is refused.
+2. Subscribe to a small list. Check its `stat`/`ls -Z`, and that
    `/etc/opensnitchd/rules/z00-blocklist:<id>.json` exists.
-3. `journalctl -u opensnitchd | grep "domains loaded"` shows the count.
-4. Give `curl` an "any host" allow, then `curl` a listed host: it is
-   denied.
-5. `ausearch -m avc -ts recent` is empty.
-6. Restart the bridge: the subscription is still there.
+3. `journalctl -u opensnitchd | grep "domains loaded"` shows the expected
+   count. This is the only proof that entries actually loaded.
+4. Give `curl` an "any host" allow, then `curl` a listed host: denied.
+5. `ausearch -m avc` is empty.
+6. Restart the bridge: the subscription persists.
 
 ## Risks and open questions
 
 - **The bridge's own download goes through opensnitchd.**
-  - In system mode, the `snitchwatch` account's HTTPS fetch triggers an
-    AskRule. With no GUI attached it gets `Unavailable`, so the shipped
-    `DefaultAction: deny` applies and the refresh fails. The previous list
-    stays enforced, and the status shows the fetch error.
-  - Options: a packaged allow for `process.path=/usr/bin/snitchwatch-bridge-cli`
-    AND `user.name=snitchwatch`, or documenting "allow once when
-    subscribing". This is part of the deny-by-default policy (Phase 1), so
-    it is the owner's call.
-  - On `user.name`: a `simple` `user.name` operator is resolved to a uid by
-    `user.Lookup` when the rule compiles (`vendor:daemon/rule/operator.go:127-136`).
-    The sysusers-assigned uid therefore doesn't need hard-coding. But a rule
-    that loads before the account exists fails to compile.
-- **"Enforced" is not proof of a load.** It means the daemon accepted the
-  rule and the list was written, not that the daemon loaded the entries.
-  Only daemon logs show the loaded count. An SELinux denial would show
-  "enforced" while blocking nothing; the VM check above is the mitigation.
+  - In system mode with no GUI attached, the `snitchwatch` account's HTTPS
+    fetch gets `Unavailable`, the shipped deny default applies, and the
+    refresh fails. The previous list stays installed, and the status shows
+    the fetch error.
+  - Options: a packaged allow for
+    `process.path=/usr/bin/snitchwatch-bridge-cli` AND `user.name=snitchwatch`,
+    or "allow once when subscribing". This belongs to the Phase 1
+    deny-by-default policy, so it is the owner's call.
+  - A `simple` `user.name` operator is resolved to a uid by `user.Lookup`
+    when the rule compiles (`vendor:daemon/rule/operator.go` `Compile`). So
+    the sysusers uid needn't be hard-coded, but a rule loaded before the
+    account exists fails to compile.
+- **"Rule installed" is not proof of a load.** Only daemon logs show the
+  count. The VM check is the mitigation; surfacing the count needs a daemon
+  change.
 - **Blocklists can break the system.** Because the blocklist wins, a list
-  containing a host that system services need (an rpm-ostree or flatpak
-  mirror) blocks it even with a user allow. There is no exception mechanism
-  until precedence rules exist.
-- **Risk from a compromised bridge account.** It could point a rule's
-  `data` at a special file and make root opensnitchd read `/dev/zero`,
-  exhausting memory. That account already controls every AskRule answer,
-  so this adds a denial-of-service vector but no new authority. Note it in
-  the security review.
-- **Exact-match semantics under-block ABP lists.** Show this in the UI
-  copy.
+  entry that system services need is blocked even with a user allow, and
+  there is no exception mechanism yet.
+- **Internal fetches from a privileged account.** With `https` only, a
+  `snitchwatch-ui` member can still make the `snitchwatch` account fetch
+  internal `https` endpoints, and hostname-like tokens from the response
+  show up as entries. Consider rejecting loopback and private-range
+  targets. Owner's call.
+- **Exact-match semantics under-block ABP lists.** Say so in the UI copy.
 - **File-conflict hot spots:**
-  - `#39:lib.rs` (pump, `run_with_incoming`, snapshot) with #48, #47 and
-    #46;
-  - `ws_messages.rs` with #47;
-  - `BlocklistsPage.qml` and its guard tests with the honest-ui PR.
+  - bridge-cli `run_with_incoming` and the pump, with #48, #47 and #46;
+  - `ws_messages.rs` and `translator/downstream.rs` (PR A's summary
+    fields), with #47, #48 and #44;
+  - `BlocklistsPage.qml` and its guards, with the honest-ui PR.
