@@ -84,3 +84,26 @@ standard export strip can remove it. Verify hardening on the exported executable
 and inspect final permissions. A finish/export of an existing GUI binary does not
 establish a clean source build. Build/export alone also does not establish
 guest runtime acceptance or production rollout readiness.
+
+## GUI logs from a Flatpak run
+
+The GUI logs to stderr. `SNITCHWATCH_LOG` (else `RUST_LOG`, else `info`)
+sets the `tracing` filter. When `SNITCHWATCH_LOG` is set, the log also goes
+to `gui.log` in the app's state directory, truncated at each start:
+`~/.var/app/org.snitchwatch.Snitchwatch/.local/state/snitchwatch/gui.log`.
+
+```bash
+systemd-run --user --unit=snitchwatch-gui-dbg \
+  flatpak run --user --log-session-bus \
+    --env=SNITCHWATCH_LOG=snitchwatch_kirigami=debug,zbus=info,info \
+    org.snitchwatch.Snitchwatch
+```
+
+`flatpak run` moves itself into `app-flatpak-org.snitchwatch.Snitchwatch-*.scope`
+before starting the app, so journald files the app's stderr (and
+`--log-session-bus`'s proxy log) under that scope, not under
+`snitchwatch-gui-dbg.service`:
+
+```bash
+journalctl --user -u 'app-flatpak-org.snitchwatch.Snitchwatch-*' --since -10min
+```

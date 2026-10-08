@@ -24,6 +24,7 @@ pub mod geo_model;
 pub(crate) mod inline_deny;
 pub mod insight;
 pub mod insight_model;
+pub mod logging;
 pub mod make_rule;
 pub mod make_rule_controller;
 pub mod notification_actions;
