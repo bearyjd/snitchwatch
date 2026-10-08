@@ -16,7 +16,9 @@
 //! (`BridgeHandles::pending_row`). Otherwise nothing is sent and the user is
 //! told so.
 
-use snitchwatch_bridge::translator::display::sanitize_tail_for_display;
+use snitchwatch_bridge::translator::display::{
+    sanitize_ends_for_display, sanitize_tail_for_display,
+};
 use snitchwatch_bridge::translator::process_binding::{is_bindable_process_path, RuleRefusal};
 use snitchwatch_bridge::ws_messages::{ConnectionRow, ServerMessage};
 use tokio::sync::broadcast;
@@ -31,8 +33,9 @@ pub(crate) const ALLOW_ONCE_ACTION: &str = "allow-once";
 pub(crate) const DENY_ACTION: &str = "deny";
 pub(crate) const REVIEW_ACTION: &str = "review";
 
-/// How much of a program path or host a notification shows. Longer ones
-/// keep their end, behind a leading "…".
+/// How much of a program path or host a notification shows. A longer path
+/// keeps its start and its end, with "…" between; a longer host keeps its
+/// end, behind a leading "…".
 const BODY_PATH_CHARS: usize = 120;
 const BODY_HOST_CHARS: usize = 100;
 
@@ -42,9 +45,11 @@ const BODY_HOST_CHARS: usize = 100;
 /// the bridge's display sanitizer.
 ///
 /// It shows the program's full path, not just its file name: a
-/// `/tmp/x/firefox` must not read as "firefox". A long path or host keeps
-/// its end, so `login.microsoft.com.<padding>.evil.tld` still shows the
-/// real domain (PR #100 review).
+/// `/tmp/x/firefox` must not read as "firefox". A long host keeps its end,
+/// so `login.microsoft.com.<padding>.evil.tld` still shows the real domain
+/// (PR #100 review). A long path keeps its start too, so a padded
+/// `/tmp/x/<padding>/usr/lib64/firefox/firefox` still shows it is in /tmp
+/// (PR #100 re-review).
 ///
 /// When Deny would be remembered (`deny`, from `InlineDeny::decide`), the
 /// body says for how long, as the inline Deny's tooltip does; a once-only
@@ -53,7 +58,7 @@ pub(crate) fn pending_body(row: &PendingRow, deny: InlineDeny) -> String {
     let program = row.process_path.as_deref().unwrap_or(&row.process);
     let asking = format!(
         "{} wants to connect to {}",
-        sanitize_tail_for_display(program, BODY_PATH_CHARS),
+        sanitize_ends_for_display(program, BODY_PATH_CHARS),
         sanitize_tail_for_display(&row.dst_host, BODY_HOST_CHARS)
     );
     match deny {
@@ -311,13 +316,19 @@ mod tests {
             "{body}"
         );
         assert!(body.ends_with(".evil.tld"), "{body}");
+        // A long path keeps its start as well as its end, so a padded
+        // `/tmp/x/…/usr/lib64/firefox/firefox` still shows it is in /tmp.
         let long_path = PendingRow {
-            process_path: Some(format!("/home/u/{}/firefox", "d/".repeat(200))),
+            process_path: Some(format!(
+                "/tmp/x/{}/usr/lib64/firefox/firefox",
+                "d/".repeat(200)
+            )),
             ..spoof.clone()
         };
         let body = pending_body(&long_path, InlineDeny::ProgramUnknown);
+        assert!(body.starts_with("/tmp/x/d/"), "{body}");
         assert!(
-            body.starts_with('…') && body.contains("/firefox wants to connect to"),
+            body.contains("…") && body.contains("/usr/lib64/firefox/firefox wants to connect to"),
             "{body}"
         );
         // With no path, the program name stands in.

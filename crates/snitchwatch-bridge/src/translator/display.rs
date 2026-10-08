@@ -91,26 +91,51 @@ fn is_display_hazard(c: char) -> bool {
 }
 
 /// Like [`sanitize_for_display`], but a long `input` keeps its END: at most
-/// `max_len` characters, with a leading "…". For a program path or a host,
-/// where the end (the file name, the registered domain) is what identifies
-/// it, and a right-truncated `login.microsoft.com.<padding>.evil.tld` would
-/// hide the real domain (PR #100 review). Escapes after truncating, so an
-/// entity is never cut in half.
+/// `max_len` characters, with a leading "…". For a host, where the end
+/// (the registered domain) is what identifies it, and a right-truncated
+/// `login.microsoft.com.<padding>.evil.tld` would hide the real domain (PR
+/// #100 review). A program path wants [`sanitize_ends_for_display`].
+/// Escapes after truncating, so an entity is never cut in half.
 pub fn sanitize_tail_for_display(input: &str, max_len: usize) -> String {
-    let kept: Vec<char> = input
+    let kept = shown_chars(input);
+    if kept.len() <= max_len {
+        return escape_markup(&kept);
+    }
+    format!("…{}", escape_markup(&kept[kept.len() - max_len..]))
+}
+
+/// Like [`sanitize_tail_for_display`], but a long `input` keeps its START
+/// and its END: at most `max_len` characters, half from each (the start
+/// gets the smaller half), with "…" between. For a program path: the end
+/// names the program and the start says where it lives, so a padded
+/// `/tmp/x/<padding>/usr/lib64/firefox/firefox` can't pass for Firefox by
+/// its end alone (PR #100 re-review). A host keeps its end only.
+pub fn sanitize_ends_for_display(input: &str, max_len: usize) -> String {
+    let kept = shown_chars(input);
+    if kept.len() <= max_len {
+        return escape_markup(&kept);
+    }
+    let start = max_len / 2;
+    let end = kept.len() - (max_len - start);
+    format!(
+        "{}…{}",
+        escape_markup(&kept[..start]),
+        escape_markup(&kept[end..])
+    )
+}
+
+/// `input` without control characters or [`is_display_hazard`] ones.
+fn shown_chars(input: &str) -> Vec<char> {
+    input
         .chars()
         .filter(|&c| !c.is_control() && !is_display_hazard(c))
-        .collect();
-    let tail = if kept.len() > max_len {
-        &kept[kept.len() - max_len..]
-    } else {
-        &kept[..]
-    };
+        .collect()
+}
+
+/// `chars` with the markup metacharacters `<`, `>` and `&` escaped.
+fn escape_markup(chars: &[char]) -> String {
     let mut out = String::new();
-    if tail.len() < kept.len() {
-        out.push('…');
-    }
-    for &c in tail {
+    for &c in chars {
         match c {
             '<' => out.push_str("&lt;"),
             '>' => out.push_str("&gt;"),
@@ -170,5 +195,27 @@ mod tests {
         assert_eq!(sanitize_tail_for_display("a\u{202e}b", 64), "ab");
         assert_eq!(sanitize_tail_for_display("x&y<z>", 3), "…&lt;z&gt;");
         assert_eq!(sanitize_tail_for_display("&&&&&", 2), "…&amp;&amp;");
+    }
+
+    #[test]
+    fn a_long_path_keeps_its_start_and_its_end() {
+        let path = format!("/tmp/x/{}/usr/lib64/firefox/firefox", "d/".repeat(200));
+        let shown = sanitize_ends_for_display(&path, 64);
+        assert!(shown.starts_with("/tmp/x/d/"), "{shown}");
+        assert!(shown.ends_with("/usr/lib64/firefox/firefox"), "{shown}");
+        assert_eq!(shown.matches('…').count(), 1, "{shown}");
+        assert_eq!(shown.chars().count(), 65);
+        assert_eq!(
+            sanitize_ends_for_display("/tmp/x/firefox", 64),
+            "/tmp/x/firefox"
+        );
+        // The start gets the smaller half of an odd budget.
+        assert_eq!(sanitize_ends_for_display("abcdefgh", 5), "ab…fgh");
+        // Hazards go before counting; escaping comes after cutting.
+        assert_eq!(sanitize_ends_for_display("a\u{202e}b", 64), "ab");
+        assert_eq!(
+            sanitize_ends_for_display("<&abcd&>", 4),
+            "&lt;&amp;…&amp;&gt;"
+        );
     }
 }
