@@ -1,8 +1,10 @@
 //! [`Notice`] on a private D-Bus bus (its own `dbus-daemon`, socket under
 //! the worktree's `target/t`): a fake notification server, our listener,
-//! and another client that tries to click for us. When `dbus-daemon` isn't
-//! installed these are skipped, loudly, except on CI (the `CI` variable is
-//! set), where they fail; the unit tests of [`classify`] run everywhere.
+//! and another client that tries to click for us; one test also puts
+//! `xdg-dbus-proxy` in between, as the Flatpak does. When `dbus-daemon` or
+//! `xdg-dbus-proxy` isn't installed these are skipped, loudly, except on CI
+//! (the `CI` variable is set), where they fail; the unit tests of
+//! [`classify`] run everywhere.
 
 use super::*;
 use std::process::{Child, Command, Stdio};
@@ -91,11 +93,24 @@ impl PrivateBus {
     /// A fake notification server. It takes the name with zbus' default
     /// flags, so a later one replaces it.
     pub(crate) async fn notification_server(&self) -> Connection {
+        self.serve(FakeServer::default()).await
+    }
+
+    /// A fake notification server that never answers `CloseNotification`.
+    pub(crate) async fn notification_server_stuck_on_close(&self) -> Connection {
+        self.serve(FakeServer {
+            stuck_on_close: true,
+            ..FakeServer::default()
+        })
+        .await
+    }
+
+    async fn serve(&self, server: FakeServer) -> Connection {
         zbus::connection::Builder::address(self.address.as_str())
             .unwrap()
             .name(SERVER)
             .unwrap()
-            .serve_at(PATH, FakeServer::default())
+            .serve_at(PATH, server)
             .unwrap()
             .build()
             .await
@@ -110,11 +125,105 @@ impl Drop for PrivateBus {
     }
 }
 
-/// Answers `Notify` with id 7, and counts the calls and closes it gets.
+/// `xdg-dbus-proxy` in front of a [`PrivateBus`], filtering as `flatpak run`
+/// does for an app with `--talk-name=org.freedesktop.Notifications`: the
+/// way the Flatpak GUI reaches the notification server. Killed on drop.
+pub(crate) struct FlatpakProxy {
+    proxy: Child,
+    address: String,
+    _dir: tempfile::TempDir,
+}
+
+impl FlatpakProxy {
+    /// `None` (skip) when `xdg-dbus-proxy` isn't installed, except on CI
+    /// (the `CI` variable is set), where it fails, as [`PrivateBus::start`].
+    pub(crate) fn start(bus: &PrivateBus) -> Option<Self> {
+        let Some(proxy_bin) = ["/usr/bin/xdg-dbus-proxy", "/bin/xdg-dbus-proxy"]
+            .into_iter()
+            .find(|path| std::path::Path::new(path).is_file())
+        else {
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "no xdg-dbus-proxy on CI: the test through the Flatpak's filter must run"
+            );
+            eprintln!("SKIPPED: no xdg-dbus-proxy, so no test through the Flatpak's filter");
+            return None;
+        };
+        let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/t");
+        std::fs::create_dir_all(&base).unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("proxy")
+            .tempdir_in(base.canonicalize().unwrap())
+            .unwrap();
+        let socket = dir.path().join("bus");
+        let log = dir.path().join("log");
+        let mut proxy = Command::new(proxy_bin)
+            .arg(&bus.address)
+            .arg(&socket)
+            .args([
+                "--filter",
+                "--talk=org.freedesktop.Notifications",
+                "--talk=org.kde.StatusNotifierWatcher",
+                "--own=org.snitchwatch.Snitchwatch.*",
+            ])
+            .stdout(Stdio::null())
+            .stderr(std::fs::File::create(&log).unwrap())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !socket.exists() {
+            let exited = proxy.try_wait().unwrap();
+            if exited.is_some() || Instant::now() >= deadline {
+                let _ = proxy.kill();
+                let _ = proxy.wait();
+                panic!(
+                    "xdg-dbus-proxy didn't start ({exited:?}): {}",
+                    std::fs::read_to_string(&log).unwrap_or_default()
+                );
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        Some(Self {
+            proxy,
+            address: format!("unix:path={}", socket.display()),
+            _dir: dir,
+        })
+    }
+
+    /// A client connection through the proxy, as the sandboxed GUI has.
+    pub(crate) async fn connect(&self) -> Connection {
+        zbus::connection::Builder::address(self.address.as_str())
+            .unwrap()
+            .build()
+            .await
+            .unwrap()
+    }
+}
+
+impl Drop for FlatpakProxy {
+    fn drop(&mut self) {
+        let _ = self.proxy.kill();
+        let _ = self.proxy.wait();
+    }
+}
+
+/// Answers `Notify` with id 7, counts the calls and closes it gets, and
+/// keeps the last call's app name, hints and timeout.
 #[derive(Default)]
 struct FakeServer {
     notified: u32,
     closed: Vec<u32>,
+    last: Option<Notified>,
+    /// Never answer `CloseNotification` (it then holds the interface).
+    stuck_on_close: bool,
+}
+
+/// What one `Notify` carried besides its text and actions.
+#[derive(Debug, Clone)]
+pub(crate) struct Notified {
+    pub(crate) app_name: String,
+    pub(crate) hints: HashMap<String, zbus::zvariant::OwnedValue>,
+    pub(crate) expire_timeout: i32,
 }
 
 #[zbus::interface(name = "org.freedesktop.Notifications")]
@@ -122,21 +231,29 @@ impl FakeServer {
     #[allow(clippy::too_many_arguments)]
     fn notify(
         &mut self,
-        _app_name: String,
+        app_name: String,
         _replaces_id: u32,
         _app_icon: String,
         _summary: String,
         _body: String,
         _actions: Vec<String>,
-        _hints: HashMap<String, zbus::zvariant::OwnedValue>,
-        _expire_timeout: i32,
+        hints: HashMap<String, zbus::zvariant::OwnedValue>,
+        expire_timeout: i32,
     ) -> u32 {
         self.notified += 1;
+        self.last = Some(Notified {
+            app_name,
+            hints,
+            expire_timeout,
+        });
         7
     }
 
-    fn close_notification(&mut self, id: u32) {
+    async fn close_notification(&mut self, id: u32) {
         self.closed.push(id);
+        if self.stuck_on_close {
+            std::future::pending::<()>().await;
+        }
     }
 }
 
@@ -160,6 +277,36 @@ pub(crate) async fn closed(server: &Connection) -> Vec<u32> {
         .unwrap();
     let ids = fake.get().await.closed.clone();
     ids
+}
+
+/// What the last `Notify` fake `server` answered carried.
+pub(crate) async fn last_notified(server: &Connection) -> Option<Notified> {
+    let fake = server
+        .object_server()
+        .interface::<_, FakeServer>(PATH)
+        .await
+        .unwrap();
+    let last = fake.get().await.last.clone();
+    last
+}
+
+/// The server closes notification 7, for `reason`, broadcast as Plasma does.
+pub(crate) async fn server_closes(server: &Connection, reason: u32) {
+    server
+        .emit_signal(
+            None::<BusName<'_>>,
+            PATH,
+            INTERFACE,
+            "NotificationClosed",
+            &(7u32, reason),
+        )
+        .await
+        .unwrap();
+}
+
+/// The server's click on notification 7's `key`, broadcast as Plasma does.
+pub(crate) async fn server_clicks(server: &Connection, key: &str) {
+    action(server, None, key).await;
 }
 
 async fn action(from: &Connection, to: Option<&UniqueName<'_>>, key: &str) {
@@ -323,4 +470,120 @@ async fn a_later_takeover_voids_an_on_demand_notice() {
     notice.close().await;
     assert_eq!(closed(&ours).await, [7]);
     assert_eq!(closed(&newer).await, Vec::<u32>::new());
+}
+
+/// Plasma (6.4 and later, checked against 6.7.4's `Server::invokeAction`)
+/// answers a click with three broadcast signals: `ActivationToken`, then
+/// `ActionInvoked`, then, for a notice that isn't resident,
+/// `NotificationClosed(id, 3)`. Through the Flatpak's filtering proxy
+/// (r11: `--talk-name=org.freedesktop.Notifications`), the click counts.
+#[tokio::test(flavor = "multi_thread")]
+async fn plasmas_click_counts_through_the_flatpak_proxy() {
+    let Some(bus) = PrivateBus::start() else {
+        return;
+    };
+    let server = bus.notification_server().await;
+    let Some(proxy) = FlatpakProxy::start(&bus) else {
+        return;
+    };
+    let listener = proxy.connect().await;
+    let mut notice = Notice::show(&listener, "summary", "body", &ACTIONS)
+        .await
+        .unwrap();
+    server
+        .emit_signal(
+            None::<BusName<'_>>,
+            PATH,
+            INTERFACE,
+            "ActivationToken",
+            &(7u32, "token"),
+        )
+        .await
+        .unwrap();
+    server_clicks(&server, "allow-once").await;
+    server_closes(&server, 3).await;
+    let end = tokio::time::timeout(
+        Duration::from_secs(5),
+        notice.wait(&KEYS, std::future::pending()),
+    )
+    .await
+    .expect("Plasma's click never arrived through the proxy");
+    assert_eq!(end, WaitEnd::Action("allow-once"));
+}
+
+/// A notice that expired is still answerable: a server can keep it (in a
+/// history) and send its click later. Plasma 6.3 and older, and dunst,
+/// say `NotificationClosed(id, 1)` when the popup times out.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_click_after_the_notice_expired_still_counts() {
+    let Some(bus) = PrivateBus::start() else {
+        return;
+    };
+    let server = bus.notification_server().await;
+    let listener = bus.connect().await;
+    let mut notice = Notice::show(&listener, "summary", "body", &ACTIONS)
+        .await
+        .unwrap();
+    server_closes(&server, EXPIRED).await;
+    routed(&server).await;
+    server_clicks(&server, "allow-once").await;
+    let end = tokio::time::timeout(
+        Duration::from_secs(5),
+        notice.wait(&KEYS, std::future::pending()),
+    )
+    .await
+    .expect("the click after expiry never counted");
+    assert_eq!(end, WaitEnd::Action("allow-once"));
+}
+
+/// The user dismissing the notice, or any close but expiry, ends the wait:
+/// a click queued behind it doesn't count.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_dismissed_notice_ends_the_wait() {
+    let Some(bus) = PrivateBus::start() else {
+        return;
+    };
+    let server = bus.notification_server().await;
+    let listener = bus.connect().await;
+    for reason in [2, 3, 4] {
+        let mut notice = Notice::show(&listener, "summary", "body", &ACTIONS)
+            .await
+            .unwrap();
+        server_closes(&server, reason).await;
+        server_clicks(&server, "allow-once").await;
+        routed(&server).await;
+        let end = tokio::time::timeout(
+            Duration::from_secs(5),
+            notice.wait(&KEYS, std::future::pending()),
+        )
+        .await
+        .expect("the close never arrived");
+        assert_eq!(end, WaitEnd::Closed(reason));
+    }
+}
+
+/// `Notify` names the app, asks the server to keep the notice (resident),
+/// names its desktop entry, and leaves the timeout to the server.
+#[tokio::test(flavor = "multi_thread")]
+async fn notify_carries_the_resident_and_desktop_entry_hints() {
+    let Some(bus) = PrivateBus::start() else {
+        return;
+    };
+    let server = bus.notification_server().await;
+    let listener = bus.connect().await;
+    let _notice = Notice::show(&listener, "summary", "body", &ACTIONS)
+        .await
+        .unwrap();
+    let notified = last_notified(&server).await.expect("Notify was called");
+    assert_eq!(notified.app_name, "Snitchwatch");
+    assert_eq!(notified.expire_timeout, -1);
+    assert!(
+        bool::try_from(&notified.hints["resident"]).unwrap(),
+        "{notified:?}"
+    );
+    assert_eq!(
+        <&str>::try_from(&notified.hints["desktop-entry"]).unwrap(),
+        "org.snitchwatch.Snitchwatch"
+    );
+    assert_eq!(notified.hints.len(), 2, "{notified:?}");
 }

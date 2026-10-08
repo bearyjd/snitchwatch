@@ -47,6 +47,12 @@ pub fn crash_log_path() -> PathBuf {
     state_dir().join("crash.log")
 }
 
+/// The GUI's own log, written when `SNITCHWATCH_LOG` is set
+/// (`crate::logging`).
+pub fn gui_log_path() -> PathBuf {
+    state_dir().join("gui.log")
+}
+
 // Pure cores of the resolvers above: the environment's values come in as
 // parameters, so tests never touch process-global state (issues #96, #97).
 

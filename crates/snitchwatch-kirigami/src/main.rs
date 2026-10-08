@@ -15,21 +15,15 @@
 use snitchwatch_kirigami::bridge_bindings as _;
 
 use cxx_qt_lib::{QQmlApplicationEngine, QString, QUrl};
-use snitchwatch_kirigami::{application, bridge_runtime};
+use snitchwatch_kirigami::{application, bridge_runtime, logging};
 
 fn main() {
     // Without this, every `tracing::info!`/`tracing::error!` call in this
-    // crate (including the bridge-startup log two lines below, and any QML
-    // handler diagnostics) is silently dropped: the default `tracing`
-    // dispatcher is a no-op until a subscriber is installed. Mirrors
-    // `snitchwatch-bridge-cli::main`'s init so `RUST_LOG` behaves the same
-    // way across both binaries.
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
+    // crate (including the bridge-startup log below, and any QML handler
+    // diagnostics) is silently dropped: the default `tracing` dispatcher is
+    // a no-op until a subscriber is installed. `SNITCHWATCH_LOG` (or
+    // `RUST_LOG`) sets the filter; see `logging` for where it goes.
+    logging::init();
 
     // Kirigami's usual `org.kde.desktop` style needs a real Plasma session and
     // hangs under `QT_QPA_PLATFORM=offscreen`; `Basic` is the lightweight
