@@ -259,7 +259,8 @@ past 2,000,000 hosts in total (in subscription order) get no rule.
   `rule_hits.json` (mode 0600) in the same state directory, and only rules
   that still exist in the daemon's first rule list after a restart keep
   theirs; without a state directory they are kept in memory and the page
-  says so.
+  says so. A count belongs to a rule's name: editing a rule keeps it, and a
+  deleted or expired rule loses it.
 - The bridge fetches only `https://` URLs, including every redirect, and
   never a loopback, link-local, carrier-grade NAT or other reserved address
   (LAN addresses, RFC 1918 and ULA, are allowed: owner decision,

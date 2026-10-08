@@ -210,6 +210,14 @@ the design above, this is what shipped):
   sets the baseline, and nothing resets it on a reconnect. This replaced
   the design's `≥ max_events - 1` heuristic, which missed failed pings and
   read `MaxEvents` only at `Subscribe` though the daemon reloads it.
+- **An edit keeps the count (decided, not reset).** A confirmed
+  `CHANGE_RULE` for an existing name, including a new action or operator,
+  keeps that name's count and last hit; only a rename (a new name) starts at
+  zero. Resetting would need a per-rule "counted since": with only the
+  global `since`, a just-edited rule at 0 would look unused for the whole
+  window to Part 2's 14-day badge. Pinned by
+  `a_confirmed_rule_change_keeps_the_count`. Part 2 should word "Unused"
+  with that in mind, or add a per-rule start if it needs one.
 - **A daemon restart zeroes nothing.** "Uptime drop" is a daemon restart:
   the events in between are lost, so it records a gap. The counts stay,
   which is also what "counts survive a reconnect" and N1 require.

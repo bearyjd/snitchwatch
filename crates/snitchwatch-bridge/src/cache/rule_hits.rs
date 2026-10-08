@@ -42,6 +42,9 @@
 //! before the prune: prompt rules are named deterministically, so a re-made
 //! rule would otherwise inherit the old count). **Nothing prunes on
 //! `withdraw`**: it runs on every daemon reconnect and would wipe every count.
+//! An edit (a confirmed `CHANGE_RULE` under the same name, even with a new
+//! action or operator) keeps the count: a count is per name, and only the
+//! global `since` says when counting began.
 //!
 //! Counts restored from the saved file wait the same way (`restored`) until
 //! the first committed snapshot says which of them still exist. Until then
