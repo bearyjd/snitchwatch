@@ -248,17 +248,40 @@ harness against the real running shell — see its own doc comment) and
 confirm the tooltip shows "Blocked: \<process\> → \<host\>" for ~5 seconds
 before reverting.
 
-**FilterOff** — right-click the tray icon:
+**FilterOff (timed pause, issue #47)** — right-click the tray icon:
 
 ```
-Tray menu should show "Pause filtering" (not currently paused).
-Click it -> tooltip becomes "Snitchwatch — filtering disabled",
-  menu item now reads "Resume filtering".
+The menu is flat, with no submenu: "Show window", then "Pause for 5
+  minutes", "Pause for 30 minutes", "Pause for 1 hour", then "Resume
+  filtering", then "Quit". All are always listed; while not paused the
+  three pause items are enabled and "Resume filtering" is greyed out.
+Click "Pause for 5 minutes" -> tooltip becomes "Snitchwatch — filtering
+  paused until HH:MM"; the pause items grey out and the resume item reads
+  "Resume filtering (until HH:MM)" and is enabled.
 Trigger a new connection (curl to an unclassified host) -> confirm it is
   silently allowed with NO pending-decision prompt shown.
-Click "Resume filtering" -> tooltip returns to normal, menu item reads
-  "Pause filtering" again, and a fresh AskRule prompts normally again.
+Click "Resume filtering (until HH:MM)" -> tooltip returns to normal, the
+  pause items are enabled again, and a fresh AskRule prompts normally.
+Pause for 5 minutes again and wait it out -> at HH:MM the "Snitchwatch —
+  filtering resumed" notification ("Your pause timer expired.") appears,
+  the menu returns to the not-paused state, and the next connection
+  prompts.
 ```
+
+**r7 check: what the tray actually exports.** VM run r6 found the old
+submenu broken in the real Plasma tray although it passed offscreen, so
+also dump the menu the StatusNotifierItem exports, once not paused and
+once paused, and confirm the items and their `enabled` flags match the
+list above:
+
+```
+busctl --user list | grep StatusNotifierItem     # the shell's SNI name
+busctl --user call <sni-name> /MenuBar com.canonical.dbusmenu GetLayout iias 0 -1 0
+```
+
+(`iias 0 -1 0` is parent id 0, unlimited depth and an empty property-name
+list, which returns every property.) Then exercise pause, resume and
+expiry live from the tray as above.
 
 **If any of these fail:** first confirm the tray icon is even receiving
 live updates at all (`Qt.labs.platform.SystemTrayIcon`'s tooltip should

@@ -12,6 +12,7 @@ fn main() {
     let builder =
         CxxQtBuilder::new_qml_module(QmlModule::new("com.snitchwatch.shell").qml_files([
             "qml/main.qml",
+            "qml/TrayMenu.qml",
             "qml/SizedOverlaySheet.qml",
             "qml/ConnectionsPage.qml",
             "qml/PendingDecisionSheet.qml",

@@ -42,6 +42,7 @@ const ALL_QML: &[(&str, &str)] = &[
     ("ScannerPage.qml", include_str!("../qml/ScannerPage.qml")),
     ("SizedOverlaySheet.qml", SIZED_SHEET),
     ("TrafficPage.qml", include_str!("../qml/TrafficPage.qml")),
+    ("TrayMenu.qml", include_str!("../qml/TrayMenu.qml")),
 ];
 
 /// Drop whole-line `//` comments so a guard can't trip over prose that merely

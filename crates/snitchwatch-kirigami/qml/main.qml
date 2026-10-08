@@ -468,46 +468,11 @@ Kirigami.ApplicationWindow {
             }
         }
 
-        menu: Labs.Menu {
-            Labs.MenuItem {
-                text: root.visible ? "Hide window" : "Show window"
-                onTriggered: root.visible ? root.hide() : root.raiseAndActivate()
-            }
-            // Timed pause (issue #47): every pause ends on its own, and the
-            // bridge accepts only these three lengths. Only shown for the
-            // two tokens a pause action applies to — "reconnect"
-            // (DaemonDown) and "default" have none to offer. See
-            // tray_controller.rs's pauseFor/resume docs.
-            Labs.Menu {
-                title: "Pause filtering"
-                visible: trayController.menuLabel === "pause_filtering"
-                Labs.MenuItem {
-                    text: "For 5 minutes"
-                    onTriggered: trayController.pauseFor(300)
-                }
-                Labs.MenuItem {
-                    text: "For 30 minutes"
-                    onTriggered: trayController.pauseFor(1800)
-                }
-                Labs.MenuItem {
-                    text: "For 1 hour"
-                    onTriggered: trayController.pauseFor(3600)
-                }
-            }
-            Labs.MenuItem {
-                visible: trayController.menuLabel === "resume_filtering"
-                text: trayController.pausedUntil
-                    ? "Resume filtering (until " + trayController.pausedUntil + ")"
-                    : "Resume filtering"
-                onTriggered: trayController.resume()
-            }
-            Labs.MenuItem {
-                separator: true
-            }
-            Labs.MenuItem {
-                text: "Quit"
-                onTriggered: Qt.quit()
-            }
+        // Flat menu in TrayMenu.qml: a nested submenu doesn't survive the
+        // StatusNotifierItem/dbusmenu export on Plasma.
+        menu: TrayMenu {
+            controller: trayController
+            window: root
         }
     }
 

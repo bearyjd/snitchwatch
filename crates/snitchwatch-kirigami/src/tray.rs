@@ -75,7 +75,7 @@ pub fn menu_label_token(label: &MenuLabel) -> &'static str {
 }
 
 /// Build the JSON-encoded `ClientMessage::SetFilteringPaused` the tray menu's
-/// "Pause filtering" submenu and "Resume filtering" item send via
+/// "Pause for …" items and "Resume filtering" item send via
 /// `BridgeFeed::sendClientJson` (the same in-process path
 /// `BridgeFeed::submitVerdict` and friends use — see
 /// `docs/superpowers/plans/2026-07-12-tray-filter-off.md`). Pure and
@@ -231,16 +231,29 @@ mod tests {
         );
     }
 
+    /// A QML source's code, read at test time (so a missing file fails the
+    /// test rather than the build), with `//` comments and all whitespace
+    /// removed so guards match code, not prose or formatting.
+    fn qml_code(name: &str) -> String {
+        let path = format!("{}/qml/{name}", env!("CARGO_MANIFEST_DIR"));
+        std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("{path}: {e}"))
+            .lines()
+            .map(|line| line.split("//").next().unwrap_or_default())
+            .flat_map(|code| code.chars().filter(|c| !c.is_whitespace()))
+            .collect()
+    }
+
     #[test]
     fn tray_menu_offers_exactly_the_allowed_pause_durations() {
         // Timed only (issue #47): no untimed toggle, and every offered
         // duration is one the bridge accepts.
-        let main_qml = include_str!("../qml/main.qml");
+        let tray_menu = qml_code("TrayMenu.qml");
         assert!(
-            !main_qml.contains("toggleFiltering"),
+            !tray_menu.contains("toggleFiltering"),
             "untimed pause toggle is back"
         );
-        let offered: Vec<u64> = main_qml
+        let offered: Vec<u64> = tray_menu
             .split("pauseFor(")
             .skip(1)
             .map(|rest| rest[..rest.find(')').unwrap()].trim().parse().unwrap())
@@ -248,6 +261,29 @@ mod tests {
         assert_eq!(
             offered,
             snitchwatch_bridge::filter_pause::ALLOWED_PAUSE_SECS.to_vec()
+        );
+    }
+
+    #[test]
+    fn tray_menu_is_flat() {
+        // Plasma's StatusNotifierItem tray (dbusmenu) showed a nested
+        // `Labs.Menu` as a bare "Pause filtering" entry with no submenu,
+        // and activating it did nothing (VM run r6). The menu's root is its
+        // only `Labs.Menu`, and the tray icon uses it rather than a menu of
+        // its own. tests/tray_menu_qml.rs checks flatness at runtime too.
+        assert_eq!(
+            qml_code("TrayMenu.qml").matches("Labs.Menu{").count(),
+            1,
+            "TrayMenu.qml nests a submenu"
+        );
+        let main_qml = qml_code("main.qml");
+        assert!(
+            main_qml.contains("menu:TrayMenu{"),
+            "the tray icon doesn't use TrayMenu"
+        );
+        assert!(
+            !main_qml.contains("Labs.Menu{"),
+            "main.qml declares a menu of its own"
         );
     }
 }
