@@ -15,11 +15,16 @@
 //!    mutates the cache (resolving pending rows by firing the oneshot).
 
 pub mod activation;
+mod busy;
 pub mod cli;
 pub mod profile_storage;
+mod replier;
+mod rule_commands;
 pub mod rule_hits_storage;
 mod rules_import;
 pub mod storage;
+#[cfg(test)]
+mod test_daemon;
 
 pub use storage::{
     resolve_storage, BridgeMode, EphemeralReason, RunOptions, Storage, PER_USER_REASON,
@@ -35,6 +40,7 @@ use snitchwatch_bridge::cache::rules::{
 };
 use snitchwatch_bridge::cache::traffic_tracker::TrafficTracker;
 use snitchwatch_bridge::daemon_commands::DaemonTransport;
+use snitchwatch_bridge::deferred_answers::ANSWER_TIMEOUT;
 use snitchwatch_bridge::filter_pause::{FilterPause, PauseRequest};
 use snitchwatch_bridge::grpc_server::UiService;
 use snitchwatch_bridge::notice::{Notice, NoticeBus};
@@ -273,6 +279,24 @@ pub async fn run(config: BridgeConfig) -> Result<RunningBridge> {
 /// [`run`] with explicit [`RunOptions`]: `main.rs` passes the resolved state
 /// directory; tests may also inject a blocklist fetcher.
 pub async fn run_with_options(config: BridgeConfig, options: RunOptions) -> Result<RunningBridge> {
+    run_tcp(config, options, ANSWER_TIMEOUT).await
+}
+
+/// [`run`] with a shorter wait before the bridge answers a prompt nobody
+/// answers (`snitchwatch_bridge::deferred_answers`), for tests that watch
+/// one time out.
+pub async fn run_with_answer_timeout(
+    config: BridgeConfig,
+    answer_timeout: std::time::Duration,
+) -> Result<RunningBridge> {
+    run_tcp(config, RunOptions::in_process(), answer_timeout).await
+}
+
+async fn run_tcp(
+    config: BridgeConfig,
+    options: RunOptions,
+    answer_timeout: std::time::Duration,
+) -> Result<RunningBridge> {
     let grpc_listener = tokio::net::TcpListener::bind(config.grpc_bind)
         .await
         .with_context(|| format!("failed to bind gRPC listener on {}", config.grpc_bind))?;
@@ -284,6 +308,7 @@ pub async fn run_with_options(config: BridgeConfig, options: RunOptions) -> Resu
         None,
         None,
         options,
+        answer_timeout,
     )
     .await
 }
@@ -308,6 +333,7 @@ pub async fn run_system(listeners: activation::ActivatedListeners) -> Result<Run
             blocklist_fetcher: None,
             mode: BridgeMode::System,
         },
+        ANSWER_TIMEOUT,
     )
     .await
 }
@@ -319,6 +345,7 @@ async fn run_with_incoming<I, IO>(
     activated_ws: Option<UnixListener>,
     system_token_path: Option<PathBuf>,
     options: RunOptions,
+    answer_timeout: std::time::Duration,
 ) -> Result<RunningBridge>
 where
     I: tokio_stream::Stream<Item = std::io::Result<IO>> + Send + 'static,
@@ -365,6 +392,7 @@ where
         filter_pause.clone(),
     )
     .with_client_presence(client_presence.clone())
+    .with_answer_timeout(answer_timeout)
     .with_daemon_transport(match grpc_endpoint {
         GrpcEndpoint::Tcp(_) => DaemonTransport::Tcp,
         GrpcEndpoint::Unix(_) => DaemonTransport::Unix,
@@ -539,11 +567,22 @@ where
     let daemon_commands = ui_service_inner.daemon_commands();
     let daemon_stream_ready = daemon_commands.stream_ready();
     let rules = ui_service_inner.rules_handle();
+    // Names a rule command or an import is changing; neither may race the
+    // other on one name (P2.1).
+    let busy_names = busy::BusyNames::default();
     // Rule import/export (roadmap P2.7): its own task; the pump only routes.
     let rules_import = rules_import::RulesImport::spawn(
         daemon_commands.clone(),
         rules.clone(),
         broadcast_tx.clone(),
+        busy_names.clone(),
+    );
+    // Rule commands (P2.1 editor checks and results); the pump only routes.
+    let rule_commands = rule_commands::RuleCommands::new(
+        daemon_commands.clone(),
+        rules.clone(),
+        broadcast_tx.clone(),
+        busy_names.clone(),
     );
     tokio::spawn(prune_expired_rules_every(
         RULE_EXPIRY_TICK,
@@ -580,6 +619,7 @@ where
 
     // Same "grab before into_server()" reason: the snapshot answer.
     let prompt_slot_for_pump = ui_service_inner.prompt_slot_handle();
+    let daemon_config_for_pump = ui_service_inner.daemon_config_handle();
     let rule_hits_for_pump = rule_hits.clone();
     let ui_service = ui_service_inner.into_server();
     let (grpc_shutdown_tx, grpc_shutdown_rx) = oneshot::channel::<()>();
@@ -677,6 +717,9 @@ where
             let Some(msg) = rules_import.try_route(msg) else {
                 continue;
             };
+            let Some(msg) = rule_commands.try_route(msg) else {
+                continue;
+            };
             // Special-cased before is_profile_message/upstream::apply — this
             // changes the shared filter pause + tray state, not cache state
             // those own. See docs/superpowers/plans/2026-07-12-tray-filter-off.md.
@@ -709,6 +752,21 @@ where
                 // GUI and the tray show the state that is actually in effect.
                 announce_pause_state(&filter_pause_for_pump, &cache_for_upstream, &snapshot_tx)
                     .await;
+                continue;
+            }
+            if let ClientMessage::DecideLater { row_id } = &msg {
+                // Needs the daemon's settings, which `upstream::apply` doesn't
+                // have (prompt-slot plan Part C).
+                if let Err(e) = snitchwatch_bridge::deferred_answers::decide_later(
+                    &cache_for_upstream,
+                    &daemon_config_for_pump,
+                    &snapshot_tx,
+                    row_id,
+                )
+                .await
+                {
+                    warn!(error = %e, "decide later not applied");
+                }
                 continue;
             }
             if let ClientMessage::RecheckDiagnostics = msg {
@@ -1190,6 +1248,7 @@ mod tests {
             Some(gui_listener),
             Some(token_path.clone()),
             RunOptions::in_process(),
+            ANSWER_TIMEOUT,
         )
         .await
         .unwrap();
@@ -1516,6 +1575,8 @@ mod tests {
             started_at_ms: 0,
             matched_rule: None,
             auto_answer: None,
+            answer_deadline_ms: None,
+            deferred: false,
         };
         bridge
             .broadcast_tx

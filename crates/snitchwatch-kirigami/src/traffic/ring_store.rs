@@ -221,6 +221,8 @@ mod tests {
             started_at_ms: 0,
             matched_rule: None,
             auto_answer: None,
+            answer_deadline_ms: None,
+            deferred: false,
         };
         let mut tracker = TrafficTracker::new(60);
         let events = tracker.record_rows(1_000_000_000_000, &[row]);

@@ -288,3 +288,124 @@ fn a_preview_that_would_overflow_the_daemon_snapshot_is_refused() {
         assert!(!error.describe().is_empty());
     }
 }
+
+// --- Re-review follow-ups ----------------------------------------------------
+
+#[test]
+fn an_allow_made_permanent_or_a_deny_unlogged_starts_unticked() {
+    let mut restart = bound("allow");
+    restart.duration = "until restart".into();
+    assert_cautioned(
+        &preview_one(Some(&restart), export_rule(&bound("allow"))),
+        "permanent",
+    );
+    let deny = bound("deny");
+    assert_cautioned(
+        &preview_one(Some(&deny), with(&deny, |v| v["nolog"] = json!(true))),
+        "stops logging the connections a blocking rule",
+    );
+}
+
+/// An allow for an interpreter or launcher, with no destination, lets
+/// every script or program it runs reach anywhere.
+#[test]
+fn an_allow_for_a_launcher_with_no_destination_starts_unticked() {
+    let launcher = |path: &str, action: &str| {
+        json!({ "name": "100-x", "enabled": true, "action": action, "duration": "always",
+                "operator": { "type": "simple", "operand": "process.path", "data": path,
+                              "sensitive": true } })
+    };
+    for path in [
+        "/usr/bin/python3",
+        "/usr/bin/python3.12",
+        "/usr/bin/bash",
+        "/bin/sh",
+        "/usr/bin/env",
+        "/usr/bin/node",
+        "/usr/bin/flatpak",
+        "/usr/bin/steam",
+        "/usr/lib64/ld-linux-x86-64.so.2",
+        "/usr/bin/busybox",
+        "/usr/bin/java",
+        "/usr/bin/php",
+        "/usr/bin/php8.3",
+        "/usr/bin/gawk",
+        "/usr/bin/socat",
+        "/usr/bin/wine",
+        "/usr/bin/systemd-run",
+        "/usr/bin/flatpak-spawn",
+    ] {
+        let item = preview_one(None, launcher(path, "allow"));
+        assert!(!item.ticked, "{path}: {item:?}");
+        assert!(
+            item.cautions
+                .iter()
+                .any(|c| c.contains("runs other programs")),
+            "{path}: {:?}",
+            item.cautions
+        );
+    }
+    assert!(preview_one(None, launcher("/usr/bin/curl", "allow")).ticked);
+    assert!(preview_one(None, launcher("/usr/bin/python3", "deny")).ticked);
+    let mut bounded = launcher("/usr/bin/python3", "allow");
+    bounded["operator"] = json!({ "type": "list", "operands": [
+        bounded["operator"].clone(),
+        { "type": "simple", "operand": "dest.host", "data": "pypi.org" } ] });
+    assert!(
+        preview_one(None, bounded).ticked,
+        "a destination narrows it"
+    );
+    // A port alone is every host on that port: still anywhere.
+    let mut port_only = launcher("/usr/bin/python3", "allow");
+    port_only["operator"] = json!({ "type": "list", "operands": [
+        port_only["operator"].clone(),
+        { "type": "simple", "operand": "dest.port", "data": "443" } ] });
+    assert!(
+        !preview_one(None, port_only).ticked,
+        "a port alone isn't a destination"
+    );
+}
+
+// --- Shared with the rule editor (P2.1) -----------------------------------
+
+#[test]
+fn edit_cautions_compare_with_the_rule_being_replaced() {
+    let deny = bound("deny");
+    let mut allow = bound("allow");
+    allow.name = "011-renamed".into();
+    let cautions = edit_cautions(Some(&deny), &allow);
+    assert!(
+        cautions.iter().any(|c| c.contains("into an allow")),
+        "{cautions:?}"
+    );
+    assert!(edit_cautions(Some(&deny), &deny).is_empty());
+    let mut host_allow = bound("allow");
+    host_allow.operator = Some(leaf("dest.host", "example.com"));
+    assert!(edit_cautions(None, &host_allow)
+        .iter()
+        .any(|c| c.contains("every app")));
+}
+
+#[test]
+fn only_an_enabled_change_is_a_toggle() {
+    let cached = bound("deny");
+    let mut toggled = cached.clone();
+    toggled.enabled = false;
+    toggled.created = 0;
+    // As a GUI sends it back: a list's operand empty.
+    toggled.operator.as_mut().unwrap().operand.clear();
+    assert!(only_enabled_differs(&cached, &toggled));
+    assert!(only_enabled_differs(&cached, &cached));
+    for change in [
+        |r: &mut Rule| r.duration = "until restart".into(),
+        |r: &mut Rule| r.action = "allow".into(),
+        |r: &mut Rule| r.precedence = true,
+        |r: &mut Rule| r.nolog = true,
+        |r: &mut Rule| r.description = "note".into(),
+        |r: &mut Rule| r.operator.as_mut().unwrap().list[1].data = "other".into(),
+    ] {
+        let mut changed = toggled.clone();
+        change(&mut changed);
+        assert!(!only_enabled_differs(&cached, &changed), "{changed:?}");
+    }
+}

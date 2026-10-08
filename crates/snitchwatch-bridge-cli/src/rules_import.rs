@@ -36,7 +36,8 @@ use tracing::{error, info, warn};
 mod apply;
 mod run_guard;
 
-pub(crate) use run_guard::{ApplyRun, Replier};
+use crate::replier::Replier;
+pub(crate) use run_guard::ApplyRun;
 
 pub(crate) const UNKNOWN_PREVIEW: &str =
     "This import preview is no longer available. Preview the file again.";
@@ -62,6 +63,8 @@ pub(crate) struct ImportConfig {
     pub(crate) retry_delay: Duration,
     /// How long a preview may be applied.
     pub(crate) preview_ttl: Duration,
+    /// Names rule commands are changing (shared with them).
+    pub(crate) busy: crate::busy::BusyNames,
 }
 
 impl Default for ImportConfig {
@@ -70,6 +73,7 @@ impl Default for ImportConfig {
             reply_timeout: Duration::from_secs(5),
             retry_delay: Duration::from_millis(100),
             preview_ttl: Duration::from_secs(10 * 60),
+            busy: crate::busy::BusyNames::default(),
         }
     }
 }
@@ -81,12 +85,18 @@ pub(crate) struct RulesImport {
 }
 
 impl RulesImport {
+    /// `busy`: the names rule commands are changing, shared with them.
     pub(crate) fn spawn(
         commands: DaemonCommands,
         rules: SharedRulesCache,
         broadcast: broadcast::Sender<ServerMessage>,
+        busy: crate::busy::BusyNames,
     ) -> Self {
-        Self::spawn_with(commands, rules, broadcast, ImportConfig::default())
+        let config = ImportConfig {
+            busy,
+            ..ImportConfig::default()
+        };
+        Self::spawn_with(commands, rules, broadcast, config)
     }
 
     pub(crate) fn spawn_with(
@@ -122,7 +132,7 @@ impl RulesImport {
             _ => return Some(msg),
         };
         let (request_id, replier) = (
-            request_id.clone(),
+            usable(request_id.clone()),
             Replier::new(reply.clone(), self.broadcast.clone()),
         );
         if self.tx.try_send(msg).is_err() {
@@ -133,7 +143,8 @@ impl RulesImport {
             } else {
                 ServerMessage::RulesImportRefused { request_id, reason }
             };
-            tokio::spawn(async move { replier.send(answer).await });
+            // Never a task per dropped request: answer only if there is room.
+            replier.send_now(answer);
         }
         None
     }
@@ -161,6 +172,16 @@ fn lock(cache: &SharedRulesCache) -> MutexGuard<'_, RulesCache> {
     cache.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// A client's request id if it is usable (`valid_request_id`), else empty:
+/// an answer never echoes anything else.
+fn usable(request_id: String) -> String {
+    if snitchwatch_bridge::ws_messages::valid_request_id(&request_id) {
+        request_id
+    } else {
+        String::new()
+    }
+}
+
 fn now_unix_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -173,13 +194,14 @@ impl ImportTask {
         while let Some(msg) = rx.recv().await {
             match msg {
                 ClientMessage::ExportRules { request_id, reply } => {
-                    self.export(self.replier(reply), request_id).await
+                    self.export(self.replier(reply), usable(request_id)).await
                 }
                 ClientMessage::PreviewRulesImport {
                     request_id,
                     document,
                     reply,
                 } => {
+                    let request_id = usable(request_id);
                     self.preview(self.replier(reply), request_id, document)
                         .await
                 }
@@ -192,7 +214,7 @@ impl ImportTask {
                     let replier = self.replier(reply);
                     if let Err(reason) = self.apply(replier.clone(), &preview_id, include) {
                         let answer = ServerMessage::RulesImportRefused {
-                            request_id,
+                            request_id: usable(request_id),
                             reason: reason.to_string(),
                         };
                         replier.send(answer).await;
@@ -356,13 +378,14 @@ impl ImportTask {
             preview_id,
             self.config.reply_timeout,
             self.config.retry_delay,
+            self.config.busy.clone(),
         );
         tokio::spawn(async move {
             // The whole guard moves in (not just its `Copy` totals field).
             let mut run = run;
             apply::run(&applier, rules, &mut run.totals).await;
-            // `run` drops here, or on a panic or cancellation above: it
-            // publishes the rules, frees the import and sends the result.
+            // On a panic or cancellation above, dropping `run` does this.
+            run.finish().await;
         });
     }
 }

@@ -518,6 +518,15 @@ Kirigami.ApplicationWindow {
         }
     }
 
+    // The rule editor for a connection (P2.1): go to the Rules tab and open
+    // the editor prefilled from the simulator's prefill form
+    // (`ConnectionsModel.simulationPrefillJson`), the way "Simulate this
+    // connection" opens the Simulate sheet. Returns whether it opened.
+    function openRuleEditor(prefillJson) {
+        const rulesPage = root.pageStack.replace(rulesPageComponent);
+        return rulesPage.openEditor(prefillJson);
+    }
+
     // Shared raise/focus helper (Task 7 requirement 1). Used both by the
     // in-app pending-row handler above and by the "Review" action on a
     // fallback desktop notification (Task 17) — same recovery path either

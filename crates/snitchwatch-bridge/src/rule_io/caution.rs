@@ -27,6 +27,91 @@ const DENY_CONDITIONS: &str = "This changes what a blocking rule matches.";
 const ALLOW_CONDITIONS: &str = "This changes what an allow rule matches.";
 const ALLOW_ON: &str = "This turns on an allow rule that was off.";
 const ALLOW_UNLOGGED: &str = "This stops logging the connections an allow rule lets through.";
+const ALLOW_PERMANENT: &str =
+    "This makes an allow rule permanent; it lasted until the firewall restarted.";
+const DENY_UNLOGGED: &str = "This stops logging the connections a blocking rule blocks.";
+const LAUNCHER_ANYWHERE: &str = "This lets a program that runs other programs (a script \
+     interpreter, shell or launcher) reach any destination, and so everything it runs.";
+
+/// Programs that run other programs: allowing one everywhere allows what it
+/// runs too.
+const LAUNCHERS: &[&str] = &[
+    "python",
+    "python3",
+    "bash",
+    "sh",
+    "zsh",
+    "dash",
+    "ksh",
+    "fish",
+    "env",
+    "perl",
+    "ruby",
+    "node",
+    "deno",
+    "bun",
+    "lua",
+    "tclsh",
+    "pwsh",
+    "java",
+    "php",
+    "awk",
+    "gawk",
+    "mawk",
+    "busybox",
+    "toybox",
+    "socat",
+    "nc",
+    "ncat",
+    "netcat",
+    "wine",
+    "wine64",
+    "xargs",
+    "nohup",
+    "sudo",
+    "doas",
+    "pkexec",
+    "systemd-run",
+    "flatpak",
+    "flatpak-spawn",
+    "steam",
+];
+
+/// Versioned names (`python3.12`, `php8.3`) and the dynamic loader
+/// (`ld-linux-x86-64.so.2`, which runs any program given to it).
+fn is_launcher(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let versioned = |prefix: &str| {
+        name.strip_prefix(prefix)
+            .is_some_and(|v| !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit() || b == b'.'))
+    };
+    LAUNCHERS.contains(&name)
+        || ["python3.", "python", "php", "perl", "ruby", "lua"]
+            .iter()
+            .any(|prefix| versioned(prefix))
+        || name.starts_with("ld-linux")
+        || name.starts_with("ld.so")
+}
+
+/// An allow tied to a launcher's path with no destination condition.
+fn launcher_anywhere(rule: &Rule) -> bool {
+    let Some(op) = &rule.operator else {
+        return false;
+    };
+    let leaves: Vec<&Operator> = if op.r#type == "list" {
+        op.list.iter().collect()
+    } else {
+        vec![op]
+    };
+    let launcher = leaves
+        .iter()
+        .any(|l| l.operand == "process.path" && l.r#type == "simple" && is_launcher(&l.data));
+    // A port alone is every host on that port: still anywhere.
+    let destination = leaves
+        .iter()
+        .any(|l| matches!(l.operand.as_str(), "dest.host" | "dest.ip" | "dest.network"));
+    launcher && !destination
+}
 
 fn blocks(rule: &Rule) -> bool {
     matches!(rule.action.as_str(), "deny" | "reject")
@@ -59,6 +144,9 @@ pub(super) fn cautions(
     if allow && all_apps {
         out.push(ALLOW_ALL_APPS.into());
     }
+    if allow && launcher_anywhere(new) {
+        out.push(LAUNCHER_ANYWHERE.into());
+    }
     let Some(old) = old else { return out };
     if blocks(old) {
         if allow {
@@ -79,6 +167,9 @@ pub(super) fn cautions(
                 lasting(&new.duration)
             ));
         }
+        if new.nolog && !old.nolog {
+            out.push(DENY_UNLOGGED.into());
+        }
     } else if old.action == "allow" && allow {
         if !same_conditions {
             out.push(ALLOW_CONDITIONS.into());
@@ -88,6 +179,9 @@ pub(super) fn cautions(
         }
         if new.nolog && !old.nolog {
             out.push(ALLOW_UNLOGGED.into());
+        }
+        if old.duration != "always" && new.duration == "always" {
+            out.push(ALLOW_PERMANENT.into());
         }
     }
     out

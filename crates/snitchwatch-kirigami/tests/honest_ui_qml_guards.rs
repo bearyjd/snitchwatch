@@ -14,6 +14,7 @@ const PROFILES_PAGE: &str = include_str!("../qml/ProfilesPage.qml");
 const RULES_PAGE: &str = include_str!("../qml/RulesPage.qml");
 const SIMULATOR_SHEET: &str = include_str!("../qml/RuleSimulatorSheet.qml");
 const IMPORT_SHEET: &str = include_str!("../qml/RulesImportSheet.qml");
+const EDITOR_SHEET: &str = include_str!("../qml/RuleEditorSheet.qml");
 const PENDING_SHEET: &str = include_str!("../qml/PendingDecisionSheet.qml");
 const CONNECTIONS_PAGE: &str = include_str!("../qml/ConnectionsPage.qml");
 const MAIN_QML: &str = include_str!("../qml/main.qml");
@@ -24,6 +25,10 @@ const SIZED_SHEET: &str = include_str!("../qml/SizedOverlaySheet.qml");
 const ALL_QML: &[(&str, &str)] = &[
     ("BlocklistsPage.qml", BLOCKLISTS_PAGE),
     ("ConnectionsPage.qml", CONNECTIONS_PAGE),
+    (
+        "DecideLaterButton.qml",
+        include_str!("../qml/DecideLaterButton.qml"),
+    ),
     (
         "DaemonHealthPage.qml",
         include_str!("../qml/DaemonHealthPage.qml"),
@@ -39,6 +44,10 @@ const ALL_QML: &[(&str, &str)] = &[
     ),
     ("main.qml", MAIN_QML),
     (
+        "MakeRuleSheet.qml",
+        include_str!("../qml/MakeRuleSheet.qml"),
+    ),
+    (
         "OnboardingPage.qml",
         include_str!("../qml/OnboardingPage.qml"),
     ),
@@ -48,6 +57,7 @@ const ALL_QML: &[(&str, &str)] = &[
         "PromptSlotBanner.qml",
         include_str!("../qml/PromptSlotBanner.qml"),
     ),
+    ("RuleEditorSheet.qml", EDITOR_SHEET),
     ("RuleSimulatorSheet.qml", SIMULATOR_SHEET),
     ("RulesImportSheet.qml", IMPORT_SHEET),
     ("RulesPage.qml", RULES_PAGE),
@@ -458,6 +468,10 @@ fn rules_page_labels_showing_rule_data_are_plain_text() {
             "row.allAppsHint",
             // P2.7: export/import outcomes, which carry bridge reasons.
             "rulesIo.statusText",
+            // P2.1: why the editor can't change a rule (bridge reasons).
+            "page.inspectNotEditable",
+            // P2.1: the editor's last result (bridge reasons).
+            "ruleEditorController.statusText",
         ],
         11,
     );
@@ -483,6 +497,30 @@ fn import_sheet_labels_are_all_plain_text_and_checkboxes_carry_no_text() {
         assert!(
             text_binding(&block).is_none(),
             "RulesImportSheet.qml puts text on a CheckBox (AutoText):\n{block}"
+        );
+    }
+}
+
+/// The rule editor shows rule names, values and reasons from the firewall
+/// service, so every label in it is plain text, and no checkbox carries text
+/// (a CheckBox's text is AutoText).
+#[test]
+fn editor_sheet_labels_are_all_plain_text_and_checkboxes_carry_no_text() {
+    let code = code_lines(EDITOR_SHEET);
+    let labels = blocks(&code, "Controls.Label {");
+    assert!(labels.len() >= 8, "found {} labels", labels.len());
+    for block in &labels {
+        assert!(
+            block.contains("textFormat: Text.PlainText"),
+            "RuleEditorSheet.qml has a label without PlainText:\n{block}"
+        );
+    }
+    let checkboxes = blocks(&code, "Controls.CheckBox {");
+    assert!(!checkboxes.is_empty());
+    for block in checkboxes {
+        assert!(
+            text_binding(&block).is_none(),
+            "RuleEditorSheet.qml puts text on a CheckBox (AutoText):\n{block}"
         );
     }
 }
@@ -603,6 +641,7 @@ fn inline_messages_carry_only_fixed_text() {
         ("RulesPage.qml", RULES_PAGE),
         ("RuleSimulatorSheet.qml", SIMULATOR_SHEET),
         ("RulesImportSheet.qml", IMPORT_SHEET),
+        ("RuleEditorSheet.qml", EDITOR_SHEET),
     ] {
         for block in blocks(&code_lines(source), "Kirigami.InlineMessage {") {
             checked += 1;
@@ -715,6 +754,7 @@ fn overlay_sheet_titles_are_plain_text() {
         ("RulesPage.qml", RULES_PAGE),
         ("RuleSimulatorSheet.qml", SIMULATOR_SHEET),
         ("RulesImportSheet.qml", IMPORT_SHEET),
+        ("RuleEditorSheet.qml", EDITOR_SHEET),
     ] {
         assert!(
             !code_lines(source).contains("Kirigami.OverlaySheet {"),

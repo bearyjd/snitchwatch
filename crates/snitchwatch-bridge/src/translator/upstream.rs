@@ -70,9 +70,9 @@ pub fn apply(
                 remember,
             })
         }
-        ClientMessage::AddRule { rule } => Ok(UpstreamEffect::AddRule { rule }),
-        ClientMessage::DeleteRule { rule_id } => Ok(UpstreamEffect::DeleteRule { rule_id }),
-        ClientMessage::UpdateRule { rule_id, rule } => {
+        ClientMessage::AddRule { rule, .. } => Ok(UpstreamEffect::AddRule { rule }),
+        ClientMessage::DeleteRule { rule_id, .. } => Ok(UpstreamEffect::DeleteRule { rule_id }),
+        ClientMessage::UpdateRule { rule_id, rule, .. } => {
             Ok(UpstreamEffect::UpdateRule { rule_id, rule })
         }
         ClientMessage::RequestSnapshot => Ok(UpstreamEffect::SnapshotRequested),
@@ -98,7 +98,10 @@ pub fn apply(
         // Routed to bridge-cli's `rules_import` task before this point.
         | ClientMessage::ExportRules { .. }
         | ClientMessage::PreviewRulesImport { .. }
-        | ClientMessage::ApplyRulesImport { .. } => Ok(UpstreamEffect::None),
+        | ClientMessage::ApplyRulesImport { .. }
+        // Intercepted by the pump too: it needs the daemon's settings
+        // (`deferred_answers::decide_later`).
+        | ClientMessage::DecideLater { .. } => Ok(UpstreamEffect::None),
     }
 }
 
@@ -447,6 +450,8 @@ mod tests {
             started_at_ms: 0,
             matched_rule: None,
             auto_answer: None,
+            answer_deadline_ms: None,
+            deferred: false,
         })
     }
 
@@ -527,7 +532,15 @@ mod tests {
     fn add_rule_returns_add_rule_effect() {
         let mut cache = ConnectionCache::new(10);
         let rule = serde_json::json!({"name": "block-everything"});
-        let effect = apply(&mut cache, ClientMessage::AddRule { rule: rule.clone() }).unwrap();
+        let effect = apply(
+            &mut cache,
+            ClientMessage::AddRule {
+                rule: rule.clone(),
+                request_id: None,
+                reply: None,
+            },
+        )
+        .unwrap();
         assert_eq!(effect, UpstreamEffect::AddRule { rule });
     }
 

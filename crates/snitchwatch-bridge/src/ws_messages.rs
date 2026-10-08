@@ -295,6 +295,12 @@ pub enum ServerMessage {
         not_sent: u32,
         no_answer: u32,
     },
+    /// The outcome of an `AddRule`/`UpdateRule`/`DeleteRule` that carried a
+    /// `request_id` (rule editor, P2.1), sent to the asking connection only.
+    RuleCommandResult {
+        request_id: String,
+        outcome: RuleCommandOutcome,
+    },
     /// How often each daemon rule decided a connection, as Snitchwatch
     /// counted from the `events` in the daemon's pings (P2.6 Part 1, see
     /// `crate::cache::rule_hits`). Sent at most every 5 seconds and only
@@ -316,6 +322,39 @@ pub enum ServerMessage {
         storage: StorageStatus,
         hits: Vec<RuleHitWire>,
     },
+}
+
+/// What happened to a rule command (P2.1). Every reason is plain text.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(
+    tag = "status",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum RuleCommandOutcome {
+    /// The daemon answered OK (both steps, for a rename).
+    Ok,
+    /// Done, with something the user should know (a renamed rule's old
+    /// file the daemon couldn't remove).
+    OkWithNote { note: String },
+    /// The daemon answered ERROR, or a rename was undone; why.
+    Rejected { reason: String },
+    /// The bridge didn't send it: the rule policy's problems.
+    Refused {
+        problems: Vec<crate::rule_policy::RuleProblem>,
+    },
+    /// No answer in time: it may or may not have been applied.
+    Timeout,
+    /// No firewall service connected; nothing was sent.
+    NoDaemon,
+    /// A rename whose outcome isn't known (see the reason).
+    Unsure { reason: String },
+}
+
+/// Whether a client's request id is usable: 1 to 64 ASCII letters, digits
+/// or `-`. Anything else is treated as absent.
+pub fn valid_request_id(id: &str) -> bool {
+    (1..=64).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
 
 /// One rule's count in [`ServerMessage::RuleHits`], and in the saved hit
@@ -358,15 +397,31 @@ pub enum ClientMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         remember: Option<bool>,
     },
+    /// `request_id` (P2.1, optional; see [`valid_request_id`]) asks for a
+    /// [`ServerMessage::RuleCommandResult`]; `reply` is stamped by
+    /// `ws_server` and never comes from the wire.
     AddRule {
         rule: serde_json::Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+        #[serde(skip)]
+        reply: Option<ReplyTo>,
     },
+    /// A `rule_id` other than `rule.name` renames (P2.1, E1).
     UpdateRule {
         rule_id: String,
         rule: serde_json::Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+        #[serde(skip)]
+        reply: Option<ReplyTo>,
     },
     DeleteRule {
         rule_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+        #[serde(skip)]
+        reply: Option<ReplyTo>,
     },
     GlobalSettings {
         settings: serde_json::Value,
@@ -449,6 +504,13 @@ pub enum ClientMessage {
         sender_uid: Option<u32>,
     },
     RecheckDiagnostics,
+    /// "Decide later" on a pending row (prompt-slot plan Part C): the bridge
+    /// blocks the program for 5 minutes, or gives the daemon no answer when
+    /// it can't name the program. Only for bridges advertising
+    /// `bridge_capabilities::DECIDE_LATER`.
+    DecideLater {
+        row_id: String,
+    },
     /// Rule import/export (roadmap P2.7); handled by bridge-cli's
     /// `rules_import` task, never by `upstream::apply`. `request_id` is the
     /// client's, echoed in the answer; `reply` is stamped by `ws_server`
@@ -481,15 +543,42 @@ pub enum ClientMessage {
 
 /// A channel back to one WebSocket connection, stamped on rule import and
 /// export requests by `ws_server` so their answers reach only the GUI that
-/// asked. Never serialized.
+/// asked. Never serialized. Clones share the connection's "stopped reading"
+/// mark, so a GUI that stops reading is waited on once, not per request.
 #[derive(Clone)]
-pub struct ReplyTo(pub tokio::sync::mpsc::Sender<ServerMessage>);
+pub struct ReplyTo {
+    tx: tokio::sync::mpsc::Sender<ServerMessage>,
+    stalled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
 
 impl ReplyTo {
+    /// One connection's channel (call once per connection, then clone).
+    pub fn new(tx: tokio::sync::mpsc::Sender<ServerMessage>) -> Self {
+        Self {
+            tx,
+            stalled: std::sync::Arc::default(),
+        }
+    }
+
     /// Deliver `message`, waiting for room; `false` when the connection is
     /// gone.
     pub async fn send(&self, message: ServerMessage) -> bool {
-        self.0.send(message).await.is_ok()
+        self.tx.send(message).await.is_ok()
+    }
+
+    /// Deliver `message` only if there is room now.
+    pub fn try_send(&self, message: ServerMessage) -> bool {
+        self.tx.try_send(message).is_ok()
+    }
+
+    /// Whether the connection was found not reading its answers.
+    pub fn stalled(&self) -> bool {
+        self.stalled.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub fn mark_stalled(&self) {
+        self.stalled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -501,7 +590,7 @@ impl std::fmt::Debug for ReplyTo {
 
 impl PartialEq for ReplyTo {
     fn eq(&self, other: &Self) -> bool {
-        self.0.same_channel(&other.0)
+        self.tx.same_channel(&other.tx)
     }
 }
 
@@ -602,6 +691,8 @@ pub struct ConnectionRow {
     pub protocol: String,
     pub direction: String,
     /// `null` for pending rows, `"allow"` / `"deny"` / `"blocklist"` once decided.
+    /// A `deferred` row may also be `null`: the daemon applied its default
+    /// action and the bridge doesn't know which one that is.
     pub action: Option<String>,
     pub bytes_sent: u64,
     pub bytes_received: u64,
@@ -624,6 +715,15 @@ pub struct ConnectionRow {
     /// `matched_rule`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_answer: Option<AutoAnswer>,
+    /// When the bridge answers this pending row itself if nobody does
+    /// (prompt-slot plan Part C), in Unix milliseconds. Only on pending rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer_deadline_ms: Option<i64>,
+    /// The prompt was put off rather than decided: nobody answered it in
+    /// time, or someone chose "Decide later". A rule can still be made for
+    /// it. Additive, omitted when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub deferred: bool,
 }
 
 /// Why the bridge answered a connection without a person (issue #78).
@@ -634,6 +734,9 @@ pub enum AutoAnswer {
     /// already waiting when the pause took effect, or the connection arrived
     /// during it (`pause_answers`).
     FilterPaused,
+    /// Nobody answered within `deferred_answers::ANSWER_TIMEOUT`, so the
+    /// daemon applied its default action (prompt-slot plan Part C).
+    NoAnswer,
     /// A reason this build doesn't know, from a newer bridge. Keeps the row
     /// readable instead of failing the whole message.
     #[serde(other)]
@@ -770,6 +873,8 @@ mod tests {
                 started_at_ms: 1_700_000_000_000,
                 matched_rule: None,
                 auto_answer: None,
+                answer_deadline_ms: None,
+                deferred: false,
             }],
         };
 
@@ -903,6 +1008,8 @@ mod tests {
             started_at_ms: 1_700_000_000_000,
             matched_rule: Some("899-firefox-allow-out.json".to_string()),
             auto_answer: None,
+            answer_deadline_ms: None,
+            deferred: false,
         };
         let json = serde_json::to_value(&row).unwrap();
         assert_eq!(json["matchedRule"], "899-firefox-allow-out.json");

@@ -99,6 +99,8 @@ struct ConnectionState {
     prompt_slot: bool,
     /// The same for `bridge_capabilities::PAUSE_ANSWERS_WAITING`.
     pause_answers_waiting: bool,
+    /// The same for `bridge_capabilities::DECIDE_LATER`.
+    decide_later: bool,
 }
 
 /// Why a UI request was not handed to the currently connected service.
@@ -138,6 +140,16 @@ impl BridgeHandles {
     /// (`crate::inline_deny`).
     pub fn advertises_app_bound_rules(&self, connection_id: u64) -> bool {
         advertises_app_bound_rules(&self.connection, connection_id)
+    }
+
+    /// True only while `connection_id` is the live session and its bridge
+    /// takes "Decide later" (prompt-slot plan Part C).
+    pub fn advertises_decide_later(&self, connection_id: u64) -> bool {
+        let state = self
+            .connection
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.connected && state.connection_id == connection_id && state.decide_later
     }
 
     /// Whether the live session's bridge sends `PromptSlot` messages. Without
@@ -464,6 +476,9 @@ async fn connect_and_relay(
         advertised(snitchwatch_bridge::bridge_capabilities::PROMPT_SLOT),
         advertised(snitchwatch_bridge::bridge_capabilities::PAUSE_ANSWERS_WAITING),
     );
+    if advertised(snitchwatch_bridge::bridge_capabilities::DECIDE_LATER) {
+        mark_decide_later(connection, connection_id);
+    }
     set_status(status, LinkState::Connected, "Connected to bridge service");
     tracing::info!(socket = %socket_path.display(), "connected to bridge service");
 
@@ -558,7 +573,19 @@ fn mark_connected_with(
     state.app_bound_rules = app_bound_rules;
     state.prompt_slot = prompt_slot;
     state.pause_answers_waiting = pause_answers_waiting;
+    state.decide_later = false;
     state.connection_id
+}
+
+/// Record that session `connection_id` takes "Decide later". A session that
+/// has been replaced meanwhile is left alone.
+fn mark_decide_later(connection: &Mutex<ConnectionState>, connection_id: u64) {
+    let mut state = connection
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if state.connection_id == connection_id {
+        state.decide_later = true;
+    }
 }
 
 /// Whether `connection_id` is the live session and its bridge advertised
@@ -594,6 +621,7 @@ fn disconnect_and_discard(
         state.app_bound_rules = false;
         state.prompt_slot = false;
         state.pause_answers_waiting = false;
+        state.decide_later = false;
     }
     while inbound_rx.try_recv().is_ok() {}
 }
@@ -743,6 +771,10 @@ mod verdict_gate_tests;
 #[cfg(test)]
 #[path = "bridge_runtime/prompt_slot_tests.rs"]
 mod prompt_slot_tests;
+
+#[cfg(test)]
+#[path = "bridge_runtime/decide_later_tests.rs"]
+mod decide_later_tests;
 
 #[cfg(test)]
 #[path = "bridge_runtime/pause_answers_tests.rs"]

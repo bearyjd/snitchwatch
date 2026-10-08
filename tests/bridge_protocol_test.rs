@@ -674,6 +674,27 @@ async fn rule_update_and_delete_reach_the_daemon_as_notifications() {
     let mut mock = MockOpensnitchd::connect(bridge.grpc_endpoint.tcp_addr().unwrap())
         .await
         .unwrap();
+    // The rule exists on the daemon: a GUI may only change a rule the
+    // bridge's list holds (P2.1), and the list comes from this snapshot.
+    mock.subscribe_with_config(snitchwatch_proto::protocol::ClientConfig {
+        name: "mock".into(),
+        rules: vec![snitchwatch_proto::protocol::Rule {
+            name: "899-firefox-allow-out".into(),
+            enabled: true,
+            action: "allow".into(),
+            duration: "always".into(),
+            operator: Some(snitchwatch_proto::protocol::Operator {
+                r#type: "simple".into(),
+                operand: "dest.host".into(),
+                data: "example.com".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }],
+        ..Default::default()
+    })
+    .await
+    .unwrap();
     let (_reply_tx, mut notifications) = mock.open_notifications().await.unwrap();
     // The bridge handles the stream's HELLO asynchronously. A level check,
     // not `changed()`, which would hang if the HELLO was already handled.
@@ -704,6 +725,8 @@ async fn rule_update_and_delete_reach_the_daemon_as_notifications() {
         .send(ClientMessage::UpdateRule {
             rule_id: "899-firefox-allow-out".to_string(),
             rule: toggled,
+            request_id: None,
+            reply: None,
         })
         .await
         .expect("inbound channel closed");
@@ -738,6 +761,8 @@ async fn rule_update_and_delete_reach_the_daemon_as_notifications() {
         .inbound_tx
         .send(ClientMessage::DeleteRule {
             rule_id: "899-firefox-allow-out".to_string(),
+            request_id: None,
+            reply: None,
         })
         .await
         .expect("inbound channel closed");
@@ -1168,6 +1193,8 @@ async fn daemon_rules_reach_the_gui_and_follow_confirmed_commands() {
         .send(ClientMessage::UpdateRule {
             rule_id: "a-firefox".into(),
             rule: toggled,
+            request_id: None,
+            reply: None,
         })
         .await
         .unwrap();
@@ -1198,6 +1225,8 @@ async fn daemon_rules_reach_the_gui_and_follow_confirmed_commands() {
         .inbound_tx
         .send(ClientMessage::DeleteRule {
             rule_id: "b-curl".into(),
+            request_id: None,
+            reply: None,
         })
         .await
         .unwrap();
@@ -1230,6 +1259,8 @@ async fn daemon_rules_reach_the_gui_and_follow_confirmed_commands() {
         .send(ClientMessage::UpdateRule {
             rule_id: "b-curl".into(),
             rule: json!({ "name": "b-curl", "enabled": false }),
+            request_id: None,
+            reply: None,
         })
         .await
         .unwrap();
@@ -1252,6 +1283,8 @@ async fn daemon_rules_reach_the_gui_and_follow_confirmed_commands() {
         .inbound_tx
         .send(ClientMessage::DeleteRule {
             rule_id: r"c-stock\ui".into(),
+            request_id: None,
+            reply: None,
         })
         .await
         .unwrap();

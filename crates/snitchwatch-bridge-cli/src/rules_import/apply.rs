@@ -12,10 +12,11 @@
 //! rules in a row get no answer.
 
 use super::Replier;
+use crate::busy::{BusyGuard, BusyNames};
+use crate::replier::display_reason;
 use snitchwatch_bridge::cache::rules::SharedRulesCache;
 use snitchwatch_bridge::daemon_commands::{CommandError, DaemonCommands, SendError};
 use snitchwatch_bridge::rule_io::{check_rule_for_apply, same_rule, ImportOutcome};
-use snitchwatch_bridge::translator::verdict::strip_display_hazards;
 use snitchwatch_bridge::ws_messages::ServerMessage;
 use snitchwatch_proto::protocol::{Action, Notification, Rule};
 use std::collections::HashMap;
@@ -31,8 +32,6 @@ pub(crate) const MAX_UNANSWERED_IN_A_ROW: u32 = 20;
 /// Retries of a command no stream could queue, each after one reply (or
 /// `retry_delay` when none is pending).
 const SEND_RETRIES: u32 = 3;
-/// Longest daemon error text shown.
-const MAX_REASON_CHARS: usize = 200;
 
 const BUSY: &str = "The firewall service was busy, so this rule wasn't sent.";
 const NO_DAEMON: &str = "The firewall service isn't connected, so this rule wasn't sent.";
@@ -42,6 +41,8 @@ const RECONNECTED: &str =
     "The firewall service reconnected during the import, so this rule wasn't sent.";
 const NOT_ANSWERING: &str = "The firewall service stopped answering, so this rule wasn't sent.";
 const ABORTED: &str = "The import stopped because of an internal error, so this rule wasn't sent.";
+pub(crate) const BEING_CHANGED: &str =
+    "Another change to this rule was being saved, so this rule wasn't sent.";
 pub(crate) const CHANGED_SINCE_PREVIEW: &str =
     "This rule changed on the firewall since the preview, so it wasn't sent.";
 
@@ -55,6 +56,9 @@ pub(crate) struct Applier {
     started_on: u64,
     reply_timeout: Duration,
     retry_delay: Duration,
+    /// Names a rule command is changing; each rule's name is held here
+    /// while its own command is in flight.
+    busy: BusyNames,
 }
 
 impl Applier {
@@ -65,6 +69,7 @@ impl Applier {
         preview_id: String,
         reply_timeout: Duration,
         retry_delay: Duration,
+        busy: BusyNames,
     ) -> Self {
         let streams = commands.stream_ready();
         let started_on = *streams.borrow();
@@ -77,6 +82,7 @@ impl Applier {
             started_on,
             reply_timeout,
             retry_delay,
+            busy,
         }
     }
 
@@ -142,17 +148,6 @@ struct Run<'a> {
     /// Set once nothing more may be sent; every later rule gets this reason.
     stop: Option<&'static str>,
     unanswered: u32,
-}
-
-/// Daemon text for a plain-text label: no hidden characters, not too long.
-fn display_reason(text: &str) -> String {
-    let shown = strip_display_hazards(text);
-    if shown.chars().count() <= MAX_REASON_CHARS {
-        return shown;
-    }
-    let mut short: String = shown.chars().take(MAX_REASON_CHARS).collect();
-    short.push('…');
-    short
 }
 
 impl Run<'_> {
@@ -244,24 +239,35 @@ impl Run<'_> {
                     .await;
             }
         };
+        let Some(guard) = self.applier.busy.claim(&[&rule.name]) else {
+            return self.not_sent(&rule.name, BEING_CHANGED).await;
+        };
         let notification = Notification {
             r#type: Action::ChangeRule as i32,
             rules: vec![checked],
             ..Default::default()
         };
-        self.send_with_retries(rule.name, notification).await;
+        self.send_with_retries(rule.name, notification, guard).await;
     }
 
-    async fn send_with_retries(&mut self, name: String, notification: Notification) {
+    /// `guard` holds the rule's name busy until its reply is in.
+    async fn send_with_retries(
+        &mut self,
+        name: String,
+        notification: Notification,
+        guard: BusyGuard,
+    ) {
         let mut retries = 0;
         loop {
             match self.applier.commands.send(notification.clone()) {
                 Ok(pending) => {
                     let timeout = self.applier.reply_timeout;
                     let waiter_name = name.clone();
-                    let handle = self
-                        .in_flight
-                        .spawn(async move { (waiter_name, pending.wait(timeout).await) });
+                    let handle = self.in_flight.spawn(async move {
+                        let reply = pending.wait(timeout).await;
+                        drop(guard);
+                        (waiter_name, reply)
+                    });
                     self.names.insert(handle.id(), name);
                     return;
                 }

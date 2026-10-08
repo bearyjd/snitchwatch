@@ -254,6 +254,8 @@ mod tests {
             started_at_ms: 0,
             matched_rule: None,
             auto_answer: None,
+            answer_deadline_ms: None,
+            deferred: false,
         }
     }
 
@@ -516,7 +518,11 @@ mod tests {
             other => panic!("expected SubscribeBlocklist, got {other:?}"),
         }
         match decode_client(r#"{"action":"deleteRule","ruleId":"block-ads"}"#).unwrap() {
-            ClientMessage::DeleteRule { rule_id } => assert_eq!(rule_id, "block-ads"),
+            ClientMessage::DeleteRule {
+                rule_id,
+                request_id: None,
+                reply: None,
+            } => assert_eq!(rule_id, "block-ads"),
             other => panic!("expected DeleteRule, got {other:?}"),
         }
     }
