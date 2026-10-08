@@ -27,6 +27,14 @@ fn is_paused(state: &TrayState, pause: &PauseState) -> bool {
 /// unknown (a bridge that predates `FilterPauseState`).
 pub fn derive_tooltip(state: &TrayState, pause: &PauseState, paused_until: &str) -> String {
     match state {
+        // The daemon being down must not hide a pause the user set: it is
+        // still in effect, and the menu still offers Resume.
+        TrayState::DaemonDown if is_paused(state, pause) && !paused_until.is_empty() => {
+            format!("opensnitchd not reachable — filtering paused until {paused_until}")
+        }
+        TrayState::DaemonDown if is_paused(state, pause) => {
+            "opensnitchd not reachable — filtering paused".into()
+        }
         TrayState::DaemonDown => "opensnitchd not reachable".into(),
         TrayState::RecentBlock { what, .. } => format!("Blocked: {what}"),
         _ if is_paused(state, pause) && !paused_until.is_empty() => {
@@ -143,6 +151,26 @@ mod tests {
         assert_eq!(
             derive_tooltip(&TrayState::FilterOff, &PAUSED, "14:30"),
             "Snitchwatch — filtering paused until 14:30"
+        );
+    }
+
+    #[test]
+    fn tooltip_daemon_down_while_paused_says_the_pause_too() {
+        // The daemon being down must not hide a pause the user set.
+        assert_eq!(
+            derive_tooltip(&TrayState::DaemonDown, &PAUSED, "14:30"),
+            "opensnitchd not reachable — filtering paused until 14:30"
+        );
+        // A pause with no end time on record.
+        assert_eq!(
+            derive_tooltip(&TrayState::DaemonDown, &PAUSED, ""),
+            "opensnitchd not reachable — filtering paused"
+        );
+        // A bridge that predates the pause state reports FilterOff only; the
+        // daemon being down then shows as down alone, as before.
+        assert_eq!(
+            derive_tooltip(&TrayState::DaemonDown, &NOT_PAUSED, "14:30"),
+            "opensnitchd not reachable"
         );
     }
 

@@ -571,6 +571,33 @@ mod tests {
         assert_eq!(*tray_rx.borrow(), TrayState::Idle);
     }
 
+    /// Issue #58: a pause expiring during a daemon outage (the expiry
+    /// announcement resyncs the tray) leaves the tray on `DaemonDown`.
+    #[tokio::test(start_paused = true)]
+    async fn a_pause_expiring_during_an_outage_keeps_the_tray_on_daemon_down() {
+        use crate::tray_state::TrayState;
+        let wall = TestWall::new();
+        let pause = wall.pause();
+        let tray = Arc::new(crate::tray_state::TrayStatePublisher::new());
+        let tray_rx = tray.subscribe();
+        let mut cache = crate::cache::connections::ConnectionCache::with_tray_publisher(64, tray)
+            .with_filter_pause(pause.clone());
+        let secs = ALLOWED_PAUSE_SECS[0];
+        pause.pause(Duration::from_secs(secs), 0).unwrap();
+        cache.set_daemon_down(true);
+        cache.resync_tray_state();
+        assert_eq!(*tray_rx.borrow(), TrayState::DaemonDown);
+
+        wall.advance(Duration::from_secs(secs + 1)).await;
+        assert!(pause.take_expired());
+        cache.resync_tray_state();
+        assert_eq!(*tray_rx.borrow(), TrayState::DaemonDown);
+
+        cache.set_daemon_down(false);
+        cache.resync_tray_state();
+        assert_eq!(*tray_rx.borrow(), TrayState::Idle);
+    }
+
     #[tokio::test(start_paused = true)]
     async fn expiry_loop_reports_each_expiry_exactly_once() {
         let wall = TestWall::new();
