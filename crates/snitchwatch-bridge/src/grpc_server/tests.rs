@@ -1729,6 +1729,30 @@ async fn subscribe_then_hello_commits_one_name_sorted_set_rules() {
     assert_eq!(*synced.borrow(), 1);
 }
 
+/// Issue #61, the usual order at login: a GUI is already connected, there
+/// is no list yet, and the daemon's snapshot is over the rule limit. The
+/// GUI is told, without waiting for anything else to publish.
+#[tokio::test]
+async fn an_oversized_snapshot_with_no_list_is_reported_at_once() {
+    use crate::cache::rules::MAX_SNAPSHOT_RULES;
+    let (svc, _cache, mut rx) = rules_service(DaemonTransport::Unix);
+    let config = with_rules(vec![daemon_rule("a"); MAX_SNAPSHOT_RULES + 1]);
+    svc.subscribe(Request::new(config)).await.unwrap();
+    let commands = svc.daemon_commands();
+    let (stream, _outbound) = commands.open_stream(None);
+    commands.on_reply(stream.id(), &hello());
+    let sent: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+    let total = u32::try_from(MAX_SNAPSHOT_RULES + 1).unwrap();
+    assert!(
+        sent.iter().any(|m| matches!(
+            m,
+            ServerMessage::RulesNotShown { over_limit_total: Some(n), .. } if *n == total
+        )),
+        "{sent:?}"
+    );
+    assert!(cached(&svc).is_unknown());
+}
+
 #[tokio::test]
 async fn hello_without_a_staged_snapshot_only_makes_its_stream_current() {
     let (svc, _cache, mut rx) = rules_service(DaemonTransport::Unix);

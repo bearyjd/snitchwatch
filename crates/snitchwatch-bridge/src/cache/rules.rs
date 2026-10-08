@@ -445,8 +445,13 @@ impl RulesSync {
             Some(snapshot) => pending.stage(key, snapshot, now),
             None => {
                 drop(pending.take_fresh(&key, now));
-                // Shown once there is no list (issue #61).
-                lock(&self.cache).over_limit_total = Some(total);
+                // Shown once there is no list (issue #61): now, if there is
+                // none already, since no commit or withdrawal will follow.
+                let mut cache = lock(&self.cache);
+                cache.over_limit_total = Some(total);
+                if cache.is_unknown() {
+                    let _ = self.broadcast.send(cache.not_shown());
+                }
             }
         }
     }
