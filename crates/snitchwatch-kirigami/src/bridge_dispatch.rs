@@ -51,11 +51,14 @@ pub fn interests_geo(msg: &ServerMessage) -> bool {
     )
 }
 
-/// True when `msg` mutates the rule list (drives `RulesModel`).
+/// True when `msg` mutates the rule list or carries the rules' hit counts
+/// (drives `RulesModel`).
 pub fn interests_rules(msg: &ServerMessage) -> bool {
     matches!(
         msg,
-        ServerMessage::SetRules { .. } | ServerMessage::UpdateRules { .. }
+        ServerMessage::SetRules { .. }
+            | ServerMessage::UpdateRules { .. }
+            | ServerMessage::RuleHits { .. }
     )
 }
 
@@ -250,6 +253,7 @@ mod tests {
             bytes_received: 0,
             started_at_ms: 0,
             matched_rule: None,
+            auto_answer: None,
         }
     }
 
@@ -304,6 +308,26 @@ mod tests {
         assert!(interests_rules(&ServerMessage::UpdateRules {
             rules: vec![]
         }));
+    }
+
+    #[test]
+    fn rule_hit_counts_route_only_to_rules() {
+        let msg = ServerMessage::RuleHits {
+            since_unix_ms: None,
+            lossy: false,
+            last_gap_unix_ms: None,
+            storage: snitchwatch_bridge::ws_messages::StorageStatus {
+                persistent: false,
+                reason: None,
+                unreadable: false,
+            },
+            hits: vec![],
+        };
+        assert!(interests_rules(&msg));
+        assert!(!interests_connections(&msg));
+        assert!(!interests_blocklists(&msg));
+        assert!(!interests_blocklist_entries(&msg));
+        assert!(!interests_geo(&msg));
     }
 
     #[test]

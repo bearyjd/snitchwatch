@@ -182,6 +182,7 @@ async fn apply_is_refused_for_an_unknown_preview_or_after_any_rule_change() {
         Duration::from_millis(10),
         Arc::downgrade(&daemon.cache),
         daemon.broadcast.clone(),
+        daemon.sync.hits(),
     ));
     tokio::time::timeout(Duration::from_secs(5), async {
         while daemon

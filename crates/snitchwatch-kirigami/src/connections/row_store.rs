@@ -517,6 +517,7 @@ mod tests {
             bytes_received: 0,
             started_at_ms: 0,
             matched_rule: None,
+            auto_answer: None,
         }
     }
 

@@ -20,6 +20,10 @@ path = "../rules_io_test.rs"
 name = "prompt_slot"
 path = "../prompt_slot_test.rs"
 
+[[test]]
+name = "pause_answers_waiting"
+path = "../pause_answers_waiting_test.rs"
+
 [dev-dependencies]
 snitchwatch-bridge = { path = "../../crates/snitchwatch-bridge", default-features = false }
 snitchwatch-bridge-cli = { path = "../../crates/snitchwatch-bridge-cli", default-features = false }

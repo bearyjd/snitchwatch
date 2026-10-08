@@ -25,6 +25,7 @@
 //! holds `<name>`. #50's process-qualified names make this rare, and the next
 //! `Subscribe` corrects it.
 
+use crate::cache::rule_hits_handle::RuleHitsHandle;
 use crate::daemon_commands::{BecameCurrent, CommandError, ConnKey, PendingReply};
 use crate::rule_wire::rule_to_wire;
 use crate::ws_messages::ServerMessage;
@@ -142,6 +143,11 @@ impl RulesCache {
         self.revision += 1;
     }
 
+    /// Whether the list is synced and has a rule of this name.
+    pub fn contains(&self, name: &str) -> bool {
+        self.rules().is_some_and(|rules| rules.contains_key(name))
+    }
+
     /// A no-op while `Unknown`.
     pub fn remove(&mut self, name: &str) {
         let removed = self.rules.as_mut().and_then(|rules| rules.remove(name));
@@ -160,16 +166,21 @@ impl RulesCache {
     }
 
     /// Drop temporary rules whose `created + duration` has passed. Returns
-    /// whether anything was removed.
-    pub fn prune_expired(&mut self, now_secs: i64) -> bool {
+    /// the names removed, in name order.
+    pub fn prune_expired(&mut self, now_secs: i64) -> Vec<String> {
         let Some(rules) = &mut self.rules else {
-            return false;
+            return Vec::new();
         };
-        let before = rules.len();
-        rules.retain(|_, rule| expires_at(rule).is_none_or(|at| at > now_secs));
-        let removed = rules.len() != before;
-        self.revision += u64::from(removed);
-        removed
+        let expired: Vec<String> = rules
+            .values()
+            .filter(|rule| expires_at(rule).is_some_and(|at| at <= now_secs))
+            .map(|rule| rule.name.clone())
+            .collect();
+        for name in &expired {
+            rules.remove(name);
+        }
+        self.revision += u64::from(!expired.is_empty());
+        expired
     }
 
     /// Apply a command the daemon answered `OK`: `CHANGE_RULE` upserts its
@@ -313,13 +324,17 @@ fn bounded_snapshot(rules: Vec<Rule>) -> Option<Snapshot> {
 }
 
 /// `UiService`'s rule state: the cache, the staged snapshots, a generation
-/// bumped on every commit, and the broadcast `SetRules` goes out on.
+/// bumped on every commit, the broadcast `SetRules` goes out on, and the
+/// per-rule hit counts that follow the list (a committed snapshot, a
+/// confirmed `DELETE_RULE` and an expired temporary rule prune them;
+/// [`Self::withdraw`] never does).
 #[derive(Clone)]
 pub struct RulesSync {
     cache: SharedRulesCache,
     pending: Arc<StdMutex<PendingSnapshots>>,
     synced: Arc<watch::Sender<u64>>,
     broadcast: broadcast::Sender<ServerMessage>,
+    hits: RuleHitsHandle,
     /// Live [`PublishHold`]s; see [`RulesSync::hold_publishes`].
     holds: Arc<AtomicUsize>,
 }
@@ -342,6 +357,7 @@ impl RulesSync {
             cache: SharedRulesCache::default(),
             pending: Arc::default(),
             synced: Arc::new(watch::channel(0).0),
+            hits: RuleHitsHandle::new(broadcast.clone()),
             broadcast,
             holds: Arc::default(),
         }
@@ -351,14 +367,42 @@ impl RulesSync {
         self.cache.clone()
     }
 
+    /// Per-rule hit counts (`cache::rule_hits`).
+    pub fn hits(&self) -> RuleHitsHandle {
+        self.hits.clone()
+    }
+
+    /// Counts the events of a ping that carried statistics, with its
+    /// `uptime` and `rule_hits`.
+    pub fn record_hits(
+        &self,
+        events: &[snitchwatch_proto::protocol::Event],
+        uptime: u64,
+        rule_hits: u64,
+    ) {
+        self.hits.record(events, uptime, rule_hits, &self.cache);
+    }
+
     /// Generation bumped each time a daemon snapshot is committed.
     pub fn synced(&self) -> watch::Receiver<u64> {
         self.synced.subscribe()
     }
 
-    /// A remembered prompt verdict (see [`RulesCache::upsert`]).
+    /// A remembered prompt verdict (see [`RulesCache::upsert`]). When it
+    /// replaces a temporary rule that has expired but not yet been pruned
+    /// (names are deterministic, `verdict::rule_name_for`), it is a new rule
+    /// and its count starts again.
     pub fn upsert(&self, rule: Rule) {
-        lock(&self.cache).upsert(rule);
+        let mut cache = lock(&self.cache);
+        let replaces_expired = cache
+            .rules()
+            .and_then(|rules| rules.get(&rule.name))
+            .and_then(expires_at)
+            .is_some_and(|at| at <= rule.created);
+        if replaces_expired {
+            self.hits.forget([rule.name.as_str()]);
+        }
+        cache.upsert(rule);
     }
 
     /// Hold a `Subscribe`'s rules until its connection sends HELLO. An
@@ -389,6 +433,7 @@ impl RulesSync {
             let mut cache = lock(&self.cache);
             cache.replace_all(snapshot.rules);
             cache.set_left_out(snapshot.left_out);
+            self.hits.adopt_snapshot(&cache);
         }
         self.publish();
         self.synced.send_modify(|generation| *generation += 1);
@@ -412,7 +457,14 @@ impl RulesSync {
 
     /// A command the daemon answered `OK`, in reply order.
     pub(crate) fn apply_confirmed(&self, sent: &Notification) {
-        lock(&self.cache).apply_confirmed(sent);
+        {
+            let mut cache = lock(&self.cache);
+            cache.apply_confirmed(sent);
+            if sent.r#type == Action::DeleteRule as i32 {
+                self.hits
+                    .forget(sent.rules.iter().map(|rule| rule.name.as_str()));
+            }
+        }
         if self.holds.load(Ordering::SeqCst) == 0 {
             self.publish();
         }
@@ -452,12 +504,14 @@ pub async fn settle_rule_command(
     publish_rules(&cache, &broadcast);
 }
 
-/// Every `period`, prune expired temporary rules and broadcast the list if
-/// anything went. Ends once the cache itself is gone (bridge shut down).
+/// Every `period`, prune expired temporary rules, forget their hit counts
+/// and broadcast the list if anything went. Ends once the cache itself is
+/// gone (bridge shut down).
 pub async fn prune_expired_rules_every(
     period: Duration,
     cache: Weak<StdMutex<RulesCache>>,
     broadcast: broadcast::Sender<ServerMessage>,
+    hits: RuleHitsHandle,
 ) {
     let mut ticks = tokio::time::interval(period);
     loop {
@@ -469,7 +523,15 @@ pub async fn prune_expired_rules_every(
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
-        if lock(&cache).prune_expired(now_secs) {
+        let pruned = {
+            let mut cache = lock(&cache);
+            let expired = cache.prune_expired(now_secs);
+            // Under the cache lock, like every hit-count change. A rule
+            // re-made under the same name later is a new rule.
+            hits.forget(expired.iter().map(String::as_str));
+            !expired.is_empty()
+        };
+        if pruned {
             publish_rules(&cache, &broadcast);
         }
     }

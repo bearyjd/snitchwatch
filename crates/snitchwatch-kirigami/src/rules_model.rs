@@ -16,8 +16,11 @@
 use core::pin::Pin;
 use cxx_qt::CxxQtType;
 use cxx_qt::Threading;
-use cxx_qt_lib::{QByteArray, QHash, QHashPair_i32_QByteArray, QModelIndex, QString, QVariant};
+use cxx_qt_lib::{
+    QByteArray, QHash, QHashPair_i32_QByteArray, QList, QModelIndex, QString, QVariant,
+};
 
+use crate::rules::hits::{RowHits, RuleHitsView};
 use crate::rules::row_store::{RuleSource, RulesStore};
 use crate::rules::simulator::SimulationForm;
 use snitchwatch_bridge::ws_messages::{ClientMessage, ServerMessage};
@@ -37,6 +40,11 @@ const ROLE_DELETABLE: i32 = 10;
 // Issue #44: a pre-#50 Snitchwatch rule that matches every program.
 const ROLE_APPLIES_TO_ALL_APPS: i32 = 11;
 const ROLE_ALL_APPS_HINT: i32 = 12;
+// P2.6 Part 1: how often the rule decided a connection (`rules::hits`).
+const ROLE_HITS_COUNTED: i32 = 13;
+const ROLE_HIT_COUNT: i32 = 14;
+const ROLE_LAST_HIT_MS: i32 = 15;
+const ROLE_HITS_NOTE: i32 = 16;
 
 #[cxx_qt::bridge]
 pub mod qobject {
@@ -49,6 +57,8 @@ pub mod qobject {
         type QModelIndex = cxx_qt_lib::QModelIndex;
         include!("cxx-qt-lib/qhash.h");
         type QHash_i32_QByteArray = cxx_qt_lib::QHash<cxx_qt_lib::QHashPair_i32_QByteArray>;
+        include!("cxx-qt-lib/qlist.h");
+        type QList_i32 = cxx_qt_lib::QList<i32>;
 
         include!(<QtCore/QAbstractListModel>);
         type QAbstractListModel;
@@ -63,6 +73,11 @@ pub mod qobject {
         /// How many rules apply to every app (issue #44); see
         /// `rules::all_apps`.
         #[qproperty(i32, legacy_host_only_count, cxx_name = "legacyHostOnlyCount")]
+        /// The hit counts' summary as JSON (`rules::hits`): whether the
+        /// bridge counts at all, since when, whether hits may be missing,
+        /// and whether the counts are saved. Empty until a `RuleHits`
+        /// arrives from the live session.
+        #[qproperty(QString, hits_info_json, cxx_name = "hitsInfoJson")]
         type RulesModel = super::RulesModelRust;
 
         /// Emitted with a JSON-encoded `ClientMessage` (`UpdateRule` /
@@ -155,6 +170,18 @@ pub mod qobject {
         #[inherit]
         #[cxx_name = "endResetModel"]
         unsafe fn end_reset_model(self: Pin<&mut RulesModel>);
+
+        #[inherit]
+        fn index(self: &RulesModel, row: i32, column: i32, parent: &QModelIndex) -> QModelIndex;
+
+        #[inherit]
+        #[cxx_name = "dataChanged"]
+        fn data_changed(
+            self: Pin<&mut RulesModel>,
+            top_left: &QModelIndex,
+            bottom_right: &QModelIndex,
+            roles: &QList_i32,
+        );
     }
 
     impl cxx_qt::Threading for RulesModel {}
@@ -166,6 +193,8 @@ pub struct RulesModelRust {
     store: RulesStore,
     count: i32,
     legacy_host_only_count: i32,
+    hits: RuleHitsView,
+    hits_info_json: QString,
 }
 
 impl qobject::RulesModel {
@@ -189,6 +218,7 @@ impl qobject::RulesModel {
             ROLE_ALL_APPS_HINT => {
                 QVariant::from(&QString::from(&rule.all_apps_hint().unwrap_or_default()))
             }
+            ROLE_HITS_COUNTED..=ROLE_HITS_NOTE => self.hits_data(rule, role),
             ROLE_ENABLED => QVariant::from(&rule.enabled),
             ROLE_ACTION => QVariant::from(&QString::from(rule.normalized_action())),
             ROLE_DURATION => QVariant::from(&QString::from(&rule.duration)),
@@ -234,7 +264,29 @@ impl qobject::RulesModel {
             QByteArray::from("appliesToAllApps"),
         );
         roles.insert(ROLE_ALL_APPS_HINT, QByteArray::from("allAppsHint"));
+        roles.insert(ROLE_HITS_COUNTED, QByteArray::from("hitsCounted"));
+        roles.insert(ROLE_HIT_COUNT, QByteArray::from("hitCount"));
+        roles.insert(ROLE_LAST_HIT_MS, QByteArray::from("lastHitMs"));
+        roles.insert(ROLE_HITS_NOTE, QByteArray::from("hitsNote"));
         roles
+    }
+
+    /// The hit-count roles of one row. `hitsCounted` is false (and the count
+    /// and time zero) whenever there is no count to stand behind; `hitsNote`
+    /// says why for a rule that can't be counted.
+    fn hits_data(&self, rule: &crate::rules::row_store::Rule, role: i32) -> QVariant {
+        let hits = self.hits.for_rule(rule);
+        match role {
+            ROLE_HITS_COUNTED => QVariant::from(&matches!(hits, RowHits::Counted { .. })),
+            ROLE_HIT_COUNT => QVariant::from(&hits.count_for_model()),
+            ROLE_LAST_HIT_MS => QVariant::from(&match hits {
+                RowHits::Counted {
+                    last_hit_unix_ms, ..
+                } => last_hit_unix_ms as f64,
+                _ => 0.0,
+            }),
+            _ => QVariant::from(&QString::from(hits.note())),
+        }
     }
 
     fn apply_server_message_json(self: Pin<&mut Self>, json: &QString) {
@@ -322,10 +374,11 @@ impl qobject::RulesModel {
             crate::bridge_dispatch::interests_rules,
             move |connection_id, _msg, json| {
                 let session_handles = session_handles.clone();
-                let _ = qt_thread.queue(move |qobject| {
+                let _ = qt_thread.queue(move |mut qobject| {
                     if !session_handles.is_current_session(connection_id) {
                         return;
                     }
+                    qobject.as_mut().note_session(connection_id);
                     qobject.apply_server_message_json(&QString::from(&json));
                 });
             },
@@ -334,7 +387,44 @@ impl qobject::RulesModel {
 }
 
 impl qobject::RulesModel {
+    /// A message from bridge session `connection_id` is about to be applied:
+    /// hit counts an earlier session sent are forgotten first.
+    fn note_session(mut self: Pin<&mut Self>, connection_id: u64) {
+        if self.as_mut().rust_mut().hits.note_session(connection_id) {
+            self.refresh_hits();
+        }
+    }
+
+    /// Re-reads the hit-count roles of every row and the summary.
+    fn refresh_hits(mut self: Pin<&mut Self>) {
+        let info = QString::from(&self.hits.info_json());
+        self.as_mut().set_hits_info_json(info);
+        let rows = self.store.len() as i32;
+        if rows == 0 {
+            return;
+        }
+        let first = self.index(0, 0, &QModelIndex::default());
+        let last = self.index(rows - 1, 0, &QModelIndex::default());
+        let mut roles = QList::<i32>::default();
+        for role in [
+            ROLE_HITS_COUNTED,
+            ROLE_HIT_COUNT,
+            ROLE_LAST_HIT_MS,
+            ROLE_HITS_NOTE,
+        ] {
+            roles.append(role);
+        }
+        self.as_mut().data_changed(&first, &last, &roles);
+    }
+
     pub fn apply_server_message(mut self: Pin<&mut Self>, msg: ServerMessage) {
+        // Counts change every few seconds on a busy system: only the count
+        // roles are refreshed, never a model reset, which would throw away
+        // the list's scroll position.
+        if self.as_mut().rust_mut().hits.apply(&msg) {
+            self.refresh_hits();
+            return;
+        }
         let changed = {
             unsafe {
                 self.as_mut().begin_reset_model();

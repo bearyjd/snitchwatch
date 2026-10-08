@@ -249,6 +249,18 @@ past 2,000,000 hosts in total (in subscription order) get no rule.
   replaced at startup: the bridge's first network reading after a restart
   counts as a network change, so if a different profile matches the current
   network, auto-switch activates it.
+- The Rules page shows how often each rule decided a connection (issue
+  P2.6, Part 1). opensnitchd reports no per-rule counts, so the bridge
+  tallies the events in the daemon's pings: the numbers are approximate and
+  can be low (a ping carries at most `Stats.MaxEvents` events, nothing is
+  reported while no bridge is connected, and a `nolog` rule is never
+  counted). The page says since when it has counted and when hits may be
+  missing. The counts are saved every 5 minutes and at shutdown in
+  `rule_hits.json` (mode 0600) in the same state directory, and only rules
+  that still exist in the daemon's first rule list after a restart keep
+  theirs; without a state directory they are kept in memory and the page
+  says so. A count belongs to a rule's name: editing a rule keeps it, and a
+  deleted or expired rule loses it.
 - The bridge fetches only `https://` URLs, including every redirect, and
   never a loopback, link-local, carrier-grade NAT or other reserved address
   (LAN addresses, RFC 1918 and ULA, are allowed: owner decision,

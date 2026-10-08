@@ -24,6 +24,7 @@
 pub mod all_apps;
 pub mod editor;
 pub mod editor_view;
+pub mod hits;
 pub mod io;
 pub mod io_view;
 pub mod row_store;
