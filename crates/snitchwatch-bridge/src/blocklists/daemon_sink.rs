@@ -319,7 +319,10 @@ impl RuleSink for DaemonRuleSink {
         for kind in &kinds {
             self.install(&list, *kind).await?;
         }
-        Ok(())
+        // The install that wrote these files may have been refused before it
+        // got to the kinds the list no longer has; finish that now, or a stale
+        // `ips.list` keeps blocking hosts the list dropped (issue #73).
+        self.remove_other_kinds(&list, &kinds).await
     }
 
     async fn replace_blocklist_rules(
@@ -464,3 +467,7 @@ fn command_failure(error: CommandError) -> NotInstalled {
 #[cfg(test)]
 #[path = "daemon_sink_tests.rs"]
 pub(in crate::blocklists) mod tests;
+
+#[cfg(test)]
+#[path = "daemon_sink_followup_tests.rs"]
+mod followup_tests;

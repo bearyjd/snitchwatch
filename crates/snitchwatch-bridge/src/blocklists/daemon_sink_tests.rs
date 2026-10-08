@@ -17,6 +17,8 @@ pub(in crate::blocklists) const ADS: &str = "ads-0123456789abcdef";
 pub(in crate::blocklists) enum Daemon {
     Accept,
     Refuse(&'static str),
+    /// Refuses `CHANGE_RULE` (an install), accepts `DELETE_RULE`.
+    RefuseChange(&'static str),
     Silent,
 }
 
@@ -34,6 +36,8 @@ pub(in crate::blocklists) struct Harness {
     pub(in crate::blocklists) commands: DaemonCommands,
     pub(in crate::blocklists) rules: RulesSync,
     seen: Arc<StdMutex<Vec<Seen>>>,
+    /// How the scripted daemon answers; [`Harness::set_daemon`] changes it.
+    mode: Arc<StdMutex<Daemon>>,
     _stream: Option<StreamRegistration>,
 }
 
@@ -48,8 +52,14 @@ impl Harness {
             commands: DaemonCommands::new(DaemonTransport::Unix, rules.clone()),
             rules,
             seen: Arc::default(),
+            mode: Arc::new(StdMutex::new(Daemon::Accept)),
             _stream: None,
         }
+    }
+
+    /// Change how the connected daemon answers from now on.
+    pub(in crate::blocklists) fn set_daemon(&self, daemon: Daemon) {
+        *self.mode.lock().unwrap() = daemon;
     }
 
     /// Connect a daemon whose rule snapshot is `snapshot`.
@@ -60,6 +70,8 @@ impl Harness {
         self.commands.on_reply(stream_id, &reply(0, Ok(())));
         let commands = self.commands.clone();
         let seen = self.seen.clone();
+        *self.mode.lock().unwrap() = daemon;
+        let mode = self.mode.clone();
         let root = self.dir.root().to_path_buf();
         tokio::spawn(async move {
             while let Some(command) = rx.recv().await {
@@ -75,10 +87,17 @@ impl Harness {
                     command: command.clone(),
                     path_existed,
                 });
-                match &daemon {
+                let answer = mode.lock().unwrap().clone();
+                match answer {
                     Daemon::Accept => commands.on_reply(stream_id, &reply(command.id, Ok(()))),
                     Daemon::Refuse(text) => {
                         commands.on_reply(stream_id, &reply(command.id, Err(text)))
+                    }
+                    Daemon::RefuseChange(text) if command.r#type == Action::ChangeRule as i32 => {
+                        commands.on_reply(stream_id, &reply(command.id, Err(text)))
+                    }
+                    Daemon::RefuseChange(_) => {
+                        commands.on_reply(stream_id, &reply(command.id, Ok(())))
                     }
                     Daemon::Silent => false,
                 };
@@ -90,7 +109,7 @@ impl Harness {
 
     /// A new bridge run over the same list directory: fresh commands, rules
     /// cache and confirmations.
-    fn restart(self) -> Self {
+    pub(in crate::blocklists) fn restart(self) -> Self {
         let rules = RulesSync::new(broadcast::channel(64).0);
         Self {
             _state: self._state,
@@ -98,6 +117,7 @@ impl Harness {
             commands: DaemonCommands::new(DaemonTransport::Unix, rules.clone()),
             rules,
             seen: Arc::default(),
+            mode: self.mode,
             _stream: None,
         }
     }
@@ -113,7 +133,7 @@ impl Harness {
         .into()
     }
 
-    fn sink(&self) -> DaemonRuleSink {
+    pub(in crate::blocklists) fn sink(&self) -> DaemonRuleSink {
         DaemonRuleSink::new(self.dir.clone(), self.commands.clone(), self.rules.cache())
             .with_timeout(Duration::from_millis(300))
     }
@@ -122,7 +142,7 @@ impl Harness {
         self.seen.lock().unwrap().clone()
     }
 
-    fn cached(&self) -> Option<Vec<String>> {
+    pub(in crate::blocklists) fn cached(&self) -> Option<Vec<String>> {
         self.rules
             .cache()
             .lock()
