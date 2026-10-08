@@ -11,20 +11,19 @@
 use std::path::PathBuf;
 
 pub fn state_dir() -> PathBuf {
-    xdg_dir_or("XDG_STATE_HOME", ".local/state").join("snitchwatch")
+    state_dir_from(xdg("XDG_STATE_HOME").as_deref(), home().as_deref())
 }
 
 pub fn data_dir() -> PathBuf {
-    xdg_dir_or("XDG_DATA_HOME", ".local/share").join("snitchwatch")
+    data_dir_from(xdg("XDG_DATA_HOME").as_deref(), home().as_deref())
 }
 
 pub fn config_dir() -> PathBuf {
-    xdg_dir_or("XDG_CONFIG_HOME", ".config").join("snitchwatch")
+    config_dir_from(xdg("XDG_CONFIG_HOME").as_deref(), home().as_deref())
 }
 
 pub fn autostart_path() -> PathBuf {
-    xdg_dir_or("XDG_CONFIG_HOME", ".config")
-        .join("autostart")
+    autostart_dir_from(xdg("XDG_CONFIG_HOME").as_deref(), home().as_deref())
         .join("snitchwatch.desktop")
 }
 
@@ -33,8 +32,7 @@ pub fn autostart_path() -> PathBuf {
 /// opensnitch-ui" section. Same directory as our own `autostart_path()`,
 /// just the upstream project's filename.
 pub fn opensnitch_ui_autostart_path() -> PathBuf {
-    xdg_dir_or("XDG_CONFIG_HOME", ".config")
-        .join("autostart")
+    autostart_dir_from(xdg("XDG_CONFIG_HOME").as_deref(), home().as_deref())
         .join("opensnitch_ui.desktop")
 }
 
@@ -51,104 +49,110 @@ pub fn crash_log_path() -> PathBuf {
     state_dir().join("crash.log")
 }
 
-fn xdg_dir_or(env_var: &str, fallback_subpath: &str) -> PathBuf {
-    if let Ok(p) = std::env::var(env_var) {
-        if !p.is_empty() {
-            return PathBuf::from(p);
-        }
+// Pure cores of the resolvers above: the environment's values come in as
+// parameters, so tests never touch process-global state (issues #96, #97).
+
+fn state_dir_from(xdg_state_home: Option<&str>, home: Option<&str>) -> PathBuf {
+    xdg_dir_from(xdg_state_home, home, ".local/state").join("snitchwatch")
+}
+
+fn data_dir_from(xdg_data_home: Option<&str>, home: Option<&str>) -> PathBuf {
+    xdg_dir_from(xdg_data_home, home, ".local/share").join("snitchwatch")
+}
+
+fn config_dir_from(xdg_config_home: Option<&str>, home: Option<&str>) -> PathBuf {
+    xdg_dir_from(xdg_config_home, home, ".config").join("snitchwatch")
+}
+
+fn autostart_dir_from(xdg_config_home: Option<&str>, home: Option<&str>) -> PathBuf {
+    xdg_dir_from(xdg_config_home, home, ".config").join("autostart")
+}
+
+/// An unset or empty `xdg` value is treated as unset; with no `home` either,
+/// resolution falls back to `/tmp`.
+fn xdg_dir_from(xdg: Option<&str>, home: Option<&str>, fallback_subpath: &str) -> PathBuf {
+    match xdg {
+        Some(p) if !p.is_empty() => PathBuf::from(p),
+        _ => PathBuf::from(home.unwrap_or("/tmp")).join(fallback_subpath),
     }
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-    PathBuf::from(home).join(fallback_subpath)
+}
+
+/// The only places this module reads the process environment.
+fn xdg(name: &str) -> Option<String> {
+    std::env::var(name).ok()
+}
+
+fn home() -> Option<String> {
+    std::env::var("HOME").ok()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
 
-    // Env vars are process-global; `cargo test` runs tests in one process on
-    // multiple threads, so any test that mutates $XDG_*/$HOME races every other
-    // one that reads them. These tests also run inside a real user session whose
-    // ambient $XDG_STATE_HOME etc. are already set. Serialize env-mutating tests
-    // under one lock and save/restore the vars they touch so the suite is
-    // deterministic regardless of the ambient environment or parallelism.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    struct EnvVarGuard {
-        key: &'static str,
-        prev: Option<String>,
-    }
-
-    impl EnvVarGuard {
-        fn set(key: &'static str, value: &str) -> Self {
-            let prev = std::env::var(key).ok();
-            std::env::set_var(key, value);
-            Self { key, prev }
-        }
-
-        fn unset(key: &'static str) -> Self {
-            let prev = std::env::var(key).ok();
-            std::env::remove_var(key);
-            Self { key, prev }
-        }
-    }
-
-    impl Drop for EnvVarGuard {
-        fn drop(&mut self) {
-            match &self.prev {
-                Some(v) => std::env::set_var(self.key, v),
-                None => std::env::remove_var(self.key),
-            }
-        }
-    }
+    // These exercise the pure `*_from` resolvers with explicit inputs. They
+    // must never call `std::env::set_var`/`remove_var`: env vars are
+    // process-global and `cargo test` runs tests on parallel threads.
 
     #[test]
     fn state_dir_uses_xdg_when_set() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _g = EnvVarGuard::set("XDG_STATE_HOME", "/tmp/snitchwatch-test-state");
         assert_eq!(
-            state_dir(),
+            state_dir_from(Some("/tmp/snitchwatch-test-state"), Some("/home/alice")),
             PathBuf::from("/tmp/snitchwatch-test-state/snitchwatch")
         );
     }
 
     #[test]
     fn state_dir_falls_back_to_home_local_state() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _g_xdg = EnvVarGuard::unset("XDG_STATE_HOME");
-        let _g_home = EnvVarGuard::set("HOME", "/home/alice");
         assert_eq!(
-            state_dir(),
+            state_dir_from(None, Some("/home/alice")),
             PathBuf::from("/home/alice/.local/state/snitchwatch")
         );
-    }
-
-    #[test]
-    fn autostart_path_uses_config_dir() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _g = EnvVarGuard::set("XDG_CONFIG_HOME", "/tmp/cfg");
         assert_eq!(
-            autostart_path(),
-            PathBuf::from("/tmp/cfg/autostart/snitchwatch.desktop")
+            state_dir_from(Some(""), Some("/home/alice")),
+            PathBuf::from("/home/alice/.local/state/snitchwatch"),
+            "an empty value counts as unset"
+        );
+        assert_eq!(
+            state_dir_from(None, None),
+            PathBuf::from("/tmp/.local/state/snitchwatch")
         );
     }
 
     #[test]
-    fn opensnitch_ui_autostart_path_uses_config_dir() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _g = EnvVarGuard::set("XDG_CONFIG_HOME", "/tmp/cfg");
+    fn data_and_config_dirs_follow_their_xdg_vars() {
         assert_eq!(
-            opensnitch_ui_autostart_path(),
-            PathBuf::from("/tmp/cfg/autostart/opensnitch_ui.desktop")
+            data_dir_from(Some("/x/data"), Some("/home/alice")),
+            PathBuf::from("/x/data/snitchwatch")
+        );
+        assert_eq!(
+            data_dir_from(None, Some("/home/alice")),
+            PathBuf::from("/home/alice/.local/share/snitchwatch")
+        );
+        assert_eq!(
+            config_dir_from(Some("/x/cfg"), Some("/home/alice")),
+            PathBuf::from("/x/cfg/snitchwatch")
+        );
+        assert_eq!(
+            config_dir_from(None, Some("/home/alice")),
+            PathBuf::from("/home/alice/.config/snitchwatch")
+        );
+    }
+
+    #[test]
+    fn autostart_entries_use_the_config_dir() {
+        let dir = autostart_dir_from(Some("/tmp/cfg"), Some("/home/alice"));
+        assert_eq!(dir, PathBuf::from("/tmp/cfg/autostart"));
+        assert_eq!(
+            autostart_dir_from(None, Some("/home/alice")),
+            PathBuf::from("/home/alice/.config/autostart")
         );
     }
 
     #[test]
     fn settings_path_uses_config_dir() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _g = EnvVarGuard::set("XDG_CONFIG_HOME", "/tmp/cfg");
         assert_eq!(
-            settings_path(),
+            config_dir_from(Some("/tmp/cfg"), None).join("settings.json"),
             PathBuf::from("/tmp/cfg/snitchwatch/settings.json")
         );
     }
