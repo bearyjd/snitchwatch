@@ -102,6 +102,10 @@ Kirigami.ScrollablePage {
     property string inspectProtocol: ""
     property string inspectVerdict: ""
     property bool inspectPending: false
+    // Issue #49: set when the row the inspector was opened on as pending has
+    // since gone away (see `recheckInspectedRow`). Shown as a notice in place of
+    // the decision sheet.
+    property bool inspectNoLongerPending: false
     // Parity 2 (pending-decision insight panel) — pulled from
     // `ConnectionsModel.rowDetailsJson` alongside the rest of the inspector
     // snapshot. Per-connection byte counters are deliberately not surfaced:
@@ -146,6 +150,26 @@ Kirigami.ScrollablePage {
         target: page.model
         function onAutoSelectRequested(row) {
             list.currentIndex = row;
+        }
+        // Issue #49: the bridge removes a pending row when opensnitchd's ask
+        // times out, and a snapshot starts with ClearConnectionRows. Flat mode
+        // reports a removal as rowsRemoved; every other mutation (clear,
+        // grouped mode, an active filter) brackets a full reset.
+        function onRowsRemoved() {
+            page.recheckInspectedRow();
+        }
+        function onModelReset() {
+            page.recheckInspectedRow();
+        }
+    }
+
+    // Issue #49: losing the bridge connection ends every prompt it held. The
+    // stub feed in some component tests has no `ok` property.
+    Connections {
+        target: page.bridgeFeed
+        ignoreUnknownSignals: true
+        function onOkChanged() {
+            page.recheckInspectedRow();
         }
     }
 
@@ -465,7 +489,26 @@ Kirigami.ScrollablePage {
         }
     }
 
+    // Issue #49: the inspector works from a copy of the row taken when it
+    // opened. If the bridge withdraws that prompt afterwards (the daemon's ask
+    // timed out, rows were cleared, the service restarted), the copy would still
+    // say pending and Allow/Deny would act on a row that no longer exists: the
+    // bridge rejects the verdict while the sheet closes as if it had worked.
+    // This only ever turns pending into not pending. Row ids carry the bridge
+    // session, so a later row that reuses the wire id is a different id and
+    // cannot bring the prompt back. The inspector itself stays open.
+    function recheckInspectedRow() {
+        if (!page.inspectPending || !page.model) {
+            return;
+        }
+        if (!page.model.isPendingRow(page.inspectId)) {
+            page.inspectPending = false;
+            page.inspectNoLongerPending = true;
+        }
+    }
+
     function openInspector(row) {
+        page.inspectNoLongerPending = false;
         page.inspectId = row.rowId;
         page.inspectProcess = row.process;
         page.inspectHost = row.host;
@@ -556,6 +599,16 @@ Kirigami.ScrollablePage {
                     page.showRuleRequested(page.inspectMatchedRule);
                     inspector.close();
                 }
+            }
+
+            // Issue #49: replaces the decision sheet below once its request is
+            // gone, so a late click can't be mistaken for a decision.
+            Kirigami.InlineMessage {
+                Layout.fillWidth: true
+                visible: page.inspectNoLongerPending
+                type: Kirigami.MessageType.Warning
+                text: "This request is no longer pending: it timed out or the connection "
+                    + "to the background service was lost; opensnitchd applied its default action."
             }
 
             // Pending decision surface (Task 7). The countdown/timeout stays

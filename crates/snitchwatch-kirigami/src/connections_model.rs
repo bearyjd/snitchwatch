@@ -214,6 +214,18 @@ pub mod qobject {
         #[cxx_name = "rowDetailsJson"]
         fn row_details_json(self: &ConnectionsModel, id: &QString) -> QString;
 
+        /// Whether `id` names a row that is still awaiting a decision: present
+        /// in the store (independent of the active filter) with no action
+        /// yet. `false` for an unknown id. The inspector re-checks this when
+        /// rows go away so it stops offering a verdict for a prompt the
+        /// bridge has withdrawn (issue #49). Read-only and never flushes the
+        /// grouped debounce buffer — it runs inside the model's own
+        /// `rowsRemoved`/`modelReset` emissions, where a flush would nest a
+        /// second reset.
+        #[qinvokable]
+        #[cxx_name = "isPendingRow"]
+        fn is_pending_row(self: &ConnectionsModel, id: &QString) -> bool;
+
         /// Issue #18 batch actions: the ids of every row still pending a
         /// decision under process group `key`, JSON-encoded as a plain
         /// array of strings in display order (e.g. `["r1","r2"]`). QML's
@@ -904,6 +916,10 @@ impl qobject::ConnectionsModel {
             tracing::error!(error = %e, "ConnectionsModel: row details serialize failed");
             "{}".to_string()
         }))
+    }
+
+    fn is_pending_row(&self, id: &QString) -> bool {
+        self.store.is_pending(&id.to_string()).unwrap_or(false)
     }
 
     /// Issue #18 batch actions: pending row ids under process group `key`,
