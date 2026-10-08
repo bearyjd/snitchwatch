@@ -159,6 +159,19 @@ pub fn resolve_storage_from(
     snitchwatch_state_dir: Option<OsString>,
     mode: BridgeMode,
 ) -> Storage {
+    let (euid, egid) = effective_ids();
+    resolve_storage_as(state_directory, snitchwatch_state_dir, mode, euid, egid)
+}
+
+/// [`resolve_storage_from`] as the user `euid`/`egid`, so tests can play the
+/// owner of a directory (a test can't `chown`).
+pub(crate) fn resolve_storage_as(
+    state_directory: Option<OsString>,
+    snitchwatch_state_dir: Option<OsString>,
+    mode: BridgeMode,
+    euid: u32,
+    egid: u32,
+) -> Storage {
     let Some(configured) = [state_directory, snitchwatch_state_dir]
         .into_iter()
         .flatten()
@@ -185,20 +198,19 @@ pub fn resolve_storage_from(
             canonical.display()
         ));
     }
-    let (euid, egid) = effective_ids();
-    let checked = std::fs::symlink_metadata(&canonical)
-        .map_err(|e| format!("state directory {}: {e}", canonical.display()))
-        .and_then(|meta| {
-            let facts = DirFacts {
-                uid: meta.uid(),
-                gid: meta.gid(),
-                mode: meta.mode(),
-            };
-            match mode {
-                BridgeMode::System => check_system_state_dir(&facts, euid, egid),
-                BridgeMode::User => check_user_state_dir(&facts, euid, &canonical),
-            }
-        });
+    let checked = match mode {
+        BridgeMode::System => std::fs::symlink_metadata(&canonical)
+            .map_err(|e| format!("state directory {}: {e}", canonical.display()))
+            .and_then(|meta| {
+                let facts = DirFacts {
+                    uid: meta.uid(),
+                    gid: meta.gid(),
+                    mode: meta.mode(),
+                };
+                check_system_state_dir(&facts, euid, egid)
+            }),
+        BridgeMode::User => secure_user_state_dir(&canonical, euid),
+    };
     match checked {
         Ok(()) => Storage::Persistent(canonical),
         Err(reason) => unusable(reason),
@@ -236,30 +248,69 @@ pub(crate) fn check_system_state_dir(
     Ok(())
 }
 
-/// A per-user bridge's state directory must be its own user's and not
-/// writable by anyone else: the databases and the SQLite journals beside them
-/// live there, and whoever can write to the directory can plant a file that
-/// SQLite then opens (a FIFO hangs it, a link is followed). Less strict than
-/// the system directory, which root opensnitchd also reads: group and other
-/// may read and enter it.
-pub(crate) fn check_user_state_dir(
+/// What to do with a per-user state directory, from its facts alone:
+/// `Ok(None)`: use it as it is. `Ok(Some(mode))`: it is the bridge user's own
+/// but group- or world-writable, so drop that write access (`mode` is the new
+/// permission bits, nothing else changed). `Err`: it isn't the bridge user's,
+/// which is not ours to change.
+///
+/// The databases and the SQLite journals beside them live there, and whoever
+/// can write to the directory can plant a file SQLite then opens (a FIFO hangs
+/// it, a link is followed). A directory that is ours is tightened rather than
+/// refused: a umask of 002 makes `~/.local/share/snitchwatch` 0775, and
+/// refusing would push those users to memory-only storage. Group and others may
+/// still read and enter it, unlike the system directory, which root
+/// opensnitchd also reads and which must be exactly 0700.
+pub(crate) fn plan_user_state_dir(
     facts: &DirFacts,
     euid: u32,
     dir: &Path,
-) -> std::result::Result<(), String> {
+) -> std::result::Result<Option<u32>, String> {
     if facts.uid != euid {
         return Err(format!(
             "state directory {} is not owned by the user running the bridge",
             dir.display()
         ));
     }
-    if facts.mode & 0o022 != 0 {
-        return Err(format!(
-            "state directory {} can be written by other users (mode {:o}); \
-             run chmod go-w on it",
-            dir.display(),
-            facts.mode & 0o7777
-        ));
+    let permissions = facts.mode & 0o7777;
+    Ok((permissions & 0o022 != 0).then_some(permissions & !0o022))
+}
+
+/// Check a per-user state directory and, if it is ours but writable by group
+/// or others, tighten it. Opened `O_DIRECTORY | O_NOFOLLOW` and inspected and
+/// changed through that one handle (`fstat`, `fchmod`), so a symlink swapped
+/// in since the path was resolved is refused, not followed, and what is
+/// checked is what is changed.
+pub(crate) fn secure_user_state_dir(dir: &Path, euid: u32) -> std::result::Result<(), String> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let describe = |e: std::io::Error| format!("state directory {}: {e}", dir.display());
+    let handle = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(dir)
+        .map_err(describe)?;
+    let meta = handle.metadata().map_err(describe)?;
+    let facts = DirFacts {
+        uid: meta.uid(),
+        gid: meta.gid(),
+        mode: meta.mode(),
+    };
+    if let Some(mode) = plan_user_state_dir(&facts, euid, dir)? {
+        handle
+            .set_permissions(std::fs::Permissions::from_mode(mode))
+            .map_err(|e| {
+                format!(
+                    "state directory {} can be written by other users and couldn't be \
+                     tightened: {e}",
+                    dir.display()
+                )
+            })?;
+        info!(
+            state_dir = %dir.display(),
+            from = format_args!("{:o}", facts.mode & 0o7777),
+            to = format_args!("{mode:o}"),
+            "dropped group and other write access to the state directory"
+        );
     }
     Ok(())
 }

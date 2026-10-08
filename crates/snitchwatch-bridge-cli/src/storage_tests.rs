@@ -375,56 +375,57 @@ fn dir_with_mode(mode: u32) -> (tempfile::TempDir, PathBuf) {
     (dir, state)
 }
 
-/// The state directory holds the databases and the SQLite files beside them;
-/// a per-user bridge's directory must be the bridge user's own and not
-/// writable by anyone else, as the system bridge's already has to be.
+/// The state directory holds the databases and the SQLite files beside them,
+/// so a per-user bridge's must not be writable by anyone else. When it is the
+/// bridge user's own (a umask of 002 makes `~/.local/share/snitchwatch` 0775)
+/// the bridge drops that write access itself and carries on: refusing would
+/// push every such user to memory-only storage.
 #[test]
-fn a_per_user_state_directory_others_can_write_is_unusable() {
+fn a_per_user_state_directory_of_ours_that_others_can_write_is_tightened_and_used() {
+    use std::os::unix::fs::PermissionsExt;
     for mode in [0o775, 0o770, 0o757, 0o707, 0o777, 0o722, 0o702] {
-        let (_dir, state) = dir_with_mode(mode);
-        for storage in [
-            resolve_storage_from(None, os(&state), BridgeMode::User),
-            resolve_storage_from(os(&state), None, BridgeMode::User),
-        ] {
-            let reason = unusable_reason(&storage);
-            assert!(
-                reason.contains("written by other users"),
-                "{mode:o}: {reason}"
-            );
-            assert!(
-                reason.contains(state.to_str().unwrap()),
-                "{mode:o}: {reason}"
-            );
-            assert!(reason.contains("chmod"), "the fix is spelled out: {reason}");
+        for from_systemd in [false, true] {
+            let (_dir, state) = dir_with_mode(mode);
+            let storage = if from_systemd {
+                resolve_storage_from(os(&state), None, BridgeMode::User)
+            } else {
+                resolve_storage_from(None, os(&state), BridgeMode::User)
+            };
+            assert_eq!(storage, Storage::Persistent(state.clone()), "{mode:o}");
+            let now = std::fs::metadata(&state).unwrap().permissions().mode() & 0o777;
+            assert_eq!(now, mode & !0o022, "{mode:o} was not tightened");
         }
     }
 }
 
 #[test]
-fn a_per_user_state_directory_without_group_or_other_write_is_fine() {
+fn a_per_user_state_directory_without_group_or_other_write_is_left_as_it_is() {
+    use std::os::unix::fs::PermissionsExt;
     for mode in [0o700, 0o750, 0o755, 0o705, 0o500] {
         let (_dir, state) = dir_with_mode(mode);
         assert_eq!(
             resolve_storage_from(None, os(&state), BridgeMode::User),
-            Storage::Persistent(state),
+            Storage::Persistent(state.clone()),
             "{mode:o}"
         );
+        let now = std::fs::metadata(&state).unwrap().permissions().mode() & 0o777;
+        assert_eq!(now, mode, "{mode:o} was changed");
     }
 }
 
+/// What to do with a per-user directory, decided from its facts alone.
 #[test]
-fn a_per_user_state_directory_must_be_the_bridge_users_own() {
+fn a_per_user_state_directory_is_used_tightened_or_refused() {
     let facts = DirFacts {
         uid: 1000,
         gid: 1000,
         mode: 0o40700,
     };
     let dir = Path::new("/home/u/.local/share/snitchwatch");
-    assert_eq!(check_user_state_dir(&facts, 1000, dir), Ok(()));
-    // The group and mode of the system check do not apply: only the owner
-    // and the write bits.
+    assert_eq!(plan_user_state_dir(&facts, 1000, dir), Ok(None));
+    // Group and mode beyond the write bits don't matter.
     assert_eq!(
-        check_user_state_dir(
+        plan_user_state_dir(
             &DirFacts {
                 gid: 5,
                 mode: 0o40755,
@@ -433,24 +434,78 @@ fn a_per_user_state_directory_must_be_the_bridge_users_own() {
             1000,
             dir
         ),
-        Ok(())
+        Ok(None)
     );
-    let other = check_user_state_dir(&DirFacts { uid: 0, ..facts }, 1000, dir).unwrap_err();
-    assert!(
-        other.contains("not owned by the user running the bridge"),
-        "{other}"
+    // Ours but writable by others: tighten, keeping every other bit.
+    for (mode, tightened) in [
+        (0o40775, 0o755),
+        (0o40770, 0o750),
+        (0o40777, 0o755),
+        (0o42775, 0o2755),
+        (0o41777, 0o1755),
+    ] {
+        assert_eq!(
+            plan_user_state_dir(&DirFacts { mode, ..facts }, 1000, dir),
+            Ok(Some(tightened)),
+            "{mode:o}"
+        );
+    }
+    // Someone else's is refused whatever its mode: it isn't ours to change.
+    for mode in [0o40700, 0o40775, 0o40777] {
+        let refused = plan_user_state_dir(
+            &DirFacts {
+                uid: 0,
+                mode,
+                ..facts
+            },
+            1000,
+            dir,
+        )
+        .unwrap_err();
+        assert!(
+            refused.contains("not owned by the user running the bridge"),
+            "{refused}"
+        );
+        assert!(refused.contains(dir.to_str().unwrap()), "{refused}");
+    }
+}
+
+/// Someone else's directory is refused and left exactly as it was: the
+/// bridge never changes what it doesn't own. (The owner is injected, as
+/// the system-mode check's is, since a test can't `chown`.)
+#[test]
+fn someone_elses_per_user_state_directory_is_refused_and_not_changed() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_dir, state) = dir_with_mode(0o775);
+    let (euid, egid) = effective_ids();
+    let storage = resolve_storage_as(
+        None,
+        os(&state),
+        BridgeMode::User,
+        euid.wrapping_add(1),
+        egid,
     );
-    assert!(other.contains(dir.to_str().unwrap()), "{other}");
-    let writable = check_user_state_dir(
-        &DirFacts {
-            mode: 0o40770,
-            ..facts
-        },
-        1000,
-        dir,
-    )
-    .unwrap_err();
-    assert!(writable.contains("written by other users"), "{writable}");
+    assert!(unusable_reason(&storage).contains("not owned by the user running the bridge"));
+    let now = std::fs::metadata(&state).unwrap().permissions().mode() & 0o777;
+    assert_eq!(now, 0o775, "a directory that isn't ours was changed");
+}
+
+/// The directory is opened `O_DIRECTORY | O_NOFOLLOW` and tightened through
+/// that handle, so a symlink swapped in after the path was resolved is
+/// refused rather than followed.
+#[test]
+fn securing_a_state_directory_refuses_a_symlink_and_a_file() {
+    use std::os::unix::fs::PermissionsExt;
+    let (dir, state) = dir_with_mode(0o775);
+    let link = dir.path().join("link");
+    std::os::unix::fs::symlink(&state, &link).unwrap();
+    assert!(secure_user_state_dir(&link, effective_ids().0).is_err());
+    let now = std::fs::metadata(&state).unwrap().permissions().mode() & 0o777;
+    assert_eq!(now, 0o775, "the link's target was changed");
+
+    let file = dir.path().join("file");
+    std::fs::write(&file, b"").unwrap();
+    assert!(secure_user_state_dir(&file, effective_ids().0).is_err());
 }
 
 /// The system bridge keeps its own, stricter rule.
