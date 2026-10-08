@@ -30,14 +30,16 @@ token handshake in system mode.
 The reviewed follow-up tracks authenticated external WebSocket sessions,
 registered after token validation and a successful authentication
 acknowledgement. Internal broadcast subscribers do not establish GUI presence.
-An unpaused Ask without an authenticated session returns gRPC `Unavailable`
-before creating a pending row, so OpenSnitch applies its own configured default
-action. The bridge does not duplicate policy or translate reject into deny.
+An Ask without an authenticated session returns gRPC `Unavailable` before
+creating a pending row, so OpenSnitch applies its own configured default
+action. This holds while filtering is paused too: a pause only auto-allows
+while at least one GUI is authenticated, so it cannot outlive every GUI
+session. The bridge does not duplicate policy or translate reject into deny.
 
 When the last client disconnects, existing pending requests are canceled even
 if a new client immediately reconnects. RPC cancellation removes its pending
 row and broadcasts removal; late verdicts cannot create a rule or history
-entry. Paused auto-allow remains unchanged. An authenticated but silent GUI
+entry. An authenticated but silent GUI
 still uses the daemon's existing RPC deadline.
 
 These runtime changes are reviewed uncommitted work on base `2690109`; they

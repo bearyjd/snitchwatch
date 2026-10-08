@@ -461,6 +461,15 @@ impl Ui for UiService {
         let conn = request.into_inner();
         let ask_id = self.next_ask_id.fetch_add(1, Ordering::Relaxed);
 
+        // Checked before the pause shortcut: a pause is a GUI user's choice
+        // and must not outlive every GUI session. With no authenticated GUI
+        // the daemon applies its own default action, paused or not
+        // (security review 2026-10-07, issue #47).
+        let mut admission = self
+            .client_presence
+            .admit()
+            .ok_or_else(|| Status::unavailable("no authenticated GUI session"))?;
+
         // Filtering paused (tray "Pause filtering"): auto-allow without
         // prompting. opensnitchd's own DefaultAction stays untouched — only
         // the bridge's own decision policy changes, so a genuine bridge
@@ -496,10 +505,6 @@ impl Ui for UiService {
             )));
         }
 
-        let mut admission = self
-            .client_presence
-            .admit()
-            .ok_or_else(|| Status::unavailable("no authenticated GUI session"))?;
         let row = connection_to_row(&conn, ask_id);
         // Captured before `row` moves into the broadcast message below.
         // Both `row.process` and `row.dst_host` are attacker-influenced

@@ -788,6 +788,9 @@ async fn ask_rule_auto_allows_immediately_when_filtering_paused() {
         notice_bus,
         filtering_paused.clone(),
     );
+    // A pause only applies while a GUI is authenticated (see
+    // `paused_bridge_without_an_authenticated_gui_defers_to_the_daemon`).
+    let _gui_session = svc.client_presence().authenticated_session();
 
     // No spawn/wait needed: paused ask_rule never blocks on a oneshot.
     let rule = svc
@@ -816,6 +819,42 @@ async fn ask_rule_auto_allows_immediately_when_filtering_paused() {
         }
         other => panic!("expected InsertConnectionRows, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn paused_bridge_without_an_authenticated_gui_defers_to_the_daemon() {
+    // Security review 2026-10-07 (issue #47): a pause is a GUI user's choice
+    // and must not outlive every GUI session. With no authenticated GUI the
+    // daemon's own default action applies, paused or not — otherwise a
+    // paused system bridge would keep auto-allowing after logout.
+    let cache = Arc::new(Mutex::new(ConnectionCache::new(64)));
+    let (tx, mut rx) = broadcast::channel::<ServerMessage>(16);
+    let svc = UiService::new(
+        cache.clone(),
+        tx,
+        Arc::new(crate::tray_state::TrayStatePublisher::new()),
+        Arc::new(crate::notice::NoticeBus::new()),
+        Arc::new(AtomicBool::new(true)),
+    );
+
+    let status = svc
+        .ask_rule(Request::new(Connection {
+            dst_host: "paused.example.com".into(),
+            process_path: "/usr/bin/curl".into(),
+            ..Default::default()
+        }))
+        .await
+        .expect_err("no authenticated GUI: the daemon must decide");
+    assert_eq!(status.code(), tonic::Code::Unavailable);
+    assert_eq!(
+        cache.lock().await.len(),
+        0,
+        "nothing auto-allowed or recorded"
+    );
+    assert!(
+        rx.try_recv().is_err(),
+        "no decided row may be broadcast for a deferred ask"
+    );
 }
 
 #[tokio::test]
