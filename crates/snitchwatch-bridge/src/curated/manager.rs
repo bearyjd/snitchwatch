@@ -36,6 +36,8 @@ struct Inner {
     broadcast: broadcast::Sender<ServerMessage>,
     state: Mutex<State>,
     wake: Notify,
+    /// The last message sent: reconcile tells GUIs only of a change.
+    last: Mutex<Option<ServerMessage>>,
 }
 
 struct State {
@@ -44,6 +46,8 @@ struct State {
     problems: BTreeMap<String, &'static str>,
     file: Option<PathBuf>,
     storage: StorageStatus,
+    /// Why nothing is ever installed or removed here.
+    unavailable: Option<String>,
 }
 
 fn lock(state: &Mutex<State>) -> MutexGuard<'_, State> {
@@ -72,8 +76,10 @@ impl CuratedDefaults {
                         reason: None,
                         unreadable: false,
                     },
+                    unavailable: None,
                 }),
                 wake: Notify::new(),
+                last: Mutex::new(None),
             }),
         }
     }
@@ -110,12 +116,24 @@ impl CuratedDefaults {
         lock(&self.inner.state).storage = status;
     }
 
+    /// Never install or remove anything here, and tell GUIs `reason`: the
+    /// per-user bridge, or no saved settings (a rule the user deleted
+    /// couldn't be remembered). Choices are not taken either.
+    pub fn set_unavailable(&self, reason: &str) {
+        lock(&self.inner.state).unavailable = Some(reason.to_string());
+    }
+
     /// A GUI's request, if it is one for the curated defaults: applied and
     /// reconciled in the background. Never waits.
     pub fn try_route(&self, msg: ClientMessage) -> Option<ClientMessage> {
         let ClientMessage::SetCuratedDefaults { ids, on } = msg else {
             return Some(msg);
         };
+        if lock(&self.inner.state).unavailable.is_some() {
+            // Undo the GUI's optimistic switch.
+            self.announce();
+            return None;
+        }
         let known: Vec<&CuratedEntry> = entries()
             .iter()
             .filter(|entry| ids.contains(&entry.id))
@@ -136,6 +154,12 @@ impl CuratedDefaults {
         None
     }
 
+    /// Reconcile again soon, e.g. after a curated rule was turned on or off
+    /// in the Rules page (the status shown changes; nothing is sent).
+    pub fn refresh(&self) {
+        self.inner.wake.notify_one();
+    }
+
     /// The `SetCuratedDefaults` message for the current state.
     pub fn message(&self) -> ServerMessage {
         let state = lock(&self.inner.state);
@@ -151,18 +175,38 @@ impl CuratedDefaults {
                 .map(|entry| summary(entry, &state, rules_known))
                 .collect(),
             storage: state.storage.clone(),
+            unavailable: state.unavailable.clone(),
         }
     }
 
     /// Send the current state to every GUI.
     pub fn announce(&self) {
-        let _ = self.inner.broadcast.send(self.message());
+        let message = self.message();
+        *self.last() = Some(message.clone());
+        let _ = self.inner.broadcast.send(message);
+    }
+
+    /// [`Self::announce`], if the state changed since the last message.
+    fn announce_changed(&self) {
+        let message = self.message();
+        let mut last = self.last();
+        if last.as_ref() != Some(&message) {
+            *last = Some(message.clone());
+            drop(last);
+            let _ = self.inner.broadcast.send(message);
+        }
+    }
+
+    fn last(&self) -> MutexGuard<'_, Option<ServerMessage>> {
+        self.inner.last.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Reconcile whenever the user changes a choice or a rules snapshot is
     /// committed (`synced`, taken before the gRPC server starts).
     pub fn spawn(&self, mut synced: watch::Receiver<u64>) -> tokio::task::JoinHandle<()> {
         let this = self.clone();
+        // GUIs get the starting state with their snapshot.
+        *self.last() = Some(self.message());
         tokio::spawn(async move {
             loop {
                 this.reconcile().await;
@@ -180,8 +224,9 @@ impl CuratedDefaults {
             let cache = self.inner.rules.lock().unwrap_or_else(|e| e.into_inner());
             cache.rules().cloned()
         };
-        let Some(rules) = rules else {
-            self.announce();
+        let unavailable = lock(&self.inner.state).unavailable.is_some();
+        let (Some(rules), false) = (rules, unavailable) else {
+            self.announce_changed();
             return;
         };
         let actions = {
@@ -192,10 +237,10 @@ impl CuratedDefaults {
             self.keep(&mut state, planned.choices);
             planned.actions
         };
-        self.announce();
+        self.announce_changed();
         for action in actions {
             self.apply(action).await;
-            self.announce();
+            self.announce_changed();
         }
     }
 
@@ -270,7 +315,9 @@ impl CuratedDefaults {
 
 fn summary(entry: &CuratedEntry, state: &State, rules_known: bool) -> CuratedDefaultSummary {
     let on = state.choices.enabled.contains(&entry.id);
-    let status = if rules_known {
+    let status = if state.unavailable.is_some() {
+        EntryStatus::Unavailable
+    } else if rules_known {
         state
             .statuses
             .get(&entry.id)

@@ -646,6 +646,54 @@ fn a_curated_default_rule_is_read_only_and_not_deletable() {
     );
     assert_eq!(read_only_reason(&curated), Some(CURATED_MANAGED_REASON));
     assert!(!deletable(&curated));
+    assert!(!toggleable(&curated), "not a shipped entry's rule");
+}
+
+/// Plan item 13: a shipped entry's rule can be turned on or off from the
+/// Rules page, nothing else; the reason says where it is managed.
+#[test]
+fn a_shipped_curated_rule_is_read_only_but_can_be_turned_on_or_off() {
+    let entry = &crate::curated::entries()[0];
+    let rule = entry.rule();
+    assert_eq!(read_only_reason(&rule), Some(CURATED_DEFAULT_REASON));
+    assert!(toggleable(&rule));
+    assert!(!deletable(&rule));
+    let wire = crate::rule_wire::rule_to_wire(&rule);
+    assert_eq!(wire["toggleable"], true);
+    assert_eq!(wire["deletable"], false);
+    // Edited outside Snitchwatch: the reserved-name reason, no toggle.
+    let mut reshaped = rule.clone();
+    reshaped.precedence = true;
+    let mut other_port = rule;
+    other_port.operator.as_mut().unwrap().list[2].data = "8443".into();
+    for edited in [reshaped, other_port] {
+        assert_eq!(read_only_reason(&edited), Some(CURATED_MANAGED_REASON));
+        assert!(!toggleable(&edited));
+    }
+}
+
+#[test]
+fn only_editable_and_shipped_curated_rules_are_toggleable() {
+    let editable = daemon_rule("899-ok", Some(op("simple", "dest.host", "example.com")));
+    assert!(toggleable(&editable));
+    assert_eq!(
+        crate::rule_wire::rule_to_wire(&editable)["toggleable"],
+        true
+    );
+    for locked in [
+        daemon_rule("a/b", Some(op("simple", "dest.host", "example.com"))),
+        daemon_rule(
+            "z00-blocklist:ads:domains",
+            Some(op("simple", "dest.host", "example.com")),
+        ),
+        daemon_rule(
+            crate::rule_name::PACKAGED_FETCH_RULE_NAME,
+            Some(op("simple", "dest.host", "example.com")),
+        ),
+    ] {
+        assert!(!toggleable(&locked), "{}", locked.name);
+        assert_eq!(crate::rule_wire::rule_to_wire(&locked)["toggleable"], false);
+    }
 }
 
 /// Re-review: Go's `IPNet.Contains` reads an IPv4-mapped network as IPv4

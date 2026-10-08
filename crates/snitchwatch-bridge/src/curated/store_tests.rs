@@ -16,7 +16,7 @@ fn chosen() -> Choices {
         .enable("flatpak-flathub")
         .enable("chronyc-local")
         .installed("flatpak-flathub", &flatpak.rule())
-        .enable("systemd-resolved-dns")
+        .enable("networkmanager-connectivity-check")
 }
 
 #[test]

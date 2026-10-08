@@ -3,11 +3,13 @@
 
 use crate::busy::BusyNames;
 use snitchwatch_bridge::cache::rules::{RulesCache, SharedRulesCache};
+use snitchwatch_bridge::curated::{requested_toggle, toggleable};
 use snitchwatch_bridge::daemon_commands::{DaemonCommands, DaemonTransport};
 use snitchwatch_bridge::rule_io::only_enabled_differs;
+use snitchwatch_bridge::rule_name::is_reserved_curated_name;
 use snitchwatch_bridge::rule_policy::{
     check_wire_rule, enable_problems, read_only_reason, validate_user_rule, PolicyProfile,
-    RuleProblem,
+    RuleProblem, CURATED_MANAGED_REASON,
 };
 use snitchwatch_bridge::translator::rule_notification::notification_for_effect;
 use snitchwatch_bridge::translator::upstream::UpstreamEffect;
@@ -39,6 +41,9 @@ pub(super) enum Command {
 pub(super) enum Plan {
     /// A toggle or a delete: one command.
     Send(Notification),
+    /// A toggle of a recommended background-service rule: the bridge sends
+    /// the data file's rule (`DaemonCommands::send_curated_toggle`).
+    ToggleCurated { name: String, enabled: bool },
     /// A new rule; its name stays busy until the daemon answers.
     Add { change: Notification, name: String },
     /// A change under the same name, restored if the daemon drops its file.
@@ -112,6 +117,9 @@ fn plan_update(
     busy: &BusyNames,
 ) -> Result<Plan, Refusal> {
     let cache = lock(rules);
+    if is_reserved_curated_name(rule_id) {
+        return plan_curated_toggle(&cache, rule_id, rule, busy);
+    }
     let old = changeable(&cache, rule_id, busy)?;
     let effect = UpstreamEffect::UpdateRule {
         rule_id: rule_id.to_string(),
@@ -139,6 +147,35 @@ fn plan_update(
     }
     stamp_created(&mut change, Some(&old));
     Ok(Plan::Edit { change, old })
+}
+
+/// A rule under the curated prefix may only be turned on or off, and only
+/// while it is a shipped entry's own rule (plan item 13). The GUI's rule
+/// says which way; the bridge sends the data file's.
+fn plan_curated_toggle(
+    cache: &RulesCache,
+    rule_id: &str,
+    rule: &serde_json::Value,
+    busy: &BusyNames,
+) -> Result<Plan, Refusal> {
+    let rules = cache.rules().ok_or_else(|| refusal("rule", NOT_LOADED))?;
+    let old = rules
+        .get(rule_id)
+        .ok_or_else(|| refusal("rule", NOT_FOUND))?;
+    let reason = read_only_reason(old).unwrap_or(CURATED_MANAGED_REASON);
+    let enabled = requested_toggle(old, rule)
+        .filter(|_| toggleable(old))
+        .ok_or_else(|| refusal("rule", reason))?;
+    if busy.contains(rule_id) {
+        return Err(refusal("name", BUSY));
+    }
+    if enabled && !old.enabled {
+        may_turn_on(old)?;
+    }
+    Ok(Plan::ToggleCurated {
+        name: rule_id.to_string(),
+        enabled,
+    })
 }
 
 /// Turning a rule on (re-review M2): not when it would match everything,

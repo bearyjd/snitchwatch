@@ -5,9 +5,9 @@
 //! The list is data, `data/curated-defaults-v1.json`, reviewed and built
 //! into the bridge. Each entry lets one program, named by its exact
 //! absolute path under `/usr`, reach the narrowest destination the
-//! bazzite-tower capture supports: one host (or this computer only, or,
-//! for the DNS resolver, any server), one port, one protocol over both IP
-//! versions. Each says in plain text why it is there.
+//! bazzite-tower capture supports: one host or this computer only (never
+//! any address), one port, one protocol over both IP versions. Each says
+//! in plain text why it is there.
 //!
 //! Nothing is on by default. The user turns entries on (`store`), and
 //! `reconcile` installs them under the reserved `snitchwatch-default-`
@@ -72,7 +72,7 @@ pub struct CuratedEntry {
     pub id: String,
     /// The program's exact absolute path, under `/usr`.
     pub path: String,
-    /// The one host it may reach; `None` with `loopback` false means any.
+    /// The one host it may reach. Exactly one of `host` and `loopback`.
     #[serde(default)]
     pub host: Option<String>,
     /// Only this computer (127.0.0.1 and ::1).
@@ -103,6 +103,23 @@ pub fn entries() -> &'static [CuratedEntry] {
             Vec::new()
         })
     })
+}
+
+/// Whether a GUI may turn the daemon's `rule` on or off: an entry's rule
+/// exactly as the data file builds it, apart from `enabled`. A copy edited
+/// outside Snitchwatch, or a rule squatting on the prefix, is left alone.
+pub fn toggleable(rule: &Rule) -> bool {
+    entry_for_rule_name(&rule.name)
+        .is_some_and(|entry| reconcile::same_ignoring_enabled(&entry.rule(), rule))
+}
+
+/// The `enabled` a GUI's wire rule asks for, if it is `current` apart from
+/// `enabled` (same name, same everything else); `None` otherwise.
+pub fn requested_toggle(current: &Rule, wire: &serde_json::Value) -> Option<bool> {
+    let wanted = crate::rule_wire::rule_from_wire(wire).ok()?;
+    let pure =
+        wanted.name == current.name && crate::rule_io::only_enabled_differs(current, &wanted);
+    pure.then_some(wanted.enabled)
 }
 
 /// The entry whose rule is called `name`.
@@ -165,10 +182,9 @@ impl CuratedEntry {
 
     /// Exactly what the rule allows, in plain text.
     pub fn allows(&self) -> String {
-        let to = match (&self.host, self.loopback) {
-            (Some(host), _) => host.clone(),
-            (None, true) => "this computer only (127.0.0.1 and ::1)".to_string(),
-            (None, false) => "any address".to_string(),
+        let to = match &self.host {
+            Some(host) => host.clone(),
+            None => "this computer only (127.0.0.1 and ::1)".to_string(),
         };
         format!(
             "{} may connect to {to} on {} port {}, over IPv4 and IPv6.",
@@ -188,8 +204,8 @@ impl CuratedEntry {
         if self.host.as_deref().is_some_and(|host| !valid_host(host)) {
             return Err("an entry's host isn't one plain host name".into());
         }
-        if self.host.is_some() && self.loopback {
-            return Err("an entry names a host and this computer".into());
+        if self.host.is_some() == self.loopback {
+            return Err("an entry names neither or both of a host and this computer".into());
         }
         if self.port == 0 {
             return Err("an entry has no port".into());
@@ -252,8 +268,7 @@ fn plain_text(text: &str) -> bool {
 /// The curated-specific allowlist. A rule under the reserved prefix is sent
 /// only if it is an `always`, non-precedence `allow` with our description,
 /// whose conditions are exactly: an exact `/usr` program path (case
-/// sensitive); at most one of one plain host or this computer; one port;
-/// one transport. It must also pass the rule editor's policy checks.
+/// sensitive); one plain host or this computer; one port; one transport. It must also pass the rule editor's policy checks.
 pub fn check_curated_rule(rule: &Rule) -> Result<(), String> {
     let id = rule
         .name
@@ -291,14 +306,15 @@ fn check_leaves(leaves: &[Operator]) -> Result<(), String> {
                 && usr_program(&op.data) => {}
         _ => return Err("the first condition isn't an exact /usr program path".into()),
     }
-    if let Some(op) = rest.next_if(|op| op.operand == "dest.host") {
-        if !(op.r#type == "simple" && !op.sensitive && valid_host(&op.data)) {
-            return Err("the host condition isn't one plain host name".into());
-        }
-    } else if let Some(op) = rest.next_if(|op| op.operand == "dest.ip") {
-        if !(op.r#type == "regexp" && op.data == LOOPBACK_PATTERN) {
-            return Err("the address condition isn't this computer".into());
-        }
+    match rest.next() {
+        Some(op)
+            if op.operand == "dest.host"
+                && op.r#type == "simple"
+                && !op.sensitive
+                && valid_host(&op.data) => {}
+        Some(op)
+            if op.operand == "dest.ip" && op.r#type == "regexp" && op.data == LOOPBACK_PATTERN => {}
+        _ => return Err("the destination isn't one plain host name or this computer".into()),
     }
     match rest.next() {
         Some(op)

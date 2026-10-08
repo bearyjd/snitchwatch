@@ -18,7 +18,6 @@ fn the_data_file_parses_and_offers_the_reviewed_entries() {
         ids,
         [
             "networkmanager-connectivity-check",
-            "systemd-resolved-dns",
             "chronyc-local",
             "flatpak-flathub"
         ]
@@ -64,7 +63,6 @@ fn each_entry_says_exactly_what_it_allows() {
         allows,
         [
             "/usr/bin/NetworkManager may connect to fedoraproject.org on TCP port 80, over IPv4 and IPv6.",
-            "/usr/lib/systemd/systemd-resolved may connect to any address on UDP port 53, over IPv4 and IPv6.",
             "/usr/bin/chronyc may connect to this computer only (127.0.0.1 and ::1) on UDP port 323, over IPv4 and IPv6.",
             "/usr/bin/flatpak may connect to dl.flathub.org on TCP port 443, over IPv4 and IPv6.",
         ]
@@ -106,6 +104,11 @@ fn the_allowlist_takes_only_the_exact_curated_shape() {
         op.data = r"\.flathub\.org$".into();
     })
     .is_err());
+    // A destination: one host or this computer, never any address.
+    assert!(changed(&|rule| {
+        rule.operator.as_mut().unwrap().list.remove(1);
+    })
+    .is_err());
     // The port and the transport.
     assert!(leaf_at(2, &|op| op.data = "0".into()).is_err());
     assert!(leaf_at(2, &|op| op.data = "1-65535".into()).is_err());
@@ -130,20 +133,46 @@ fn a_bad_entry_is_refused() {
             r#"{{"id": "x", "path": "{path}", "port": 443, "protocol": "tcp", "why": "w", "evidence": "e"{rest}}}"#
         )
     };
-    assert!(parse(&file(&entry("/usr/bin/flatpak", ""))).is_ok());
+    let host = r#", "host": "a.org""#;
+    assert!(parse(&file(&entry("/usr/bin/flatpak", host))).is_ok());
+    assert!(parse(&file(&entry("/usr/bin/flatpak", r#", "loopback": true"#))).is_ok());
     for bad in [
-        entry("/home/u/bin/flatpak", ""),
-        entry("/opt/x/flatpak", ""),
-        entry("/usr/bin/./flatpak", ""),
+        entry("/home/u/bin/flatpak", host),
+        entry("/opt/x/flatpak", host),
+        entry("/usr/bin/./flatpak", host),
+        // No destination: any address is never offered in v1 (S3).
+        entry("/usr/bin/flatpak", ""),
         entry("/usr/bin/flatpak", r#", "host": "*.flathub.org""#),
         entry("/usr/bin/flatpak", r#", "host": "10.0.2.3""#),
         entry("/usr/bin/flatpak", r#", "host": "a.org", "loopback": true"#),
-        entry("/usr/bin/flatpak", r#", "pathRegexp": ".*""#),
-        entry("/usr/bin/flatpak", r#", "why": "<b>x</b>""#),
+        entry(
+            "/usr/bin/flatpak",
+            r#", "host": "a.org", "pathRegexp": ".*""#,
+        ),
+        entry("/usr/bin/flatpak", host).replace(r#""why": "w""#, r#""why": "<b>x</b>""#),
     ] {
         assert!(parse(&file(&bad)).is_err(), "{bad}");
     }
-    let twice = format!("{}, {}", entry("/usr/bin/a", ""), entry("/usr/bin/b", ""));
+    let twice = format!(
+        "{}, {}",
+        entry("/usr/bin/a", host),
+        entry("/usr/bin/b", host)
+    );
     assert!(parse(&file(&twice)).is_err(), "duplicate ids");
     assert!(parse(r#"{"version": 2, "entries": []}"#).is_err());
+}
+
+#[test]
+fn a_requested_toggle_is_only_a_change_of_enabled() {
+    let current = flatpak().rule();
+    let mut wire = crate::rule_wire::rule_to_wire(&current);
+    wire["enabled"] = false.into();
+    assert_eq!(requested_toggle(&current, &wire), Some(false));
+    let mut renamed = wire.clone();
+    renamed["name"] = "my-flatpak".into();
+    assert_eq!(requested_toggle(&current, &renamed), None);
+    let mut wider = wire.clone();
+    wider["operator"]["operands"][1]["data"] = "example.org".into();
+    assert_eq!(requested_toggle(&current, &wider), None);
+    assert_eq!(requested_toggle(&current, &serde_json::json!({})), None);
 }

@@ -131,10 +131,16 @@ async fn nothing_is_sent_until_the_user_turns_an_entry_on() {
     let curated = harness.curated();
     curated.reconcile().await;
     assert!(harness.seen().is_empty());
-    let ServerMessage::SetCuratedDefaults { entries, storage } = curated.message() else {
+    let ServerMessage::SetCuratedDefaults {
+        entries,
+        storage,
+        unavailable,
+    } = curated.message()
+    else {
         unreachable!()
     };
     assert!(storage.persistent);
+    assert_eq!(unavailable, None);
     assert!(entries
         .iter()
         .all(|e| !e.on && e.status == EntryStatus::Off));
@@ -238,4 +244,32 @@ async fn nothing_happens_while_the_daemons_rules_are_unknown() {
     curated.reconcile().await;
     assert!(harness.seen().is_empty());
     assert_eq!(entry_state(&curated, FLATPAK).status, EntryStatus::Waiting);
+}
+
+/// The per-user bridge, or one without saved settings (a deletion couldn't
+/// be remembered): nothing is installed or removed, and the GUI says why.
+#[tokio::test]
+async fn an_unavailable_bridge_changes_nothing_and_says_why() {
+    let harness = Harness::new().connect(Daemon::Accept, vec![flatpak_rule()]);
+    let curated = harness.curated();
+    curated.set_unavailable("Needs the system service.");
+    turn(&curated, FLATPAK, true);
+    curated.reconcile().await;
+    turn(&curated, FLATPAK, false);
+    curated.reconcile().await;
+    assert!(harness.seen().is_empty());
+    let ServerMessage::SetCuratedDefaults {
+        entries,
+        unavailable,
+        ..
+    } = curated.message()
+    else {
+        unreachable!()
+    };
+    assert_eq!(unavailable.as_deref(), Some("Needs the system service."));
+    assert!(entries.iter().all(|e| !e.on), "the choice wasn't taken");
+    assert!(
+        store::load(&harness.file).unwrap().is_none(),
+        "nothing saved"
+    );
 }

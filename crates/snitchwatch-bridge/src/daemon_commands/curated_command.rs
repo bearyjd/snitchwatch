@@ -12,6 +12,9 @@
 //! };
 //! ```
 //!
+//! A GUI may only turn a shipped entry's rule on or off
+//! ([`DaemonCommands::send_curated_toggle`]), never add, edit or delete one.
+//!
 //! [`check`](CuratedCommand::check) re-validates at the send point: a
 //! `CHANGE_RULE` carries exactly one rule that passes
 //! `curated::check_curated_rule` (the curated-specific allowlist plus the
@@ -20,7 +23,7 @@
 use snitchwatch_proto::protocol::{Action, Notification, Rule};
 
 use super::{DaemonCommands, PendingReply, SendError};
-use crate::curated::{check_curated_rule, valid_id, CuratedEntry};
+use crate::curated::{check_curated_rule, entry_for_rule_name, toggleable, valid_id, CuratedEntry};
 use crate::rule_name::{validate_rule_name, CURATED_DEFAULT_RULE_NAME_PREFIX};
 
 /// A curated rule command built by the bridge itself.
@@ -35,12 +38,19 @@ impl CuratedCommand {
         Self::change(entry.rule())
     }
 
-    /// `CHANGE_RULE` turning a curated rule on or off: `wanted` must be the
-    /// daemon's `current` rule apart from `enabled`. Anything else, `None`.
-    pub(crate) fn toggle(current: &Rule, wanted: &Rule) -> Option<Self> {
-        let pure_toggle = current.name == wanted.name
-            && crate::curated::reconcile::same_ignoring_enabled(current, wanted);
-        (pure_toggle && check_curated_rule(wanted).is_ok()).then(|| Self::change(wanted.clone()))
+    /// `CHANGE_RULE` turning the daemon's rule `current` on or off: the data
+    /// file's rule, with `current`'s `created`. `None` unless `current` is
+    /// [`toggleable`] (that same rule apart from `enabled`).
+    pub(crate) fn toggle(current: &Rule, enabled: bool) -> Option<Self> {
+        if !toggleable(current) {
+            return None;
+        }
+        let entry = entry_for_rule_name(&current.name)?;
+        Some(Self::change(Rule {
+            enabled,
+            created: current.created,
+            ..entry.rule()
+        }))
     }
 
     fn change(rule: Rule) -> Self {
@@ -108,12 +118,34 @@ impl DaemonCommands {
         command.check()?;
         self.dispatch(command.notification)
     }
+
+    /// A GUI's pure toggle of the curated rule `name` (plan item 13): the
+    /// data file's rule, sent only while the daemon's cached copy is that
+    /// rule apart from `enabled`. The GUI supplies nothing else, so it can't
+    /// add, widen or keep alive any other rule under the prefix. [`SendError::ReservedName`] unless the cached rule is
+    /// [`toggleable`].
+    pub fn send_curated_toggle(
+        &self,
+        name: &str,
+        enabled: bool,
+    ) -> Result<PendingReply, SendError> {
+        let command = {
+            let cache = self.rules.cache();
+            let cache = cache.lock().unwrap_or_else(|e| e.into_inner());
+            cache
+                .rules()
+                .and_then(|rules| rules.get(name))
+                .and_then(|current| CuratedCommand::toggle(current, enabled))
+        };
+        self.send_curated(command.ok_or(SendError::ReservedName)?)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::curated::entries;
+    use crate::daemon_commands::{DaemonTransport, StreamRegistration};
 
     fn flatpak() -> &'static CuratedEntry {
         entries()
@@ -146,22 +178,86 @@ mod tests {
     }
 
     #[test]
-    fn a_toggle_is_only_a_change_of_enabled() {
+    fn a_toggle_changes_only_enabled_of_a_shipped_entrys_rule() {
         let current = flatpak().rule();
-        let off = Rule {
-            enabled: false,
+        let toggle = CuratedCommand::toggle(&current, false).unwrap();
+        assert_eq!(toggle.check(), Ok(()));
+        assert_eq!(
+            toggle.rule(),
+            Some(&Rule {
+                enabled: false,
+                ..current.clone()
+            })
+        );
+        // Under the prefix but not in the data file: a squatter.
+        let squatter = Rule {
+            name: "snitchwatch-default-squatter".into(),
             ..current.clone()
         };
-        let toggle = CuratedCommand::toggle(&current, &off).unwrap();
-        assert_eq!(toggle.check(), Ok(()));
-        assert!(!toggle.rule().unwrap().enabled);
-        let mut wider = off.clone();
-        wider.operator.as_mut().unwrap().list.remove(1);
-        assert!(CuratedCommand::toggle(&current, &wider).is_none());
-        let deny = Rule {
-            action: "deny".into(),
-            ..off
+        assert!(CuratedCommand::toggle(&squatter, true).is_none());
+        // Edited outside Snitchwatch, even within the curated shape: left
+        // alone, so a toggle only ever sends a rule from the data file.
+        let mut reshaped = current.clone();
+        reshaped.operator.as_mut().unwrap().list.remove(1);
+        assert!(CuratedCommand::toggle(&reshaped, true).is_none());
+        let mut other_port = current;
+        other_port.operator.as_mut().unwrap().list[2].data = "8443".into();
+        assert!(check_curated_rule(&other_port).is_ok());
+        assert!(CuratedCommand::toggle(&other_port, true).is_none());
+    }
+
+    fn connected(
+        rules: Vec<Rule>,
+    ) -> (
+        DaemonCommands,
+        tokio::sync::mpsc::Receiver<Notification>,
+        StreamRegistration,
+    ) {
+        let sync = crate::cache::rules::RulesSync::new(tokio::sync::broadcast::channel(8).0);
+        let commands = DaemonCommands::new(DaemonTransport::Unix, sync.clone());
+        sync.stage(None, rules);
+        let (stream, rx) = commands.open_stream(None);
+        commands.on_reply(
+            stream.id(),
+            &snitchwatch_proto::protocol::NotificationReply {
+                id: 0,
+                code: snitchwatch_proto::protocol::NotificationReplyCode::Ok as i32,
+                data: String::new(),
+            },
+        );
+        (commands, rx, stream)
+    }
+
+    #[tokio::test]
+    async fn a_gui_toggle_sends_the_daemons_own_rule_with_only_enabled_changed() {
+        let mut daemons = flatpak().rule();
+        daemons.created = 1_700_000_000;
+        let squatter = Rule {
+            name: "snitchwatch-default-squatter".into(),
+            ..flatpak().rule()
         };
-        assert!(CuratedCommand::toggle(&current, &deny).is_none());
+        let (commands, mut rx, _stream) = connected(vec![daemons.clone(), squatter]);
+        let _reply = commands.send_curated_toggle(&daemons.name, false).unwrap();
+        let sent = rx.try_recv().unwrap();
+        assert_eq!(sent.r#type, Action::ChangeRule as i32);
+        assert_eq!(
+            sent.rules,
+            [Rule {
+                enabled: false,
+                ..daemons
+            }]
+        );
+        for name in [
+            "snitchwatch-default-squatter",
+            "snitchwatch-default-chronyc-local",
+            "user-rule",
+        ] {
+            assert_eq!(
+                commands.send_curated_toggle(name, true).err(),
+                Some(SendError::ReservedName),
+                "{name}"
+            );
+        }
+        assert!(rx.try_recv().is_err(), "nothing else sent");
     }
 }

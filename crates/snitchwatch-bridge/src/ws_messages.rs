@@ -153,6 +153,10 @@ pub enum ServerMessage {
     SetCuratedDefaults {
         entries: Vec<crate::curated::wire::CuratedDefaultSummary>,
         storage: StorageStatus,
+        /// Why this bridge never installs them (the per-user bridge, or no
+        /// saved settings); `None` when it does.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        unavailable: Option<String>,
     },
     SetConnectionsStatus {
         status: ConnectionsStatus,

@@ -40,6 +40,9 @@ pub enum CuratedAction {
 pub enum EntryStatus {
     /// The daemon's rule list isn't known yet: nothing is done.
     Waiting,
+    /// This bridge doesn't install recommended rules (see the message's
+    /// `unavailable`): nothing is done.
+    Unavailable,
     /// Not turned on, and not in the daemon.
     Off,
     /// Turned on; the rule is being installed.

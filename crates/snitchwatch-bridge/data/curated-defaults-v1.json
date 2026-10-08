@@ -11,14 +11,6 @@
       "evidence": "bazzite-tower r10: idle and after update, /usr/bin/NetworkManager to fedoraproject.org port 80 over tcp and tcp6"
     },
     {
-      "id": "systemd-resolved-dns",
-      "path": "/usr/lib/systemd/systemd-resolved",
-      "port": 53,
-      "protocol": "udp",
-      "why": "systemd-resolved looks up names for every program, using the DNS servers your network provides. Those servers change from network to network, so this allows any server, on the DNS port only. The other rules here need it.",
-      "evidence": "bazzite-tower r10: idle and after update, /usr/lib/systemd/systemd-resolved to the network's DNS server port 53 over udp"
-    },
-    {
       "id": "chronyc-local",
       "path": "/usr/bin/chronyc",
       "loopback": true,
