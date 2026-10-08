@@ -24,6 +24,8 @@
 use core::pin::Pin;
 use cxx_qt::Threading;
 use cxx_qt_lib::QString;
+
+use crate::bridge_runtime::{LinkState, LinkStatus};
 use snitchwatch_bridge::ws_messages::ServerMessage;
 
 #[cxx_qt::bridge]
@@ -42,6 +44,11 @@ pub mod qobject {
         #[qproperty(bool, ok)]
         /// Human-readable status line for the app-level `InlineMessage`.
         #[qproperty(QString, status_text, cxx_name = "statusText")]
+        /// Which fixed sentence the app-level banner shows: `connecting`,
+        /// `connected`, `retrying`, `failed` or `stopped`
+        /// (`bridge_runtime::LinkState::token`). The banner reads this, never
+        /// `statusText`, which carries error text.
+        #[qproperty(QString, link_state, cxx_name = "linkState")]
         type BridgeFeed = super::BridgeFeedRust;
 
         /// Refresh `ok` / `statusText` from the bridge runtime's current state.
@@ -109,20 +116,43 @@ pub mod qobject {
 }
 
 /// Rust-side state for [`qobject::BridgeFeed`].
-#[derive(Default)]
 pub struct BridgeFeedRust {
     ok: bool,
     status_text: QString,
+    link_state: QString,
+}
+
+impl Default for BridgeFeedRust {
+    fn default() -> Self {
+        Self {
+            ok: false,
+            status_text: QString::default(),
+            link_state: QString::from(LinkState::Connecting.token()),
+        }
+    }
+}
+
+/// What `BridgeFeed` publishes for the runtime's link status: `ok`,
+/// `statusText` and `linkState`. Before the runtime exists the shell is just
+/// starting.
+fn published(link: Option<LinkStatus>) -> (bool, String, &'static str) {
+    let link = link.unwrap_or(LinkStatus {
+        state: LinkState::Connecting,
+        detail: "Bridge not started".to_string(),
+    });
+    (
+        link.state == LinkState::Connected,
+        link.detail,
+        link.state.token(),
+    )
 }
 
 impl qobject::BridgeFeed {
     fn refresh(mut self: Pin<&mut Self>) {
-        let (ok, msg) = match crate::bridge_runtime::status() {
-            Some(status) => status,
-            None => (false, "Bridge not started".to_string()),
-        };
+        let (ok, detail, state) = published(crate::bridge_runtime::link_status());
         self.as_mut().set_ok(ok);
-        self.as_mut().set_status_text(QString::from(&msg));
+        self.as_mut().set_status_text(QString::from(&detail));
+        self.as_mut().set_link_state(QString::from(state));
     }
 
     fn app_bound_rules_for(&self, row_id: &QString) -> bool {
@@ -331,5 +361,37 @@ mod tests {
             verdict_not_remembered_row(2, &ServerMessage::ClearConnectionRows),
             None
         );
+    }
+
+    fn link(state: LinkState) -> Option<LinkStatus> {
+        Some(LinkStatus {
+            state,
+            detail: "Bridge unavailable: <b>x</b>".to_string(),
+        })
+    }
+
+    #[test]
+    fn every_link_state_is_published_with_its_own_token_and_only_connected_is_ok() {
+        for (state, ok, token) in [
+            (LinkState::Connecting, false, "connecting"),
+            (LinkState::Connected, true, "connected"),
+            (LinkState::Retrying, false, "retrying"),
+            (LinkState::Failed, false, "failed"),
+            (LinkState::Stopped, false, "stopped"),
+        ] {
+            let (published_ok, detail, published_token) = published(link(state));
+            assert_eq!(published_ok, ok, "{state:?}");
+            assert_eq!(published_token, token, "{state:?}");
+            // The message is carried through untouched, to be shown.
+            assert_eq!(detail, "Bridge unavailable: <b>x</b>");
+        }
+    }
+
+    #[test]
+    fn before_the_runtime_starts_the_shell_is_connecting() {
+        let (ok, detail, token) = published(None);
+        assert!(!ok);
+        assert_eq!(token, "connecting");
+        assert_eq!(detail, "Bridge not started");
     }
 }

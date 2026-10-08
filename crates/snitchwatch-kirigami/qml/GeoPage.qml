@@ -22,14 +22,28 @@ Kirigami.ScrollablePage {
     // Injected by the caller (main.qml) so the model's lifetime is owned there.
     property GeoModel model
 
-    Kirigami.PlaceholderMessage {
+    ColumnLayout {
         anchors.centerIn: parent
         width: parent.width - (Kirigami.Units.largeSpacing * 4)
         visible: page.model && !page.model.dbAvailable
-        icon.name: "map-globe"
-        text: "No GeoIP database installed"
-        explanation: "Place a GeoLite2-Country.mmdb file at:\n" + (page.model ? page.model.dbPath : "")
-                     + "\n\nLocal-network traffic still appears below; public destinations show as “Unknown” until a database is installed. Snitchwatch never downloads one automatically."
+        spacing: Kirigami.Units.largeSpacing
+
+        Kirigami.PlaceholderMessage {
+            Layout.fillWidth: true
+            icon.name: "map-globe"
+            text: "No GeoIP database installed"
+            explanation: "Place a GeoLite2-Country.mmdb file at the path shown here. Local-network traffic still appears in the list; public destinations show as “Unknown” until a database is installed. Snitchwatch never downloads one automatically."
+        }
+        // A host path, so it sits in a PlainText label, not in the
+        // PlaceholderMessage's explanation, which renders markup (issue #51).
+        Controls.Label {
+            objectName: "geoDatabasePath"
+            Layout.fillWidth: true
+            horizontalAlignment: Text.AlignHCenter
+            wrapMode: Text.WrapAnywhere
+            textFormat: Text.PlainText
+            text: page.model ? page.model.dbPath : ""
+        }
     }
 
     Kirigami.PlaceholderMessage {
@@ -77,6 +91,8 @@ Kirigami.ScrollablePage {
                     }
 
                     Controls.Label {
+                        // From the GeoIP database file on disk (issue #51).
+                        textFormat: Text.PlainText
                         text: row.countryName
                         elide: Text.ElideRight
                         Layout.fillWidth: true

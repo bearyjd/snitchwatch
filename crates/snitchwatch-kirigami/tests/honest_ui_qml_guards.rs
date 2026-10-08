@@ -556,15 +556,10 @@ fn pending_decision_sheet_labels_showing_remote_data_are_plain_text() {
 /// markup, so an escaped `&lt;b&gt;` shows up literally. Data therefore never
 /// goes into an InlineMessage — only string literals joined by `+` do.
 ///
-/// Scope: the pages this branch edited (the decision prompt, Connections,
-/// Blocklists, Profiles, Rules). Not yet covered (issue #51 follow-up):
-/// `main.qml`'s three window banners (`bridgeFeed.statusText`, which carries
-/// the bridge runtime's own error message; `daemonHealthModel.statusSummary`;
-/// the pending-age count), `DaemonHealthPage.qml` (`statusSummary`),
-/// `DiagnosticsPage.qml` (`coexistenceDetail`) and `ScannerPage.qml`
-/// (`errorText`, which includes the scanner's stderr and binary path). Most
-/// are built from local checks, but `statusText` and `errorText` embed
-/// externally produced text, so they need the same Label treatment.
+/// Scope: the decision prompt, Connections, Blocklists, Profiles and Rules.
+/// `honest_ui_external_text_guards.rs` keeps the external text on `main.qml`
+/// and the diagnostics pages out of InlineMessages; the banners left there
+/// (`statusSummary`, the pending-age count) show only text built locally.
 #[test]
 fn inline_messages_carry_only_fixed_text() {
     let mut checked = 0;
