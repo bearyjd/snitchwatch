@@ -117,7 +117,7 @@ SizedOverlaySheet {
             wrapMode: Text.Wrap
             opacity: 0.7
             font: Kirigami.Theme.smallFont
-            text: "Regular expressions are matched the way opensnitchd's Go engine (RE2) does, as closely as this simulator can. A pattern it can't read, such as a character class with a literal dash, an escaped character other than \\d \\w \\s, or non-ASCII text, is reported as not simulated."
+            text: "Regular expressions are matched the way opensnitchd's Go engine (RE2) does, as closely as this simulator can. A pattern it can't read is reported as not simulated. Inside [...], only these are simulated: a leading ^, ASCII letters and digits, ranges between two of them (a-z, 0-9), single punctuation marks other than \\ [ ] ^ and -, \\d \\w \\s and their capitals, and POSIX classes such as [:alpha:]. Anything else in a class, such as a dash outside a range, an escaped punctuation mark like \\., a space or non-ASCII text, is reported as not simulated."
         }
 
         Kirigami.FormLayout {

@@ -6,8 +6,10 @@
 //! answers it or reported as not simulated — never the other definite
 //! answer.** Each row is `(pattern, subject, Go's answer, whether the
 //! simulator models the pattern)`; the Go answers are worked out from Go's
-//! `regexp/syntax` grammar by hand, and patterns are matched sensitively so
-//! `Compile` doesn't lowercase them.
+//! `regexp/syntax` grammar by hand. Patterns are matched sensitively, so
+//! `Compile` doesn't lowercase them; only the second table in
+//! `case_folding_answers_like_go` turns that off, to cover the operator's
+//! non-sensitive mode.
 //!
 //! Every adversarial pattern from the review rounds is here, and so are the
 //! common forms that stay simulated.
@@ -225,6 +227,7 @@ fn every_other_class_form_is_not_simulated() {
         ("^[\\w.-]+$", "a-b", true, false),
         ("^[a-z0-9.-]+$", "a-b.c", true, false),
         ("^[ \\t]$", " ", true, false),
+        ("^[ ]$", " ", true, false),
         ("^[a-]$", "-", true, false),
         ("^[-a]$", "-", true, false),
         ("^[]a]$", "]", true, false),
