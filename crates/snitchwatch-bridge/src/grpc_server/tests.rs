@@ -379,7 +379,15 @@ async fn persistent_allow_verdict_broadcasts_rule_for_live_clients() {
             assert_eq!(rules[0]["name"], rule.name);
             assert_eq!(rules[0]["action"], "allow");
             assert_eq!(rules[0]["duration"], "always");
-            assert_eq!(rules[0]["operator"]["operand"], "dest.host");
+            // Issue #44: the remembered "This host" rule is bound to the
+            // asking program, end to end through the wire shape.
+            let operator = &rules[0]["operator"];
+            assert_eq!(operator["type"], "list");
+            assert_eq!(operator["operands"][0]["operand"], "process.path");
+            assert_eq!(operator["operands"][0]["data"], "/usr/bin/curl");
+            assert_eq!(operator["operands"][1]["operand"], "dest.host");
+            assert_eq!(operator["operands"][1]["data"], "example.com");
+            assert!(rule.name.contains("-pcurl-"), "got: {}", rule.name);
         }
         other => panic!("expected UpdateRules, got {other:?}"),
     }
@@ -766,6 +774,39 @@ async fn second_deny_within_ttl_supersedes_first_blocks_revert_timer() {
     tokio::time::advance(RECENT_BLOCK_TTL).await;
     tray_rx.changed().await.unwrap();
     assert_eq!(*tray_rx.borrow(), TrayState::Idle);
+}
+
+#[test]
+fn process_bound_verdict_rule_survives_the_wire_round_trip() {
+    // Issue #44: toggling a rule in the GUI sends its wire shape back through
+    // `rule_from_wire` as a CHANGE_RULE, which the daemon applies wholesale —
+    // so the process binding must come back intact, case sensitivity included.
+    let conn = Connection {
+        protocol: "tcp".into(),
+        dst_host: "example.com".into(),
+        dst_ip: "93.184.216.34".into(),
+        dst_port: 443,
+        process_path: "/usr/bin/curl".into(),
+        ..Default::default()
+    };
+    let rule = crate::translator::verdict::verdict_to_rule(
+        Verdict::Allow,
+        VerdictDuration::Always,
+        VerdictScope::ThisHost,
+        &conn,
+        0,
+    );
+    let back = rule_from_wire(&rule_to_wire(&rule)).unwrap();
+    assert_eq!(back.name, rule.name);
+    let op = back.operator.unwrap();
+    assert_eq!(op.r#type, "list");
+    assert_eq!(op.list.len(), 2, "{op:?}");
+    let (process, host) = (&op.list[0], &op.list[1]);
+    assert_eq!(process.operand, "process.path");
+    assert_eq!(process.data, "/usr/bin/curl");
+    assert!(process.sensitive);
+    assert_eq!(host.operand, "dest.host");
+    assert_eq!(host.data, "example.com");
 }
 
 #[tokio::test]

@@ -290,12 +290,6 @@ pub fn validate_rule_shape(rule: &Rule) -> Result<(), MockError> {
 /// `Regexp`, `Complex`, `List`, `Network`, `Lists`).
 const KNOWN_OPERATOR_TYPES: &[&str] = &["simple", "regexp", "complex", "list", "network", "lists"];
 
-/// Mirrors `Operator.Compile()` (operator.go:109-214) for the subset this
-/// bridge actually emits (`simple`/`regexp` — see `translator::verdict`).
-/// Not a full port: `network`/`lists` compilation depends on daemon-local
-/// state (alias cache, loaded blocklists) this mock has no access to, and
-/// this bridge never emits those types for an `AskRule` reply, so they're
-/// only checked for a known type, not fully compiled.
 /// The `operator.operand` vocabulary the daemon recognizes
 /// (`vendor/opensnitch/daemon/rule/operator.go`'s `Operand` consts,
 /// lines 31-56). `process.env.` is a *prefix* (`OpProcessEnvPrefix`), not an
@@ -333,6 +327,14 @@ fn is_known_operand(operand: &str) -> bool {
     KNOWN_OPERANDS.contains(&operand) || operand.starts_with("process.env.")
 }
 
+/// Mirrors `Operator.Compile()` (operator.go:109-214) for the subset this
+/// bridge actually emits (`simple`/`regexp`, and since issue #44 a `list`
+/// of those — see `translator::verdict`).
+/// Not a full port: `network`/`lists` compilation depends on daemon-local
+/// state (alias cache, loaded blocklists) this mock has no access to, and
+/// this bridge never emits those types for an `AskRule` reply, so they're
+/// only checked for a known type, not fully compiled.
+///
 /// Issue #14 security review round 2, LOW: `Operator.Compile()`
 /// (`operator.go:109-214`) doesn't actually validate `Operand` against this
 /// vocabulary for every `Type` — for `Simple`, `Compile` sets its callback
@@ -354,7 +356,10 @@ fn validate_operator_compiles(op: &snitchwatch_proto::protocol::Operator) -> Res
             op.r#type
         )));
     }
-    if !is_known_operand(&op.operand) {
+    // `Compile` overwrites a list's operand with `OpList` (operator.go:154-155),
+    // so the daemon accepts any operand there — including the empty one the
+    // bridge's `operator_from_wire` produces for a GUI-toggled list rule.
+    if op.r#type != "list" && !is_known_operand(&op.operand) {
         return Err(MockError::InvalidRule(format!(
             "unknown operator operand: `{}`",
             op.operand
@@ -373,6 +378,22 @@ fn validate_operator_compiles(op: &snitchwatch_proto::protocol::Operator) -> Res
             return Err(MockError::InvalidRule(format!(
                 "operator.data does not compile as a regexp: {e}"
             )));
+        }
+    }
+
+    // `Match` dispatches on the operand (operator.go:340), not the type, so
+    // guard either spelling of a list.
+    if op.r#type == "list" || op.operand == "list" {
+        // loader.go:413-420 compiles every member of a `list`, and
+        // listMatch (operator.go:327-333) starts from `true`, so a list with
+        // no members would match every connection.
+        if op.list.is_empty() {
+            return Err(MockError::InvalidRule(
+                "list operator has no members".to_string(),
+            ));
+        }
+        for member in &op.list {
+            validate_operator_compiles(member)?;
         }
     }
 
@@ -549,6 +570,101 @@ mod tests {
         let op = rule.operator.as_mut().unwrap();
         op.r#type = "regexp".to_string();
         op.data = r"^(?:[^.]+\.)*example\.com$".to_string();
+        assert!(validate_rule_shape(&rule).is_ok());
+    }
+
+    // Issue #44: `ThisHost` / `AnyHostOnDomain` verdicts nest the host
+    // operator inside a `list`, so the canary must reach list members the
+    // way loader.go:413-420 compiles each of them.
+
+    fn list_member(
+        r#type: &str,
+        operand: &str,
+        data: &str,
+    ) -> snitchwatch_proto::protocol::Operator {
+        snitchwatch_proto::protocol::Operator {
+            r#type: r#type.to_string(),
+            operand: operand.to_string(),
+            data: data.to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn list_rule(members: Vec<snitchwatch_proto::protocol::Operator>) -> Rule {
+        let mut rule = valid_rule();
+        rule.operator = Some(snitchwatch_proto::protocol::Operator {
+            r#type: "list".to_string(),
+            operand: "list".to_string(),
+            list: members,
+            ..Default::default()
+        });
+        rule
+    }
+
+    #[test]
+    fn validate_rule_shape_accepts_a_process_bound_host_list() {
+        let rule = list_rule(vec![
+            list_member("simple", "process.path", "/usr/bin/curl"),
+            list_member("regexp", "dest.host", r"^(?:[^.]+\.)*example\.com$"),
+        ]);
+        assert!(validate_rule_shape(&rule).is_ok());
+    }
+
+    #[test]
+    fn validate_rule_shape_rejects_an_uncompilable_regexp_inside_a_list() {
+        let rule = list_rule(vec![
+            list_member("simple", "process.path", "/usr/bin/curl"),
+            list_member("regexp", "dest.host", "(unclosed"),
+        ]);
+        let err = validate_rule_shape(&rule).unwrap_err();
+        assert!(matches!(err, MockError::InvalidRule(msg) if msg.contains("does not compile")));
+    }
+
+    #[test]
+    fn validate_rule_shape_rejects_an_unknown_operand_inside_a_list() {
+        let rule = list_rule(vec![
+            list_member("simple", "process.path", "/usr/bin/curl"),
+            list_member("simple", "dest.hostname", "example.com"),
+        ]);
+        let err = validate_rule_shape(&rule).unwrap_err();
+        assert!(
+            matches!(err, MockError::InvalidRule(msg) if msg.contains("unknown operator operand"))
+        );
+    }
+
+    #[test]
+    fn validate_rule_shape_rejects_an_empty_list() {
+        // listMatch (operator.go:327-333) starts from `true`, so a list with
+        // no members would match every connection.
+        let err = validate_rule_shape(&list_rule(Vec::new())).unwrap_err();
+        assert!(matches!(err, MockError::InvalidRule(msg) if msg.contains("no members")));
+    }
+
+    #[test]
+    fn validate_rule_shape_rejects_a_list_operand_with_no_members_whatever_its_type() {
+        // `Match` dispatches on the *operand* (operator.go:340), so a
+        // memberless `operand: "list"` matches everything even when its
+        // `type` isn't "list".
+        let mut rule = valid_rule();
+        let op = rule.operator.as_mut().unwrap();
+        op.r#type = "simple".to_string();
+        op.operand = "list".to_string();
+        op.list = Vec::new();
+        let err = validate_rule_shape(&rule).unwrap_err();
+        assert!(matches!(err, MockError::InvalidRule(msg) if msg.contains("no members")));
+    }
+
+    #[test]
+    fn validate_rule_shape_accepts_a_list_with_an_empty_operand() {
+        // A GUI toggle sends the rule back through the bridge's
+        // `operator_from_wire`, which leaves a list's operand empty; the daemon
+        // accepts that because `Compile` overwrites a list's operand with
+        // `OpList` (operator.go:154-155). The mock must not be stricter here.
+        let mut rule = list_rule(vec![
+            list_member("simple", "process.path", "/usr/bin/curl"),
+            list_member("simple", "dest.host", "example.com"),
+        ]);
+        rule.operator.as_mut().unwrap().operand = String::new();
         assert!(validate_rule_shape(&rule).is_ok());
     }
 

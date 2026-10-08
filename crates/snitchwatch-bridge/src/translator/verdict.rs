@@ -9,8 +9,12 @@
 //! argument with no validation; `vendor/opensnitch/daemon/dns/track.go:47`
 //! takes DNS answer names straight from a hostile server). Every function in
 //! this module that touches `dst_host` must treat it as hostile input.
-//! `conn.process_path` is NOT in this class — it's daemon-attested from
-//! `/proc/<pid>/exe`.
+//! `conn.process_path` is NOT in this class — the daemon reports it, normally
+//! from `/proc/<pid>/exe`. It is not a verified program identity, though:
+//! it's the path as seen in the process's own mount namespace, and when
+//! `exe` can't be read the daemon falls back to the process-settable `comm`,
+//! argv\[0\], or a placeholder such as `Kernel connection`
+//! (`daemon/procmon/details.go`). Rules bound to it are as strong as that.
 //!
 //! The M0 spike taught us things about `Rule`:
 //!   - `created` is a unix-seconds int64.
@@ -92,8 +96,36 @@ fn sanitize_host_for_rule_name(raw: &str) -> String {
     // purely cosmetic (the daemon has no documented rule-name length
     // limit), not a security boundary.
     const MAX_BASE_LEN: usize = 48;
+    rule_name_component(raw, raw, "host", MAX_BASE_LEN)
+}
 
-    let cleaned: String = raw
+/// Issue #44: the program part of an app-bound rule's name. The readable
+/// part is the executable's basename; the digest covers the **full raw
+/// path**, so `/usr/bin/curl` and `/tmp/curl` never share a name.
+/// `process_path` comes from the daemon (see module doc), but any local
+/// user picks the names of their own binaries — and the daemon can fall back
+/// to a process-chosen name — so it gets the same `[A-Za-z0-9.-]`
+/// neutralization as a hostile host.
+fn sanitize_process_for_rule_name(process_path: &str) -> String {
+    const MAX_BASE_LEN: usize = 32;
+    let basename = match process_path.rfind('/') {
+        Some(slash) => &process_path[slash + 1..],
+        None => process_path,
+    };
+    rule_name_component(basename, process_path, "process", MAX_BASE_LEN)
+}
+
+/// `<display, neutralized and truncated>-<first 16 hex of SHA-256(identity)>`
+/// — the shared shape of every rule-name component. See
+/// [`sanitize_host_for_rule_name`] for why the digest of the raw identity
+/// is always appended (cleaning alone is many-to-one).
+fn rule_name_component(
+    display: &str,
+    identity: &str,
+    fallback: &str,
+    max_base_len: usize,
+) -> String {
+    let cleaned: String = display
         .chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || c == '.' || c == '-' {
@@ -109,14 +141,14 @@ fn sanitize_host_for_rule_name(raw: &str) -> String {
     // replaced with `_`), so byte-slicing at any length is safe — no
     // UTF-8 char-boundary panic risk.
     let base = if trimmed.is_empty() {
-        "host"
+        fallback
     } else {
-        &trimmed[..trimmed.len().min(MAX_BASE_LEN)]
+        &trimmed[..trimmed.len().min(max_base_len)]
     };
 
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
-    hasher.update(raw.as_bytes());
+    hasher.update(identity.as_bytes());
     let digest = hasher.finalize();
     let mut digest_hex = String::with_capacity(16);
     for byte in digest.iter().take(8) {
@@ -137,12 +169,25 @@ fn sanitize_host_for_rule_name(raw: &str) -> String {
 /// dst-ip substitution applied by the caller (both call sites do) — it is
 /// still hostile input (see module doc) and is sanitized via
 /// [`sanitize_host_for_rule_name`] before it becomes part of a filename.
-pub fn rule_name_for(verdict: Verdict, host: &str, port: u16) -> String {
-    format!(
+///
+/// `process_path` is the connection's raw `process_path` (empty when the
+/// daemon couldn't attribute one). Issue #44 binds rules to their program,
+/// so a non-empty path appends `-p<program component>`; an empty path
+/// yields exactly the pre-#44 host-only name.
+pub fn rule_name_for(verdict: Verdict, host: &str, port: u16, process_path: &str) -> String {
+    let host_name = format!(
         "snitchwatch-{}-{}-{port}",
         verdict_action_str(verdict),
         sanitize_host_for_rule_name(host)
-    )
+    );
+    if process_path.is_empty() {
+        host_name
+    } else {
+        format!(
+            "{host_name}-p{}",
+            sanitize_process_for_rule_name(process_path)
+        )
+    }
 }
 
 pub fn verdict_to_rule(
@@ -164,7 +209,7 @@ pub fn verdict_to_rule(
 
     Rule {
         created: now_secs,
-        name: rule_name_for(verdict, host, conn.dst_port as u16),
+        name: rule_name_for(verdict, host, conn.dst_port as u16, &conn.process_path),
         description: "snitchwatch interactive verdict".to_string(),
         enabled: true,
         precedence: false,
@@ -492,8 +537,8 @@ fn any_host_on_domain_operator_checked(conn: &Connection) -> (Operator, Option<S
 /// [`this_host_operator`] when the process path is unknown, rather than risk
 /// an operator that matches every connection from every process.
 ///
-/// `conn.process_path` is daemon-attested (`/proc/<pid>/exe`), NOT hostile
-/// input like `dst_host` — see module doc.
+/// `conn.process_path` is reported by the daemon, NOT hostile input like
+/// `dst_host` — see module doc for what it is and isn't.
 fn any_host_operator_checked(conn: &Connection) -> (Operator, Option<ScopeDegradation>) {
     if conn.process_path.is_empty() {
         tracing::warn!(
@@ -507,10 +552,18 @@ fn any_host_operator_checked(conn: &Connection) -> (Operator, Option<ScopeDegrad
             Some(ScopeDegradation::ProcessPathUnavailable),
         );
     }
-    (
-        simple_operator("process.path", conn.process_path.as_str()),
-        None,
-    )
+    (process_path_operator(conn), None)
+}
+
+/// Exact, **case-sensitive** match on the executable path. A non-sensitive
+/// simple operator compares with Unicode case folding (`strings.EqualFold`,
+/// `operator.go` `simpleCmp`), which Linux paths don't have — `/tmp/ſcript`
+/// would match a rule for `/tmp/script`.
+fn process_path_operator(conn: &Connection) -> Operator {
+    Operator {
+        sensitive: true,
+        ..simple_operator("process.path", conn.process_path.as_str())
+    }
 }
 
 fn build_operator_checked(
@@ -518,9 +571,46 @@ fn build_operator_checked(
     conn: &Connection,
 ) -> (Operator, Option<ScopeDegradation>) {
     match scope {
-        VerdictScope::ThisHost => (this_host_operator(conn), None),
-        VerdictScope::AnyHostOnDomain => any_host_on_domain_operator_checked(conn),
+        VerdictScope::ThisHost => (bind_to_process(this_host_operator(conn), conn), None),
+        VerdictScope::AnyHostOnDomain => {
+            let (host, degradation) = any_host_on_domain_operator_checked(conn);
+            (bind_to_process(host, conn), degradation)
+        }
         VerdictScope::AnyHost => any_host_operator_checked(conn),
+    }
+}
+
+/// Issue #44: a `ThisHost` / `AnyHostOnDomain` answer is about *this*
+/// program reaching that host, so the rule must match the program AND the
+/// host. A bare host operator matches every process, which turned one app's
+/// remembered allow into an allow for all of them.
+///
+/// opensnitchd ANDs `list` members (`daemon/rule/operator.go` `listMatch`,
+/// short-circuiting, so the exact `process.path` compare goes first),
+/// compiles each member when the rule is loaded, and ignores `data` for a
+/// `list`. This binds to the executable *path* the daemon reports, which is
+/// as strong as the daemon's process identity and no stronger — see module
+/// doc.
+///
+/// An empty `process_path` keeps the host-only fallback for now: refusing
+/// instead changes the contract `grpc_server.rs` relies on, which is the
+/// second half of issue #44.
+fn bind_to_process(host: Operator, conn: &Connection) -> Operator {
+    if conn.process_path.is_empty() {
+        tracing::warn!(
+            dst_host = %conn.dst_host,
+            dst_ip = %conn.dst_ip,
+            "host-scoped verdict with an empty process_path; emitting a \
+             process-agnostic rule (issue #44 second half)"
+        );
+        return host;
+    }
+    Operator {
+        r#type: "list".to_string(),
+        operand: "list".to_string(),
+        data: String::new(),
+        sensitive: false,
+        list: vec![process_path_operator(conn), host],
     }
 }
 
@@ -596,7 +686,12 @@ mod tests {
             &conn,
             1_700_000_000,
         );
-        let name = rule_name_for(Verdict::Allow, &conn.dst_host, conn.dst_port as u16);
+        let name = rule_name_for(
+            Verdict::Allow,
+            &conn.dst_host,
+            conn.dst_port as u16,
+            &conn.process_path,
+        );
         assert_eq!(rule.name, name);
     }
 
@@ -649,7 +744,7 @@ mod tests {
             &sample_connection(),
             0,
         );
-        let op = rule.operator.unwrap();
+        let op = process_bound_host_member(rule, "/usr/bin/curl");
         assert_eq!(op.r#type, "simple");
         assert_eq!(op.operand, "dest.host");
         assert_eq!(op.data, "github.com");
@@ -666,7 +761,7 @@ mod tests {
             &conn,
             0,
         );
-        let op = rule.operator.unwrap();
+        let op = process_bound_host_member(rule, "/usr/bin/curl");
         assert_eq!(op.r#type, "simple");
         assert_eq!(op.operand, "dest.ip");
         assert_eq!(op.data, "140.82.121.4");
@@ -683,7 +778,7 @@ mod tests {
             &conn,
             0,
         );
-        let op = rule.operator.unwrap();
+        let op = process_bound_host_member(rule, "/usr/bin/curl");
         assert_eq!(op.r#type, "regexp");
         assert_eq!(op.operand, "dest.host");
         assert_eq!(op.data, r"^(?:[^.]+\.)*example\.com$");
@@ -719,7 +814,7 @@ mod tests {
             &conn,
             0,
         );
-        let op = rule.operator.unwrap();
+        let op = process_bound_host_member(rule, "/usr/bin/curl");
         assert_eq!(op.r#type, "simple", "must degrade, not wildcard");
         assert_eq!(op.operand, "dest.host");
     }
@@ -738,7 +833,7 @@ mod tests {
             &conn,
             0,
         );
-        let op = rule.operator.unwrap();
+        let op = process_bound_host_member(rule, "/usr/bin/curl");
         let re = regex::Regex::new(&op.data).unwrap();
         assert!(re.is_match("example.co.uk"));
         assert!(
@@ -758,7 +853,7 @@ mod tests {
             &conn,
             0,
         );
-        let op = rule.operator.unwrap();
+        let op = process_bound_host_member(rule, "/usr/bin/curl");
         // Never a bare wildcard-everything pattern.
         assert_ne!(
             op.r#type, "regexp",
@@ -781,7 +876,7 @@ mod tests {
             &conn,
             0,
         );
-        let op = rule.operator.unwrap();
+        let op = process_bound_host_member(rule, "/usr/bin/curl");
         assert_eq!(op.r#type, "simple");
         assert_eq!(op.operand, "dest.host");
         assert_eq!(op.data, "github.com");
@@ -820,7 +915,7 @@ mod tests {
             &conn,
             0,
         );
-        let op = rule.operator.unwrap();
+        let op = process_bound_host_member(rule, "/usr/bin/curl");
         assert_eq!(op.r#type, "simple", "must degrade, not wildcard");
     }
 
@@ -838,7 +933,7 @@ mod tests {
             &conn,
             0,
         );
-        let op = rule.operator.unwrap();
+        let op = process_bound_host_member(rule, "/usr/bin/curl");
         assert_eq!(op.r#type, "simple", "must degrade, not wildcard");
     }
 
@@ -855,7 +950,7 @@ mod tests {
             &conn,
             0,
         );
-        let op = rule.operator.unwrap();
+        let op = process_bound_host_member(rule, "/usr/bin/curl");
         assert_eq!(op.r#type, "regexp");
         assert_eq!(op.data, r"^(?:[^.]+\.)*example\.co\.uk$");
     }
@@ -874,7 +969,7 @@ mod tests {
             &conn,
             0,
         );
-        let op = rule.operator.unwrap();
+        let op = process_bound_host_member(rule, "/usr/bin/curl");
         assert_eq!(op.r#type, "simple", "must degrade, not wildcard");
         assert_eq!(op.data, "shop.co.uk");
     }
@@ -893,7 +988,7 @@ mod tests {
             &conn,
             0,
         );
-        let op = rule.operator.unwrap();
+        let op = process_bound_host_member(rule, "/usr/bin/curl");
         assert_eq!(op.r#type, "simple", "must degrade, not wildcard");
         assert_eq!(op.data, "user.github.io");
     }
@@ -916,7 +1011,7 @@ mod tests {
             &conn,
             0,
         );
-        let op = rule.operator.unwrap();
+        let op = process_bound_host_member(rule, "/usr/bin/curl");
         assert_eq!(op.r#type, "simple", "must degrade, not wildcard");
     }
 
@@ -931,7 +1026,7 @@ mod tests {
             &conn,
             0,
         );
-        let op = rule.operator.unwrap();
+        let op = process_bound_host_member(rule, "/usr/bin/curl");
         assert_eq!(op.r#type, "simple", "must degrade, not wildcard");
     }
 
@@ -949,7 +1044,7 @@ mod tests {
             &conn,
             0,
         );
-        let op = rule.operator.unwrap();
+        let op = process_bound_host_member(rule, "/usr/bin/curl");
         assert_eq!(op.r#type, "regexp");
         assert_eq!(op.data, r"^(?:[^.]+\.)*example\.com$");
     }
@@ -965,7 +1060,7 @@ mod tests {
             &conn,
             0,
         );
-        let op = rule.operator.unwrap();
+        let op = process_bound_host_member(rule, "/usr/bin/curl");
         assert_eq!(op.r#type, "regexp");
         assert_eq!(op.data, r"^(?:[^.]+\.)*example\.co\.uk$");
     }
@@ -1029,7 +1124,7 @@ mod tests {
 
     #[test]
     fn rule_name_for_neutralizes_path_traversal() {
-        let name = rule_name_for(Verdict::Allow, "../../../../etc/cron.d/x", 443);
+        let name = rule_name_for(Verdict::Allow, "../../../../etc/cron.d/x", 443, "");
         // The security property that actually matters: no `/` survives, so
         // `filepath.Join(l.Path, name + ".json")` can never treat the
         // sanitized name as more than one path component — there's no
@@ -1046,22 +1141,22 @@ mod tests {
 
     #[test]
     fn rule_name_for_handles_empty_host() {
-        let name = rule_name_for(Verdict::Allow, "", 443);
+        let name = rule_name_for(Verdict::Allow, "", 443, "");
         assert!(!name.is_empty());
         assert!(!name.contains('/'));
     }
 
     #[test]
     fn rule_name_for_is_deterministic_for_the_same_input() {
-        let a = rule_name_for(Verdict::Deny, "../../etc/passwd", 80);
-        let b = rule_name_for(Verdict::Deny, "../../etc/passwd", 80);
+        let a = rule_name_for(Verdict::Deny, "../../etc/passwd", 80, "");
+        let b = rule_name_for(Verdict::Deny, "../../etc/passwd", 80, "");
         assert_eq!(a, b);
     }
 
     #[test]
     fn rule_name_for_distinct_hostile_hosts_do_not_collide() {
-        let a = rule_name_for(Verdict::Deny, "../../etc/passwd", 80);
-        let b = rule_name_for(Verdict::Deny, "../../etc/shadow", 80);
+        let a = rule_name_for(Verdict::Deny, "../../etc/passwd", 80, "");
+        let b = rule_name_for(Verdict::Deny, "../../etc/shadow", 80, "");
         assert_ne!(a, b, "distinct hostile inputs must not collide");
     }
 
@@ -1076,9 +1171,9 @@ mod tests {
         // character-mapping alone (both `/` and `%` map to `_`, same as a
         // literal leading `_`) — the always-appended raw-input digest is
         // what actually distinguishes them.
-        let a = rule_name_for(Verdict::Deny, "_dmarc.example.com", 443);
-        let b = rule_name_for(Verdict::Deny, "/dmarc.example.com", 443);
-        let c = rule_name_for(Verdict::Deny, "%dmarc.example.com", 443);
+        let a = rule_name_for(Verdict::Deny, "_dmarc.example.com", 443, "");
+        let b = rule_name_for(Verdict::Deny, "/dmarc.example.com", 443, "");
+        let c = rule_name_for(Verdict::Deny, "%dmarc.example.com", 443, "");
         assert_ne!(a, b);
         assert_ne!(b, c);
         assert_ne!(a, c);
@@ -1088,9 +1183,9 @@ mod tests {
     fn rule_name_for_distinguishes_dot_dash_variants_that_trim_identically() {
         // "evil.com", "evil.com.", and "evil.com--" all trim to the same
         // "evil.com" under leading/trailing `.`/`-` trimming alone.
-        let a = rule_name_for(Verdict::Deny, "evil.com", 443);
-        let b = rule_name_for(Verdict::Deny, "evil.com.", 443);
-        let c = rule_name_for(Verdict::Deny, "evil.com--", 443);
+        let a = rule_name_for(Verdict::Deny, "evil.com", 443, "");
+        let b = rule_name_for(Verdict::Deny, "evil.com.", 443, "");
+        let c = rule_name_for(Verdict::Deny, "evil.com--", 443, "");
         assert_ne!(a, b);
         assert_ne!(b, c);
         assert_ne!(a, c);
@@ -1109,6 +1204,21 @@ mod tests {
         assert_eq!(op.r#type, "simple");
         assert_eq!(op.operand, "process.path");
         assert_eq!(op.data, "/usr/bin/curl");
+        // A non-sensitive simple operator compares with Unicode case folding
+        // (`strings.EqualFold`, operator.go:224-226); Linux paths aren't.
+        assert!(op.sensitive, "process.path must match case-sensitively");
+    }
+
+    #[test]
+    fn any_host_scope_names_the_rule_after_its_program() {
+        let rule = verdict_to_rule(
+            Verdict::Allow,
+            VerdictDuration::Always,
+            VerdictScope::AnyHost,
+            &sample_connection(),
+            0,
+        );
+        assert!(rule.name.contains("-pcurl-"), "got: {}", rule.name);
     }
 
     #[test]
@@ -1128,6 +1238,179 @@ mod tests {
         assert_ne!(op.operand, "process.path");
         assert_eq!(op.operand, "dest.host");
         assert_eq!(op.data, "github.com");
+    }
+
+    // -- issue #44: host/domain scopes are bound to the requesting process --
+
+    /// The `[process.path, <host op>]` pair a process-bound `ThisHost` /
+    /// `AnyHostOnDomain` rule must carry. Panics unless the rule is exactly
+    /// that shape for `process_path`, then returns the host member.
+    fn process_bound_host_member(rule: Rule, process_path: &str) -> Operator {
+        let op = rule.operator.expect("every rule carries an operator");
+        assert_eq!(op.r#type, "list", "scope must be process-bound: {op:?}");
+        assert_eq!(op.operand, "list");
+        assert_eq!(op.list.len(), 2, "exactly process + host: {op:?}");
+        let process = &op.list[0];
+        assert_eq!(process.r#type, "simple");
+        assert_eq!(process.operand, "process.path");
+        assert_eq!(process.data, process_path);
+        assert!(
+            process.sensitive,
+            "process.path must match case-sensitively"
+        );
+        op.list[1].clone()
+    }
+
+    #[test]
+    fn this_host_scope_binds_a_remembered_rule_to_the_requesting_process() {
+        let rule = verdict_to_rule(
+            Verdict::Allow,
+            VerdictDuration::Always,
+            VerdictScope::ThisHost,
+            &sample_connection(),
+            0,
+        );
+        let host = process_bound_host_member(rule, "/usr/bin/curl");
+        assert_eq!(host.r#type, "simple");
+        assert_eq!(host.operand, "dest.host");
+        assert_eq!(host.data, "github.com");
+    }
+
+    #[test]
+    fn this_host_scope_binds_a_bare_ip_rule_to_the_requesting_process() {
+        let mut conn = sample_connection();
+        conn.dst_host = String::new();
+        let rule = verdict_to_rule(
+            Verdict::Deny,
+            VerdictDuration::Always,
+            VerdictScope::ThisHost,
+            &conn,
+            0,
+        );
+        let host = process_bound_host_member(rule, "/usr/bin/curl");
+        assert_eq!(host.operand, "dest.ip");
+        assert_eq!(host.data, "140.82.121.4");
+    }
+
+    #[test]
+    fn any_host_on_domain_scope_binds_the_wildcard_to_the_requesting_process() {
+        let mut conn = sample_connection();
+        conn.dst_host = "www.example.com".to_string();
+        let rule = verdict_to_rule(
+            Verdict::Allow,
+            VerdictDuration::Always,
+            VerdictScope::AnyHostOnDomain,
+            &conn,
+            0,
+        );
+        let host = process_bound_host_member(rule, "/usr/bin/curl");
+        assert_eq!(host.r#type, "regexp");
+        assert_eq!(host.operand, "dest.host");
+        assert_eq!(host.data, r"^(?:[^.]+\.)*example\.com$");
+    }
+
+    #[test]
+    fn degraded_domain_scope_is_still_bound_to_the_requesting_process() {
+        // `example.com` is its own registrable domain, so the wildcard
+        // degrades to the exact host — and must stay process-bound.
+        let mut conn = sample_connection();
+        conn.dst_host = "example.com".to_string();
+        let (_, degradation) = build_operator_checked(VerdictScope::AnyHostOnDomain, &conn);
+        assert_eq!(
+            degradation,
+            Some(ScopeDegradation::AtOrAboveRegistrableDomain)
+        );
+        let rule = verdict_to_rule(
+            Verdict::Deny,
+            VerdictDuration::Always,
+            VerdictScope::AnyHostOnDomain,
+            &conn,
+            0,
+        );
+        let host = process_bound_host_member(rule, "/usr/bin/curl");
+        assert_eq!(host.operand, "dest.host");
+        assert_eq!(host.data, "example.com");
+    }
+
+    #[test]
+    fn host_scopes_keep_the_host_only_fallback_when_process_path_is_empty() {
+        // Deliberately unchanged here: refusing instead of degrading changes
+        // the contract `grpc_server.rs` relies on, and is the second half of
+        // issue #44 (after draft PR #39 merges). This test pins today's
+        // fallback so that change is a visible, intentional edit.
+        let mut conn = sample_connection();
+        conn.process_path = String::new();
+        for scope in [VerdictScope::ThisHost, VerdictScope::AnyHostOnDomain] {
+            let rule = verdict_to_rule(Verdict::Allow, VerdictDuration::Always, scope, &conn, 0);
+            let op = rule.operator.unwrap();
+            assert_eq!(op.operand, "dest.host", "scope {scope:?}: {op:?}");
+            assert!(op.list.is_empty(), "scope {scope:?}: {op:?}");
+        }
+    }
+
+    // -- issue #44: process-bound rules need process-distinct names. If two
+    // programs' rules for the same verdict/host/port shared a name, the
+    // daemon would store the second as `<name>-2` (`setUniqueName`,
+    // loader.go:332-341) while the bridge and the Rules page still call it
+    // `<name>` — so a later toggle or delete there would edit the *other*
+    // program's rule. --
+
+    #[test]
+    fn rule_name_for_distinguishes_programs_for_the_same_host_and_port() {
+        let curl = rule_name_for(Verdict::Allow, "github.com", 443, "/usr/bin/curl");
+        let firefox = rule_name_for(
+            Verdict::Allow,
+            "github.com",
+            443,
+            "/usr/lib64/firefox/firefox",
+        );
+        assert_ne!(curl, firefox);
+    }
+
+    #[test]
+    fn rule_name_for_distinguishes_programs_sharing_a_basename() {
+        let system = rule_name_for(Verdict::Allow, "github.com", 443, "/usr/bin/curl");
+        let dropped = rule_name_for(Verdict::Allow, "github.com", 443, "/tmp/curl");
+        assert_ne!(system, dropped);
+    }
+
+    #[test]
+    fn rule_name_for_without_a_process_keeps_the_host_only_name() {
+        // Pinned literally (digest = first 8 bytes of SHA-256("github.com"),
+        // computed outside this crate) so the shared-sanitizer refactor
+        // can't silently rename existing rules.
+        assert_eq!(
+            rule_name_for(Verdict::Deny, "github.com", 443, ""),
+            "snitchwatch-deny-github.com-3aeb002460381c6f-443"
+        );
+    }
+
+    #[test]
+    fn rule_name_for_neutralizes_the_process_path_but_keeps_its_basename() {
+        let name = rule_name_for(Verdict::Allow, "github.com", 443, "/opt/../evil dir/a b");
+        assert!(!name.contains('/'), "no path separator may survive: {name}");
+        assert!(!name.contains(' '), "{name}");
+        assert!(
+            name.contains("-pa_b-"),
+            "readable basename expected: {name}"
+        );
+    }
+
+    #[test]
+    fn verdict_to_rule_names_a_process_bound_rule_after_its_program() {
+        let conn = sample_connection();
+        let rule = verdict_to_rule(
+            Verdict::Allow,
+            VerdictDuration::Always,
+            VerdictScope::ThisHost,
+            &conn,
+            0,
+        );
+        assert_eq!(
+            rule.name,
+            rule_name_for(Verdict::Allow, "github.com", 443, "/usr/bin/curl")
+        );
+        assert!(rule.name.contains("-pcurl-"), "got: {}", rule.name);
     }
 
     // -- sanitize_for_display / MEDIUM-1 (issue #14 security review round 2) --
