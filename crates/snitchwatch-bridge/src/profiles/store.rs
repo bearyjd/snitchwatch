@@ -110,7 +110,7 @@ impl ProfileStore {
         if version > SCHEMA_VERSION {
             return Err(StoreError::NewerSchema(version));
         }
-        crate::sqlite_file::require_plain_schema(&conn)?;
+        crate::sqlite_file::require_known_schema(&conn, SCHEMA)?;
         conn.execute_batch(SCHEMA)?;
         // Only when it changes: rewriting the same value still writes to the
         // file, and a store that turns out to be unreadable is left as it is.

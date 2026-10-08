@@ -122,7 +122,7 @@ impl BlocklistStore {
         if version > SCHEMA_VERSION {
             return Err(StoreError::NewerSchema(version));
         }
-        crate::sqlite_file::require_plain_schema(&conn)?;
+        crate::sqlite_file::require_known_schema(&conn, SCHEMA)?;
         conn.execute_batch("PRAGMA foreign_keys = ON;")?;
         conn.execute_batch(SCHEMA)?;
         conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
