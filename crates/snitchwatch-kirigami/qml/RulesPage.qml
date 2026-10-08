@@ -15,12 +15,16 @@
 // always evaluate first regardless (see the design doc's specificity
 // section), independent of this display grouping.
 //
-// toggleEnabled/deleteRule are plain qinvokables on `RulesModel`; they emit
+// setEnabled/deleteRule are plain qinvokables on `RulesModel`; they emit
 // `ruleChangeRequested` with a JSON-encoded `ClientMessage` for the live
 // bridge feed to forward — the same signal-out pattern
-// `BlocklistsModel.subscribe`/`unsubscribe` uses (no bridge changes, no local
-// optimistic mutation — the row reflects the server's next
-// `SetRules`/`UpdateRules` push).
+// `BlocklistsModel.subscribe`/`unsubscribe` uses (no local mutation of the
+// model — the row reflects the server's next `SetRules`/`UpdateRules` push).
+// Only the inspector's switch moves ahead of the bridge, and the inspector
+// re-reads its rule on every model reset (#48).
+//
+// Names are shown via the `displayName` role (bidi overrides and zero-width
+// characters removed by the bridge); `name` stays the rule's identity.
 import QtQuick
 import QtQuick.Layouts
 import QtQuick.Controls as Controls
@@ -36,6 +40,10 @@ Kirigami.ScrollablePage {
 
     // Snapshot of the rule currently shown in the detail sheet.
     property string inspectName: ""
+    property string inspectDisplayName: ""
+    // Non-empty when Snitchwatch can't edit the rule (the bridge's reason);
+    // the rule is still shown because the daemon still enforces it.
+    property string inspectReadOnlyReason: ""
     property bool inspectEnabled: true
     property string inspectAction: ""
     property string inspectDuration: ""
@@ -44,6 +52,9 @@ Kirigami.ScrollablePage {
     property string inspectSource: "user"
     property string inspectBlocklistId: ""
     property bool confirmingDelete: false
+    // Exposed for the headless inspector probe (tests/rules_inspector_qml.rs).
+    property alias inspectorSheet: inspector
+    property alias inspectorEnabledSwitch: inspectEnabledSwitch
 
     // Simulate panel state (rule-match diagnostics' "Simulate" sheet — see
     // `rules::simulator` module docs for exactly what semantics are
@@ -74,7 +85,19 @@ Kirigami.ScrollablePage {
         const json = page.model.selectRuleByName(name);
         if (!json) return false;
         const rule = JSON.parse(json);
+        page.fillInspector(rule);
+        page.confirmingDelete = false;
+        list.currentIndex = rule.precedence;
+        list.positionViewAtIndex(rule.precedence, ListView.Contain);
+        inspector.open();
+        return true;
+    }
+
+    // `rule` is `selectRuleByName`'s JSON shape.
+    function fillInspector(rule) {
         page.inspectName = rule.name;
+        page.inspectDisplayName = rule.displayName;
+        page.inspectReadOnlyReason = rule.readOnlyReason;
         page.inspectEnabled = rule.enabled;
         page.inspectAction = rule.action;
         page.inspectDuration = rule.duration;
@@ -82,11 +105,39 @@ Kirigami.ScrollablePage {
         page.inspectPrecedence = rule.precedence;
         page.inspectSource = rule.source;
         page.inspectBlocklistId = rule.blocklistId;
-        page.confirmingDelete = false;
-        list.currentIndex = rule.precedence;
-        list.positionViewAtIndex(rule.precedence, ListView.Contain);
-        inspector.open();
-        return true;
+    }
+
+    // The bridge re-sends the whole list after every rule command, whether
+    // the daemon accepted it, refused it or never answered, and clears it
+    // when its daemon stream goes away (#48). Re-read the open rule so the
+    // sheet never keeps a state the daemon doesn't have; close the sheet if
+    // the rule is gone.
+    function refreshInspector() {
+        if (!inspector.visible || !page.inspectName || !page.model) return;
+        const json = page.model.selectRuleByName(page.inspectName);
+        if (!json) {
+            page.confirmingDelete = false;
+            inspector.close();
+            return;
+        }
+        page.fillInspector(JSON.parse(json));
+    }
+
+    // The switch sends the value it now shows, not a flip of the model's
+    // (possibly not yet updated) value, then goes back to following
+    // `inspectEnabled`, which the next model reset corrects.
+    function setInspectEnabled(enabled) {
+        if (!page.model) return;
+        page.model.setEnabled(page.inspectName, enabled);
+        page.inspectEnabled = enabled;
+        inspectEnabledSwitch.checked = Qt.binding(function () { return page.inspectEnabled; });
+    }
+
+    Connections {
+        target: page.model
+        function onModelReset() {
+            page.refreshInspector();
+        }
     }
 
     // Run the rule-match simulator (Qt-free logic in `rules::simulator`)
@@ -161,6 +212,8 @@ Kirigami.ScrollablePage {
 
             required property int index
             required property string name
+            required property string displayName
+            required property string readOnlyReason
             required property bool enabled
             // Named `ruleAction` (not `action`) because `Controls.ItemDelegate`
             // (an `AbstractButton` subclass) already declares a built-in
@@ -193,7 +246,7 @@ Kirigami.ScrollablePage {
                     spacing: 0
                     Controls.Label {
                         textFormat: Text.PlainText
-                        text: row.source === "blocklist" ? ("blocklist: " + row.blocklistId) : row.name
+                        text: row.source === "blocklist" ? ("blocklist: " + row.blocklistId) : row.displayName
                         font.bold: true
                         elide: Text.ElideRight
                         Layout.fillWidth: true
@@ -210,6 +263,14 @@ Kirigami.ScrollablePage {
                         elide: Text.ElideMiddle
                         Layout.fillWidth: true
                     }
+                }
+
+                Controls.Label {
+                    visible: row.readOnlyReason.length > 0
+                    text: "read-only"
+                    opacity: 0.6
+                    font: Kirigami.Theme.smallFont
+                    Layout.alignment: Qt.AlignVCenter
                 }
 
                 Controls.Label {
@@ -230,6 +291,8 @@ Kirigami.ScrollablePage {
 
     function openInspector(row) {
         page.inspectName = row.name;
+        page.inspectDisplayName = row.displayName;
+        page.inspectReadOnlyReason = row.readOnlyReason;
         page.inspectEnabled = row.enabled;
         page.inspectAction = row.ruleAction;
         page.inspectDuration = row.duration;
@@ -245,7 +308,7 @@ Kirigami.ScrollablePage {
     // BlocklistsPage's inspector, so it behaves identically at every width.
     SizedOverlaySheet {
         id: inspector
-        title: page.inspectSource === "blocklist" ? ("blocklist: " + page.inspectBlocklistId) : page.inspectName
+        title: page.inspectSource === "blocklist" ? ("blocklist: " + page.inspectBlocklistId) : page.inspectDisplayName
 
         ColumnLayout {
             Layout.preferredWidth: inspector.preferredWidth
@@ -256,7 +319,7 @@ Kirigami.ScrollablePage {
                 Controls.Label {
                     Kirigami.FormData.label: "Name"
                     textFormat: Text.PlainText
-                    text: page.inspectName
+                    text: page.inspectDisplayName
                     elide: Text.ElideMiddle
                 }
                 Controls.Label {
@@ -288,12 +351,19 @@ Kirigami.ScrollablePage {
                           + " — evaluated in this order, first match wins"
                 }
                 Controls.Switch {
+                    id: inspectEnabledSwitch
                     Kirigami.FormData.label: "Enabled"
+                    enabled: page.inspectReadOnlyReason.length === 0
                     checked: page.inspectEnabled
-                    onToggled: {
-                        page.model.toggleEnabled(page.inspectName);
-                        page.inspectEnabled = checked;
-                    }
+                    onToggled: page.setInspectEnabled(checked)
+                }
+                Controls.Label {
+                    Kirigami.FormData.label: "Read-only"
+                    visible: page.inspectReadOnlyReason.length > 0
+                    textFormat: Text.PlainText
+                    text: page.inspectReadOnlyReason
+                    wrapMode: Text.Wrap
+                    Layout.fillWidth: true
                 }
             }
 
@@ -306,6 +376,7 @@ Kirigami.ScrollablePage {
             Controls.Button {
                 Layout.fillWidth: true
                 visible: !page.confirmingDelete
+                enabled: page.inspectReadOnlyReason.length === 0
                 text: "Delete rule"
                 icon.name: "edit-delete-remove"
                 onClicked: page.confirmingDelete = true

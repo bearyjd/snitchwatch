@@ -245,10 +245,13 @@ fn rules_page_labels_showing_rule_data_are_plain_text() {
         RULES_PAGE,
         &[
             "row.name",
+            "row.displayName",
             "row.operatorSummary",
             "row.ruleAction",
             "row.blocklistId",
             "page.inspectName",
+            "page.inspectDisplayName",
+            "page.inspectReadOnlyReason",
             "page.inspectSource",
             "page.inspectAction",
             "page.inspectDuration",

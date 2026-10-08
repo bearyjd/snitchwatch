@@ -12,7 +12,7 @@
 // create/rename/updateMatchers/deleteProfile/activateProfile/deactivateProfile
 // are plain qinvokables on `ProfilesModel`; they emit `profileChangeRequested`
 // with a JSON-encoded `ClientMessage` for the live bridge feed to forward —
-// the same signal-out pattern `BlocklistsModel.subscribe`/`RulesModel.toggleEnabled`
+// the same signal-out pattern `BlocklistsModel.subscribe`/`RulesModel.setEnabled`
 // use (no bridge changes, no local optimistic mutation — the row reflects
 // the server's next `SetProfiles`/`ProfileChanged` push).
 import QtQuick

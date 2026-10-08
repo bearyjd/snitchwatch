@@ -4,8 +4,8 @@
 //! This is the missing leg of rule enable/disable/delete: the effects were
 //! produced and then dropped, because the bridge's outbound `Notifications`
 //! stream was parked on `pending()`. `snitchwatch-bridge-cli` calls
-//! [`notification_for_effect`] and pushes the result through
-//! `UiService::notifications_handle`.
+//! [`notification_for_effect`] and sends the result through
+//! `UiService::daemon_commands`, which assigns the id.
 //!
 //! **Why `CHANGE_RULE` for a toggle rather than `ENABLE_RULE`/`DISABLE_RULE`:**
 //! all three daemon handlers end in `c.rules.Replace(r, r.Duration == Always)`
@@ -28,11 +28,11 @@ use crate::translator::upstream::UpstreamEffect;
 ///
 /// Returns `Ok(None)` for effects that aren't rule edits (the caller keeps its
 /// existing handling for those), and `Err` when a rule can't be represented in
-/// the shape the daemon accepts — see [`crate::grpc_server::rule_from_wire`]
+/// the shape the daemon accepts — see [`crate::rule_wire::rule_from_wire`]
 /// for why a malformed rule must die here rather than reach the daemon.
 ///
-/// `id` is echoed back by the daemon in its `NotificationReply`, so callers
-/// should pass a monotonically increasing, non-zero value.
+/// `id` is echoed back by the daemon in its `NotificationReply`.
+/// `DaemonCommands::send` replaces it with its own non-zero, increasing id.
 pub fn notification_for_effect(
     effect: &UpstreamEffect,
     id: u64,
@@ -42,7 +42,7 @@ pub fn notification_for_effect(
         // yet, so both add and update are CHANGE_RULE.
         UpstreamEffect::AddRule { rule } | UpstreamEffect::UpdateRule { rule, .. } => (
             Action::ChangeRule,
-            vec![crate::grpc_server::rule_from_wire(rule)?],
+            vec![crate::rule_wire::rule_from_wire(rule)?],
         ),
         // DELETE_RULE reads only `rul.Name`
         // (`vendor/opensnitch/daemon/ui/notifications.go:132`), so a name-only

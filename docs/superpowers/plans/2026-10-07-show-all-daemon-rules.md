@@ -173,8 +173,9 @@ makes, and a GUI that connects or reconnects receives the full list.
        defend against.
    - **Replies (both modes):** a non-zero reply resolves its waiter only if
      it arrives on the stream that is current **at reply time**. Other
-     streams' replies are logged and ignored. Waiters are not tied to a
-     stream.
+     streams' replies are logged and ignored. In TCP mode waiters are not
+     tied to a stream; in Unix mode a reply must also come from the stream
+     the command went to.
    - **When streams close:**
      - **TCP mode:** in-flight waiters stay pending while any stream
        remains open; fan-out already delivered their command to every
@@ -191,13 +192,18 @@ makes, and a GUI that connects or reconnects receives the full list.
      - a fake that sends a HELLO and then closes just hands "current" back
        to the real daemon's still-open stream.
 
-     But while a fake that subscribed and sent a *later* HELLO stays
-     connected, it is current. That lets it:
+     But while a fake that subscribed and sent a *later* HELLO is the
+     current stream, it can:
      - replace the Rules list shown to the user;
-     - answer replies, faking "rule installed" for #45/#46.
+     - answer replies, faking "rule installed" for #45/#46;
+     - get its forged rule bodies installed by the real daemon: a toggle
+       the user makes on one of its rows is sent, body and all, to every
+       stream.
 
-     This is a residual risk until the TCP transport is retired (#35). See
-     Risks.
+     Its list is withdrawn (cache `Unknown`, empty `SetRules`) as soon as
+     its stream closes or stops being current (review finding H1), so it
+     cannot outlive the fake. This is a residual risk until the TCP
+     transport is retired (#35). See Risks.
    - **Mock change (required):** `MockOpensnitchd::open_notifications`
      must send `NotificationReply { id: 0, code: OK }` first, as the real
      daemon's `listenForNotifications` does.
@@ -342,16 +348,24 @@ Manual VM check:
 - **Residual impersonation risk in legacy TCP mode** (until #35 retires
   the TCP transport for the per-user bridge).
   - Any local user can connect to `127.0.0.1:50051`, call `Subscribe` and
-    send a later HELLO. **While that connection stays open**, their stream
-    is current, so they can:
+    send a later HELLO. **While their stream is the current one**, they
+    can:
     - replace the Rules list the GUI shows;
     - answer command replies, so #45/#46 report "rule installed" for a
-      rule the real daemon may have rejected.
+      rule the real daemon may have rejected;
+    - have the real daemon install a forged rule body: a toggle the user
+      makes on one of the forged rows goes, body and all, to every stream.
+  - *(Corrected after review: an earlier version said "while that
+    connection stays open", and the forged list then outlived the
+    impostor. The list now belongs to the stream that committed it and is
+    withdrawn when that stream closes or another stream becomes current
+    without its own snapshot.)*
   - The real daemon still receives every command. TCP mode keeps the
     fan-out, `NoDaemon` requires zero open streams, and when the impostor
     disconnects, the current stream falls back to the daemon's still-open
-    stream. The impostor cannot cut the daemon off; it can only spoof
-    what the GUI is told.
+    stream. The impostor cannot cut the daemon off.
+  - The number of open daemon streams is not capped: on TCP a cap would
+    let a local process fill it and lock the real daemon's stream out.
   - Today that same user can already send fake `AskRule` prompts and fake
     stats on that port (#35). This adds rule-list and status spoofing
     to that existing exposure.

@@ -5,12 +5,15 @@
 //! `grpc_client.rs` and `translator/downstream.rs` envelope hack.
 
 use crate::cache::connections::{ConnectionCache, Verdict};
+use crate::cache::rules::{RulesSync, SharedRulesCache};
 use crate::client_presence::ClientPresence;
 use crate::daemon_alerts::DaemonAlertStore;
+use crate::daemon_commands::{DaemonCommands, DaemonTransport};
 use crate::daemon_liveness::StreamGuard;
 use crate::diagnostics::DiagnosticsCtx;
 use crate::filter_pause::FilterPause;
 use crate::notice::NoticeBus;
+use crate::rule_wire::rule_to_wire;
 use crate::translator::connection::{connection_to_row, event_to_row};
 use crate::translator::verdict::verdict_to_rule;
 use crate::tray_state::{TrayState, TrayStatePublisher};
@@ -29,143 +32,6 @@ use tokio_stream::Stream;
 use tonic::{Request, Response, Status, Streaming};
 use tracing::{debug, info, warn};
 
-/// Convert a rule returned to opensnitchd into the tolerant wire shape the
-/// desktop Rules model consumes. Persistent interactive verdicts originate in
-/// this gRPC reply, rather than in an upstream `SetRules` push, so without
-/// this conversion the daemon saves a rule the UI never learns about.
-fn rule_to_wire(rule: &Rule) -> serde_json::Value {
-    serde_json::json!({
-        "name": rule.name,
-        "enabled": rule.enabled,
-        "action": rule.action,
-        "duration": rule.duration,
-        "description": rule.description,
-        "operator": rule.operator.as_ref().map(operator_to_wire).unwrap_or(serde_json::Value::Null),
-        // Round-trip ballast, not display data: the Rules model sends the whole
-        // rule back as a CHANGE_RULE and the daemon does a wholesale `Replace`,
-        // so any field omitted here is a field the next toggle silently clears
-        // on the daemon. Dropping `precedence` would quietly change which rule
-        // wins for unrelated traffic. See `rule_from_wire`, which reads both.
-        "precedence": rule.precedence,
-        "nolog": rule.nolog,
-    })
-}
-
-fn operator_to_wire(operator: &snitchwatch_proto::protocol::Operator) -> serde_json::Value {
-    if operator.list.is_empty() {
-        serde_json::json!({
-            "type": operator.r#type,
-            "operand": operator.operand,
-            "data": operator.data,
-            "sensitive": operator.sensitive,
-        })
-    } else {
-        serde_json::json!({
-            "type": operator.r#type,
-            "operands": operator.list.iter().map(operator_to_wire).collect::<Vec<_>>(),
-        })
-    }
-}
-
-/// Inverse of [`rule_to_wire`]: parse the wire rule shape the Rules model
-/// emits (see `snitchwatch-kirigami`'s `rules::row_store::Rule`) back into the
-/// proto [`Rule`] opensnitchd expects in a `CHANGE_RULE` notification.
-///
-/// **Returns `Err` rather than ever producing `operator: None`.** The daemon
-/// runs every notified rule through `rule.Deserialize`
-/// (`vendor/opensnitch/daemon/rule/rule.go:85-89`, which hard-rejects a null
-/// operator) and then `Operator.Compile()`
-/// (`vendor/opensnitch/daemon/rule/operator.go:109-214`, which rejects unknown
-/// operator types and uncompilable regexps). A rejected rule doesn't error
-/// visibly — the daemon just falls back to its default action. That silent
-/// failure is exactly what issue #14 was, so malformed input dies here instead.
-///
-/// `created` is left at 0 (the daemon stamps its own). `precedence`/`nolog` are
-/// read when present and default to `false`; see this module's
-/// `rule_from_wire` tests for the round-trip guarantee.
-pub(crate) fn rule_from_wire(v: &serde_json::Value) -> Result<Rule, String> {
-    let obj = v.as_object().ok_or("rule must be a JSON object")?;
-    let name = obj
-        .get("name")
-        .and_then(|x| x.as_str())
-        .ok_or("rule.name missing")?;
-    crate::rule_name::validate_rule_name(name)?;
-    let action = obj
-        .get("action")
-        .and_then(|x| x.as_str())
-        .filter(|s| !s.is_empty())
-        .ok_or("rule.action missing or empty")?;
-    let operator = obj.get("operator").ok_or("rule.operator missing")?;
-    if operator.is_null() {
-        return Err("rule.operator is null; the daemon would reject this rule".to_string());
-    }
-
-    Ok(Rule {
-        created: 0,
-        name: name.to_string(),
-        description: str_field(obj, "description"),
-        enabled: bool_field(obj, "enabled"),
-        precedence: bool_field(obj, "precedence"),
-        nolog: bool_field(obj, "nolog"),
-        action: action.to_string(),
-        duration: obj
-            .get("duration")
-            .and_then(|x| x.as_str())
-            .filter(|s| !s.is_empty())
-            .ok_or("rule.duration missing or empty")?
-            .to_string(),
-        operator: Some(operator_from_wire(operator)?),
-    })
-}
-
-/// Inverse of [`operator_to_wire`], mirroring its two branches: an `operands`
-/// array means a list operator, anything else is a leaf.
-fn operator_from_wire(
-    v: &serde_json::Value,
-) -> Result<snitchwatch_proto::protocol::Operator, String> {
-    let obj = v.as_object().ok_or("operator must be a JSON object")?;
-    let op_type = obj
-        .get("type")
-        .and_then(|x| x.as_str())
-        .filter(|s| !s.is_empty())
-        .ok_or("operator.type missing or empty")?
-        .to_string();
-
-    match obj.get("operands").and_then(|x| x.as_array()) {
-        Some(operands) => Ok(snitchwatch_proto::protocol::Operator {
-            r#type: op_type,
-            list: operands
-                .iter()
-                .map(operator_from_wire)
-                .collect::<Result<Vec<_>, _>>()?,
-            ..Default::default()
-        }),
-        None => Ok(snitchwatch_proto::protocol::Operator {
-            r#type: op_type,
-            operand: obj
-                .get("operand")
-                .and_then(|x| x.as_str())
-                .filter(|s| !s.is_empty())
-                .ok_or("operator.operand missing or empty")?
-                .to_string(),
-            data: str_field(obj, "data"),
-            sensitive: bool_field(obj, "sensitive"),
-            list: Vec::new(),
-        }),
-    }
-}
-
-fn str_field(obj: &serde_json::Map<String, serde_json::Value>, key: &str) -> String {
-    obj.get(key)
-        .and_then(|x| x.as_str())
-        .unwrap_or_default()
-        .to_string()
-}
-
-fn bool_field(obj: &serde_json::Map<String, serde_json::Value>, key: &str) -> bool {
-    obj.get(key).and_then(|x| x.as_bool()).unwrap_or(false)
-}
-
 /// Re-exported so existing call sites (and anything that historically
 /// imported it from here) keep working; `daemon_watchdog`/`diagnostics` now
 /// import [`crate::daemon_liveness::DaemonLiveness`] directly instead —
@@ -179,11 +45,10 @@ pub use crate::daemon_liveness::DaemonLiveness;
 /// count for long) — easy to tune later, not a measured value.
 const RECENT_BLOCK_TTL: Duration = Duration::from_secs(5);
 
-/// Buffer for outbound daemon notifications. Rule toggles/deletes are
-/// user-paced (one click each), so this only needs to absorb a burst faster
-/// than the daemon drains it — e.g. a batch delete. A lagging receiver is
-/// logged and skips ahead rather than killing the stream.
-const NOTIFICATION_CHANNEL_CAPACITY: usize = 64;
+/// Largest daemon message decoded (tonic's own default, made explicit). The
+/// biggest is a `Subscribe` carrying the full rule list, which
+/// `cache::rules::MAX_SNAPSHOT_RULES` bounds again after decoding.
+const MAX_DAEMON_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
 
 /// Bridge-side gRPC server state. Handed to `UiServer::new` for tonic.
 #[derive(Clone)]
@@ -239,20 +104,12 @@ pub struct UiService {
     /// (e.g. in most unit tests here) means `post_alert` still records the
     /// alert but skips the push broadcast.
     diagnostics_ctx: Arc<OnceLock<Arc<DiagnosticsCtx>>>,
-    /// Outbound commands for whichever daemon currently holds the
-    /// `Notifications` stream open (rule enable/disable/delete today).
-    ///
-    /// `broadcast`, not `mpsc`, for two reasons: a daemon that drops and
-    /// redials simply resubscribes and starts receiving again, and a send with
-    /// nobody listening is a benign `Err` rather than a channel that fills up
-    /// and wedges the caller. Nothing is replayed — a notification sent while
-    /// no daemon is connected is dropped, which is correct: the daemon reloads
-    /// its own rules on connect.
-    ///
-    /// Created here rather than taken as a `new()` parameter for the same
-    /// reason as [`Self::diagnostics_ctx`] — see its doc comment. Producers
-    /// get it via [`Self::notifications_handle`].
-    notifications: broadcast::Sender<Notification>,
+    /// Outbound rule commands and reply correlation (`daemon_commands`);
+    /// internal for the same reason as [`Self::diagnostics_ctx`].
+    commands: DaemonCommands,
+    /// The daemon's rule list (issue #48): staged per connection by
+    /// `subscribe`, committed on that connection's HELLO.
+    rules: RulesSync,
 }
 
 /// Future-drop cleanup also runs for tonic transport cancellation. A closed
@@ -285,6 +142,7 @@ impl UiService {
         notice_bus: Arc<NoticeBus>,
         filter_pause: Arc<FilterPause>,
     ) -> Self {
+        let rules = RulesSync::new(broadcast.clone());
         Self {
             cache,
             broadcast,
@@ -298,7 +156,8 @@ impl UiService {
             firewall_status: Arc::new(StdMutex::new(None)),
             alert_store: Arc::new(DaemonAlertStore::new()),
             diagnostics_ctx: Arc::new(OnceLock::new()),
-            notifications: broadcast::channel(NOTIFICATION_CHANNEL_CAPACITY).0,
+            commands: DaemonCommands::new(DaemonTransport::Tcp, rules.clone()),
+            rules,
         }
     }
 
@@ -311,17 +170,28 @@ impl UiService {
         self.client_presence.clone()
     }
 
-    /// Sender for outbound daemon commands (see [`Self::notifications`]).
-    /// Exposed as an accessor, not a `new()` parameter, so the seven existing
-    /// call sites don't change — same rationale as [`Self::liveness_handle`].
-    pub fn notifications_handle(&self) -> broadcast::Sender<Notification> {
-        self.notifications.clone()
+    /// TCP (the default) fans commands out to every open daemon stream; the
+    /// root-only Unix socket uses the current one. Call before taking handles.
+    pub fn with_daemon_transport(mut self, transport: DaemonTransport) -> Self {
+        self.commands = DaemonCommands::new(transport, self.rules.clone());
+        self
+    }
+
+    /// Outbound rule commands (see [`Self::commands`]).
+    pub fn daemon_commands(&self) -> DaemonCommands {
+        self.commands.clone()
+    }
+
+    /// The bridge's copy of the daemon's rule list.
+    pub fn rules_handle(&self) -> SharedRulesCache {
+        self.rules.cache()
     }
 
     /// Convenience: wrap into a tonic `UiServer<UiService>` ready for
     /// `Server::builder().add_service(...)`.
+    /// The decode limit is explicit: it bounds one `Subscribe` rule snapshot.
     pub fn into_server(self) -> UiServer<Self> {
-        UiServer::new(self)
+        UiServer::new(self).max_decoding_message_size(MAX_DAEMON_MESSAGE_BYTES)
     }
 
     /// Handle to the daemon-liveness tracker, for `daemon_watchdog::run` and
@@ -616,6 +486,10 @@ impl Ui for UiService {
         // duration is an active daemon rule, including a five-minute or
         // until-restart rule, and must be visible/editable immediately rather
         // than waiting for a daemon-side rule-list push that may never come.
+        // May diverge on the daemon's `setUniqueName`; see `cache::rules`.
+        if resolution.duration.remembers() {
+            self.rules.upsert(rule.clone());
+        }
         if resolution.duration.remembers() && self.broadcast.receiver_count() > 0 {
             if let Err(e) = self.broadcast.send(ServerMessage::UpdateRules {
                 rules: vec![rule_to_wire(&rule)],
@@ -632,8 +506,11 @@ impl Ui for UiService {
         request: Request<ClientConfig>,
     ) -> Result<Response<ClientConfig>, Status> {
         self.liveness.touch();
+        let conn = request.remote_addr();
         let cfg = request.into_inner();
         info!(client = %cfg.name, version = %cfg.version, "client subscribed");
+        // Staged until this connection's stream says HELLO (see `cache::rules`).
+        self.rules.stage(conn, cfg.rules.clone());
         {
             let mut guard = self
                 .firewall_status
@@ -715,17 +592,20 @@ impl Ui for UiService {
         // partway through the reply loop can't wedge the counter open
         // forever — see `StreamGuard`'s doc comment.
         let guard = StreamGuard::open(self.liveness.clone());
-        let liveness = self.liveness.clone();
+        // Registered before the reply loop, so HELLO can't race it; dropped on loop end/unwind.
+        let (registration, mut rx) = self.commands.open_stream(request.remote_addr());
+        let service = self.clone();
         let mut inbound = request.into_inner();
         tokio::spawn(async move {
             let _guard = guard;
             while let Ok(Some(reply)) = inbound.message().await {
-                liveness.touch();
+                service.liveness.touch();
                 info!(
                     id = reply.id,
                     code = reply.code,
                     "notification reply from daemon"
                 );
+                service.commands.on_reply(registration.id(), &reply);
             }
             warn!("notification reply stream ended");
             // `_guard` drops here (or during an unwind, if the loop above
@@ -739,38 +619,25 @@ impl Ui for UiService {
         // ordered to close notifications" and tears the stream down
         // (`vendor/opensnitch/daemon/ui/notifications.go:405-408`). The
         // placeholder this replaced would have done exactly that. Producers go
-        // through `notifications_handle()`, and `Action::None` is filtered here
-        // as a second line of defence.
-        let mut rx = self.notifications.subscribe();
+        // through `daemon_commands()`, and `Action::None` is filtered here
+        // as a second line of defence. Ends when the stream is closed.
         let outbound = async_stream::try_stream! {
-            loop {
-                match rx.recv().await {
-                    Ok(notification) => {
-                        if notification.r#type == Action::None as i32 {
-                            warn!(
-                                id = notification.id,
-                                "refusing to send a NONE-typed notification; it would close \
-                                 the daemon's stream"
-                            );
-                            continue;
-                        }
-                        debug!(
-                            id = notification.id,
-                            action = notification.r#type,
-                            rules = notification.rules.len(),
-                            "sending notification to daemon"
-                        );
-                        yield notification;
-                    }
-                    // A slow daemon missed messages. Skipping is right: each
-                    // notification is an independent command, and the daemon's
-                    // own rule state is authoritative on its next push.
-                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                        warn!(skipped, "notification receiver lagged; commands dropped");
-                    }
-                    // Sender gone (bridge shutting down): end the stream.
-                    Err(broadcast::error::RecvError::Closed) => break,
+            while let Some(notification) = rx.recv().await {
+                if notification.r#type == Action::None as i32 {
+                    warn!(
+                        id = notification.id,
+                        "refusing to send a NONE-typed notification; it would close \
+                         the daemon's stream"
+                    );
+                    continue;
                 }
+                debug!(
+                    id = notification.id,
+                    action = notification.r#type,
+                    rules = notification.rules.len(),
+                    "sending notification to daemon"
+                );
+                yield notification;
             }
         };
 

@@ -336,6 +336,15 @@ pub fn sanitize_for_display(input: &str, max_len: usize) -> String {
 /// separators (category Zl/Zp) can inject a visual line break a
 /// control-char-only strip wouldn't catch, splitting a notification body
 /// across lines the caller didn't intend.
+/// Plain-text form of attacker-influenced text for a `Text.PlainText` label:
+/// drops control characters and [`is_display_hazard`] ones, escapes nothing.
+pub fn strip_display_hazards(input: &str) -> String {
+    input
+        .chars()
+        .filter(|&c| !c.is_control() && !is_display_hazard(c))
+        .collect()
+}
+
 fn is_display_hazard(c: char) -> bool {
     matches!(c,
         '\u{200B}'..='\u{200F}' // zero-width space/ZWNJ/ZWJ, LRM, RLM

@@ -8,7 +8,7 @@
 //!   * `applyServerMessageJson` is callable from QML and drives the real
 //!     deserialize -> row-store-apply path without aborting (a Rust panic
 //!     inside the invokable would abort this test binary), and
-//!   * `toggleEnabled`/`deleteRule` run the real emit-signal path without
+//!   * `setEnabled`/`deleteRule` run the real emit-signal path without
 //!     aborting.
 //!
 //! It intentionally does NOT assert row counts/content: a thrown JS error in
@@ -41,7 +41,7 @@ fn rules_model_registers_and_ingest_invokable_runs() {
 
     // Instantiate the Rust model and drive real events through it: a SetRules
     // insert (one user rule, one blocklist-band rule), an UpdateRules upsert,
-    // plus one toggleEnabled/deleteRule call each. If any invokable panicked,
+    // plus one setEnabled/deleteRule call each. If any invokable panicked,
     // the whole test binary would abort; if the type were unregistered, the
     // root would be null.
     let qml = r#"
@@ -70,7 +70,7 @@ QtObject {
                   operator: { operand: "process.path", data: "/usr/bin/firefox" } }
             ]
         }));
-        model.toggleEnabled("899-firefox-allow-out");
+        model.setEnabled("899-firefox-allow-out", false);
         model.deleteRule("z00-blocklist:stevenblack:0001-doubleclick.net");
         // Best-effort visibility only (not load-bearing — see module docs).
         console.log("[test] RulesModel.count after insert =", model.count);

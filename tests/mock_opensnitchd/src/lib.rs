@@ -9,8 +9,8 @@
 
 use snitchwatch_proto::protocol::ui_client::UiClient;
 use snitchwatch_proto::protocol::{
-    Alert, ClientConfig, Connection, MsgResponse, Notification, NotificationReply, PingReply,
-    PingRequest, Rule,
+    Alert, ClientConfig, Connection, MsgResponse, Notification, NotificationReply,
+    NotificationReplyCode, PingReply, PingRequest, Rule,
 };
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -222,7 +222,11 @@ impl MockOpensnitchd {
         .await
     }
 
-    /// Open the bidi `Notifications` stream.
+    /// Open the bidi `Notifications` stream. Like the real daemon
+    /// (`vendor/opensnitch/daemon/ui/notifications.go` `listenForNotifications`),
+    /// the first message it sends is a HELLO: `NotificationReply { id: 0, OK }`.
+    /// The bridge handles it asynchronously; wait on
+    /// `RunningBridge::daemon_stream_ready` before relying on it.
     ///
     /// Yields each inbound [`Notification`] whole. It previously forwarded only
     /// `n.id` and discarded the rest, which made it impossible to assert what
@@ -245,6 +249,13 @@ impl MockOpensnitchd {
         MockError,
     > {
         let (reply_tx, reply_rx) = mpsc::channel::<NotificationReply>(16);
+        reply_tx
+            .try_send(NotificationReply {
+                id: 0,
+                code: NotificationReplyCode::Ok as i32,
+                data: String::new(),
+            })
+            .expect("a fresh channel has room for the HELLO");
         let outbound = tokio_stream::wrappers::ReceiverStream::new(reply_rx);
 
         let mut inbound = self.client.notifications(outbound).await?.into_inner();
