@@ -81,14 +81,18 @@ pub fn notification_for_effect(
 
 /// Issue #45: blocklist rules are installed and removed by the bridge only.
 /// The rules Snitchwatch ships (`000-snitchwatch-…`) are never changed or
-/// deleted from a GUI. `DaemonCommands::send` refuses both too. The error
-/// never echoes the name.
+/// deleted from a GUI, and neither are names under the curated-defaults
+/// prefix (`snitchwatch-default-…`). `DaemonCommands::send` refuses all
+/// three too. The error never echoes the name.
 fn refuse_reserved_name(name: &str) -> Result<(), String> {
     if crate::rule_name::is_reserved_blocklist_name(name) {
         return Err("blocklist rules are managed on the Blocklists page".to_string());
     }
     if crate::rule_name::is_reserved_packaged_name(name) {
         return Err("rules built into Snitchwatch can't be changed or deleted".to_string());
+    }
+    if crate::rule_name::is_reserved_curated_name(name) {
+        return Err("this name is reserved for Snitchwatch's own rules".to_string());
     }
     Ok(())
 }
@@ -189,6 +193,30 @@ mod tests {
                 let err = notification_for_effect(&effect, 1).unwrap_err();
                 assert!(err.contains("Blocklists page"), "{effect:?}: {err}");
             }
+        }
+    }
+
+    /// P2.7 review L4: the curated-defaults prefix is Snitchwatch's own too.
+    #[test]
+    fn a_gui_can_never_add_update_or_delete_a_curated_default_rule() {
+        let name = "snitchwatch-default-steam";
+        for effect in [
+            UpstreamEffect::AddRule {
+                rule: wire_rule(name, true),
+            },
+            UpstreamEffect::UpdateRule {
+                rule_id: name.to_string(),
+                rule: wire_rule(name, false),
+            },
+            UpstreamEffect::DeleteRule {
+                rule_id: name.to_string(),
+            },
+        ] {
+            let err = notification_for_effect(&effect, 1).unwrap_err();
+            assert!(
+                err.contains("reserved for Snitchwatch"),
+                "{effect:?}: {err}"
+            );
         }
     }
 
