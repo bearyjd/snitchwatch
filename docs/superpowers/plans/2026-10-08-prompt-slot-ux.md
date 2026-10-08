@@ -323,6 +323,8 @@ Branch `feat/prompt-slot-notification-actions`, after Part C.
   "<program> wants to connect to <host>". Both are escaped for the
   notification markup subset by the bridge's `sanitize_for_display`, which
   also strips control and bidi characters.
+  - When Deny would last until the firewall restarts, the body says so, as
+    the inline Deny's tooltip does.
 - **No "Decide later" on the notification.** Item 8 lists it, but the owner's
   S5 is "Allow once and Deny only". It can be added if S5 is widened.
 - **Not done:** the notification isn't withdrawn when its row is answered

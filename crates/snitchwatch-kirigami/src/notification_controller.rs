@@ -47,6 +47,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 
 use crate::bridge_runtime::{BridgeHandles, BridgeNotice, PendingRow};
+use crate::inline_deny::InlineDeny;
 use crate::notification_actions::{
     act, pending_body, still_waiting, NoticeAction, ALLOW_ONCE_ACTION, DENY_ACTION,
 };
@@ -218,11 +219,17 @@ impl qobject::NotificationController {
     /// afterwards goes out as a fixed-text notification.
     fn dispatch_pending(self: Pin<&mut Self>, target: PendingTarget) {
         let qt_thread = self.qt_thread();
+        let deny = InlineDeny::decide(
+            target.row.process_path.as_deref(),
+            target
+                .handles
+                .advertises_app_bound_rules(target.connection_id),
+        );
         std::thread::spawn(move || {
             let mut notification = notify_rust::Notification::new();
             notification
                 .summary("Snitchwatch — pending decision")
-                .body(&pending_body(&target.row))
+                .body(&pending_body(&target.row, deny))
                 .icon("security-high")
                 .action(ALLOW_ONCE_ACTION, "Allow once")
                 .action(DENY_ACTION, "Deny")

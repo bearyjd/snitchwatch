@@ -30,14 +30,24 @@ pub(crate) const DENY_ACTION: &str = "deny";
 /// The pending notification's body. The program and host come from outside
 /// and freedesktop notification servers render a markup subset in bodies,
 /// so both are escaped (and stripped of control and bidi characters) by the
-/// bridge's display sanitizer.
-pub(crate) fn pending_body(row: &PendingRow) -> String {
-    format!(
+/// bridge's display sanitizer. When Deny would be remembered (`deny`, from
+/// `InlineDeny::decide`), the body says for how long, as the inline Deny's
+/// tooltip does; a once-only Deny explains itself after the click.
+pub(crate) fn pending_body(row: &PendingRow, deny: InlineDeny) -> String {
+    let asking = format!(
         "{} wants to connect to {}",
         sanitize_for_display(&row.process, 64),
         sanitize_for_display(&row.dst_host, 128)
-    )
+    );
+    match deny {
+        InlineDeny::UntilRestart => format!("{asking}\n{DENY_UNTIL_RESTART}"),
+        InlineDeny::ProgramUnknown | InlineDeny::BridgeTooOld => asking,
+    }
 }
+
+/// What a remembered Deny does; the inline Deny's tooltip says the same.
+pub(crate) const DENY_UNTIL_RESTART: &str =
+    "Deny blocks this program from this host until the firewall restarts.";
 
 /// An answer offered on the pending notification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -163,17 +173,39 @@ mod tests {
     #[test]
     fn the_body_never_carries_markup_from_the_program_or_host() {
         assert_eq!(
-            pending_body(&row("curl", "example.com")),
+            pending_body(&row("curl", "example.com"), InlineDeny::ProgramUnknown),
             "curl wants to connect to example.com"
         );
-        let body = pending_body(&row(
-            "<b>evil</b>",
-            "<img src=\"http://tracker.example/x.png\">&amp;\u{202e}moc.knab",
-        ));
+        let body = pending_body(
+            &row(
+                "<b>evil</b>",
+                "<img src=\"http://tracker.example/x.png\">&amp;\u{202e}moc.knab",
+            ),
+            InlineDeny::UntilRestart,
+        );
         assert!(!body.contains('<') && !body.contains('>'), "{body}");
         assert!(body.contains("&lt;b&gt;evil&lt;/b&gt;"), "{body}");
         assert!(body.contains("&amp;amp;"), "{body}");
         assert!(!body.contains('\u{202e}'), "bidi override kept: {body}");
+    }
+
+    #[test]
+    fn the_body_says_how_long_a_remembered_deny_lasts() {
+        let body = |deny| pending_body(&row("curl", "example.com"), deny);
+        assert_eq!(
+            body(InlineDeny::UntilRestart),
+            format!("curl wants to connect to example.com\n{DENY_UNTIL_RESTART}")
+        );
+        for once in [InlineDeny::ProgramUnknown, InlineDeny::BridgeTooOld] {
+            assert_eq!(body(once), "curl wants to connect to example.com");
+        }
+        let inline = include_str!("../qml/InlineVerdicts.qml");
+        assert!(
+            inline.contains("Blocks this program from this host until the firewall restarts")
+                && DENY_UNTIL_RESTART
+                    .contains("blocks this program from this host until the firewall restarts"),
+            "the notification and the inline Deny drifted"
+        );
     }
 
     #[test]
