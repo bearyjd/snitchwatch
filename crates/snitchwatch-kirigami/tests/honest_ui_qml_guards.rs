@@ -432,13 +432,13 @@ fn no_shipped_qml_shortens_the_make_rule_deadline() {
 
 /// H1 (PR #111 review): a passive notification renders rich text, and a
 /// refusal's reason is bridge text, so the notice for an outcome off screen is
-/// one of two FIXED strings. `finished` carries no text at all; the reason
+/// one of three FIXED strings. `finished` carries no text at all; the reason
 /// stays in the sheet's plain-text result.
 #[test]
 fn make_rule_notices_are_fixed_text_only() {
     assert!(
         MAKE_RULE_CONTROLLER_RS.contains(
-            "fn finished(self: Pin<&mut MakeRuleController>, row_id: QString, created: bool);"
+            "fn finished(self: Pin<&mut MakeRuleController>, row_id: QString, ending: i32);"
         ),
         "MakeRuleController.finished must carry no text"
     );
@@ -446,7 +446,8 @@ fn make_rule_notices_are_fixed_text_only() {
     for line in [
         "readonly property string createdText: \"The rule was created.\"",
         "readonly property string notCreatedText: \"A rule couldn't be created. Open that connection to see why.\"",
-        "outcomes.notice(created ? outcomes.createdText : outcomes.notCreatedText);",
+        "readonly property string unknownText: \"The firewall service didn't confirm the rule. Open that connection to see more.\"",
+        "outcomes.notice(ending === 1 ? outcomes.createdText : ending === 2 ? outcomes.unknownText : outcomes.notCreatedText);",
     ] {
         assert!(has_line(&outcomes, line), "MakeRuleOutcomes.qml lost `{line}`");
     }
@@ -455,6 +456,11 @@ fn make_rule_notices_are_fixed_text_only() {
         outcomes.matches(".notice(").count(),
         1,
         "MakeRuleOutcomes.qml emits a notice other than the fixed one"
+    );
+    assert_eq!(
+        outcomes.matches("readonly property string ").count(),
+        3,
+        "MakeRuleOutcomes.qml has exactly three fixed notices"
     );
     for data in ["status", "reason", "statusText"] {
         assert!(

@@ -20,8 +20,10 @@ QtObject {
 
     readonly property string createdText: "The rule was created."
     readonly property string notCreatedText: "A rule couldn't be created. Open that connection to see why."
+    // No result in time, or the bridge session went away: it may exist.
+    readonly property string unknownText: "The firewall service didn't confirm the rule. Open that connection to see more."
 
-    // One of the two fixed texts above, for the window's passive notification.
+    // One of the three fixed texts above, for the window's passive notification.
     signal notice(string text)
 
     // The bridge's result never came: give up after a silence.
@@ -34,9 +36,11 @@ QtObject {
 
     property Connections watcher: Connections {
         target: outcomes.controller
-        function onFinished(rowId, created) {
+        // `ending`: MakeRuleController.finished's 0 not created, 1 created,
+        // 2 unknown (Rust `make_rule::Ending`).
+        function onFinished(rowId, ending) {
             if (!outcomes.shownInPlace(rowId)) {
-                outcomes.notice(created ? outcomes.createdText : outcomes.notCreatedText);
+                outcomes.notice(ending === 1 ? outcomes.createdText : ending === 2 ? outcomes.unknownText : outcomes.notCreatedText);
             }
         }
     }

@@ -33,7 +33,7 @@ use snitchwatch_bridge::cache::connections::Verdict;
 use snitchwatch_bridge::rule_wire::rule_to_wire;
 use snitchwatch_bridge::translator::verdict::verdict_to_rule;
 use snitchwatch_bridge::ws_messages::{
-    valid_request_id, ClientMessage, ConnectionRow, ServerMessage,
+    valid_request_id, ClientMessage, ConnectionRow, RuleCommandOutcome, ServerMessage,
 };
 use snitchwatch_proto::protocol::Connection;
 use std::time::{Duration, Instant};
@@ -138,10 +138,30 @@ const WORDING: Wording = Wording {
 /// What the sheet says for the bridge's `outcome` (what [`MakeRuleWait`]
 /// finishes with). Plain text; `saved` means the rule was created.
 #[cfg(test)]
-pub(crate) fn outcome_status(
-    outcome: &snitchwatch_bridge::ws_messages::RuleCommandOutcome,
-) -> Finished {
+pub(crate) fn outcome_status(outcome: &RuleCommandOutcome) -> Finished {
     crate::rules::editor_view::finished_with(outcome, &WORDING)
+}
+
+/// How a request ended, for the off-screen notice (`MakeRuleOutcomes.qml`
+/// reads these numbers): only Ok is created, and when the outcome isn't
+/// known (no result in time, the session gone, the bridge's own timeout or
+/// an unsure result) it is unknown, never "not created" (PR #111).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Ending {
+    NotCreated = 0,
+    Created = 1,
+    Unknown = 2,
+}
+
+/// The [`Ending`] of the bridge's `outcome`.
+pub(crate) fn ending_of(outcome: &RuleCommandOutcome) -> Ending {
+    match outcome {
+        RuleCommandOutcome::Ok | RuleCommandOutcome::OkWithNote { .. } => Ending::Created,
+        RuleCommandOutcome::Timeout | RuleCommandOutcome::Unsure { .. } => Ending::Unknown,
+        RuleCommandOutcome::Rejected { .. }
+        | RuleCommandOutcome::Refused { .. }
+        | RuleCommandOutcome::NoDaemon => Ending::NotCreated,
+    }
 }
 
 /// The row a request is about, and the row's bridge session (from its
@@ -175,10 +195,17 @@ impl MakeRuleWait {
     }
 
     /// The row and how it ended, when `message` is the awaited result.
-    pub(crate) fn on_message(&mut self, message: &ServerMessage) -> Option<(String, Finished)> {
+    pub(crate) fn on_message(
+        &mut self,
+        message: &ServerMessage,
+    ) -> Option<(String, Finished, Ending)> {
+        let ServerMessage::RuleCommandResult { outcome, .. } = message else {
+            return None;
+        };
+        let ending = ending_of(outcome);
         self.0
             .result_with(message, &WORDING)
-            .map(|(tag, done)| (tag.row_id, done))
+            .map(|(tag, done)| (tag.row_id, done, ending))
     }
 
     /// Gives up after `after` of silence ([`NO_ANSWER_AFTER`] outside the
@@ -190,11 +217,11 @@ impl MakeRuleWait {
         now: Instant,
         after: Duration,
         is_current: impl Fn(u64) -> bool,
-    ) -> Option<(String, Finished)> {
+    ) -> Option<(String, Finished, Ending)> {
         let gone = |tag: &RowTag| tag.session.is_some_and(|session| !is_current(session));
         self.0
             .expired_with(now, after, gone, &WORDING)
-            .map(|(tag, done)| (tag.row_id, done))
+            .map(|(tag, done)| (tag.row_id, done, Ending::Unknown))
     }
 }
 
@@ -463,10 +490,11 @@ mod tests {
         assert!(wait
             .on_message(&ServerMessage::ClearConnectionRows)
             .is_none());
-        let (row, done) = wait
+        let (row, done, ending) = wait
             .on_message(&result("make-1", RuleCommandOutcome::Ok))
             .unwrap();
         assert_eq!(row, "1:ask-1");
+        assert_eq!(ending, Ending::Created);
         assert_eq!(
             done,
             Finished {
@@ -501,8 +529,9 @@ mod tests {
         for (outcome, text) in cases {
             let mut wait = MakeRuleWait::default();
             wait.begin("make-1".into(), "1:event-5-1".into(), Instant::now());
-            let (_, done) = wait.on_message(&result("make-1", outcome)).unwrap();
+            let (_, done, ending) = wait.on_message(&result("make-1", outcome)).unwrap();
             assert!(!done.saved, "{text}");
+            assert_ne!(ending, Ending::Created, "{text}");
             assert_eq!(done.status, text);
         }
         let refused = outcome_status(&RuleCommandOutcome::Refused { problems: vec![] });
@@ -569,7 +598,7 @@ mod tests {
                 .is_none(),
             "not yet"
         );
-        let (row, done) = wait
+        let (row, done, ending) = wait
             .poll(
                 now + NO_ANSWER_AFTER + Duration::from_secs(1),
                 NO_ANSWER_AFTER,
@@ -577,12 +606,54 @@ mod tests {
             )
             .unwrap();
         assert_eq!(row, "1:ask-1");
+        assert_eq!(ending, Ending::Unknown, "it may have been created");
         assert!(!done.saved);
         assert_eq!(done.status, NO_ANSWER);
         // A late Ok after giving up changes nothing.
         assert!(wait
             .on_message(&result("make-1", RuleCommandOutcome::Ok))
             .is_none());
+    }
+
+    /// The off-screen notice's three cases (PR #111): created only for Ok,
+    /// unknown when the outcome isn't known, not created otherwise.
+    #[test]
+    fn each_result_ends_as_created_not_created_or_unknown() {
+        use snitchwatch_bridge::rule_policy::RuleProblem;
+        let cases = [
+            (RuleCommandOutcome::Ok, Ending::Created),
+            (
+                RuleCommandOutcome::OkWithNote { note: "n".into() },
+                Ending::Created,
+            ),
+            (
+                RuleCommandOutcome::Rejected { reason: "r".into() },
+                Ending::NotCreated,
+            ),
+            (
+                RuleCommandOutcome::Refused {
+                    problems: vec![RuleProblem {
+                        path: "name".into(),
+                        reason: "taken".into(),
+                    }],
+                },
+                Ending::NotCreated,
+            ),
+            (RuleCommandOutcome::NoDaemon, Ending::NotCreated),
+            (RuleCommandOutcome::Timeout, Ending::Unknown),
+            (
+                RuleCommandOutcome::Unsure { reason: "u".into() },
+                Ending::Unknown,
+            ),
+        ];
+        for (outcome, want) in cases {
+            assert_eq!(ending_of(&outcome), want, "{outcome:?}");
+        }
+        assert_eq!(
+            [Ending::NotCreated, Ending::Created, Ending::Unknown].map(|e| e as i32),
+            [0, 1, 2],
+            "the numbers MakeRuleOutcomes.qml reads"
+        );
     }
 
     #[test]
@@ -592,10 +663,11 @@ mod tests {
         wait.begin("make-1".into(), "1:ask-1".into(), now);
         let short = Duration::from_millis(50);
         assert!(wait.poll(now + short, short, |_| true).is_none());
-        let (_, done) = wait
+        let (_, done, ending) = wait
             .poll(now + Duration::from_millis(51), short, |_| true)
             .unwrap();
         assert_eq!(done.status, NO_ANSWER);
+        assert_eq!(ending, Ending::Unknown);
     }
 
     /// A result goes only to the connection that asked; once the row's
@@ -608,8 +680,9 @@ mod tests {
         assert!(wait
             .poll(now, NO_ANSWER_AFTER, |session| session == 3)
             .is_none());
-        let (row, done) = wait.poll(now, NO_ANSWER_AFTER, |_| false).unwrap();
+        let (row, done, ending) = wait.poll(now, NO_ANSWER_AFTER, |_| false).unwrap();
         assert_eq!(row, "3:ask-1");
+        assert_eq!(ending, Ending::Unknown);
         assert!(!done.saved);
         assert_eq!(done.status, NO_ANSWER);
         // A row id naming no session waits for the deadline only.

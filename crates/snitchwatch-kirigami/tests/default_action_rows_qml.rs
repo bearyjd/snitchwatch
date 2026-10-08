@@ -12,7 +12,7 @@
 //!     rule-matched row still gets none;
 //!   * "Make a rule…" says only what the bridge answered, in place; an
 //!     outcome off screen (another row, the inspector closed, the page gone)
-//!     comes as one of two FIXED notices, never the bridge's text (PR #111
+//!     comes as one of three FIXED notices, never the bridge's text (PR #111
 //!     review, H1). The controller and `MakeRuleOutcomes` live at window
 //!     level, as in main.qml, and outlive the page (OQ1).
 //!
@@ -90,6 +90,8 @@ Controls.ApplicationWindow {
     }
     readonly property string createdNotice: "The rule was created."
     readonly property string notCreatedNotice: "A rule couldn't be created. Open that connection to see why."
+    readonly property string unknownNotice: "The firewall service didn't confirm the rule. Open that "
+        + "connection to see more."
     readonly property string noAnswer: "No answer from the firewall in time. The rule may have "
         + "been created; check the Rules page."
 
@@ -302,7 +304,7 @@ Controls.ApplicationWindow {
                                       "busy-elsewhere note after the wait ended");
                     windowController.shortenDeadlineForTests(30000);
                     // Its row wasn't on screen: a fixed notice, never the text.
-                    probeWindow.checkNotices([probeWindow.notCreatedNotice], "after a silence");
+                    probeWindow.checkNotices([probeWindow.unknownNotice], "after a silence");
 
                     // L2: a row of a session that isn't live (no bridge runs
                     // here) ends its wait at the first poll, deadline or not.
@@ -311,8 +313,8 @@ Controls.ApplicationWindow {
                     probeWindow.check(!windowController.busy
                                       && windowController.statusText === probeWindow.noAnswer,
                                       "a gone session still waits: " + windowController.busy);
-                    probeWindow.checkNotices([probeWindow.notCreatedNotice,
-                                              probeWindow.notCreatedNotice], "a gone session");
+                    probeWindow.checkNotices([probeWindow.unknownNotice,
+                                              probeWindow.unknownNotice], "a gone session");
 
                     // L1: the inspector closes while its row's rule waits.
                     page.inspectorSheet.close();
@@ -324,8 +326,8 @@ Controls.ApplicationWindow {
                     probeWindow.check(!page.makeRuleSheet.visible, "the inspector didn't close");
                     const id = windowController.begin("1:default-stray");
                     probeWindow.result(id, { status: "rejected", reason: "<img src=x>" });
-                    probeWindow.checkNotices([probeWindow.notCreatedNotice,
-                                              probeWindow.notCreatedNotice,
+                    probeWindow.checkNotices([probeWindow.unknownNotice,
+                                              probeWindow.unknownNotice,
                                               probeWindow.notCreatedNotice], "inspector closed");
                     connModel.setGroupedMode(true);
                 } else if (probeWindow.phase === 4) {
@@ -351,8 +353,8 @@ Controls.ApplicationWindow {
                     probeWindow.result(probeWindow.pendingAfterPage, { status: "ok" });
                     probeWindow.check(!windowController.busy && windowController.created,
                                       "the controller lost the request");
-                    probeWindow.checkNotices([probeWindow.notCreatedNotice,
-                                              probeWindow.notCreatedNotice,
+                    probeWindow.checkNotices([probeWindow.unknownNotice,
+                                              probeWindow.unknownNotice,
                                               probeWindow.notCreatedNotice,
                                               probeWindow.createdNotice], "page gone");
                     probeWindow.check(probeWindow.shown.length === 0,

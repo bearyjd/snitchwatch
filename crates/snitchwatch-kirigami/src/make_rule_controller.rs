@@ -14,7 +14,7 @@ use cxx_qt::{CxxQtType, Threading};
 use cxx_qt_lib::QString;
 use std::time::{Duration, Instant};
 
-use crate::make_rule::{Finished, MakeRuleWait, NOT_SENT, NO_ANSWER_AFTER, SENDING};
+use crate::make_rule::{Ending, Finished, MakeRuleWait, NOT_SENT, NO_ANSWER_AFTER, SENDING};
 use snitchwatch_bridge::ws_messages::ServerMessage;
 
 #[cxx_qt::bridge]
@@ -38,12 +38,14 @@ pub mod qobject {
         #[qproperty(bool, created)]
         type MakeRuleController = super::MakeRuleControllerRust;
 
-        /// A request about row `row_id` ended; `created` when the bridge said
-        /// Ok. No text: the reasons are bridge text and stay in the sheet's
-        /// plain-text result, and `MakeRuleOutcomes.qml` turns this into a
-        /// fixed notice when that row isn't on screen (PR #111 review, H1).
+        /// A request about row `row_id` ended: `ending` is
+        /// `make_rule::Ending` (0 not created, 1 created, 2 unknown). No
+        /// text: the reasons are bridge text and stay in the sheet's
+        /// plain-text result, and `MakeRuleOutcomes.qml` turns this into one
+        /// of three fixed notices when that row isn't on screen (PR #111
+        /// review, H1).
         #[qsignal]
-        fn finished(self: Pin<&mut MakeRuleController>, row_id: QString, created: bool);
+        fn finished(self: Pin<&mut MakeRuleController>, row_id: QString, ending: i32);
 
         /// Feed the bridge's `RuleCommandResult`s to this controller.
         #[qinvokable]
@@ -149,8 +151,8 @@ impl qobject::MakeRuleController {
             .rust_mut()
             .wait
             .poll(Instant::now(), after, is_current);
-        if let Some((row_id, done)) = gave_up {
-            self.finish(row_id, done);
+        if let Some((row_id, done, ending)) = gave_up {
+            self.finish(row_id, done, ending);
         }
     }
 
@@ -160,12 +162,12 @@ impl qobject::MakeRuleController {
     }
 
     /// The wait ended: say how, for the row it was about.
-    fn finish(mut self: Pin<&mut Self>, row_id: String, done: Finished) {
+    fn finish(mut self: Pin<&mut Self>, row_id: String, done: Finished, ending: Ending) {
         self.as_mut().set_row_id(QString::from(&row_id));
         self.as_mut().set_created(done.saved);
         self.as_mut().set_busy(false);
         self.as_mut().set_status_text(QString::from(&done.status));
-        self.finished(QString::from(&row_id), done.saved);
+        self.finished(QString::from(&row_id), ending as i32);
     }
 
     fn apply_server_message_json(self: Pin<&mut Self>, json: &QString) {
@@ -177,8 +179,8 @@ impl qobject::MakeRuleController {
 
     fn on_message(mut self: Pin<&mut Self>, message: ServerMessage) {
         let done = self.as_mut().rust_mut().wait.on_message(&message);
-        if let Some((row_id, done)) = done {
-            self.finish(row_id, done);
+        if let Some((row_id, done, ending)) = done {
+            self.finish(row_id, done, ending);
         }
     }
 
