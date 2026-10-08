@@ -43,6 +43,10 @@ pub fn derive_profile_id(name: &str, existing_ids: &[String]) -> String {
     if slug.is_empty() {
         slug = "profile".to_string();
     }
+    // The bridge takes ids of at most 64 plain characters; leave room for a
+    // `-<n>` suffix.
+    slug.truncate(60);
+    let slug = slug.trim_end_matches('-').to_string();
     if !existing_ids.iter().any(|id| id == &slug) {
         return slug;
     }
@@ -59,6 +63,20 @@ pub fn derive_profile_id(name: &str, existing_ids: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The bridge takes profile ids of at most 64 plain characters
+    /// (PR #104 re-review), whatever the name's length.
+    #[test]
+    fn a_long_name_gives_an_id_the_bridge_takes() {
+        let long = "Home ".repeat(40);
+        let id = derive_profile_id(&long, &[]);
+        assert!(id.len() <= 64, "{id}");
+        let again = derive_profile_id(&long, std::slice::from_ref(&id));
+        assert!(again.len() <= 64 && again != id, "{again}");
+        assert!(snitchwatch_bridge::profiles::materializer::valid_rule_id(
+            &again
+        ));
+    }
 
     #[test]
     fn parse_matchers_trims_and_drops_empty_entries() {

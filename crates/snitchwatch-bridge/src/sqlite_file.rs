@@ -255,9 +255,6 @@ mod tests {
 
     const SUFFIXES: [&str; 3] = ["-journal", "-wal", "-shm"];
 
-    /// SQLite deletes a `-journal` or `-wal` beside an *empty* database
-    /// without reading it, so a FIFO only hangs it next to one that has a
-    /// table: the fixtures make one first.
     /// PR #104 review: a store busy at start (another process, a backup)
     /// waits instead of failing the open at once.
     #[test]
@@ -269,6 +266,10 @@ mod tests {
             .unwrap();
         assert_eq!(ms, 5000);
     }
+
+    /// SQLite deletes a `-journal` or `-wal` beside an *empty* database
+    /// without reading it, so a FIFO only hangs it next to one that has a
+    /// table: the fixtures make one first.
 
     #[test]
     fn a_fifo_sidecar_is_refused_without_hanging() {

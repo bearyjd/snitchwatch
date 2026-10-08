@@ -213,3 +213,17 @@ fn names_are_stable_and_unusable_ids_are_refused() {
         );
     }
 }
+
+/// A repeated rule id would name the same daemon rule twice: only the first
+/// is installed (PR #104 re-review).
+#[test]
+fn a_repeated_rule_id_is_not_installed_twice() {
+    let rules = vec![
+        legacy("r1", "deny", "dest.host", "a.example"),
+        legacy("r1", "allow", "dest.host", "b.example"),
+    ];
+    let out = materialize_profile("home", &rules);
+    assert!(out[0].1.is_ok());
+    let found = reasons(out[1].1.clone());
+    assert!(found.iter().any(|r| r == DUPLICATE_RULE_ID), "{found:?}");
+}

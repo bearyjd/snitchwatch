@@ -44,6 +44,10 @@ pub const UNREADABLE_REASON: &str = "Snitchwatch can't read its saved profiles (
      in its state folder), so it changes no profile rules: rules it installed earlier were left \
      in place. Fix or move that file, then restart Snitchwatch's background service.";
 
+/// Why a system bridge with nowhere to save profiles changes none.
+pub const NOWHERE_REASON: &str = "Snitchwatch has no place to save profiles here, so it changes \
+     no profile rules: rules it installed earlier were left in place.";
+
 /// Why a per-user bridge applies no profile rules.
 pub const PER_USER_REASON: &str = "Profiles are applied to the firewall only by the \
      system-wide Snitchwatch service; in this per-user setup another program could pose as the \
@@ -66,8 +70,11 @@ pub(crate) fn build_profiles_manager(
         (BridgeMode::System, Storage::Persistent(_)) => {
             Arc::new(DaemonProfileSink::new(daemon.commands, daemon.rules))
         }
-        (BridgeMode::System, Storage::Ephemeral(_)) => {
+        (BridgeMode::System, Storage::Ephemeral(EphemeralReason::Unusable(_))) => {
             Arc::new(NoopProfileRuleSink::new(UNREADABLE_REASON))
+        }
+        (BridgeMode::System, Storage::Ephemeral(_)) => {
+            Arc::new(NoopProfileRuleSink::new(NOWHERE_REASON))
         }
         (BridgeMode::User, _) => Arc::new(NoopProfileRuleSink::new(PER_USER_REASON)),
     };
@@ -371,10 +378,7 @@ mod tests {
             Storage::Ephemeral(EphemeralReason::InProcess),
             BridgeMode::System,
         );
-        assert_eq!(
-            memory.not_applied_reason().as_deref(),
-            Some(UNREADABLE_REASON)
-        );
+        assert_eq!(memory.not_applied_reason().as_deref(), Some(NOWHERE_REASON));
         // One bad row makes the whole store unreadable (the safe choice:
         // a skipped row could be the active profile's).
         let (_dir, state) = state();

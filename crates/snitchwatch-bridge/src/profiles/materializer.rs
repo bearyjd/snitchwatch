@@ -38,6 +38,9 @@ pub const PROFILE_BAND_PREFIX: &str = PROFILE_RULE_NAME_PREFIX;
 pub const RULE_ID_UNUSABLE: &str = "this rule's id can't be used in a firewall rule name; \
      remove the rule and add it again";
 
+/// Why the second rule with an id isn't installed.
+pub const DUPLICATE_RULE_ID: &str = "another rule in this profile has the same id";
+
 /// Longest profile rule id (`AddProfileRule`).
 pub const MAX_RULE_ID_LEN: usize = 64;
 
@@ -117,13 +120,26 @@ fn conditions(rule: &ProfileRule) -> Result<Operator, String> {
 }
 
 /// Every rule of a profile with its outcome, in stored order, by rule id.
+/// A repeated id would name the same daemon rule twice: only its first rule
+/// is installed.
 pub fn materialize_profile(
     profile_id: &str,
     rules: &[ProfileRule],
 ) -> Vec<(String, Result<Rule, Vec<RuleProblem>>)> {
+    let mut seen = std::collections::HashSet::new();
     rules
         .iter()
-        .map(|rule| (rule.id.clone(), materialize_rule(profile_id, rule)))
+        .map(|rule| {
+            let outcome = if seen.insert(rule.id.as_str()) {
+                materialize_rule(profile_id, rule)
+            } else {
+                Err(vec![RuleProblem {
+                    path: "id".into(),
+                    reason: DUPLICATE_RULE_ID.into(),
+                }])
+            };
+            (rule.id.clone(), outcome)
+        })
         .collect()
 }
 

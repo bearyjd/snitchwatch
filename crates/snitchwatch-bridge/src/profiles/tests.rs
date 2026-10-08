@@ -407,6 +407,74 @@ async fn a_restart_without_a_network_yet_keeps_the_choice() {
     assert_eq!(active(&after).as_deref(), Some("office"));
 }
 
+/// A click while a new network is still settling is saved with that
+/// network (the newest one seen), so the settled reading doesn't override
+/// it (PR #104 re-review).
+#[tokio::test]
+async fn a_click_during_the_settle_time_is_saved_with_the_newest_network() {
+    let mgr = manager();
+    two_profiles(&mgr).await;
+    mgr.on_network_observed(Some("Home-5G".into()))
+        .await
+        .unwrap();
+    mgr.note_network(Some("Office-Guest".into()));
+    mgr.note_network(None);
+    mgr.activate("home").await.unwrap();
+    let saved = mgr.store().manual_choice().unwrap().unwrap();
+    assert_eq!(saved.network.as_deref(), Some("Office-Guest"));
+    mgr.on_network_observed(Some("Office-Guest".into()))
+        .await
+        .unwrap();
+    assert_eq!(active(&mgr).as_deref(), Some("home"));
+}
+
+/// A choice saved with no network known by an earlier run is not adopted
+/// by this run's first network: only this run's own click is.
+#[tokio::test]
+async fn an_earlier_runs_choice_without_a_network_is_not_adopted() {
+    let mgr = manager();
+    two_profiles(&mgr).await;
+    mgr.store()
+        .set_manual_choice(&ManualChoice {
+            profile_id: Some("office".into()),
+            network: None,
+        })
+        .unwrap();
+    mgr.store().set_active(Some("office")).unwrap();
+    mgr.on_network_observed(Some("Home-5G".into()))
+        .await
+        .unwrap();
+    assert_eq!(active(&mgr).as_deref(), Some("home"));
+    assert_eq!(mgr.store().manual_choice().unwrap(), None);
+}
+
+/// PR #104 re-review: creating a profile under an existing id would have
+/// wiped its rules and its active flag (and a pass would then purge them).
+#[tokio::test]
+async fn creating_an_existing_or_unusable_profile_id_is_refused() {
+    let (mgr, _sink) = with_sink();
+    mgr.create_profile("home", "Home", vec![]).await.unwrap();
+    mgr.add_rule("home", host_rule("r1", "a.example"))
+        .await
+        .unwrap();
+    mgr.activate("home").await.unwrap();
+    assert!(matches!(
+        mgr.create_profile("home", "Home again", vec![]).await,
+        Err(ProfilesError::Refused(_))
+    ));
+    let home = mgr.store().get_profile("home").unwrap().unwrap();
+    assert!(home.active && home.rules.len() == 1, "{home:?}");
+    for id in ["a/b", "", &"x".repeat(65)] {
+        assert!(
+            matches!(
+                mgr.create_profile(id, "X", vec![]).await,
+                Err(ProfilesError::Refused(_))
+            ),
+            "{id}"
+        );
+    }
+}
+
 /// A flapping network is acted on once it settles, not on every change.
 #[tokio::test(start_paused = true)]
 async fn a_flapping_network_is_acted_on_once_it_settles() {

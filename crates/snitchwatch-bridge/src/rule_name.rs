@@ -46,7 +46,7 @@ pub const PACKAGED_FETCH_RULE_NAME: &str = "000-snitchwatch-bridge-fetch";
 pub const CURATED_DEFAULT_RULE_NAME_PREFIX: &str = "snitchwatch-default-";
 
 /// Name prefix of the rules Snitchwatch installs for the active profile
-/// (`850-profile:<profile>:<seq>-<rule>`, issue #46 Part 2). Reserved: a GUI
+/// (`850-profile:<profile>:<rule>`, issue #46 Part 2). Reserved: a GUI
 /// can't add, change or delete a rule under it, so it can't replace a
 /// profile's deny with an allow. Those rules are managed on the Profiles
 /// page.

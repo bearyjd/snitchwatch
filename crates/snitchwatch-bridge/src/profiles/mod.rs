@@ -57,6 +57,8 @@ pub const MAX_RULES_PER_PROFILE: usize = 64;
 /// and tests).
 pub const NO_SINK_REASON: &str = "Profiles aren't applied to the firewall by this Snitchwatch";
 
+const PROFILE_ID_REFUSED: &str = "a profile's id must be 1 to 64 letters, digits, - or _";
+const PROFILE_EXISTS: &str = "a profile with this id already exists";
 const RULE_ID_REFUSED: &str = "a profile rule's id must be 1 to 64 letters, digits, - or _";
 const TOO_MANY_RULES: &str = "a profile holds at most 64 rules";
 const OVER_CAP: &str = "a profile holds at most 64 rules; this one wasn't installed";
@@ -112,9 +114,14 @@ pub struct ProfilesManager {
     /// Serializes manual choices and network observations, so an
     /// auto-switch can't land between a click and its saved choice.
     switch_lock: Mutex<()>,
-    /// The last network that settled (what a manual choice is saved with);
-    /// `None` until one has since the bridge started.
+    /// The last network that settled; `None` until one has since the
+    /// bridge started.
     last_settled: StdMutex<Option<String>>,
+    /// The newest network seen, settled or not (never "none"): what a
+    /// manual choice is saved with, falling back to `last_settled`.
+    latest_network: StdMutex<Option<String>>,
+    /// A manual choice was made during this bridge run.
+    chose_this_run: std::sync::atomic::AtomicBool,
     statuses: StdMutex<Statuses>,
     enforce_requested: Notify,
     /// One enforcement pass at a time.
@@ -150,6 +157,8 @@ impl ProfilesManager {
             },
             switch_lock: Mutex::new(()),
             last_settled: StdMutex::new(None),
+            latest_network: StdMutex::new(None),
+            chose_this_run: std::sync::atomic::AtomicBool::new(false),
             statuses: StdMutex::new(statuses),
             enforce_requested: Notify::new(),
             pass_lock: Mutex::new(()),
@@ -217,6 +226,14 @@ impl ProfilesManager {
         network_matchers: Vec<String>,
     ) -> Result<(), ProfilesError> {
         let _switch = self.switch_lock.lock().await;
+        if !valid_rule_id(id) {
+            return Err(refused("id", PROFILE_ID_REFUSED));
+        }
+        // Writing over an existing profile would wipe its rules and its
+        // active flag, and the next pass would purge them.
+        if self.store.get_profile(id)?.is_some() {
+            return Err(refused("id", PROFILE_EXISTS));
+        }
         self.store.upsert_profile(&Profile {
             id: id.to_string(),
             name: name.to_string(),
@@ -312,7 +329,7 @@ impl ProfilesManager {
     }
 
     /// Manually activate `id`; the choice is saved with the newest network
-    /// seen (issue #82, see module docs).
+    /// seen, or the last settled one (issue #82, see module docs).
     pub async fn activate(&self, id: &str) -> Result<(), ProfilesError> {
         let _switch = self.switch_lock.lock().await;
         self.activate_inner(id)?;
@@ -327,7 +344,10 @@ impl ProfilesManager {
     }
 
     fn save_manual_choice(&self, profile_id: Option<&str>) -> Result<(), ProfilesError> {
-        let network = lock(&self.last_settled).clone();
+        let latest = lock(&self.latest_network).clone();
+        let network = latest.or_else(|| lock(&self.last_settled).clone());
+        self.chose_this_run
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         self.store.set_manual_choice(&ManualChoice {
             profile_id: profile_id.map(str::to_string),
             network,
@@ -433,6 +453,14 @@ impl ProfilesManager {
 }
 
 impl ProfilesManager {
+    /// The newest network reading, settled or not; no network is ignored
+    /// (a click while the network drops keeps the last one seen).
+    pub fn note_network(&self, network: Option<String>) {
+        if network.is_some() {
+            *lock(&self.latest_network) = network;
+        }
+    }
+
     /// Act on a network that stayed the same for the settle time (the
     /// auto-switch task calls this; tests call it directly). No network (a
     /// reboot before Wi-Fi joins, suspend, a drop) is no change: nothing
@@ -454,9 +482,14 @@ impl ProfilesManager {
             }
             *last = Some(network.clone());
         }
+        let chose_this_run = self
+            .chose_this_run
+            .load(std::sync::atomic::Ordering::SeqCst);
         if let Some(choice) = self.store.manual_choice()? {
             match &choice.network {
-                None => {
+                // Only this run's own click: an earlier run's choice made
+                // with no network known says nothing about this network.
+                None if chose_this_run => {
                     let kept = ManualChoice {
                         network: Some(network),
                         ..choice
@@ -465,7 +498,7 @@ impl ProfilesManager {
                     return Ok(());
                 }
                 Some(made_on) if *made_on == network => return Ok(()),
-                Some(_) => self.store.clear_manual_choice()?,
+                _ => self.store.clear_manual_choice()?,
             }
         }
         let profiles = self.store.list_profiles()?;

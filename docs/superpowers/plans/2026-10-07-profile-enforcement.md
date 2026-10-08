@@ -245,11 +245,17 @@ Built as designed above; where it differs from steps 4–11:
 - **After a restart** the active profile's rules start pending, so the
   first pass records them installed when the snapshot holds them, and
   sends nothing.
-- **#82 as built:** a manual choice is saved with the last network that
-  settled and holds while that network is observed, also after a restart.
-  No network (before Wi-Fi joins, suspend, a drop) is no change: it neither
-  acts nor clears the choice (PR #104 review M1). A choice made before any
-  network settled is kept by the first one that does. Only a different
+- **#82 as built:** a manual choice is saved with the newest network
+  reading (a click during the settle time after joining a network keeps
+  that network), or the last settled one, and holds while that network is
+  observed, also after a restart. No network (before Wi-Fi joins, suspend,
+  a drop) is no change: it neither acts nor clears the choice (PR #104
+  review M1). A choice made in this run before any network was seen is
+  kept by the first network that settles; an earlier run's is not.
+- **Profile ids** are plain tokens of at most 64 characters, and creating a
+  profile under an existing id is refused (it would have wiped the
+  profile's rules and active flag, and a pass would then purge them). A
+  repeated rule id in a saved profile installs only its first rule. Only a different
   network clears it; with no manual choice saved, the first network after a
   restart lets auto-switch decide.
 - **Stable names:** `850-profile:<profile>:<rule id>`, no position, so

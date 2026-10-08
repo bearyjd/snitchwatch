@@ -22,8 +22,9 @@ impl ProfilesManager {
         self.spawn_auto_switch_with(watcher, NETWORK_SETTLE)
     }
 
-    /// A network value that stays the same for `settle` goes to
-    /// [`Self::on_network_observed`]. The watcher's value at start
+    /// Every network value is noted at once ([`Self::note_network`], what a
+    /// manual choice is saved with); one that stays the same for `settle`
+    /// goes to [`Self::on_network_observed`]. The watcher's value at start
     /// counts too. The loop ends when the watcher does, after acting on its
     /// last value.
     pub fn spawn_auto_switch_with(
@@ -35,6 +36,7 @@ impl ProfilesManager {
             let mut rx = watcher.subscribe();
             let mut current = watcher.current_connection_id().await;
             loop {
+                self.note_network(current.clone());
                 let changed = tokio::time::timeout(settle, rx.changed()).await;
                 if let Ok(Ok(())) = changed {
                     current = rx.borrow_and_update().clone();
