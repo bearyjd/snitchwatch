@@ -298,6 +298,71 @@ Branch `feat/78-pause-answers-waiting`, after #86; owner decision: option 1.
      the inspector does since #56.
 6. **No remembered Allow from a notification.** Only Allow-once.
 
+#### B as implemented (2026-10-08): departures
+
+Branch `feat/prompt-slot-notification-actions`, after Part C.
+- **No QML in the path.** The actions run in Rust on the notification's
+  thread (`notification_actions::act`), through `bridge_feed::dispatch_to`
+  rather than `BridgeFeed.submitVerdict`. So #77's gate and the
+  session-routed send apply, with the window closed too.
+  - Deny's duration comes from `InlineDeny::decide`, the inline button's
+    rule: until restart only for a bindable program on a session with
+    app-bound rules, otherwise once.
+  - A once-only Deny follows up with the same plain sentence the page shows.
+- **Row ids.** `Notice::Pending { row_id }` is the ask id, so the row is
+  `ask_row_id(row_id)` in the notice's session.
+- **Still waiting?** The runtime keeps each session's waiting rows
+  (`bridge_runtime/pending_rows.rs`), fed by the same row messages as the
+  model. It uses the same pending test and starts empty per session.
+  - After the 5 s grace a notice is shown only if its row still waits in
+    its session. This closes #78's gap: a prompt answered by a tray-only
+    pause within 5 s is no longer announced.
+  - Every action checks again. A stale one sends nothing and says so in a
+    fixed-text notification.
+- **Body.** It is built from the waiting row, not the notice:
+  "<program> wants to connect to <host>". Both are escaped for the
+  notification markup subset by the bridge's `sanitize_for_display`, which
+  also strips control and bidi characters.
+  - When Deny would last until the firewall restarts, the body says so, as
+    the inline Deny's tooltip does.
+- **No "Decide later" on the notification.** Item 8 lists it, but the owner's
+  S5 is "Allow once and Deny only". It can be added if S5 is widened.
+- **PR #100 security review fixes.**
+  - **Only the notification server can click.** notify-rust's
+    `wait_for_action` accepted `ActionInvoked` from any sender on the bus.
+    `notification_signals` sends `Notify` itself, on the connection that
+    listens. Its match rule names the server's unique name, path and
+    interface. `classify` checks the sender, the id and that the key is one
+    of ours. A change of owner voids the notice. Every other notice now
+    carries no actions.
+  - **Body.** It shows the full program path. A long path or host keeps its
+    end behind a leading "…".
+  - **Format characters.** The display sanitizer strips every format
+    character (Unicode category Cf).
+  - **Lost race.** The bridge drops a verdict for a row that stopped
+    waiting without saying so. The answer then watches for the row's
+    update, and says "This prompt was already answered" when the row was
+    settled another way.
+  - **Withdrawn.** The notification is closed once its row stops waiting.
+- **PR #100 re-review fixes.**
+  - **On-demand servers.** A server started on demand (dunst, say) takes
+    the name after the notice starts hearing owner changes, so that change
+    is already queued when the wait starts. A change now voids the notice
+    only when the server that showed it lost the name; any other change is
+    ignored. Owner changes are polled before clicks.
+  - **A voided notice is closed,** and its row still waits for the window.
+    `CloseNotification` goes to the unique name that showed it, never to
+    a new owner, whose notification with that id is somebody else's.
+  - **CI runs the private-bus tests.** The kirigami job installs
+    `dbus-daemon` and sets `CI`; with `CI` set, a missing `dbus-daemon`
+    fails these tests instead of skipping them.
+  - **Path.** A long program path keeps its start and its end
+    (`sanitize_ends_for_display`), so a padded `/tmp/x/…/firefox` still
+    shows `/tmp`. A host keeps its end only.
+  - **Invisible characters.** The display sanitizer also strips the
+    invisible characters outside Cf: the combining grapheme joiner, the
+    Hangul fillers and the variation selectors.
+
 ### C. Bridge auto-answer and "Decide later" (BR + UI, M; S1/S2 decided: P-a after 30 s, "Decide later" = P-c)
 
 7. **Auto-answer.** `ask_rule`'s `tokio::select!` gains a third arm,
