@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use crate::blocklists::BlocklistsManager;
+use crate::blocklists::{BlocklistsManager, SubscribeOutcome};
 use crate::cache::connections::{ConnectionCache, Verdict};
 use crate::profiles::store::ProfileRule;
 use crate::profiles::ProfilesManager;
@@ -83,6 +83,7 @@ pub fn apply(
         ClientMessage::GlobalSettings { .. }
         | ClientMessage::SubscribeBlocklist { .. }
         | ClientMessage::UnsubscribeBlocklist { .. }
+        | ClientMessage::RequestBlocklistEntries { .. }
         | ClientMessage::CreateProfile { .. }
         | ClientMessage::UpdateProfile { .. }
         | ClientMessage::DeleteProfile { .. }
@@ -100,22 +101,47 @@ pub fn apply(
 /// Outcome of routing a blocklist-related ClientMessage to the manager.
 #[derive(Debug, PartialEq)]
 pub enum BlocklistActionOutcome {
-    Subscribed { id: String },
-    Unsubscribed { id: String },
+    Subscribed {
+        id: String,
+    },
+    /// The URL was already subscribed: no change, no download.
+    AlreadySubscribed {
+        id: String,
+    },
+    /// Refused (bad URL, too many lists, id clash, store error); nothing was
+    /// stored and GUIs were told why.
+    Rejected {
+        reason: String,
+    },
+    Unsubscribed {
+        id: String,
+    },
     Unhandled(Box<ClientMessage>),
 }
 
 /// Route a blocklist ClientMessage to the appropriate BlocklistsManager method.
+/// Subscribe validates the URL first (https, a host, an allowed address, at
+/// most 2048 bytes); a refused subscribe becomes a visible row and is never
+/// stored. Subscribing to an existing URL changes nothing.
 pub async fn handle_blocklist_action(
     mgr: Arc<BlocklistsManager>,
     action: ClientMessage,
 ) -> anyhow::Result<BlocklistActionOutcome> {
     match action {
-        ClientMessage::SubscribeBlocklist { url } => {
-            let id = mgr.add_subscription(&url).await?;
-            let _ = mgr.refresh_now(&id).await;
-            Ok(BlocklistActionOutcome::Subscribed { id })
-        }
+        ClientMessage::SubscribeBlocklist { url } => match mgr.subscribe_url(&url).await {
+            SubscribeOutcome::Added(id) => {
+                let _ = mgr.refresh_now(&id).await;
+                Ok(BlocklistActionOutcome::Subscribed { id })
+            }
+            SubscribeOutcome::AlreadySubscribed(id) => {
+                Ok(BlocklistActionOutcome::AlreadySubscribed { id })
+            }
+            SubscribeOutcome::Refused(reason) => {
+                tracing::warn!(%reason, "refused blocklist subscription");
+                mgr.reject_subscription(&url, &reason);
+                Ok(BlocklistActionOutcome::Rejected { reason })
+            }
+        },
         ClientMessage::UnsubscribeBlocklist { id } => {
             mgr.remove_subscription(&id).await?;
             Ok(BlocklistActionOutcome::Unsubscribed { id })
@@ -343,6 +369,29 @@ mod blocklist_action_tests {
         let subs = mgr.store().list_subscriptions().unwrap();
         assert_eq!(subs.len(), 1);
         assert_eq!(subs[0].url, "https://example.invalid/hosts.txt");
+    }
+
+    #[tokio::test]
+    async fn subscribe_blocklist_refuses_non_https_urls_visibly() {
+        let mgr = manager();
+        let mut events = mgr.subscribe();
+        for url in ["http://x.example/hosts", "file:///dev/zero"] {
+            let outcome = handle_blocklist_action(
+                mgr.clone(),
+                ClientMessage::SubscribeBlocklist { url: url.into() },
+            )
+            .await
+            .unwrap();
+            assert!(
+                matches!(outcome, BlocklistActionOutcome::Rejected { .. }),
+                "{url}: {outcome:?}"
+            );
+            assert!(matches!(
+                events.recv().await.unwrap(),
+                crate::blocklists::BlocklistEvent::SubscriptionRejected { .. }
+            ));
+        }
+        assert!(mgr.store().list_subscriptions().unwrap().is_empty());
     }
 
     #[tokio::test]

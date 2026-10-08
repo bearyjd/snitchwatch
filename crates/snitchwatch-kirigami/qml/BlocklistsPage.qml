@@ -13,9 +13,11 @@
 // `ConnectionsModel`'s live wiring.
 //
 // Status display (last-updated, fetch-failed) reads the bridge's `FetchStatus`
-// as already projected into `BlocklistsModel`'s `status` / `lastUpdated` /
-// `lastFailureReason` roles by the Rust row store — no fetch-status logic
-// lives in QML.
+// as already projected into `BlocklistsModel`'s `status` / `statusLabel` /
+// `lastUpdated` / `lastFailureReason` roles by the Rust row store — no
+// fetch-status logic lives in QML. `status` is only the download result;
+// whether a list blocks anything is the separate `enforcementLabel` role
+// (issue #45), which never says more than "Rule installed".
 import QtQuick
 import QtQuick.Layouts
 import QtQuick.Controls as Controls
@@ -36,8 +38,17 @@ Kirigami.ScrollablePage {
     property string inspectUrl: ""
     property int inspectEntryCount: 0
     property string inspectStatus: ""
+    property string inspectStatusLabel: ""
+    property string inspectEnforcementLabel: ""
+    property string inspectEnforcementReason: ""
     property string inspectLastUpdated: ""
     property string inspectLastFailureReason: ""
+
+    // Where the bridge keeps subscriptions (`SetBlocklists.storage`). Not
+    // persistent until the bridge says so: no model, no message yet, or an
+    // older bridge all mean "kept in memory only".
+    readonly property bool storagePersistent: page.model ? page.model.storagePersistent : false
+    readonly property string storageReason: page.model ? page.model.storageReason : ""
 
     function statusColor(status) {
         switch (status) {
@@ -74,19 +85,42 @@ Kirigami.ScrollablePage {
         }
     }
 
-    // Issue #45: the shipped bridge wires a no-op rule sink and an in-memory
-    // subscription store (`snitchwatch-bridge-cli/src/lib.rs`), so a
-    // subscription here materializes no daemon rules and is forgotten on
-    // restart. Deliberately unconditional and non-dismissable (no close
-    // button, no actions) until a real sink + persisted store land — then
-    // delete this banner.
-    header: Kirigami.InlineMessage {
-        type: Kirigami.MessageType.Warning
-        visible: true
-        text: "Preview: blocklist subscriptions are shown here but are not applied to the "
-            + "firewall yet, so they do not block anything. They are also kept in memory only, "
-            + "so they are lost when Snitchwatch's background service restarts (for example "
-            + "on logout or reboot)."
+    // Issue #45: the bridge installs no daemon rules for blocklists yet (PR B
+    // will), so a subscription here blocks nothing. It persists only when the
+    // bridge has a state directory. Exactly one variant is shown, keyed on
+    // `storagePersistent`; neither is dismissable (no close button, no
+    // actions). Both keep "not applied" until PR B removes them. The storage
+    // problem's reason is data, so it goes in a PlainText label, never in an
+    // InlineMessage (issue #51).
+    header: ColumnLayout {
+        spacing: 0
+
+        Kirigami.InlineMessage {
+            objectName: "persistentStorageBanner"
+            Layout.fillWidth: true
+            type: Kirigami.MessageType.Warning
+            visible: page.storagePersistent
+            text: "Preview: blocklist subscriptions are saved, but they are not applied to the "
+                + "firewall yet, so they do not block anything."
+        }
+        Kirigami.InlineMessage {
+            objectName: "memoryOnlyStorageBanner"
+            Layout.fillWidth: true
+            type: Kirigami.MessageType.Warning
+            visible: !page.storagePersistent
+            text: "Preview: blocklist subscriptions are shown here but are not applied to the "
+                + "firewall yet, so they do not block anything. They are also kept in memory only, "
+                + "so they are lost when Snitchwatch's background service restarts (for example "
+                + "on logout or reboot)."
+        }
+        Controls.Label {
+            Layout.fillWidth: true
+            Layout.margins: Kirigami.Units.smallSpacing
+            visible: !page.storagePersistent && page.storageReason.length > 0
+            textFormat: Text.PlainText
+            wrapMode: Text.Wrap
+            text: "Subscriptions could not be saved: " + page.storageReason
+        }
     }
 
     Kirigami.PlaceholderMessage {
@@ -115,6 +149,9 @@ Kirigami.ScrollablePage {
             required property string url
             required property int entryCount
             required property string status
+            required property string statusLabel
+            required property string enforcementLabel
+            required property string enforcementReason
             required property string lastUpdated
             required property string lastFailureReason
 
@@ -154,8 +191,15 @@ Kirigami.ScrollablePage {
 
                 Controls.Label {
                     textFormat: Text.PlainText
-                    text: row.status
+                    text: row.statusLabel
                     color: page.statusColor(row.status)
+                    Layout.alignment: Qt.AlignVCenter
+                }
+
+                Controls.Label {
+                    textFormat: Text.PlainText
+                    text: row.enforcementLabel
+                    opacity: 0.7
                     Layout.alignment: Qt.AlignVCenter
                 }
             }
@@ -168,8 +212,21 @@ Kirigami.ScrollablePage {
         page.inspectUrl = row.url;
         page.inspectEntryCount = row.entryCount;
         page.inspectStatus = row.status;
+        page.inspectStatusLabel = row.statusLabel;
+        page.inspectEnforcementLabel = row.enforcementLabel;
+        page.inspectEnforcementReason = row.enforcementReason;
         page.inspectLastUpdated = row.lastUpdated;
         page.inspectLastFailureReason = row.lastFailureReason;
+        // Entries are never pushed (a whole list in one message overflowed
+        // GUI clients, issue #45): ask for the first page. Pages are
+        // broadcast to every GUI, so the entries model first notes which
+        // list this inspector wants and ignores the rest.
+        if (page.entriesModel) {
+            page.entriesModel.expectEntries(row.listId);
+        }
+        if (page.model) {
+            page.model.requestEntries(row.listId, 0);
+        }
         inspector.open();
     }
 
@@ -196,10 +253,22 @@ Kirigami.ScrollablePage {
                     text: page.inspectEntryCount
                 }
                 Controls.Label {
-                    Kirigami.FormData.label: "Status"
+                    Kirigami.FormData.label: "Download"
                     textFormat: Text.PlainText
-                    text: page.inspectStatus
+                    text: page.inspectStatusLabel
                     color: page.statusColor(page.inspectStatus)
+                }
+                Controls.Label {
+                    Kirigami.FormData.label: "Blocking"
+                    textFormat: Text.PlainText
+                    text: page.inspectEnforcementLabel
+                }
+                Controls.Label {
+                    Kirigami.FormData.label: "Why"
+                    visible: page.inspectEnforcementReason.length > 0
+                    textFormat: Text.PlainText
+                    text: page.inspectEnforcementReason
+                    wrapMode: Text.Wrap
                 }
                 Controls.Label {
                     Kirigami.FormData.label: "Last updated"
@@ -209,7 +278,8 @@ Kirigami.ScrollablePage {
                 }
                 Controls.Label {
                     Kirigami.FormData.label: "Last failure"
-                    visible: page.inspectStatus === "failed" && page.inspectLastFailureReason.length > 0
+                    visible: (page.inspectStatus === "failed" || page.inspectStatus === "refused")
+                        && page.inspectLastFailureReason.length > 0
                     textFormat: Text.PlainText
                     text: page.inspectLastFailureReason
                     color: Kirigami.Theme.negativeTextColor
@@ -227,15 +297,14 @@ Kirigami.ScrollablePage {
             }
 
             // The entries model holds at most one subscription's hosts at a
-            // time (fed by the live bridge feed's SetBlocklistEntries
-            // message). Show them when they match what's being inspected;
-            // otherwise this subscription's entries haven't been pushed yet.
+            // time, loaded a page at a time on request (openInspector, "Show
+            // more"). Show them when they match what's being inspected.
             Kirigami.PlaceholderMessage {
                 Layout.fillWidth: true
                 visible: !page.entriesModel || page.entriesModel.subscriptionId !== page.inspectId
                 icon.name: "view-refresh"
                 text: "Entries not loaded"
-                explanation: "Waiting for the live feed to push this subscription's host list."
+                explanation: "Waiting for Snitchwatch's background service to send this list's hosts."
             }
 
             ListView {
@@ -251,6 +320,23 @@ Kirigami.ScrollablePage {
                     textFormat: Text.PlainText
                     text: host
                 }
+            }
+
+            Controls.Label {
+                visible: page.entriesModel && page.entriesModel.subscriptionId === page.inspectId
+                text: page.entriesModel
+                    ? "Showing " + page.entriesModel.count + " of " + page.entriesModel.total + " hosts"
+                    : ""
+                opacity: 0.7
+            }
+
+            Controls.Button {
+                Layout.fillWidth: true
+                visible: page.entriesModel && page.entriesModel.subscriptionId === page.inspectId
+                    && page.entriesModel.hasMore
+                text: "Show more"
+                icon.name: "go-down"
+                onClicked: page.model.requestEntries(page.inspectId, page.entriesModel.count)
             }
 
             Controls.Button {

@@ -49,9 +49,30 @@ pub fn sniff_format(body: &str) -> ListFormat {
     }
 }
 
-pub fn parse(format: ListFormat, body: &str) -> Vec<String> {
-    let mut seen: BTreeSet<String> = BTreeSet::new();
-    let mut out: Vec<String> = Vec::new();
+/// Most unique hosts one list may hold. 64 MiB of short lines would be ~10M
+/// hosts; each costs memory here, in the store and (PR B) in opensnitchd, so a
+/// larger list fails as a whole rather than being truncated silently.
+pub const MAX_ENTRIES: usize = 1_000_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TooManyEntries {
+    pub limit: usize,
+}
+
+/// Parse `body` into unique, lowercased, sorted hosts, at most
+/// [`MAX_ENTRIES`] of them.
+pub fn parse(format: ListFormat, body: &str) -> Result<Vec<String>, TooManyEntries> {
+    parse_with_limit(format, body, MAX_ENTRIES)
+}
+
+/// [`parse`] with an explicit limit. Each host is held once (in the set),
+/// not twice.
+pub fn parse_with_limit(
+    format: ListFormat,
+    body: &str,
+    limit: usize,
+) -> Result<Vec<String>, TooManyEntries> {
+    let mut hosts: BTreeSet<String> = BTreeSet::new();
     for line in body.lines() {
         let line = line.trim();
         if line.is_empty()
@@ -67,12 +88,15 @@ pub fn parse(format: ListFormat, body: &str) -> Vec<String> {
             ListFormat::AdblockPlus => parse_abp_line(line),
         };
         if let Some(host) = host_opt {
-            if is_valid_hostname(&host) && !is_local_loopback(&host) && seen.insert(host.clone()) {
-                out.push(host);
+            if is_valid_hostname(&host) && !is_local_loopback(&host) {
+                hosts.insert(host);
+                if hosts.len() > limit {
+                    return Err(TooManyEntries { limit });
+                }
             }
         }
     }
-    out
+    Ok(hosts.into_iter().collect())
 }
 
 fn parse_hosts_line(line: &str) -> Option<String> {
@@ -148,17 +172,17 @@ mod tests {
     #[test]
     fn parses_hosts_skipping_localhost_and_comments() {
         let body = "# StevenBlack tiny\n127.0.0.1 localhost\n0.0.0.0 doubleclick.net\n0.0.0.0 google-analytics.com\n# trailing comment\n0.0.0.0 facebook.net\n";
-        let parsed = parse(ListFormat::Hosts, body);
+        let parsed = parse(ListFormat::Hosts, body).unwrap();
         assert_eq!(
             parsed,
-            vec!["doubleclick.net", "google-analytics.com", "facebook.net"]
+            vec!["doubleclick.net", "facebook.net", "google-analytics.com"]
         );
     }
 
     #[test]
     fn parses_domains_one_per_line() {
         let body = "doubleclick.net\n# comment\n\ngoogle-analytics.com\n";
-        let parsed = parse(ListFormat::Domains, body);
+        let parsed = parse(ListFormat::Domains, body).unwrap();
         assert_eq!(parsed, vec!["doubleclick.net", "google-analytics.com"]);
     }
 
@@ -166,21 +190,47 @@ mod tests {
     fn parses_abp_extracts_domain_between_pipes_and_caret() {
         let body =
             "[Adblock Plus 2.0]\n||doubleclick.net^\n!comment\n||tracker.example^$third-party\n";
-        let parsed = parse(ListFormat::AdblockPlus, body);
+        let parsed = parse(ListFormat::AdblockPlus, body).unwrap();
         assert_eq!(parsed, vec!["doubleclick.net", "tracker.example"]);
     }
 
     #[test]
     fn rejects_invalid_hostnames() {
         let body = "doubleclick.net\nnot a hostname\n   \n--bad--\nvalid.example\n";
-        let parsed = parse(ListFormat::Domains, body);
+        let parsed = parse(ListFormat::Domains, body).unwrap();
         assert_eq!(parsed, vec!["doubleclick.net", "valid.example"]);
     }
 
     #[test]
     fn deduplicates_entries() {
         let body = "doubleclick.net\ndoubleclick.net\ngoogle-analytics.com\n";
-        let parsed = parse(ListFormat::Domains, body);
+        let parsed = parse(ListFormat::Domains, body).unwrap();
         assert_eq!(parsed, vec!["doubleclick.net", "google-analytics.com"]);
+    }
+
+    /// Issue #45: 64 MiB of short lines is ~10M hosts. More unique entries
+    /// than the limit fail the whole list instead of being held in memory.
+    #[test]
+    fn more_unique_entries_than_the_limit_fail_the_list() {
+        let body = "a.example\nb.example\nc.example\nb.example\n";
+        assert_eq!(
+            parse_with_limit(ListFormat::Domains, body, 3)
+                .unwrap()
+                .len(),
+            3
+        );
+        assert_eq!(
+            parse_with_limit(ListFormat::Domains, body, 2),
+            Err(TooManyEntries { limit: 2 })
+        );
+    }
+
+    #[test]
+    fn the_production_entry_limit_is_enforced() {
+        let body: String = (0..=MAX_ENTRIES).map(|i| format!("h{i}.x\n")).collect();
+        assert_eq!(
+            parse(ListFormat::Domains, &body),
+            Err(TooManyEntries { limit: MAX_ENTRIES })
+        );
     }
 }

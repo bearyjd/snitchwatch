@@ -57,20 +57,34 @@ QtObject {
             action: "setBlocklists",
             blocklists: [
                 { id: "l1", displayName: "Ads", url: "https://example.invalid/ads.txt",
-                  entryCount: 3, status: "ok", lastUpdatedIso8601: null, lastFailureReason: null }
-            ]
+                  entryCount: 3, status: "ok", lastUpdatedIso8601: null, lastFailureReason: null,
+                  enforcement: "not_enforced", enforcementReason: "no rule sink yet" }
+            ],
+            storage: { persistent: true }
+        }));
+        entries.expectEntries("l1");
+        entries.applyServerMessageJson(JSON.stringify({
+            action: "setBlocklistEntries",
+            subscriptionId: "l1",
+            entries: [ { host: "ads.example" }, { host: "tracker.example" } ],
+            offset: 0,
+            total: 3
         }));
         entries.applyServerMessageJson(JSON.stringify({
             action: "setBlocklistEntries",
             subscriptionId: "l1",
-            entries: [ { host: "ads.example" }, { host: "tracker.example" } ]
+            entries: [ { host: "third.example" } ],
+            offset: 2,
+            total: 3
         }));
+        model.requestEntries("l1", 0);
         model.subscribe("https://example.invalid/new.txt");
         model.unsubscribe("l1");
         entries.clearEntries();
         // Best-effort visibility only (not load-bearing — see module docs).
         console.log("[test] BlocklistsModel.count after insert =", model.count,
-                    "entries.count =", entries.count);
+                    "entries.count =", entries.count, "of", entries.total,
+                    "hasMore =", entries.hasMore);
     }
 }
 "#;

@@ -1,32 +1,84 @@
 //! Bridge-owned blocklist subscriptions, fetch loop, and rule materialization.
+//!
+//! Production wiring (issue #45 PR A): one [`worker::BlocklistWorker`] runs
+//! every subscribe, unsubscribe and scheduled refresh in order, so at most one
+//! (bounded, https-only) fetch is in flight; [`spawn_event_pump`] turns
+//! [`BlocklistEvent`]s into `ServerMessage`s. No daemon rules are installed
+//! yet: the default [`NoopRuleSink`] reports every list as not enforced.
 
+pub mod event_pump;
+pub mod fetch_guard;
 pub mod fetcher;
 pub mod format;
+mod manager;
 pub mod materializer;
 pub mod store;
+pub mod worker;
 
-use std::sync::Arc;
-use std::time::Duration;
+pub use event_pump::spawn_event_pump;
+pub use manager::{BlocklistsManager, SubscribeOutcome};
 
 use async_trait::async_trait;
-use chrono::Utc;
-use tokio::sync::broadcast;
-use tokio::task::JoinHandle;
-use tracing::{info, warn};
+use chrono::{DateTime, Utc};
 
-use crate::blocklists::fetcher::{build_client, fetch, FetchOutcome};
-use crate::blocklists::materializer::{materialize_batch, MaterializedRule};
-use crate::blocklists::store::{BlocklistStore, FetchStatus, Subscription};
+use crate::blocklists::materializer::MaterializedRule;
 
-/// Events emitted whenever blocklist state changes. The translator subscribes
-/// and rebroadcasts as `SetBlocklists` / `SetBlocklistEntries` over the WS.
+/// Events emitted whenever blocklist state changes. [`spawn_event_pump`]
+/// rebroadcasts them as `SetBlocklists` / `SetBlocklistEntries` / … over the WS.
 #[derive(Debug, Clone)]
 pub enum BlocklistEvent {
     SubscriptionsChanged,
-    EntriesChanged { subscription_id: String },
-    StatusChanged { subscription_id: String },
+    EntriesChanged {
+        subscription_id: String,
+    },
+    StatusChanged {
+        subscription_id: String,
+    },
+    /// A subscribe request was refused before anything was stored (a bad URL,
+    /// too many lists, or the worker queue was full). Shown to the user,
+    /// never persisted.
+    SubscriptionRejected {
+        url: String,
+        reason: String,
+    },
+    /// A GUI asked for a page of a subscription's hosts. Entries are only
+    /// ever sent a page at a time, on request (issue #45).
+    EntriesRequested {
+        subscription_id: String,
+        offset: u64,
+        limit: u32,
+    },
 }
 
+/// Whether a subscription's hosts are enforced by the daemon. Kept in memory
+/// only; [`FetchStatus`] separately records the download result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Enforcement {
+    /// Not downloaded or pushed to a sink yet.
+    Pending,
+    /// The sink accepted the rules: the daemon replied OK and (PR B) the list
+    /// file was written. Shown as "Rule installed", not "Enforced": the daemon
+    /// may still load 0 entries.
+    RuleInstalled {
+        at: DateTime<Utc>,
+    },
+    NotEnforced {
+        reason: String,
+    },
+}
+
+/// Why every list is unenforced until PR B wires a daemon sink. Shown to the
+/// user.
+pub const NO_RULE_SINK_REASON: &str = "Blocking isn't available yet";
+/// Enforcement reason for a subscription whose first download failed.
+pub const NOT_DOWNLOADED_REASON: &str = "The list hasn't been downloaded";
+/// Fetch status reason when a downloaded list couldn't be written.
+pub const STORE_ERROR_REASON: &str = "Couldn't save the list";
+/// Most subscriptions one bridge keeps (each can hold `format::MAX_ENTRIES`).
+pub const MAX_SUBSCRIPTIONS: usize = 32;
+/// A list whose last download failed is retried after this long (or its own
+/// refresh interval, if shorter), not on every scheduler tick.
+pub const FAILED_RETRY_SECS: i64 = 60 * 60;
 /// Sink that receives materialized deny rules after a successful blocklist
 /// refresh. The default implementation is [`NoopRuleSink`]; replace it with
 /// [`BlocklistsManager::with_rule_sink`] to wire in the real opensnitchd writer.
@@ -51,6 +103,13 @@ pub enum BlocklistEvent {
 #[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait RuleSink: Send + Sync + 'static {
+    /// False for a sink that installs nothing ([`NoopRuleSink`]). The manager
+    /// then skips materializing rules (hundreds of bytes per host) and
+    /// reports every list as [`NO_RULE_SINK_REASON`].
+    fn installs_rules(&self) -> bool {
+        true
+    }
+
     async fn replace_blocklist_rules(
         &self,
         list_id: &str,
@@ -58,163 +117,47 @@ pub trait RuleSink: Send + Sync + 'static {
     ) -> anyhow::Result<()>;
 }
 
-/// No-op sink used when no real sink has been wired in.
+/// Sink used when no real sink has been wired in. It installs nothing: it
+/// says so through [`RuleSink::installs_rules`], and fails any push with
+/// [`NO_RULE_SINK_REASON`]. The manager never reports such a list installed.
 pub struct NoopRuleSink;
 
 #[async_trait]
 impl RuleSink for NoopRuleSink {
+    fn installs_rules(&self) -> bool {
+        false
+    }
+
     async fn replace_blocklist_rules(
         &self,
         _list_id: &str,
         _rules: Vec<MaterializedRule>,
     ) -> anyhow::Result<()> {
-        Ok(())
+        anyhow::bail!(NO_RULE_SINK_REASON)
     }
 }
 
-pub struct BlocklistsManager {
-    store: Arc<BlocklistStore>,
-    bus: broadcast::Sender<BlocklistEvent>,
-    client: reqwest::Client,
-    rule_sink: Arc<dyn RuleSink>,
+/// Longest sanitized stem kept in an id. Ids become rule names and (PR B) list
+/// directory names, so a 2 KiB URL must not produce a 2 KiB id.
+const MAX_ID_STEM_CHARS: usize = 64;
+
+/// `<sanitized stem>-<16 hex (64 bits) of SHA-256(url)>`. The hash keeps two
+/// URLs that end in the same file name (`…/hosts`) apart; the result only ever
+/// contains `[A-Za-z0-9_-]`. A collision is still refused at subscribe time.
+pub(crate) fn derive_id(url: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(url.as_bytes());
+    let hash: String = digest[..8].iter().map(|b| format!("{b:02x}")).collect();
+    format!("{}-{hash}", sanitized_stem(url))
 }
 
-impl BlocklistsManager {
-    pub fn new(store: Arc<BlocklistStore>) -> Self {
-        let (bus, _) = broadcast::channel(64);
-        Self {
-            store,
-            bus,
-            client: build_client(),
-            rule_sink: Arc::new(NoopRuleSink),
-        }
-    }
-
-    /// Replace the default no-op rule sink with a real implementation.
-    pub fn with_rule_sink(mut self, sink: Arc<dyn RuleSink>) -> Self {
-        self.rule_sink = sink;
-        self
-    }
-
-    pub fn subscribe(&self) -> broadcast::Receiver<BlocklistEvent> {
-        self.bus.subscribe()
-    }
-
-    pub fn store(&self) -> &Arc<BlocklistStore> {
-        &self.store
-    }
-
-    /// Add a subscription record (does not fetch). Use [`refresh_now`] to pull.
-    pub async fn add_subscription(&self, url: &str) -> anyhow::Result<String> {
-        let id = derive_id(url);
-        let display_name = derive_display_name(url);
-        let sub = Subscription {
-            id: id.clone(),
-            url: url.to_string(),
-            display_name,
-            format_hint: None,
-            refresh_interval_secs: 86_400,
-            last_fetched_at: None,
-            last_fetch_status: FetchStatus::Pending,
-            entry_count: 0,
-        };
-        self.store.upsert_subscription(&sub)?;
-        let _ = self.bus.send(BlocklistEvent::SubscriptionsChanged);
-        Ok(id)
-    }
-
-    pub async fn remove_subscription(&self, id: &str) -> anyhow::Result<()> {
-        self.store.delete_subscription(id)?;
-        let _ = self.bus.send(BlocklistEvent::SubscriptionsChanged);
-        Ok(())
-    }
-
-    /// Pull a subscription synchronously and update the store + bus accordingly.
-    pub async fn refresh_now(&self, id: &str) -> anyhow::Result<FetchStatus> {
-        let Some(mut sub) = self.store.get_subscription(id)? else {
-            anyhow::bail!("unknown subscription: {id}");
-        };
-        let outcome = fetch(&self.client, &sub.url).await;
-        let new_status = match outcome {
-            FetchOutcome::Ok { hosts, .. } => {
-                let host_refs: Vec<&str> = hosts.iter().map(String::as_str).collect();
-                self.store.replace_entries(&sub.id, &host_refs)?;
-                sub.entry_count = host_refs.len() as i64;
-                sub.last_fetched_at = Some(Utc::now());
-                sub.last_fetch_status = FetchStatus::Ok;
-                self.store.upsert_subscription(&sub)?;
-                let materialized = materialize_batch(&sub.id, &hosts);
-                if let Err(e) = self
-                    .rule_sink
-                    .replace_blocklist_rules(&sub.id, materialized)
-                    .await
-                {
-                    warn!(id = %sub.id, error = %e, "rule sink push failed; entries cached but not enforced");
-                }
-                let _ = self.bus.send(BlocklistEvent::EntriesChanged {
-                    subscription_id: sub.id.clone(),
-                });
-                let _ = self.bus.send(BlocklistEvent::StatusChanged {
-                    subscription_id: sub.id.clone(),
-                });
-                info!(id = %sub.id, count = host_refs.len(), "blocklist refreshed");
-                FetchStatus::Ok
-            }
-            FetchOutcome::Failed { reason } => {
-                sub.last_fetch_status = FetchStatus::Failed {
-                    reason: reason.clone(),
-                };
-                self.store.upsert_subscription(&sub)?;
-                let _ = self.bus.send(BlocklistEvent::StatusChanged {
-                    subscription_id: sub.id.clone(),
-                });
-                warn!(id = %sub.id, %reason, "blocklist refresh failed; cache preserved");
-                FetchStatus::Failed { reason }
-            }
-        };
-        Ok(new_status)
-    }
-
-    pub fn spawn_refresh_loop(self: Arc<Self>, tick: Duration) -> JoinHandle<()> {
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(tick);
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            loop {
-                interval.tick().await;
-                let due = match self.due_subscriptions() {
-                    Ok(d) => d,
-                    Err(e) => {
-                        warn!(error = %e, "blocklist scheduler: store read failed");
-                        continue;
-                    }
-                };
-                for id in due {
-                    if let Err(e) = self.refresh_now(&id).await {
-                        warn!(%id, error = %e, "scheduled refresh failed");
-                    }
-                }
-            }
-        })
-    }
-
-    fn due_subscriptions(&self) -> Result<Vec<String>, store::StoreError> {
-        let now = Utc::now();
-        let subs = self.store.list_subscriptions()?;
-        Ok(subs
-            .into_iter()
-            .filter(|s| match s.last_fetched_at {
-                None => true,
-                Some(t) => {
-                    let elapsed = (now - t).num_seconds();
-                    elapsed >= s.refresh_interval_secs
-                }
-            })
-            .map(|s| s.id)
-            .collect())
-    }
+pub(crate) fn derive_display_name(url: &str) -> String {
+    sanitized_stem(url).replace('_', " ")
 }
 
-fn derive_id(url: &str) -> String {
+/// The URL's last path segment without query or `.txt`, with every character
+/// outside `[A-Za-z0-9_-]` replaced by `_`, capped, or `list` if empty.
+fn sanitized_stem(url: &str) -> String {
     let stem = url
         .rsplit('/')
         .next()
@@ -225,6 +168,7 @@ fn derive_id(url: &str) -> String {
         .trim_end_matches(".txt");
     let cleaned: String = stem
         .chars()
+        .take(MAX_ID_STEM_CHARS)
         .map(|c| {
             if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
                 c
@@ -234,21 +178,70 @@ fn derive_id(url: &str) -> String {
         })
         .collect();
     if cleaned.is_empty() {
-        format!("list-{:x}", url.len())
+        "list".to_string()
     } else {
         cleaned
     }
 }
 
-fn derive_display_name(url: &str) -> String {
-    derive_id(url).replace('_', " ")
-}
-
 #[cfg(test)]
 pub mod test_helpers {
+    use crate::blocklists::fetcher::{process_body, BlocklistFetch, FetchOutcome};
     use crate::blocklists::store::{BlocklistStore, FetchStatus, Subscription};
     use crate::blocklists::BlocklistsManager;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+
+    const FIXTURE_PREFIX: &str = "https://fixtures.invalid/";
+    const FIXTURE_MAX_BYTES: u64 = 1024 * 1024;
+
+    /// An https URL the [`FixtureFetcher`] serves from
+    /// `tests/fixtures/blocklists/<name>`.
+    pub fn fixture_url(name: &str) -> String {
+        format!("{FIXTURE_PREFIX}{name}")
+    }
+
+    /// Test-only [`BlocklistFetch`]: reads `tests/fixtures/blocklists/<name>`
+    /// for [`fixture_url`] URLs (size-capped), fails everything else. Counts
+    /// calls. Production has no file-reading fetch path; this lives here.
+    #[derive(Default)]
+    pub struct FixtureFetcher {
+        pub calls: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl BlocklistFetch for FixtureFetcher {
+        async fn fetch(&self, url: &str) -> FetchOutcome {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let Some(name) = url.strip_prefix(FIXTURE_PREFIX) else {
+                return FetchOutcome::Failed {
+                    reason: format!("not a fixture URL: {url}"),
+                };
+            };
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tests/fixtures/blocklists")
+                .join(name);
+            match std::fs::metadata(&path) {
+                Ok(m) if m.len() <= FIXTURE_MAX_BYTES => {}
+                Ok(m) => {
+                    return FetchOutcome::Failed {
+                        reason: format!("fixture too large: {} bytes", m.len()),
+                    }
+                }
+                Err(e) => {
+                    return FetchOutcome::Failed {
+                        reason: format!("fixture {name}: {e}"),
+                    }
+                }
+            }
+            match std::fs::read_to_string(&path) {
+                Ok(body) => process_body(&body),
+                Err(e) => FetchOutcome::Failed {
+                    reason: format!("fixture {name}: {e}"),
+                },
+            }
+        }
+    }
 
     pub fn seeded_manager(seeds: &[(&str, usize)]) -> BlocklistsManager {
         let store = Arc::new(BlocklistStore::open_in_memory().unwrap());
@@ -261,6 +254,7 @@ pub mod test_helpers {
                     format_hint: None,
                     refresh_interval_secs: 86_400,
                     last_fetched_at: None,
+                    last_attempt_at: None,
                     last_fetch_status: FetchStatus::Ok,
                     entry_count: *n_entries as i64,
                 })
@@ -276,314 +270,4 @@ pub mod test_helpers {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn manager() -> BlocklistsManager {
-        let store = Arc::new(BlocklistStore::open_in_memory().unwrap());
-        BlocklistsManager::new(store)
-    }
-
-    #[test]
-    fn module_exports_compile() {
-        let _ = std::any::type_name::<store::Subscription>();
-    }
-
-    #[tokio::test]
-    async fn add_subscription_emits_subscriptions_changed_event() {
-        let mgr = manager();
-        let mut rx = mgr.subscribe();
-        let id = mgr
-            .add_subscription("https://example.invalid/list.txt")
-            .await
-            .unwrap();
-        assert_eq!(id, "list");
-        let evt = rx.recv().await.expect("event");
-        assert!(matches!(evt, BlocklistEvent::SubscriptionsChanged));
-    }
-
-    #[tokio::test]
-    async fn remove_subscription_clears_store() {
-        let mgr = manager();
-        let id = mgr
-            .add_subscription("https://example.invalid/test.txt")
-            .await
-            .unwrap();
-        mgr.remove_subscription(&id).await.unwrap();
-        assert!(mgr.store.get_subscription(&id).unwrap().is_none());
-    }
-
-    #[test]
-    fn derive_id_handles_query_strings_and_special_chars() {
-        assert_eq!(
-            derive_id("https://x.example/hosts.txt?branch=main"),
-            "hosts"
-        );
-        assert_eq!(derive_id("https://x.example/StevenBlack/hosts"), "hosts");
-        assert_eq!(
-            derive_id("https://x.example/path/with%20space"),
-            "with_20space"
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn refresh_loop_drives_pending_subscriptions_with_short_interval() {
-        use std::time::Duration;
-        let store = Arc::new(BlocklistStore::open_in_memory().unwrap());
-        let fixture_path = std::env::current_dir()
-            .unwrap()
-            .join("../../tests/fixtures/blocklists/domains-tiny.txt")
-            .canonicalize()
-            .unwrap();
-        let url = format!("file://{}", fixture_path.display());
-        store
-            .upsert_subscription(&Subscription {
-                id: "tiny".into(),
-                url,
-                display_name: "tiny".into(),
-                format_hint: None,
-                refresh_interval_secs: 1,
-                last_fetched_at: None,
-                last_fetch_status: FetchStatus::Pending,
-                entry_count: 0,
-            })
-            .unwrap();
-        let mgr = Arc::new(BlocklistsManager::new(store.clone()));
-        let mut rx = mgr.subscribe();
-        let handle = BlocklistsManager::spawn_refresh_loop(mgr.clone(), Duration::from_millis(100));
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        loop {
-            if tokio::time::Instant::now() >= deadline {
-                handle.abort();
-                panic!("never observed EntriesChanged for tiny");
-            }
-            match tokio::time::timeout(Duration::from_millis(200), rx.recv()).await {
-                Ok(Ok(BlocklistEvent::EntriesChanged { subscription_id }))
-                    if subscription_id == "tiny" =>
-                {
-                    break
-                }
-                Ok(Ok(_)) => continue,
-                Ok(Err(_)) => continue,
-                Err(_) => continue,
-            }
-        }
-        handle.abort();
-        let entries = store.list_entries("tiny").unwrap();
-        assert!(entries.contains(&"doubleclick.net".to_string()));
-    }
-
-    #[tokio::test]
-    async fn refresh_pushes_materialized_rules_to_sink() {
-        use crate::blocklists::materializer::MaterializedRule;
-        use std::sync::Mutex as StdMutex;
-
-        #[derive(Default)]
-        struct CapturingSink {
-            calls: StdMutex<Vec<Vec<MaterializedRule>>>,
-        }
-
-        #[async_trait]
-        impl super::RuleSink for CapturingSink {
-            async fn replace_blocklist_rules(
-                &self,
-                _list_id: &str,
-                rules: Vec<MaterializedRule>,
-            ) -> anyhow::Result<()> {
-                self.calls.lock().unwrap().push(rules);
-                Ok(())
-            }
-        }
-
-        let store = Arc::new(BlocklistStore::open_in_memory().unwrap());
-        let fixture = std::env::current_dir()
-            .unwrap()
-            .join("../../tests/fixtures/blocklists/domains-tiny.txt")
-            .canonicalize()
-            .unwrap();
-        store
-            .upsert_subscription(&Subscription {
-                id: "tiny".into(),
-                url: format!("file://{}", fixture.display()),
-                display_name: "tiny".into(),
-                format_hint: None,
-                refresh_interval_secs: 86_400,
-                last_fetched_at: None,
-                last_fetch_status: FetchStatus::Pending,
-                entry_count: 0,
-            })
-            .unwrap();
-        let sink: Arc<CapturingSink> = Arc::new(CapturingSink::default());
-        let mgr = BlocklistsManager::new(store).with_rule_sink(sink.clone());
-        mgr.refresh_now("tiny").await.unwrap();
-        let calls = sink.calls.lock().unwrap();
-        assert_eq!(calls.len(), 1, "expected one push call");
-        assert!(!calls[0].is_empty(), "domains-tiny.txt should have hosts");
-        assert!(calls[0][0].name.starts_with("z00-blocklist:tiny:"));
-    }
-
-    #[tokio::test]
-    async fn refresh_removes_legacy_band_rules() {
-        // A sink that models a daemon's name-keyed rule set and honors the
-        // `RuleSink` replace contract: on each replace it purges every existing
-        // rule under the list's owned prefixes (current + legacy band), then
-        // installs the fresh set. Proves an upgrade off the old "900-blocklist:"
-        // band leaves no orphaned old-prefix denies.
-        use crate::blocklists::materializer::{
-            owned_blocklist_rule_name_prefixes, MaterializedRule,
-        };
-        use std::collections::BTreeMap;
-        use std::sync::Mutex as StdMutex;
-
-        #[derive(Default)]
-        struct RuleStoreSink {
-            rules: StdMutex<BTreeMap<String, MaterializedRule>>,
-        }
-
-        #[async_trait]
-        impl super::RuleSink for RuleStoreSink {
-            async fn replace_blocklist_rules(
-                &self,
-                list_id: &str,
-                rules: Vec<MaterializedRule>,
-            ) -> anyhow::Result<()> {
-                let mut map = self.rules.lock().unwrap();
-                let owned = owned_blocklist_rule_name_prefixes(list_id);
-                map.retain(|name, _| !owned.iter().any(|p| name.starts_with(p.as_str())));
-                for rule in rules {
-                    map.insert(rule.name.clone(), rule);
-                }
-                Ok(())
-            }
-        }
-
-        let store = Arc::new(BlocklistStore::open_in_memory().unwrap());
-        let fixture = std::env::current_dir()
-            .unwrap()
-            .join("../../tests/fixtures/blocklists/domains-tiny.txt")
-            .canonicalize()
-            .unwrap();
-        store
-            .upsert_subscription(&Subscription {
-                id: "tiny".into(),
-                url: format!("file://{}", fixture.display()),
-                display_name: "tiny".into(),
-                format_hint: None,
-                refresh_interval_secs: 86_400,
-                last_fetched_at: None,
-                last_fetch_status: FetchStatus::Pending,
-                entry_count: 0,
-            })
-            .unwrap();
-
-        let sink: Arc<RuleStoreSink> = Arc::new(RuleStoreSink::default());
-        // Seed the daemon with an orphaned legacy-band rule, as a pre-upgrade
-        // daemon would hold, plus an unrelated user rule that must survive.
-        {
-            let mut map = sink.rules.lock().unwrap();
-            map.insert(
-                "900-blocklist:tiny:0000-doubleclick.net".to_string(),
-                MaterializedRule {
-                    name: "900-blocklist:tiny:0000-doubleclick.net".to_string(),
-                    enabled: true,
-                    action: "deny".to_string(),
-                    duration: "always".to_string(),
-                    description: String::new(),
-                    operator: super::materializer::Operator {
-                        kind: "simple".to_string(),
-                        operand: "dest.host".to_string(),
-                        data: "doubleclick.net".to_string(),
-                    },
-                },
-            );
-            map.insert(
-                "899-firefox-allow-out".to_string(),
-                MaterializedRule {
-                    name: "899-firefox-allow-out".to_string(),
-                    enabled: true,
-                    action: "allow".to_string(),
-                    duration: "always".to_string(),
-                    description: String::new(),
-                    operator: super::materializer::Operator {
-                        kind: "simple".to_string(),
-                        operand: "process.path".to_string(),
-                        data: "/usr/bin/firefox".to_string(),
-                    },
-                },
-            );
-        }
-
-        let mgr = BlocklistsManager::new(store).with_rule_sink(sink.clone());
-        mgr.refresh_now("tiny").await.unwrap();
-
-        let map = sink.rules.lock().unwrap();
-        assert!(
-            !map.keys().any(|n| n.starts_with("900-blocklist:tiny:")),
-            "legacy-band rules must be purged on refresh: {:?}",
-            map.keys().collect::<Vec<_>>()
-        );
-        assert!(
-            map.keys().any(|n| n.starts_with("z00-blocklist:tiny:")),
-            "current-band rules must be installed: {:?}",
-            map.keys().collect::<Vec<_>>()
-        );
-        assert!(
-            map.contains_key("899-firefox-allow-out"),
-            "unrelated user rules must survive the replace"
-        );
-    }
-
-    #[tokio::test]
-    async fn failed_refresh_preserves_prior_entries() {
-        let store = Arc::new(BlocklistStore::open_in_memory().unwrap());
-        let good = std::env::current_dir()
-            .unwrap()
-            .join("../../tests/fixtures/blocklists/domains-tiny.txt")
-            .canonicalize()
-            .unwrap();
-        store
-            .upsert_subscription(&Subscription {
-                id: "preserve".into(),
-                url: format!("file://{}", good.display()),
-                display_name: "preserve".into(),
-                format_hint: None,
-                refresh_interval_secs: 86_400,
-                last_fetched_at: None,
-                last_fetch_status: FetchStatus::Pending,
-                entry_count: 0,
-            })
-            .unwrap();
-        let mgr = BlocklistsManager::new(store.clone());
-        mgr.refresh_now("preserve").await.unwrap();
-        let count_before = store.list_entries("preserve").unwrap().len();
-        assert!(count_before > 0, "priming failed");
-
-        // Now point the URL at a file that does not exist and refresh again.
-        store
-            .upsert_subscription(&Subscription {
-                id: "preserve".into(),
-                url: "file:///definitely/does/not/exist.txt".into(),
-                display_name: "preserve".into(),
-                format_hint: None,
-                refresh_interval_secs: 86_400,
-                last_fetched_at: Some(Utc::now() - chrono::Duration::seconds(100_000)),
-                last_fetch_status: FetchStatus::Ok,
-                entry_count: count_before as i64,
-            })
-            .unwrap();
-        let status = mgr.refresh_now("preserve").await.unwrap();
-        match status {
-            FetchStatus::Failed { reason } => {
-                assert!(reason.contains("does/not/exist") || reason.contains("No such file"));
-            }
-            other => panic!("expected Failed, got {other:?}"),
-        }
-        // Critical: entries must STILL be present.
-        let entries_after = store.list_entries("preserve").unwrap();
-        assert_eq!(
-            entries_after.len(),
-            count_before,
-            "failed fetch must not clear cached entries"
-        );
-    }
-}
+mod tests;

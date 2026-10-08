@@ -1,15 +1,18 @@
 //! Helpers that build server-to-client [`ServerMessage`] variants for
 //! blocklist and profile events.
 
+use crate::blocklists::fetcher::MAX_URL_LEN;
 use crate::blocklists::store::FetchStatus;
-use crate::blocklists::BlocklistsManager;
+use crate::blocklists::{derive_display_name, derive_id, BlocklistsManager, Enforcement};
 use crate::profiles::ProfilesManager;
 use crate::ws_messages::{
     BlocklistEntry, BlocklistSummary, ProfileRuleWire, ProfileSummary, ServerMessage,
+    ENFORCEMENT_NOT_ENFORCED, ENFORCEMENT_PENDING, ENFORCEMENT_RULE_INSTALLED,
 };
 
 pub async fn build_set_blocklists(mgr: &BlocklistsManager) -> anyhow::Result<ServerMessage> {
-    let subs = mgr.store().list_subscriptions()?;
+    // From memory: never waits on the store lock while a list is written.
+    let subs = mgr.subscriptions();
     let blocklists = subs
         .into_iter()
         .map(|s| {
@@ -18,6 +21,7 @@ pub async fn build_set_blocklists(mgr: &BlocklistsManager) -> anyhow::Result<Ser
                 FetchStatus::Ok => ("ok".to_string(), None),
                 FetchStatus::Failed { reason } => ("failed".to_string(), Some(reason)),
             };
+            let (enforcement, enforcement_reason) = enforcement_wire(mgr.enforcement(&s.id));
             BlocklistSummary {
                 id: s.id,
                 display_name: s.display_name,
@@ -26,17 +30,53 @@ pub async fn build_set_blocklists(mgr: &BlocklistsManager) -> anyhow::Result<Ser
                 status,
                 last_updated_iso8601: s.last_fetched_at.map(|t| t.to_rfc3339()),
                 last_failure_reason,
+                enforcement,
+                enforcement_reason,
             }
         })
         .collect();
-    Ok(ServerMessage::SetBlocklists { blocklists })
+    Ok(ServerMessage::SetBlocklists {
+        blocklists,
+        storage: Some(mgr.storage_status().clone()),
+    })
 }
 
-pub async fn build_set_blocklist_entries(
+fn enforcement_wire(enforcement: Enforcement) -> (String, Option<String>) {
+    match enforcement {
+        Enforcement::Pending => (ENFORCEMENT_PENDING.to_string(), None),
+        Enforcement::RuleInstalled { .. } => (ENFORCEMENT_RULE_INSTALLED.to_string(), None),
+        Enforcement::NotEnforced { reason } => (ENFORCEMENT_NOT_ENFORCED.to_string(), Some(reason)),
+    }
+}
+
+/// A row for a subscribe request that was refused and never stored, so the
+/// user sees why (status `refused`: "Not downloaded", not "Download failed").
+/// The next `SetBlocklists` drops it.
+pub fn build_rejected_blocklist(url: &str, reason: &str) -> ServerMessage {
+    ServerMessage::SetBlocklistDetails {
+        details: BlocklistSummary {
+            id: derive_id(url),
+            display_name: derive_display_name(url),
+            url: url.chars().take(MAX_URL_LEN).collect(),
+            entry_count: 0,
+            status: "refused".to_string(),
+            last_updated_iso8601: None,
+            last_failure_reason: Some(reason.to_string()),
+            enforcement: ENFORCEMENT_NOT_ENFORCED.to_string(),
+            enforcement_reason: Some(reason.to_string()),
+        },
+    }
+}
+
+/// One page of a subscription's hosts (at most
+/// `BLOCKLIST_ENTRIES_PAGE_MAX`). Full lists are never sent in one message.
+pub async fn build_blocklist_entries_page(
     mgr: &BlocklistsManager,
     subscription_id: &str,
+    offset: u64,
+    limit: u32,
 ) -> anyhow::Result<ServerMessage> {
-    let hosts = mgr.store().list_entries(subscription_id)?;
+    let (hosts, total) = mgr.entries_page(subscription_id, offset, limit).await?;
     let entries = hosts
         .into_iter()
         .map(|host| BlocklistEntry { host })
@@ -44,6 +84,8 @@ pub async fn build_set_blocklist_entries(
     Ok(ServerMessage::SetBlocklistEntries {
         subscription_id: subscription_id.to_string(),
         entries,
+        offset,
+        total,
     })
 }
 
@@ -52,8 +94,7 @@ pub async fn build_set_blocklist_status(
     subscription_id: &str,
 ) -> anyhow::Result<ServerMessage> {
     let sub = mgr
-        .store()
-        .get_subscription(subscription_id)?
+        .subscription(subscription_id)
         .ok_or_else(|| anyhow::anyhow!("unknown subscription: {subscription_id}"))?;
     let (status, last_failure_reason) = match sub.last_fetch_status {
         FetchStatus::Pending => ("pending".to_string(), None),
@@ -148,8 +189,23 @@ mod blocklist_emission_tests {
         let mgr = seeded_manager(&[("stevenblack", 5), ("easylist", 3)]);
         let msg = build_set_blocklists(&mgr).await.unwrap();
         match msg {
-            ServerMessage::SetBlocklists { blocklists } => {
+            ServerMessage::SetBlocklists {
+                blocklists,
+                storage,
+            } => {
+                assert_eq!(
+                    storage.map(|s| s.persistent),
+                    Some(false),
+                    "the default manager is not persistent"
+                );
                 assert_eq!(blocklists.len(), 2);
+                // No sink installs rules: every list says so, even before
+                // its first download.
+                assert!(blocklists.iter().all(|b| {
+                    b.enforcement == ENFORCEMENT_NOT_ENFORCED
+                        && b.enforcement_reason.as_deref()
+                            == Some(crate::blocklists::NO_RULE_SINK_REASON)
+                }));
                 assert!(blocklists
                     .iter()
                     .any(|b| b.id == "stevenblack" && b.entry_count == 5));
@@ -162,18 +218,52 @@ mod blocklist_emission_tests {
     }
 
     #[tokio::test]
-    async fn entries_changed_yields_set_blocklist_entries() {
-        let mgr = seeded_manager(&[("test", 2)]);
-        let msg = build_set_blocklist_entries(&mgr, "test").await.unwrap();
+    async fn entries_are_served_a_capped_page_at_a_time() {
+        use crate::ws_messages::BLOCKLIST_ENTRIES_PAGE_MAX;
+        let n = BLOCKLIST_ENTRIES_PAGE_MAX as usize * 2 + 5;
+        let mgr = seeded_manager(&[("big", n)]);
+        let msg = build_blocklist_entries_page(&mgr, "big", 0, u32::MAX)
+            .await
+            .unwrap();
         match msg {
             ServerMessage::SetBlocklistEntries {
                 subscription_id,
                 entries,
+                offset,
+                total,
             } => {
-                assert_eq!(subscription_id, "test");
-                assert_eq!(entries.len(), 2);
+                assert_eq!(subscription_id, "big");
+                assert_eq!(entries.len(), BLOCKLIST_ENTRIES_PAGE_MAX as usize);
+                assert_eq!(offset, 0);
+                assert_eq!(total, n as u64);
             }
             other => panic!("expected SetBlocklistEntries, got {other:?}"),
+        }
+        let last =
+            build_blocklist_entries_page(&mgr, "big", 2 * BLOCKLIST_ENTRIES_PAGE_MAX as u64, 10)
+                .await
+                .unwrap();
+        assert!(matches!(
+            last,
+            ServerMessage::SetBlocklistEntries { ref entries, offset, .. }
+                if entries.len() == 5 && offset == 2 * BLOCKLIST_ENTRIES_PAGE_MAX as u64
+        ));
+    }
+
+    #[test]
+    fn a_rejected_url_becomes_a_failed_not_enforced_row() {
+        let long = format!("http://x.example/{}", "a".repeat(10_000));
+        match build_rejected_blocklist(&long, "only https:// blocklist URLs are allowed") {
+            ServerMessage::SetBlocklistDetails { details } => {
+                assert_eq!(details.status, "refused", "never \"Download failed\"");
+                assert_eq!(details.enforcement, ENFORCEMENT_NOT_ENFORCED);
+                assert_eq!(
+                    details.last_failure_reason.as_deref(),
+                    Some("only https:// blocklist URLs are allowed")
+                );
+                assert!(details.url.len() <= MAX_URL_LEN, "the echoed URL is capped");
+            }
+            other => panic!("expected SetBlocklistDetails, got {other:?}"),
         }
     }
 }

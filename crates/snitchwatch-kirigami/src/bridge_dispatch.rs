@@ -317,7 +317,10 @@ mod tests {
                 status: "ok".into(),
                 last_updated_iso8601: None,
                 last_failure_reason: None,
+                enforcement: String::new(),
+                enforcement_reason: None,
             }],
+            storage: None,
         };
         assert!(interests_blocklists(&msg));
         assert!(!interests_blocklist_entries(&msg));
@@ -337,6 +340,8 @@ mod tests {
             entries: vec![BlocklistEntry {
                 host: "doubleclick.net".into(),
             }],
+            offset: 0,
+            total: 1,
         };
         assert!(interests_blocklist_entries(&msg));
         assert!(!interests_blocklists(&msg));

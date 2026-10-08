@@ -18,7 +18,9 @@ use cxx_qt::CxxQtType;
 use cxx_qt::Threading;
 use cxx_qt_lib::{QByteArray, QHash, QHashPair_i32_QByteArray, QModelIndex, QString, QVariant};
 
-use crate::blocklists::row_store::{EntriesStore, SubscriptionsStore};
+use crate::blocklists::row_store::{
+    enforcement_label, status_label, EntriesStore, SubscriptionsStore,
+};
 use snitchwatch_bridge::ws_messages::{ClientMessage, ServerMessage};
 
 // Subscription roles.
@@ -29,6 +31,10 @@ const SUB_ENTRY_COUNT: i32 = 3;
 const SUB_STATUS: i32 = 4;
 const SUB_LAST_UPDATED: i32 = 5;
 const SUB_LAST_FAILURE: i32 = 6;
+const SUB_STATUS_LABEL: i32 = 7;
+const SUB_ENFORCEMENT: i32 = 8;
+const SUB_ENFORCEMENT_LABEL: i32 = 9;
+const SUB_ENFORCEMENT_REASON: i32 = 10;
 
 // Entry roles.
 const ENTRY_HOST: i32 = 0;
@@ -51,10 +57,14 @@ pub mod qobject {
 
     extern "RustQt" {
         /// Blocklist subscription master list, bound by `BlocklistsPage.qml`.
+        /// `storagePersistent` / `storageReason` mirror the last
+        /// `SetBlocklists.storage` (issue #45); false / "" until one arrives.
         #[qobject]
         #[qml_element]
         #[base = QAbstractListModel]
         #[qproperty(i32, count)]
+        #[qproperty(bool, storage_persistent, cxx_name = "storagePersistent")]
+        #[qproperty(QString, storage_reason, cxx_name = "storageReason")]
         type BlocklistsModel = super::BlocklistsModelRust;
 
         /// Emitted with a JSON-encoded `ClientMessage` (SubscribeBlocklist /
@@ -97,11 +107,21 @@ pub mod qobject {
         #[qinvokable]
         fn unsubscribe(self: Pin<&mut BlocklistsModel>, id: &QString);
 
+        /// Ask for a page of a list's hosts from `offset` (emits
+        /// RequestBlocklistEntries). Entries are never pushed unasked.
+        #[qinvokable]
+        #[cxx_name = "requestEntries"]
+        fn request_entries(self: Pin<&mut BlocklistsModel>, id: &QString, offset: i32);
+
         /// Per-subscription entry (host) list, bound by the detail view.
+        /// `total` is the list's full entry count; `hasMore` is true while
+        /// fewer than `total` hosts are loaded.
         #[qobject]
         #[qml_element]
         #[base = QAbstractListModel]
         #[qproperty(i32, count)]
+        #[qproperty(i32, total)]
+        #[qproperty(bool, has_more, cxx_name = "hasMore")]
         #[qproperty(QString, subscription_id, cxx_name = "subscriptionId")]
         type BlocklistEntriesModel = super::BlocklistEntriesModelRust;
 
@@ -135,6 +155,13 @@ pub mod qobject {
         #[qinvokable]
         #[cxx_name = "clearEntries"]
         fn clear_entries(self: Pin<&mut BlocklistEntriesModel>);
+
+        /// Show only `id`'s entries from now on: pages for any other list
+        /// (another GUI's requests are broadcast too) are ignored. Call
+        /// before `BlocklistsModel.requestEntries(id, 0)`.
+        #[qinvokable]
+        #[cxx_name = "expectEntries"]
+        fn expect_entries(self: Pin<&mut BlocklistEntriesModel>, id: &QString);
     }
 
     unsafe extern "RustQt" {
@@ -164,6 +191,8 @@ pub mod qobject {
 pub struct BlocklistsModelRust {
     store: SubscriptionsStore,
     count: i32,
+    storage_persistent: bool,
+    storage_reason: QString,
 }
 
 impl qobject::BlocklistsModel {
@@ -187,6 +216,12 @@ impl qobject::BlocklistsModel {
             SUB_LAST_FAILURE => QVariant::from(&QString::from(
                 sub.last_failure_reason.as_deref().unwrap_or(""),
             )),
+            SUB_STATUS_LABEL => QVariant::from(&QString::from(&status_label(&sub.status))),
+            SUB_ENFORCEMENT => QVariant::from(&QString::from(&sub.enforcement)),
+            SUB_ENFORCEMENT_LABEL => QVariant::from(&QString::from(enforcement_label(sub))),
+            SUB_ENFORCEMENT_REASON => QVariant::from(&QString::from(
+                sub.enforcement_reason.as_deref().unwrap_or(""),
+            )),
             _ => QVariant::default(),
         }
     }
@@ -200,6 +235,13 @@ impl qobject::BlocklistsModel {
         roles.insert(SUB_STATUS, QByteArray::from("status"));
         roles.insert(SUB_LAST_UPDATED, QByteArray::from("lastUpdated"));
         roles.insert(SUB_LAST_FAILURE, QByteArray::from("lastFailureReason"));
+        roles.insert(SUB_STATUS_LABEL, QByteArray::from("statusLabel"));
+        roles.insert(SUB_ENFORCEMENT, QByteArray::from("enforcement"));
+        roles.insert(SUB_ENFORCEMENT_LABEL, QByteArray::from("enforcementLabel"));
+        roles.insert(
+            SUB_ENFORCEMENT_REASON,
+            QByteArray::from("enforcementReason"),
+        );
         roles
     }
 
@@ -218,6 +260,14 @@ impl qobject::BlocklistsModel {
 
     fn unsubscribe(self: Pin<&mut Self>, id: &QString) {
         self.emit_client(ClientMessage::UnsubscribeBlocklist { id: id.to_string() });
+    }
+
+    fn request_entries(self: Pin<&mut Self>, id: &QString, offset: i32) {
+        self.emit_client(ClientMessage::RequestBlocklistEntries {
+            subscription_id: id.to_string(),
+            offset: u64::try_from(offset).unwrap_or(0),
+            limit: None,
+        });
     }
 
     fn start_bridge_feed(self: Pin<&mut Self>) {
@@ -258,7 +308,11 @@ impl qobject::BlocklistsModel {
         };
         if changed {
             let n = self.store.len() as i32;
+            let persistent = self.store.storage_persistent();
+            let reason = QString::from(self.store.storage_reason());
             self.as_mut().set_count(n);
+            self.as_mut().set_storage_persistent(persistent);
+            self.as_mut().set_storage_reason(reason);
         }
     }
 
@@ -279,6 +333,8 @@ impl qobject::BlocklistsModel {
 pub struct BlocklistEntriesModelRust {
     store: EntriesStore,
     count: i32,
+    total: i32,
+    has_more: bool,
     subscription_id: QString,
 }
 
@@ -320,6 +376,24 @@ impl qobject::BlocklistEntriesModel {
         }
         if changed {
             self.as_mut().set_count(0);
+            self.as_mut().set_total(0);
+            self.as_mut().set_has_more(false);
+            self.as_mut().set_subscription_id(QString::default());
+        }
+    }
+
+    fn expect_entries(mut self: Pin<&mut Self>, id: &QString) {
+        unsafe {
+            self.as_mut().begin_reset_model();
+        }
+        let changed = self.as_mut().rust_mut().store.expect(&id.to_string());
+        unsafe {
+            self.as_mut().end_reset_model();
+        }
+        if changed {
+            self.as_mut().set_count(0);
+            self.as_mut().set_total(0);
+            self.as_mut().set_has_more(false);
             self.as_mut().set_subscription_id(QString::default());
         }
     }
@@ -359,8 +433,12 @@ impl qobject::BlocklistEntriesModel {
         }
         if changed {
             let n = self.store.len() as i32;
+            let total = i32::try_from(self.store.total()).unwrap_or(i32::MAX);
+            let has_more = self.store.has_more();
             let sub = QString::from(self.store.subscription_id());
             self.as_mut().set_count(n);
+            self.as_mut().set_total(total);
+            self.as_mut().set_has_more(has_more);
             self.as_mut().set_subscription_id(sub);
         }
     }

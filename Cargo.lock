@@ -4582,6 +4582,7 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-rustls",
  "tokio-stream",
  "tokio-tungstenite",
  "tonic",
@@ -4595,6 +4596,7 @@ name = "snitchwatch-bridge-cli"
 version = "0.1.1"
 dependencies = [
  "anyhow",
+ "async-trait",
  "futures-util",
  "hyper-util",
  "libc",
