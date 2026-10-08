@@ -17,7 +17,7 @@ use crate::rule_wire::rule_to_wire;
 use crate::translator::connection::{connection_to_row, event_to_row};
 use crate::translator::verdict::{once_rule, verdict_to_rule};
 use crate::tray_state::{TrayState, TrayStatePublisher};
-use crate::ws_messages::ServerMessage;
+use crate::ws_messages::{ConnectionRow, ServerMessage};
 use snitchwatch_proto::protocol::ui_server::{Ui, UiServer};
 use snitchwatch_proto::protocol::{
     Action, Alert, ClientConfig, Connection, MsgResponse, Notification, NotificationReply,
@@ -314,6 +314,24 @@ impl UiService {
         once_rule(resolution.verdict, resolution.scope, conn, now_secs)
     }
 
+    /// Record an Ask the pause decides on arrival (issue #78): the row is
+    /// stored already allowed and labelled `filterPaused`, and GUIs get it as
+    /// a decided row, never as a waiting prompt. The caller holds the cache
+    /// lock the pause's scan of waiting prompts takes too, and builds the
+    /// Allow once reply after releasing it.
+    fn allow_on_arrival(&self, cache: &mut ConnectionCache, row: ConnectionRow) {
+        let decided_row = crate::pause_answers::allowed_on_arrival(row);
+        cache.insert_decided(decided_row.clone());
+        if self.broadcast.receiver_count() > 0 {
+            let msg = ServerMessage::InsertConnectionRows {
+                rows: vec![decided_row],
+            };
+            if let Err(e) = self.broadcast.send(msg) {
+                warn!(error = %e, "ask_rule (paused): broadcast send failed");
+            }
+        }
+    }
+
     /// Publish `TrayState::RecentBlock` and schedule its own revert after
     /// [`RECENT_BLOCK_TTL`]. If a second block happens before the first's
     /// timer fires, the first's timer becomes a no-op (its captured
@@ -447,40 +465,6 @@ impl Ui for UiService {
             .admit()
             .ok_or_else(|| Status::unavailable("no authenticated GUI session"))?;
 
-        // Filtering paused (tray "Pause filtering"): auto-allow (Once)
-        // without prompting; the daemon's DefaultAction is untouched, so a
-        // crashed bridge still hits it (plans/2026-07-12-tray-filter-off.md).
-        // `applies_to` checks the deadline (an expired pause stops at once)
-        // and that this admission's GUI-session generation set the pause,
-        // under the presence lock (issue #47).
-        if self.filter_pause.applies_to(&admission) {
-            let row = connection_to_row(&conn, ask_id);
-            let mut decided_row = row.clone();
-            decided_row.action = Some("allow".to_string());
-            {
-                let mut cache = self.cache.lock().await;
-                cache.insert_decided(decided_row.clone());
-            }
-            if self.broadcast.receiver_count() > 0 {
-                let msg = ServerMessage::InsertConnectionRows {
-                    rows: vec![decided_row],
-                };
-                if let Err(e) = self.broadcast.send(msg) {
-                    warn!(error = %e, "ask_rule (paused): broadcast send failed");
-                }
-            }
-            let now_secs = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0);
-            return Ok(Response::new(once_rule(
-                Verdict::Allow,
-                crate::ws_messages::VerdictScope::ThisHost,
-                &conn,
-                now_secs,
-            )));
-        }
-
         let row = connection_to_row(&conn, ask_id);
         // Captured before `row` moves into the broadcast message below.
         // Both `row.process` and `row.dst_host` are attacker-influenced
@@ -498,6 +482,29 @@ impl Ui for UiService {
         let row_id = row.id.clone();
         let verdict_rx = {
             let mut cache = self.cache.lock().await;
+            // Filtering paused (tray "Pause filtering"): auto-allow (Once)
+            // without prompting; the daemon's DefaultAction is untouched, so a
+            // crashed bridge still hits it (plans/2026-07-12-tray-filter-off.md).
+            // `applies_to` checks the deadline (an expired pause stops at once)
+            // and that this admission's GUI-session generation set the pause,
+            // under the presence lock (issue #47). Decided under the cache
+            // lock, which the pause's scan of waiting prompts holds too, so an
+            // Ask is never left waiting once a pause applies (issue #78,
+            // `pause_answers`).
+            if self.filter_pause.applies_to(&admission) {
+                self.allow_on_arrival(&mut cache, row);
+                drop(cache);
+                let now_secs = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
+                return Ok(Response::new(once_rule(
+                    Verdict::Allow,
+                    crate::ws_messages::VerdictScope::ThisHost,
+                    &conn,
+                    now_secs,
+                )));
+            }
             let receiver = cache
                 .insert_admitted(row.clone(), admission.clone(), self.broadcast.clone())
                 .ok_or_else(|| {
@@ -754,3 +761,7 @@ mod refusal_tests;
 #[cfg(test)]
 #[path = "grpc_server/prompt_slot_tests.rs"]
 mod prompt_slot_tests;
+
+#[cfg(test)]
+#[path = "grpc_server/pause_answer_tests.rs"]
+mod pause_answer_tests;

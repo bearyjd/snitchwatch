@@ -6,7 +6,7 @@
 use super::*;
 use snitchwatch_bridge::prompt_slot::PromptSlotHolder;
 
-fn handles(connection: &Arc<Mutex<ConnectionState>>) -> BridgeHandles {
+pub(super) fn handles(connection: &Arc<Mutex<ConnectionState>>) -> BridgeHandles {
     let (broadcast_tx, _) = broadcast::channel(1);
     let (inbound_tx, _inbound_rx) = mpsc::channel(1);
     BridgeHandles {
@@ -23,7 +23,7 @@ async fn the_prompt_slot_capability_belongs_to_the_live_session() {
     let handles = handles(&connection);
     let (_inbound_tx, mut inbound_rx) = mpsc::channel(1);
 
-    mark_connected_with(&connection, false, true);
+    mark_connected_with(&connection, false, true, false);
     assert!(handles.advertises_prompt_slot());
     disconnect_and_discard(&connection, &mut inbound_rx);
     assert!(!handles.advertises_prompt_slot(), "after a disconnect");

@@ -586,6 +586,25 @@ pub struct ConnectionRow {
     /// consumers (the web frontend) that don't know about it are unaffected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub matched_rule: Option<String>,
+    /// Set when the bridge answered this connection itself rather than a
+    /// person (issue #78). Additive and omitted when absent, like
+    /// `matched_rule`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_answer: Option<AutoAnswer>,
+}
+
+/// Why the bridge answered a connection without a person (issue #78).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum AutoAnswer {
+    /// Allowed once because filtering was paused: either the prompt was
+    /// already waiting when the pause took effect, or the connection arrived
+    /// during it (`pause_answers`).
+    FilterPaused,
+    /// A reason this build doesn't know, from a newer bridge. Keeps the row
+    /// readable instead of failing the whole message.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -717,6 +736,7 @@ mod tests {
                 bytes_received: 0,
                 started_at_ms: 1_700_000_000_000,
                 matched_rule: None,
+                auto_answer: None,
             }],
         };
 
@@ -838,6 +858,7 @@ mod tests {
             bytes_received: 0,
             started_at_ms: 1_700_000_000_000,
             matched_rule: Some("899-firefox-allow-out.json".to_string()),
+            auto_answer: None,
         };
         let json = serde_json::to_value(&row).unwrap();
         assert_eq!(json["matchedRule"], "899-firefox-allow-out.json");
