@@ -59,6 +59,7 @@ pub fn interests_rules(msg: &ServerMessage) -> bool {
         ServerMessage::SetRules { .. }
             | ServerMessage::UpdateRules { .. }
             | ServerMessage::RuleHits { .. }
+            | ServerMessage::RulesNotShown { .. }
     )
 }
 
@@ -310,6 +311,12 @@ mod tests {
         assert!(interests_rules(&ServerMessage::UpdateRules {
             rules: vec![]
         }));
+        let not_shown = ServerMessage::RulesNotShown {
+            too_large: 1,
+            over_limit_total: None,
+        };
+        assert!(interests_rules(&not_shown));
+        assert!(!interests_connections(&not_shown));
     }
 
     #[test]

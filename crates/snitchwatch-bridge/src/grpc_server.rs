@@ -290,7 +290,9 @@ impl UiService {
     /// rule is an active daemon rule, including a five-minute or
     /// until-restart rule, and must be visible/editable immediately rather
     /// than waiting for a daemon-side rule-list push that may never come.
-    /// May diverge on the daemon's `setUniqueName`; see `cache::rules`.
+    /// May diverge on the daemon's `setUniqueName`; see `cache::rules`. On
+    /// the legacy TCP transport the prompt may come from a process posing as
+    /// the daemon; see the residual risk in `daemon_commands` (issue #61).
     ///
     /// Issue #44: a remembered verdict `verdict_to_rule` refuses (no absolute
     /// process path) is answered once instead, never cached or announced as

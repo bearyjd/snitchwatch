@@ -798,8 +798,8 @@ where
                     // full state. Re-broadcast the snapshots the bridge itself
                     // owns: connection rows (clear + full insert, the same
                     // sequence a fresh view needs), blocklists, profiles,
-                    // the daemon's rules once a snapshot has been committed
-                    // (see `ClientMessage::RequestSnapshot` docs), diagnostics,
+                    // the daemon's rules (empty until a snapshot has been
+                    // committed, see `ClientMessage::RequestSnapshot`), diagnostics,
                     // tray and filter-pause state.
                     let rows = cache_for_upstream.lock().await.rows().to_vec();
                     let _ = snapshot_tx.send(ServerMessage::ClearConnectionRows);

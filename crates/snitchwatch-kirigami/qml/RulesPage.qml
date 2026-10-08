@@ -94,6 +94,8 @@ Kirigami.ScrollablePage {
     // Not `ioStatus.visible`: a child of a hidden header always reads false.
     readonly property bool showsIoStatus: rulesIo.statusText.length > 0 && !importSheet.visible
     // The rule editor's last result once its sheet closed (P2.1).
+    // What the list leaves out (issue #61).
+    readonly property bool showsNotShown: !!page.model && page.model.notShownText.length > 0
     readonly property bool showsEditorStatus: ruleEditorController.statusText.length > 0
                                               && !ruleEditor.visible
 
@@ -294,6 +296,7 @@ Kirigami.ScrollablePage {
     // last import or export outcome.
     header: ColumnLayout {
         visible: page.showsAllAppsNotice || page.showsIoStatus || page.showsEditorStatus
+                 || page.showsNotShown
             || hitsSummaryLabel.text.length > 0 || hitsStorageLabel.text.length > 0
         spacing: 0
 
@@ -354,6 +357,16 @@ Kirigami.ScrollablePage {
             textFormat: Text.PlainText
             text: rulesIo.statusText
             wrapMode: Text.Wrap
+        }
+        // Rules the list leaves out (issue #61), plain text.
+        Controls.Label {
+            objectName: "rulesNotShown"
+            visible: page.showsNotShown
+            Layout.fillWidth: true
+            Layout.margins: Kirigami.Units.smallSpacing
+            textFormat: Text.PlainText
+            wrapMode: Text.Wrap
+            text: page.model ? page.model.notShownText : ""
         }
         // The rule editor's last result (P2.1), plain text.
         Controls.Label {

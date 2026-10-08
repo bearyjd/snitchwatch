@@ -69,6 +69,9 @@ pub struct RulesCache {
     rules: Option<BTreeMap<String, Rule>>,
     revision: u64,
     left_out: BTreeMap<String, usize>,
+    /// How many rules the daemon's last snapshot had when it was over
+    /// [`MAX_SNAPSHOT_RULES`] and so not read at all (issue #61).
+    over_limit_total: Option<usize>,
 }
 
 /// A `Subscribe` snapshot within the limits, and what it left out.
@@ -115,7 +118,20 @@ impl RulesCache {
 
     pub fn replace_all(&mut self, rules: Vec<Rule>) {
         self.rules = Some(rules.into_iter().map(|r| (r.name.clone(), r)).collect());
+        self.over_limit_total = None;
         self.revision += 1;
+    }
+
+    /// What the GUI's list leaves out (issue #61): rules over the size
+    /// limits, and, while there is no list, a snapshot over the rule limit.
+    fn not_shown(&self) -> ServerMessage {
+        ServerMessage::RulesNotShown {
+            too_large: u32::try_from(self.left_out.len()).unwrap_or(u32::MAX),
+            over_limit_total: self
+                .over_limit_total
+                .filter(|_| self.is_unknown())
+                .map(|total| u32::try_from(total).unwrap_or(u32::MAX)),
+        }
     }
 
     /// Forget the list (its stream is gone). A no-op while `Unknown`.
@@ -128,14 +144,19 @@ impl RulesCache {
 
     /// Insert or replace by name. When the rule is already cached and the
     /// incoming `created` is 0 (every GUI toggle goes through
-    /// `rule_from_wire`, which zeroes it), the cached `created` is kept: the
-    /// daemon's original expiry timer still fires on the original schedule.
-    /// A no-op while `Unknown`: one rule is not the full list.
+    /// `rule_from_wire`, which zeroes it), the cached `created` is kept if
+    /// the duration is the same: the daemon's original expiry timer still
+    /// fires on the original schedule. A changed duration has a new clock
+    /// from now for an enabled rule, and none for a disabled one
+    /// (`scheduleTemporaryRule`, issue #61). A no-op while `Unknown`: one
+    /// rule is not the full list.
     pub fn upsert(&mut self, mut rule: Rule) {
         let Some(rules) = &mut self.rules else { return };
         if rule.created == 0 {
-            if let Some(cached) = rules.get(&rule.name) {
-                rule.created = cached.created;
+            match rules.get(&rule.name) {
+                Some(cached) if cached.duration == rule.duration => rule.created = cached.created,
+                Some(_) if rule.enabled => rule.created = now_secs(),
+                _ => {}
             }
         }
         self.left_out.remove(&rule.name);
@@ -263,13 +284,22 @@ fn lock<T>(mutex: &StdMutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Broadcast the full list as `SetRules` when the cache is synced. Sent with
-/// the cache lock held, so two publishers can't deliver lists out of order.
+/// Broadcast the full list as `SetRules`, empty while the cache is Unknown
+/// (so a GUI's stale list, or a switch it flipped on one, is reset, issue
+/// #61), then what the list leaves out. Sent with the cache lock held, so
+/// two publishers can't deliver lists out of order.
 pub fn publish_rules(cache: &StdMutex<RulesCache>, broadcast: &broadcast::Sender<ServerMessage>) {
     let cache = lock(cache);
-    if let Some(rules) = cache.snapshot_wire() {
-        let _ = broadcast.send(ServerMessage::SetRules { rules });
-    }
+    let rules = cache.snapshot_wire().unwrap_or_default();
+    let _ = broadcast.send(ServerMessage::SetRules { rules });
+    let _ = broadcast.send(cache.not_shown());
+}
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 /// Whether a daemon rule fits the per-field limits. Imported rules use the
@@ -409,10 +439,15 @@ impl RulesSync {
     /// oversized snapshot also discards the key's earlier one.
     pub fn stage(&self, key: ConnKey, rules: Vec<Rule>) {
         let now = Instant::now();
+        let total = rules.len();
         let mut pending = lock(&self.pending);
         match bounded_snapshot(rules) {
             Some(snapshot) => pending.stage(key, snapshot, now),
-            None => drop(pending.take_fresh(&key, now)),
+            None => {
+                drop(pending.take_fresh(&key, now));
+                // Shown once there is no list (issue #61).
+                lock(&self.cache).over_limit_total = Some(total);
+            }
         }
     }
 
@@ -453,6 +488,7 @@ impl RulesSync {
         let _ = self
             .broadcast
             .send(ServerMessage::SetRules { rules: Vec::new() });
+        let _ = self.broadcast.send(cache.not_shown());
     }
 
     /// A command the daemon answered `OK`, in reply order.
@@ -519,13 +555,9 @@ pub async fn prune_expired_rules_every(
         let Some(cache) = cache.upgrade() else {
             return;
         };
-        let now_secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
         let pruned = {
             let mut cache = lock(&cache);
-            let expired = cache.prune_expired(now_secs);
+            let expired = cache.prune_expired(now_secs());
             // Under the cache lock, like every hit-count change. A rule
             // re-made under the same name later is a new rule.
             hits.forget(expired.iter().map(String::as_str));

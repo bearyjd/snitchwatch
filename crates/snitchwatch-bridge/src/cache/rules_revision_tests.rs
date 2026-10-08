@@ -114,6 +114,10 @@ fn withdraw_bumps_the_revision_and_broadcasts_only_once() {
     assert!(lock(&sync.cache).is_unknown());
     assert!(lock(&sync.cache).revision() > before);
     assert!(matches!(rx.try_recv(), Ok(ServerMessage::SetRules { rules }) if rules.is_empty()));
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(ServerMessage::RulesNotShown { .. })
+    ));
 
     sync.withdraw();
     assert!(rx.try_recv().is_err(), "a second withdraw is a no-op");
@@ -142,6 +146,10 @@ fn held_publishes_coalesce_into_one_set_rules() {
         Ok(ServerMessage::SetRules { rules }) => assert_eq!(rules.len(), 2),
         other => panic!("expected one SetRules, got {other:?}"),
     }
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(ServerMessage::RulesNotShown { .. })
+    ));
     assert!(rx.try_recv().is_err(), "exactly one");
 
     sync.apply_confirmed(&change("c"));

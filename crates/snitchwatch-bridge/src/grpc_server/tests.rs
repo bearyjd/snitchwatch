@@ -1716,6 +1716,10 @@ async fn subscribe_then_hello_commits_one_name_sorted_set_rules() {
         commands.send(delete("a")).is_ok(),
         "a client that saw SetRules can send rule commands"
     );
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(ServerMessage::RulesNotShown { too_large: 0, .. })
+    ));
     assert!(rx.try_recv().is_err(), "exactly one SetRules");
     assert_eq!(*synced.borrow(), 1);
 
@@ -1878,7 +1882,11 @@ async fn a_redial_adopts_the_new_connections_snapshot_and_correlates_its_replies
     new.subscribe(with_rules(vec![daemon_rule("new-b"), daemon_rule("new-a")]))
         .await
         .unwrap();
-    assert!(rx.try_recv().is_err(), "staged until the new HELLO");
+    assert!(
+        !std::iter::from_fn(|| rx.try_recv().ok())
+            .any(|m| matches!(m, ServerMessage::SetRules { .. })),
+        "staged until the new HELLO"
+    );
     let (new_replies, mut new_commands) = open_daemon_stream(&mut new).await;
     assert_eq!(next_set_rules(&mut rx).await, vec!["new-a", "new-b"]);
     tokio::time::timeout(Duration::from_secs(10), ready.wait_for(|g| *g >= 2))

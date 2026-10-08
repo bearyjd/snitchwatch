@@ -197,3 +197,27 @@ async fn an_add_being_saved_keeps_its_name() {
     assert_eq!(first.rules[0].name, "100-x");
     assert!(daemon.rx.try_recv().is_err(), "only the first add was sent");
 }
+
+/// Issue #61: with no list (before the first sync, or once its stream is
+/// gone), a refused toggle still re-sends one, empty, so a switch the GUI
+/// flipped on its stale list is reset.
+#[tokio::test]
+async fn a_toggle_refused_with_no_list_resets_the_switch() {
+    let rule = stock("100-a", leaf("simple", "dest.host", "x.example"), "always");
+    let mut daemon = daemon(vec![rule.clone()]);
+    drop(daemon.registration.take());
+    assert!(daemon.cache.lock().unwrap().is_unknown());
+    let commands = commands(&daemon);
+    let mut rx = daemon.broadcast.subscribe();
+    commands.try_route(update("100-a", switched(&rule, true), None));
+    let reset = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let ServerMessage::SetRules { rules } = rx.recv().await.unwrap() {
+                return rules;
+            }
+        }
+    })
+    .await
+    .expect("no list was sent to reset the switch");
+    assert!(reset.is_empty(), "{reset:?}");
+}

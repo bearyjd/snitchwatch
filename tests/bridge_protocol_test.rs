@@ -1135,8 +1135,9 @@ async fn daemon_rules_reach_the_gui_and_follow_confirmed_commands() {
     .await
     .unwrap();
 
-    // 2. No setRules yet: nothing is committed before the stream's HELLO.
-    //    trayState is the last message of a snapshot.
+    // 2. No rules yet: nothing is committed before the stream's HELLO, so
+    //    the snapshot's setRules is the empty list (#61: it resets a GUI's
+    //    stale one). trayState is the last message of a snapshot.
     ws.send(Message::Text(
         json!({ "action": "requestSnapshot" }).to_string(),
     ))
@@ -1151,7 +1152,11 @@ async fn daemon_rules_reach_the_gui_and_follow_confirmed_commands() {
                 None => panic!("ws stream ended early"),
             };
             let v: serde_json::Value = serde_json::from_str(&t).unwrap();
-            assert_ne!(v["action"], "setRules", "rules sent before HELLO: {v}");
+            let listed = v["rules"].as_array().is_some_and(|rules| !rules.is_empty());
+            assert!(
+                v["action"] != "setRules" || !listed,
+                "rules sent before HELLO: {v}"
+            );
             if v["action"] == "trayState" {
                 break;
             }

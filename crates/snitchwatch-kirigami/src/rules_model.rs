@@ -82,6 +82,9 @@ pub mod qobject {
         /// and whether the counts are saved. Empty until a `RuleHits`
         /// arrives from the live session.
         #[qproperty(QString, hits_info_json, cxx_name = "hitsInfoJson")]
+        /// What the list leaves out, as plain text (issue #61); "" when
+        /// nothing is.
+        #[qproperty(QString, not_shown_text, cxx_name = "notShownText")]
         type RulesModel = super::RulesModelRust;
 
         /// Emitted with a JSON-encoded `ClientMessage` (`UpdateRule` /
@@ -199,6 +202,7 @@ pub struct RulesModelRust {
     legacy_host_only_count: i32,
     hits: RuleHitsView,
     hits_info_json: QString,
+    not_shown_text: QString,
 }
 
 impl qobject::RulesModel {
@@ -434,6 +438,10 @@ impl qobject::RulesModel {
         // the list's scroll position.
         if self.as_mut().rust_mut().hits.apply(&msg) {
             self.refresh_hits();
+            return;
+        }
+        if let Some(text) = crate::rules::not_shown::not_shown_text(&msg) {
+            self.as_mut().set_not_shown_text(QString::from(&text));
             return;
         }
         let changed = {

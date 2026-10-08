@@ -35,7 +35,13 @@
 //!   Rules page shows *its* list and *its* replies decide command outcomes,
 //!   and a toggle the user makes on one of its forged rows is sent, forged
 //!   body and all, to every stream: the real daemon installs that body. The
-//!   list is withdrawn the moment the stream closes or stops being current.
+//!   list is withdrawn the moment the stream closes or stops being current,
+//!   and the Rules page then stays empty until the real daemon reconnects
+//!   and sends its own list: a forged list is never left standing in its
+//!   place (issue #61). A prompt from such a process that the user answers
+//!   with a remembered duration also adds that rule to the list shown,
+//!   whichever stream is current (`UiService::verdict_reply`); its name is
+//!   bridge-made and its fields pass the same checks as any prompt answer.
 //! - [`DaemonTransport::Unix`] (system mode, root-only socket): commands go
 //!   only to the current stream, and its waiters fail when that stream
 //!   closes.

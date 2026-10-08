@@ -332,16 +332,113 @@ async fn the_expiry_tick_prunes_and_publishes_then_ends_with_the_cache() {
 }
 
 #[tokio::test]
-async fn publish_sends_set_rules_only_when_synced() {
+async fn publish_sends_the_synced_list() {
     let (tx, mut rx) = broadcast::channel(4);
     let cache = StdMutex::new(RulesCache::default());
-    publish_rules(&cache, &tx);
-    assert!(rx.try_recv().is_err());
-
     lock(&cache).replace_all(vec![rule("a", "always", 0)]);
     publish_rules(&cache, &tx);
     match rx.try_recv().unwrap() {
         ServerMessage::SetRules { rules } => assert_eq!(rules[0]["name"], "a"),
         other => panic!("expected SetRules, got {other:?}"),
     }
+}
+
+// --- Issue #61 -------------------------------------------------------------
+
+fn published(rx: &mut broadcast::Receiver<ServerMessage>) -> Vec<ServerMessage> {
+    std::iter::from_fn(|| rx.try_recv().ok()).collect()
+}
+
+/// Before the first sync (or after a withdrawal) a refused command's
+/// re-publish still reaches the GUI, as an empty list, so a switch flipped
+/// optimistically on a stale list is reset.
+#[test]
+fn publishing_while_unknown_sends_the_empty_list() {
+    let (tx, mut rx) = broadcast::channel(8);
+    let cache = StdMutex::new(RulesCache::default());
+    publish_rules(&cache, &tx);
+    let sent = published(&mut rx);
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, ServerMessage::SetRules { rules } if rules.is_empty())),
+        "{sent:?}"
+    );
+}
+
+/// Rules Snitchwatch doesn't show are counted for the GUI, not only logged:
+/// rules over the size limits, and a whole list over the rule limit.
+#[test]
+fn what_the_list_leaves_out_is_published_with_it() {
+    let (tx, mut rx) = broadcast::channel(8);
+    let sync = RulesSync::new(tx);
+    sync.stage(None, vec![rule("a", "always", 0); MAX_SNAPSHOT_RULES + 1]);
+    sync.publish();
+    let not_shown = |sent: Vec<ServerMessage>| {
+        sent.into_iter().find_map(|m| match m {
+            ServerMessage::RulesNotShown {
+                too_large,
+                over_limit_total,
+            } => Some((too_large, over_limit_total)),
+            _ => None,
+        })
+    };
+    assert_eq!(
+        not_shown(published(&mut rx)),
+        Some((0, Some(MAX_SNAPSHOT_RULES as u32 + 1)))
+    );
+    lock(&sync.cache).replace_all(vec![rule("a", "always", 0)]);
+    lock(&sync.cache).set_left_out([("long".to_string(), 20_000)].into());
+    sync.publish();
+    assert_eq!(not_shown(published(&mut rx)), Some((1, None)));
+    // A list is shown: an oversized snapshot staged since isn't counted,
+    // and an adopted list forgets the earlier one.
+    sync.stage(None, vec![rule("a", "always", 0); MAX_SNAPSHOT_RULES + 1]);
+    sync.publish();
+    assert_eq!(not_shown(published(&mut rx)), Some((1, None)));
+    lock(&sync.cache).replace_all(Vec::new());
+    lock(&sync.cache).set_unknown();
+    sync.publish();
+    assert_eq!(not_shown(published(&mut rx)), Some((0, None)));
+}
+
+/// A rule whose duration changed has a new clock (`scheduleTemporaryRule`),
+/// so the old `created` doesn't carry over: the cache must not prune a rule
+/// edited from 5 minutes to an hour after the first 5.
+#[test]
+fn a_changed_duration_does_not_keep_the_old_clock() {
+    let mut cache = synced(vec![rule("a", "5m", T)]);
+    cache.upsert(rule("a", "1h", 0));
+    let created = get(&cache, "a").created;
+    assert_ne!(created, T, "the old clock carried over");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    assert!((now - created).abs() < 5, "a new clock: {created}");
+    let mut off = rule("b", "1h", 0);
+    off.enabled = false;
+    let mut cache = synced(vec![rule("b", "5m", T)]);
+    cache.upsert(off);
+    assert_eq!(get(&cache, "b").created, 0, "a disabled rule has no clock");
+}
+
+/// The stage/commit race (#61): a commit adopts the newest snapshot staged
+/// under its connection's key. On the Unix socket every connection is root's
+/// daemon (one shared key), so the newest is the daemon's newest list; on
+/// TCP each connection's key is its own peer address, so one connection
+/// never commits another's snapshot.
+#[test]
+fn distinct_connections_never_take_each_others_snapshot() {
+    let now = Instant::now();
+    let mut pending = PendingSnapshots::default();
+    pending.stage(key(1), vec![rule("one", "always", 0)], now);
+    pending.stage(key(2), vec![rule("two", "always", 0)], now);
+    assert_eq!(
+        pending.take_fresh(&key(1), now).unwrap().rules[0].name,
+        "one"
+    );
+    assert_eq!(
+        pending.take_fresh(&key(2), now).unwrap().rules[0].name,
+        "two"
+    );
 }

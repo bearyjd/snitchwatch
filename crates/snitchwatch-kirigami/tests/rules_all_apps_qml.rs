@@ -250,6 +250,18 @@ Window {
                 probeWindow.check(rulesModel.legacyHostOnlyCount === 0 && !page.header.visible,
                                   "notice stays without flagged rules");
 
+                // Issue #61: what the list leaves out is said under the title.
+                rulesModel.applyServerMessageJson(JSON.stringify({
+                    action: "rulesNotShown", tooLarge: 2 }));
+                const notShown = probeWindow.findChild(page.header, "rulesNotShown");
+                probeWindow.check(page.header.visible && notShown && notShown.visible
+                                  && notShown.textFormat === Text.PlainText
+                                  && notShown.text.indexOf("2 rules aren't listed") === 0,
+                                  "not-shown label: " + (notShown ? notShown.text : "missing"));
+                rulesModel.applyServerMessageJson(JSON.stringify({
+                    action: "rulesNotShown", tooLarge: 0 }));
+                probeWindow.check(!page.header.visible, "the not-shown label stays");
+
                 if (probeWindow.failures.length > 0) {
                     throw new Error("all-apps probe: " + probeWindow.failures.join("; "));
                 }

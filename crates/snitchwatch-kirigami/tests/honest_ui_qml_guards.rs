@@ -468,6 +468,8 @@ fn rules_page_labels_showing_rule_data_are_plain_text() {
             "row.allAppsHint",
             // Issue #64: the flagged row's badge.
             "row.flagBadge",
+            // Issue #61: what the list leaves out.
+            "page.model.notShownText",
             // P2.7: export/import outcomes, which carry bridge reasons.
             "rulesIo.statusText",
             // P2.1: why the editor can't change a rule (bridge reasons).

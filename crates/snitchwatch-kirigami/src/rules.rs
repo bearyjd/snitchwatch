@@ -29,6 +29,7 @@ pub mod editor_view;
 pub mod hits;
 pub mod io;
 pub mod io_view;
+pub mod not_shown;
 pub mod row_store;
 pub mod simulator;
 
