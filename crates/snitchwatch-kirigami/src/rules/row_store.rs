@@ -25,7 +25,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use snitchwatch_bridge::profiles::materializer::PROFILE_BAND_PREFIX;
+use snitchwatch_bridge::rule_name::is_reserved_profile_name;
 use snitchwatch_bridge::ws_messages::ServerMessage;
 
 /// The `z00-blocklist:<list_id>:<kind>` filename band a subscribed
@@ -100,7 +100,9 @@ pub struct Rule {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuleSource {
     User,
-    /// A network profile's rule, in the bridge's `850-profile:` band.
+    /// A network profile's rule, in the bridge's `850-profile:` band: the
+    /// same test the bridge makes it read-only by, so the label and the
+    /// read-only reason ("Managed on the Profiles page") always agree.
     Profile,
     Blocklist {
         list_id: String,
@@ -137,7 +139,7 @@ impl Rule {
             Some(rest) => RuleSource::Blocklist {
                 list_id: rest.split(':').next().unwrap_or("").to_string(),
             },
-            None if self.name.starts_with(PROFILE_BAND_PREFIX) => RuleSource::Profile,
+            None if is_reserved_profile_name(&self.name) => RuleSource::Profile,
             None => RuleSource::User,
         }
     }
