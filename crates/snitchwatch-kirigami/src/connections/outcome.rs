@@ -22,7 +22,7 @@
 
 use snitchwatch_bridge::ws_messages::ConnectionRow;
 
-use super::row_store::Verdict;
+use super::row_store::{matched_rule_name, Verdict};
 
 /// Whether `row` still waits for an answer.
 pub fn is_pending(row: &ConnectionRow) -> bool {
@@ -44,10 +44,11 @@ impl Verdict {
 /// Whether the daemon may list `row`'s connection, and its retries, again as
 /// rows decided by its default action (E3; the inspector's two-rows hint): a
 /// put-off row the default action settled, i.e. without a rule on record
-/// ("Decide later"'s 5-minute block has one). The bridge can't match the two
-/// (plan `2026-10-08-default-applied-events.md`).
+/// ("Decide later"'s 5-minute block has one), and never a row that already
+/// is the default-decided one. The bridge can't match the two (plan
+/// `2026-10-08-default-applied-events.md`).
 pub fn may_be_listed_again(row: &ConnectionRow) -> bool {
-    row.deferred && row.matched_rule.is_none()
+    !row.decided_by_default && row.deferred && matched_rule_name(row).is_empty()
 }
 
 /// The verdict label of a deferred row or a row decided by the firewall's
@@ -228,6 +229,18 @@ mod tests {
             ..row(Some("deny"), false)
         };
         assert!(!may_be_listed_again(&by_default));
+        // The flag wins even beside `deferred` (never sent together), and an
+        // empty rule name is no rule.
+        let both = ConnectionRow {
+            decided_by_default: true,
+            ..row(None, true)
+        };
+        assert!(!may_be_listed_again(&both));
+        let empty_name = ConnectionRow {
+            matched_rule: Some(String::new()),
+            ..row(Some("deny"), true)
+        };
+        assert!(may_be_listed_again(&empty_name));
     }
 
     /// The flag always means "decided, no rule" (PR #108 review), even on a
