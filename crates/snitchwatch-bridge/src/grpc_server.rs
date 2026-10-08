@@ -112,6 +112,9 @@ pub struct UiService {
     rules: RulesSync,
     /// Who holds the daemon's single prompt slot (`crate::prompt_slot`).
     prompt_slot: crate::prompt_slot::PromptSlotHandle,
+    /// The daemon's own settings from its latest `subscribe`
+    /// (`crate::daemon_config`).
+    daemon_config: crate::daemon_config::SharedDaemonConfig,
 }
 
 /// Future-drop cleanup also runs for tonic transport cancellation. A closed
@@ -180,7 +183,13 @@ impl UiService {
             commands: DaemonCommands::new(DaemonTransport::Tcp, rules.clone()),
             rules,
             prompt_slot,
+            daemon_config: Default::default(),
         }
+    }
+
+    /// The daemon's settings from its latest `subscribe`.
+    pub fn daemon_config_handle(&self) -> crate::daemon_config::SharedDaemonConfig {
+        self.daemon_config.clone()
     }
 
     /// The prompt slot, for the `RequestSnapshot` answer.
@@ -589,6 +598,9 @@ impl Ui for UiService {
         let conn = request.remote_addr();
         let cfg = request.into_inner();
         info!(client = %cfg.name, version = %cfg.version, "client subscribed");
+        // Never log `cfg.config` itself: see `daemon_config`.
+        self.daemon_config
+            .set(crate::daemon_config::DaemonConfigView::parse(&cfg.config));
         // Staged until this connection's stream says HELLO (see `cache::rules`).
         self.rules.stage(conn, cfg.rules.clone());
         {
@@ -755,3 +767,7 @@ mod prompt_slot_tests;
 #[cfg(test)]
 #[path = "grpc_server/pause_answer_tests.rs"]
 mod pause_answer_tests;
+
+#[cfg(test)]
+#[path = "grpc_server/answer_timeout_tests.rs"]
+mod answer_timeout_tests;
