@@ -254,6 +254,67 @@ pub struct PendingReply {
     inner: Arc<StdMutex<Inner>>,
 }
 
+/// The checks every command passes before it is queued anywhere.
+fn check_sendable(notification: &Notification) -> Result<(), SendError> {
+    if !ALLOWED_ACTIONS
+        .iter()
+        .any(|action| *action as i32 == notification.r#type)
+    {
+        warn!(
+            action = notification.r#type,
+            "refusing to send a non-rule command to the daemon"
+        );
+        return Err(SendError::NotAllowed);
+    }
+    // The root daemon turns the name into a file path.
+    if let Some(error) = notification
+        .rules
+        .iter()
+        .find_map(|rule| crate::rule_name::validate_rule_name(&rule.name).err())
+    {
+        warn!(%error, "refusing to send a rule command with an unsafe rule name");
+        return Err(SendError::InvalidRuleName);
+    }
+    Ok(())
+}
+
+/// The streams `delivery` sends to, or why there are none.
+fn targets(inner: &Inner, delivery: Delivery) -> Result<Vec<StreamId>, SendError> {
+    let targets: Vec<StreamId> = match (inner.transport, delivery) {
+        (DaemonTransport::Tcp, Delivery::Usual) => inner.streams.keys().copied().collect(),
+        (DaemonTransport::Unix, Delivery::Usual) => inner.current.into_iter().collect(),
+        (DaemonTransport::Tcp, Delivery::CommittedStream) => {
+            return Err(SendError::NotOnThisTransport)
+        }
+        (DaemonTransport::Unix, Delivery::CommittedStream) => {
+            inner.committed_by.into_iter().collect()
+        }
+    };
+    if targets.is_empty() {
+        return Err(SendError::NoDaemon);
+    }
+    Ok(targets)
+}
+
+/// Queue `notification` (already given `id`) on each of `targets`; returns
+/// how many took it. A stream whose queue is full drops its copy.
+fn queue_on(inner: &Inner, targets: &[StreamId], id: u64, notification: &Notification) -> usize {
+    let mut queued = 0;
+    for &target in targets {
+        match inner.streams[&target].tx.try_send(notification.clone()) {
+            Ok(()) => queued += 1,
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                warn!(
+                    stream = target,
+                    id, "daemon stream queue full; command dropped for it"
+                )
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {}
+        }
+    }
+    queued
+}
+
 fn lock(inner: &StdMutex<Inner>) -> MutexGuard<'_, Inner> {
     inner.lock().unwrap_or_else(|e| e.into_inner())
 }
@@ -438,56 +499,13 @@ impl DaemonCommands {
         mut notification: Notification,
         delivery: Delivery,
     ) -> Result<PendingReply, SendError> {
-        if !ALLOWED_ACTIONS
-            .iter()
-            .any(|action| *action as i32 == notification.r#type)
-        {
-            warn!(
-                action = notification.r#type,
-                "refusing to send a non-rule command to the daemon"
-            );
-            return Err(SendError::NotAllowed);
-        }
-        // The root daemon turns the name into a file path.
-        if let Some(error) = notification
-            .rules
-            .iter()
-            .find_map(|rule| crate::rule_name::validate_rule_name(&rule.name).err())
-        {
-            warn!(%error, "refusing to send a rule command with an unsafe rule name");
-            return Err(SendError::InvalidRuleName);
-        }
+        check_sendable(&notification)?;
         let mut inner = lock(&self.inner);
-        let targets: Vec<StreamId> = match (inner.transport, delivery) {
-            (DaemonTransport::Tcp, Delivery::Usual) => inner.streams.keys().copied().collect(),
-            (DaemonTransport::Unix, Delivery::Usual) => inner.current.into_iter().collect(),
-            (DaemonTransport::Tcp, Delivery::CommittedStream) => {
-                return Err(SendError::NotOnThisTransport)
-            }
-            (DaemonTransport::Unix, Delivery::CommittedStream) => {
-                inner.committed_by.into_iter().collect()
-            }
-        };
-        if targets.is_empty() {
-            return Err(SendError::NoDaemon);
-        }
+        let targets = targets(&inner, delivery)?;
         let id = inner.next_id;
         inner.next_id += 1;
         notification.id = id;
-        let mut queued = 0;
-        for target in targets {
-            match inner.streams[&target].tx.try_send(notification.clone()) {
-                Ok(()) => queued += 1,
-                Err(mpsc::error::TrySendError::Full(_)) => {
-                    warn!(
-                        stream = target,
-                        id, "daemon stream queue full; command dropped for it"
-                    )
-                }
-                Err(mpsc::error::TrySendError::Closed(_)) => {}
-            }
-        }
-        if queued == 0 {
+        if queue_on(&inner, &targets, id, &notification) == 0 {
             return Err(SendError::NotQueued);
         }
         let (tx, rx) = oneshot::channel();

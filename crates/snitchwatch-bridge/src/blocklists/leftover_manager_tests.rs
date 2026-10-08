@@ -221,10 +221,6 @@ async fn the_message_says_why_nothing_manages_the_rules() {
         cause_and_reason(&without_a_state_directory(&h)),
         (Some("no_state_dir".into()), None, 2)
     );
-    let per_user = BlocklistsManager::new(Arc::new(BlocklistStore::open_in_memory().unwrap()))
-        .with_rule_sink(Arc::new(NoopRuleSink::new(PER_USER_REASON)))
-        .with_leftover_rules(leftover(&h));
-    assert_eq!(cause_and_reason(&per_user).0.as_deref(), Some("per_user"));
 }
 
 #[tokio::test]
@@ -330,4 +326,35 @@ async fn a_failed_removals_note_does_not_outlive_its_leftovers() {
     h.rules.cache().lock().unwrap().replace_all(two_rules(&h));
     let (_, reason, count) = cause_and_reason(&mgr);
     assert_eq!((count, reason), (2, None), "a new set of leftovers is new");
+}
+
+#[tokio::test]
+async fn a_removal_that_stopped_part_way_says_how_far_it_got() {
+    let h = Harness::new();
+    let snapshot = vec![
+        super::daemon_sink::tests::legacy_rule("900-blocklist:old:0001-x.example"),
+        h.bridge_rule(ADS, ListKind::Domains),
+        h.bridge_rule(ADS, ListKind::Ips),
+    ];
+    let h = h.connect(Daemon::AcceptThenSilent(1), snapshot);
+    let mgr = without_a_state_directory(&h);
+    mgr.remove_leftover_rules().await;
+    let (_, reason, count) = cause_and_reason(&mgr);
+    assert_eq!(count, 2);
+    assert_eq!(
+        reason.as_deref(),
+        Some("Removed 1 of 3 rules, then it stopped: The firewall service didn't answer. The rest stay.")
+    );
+}
+
+#[tokio::test]
+async fn a_partly_refused_removal_counts_what_went() {
+    let h = holding_two();
+    h.set_daemon(Daemon::RefuseDelete("busy"));
+    let mgr = without_a_state_directory(&h);
+    mgr.remove_leftover_rules().await;
+    assert_eq!(
+        mgr.leftover_outcome().as_deref(),
+        Some("Removed 0 of 2 rules; the firewall service refused to delete 2, which stay.")
+    );
 }

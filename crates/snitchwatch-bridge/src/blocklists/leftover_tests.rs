@@ -99,9 +99,27 @@ async fn an_unanswered_delete_stops_the_pass_and_says_the_daemon_is_unavailable(
         h.bridge_rule(ADS, ListKind::Ips),
     ];
     let h = h.connect(Daemon::Silent, snapshot);
-    let err = leftover(&h).remove_all().await.unwrap_err();
-    assert!(err.daemon_unavailable);
+    let outcome = leftover(&h).remove_all().await.unwrap();
+    assert!(outcome.stopped.is_some_and(|e| e.daemon_unavailable));
+    assert_eq!((outcome.removed, outcome.total), (0, 2));
     assert_eq!(h.seen().len(), 1, "the second delete wasn't tried");
+}
+
+/// The page is told how far a removal got before the daemon stopped
+/// answering, not just that it stopped.
+#[tokio::test]
+async fn a_pass_that_stops_part_way_says_what_it_had_done() {
+    let h = Harness::new();
+    let snapshot = vec![
+        legacy_rule("900-blocklist:old:0001-x.example"),
+        h.bridge_rule(ADS, ListKind::Domains),
+        h.bridge_rule(ADS, ListKind::Ips),
+    ];
+    let h = h.connect(Daemon::AcceptThenSilent(1), snapshot);
+    let outcome = leftover(&h).remove_all().await.unwrap();
+    assert_eq!((outcome.removed, outcome.refused, outcome.total), (1, 0, 3));
+    assert!(outcome.stopped.is_some_and(|e| e.daemon_unavailable));
+    assert_eq!(h.seen().len(), 2, "the third wasn't tried");
 }
 
 #[tokio::test]

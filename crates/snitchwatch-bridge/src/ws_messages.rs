@@ -10,7 +10,7 @@ mod verdict_wire;
 pub use blocklist_wire::{
     BlocklistEntry, BlocklistSummary, BLOCKLIST_ENTRIES_PAGE_MAX, ENFORCEMENT_NOT_ENFORCED,
     ENFORCEMENT_PENDING, ENFORCEMENT_RULE_INSTALLED, LEFTOVER_CAUSE_NO_STATE_DIR,
-    LEFTOVER_CAUSE_PER_USER, LEFTOVER_CAUSE_STORE_UNREADABLE,
+    LEFTOVER_CAUSE_STORE_UNREADABLE,
 };
 
 pub use verdict_wire::{
@@ -642,6 +642,12 @@ impl ReplyTo {
     pub fn mark_stalled(&self) {
         self.stalled
             .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// The connection took an answer again: it is reading after all.
+    pub fn clear_stalled(&self) {
+        self.stalled
+            .store(false, std::sync::atomic::Ordering::SeqCst);
     }
 }
 

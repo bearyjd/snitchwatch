@@ -13,7 +13,7 @@ use crate::blocklists::{
 
 impl BlocklistsManager {
     /// Every subscription in the order it was subscribed.
-    pub(super) fn subscriptions_in_order(&self) -> Vec<Subscription> {
+    pub(crate) fn subscriptions_in_order(&self) -> Vec<Subscription> {
         let order = self.order().clone();
         let cache = self.cache();
         let mut subs: Vec<Subscription> = order
@@ -78,7 +78,7 @@ impl BlocklistsManager {
     /// Past the total size limit, remove what `id` had and say why. With
     /// `daemon_down` only its files go (see
     /// [`demote_lists_past_the_limit`](Self::demote_lists_past_the_limit)).
-    async fn remove_over_limit(
+    pub(super) async fn remove_over_limit(
         &self,
         id: &str,
         reason: String,
@@ -182,6 +182,13 @@ impl BlocklistsManager {
         self.rule_sink.remove_orphans(&keep).await;
     }
 
+    fn cleanup_pending_for(&self, id: &str) -> bool {
+        self.cleanup_pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(id)
+    }
+
     /// One list's outcome, or `None` when there is nothing to record.
     async fn reconcile_one(
         &self,
@@ -196,6 +203,10 @@ impl BlocklistsManager {
         }
         let checked = self.rule_sink.files_verified(id);
         if checked && self.rule_sink.is_current(id) {
+            if self.cleanup_pending_for(id) {
+                // The list's own rules are in: only the old kind is left.
+                return Some(self.rule_sink.retry_cleanup(id).await);
+            }
             return (!matches!(before, Enforcement::RuleInstalled { .. })).then_some(Ok(()));
         }
         let tried = matches!(

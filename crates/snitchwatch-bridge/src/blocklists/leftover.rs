@@ -33,12 +33,17 @@ use crate::daemon_commands::{
 use crate::rule_name::is_reserved_blocklist_name;
 
 /// What a removal pass did.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemovedLeftovers {
     /// Rules the daemon confirmed deleting.
     pub removed: usize,
     /// Rules the daemon refused to delete (logged; they stay listed).
     pub refused: usize,
+    /// Rules there were to delete when the pass began.
+    pub total: usize,
+    /// Why the pass stopped before the end (the daemon couldn't be reached or
+    /// didn't answer); the rules after that point were not tried.
+    pub stopped: Option<NotInstalled>,
 }
 
 pub struct LeftoverRules {
@@ -83,8 +88,9 @@ impl LeftoverRules {
     }
 
     /// Delete every rule [`names`](Self::names) lists, one at a time. A
-    /// refusal is counted and skipped; stops, with an error, at the first
-    /// delete the daemon can't be reached for.
+    /// refusal is counted and skipped; at the first delete the daemon can't be
+    /// reached for the pass stops and says why, with what it had done. Only
+    /// when the list is unknown does it do nothing and return an error.
     pub async fn remove_all(&self) -> Result<RemovedLeftovers, NotInstalled> {
         let names = self.names().ok_or_else(|| {
             NotInstalled::daemon_unavailable(
@@ -95,37 +101,58 @@ impl LeftoverRules {
         let mut outcome = RemovedLeftovers {
             removed: 0,
             refused: 0,
+            total: names.len(),
+            stopped: None,
         };
         for name in names {
             let Some(command) = BlocklistCommand::delete(&name) else {
                 continue;
             };
-            let sent = self
-                .commands
-                .send_leftover_delete(command)
-                .map_err(|e| match e {
-                    SendError::NoDaemon | SendError::NotQueued => {
-                        NotInstalled::daemon_unavailable("The firewall service isn't connected")
-                    }
-                    other => NotInstalled::new(format!("Snitchwatch refused to send ({other})")),
-                })?
-                .wait(self.timeout)
-                .await;
-            match sent {
+            match self.delete_one(command).await {
                 Ok(()) => outcome.removed += 1,
-                Err(CommandError::Rejected(_)) => {
+                Err(DeleteStop::Refused) => {
                     warn!("daemon refused to delete a leftover blocklist rule");
                     outcome.refused += 1;
                 }
-                Err(CommandError::Timeout | CommandError::StreamClosed) => {
-                    return Err(NotInstalled::daemon_unavailable(
-                        "The firewall service didn't answer",
-                    ));
+                Err(DeleteStop::Unreachable(why)) => {
+                    outcome.stopped = Some(why);
+                    break;
                 }
             }
         }
         Ok(outcome)
     }
+
+    async fn delete_one(&self, command: BlocklistCommand) -> Result<(), DeleteStop> {
+        let pending = self
+            .commands
+            .send_leftover_delete(command)
+            .map_err(|e| match e {
+                SendError::NoDaemon | SendError::NotQueued => DeleteStop::Unreachable(
+                    NotInstalled::daemon_unavailable("The firewall service isn't connected"),
+                ),
+                other => DeleteStop::Unreachable(NotInstalled::new(format!(
+                    "Snitchwatch refused to send ({other})"
+                ))),
+            })?;
+        match pending.wait(self.timeout).await {
+            Ok(()) => Ok(()),
+            Err(CommandError::Rejected(_)) => Err(DeleteStop::Refused),
+            Err(CommandError::Timeout | CommandError::StreamClosed) => {
+                Err(DeleteStop::Unreachable(NotInstalled::daemon_unavailable(
+                    "The firewall service didn't answer",
+                )))
+            }
+        }
+    }
+}
+
+/// Why one delete didn't end in an `OK`.
+enum DeleteStop {
+    /// The daemon answered `ERROR`; the pass goes on.
+    Refused,
+    /// Nothing more can be tried.
+    Unreachable(NotInstalled),
 }
 
 #[cfg(test)]

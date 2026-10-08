@@ -102,7 +102,10 @@ async fn send_page(
         return;
     };
     if reply.stalled() {
-        let _ = reply.try_send(page);
+        // Without waiting; one that fits means the GUI reads again.
+        if reply.try_send(page) {
+            reply.clear_stalled();
+        }
     } else if tokio::time::timeout(PAGE_WAIT, reply.send(page))
         .await
         .is_err()
@@ -183,5 +186,34 @@ mod tests {
             }
             other => panic!("expected SetBlocklistDetails, got {other:?}"),
         }
+    }
+
+    fn page() -> ServerMessage {
+        ServerMessage::SetBlocklistEntries {
+            subscription_id: "a".into(),
+            entries: Vec::new(),
+            offset: 0,
+            total: 0,
+            request_id: None,
+            last_updated_iso8601: None,
+        }
+    }
+
+    /// A GUI that stops reading is waited on once; when it reads again its
+    /// pages are waited on again, not dropped for the life of the connection.
+    #[tokio::test(start_paused = true)]
+    async fn a_gui_that_reads_again_is_no_longer_a_stalled_one() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let reply = ReplyTo::new(tx);
+        let (broadcast_tx, _keep) = broadcast::channel(4);
+        send_page(page(), Some(reply.clone()), &broadcast_tx).await; // fills the queue
+        assert!(!reply.stalled());
+        send_page(page(), Some(reply.clone()), &broadcast_tx).await; // waits, then gives up
+        assert!(reply.stalled(), "nobody read the first page");
+
+        assert!(rx.recv().await.is_some(), "the GUI reads again");
+        send_page(page(), Some(reply.clone()), &broadcast_tx).await; // fits at once
+        assert!(!reply.stalled(), "a page that fit ends the stall");
+        assert!(rx.try_recv().is_ok());
     }
 }

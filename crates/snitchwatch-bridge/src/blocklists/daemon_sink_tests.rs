@@ -21,6 +21,8 @@ pub(in crate::blocklists) enum Daemon {
     RefuseChange(&'static str),
     /// Refuses `DELETE_RULE`, accepts `CHANGE_RULE`.
     RefuseDelete(&'static str),
+    /// Answers `OK` to this many commands, then stops answering.
+    AcceptThenSilent(usize),
     Silent,
 }
 
@@ -76,6 +78,7 @@ impl Harness {
         let mode = self.mode.clone();
         let root = self.dir.root().to_path_buf();
         tokio::spawn(async move {
+            let mut answered = 0usize;
             while let Some(command) = rx.recv().await {
                 let rule = &command.rules[0];
                 let path_existed = match &rule.operator {
@@ -107,6 +110,11 @@ impl Harness {
                     Daemon::RefuseDelete(_) => {
                         commands.on_reply(stream_id, &reply(command.id, Ok(())))
                     }
+                    Daemon::AcceptThenSilent(n) if answered < n => {
+                        answered += 1;
+                        commands.on_reply(stream_id, &reply(command.id, Ok(())))
+                    }
+                    Daemon::AcceptThenSilent(_) => false,
                     Daemon::Silent => false,
                 };
             }

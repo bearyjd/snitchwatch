@@ -149,9 +149,10 @@ Kirigami.ScrollablePage {
                       + (page.leftoverRules === 1 ? "is" : "are") + " probably "
                       + (page.leftoverRules === 1 ? "a list" : "lists") + " you still subscribe to: "
                       + "Snitchwatch can't read its saved blocklists, so it isn't changing "
-                      + (page.leftoverRules === 1 ? "it" : "them") + ". Removing "
-                      + (page.leftoverRules === 1 ? "it" : "them") + " turns that blocking off "
-                      + "until Snitchwatch can read the saved lists again."
+                      + (page.leftoverRules === 1 ? "it" : "them") + ". It checks them only when "
+                      + "it starts. Removing " + (page.leftoverRules === 1 ? "it" : "them")
+                      + " turns that blocking off; it comes back only if the saved blocklists "
+                      + "can be read after a restart, and if they are damaged it stays off."
                     : (page.leftoverRules === 1
                        ? "1 blocklist rule made by Snitchwatch is still in the firewall"
                        : page.leftoverRules + " blocklist rules made by Snitchwatch are still in "
@@ -163,7 +164,7 @@ Kirigami.ScrollablePage {
             Controls.Button {
                 objectName: "removeLeftovers"
                 visible: !page.confirmingLeftover
-                text: page.leftoversProbablyWanted ? "Turn off these rules" : "Remove these rules"
+                text: "Remove these rules"
                 icon.name: "edit-delete-remove"
                 onClicked: page.confirmingLeftover = true
             }
@@ -185,8 +186,9 @@ Kirigami.ScrollablePage {
                     Layout.fillWidth: true
                     wrapMode: Text.Wrap
                     text: page.leftoversProbablyWanted
-                        ? "Turn them off? The hosts they block will no longer be blocked until "
-                          + "Snitchwatch can read its saved blocklists again."
+                        ? "Remove them? The hosts they block will no longer be blocked until "
+                          + "Snitchwatch is restarted with readable saved blocklists, and not at "
+                          + "all if they are damaged."
                         : "Remove them from the firewall? The hosts they blocked will no longer "
                           + "be blocked."
                 }
@@ -212,7 +214,9 @@ Kirigami.ScrollablePage {
             type: Kirigami.MessageType.Warning
             visible: page.perUserBlocklists
             text: "This Snitchwatch service runs for your user only, so it doesn't apply blocklists "
-                + "to the firewall. That needs the system-wide Snitchwatch service."
+                + "to the firewall. That needs the system-wide Snitchwatch service. Blocklist "
+                + "rules a system-wide Snitchwatch service left in the firewall can't be checked "
+                + "or removed from here; start the system-wide service to remove them."
         }
         Kirigami.InlineMessage {
             objectName: "overLimitBanner"

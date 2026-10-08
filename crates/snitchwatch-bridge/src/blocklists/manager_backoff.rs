@@ -16,14 +16,17 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 use super::BlocklistsManager;
+use crate::blocklists::worker::DEFAULT_REFRESH_TICK;
 use crate::blocklists::{NotInstalled, NO_HOSTS_REASON, REFUSAL_BACKOFF_MINUTES};
 
 /// A refresh tick comes every 15 minutes, counted from its own start, but a
-/// refusal is stamped when its install finishes, a moment after: without
-/// slack the tick exactly one period later would find it 15 minutes less a
-/// few seconds old and skip it, so the schedule would run a whole tick long.
-/// Within this much of its time a list is due.
-const TICK_SLACK: Duration = Duration::from_secs(60);
+/// refusal is stamped when its install finishes, which can be well after: the
+/// tick starts with the downloads, and a large list takes minutes. Without
+/// slack the tick exactly one period later would find the refusal that much
+/// short of its time and skip it, so the schedule would run a whole tick
+/// long. Within half a tick of its time a list is due. (A pass whose
+/// downloads take longer than that can still run a tick long.)
+const TICK_SLACK: Duration = Duration::from_secs(DEFAULT_REFRESH_TICK.as_secs() / 2);
 
 /// How often a list was refused in a row, and when a tick may try again.
 #[derive(Debug, Clone, Copy)]

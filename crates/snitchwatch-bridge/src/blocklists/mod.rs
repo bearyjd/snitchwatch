@@ -134,9 +134,17 @@ pub const AGGREGATE_MAX_HOSTS: u64 = 2_000_000;
 /// of the filesystem that also holds /var/home. With this bound the worst
 /// case (81-byte ids, 253-byte hosts) is about 1.3 GB and real lists (ids
 /// ~30 bytes, hosts ~25) a few hundred MB. 4,000,000 is a judgement call, not
-/// a measured limit. A download that would pass it is refused and keeps the
-/// list's earlier hosts, like any failed download.
+/// a measured limit.
+///
+/// A hard bound, like the total size limit, it goes to the earliest
+/// subscriptions. A download that would pass it for the lists up to and
+/// including the list is refused and keeps the list's earlier hosts, like any
+/// failed download; and after every save, and at start, the lists whose hosts
+/// no longer fit after the earlier ones (an early list that grew) have their
+/// saved hosts cleared. It is never smaller than [`AGGREGATE_MAX_HOSTS`], so
+/// a cleared list is one the daemon doesn't enforce: only browsing is lost.
 pub const STORED_MAX_HOSTS: u64 = 4_000_000;
+const _: () = assert!(STORED_MAX_HOSTS >= AGGREGATE_MAX_HOSTS);
 /// How the reason of a download refused by [`STORED_MAX_HOSTS`] starts: a
 /// refresh tick keys on it to leave such a list to its normal interval.
 pub const STORAGE_LIMIT_REASON_PREFIX: &str = "Saving this list would pass the limit of";
@@ -255,6 +263,13 @@ pub trait RuleSink: Send + Sync + 'static {
 
     /// Delete `list_id`'s rules from the daemon, then its files.
     async fn remove_blocklist_rules(&self, _list_id: &str) -> Result<(), NotInstalled> {
+        Ok(())
+    }
+
+    /// A list's own rules are in place but an old rule or file of a kind it no
+    /// longer has couldn't be removed (a [`NotInstalled::cleanup_pending`]):
+    /// try just that again, not the list's rules.
+    async fn retry_cleanup(&self, _list_id: &str) -> Result<(), NotInstalled> {
         Ok(())
     }
 

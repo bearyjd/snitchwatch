@@ -33,8 +33,6 @@ pub const BLOCKLIST_ENTRIES_PAGE_MAX: u32 = 1000;
 pub const LEFTOVER_CAUSE_STORE_UNREADABLE: &str = "store_unreadable";
 /// `cause`: this service has no state directory to keep subscriptions in.
 pub const LEFTOVER_CAUSE_NO_STATE_DIR: &str = "no_state_dir";
-/// `cause`: a per-user service, which installs no blocklist rules.
-pub const LEFTOVER_CAUSE_PER_USER: &str = "per_user";
 
 /// [`BlocklistSummary::enforcement`]: not downloaded or pushed yet.
 pub const ENFORCEMENT_PENDING: &str = "pending";

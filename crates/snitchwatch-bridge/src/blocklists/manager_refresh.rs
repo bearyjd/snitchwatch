@@ -10,7 +10,7 @@ use crate::blocklists::fetcher::FetchOutcome;
 use crate::blocklists::store::{FetchStatus, Subscription};
 use crate::blocklists::{
     thousands, BlocklistEvent, Enforcement, NotInstalled, FAILED_RETRY_SECS, NOT_DOWNLOADED_REASON,
-    STORAGE_LIMIT_REASON_PREFIX, STORE_ERROR_REASON,
+    OVER_LIMIT_REASON_PREFIX, STORAGE_LIMIT_REASON_PREFIX, STORE_ERROR_REASON,
 };
 
 /// What saving a download did.
@@ -151,8 +151,9 @@ impl BlocklistsManager {
         };
         let id = updated.id.clone();
         self.cache().insert(id.clone(), updated);
+        let daemon_down = self.clear_lists_past_the_saved_limit().await;
         if self.installs_rules() {
-            self.install_downloaded(&id, hosts).await;
+            self.install_downloaded(&id, hosts, daemon_down).await;
         }
         let _ = self.bus.send(BlocklistEvent::EntriesChanged {
             subscription_id: id.clone(),
@@ -201,8 +202,8 @@ impl BlocklistsManager {
     /// later lists left room for: those come off the daemon first, so it
     /// never holds more than the limit, even for a moment. A daemon that
     /// didn't answer them isn't asked again for this list.
-    async fn install_downloaded(&self, id: &str, hosts: Vec<String>) {
-        let outcome = if self.demote_lists_past_the_limit(id).await {
+    async fn install_downloaded(&self, id: &str, hosts: Vec<String>, daemon_down: bool) {
+        let outcome = if daemon_down || self.demote_lists_past_the_limit(id).await {
             Err(NotInstalled::daemon_unavailable(
                 "The firewall service didn't answer",
             ))
@@ -210,6 +211,107 @@ impl BlocklistsManager {
             self.install(id, hosts).await
         };
         self.record_install(id, &outcome);
+    }
+
+    /// The hard bound on disk use: walk the lists in subscription order and
+    /// clear the saved hosts of any whose running total, over the lists kept
+    /// before it, passes the limit ([`STORED_MAX_HOSTS`](crate::blocklists::STORED_MAX_HOSTS)).
+    /// A list's room is only measured against earlier lists, so a later one
+    /// can come to hold hosts the earlier ones then outgrow; this undoes that
+    /// after every save, so the total ends each refresh within the limit
+    /// (during a save it can pass it by that list's size, at most
+    /// `format::MAX_ENTRIES` hosts). A cleared list is already past the total
+    /// size limit, which is the smaller, so it is off the daemon (this takes
+    /// it off if not): only browsing its hosts is lost. Returns whether the
+    /// daemon stopped answering meanwhile.
+    pub(super) async fn clear_lists_past_the_saved_limit(&self) -> bool {
+        let mut daemon_down = false;
+        for id in lists_past_the_limit(&self.subscriptions_in_order(), self.stored_cap) {
+            let Some(sub) = self.subscription(&id) else {
+                continue;
+            };
+            let row = self.cleared_row(&sub);
+            let saved = row.clone();
+            match self
+                .with_store(move |s| s.replace_entries_and_update(&saved, &[]))
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) => continue,
+                Err(e) => {
+                    error!(%id, error = %e, "couldn't clear a list past the saved-hosts limit");
+                    continue;
+                }
+            }
+            self.cache().insert(id.clone(), row);
+            warn!(%id, "cleared a list's saved hosts: the lists before it fill the saved-hosts limit");
+            if self.installs_rules() {
+                let outcome = self
+                    .remove_over_limit(&id, self.cleared_enforcement_reason(), daemon_down)
+                    .await;
+                daemon_down |= matches!(&outcome, Err(e) if e.daemon_unavailable);
+                self.record_install(&id, &outcome);
+            }
+            let _ = self.bus.send(BlocklistEvent::EntriesChanged {
+                subscription_id: id.clone(),
+            });
+            let _ = self.bus.send(BlocklistEvent::StatusChanged {
+                subscription_id: id,
+            });
+        }
+        daemon_down
+    }
+
+    /// The same walk when the bridge starts, over what an earlier run (or a
+    /// version from before the limit) left: store and memory only. Such a
+    /// list is past the enforcement limit too, so no rule of it is installed.
+    pub(super) fn clear_lists_past_the_saved_limit_at_start(&self) {
+        for id in lists_past_the_limit(&self.subscriptions_in_order(), self.stored_cap) {
+            let Some(sub) = self.subscription(&id) else {
+                continue;
+            };
+            let row = self.cleared_row(&sub);
+            match self.store.replace_entries_and_update(&row, &[]) {
+                Ok(true) => {
+                    warn!(%id, "cleared a list's saved hosts at start: over the saved-hosts limit");
+                    self.cache().insert(id, row);
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    error!(%id, error = %e, "couldn't clear a list past the saved-hosts limit")
+                }
+            }
+        }
+    }
+
+    /// `sub` with its saved hosts gone: no hosts, no download time (nothing
+    /// is saved from one), and the reason.
+    fn cleared_row(&self, sub: &Subscription) -> Subscription {
+        Subscription {
+            entry_count: 0,
+            last_fetched_at: None,
+            last_fetch_status: FetchStatus::Failed {
+                reason: format!(
+                    "{STORAGE_LIMIT_REASON_PREFIX} {} hosts across all lists, so this list's \
+                     saved hosts were removed to keep the lists before it. It is past the total \
+                     size limit, so it blocks nothing; only browsing its hosts is lost. Remove a \
+                     list to make room.",
+                    thousands(self.stored_cap)
+                ),
+            },
+            ..sub.clone()
+        }
+    }
+
+    /// What a cleared list's enforcement says; GUIs key their warning on the
+    /// prefix.
+    pub(super) fn cleared_enforcement_reason(&self) -> String {
+        format!(
+            "{OVER_LIMIT_REASON_PREFIX}: the lists before it fill the {} hosts Snitchwatch \
+             saves, so its saved hosts were removed and it blocks nothing. Remove a list to \
+             make room.",
+            thousands(self.stored_cap)
+        )
     }
 
     /// Ids whose refresh interval elapsed, that were never downloaded, whose
@@ -225,20 +327,41 @@ impl BlocklistsManager {
             .collect()
     }
 
-    /// A list was removed, which may have made room for those refused for it.
-    pub(super) fn retry_lists_refused_for_room(&self) {
-        let refused: Vec<String> = self
-            .cache()
-            .values()
-            .filter(|s| refused_for_room(s))
-            .map(|s| s.id.clone())
-            .collect();
+    /// A list was removed, which may have made room for those refused for it
+    /// among `after` it (the lists subscribed after it: room is measured
+    /// against the lists before one, so earlier ones gain none).
+    pub(super) fn retry_lists_refused_for_room(&self, after: &[String]) {
+        let refused: Vec<String> = {
+            let cache = self.cache();
+            after
+                .iter()
+                .filter_map(|id| cache.get(id))
+                .filter(|s| refused_for_room(s))
+                .map(|s| s.id.clone())
+                .collect()
+        };
         self.waiting_for_room().extend(refused);
     }
 }
 
+/// The ids, in order, of the lists whose hosts don't fit: each is measured
+/// against the lists kept before it, and a cleared one adds nothing.
+fn lists_past_the_limit(in_order: &[Subscription], cap: u64) -> Vec<String> {
+    let mut kept: u64 = 0;
+    let mut past = Vec::new();
+    for sub in in_order {
+        let hosts = u64::try_from(sub.entry_count).unwrap_or(0);
+        if kept.saturating_add(hosts) > cap {
+            past.push(sub.id.clone());
+        } else {
+            kept += hosts;
+        }
+    }
+    past
+}
+
 /// The last download was refused by the limit on saved hosts.
-fn refused_for_room(sub: &Subscription) -> bool {
+pub(super) fn refused_for_room(sub: &Subscription) -> bool {
     matches!(&sub.last_fetch_status,
         FetchStatus::Failed { reason } if reason.starts_with(STORAGE_LIMIT_REASON_PREFIX))
 }

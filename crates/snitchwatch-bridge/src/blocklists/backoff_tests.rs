@@ -18,6 +18,9 @@ struct Sink {
     unavailable: AtomicBool,
     no_hosts: AtomicBool,
     cleanup_pending: AtomicBool,
+    /// The list's own rules are in place, with their files checked.
+    in_place: AtomicBool,
+    cleanups: AtomicUsize,
     pushes: AtomicUsize,
     reinstalls: AtomicUsize,
     verified: AtomicBool,
@@ -43,6 +46,19 @@ impl Sink {
 impl RuleSink for Sink {
     fn files_verified(&self, _list_id: &str) -> bool {
         self.verified.load(Ordering::SeqCst)
+    }
+
+    fn is_current(&self, _list_id: &str) -> bool {
+        self.in_place.load(Ordering::SeqCst)
+    }
+
+    async fn retry_cleanup(&self, _list_id: &str) -> Result<(), NotInstalled> {
+        self.cleanups.fetch_add(1, Ordering::SeqCst);
+        if self.cleanup_pending.load(Ordering::SeqCst) {
+            Err(NotInstalled::cleanup_pending("an old rule is still there"))
+        } else {
+            Ok(())
+        }
     }
 
     async fn reinstall_blocklist_rules(&self, _list_id: &str) -> Result<(), NotInstalled> {
@@ -115,9 +131,9 @@ impl Fixture {
     }
 }
 
-/// A tick finds the list still backing off a second before the minute of
-/// slack runs out, and due at it. (Slack: a refusal is stamped a little after
-/// its tick began, so the tick one period later is a little early.)
+/// A tick finds the list still backing off a second before the half tick of
+/// slack runs out, and due at it. (Slack: a refusal is stamped after its tick
+/// began, so the tick one period later is early.)
 async fn assert_retried_after(f: &Fixture, secs: u64) {
     let before = f.pushes();
     f.advance_secs(secs - 1).await;
@@ -138,12 +154,12 @@ async fn a_refused_list_is_retried_after_15_minutes_then_an_hour_then_four() {
         .starts_with("The firewall service refused the rule"));
     assert!(f.reason().ends_with("about 15 minutes."), "{}", f.reason());
 
-    // Due a minute early, the slack, and not before.
-    assert_retried_after(&f, 14 * 60).await;
+    // Due half a tick early, the slack, and not before.
+    assert_retried_after(&f, 15 * 60 - 450).await;
     assert!(f.reason().ends_with("about 1 hour."), "{}", f.reason());
-    assert_retried_after(&f, 59 * 60).await;
+    assert_retried_after(&f, 60 * 60 - 450).await;
     assert!(f.reason().ends_with("about 4 hours."), "{}", f.reason());
-    assert_retried_after(&f, 239 * 60).await;
+    assert_retried_after(&f, 240 * 60 - 450).await;
     assert!(
         f.reason().ends_with("about 4 hours."),
         "the schedule stops growing: {}",
@@ -152,18 +168,19 @@ async fn a_refused_list_is_retried_after_15_minutes_then_an_hour_then_four() {
     assert_eq!(f.pushes(), 4);
 }
 
-/// The reported bug: the install that refused a list finished a few seconds
-/// after its tick began, so the tick exactly 15 minutes later skipped it and
-/// the schedule ran a whole tick long.
+/// The reported bug: the install that refused a list finished after its tick
+/// began (a download took minutes), so the tick exactly 15 minutes later
+/// skipped it and the schedule ran a whole tick long.
 #[tokio::test(start_paused = true)]
 async fn the_tick_one_period_after_a_refusal_retries_the_list() {
     let f = Fixture::new();
-    // The tick began at T; the install finished, and was refused, at T + 20 s.
-    f.advance_secs(20).await;
+    // The tick began at T; the download took five minutes and the install was
+    // refused at T + 5 minutes.
+    f.advance(5).await;
     f.mgr.reconcile().await;
     assert_eq!(f.pushes(), 1);
     // The next tick is at exactly T + 15 minutes.
-    f.advance_secs(15 * 60 - 20).await;
+    f.advance(10).await;
     f.tick().await;
     assert_eq!(f.pushes(), 2, "retried on the tick after 15 minutes");
 }
@@ -342,4 +359,40 @@ async fn a_list_taken_off_for_the_size_limit_forgets_its_refusals() {
     // `other` grows to 2 hosts: 2 + 2 > 3, so `ads` comes off the daemon.
     mgr.refresh_now("other").await.unwrap();
     assert!(mgr.refusal_state("ads").is_none());
+}
+
+/// With the list's own rules in place, a pending cleanup is retried on its
+/// own: the list's rules are not sent again, and when it succeeds the list
+/// reads installed.
+#[tokio::test(start_paused = true)]
+async fn a_pending_cleanup_retries_only_the_cleanup() {
+    let f = Fixture::new();
+    f.sink.cleanup_pending.store(true, Ordering::SeqCst);
+    f.mgr.reconcile().await;
+    assert_eq!(f.pushes(), 1, "the rules went in, the cleanup is pending");
+    assert!(matches!(
+        f.mgr.enforcement("ads"),
+        Enforcement::Unconfirmed { .. }
+    ));
+
+    // The rules are in place now; the next ticks only retry the old kind.
+    f.sink.verified.store(true, Ordering::SeqCst);
+    f.sink.in_place.store(true, Ordering::SeqCst);
+    f.tick().await;
+    f.tick().await;
+    assert_eq!(f.pushes(), 1, "the list's rules were not sent again");
+    assert_eq!(f.sink.cleanups.load(Ordering::SeqCst), 2);
+    assert!(matches!(
+        f.mgr.enforcement("ads"),
+        Enforcement::Unconfirmed { .. }
+    ));
+
+    f.sink.cleanup_pending.store(false, Ordering::SeqCst);
+    f.tick().await;
+    assert!(matches!(
+        f.mgr.enforcement("ads"),
+        Enforcement::RuleInstalled { .. }
+    ));
+    f.tick().await;
+    assert_eq!(f.sink.cleanups.load(Ordering::SeqCst), 3, "done: no more");
 }

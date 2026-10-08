@@ -240,16 +240,20 @@ past 2,000,000 hosts in total (in subscription order) get no rule.
   right away finds the files in place. If the rule delete is refused, or the
   firewall service doesn't answer (it is asked once, not twice), the files go
   at once.
-- If this service can't manage blocklist rules (no state directory, a
-  per-user service, or saved subscriptions it can't read) but the firewall
-  still holds `z00-blocklist:…` rules Snitchwatch made, the Blocklists page
-  counts them and offers, after asking, to remove them. When the cause is
-  saved subscriptions it can't read, it says the rules are probably lists you
-  still subscribe to and that removing them turns that blocking off until
-  they can be read again. A removal the firewall service refuses or doesn't
-  answer is shown under the button. Rules it didn't make are never touched,
-  and nothing is offered over the legacy per-user TCP connection to the
-  firewall service (any local process can pose as the daemon there; see #35).
+- If a system-wide service can't manage blocklist rules (no state directory,
+  or saved subscriptions it can't read) but the firewall still holds
+  `z00-blocklist:…` rules Snitchwatch made, the Blocklists page counts them
+  and offers, after asking, to remove them. When the cause is saved
+  subscriptions it can't read, it says the rules are probably lists you
+  still subscribe to, that Snitchwatch checks its saved blocklists only when
+  it starts, and that removing them turns that blocking off (back on only if
+  they can be read after a restart; off for good if they are damaged). A
+  removal the firewall service refuses or stops answering is shown under the
+  button, with how many rules went first. Rules it didn't make are never
+  touched. A per-user service reaches the firewall service over the legacy
+  TCP connection, where any local process can pose as the daemon (see #35):
+  it offers nothing there, and its page says rules a system-wide service left
+  can't be checked or removed from it.
 
 - Subscriptions persist in `blocklists.sqlite3` (mode 0600) under the state
   directory: `$STATE_DIRECTORY` (set by both systemd units), else
@@ -295,15 +299,19 @@ past 2,000,000 hosts in total (in subscription order) get no rule.
   path, so a local plain-HTTP fixture server can't be subscribed to.
 - Lists are capped at 64 MiB and 1,000,000 hosts, and at 32 subscriptions.
   The bridge also saves at most 4,000,000 hosts across all lists (twice the
-  enforcement limit above, so lists past it can still be browsed). Like that
-  limit it goes to the earliest subscriptions: a download that would take
-  the lists up to and including it past the limit is refused with the reason
-  shown, and the list keeps its earlier hosts; later lists never stop an
-  earlier one from refreshing. When the lists before one already fill the
-  limit it is not downloaded at all, and a list refused this way waits its
-  normal refresh interval (or until another list is removed) instead of being
-  fetched every hour. A store that was already over the limit before it
-  existed keeps what it has; its later lists can't grow.
+  enforcement limit above, so lists past it can still be browsed), and that
+  is a hard bound. Like the enforcement limit it goes to the earliest
+  subscriptions: a download that would take the lists up to and including it
+  past the limit is refused with the reason shown, and the list keeps its
+  earlier hosts; when the lists before one already fill the limit it is not
+  downloaded at all. A list refused this way waits its normal refresh
+  interval (or until a list before it is removed) instead of being fetched
+  every hour. When an earlier list grows, or a store from before the limit
+  existed is over it, the later lists that no longer fit have their saved
+  hosts cleared (after every save, and at start), with the reason shown: they
+  are past the enforcement limit too, so they block nothing already and only
+  browsing their hosts is lost. (During a save the total can pass the limit
+  by that list's size, at most 1,000,000 hosts.)
   Hosts are sent to GUIs a page at a time, on request
   (`requestBlocklistEntries`), never as a whole list. A page goes only to the
   connection that asked for it; it echoes the request's `requestId` (1 to 64

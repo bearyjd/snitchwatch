@@ -142,13 +142,19 @@ Window {
                 const worry = probeWindow.part("leftoverText").text;
                 probeWindow.check(worry.indexOf("probably lists you still subscribe to") > 0
                                   && worry.indexOf("turns that blocking off") > 0
+                                  && worry.indexOf("only when it starts") > 0
+                                  && worry.indexOf("after a restart") > 0
+                                  && worry.indexOf("if they are damaged it stays off") > 0
                                   && worry.indexOf("may no longer have") < 0,
                                   "unreadable-store text: '" + worry + "'");
-                probeWindow.check(remove.text === "Turn off these rules", "button: '" + remove.text + "'");
+                probeWindow.check(remove.text === "Remove these rules", "button: '" + remove.text + "'");
                 remove.clicked();
                 const sure = probeWindow.part("leftoverConfirmText").text;
-                probeWindow.check(sure.indexOf("until Snitchwatch can read its saved blocklists again") > 0,
+                probeWindow.check(sure.indexOf("restarted with readable saved blocklists") > 0
+                                  && sure.indexOf("not at all if they are damaged") > 0,
                                   "confirmation: '" + sure + "'");
+                probeWindow.check(probeWindow.part("confirmRemoveLeftovers").text === "Confirm remove",
+                                  "confirm button: '" + probeWindow.part("confirmRemoveLeftovers").text + "'");
                 probeWindow.part("cancelRemoveLeftovers").clicked();
                 probeWindow.check(probeWindow.sent.length === 1, "cancel sent something");
 
@@ -161,6 +167,25 @@ Window {
                                   && why.textFormat === Text.PlainText,
                                   "failure under the button: '" + why.text + "'");
                 probeWindow.check(remove.text === "Remove these rules", "button after: '" + remove.text + "'");
+
+                // A per-user service can't check or remove a system service's
+                // leftovers over its legacy connection: the page says so in
+                // fixed text, only while it is a per-user service.
+                const perUser = probeWindow.findChild(page.header, "perUserBanner");
+                probeWindow.check(perUser !== null && !perUser.visible, "per-user banner on a system service");
+                model.applyServerMessageJson(JSON.stringify({
+                    action: "setBlocklists",
+                    blocklists: [{ id: "l1", displayName: "Ads", url: "https://example.invalid/ads.txt",
+                                   entryCount: 1, status: "ok", enforcement: "not_enforced",
+                                   enforcementReason: "Blocking with lists needs the system-wide "
+                                       + "Snitchwatch service; this per-user service can't keep the "
+                                       + "list files safe from other apps." }],
+                    storage: { persistent: true }
+                }));
+                probeWindow.check(perUser.visible, "no per-user banner for a per-user service");
+                probeWindow.check(perUser.text.indexOf("can't be checked or removed from here") > 0
+                                  && perUser.text.indexOf("start the system-wide service to remove them") > 0,
+                                  "per-user banner text: '" + perUser.text + "'");
 
                 // The bridge reports none left.
                 probeWindow.leftovers(0);
