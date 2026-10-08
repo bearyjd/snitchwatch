@@ -114,26 +114,41 @@ pub async fn build_set_profiles(mgr: &ProfilesManager) -> anyhow::Result<ServerM
         .store()
         .list_profiles()?
         .into_iter()
-        .map(|p| ProfileSummary {
-            id: p.id,
-            name: p.name,
-            network_matchers: p.network_matchers,
-            rules: p
+        .map(|p| {
+            let rules = p
                 .rules
                 .into_iter()
-                .map(|r| ProfileRuleWire {
-                    id: r.id,
-                    action: r.action,
-                    operand: r.operand,
-                    data: r.data,
+                .map(|r| {
+                    let (enforcement, enforcement_reason) = mgr
+                        .rule_status(&p.id, &r.id)
+                        .map(enforcement_wire)
+                        .unwrap_or_default();
+                    ProfileRuleWire {
+                        id: r.id,
+                        action: r.action,
+                        operand: r.operand,
+                        data: r.data,
+                        operator: r.operator,
+                        enforcement,
+                        enforcement_reason,
+                    }
                 })
-                .collect(),
-            active: p.active,
+                .collect();
+            ProfileSummary {
+                id: p.id,
+                name: p.name,
+                network_matchers: p.network_matchers,
+                rules,
+                active: p.active,
+            }
         })
         .collect();
+    let not_applied_reason = mgr.not_applied_reason();
     Ok(ServerMessage::SetProfiles {
         profiles,
         storage: Some(mgr.storage_status().clone()),
+        applies_rules: not_applied_reason.is_none(),
+        not_applied_reason,
     })
 }
 
@@ -163,7 +178,9 @@ mod profile_emission_tests {
         let mgr = ProfilesManager::new(store);
         let msg = build_set_profiles(&mgr).await.unwrap();
         match msg {
-            ServerMessage::SetProfiles { profiles, storage } => {
+            ServerMessage::SetProfiles {
+                profiles, storage, ..
+            } => {
                 assert_eq!(profiles.len(), 1);
                 assert_eq!(profiles[0].id, "home");
                 assert!(profiles[0].active);
