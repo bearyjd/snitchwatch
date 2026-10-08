@@ -358,73 +358,16 @@ pub async fn serve_with_blocklists(
     let server = WsServer::new(socket_path.clone(), token.clone(), handles);
     let listener = server.bind().await?;
 
-    // Spawn the inbound message handler — routes blocklist actions and broadcasts updates.
-    let bl_mgr = blocklists.clone();
+    // The same blocklist worker and event pump the production bridge runs.
+    let events = crate::blocklists::spawn_event_pump(blocklists.clone(), broadcast_tx.clone());
+    let (worker, worker_handle) = crate::blocklists::worker::BlocklistWorker::spawn(blocklists);
     tokio::spawn(async move {
-        use crate::translator::upstream::{handle_blocklist_action, BlocklistActionOutcome};
         while let Some(msg) = inbound_rx.recv().await {
-            match handle_blocklist_action(bl_mgr.clone(), msg).await {
-                Ok(BlocklistActionOutcome::Subscribed { .. }) => {}
-                Ok(BlocklistActionOutcome::Unsubscribed { .. }) => {}
-                Ok(BlocklistActionOutcome::Unhandled(_)) => {}
-                Err(e) => tracing::warn!(error = %e, "blocklist action failed"),
-            }
+            let _ = worker.try_route(msg);
         }
+        events.abort();
+        worker_handle.abort();
     });
-
-    // Spawn a task that listens to blocklist events and broadcasts ServerMessages.
-    let bl_mgr2 = blocklists.clone();
-    let bc_tx2 = broadcast_tx.clone();
-    let mut bl_rx = blocklists.subscribe();
-    tokio::spawn(async move {
-        while let Ok(evt) = bl_rx.recv().await {
-            match evt {
-                crate::blocklists::BlocklistEvent::SubscriptionsChanged => {
-                    if let Ok(m) =
-                        crate::translator::downstream::build_set_blocklists(&bl_mgr2).await
-                    {
-                        let _ = bc_tx2.send(m);
-                    }
-                }
-                crate::blocklists::BlocklistEvent::EntriesChanged {
-                    ref subscription_id,
-                } => {
-                    // Broadcast the entries themselves.
-                    if let Ok(m) = crate::translator::downstream::build_set_blocklist_entries(
-                        &bl_mgr2,
-                        subscription_id,
-                    )
-                    .await
-                    {
-                        let _ = bc_tx2.send(m);
-                    }
-                    // Also broadcast an updated summary (entry_count changed).
-                    if let Ok(m) =
-                        crate::translator::downstream::build_set_blocklists(&bl_mgr2).await
-                    {
-                        let _ = bc_tx2.send(m);
-                    }
-                }
-                crate::blocklists::BlocklistEvent::StatusChanged {
-                    ref subscription_id,
-                } => {
-                    if let Ok(m) = crate::translator::downstream::build_set_blocklist_status(
-                        &bl_mgr2,
-                        subscription_id,
-                    )
-                    .await
-                    {
-                        let _ = bc_tx2.send(m);
-                    }
-                }
-            }
-        }
-    });
-
-    // Send initial empty SetBlocklists snapshot to all new connections.
-    if let Ok(initial) = crate::translator::downstream::build_set_blocklists(&blocklists).await {
-        let _ = broadcast_tx.send(initial);
-    }
 
     let handle = tokio::spawn(async move {
         let _ = server.serve(listener).await;

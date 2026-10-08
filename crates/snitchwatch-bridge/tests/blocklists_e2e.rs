@@ -1,27 +1,59 @@
 //! End-to-end: a real WS client connects to the bridge, subscribes to a
-//! file:// blocklist, and receives SetBlocklists + SetBlocklistEntries messages.
+//! fixture blocklist, and receives SetBlocklists + SetBlocklistEntries
+//! messages. No network: the list comes from a test-only fetcher, because
+//! production fetches only `https` and has no file-reading path (issue #45).
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
+use snitchwatch_bridge::blocklists::fetcher::{process_body, BlocklistFetch, FetchOutcome};
 use snitchwatch_bridge::blocklists::store::BlocklistStore;
 use snitchwatch_bridge::blocklists::BlocklistsManager;
-use snitchwatch_bridge::ws_messages::{ClientMessage, ServerMessage};
+use snitchwatch_bridge::ws_messages::{ClientMessage, ServerMessage, ENFORCEMENT_NOT_ENFORCED};
 use tokio::net::UnixStream;
 use tokio_tungstenite::tungstenite::Message;
 
+const FIXTURE_PREFIX: &str = "https://fixtures.invalid/";
+const FIXTURE_MAX_BYTES: u64 = 1024 * 1024;
+
+/// Serves `tests/fixtures/blocklists/<name>` for `https://fixtures.invalid/<name>`
+/// (size-capped) and fails every other URL.
+struct FixtureFetcher;
+
+#[async_trait::async_trait]
+impl BlocklistFetch for FixtureFetcher {
+    async fn fetch(&self, url: &str) -> FetchOutcome {
+        let Some(name) = url.strip_prefix(FIXTURE_PREFIX) else {
+            return FetchOutcome::Failed {
+                reason: format!("not a fixture URL: {url}"),
+            };
+        };
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/blocklists")
+            .join(name);
+        let body = std::fs::metadata(&path)
+            .map_err(|e| e.to_string())
+            .and_then(|m| {
+                if m.len() <= FIXTURE_MAX_BYTES {
+                    std::fs::read_to_string(&path).map_err(|e| e.to_string())
+                } else {
+                    Err(format!("fixture too large: {} bytes", m.len()))
+                }
+            });
+        match body {
+            Ok(body) => process_body(&body),
+            Err(reason) => FetchOutcome::Failed { reason },
+        }
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn subscribe_blocklist_via_ws_yields_entries() {
-    let fixture = std::env::current_dir()
-        .unwrap()
-        .join("../../tests/fixtures/blocklists/domains-tiny.txt")
-        .canonicalize()
-        .expect("fixture file must exist");
-    let file_url = format!("file://{}", fixture.display());
+    let fixture_url = format!("{FIXTURE_PREFIX}domains-tiny.txt");
 
     let store = Arc::new(BlocklistStore::open_in_memory().unwrap());
-    let mgr = Arc::new(BlocklistsManager::new(store));
+    let mgr = Arc::new(BlocklistsManager::new(store).with_fetcher(Arc::new(FixtureFetcher)));
     let socket_dir = tempfile::tempdir().unwrap();
     let socket_path = socket_dir.path().join("bridge.sock");
     let (socket_path, token, _shutdown) =
@@ -44,8 +76,8 @@ async fn subscribe_blocklist_via_ws_yields_entries() {
         .await
         .expect("token handshake send failed");
 
-    // Subscribe to the file:// blocklist.
-    let sub_msg = ClientMessage::SubscribeBlocklist { url: file_url };
+    // Subscribe to the fixture blocklist.
+    let sub_msg = ClientMessage::SubscribeBlocklist { url: fixture_url };
     ws.send(Message::Text(serde_json::to_string(&sub_msg).unwrap()))
         .await
         .unwrap();
@@ -66,9 +98,13 @@ async fn subscribe_blocklist_via_ws_yields_entries() {
             _ => continue,
         };
         match msg {
-            ServerMessage::SetBlocklists { ref blocklists }
+            ServerMessage::SetBlocklists { ref blocklists, .. }
                 if blocklists.iter().any(|b| b.entry_count > 0) =>
             {
+                // Downloaded, but PR A installs no daemon rule: never "enforced".
+                assert!(blocklists
+                    .iter()
+                    .all(|b| b.enforcement == ENFORCEMENT_NOT_ENFORCED));
                 saw_set = true;
             }
             ServerMessage::SetBlocklistEntries { ref entries, .. } if !entries.is_empty() => {

@@ -50,6 +50,8 @@ impl FetchStatus {
 pub enum StoreError {
     #[error("sqlite error: {0}")]
     Sqlite(#[from] rusqlite::Error),
+    #[error("{0}")]
+    Io(#[from] std::io::Error),
     #[error("store mutex poisoned")]
     Poisoned,
 }
@@ -82,7 +84,17 @@ CREATE INDEX IF NOT EXISTS idx_entries_sub ON entries(subscription_id);
 "#;
 
 impl BlocklistStore {
+    /// Open (or create) the database at `path`, owner-only (0600). SQLite
+    /// gives its journal files the database's mode.
     pub fn open(path: &Path) -> Result<Self, StoreError> {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(path)?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
         let conn = Connection::open(path)?;
         Self::initialize(conn)
     }
@@ -268,6 +280,36 @@ mod tests {
             .expect("get")
             .expect("found");
         assert_eq!(loaded, sub);
+    }
+
+    /// The database names every subscribed URL; in system mode it sits in
+    /// `/var/lib/snitchwatch`. Created owner-only, and tightened if it exists.
+    #[test]
+    fn open_creates_the_database_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blocklists.sqlite3");
+        let store = BlocklistStore::open(&path).expect("open");
+        store
+            .upsert_subscription(&Subscription {
+                id: "a".into(),
+                url: "https://x.example/a".into(),
+                display_name: "a".into(),
+                format_hint: None,
+                refresh_interval_secs: 1,
+                last_fetched_at: None,
+                last_fetch_status: FetchStatus::Pending,
+                entry_count: 0,
+            })
+            .unwrap();
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&path), 0o600);
+        drop(store);
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let reopened = BlocklistStore::open(&path).expect("reopen");
+        assert_eq!(mode(&path), 0o600, "an existing database is tightened");
+        assert_eq!(reopened.list_subscriptions().unwrap().len(), 1);
     }
 
     #[test]

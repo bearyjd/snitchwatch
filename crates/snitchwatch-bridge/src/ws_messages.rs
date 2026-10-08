@@ -96,6 +96,10 @@ pub enum ServerMessage {
     },
     SetBlocklists {
         blocklists: Vec<BlocklistSummary>,
+        /// Whether subscriptions survive a bridge restart (issue #45). `None`
+        /// from an older bridge; GUIs treat that as not persistent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        storage: Option<StorageStatus>,
     },
     SetBlocklistDetails {
         details: BlocklistSummary,
@@ -466,11 +470,40 @@ pub struct BlocklistSummary {
     pub display_name: String,
     pub url: String,
     pub entry_count: i64,
+    /// The download result (`pending` / `ok` / `failed`), not enforcement.
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_updated_iso8601: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_failure_reason: Option<String>,
+    /// One of the `ENFORCEMENT_*` values. Empty from an older bridge, which
+    /// enforced nothing.
+    #[serde(default)]
+    pub enforcement: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enforcement_reason: Option<String>,
+}
+
+/// [`BlocklistSummary::enforcement`]: not downloaded or pushed yet.
+pub const ENFORCEMENT_PENDING: &str = "pending";
+/// [`BlocklistSummary::enforcement`]: the daemon accepted the list's rule.
+/// The daemon may still have loaded 0 entries, so GUIs say "Rule installed",
+/// never "Enforced".
+pub const ENFORCEMENT_RULE_INSTALLED: &str = "rule_installed";
+/// [`BlocklistSummary::enforcement`]: nothing blocks this list's hosts; see
+/// `enforcement_reason`.
+pub const ENFORCEMENT_NOT_ENFORCED: &str = "not_enforced";
+
+/// Where the bridge keeps blocklist subscriptions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageStatus {
+    /// True only when subscriptions are saved in a state directory and
+    /// survive a restart.
+    pub persistent: bool,
+    /// Why storage is not persistent, when it was configured but unusable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -796,13 +829,44 @@ mod blocklist_message_tests {
                 status: "ok".into(),
                 last_updated_iso8601: Some("2026-04-11T12:00:00Z".into()),
                 last_failure_reason: None,
+                enforcement: ENFORCEMENT_NOT_ENFORCED.into(),
+                enforcement_reason: Some("no rule sink yet".into()),
             }],
+            storage: Some(StorageStatus {
+                persistent: false,
+                reason: Some("blocklist store: disk full".into()),
+            }),
         };
         let json = serde_json::to_value(&msg).unwrap();
         assert_eq!(json["action"], "setBlocklists");
         assert_eq!(json["blocklists"][0]["id"], "stevenblack");
         assert_eq!(json["blocklists"][0]["displayName"], "StevenBlack");
         assert_eq!(json["blocklists"][0]["entryCount"], 1234);
+        assert_eq!(json["blocklists"][0]["enforcement"], "not_enforced");
+        assert_eq!(
+            json["blocklists"][0]["enforcementReason"],
+            "no rule sink yet"
+        );
+        assert_eq!(json["storage"]["persistent"], false);
+        assert_eq!(json["storage"]["reason"], "blocklist store: disk full");
+    }
+
+    /// An older bridge sends neither `storage` nor the enforcement fields.
+    #[test]
+    fn set_blocklists_from_an_older_bridge_still_parses() {
+        let json = r#"{"action":"setBlocklists","blocklists":[{"id":"a","displayName":"A",
+            "url":"https://x.example/a","entryCount":1,"status":"ok"}]}"#;
+        match serde_json::from_str::<ServerMessage>(json).unwrap() {
+            ServerMessage::SetBlocklists {
+                blocklists,
+                storage,
+            } => {
+                assert_eq!(storage, None);
+                assert_eq!(blocklists[0].enforcement, "");
+                assert_eq!(blocklists[0].enforcement_reason, None);
+            }
+            other => panic!("expected SetBlocklists, got {other:?}"),
+        }
     }
 
     #[test]
