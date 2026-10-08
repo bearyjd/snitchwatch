@@ -4,8 +4,12 @@
 //! only "This time" for them, says why, and `submit()` sends `this_time`
 //! whatever state the selector is left in (pre-selected, switched scope,
 //! forced index or model). "Any host" (the program alone) and capable bridges
-//! keep every duration. `bridge_runtime/verdict_gate_tests.rs` enforces the
-//! same rule again in Rust, under every QML path.
+//! keep every duration. An unidentifiable program (#44) is never remembered
+//! under any scope, "Any host" included: on an old bridge an empty process
+//! path would otherwise become a host-only rule for every app.
+//! `bridge_runtime/verdict_gate_tests.rs` enforces the same rule again in
+//! Rust (`dispatch_to`), given the `bindableProcessPath` flag the sheet passes
+//! to `submitVerdict`; Rust does not look the row up itself.
 //!
 //! Same probe shape as `inline_verdict_qml.rs`: a real `ConnectionsPage` and
 //! `ConnectionsModel` with a stub feed. The stub's `appBound` stands for the
@@ -24,6 +28,43 @@ use common::{capture_stderr, init_headless_qt_env};
 
 const PROBE_URL: &str = "qrc:/sheet_old_bridge_probe.qml";
 const SHELL_QML_PREFIX: &str = "qrc:/qt/qml/com/snitchwatch/shell/qml/";
+
+/// The first double-quoted string after `key`, which follows `anchor`.
+fn quoted_after<'a>(source: &'a str, anchor: &str, key: &str) -> &'a str {
+    let after_anchor = &source[source.find(anchor).unwrap_or_else(|| panic!("no {anchor}"))..];
+    let after_key = &after_anchor[after_anchor.find(key).unwrap_or_else(|| panic!("no {key}"))..];
+    let start = after_key.find('"').expect("opening quote") + 1;
+    let len = after_key[start..].find('"').expect("closing quote");
+    &after_key[start..start + len]
+}
+
+/// The two "too old" explanations are worded for different actions (remember
+/// an answer, block a program) and needn't match, but a user must read the
+/// same cause in both: the bridge is too old to limit a rule to this program.
+#[test]
+fn both_too_old_sentences_name_the_cause_and_the_program() {
+    let sheet = quoted_after(
+        include_str!("../qml/PendingDecisionSheet.qml"),
+        "id: oldBridgeNoteLabel",
+        "text:",
+    );
+    let inline = quoted_after(
+        include_str!("../qml/InlineVerdicts.qml"),
+        "readonly property string bridgeTooOldSentence",
+        ":",
+    );
+    for (name, sentence) in [
+        ("PendingDecisionSheet.qml", sheet),
+        ("InlineVerdicts.qml", inline),
+    ] {
+        for needle in ["too old", "this program"] {
+            assert!(
+                sentence.contains(needle),
+                "{name}'s old-bridge sentence lost {needle:?}: {sentence:?}"
+            );
+        }
+    }
+}
 
 #[test]
 fn an_old_bridge_never_gets_a_remembered_host_scoped_answer() {
@@ -44,15 +85,17 @@ Controls.ApplicationWindow {
     width: 800
     height: 600
 
-    readonly property string note: "This firewall bridge is too old to limit a rule to just this program, so it can only answer this connection. Update Snitchwatch's background service to remember answers."
+    readonly property string note: "This firewall bridge is too old to limit a rule to just this program, so with this scope it can only answer this connection. Update Snitchwatch's background service to remember answers."
     property var failures: []
     property string last: ""
+    property var lastBindable: null
 
     QtObject {
         id: feedStub
         property bool appBound: false
-        function submitVerdict(rowId, choice, scope, duration) {
+        function submitVerdict(rowId, choice, scope, duration, bindable) {
             probeWindow.last = rowId + " " + scope + "/" + duration;
+            probeWindow.lastBindable = bindable;
             return true;
         }
         function appBoundRulesFor(rowId) {
@@ -87,11 +130,16 @@ Controls.ApplicationWindow {
             matchedRule: "", matchedRuleDisplay: ""
         });
     }
-    // Submits with the sheet as it is and checks what was sent.
+    // Submits with the sheet as it is and checks what was sent, and that the
+    // row's real `bindableProcessPath` went with it (Rust trusts the flag).
     function expectSubmit(expected, what) {
         probeWindow.last = "";
+        probeWindow.lastBindable = null;
         page.decisionSheet.submit("allow");
         probeWindow.check(probeWindow.last === expected, what + ": sent " + probeWindow.last);
+        const rowId = expected.split(" ")[0];
+        probeWindow.check(probeWindow.lastBindable === (rowId === "abs" || rowId === "abs2"),
+                          what + ": bindable flag " + probeWindow.lastBindable);
     }
 
     Timer {
@@ -105,7 +153,8 @@ Controls.ApplicationWindow {
                     rows: [
                         probeWindow.row("abs", "/usr/bin/curl"),
                         probeWindow.row("abs2", "/usr/bin/wget"),
-                        probeWindow.row("kernel", "Kernel connection")
+                        probeWindow.row("kernel", "Kernel connection"),
+                        probeWindow.row("nopath", null)
                     ]
                 }));
                 const sheet = page.decisionSheet;
@@ -160,11 +209,25 @@ Controls.ApplicationWindow {
                 probeWindow.openOn("abs2");
                 probeWindow.expectSubmit("abs2 this_host/this_time", "pre-selected Forever");
 
-                // The program comes first: the #44 note, not this one.
-                probeWindow.openOn("kernel");
-                probeWindow.check(sheet.bindableProcessPath === false
-                                  && sheet.showOldBridgeNote === false,
-                                  "kernel row shows the old-bridge note");
+                // The program comes first: the #44 note, not this one, and no
+                // scope remembers anything for it, "Any host" included (an
+                // empty path is a host-only rule for every app on an old
+                // bridge). A pre-selected Forever must not get through.
+                for (const id of ["kernel", "nopath"]) {
+                    probeWindow.openOn(id);
+                    probeWindow.check(sheet.bindableProcessPath === false
+                                      && sheet.showOldBridgeNote === false,
+                                      id + " row shows the old-bridge note");
+                    for (const [index, scope] of [[0, "this_host"], [1, "any_host_on_domain"],
+                                                  [2, "any_host"]]) {
+                        scopes.currentIndex = index;
+                        probeWindow.check(durations.count === 1,
+                                          id + " " + scope + " offers " + durations.count);
+                        durations.currentIndex = 3;
+                        probeWindow.expectSubmit(id + " " + scope + "/this_time",
+                                                 id + " " + scope);
+                    }
+                }
 
                 // A stale index, then a forced model: still once.
                 probeWindow.openOn("abs");
@@ -174,6 +237,14 @@ Controls.ApplicationWindow {
                 durations.model = [{ label: "Forever", token: "forever" }];
                 durations.currentIndex = 0;
                 probeWindow.expectSubmit("abs this_host/this_time", "forced selector");
+                // The same for a program that can't be identified, under "Any host".
+                for (const id of ["kernel", "nopath"]) {
+                    probeWindow.openOn(id);
+                    scopes.currentIndex = 2;
+                    durations.currentIndex = 0;
+                    probeWindow.expectSubmit(id + " any_host/this_time",
+                                             id + " forced selector, Any host");
+                }
 
                 if (probeWindow.failures.length > 0) {
                     throw new Error("sheet old-bridge probe: " + probeWindow.failures.join("; "));

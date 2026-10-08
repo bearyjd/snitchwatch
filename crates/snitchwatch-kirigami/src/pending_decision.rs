@@ -31,6 +31,11 @@
 //! scope/duration extension — it only builds the existing `SetVerdict`
 //! message the WS protocol already defines (now carrying a typed `duration`
 //! field instead of a plain `remember: bool`).
+//!
+//! **Last gate:** `dispatch_to` runs every verdict through [`limit_to_bridge`],
+//! which sends a remembered one once-only when the caller reports no bindable
+//! program or the bridge session can't bind a host scope to it (issues #44,
+//! #72).
 
 use snitchwatch_bridge::ws_messages::{
     effective_verdict_duration, ClientMessage, VerdictAction, VerdictDuration, VerdictScope,
@@ -115,30 +120,50 @@ pub fn build_verdict_message(
     })
 }
 
-/// Issue #72: a bridge session that didn't advertise app-bound rules
+/// Issues #44 and #72: whether a verdict may be remembered, given what the
+/// caller reports about its program and what the row's bridge session can do.
+/// `bindable_process_path` is the caller's word that the program has a file a
+/// rule can be bound to (`is_bindable_process_path`; the feed can't look the
+/// row up itself). A bridge session that didn't advertise app-bound rules
 /// (`bridge_capabilities::APP_BOUND_RULES`) builds "This host only" and "Any
-/// host on this domain" rules without the program, so remembering one would
-/// cover every app. Such a verdict goes out once-only instead. "Any host"
-/// matches the program alone, even on those bridges, so it is kept, as is
-/// every verdict on a capable session.
-pub(crate) fn limit_to_bridge(msg: ClientMessage, app_bound_rules: bool) -> ClientMessage {
+/// host on this domain" rules without the program, so those would cover every
+/// app. "Any host" matches the program alone, even on those bridges.
+fn may_remember(scope: VerdictScope, app_bound_rules: bool, bindable_process_path: bool) -> bool {
+    bindable_process_path && (app_bound_rules || matches!(scope, VerdictScope::AnyHost))
+}
+
+/// Send a verdict that asks to be remembered once-only instead, unless
+/// [`may_remember`]. Returns the message to send and whether it changed, so
+/// the caller can say so. A verdict already once-only, and any other message,
+/// is returned as it came.
+///
+/// This is only as good as `bindable_process_path`: it does not look at the
+/// row itself (see `BridgeFeed::submitVerdict`).
+pub(crate) fn limit_to_bridge(
+    msg: ClientMessage,
+    app_bound_rules: bool,
+    bindable_process_path: bool,
+) -> (ClientMessage, bool) {
     match msg {
         ClientMessage::SetVerdict {
             row_id,
             verdict,
-            scope: scope @ (VerdictScope::ThisHost | VerdictScope::AnyHostOnDomain),
+            scope,
             duration,
             remember,
-        } if !app_bound_rules && effective_verdict_duration(duration, remember).remembers() => {
-            ClientMessage::SetVerdict {
+        } if effective_verdict_duration(duration, remember).remembers()
+            && !may_remember(scope, app_bound_rules, bindable_process_path) =>
+        {
+            let limited = ClientMessage::SetVerdict {
                 row_id,
                 verdict,
                 scope,
                 duration: Some(VerdictDuration::Once),
                 remember: None,
-            }
+            };
+            (limited, true)
         }
-        other => other,
+        other => (other, false),
     }
 }
 
@@ -244,20 +269,31 @@ mod tests {
         }
     }
 
+    /// Every way a verdict can ask to be remembered, the legacy pre-duration
+    /// `remember` included.
+    const REMEMBERED: [(Option<VerdictDuration>, Option<bool>); 4] = [
+        (Some(VerdictDuration::FiveMinutes), None),
+        (Some(VerdictDuration::UntilRestart), None),
+        (Some(VerdictDuration::Always), None),
+        (None, Some(true)),
+    ];
+    const SCOPES: [VerdictScope; 3] = [
+        VerdictScope::ThisHost,
+        VerdictScope::AnyHostOnDomain,
+        VerdictScope::AnyHost,
+    ];
+
+    fn once(scope: VerdictScope) -> ClientMessage {
+        verdict(scope, Some(VerdictDuration::Once), None)
+    }
+
     #[test]
     fn an_old_bridge_never_remembers_a_host_scoped_verdict() {
-        let remembered = [
-            (Some(VerdictDuration::FiveMinutes), None),
-            (Some(VerdictDuration::UntilRestart), None),
-            (Some(VerdictDuration::Always), None),
-            // The legacy pre-duration shape.
-            (None, Some(true)),
-        ];
         for scope in [VerdictScope::ThisHost, VerdictScope::AnyHostOnDomain] {
-            for (duration, remember) in remembered {
+            for (duration, remember) in REMEMBERED {
                 assert_eq!(
-                    limit_to_bridge(verdict(scope, duration, remember), false),
-                    verdict(scope, Some(VerdictDuration::Once), None),
+                    limit_to_bridge(verdict(scope, duration, remember), false, true),
+                    (once(scope), true),
                     "{scope:?} {duration:?} {remember:?}"
                 );
             }
@@ -265,28 +301,57 @@ mod tests {
     }
 
     #[test]
-    fn any_host_capable_bridges_and_other_messages_are_kept() {
+    fn an_unidentifiable_program_is_never_remembered_under_any_scope_on_any_bridge() {
+        // "Any host" included: on an old bridge an empty process path turns
+        // into a host-only rule for every app (#44).
+        for app_bound_rules in [false, true] {
+            for scope in SCOPES {
+                for (duration, remember) in REMEMBERED {
+                    assert_eq!(
+                        limit_to_bridge(verdict(scope, duration, remember), app_bound_rules, false),
+                        (once(scope), true),
+                        "{scope:?} {duration:?} {remember:?} app-bound {app_bound_rules}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_verdict_the_bridge_can_bind_is_kept_and_not_reported() {
         let kept = [
+            // "Any host" is the program alone, so an old bridge keeps it.
             (
                 verdict(VerdictScope::AnyHost, Some(VerdictDuration::Always), None),
                 false,
+                true,
             ),
             (
                 verdict(VerdictScope::ThisHost, Some(VerdictDuration::Always), None),
+                true,
                 true,
             ),
             (
                 verdict(VerdictScope::AnyHostOnDomain, None, Some(true)),
                 true,
+                true,
             ),
+            // Already once-only, in either shape: nothing to downgrade.
+            (once(VerdictScope::ThisHost), false, true),
+            (once(VerdictScope::AnyHost), false, false),
             (
-                verdict(VerdictScope::ThisHost, Some(VerdictDuration::Once), None),
+                verdict(VerdictScope::ThisHost, None, Some(false)),
+                false,
                 false,
             ),
-            (ClientMessage::RequestSnapshot, false),
+            (verdict(VerdictScope::ThisHost, None, None), false, false),
+            (ClientMessage::RequestSnapshot, false, false),
         ];
-        for (msg, app_bound_rules) in kept {
-            assert_eq!(limit_to_bridge(msg.clone(), app_bound_rules), msg);
+        for (msg, app_bound_rules, bindable) in kept {
+            assert_eq!(
+                limit_to_bridge(msg.clone(), app_bound_rules, bindable),
+                (msg, false)
+            );
         }
     }
 

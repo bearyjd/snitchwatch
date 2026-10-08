@@ -45,6 +45,8 @@ ColumnLayout {
     // own absolute-path rule). Without it only "This time" is offered: the
     // bridge would answer anything longer once anyway. False by default, so a
     // caller that never sets it can't offer a duration that won't be kept.
+    // `submit()` also sends it to `BridgeFeed.submitVerdict`, whose Rust gate
+    // sends a remembered verdict once-only without it.
     property bool bindableProcessPath: false
     // Exposed for the headless probe (tests/verdict_not_remembered_qml.rs).
     property alias durationSelector: durationBox
@@ -206,7 +208,7 @@ ColumnLayout {
         opacity: 0.7
         font: Kirigami.Theme.smallFont
         textFormat: Text.PlainText
-        text: "This firewall bridge is too old to limit a rule to just this program, so it can only answer this connection. Update Snitchwatch's background service to remember answers."
+        text: "This firewall bridge is too old to limit a rule to just this program, so with this scope it can only answer this connection. Update Snitchwatch's background service to remember answers."
     }
 
     // Countdown display only — never a client-side timer.
@@ -290,7 +292,10 @@ ColumnLayout {
         // reads the scope sent below.
         const duration = sheet.remembers ? durationBox.currentValue : "this_time";
         if (sheet.bridgeFeed !== null) {
-            sheet.bridgeFeed.submitVerdict(sheet.rowId, action, scopeBox.currentValue, duration);
+            // `bindableProcessPath`, not `remembers`: Rust checks the program
+            // again, and must not depend on this sheet's own gate.
+            sheet.bridgeFeed.submitVerdict(sheet.rowId, action, scopeBox.currentValue, duration,
+                                           sheet.bindableProcessPath);
         } else {
             // Unreachable in the running app; logged rather than dropped
             // silently so a mis-wired container can't lose a decision without
