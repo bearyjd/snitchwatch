@@ -102,14 +102,14 @@ The two fields that matter, relative to upstream's defaults:
 Restart the daemon so it picks up the new config:
 
 ```bash
-sudo systemctl enable --now opensnitchd.service
-sudo systemctl restart opensnitchd.service
+sudo systemctl enable --now opensnitch.service
+sudo systemctl restart opensnitch.service
 ```
 
 Verify:
 
 ```bash
-systemctl is-active opensnitchd.service      # -> active
+systemctl is-active opensnitch.service       # -> active
 grep -E '"DefaultAction"|"Address"' /etc/opensnitchd/default-config.json
 ```
 
@@ -175,7 +175,7 @@ Confirm the whole chain, including the fail-open fix:
 
 ```bash
 # Daemon up and fail-closed:
-systemctl is-active opensnitchd.service
+systemctl is-active opensnitch.service
 grep '"DefaultAction": "deny"' /etc/opensnitchd/default-config.json
 
 # Bridge up independently of the GUI window:

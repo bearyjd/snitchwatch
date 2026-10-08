@@ -80,9 +80,9 @@ one opensnitchd rule (owner decision, 2026-10-08):
   (e.g. `systemd-resolved`) are allowed. OpenSnitch intercepts loopback
   too (its "allow localhost connections" system rule is off by default),
   so a query to `127.0.0.53:53` needs allowing as well.
-- **Unit name:** the Fedora RPM's unit is `opensnitch.service`; some
-  older Snitchwatch docs and `recipe.yml` still say `opensnitchd.service`
-  (issue #92).
+- **Unit name:** the Fedora RPM's unit is `opensnitch.service`, with no
+  `opensnitchd.service` alias (issue #92). `opensnitchd` is the daemon's
+  binary, not its unit.
 - **Where it ships:**
   - the bluebuild image (`files` module);
   - the system-bridge overlay (`system/stage.sh` installs the same file

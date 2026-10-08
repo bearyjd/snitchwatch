@@ -15,11 +15,17 @@ pub fn state_dir() -> PathBuf {
 }
 
 pub fn data_dir() -> PathBuf {
-    xdg_dir_or("XDG_DATA_HOME", ".local/share").join("snitchwatch")
+    data_dir_from(
+        env_var("XDG_DATA_HOME").as_deref(),
+        env_var("HOME").as_deref(),
+    )
 }
 
 pub fn config_dir() -> PathBuf {
-    xdg_dir_or("XDG_CONFIG_HOME", ".config").join("snitchwatch")
+    config_dir_from(
+        env_var("XDG_CONFIG_HOME").as_deref(),
+        env_var("HOME").as_deref(),
+    )
 }
 
 pub fn autostart_path() -> PathBuf {
@@ -43,6 +49,16 @@ fn state_dir_from(xdg_state_home: Option<&str>, home: Option<&str>) -> PathBuf {
     xdg_dir_from(xdg_state_home, home, ".local/state").join("snitchwatch")
 }
 
+/// Pure core of [`data_dir`] (issue #97).
+fn data_dir_from(xdg_data_home: Option<&str>, home: Option<&str>) -> PathBuf {
+    xdg_dir_from(xdg_data_home, home, ".local/share").join("snitchwatch")
+}
+
+/// Pure core of [`config_dir`] (issue #97).
+fn config_dir_from(xdg_config_home: Option<&str>, home: Option<&str>) -> PathBuf {
+    xdg_dir_from(xdg_config_home, home, ".config").join("snitchwatch")
+}
+
 /// Pure core of [`autostart_path`].
 fn autostart_path_from(xdg_config_home: Option<&str>, home: Option<&str>) -> PathBuf {
     xdg_dir_from(xdg_config_home, home, ".config")
@@ -57,14 +73,6 @@ fn xdg_dir_from(xdg: Option<&str>, home: Option<&str>, fallback_subpath: &str) -
         Some(p) if !p.is_empty() => PathBuf::from(p),
         _ => PathBuf::from(home.unwrap_or("/tmp")).join(fallback_subpath),
     }
-}
-
-fn xdg_dir_or(env_name: &str, fallback_subpath: &str) -> PathBuf {
-    xdg_dir_from(
-        env_var(env_name).as_deref(),
-        env_var("HOME").as_deref(),
-        fallback_subpath,
-    )
 }
 
 /// The only place this module reads the process environment.
@@ -110,6 +118,34 @@ mod tests {
         assert_eq!(
             state_dir_from(None, None),
             PathBuf::from("/tmp/.local/state/snitchwatch")
+        );
+    }
+
+    #[test]
+    fn data_dir_uses_xdg_or_falls_back_to_home_local_share() {
+        assert_eq!(
+            data_dir_from(Some("/x/data"), Some("/home/alice")),
+            PathBuf::from("/x/data/snitchwatch")
+        );
+        assert_eq!(
+            data_dir_from(Some(""), Some("/home/alice")),
+            PathBuf::from("/home/alice/.local/share/snitchwatch")
+        );
+        assert_eq!(
+            data_dir_from(None, None),
+            PathBuf::from("/tmp/.local/share/snitchwatch")
+        );
+    }
+
+    #[test]
+    fn config_dir_uses_xdg_or_falls_back_to_home_config() {
+        assert_eq!(
+            config_dir_from(Some("/x/cfg"), Some("/home/alice")),
+            PathBuf::from("/x/cfg/snitchwatch")
+        );
+        assert_eq!(
+            config_dir_from(None, Some("/home/alice")),
+            PathBuf::from("/home/alice/.config/snitchwatch")
         );
     }
 

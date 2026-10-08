@@ -700,10 +700,6 @@ pub fn handles() -> Option<BridgeHandles> {
     }
 }
 
-pub fn status() -> Option<(bool, String)> {
-    STARTED.get().map(status_of)
-}
-
 /// The link's state and message, or `None` before the runtime was started.
 pub fn link_status() -> Option<LinkStatus> {
     STARTED.get().map(link_of)
