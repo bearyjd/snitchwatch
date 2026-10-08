@@ -240,6 +240,33 @@ async fn a_confirmed_delete_drops_the_count_and_a_rejected_one_does_not() {
 }
 
 #[tokio::test]
+async fn a_confirmed_rule_change_keeps_the_count() {
+    let (svc, _rx) = service();
+    let stream = connect(&svc, &["a", "b"]).await;
+    ping(&svc, vec![event("a"), event("a")], 10).await;
+    let commands = svc.daemon_commands();
+
+    let mut disabled = rule("a");
+    disabled.enabled = false;
+    let change = commands
+        .send(Notification {
+            r#type: Action::ChangeRule as i32,
+            rules: vec![disabled],
+            ..Default::default()
+        })
+        .unwrap();
+    commands.on_reply(
+        stream.stream.id(),
+        &NotificationReply {
+            id: change.id(),
+            code: NotificationReplyCode::Ok as i32,
+            data: String::new(),
+        },
+    );
+    assert_eq!(hits(&svc), vec![pair("a", 2)]);
+}
+
+#[tokio::test]
 async fn the_daemons_configured_event_cap_decides_what_looks_incomplete() {
     let batch = |n: usize| (0..n).map(|_| event("a")).collect::<Vec<_>>();
     // The default (150) when the daemon's config says nothing.

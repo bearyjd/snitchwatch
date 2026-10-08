@@ -364,3 +364,25 @@ fn saved_counts_are_capped_at_the_entry_limit() {
     hits.restore(saved(&refs), NOW);
     assert_eq!(hits.to_saved().unwrap().hits.len(), MAX_TRACKED_RULES);
 }
+
+#[test]
+fn live_and_restored_counts_together_stay_within_the_saved_limit() {
+    let mut hits = RuleHits::default();
+    let old: Vec<(String, u64)> = (0..MAX_TRACKED_RULES)
+        .map(|i| (format!("old{i:05}"), 1))
+        .collect();
+    let refs: Vec<(&str, u64)> = old.iter().map(|(n, c)| (n.as_str(), *c)).collect();
+    hits.restore(saved(&refs), NOW);
+    let live: Vec<String> = (0..10).map(|i| format!("live{i}")).collect();
+    for name in &live {
+        rec(&mut hits, &[ev(name, 1)], &[name.as_str()]);
+    }
+    let out = hits.to_saved().unwrap();
+    assert_eq!(out.hits.len(), MAX_TRACKED_RULES, "the file's own limit");
+    for name in &live {
+        assert!(
+            out.hits.iter().any(|h| &h.name == name),
+            "{name}: the live counts go first"
+        );
+    }
+}
