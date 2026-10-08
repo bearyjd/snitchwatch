@@ -117,11 +117,22 @@ fn a_permanent_rule_new_to_the_cache_without_a_stamp_is_stamped_now_too() {
     assert_eq!(get(&cache, "fresh").created, T);
 }
 
+/// A stamp a rule brings is kept only on the prompt-answer path (the
+/// bridge built the rule and stamped it); a confirmed `CHANGE_RULE` is
+/// restamped whatever it carried, because the daemon's `Deserialize` makes
+/// the rule anew (`rule.Create`) and ignores it (PR #106 review N5).
 #[test]
-fn a_stamp_the_rule_already_has_is_kept() {
+fn a_stamp_the_rule_already_has_is_kept_only_for_a_prompt_answer() {
     let mut cache = synced(vec![rule("a", "always", T - 100)]);
     cache.upsert_at(rule("a", "always", T - 5), T);
     assert_eq!(get(&cache, "a").created, T - 5);
+    let change = Notification {
+        r#type: Action::ChangeRule as i32,
+        rules: vec![rule("a", "always", T - 5)],
+        ..Default::default()
+    };
+    cache.apply_confirmed_at(&change, T + 1);
+    assert_eq!(get(&cache, "a").created, T + 1);
 }
 
 /// #101 and PR #106 review M2 together: every confirmed change restamps
@@ -298,6 +309,30 @@ fn a_key_keeps_only_its_latest_snapshot_and_each_stream_adopts_it_once() {
         pending.adopt_fresh(&key(1), 2, now).unwrap().rules[0].name,
         "new"
     );
+}
+
+/// What a stream that becomes current again holds (N1): only a snapshot it
+/// adopted, and only while it is fresh.
+#[test]
+fn only_a_fresh_snapshot_a_stream_adopted_is_held_again() {
+    let then = Instant::now();
+    let mut pending = PendingSnapshots::default();
+    pending.stage(key(1), vec![rule("a", "always", 0)], then);
+    assert!(
+        pending.adopted_fresh(&key(1), 1, then).is_none(),
+        "not adopted"
+    );
+    pending.adopt_fresh(&key(1), 1, then).unwrap();
+    assert_eq!(
+        pending.adopted_fresh(&key(1), 1, then).unwrap().rules[0].name,
+        "a"
+    );
+    assert!(
+        pending.adopted_fresh(&key(1), 2, then).is_none(),
+        "another stream"
+    );
+    let stale = then + Duration::from_secs(31);
+    assert!(pending.adopted_fresh(&key(1), 1, stale).is_none(), "stale");
 }
 
 #[test]

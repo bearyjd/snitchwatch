@@ -205,8 +205,9 @@ impl RulesCache {
     /// Insert or replace by name, as the daemon stores a change at
     /// `now_secs` (PR #106 review M2). `created` is the daemon's stamp,
     /// which it makes anew on every change (`rule.Create` from each
-    /// `CHANGE_RULE`): a rule without one (every GUI change goes through
-    /// `rule_from_wire`, which zeroes it) is stamped `now_secs`. Its
+    /// `CHANGE_RULE`): a rule without one is stamped `now_secs`, and one
+    /// with one keeps it, which only a prompt answer the bridge stamped
+    /// itself does ([`Self::apply_confirmed_at`] restamps every change). Its
     /// [`Expiry`]: a running timer of the same duration still removes it
     /// first; otherwise an enabled temporary rule starts one now, and any
     /// other has none. A no-op while `Unknown`: one rule is not the full
@@ -293,7 +294,13 @@ impl RulesCache {
     pub fn apply_confirmed_at(&mut self, sent: &Notification, now_secs: i64) {
         if sent.r#type == Action::ChangeRule as i32 {
             for rule in &sent.rules {
-                self.upsert_at(rule.clone(), now_secs);
+                // The daemon makes the rule anew and stamps it, whatever
+                // stamp it carried (`Deserialize`, `rule.Create`; N5).
+                let restamped = Rule {
+                    created: now_secs,
+                    ..rule.clone()
+                };
+                self.upsert_at(restamped, now_secs);
             }
         } else if sent.r#type == Action::DeleteRule as i32 {
             for rule in &sent.rules {
@@ -349,13 +356,16 @@ pub(crate) fn parse_duration_secs(duration: &str) -> Option<i64> {
 /// A snapshot stays staged after a stream adopts it, until the next one for
 /// its key or [`PENDING_SNAPSHOT_TTL`]: another stream of the same key may
 /// still say HELLO (PR #106 review OQ1). On the Unix socket every stream
-/// shares one key, so a redialled daemon's old stream can say HELLO late,
-/// adopt the new stream's snapshot, and close; the new stream's own HELLO
-/// then adopts it again rather than finding nothing and leaving no list.
-/// On TCP each connection has its own key. A stream never adopts the same
-/// snapshot twice. The cost: adopting it again replaces the list, so a
-/// change confirmed on the old stream between the two HELLOs drops off the
-/// list (and its hit count restarts) until the daemon's next snapshot.
+/// shares one key, so a redialled daemon's old and new streams may both say
+/// HELLO after the new one subscribed, in either order. Each adopts the new
+/// stream's snapshot once, and when the stream holding the list closes, the
+/// stream that falls back to current holds it if it adopted the same
+/// snapshot ([`RulesSync::readopt`], review N1). Only within the 30 s: a
+/// stream that becomes current later finds nothing, and the list is
+/// withdrawn until the daemon reconnects. On TCP each connection has its own
+/// key, and a closed stream's list is never handed to another. The cost: adopting it again replaces the list, so a change confirmed
+/// on the old stream between the two adoptions drops off the list (and its
+/// hit count restarts) until the daemon reconnects.
 #[derive(Debug, Default)]
 pub struct PendingSnapshots {
     entries: VecDeque<Staged>,
@@ -385,6 +395,21 @@ impl PendingSnapshots {
         while self.entries.len() > PENDING_SNAPSHOT_CAP {
             self.entries.pop_front();
         }
+    }
+
+    /// `key`'s fresh snapshot if `stream` has adopted it already: what a
+    /// stream that becomes current again holds (PR #106 review N1).
+    pub(crate) fn adopted_fresh(
+        &self,
+        key: &ConnKey,
+        stream: StreamId,
+        now: Instant,
+    ) -> Option<Snapshot> {
+        self.entries
+            .iter()
+            .find(|staged| staged.key == *key && staged.adopted_by.contains(&stream))
+            .filter(|staged| now.saturating_duration_since(staged.at) <= PENDING_SNAPSHOT_TTL)
+            .map(|staged| staged.snapshot.clone())
     }
 
     /// `key`'s snapshot for `stream`: `Some` only when it is fresh and this
@@ -631,9 +656,32 @@ impl RulesSync {
     pub(crate) fn commit(&self, current: &BecameCurrent<'_>) -> Adopted {
         let staged =
             lock(&self.pending).adopt_fresh(&current.conn(), current.stream(), Instant::now());
-        let Some(snapshot) = staged else {
-            return Adopted::Nothing;
-        };
+        match staged {
+            Some(snapshot) => self.adopt(current, snapshot),
+            None => Adopted::Nothing,
+        }
+    }
+
+    /// The committing stream closed and `current` is current instead: if it
+    /// adopted the same staged snapshot, it holds the list from now on, as
+    /// adopted again from that snapshot (PR #106 review N1: either HELLO
+    /// order on the Unix socket's one key). [`Adopted::Nothing`] otherwise,
+    /// and the caller withdraws.
+    pub(crate) fn readopt(&self, current: &BecameCurrent<'_>) -> Adopted {
+        let staged =
+            lock(&self.pending).adopted_fresh(&current.conn(), current.stream(), Instant::now());
+        match staged {
+            Some(snapshot) => self.adopt(current, snapshot),
+            None => Adopted::Nothing,
+        }
+    }
+
+    /// Whether the cache holds a list (not only an over-limit count).
+    pub(crate) fn has_list(&self) -> bool {
+        !lock(&self.cache).is_unknown()
+    }
+
+    fn adopt(&self, current: &BecameCurrent<'_>, snapshot: Snapshot) -> Adopted {
         if let Some(total) = snapshot.over_limit {
             warn!(
                 stream = current.stream(),

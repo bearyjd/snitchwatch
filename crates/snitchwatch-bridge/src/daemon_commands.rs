@@ -20,10 +20,14 @@
 //! current at that moment. The list belongs to that stream: when it closes,
 //! or another stream becomes current without a snapshot of its own, the list
 //! is withdrawn (cache `Unknown`, empty `SetRules`) rather than left standing
-//! under a different stream. A staged snapshot can be adopted again by
-//! another stream of the same connection key (`PendingSnapshots`), so on the
-//! Unix socket a late HELLO from a redialled daemon's old stream can't leave
-//! the new stream without a list.
+//! under a different stream. Within 30 s of its `Subscribe`, a staged
+//! snapshot can be adopted again by another stream of the same connection
+//! key, and on the Unix socket, when the stream holding it closes, a
+//! fallback stream that adopted it too holds it instead (`PendingSnapshots`;
+//! on TCP that stream may be another local process's). So on the Unix
+//! socket a redialled daemon's old and new streams saying HELLO in either
+//! order don't leave the new stream without a list; later than that, a
+//! withdrawn list comes back only when the daemon reconnects.
 //!
 //! **Delivery, by transport.**
 //! - [`DaemonTransport::Tcp`] (legacy per-user mode, `127.0.0.1`): every
@@ -515,6 +519,11 @@ impl DaemonCommands {
         check_sendable(&notification)?;
         let mut inner = lock(&self.inner);
         let targets = targets(&inner, delivery)?;
+        // The committed stream may own only an over-limit count, no list: a
+        // leftover delete needs the list it was decided from (PR #106 N3).
+        if matches!(delivery, Delivery::CommittedStream) && !self.rules.has_list() {
+            return Err(SendError::NoDaemon);
+        }
         let id = inner.next_id;
         inner.next_id += 1;
         notification.id = id;
@@ -541,6 +550,21 @@ impl DaemonCommands {
         })
     }
 
+    /// On the Unix socket, the stream that is current now holds the list if
+    /// it adopted the same snapshot as the one that closed
+    /// (`RulesSync::readopt`, PR #106 N1). Never on TCP, where the stream a
+    /// list falls back to may be another local process's: its list is
+    /// withdrawn as before.
+    fn readopt_for_current(&self, inner: &Inner) -> Option<StreamId> {
+        if inner.transport != DaemonTransport::Unix {
+            return None;
+        }
+        let next = inner.current?;
+        let conn = inner.streams.get(&next)?.conn;
+        let adopted = self.rules.readopt(&BecameCurrent::new(inner, next, conn));
+        (adopted != Adopted::Nothing).then_some(next)
+    }
+
     fn close_stream(&self, stream: StreamId) {
         let mut inner = lock(&self.inner);
         if inner.streams.remove(&stream).is_none() {
@@ -556,8 +580,10 @@ impl DaemonCommands {
                 .map(|(_, id)| id);
         }
         if inner.committed_by == Some(stream) {
-            self.rules.withdraw();
-            inner.committed_by = None;
+            inner.committed_by = self.readopt_for_current(&inner);
+            if inner.committed_by.is_none() {
+                self.rules.withdraw();
+            }
         }
         let failed: Vec<u64> = match inner.transport {
             DaemonTransport::Tcp if inner.streams.is_empty() => {

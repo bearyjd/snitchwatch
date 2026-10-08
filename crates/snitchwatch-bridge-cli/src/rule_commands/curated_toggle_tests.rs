@@ -39,17 +39,23 @@ async fn a_shipped_curated_rule_turns_off_and_on_again() {
     assert_eq!(result(&mut rx).await, RuleCommandOutcome::Ok);
     commands.try_route(update(&rule.name, switched(&rule, true), Some("on")));
     assert_eq!(result(&mut rx).await, RuleCommandOutcome::Ok);
+    // `created` aside: the daemon stamps every change itself and ignores
+    // the one sent, and a confirmed change restamps the cached rule (N5).
+    let unstamped = |rule: &Rule| Rule {
+        created: 0,
+        ..rule.clone()
+    };
     let sent: Vec<Rule> = seen
         .lock()
         .unwrap()
         .iter()
-        .map(|n| n.rules[0].clone())
+        .map(|n| unstamped(&n.rules[0]))
         .collect();
     let off = Rule {
         enabled: false,
-        ..rule.clone()
+        ..unstamped(&rule)
     };
-    assert_eq!(sent, [off, rule]);
+    assert_eq!(sent, [off, unstamped(&rule)]);
 }
 
 /// Everything but a pure toggle of a shipped entry's own rule is refused,

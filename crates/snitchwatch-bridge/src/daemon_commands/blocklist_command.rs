@@ -341,9 +341,9 @@ mod tests {
 
     /// On the Unix socket it goes to the stream whose snapshot the cache
     /// holds. A later stream's HELLO adopts the snapshot still staged under
-    /// the socket's one key (PR #106 OQ1) and holds it from then on; once
-    /// that stream is gone the snapshot is withdrawn, and then nothing is
-    /// sent at all.
+    /// the socket's one key (PR #106 OQ1) and holds it from then on; once no
+    /// stream that adopted it is left, the snapshot is withdrawn, and then
+    /// nothing is sent at all.
     #[tokio::test]
     async fn a_leftover_delete_goes_only_to_the_stream_whose_snapshot_is_held() {
         let rules = RulesSync::new(broadcast::channel(8).0);
@@ -360,12 +360,43 @@ mod tests {
         assert!(second_rx.try_recv().is_ok(), "the stream that holds it now");
         assert!(first_rx.try_recv().is_err());
 
+        // When it closes, the first stream, current again and holding the
+        // same snapshot, holds the list (N1); when that one closes too, the
+        // list is withdrawn and nothing is sent at all.
         drop(second);
+        assert!(commands.send_leftover_delete(the_delete()).is_ok());
+        assert!(
+            first_rx.try_recv().is_ok(),
+            "the stream that holds it again"
+        );
+        drop(first);
         assert!(matches!(
             commands.send_leftover_delete(the_delete()),
             Err(SendError::NoDaemon)
         ));
-        assert!(first_rx.try_recv().is_err());
+    }
+
+    /// PR #106 review N3: a stream that owns only an over-limit count holds
+    /// no list, so a leftover delete isn't sent to it.
+    #[tokio::test]
+    async fn no_leftover_delete_goes_out_without_a_list() {
+        let rules = RulesSync::new(broadcast::channel(8).0);
+        let commands = DaemonCommands::new(DaemonTransport::Unix, rules.clone());
+        let too_many = snitchwatch_proto::protocol::Rule {
+            name: "r".into(),
+            ..Default::default()
+        };
+        rules.stage(
+            None,
+            vec![too_many; crate::cache::rules::MAX_SNAPSHOT_RULES + 1],
+        );
+        let (stream, mut stream_rx) = commands.open_stream(None);
+        commands.on_reply(stream.id(), &hello());
+        assert!(matches!(
+            commands.send_leftover_delete(the_delete()),
+            Err(SendError::NoDaemon)
+        ));
+        assert!(stream_rx.try_recv().is_err());
     }
 
     #[tokio::test]

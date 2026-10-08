@@ -1944,6 +1944,51 @@ async fn a_late_hello_on_the_shared_key_does_not_leave_the_new_stream_without_a_
     assert_eq!(*svc.rules.synced().borrow(), synced);
 }
 
+/// PR #106 review N1, the other HELLO order: the new stream says HELLO
+/// first and adopts its snapshot, the old stream's late HELLO adopts the
+/// same one and takes the list, then the old stream closes. The new stream,
+/// current again, holds the list instead of seeing it withdrawn.
+#[tokio::test]
+async fn a_late_hello_after_the_new_streams_own_keeps_the_list_when_it_closes() {
+    let (svc, _cache, _rx) = rules_service(DaemonTransport::Unix);
+    let commands = svc.daemon_commands();
+    svc.subscribe(Request::new(with_rules(vec![daemon_rule("old")])))
+        .await
+        .unwrap();
+    let (old, _old_rx) = commands.open_stream(None);
+    svc.subscribe(Request::new(with_rules(vec![daemon_rule("new")])))
+        .await
+        .unwrap();
+    let (new, _new_rx) = commands.open_stream(None);
+    commands.on_reply(new.id(), &hello());
+    commands.on_reply(old.id(), &hello());
+    assert!(cached(&svc).contains("new"));
+    drop(old);
+    assert!(!cached(&svc).is_unknown(), "withdrawn with the old stream");
+    assert!(cached(&svc).contains("new"));
+    // The new stream holds it now: its close withdraws it.
+    drop(new);
+    assert!(cached(&svc).is_unknown());
+}
+
+/// N1 holds only for a stream that adopted the snapshot: one that said
+/// HELLO before it was staged doesn't get the list when the holder closes.
+#[tokio::test]
+async fn a_stream_that_never_adopted_the_snapshot_does_not_get_the_list() {
+    let (svc, _cache, _rx) = rules_service(DaemonTransport::Unix);
+    let commands = svc.daemon_commands();
+    let (early, _early_rx) = commands.open_stream(None);
+    commands.on_reply(early.id(), &hello());
+    svc.subscribe(Request::new(with_rules(vec![daemon_rule("a")])))
+        .await
+        .unwrap();
+    let (holder, _holder_rx) = commands.open_stream(None);
+    commands.on_reply(holder.id(), &hello());
+    assert!(cached(&svc).contains("a"));
+    drop(holder);
+    assert!(cached(&svc).is_unknown());
+}
+
 #[tokio::test]
 async fn hello_without_a_staged_snapshot_only_makes_its_stream_current() {
     let (svc, _cache, mut rx) = rules_service(DaemonTransport::Unix);
