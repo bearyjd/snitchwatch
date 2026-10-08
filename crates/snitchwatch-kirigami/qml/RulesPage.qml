@@ -247,18 +247,6 @@ Kirigami.ScrollablePage {
         id: inspector
         title: page.inspectSource === "blocklist" ? ("blocklist: " + page.inspectBlocklistId) : page.inspectName
 
-        // The title is rule data. OverlaySheet draws `title` with its default
-        // header Heading (AutoText, no textFormat hook), so supply the same
-        // heading — level/alignment/elide copied from Kirigami's template —
-        // with PlainText. Close button and padding live outside `header`.
-        header: Kirigami.Heading {
-            level: 2
-            verticalAlignment: Text.AlignVCenter
-            elide: Text.ElideRight
-            textFormat: Text.PlainText
-            text: inspector.title
-        }
-
         ColumnLayout {
             Layout.preferredWidth: inspector.preferredWidth
             spacing: Kirigami.Units.largeSpacing

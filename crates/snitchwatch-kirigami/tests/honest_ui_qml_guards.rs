@@ -15,6 +15,7 @@ const RULES_PAGE: &str = include_str!("../qml/RulesPage.qml");
 const PENDING_SHEET: &str = include_str!("../qml/PendingDecisionSheet.qml");
 const CONNECTIONS_PAGE: &str = include_str!("../qml/ConnectionsPage.qml");
 const MAIN_QML: &str = include_str!("../qml/main.qml");
+const SIZED_SHEET: &str = include_str!("../qml/SizedOverlaySheet.qml");
 
 /// Drop whole-line `//` comments so a guard can't trip over prose that merely
 /// names the thing it forbids (same helper shape as `qml_source_guards.rs`).
@@ -26,15 +27,15 @@ fn code_lines(source: &str) -> String {
         .join("\n")
 }
 
-/// Every `Controls.Label { ... }` body in `source`, found by brace counting
-/// (braces inside double-quoted strings are ignored). Good enough for the flat,
-/// one-property-per-line style these pages are written in.
-fn label_blocks(source: &str) -> Vec<String> {
-    const OPEN: &str = "Controls.Label {";
-    let mut blocks = Vec::new();
+/// Every `<open> ... }` body in `source` (e.g. open = `Controls.Label {`),
+/// found by brace counting (braces inside double-quoted strings are ignored).
+/// Good enough for the flat, one-property-per-line style these pages are
+/// written in.
+fn blocks(source: &str, open: &str) -> Vec<String> {
+    let mut found = Vec::new();
     let mut rest = source;
-    while let Some(start) = rest.find(OPEN) {
-        let body_start = start + OPEN.len();
+    while let Some(start) = rest.find(open) {
+        let body_start = start + open.len();
         let mut depth = 1usize;
         let mut in_string = false;
         let mut end = rest.len();
@@ -52,10 +53,65 @@ fn label_blocks(source: &str) -> Vec<String> {
                 _ => {}
             }
         }
-        blocks.push(rest[body_start..end].to_string());
+        found.push(rest[body_start..end].to_string());
         rest = &rest[end..];
     }
-    blocks
+    found
+}
+
+/// The block's `text:` binding: the `text:` line plus any continuation lines
+/// indented deeper than it (how multi-line ternaries / `+` chains are written
+/// here), so a later `color:` line can't be mistaken for part of the text.
+fn text_binding(block: &str) -> Option<String> {
+    let lines: Vec<&str> = block.lines().collect();
+    let start = lines
+        .iter()
+        .position(|l| l.trim_start().starts_with("text:"))?;
+    let indent = |l: &str| l.len() - l.trim_start().len();
+    let base = indent(lines[start]);
+    let mut binding = lines[start].to_string();
+    for line in &lines[start + 1..] {
+        if line.trim().is_empty() || indent(line) <= base {
+            break;
+        }
+        binding.push('\n');
+        binding.push_str(line);
+    }
+    Some(binding)
+}
+
+/// Every `Controls.Label` whose `text:` binding mentions one of `data_exprs`
+/// (daemon / subscription / remote-derived strings) must set
+/// `textFormat: Text.PlainText`. `min_checked` stops the guard passing
+/// vacuously if the matcher drifts from the page.
+fn assert_data_labels_plain_text(
+    page_name: &str,
+    source: &str,
+    data_exprs: &[&str],
+    min_checked: usize,
+) {
+    let code = code_lines(source);
+    let mut checked = 0;
+    for block in blocks(&code, "Controls.Label {") {
+        let Some(binding) = text_binding(&block) else {
+            continue;
+        };
+        if !data_exprs.iter().any(|d| binding.contains(d)) {
+            continue;
+        }
+        checked += 1;
+        assert!(
+            block.contains("textFormat: Text.PlainText"),
+            "{page_name} label shows data without `textFormat: Text.PlainText` — \
+             `Controls.Label` defaults to AutoText, which renders markup in daemon-derived \
+             strings (issue #51):\n{block}"
+        );
+    }
+    assert!(
+        checked >= min_checked,
+        "expected at least {min_checked} data-bearing labels in {page_name}, found {checked} — \
+         did the guard's matcher drift from the page?"
+    );
 }
 
 /// The banner must be an `InlineMessage` of type Warning, shown
@@ -103,69 +159,163 @@ fn profiles_page_warns_it_is_not_enforced() {
 /// Issue #51: `Controls.Label` defaults to `Text.AutoText`, which renders
 /// anything that looks like HTML as rich text. Rule names, operator data and
 /// blocklist ids come from the daemon / subscription URLs, so every label that
-/// shows them must opt into `Text.PlainText`.
+/// shows them must opt into `Text.PlainText`. Numeric / static expressions
+/// (`row.precedence`, `row.enabled`, `sourceLabel(...)`) are intentionally
+/// absent from the list.
 #[test]
 fn rules_page_labels_showing_rule_data_are_plain_text() {
-    // Expressions that carry rule-derived strings. Numeric / static ones
-    // (`row.precedence`, `row.enabled`, `sourceLabel(...)`) are intentionally
-    // absent.
-    const RULE_DATA: &[&str] = &[
-        "row.name",
-        "row.operatorSummary",
-        "row.ruleAction",
-        "row.blocklistId",
-        "page.inspectName",
-        "page.inspectSource",
-        "page.inspectAction",
-        "page.inspectDuration",
-        "page.inspectOperatorSummary",
-        "page.simulateMatchedRule",
-        "page.simulateAction",
-        "page.simulateUnsupported",
-    ];
-
-    let code = code_lines(RULES_PAGE);
-    let mut checked = 0;
-    for block in label_blocks(&code) {
-        let shows_rule_data = block
-            .lines()
-            .filter(|l| l.contains("text:") || l.trim_start().starts_with('+'))
-            .any(|l| RULE_DATA.iter().any(|d| l.contains(d)));
-        if !shows_rule_data {
-            continue;
-        }
-        checked += 1;
-        assert!(
-            block.contains("textFormat: Text.PlainText"),
-            "RulesPage.qml label shows rule data without `textFormat: Text.PlainText`:\n{block}"
-        );
-    }
-    assert!(
-        checked >= 11,
-        "expected at least 11 rule-data labels in RulesPage.qml (row name/summary/action, \
-         inspector name/source/action/duration/target, simulator matched/action/unsupported), \
-         found {checked} — did the guard's matcher drift from the page?"
+    assert_data_labels_plain_text(
+        "RulesPage.qml",
+        RULES_PAGE,
+        &[
+            "row.name",
+            "row.operatorSummary",
+            "row.ruleAction",
+            "row.blocklistId",
+            "page.inspectName",
+            "page.inspectSource",
+            "page.inspectAction",
+            "page.inspectDuration",
+            "page.inspectOperatorSummary",
+            "page.simulateMatchedRule",
+            "page.simulateAction",
+            "page.simulateUnsupported",
+        ],
+        11,
     );
 }
 
-/// The inspector sheet's title is the rule name. `Kirigami.OverlaySheet`
-/// draws `title` with its own default `Kirigami.Heading` (AutoText, no way to
-/// set `textFormat` through `title:`), so RulesPage supplies its own heading
-/// via `header:` — otherwise a rule named `<b>x</b>` renders as markup there
-/// even though every `Controls.Label` below it is plain text.
+/// Same hazard on the Connections tab: process names, hosts and matched-rule
+/// names come straight from the daemon / the connecting program.
 #[test]
-fn rules_page_inspector_title_is_plain_text() {
-    let code = code_lines(RULES_PAGE);
+fn connections_page_labels_showing_connection_data_are_plain_text() {
+    assert_data_labels_plain_text(
+        "ConnectionsPage.qml",
+        CONNECTIONS_PAGE,
+        &[
+            "row.process",
+            "row.host",
+            "row.verdict",
+            "row.groupLabel",
+            "page.inspectHost",
+            "page.inspectIp",
+            "page.inspectProtocol",
+            "page.inspectVerdict",
+            "page.inspectMatchedRuleDisplay",
+        ],
+        10,
+    );
+}
+
+/// Blocklist names, URLs, fetch-failure reasons and (above all) the host
+/// entries are fetched from remote subscription URLs.
+#[test]
+fn blocklists_page_labels_showing_subscription_data_are_plain_text() {
+    assert_data_labels_plain_text(
+        "BlocklistsPage.qml",
+        BLOCKLISTS_PAGE,
+        &[
+            "row.displayName",
+            "row.url",
+            "row.status",
+            "page.inspectUrl",
+            "page.inspectStatus",
+            "page.inspectLastUpdated",
+            "page.inspectLastFailureReason",
+            "text: host",
+        ],
+        8,
+    );
+}
+
+#[test]
+fn profiles_page_labels_showing_profile_data_are_plain_text() {
+    assert_data_labels_plain_text(
+        "ProfilesPage.qml",
+        PROFILES_PAGE,
+        &["row.name", "row.networkMatchers"],
+        2,
+    );
+}
+
+/// The decision prompt: the connecting program's name and the destination host
+/// (plus the reverse-DNS / RDAP answers, which are fully remote-controlled)
+/// are attacker-influenced text on the one surface the user must read to
+/// decide safely.
+#[test]
+fn pending_decision_sheet_labels_showing_remote_data_are_plain_text() {
+    assert_data_labels_plain_text(
+        "PendingDecisionSheet.qml",
+        PENDING_SHEET,
+        &[
+            "sheet.process",
+            "insight.hostname",
+            "insight.org",
+            "insight.registrar",
+            "insight.country",
+        ],
+        5,
+    );
+}
+
+/// `Kirigami.InlineMessage` renders its `text` through a `SelectableLabel`
+/// (AutoText) with no `textFormat` hook, and HTML-escaping doesn't fix that:
+/// AutoText only decodes entities when it already judges the string to be
+/// markup, so an escaped `&lt;b&gt;` shows up literally. Data therefore never
+/// goes into an InlineMessage — only fixed text does.
+#[test]
+fn inline_messages_carry_only_fixed_text() {
+    for (name, source) in [
+        ("PendingDecisionSheet.qml", PENDING_SHEET),
+        ("ConnectionsPage.qml", CONNECTIONS_PAGE),
+        ("BlocklistsPage.qml", BLOCKLISTS_PAGE),
+        ("ProfilesPage.qml", PROFILES_PAGE),
+        ("RulesPage.qml", RULES_PAGE),
+    ] {
+        for block in blocks(&code_lines(source), "Kirigami.InlineMessage {") {
+            let binding = text_binding(&block).unwrap_or_default();
+            for forbidden in ["sheet.", "page.", "row.", "model."] {
+                assert!(
+                    !binding.contains(forbidden),
+                    "{name} interpolates `{forbidden}...` data into an InlineMessage's text, \
+                     which can't be rendered as plain text (issue #51). Put the data in a \
+                     `Controls.Label` with `textFormat: Text.PlainText` instead:\n{binding}"
+                );
+            }
+        }
+    }
+}
+
+/// Sheet titles are data too (process name, rule name, subscription name,
+/// profile name). `Kirigami.OverlaySheet` draws `title` with its own default
+/// header `Heading` (AutoText, no `textFormat` hook through `title:`), so
+/// `SizedOverlaySheet` supplies a PlainText header once for every sheet — and
+/// no page may bypass it with a bare `Kirigami.OverlaySheet`.
+#[test]
+fn overlay_sheet_titles_are_plain_text() {
+    let code = code_lines(SIZED_SHEET);
     let start = code
         .find("header: Kirigami.Heading {")
-        .expect("RulesPage.qml's inspector lost its PlainText header override");
+        .expect("SizedOverlaySheet.qml lost its PlainText header override");
     let header = &code[start..];
-    let header = &header[..header.find("\n        }").unwrap_or(header.len())];
+    let header = &header[..header.find("\n    }").unwrap_or(header.len())];
     assert!(
-        header.contains("textFormat: Text.PlainText") && header.contains("inspector.title"),
-        "RulesPage.qml's inspector header must render `inspector.title` with \
+        header.contains("textFormat: Text.PlainText") && header.contains("sheet.title"),
+        "SizedOverlaySheet.qml's header must render `sheet.title` with \
          `textFormat: Text.PlainText`:\n{header}"
     );
+    for (name, source) in [
+        ("ConnectionsPage.qml", CONNECTIONS_PAGE),
+        ("BlocklistsPage.qml", BLOCKLISTS_PAGE),
+        ("ProfilesPage.qml", PROFILES_PAGE),
+        ("RulesPage.qml", RULES_PAGE),
+    ] {
+        assert!(
+            !code_lines(source).contains("Kirigami.OverlaySheet {"),
+            "{name} declares a bare Kirigami.OverlaySheet, bypassing SizedOverlaySheet's \
+             PlainText title header (issue #51)"
+        );
+    }
 }
 
 /// Issue #49: the bridge hardcodes per-connection bytes to 0 and opensnitchd

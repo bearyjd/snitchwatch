@@ -1,7 +1,14 @@
 //! Integration smoke: the "not enforced" banners on `BlocklistsPage.qml` and
 //! `ProfilesPage.qml` (issues #45/#46) are live, visible and non-dismissable
-//! once the real pages are instantiated, and the edited `RulesPage.qml` /
-//! `ConnectionsPage.qml` (-> `PendingDecisionSheet.qml`) still load.
+//! once the real pages are instantiated; every page's inspector sheet draws its
+//! title through `SizedOverlaySheet`'s PlainText header (issue #51); and the
+//! edited `RulesPage.qml` / `ConnectionsPage.qml` (-> `PendingDecisionSheet.qml`)
+//! load and open their inspectors on markup-looking data without warnings.
+//!
+//! What this does NOT prove: that each individual data `Label` is PlainText
+//! (cxx-qt-lib can't reach into delegates, and the labels sit in unopened
+//! sheets / ListView delegates). That coverage is source-guard only — see
+//! `honest_ui_qml_guards.rs`.
 //!
 //! Same two-layer shape as `inline_verdict_qml.rs`: a real `Window` driven by
 //! a real event loop (so delegates and header bindings actually evaluate), with
@@ -57,10 +64,6 @@ Window {
     }
     RulesPage {
         id: rulesPage
-        // Opens the inspector sheet (and its PlainText header override) on a
-        // rule whose name looks like markup, so a broken header surfaces as a
-        // page warning below.
-        Component.onCompleted: openRuleByName("<b>bold</b>-rule")
         anchors { left: profilesPage.right; top: parent.top; bottom: parent.bottom }
         width: parent.width / 4
         model: RulesModel {
@@ -75,9 +78,43 @@ Window {
         }
     }
     ConnectionsPage {
+        id: connectionsPage
         anchors { right: parent.right; top: parent.top; bottom: parent.bottom }
         width: parent.width / 4
-        model: ConnectionsModel {}
+        model: ConnectionsModel {
+            Component.onCompleted: applyServerMessageJson(JSON.stringify({
+                action: "insertConnectionRows",
+                rows: [
+                    { id: "r1", process: "<b>evil</b>", processPath: null,
+                      dstHost: "<i>h</i>.example", dstIp: "203.0.113.9", dstPort: 443,
+                      protocol: "tcp", direction: "outgoing", action: null,
+                      bytesSent: 0, bytesReceived: 0, startedAtMs: 0 }
+                ]
+            }))
+        }
+    }
+
+    // Every inspector sheet is a SizedOverlaySheet declared directly on its
+    // page; its title must be drawn by a PlainText Heading, not Kirigami's
+    // AutoText default.
+    function checkSheetTitles(page, name) {
+        let sheets = 0;
+        for (let i = 0; i < page.scrollablePageData.length; i++) {
+            const sheet = page.scrollablePageData[i];
+            if (sheet.header === undefined || sheet.title === undefined) {
+                continue;
+            }
+            sheets++;
+            if (sheet.header.textFormat !== Text.PlainText) {
+                throw new Error(name + ": sheet title header is not PlainText");
+            }
+            if (sheet.header.text !== sheet.title) {
+                throw new Error(name + ": sheet header does not show its title");
+            }
+        }
+        if (sheets === 0) {
+            throw new Error(name + ": found no OverlaySheet to check - probe lookup drifted");
+        }
     }
 
     function checkBanner(page, name) {
@@ -102,10 +139,29 @@ Window {
         }
     }
 
+    // Opens the Rules and Connections inspectors on markup-looking data. Done
+    // from a Timer, not Component.onCompleted: the order in which a page's and
+    // its child model's onCompleted handlers run is undefined, and the rule
+    // would not exist yet if the page's ran first. The sheets then get until
+    // the checker below to lay out, so any warning they raise is captured.
+    Timer {
+        interval: 50
+        running: true
+        repeat: false
+        onTriggered: {
+            rulesPage.openRuleByName("<b>bold</b>-rule");
+            connectionsPage.openInspector({
+                rowId: "r1", process: "<b>evil</b>", host: "<i>h</i>.example", port: 443,
+                protocol: "tcp", verdict: "", pending: true,
+                matchedRule: "", matchedRuleDisplay: "awaiting decision"
+            });
+        }
+    }
+
     // Quits the loop once layout/polish has run; `finally` keeps Qt.quit()
     // reachable when a check throws, which would otherwise hang the binary.
     Timer {
-        interval: 150
+        interval: 300
         running: true
         repeat: false
         onTriggered: {
@@ -115,6 +171,13 @@ Window {
                 if (rulesPage.inspectName !== "<b>bold</b>-rule") {
                     throw new Error("RulesPage inspector did not open on the markup-named rule");
                 }
+                if (connectionsPage.inspectProcess !== "<b>evil</b>") {
+                    throw new Error("ConnectionsPage inspector did not open on the pending row");
+                }
+                checkSheetTitles(blocklistsPage, "BlocklistsPage");
+                checkSheetTitles(profilesPage, "ProfilesPage");
+                checkSheetTitles(rulesPage, "RulesPage");
+                checkSheetTitles(connectionsPage, "ConnectionsPage");
             } finally {
                 Qt.quit();
             }

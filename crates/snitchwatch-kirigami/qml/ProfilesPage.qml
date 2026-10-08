@@ -120,12 +120,14 @@ Kirigami.ScrollablePage {
                     Layout.fillWidth: true
                     spacing: 0
                     Controls.Label {
+                        textFormat: Text.PlainText
                         text: row.name
                         font.bold: true
                         elide: Text.ElideRight
                         Layout.fillWidth: true
                     }
                     Controls.Label {
+                        textFormat: Text.PlainText
                         text: row.networkMatchers.length > 0 ? row.networkMatchers : "No network matchers (manual activation only)"
                         opacity: 0.7
                         font: Kirigami.Theme.smallFont

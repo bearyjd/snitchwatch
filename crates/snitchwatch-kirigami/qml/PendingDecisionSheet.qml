@@ -66,6 +66,19 @@ ColumnLayout {
         Layout.fillWidth: true
         visible: true
         type: Kirigami.MessageType.Warning
+        text: "A new connection is waiting for your decision"
+    }
+
+    // The program name and destination are attacker-influenced, and
+    // InlineMessage renders its text as AutoText with no textFormat hook (and
+    // HTML-escaping wouldn't help — AutoText shows `&lt;` literally unless it
+    // already judges the string to be markup). So they live in a PlainText
+    // Label rather than in the message above (issue #51).
+    Controls.Label {
+        Layout.fillWidth: true
+        wrapMode: Text.Wrap
+        font.bold: true
+        textFormat: Text.PlainText
         text: sheet.process + " wants to connect to " + sheet.host
     }
 
@@ -140,6 +153,7 @@ ColumnLayout {
 
         Controls.Label {
             Kirigami.FormData.label: "Reverse DNS"
+            textFormat: Text.PlainText
             text: insight.loading
                   ? "Looking up…"
                   : (insight.hostname.length > 0
@@ -149,16 +163,19 @@ ColumnLayout {
         Controls.Label {
             Kirigami.FormData.label: "Organization"
             visible: insight.org.length > 0
+            textFormat: Text.PlainText
             text: insight.org
         }
         Controls.Label {
             Kirigami.FormData.label: "Registrar"
             visible: insight.registrar.length > 0
+            textFormat: Text.PlainText
             text: insight.registrar
         }
         Controls.Label {
             Kirigami.FormData.label: "Country"
             visible: insight.country.length > 0
+            textFormat: Text.PlainText
             text: insight.country
         }
         Controls.Label {

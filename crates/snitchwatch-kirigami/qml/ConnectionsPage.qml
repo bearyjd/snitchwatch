@@ -327,6 +327,7 @@ Kirigami.ScrollablePage {
 
                 Controls.Label {
                     visible: !row.isGroupHeader
+                    textFormat: Text.PlainText
                     text: page.verdictGlyph(row.verdict, row.pending)
                     color: page.verdictColor(row.verdict)
                     Layout.alignment: Qt.AlignVCenter
@@ -337,12 +338,14 @@ Kirigami.ScrollablePage {
                     Layout.fillWidth: true
                     spacing: 0
                     Controls.Label {
+                        textFormat: Text.PlainText
                         text: row.process
                         font.bold: row.pending
                         elide: Text.ElideRight
                         Layout.fillWidth: true
                     }
                     Controls.Label {
+                        textFormat: Text.PlainText
                         text: row.host + ":" + row.port + "  " + row.protocol
                         opacity: 0.7
                         font: Kirigami.Theme.smallFont
@@ -353,6 +356,7 @@ Kirigami.ScrollablePage {
 
                 Controls.Label {
                     visible: !row.isGroupHeader
+                    textFormat: Text.PlainText
                     text: row.pending ? "pending" : row.verdict
                     color: page.verdictColor(row.verdict)
                     Layout.alignment: Qt.AlignVCenter
@@ -360,6 +364,7 @@ Kirigami.ScrollablePage {
 
                 Controls.Label {
                     visible: row.isGroupHeader
+                    textFormat: Text.PlainText
                     text: row.groupLabel
                     font.bold: true
                     color: row.groupPending > 0 ? Kirigami.Theme.neutralTextColor : Kirigami.Theme.textColor
@@ -505,10 +510,12 @@ Kirigami.ScrollablePage {
                 Layout.fillWidth: true
                 Controls.Label {
                     Kirigami.FormData.label: "Host"
+                    textFormat: Text.PlainText
                     text: page.inspectHost
                 }
                 Controls.Label {
                     Kirigami.FormData.label: "Destination IP"
+                    textFormat: Text.PlainText
                     text: page.inspectIp.length > 0 ? page.inspectIp : "unavailable"
                     elide: Text.ElideMiddle
                 }
@@ -518,15 +525,18 @@ Kirigami.ScrollablePage {
                 }
                 Controls.Label {
                     Kirigami.FormData.label: "Protocol"
+                    textFormat: Text.PlainText
                     text: page.inspectProtocol
                 }
                 Controls.Label {
                     Kirigami.FormData.label: "Verdict"
+                    textFormat: Text.PlainText
                     text: page.inspectPending ? "pending" : page.inspectVerdict
                     color: page.verdictColor(page.inspectVerdict)
                 }
                 Controls.Label {
                     Kirigami.FormData.label: "Matched rule"
+                    textFormat: Text.PlainText
                     text: page.inspectMatchedRuleDisplay
                     elide: Text.ElideMiddle
                 }

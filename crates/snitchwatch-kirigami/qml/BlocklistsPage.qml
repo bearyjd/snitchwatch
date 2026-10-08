@@ -129,12 +129,14 @@ Kirigami.ScrollablePage {
                     Layout.fillWidth: true
                     spacing: 0
                     Controls.Label {
+                        textFormat: Text.PlainText
                         text: row.displayName
                         font.bold: true
                         elide: Text.ElideRight
                         Layout.fillWidth: true
                     }
                     Controls.Label {
+                        textFormat: Text.PlainText
                         text: row.url
                         opacity: 0.7
                         font: Kirigami.Theme.smallFont
@@ -150,6 +152,7 @@ Kirigami.ScrollablePage {
                 }
 
                 Controls.Label {
+                    textFormat: Text.PlainText
                     text: row.status
                     color: page.statusColor(row.status)
                     Layout.alignment: Qt.AlignVCenter
@@ -183,6 +186,7 @@ Kirigami.ScrollablePage {
                 Layout.fillWidth: true
                 Controls.Label {
                     Kirigami.FormData.label: "URL"
+                    textFormat: Text.PlainText
                     text: page.inspectUrl
                     elide: Text.ElideMiddle
                 }
@@ -192,17 +196,20 @@ Kirigami.ScrollablePage {
                 }
                 Controls.Label {
                     Kirigami.FormData.label: "Status"
+                    textFormat: Text.PlainText
                     text: page.inspectStatus
                     color: page.statusColor(page.inspectStatus)
                 }
                 Controls.Label {
                     Kirigami.FormData.label: "Last updated"
                     visible: page.inspectLastUpdated.length > 0
+                    textFormat: Text.PlainText
                     text: page.inspectLastUpdated
                 }
                 Controls.Label {
                     Kirigami.FormData.label: "Last failure"
                     visible: page.inspectStatus === "failed" && page.inspectLastFailureReason.length > 0
+                    textFormat: Text.PlainText
                     text: page.inspectLastFailureReason
                     color: Kirigami.Theme.negativeTextColor
                     wrapMode: Text.Wrap
@@ -240,6 +247,7 @@ Kirigami.ScrollablePage {
                 delegate: Controls.Label {
                     required property string host
                     width: ListView.view ? ListView.view.width : implicitWidth
+                    textFormat: Text.PlainText
                     text: host
                 }
             }
