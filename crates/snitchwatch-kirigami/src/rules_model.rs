@@ -240,13 +240,14 @@ impl qobject::RulesModel {
             ROLE_SOURCE => {
                 let source = match rule.source() {
                     RuleSource::User => "user",
+                    RuleSource::Profile => "profile",
                     RuleSource::Blocklist { .. } => "blocklist",
                 };
                 QVariant::from(&QString::from(source))
             }
             ROLE_BLOCKLIST_ID => {
                 let id = match rule.source() {
-                    RuleSource::User => String::new(),
+                    RuleSource::User | RuleSource::Profile => String::new(),
                     RuleSource::Blocklist { list_id } => list_id,
                 };
                 QVariant::from(&QString::from(&id))

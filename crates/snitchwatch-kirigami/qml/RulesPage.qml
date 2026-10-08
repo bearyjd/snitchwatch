@@ -104,7 +104,8 @@ Kirigami.ScrollablePage {
     }
 
     function sourceLabel(source) {
-        return source === "blocklist" ? "Blocklist rules" : "User rules";
+        if (source === "blocklist") return "Blocklist rules";
+        return source === "profile" ? "Profile rules" : "User rules";
     }
 
     // The model's JSON summary of the hit counts; null until the bridge has

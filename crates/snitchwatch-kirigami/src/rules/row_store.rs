@@ -25,6 +25,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use snitchwatch_bridge::profiles::materializer::PROFILE_BAND_PREFIX;
 use snitchwatch_bridge::ws_messages::ServerMessage;
 
 /// The `z00-blocklist:<list_id>:<kind>` filename band a subscribed
@@ -92,13 +93,18 @@ pub struct Rule {
     pub deletable: Option<bool>,
 }
 
-/// Where a rule originated: authored directly by the user, or installed for
-/// a subscribed blocklist (the `z00-blocklist:<id>:` band, or the legacy
+/// Where a rule originated: authored directly by the user, installed for a
+/// network profile (the `850-profile:` band), or installed for a subscribed
+/// blocklist (the `z00-blocklist:<id>:` band, or the legacy
 /// `900-blocklist:<id>:` band during a migration window).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuleSource {
     User,
-    Blocklist { list_id: String },
+    /// A network profile's rule, in the bridge's `850-profile:` band.
+    Profile,
+    Blocklist {
+        list_id: String,
+    },
 }
 
 impl Rule {
@@ -131,6 +137,7 @@ impl Rule {
             Some(rest) => RuleSource::Blocklist {
                 list_id: rest.split(':').next().unwrap_or("").to_string(),
             },
+            None if self.name.starts_with(PROFILE_BAND_PREFIX) => RuleSource::Profile,
             None => RuleSource::User,
         }
     }
@@ -333,6 +340,7 @@ pub fn found_rule_json(store: &RulesStore, name: &str) -> Option<String> {
     let rule = store.row(idx)?;
     let (source, blocklist_id) = match rule.source() {
         RuleSource::User => ("user", String::new()),
+        RuleSource::Profile => ("profile", String::new()),
         RuleSource::Blocklist { list_id } => ("blocklist", list_id),
     };
     let found = FoundRule {
@@ -743,6 +751,25 @@ mod tests {
         assert_eq!(parsed["source"], "blocklist");
         assert_eq!(parsed["blocklistId"], "ads");
         assert_eq!(parsed["action"], "deny");
+    }
+
+    /// A profile's rule is labelled as one, in the list and the inspector,
+    /// rather than as the user's own.
+    #[test]
+    fn profile_band_rules_are_labelled_profile_rules() {
+        let name = "850-profile:home:0001-allow-dns";
+        let r = rule(name, true, "allow");
+        assert_eq!(r.source(), RuleSource::Profile);
+        assert!(!r.is_blocklist_sourced());
+        let mut s = RulesStore::new();
+        s.apply(&ServerMessage::SetRules {
+            rules: vec![serde_json::to_value(r).unwrap()],
+        });
+        let parsed: serde_json::Value =
+            serde_json::from_str(&found_rule_json(&s, name).unwrap()).unwrap();
+        assert_eq!(parsed["source"], "profile");
+        assert_eq!(parsed["blocklistId"], "");
+        assert_eq!(rule("849-mine", true, "allow").source(), RuleSource::User);
     }
 
     #[test]

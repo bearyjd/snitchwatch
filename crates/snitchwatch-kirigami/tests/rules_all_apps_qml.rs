@@ -250,6 +250,12 @@ Window {
                 probeWindow.check(rulesModel.legacyHostOnlyCount === 0 && !page.header.visible,
                                   "notice stays without flagged rules");
 
+                // A profile's rules are labelled as such (Source, sections).
+                probeWindow.check(page.sourceLabel("profile") === "Profile rules"
+                                  && page.sourceLabel("user") === "User rules"
+                                  && page.sourceLabel("blocklist") === "Blocklist rules",
+                                  "source labels");
+
                 // Issue #61: what the list leaves out is said under the title.
                 rulesModel.applyServerMessageJson(JSON.stringify({
                     action: "rulesNotShown", tooLarge: 2 }));
