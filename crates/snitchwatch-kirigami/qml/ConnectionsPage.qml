@@ -550,6 +550,9 @@ Kirigami.ScrollablePage {
         page.inspectMatchedRule = row.matchedRule;
         page.inspectMatchedRuleDisplay = row.matchedRuleDisplay;
         page.applyRowDetails(row.rowId);
+        // The row may be a stale pending one, and with the connection already
+        // down no `ok` change follows to catch it.
+        page.recheckInspectedRow();
         inspector.open();
     }
 

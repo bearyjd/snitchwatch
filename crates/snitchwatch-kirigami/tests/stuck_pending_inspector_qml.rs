@@ -231,6 +231,16 @@ Window {
                 probeWindow.insertPending("2:7");
                 probeWindow.check(probeWindow.withdrawn() && page.inspectId === "1:7",
                                   "reconnect: the old prompt was revived by the new session");
+                probeWindow.send({ action: "clearConnectionRows" });
+
+                // Opening on a stale pending row while the connection is already
+                // down: no `ok` transition follows, so opening must check too.
+                probeWindow.insertPending("1:9");
+                feedStub.ok = false;
+                probeWindow.openOn("1:9");
+                probeWindow.check(probeWindow.withdrawn(),
+                                  "open while down: a verdict is offered with no connection");
+                feedStub.ok = true;
 
                 if (probeWindow.failures.length > 0) {
                     throw new Error(probeWindow.failures.join("; "));
