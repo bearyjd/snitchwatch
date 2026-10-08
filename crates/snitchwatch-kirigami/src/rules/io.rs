@@ -19,6 +19,11 @@ use std::path::Path;
 /// Largest import file read, the bridge's document cap.
 pub const MAX_IMPORT_FILE_BYTES: usize = snitchwatch_bridge::rule_io::MAX_DOCUMENT_BYTES;
 
+/// The import limit in words. An exported rule takes about 850 bytes when it
+/// names a program, host and port, and about 400 when it names only a host.
+const SIZE_LIMIT: &str = "This file is too large to import. Snitchwatch imports files of up \
+     to 960 KiB, which is about 1,000 to 2,000 rules.";
+
 /// Why a file wasn't read or written. Fixed text: nothing echoes the file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileError {
@@ -36,7 +41,7 @@ impl FileError {
         match self {
             Self::NotLocal => "Choose a file on this computer.",
             Self::NotAFile => "That isn't a regular file.",
-            Self::TooLarge => "This file is too large to import (the limit is 960 KiB).",
+            Self::TooLarge => SIZE_LIMIT,
             Self::Unreadable => "The file couldn't be read.",
             Self::NotJson => "This file isn't valid JSON, so it isn't a Snitchwatch rules file.",
             Self::NotWritten => "The file couldn't be saved there.",
@@ -313,7 +318,8 @@ pub fn export_summary(rules: usize, omitted: &OmittedCounts, bytes: usize) -> St
     }
     if bytes > MAX_IMPORT_FILE_BYTES {
         summary.push_str(
-            " This file is too large to import back into Snitchwatch (the limit is 960 KiB).",
+            " This file is too large to import back into Snitchwatch: imports are limited to \
+             960 KiB, about 1,000 to 2,000 rules.",
         );
     }
     summary

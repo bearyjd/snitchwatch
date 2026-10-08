@@ -91,6 +91,12 @@ fn a_request_over_the_bridge_message_cap_is_not_sent() {
 
 #[test]
 fn errors_are_fixed_text() {
+    // The over-cap refusal says how much fits, in rules, not only bytes.
+    let too_large = FileError::TooLarge.describe();
+    assert!(
+        too_large.contains("960 KiB") && too_large.contains("1,000 to 2,000 rules"),
+        "{too_large}"
+    );
     for error in [
         FileError::NotLocal,
         FileError::NotAFile,
@@ -240,6 +246,7 @@ fn outcomes_and_summaries_are_plain_sentences() {
     assert!(summary.contains("3 rules weren't exported"), "{summary}");
     let large = export_summary(1, &OmittedCounts::default(), MAX_IMPORT_FILE_BYTES + 1);
     assert!(large.contains("too large to import back"), "{large}");
+    assert!(large.contains("1,000 to 2,000 rules"), "{large}");
 }
 
 #[test]

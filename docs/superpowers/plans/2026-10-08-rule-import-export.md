@@ -510,6 +510,44 @@ Tower VM checks:
   - `ws_server.rs` `pump_authenticated`/`ws_handler` (size cap);
   - `RulesPage.qml` header, with #44 Part B, P2.6 and P2.1.
 
+## Implementation notes (2026-10-08)
+
+Decided while implementing, against the merged code (base `1c3615c`):
+
+- **X5. Document cap: 960 KiB, not 8 MiB** (orchestrator call, logged for
+  the owner). `ws_handler` already caps every client message at
+  `MAX_CLIENT_MESSAGE_BYTES` = 1 MiB (#45 PR A), and a security limit isn't
+  raised for this. `rule_io::MAX_DOCUMENT_BYTES` = 1 MiB − 64 KiB envelope
+  slack. An exported rule takes about 850 bytes (program, host and port) or
+  400 (host only), so a file holds about 1,000 to 2,000 rules; the GUI's
+  refusal and the export summary say so. `pump_authenticated` still drops
+  an over-cap frame before parsing it.
+- **Network aliases are refused.** The merged `validate_operator` refuses
+  `LAN`/`MULTICAST` (the bridge can't see the daemon host's alias file), and
+  `DaemonCommands::send` refuses what it refuses. The alias tests became
+  "refused through the Import path".
+- **Match-all is refused.** A rule whose only condition is `true`, or a list
+  of only `true`, is refused on import; `true` next to a narrowing condition
+  is fine. A `/0` network counts as narrowing.
+- **`SendError` has six variants.** `ReservedName` and `RefusedOperator` are
+  reported as refused, like `InvalidRuleName`.
+- **Protocol additions:** `RulesImportRefused { reason }` (preview or apply
+  refused as a whole) and `noAnswer` in `RulesImportResult`.
+- **Export also leaves out rules the import would refuse** (aliases, `true`,
+  hash conditions), counted per category. `source.daemonVersion` is left
+  empty: the bridge doesn't keep the daemon version.
+- **Import never shortens what it shows:** every condition is shown in full;
+  hidden characters are stripped from the display and flagged.
+- **Buttons aren't gated on an unknown rule list:** the GUI can't tell it
+  from an empty list (`withdraw` sends an empty `SetRules`); the bridge's
+  answer is shown instead.
+- **`SetRules` is coalesced during an apply** (`RulesSync::hold_publishes`):
+  one full list per confirmed rule would cost O(n²) serialization in every
+  GUI. The user's own toggles show once the apply ends.
+- **Tests:** the bridge integration tests are their own target
+  (`tests/rules_io_test.rs`); the busy queue and the expiry-tick staleness
+  are unit tests against a real `DaemonCommands`.
+
 ## OWNER QUESTIONS
 
-None. X1–X4 are decided at the top of this plan.
+None. X1–X4 are decided at the top of this plan; X5 is logged above.

@@ -84,7 +84,10 @@ pub enum DocumentError {
 impl DocumentError {
     pub fn describe(self) -> &'static str {
         match self {
-            Self::TooLarge => "This file is too large to import (the limit is 960 KiB).",
+            Self::TooLarge => {
+                "This file is too large to import. Snitchwatch imports files of up to 960 KiB, \
+                 which is about 1,000 to 2,000 rules."
+            }
             Self::NotJson => "This file isn't valid JSON.",
             Self::NotRulesFile => "This isn't a Snitchwatch rules file.",
             Self::Newer => "This file was made by a newer Snitchwatch.",
