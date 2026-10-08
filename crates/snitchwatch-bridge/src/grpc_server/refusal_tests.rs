@@ -259,3 +259,25 @@ fn verdict_not_remembered_round_trips_via_json() {
         notice
     );
 }
+
+/// #44 security review S3: the pending notice's process path reaches every
+/// desktop notifier body, and freedesktop servers render markup there.
+#[tokio::test]
+async fn the_pending_notice_carries_a_display_safe_process_path() {
+    let asked = ask_and_resolve(
+        kernel_connection("/tmp/<b>evil</b>\x1b[31m\u{202e}"),
+        Verdict::Allow,
+        VerdictDuration::Once,
+        VerdictScope::ThisHost,
+    )
+    .await;
+    let process = asked
+        .notices
+        .iter()
+        .find_map(|n| match n {
+            Notice::Pending { process, .. } => Some(process.clone()),
+            _ => None,
+        })
+        .expect("a pending notice");
+    assert_eq!(process, "/tmp/&lt;b&gt;evil&lt;/b&gt;[31m");
+}

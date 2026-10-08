@@ -226,12 +226,6 @@ impl UiService {
         let _ = self.diagnostics_ctx.set(ctx);
     }
 
-    /// Publish `TrayState::RecentBlock` and schedule its own revert after
-    /// [`RECENT_BLOCK_TTL`]. If a second block happens before the first's
-    /// timer fires, the first's timer becomes a no-op (its captured
-    /// generation no longer matches) — the newer block's own timer owns the
-    /// eventual revert, so the tray never flickers back to a stale display
-    /// mid-block.
     /// The `AskRule` reply for a resolved verdict.
     ///
     /// A one-shot reply is deliberately absent from Rules. Every remembered
@@ -287,6 +281,12 @@ impl UiService {
         once_rule(resolution.verdict, resolution.scope, conn, now_secs)
     }
 
+    /// Publish `TrayState::RecentBlock` and schedule its own revert after
+    /// [`RECENT_BLOCK_TTL`]. If a second block happens before the first's
+    /// timer fires, the first's timer becomes a no-op (its captured
+    /// generation no longer matches) — the newer block's own timer owns the
+    /// eventual revert, so the tray never flickers back to a stale display
+    /// mid-block.
     fn publish_recent_block(&self, what: String) {
         let generation = self.block_generation.fetch_add(1, Ordering::SeqCst) + 1;
         self.tray_pub.set(TrayState::RecentBlock {
@@ -456,9 +456,11 @@ impl Ui for UiService {
             let _ = self
                 .broadcast
                 .send(ServerMessage::InsertConnectionRows { rows: vec![row] });
+            // Every desktop notifier puts this in a body that freedesktop
+            // servers render as markup (#44 security review S3).
             self.notice_bus.send(crate::notice::Notice::Pending {
                 row_id: ask_id,
-                process: conn.process_path.clone(),
+                process: crate::translator::verdict::sanitize_for_display(&conn.process_path, 128),
             });
             receiver
         };
