@@ -1,4 +1,4 @@
-# Linux App Firewall + Bazzite Security Scanner — Handoff (updated 2026-10-08)
+# Linux App Firewall + Bazzite Security Scanner — Handoff (updated 2026-10-08, evening)
 
 > **Read this first if you're picking this repo up cold.** Everything below
 > the "Current status" section is the *original* handoff from 2026-07-04,
@@ -6,10 +6,91 @@
 > was decided and why, but stale as a status report. Trust this section for
 > "what's true today."
 
+## 2026-10-08 evening (current)
+
+`main` is at `9f5e2d6`. The overnight section below describes `90a032b`;
+everything here merged after it. No merged work is blocked on the owner.
+
+**Merged since `90a032b`, in order:**
+- #86: who holds the daemon's prompt slot.
+- #87: simulate-this-connection DNS host fix.
+- #88: owner decisions doc.
+- #91: a narrow packaged allow rule for the system bridge's blocklist
+  downloads:
+  `packaging/bluebuild/files/system/etc/opensnitchd/rules/000-snitchwatch-bridge-fetch.json`.
+- #90: profile/blocklist store hardening.
+- #89: rule import/export with a dry-run preview (P2.7).
+- #93: pausing lets waiting connections through once (#78).
+- #95: test hotfix. #96: flaky tests.
+- #94: rule hit counts saved across restarts (P2.6 part 1).
+- #98: prompt-slot C, a 30 s auto-answer with `DefaultAction`, and Decide
+  later.
+- #99: rule editor with import safety checks (P2.1).
+- #103: `opensnitch.service` in packaging (#92); no test mutates process env
+  (#97).
+- #100: answer a waiting prompt from its notification (prompt-slot B).
+- #104: profiles enforced (#46 Part 2); manual choice kept per network (#82).
+- #108: connections decided by the daemon's `DefaultAction` are shown (E3).
+  It needs bazzite-tower's daemon fork. The marker is rule name `""` plus
+  description `snitchwatch:default-action`. Plan:
+  `docs/superpowers/plans/2026-10-08-default-applied-events.md`.
+- #101: unused/shadowed rule badges (P2.6 part 2).
+- #107: blocklist follow-ups (#73); hard 4,000,000 saved-hosts bound (#67).
+- #112: the notification fix from the tower r11 VM run. The pending notice is
+  posted when the window is hidden later; the notice is resident; GUI logs
+  are reachable (recipe: "GUI logs from a Flatpak run" in
+  `packaging/flatpak/README.md`).
+- #105: recommended rules for background services, opt-in (prompt-slot D).
+- #111: Make-a-rule follow-ups.
+- #106: Rules page follow-ups (#102, #64, #61).
+
+**Closed today (among others):** #46, #73, #78, #82, #92, #97, #102, #64, #61.
+
+**Tower (`bazzite-tower`, a separate repo and session).** PR numbers in this
+block are tower's, not this repo's.
+- VM runs r10 and r11 passed. r11's one finding: #100's notification buttons
+  didn't answer. #112 fixed that.
+- Issue A (no notice posted after the window raise) is root-caused and fixed.
+  Issue B (the click) is hardened and instrumented, but its root cause is
+  unconfirmed, pending r12.
+- The r12 head is Snitchwatch `9f5e2d6` plus tower PRs #89 (E2
+  drop-while-busy, E3 events) and #91 (loadRule ValidName).
+- Merging tower PRs #86-#91 is the owner's call. Nothing in this repo depends
+  on them being merged.
+
+**Owner decisions pending: #117.** S6 (DNS rule for systemd-resolved), N3
+(the "Unused" window across restarts), #65 (rule-file reloads),
+`InterceptUnknown`, and orchestrator calls to revisit. Nothing merged is
+blocked on them.
+
+**Follow-up issues, not started:**
+- #109 (blocklists), #110 (flaky tests under load), #113 (recommended rules),
+  #116 (tidy leftovers).
+- #114: hidden empty placeholders on four pages, all-apps hint escaping,
+  remembered-answer twin rows.
+- #115: rules cache and Rules page, Make-a-rule nits, connections exact
+  action compare.
+- #35 and #17 remain pre-existing open security/diagnostics issues.
+
+**Behaviour changes worth knowing:**
+- The per-user bridge (TCP) no longer offers leftover blocklist rule removal
+  until #35 retires TCP.
+- Unfocusing a visible window while a prompt waits now posts the pending
+  notice.
+- Blocklist entry pages go only to the GUI that asked.
+- Recommended rules are off by default and installed only by the system
+  bridge.
+
+**Dev tip:** after a change to Rust/Qt types, qproperties or invokables, the
+Kirigami QML tests can segfault on stale AOT build artifacts. Run
+`cargo clean -p snitchwatch-kirigami` first.
+
 ## 2026-10-08 overnight + owner decisions
 
-`main` is at `90a032b`. The "Previously (2026-10-07)" section below predates
-everything here (it still calls #39 a draft; #39 merged as `670f42c`).
+Earlier on 2026-10-08, `main` was at `90a032b`. This section is history; the
+"2026-10-08 evening (current)" section above is the current status. The
+"Previously (2026-10-07)" section below predates everything here (it still
+calls #39 a draft; #39 merged as `670f42c`).
 
 **Merged:** #68-#71 earlier (match-all rule refusals, #45 PR A blocklist
 plumbing, GUI-regexp refusal, #44 app-bound answers), then #74 (inline Deny
