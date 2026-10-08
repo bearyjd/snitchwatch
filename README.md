@@ -202,14 +202,41 @@ just reached from this shell's own **Settings & Diagnostics** page instead.
 
 ## M4 — Subscribe to a blocklist
 
-Snitchwatch ships its own blocklist subscription manager. Today it downloads
-and stores lists, but **installs no deny rules in opensnitchd yet** (issue #45
-PR B): the Blocklists page says "Blocking isn't available yet" on every list.
+Snitchwatch ships its own blocklist subscription manager (issue #45). With
+the **system** Snitchwatch service (`snitchwatch-system-bridge.service`), each
+subscribed list becomes one opensnitchd deny rule per kind,
+`z00-blocklist:<id>:domains` (`lists.domains`) and, for lists with IPv4
+entries, `z00-blocklist:<id>:ips` (`lists.ips`), reading files the bridge
+writes under `<state>/blocklists/<id>/` (directories 0700, files 0600; the
+path contract is in `crates/snitchwatch-bridge/src/blocklists/list_dir.rs`).
+**The blocklist wins:** a matching deny beats every allow that isn't a
+`precedence` rule. Hosts match by exact name, not subdomains. IPs on local,
+private, CGNAT, benchmarking, multicast or reserved networks are never blocked, and lists
+past 2,000,000 hosts in total (in subscription order) get no rule.
+
+- A per-user bridge saves subscriptions but installs **no** blocklist rule:
+  root opensnitchd would read list files any of your apps could replace.
+
+- A list reads "Rule installed" only once opensnitchd answered `OK` to its
+  rule(s) or already holds them unchanged; anything else (no daemon, a
+  refusal, no state directory, a per-user bridge) reads "Not enforced" or
+  "Not confirmed yet" with the reason, and the page warns while any list
+  does. Refused or unanswered lists are retried on every refresh tick and
+  daemon reconnect.
+  "Rule installed" still isn't proof the daemon loaded the hosts: check
+  `journalctl -u opensnitchd | grep "domains loaded"`.
+- These rules are read-only on the Rules page ("Managed on the Blocklists
+  page"); no GUI can add, change or delete a rule named `z00-blocklist:…`.
 
 - Subscriptions persist in `blocklists.sqlite3` (mode 0600) under the state
   directory: `$STATE_DIRECTORY` (set by both systemd units), else
   `SNITCHWATCH_STATE_DIR`. With neither, they are kept in memory only and the
-  page says so.
+  page says so. Profiles and the active-profile choice persist the same way,
+  in `profiles.sqlite3` (issue #46); profiles are not applied to the
+  firewall yet, and the Profiles page says so. A manual choice can still be
+  replaced at startup: the bridge's first network reading after a restart
+  counts as a network change, so if a different profile matches the current
+  network, auto-switch activates it.
 - The bridge fetches only `https://` URLs, including every redirect, and
   never a loopback, link-local, carrier-grade NAT or other reserved address
   (LAN addresses are allowed for now). There is no `http://` or `file://`

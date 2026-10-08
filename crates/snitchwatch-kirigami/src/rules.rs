@@ -6,8 +6,9 @@
 //!   program (issue #44, second half).
 //! - [`simulator`]: pure, Qt-free rule-match simulator (Little-Snitch-parity
 //!   "rule-match diagnostics" simulate panel) — evaluates a candidate
-//!   process/host/port/protocol against `row_store`'s cached rules using
-//!   opensnitchd's own precedence semantics.
+//!   connection against `row_store`'s cached rules the way opensnitchd
+//!   v1.8.0 does: every operand it matches on, its rule order, and its
+//!   comparison semantics. Inputs left blank are reported as not evaluated.
 //! - The cxx-qt `QAbstractListModel` wrapper that binds this to QML lives in
 //!   the top-level [`crate::rules_model`] module (kept flat under `src/`
 //!   with the other `#[cxx_qt::bridge]` files, per the same cxx-qt-build

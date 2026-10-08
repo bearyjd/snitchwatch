@@ -18,3 +18,4 @@ regex = { workspace = true }
 
 [dev-dependencies]
 snitchwatch-bridge = { path = "../../crates/snitchwatch-bridge" }
+tempfile = { workspace = true }

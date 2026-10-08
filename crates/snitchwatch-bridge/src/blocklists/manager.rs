@@ -14,12 +14,11 @@ use tracing::{error, info, warn};
 use crate::blocklists::fetcher::{
     validate_subscription_url, BlocklistFetch, FetchOutcome, HttpsFetcher, MAX_URL_LEN,
 };
-use crate::blocklists::materializer::materialize_batch;
 use crate::blocklists::store::{BlocklistStore, FetchStatus, StoreError, Subscription};
 use crate::blocklists::{
-    derive_display_name, derive_id, BlocklistEvent, Enforcement, NoopRuleSink, RuleSink,
-    FAILED_RETRY_SECS, MAX_SUBSCRIPTIONS, NOT_DOWNLOADED_REASON, NO_RULE_SINK_REASON,
-    STORE_ERROR_REASON,
+    derive_display_name, derive_id, BlocklistEvent, Enforcement, NoopRuleSink, NotInstalled,
+    RuleSink, FAILED_RETRY_SECS, MAX_SUBSCRIPTIONS, NOT_DOWNLOADED_REASON, STORE_ERROR_REASON,
+    UNREADABLE_STORE_REASON,
 };
 use crate::ws_messages::{StorageStatus, BLOCKLIST_ENTRIES_PAGE_MAX};
 
@@ -42,33 +41,54 @@ pub struct BlocklistsManager {
     enforcement: Mutex<HashMap<String, Enforcement>>,
     /// Mirror of the subscriptions table, by id.
     subscriptions: Mutex<BTreeMap<String, Subscription>>,
+    /// Ids in the order they were subscribed: the [`AGGREGATE_MAX_HOSTS`]
+    /// budget goes to the earliest lists.
+    order: Mutex<Vec<String>>,
+    /// Why the stored subscriptions couldn't be read at start. While set,
+    /// which lists to keep is unknown, so nothing is ever purged.
+    load_error: Option<String>,
 }
 
 impl BlocklistsManager {
     pub fn new(store: Arc<BlocklistStore>) -> Self {
         let (bus, _) = broadcast::channel(64);
-        let subscriptions = match store.list_subscriptions() {
-            Ok(subs) => subs.into_iter().map(|s| (s.id.clone(), s)).collect(),
+        let loaded = store
+            .list_subscriptions()
+            .and_then(|subs| Ok((subs, store.subscription_order()?)));
+        let (subscriptions, order, load_error) = match loaded {
+            Ok((subs, order)) => (
+                subs.into_iter().map(|s| (s.id.clone(), s)).collect(),
+                order,
+                None,
+            ),
             Err(e) => {
-                error!(error = %e, "blocklist store unreadable; starting with no subscriptions");
-                BTreeMap::new()
+                error!(error = %e, "blocklist store unreadable; no blocklist rule will be removed");
+                (BTreeMap::new(), Vec::new(), Some(e.to_string()))
             }
         };
-        Self {
+        let manager = Self {
             store,
             bus,
             fetcher: Arc::new(HttpsFetcher::new()),
-            rule_sink: Arc::new(NoopRuleSink),
+            rule_sink: Arc::new(NoopRuleSink::default()),
             storage: StorageStatus {
+                unreadable: false,
                 persistent: false,
                 reason: None,
             },
             enforcement: Mutex::new(HashMap::new()),
             subscriptions: Mutex::new(subscriptions),
-        }
+            order: Mutex::new(order),
+            load_error,
+        };
+        let storage = manager.storage.clone();
+        manager.with_storage_status(storage)
     }
 
-    /// Replace the default no-op rule sink with a real implementation.
+    /// Replace the default no-op rule sink: a [`daemon_sink::DaemonRuleSink`]
+    /// with a state directory, a `NoopRuleSink` saying why without one.
+    ///
+    /// [`daemon_sink::DaemonRuleSink`]: crate::blocklists::daemon_sink::DaemonRuleSink
     pub fn with_rule_sink(mut self, sink: Arc<dyn RuleSink>) -> Self {
         self.rule_sink = sink;
         self
@@ -82,9 +102,17 @@ impl BlocklistsManager {
     }
 
     /// Record whether [`store`](Self::store) outlives the bridge process. Sent
-    /// to GUIs with every `SetBlocklists`.
+    /// to GUIs with every `SetBlocklists`. A store that couldn't be read is
+    /// reported as such, whatever `storage` says.
     pub fn with_storage_status(mut self, storage: StorageStatus) -> Self {
-        self.storage = storage;
+        self.storage = match &self.load_error {
+            Some(e) => StorageStatus {
+                unreadable: true,
+                persistent: storage.persistent,
+                reason: Some(format!("Couldn't read the saved blocklists: {e}")),
+            },
+            None => storage,
+        };
         self
     }
 
@@ -113,9 +141,15 @@ impl BlocklistsManager {
         self.cache().contains_key(id)
     }
 
+    fn order(&self) -> MutexGuard<'_, Vec<String>> {
+        self.order
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     /// The subscription's enforcement state. Without a sink that installs
-    /// rules, every list is "Blocking isn't available yet", including after
-    /// a restart.
+    /// rules, every list reports the sink's reason, including after a
+    /// restart.
     pub fn enforcement(&self, id: &str) -> Enforcement {
         self.enforcement_map()
             .get(id)
@@ -124,13 +158,43 @@ impl BlocklistsManager {
     }
 
     fn default_enforcement(&self) -> Enforcement {
-        if self.rule_sink.installs_rules() {
-            Enforcement::Pending
-        } else {
-            Enforcement::NotEnforced {
-                reason: NO_RULE_SINK_REASON.to_string(),
-            }
+        match self.unavailable_reason() {
+            Some(reason) => Enforcement::NotEnforced { reason },
+            None => Enforcement::Pending,
         }
+    }
+
+    /// Why nothing is installed: an unreadable store (the size limit can't
+    /// count the rules already there), or a sink that installs nothing.
+    fn unavailable_reason(&self) -> Option<String> {
+        if self.load_error.is_some() {
+            return Some(UNREADABLE_STORE_REASON.to_string());
+        }
+        self.rule_sink.unavailable_reason()
+    }
+
+    fn installs_rules(&self) -> bool {
+        self.unavailable_reason().is_none()
+    }
+
+    /// Record a sink outcome (the caller tells GUIs).
+    fn record_install(&self, id: &str, outcome: &Result<(), NotInstalled>) {
+        let enforcement = match outcome {
+            Ok(()) => Enforcement::RuleInstalled { at: Utc::now() },
+            Err(e) if e.daemon_unavailable => {
+                warn!(%id, reason = %e.reason, "blocklist not confirmed");
+                Enforcement::Unconfirmed {
+                    reason: e.reason.clone(),
+                }
+            }
+            Err(e) => {
+                warn!(%id, reason = %e.reason, "blocklist not enforced");
+                Enforcement::NotEnforced {
+                    reason: e.reason.clone(),
+                }
+            }
+        };
+        self.enforcement_map().insert(id.to_string(), enforcement);
     }
 
     fn enforcement_map(&self) -> MutexGuard<'_, HashMap<String, Enforcement>> {
@@ -200,6 +264,7 @@ impl BlocklistsManager {
             return SubscribeOutcome::Refused("Couldn't save the subscription".to_string());
         }
         self.cache().insert(id.clone(), sub);
+        self.order().push(id.clone());
         let _ = self.bus.send(BlocklistEvent::SubscriptionsChanged);
         SubscribeOutcome::Added(id)
     }
@@ -227,13 +292,22 @@ impl BlocklistsManager {
         let _ = self.bus.send(BlocklistEvent::SubscriptionsChanged);
     }
 
+    /// Forget `id`, then delete its daemon rules and only then its files
+    /// (issue #45). A rule the daemon couldn't delete now is an orphan the
+    /// next [`reconcile`](Self::reconcile) deletes.
     pub async fn remove_subscription(&self, id: &str) -> anyhow::Result<()> {
         let owned = id.to_string();
         self.with_store(move |s| s.delete_subscription(&owned))
             .await?;
         self.cache().remove(id);
+        self.order().retain(|other| other != id);
         self.enforcement_map().remove(id);
         let _ = self.bus.send(BlocklistEvent::SubscriptionsChanged);
+        if self.installs_rules() {
+            if let Err(e) = self.rule_sink.remove_blocklist_rules(id).await {
+                warn!(%id, reason = %e.reason, "couldn't remove an unsubscribed list's rules");
+            }
+        }
         Ok(())
     }
 
@@ -301,7 +375,7 @@ impl BlocklistsManager {
                         error!(id = %updated.id, error = %e, "couldn't record a failed download")
                     }
                 }
-                if self.rule_sink.installs_rules() {
+                if self.installs_rules() {
                     self.enforcement_map()
                         .entry(updated.id.clone())
                         .or_insert_with(|| Enforcement::NotEnforced {
@@ -329,19 +403,19 @@ impl BlocklistsManager {
         updated.last_fetched_at = Some(now);
         updated.last_attempt_at = Some(now);
         updated.last_fetch_status = FetchStatus::Ok;
-        // Skipped while nothing can install rules: ~600 B per host for nothing.
-        let rules = self
-            .rule_sink
-            .installs_rules()
-            .then(|| materialize_batch(&updated.id, &hosts));
         let row = updated.clone();
         let count = hosts.len();
-        match self
-            .with_store(move |s| s.replace_entries_and_update(&row, &hosts))
+        // The hosts come back out of the blocking task for the sink, so up
+        // to `MAX_ENTRIES` strings are never cloned.
+        let hosts = match self
+            .with_store(move |s| {
+                s.replace_entries_and_update(&row, &hosts)
+                    .map(|ok| (ok, hosts))
+            })
             .await
         {
-            Ok(true) => {}
-            Ok(false) => return FetchStatus::Ok,
+            Ok((true, hosts)) => hosts,
+            Ok((false, _)) => return FetchStatus::Ok,
             Err(e) => {
                 error!(id = %updated.id, error = %e, "couldn't store a downloaded blocklist");
                 updated.entry_count = self.subscription(&updated.id).map_or(0, |s| s.entry_count);
@@ -357,20 +431,12 @@ impl BlocklistsManager {
                 });
                 return status;
             }
-        }
+        };
         let id = updated.id.clone();
         self.cache().insert(id.clone(), updated);
-        if let Some(rules) = rules {
-            let enforcement = match self.rule_sink.replace_blocklist_rules(&id, rules).await {
-                Ok(()) => Enforcement::RuleInstalled { at: Utc::now() },
-                Err(e) => {
-                    warn!(%id, error = %e, "rule sink push failed; entries cached but not enforced");
-                    Enforcement::NotEnforced {
-                        reason: e.to_string(),
-                    }
-                }
-            };
-            self.enforcement_map().insert(id.clone(), enforcement);
+        if self.installs_rules() {
+            let outcome = self.install(&id, hosts).await;
+            self.record_install(&id, &outcome);
         }
         let _ = self.bus.send(BlocklistEvent::EntriesChanged {
             subscription_id: id.clone(),
@@ -409,3 +475,6 @@ fn is_due(sub: &Subscription, now: DateTime<Utc>) -> bool {
         None => (now - attempt).num_seconds() >= FAILED_RETRY_SECS.min(sub.refresh_interval_secs),
     }
 }
+
+#[path = "manager_reconcile.rs"]
+mod reconcile;

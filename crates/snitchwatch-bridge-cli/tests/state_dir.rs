@@ -1,5 +1,6 @@
-//! The real binary writes `blocklists.sqlite3` only in its configured state
-//! directory, owner-only, and nowhere without one (issue #45).
+//! The real binary writes `blocklists.sqlite3` (issue #45) and
+//! `profiles.sqlite3` (issue #46) only in its configured state directory,
+//! owner-only, and nowhere without one.
 //!
 //! Every child runs with a cleared environment plus only what it needs: `PATH`,
 //! a temp `XDG_RUNTIME_DIR` and `current_dir`, a relative WS socket, an
@@ -16,7 +17,7 @@ use std::time::{Duration, Instant};
 
 const BIN: &str = env!("CARGO_BIN_EXE_snitchwatch-bridge-cli");
 const DEADLINE: Duration = Duration::from_secs(10);
-const DB: &str = "blocklists.sqlite3";
+const DBS: [&str; 2] = ["blocklists.sqlite3", "profiles.sqlite3"];
 
 /// Kills and reaps the child on drop, so a failed assertion never leaks a
 /// running bridge.
@@ -68,7 +69,7 @@ fn start_bridge(dir: &Path, extra: &[(&str, &Path)]) -> ChildGuard {
     }
 }
 
-/// Every `blocklists.sqlite3` under `root`.
+/// Every `blocklists.sqlite3` and `profiles.sqlite3` under `root`, sorted.
 fn databases(root: &Path) -> Vec<PathBuf> {
     let mut found = Vec::new();
     let mut pending = vec![root.to_path_buf()];
@@ -77,23 +78,30 @@ fn databases(root: &Path) -> Vec<PathBuf> {
             let path = entry.unwrap().path();
             if path.is_dir() {
                 pending.push(path);
-            } else if path.file_name().is_some_and(|n| n == DB) {
+            } else if path
+                .file_name()
+                .is_some_and(|n| DBS.iter().any(|db| n == *db))
+            {
                 found.push(path);
             }
         }
     }
+    found.sort();
     found
 }
 
 fn assert_only_database_in(root: &Path, state: &Path) {
-    let expected = state.canonicalize().unwrap().join(DB);
+    let state = state.canonicalize().unwrap();
+    let expected: Vec<PathBuf> = DBS.iter().map(|db| state.join(db)).collect();
     let found: Vec<PathBuf> = databases(root)
         .into_iter()
         .map(|p| p.canonicalize().unwrap())
         .collect();
-    assert_eq!(found, vec![expected.clone()]);
-    let mode = std::fs::metadata(&expected).unwrap().permissions().mode() & 0o777;
-    assert_eq!(mode, 0o600, "the database must be owner-only");
+    assert_eq!(found, expected);
+    for db in &expected {
+        let mode = std::fs::metadata(db).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "{} must be owner-only", db.display());
+    }
 }
 
 #[test]

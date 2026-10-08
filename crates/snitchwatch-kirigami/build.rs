@@ -19,6 +19,7 @@ fn main() {
             "qml/PendingDecisionSheet.qml",
             "qml/BlocklistsPage.qml",
             "qml/RulesPage.qml",
+            "qml/RuleSimulatorSheet.qml",
             "qml/ProfilesPage.qml",
             "qml/TrafficPage.qml",
             "qml/OnboardingPage.qml",
