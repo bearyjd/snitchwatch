@@ -24,6 +24,9 @@ Kirigami.ScrollablePage {
             Layout.fillWidth: true
             wrapMode: Text.WordWrap
             visible: page.model.hasProblem
+            // Failure details from the bridge's daemon and kernel checks
+            // (issue #51).
+            textFormat: Text.PlainText
             text: page.model.troubleshootingText
         }
 

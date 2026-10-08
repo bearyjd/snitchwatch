@@ -45,6 +45,8 @@ Kirigami.ApplicationWindow {
     // need explicitly named root properties to inject these objects without
     // accidentally self-binding a same-named page property.
     property var bridgeFeedRef: bridgeFeed
+    // Exposed for the headless probe (tests/honest_ui_main_banner_qml.rs).
+    property alias bridgeStatusLabel: bridgeStatusLabel
 
     // Core-loop connection model (Task 6). Owned here so its lifetime spans the
     // window; pages bind to it. Its live outbound feed is started in the
@@ -217,8 +219,11 @@ Kirigami.ApplicationWindow {
 
     // App-level bridge status. Hidden while the bridge is healthy; shows an
     // error banner over the current page if it failed to start. Floats above
-    // pageStack so it's visible on any tab.
-    Kirigami.InlineMessage {
+    // pageStack so it's visible on any tab. `statusText` carries the bridge
+    // runtime's own error message, so it sits in a PlainText label under the
+    // fixed-text message, never in it (issue #51: InlineMessage renders its
+    // text as markup).
+    ColumnLayout {
         id: bridgeBanner
         z: 999
         anchors {
@@ -227,9 +232,29 @@ Kirigami.ApplicationWindow {
             right: parent.right
             margins: Kirigami.Units.smallSpacing
         }
-        type: Kirigami.MessageType.Error
         visible: !bridgeFeed.ok
-        text: bridgeFeed.statusText
+        spacing: 0
+
+        Kirigami.InlineMessage {
+            Layout.fillWidth: true
+            visible: true
+            type: Kirigami.MessageType.Error
+            text: "Snitchwatch can't reach its background service. It keeps retrying."
+        }
+        Rectangle {
+            Layout.fillWidth: true
+            implicitHeight: bridgeStatusLabel.implicitHeight + Kirigami.Units.smallSpacing * 2
+            color: Kirigami.Theme.backgroundColor
+
+            Controls.Label {
+                id: bridgeStatusLabel
+                anchors.fill: parent
+                anchors.margins: Kirigami.Units.smallSpacing
+                wrapMode: Text.Wrap
+                textFormat: Text.PlainText
+                text: bridgeFeed.statusText
+            }
+        }
     }
 
     // Daemon/kernel readiness banner — distinct from bridgeBanner above:

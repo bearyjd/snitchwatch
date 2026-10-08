@@ -77,6 +77,8 @@ Kirigami.ScrollablePage {
                     }
 
                     Controls.Label {
+                        // From the GeoIP database file on disk (issue #51).
+                        textFormat: Text.PlainText
                         text: row.countryName
                         elide: Text.ElideRight
                         Layout.fillWidth: true
