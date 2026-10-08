@@ -1335,7 +1335,8 @@ mod tests {
 
     #[test]
     fn rule_name_for_neutralizes_the_process_path_but_keeps_its_basename() {
-        let name = rule_name_for(Verdict::Allow, "github.com", 443, "/opt/../evil dir/a b");
+        // Canonical (a `..` path is never bound, so it gets no program part).
+        let name = rule_name_for(Verdict::Allow, "github.com", 443, "/opt/evil dir/a b");
         assert!(!name.contains('/'), "no path separator may survive: {name}");
         assert!(!name.contains(' '), "{name}");
         assert!(

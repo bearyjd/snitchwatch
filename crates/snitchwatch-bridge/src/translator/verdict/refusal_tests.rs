@@ -5,7 +5,30 @@
 
 use super::*;
 
-const NOT_BINDABLE: [&str; 4] = ["", "Kernel connection", "curl", "bin/curl"];
+/// Not a program file a rule can be bound to: no path at all, the daemon's
+/// placeholder, comm / argv[0] fallbacks, and (security review S1) absolute
+/// strings that name no real executable or aren't `readlink`'s canonical form.
+const NOT_BINDABLE: [&str; 19] = [
+    "",
+    "Kernel connection",
+    "curl",
+    "bin/curl",
+    "/proc/self/exe",
+    "/proc/1234/exe",
+    "/proc/1234/fd/3",
+    "/memfd:payload",
+    "/dev/fd/3",
+    "/",
+    "/usr//bin/curl",
+    "/usr/./bin/curl",
+    "/usr/lib/../bin/curl",
+    "/usr/bin/..",
+    "/usr/bin/.",
+    "/usr/bin/",
+    "/usr/bin/curl\n",
+    "/usr/bin/\u{1b}[31mcurl",
+    "/usr/bin/cu\u{7f}rl",
+];
 const SCOPES: [VerdictScope; 3] = [
     VerdictScope::ThisHost,
     VerdictScope::AnyHostOnDomain,
@@ -42,7 +65,15 @@ fn only_an_absolute_path_is_bindable() {
     for path in NOT_BINDABLE {
         assert!(!is_bindable_process_path(path), "{path:?}");
     }
-    assert!(is_bindable_process_path("/usr/bin/curl"));
+    for path in [
+        "/usr/bin/curl",
+        "/usr/lib64/firefox/firefox",
+        "/opt/app-1.2/bin/run.sh",
+        "/app/bin/.hidden",
+        "/home/u/my prog",
+    ] {
+        assert!(is_bindable_process_path(path), "{path:?}");
+    }
 }
 
 #[test]
