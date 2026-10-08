@@ -231,7 +231,7 @@ fn every_operand_has_a_positive_and_a_negative_case() {
         case(
             "protocol - (tcp6 is not tcp)",
             simple("protocol", "tcp"),
-            base_with(|i| i.protocol = "tcp6".to_string()),
+            base_with(|i| i.protocol = Some("tcp6".to_string())),
             false,
         ),
         case(
@@ -524,5 +524,18 @@ fn a_blank_process_path_is_unknown_not_an_empty_path() {
     assert_eq!(result.unevaluated[0].operand, "process.path");
     assert!(result.unevaluated[0].missing.contains("process path"));
     // A rule that doesn't look at the path is still decided.
+    assert!(matched(simple("dest.host", "example.com"), &unknown));
+}
+
+#[test]
+fn a_blank_protocol_is_unknown_not_an_empty_one() {
+    let unknown = base_with(|i| i.protocol = None);
+    for data in ["tcp", ""] {
+        let result = run(simple("protocol", data), &unknown);
+        assert_eq!(result.matched_rule, None, "{data:?}");
+        assert_eq!(result.unevaluated.len(), 1, "{data:?}");
+        assert!(result.unevaluated[0].missing.contains("protocol"));
+    }
+    // A rule that doesn't look at it is still decided.
     assert!(matched(simple("dest.host", "example.com"), &unknown));
 }
