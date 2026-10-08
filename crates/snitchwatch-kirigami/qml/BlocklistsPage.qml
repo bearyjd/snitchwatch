@@ -62,6 +62,16 @@ Kirigami.ScrollablePage {
     // store). They keep blocking; the Rules page won't touch them, so this
     // page offers to remove them.
     readonly property int leftoverRules: page.model ? page.model.leftoverRules : 0
+    // Why nothing manages them, and how the last removal went (bridge text,
+    // shown in PlainText labels only).
+    readonly property string leftoverCause: page.model ? page.model.leftoverCause : ""
+    readonly property string leftoverReason: page.model ? page.model.leftoverReason : ""
+    // With an unreadable store the rules are probably lists the user still
+    // subscribes to: the page says so, and what removing them does.
+    readonly property bool leftoversProbablyWanted: page.leftoverCause === "store_unreadable"
+    function leftoverNoun() {
+        return page.leftoverRules === 1 ? "1 blocklist rule" : page.leftoverRules + " blocklist rules";
+    }
     property bool confirmingLeftover: false
 
     function statusColor(status) {
@@ -133,29 +143,52 @@ Kirigami.ScrollablePage {
                 textFormat: Text.PlainText
                 wrapMode: Text.Wrap
                 color: Kirigami.Theme.neutralTextColor
-                text: (page.leftoverRules === 1
+                text: page.leftoversProbablyWanted
+                    ? page.leftoverNoun() + " made by Snitchwatch "
+                      + (page.leftoverRules === 1 ? "is" : "are") + " in the firewall, and "
+                      + (page.leftoverRules === 1 ? "is" : "are") + " probably "
+                      + (page.leftoverRules === 1 ? "a list" : "lists") + " you still subscribe to: "
+                      + "Snitchwatch can't read its saved blocklists, so it isn't changing "
+                      + (page.leftoverRules === 1 ? "it" : "them") + ". Removing "
+                      + (page.leftoverRules === 1 ? "it" : "them") + " turns that blocking off "
+                      + "until Snitchwatch can read the saved lists again."
+                    : (page.leftoverRules === 1
                        ? "1 blocklist rule made by Snitchwatch is still in the firewall"
                        : page.leftoverRules + " blocklist rules made by Snitchwatch are still in "
                          + "the firewall")
-                    + ", but this service isn't managing " + (page.leftoverRules === 1 ? "it" : "them")
-                    + ", so " + (page.leftoverRules === 1 ? "it keeps" : "they keep")
-                    + " blocking the hosts of lists you may no longer have."
+                      + ", but this service isn't managing " + (page.leftoverRules === 1 ? "it" : "them")
+                      + ", so " + (page.leftoverRules === 1 ? "it keeps" : "they keep")
+                      + " blocking the hosts of lists you may no longer have."
             }
             Controls.Button {
                 objectName: "removeLeftovers"
                 visible: !page.confirmingLeftover
-                text: "Remove these rules"
+                text: page.leftoversProbablyWanted ? "Turn off these rules" : "Remove these rules"
                 icon.name: "edit-delete-remove"
                 onClicked: page.confirmingLeftover = true
+            }
+            // A removal that failed, or left some behind.
+            Controls.Label {
+                objectName: "leftoverReasonText"
+                Layout.fillWidth: true
+                visible: page.leftoverReason.length > 0
+                textFormat: Text.PlainText
+                wrapMode: Text.Wrap
+                color: Kirigami.Theme.negativeTextColor
+                text: page.leftoverReason
             }
             RowLayout {
                 visible: page.confirmingLeftover
                 spacing: Kirigami.Units.largeSpacing
                 Controls.Label {
+                    objectName: "leftoverConfirmText"
                     Layout.fillWidth: true
                     wrapMode: Text.Wrap
-                    text: "Remove them from the firewall? The hosts they blocked will no longer "
-                        + "be blocked."
+                    text: page.leftoversProbablyWanted
+                        ? "Turn them off? The hosts they block will no longer be blocked until "
+                          + "Snitchwatch can read its saved blocklists again."
+                        : "Remove them from the firewall? The hosts they blocked will no longer "
+                          + "be blocked."
                 }
                 Controls.Button {
                     objectName: "cancelRemoveLeftovers"

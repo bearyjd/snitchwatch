@@ -4,26 +4,29 @@
 //! the bridge's snapshot path) never wait on the store lock while a large
 //! list is being written. Store work runs on the blocking pool.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use tokio::sync::broadcast;
 use tracing::{error, info, warn};
 
 use crate::blocklists::fetcher::{
-    validate_subscription_url, BlocklistFetch, FetchOutcome, HttpsFetcher, MAX_URL_LEN,
+    validate_subscription_url, BlocklistFetch, HttpsFetcher, MAX_URL_LEN,
 };
 use crate::blocklists::leftover::LeftoverRules;
 use crate::blocklists::store::{
     BlocklistStore, EntriesPage, FetchStatus, StoreError, Subscription,
 };
 use crate::blocklists::{
-    derive_display_name, derive_id, thousands, BlocklistEvent, Enforcement, NoopRuleSink,
-    NotInstalled, RuleSink, AGGREGATE_MAX_HOSTS, FAILED_RETRY_SECS, MAX_SUBSCRIPTIONS,
-    NOT_DOWNLOADED_REASON, STORED_MAX_HOSTS, STORE_ERROR_REASON, UNREADABLE_STORE_REASON,
+    derive_display_name, derive_id, BlocklistEvent, Enforcement, NoopRuleSink, NotInstalled,
+    RuleSink, AGGREGATE_MAX_HOSTS, MAX_SUBSCRIPTIONS, PER_USER_REASON, STORED_MAX_HOSTS,
+    UNREADABLE_STORE_REASON,
 };
-use crate::ws_messages::{StorageStatus, BLOCKLIST_ENTRIES_PAGE_MAX};
+use crate::ws_messages::{
+    ReplyTo, StorageStatus, BLOCKLIST_ENTRIES_PAGE_MAX, LEFTOVER_CAUSE_NO_STATE_DIR,
+    LEFTOVER_CAUSE_PER_USER, LEFTOVER_CAUSE_STORE_UNREADABLE,
+};
 
 /// Result of [`BlocklistsManager::subscribe_url`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,18 +58,21 @@ pub struct BlocklistsManager {
     leftover: Option<LeftoverRules>,
     /// The leftover count GUIs were last told, so a change is announced once.
     leftover_announced: Mutex<Option<usize>>,
+    /// How the last removal of leftover rules went, when it did not fully
+    /// succeed, for the page to show under its button.
+    leftover_outcome: Mutex<Option<String>>,
     /// Lists the daemon refused: how often in a row, and when a refresh tick
     /// may try again (issue #73).
     refusals: Mutex<HashMap<String, backoff::Refusal>>,
-    /// The time of day, replaceable in tests.
-    clock: Clock,
     /// [`AGGREGATE_MAX_HOSTS`], lowered in tests.
     aggregate_cap: u64,
     /// [`STORED_MAX_HOSTS`], lowered in tests.
     stored_cap: u64,
+    /// Lists refused for room that a list removed since may have freed: the
+    /// next tick tries them again. In memory only: after a restart they wait
+    /// their normal interval.
+    waiting_for_room: Mutex<BTreeSet<String>>,
 }
-
-type Clock = Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>;
 
 impl BlocklistsManager {
     pub fn new(store: Arc<BlocklistStore>) -> Self {
@@ -101,10 +107,11 @@ impl BlocklistsManager {
             load_error,
             leftover: None,
             leftover_announced: Mutex::new(None),
+            leftover_outcome: Mutex::new(None),
             refusals: Mutex::new(HashMap::new()),
-            clock: Arc::new(Utc::now),
             aggregate_cap: AGGREGATE_MAX_HOSTS,
             stored_cap: STORED_MAX_HOSTS,
+            waiting_for_room: Mutex::new(BTreeSet::new()),
         };
         let storage = manager.storage.clone();
         manager.with_storage_status(storage)
@@ -130,13 +137,6 @@ impl BlocklistsManager {
     #[cfg(test)]
     pub(crate) fn with_stored_cap(mut self, cap: u64) -> Self {
         self.stored_cap = cap;
-        self
-    }
-
-    /// Replace the clock refusal backoff reads. Tests only.
-    #[cfg(test)]
-    pub(crate) fn with_clock(mut self, clock: Clock) -> Self {
-        self.clock = clock;
         self
     }
 
@@ -193,6 +193,12 @@ impl BlocklistsManager {
         self.cache().contains_key(id)
     }
 
+    fn waiting_for_room(&self) -> MutexGuard<'_, BTreeSet<String>> {
+        self.waiting_for_room
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     fn order(&self) -> MutexGuard<'_, Vec<String>> {
         self.order
             .lock()
@@ -243,8 +249,34 @@ impl BlocklistsManager {
         (!names.is_empty()).then_some(names.len())
     }
 
+    /// Why nothing manages the leftover rules: an unreadable store (they are
+    /// probably lists still subscribed to), a per-user service, or no state
+    /// directory. `None` when this bridge manages its rules.
+    pub fn leftover_cause(&self) -> Option<&'static str> {
+        if self.installs_rules() {
+            return None;
+        }
+        Some(if self.load_error.is_some() {
+            LEFTOVER_CAUSE_STORE_UNREADABLE
+        } else if self.rule_sink.unavailable_reason().as_deref() == Some(PER_USER_REASON) {
+            LEFTOVER_CAUSE_PER_USER
+        } else {
+            LEFTOVER_CAUSE_NO_STATE_DIR
+        })
+    }
+
+    /// How the last removal went, while there are still leftovers.
+    pub fn leftover_outcome(&self) -> Option<String> {
+        self.leftover_count()?;
+        self.leftover_outcome
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
     /// Delete the leftover rules, because the user asked. Does nothing while
-    /// this bridge manages its rules. Tells GUIs what is left.
+    /// this bridge manages its rules. Tells GUIs what is left, and, if some
+    /// stay, why.
     pub async fn remove_leftover_rules(&self) {
         if self.installs_rules() {
             warn!("asked to remove leftover blocklist rules while managing them; ignored");
@@ -253,14 +285,32 @@ impl BlocklistsManager {
         let Some(leftover) = &self.leftover else {
             return;
         };
-        match leftover.remove_all().await {
-            Ok(done) => info!(
-                removed = done.removed,
-                refused = done.refused,
-                "removed leftover blocklist rules"
-            ),
-            Err(e) => warn!(reason = %e.reason, "couldn't remove leftover blocklist rules"),
-        }
+        let outcome = match leftover.remove_all().await {
+            Ok(done) => {
+                info!(
+                    removed = done.removed,
+                    refused = done.refused,
+                    "removed leftover blocklist rules"
+                );
+                (done.refused > 0).then(|| {
+                    format!(
+                        "Removed {} rule(s); the firewall service refused to delete {}, which stay.",
+                        done.removed, done.refused
+                    )
+                })
+            }
+            Err(e) => {
+                warn!(reason = %e.reason, "couldn't remove leftover blocklist rules");
+                Some(format!(
+                    "The rules were not removed: {}.",
+                    e.reason.trim_end_matches('.')
+                ))
+            }
+        };
+        *self
+            .leftover_outcome
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = outcome;
         *self.leftover_announced() = self.leftover_count();
         let _ = self.bus.send(BlocklistEvent::SubscriptionsChanged);
     }
@@ -275,6 +325,13 @@ impl BlocklistsManager {
     /// were last told.
     pub(super) fn announce_leftover_change(&self) {
         let now = self.leftover_count();
+        if now.is_none() {
+            // Nothing left, so nothing to say about how removing it went.
+            *self
+                .leftover_outcome
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        }
         let mut told = self.leftover_announced();
         if *told != now {
             *told = now;
@@ -287,7 +344,7 @@ impl BlocklistsManager {
     fn record_install(&self, id: &str, outcome: &Result<(), NotInstalled>) {
         let enforcement = match outcome {
             Ok(()) => Enforcement::RuleInstalled { at: Utc::now() },
-            Err(e) if e.daemon_unavailable => {
+            Err(e) if e.daemon_unavailable || e.cleanup_pending => {
                 warn!(%id, reason = %e.reason, "blocklist not confirmed");
                 Enforcement::Unconfirmed {
                     reason: e.reason.clone(),
@@ -409,6 +466,8 @@ impl BlocklistsManager {
         self.order().retain(|other| other != id);
         self.enforcement_map().remove(id);
         self.forget_refusals(id);
+        self.waiting_for_room().remove(id);
+        self.retry_lists_refused_for_room();
         let _ = self.bus.send(BlocklistEvent::SubscriptionsChanged);
         if self.installs_rules() {
             if let Err(e) = self.rule_sink.release_blocklist_rules(id).await {
@@ -419,13 +478,22 @@ impl BlocklistsManager {
     }
 
     /// Ask the event pump for a page of `id`'s hosts (at most
-    /// [`BLOCKLIST_ENTRIES_PAGE_MAX`]), to be sent with `request_id`.
-    pub fn request_entries(&self, id: &str, offset: u64, limit: u32, request_id: Option<String>) {
+    /// [`BLOCKLIST_ENTRIES_PAGE_MAX`]), to be sent with `request_id` to
+    /// `reply`'s connection (everyone, with none).
+    pub fn request_entries(
+        &self,
+        id: &str,
+        offset: u64,
+        limit: u32,
+        request_id: Option<String>,
+        reply: Option<ReplyTo>,
+    ) {
         let _ = self.bus.send(BlocklistEvent::EntriesRequested {
             subscription_id: id.to_string(),
             offset,
             limit,
             request_id,
+            reply,
         });
     }
 
@@ -444,170 +512,11 @@ impl BlocklistsManager {
             .await?
             .ok_or_else(|| anyhow::anyhow!("unknown subscription: {id}"))
     }
-
-    /// Download `id` now and update the store, memory and GUIs. A failed
-    /// download keeps the cached entries.
-    pub async fn refresh_now(&self, id: &str) -> anyhow::Result<FetchStatus> {
-        let Some(mut sub) = self.subscription(id) else {
-            anyhow::bail!("unknown subscription: {id}");
-        };
-        // Saved before the download: a bridge killed mid-download or
-        // mid-parse backs off on restart instead of retrying at once.
-        sub.last_attempt_at = Some(Utc::now());
-        let row = sub.clone();
-        match self.with_store(move |s| s.update_subscription(&row)).await {
-            Ok(false) => anyhow::bail!("subscription removed: {id}"),
-            Ok(true) => {}
-            Err(e) => error!(%id, error = %e, "couldn't record a download attempt"),
-        }
-        self.cache().insert(sub.id.clone(), sub.clone());
-        let outcome = match self.fetcher.fetch(&sub.url).await {
-            FetchOutcome::Ok { hosts, .. } if self.over_stored_limit(&sub.id, hosts.len()) => {
-                FetchOutcome::Failed {
-                    reason: format!(
-                        "Saving this list would pass the limit of {} hosts across all lists",
-                        thousands(self.stored_cap)
-                    ),
-                }
-            }
-            outcome => outcome,
-        };
-        let now = Utc::now();
-        match outcome {
-            FetchOutcome::Ok { hosts, .. } => Ok(self.store_download(sub, hosts, now).await),
-            FetchOutcome::Failed { reason } => {
-                let mut updated = sub;
-                updated.last_attempt_at = Some(now);
-                updated.last_fetch_status = FetchStatus::Failed {
-                    reason: reason.clone(),
-                };
-                let row = updated.clone();
-                match self.with_store(move |s| s.update_subscription(&row)).await {
-                    Ok(false) => return Ok(updated.last_fetch_status),
-                    Ok(true) => {}
-                    Err(e) => {
-                        error!(id = %updated.id, error = %e, "couldn't record a failed download")
-                    }
-                }
-                if self.installs_rules() {
-                    self.enforcement_map()
-                        .entry(updated.id.clone())
-                        .or_insert_with(|| Enforcement::NotEnforced {
-                            reason: NOT_DOWNLOADED_REASON.to_string(),
-                        });
-                }
-                self.cache().insert(updated.id.clone(), updated.clone());
-                let _ = self.bus.send(BlocklistEvent::StatusChanged {
-                    subscription_id: updated.id.clone(),
-                });
-                warn!(id = %updated.id, %reason, "blocklist refresh failed; cache preserved");
-                Ok(FetchStatus::Failed { reason })
-            }
-        }
-    }
-
-    /// Whether saving `hosts` hosts for `id` would take the hosts saved in
-    /// all lists past [`STORED_MAX_HOSTS`]. `id`'s own old copy is replaced,
-    /// so only the other lists count.
-    fn over_stored_limit(&self, id: &str, hosts: usize) -> bool {
-        let others: u64 = self
-            .cache()
-            .values()
-            .filter(|s| s.id != id)
-            .map(|s| u64::try_from(s.entry_count).unwrap_or(0))
-            .sum();
-        others.saturating_add(hosts as u64) > self.stored_cap
-    }
-
-    async fn store_download(
-        &self,
-        sub: Subscription,
-        hosts: Vec<String>,
-        now: DateTime<Utc>,
-    ) -> FetchStatus {
-        let mut updated = sub;
-        updated.entry_count = hosts.len() as i64;
-        updated.last_fetched_at = Some(now);
-        updated.last_attempt_at = Some(now);
-        updated.last_fetch_status = FetchStatus::Ok;
-        let row = updated.clone();
-        let count = hosts.len();
-        // The hosts come back out of the blocking task for the sink, so up
-        // to `MAX_ENTRIES` strings are never cloned.
-        let hosts = match self
-            .with_store(move |s| {
-                s.replace_entries_and_update(&row, &hosts)
-                    .map(|ok| (ok, hosts))
-            })
-            .await
-        {
-            Ok((true, hosts)) => hosts,
-            Ok((false, _)) => return FetchStatus::Ok,
-            Err(e) => {
-                error!(id = %updated.id, error = %e, "couldn't store a downloaded blocklist");
-                updated.entry_count = self.subscription(&updated.id).map_or(0, |s| s.entry_count);
-                updated.last_fetched_at = None;
-                updated.last_fetch_status = FetchStatus::Failed {
-                    reason: STORE_ERROR_REASON.to_string(),
-                };
-                let status = updated.last_fetch_status.clone();
-                let id = updated.id.clone();
-                self.cache().insert(id.clone(), updated);
-                let _ = self.bus.send(BlocklistEvent::StatusChanged {
-                    subscription_id: id,
-                });
-                return status;
-            }
-        };
-        let id = updated.id.clone();
-        self.cache().insert(id.clone(), updated);
-        if self.installs_rules() {
-            // This list may have grown past what later lists left room for:
-            // take those off the daemon before this one's files change, so it
-            // never holds more than the limit, even for a moment.
-            self.demote_lists_past_the_limit(&id).await;
-            let outcome = self.install(&id, hosts).await;
-            self.record_install(&id, &outcome);
-        }
-        let _ = self.bus.send(BlocklistEvent::EntriesChanged {
-            subscription_id: id.clone(),
-        });
-        let _ = self.bus.send(BlocklistEvent::StatusChanged {
-            subscription_id: id.clone(),
-        });
-        info!(%id, count, "blocklist refreshed");
-        FetchStatus::Ok
-    }
-
-    /// Ids whose refresh interval elapsed, that were never downloaded, or
-    /// whose failed download is past its retry backoff.
-    pub fn due_subscription_ids(&self) -> Vec<String> {
-        let now = Utc::now();
-        self.cache()
-            .values()
-            .filter(|s| is_due(s, now))
-            .map(|s| s.id.clone())
-            .collect()
-    }
-}
-
-/// Never attempted: due. Last attempt succeeded: due after the refresh
-/// interval. Last attempt failed or never finished (the bridge stopped
-/// mid-download): due after the retry backoff.
-fn is_due(sub: &Subscription, now: DateTime<Utc>) -> bool {
-    let Some(attempt) = sub.last_attempt_at.or(sub.last_fetched_at) else {
-        return true;
-    };
-    let succeeded = sub
-        .last_fetched_at
-        .filter(|fetched| *fetched >= attempt && sub.last_fetch_status == FetchStatus::Ok);
-    match succeeded {
-        Some(fetched) => (now - fetched).num_seconds() >= sub.refresh_interval_secs,
-        None => (now - attempt).num_seconds() >= FAILED_RETRY_SECS.min(sub.refresh_interval_secs),
-    }
 }
 
 #[path = "manager_backoff.rs"]
 mod backoff;
 #[path = "manager_reconcile.rs"]
 mod reconcile;
+#[path = "manager_refresh.rs"]
+mod refresh;

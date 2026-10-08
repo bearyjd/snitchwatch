@@ -27,6 +27,15 @@ pub struct BlocklistSummary {
 /// Most hosts in one `SetBlocklistEntries` page (~260 KiB of JSON at most).
 pub const BLOCKLIST_ENTRIES_PAGE_MAX: u32 = 1000;
 
+/// [`ServerMessage::SetBlocklistLeftovers`](super::ServerMessage) `cause`:
+/// the saved subscriptions can't be read, so the rules are probably lists the
+/// user still subscribes to and the bridge dares not change them.
+pub const LEFTOVER_CAUSE_STORE_UNREADABLE: &str = "store_unreadable";
+/// `cause`: this service has no state directory to keep subscriptions in.
+pub const LEFTOVER_CAUSE_NO_STATE_DIR: &str = "no_state_dir";
+/// `cause`: a per-user service, which installs no blocklist rules.
+pub const LEFTOVER_CAUSE_PER_USER: &str = "per_user";
+
 /// [`BlocklistSummary::enforcement`]: not downloaded or pushed yet.
 pub const ENFORCEMENT_PENDING: &str = "pending";
 /// [`BlocklistSummary::enforcement`]: the daemon accepted the list's rule,

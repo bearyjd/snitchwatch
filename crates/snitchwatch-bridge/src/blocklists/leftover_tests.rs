@@ -111,3 +111,30 @@ async fn with_no_daemon_connected_nothing_is_sent() {
     assert!(err.daemon_unavailable);
     assert!(h.seen().is_empty());
 }
+
+/// A name the bridge could not send a delete for is not counted, or the page
+/// would offer to remove what removing can't.
+#[tokio::test]
+async fn a_rule_whose_delete_could_not_be_sent_is_not_counted() {
+    let h = Harness::new();
+    let mut unsendable = h.bridge_rule(ADS, ListKind::Domains);
+    unsendable.name = "z00-blocklist:ads/../domains".to_string();
+    let snapshot = vec![unsendable, h.bridge_rule(ADS, ListKind::Ips)];
+    let h = h.connect(Daemon::Accept, snapshot);
+    assert_eq!(
+        leftover(&h).names(),
+        Some(vec![format!("z00-blocklist:{ADS}:ips")])
+    );
+}
+
+/// Over the legacy TCP connection nothing is listed and nothing deleted.
+#[tokio::test]
+async fn over_tcp_nothing_is_listed_or_deleted() {
+    use crate::daemon_commands::{DaemonCommands, DaemonTransport};
+    let h = Harness::new().connect(Daemon::Accept, vec![user_rule("z00-blocklist:ads:domains")]);
+    let tcp = DaemonCommands::new(DaemonTransport::Tcp, h.rules.clone());
+    let leftover = LeftoverRules::new(tcp, h.rules.cache());
+    assert_eq!(leftover.names(), None);
+    assert!(leftover.remove_all().await.is_err());
+    assert!(h.seen().is_empty());
+}

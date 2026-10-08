@@ -6,24 +6,33 @@
 //! schedule says, and a success starts the schedule over; a daemon that
 //! doesn't answer is not a refusal and is retried every tick. The reason
 //! shown to the user says when the next try is.
+//!
+//! The schedule lives in memory and runs on the monotonic clock (tests pause
+//! it): a restart forgets it, so a list the daemon refuses is tried at the
+//! first pass of the new run and the schedule starts again from there.
 
-use chrono::{DateTime, Utc};
+use std::time::Duration;
+
+use tokio::time::Instant;
 
 use super::BlocklistsManager;
 use crate::blocklists::{NotInstalled, NO_HOSTS_REASON, REFUSAL_BACKOFF_MINUTES};
+
+/// A refresh tick comes every 15 minutes, counted from its own start, but a
+/// refusal is stamped when its install finishes, a moment after: without
+/// slack the tick exactly one period later would find it 15 minutes less a
+/// few seconds old and skip it, so the schedule would run a whole tick long.
+/// Within this much of its time a list is due.
+const TICK_SLACK: Duration = Duration::from_secs(60);
 
 /// How often a list was refused in a row, and when a tick may try again.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Refusal {
     failures: u32,
-    retry_after: DateTime<Utc>,
+    retry_after: Instant,
 }
 
 impl BlocklistsManager {
-    fn now(&self) -> DateTime<Utc> {
-        (self.clock)()
-    }
-
     fn refusals(&self) -> std::sync::MutexGuard<'_, std::collections::HashMap<String, Refusal>> {
         self.refusals
             .lock()
@@ -34,7 +43,7 @@ impl BlocklistsManager {
     pub(super) fn backing_off(&self, id: &str) -> bool {
         self.refusals()
             .get(id)
-            .is_some_and(|refusal| self.now() < refusal.retry_after)
+            .is_some_and(|refusal| Instant::now() + TICK_SLACK < refusal.retry_after)
     }
 
     pub(super) fn forget_refusals(&self, id: &str) {
@@ -42,7 +51,7 @@ impl BlocklistsManager {
     }
 
     #[cfg(test)]
-    pub(crate) fn refusal_state(&self, id: &str) -> Option<(u32, DateTime<Utc>)> {
+    pub(crate) fn refusal_state(&self, id: &str) -> Option<(u32, Instant)> {
         self.refusals()
             .get(id)
             .map(|refusal| (refusal.failures, refusal.retry_after))
@@ -61,7 +70,7 @@ impl BlocklistsManager {
                 self.forget_refusals(id);
                 return Ok(());
             }
-            Err(e) if e.daemon_unavailable => return Err(e),
+            Err(e) if e.daemon_unavailable || e.cleanup_pending => return Err(e),
             Err(e) => e,
         };
         if refused.reason == NO_HOSTS_REASON {
@@ -75,7 +84,7 @@ impl BlocklistsManager {
             id.to_string(),
             Refusal {
                 failures,
-                retry_after: self.now() + chrono::Duration::minutes(minutes),
+                retry_after: Instant::now() + Duration::from_secs(minutes.unsigned_abs() * 60),
             },
         );
         Err(NotInstalled {
@@ -85,6 +94,7 @@ impl BlocklistsManager {
                 how_long(minutes)
             ),
             daemon_unavailable: false,
+            cleanup_pending: false,
         })
     }
 }

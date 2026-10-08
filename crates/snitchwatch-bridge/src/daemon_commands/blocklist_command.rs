@@ -26,7 +26,7 @@ use std::path::{Component, Path, PathBuf};
 
 use snitchwatch_proto::protocol::{Action, Notification, Rule};
 
-use super::{DaemonCommands, PendingReply, SendError};
+use super::{DaemonCommands, Delivery, PendingReply, SendError};
 use crate::blocklists::list_dir::{IdComponent, ListDir, LISTS_DIR_NAME};
 use crate::blocklists::materializer::{list_rule_name, materialize_list_rule, ListKind};
 use crate::rule_name::{
@@ -170,6 +170,23 @@ impl DaemonCommands {
         command.check(self.blocklist_root.get().map(PathBuf::as_path))?;
         self.dispatch(command.notification)
     }
+
+    /// Send the delete of a blocklist rule that was read from the daemon's
+    /// committed rule snapshot (issue #73), to the stream that snapshot came
+    /// from and to no other. Never over the TCP transport: there any
+    /// local process can pose as the daemon, show a list of its own as the
+    /// snapshot, and have a delete of a real rule's name sent on to the
+    /// real daemon. Refused until #35 retires that transport.
+    pub fn send_leftover_delete(
+        &self,
+        command: BlocklistCommand,
+    ) -> Result<PendingReply, SendError> {
+        command.check(None)?;
+        if command.notification.r#type != Action::DeleteRule as i32 {
+            return Err(SendError::RefusedOperator);
+        }
+        self.dispatch_via(command.notification, Delivery::CommittedStream)
+    }
 }
 
 #[cfg(test)]
@@ -284,5 +301,71 @@ mod tests {
             command.check(Some(dir.root())).is_err(),
             "a trailing slash passed"
         );
+    }
+
+    // --- send_leftover_delete (issue #73, security L1) -----------------------
+
+    use crate::cache::rules::RulesSync;
+    use crate::daemon_commands::DaemonTransport;
+    use snitchwatch_proto::protocol::{NotificationReply, NotificationReplyCode};
+    use tokio::sync::broadcast;
+
+    fn commands(transport: DaemonTransport) -> DaemonCommands {
+        DaemonCommands::new(transport, RulesSync::new(broadcast::channel(8).0))
+    }
+
+    fn hello() -> NotificationReply {
+        NotificationReply {
+            id: 0,
+            code: NotificationReplyCode::Ok as i32,
+            ..Default::default()
+        }
+    }
+
+    fn the_delete() -> BlocklistCommand {
+        BlocklistCommand::delete("z00-blocklist:ads:domains").unwrap()
+    }
+
+    /// Over TCP any local process can say HELLO and show a snapshot of its
+    /// own, so a delete read from one is never sent.
+    #[tokio::test]
+    async fn a_leftover_delete_is_never_sent_over_tcp() {
+        let commands = commands(DaemonTransport::Tcp);
+        let (stream, _rx) = commands.open_stream(None);
+        commands.on_reply(stream.id(), &hello());
+        assert!(matches!(
+            commands.send_leftover_delete(the_delete()),
+            Err(SendError::NotOnThisTransport)
+        ));
+    }
+
+    /// On the Unix socket it goes to the stream whose snapshot the cache
+    /// holds; a stream that said HELLO without one withdraws that snapshot,
+    /// and then nothing is sent at all.
+    #[tokio::test]
+    async fn a_leftover_delete_goes_only_to_the_stream_whose_snapshot_is_held() {
+        let rules = RulesSync::new(broadcast::channel(8).0);
+        let commands = DaemonCommands::new(DaemonTransport::Unix, rules.clone());
+        rules.stage(None, Vec::new());
+        let (first, mut first_rx) = commands.open_stream(None);
+        commands.on_reply(first.id(), &hello());
+        assert!(commands.send_leftover_delete(the_delete()).is_ok());
+        assert!(first_rx.try_recv().is_ok(), "the committed stream got it");
+
+        let (second, mut second_rx) = commands.open_stream(None);
+        commands.on_reply(second.id(), &hello());
+        assert!(matches!(
+            commands.send_leftover_delete(the_delete()),
+            Err(SendError::NoDaemon)
+        ));
+        assert!(second_rx.try_recv().is_err());
+        assert!(first_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn only_a_delete_can_be_sent_that_way() {
+        let (_state, _dir, install) = installed();
+        let commands = commands(DaemonTransport::Unix);
+        assert!(commands.send_leftover_delete(install).is_err());
     }
 }

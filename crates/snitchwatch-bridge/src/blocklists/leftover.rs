@@ -14,7 +14,11 @@
 //! the user asks, deletes them. Only rules Snitchwatch made are ever listed or
 //! deleted ([`made_by_bridge`]: the `lists` deny shape, or the legacy blocklist
 //! tag); a rule under a blocklist name that someone else made is left alone.
-//! A delete names no path, so it goes out without a pinned list root.
+//! A delete names no path, so it goes out without a pinned list root. It goes
+//! only to the daemon stream the snapshot came from, and never over the
+//! legacy TCP connection, where any local process can pose as the daemon and
+//! show a snapshot of its own (see [`DaemonCommands::send_leftover_delete`]);
+//! there nothing is listed, so nothing is offered.
 
 use std::time::Duration;
 
@@ -23,7 +27,9 @@ use tracing::warn;
 use crate::blocklists::daemon_sink::{made_by_bridge, BLOCKLIST_COMMAND_TIMEOUT};
 use crate::blocklists::NotInstalled;
 use crate::cache::rules::SharedRulesCache;
-use crate::daemon_commands::{BlocklistCommand, CommandError, DaemonCommands, SendError};
+use crate::daemon_commands::{
+    BlocklistCommand, CommandError, DaemonCommands, DaemonTransport, SendError,
+};
 use crate::rule_name::is_reserved_blocklist_name;
 
 /// What a removal pass did.
@@ -56,8 +62,12 @@ impl LeftoverRules {
     }
 
     /// Names of the blocklist rules Snitchwatch made in the daemon's
-    /// committed rule snapshot, sorted; `None` while that is unknown.
+    /// committed rule snapshot, sorted, that it could delete; `None` while
+    /// that is unknown, and over the legacy TCP connection.
     pub fn names(&self) -> Option<Vec<String>> {
+        if self.commands.transport() == DaemonTransport::Tcp {
+            return None;
+        }
         let cache = self
             .rules
             .lock()
@@ -66,6 +76,7 @@ impl LeftoverRules {
             rules
                 .values()
                 .filter(|rule| is_reserved_blocklist_name(&rule.name) && made_by_bridge(rule))
+                .filter(|rule| BlocklistCommand::delete(&rule.name).is_some())
                 .map(|rule| rule.name.clone())
                 .collect()
         })
@@ -91,7 +102,7 @@ impl LeftoverRules {
             };
             let sent = self
                 .commands
-                .send_blocklist(command)
+                .send_leftover_delete(command)
                 .map_err(|e| match e {
                     SendError::NoDaemon | SendError::NotQueued => {
                         NotInstalled::daemon_unavailable("The firewall service isn't connected")

@@ -300,6 +300,7 @@ async fn entry_requests_for_unknown_ids_are_dropped() {
         offset: 0,
         limit: None,
         request_id: None,
+        reply: None,
     };
     assert_eq!(
         worker.try_route(request("forged\nWARN fake log line")),
@@ -331,6 +332,7 @@ async fn an_entry_request_keeps_a_valid_id_and_treats_any_other_as_absent() {
             offset: 0,
             limit: None,
             request_id: Some(request_id.to_string()),
+            reply: None,
         };
         assert_eq!(worker.try_route(message), None);
         match events.try_recv() {

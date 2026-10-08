@@ -481,6 +481,7 @@ async fn connect_and_relay(
     if advertised(snitchwatch_bridge::bridge_capabilities::DECIDE_LATER) {
         mark_decide_later(connection, connection_id);
     }
+    clear_unreported_leftovers(&capabilities, connection_id, broadcast_tx);
     set_status(status, LinkState::Connected, "Connected to bridge service");
     tracing::info!(socket = %socket_path.display(), "connected to bridge service");
 
@@ -523,6 +524,30 @@ async fn connect_and_relay(
             },
         }
     }
+}
+
+/// A bridge that doesn't advertise `blocklistLeftovers` never reports "none
+/// left", so the count an earlier bridge sent (the model is kept across
+/// reconnects) would stay on the page for ever: say none are known.
+fn clear_unreported_leftovers(
+    capabilities: &[String],
+    connection_id: u64,
+    broadcast_tx: &broadcast::Sender<ReceivedServerMessage>,
+) {
+    if capabilities
+        .iter()
+        .any(|c| c == snitchwatch_bridge::bridge_capabilities::BLOCKLIST_LEFTOVERS)
+    {
+        return;
+    }
+    let _ = broadcast_tx.send(ReceivedServerMessage {
+        connection_id,
+        message: ServerMessage::SetBlocklistLeftovers {
+            count: 0,
+            cause: None,
+            reason: None,
+        },
+    });
 }
 
 /// Returns the capabilities the bridge advertised (empty for bridges that
@@ -788,3 +813,7 @@ mod pause_answers_tests;
 #[cfg(test)]
 #[path = "bridge_runtime/notification_action_tests.rs"]
 mod notification_action_tests;
+
+#[cfg(test)]
+#[path = "bridge_runtime/leftover_capability_tests.rs"]
+mod leftover_capability_tests;

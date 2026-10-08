@@ -44,8 +44,13 @@ pub async fn build_set_blocklists(mgr: &BlocklistsManager) -> anyhow::Result<Ser
 /// How many leftover blocklist rules the page should offer to remove
 /// (issue #73); `0` when there are none. Sent after every `SetBlocklists`.
 pub fn build_set_blocklist_leftovers(mgr: &BlocklistsManager) -> ServerMessage {
+    let count = mgr.leftover_count().unwrap_or(0);
     ServerMessage::SetBlocklistLeftovers {
-        count: u32::try_from(mgr.leftover_count().unwrap_or(0)).unwrap_or(u32::MAX),
+        count: u32::try_from(count).unwrap_or(u32::MAX),
+        cause: (count > 0)
+            .then(|| mgr.leftover_cause().map(str::to_string))
+            .flatten(),
+        reason: mgr.leftover_outcome(),
     }
 }
 

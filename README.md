@@ -224,22 +224,32 @@ past 2,000,000 hosts in total (in subscription order) get no rule.
   does. Unanswered lists are retried on every refresh tick and daemon
   reconnect. A list the daemon *refuses* is left alone for 15 minutes after
   the first refusal, 1 hour after the second and 4 hours after every one
-  after that (a reconnect or a new rules snapshot tries it again at once),
-  and its reason says when it will be tried again.
+  after that (a refresh tick a minute early still counts; a reconnect or a
+  new rules snapshot tries it again at once), and its reason says when it
+  will be tried again. The schedule is kept in memory only, so a restart
+  tries every refused list at its first pass.
   "Rule installed" still isn't proof the daemon loaded the hosts: check
   `sudo grep "domains loaded" /var/log/opensnitchd.log` (the shipped config
   logs there, not to the journal).
 - These rules are read-only on the Rules page ("Managed on the Blocklists
   page"); no GUI can add, change or delete a rule named `z00-blocklist:…`.
-- Unsubscribing deletes the list's rules at once but keeps its files for five
-  minutes: opensnitchd reloads a path at most every 30 seconds and treats a
-  missing file as an empty list, so subscribing again right away finds the
-  files in place. If the rule delete is refused, the files go at once.
+- Unsubscribing deletes the list's rules at once but keeps its files for at
+  least five minutes (until the first clean-up after that, and for no more
+  than 32 lists at a time): opensnitchd reloads a path at most every 30
+  seconds and treats a missing file as an empty list, so subscribing again
+  right away finds the files in place. If the rule delete is refused, or the
+  firewall service doesn't answer (it is asked once, not twice), the files go
+  at once.
 - If this service can't manage blocklist rules (no state directory, a
   per-user service, or saved subscriptions it can't read) but the firewall
   still holds `z00-blocklist:…` rules Snitchwatch made, the Blocklists page
-  counts them and offers, after asking, to remove them. Rules it didn't make
-  are never touched.
+  counts them and offers, after asking, to remove them. When the cause is
+  saved subscriptions it can't read, it says the rules are probably lists you
+  still subscribe to and that removing them turns that blocking off until
+  they can be read again. A removal the firewall service refuses or doesn't
+  answer is shown under the button. Rules it didn't make are never touched,
+  and nothing is offered over the legacy per-user TCP connection to the
+  firewall service (any local process can pose as the daemon there; see #35).
 
 - Subscriptions persist in `blocklists.sqlite3` (mode 0600) under the state
   directory: `$STATE_DIRECTORY` (set by both systemd units), else
@@ -285,15 +295,21 @@ past 2,000,000 hosts in total (in subscription order) get no rule.
   path, so a local plain-HTTP fixture server can't be subscribed to.
 - Lists are capped at 64 MiB and 1,000,000 hosts, and at 32 subscriptions.
   The bridge also saves at most 4,000,000 hosts across all lists (twice the
-  enforcement limit above, so lists past it can still be browsed): a
-  download that would pass that is refused with the reason shown, and the
-  list keeps its earlier hosts.
+  enforcement limit above, so lists past it can still be browsed). Like that
+  limit it goes to the earliest subscriptions: a download that would take
+  the lists up to and including it past the limit is refused with the reason
+  shown, and the list keeps its earlier hosts; later lists never stop an
+  earlier one from refreshing. When the lists before one already fill the
+  limit it is not downloaded at all, and a list refused this way waits its
+  normal refresh interval (or until another list is removed) instead of being
+  fetched every hour. A store that was already over the limit before it
+  existed keeps what it has; its later lists can't grow.
   Hosts are sent to GUIs a page at a time, on request
-  (`requestBlocklistEntries`), never as a whole list. Pages go to every
-  connected GUI, so a request may carry a `requestId` (1 to 64 ASCII letters, digits or `-`; anything else is treated
-  as absent) that comes back on the page that answers it, and each page carries the list's
-  `lastUpdatedIso8601`: a GUI keeps only its own pages and starts a list over
-  if two pages come from different downloads.
+  (`requestBlocklistEntries`), never as a whole list. A page goes only to the
+  connection that asked for it; it echoes the request's `requestId` (1 to 64
+  ASCII letters, digits or `-`; anything else is treated as absent) and
+  carries the list's `lastUpdatedIso8601`, so a GUI that sees two pages of
+  one list from different downloads starts over rather than mix them.
 
 To exercise blocklists without the network, use the fixture-fetcher tests:
 

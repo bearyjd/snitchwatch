@@ -12,9 +12,19 @@ use super::fetcher::{process_body, BlocklistFetch, FetchOutcome};
 use super::store::{BlocklistStore, FetchStatus, Subscription};
 use super::*;
 
-/// Logs what it is asked, in order.
+/// Logs what it is asked, in order. While `hung`, deleting rules fails as a
+/// daemon that doesn't answer would (and every ask is logged).
 #[derive(Default)]
-struct Log(StdMutex<Vec<String>>);
+struct Log {
+    asked: StdMutex<Vec<String>>,
+    hung: std::sync::atomic::AtomicBool,
+}
+
+impl Log {
+    fn note(&self, entry: String) {
+        self.asked.lock().unwrap().push(entry);
+    }
+}
 
 #[async_trait]
 impl RuleSink for Log {
@@ -23,15 +33,20 @@ impl RuleSink for Log {
         list_id: &str,
         hosts: Vec<String>,
     ) -> Result<(), NotInstalled> {
-        self.0
-            .lock()
-            .unwrap()
-            .push(format!("replace:{list_id}:{}", hosts.len()));
+        self.note(format!("replace:{list_id}:{}", hosts.len()));
         Ok(())
     }
 
     async fn remove_blocklist_rules(&self, list_id: &str) -> Result<(), NotInstalled> {
-        self.0.lock().unwrap().push(format!("remove:{list_id}"));
+        self.note(format!("remove:{list_id}"));
+        if self.hung.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(NotInstalled::daemon_unavailable("didn't answer"));
+        }
+        Ok(())
+    }
+
+    async fn remove_blocklist_files(&self, list_id: &str) -> Result<(), NotInstalled> {
+        self.note(format!("files:{list_id}"));
         Ok(())
     }
 }
@@ -81,7 +96,7 @@ fn manager(grown_to: usize) -> (BlocklistsManager, Arc<Log>) {
 }
 
 fn log(log: &Log) -> Vec<String> {
-    log.0.lock().unwrap().clone()
+    log.asked.lock().unwrap().clone()
 }
 
 fn over_limit(mgr: &BlocklistsManager, id: &str) -> bool {
@@ -138,4 +153,40 @@ async fn a_list_already_demoted_is_not_removed_again_by_every_refresh() {
         .filter(|entry| entry == "remove:third")
         .count();
     assert_eq!(removals, 1);
+}
+
+/// A daemon that doesn't answer the first removal isn't waited on for the
+/// rest: their files go, and the grown list isn't installed (it would wait on
+/// the same daemon) but reads "not confirmed".
+#[tokio::test]
+async fn a_daemon_that_does_not_answer_is_asked_once_when_lists_are_taken_off() {
+    let (mgr, sink) = manager(8); // 8 + 3 + 3 = 14: second and third are over
+    sink.hung.store(true, std::sync::atomic::Ordering::SeqCst);
+    mgr.refresh_now("first").await.unwrap();
+    assert_eq!(
+        log(&sink),
+        vec!["remove:second", "files:third"],
+        "one wait on the daemon, nothing for the grown list"
+    );
+    assert!(matches!(
+        mgr.enforcement("first"),
+        Enforcement::Unconfirmed { .. }
+    ));
+    for id in ["second", "third"] {
+        assert!(
+            !matches!(mgr.enforcement(id), Enforcement::RuleInstalled { .. }),
+            "{id}"
+        );
+    }
+}
+
+/// The same pass with a daemon that answers asks it about every list.
+#[tokio::test]
+async fn a_daemon_that_answers_is_asked_about_every_list() {
+    let (mgr, sink) = manager(8);
+    mgr.refresh_now("first").await.unwrap();
+    assert_eq!(
+        log(&sink),
+        vec!["remove:second", "remove:third", "replace:first:8"]
+    );
 }

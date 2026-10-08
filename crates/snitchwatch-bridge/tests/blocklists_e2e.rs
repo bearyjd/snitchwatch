@@ -110,6 +110,7 @@ async fn subscribe_blocklist_via_ws_yields_entries() {
         offset: 0,
         limit: None,
         request_id: Some("gui-e2e".into()),
+        reply: None,
     };
     ws.send(Message::Text(serde_json::to_string(&request).unwrap()))
         .await
@@ -149,5 +150,95 @@ async fn next_message(
     match tokio::time::timeout(Duration::from_secs(2), ws.next()).await {
         Ok(Some(Ok(Message::Text(text)))) => serde_json::from_str(&text).ok(),
         _ => None,
+    }
+}
+
+async fn connect(
+    socket_path: &std::path::Path,
+    token: &snitchwatch_bridge::auth::Token,
+) -> tokio_tungstenite::WebSocketStream<UnixStream> {
+    let stream = UnixStream::connect(socket_path)
+        .await
+        .expect("unix socket connect failed");
+    let (mut ws, _resp) = tokio_tungstenite::client_async("ws://localhost/stream", stream)
+        .await
+        .expect("ws client connects");
+    ws.send(Message::Text(token.as_str().to_string()))
+        .await
+        .expect("token handshake send failed");
+    ws
+}
+
+/// Issue #67: a page answers the GUI that asked and is sent to no other.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_entries_page_goes_only_to_the_connection_that_asked() {
+    let store = Arc::new(BlocklistStore::open_in_memory().unwrap());
+    let mgr = Arc::new(BlocklistsManager::new(store).with_fetcher(Arc::new(FixtureFetcher)));
+    let socket_dir = tempfile::tempdir().unwrap();
+    let (socket_path, token, _shutdown) = snitchwatch_bridge::ws_server::serve_with_blocklists(
+        socket_dir.path().join("bridge.sock"),
+        mgr,
+    )
+    .await
+    .expect("bridge boots");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let mut asker = connect(&socket_path, &token).await;
+    let mut bystander = connect(&socket_path, &token).await;
+    let subscribe = ClientMessage::SubscribeBlocklist {
+        url: format!("{FIXTURE_PREFIX}domains-tiny.txt"),
+    };
+    asker
+        .send(Message::Text(serde_json::to_string(&subscribe).unwrap()))
+        .await
+        .unwrap();
+    let mut list_id = None;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while tokio::time::Instant::now() < deadline && list_id.is_none() {
+        if let Some(ServerMessage::SetBlocklists { blocklists, .. }) =
+            next_message(&mut asker).await
+        {
+            list_id = blocklists
+                .iter()
+                .find(|b| b.entry_count > 0)
+                .map(|b| b.id.clone());
+        }
+    }
+    let list_id = list_id.expect("never received a populated SetBlocklists");
+
+    let request = ClientMessage::RequestBlocklistEntries {
+        subscription_id: list_id,
+        offset: 0,
+        limit: None,
+        request_id: Some("asker-1".into()),
+        reply: None,
+    };
+    asker
+        .send(Message::Text(serde_json::to_string(&request).unwrap()))
+        .await
+        .unwrap();
+
+    let mut asker_got_it = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while tokio::time::Instant::now() < deadline && !asker_got_it {
+        asker_got_it = matches!(
+            next_message(&mut asker).await,
+            Some(ServerMessage::SetBlocklistEntries { request_id, .. })
+                if request_id.as_deref() == Some("asker-1")
+        );
+    }
+    assert!(asker_got_it, "the asker never received its page");
+
+    // Everything the other connection received meanwhile: summaries, but no
+    // entries page.
+    let quiet_until = tokio::time::Instant::now() + Duration::from_millis(800);
+    while tokio::time::Instant::now() < quiet_until {
+        assert!(
+            !matches!(
+                next_message(&mut bystander).await,
+                Some(ServerMessage::SetBlocklistEntries { .. })
+            ),
+            "a page reached a connection that did not ask for it"
+        );
     }
 }

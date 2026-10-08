@@ -75,6 +75,8 @@ pub mod qobject {
         /// Blocklist rules Snitchwatch made that this service isn't
         /// managing (issue #73); `removeLeftoverRules()` deletes them.
         #[qproperty(i32, leftover_rules, cxx_name = "leftoverRules")]
+        #[qproperty(QString, leftover_cause, cxx_name = "leftoverCause")]
+        #[qproperty(QString, leftover_reason, cxx_name = "leftoverReason")]
         type BlocklistsModel = super::BlocklistsModelRust;
 
         /// Emitted with a JSON-encoded `ClientMessage` (SubscribeBlocklist /
@@ -221,6 +223,8 @@ pub struct BlocklistsModelRust {
     any_over_limit: bool,
     storage_unreadable: bool,
     leftover_rules: i32,
+    leftover_cause: QString,
+    leftover_reason: QString,
 }
 
 impl qobject::BlocklistsModel {
@@ -300,6 +304,7 @@ impl qobject::BlocklistsModel {
             offset: u64::try_from(offset).unwrap_or(0),
             limit: None,
             request_id: Some(client_request_id().to_string()),
+            reply: None,
         });
     }
 
@@ -349,6 +354,10 @@ impl qobject::BlocklistsModel {
             let unreadable = self.store.storage_unreadable();
             let leftover = i32::try_from(self.store.leftover_rules()).unwrap_or(i32::MAX);
             self.as_mut().set_leftover_rules(leftover);
+            let leftover_cause = QString::from(self.store.leftover_cause());
+            self.as_mut().set_leftover_cause(leftover_cause);
+            let leftover_reason = QString::from(self.store.leftover_reason());
+            self.as_mut().set_leftover_reason(leftover_reason);
             self.as_mut().set_count(n);
             self.as_mut().set_storage_persistent(persistent);
             self.as_mut().set_storage_reason(reason);

@@ -57,7 +57,7 @@ async fn nothing_is_reported_while_the_daemons_rule_list_is_unknown() {
 }
 
 #[tokio::test]
-async fn no_leftovers_means_no_message_not_zero() {
+async fn a_daemon_with_only_user_rules_has_no_leftover_count() {
     let h = Harness::new().connect(Daemon::Accept, vec![user_rule("899-firefox")]);
     assert_eq!(without_a_state_directory(&h).leftover_count(), None);
 }
@@ -167,7 +167,11 @@ async fn the_event_pump_follows_every_summary_with_the_leftover_count() {
     ));
     assert_eq!(
         seen[1],
-        crate::ws_messages::ServerMessage::SetBlocklistLeftovers { count: 2 }
+        crate::ws_messages::ServerMessage::SetBlocklistLeftovers {
+            count: 2,
+            cause: Some("no_state_dir".into()),
+            reason: None,
+        }
     );
 }
 
@@ -191,4 +195,139 @@ async fn the_gui_message_runs_the_removal_on_the_worker() {
     .expect("the leftover rules were not removed");
     task.abort();
     assert_eq!(h.seen().len(), 2);
+}
+
+fn message(mgr: &BlocklistsManager) -> crate::ws_messages::ServerMessage {
+    crate::translator::downstream::build_set_blocklist_leftovers(mgr)
+}
+
+fn cause_and_reason(mgr: &BlocklistsManager) -> (Option<String>, Option<String>, u32) {
+    match message(mgr) {
+        crate::ws_messages::ServerMessage::SetBlocklistLeftovers {
+            count,
+            cause,
+            reason,
+        } => (cause, reason, count),
+        other => panic!("expected SetBlocklistLeftovers, got {other:?}"),
+    }
+}
+
+/// With an unreadable store the leftovers are probably lists still
+/// subscribed to; the GUI is told so, apart from the other causes.
+#[tokio::test]
+async fn the_message_says_why_nothing_manages_the_rules() {
+    let h = holding_two();
+    assert_eq!(
+        cause_and_reason(&without_a_state_directory(&h)),
+        (Some("no_state_dir".into()), None, 2)
+    );
+    let per_user = BlocklistsManager::new(Arc::new(BlocklistStore::open_in_memory().unwrap()))
+        .with_rule_sink(Arc::new(NoopRuleSink::new(PER_USER_REASON)))
+        .with_leftover_rules(leftover(&h));
+    assert_eq!(cause_and_reason(&per_user).0.as_deref(), Some("per_user"));
+}
+
+#[tokio::test]
+async fn an_unreadable_store_is_the_cause_when_the_store_cant_be_read() {
+    let h = holding_two();
+    // A store that opens but can't be listed.
+    let broken = Arc::new(BlocklistStore::open_in_memory().unwrap());
+    broken
+        .lock_for_test()
+        .execute_batch("DROP TABLE subscriptions;")
+        .unwrap();
+    let mgr = BlocklistsManager::new(broken)
+        .with_rule_sink(Arc::new(NoopRuleSink::new("no state directory")))
+        .with_leftover_rules(leftover(&h));
+    assert_eq!(mgr.leftover_cause(), Some("store_unreadable"));
+    assert_eq!(
+        cause_and_reason(&mgr).0.as_deref(),
+        Some("store_unreadable")
+    );
+}
+
+/// No leftovers, no cause: the notice is gone, whatever the bridge is.
+#[tokio::test]
+async fn no_leftovers_have_no_cause() {
+    let h = Harness::new().connect(Daemon::Accept, vec![user_rule("899-firefox")]);
+    assert_eq!(
+        cause_and_reason(&without_a_state_directory(&h)),
+        (None, None, 0)
+    );
+}
+
+/// A removal the daemon partly refuses says so under the button.
+#[tokio::test]
+async fn a_refused_removal_is_reported_to_the_gui() {
+    let h = holding_two();
+    h.set_daemon(Daemon::RefuseDelete("busy"));
+    let mgr = without_a_state_directory(&h);
+    mgr.remove_leftover_rules().await;
+    let (cause, reason, count) = cause_and_reason(&mgr);
+    assert_eq!((cause.as_deref(), count), (Some("no_state_dir"), 2));
+    let reason = reason.expect("the refusal is reported");
+    assert!(
+        reason.contains("refused") && reason.contains("2"),
+        "{reason}"
+    );
+}
+
+#[tokio::test]
+async fn a_removal_that_could_not_reach_the_daemon_says_why() {
+    let h = holding_two();
+    h.set_daemon(Daemon::Silent);
+    let mgr = without_a_state_directory(&h);
+    mgr.remove_leftover_rules().await;
+    let reason = cause_and_reason(&mgr).1.expect("the failure is reported");
+    assert!(
+        reason.starts_with("The rules were not removed: The firewall service didn't answer"),
+        "{reason}"
+    );
+}
+
+/// The note belongs to a removal that left something: a clean one clears it,
+/// and it is not shown once nothing is left.
+#[tokio::test]
+async fn the_note_of_a_failed_removal_goes_with_the_leftovers() {
+    let h = holding_two();
+    h.set_daemon(Daemon::RefuseDelete("busy"));
+    let mgr = without_a_state_directory(&h);
+    mgr.remove_leftover_rules().await;
+    assert!(mgr.leftover_outcome().is_some());
+    h.set_daemon(Daemon::Accept);
+    mgr.remove_leftover_rules().await;
+    assert_eq!(mgr.leftover_count(), None);
+    assert_eq!(mgr.leftover_outcome(), None);
+    assert_eq!(cause_and_reason(&mgr), (None, None, 0));
+}
+
+fn two_rules(h: &Harness) -> Vec<snitchwatch_proto::protocol::Rule> {
+    vec![
+        h.bridge_rule(ADS, ListKind::Domains),
+        h.bridge_rule(ADS, ListKind::Ips),
+    ]
+}
+
+/// The leftovers go by some other means (the daemon's list changed): the
+/// note about the failed removal is not shown for them, nor for any that
+/// come later.
+#[tokio::test]
+async fn a_failed_removals_note_does_not_outlive_its_leftovers() {
+    let h = holding_two();
+    h.set_daemon(Daemon::RefuseDelete("busy"));
+    let mgr = without_a_state_directory(&h);
+    mgr.remove_leftover_rules().await;
+    assert!(mgr.leftover_outcome().is_some());
+
+    h.rules.cache().lock().unwrap().replace_all(Vec::new());
+    assert_eq!(
+        cause_and_reason(&mgr),
+        (None, None, 0),
+        "no note for no leftovers, even before anything announced the change"
+    );
+    mgr.reconcile().await;
+
+    h.rules.cache().lock().unwrap().replace_all(two_rules(&h));
+    let (_, reason, count) = cause_and_reason(&mgr);
+    assert_eq!((count, reason), (2, None), "a new set of leftovers is new");
 }

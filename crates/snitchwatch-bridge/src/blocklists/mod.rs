@@ -52,6 +52,9 @@ pub enum BlocklistEvent {
         limit: u32,
         /// Echoed on the page, so each GUI keeps only its own (issue #67).
         request_id: Option<String>,
+        /// The connection that asked, which alone gets the page; `None` for
+        /// an in-process sender, answered on the broadcast.
+        reply: Option<crate::ws_messages::ReplyTo>,
     },
 }
 
@@ -134,6 +137,9 @@ pub const AGGREGATE_MAX_HOSTS: u64 = 2_000_000;
 /// a measured limit. A download that would pass it is refused and keeps the
 /// list's earlier hosts, like any failed download.
 pub const STORED_MAX_HOSTS: u64 = 4_000_000;
+/// How the reason of a download refused by [`STORED_MAX_HOSTS`] starts: a
+/// refresh tick keys on it to leave such a list to its normal interval.
+pub const STORAGE_LIMIT_REASON_PREFIX: &str = "Saving this list would pass the limit of";
 
 /// How much a [`BlocklistsManager::reconcile_with`] pass does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -159,6 +165,11 @@ pub struct NotInstalled {
     /// The daemon is unreachable or didn't answer: a reconcile pass stops
     /// here instead of trying every other list too.
     pub daemon_unavailable: bool,
+    /// The list's own rules went in, but an old rule or file of a kind it no
+    /// longer has couldn't be removed. Not a refusal of the list: shown as
+    /// "not confirmed", never backed off, and it doesn't stop a reconcile
+    /// pass.
+    pub cleanup_pending: bool,
 }
 
 impl NotInstalled {
@@ -166,6 +177,7 @@ impl NotInstalled {
         Self {
             reason: reason.into(),
             daemon_unavailable: false,
+            cleanup_pending: false,
         }
     }
 
@@ -173,6 +185,15 @@ impl NotInstalled {
         Self {
             reason: reason.into(),
             daemon_unavailable: true,
+            cleanup_pending: false,
+        }
+    }
+
+    pub fn cleanup_pending(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+            daemon_unavailable: false,
+            cleanup_pending: true,
         }
     }
 }
@@ -234,6 +255,15 @@ pub trait RuleSink: Send + Sync + 'static {
 
     /// Delete `list_id`'s rules from the daemon, then its files.
     async fn remove_blocklist_rules(&self, _list_id: &str) -> Result<(), NotInstalled> {
+        Ok(())
+    }
+
+    /// Delete `list_id`'s files only, without asking the daemon anything: for
+    /// when it has just not answered, and waiting on it again for each of
+    /// several lists would stall the caller. A rule left in the daemon then
+    /// reads a missing list (nothing blocked) until the next reconcile
+    /// deletes it.
+    async fn remove_blocklist_files(&self, _list_id: &str) -> Result<(), NotInstalled> {
         Ok(())
     }
 

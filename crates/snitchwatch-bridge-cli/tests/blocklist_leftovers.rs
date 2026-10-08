@@ -1,6 +1,9 @@
-//! Issue #73: blocklist rules Snitchwatch made that nothing manages (the
-//! state directory is gone, or this is a per-user service) are counted for the
-//! Blocklists page and removed when the user asks, through the mock daemon.
+//! Issue #73: blocklist rules Snitchwatch made that nothing manages are
+//! counted for the Blocklists page and removed when the user asks, through
+//! the mock daemon, over the Unix socket of a system service (see
+//! `src/leftover_unix_tests.rs`). Over the legacy TCP connection, where any
+//! local process can pose as the daemon, nothing is offered or deleted: these
+//! tests pin that, and that a service managing its rules reports none.
 
 use std::time::Duration;
 
@@ -106,7 +109,7 @@ async fn start(storage: Storage, mode: BridgeMode, snapshot: Vec<Rule>) -> Setup
 async fn next_count(rx: &mut broadcast::Receiver<ServerMessage>) -> u32 {
     tokio::time::timeout(WAIT, async {
         loop {
-            if let ServerMessage::SetBlocklistLeftovers { count } = rx.recv().await.unwrap() {
+            if let ServerMessage::SetBlocklistLeftovers { count, .. } = rx.recv().await.unwrap() {
                 return count;
             }
         }
@@ -129,61 +132,41 @@ fn snapshot() -> Vec<Rule> {
     ]
 }
 
+/// Over TCP the snapshot could be a local process's, and a delete goes to
+/// every stream: nothing is listed, and a request to remove sends nothing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn rules_left_by_a_bridge_without_a_state_directory_are_counted_and_removable() {
-    let mut s = start(
-        Storage::Ephemeral(EphemeralReason::NotConfigured),
-        BridgeMode::System,
-        snapshot(),
-    )
-    .await;
-    // The commit of the daemon's snapshot triggers a reconcile, which tells
-    // the page; the foreign rule isn't counted.
-    count_until(&mut s.rx, 2).await;
-
-    s.bridge
-        .inbound_tx
-        .send(ClientMessage::RemoveLeftoverBlocklistRules)
-        .await
-        .unwrap();
-    let mut deleted = Vec::new();
-    for _ in 0..2 {
-        let n = tokio::time::timeout(WAIT, s.seen.recv())
-            .await
-            .expect("no delete reached the daemon")
-            .unwrap();
-        assert_eq!(n.r#type, Action::DeleteRule as i32);
-        deleted.push(n.rules[0].name.clone());
-    }
-    deleted.sort();
-    assert_eq!(
-        deleted,
-        vec![
-            "z00-blocklist:ads-0123456789abcdef:domains".to_string(),
-            "z00-blocklist:ads-0123456789abcdef:ips".to_string(),
-        ]
-    );
-    count_until(&mut s.rx, 0).await;
-    assert!(
-        tokio::time::timeout(Duration::from_millis(300), s.seen.recv())
-            .await
-            .is_err(),
-        "the foreign rule was left alone"
-    );
-    s.bridge.shutdown();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_per_user_service_offers_the_same() {
+async fn over_the_legacy_tcp_connection_nothing_is_offered_or_deleted() {
     let state = tempfile::tempdir().unwrap();
-    let mut s = start(
-        Storage::Persistent(state.path().canonicalize().unwrap()),
-        BridgeMode::User,
-        snapshot(),
-    )
-    .await;
-    count_until(&mut s.rx, 2).await;
-    s.bridge.shutdown();
+    for (storage, mode) in [
+        (
+            Storage::Ephemeral(EphemeralReason::NotConfigured),
+            BridgeMode::System,
+        ),
+        (
+            Storage::Persistent(state.path().canonicalize().unwrap()),
+            BridgeMode::User,
+        ),
+    ] {
+        let mut s = start(storage, mode, snapshot()).await;
+        s.bridge
+            .inbound_tx
+            .send(ClientMessage::RemoveLeftoverBlocklistRules)
+            .await
+            .unwrap();
+        s.bridge
+            .inbound_tx
+            .send(ClientMessage::RequestSnapshot)
+            .await
+            .unwrap();
+        assert_eq!(next_count(&mut s.rx).await, 0);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), s.seen.recv())
+                .await
+                .is_err(),
+            "a delete reached the daemon"
+        );
+        s.bridge.shutdown();
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

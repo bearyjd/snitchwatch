@@ -353,9 +353,10 @@ fn blocklists_page_labels_showing_subscription_data_are_plain_text() {
             "page.inspectLastUpdated",
             "page.inspectLastFailureReason",
             "page.storageReason",
+            "page.leftoverReason",
             "text: host",
         ],
-        12,
+        13,
     );
 }
 

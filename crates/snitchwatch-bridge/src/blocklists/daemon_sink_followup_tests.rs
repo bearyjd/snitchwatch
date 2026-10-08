@@ -3,6 +3,7 @@
 
 use super::tests::{change, delete, hosts, kind_of, Daemon, Harness, ADS};
 use super::*;
+use snitchwatch_proto::protocol::Action;
 
 fn domains_rule() -> String {
     format!("z00-blocklist:{ADS}:domains")
@@ -275,4 +276,140 @@ async fn releasing_with_the_daemons_rules_unknown_deletes_both_kinds_by_name() {
         .map(|s| kind_of(&s.command))
         .collect();
     assert_eq!(names, vec![delete(&domains_rule()), delete(&ips_rule())]);
+}
+
+// --- Code review of the follow-ups (PR #107) ------------------------------------
+
+fn deletes(h: &Harness, after: usize) -> usize {
+    h.seen()
+        .split_off(after)
+        .iter()
+        .filter(|s| s.command.r#type == Action::DeleteRule as i32)
+        .count()
+}
+
+/// A delete the daemon refuses leaves a rule that would go on blocking a list
+/// the user dropped: without its files it reads nothing, so they go at once
+/// and the unsubscribe says the rule is still there.
+#[tokio::test]
+async fn a_refused_delete_at_unsubscribe_takes_the_files_at_once() {
+    let h = Harness::new().connect(Daemon::Accept, Vec::new());
+    let sink = h.sink();
+    sink.replace_blocklist_rules(ADS, hosts(&["a.example"]))
+        .await
+        .unwrap();
+    h.set_daemon(Daemon::RefuseDelete("busy"));
+    let err = sink.release_blocklist_rules(ADS).await.unwrap_err();
+    assert!(err.reason.contains("refused to delete"), "{}", err.reason);
+    assert!(!h.dir.list_dir(&IdComponent::from_id(ADS)).exists());
+}
+
+/// A daemon that doesn't answer is waited on once at unsubscribe, not again
+/// by the fallback that removes the files.
+#[tokio::test]
+async fn a_silent_daemon_is_asked_to_delete_once_at_unsubscribe() {
+    let h = Harness::new().connect(Daemon::Accept, Vec::new());
+    let sink = h.sink();
+    sink.replace_blocklist_rules(ADS, hosts(&["a.example", "203.0.113.7"]))
+        .await
+        .unwrap();
+    let before = h.seen().len();
+    h.set_daemon(Daemon::Silent);
+    let err = sink.release_blocklist_rules(ADS).await.unwrap_err();
+    assert!(err.daemon_unavailable);
+    assert_eq!(deletes(&h, before), 1, "the delete is not tried again");
+    assert!(!h.dir.list_dir(&IdComponent::from_id(ADS)).exists());
+}
+
+#[tokio::test]
+async fn removing_only_the_files_asks_the_daemon_nothing() {
+    let h = Harness::new().connect(Daemon::Accept, Vec::new());
+    let sink = h.sink();
+    sink.replace_blocklist_rules(ADS, hosts(&["a.example"]))
+        .await
+        .unwrap();
+    let before = h.seen().len();
+    sink.remove_blocklist_files(ADS).await.unwrap();
+    assert_eq!(h.seen().len(), before);
+    assert!(!h.dir.list_dir(&IdComponent::from_id(ADS)).exists());
+}
+
+fn nth_list(n: usize) -> String {
+    format!("l{n:02}-0123456789abcdef")
+}
+
+/// Unsubscribing many lists at once can't pile up directories: past the
+/// limit the files go at once.
+#[tokio::test]
+async fn only_so_many_released_lists_keep_their_files() {
+    let h = Harness::new().connect(Daemon::Accept, Vec::new());
+    let sink = h.sink().with_release_grace(Duration::from_secs(3600));
+    for n in 0..34 {
+        let id = nth_list(n);
+        sink.replace_blocklist_rules(&id, hosts(&["a.example"]))
+            .await
+            .unwrap();
+        sink.release_blocklist_rules(&id).await.unwrap();
+    }
+    let kept = (0..34)
+        .filter(|n| {
+            h.dir
+                .list_dir(&IdComponent::from_id(&nth_list(*n)))
+                .exists()
+        })
+        .count();
+    assert_eq!(kept, 32);
+    assert!(h
+        .dir
+        .list_dir(&IdComponent::from_id(&nth_list(31)))
+        .exists());
+    assert!(!h
+        .dir
+        .list_dir(&IdComponent::from_id(&nth_list(33)))
+        .exists());
+}
+
+/// Notes of lists whose grace is over are dropped when the next list is
+/// released, so they don't count towards that limit between purges.
+#[tokio::test]
+async fn expired_release_notes_do_not_count_towards_the_limit() {
+    let h = Harness::new().connect(Daemon::Accept, Vec::new());
+    let sink = h.sink().with_release_grace(Duration::ZERO);
+    for n in 0..40 {
+        let id = nth_list(n);
+        sink.replace_blocklist_rules(&id, hosts(&["a.example"]))
+            .await
+            .unwrap();
+        sink.release_blocklist_rules(&id).await.unwrap();
+    }
+    assert!((0..40).all(|n| h.dir.list_dir(&IdComponent::from_id(&nth_list(n))).exists()));
+}
+
+/// An old rule the daemon refuses to delete is a cleanup left to do, not a
+/// refusal of the list whose own rules went in.
+#[tokio::test]
+async fn a_refused_stale_kind_cleanup_is_not_a_refused_install() {
+    let h = Harness::new().connect(Daemon::Accept, Vec::new());
+    h.sink()
+        .replace_blocklist_rules(ADS, hosts(&["ads.example", "203.0.113.7"]))
+        .await
+        .unwrap();
+    let ips = h.bridge_rule(ADS, ListKind::Ips);
+    let domains = h.bridge_rule(ADS, ListKind::Domains);
+    let h = h
+        .restart()
+        .connect(Daemon::RefuseDelete("busy"), vec![ips, domains]);
+    let sink = h.sink();
+    let err = sink
+        .replace_blocklist_rules(ADS, hosts(&["other.example"]))
+        .await
+        .unwrap_err();
+    assert!(err.cleanup_pending && !err.daemon_unavailable, "{err:?}");
+    assert!(err.reason.contains("old rule"), "{}", err.reason);
+    let list = IdComponent::from_id(ADS);
+    assert!(h.dir.has_list(&list, ListKind::Domains));
+    assert!(
+        !h.dir.has_list(&list, ListKind::Ips),
+        "the stale file went, so the stale rule matches nothing"
+    );
 }

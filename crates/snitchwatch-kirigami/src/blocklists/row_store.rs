@@ -27,6 +27,10 @@ pub struct SubscriptionsStore {
     /// Blocklist rules Snitchwatch made that nothing manages (issue #73),
     /// from the last `SetBlocklistLeftovers`; 0 until one arrives.
     leftover: u32,
+    /// `cause` of the last `SetBlocklistLeftovers`, or "" (an older bridge).
+    leftover_cause: String,
+    /// `reason` of the last `SetBlocklistLeftovers`, or "".
+    leftover_reason: String,
 }
 
 /// The download result as shown to the user. `status` only says whether the
@@ -133,6 +137,17 @@ impl SubscriptionsStore {
         self.leftover
     }
 
+    /// Why nothing manages them (`store_unreadable`, `no_state_dir`,
+    /// `per_user`), or "" when the bridge didn't say.
+    pub fn leftover_cause(&self) -> &str {
+        &self.leftover_cause
+    }
+
+    /// How the last removal went, when it left some, or "".
+    pub fn leftover_reason(&self) -> &str {
+        &self.leftover_reason
+    }
+
     /// Apply one bridge message. Returns `true` if the subscription list
     /// changed (the model wrapper resets on `true`).
     pub fn apply(&mut self, msg: &ServerMessage) -> bool {
@@ -147,12 +162,24 @@ impl SubscriptionsStore {
                     // A bridge that predates `SetBlocklistLeftovers` says
                     // nothing about them: don't keep an older one's count.
                     self.leftover = 0;
+                    self.leftover_cause.clear();
+                    self.leftover_reason.clear();
                 }
                 true
             }
-            ServerMessage::SetBlocklistLeftovers { count } => {
-                let changed = self.leftover != *count;
+            ServerMessage::SetBlocklistLeftovers {
+                count,
+                cause,
+                reason,
+            } => {
+                let cause = cause.clone().unwrap_or_default();
+                let reason = reason.clone().unwrap_or_default();
+                let changed = self.leftover != *count
+                    || self.leftover_cause != cause
+                    || self.leftover_reason != reason;
                 self.leftover = *count;
+                self.leftover_cause = cause;
+                self.leftover_reason = reason;
                 changed
             }
             ServerMessage::SetBlocklistDetails { details } => self.upsert(details.clone()),
@@ -237,10 +264,18 @@ mod tests {
     fn leftover_rules_follow_the_bridges_count() {
         let mut s = SubscriptionsStore::new();
         assert_eq!(s.leftover_rules(), 0);
-        assert!(s.apply(&ServerMessage::SetBlocklistLeftovers { count: 3 }));
+        assert!(s.apply(&ServerMessage::SetBlocklistLeftovers {
+            count: 3,
+            cause: None,
+            reason: None
+        }));
         assert_eq!(s.leftover_rules(), 3);
         assert!(
-            !s.apply(&ServerMessage::SetBlocklistLeftovers { count: 3 }),
+            !s.apply(&ServerMessage::SetBlocklistLeftovers {
+                count: 3,
+                cause: None,
+                reason: None
+            }),
             "the same count isn't a change"
         );
         // A summary from a bridge that knows about storage keeps the count.
@@ -253,14 +288,62 @@ mod tests {
             }),
         });
         assert_eq!(s.leftover_rules(), 3);
-        assert!(s.apply(&ServerMessage::SetBlocklistLeftovers { count: 0 }));
+        assert!(s.apply(&ServerMessage::SetBlocklistLeftovers {
+            count: 0,
+            cause: None,
+            reason: None
+        }));
         assert_eq!(s.leftover_rules(), 0);
+    }
+
+    #[test]
+    fn the_cause_and_the_outcome_of_a_removal_follow_the_bridge() {
+        let mut s = SubscriptionsStore::new();
+        let told =
+            |cause: Option<&str>, reason: Option<&str>| ServerMessage::SetBlocklistLeftovers {
+                count: 2,
+                cause: cause.map(str::to_string),
+                reason: reason.map(str::to_string),
+            };
+        assert!(s.apply(&told(Some("store_unreadable"), None)));
+        assert_eq!(s.leftover_cause(), "store_unreadable");
+        assert_eq!(s.leftover_reason(), "");
+        assert!(
+            s.apply(&told(Some("no_state_dir"), None)),
+            "a new cause under the same count is a change"
+        );
+        assert!(s.apply(&told(Some("store_unreadable"), None)));
+        assert!(
+            s.apply(&told(
+                Some("store_unreadable"),
+                Some("The rules were not removed.")
+            )),
+            "a new outcome under the same count is a change"
+        );
+        assert_eq!(s.leftover_reason(), "The rules were not removed.");
+        assert!(!s.apply(&told(
+            Some("store_unreadable"),
+            Some("The rules were not removed.")
+        )));
+        // An older bridge's summary clears the lot.
+        s.apply(&ServerMessage::SetBlocklists {
+            blocklists: vec![],
+            storage: None,
+        });
+        assert_eq!(
+            (s.leftover_rules(), s.leftover_cause(), s.leftover_reason()),
+            (0, "", "")
+        );
     }
 
     #[test]
     fn an_older_bridge_never_leaves_a_stale_leftover_count() {
         let mut s = SubscriptionsStore::new();
-        s.apply(&ServerMessage::SetBlocklistLeftovers { count: 3 });
+        s.apply(&ServerMessage::SetBlocklistLeftovers {
+            count: 3,
+            cause: None,
+            reason: None,
+        });
         s.apply(&ServerMessage::SetBlocklists {
             blocklists: vec![],
             storage: None,

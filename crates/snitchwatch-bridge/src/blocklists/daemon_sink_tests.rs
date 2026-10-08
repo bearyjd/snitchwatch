@@ -19,6 +19,8 @@ pub(in crate::blocklists) enum Daemon {
     Refuse(&'static str),
     /// Refuses `CHANGE_RULE` (an install), accepts `DELETE_RULE`.
     RefuseChange(&'static str),
+    /// Refuses `DELETE_RULE`, accepts `CHANGE_RULE`.
+    RefuseDelete(&'static str),
     Silent,
 }
 
@@ -97,6 +99,12 @@ impl Harness {
                         commands.on_reply(stream_id, &reply(command.id, Err(text)))
                     }
                     Daemon::RefuseChange(_) => {
+                        commands.on_reply(stream_id, &reply(command.id, Ok(())))
+                    }
+                    Daemon::RefuseDelete(text) if command.r#type == Action::DeleteRule as i32 => {
+                        commands.on_reply(stream_id, &reply(command.id, Err(text)))
+                    }
+                    Daemon::RefuseDelete(_) => {
                         commands.on_reply(stream_id, &reply(command.id, Ok(())))
                     }
                     Daemon::Silent => false,

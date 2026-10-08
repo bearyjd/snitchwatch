@@ -54,13 +54,27 @@ fn set_blocklists_from_an_older_bridge_still_parses() {
 
 #[test]
 fn leftover_blocklist_rules_are_counted_and_removed_by_additive_messages() {
-    let msg = ServerMessage::SetBlocklistLeftovers { count: 3 };
+    let msg = ServerMessage::SetBlocklistLeftovers {
+        count: 3,
+        cause: None,
+        reason: None,
+    };
     let json = serde_json::to_value(&msg).unwrap();
     assert_eq!(
         json,
         serde_json::json!({"action": "setBlocklistLeftovers", "count": 3})
     );
     assert_eq!(serde_json::from_value::<ServerMessage>(json).unwrap(), msg);
+    // The additive fields appear only when there is something to say.
+    let told = ServerMessage::SetBlocklistLeftovers {
+        count: 3,
+        cause: Some(LEFTOVER_CAUSE_STORE_UNREADABLE.into()),
+        reason: Some("The rules were not removed.".into()),
+    };
+    let json = serde_json::to_value(&told).unwrap();
+    assert_eq!(json["cause"], "store_unreadable");
+    assert_eq!(json["reason"], "The rules were not removed.");
+    assert_eq!(serde_json::from_value::<ServerMessage>(json).unwrap(), told);
     assert_eq!(
         serde_json::from_str::<ClientMessage>(r#"{"action":"removeLeftoverBlocklistRules"}"#)
             .unwrap(),
@@ -154,6 +168,7 @@ fn request_blocklist_entries_parses_with_defaults() {
             offset: 0,
             limit: None,
             request_id: None,
+            reply: None,
         }
     );
     let tagged: ClientMessage = serde_json::from_str(

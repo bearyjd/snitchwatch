@@ -110,6 +110,10 @@ pub enum SendError {
     NoDaemon,
     /// Every target stream's queue was full or closing.
     NotQueued,
+    /// A command that is only sent where the daemon's identity is proven
+    /// (see [`DaemonCommands::send_leftover_delete`]), on a transport where
+    /// it is not.
+    NotOnThisTransport,
 }
 
 impl std::fmt::Display for SendError {
@@ -125,6 +129,9 @@ impl std::fmt::Display for SendError {
             Self::RefusedOperator => "a rule condition the bridge won't send; refused",
             Self::NoDaemon => "no daemon connected",
             Self::NotQueued => "no daemon stream could queue the command",
+            Self::NotOnThisTransport => {
+                "this command isn't sent over the legacy per-user connection; refused"
+            }
         })
     }
 }
@@ -196,6 +203,15 @@ struct LateCommand {
     stream: Option<StreamId>,
     command: Notification,
     timed_out_at: Instant,
+}
+
+/// Which streams a command is sent to.
+#[derive(Clone, Copy)]
+enum Delivery {
+    /// What the transport does for every command (see the module doc).
+    Usual,
+    /// Only the stream whose rule snapshot the cache holds: Unix only.
+    CommittedStream,
 }
 
 struct Inner {
@@ -410,8 +426,18 @@ impl DaemonCommands {
         self.dispatch(notification)
     }
 
-    /// The checks every command passes, then delivery.
-    fn dispatch(&self, mut notification: Notification) -> Result<PendingReply, SendError> {
+    /// The checks every command passes, then delivery to every stream the
+    /// transport sends to.
+    fn dispatch(&self, notification: Notification) -> Result<PendingReply, SendError> {
+        self.dispatch_via(notification, Delivery::Usual)
+    }
+
+    /// [`dispatch`](Self::dispatch) with the streams to send to chosen.
+    fn dispatch_via(
+        &self,
+        mut notification: Notification,
+        delivery: Delivery,
+    ) -> Result<PendingReply, SendError> {
         if !ALLOWED_ACTIONS
             .iter()
             .any(|action| *action as i32 == notification.r#type)
@@ -432,9 +458,15 @@ impl DaemonCommands {
             return Err(SendError::InvalidRuleName);
         }
         let mut inner = lock(&self.inner);
-        let targets: Vec<StreamId> = match inner.transport {
-            DaemonTransport::Tcp => inner.streams.keys().copied().collect(),
-            DaemonTransport::Unix => inner.current.into_iter().collect(),
+        let targets: Vec<StreamId> = match (inner.transport, delivery) {
+            (DaemonTransport::Tcp, Delivery::Usual) => inner.streams.keys().copied().collect(),
+            (DaemonTransport::Unix, Delivery::Usual) => inner.current.into_iter().collect(),
+            (DaemonTransport::Tcp, Delivery::CommittedStream) => {
+                return Err(SendError::NotOnThisTransport)
+            }
+            (DaemonTransport::Unix, Delivery::CommittedStream) => {
+                inner.committed_by.into_iter().collect()
+            }
         };
         if targets.is_empty() {
             return Err(SendError::NoDaemon);

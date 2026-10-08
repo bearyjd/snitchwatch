@@ -9,7 +9,8 @@ mod blocklist_wire;
 mod verdict_wire;
 pub use blocklist_wire::{
     BlocklistEntry, BlocklistSummary, BLOCKLIST_ENTRIES_PAGE_MAX, ENFORCEMENT_NOT_ENFORCED,
-    ENFORCEMENT_PENDING, ENFORCEMENT_RULE_INSTALLED,
+    ENFORCEMENT_PENDING, ENFORCEMENT_RULE_INSTALLED, LEFTOVER_CAUSE_NO_STATE_DIR,
+    LEFTOVER_CAUSE_PER_USER, LEFTOVER_CAUSE_STORE_UNREADABLE,
 };
 
 pub use verdict_wire::{
@@ -131,9 +132,17 @@ pub enum ServerMessage {
     /// directory, is a per-user one, or can't read its saved subscriptions.
     /// Sent after every `SetBlocklists`; `0` clears the page's notice. The
     /// user can remove them with `RemoveLeftoverBlocklistRules`. Additive:
-    /// older clients ignore it.
+    /// older clients ignore it. `cause` says why nothing manages them (one of
+    /// the `LEFTOVER_CAUSE_*` values; a client treats one it doesn't know
+    /// like none), because with an unreadable store they are probably lists
+    /// the user still subscribes to. `reason` is how the last removal went
+    /// when it didn't fully succeed: plain text, absent otherwise.
     SetBlocklistLeftovers {
         count: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cause: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
     },
     /// One page (at most [`BLOCKLIST_ENTRIES_PAGE_MAX`] hosts, starting at
     /// `offset`) of a subscription's `total` hosts, sent only in answer to
@@ -474,7 +483,10 @@ pub enum ClientMessage {
     /// Ask for a page of a subscription's hosts; answered with
     /// `SetBlocklistEntries`. `limit` is capped at
     /// [`BLOCKLIST_ENTRIES_PAGE_MAX`]. `request_id` (optional; see
-    /// [`valid_request_id`]) comes back on the page that answers it.
+    /// [`valid_request_id`]) comes back on the page that answers it. The
+    /// page goes only to the connection that asked (`reply`, stamped by
+    /// `ws_server`, never from the wire); a request with no connection (an
+    /// in-process sender) is answered on the broadcast.
     RequestBlocklistEntries {
         subscription_id: String,
         #[serde(default)]
@@ -483,6 +495,8 @@ pub enum ClientMessage {
         limit: Option<u32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
+        #[serde(skip)]
+        reply: Option<ReplyTo>,
     },
     CreateProfile {
         id: String,

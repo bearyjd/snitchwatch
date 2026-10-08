@@ -52,6 +52,12 @@ Window {
     function leftovers(count) {
         model.applyServerMessageJson(JSON.stringify({ action: "setBlocklistLeftovers", count: count }));
     }
+    function leftoversWith(count, cause, reason) {
+        const message = { action: "setBlocklistLeftovers", count: count };
+        if (cause) { message.cause = cause; }
+        if (reason) { message.reason = reason; }
+        model.applyServerMessageJson(JSON.stringify(message));
+    }
     function findChild(item, name) {
         if (!item) {
             return null;
@@ -128,6 +134,33 @@ Window {
                                   && probeWindow.sent[0].action === "removeLeftoverBlocklistRules",
                                   "confirm sent: " + JSON.stringify(probeWindow.sent));
                 probeWindow.check(!page.confirmingLeftover, "still asking after confirming");
+
+                // The store can't be read: the rules are probably lists the
+                // user still subscribes to, and the page says what removing
+                // them does instead of calling them leftovers.
+                probeWindow.leftoversWith(2, "store_unreadable", "");
+                const worry = probeWindow.part("leftoverText").text;
+                probeWindow.check(worry.indexOf("probably lists you still subscribe to") > 0
+                                  && worry.indexOf("turns that blocking off") > 0
+                                  && worry.indexOf("may no longer have") < 0,
+                                  "unreadable-store text: '" + worry + "'");
+                probeWindow.check(remove.text === "Turn off these rules", "button: '" + remove.text + "'");
+                remove.clicked();
+                const sure = probeWindow.part("leftoverConfirmText").text;
+                probeWindow.check(sure.indexOf("until Snitchwatch can read its saved blocklists again") > 0,
+                                  "confirmation: '" + sure + "'");
+                probeWindow.part("cancelRemoveLeftovers").clicked();
+                probeWindow.check(probeWindow.sent.length === 1, "cancel sent something");
+
+                // A removal that failed shows under the button, as plain text.
+                probeWindow.check(!probeWindow.part("leftoverReasonText").visible,
+                                  "a reason before any removal failed");
+                probeWindow.leftoversWith(2, "no_state_dir", "The rules were not removed: <b>x</b>.");
+                const why = probeWindow.part("leftoverReasonText");
+                probeWindow.check(why.visible && why.text === "The rules were not removed: <b>x</b>."
+                                  && why.textFormat === Text.PlainText,
+                                  "failure under the button: '" + why.text + "'");
+                probeWindow.check(remove.text === "Remove these rules", "button after: '" + remove.text + "'");
 
                 // The bridge reports none left.
                 probeWindow.leftovers(0);

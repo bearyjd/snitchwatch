@@ -48,8 +48,11 @@ impl BlocklistsManager {
     /// Lists other than `except` that the lists' current sizes put past the
     /// total size limit are taken off the daemon now and told why, unless they
     /// already were. `except` (a list just refreshed) is installed or demoted
-    /// by the caller, after this.
-    pub(super) async fn demote_lists_past_the_limit(&self, except: &str) {
+    /// by the caller, after this. Once the daemon fails to answer, the
+    /// remaining lists only lose their files (it isn't waited on again for
+    /// each), and `true` comes back so the caller doesn't wait on it either.
+    pub(super) async fn demote_lists_past_the_limit(&self, except: &str) -> bool {
+        let mut daemon_down = false;
         for sub in self.subscriptions_in_order() {
             if sub.id == except {
                 continue;
@@ -62,23 +65,40 @@ impl BlocklistsManager {
             if already {
                 continue;
             }
-            let outcome = self.remove_over_limit(&sub.id, reason).await;
+            let outcome = self.remove_over_limit(&sub.id, reason, daemon_down).await;
+            daemon_down |= matches!(&outcome, Err(e) if e.daemon_unavailable);
             self.record_install(&sub.id, &outcome);
             let _ = self.bus.send(BlocklistEvent::StatusChanged {
                 subscription_id: sub.id.clone(),
             });
         }
+        daemon_down
     }
 
-    /// Past the total size limit, remove what `id` had and say why.
-    async fn remove_over_limit(&self, id: &str, reason: String) -> Result<(), NotInstalled> {
-        let removed = self.rule_sink.remove_blocklist_rules(id).await;
+    /// Past the total size limit, remove what `id` had and say why. With
+    /// `daemon_down` only its files go (see
+    /// [`demote_lists_past_the_limit`](Self::demote_lists_past_the_limit)).
+    async fn remove_over_limit(
+        &self,
+        id: &str,
+        reason: String,
+        daemon_down: bool,
+    ) -> Result<(), NotInstalled> {
+        self.forget_refusals(id);
+        let removed = if daemon_down {
+            self.rule_sink.remove_blocklist_files(id).await.and(Err(
+                NotInstalled::daemon_unavailable("The firewall service didn't answer"),
+            ))
+        } else {
+            self.rule_sink.remove_blocklist_rules(id).await
+        };
         if let Err(e) = &removed {
             warn!(%id, reason = %e.reason, "couldn't remove an over-limit list's rules");
         }
         Err(NotInstalled {
             reason,
             daemon_unavailable: removed.is_err_and(|e| e.daemon_unavailable),
+            cleanup_pending: false,
         })
     }
 
@@ -88,7 +108,7 @@ impl BlocklistsManager {
         match self.over_aggregate_cap(id) {
             Some(reason) => {
                 drop(hosts);
-                self.remove_over_limit(id, reason).await
+                self.remove_over_limit(id, reason, false).await
             }
             None => {
                 let outcome = self.rule_sink.replace_blocklist_rules(id, hosts).await;
@@ -172,7 +192,7 @@ impl BlocklistsManager {
     ) -> Option<Result<(), NotInstalled>> {
         let id = sub.id.as_str();
         if let Some(reason) = self.over_aggregate_cap(id) {
-            return Some(self.remove_over_limit(id, reason).await);
+            return Some(self.remove_over_limit(id, reason, false).await);
         }
         let checked = self.rule_sink.files_verified(id);
         if checked && self.rule_sink.is_current(id) {

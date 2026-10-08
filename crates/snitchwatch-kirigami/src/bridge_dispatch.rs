@@ -358,7 +358,8 @@ mod tests {
             status: "fetching".into(),
             last_failure_reason: None,
         }));
-        let leftovers = ServerMessage::SetBlocklistLeftovers { count: 2 };
+        let leftovers: ServerMessage =
+            serde_json::from_str(r#"{"action":"setBlocklistLeftovers","count":2}"#).unwrap();
         assert!(interests_blocklists(&leftovers));
         assert!(!interests_rules(&leftovers));
     }
