@@ -226,6 +226,44 @@ mod tests {
     }
 
     #[test]
+    fn only_rule_edits_are_ever_forwarded_never_change_config() {
+        // CHANGE_CONFIG lets the sender repoint Rules.Path, log/firewall
+        // config paths, the server address and TLS paths — after which even
+        // valid rule names make root write anywhere. Nothing a GUI sends may
+        // ever become one (or anything but a rule edit).
+        let effects = [
+            UpstreamEffect::None,
+            UpstreamEffect::VerdictApplied {
+                row_id: "r".to_string(),
+                verdict: crate::cache::connections::Verdict::Allow,
+                remember: true,
+            },
+            UpstreamEffect::AddRule {
+                rule: wire_rule("r", true),
+            },
+            UpstreamEffect::DeleteRule {
+                rule_id: "r".to_string(),
+            },
+            UpstreamEffect::UpdateRule {
+                rule_id: "r".to_string(),
+                rule: wire_rule("r", true),
+            },
+            UpstreamEffect::SnapshotRequested,
+        ];
+        for effect in effects {
+            if let Some(ntf) = notification_for_effect(&effect, 1).unwrap() {
+                assert!(
+                    ntf.r#type == Action::ChangeRule as i32
+                        || ntf.r#type == Action::DeleteRule as i32,
+                    "{effect:?} produced action {}",
+                    ntf.r#type
+                );
+                assert_ne!(ntf.r#type, Action::ChangeConfig as i32);
+            }
+        }
+    }
+
+    #[test]
     fn notification_type_is_never_none() {
         // A NONE-typed notification tells the daemon to close the stream
         // (`notifications.go:405-408`). Nothing this function emits may be one.
