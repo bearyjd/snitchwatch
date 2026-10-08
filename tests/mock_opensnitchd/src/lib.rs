@@ -355,7 +355,10 @@ fn validate_operator_compiles(op: &snitchwatch_proto::protocol::Operator) -> Res
             op.r#type
         )));
     }
-    if !is_known_operand(&op.operand) {
+    // `Compile` overwrites a list's operand with `OpList` (operator.go:154-155),
+    // so the daemon accepts any operand there — including the empty one the
+    // bridge's `operator_from_wire` produces for a GUI-toggled list rule.
+    if op.r#type != "list" && !is_known_operand(&op.operand) {
         return Err(MockError::InvalidRule(format!(
             "unknown operator operand: `{}`",
             op.operand
@@ -632,6 +635,20 @@ mod tests {
         // no members would match every connection.
         let err = validate_rule_shape(&list_rule(Vec::new())).unwrap_err();
         assert!(matches!(err, MockError::InvalidRule(msg) if msg.contains("no members")));
+    }
+
+    #[test]
+    fn validate_rule_shape_accepts_a_list_with_an_empty_operand() {
+        // A GUI toggle sends the rule back through the bridge's
+        // `operator_from_wire`, which leaves a list's operand empty; the daemon
+        // accepts that because `Compile` overwrites a list's operand with
+        // `OpList` (operator.go:154-155). The mock must not be stricter here.
+        let mut rule = list_rule(vec![
+            list_member("simple", "process.path", "/usr/bin/curl"),
+            list_member("simple", "dest.host", "example.com"),
+        ]);
+        rule.operator.as_mut().unwrap().operand = String::new();
+        assert!(validate_rule_shape(&rule).is_ok());
     }
 
     #[test]
