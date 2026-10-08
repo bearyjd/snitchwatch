@@ -13,9 +13,9 @@ use core::pin::Pin;
 use cxx_qt::{CxxQtType, Threading};
 use cxx_qt_lib::QString;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use crate::make_rule::{Finished, MakeRuleWait, NOT_SENT, SENDING};
+use crate::make_rule::{Finished, MakeRuleWait, NOT_SENT, NO_ANSWER_AFTER, SENDING};
 use snitchwatch_bridge::ws_messages::ServerMessage;
 
 #[cxx_qt::bridge]
@@ -37,6 +37,10 @@ pub mod qobject {
         #[qproperty(QString, row_id, cxx_name = "rowId")]
         /// Whether the last request's result was Ok.
         #[qproperty(bool, created)]
+        /// How long to wait for the result, in milliseconds
+        /// (`make_rule::NO_ANSWER_AFTER`). Only the headless probes change
+        /// it, to see a silence end the wait.
+        #[qproperty(i32, no_answer_after_ms, cxx_name = "noAnswerAfterMs")]
         type MakeRuleController = super::MakeRuleControllerRust;
 
         /// Feed the bridge's `RuleCommandResult`s to this controller.
@@ -68,13 +72,26 @@ pub mod qobject {
 }
 
 /// Rust-side state for [`qobject::MakeRuleController`].
-#[derive(Default)]
 pub struct MakeRuleControllerRust {
     busy: bool,
     status_text: QString,
     row_id: QString,
     created: bool,
+    no_answer_after_ms: i32,
     wait: MakeRuleWait,
+}
+
+impl Default for MakeRuleControllerRust {
+    fn default() -> Self {
+        Self {
+            busy: false,
+            status_text: QString::default(),
+            row_id: QString::default(),
+            created: false,
+            no_answer_after_ms: i32::try_from(NO_ANSWER_AFTER.as_millis()).unwrap_or(i32::MAX),
+            wait: MakeRuleWait::default(),
+        }
+    }
 }
 
 fn next_request_id() -> String {
@@ -116,7 +133,8 @@ impl qobject::MakeRuleController {
     }
 
     fn poll(mut self: Pin<&mut Self>) {
-        let gave_up = self.as_mut().rust_mut().wait.poll(Instant::now());
+        let after = Duration::from_millis(u64::try_from(self.no_answer_after_ms).unwrap_or(0));
+        let gave_up = self.as_mut().rust_mut().wait.poll(Instant::now(), after);
         if let Some((row_id, done)) = gave_up {
             self.finish(row_id, done);
         }

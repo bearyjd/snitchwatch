@@ -336,6 +336,41 @@ fn connections_page_labels_showing_connection_data_are_plain_text() {
     );
 }
 
+/// A result that never comes must still end the wait: each rule-command sheet
+/// polls its controller every second while it is busy, and the controller
+/// gives up after its deadline (`NO_ANSWER_AFTER`).
+#[test]
+fn rule_command_sheets_poll_their_controller_while_busy() {
+    for (name, source, running, triggered) in [
+        (
+            "MakeRuleSheet.qml",
+            MAKE_RULE_SHEET,
+            "running: controller.busy",
+            "onTriggered: controller.poll()",
+        ),
+        (
+            "RuleEditorSheet.qml",
+            EDITOR_SHEET,
+            "running: !!sheet.controller && sheet.controller.busy",
+            "onTriggered: sheet.controller.poll()",
+        ),
+    ] {
+        let polling = blocks(&code_lines(source), "Timer {")
+            .into_iter()
+            .filter(|timer| {
+                has_line(timer, "interval: 1000")
+                    && has_line(timer, "repeat: true")
+                    && has_line(timer, running)
+                    && has_line(timer, triggered)
+            })
+            .count();
+        assert_eq!(
+            polling, 1,
+            "{name} must poll its controller every second while busy"
+        );
+    }
+}
+
 /// M1 (PR #108 security review): "Make a rule…" never claims the rule exists
 /// by itself. Its only outcome text is `MakeRuleController`'s, which says
 /// "created" only for the bridge's Ok result, shown as plain text.

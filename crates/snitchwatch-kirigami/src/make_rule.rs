@@ -36,7 +36,7 @@ use snitchwatch_bridge::ws_messages::{
     valid_request_id, ClientMessage, ConnectionRow, RuleCommandOutcome, ServerMessage,
 };
 use snitchwatch_proto::protocol::Connection;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::pending_decision::{parse_duration, parse_scope, VerdictChoice};
 pub(crate) use crate::rules::editor_view::NO_ANSWER_AFTER;
@@ -190,10 +190,11 @@ impl MakeRuleWait {
         Some((row_id, outcome_status(outcome)))
     }
 
-    /// Gives up after [`NO_ANSWER_AFTER`] of silence.
-    pub(crate) fn poll(&mut self, now: Instant) -> Option<(String, Finished)> {
+    /// Gives up after `after` of silence ([`NO_ANSWER_AFTER`] outside the
+    /// probes).
+    pub(crate) fn poll(&mut self, now: Instant, after: Duration) -> Option<(String, Finished)> {
         let (_, _, sent_at) = self.waiting.as_ref()?;
-        if now.duration_since(*sent_at) <= NO_ANSWER_AFTER {
+        if now.duration_since(*sent_at) <= after {
             return None;
         }
         let (_, row_id, _) = self.waiting.take()?;
@@ -516,9 +517,15 @@ mod tests {
         let now = Instant::now();
         let mut wait = MakeRuleWait::default();
         wait.begin("make-1".into(), "1:ask-1".into(), now);
-        assert!(wait.poll(now + NO_ANSWER_AFTER).is_none(), "not yet");
+        assert!(
+            wait.poll(now + NO_ANSWER_AFTER, NO_ANSWER_AFTER).is_none(),
+            "not yet"
+        );
         let (row, done) = wait
-            .poll(now + NO_ANSWER_AFTER + Duration::from_secs(1))
+            .poll(
+                now + NO_ANSWER_AFTER + Duration::from_secs(1),
+                NO_ANSWER_AFTER,
+            )
             .unwrap();
         assert_eq!(row, "1:ask-1");
         assert!(!done.created);
@@ -527,6 +534,17 @@ mod tests {
         assert!(wait
             .on_message(&result("make-1", RuleCommandOutcome::Ok))
             .is_none());
+    }
+
+    #[test]
+    fn a_shorter_deadline_ends_the_wait_sooner() {
+        let now = Instant::now();
+        let mut wait = MakeRuleWait::default();
+        wait.begin("make-1".into(), "1:ask-1".into(), now);
+        let short = Duration::from_millis(50);
+        assert!(wait.poll(now + short, short).is_none());
+        let (_, done) = wait.poll(now + Duration::from_millis(51), short).unwrap();
+        assert_eq!(done.status, NO_ANSWER);
     }
 
     #[test]

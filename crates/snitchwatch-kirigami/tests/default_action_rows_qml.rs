@@ -224,11 +224,30 @@ Controls.ApplicationWindow {
                     probeWindow.check(sheet.result === "The rule was created."
                                       && sheet.controller.created,
                                       "ok: " + sheet.result);
-                    // Another row's request says nothing here.
-                    sheet.controller.begin("1:rule");
+                    // Another row's request says nothing here. (A row id
+                    // naming no session, so only the deadline can end it.)
+                    sheet.controller.begin("probe-row");
                     probeWindow.check(sheet.result === "", "another row's status: " + sheet.result);
+                    sheet.controller.applyServerMessageJson(JSON.stringify({
+                        action: "ruleCommandResult", requestId: "unrelated", outcome: { status: "ok" }
+                    }));
+                    probeWindow.check(sheet.controller.busy, "an unrelated result ended the wait");
+                    // Finish it the way a silence does, with a short deadline.
+                    sheet.controller.noAnswerAfterMs = 50;
+                    sheet.controller.poll();
+                    probeWindow.check(sheet.controller.busy, "gave up before the deadline");
                     connModel.setGroupedMode(true);
                 } else if (probeWindow.phase === 2) {
+                    // 150 ms later: past the 50 ms deadline, poll gives up.
+                    const controller = page.makeRuleSheet.controller;
+                    controller.poll();
+                    probeWindow.check(!controller.busy && !controller.created
+                                      && controller.statusText === "No answer from the firewall "
+                                         + "in time. The rule may have been created; check the "
+                                         + "Rules page.",
+                                      "after a silence: busy " + controller.busy + " '"
+                                      + controller.statusText + "'");
+                    controller.noAnswerAfterMs = 30000;
                     for (const d of probeWindow.delegates()) {
                         if (d.isGroupHeader && d.depth === 0 && !d.expanded) {
                             connModel.toggleProcessGroup(d.groupKey);
