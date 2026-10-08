@@ -82,9 +82,10 @@ pub struct TrayControllerRust {
     paused_until: QString,
     tray_state: BridgeTrayState,
     pause_state: BridgePauseState,
-    /// A prompt holds the daemon's single slot in the live session (issue
-    /// #78; `PromptSlot` messages).
+    /// A prompt holds the daemon's single slot (issue #78; `PromptSlot`
+    /// messages), as of session `slot_session`.
     slot_held: bool,
+    slot_session: u64,
 }
 
 impl Default for TrayControllerRust {
@@ -96,6 +97,7 @@ impl Default for TrayControllerRust {
             tray_state: BridgeTrayState::Idle,
             pause_state: BridgePauseState::NOT_PAUSED,
             slot_held: false,
+            slot_session: 0,
         }
     }
 }
@@ -141,6 +143,7 @@ impl qobject::TrayController {
                     let _ = slot_thread.queue(move |mut qobject| {
                         if session_handles.is_current_session(received.connection_id) {
                             qobject.as_mut().rust_mut().slot_held = received.holder.is_some();
+                            qobject.as_mut().rust_mut().slot_session = received.connection_id;
                             qobject.refresh();
                         }
                     });
@@ -202,12 +205,12 @@ impl qobject::TrayController {
             (true, Some(ms)) => local_hh_mm(ms),
             _ => String::new(),
         };
-        let tooltip = derive_tooltip_with_slot(
-            &self.rust().tray_state,
-            &pause,
-            &until,
-            self.rust().slot_held,
-        );
+        // Only while that state belongs to the live session: after a
+        // disconnect, or on an older bridge, nothing is known to be waiting.
+        let slot_held = self.rust().slot_held
+            && crate::bridge_runtime::handles()
+                .is_some_and(|handles| handles.is_current_session(self.rust().slot_session));
+        let tooltip = derive_tooltip_with_slot(&self.rust().tray_state, &pause, &until, slot_held);
         let label = derive_menu_label(&self.rust().tray_state, &pause);
         self.as_mut().set_tooltip(QString::from(&tooltip));
         self.as_mut()

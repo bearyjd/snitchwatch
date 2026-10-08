@@ -184,27 +184,27 @@ impl PromptSlotHandle {
     }
 
     /// Marks `row_id` as holding the slot and announces it.
+    ///
+    /// Every announcement is sent while the slot lock is held, so concurrent
+    /// changes (a ping racing a verdict, two Asks) reach clients in the order
+    /// they happened, the way `ask_rule` publishes a row's insertion under
+    /// the settlement mutex. Clients keep only the latest state, so a stale
+    /// message sent last would leave an answered prompt on screen. Both sends
+    /// are synchronous and never block.
     pub fn hold(&self, row_id: &str, what: String) {
-        let message = {
-            let mut slot = self.lock();
-            slot.hold(row_id, what, now_ms());
-            slot.message()
-        };
-        let _ = self.broadcast.send(message);
+        let mut slot = self.lock();
+        slot.hold(row_id, what, now_ms());
+        let _ = self.broadcast.send(slot.message());
     }
 
     /// Releases `row_id` (whatever ended the prompt) and announces it.
     /// `ask_id` keys the summary notice like the other per-prompt notices.
     pub fn release(&self, row_id: &str, ask_id: u64) {
-        let (released, message) = {
-            let mut slot = self.lock();
-            let released = slot.release(row_id);
-            (released, slot.message())
-        };
-        let Some(count) = released else {
+        let mut slot = self.lock();
+        let Some(count) = slot.release(row_id) else {
             return;
         };
-        let _ = self.broadcast.send(message);
+        let _ = self.broadcast.send(slot.message());
         if let Some(count) = count.filter(|n| *n > 0) {
             self.notices.send(Notice::PromptSlotSummary {
                 row_id: ask_id,
@@ -215,15 +215,12 @@ impl PromptSlotHandle {
 
     /// A ping's counters. Announces only when the broadcast state changed.
     pub fn observe(&self, rule_misses: u64, uptime: u64, rules_generation: u64) {
-        let changed = {
-            let mut slot = self.lock();
-            let before = slot.message();
-            slot.observe(rule_misses, uptime, rules_generation);
-            let after = slot.message();
-            (after != before).then_some(after)
-        };
-        if let Some(message) = changed {
-            let _ = self.broadcast.send(message);
+        let mut slot = self.lock();
+        let before = slot.message();
+        slot.observe(rule_misses, uptime, rules_generation);
+        let after = slot.message();
+        if after != before {
+            let _ = self.broadcast.send(after);
         }
     }
 
