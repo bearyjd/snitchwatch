@@ -5,7 +5,8 @@
 //! Runs on the bridge runtime. The notification is sent and heard through
 //! `crate::notification_signals`, so only the notification server's click
 //! counts. The answer goes through `notification_actions::act_and_confirm`,
-//! and the notification is closed once its row stops waiting.
+//! and the notification is closed once its row stops waiting, or once the
+//! server that showed it goes (its buttons are then void).
 
 use std::time::Duration;
 
@@ -79,8 +80,10 @@ pub(crate) async fn show_and_answer(
     };
     match notice.wait(&KEYS, row_stops_waiting(&target)).await {
         WaitEnd::Action(key) => on_action(&target, key, on_review).await,
-        WaitEnd::Stopped => notice.close().await,
-        WaitEnd::Closed | WaitEnd::ServerChanged => {}
+        // A new server voids the notice's buttons, so it goes; the row
+        // still waits, to be answered in the window.
+        WaitEnd::Stopped | WaitEnd::ServerChanged => notice.close().await,
+        WaitEnd::Closed => {}
     }
 }
 

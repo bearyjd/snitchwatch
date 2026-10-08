@@ -366,3 +366,48 @@ async fn no_word_from_the_bridge_keeps_the_outcome() {
         ActionOutcome::NoLongerWaiting
     );
 }
+
+/// The notification server is replaced while a pending notice is shown: its
+/// buttons are void, so the notice is closed on the server that showed it,
+/// and the row, unanswered, still waits for the window.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_replaced_notification_server_closes_the_notice_and_the_row_still_waits() {
+    use crate::notification_signals::bus_tests::{closed, notified, PrivateBus};
+    use crate::pending_notice::{show_and_answer, PendingTarget};
+
+    let Some(bus) = PrivateBus::start() else {
+        return;
+    };
+    let server = bus.notification_server().await;
+    let listener = bus.connect().await;
+    let (handles, connection, mut inbound_rx) = handles_and_queue();
+    let session = mark_connected(&connection, true);
+    insert(
+        &connection,
+        session,
+        vec![row("ask-1", Some("/usr/bin/curl"))],
+    );
+    let notice = BridgeNotice::Pending {
+        row_id: 1,
+        process: "curl".into(),
+    };
+    let target = PendingTarget::of(&handles, session, &notice).expect("still waiting");
+    let shown = tokio::spawn(async move { show_and_answer(&listener, target, || {}).await });
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while notified(&server).await == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the notice was never shown"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let _newer = bus.notification_server().await;
+    tokio::time::timeout(Duration::from_secs(5), shown)
+        .await
+        .expect("the takeover never ended the notice")
+        .unwrap();
+    assert_eq!(closed(&server).await, [7]);
+    assert!(handles.pending_row(session, "ask-1").is_some());
+    assert!(inbound_rx.try_recv().is_err(), "nothing was answered");
+}

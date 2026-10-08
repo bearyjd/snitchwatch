@@ -13,13 +13,18 @@
 //!   sender of every message again;
 //! - only the caller's own action keys count. An unknown key, or a signal
 //!   for another notification, is ignored and the wait goes on;
-//! - if `org.freedesktop.Notifications` changes owner (the server
-//!   restarted), the wait ends with no action.
+//! - if the server that showed the notice loses `org.freedesktop.Notifications`
+//!   (it restarted, or another server took over), the wait ends with no
+//!   action, and [`Notice::close`] goes to that server, not the new one. A
+//!   change that isn't that server losing the name, such as a server started
+//!   on demand taking it while the notice was being shown, is ignored (PR
+//!   #100 re-review).
 
 use std::collections::HashMap;
 use std::future::Future;
 
 use futures_util::StreamExt;
+use zbus::fdo::{DBusProxy, NameOwnerChanged, NameOwnerChangedStream};
 use zbus::message::Type;
 use zbus::names::{BusName, OwnedUniqueName, UniqueName};
 use zbus::{Connection, MatchRule, Message, MessageStream};
@@ -78,7 +83,8 @@ pub(crate) fn classify(
 pub(crate) enum WaitEnd {
     Action(&'static str),
     Closed,
-    /// The server changed owner or went away: the notice's actions are void.
+    /// The server that showed the notice lost the name (it went away or was
+    /// replaced): the notice's actions are void.
     ServerChanged,
     /// The caller's `stop` future finished first.
     Stopped,
@@ -87,28 +93,41 @@ pub(crate) enum WaitEnd {
 /// A shown notification and the subscription that hears its answer.
 pub(crate) struct Notice {
     conn: Connection,
+    /// The server that showed it: the only sender trusted.
     owner: OwnedUniqueName,
     id: u32,
     signals: MessageStream,
-    owner_changes: zbus::fdo::NameOwnerChangedStream,
+    owner_changes: NameOwnerChangedStream,
 }
 
 impl Notice {
     /// Show a notification with `actions` (key, label). Listens first, in
     /// this order: owner changes, the owner, the server's signals, then
     /// `Notify`. If the reply comes from a different owner, the server
-    /// changed in between: the notification is closed and nothing is
-    /// returned.
+    /// changed in between: the notification is closed on the server that
+    /// answered, and nothing is returned.
     pub(crate) async fn show(
         conn: &Connection,
         summary: &str,
         body: &str,
         actions: &[(&str, &str)],
     ) -> zbus::Result<Self> {
-        let dbus = zbus::fdo::DBusProxy::new(conn).await?;
-        let owner_changes = dbus
-            .receive_name_owner_changed_with_args(&[(0, SERVER)])
-            .await?;
+        let dbus = DBusProxy::new(conn).await?;
+        let owner_changes = hear_owner_changes(&dbus).await?;
+        Self::show_heard(conn, &dbus, owner_changes, summary, body, actions).await
+    }
+
+    /// The rest of [`Notice::show`], once `owner_changes` is heard. Apart so
+    /// a test can take the server's name in between, as a server started on
+    /// demand does.
+    async fn show_heard(
+        conn: &Connection,
+        dbus: &DBusProxy<'_>,
+        owner_changes: NameOwnerChangedStream,
+        summary: &str,
+        body: &str,
+        actions: &[(&str, &str)],
+    ) -> zbus::Result<Self> {
         // A server that starts on demand (dunst, say) has no owner until
         // something calls it; notify-rust's `Notify` used to start it.
         if let Err(error) = dbus
@@ -149,20 +168,22 @@ impl Notice {
             )
             .await?;
         let id: u32 = reply.body().deserialize()?;
-        let notice = Self {
+        let shown_by = reply.header().sender().cloned();
+        if shown_by.as_ref() != Some(&*owner) {
+            if let Some(shown_by) = shown_by {
+                close_on(conn, &shown_by, id).await;
+            }
+            return Err(zbus::Error::Failure(
+                "the notification server changed while showing".into(),
+            ));
+        }
+        Ok(Self {
             conn: conn.clone(),
             owner,
             id,
             signals,
             owner_changes,
-        };
-        if reply.header().sender() != Some(&*notice.owner) {
-            notice.close().await;
-            return Err(zbus::Error::Failure(
-                "the notification server changed while showing".into(),
-            ));
-        }
-        Ok(notice)
+        })
     }
 
     /// Wait for one of `keys`, the notice closing, the server changing, or
@@ -174,7 +195,14 @@ impl Notice {
     ) -> WaitEnd {
         tokio::pin!(stop);
         loop {
+            // Owner changes first, so a click queued behind one loses.
             tokio::select! {
+                biased;
+                change = self.owner_changes.next() => {
+                    if voids(change.as_ref(), &self.owner) {
+                        return WaitEnd::ServerChanged;
+                    }
+                }
                 message = self.signals.next() => match message {
                     Some(Ok(message)) => match classify(&message, &self.owner, self.id, keys) {
                         Signal::Action(key) => return WaitEnd::Action(key),
@@ -184,33 +212,65 @@ impl Notice {
                     Some(Err(error)) => tracing::debug!(%error, "unreadable notification signal"),
                     None => return WaitEnd::ServerChanged,
                 },
-                _ = self.owner_changes.next() => return WaitEnd::ServerChanged,
                 _ = &mut stop => return WaitEnd::Stopped,
             }
         }
     }
 
-    /// Ask the server to close the notification. Best effort.
+    /// Ask the server that showed the notification to close it. Best
+    /// effort. It goes to that server's unique name, not to whoever owns
+    /// `org.freedesktop.Notifications` now: after a takeover, the new
+    /// server's notification with this id is somebody else's.
     pub(crate) async fn close(&self) {
-        if let Err(error) = self
-            .conn
-            .call_method(
-                Some(SERVER),
-                PATH,
-                Some(INTERFACE),
-                "CloseNotification",
-                &(self.id,),
-            )
-            .await
-        {
-            tracing::debug!(%error, "closing the notification failed");
+        close_on(&self.conn, &self.owner, self.id).await;
+    }
+}
+
+/// Whether a change of the server's owner voids a notice shown by `owner`:
+/// only when `owner` lost the name. Any other change is ignored, above all
+/// a server started on demand taking the name (`""` to it) while `show`
+/// was looking its owner up. An unreadable change, or the end of the
+/// changes, voids it.
+fn voids(change: Option<&NameOwnerChanged>, owner: &UniqueName<'_>) -> bool {
+    let Some(change) = change else {
+        return true;
+    };
+    match change.args() {
+        Ok(args) => args.old_owner().as_ref() == Some(owner),
+        Err(error) => {
+            tracing::debug!(%error, "unreadable owner change of the notification server");
+            true
         }
     }
 }
 
+/// Ask notification server `server` (a unique name) to close notification
+/// `id`. Best effort.
+async fn close_on(conn: &Connection, server: &UniqueName<'_>, id: u32) {
+    if let Err(error) = conn
+        .call_method(
+            Some(server.as_str()),
+            PATH,
+            Some(INTERFACE),
+            "CloseNotification",
+            &(id,),
+        )
+        .await
+    {
+        tracing::debug!(%error, "closing the notification failed");
+    }
+}
+
+/// `org.freedesktop.Notifications`' owner changes, heard before its owner
+/// is looked up.
+async fn hear_owner_changes(dbus: &DBusProxy<'_>) -> zbus::Result<NameOwnerChangedStream> {
+    dbus.receive_name_owner_changed_with_args(&[(0, SERVER)])
+        .await
+}
+
 #[cfg(test)]
 #[path = "notification_signals/bus_tests.rs"]
-mod bus_tests;
+pub(crate) mod bus_tests;
 
 #[cfg(test)]
 mod tests {
