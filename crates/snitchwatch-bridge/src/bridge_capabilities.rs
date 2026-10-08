@@ -24,12 +24,18 @@ pub const PROMPT_SLOT: &str = "promptSlot";
 /// this is advertised.
 pub const PAUSE_ANSWERS_WAITING: &str = "pauseAnswersWaiting";
 
+/// The bridge sends `RuleHits` messages: per-rule hit counts derived from
+/// the daemon's pings (`crate::cache::rule_hits`). Without it a client shows
+/// no counts at all.
+pub const RULE_HITS: &str = "ruleHits";
+
 /// What this bridge advertises to every authenticated client.
 pub fn advertised() -> Vec<String> {
     vec![
         APP_BOUND_RULES.to_string(),
         PROMPT_SLOT.to_string(),
         PAUSE_ANSWERS_WAITING.to_string(),
+        RULE_HITS.to_string(),
     ]
 }
 
@@ -64,13 +70,18 @@ mod tests {
     }
 
     #[test]
-    fn this_bridge_advertises_app_bound_rules_the_prompt_slot_and_pause_answers() {
+    fn this_bridge_advertises_app_bound_rules_the_prompt_slot_pause_answers_and_rule_hits() {
         let ack: serde_json::Value = serde_json::from_str(&current_ack()).unwrap();
         assert_eq!(
             ack,
             serde_json::json!({
                 "action": "authenticated",
-                "capabilities": ["appBoundRules", "promptSlot", "pauseAnswersWaiting"],
+                "capabilities": [
+                    "appBoundRules",
+                    "promptSlot",
+                    "pauseAnswersWaiting",
+                    "ruleHits"
+                ],
             })
         );
     }

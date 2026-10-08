@@ -18,6 +18,7 @@
 //!   one-directory constraint noted in [`crate::connections`]).
 
 pub mod all_apps;
+pub mod hits;
 pub mod io;
 pub mod io_view;
 pub mod row_store;
