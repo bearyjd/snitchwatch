@@ -271,7 +271,16 @@ impl Ui for UiService {
             );
             self.rules
                 .record_hits(&stats.events, stats.uptime, stats.rule_hits);
-            let new_rows: Vec<_> = stats.events.iter().filter_map(event_to_row).collect();
+            let new_rows: Vec<_> = {
+                let rules = self.rules_handle();
+                let rules = rules.lock().unwrap_or_else(|e| e.into_inner());
+                let listed = |name: &str| rules.rules().map(|r| r.contains_key(name));
+                stats
+                    .events
+                    .iter()
+                    .filter_map(|event| event_to_row(event, listed))
+                    .collect()
+            };
             if !new_rows.is_empty() {
                 {
                     let mut cache = self.cache.lock().await;

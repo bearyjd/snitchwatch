@@ -5,6 +5,7 @@
 //! as a stable correlation handle so the WS client can later send back a
 //! `setVerdict` referencing the same row.
 
+use crate::translator::verdict::is_answer_name;
 use crate::ws_messages::ConnectionRow;
 use snitchwatch_proto::protocol::{Connection, Event};
 
@@ -91,11 +92,6 @@ fn normalized_action(action: &str) -> &'static str {
     }
 }
 
-/// A name `translator::verdict::rule_name_for` makes for a verdict.
-fn is_bridge_answer(name: &str) -> bool {
-    name.starts_with("snitchwatch-allow-") || name.starts_with("snitchwatch-deny-")
-}
-
 /// Translate a daemon-reported `Event` (a `Connection` paired with the `Rule`
 /// that decided it) into a *decided* `ConnectionRow` carrying that rule's
 /// name in `matched_rule`.
@@ -105,16 +101,20 @@ fn is_bridge_answer(name: &str) -> bool {
 /// that matched a pre-existing rule and therefore never went through the
 /// interactive `AskRule` flow (see `grpc_server::UiService::ping`). Returns
 /// `None` when the event doesn't carry both a connection and the rule that
-/// matched it — there is nothing useful to show without both — and for the
-/// bridge's own `once` answer to an Ask (issue #102): the daemon never
-/// stores a `once` rule, so it decided only the connection the bridge was
-/// asked about, which the bridge already lists as that Ask's row (labelled,
-/// for an answer the filtering pause gave). The daemon's own `once` rules
-/// (`ui.client.*`, decided with no Ask row) are listed.
-pub fn event_to_row(event: &Event) -> Option<ConnectionRow> {
+/// matched it — there is nothing useful to show without both.
+///
+/// A once answer isn't listed twice (issue #102): the bridge's own `once`
+/// answer to an Ask decided only the connection the bridge was asked about,
+/// which it already lists as that Ask's row (labelled, for an answer the
+/// filtering pause gave), and the daemon never stores a `once` rule. So such
+/// an event is left out, but only when `listed` says the committed rule list
+/// has no rule of that name (PR #106 review, security L2): with no list
+/// (`None`), or a stored rule of that name, the row is listed. The daemon's
+/// own `once` rules (`ui.client.*`, decided with no Ask row) are listed.
+pub fn event_to_row(event: &Event, listed: impl Fn(&str) -> Option<bool>) -> Option<ConnectionRow> {
     let conn = event.connection.as_ref()?;
     let rule = event.rule.as_ref()?;
-    if rule.duration == "once" && is_bridge_answer(&rule.name) {
+    if rule.duration == "once" && is_answer_name(&rule.name) && listed(&rule.name) == Some(false) {
         return None;
     }
 
@@ -242,7 +242,7 @@ mod tests {
             rule: Some(sample_rule("899-firefox-allow-out.json", "allow")),
             unixnano: 1_700_000_000_123_456_789,
         };
-        let row = event_to_row(&event).expect("both connection and rule present");
+        let row = event_to_row(&event, |_| Some(false)).expect("both connection and rule present");
         assert_eq!(row.id, "event-1700000000123456789");
         assert_eq!(row.process, "curl");
         assert_eq!(row.dst_host, "github.com");
@@ -265,7 +265,7 @@ mod tests {
             )),
             unixnano: 1,
         };
-        let row = event_to_row(&event).unwrap();
+        let row = event_to_row(&event, |_| Some(false)).unwrap();
         assert_eq!(row.action.as_deref(), Some("deny"));
     }
 
@@ -277,32 +277,39 @@ mod tests {
             rule: Some(sample_rule("899-firefox-allow-out.json", "allow")),
             unixnano: 1,
         };
-        assert!(event_to_row(&event).is_none());
+        assert!(event_to_row(&event, |_| Some(false)).is_none());
     }
 
-    /// Issue #102: a `once` rule is only ever an answer to an Ask (the
-    /// daemon never stores one), so its event is the asked connection again,
-    /// already listed as its Ask row with that row's label ("Allowed once
-    /// (filtering was paused)", say). It isn't listed a second time.
+    /// Issue #102: a once answer isn't listed twice. A `once` rule is only
+    /// ever an answer to an Ask (the daemon never stores one), so its event
+    /// is the asked connection again, already listed as its Ask row with
+    /// that row's label ("Allowed once (filtering was paused)", say).
     #[test]
-    fn an_event_decided_by_an_answer_to_an_ask_is_not_listed_again() {
-        let mut once = sample_rule("snitchwatch-allow-github.com-443-0123abcd", "allow");
-        once.duration = "once".into();
-        let event = Event {
-            time: String::new(),
-            connection: Some(sample_connection()),
-            rule: Some(once),
-            unixnano: 1,
-        };
-        assert!(event_to_row(&event).is_none());
+    fn a_once_answer_to_an_ask_is_not_listed_twice() {
+        for (name, action) in [
+            ("snitchwatch-allow-github.com-443-0123abcd", "allow"),
+            ("snitchwatch-deny-github.com-443-0123abcd", "deny"),
+        ] {
+            let mut once = sample_rule(name, action);
+            once.duration = "once".into();
+            let event = Event {
+                time: String::new(),
+                connection: Some(sample_connection()),
+                rule: Some(once),
+                unixnano: 1,
+            };
+            assert!(event_to_row(&event, |_| Some(false)).is_none(), "{name}");
+        }
         let mut kept = sample_rule("snitchwatch-allow-github.com-443-0123abcd", "allow");
         kept.duration = "until restart".into();
         let event = Event {
+            time: String::new(),
+            connection: Some(sample_connection()),
             rule: Some(kept),
-            ..event
+            unixnano: 1,
         };
         assert!(
-            event_to_row(&event).is_some(),
+            event_to_row(&event, |_| Some(true)).is_some(),
             "a stored rule's events are listed"
         );
         // The daemon's own once rules (no GUI connected, an Ask that
@@ -313,7 +320,33 @@ mod tests {
             rule: Some(daemons),
             ..event
         };
-        assert!(event_to_row(&event).is_some());
+        assert!(event_to_row(&event, |_| Some(false)).is_some());
+    }
+
+    /// PR #106 review, security L2: only an answer the list is known not to
+    /// hold is left out. With no list, or a stored rule of that name (a
+    /// file someone named like an answer), the event is listed.
+    #[test]
+    fn a_once_answer_is_listed_unless_the_list_is_known_not_to_have_it() {
+        let mut once = sample_rule("snitchwatch-deny-github.com-443-0123abcd", "deny");
+        once.duration = "once".into();
+        let event = Event {
+            time: String::new(),
+            connection: Some(sample_connection()),
+            rule: Some(once),
+            unixnano: 1,
+        };
+        assert!(event_to_row(&event, |_| None).is_some(), "no list");
+        assert!(event_to_row(&event, |_| Some(true)).is_some(), "stored");
+        let asked = std::cell::Cell::new(None);
+        event_to_row(&event, |name| {
+            asked.set(Some(name.to_string()));
+            Some(false)
+        });
+        assert_eq!(
+            asked.take().as_deref(),
+            Some("snitchwatch-deny-github.com-443-0123abcd")
+        );
     }
 
     #[test]
@@ -324,6 +357,6 @@ mod tests {
             rule: None,
             unixnano: 1,
         };
-        assert!(event_to_row(&event).is_none());
+        assert!(event_to_row(&event, |_| Some(false)).is_none());
     }
 }

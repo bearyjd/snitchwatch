@@ -178,8 +178,8 @@ fn rule_name_component(
 /// also the only operator such a connection can get.
 pub fn rule_name_for(verdict: Verdict, host: &str, port: u16, process_path: &str) -> String {
     let host_name = format!(
-        "snitchwatch-{}-{}-{port}",
-        verdict_action_str(verdict),
+        "{}{}-{port}",
+        answer_name_prefix(verdict),
         sanitize_host_for_rule_name(host)
     );
     if is_bindable_process_path(process_path) {
@@ -190,6 +190,18 @@ pub fn rule_name_for(verdict: Verdict, host: &str, port: u16, process_path: &str
     } else {
         host_name
     }
+}
+
+/// The start of every rule name [`rule_name_for`] makes for `verdict`.
+pub fn answer_name_prefix(verdict: Verdict) -> String {
+    format!("snitchwatch-{}-", verdict_action_str(verdict))
+}
+
+/// Whether `name` starts like a name [`rule_name_for`] makes.
+pub fn is_answer_name(name: &str) -> bool {
+    [Verdict::Allow, Verdict::Deny]
+        .into_iter()
+        .any(|verdict| name.starts_with(&answer_name_prefix(verdict)))
 }
 
 /// The `AskRule` reply for an interactive verdict.
