@@ -109,6 +109,14 @@ impl Notice {
         let owner_changes = dbus
             .receive_name_owner_changed_with_args(&[(0, SERVER)])
             .await?;
+        // A server that starts on demand (dunst, say) has no owner until
+        // something calls it; notify-rust's `Notify` used to start it.
+        if let Err(error) = dbus
+            .start_service_by_name(zbus::names::WellKnownName::try_from(SERVER)?, 0)
+            .await
+        {
+            tracing::debug!(%error, "the notification server didn't start on demand");
+        }
         let owner = dbus.get_name_owner(BusName::try_from(SERVER)?).await?;
         let rule = MatchRule::builder()
             .msg_type(Type::Signal)

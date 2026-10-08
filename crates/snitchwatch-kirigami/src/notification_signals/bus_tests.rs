@@ -136,17 +136,31 @@ async fn only_the_notification_servers_click_counts() {
     // Another client clicks for us: broadcast, then sent to us directly.
     action(&attacker, None, "allow-once").await;
     action(&attacker, Some(&us), "allow-once").await;
-    // The server, with a key that isn't ours, then with ours.
+    // The server, with a key that isn't ours, then with ours, sent to us
+    // the way a server answering the `Notify` caller does.
     action(&server, Some(&us), "default").await;
-    action(&server, None, "deny").await;
-
+    action(&server, Some(&us), "deny").await;
     let end = tokio::time::timeout(
         Duration::from_secs(5),
         notice.wait(&KEYS, std::future::pending()),
     )
     .await
-    .expect("the server's click never arrived");
+    .expect("the server's targeted click never arrived");
     assert_eq!(end, WaitEnd::Action("deny"));
+
+    // A server that broadcasts its signals is heard too.
+    let mut notice = Notice::show(&listener, "summary", "body", &ACTIONS)
+        .await
+        .unwrap();
+    action(&attacker, None, "deny").await;
+    action(&server, None, "allow-once").await;
+    let end = tokio::time::timeout(
+        Duration::from_secs(5),
+        notice.wait(&KEYS, std::future::pending()),
+    )
+    .await
+    .expect("the server's broadcast click never arrived");
+    assert_eq!(end, WaitEnd::Action("allow-once"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
