@@ -452,6 +452,18 @@ fn a_list_constrained_only_by_hashes_is_refused() {
 }
 
 #[test]
+fn a_regexp_that_matches_every_host_is_refused() {
+    // Unanchored: an empty match fits every dest.host.
+    assert!(refused(leaf("regexp", "dest.host", "a*")));
+    assert!(refused(leaf("regexp", "dest.host", "^")));
+    assert!(refused(list(vec![
+        process(),
+        leaf("regexp", "dest.host", ".*")
+    ])));
+    assert!(!refused(leaf("regexp", "dest.host", "^a*$")));
+}
+
+#[test]
 fn an_empty_or_missing_regexp_is_refused() {
     assert!(refused(leaf("regexp", "dest.host", "")));
     assert!(refused(json!({ "type": "regexp", "operand": "dest.host" })));
@@ -468,7 +480,7 @@ fn a_case_insensitive_pattern_that_lowercasing_changes_is_refused() {
     // every bare-IP connection.
     assert!(refused(leaf("regexp", "dest.host", r"^\D*$")));
     let sensitive =
-        json!({ "type": "regexp", "operand": "dest.host", "data": r"^\D*$", "sensitive": true });
+        json!({ "type": "regexp", "operand": "dest.host", "data": r"^\D+$", "sensitive": true });
     assert!(!refused(sensitive));
     assert!(
         !refused(leaf("regexp", "dest.host", r"^\\D$")),
