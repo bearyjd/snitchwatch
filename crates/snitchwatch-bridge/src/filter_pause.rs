@@ -6,6 +6,12 @@
 //! pause request goes through `client_presence::apply_pause_request`; nothing
 //! else may call [`FilterPause::pause`].
 //!
+//! A pause belongs to the GUI-session generation that set it (see
+//! `client_presence::ClientPresence::current_generation`). `ask_rule` honors
+//! it only for an admission of that same generation, so a GUI that
+//! authenticates after every earlier GUI left is never auto-allowed under
+//! their pause, even before the last-loss clear has run.
+//!
 //! A pause is active only while *both* of its deadlines are ahead. The
 //! monotonic deadline doesn't move when the wall clock is stepped backwards;
 //! the wall deadline still passes while the machine is suspended, when the
@@ -16,6 +22,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::time::{Instant, MissedTickBehavior};
 
+use crate::client_presence::Admission;
 use crate::ws_messages::ServerMessage;
 
 /// The only pause lengths the bridge accepts: 5 minutes, 30 minutes, 1 hour.
@@ -82,6 +89,8 @@ impl PauseState {
 struct Active {
     mono_deadline: Instant,
     wall_deadline: SystemTime,
+    /// The GUI-session generation whose request set this pause.
+    owner_generation: u64,
 }
 
 impl Active {
@@ -122,9 +131,14 @@ impl FilterPause {
         self.active.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Start (or replace) a pause. Only `client_presence::apply_pause_request`
-    /// may call this.
-    pub fn pause(&self, duration: Duration) -> Result<PauseState, Rejected> {
+    /// Start (or replace) a pause owned by GUI-session generation
+    /// `owner_generation`. Only `client_presence::apply_pause_request` may
+    /// call this, under the presence lock.
+    pub(crate) fn pause(
+        &self,
+        duration: Duration,
+        owner_generation: u64,
+    ) -> Result<PauseState, Rejected> {
         if duration.subsec_nanos() != 0 || !ALLOWED_PAUSE_SECS.contains(&duration.as_secs()) {
             return Err(Rejected(duration));
         }
@@ -133,6 +147,7 @@ impl FilterPause {
         *self.lock() = Some(Active {
             mono_deadline: now_mono + duration,
             wall_deadline: now_wall + duration,
+            owner_generation,
         });
         Ok(self.state())
     }
@@ -140,6 +155,37 @@ impl FilterPause {
     /// End any pause. Reports whether there was one to clear.
     pub fn resume(&self) -> bool {
         self.lock().take().is_some()
+    }
+
+    /// Clear a pause whose owning GUI-session generation has ended, i.e. one
+    /// older than `current_generation`. A pause set since, by a GUI of the
+    /// current generation, is kept. Reports whether a pause was cleared.
+    pub fn clear_if_owner_ended(&self, current_generation: u64) -> bool {
+        let mut active = self.lock();
+        if active
+            .as_ref()
+            .is_some_and(|pause| pause.owner_generation < current_generation)
+        {
+            *active = None;
+            return true;
+        }
+        false
+    }
+
+    /// Whether the pause applies to an `AskRule` admitted under `admission`:
+    /// it is active, and owned by the admission's GUI-session generation,
+    /// which is still current. Checked under the presence lock (lock order
+    /// presence → pause), so a racing last-session loss can't slip between
+    /// the check and the auto-allow decision.
+    pub(crate) fn applies_to(&self, admission: &Admission) -> bool {
+        let generation = admission.generation();
+        admission.while_current(|| {
+            let now_mono = Instant::now();
+            let now_wall = (self.wall_clock)();
+            self.lock().as_ref().is_some_and(|pause| {
+                pause.owner_generation == generation && pause.is_active(now_mono, now_wall)
+            })
+        }) == Some(true)
     }
 
     pub fn is_active(&self, now_mono: Instant, now_wall: SystemTime) -> bool {
@@ -259,7 +305,7 @@ mod tests {
         for secs in ALLOWED_PAUSE_SECS {
             let wall = TestWall::new();
             let pause = wall.pause();
-            let state = pause.pause(Duration::from_secs(secs)).unwrap();
+            let state = pause.pause(Duration::from_secs(secs), 0).unwrap();
             assert_eq!(
                 state,
                 PauseState {
@@ -285,14 +331,14 @@ mod tests {
         let pause = wall.pause();
         for secs in [0, 301, 7200] {
             assert_eq!(
-                pause.pause(Duration::from_secs(secs)),
+                pause.pause(Duration::from_secs(secs), 0),
                 Err(Rejected(Duration::from_secs(secs)))
             );
             assert!(!pause.is_active_now(), "{secs} s must not start a pause");
         }
 
-        let before = pause.pause(Duration::from_secs(300)).unwrap();
-        assert!(pause.pause(Duration::from_secs(7200)).is_err());
+        let before = pause.pause(Duration::from_secs(300), 0).unwrap();
+        assert!(pause.pause(Duration::from_secs(7200), 0).is_err());
         assert_eq!(
             pause.state(),
             before,
@@ -305,7 +351,7 @@ mod tests {
         // Suspend: the monotonic clock stands still while the wall clock runs.
         let wall = TestWall::new();
         let pause = wall.pause();
-        pause.pause(Duration::from_secs(300)).unwrap();
+        pause.pause(Duration::from_secs(300), 0).unwrap();
         wall.step_forward(Duration::from_secs(301));
         assert!(!pause.is_active_now());
         assert_eq!(pause.state(), PauseState::NOT_PAUSED);
@@ -315,7 +361,7 @@ mod tests {
     async fn a_backwards_wall_jump_does_not_extend_the_pause() {
         let wall = TestWall::new();
         let pause = wall.pause();
-        pause.pause(Duration::from_secs(300)).unwrap();
+        pause.pause(Duration::from_secs(300), 0).unwrap();
         wall.step_back(Duration::from_secs(3600));
         // The end time shown to the user follows the earlier deadline.
         assert_eq!(
@@ -326,11 +372,54 @@ mod tests {
         assert!(!pause.is_active_now());
     }
 
+    #[test]
+    fn a_pause_never_applies_through_a_stale_admission() {
+        // Security review F2: the last GUI leaves between `ask_rule`'s
+        // admission and its pause check, before the clear task has run.
+        let presence = crate::client_presence::ClientPresence::default();
+        let pause = FilterPause::new();
+        let gui = presence.authenticated_session();
+        let admission = presence.admit().unwrap();
+        pause
+            .pause(Duration::from_secs(300), presence.current_generation())
+            .unwrap();
+        assert!(pause.applies_to(&admission));
+        drop(gui);
+        assert!(pause.is_active_now(), "the clear task hasn't run yet");
+        assert!(!pause.applies_to(&admission));
+    }
+
+    #[test]
+    fn a_pause_applies_only_to_its_owner_generation() {
+        // Security review F1: GUI B authenticates after GUI A, the pause's
+        // owner, left; until the clear task runs, A's pause must not
+        // auto-allow for B.
+        let presence = crate::client_presence::ClientPresence::default();
+        let pause = FilterPause::new();
+        let gui_a = presence.authenticated_session();
+        pause
+            .pause(Duration::from_secs(300), presence.current_generation())
+            .unwrap();
+        drop(gui_a);
+        let _gui_b = presence.authenticated_session();
+        assert!(!pause.applies_to(&presence.admit().unwrap()));
+
+        assert!(pause.clear_if_owner_ended(presence.current_generation()));
+        pause
+            .pause(Duration::from_secs(300), presence.current_generation())
+            .unwrap();
+        assert!(pause.applies_to(&presence.admit().unwrap()));
+        assert!(
+            !pause.clear_if_owner_ended(presence.current_generation()),
+            "B's own pause must survive a late clear for A's loss"
+        );
+    }
+
     #[tokio::test(start_paused = true)]
     async fn resume_reports_whether_a_pause_was_cleared() {
         let pause = TestWall::new().pause();
         assert!(!pause.resume());
-        pause.pause(Duration::from_secs(1800)).unwrap();
+        pause.pause(Duration::from_secs(1800), 0).unwrap();
         assert!(pause.resume());
         assert!(!pause.is_active_now());
         assert!(!pause.resume());
@@ -341,7 +430,7 @@ mod tests {
         let wall = TestWall::new();
         let pause = wall.pause();
         assert!(!pause.take_expired());
-        pause.pause(Duration::from_secs(300)).unwrap();
+        pause.pause(Duration::from_secs(300), 0).unwrap();
         assert!(!pause.take_expired());
         assert!(pause.is_active_now());
         wall.advance(Duration::from_secs(300)).await;
@@ -424,7 +513,7 @@ mod tests {
         let _verdict = cache.insert_pending(pending_row("pre-pause"));
         assert_eq!(*tray_rx.borrow(), TrayState::Pending(1));
 
-        pause.pause(Duration::from_secs(300)).unwrap();
+        pause.pause(Duration::from_secs(300), 0).unwrap();
         cache.resync_tray_state();
         assert_eq!(
             *tray_rx.borrow(),
@@ -447,7 +536,7 @@ mod tests {
         use crate::tray_state::TrayState;
         let (mut cache, pause, tray_rx) = paused_cache();
         let _verdict = cache.insert_pending(pending_row("pre-pause"));
-        pause.pause(Duration::from_secs(300)).unwrap();
+        pause.pause(Duration::from_secs(300), 0).unwrap();
         assert!(cache.cancel_pending("pre-pause"));
         assert_eq!(*tray_rx.borrow(), TrayState::FilterOff);
 
@@ -470,7 +559,7 @@ mod tests {
             "silent while not paused"
         );
 
-        pause.pause(Duration::from_secs(300)).unwrap();
+        pause.pause(Duration::from_secs(300), 0).unwrap();
         wall.advance(Duration::from_secs(299)).await;
         settle().await;
         assert_eq!(expiries.load(Ordering::SeqCst), 0);
@@ -492,9 +581,9 @@ mod tests {
         let pause = wall.pause();
         let (expiries, task) = spawn_expiry(&pause);
 
-        pause.pause(Duration::from_secs(300)).unwrap();
+        pause.pause(Duration::from_secs(300), 0).unwrap();
         wall.advance(Duration::from_secs(240)).await;
-        pause.pause(Duration::from_secs(1800)).unwrap();
+        pause.pause(Duration::from_secs(1800), 0).unwrap();
         wall.advance(Duration::from_secs(120)).await;
         settle().await;
         assert_eq!(expiries.load(Ordering::SeqCst), 0, "old deadline fired");
@@ -512,7 +601,7 @@ mod tests {
         let pause = wall.pause();
         let (expiries, task) = spawn_expiry(&pause);
 
-        pause.pause(Duration::from_secs(300)).unwrap();
+        pause.pause(Duration::from_secs(300), 0).unwrap();
         settle().await;
         wall.step_forward(Duration::from_secs(400));
         tokio::time::advance(EXPIRY_TICK).await;

@@ -478,8 +478,10 @@ impl Ui for UiService {
         // hits the daemon's fail-closed default. See
         // docs/superpowers/plans/2026-07-12-tray-filter-off.md. The deadline
         // is checked here, so an expired pause stops auto-allowing even
-        // before the expiry task clears it (issue #47).
-        if self.filter_pause.is_active_now() {
+        // before the expiry task clears it, and only a pause set by this
+        // admission's GUI-session generation applies, checked under the
+        // presence lock (issue #47).
+        if self.filter_pause.applies_to(&admission) {
             let row = connection_to_row(&conn, ask_id);
             let mut decided_row = row.clone();
             decided_row.action = Some("allow".to_string());

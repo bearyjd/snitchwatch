@@ -819,7 +819,7 @@ async fn recent_block_reverts_to_filter_off_while_paused() {
     tray_rx.changed().await.unwrap();
     assert_eq!(*tray_rx.borrow(), TrayState::Pending(1));
 
-    filter_pause.pause(Duration::from_secs(300)).unwrap();
+    filter_pause.pause(Duration::from_secs(300), 0).unwrap();
     cache.lock().await.resync_tray_state();
     cache
         .lock()
@@ -882,7 +882,7 @@ async fn ask_rule_auto_allows_immediately_when_filtering_paused() {
     let (tx, mut rx) = broadcast::channel::<ServerMessage>(16);
     let notice_bus = Arc::new(crate::notice::NoticeBus::new());
     let filter_pause = Arc::new(FilterPause::new());
-    filter_pause.pause(Duration::from_secs(300)).unwrap();
+    filter_pause.pause(Duration::from_secs(300), 0).unwrap();
     let svc = UiService::new(cache.clone(), tx, tray_pub, notice_bus, filter_pause);
     // A pause only applies while a GUI is authenticated (see
     // `paused_bridge_without_an_authenticated_gui_defers_to_the_daemon`).
@@ -926,7 +926,7 @@ async fn paused_bridge_without_an_authenticated_gui_defers_to_the_daemon() {
     let cache = Arc::new(Mutex::new(ConnectionCache::new(64)));
     let (tx, mut rx) = broadcast::channel::<ServerMessage>(16);
     let filter_pause = Arc::new(FilterPause::new());
-    filter_pause.pause(Duration::from_secs(300)).unwrap();
+    filter_pause.pause(Duration::from_secs(300), 0).unwrap();
     let svc = UiService::new(
         cache.clone(),
         tx,
@@ -1000,6 +1000,54 @@ async fn ask_rule_prompts_normally_when_not_paused() {
     assert_eq!(rule.action, "allow");
 }
 
+#[tokio::test]
+async fn a_departed_guis_pause_does_not_auto_allow_for_the_next_gui() {
+    // Security review F1: the last-loss clear runs in its own task. A GUI that
+    // authenticates before it runs must still be prompted, not auto-allowed
+    // under the departed GUI's pause.
+    let (svc, cache, mut rx) = lifecycle_service();
+    let presence = svc.client_presence();
+    let gui_a = presence.authenticated_session();
+    crate::client_presence::apply_pause_request(
+        &presence,
+        &svc.filter_pause,
+        crate::filter_pause::PauseRequest::Pause(Duration::from_secs(300)),
+        Some(presence.current_generation()),
+    );
+    drop(gui_a); // No clear task in this test: the gap stays open.
+    let _gui_b = presence.authenticated_session();
+    assert!(svc.filter_pause.is_active_now());
+
+    let ask = tokio::spawn({
+        let svc = svc.clone();
+        async move {
+            svc.ask_rule(Request::new(Connection {
+                dst_host: "next-gui.example.com".into(),
+                process_path: "/usr/bin/curl".into(),
+                ..Default::default()
+            }))
+            .await
+        }
+    });
+    let row_id = lifecycle_pending(&mut rx).await;
+    assert_eq!(
+        cache.lock().await.pending_count(),
+        1,
+        "GUI B was auto-allowed under GUI A's pause"
+    );
+    cache
+        .lock()
+        .await
+        .resolve(
+            &row_id,
+            Verdict::Deny,
+            VerdictDuration::Once,
+            VerdictScope::ThisHost,
+        )
+        .unwrap();
+    assert_eq!(ask.await.unwrap().unwrap().into_inner().action, "deny");
+}
+
 #[tokio::test(start_paused = true)]
 async fn an_expired_pause_prompts_before_its_expiry_tick_runs() {
     // Issue #47: `ask_rule` checks the deadline itself, so an expired pause
@@ -1021,7 +1069,7 @@ async fn an_expired_pause_prompts_before_its_expiry_tick_runs() {
         filter_pause.clone(),
     );
     let _gui_session = svc.client_presence().authenticated_session();
-    filter_pause.pause(Duration::from_secs(300)).unwrap();
+    filter_pause.pause(Duration::from_secs(300), 0).unwrap();
     tokio::time::advance(Duration::from_secs(301)).await;
     let mut tray_rx = tray_pub.subscribe();
 

@@ -187,7 +187,7 @@ mod tests {
         );
         let tray_pub = Arc::new(TrayStatePublisher::new());
         let filter_pause = Arc::new(crate::filter_pause::FilterPause::new());
-        filter_pause.pause(Duration::from_secs(300)).unwrap();
+        filter_pause.pause(Duration::from_secs(300), 0).unwrap();
         let cache = Arc::new(TokioMutex::new(
             ConnectionCache::with_tray_publisher(64, tray_pub.clone())
                 .with_filter_pause(filter_pause),

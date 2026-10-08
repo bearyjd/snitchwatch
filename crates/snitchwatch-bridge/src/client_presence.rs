@@ -89,7 +89,10 @@ pub async fn clear_pause_on_last_session_loss<F, Fut>(
     Fut: Future<Output = ()>,
 {
     while losses.changed().await.is_ok() {
-        if pause.resume() {
+        // A late wake-up must not clear a pause a GUI of the new generation
+        // set in the meantime; only the departed generation's pause goes.
+        let current_generation = *losses.borrow_and_update();
+        if pause.clear_if_owner_ended(current_generation) {
             tracing::info!("last authenticated GUI session ended; filtering pause cleared");
             on_cleared().await;
         }
@@ -121,12 +124,13 @@ pub fn apply_pause_request(
         pause.resume();
         return pause.state();
     };
-    let set = || pause.pause(duration);
     let outcome = match sender_generation {
-        Some(generation) => presence.while_generation_current(generation, set),
-        None => presence
-            .admit()
-            .and_then(|admission| admission.while_current(set)),
+        Some(generation) => {
+            presence.while_generation_current(generation, || pause.pause(duration, generation))
+        }
+        None => presence.admit().and_then(|admission| {
+            admission.while_current(|| pause.pause(duration, admission.generation))
+        }),
     };
     match outcome {
         None => tracing::info!(
@@ -160,6 +164,11 @@ pub struct Admission {
 }
 
 impl Admission {
+    /// The GUI-session generation this admission was taken under.
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
+    }
+
     /// Serialize admission/verdict resolution against the last-client loss.
     pub(crate) fn while_current<T>(&self, f: impl FnOnce() -> T) -> Option<T> {
         self.presence.while_generation_current(self.generation, f)
@@ -229,7 +238,9 @@ mod tests {
         let pause = Arc::new(FilterPause::new());
         let first = presence.authenticated_session();
         let second = presence.authenticated_session();
-        pause.pause(THIRTY_MINUTES).unwrap();
+        pause
+            .pause(THIRTY_MINUTES, presence.current_generation())
+            .unwrap();
         let mut cleared_rx = spawn_clear_task(&presence, &pause);
         tokio::task::yield_now().await;
 
@@ -289,6 +300,44 @@ mod tests {
         );
         pause.resume();
         assert!(apply_pause_request(&presence, &pause, pause_for_thirty_minutes(), None).paused);
+    }
+
+    #[tokio::test]
+    async fn a_late_last_loss_clear_keeps_a_new_guis_fresh_pause() {
+        // Code review L2: the clear task only sees GUI A's departure after
+        // GUI B authenticated and paused; B's pause must stand.
+        let presence = ClientPresence::default();
+        let pause = Arc::new(FilterPause::new());
+        let losses = presence.session_losses();
+        let gui_a = presence.authenticated_session();
+        let stamp_a = presence.current_generation();
+        apply_pause_request(&presence, &pause, pause_for_thirty_minutes(), Some(stamp_a));
+        drop(gui_a);
+        let _gui_b = presence.authenticated_session();
+        let stamp_b = presence.current_generation();
+        assert!(
+            apply_pause_request(&presence, &pause, pause_for_thirty_minutes(), Some(stamp_b))
+                .paused
+        );
+
+        let (cleared_tx, mut cleared_rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(clear_pause_on_last_session_loss(
+            losses,
+            pause.clone(),
+            move || {
+                let cleared_tx = cleared_tx.clone();
+                async move {
+                    let _ = cleared_tx.send(());
+                }
+            },
+        ));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(200), cleared_rx.recv())
+                .await
+                .is_err(),
+            "the late clear must not report clearing B's pause"
+        );
+        assert!(pause.is_active_now(), "B's fresh pause was wiped");
     }
 
     #[test]
