@@ -26,6 +26,11 @@
 //!   narrows, is refused. So is an empty regexp (a missing `data` arrives
 //!   as `""`), and a pattern Go's RE2 would read differently once the
 //!   daemon lowercases it (see `regexp`).
+//! - `Compile` overwrites a `simple` `user.name` leaf's data with the uid,
+//!   and the daemon reports the rule that way. Sent back, the uid is looked
+//!   up as a *name*: an enabled rule is refused, and a disabled one is
+//!   saved and then never compiles again. So a numeric `user.name` is
+//!   refused, and such a rule is listed read-only.
 //!
 //! [`validate_operator`] accepts only shapes that evaluate as written: a leaf
 //! (`simple`, `regexp`, `network`) or one `list` of 1..=64 leaves. Every
@@ -188,6 +193,9 @@ fn validate_leaf(op: &Operator) -> Result<(), String> {
         ));
     }
     match op.r#type.as_str() {
+        "simple" if op.operand == "user.name" && is_uid(&op.data) => {
+            Err(USER_NAME_IS_A_UID.to_string())
+        }
         "simple" => match operand_kind(&op.operand)? {
             OperandKind::True | OperandKind::Text => Ok(()),
             OperandKind::Network => Err(NETWORK_OPERAND_NEEDS_NETWORK.to_string()),
@@ -221,6 +229,9 @@ fn validate_leaf(op: &Operator) -> Result<(), String> {
 const NETWORK_OPERAND_NEEDS_NETWORK: &str =
     "the dest.network and source.network operands need the network type";
 const TRUE_NEEDS_SIMPLE: &str = "the true operand needs the simple type";
+const USER_NAME_IS_A_UID: &str = "this user.name condition holds the uid the firewall service \
+     reports once the rule is loaded; sent back, it would be looked up as a user name and the \
+     rule would stop loading";
 const LISTS_REFUSED: &str =
     "blocklist (lists) rules are managed by Snitchwatch and can't be sent from a GUI";
 
@@ -247,6 +258,12 @@ fn operand_kind(operand: &str) -> Result<OperandKind, String> {
         return Err(LISTS_REFUSED.to_string());
     }
     Err("unknown operator operand".to_string())
+}
+
+/// What `Compile` writes over a `user.name` leaf's data: a decimal uid.
+/// `useradd` refuses fully numeric names, so no real name looks like this.
+fn is_uid(data: &str) -> bool {
+    !data.is_empty() && data.bytes().all(|b| b.is_ascii_digit())
 }
 
 /// A portable environment variable name (`[A-Za-z_][A-Za-z0-9_]*`).
