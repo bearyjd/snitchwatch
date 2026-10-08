@@ -290,6 +290,15 @@ takes it again. Meanwhile every other new connection gets `DefaultAction`:
         Deleting it could silently undo a change the user chose, such as
         narrowing a curated allow's scope;
       - nothing outside the prefix is ever deleted.
+    - **Required before building D (critic, 2026-10-08, HIGH):** "an entry
+      missing from the daemon is installed" must not reinstall a curated
+      rule the **user deleted** — otherwise deleting e.g. the `kioworker`
+      allow is silently undone at the next daemon restart. Record
+      user-deleted curated names (persisted with the other bridge state)
+      and never reinstall them; and the reserved-prefix refusal must still
+      allow **pure toggles** (`enabled` only) of curated rules. Tests: a
+      deleted curated rule stays deleted across reconcile/restart; toggling
+      a curated rule off and on works under the prefix check.
 14. **Content.** It comes from the first-boot capture spike (roadmap §6
     item 5): on a fresh tower VM image, record every program that asks in
     the first 10 minutes after login. Known hard cases go to the owner
