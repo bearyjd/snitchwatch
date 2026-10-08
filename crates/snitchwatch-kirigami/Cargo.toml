@@ -82,3 +82,8 @@ tokio = { version = "1.40", features = ["test-util"] }
 mock-opensnitchd = { path = "../../tests/mock_opensnitchd" }
 snitchwatch-bridge-cli = { path = "../snitchwatch-bridge-cli", default-features = false }
 tracing-subscriber = "0.3"
+# logging.rs' frame-cap test drives a `log` record through `LogTracer`, the
+# path tungstenite's frame logs take. Both are already in the graph
+# (tungstenite, tracing-subscriber).
+log = "0.4"
+tracing-log = "0.2"
