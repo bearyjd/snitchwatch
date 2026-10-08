@@ -280,7 +280,8 @@ async fn refresh_loop_drives_pending_subscriptions_through_the_worker() {
 async fn aborting_the_tasks_stops_them() {
     let mgr = manager_with(Arc::new(FixtureFetcher::default()), &[]);
     let (tx, _rx) = broadcast::channel(4);
-    let tasks = BlocklistTasks::spawn(mgr, tx, Duration::from_secs(3600));
+    let (_synced_tx, synced) = tokio::sync::watch::channel(0);
+    let tasks = BlocklistTasks::spawn(mgr, tx, Duration::from_secs(3600), Some(synced));
     tasks.abort();
     wait_for("the aborted tasks", || tasks.is_finished()).await;
 }
@@ -309,4 +310,221 @@ async fn entry_requests_for_unknown_ids_are_dropped() {
         events.try_recv(),
         Ok(BlocklistEvent::EntriesRequested { subscription_id, .. }) if subscription_id == "known"
     ));
+}
+
+/// Counts reconcile passes (each ends in `remove_orphans`).
+#[derive(Default)]
+struct ReconcileCounter {
+    passes: AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl crate::blocklists::RuleSink for ReconcileCounter {
+    async fn replace_blocklist_rules(
+        &self,
+        _list_id: &str,
+        _hosts: Vec<String>,
+    ) -> Result<(), crate::blocklists::NotInstalled> {
+        Ok(())
+    }
+
+    async fn remove_orphans(&self, _keep: &[String]) {
+        self.passes.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+fn counted_manager() -> (Arc<BlocklistsManager>, Arc<ReconcileCounter>) {
+    let sink = Arc::new(ReconcileCounter::default());
+    let store = Arc::new(BlocklistStore::open_in_memory().unwrap());
+    let mgr = BlocklistsManager::new(store)
+        .with_fetcher(Arc::new(FixtureFetcher::default()))
+        .with_rule_sink(sink.clone());
+    (Arc::new(mgr), sink)
+}
+
+/// Issue #45 PR B: each committed daemon rules snapshot (a new daemon
+/// connection) reconciles the lists, on the worker.
+#[tokio::test]
+async fn each_committed_rules_snapshot_triggers_a_reconcile() {
+    let (mgr, sink) = counted_manager();
+    let (tx, _rx) = broadcast::channel(16);
+    let (synced_tx, synced) = tokio::sync::watch::channel(0u64);
+    let tasks = BlocklistTasks::spawn(mgr, tx, Duration::from_secs(3600), Some(synced));
+    // The refresh loop's first tick (at start) reconciles once.
+    wait_for("the startup tick's reconcile", || {
+        sink.passes.load(Ordering::SeqCst) == 1
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(sink.passes.load(Ordering::SeqCst), 1, "no snapshot yet");
+    synced_tx.send_modify(|g| *g += 1);
+    wait_for("the first snapshot's reconcile", || {
+        sink.passes.load(Ordering::SeqCst) == 2
+    })
+    .await;
+    synced_tx.send_modify(|g| *g += 1);
+    wait_for("the second snapshot's reconcile", || {
+        sink.passes.load(Ordering::SeqCst) == 3
+    })
+    .await;
+    tasks.abort();
+}
+
+/// Subscription changes reconcile too, after the subscribe or unsubscribe.
+#[tokio::test]
+async fn subscribing_and_unsubscribing_trigger_a_reconcile() {
+    let (mgr, sink) = counted_manager();
+    let (worker, handle) = BlocklistWorker::spawn(mgr.clone());
+    assert_eq!(
+        worker.try_route(ClientMessage::SubscribeBlocklist {
+            url: fixture_url("domains-tiny.txt"),
+        }),
+        None
+    );
+    wait_for("the subscribe's reconcile", || {
+        sink.passes.load(Ordering::SeqCst) == 1
+    })
+    .await;
+    let id = mgr.subscriptions()[0].id.clone();
+    worker.unsubscribe(id);
+    wait_for("the unsubscribe's reconcile", || {
+        sink.passes.load(Ordering::SeqCst) == 2
+    })
+    .await;
+    assert!(mgr.subscriptions().is_empty());
+    handle.abort();
+}
+
+/// Review (code M): a scheduled refresh tick also reconciles, so a list the
+/// daemon refused or didn't answer for is retried without a restart.
+#[tokio::test]
+async fn a_refresh_tick_triggers_a_full_reconcile() {
+    let (mgr, sink) = counted_manager();
+    let (worker, handle) = BlocklistWorker::spawn(mgr);
+    assert!(worker.enqueue(BlocklistJob::RefreshDue));
+    wait_for("the refresh tick's reconcile", || {
+        sink.passes.load(Ordering::SeqCst) == 1
+    })
+    .await;
+    handle.abort();
+}
+
+/// Refuses every install; counts installs and reconcile passes.
+#[derive(Default)]
+struct RefusingCounter {
+    installs: AtomicUsize,
+    passes: AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl crate::blocklists::RuleSink for RefusingCounter {
+    async fn replace_blocklist_rules(
+        &self,
+        _list_id: &str,
+        _hosts: Vec<String>,
+    ) -> Result<(), crate::blocklists::NotInstalled> {
+        self.installs.fetch_add(1, Ordering::SeqCst);
+        Err(crate::blocklists::NotInstalled::new("refused"))
+    }
+
+    async fn remove_orphans(&self, _keep: &[String]) {
+        self.passes.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+fn manager_over(
+    sink: Arc<dyn crate::blocklists::RuleSink>,
+    subs: &[Subscription],
+) -> Arc<BlocklistsManager> {
+    let store = Arc::new(BlocklistStore::open_in_memory().unwrap());
+    for sub in subs {
+        store.upsert_subscription(sub).unwrap();
+    }
+    Arc::new(
+        BlocklistsManager::new(store)
+            .with_fetcher(Arc::new(FixtureFetcher::default()))
+            .with_rule_sink(sink),
+    )
+}
+
+/// Code re-review: one refresh tick, however many lists are due, runs one
+/// full reconcile, after its downloads.
+#[tokio::test]
+async fn a_refresh_tick_with_several_due_lists_reconciles_once() {
+    let sink = Arc::new(ReconcileCounter::default());
+    let url = fixture_url("domains-tiny.txt");
+    let mgr = manager_over(
+        sink.clone(),
+        &[
+            subscription("a", &url),
+            subscription("b", &url),
+            subscription("c", &url),
+        ],
+    );
+    let (worker, handle) = BlocklistWorker::spawn(mgr.clone());
+    assert!(worker.enqueue(BlocklistJob::RefreshDue));
+    wait_for("all three downloads", || {
+        mgr.subscriptions()
+            .iter()
+            .all(|s| s.last_fetch_status == FetchStatus::Ok)
+    })
+    .await;
+    wait_for("the tick's reconcile", || {
+        sink.passes.load(Ordering::SeqCst) >= 1
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        sink.passes.load(Ordering::SeqCst),
+        1,
+        "one reconcile per tick"
+    );
+    handle.abort();
+}
+
+/// Code re-review: a list refused while it was downloaded in a refresh
+/// tick isn't tried again by the same tick's reconcile.
+#[tokio::test]
+async fn a_list_refused_during_a_refresh_tick_is_tried_once_in_it() {
+    let sink = Arc::new(RefusingCounter::default());
+    let mgr = manager_over(
+        sink.clone(),
+        &[subscription("a", &fixture_url("domains-tiny.txt"))],
+    );
+    let (worker, handle) = BlocklistWorker::spawn(mgr);
+    assert!(worker.enqueue(BlocklistJob::RefreshDue));
+    wait_for("the tick's reconcile", || {
+        sink.passes.load(Ordering::SeqCst) == 1
+    })
+    .await;
+    assert_eq!(sink.installs.load(Ordering::SeqCst), 1);
+    handle.abort();
+}
+
+/// Code re-review: an unsubscribe can free room under the total size
+/// limit, so it runs a full reconcile (which also retries refused lists).
+#[tokio::test]
+async fn an_unsubscribe_runs_a_full_reconcile() {
+    let sink = Arc::new(RefusingCounter::default());
+    let downloaded = |id: &str| Subscription {
+        last_fetched_at: Some(chrono::Utc::now()),
+        last_fetch_status: FetchStatus::Ok,
+        entry_count: 1,
+        ..subscription(id, &format!("https://example.invalid/{id}"))
+    };
+    let mgr = manager_over(sink.clone(), &[downloaded("a"), downloaded("b")]);
+    mgr.reconcile().await;
+    assert_eq!(sink.installs.load(Ordering::SeqCst), 2);
+    let (worker, handle) = BlocklistWorker::spawn(mgr);
+    worker.unsubscribe("b".to_string());
+    wait_for("the unsubscribe's reconcile", || {
+        sink.passes.load(Ordering::SeqCst) == 2
+    })
+    .await;
+    assert_eq!(
+        sink.installs.load(Ordering::SeqCst),
+        3,
+        "the refused list wasn't retried"
+    );
+    handle.abort();
 }

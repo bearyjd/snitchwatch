@@ -9,15 +9,14 @@
 //! store deserializes each value into; entries that fail to parse are dropped
 //! rather than panicking or poisoning the whole list.
 //!
-//! Per the design doc
-//! (`docs/superpowers/specs/2026-04-10-snitchwatch-design.md`, "The blocklist
-//! verdict type"), the bridge materializes every subscribed blocklist entry as
-//! a deny rule named `z00-blocklist:<list_id>:<seq>-<host>` (see
+//! The bridge installs each subscribed blocklist as one `lists.*` deny rule
+//! per list kind, named `z00-blocklist:<list_id>:<kind>` (issue #45; see
 //! `snitchwatch_bridge::blocklists::materializer`). [`Rule::source`] detects
 //! that band by name prefix so the Rules tab can render blocklist-sourced
 //! rules distinctly (and grouped) instead of mixing them in with user rules —
-//! the same underlying deny rules are already shown in full on the Blocklists
-//! tab, so this view intentionally does not repeat their per-host detail.
+//! the list's hosts are shown on the Blocklists tab, so this view
+//! intentionally does not repeat them. The bridge marks these rules
+//! read-only and not deletable ("Managed on the Blocklists page").
 //!
 //! Rule state changes are whole-list replaces/upserts, not a hot per-row
 //! stream (mirrors the Blocklists store's reasoning) — this store reports a
@@ -28,9 +27,9 @@ use serde::{Deserialize, Serialize};
 
 use snitchwatch_bridge::ws_messages::ServerMessage;
 
-/// The `z00-blocklist:<list_id>:<seq>-<host>` filename band a subscribed
-/// blocklist's materialized deny rules fall in (see
-/// `snitchwatch_bridge::blocklists::materializer::materialize_entry`).
+/// The `z00-blocklist:<list_id>:<kind>` filename band a subscribed
+/// blocklist's deny rules fall in (see
+/// `snitchwatch_bridge::blocklists::materializer::list_rule_name`).
 const BLOCKLIST_RULE_NAME_PREFIX: &str = "z00-blocklist:";
 
 /// The legacy `900-blocklist:` band emitted by pre-migration builds. Still
@@ -93,9 +92,9 @@ pub struct Rule {
     pub deletable: Option<bool>,
 }
 
-/// Where a rule originated: authored directly by the user, or materialized
-/// from a subscribed blocklist entry (the `z00-blocklist:<id>:` band, or the
-/// legacy `900-blocklist:<id>:` band during a migration window).
+/// Where a rule originated: authored directly by the user, or installed for
+/// a subscribed blocklist (the `z00-blocklist:<id>:` band, or the legacy
+/// `900-blocklist:<id>:` band during a migration window).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuleSource {
     User,

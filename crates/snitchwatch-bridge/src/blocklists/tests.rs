@@ -119,134 +119,43 @@ fn derive_id_uses_only_safe_characters_and_a_bounded_stem() {
 }
 
 #[tokio::test]
-async fn refresh_pushes_materialized_rules_to_sink() {
-    use crate::blocklists::materializer::MaterializedRule;
+async fn refresh_pushes_the_downloaded_hosts_to_the_sink() {
     use std::sync::Mutex as StdMutex;
 
     #[derive(Default)]
     struct CapturingSink {
-        calls: StdMutex<Vec<Vec<MaterializedRule>>>,
+        calls: StdMutex<Vec<(String, Vec<String>)>>,
     }
 
     #[async_trait]
     impl super::RuleSink for CapturingSink {
         async fn replace_blocklist_rules(
             &self,
-            _list_id: &str,
-            rules: Vec<MaterializedRule>,
-        ) -> anyhow::Result<()> {
-            self.calls.lock().unwrap().push(rules);
+            list_id: &str,
+            hosts: Vec<String>,
+        ) -> Result<(), NotInstalled> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((list_id.to_string(), hosts));
             Ok(())
         }
     }
 
     let store = store_with("tiny", &fixture_url("domains-tiny.txt"));
     let sink: Arc<CapturingSink> = Arc::new(CapturingSink::default());
-    let mgr = BlocklistsManager::new(store)
+    let mgr = BlocklistsManager::new(store.clone())
         .with_fetcher(Arc::new(FixtureFetcher::default()))
         .with_rule_sink(sink.clone());
     mgr.refresh_now("tiny").await.unwrap();
     let calls = sink.calls.lock().unwrap();
     assert_eq!(calls.len(), 1, "expected one push call");
-    assert!(!calls[0].is_empty(), "domains-tiny.txt should have hosts");
-    assert!(calls[0][0].name.starts_with("z00-blocklist:tiny:"));
+    assert_eq!(calls[0].0, "tiny");
+    assert_eq!(calls[0].1, store.list_entries("tiny").unwrap());
+    assert!(!calls[0].1.is_empty(), "domains-tiny.txt should have hosts");
     assert!(
         matches!(mgr.enforcement("tiny"), Enforcement::RuleInstalled { .. }),
         "a sink that accepted the rules reports them installed"
-    );
-}
-
-#[tokio::test]
-async fn refresh_removes_legacy_band_rules() {
-    // A sink that models a daemon's name-keyed rule set and honors the
-    // `RuleSink` replace contract: on each replace it purges every existing
-    // rule under the list's owned prefixes (current + legacy band), then
-    // installs the fresh set. Proves an upgrade off the old "900-blocklist:"
-    // band leaves no orphaned old-prefix denies.
-    use crate::blocklists::materializer::{owned_blocklist_rule_name_prefixes, MaterializedRule};
-    use std::collections::BTreeMap;
-    use std::sync::Mutex as StdMutex;
-
-    #[derive(Default)]
-    struct RuleStoreSink {
-        rules: StdMutex<BTreeMap<String, MaterializedRule>>,
-    }
-
-    #[async_trait]
-    impl super::RuleSink for RuleStoreSink {
-        async fn replace_blocklist_rules(
-            &self,
-            list_id: &str,
-            rules: Vec<MaterializedRule>,
-        ) -> anyhow::Result<()> {
-            let mut map = self.rules.lock().unwrap();
-            let owned = owned_blocklist_rule_name_prefixes(list_id);
-            map.retain(|name, _| !owned.iter().any(|p| name.starts_with(p.as_str())));
-            for rule in rules {
-                map.insert(rule.name.clone(), rule);
-            }
-            Ok(())
-        }
-    }
-
-    let store = store_with("tiny", &fixture_url("domains-tiny.txt"));
-
-    let sink: Arc<RuleStoreSink> = Arc::new(RuleStoreSink::default());
-    // Seed the daemon with an orphaned legacy-band rule, as a pre-upgrade
-    // daemon would hold, plus an unrelated user rule that must survive.
-    {
-        let mut map = sink.rules.lock().unwrap();
-        map.insert(
-            "900-blocklist:tiny:0000-doubleclick.net".to_string(),
-            MaterializedRule {
-                name: "900-blocklist:tiny:0000-doubleclick.net".to_string(),
-                enabled: true,
-                action: "deny".to_string(),
-                duration: "always".to_string(),
-                description: String::new(),
-                operator: super::materializer::Operator {
-                    kind: "simple".to_string(),
-                    operand: "dest.host".to_string(),
-                    data: "doubleclick.net".to_string(),
-                },
-            },
-        );
-        map.insert(
-            "899-firefox-allow-out".to_string(),
-            MaterializedRule {
-                name: "899-firefox-allow-out".to_string(),
-                enabled: true,
-                action: "allow".to_string(),
-                duration: "always".to_string(),
-                description: String::new(),
-                operator: super::materializer::Operator {
-                    kind: "simple".to_string(),
-                    operand: "process.path".to_string(),
-                    data: "/usr/bin/firefox".to_string(),
-                },
-            },
-        );
-    }
-
-    let mgr = BlocklistsManager::new(store)
-        .with_fetcher(Arc::new(FixtureFetcher::default()))
-        .with_rule_sink(sink.clone());
-    mgr.refresh_now("tiny").await.unwrap();
-
-    let map = sink.rules.lock().unwrap();
-    assert!(
-        !map.keys().any(|n| n.starts_with("900-blocklist:tiny:")),
-        "legacy-band rules must be purged on refresh: {:?}",
-        map.keys().collect::<Vec<_>>()
-    );
-    assert!(
-        map.keys().any(|n| n.starts_with("z00-blocklist:tiny:")),
-        "current-band rules must be installed: {:?}",
-        map.keys().collect::<Vec<_>>()
-    );
-    assert!(
-        map.contains_key("899-firefox-allow-out"),
-        "unrelated user rules must survive the replace"
     );
 }
 
@@ -322,9 +231,9 @@ async fn a_failing_sink_reports_not_enforced_with_its_error() {
         async fn replace_blocklist_rules(
             &self,
             _list_id: &str,
-            _rules: Vec<materializer::MaterializedRule>,
-        ) -> anyhow::Result<()> {
-            anyhow::bail!("daemon said no")
+            _hosts: Vec<String>,
+        ) -> Result<(), NotInstalled> {
+            Err(NotInstalled::new("daemon said no"))
         }
     }
     let store = store_with("tiny", &fixture_url("domains-tiny.txt"));
@@ -408,6 +317,7 @@ async fn the_production_fetcher_never_reads_a_stored_file_url() {
 fn storage_status_defaults_to_not_persistent() {
     assert!(!manager().storage_status().persistent);
     let persistent = StorageStatus {
+        unreadable: false,
         persistent: true,
         reason: None,
     };
@@ -447,25 +357,24 @@ impl CountingSink {
 
 #[async_trait]
 impl super::RuleSink for CountingSink {
-    fn installs_rules(&self) -> bool {
-        self.installs
+    fn unavailable_reason(&self) -> Option<String> {
+        (!self.installs).then(|| NO_RULE_SINK_REASON.to_string())
     }
 
     async fn replace_blocklist_rules(
         &self,
         _list_id: &str,
-        _rules: Vec<materializer::MaterializedRule>,
-    ) -> anyhow::Result<()> {
+        _hosts: Vec<String>,
+    ) -> Result<(), NotInstalled> {
         self.pushes
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
 }
 
-/// S1: ~600 B of materialized rule per host is not built (or pushed) while
-/// no sink can install rules.
+/// Nothing is pushed to a sink that installs nothing; its reason is shown.
 #[tokio::test]
-async fn nothing_is_materialized_while_no_sink_installs_rules() {
+async fn nothing_is_pushed_while_the_sink_installs_nothing() {
     let sink = Arc::new(CountingSink {
         installs: false,
         pushes: Default::default(),

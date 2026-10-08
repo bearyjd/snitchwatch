@@ -218,30 +218,36 @@ fn has_line(block: &str, line: &str) -> bool {
     block.lines().any(|l| l.trim() == line)
 }
 
-/// Issue #45 PR A: the bridge persists blocklist subscriptions when it has a
-/// state directory, but still installs no daemon rules. So the Blocklists
-/// header holds two banner variants, keyed on `page.storagePersistent`:
-/// both say "not applied" (and are Warnings, not dismissable, jargon-free);
-/// only the not-persistent one says subscriptions are lost on restart. The
-/// page defaults to not persistent, and the storage problem's reason is data,
-/// so it goes in a PlainText label, never an InlineMessage.
-fn assert_storage_keyed_banner(page_name: &str, source: &str) {
+/// Issue #45 PR B: blocklists are enforced through daemon rules, but only a
+/// list whose rule the daemon accepted says so. The Blocklists header holds
+/// two warnings, neither dismissable nor jargon-laden:
+/// - one keyed on `page.anyNotEnforced` (any list not "rule installed",
+///   defaulting to false only while there is no model), saying lists are
+///   not blocking and where to see why;
+/// - one keyed on `!page.storagePersistent`, saying subscriptions are lost
+///   on restart.
+///
+/// No warning may still claim blocklists are never applied ("Preview", "not
+/// applied to the firewall yet"). The storage problem's reason is data, so
+/// it goes in a PlainText label, never an InlineMessage.
+fn assert_enforcement_keyed_banners(page_name: &str, source: &str) {
     let code = code_lines(source);
-    assert!(
-        has_line(
-            &code,
-            "readonly property bool storagePersistent: page.model ? page.model.storagePersistent : false"
-        ),
-        "{page_name} must default to not persistent until the bridge says otherwise"
-    );
+    for (property, default) in [
+        ("storagePersistent", "false"),
+        ("storageUnreadable", "false"),
+        ("anyNotEnforced", "false"),
+        ("perUserBlocklists", "false"),
+        ("anyOverLimit", "false"),
+    ] {
+        let line = format!(
+            "readonly property bool {property}: page.model ? page.model.{property} : {default}"
+        );
+        assert!(has_line(&code, &line), "{page_name} must declare `{line}`");
+    }
     let header = blocks(&code, "header: ColumnLayout {");
     assert_eq!(header.len(), 1, "{page_name} lost its banner header");
     let banners = blocks(&header[0], "Kirigami.InlineMessage {");
-    assert_eq!(
-        banners.len(),
-        2,
-        "{page_name}: expected two banner variants"
-    );
+    assert_eq!(banners.len(), 5, "{page_name}: expected five warnings");
     for banner in &banners {
         assert!(
             banner.contains("type: Kirigami.MessageType.Warning"),
@@ -252,53 +258,74 @@ fn assert_storage_keyed_banner(page_name: &str, source: &str) {
             "{page_name}'s banner must not be dismissable:\n{banner}"
         );
         assert!(
-            banner.contains("not applied"),
-            "{page_name}'s banner must say subscriptions are not applied to the firewall:\n{banner}"
-        );
-        assert!(
             !banner.contains("bridge"),
             "{page_name}'s banner uses internal jargon (\"bridge\")"
         );
+        assert!(
+            !banner.contains("Preview") && !banner.contains("not applied to the firewall yet"),
+            "{page_name}: blocklists are enforced now; no banner may say they never are:\n{banner}"
+        );
     }
-    let persistent = banners
-        .iter()
-        .find(|b| has_line(b, "visible: page.storagePersistent"))
-        .unwrap_or_else(|| panic!("{page_name}: no banner shown for persistent storage"));
-    let memory_only = banners
-        .iter()
-        .find(|b| has_line(b, "visible: !page.storagePersistent"))
-        .unwrap_or_else(|| panic!("{page_name}: no banner shown for memory-only storage"));
-    assert!(
-        memory_only.contains("restart"),
-        "{page_name}: the memory-only banner must say subscriptions are lost on restart"
+    let keyed = |visible: &str, says: &[&str]| {
+        let banner = banners
+            .iter()
+            .find(|b| has_line(b, &format!("visible: {visible}")))
+            .unwrap_or_else(|| panic!("{page_name}: no warning keyed on `{visible}`"));
+        for phrase in says {
+            assert!(
+                banner.contains(phrase),
+                "{page_name}: the `{visible}` warning must say \"{phrase}\":\n{banner}"
+            );
+        }
+    };
+    // A pending list isn't known not to block, only not confirmed to.
+    keyed("page.anyNotEnforced", &["aren't confirmed"]);
+    keyed(
+        "page.perUserBlocklists",
+        &["system-wide", "doesn't apply blocklists"],
     );
-    assert!(
-        !persistent.contains("restart"),
-        "{page_name}: the persistent banner must not claim subscriptions are lost on restart"
+    keyed("page.anyOverLimit", &["2,000,000", "aren't applied"]);
+    keyed(
+        "page.storageUnreadable",
+        &["couldn't read its saved blocklists"],
     );
-    let reasons = blocks(&header[0], "Controls.Label {");
+    keyed("!page.storagePersistent", &["restart"]);
+    let labels = blocks(&header[0], "Controls.Label {");
+    let reasons: Vec<_> = labels
+        .iter()
+        .filter(|l| l.contains("page.storageReason"))
+        .collect();
     assert_eq!(
         reasons.len(),
         1,
         "{page_name}: expected one storage-reason label"
     );
     assert!(
-        reasons[0].contains("page.storageReason")
-            && reasons[0].contains("textFormat: Text.PlainText")
-            && reasons[0].contains("!page.storagePersistent"),
-        "{page_name}: the storage reason must be a PlainText label shown only when not \
-         persistent:\n{}",
+        reasons[0].contains("textFormat: Text.PlainText"),
+        "{page_name}: the storage reason must be a PlainText label:\n{}",
         reasons[0]
+    );
+    // `lists.domains` is an exact lookup: say so whenever there are lists,
+    // not only in the empty state.
+    let exact = labels
+        .iter()
+        .find(|l| l.contains("exact name"))
+        .unwrap_or_else(|| panic!("{page_name}: no exact-name note in the header"));
+    assert!(
+        exact.contains("not subdomains")
+            && has_line(exact, "visible: page.model && page.model.count > 0"),
+        "{page_name}: the exact-name note must show whenever lists exist:\n{exact}"
     );
 }
 
-/// Issues #45/#46: no daemon rules are installed for blocklists (PR B) or
-/// profiles, so these tabs must say so; profiles are also in memory only.
+/// Issue #45: a blocklist row says "Rule installed" only for a list the
+/// daemon accepted; every other list is called out at the top of the page.
 #[test]
-fn blocklists_page_warns_it_is_not_enforced() {
-    assert_storage_keyed_banner("BlocklistsPage.qml", BLOCKLISTS_PAGE);
+fn blocklists_page_warns_while_any_list_is_not_enforced() {
+    assert_enforcement_keyed_banners("BlocklistsPage.qml", BLOCKLISTS_PAGE);
 }
 
+/// Issue #46: profiles install no daemon rules and are kept in memory only.
 #[test]
 fn profiles_page_warns_it_is_not_enforced() {
     assert_preview_banner("ProfilesPage.qml", PROFILES_PAGE);

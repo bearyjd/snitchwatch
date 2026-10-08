@@ -2,6 +2,9 @@
 //! process environment.
 
 use super::*;
+use snitchwatch_bridge::blocklists::Enforcement;
+use snitchwatch_bridge::cache::rules::RulesSync;
+use snitchwatch_bridge::daemon_commands::DaemonTransport;
 
 fn os(path: &Path) -> Option<OsString> {
     Some(path.as_os_str().to_owned())
@@ -118,6 +121,7 @@ fn only_an_unusable_reason_reaches_the_user() {
     assert_eq!(
         status(Storage::Persistent("/x".into())),
         StorageStatus {
+            unreadable: false,
             persistent: true,
             reason: None
         }
@@ -126,6 +130,7 @@ fn only_an_unusable_reason_reaches_the_user() {
         assert_eq!(
             status(Storage::Ephemeral(reason)),
             StorageStatus {
+                unreadable: false,
                 persistent: false,
                 reason: None
             }
@@ -134,6 +139,7 @@ fn only_an_unusable_reason_reaches_the_user() {
     assert_eq!(
         status(unusable("blocklist store: locked".into())),
         StorageStatus {
+            unreadable: false,
             persistent: false,
             reason: Some("blocklist store: locked".into())
         }
@@ -171,23 +177,40 @@ fn an_unopenable_store_falls_back_to_memory() {
     assert!(store.list_subscriptions().unwrap().is_empty());
 }
 
+/// The daemon handles a test manager's sink would send through.
+fn daemon() -> DaemonRules {
+    let rules = RulesSync::new(tokio::sync::broadcast::channel(4).0);
+    DaemonRules {
+        commands: DaemonCommands::new(DaemonTransport::Tcp, rules.clone()),
+        rules: rules.cache(),
+    }
+}
+
 #[test]
 fn the_manager_reports_the_resolved_storage() {
     let dir = tempfile::tempdir().unwrap();
     let state = dir.path().canonicalize().unwrap();
-    let persistent = build_blocklists_manager(RunOptions {
-        storage: Storage::Persistent(state.clone()),
-        blocklist_fetcher: None,
-    })
+    let persistent = build_blocklists_manager(
+        RunOptions {
+            storage: Storage::Persistent(state.clone()),
+            blocklist_fetcher: None,
+            mode: BridgeMode::User,
+        },
+        daemon(),
+    )
     .unwrap();
     assert!(persistent.storage_status().persistent);
 
     std::fs::remove_file(state.join(BLOCKLIST_DB_FILE)).unwrap();
     std::fs::create_dir(state.join(BLOCKLIST_DB_FILE)).unwrap();
-    let fallback = build_blocklists_manager(RunOptions {
-        storage: Storage::Persistent(state),
-        blocklist_fetcher: None,
-    })
+    let fallback = build_blocklists_manager(
+        RunOptions {
+            storage: Storage::Persistent(state),
+            blocklist_fetcher: None,
+            mode: BridgeMode::User,
+        },
+        daemon(),
+    )
     .unwrap();
     assert!(!fallback.storage_status().persistent);
     assert!(fallback
@@ -196,6 +219,146 @@ fn the_manager_reports_the_resolved_storage() {
         .as_deref()
         .is_some_and(|r| r.starts_with("blocklist store: ")));
 
-    let in_process = build_blocklists_manager(RunOptions::in_process()).unwrap();
+    let in_process = build_blocklists_manager(RunOptions::in_process(), daemon()).unwrap();
+    assert_eq!(RunOptions::in_process().mode, BridgeMode::User);
     assert!(!in_process.storage_status().persistent);
+}
+
+fn not_enforced(manager: &BlocklistsManager) -> String {
+    match manager.enforcement("any") {
+        Enforcement::NotEnforced { reason } => reason,
+        other => panic!("expected NotEnforced, got {other:?}"),
+    }
+}
+
+/// Issue #45 PR B (B0): without a state directory nothing is installed and
+/// every list says why; no list directory is created anywhere.
+#[test]
+fn ephemeral_storage_installs_nothing_and_says_why() {
+    for (storage, reason) in [
+        (
+            Storage::Ephemeral(EphemeralReason::InProcess),
+            "no state directory: in-process",
+        ),
+        (
+            Storage::Ephemeral(EphemeralReason::NotConfigured),
+            "no state directory: not configured",
+        ),
+        (
+            Storage::Ephemeral(EphemeralReason::Unusable(
+                "unexpected state directory /x".into(),
+            )),
+            "no state directory: unexpected state directory /x",
+        ),
+    ] {
+        let manager = build_blocklists_manager(
+            RunOptions {
+                storage,
+                blocklist_fetcher: None,
+                mode: BridgeMode::System,
+            },
+            daemon(),
+        )
+        .unwrap();
+        assert_eq!(not_enforced(&manager), reason);
+    }
+
+    // A state directory whose database can't open is Unusable too: no list
+    // files go next to it.
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().canonicalize().unwrap();
+    std::fs::create_dir(state.join(BLOCKLIST_DB_FILE)).unwrap();
+    let fallback = build_blocklists_manager(
+        RunOptions {
+            storage: Storage::Persistent(state.clone()),
+            blocklist_fetcher: None,
+            mode: BridgeMode::System,
+        },
+        daemon(),
+    )
+    .unwrap();
+    assert!(not_enforced(&fallback).starts_with("no state directory: blocklist store: "));
+    assert!(!state.join("blocklists").exists());
+}
+
+#[test]
+fn the_system_bridge_creates_the_private_list_directory() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().canonicalize().unwrap();
+    let manager = build_blocklists_manager(
+        RunOptions {
+            storage: Storage::Persistent(state.clone()),
+            blocklist_fetcher: None,
+            mode: BridgeMode::System,
+        },
+        daemon(),
+    )
+    .unwrap();
+    assert_eq!(manager.enforcement("any"), Enforcement::Pending);
+    let mode = std::fs::metadata(state.join("blocklists"))
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o7777, 0o700);
+}
+
+/// The system bridge's state directory must be the service account's own,
+/// mode 0700 (`StateDirectoryMode=0700`): root opensnitchd reads list files
+/// under it.
+#[test]
+fn the_system_state_directory_must_be_the_services_and_private() {
+    let ok = SystemDirFacts {
+        uid: 991,
+        gid: 991,
+        mode: 0o40700,
+    };
+    assert_eq!(check_system_state_dir(&ok, 991, 991), Ok(()));
+    for (facts, why) in [
+        (SystemDirFacts { uid: 0, ..ok }, "owner"),
+        (SystemDirFacts { gid: 0, ..ok }, "group"),
+        (
+            SystemDirFacts {
+                mode: 0o40750,
+                ..ok
+            },
+            "group-readable",
+        ),
+        (
+            SystemDirFacts {
+                mode: 0o40701,
+                ..ok
+            },
+            "world bit",
+        ),
+    ] {
+        let err = check_system_state_dir(&facts, 991, 991).unwrap_err();
+        assert!(err.contains(SYSTEM_STATE_DIR), "{why}: {err}");
+    }
+}
+
+/// Review M3: root opensnitchd would read per-user list files that any of
+/// the user's processes can replace (a FIFO hangs it, a link to /dev/zero
+/// exhausts its memory and, with `QueueBypass`, fails open). Only the system
+/// bridge installs blocklist rules; a per-user one writes no list file.
+#[test]
+fn the_per_user_bridge_never_installs_blocklist_rules() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().canonicalize().unwrap();
+    let manager = build_blocklists_manager(
+        RunOptions {
+            storage: Storage::Persistent(state.clone()),
+            blocklist_fetcher: None,
+            mode: BridgeMode::User,
+        },
+        daemon(),
+    )
+    .unwrap();
+    assert!(
+        manager.storage_status().persistent,
+        "subscriptions are still saved"
+    );
+    assert_eq!(not_enforced(&manager), PER_USER_REASON);
+    assert!(!PER_USER_REASON.contains("bridge"), "plain language");
+    assert!(!state.join("blocklists").exists());
 }

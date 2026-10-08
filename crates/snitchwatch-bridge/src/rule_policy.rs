@@ -52,6 +52,12 @@ pub const SHAPE_READ_ONLY_REASON: &str = "Snitchwatch can't change this rule bec
      conditions (a rule type, condition or network alias Snitchwatch won't send back to the \
      firewall service). The rule still applies; you can still delete it.";
 
+/// Why a GUI may not change or delete a rule under a blocklist name
+/// ([`crate::rule_name::is_reserved_blocklist_name`]): Snitchwatch installs
+/// and removes those itself, from the Blocklists page (issue #45).
+pub const BLOCKLIST_MANAGED_REASON: &str =
+    "Managed on the Blocklists page. Subscribe to or remove the list there.";
+
 /// Operands whose value the daemon passes as a `net.IP`; only the `network`
 /// type can compare one.
 const NETWORK_OPERANDS: &[&str] = &["dest.network", "source.network"];
@@ -116,6 +122,9 @@ pub fn validate_operator(op: &Operator) -> Result<(), String> {
 /// Uses the same checks as [`crate::rule_wire::rule_from_wire`], so a rule
 /// the GUI may edit is one the bridge will send back.
 pub fn read_only_reason(rule: &Rule) -> Option<&'static str> {
+    if crate::rule_name::is_reserved_blocklist_name(&rule.name) {
+        return Some(BLOCKLIST_MANAGED_REASON);
+    }
     if crate::rule_name::validate_rule_name(&rule.name).is_err() {
         return Some(crate::rule_wire::READ_ONLY_REASON);
     }
@@ -128,9 +137,11 @@ pub fn read_only_reason(rule: &Rule) -> Option<&'static str> {
 /// Whether a GUI may delete a daemon rule. `DELETE_RULE` carries only the
 /// name (`Loader.Delete` never reads the operator), so this is the name
 /// check `notification_for_effect` applies to a `DeleteRule`: a rule
-/// read-only only for its conditions stays deletable.
+/// read-only only for its conditions stays deletable. A blocklist rule is
+/// removed from the Blocklists page instead.
 pub fn deletable(rule: &Rule) -> bool {
     crate::rule_name::validate_rule_name(&rule.name).is_ok()
+        && !crate::rule_name::is_reserved_blocklist_name(&rule.name)
 }
 
 fn validate_list(op: &Operator) -> Result<(), String> {

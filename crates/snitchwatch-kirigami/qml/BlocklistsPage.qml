@@ -17,7 +17,8 @@
 // `lastUpdated` / `lastFailureReason` roles by the Rust row store — no
 // fetch-status logic lives in QML. `status` is only the download result;
 // whether a list blocks anything is the separate `enforcementLabel` role
-// (issue #45), which never says more than "Rule installed".
+// (issue #45), which never says more than "Rule installed": the firewall
+// service accepted the list's rule, and may still have loaded 0 hosts.
 import QtQuick
 import QtQuick.Layouts
 import QtQuick.Controls as Controls
@@ -49,6 +50,13 @@ Kirigami.ScrollablePage {
     // older bridge all mean "kept in memory only".
     readonly property bool storagePersistent: page.model ? page.model.storagePersistent : false
     readonly property string storageReason: page.model ? page.model.storageReason : ""
+    // Some list isn't "Rule installed" (issue #45); each row says why. The
+    // definite cases (a per-user service, the total size limit) and an
+    // unreadable store get their own plain warnings.
+    readonly property bool anyNotEnforced: page.model ? page.model.anyNotEnforced : false
+    readonly property bool perUserBlocklists: page.model ? page.model.perUserBlocklists : false
+    readonly property bool anyOverLimit: page.model ? page.model.anyOverLimit : false
+    readonly property bool storageUnreadable: page.model ? page.model.storageUnreadable : false
 
     function statusColor(status) {
         switch (status) {
@@ -85,41 +93,74 @@ Kirigami.ScrollablePage {
         }
     }
 
-    // Issue #45: the bridge installs no daemon rules for blocklists yet (PR B
-    // will), so a subscription here blocks nothing. It persists only when the
-    // bridge has a state directory. Exactly one variant is shown, keyed on
-    // `storagePersistent`; neither is dismissable (no close button, no
-    // actions). Both keep "not applied" until PR B removes them. The storage
+    // Issue #45: each list becomes a firewall rule that blocks its hosts for
+    // every app, but only a row reading "Rule installed" is one the firewall
+    // service accepted (or already held). Fixed-text warnings, none
+    // dismissable (no close button, no actions): an unreadable store; a
+    // per-user service, which applies no blocklists; lists over the total
+    // size limit; any other list not confirmed (each row's details say why);
+    // and subscriptions kept in memory only, lost on restart. The storage
     // problem's reason is data, so it goes in a PlainText label, never in an
     // InlineMessage (issue #51).
     header: ColumnLayout {
         spacing: 0
 
         Kirigami.InlineMessage {
-            objectName: "persistentStorageBanner"
+            objectName: "unreadableStoreBanner"
             Layout.fillWidth: true
             type: Kirigami.MessageType.Warning
-            visible: page.storagePersistent
-            text: "Preview: blocklist subscriptions are saved, but they are not applied to the "
-                + "firewall yet, so they do not block anything."
+            visible: page.storageUnreadable
+            text: "Snitchwatch couldn't read its saved blocklists, so it isn't changing any "
+                + "blocklist rules the firewall already has."
+        }
+        Kirigami.InlineMessage {
+            objectName: "perUserBanner"
+            Layout.fillWidth: true
+            type: Kirigami.MessageType.Warning
+            visible: page.perUserBlocklists
+            text: "This Snitchwatch service runs for your user only, so it doesn't apply blocklists "
+                + "to the firewall. That needs the system-wide Snitchwatch service."
+        }
+        Kirigami.InlineMessage {
+            objectName: "overLimitBanner"
+            Layout.fillWidth: true
+            type: Kirigami.MessageType.Warning
+            visible: page.anyOverLimit
+            text: "Some blocklists are over the total size limit of 2,000,000 hosts, so they "
+                + "aren't applied to the firewall. Remove a list to make room."
+        }
+        Kirigami.InlineMessage {
+            objectName: "notEnforcedBanner"
+            Layout.fillWidth: true
+            type: Kirigami.MessageType.Warning
+            visible: page.anyNotEnforced
+            text: "Some blocklists aren't confirmed to be blocking. Open a list to see why."
         }
         Kirigami.InlineMessage {
             objectName: "memoryOnlyStorageBanner"
             Layout.fillWidth: true
             type: Kirigami.MessageType.Warning
             visible: !page.storagePersistent
-            text: "Preview: blocklist subscriptions are shown here but are not applied to the "
-                + "firewall yet, so they do not block anything. They are also kept in memory only, "
-                + "so they are lost when Snitchwatch's background service restarts (for example "
-                + "on logout or reboot)."
+            text: "Blocklist subscriptions are kept in memory only, so they can't be applied to "
+                + "the firewall and are lost when Snitchwatch's background service restarts (for "
+                + "example on logout or reboot)."
+        }
+        Controls.Label {
+            objectName: "exactMatchNote"
+            Layout.fillWidth: true
+            Layout.margins: Kirigami.Units.smallSpacing
+            visible: page.model && page.model.count > 0
+            wrapMode: Text.Wrap
+            opacity: 0.7
+            text: "Hosts are matched by exact name, not subdomains."
         }
         Controls.Label {
             Layout.fillWidth: true
             Layout.margins: Kirigami.Units.smallSpacing
-            visible: !page.storagePersistent && page.storageReason.length > 0
+            visible: page.storageReason.length > 0
             textFormat: Text.PlainText
             wrapMode: Text.Wrap
-            text: "Subscriptions could not be saved: " + page.storageReason
+            text: "Details: " + page.storageReason
         }
     }
 
@@ -129,7 +170,8 @@ Kirigami.ScrollablePage {
         visible: !page.model || page.model.count === 0
         icon.name: "edit-delete"
         text: "No blocklist subscriptions yet"
-        explanation: "Subscribe to a blocklist URL above to preview its host list."
+        explanation: "Subscribe to a blocklist URL above to block its hosts for every app. "
+            + "Hosts are matched by exact name, not subdomains."
     }
 
     ListView {

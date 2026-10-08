@@ -230,7 +230,7 @@ starts persisting ids.
 | Unit | `packaging/systemd/snitchwatch-bridge.service` `StateDirectory=snitchwatch` | `packaging/system/snitchwatch-system-bridge.service` `StateDirectory=snitchwatch`, `StateDirectoryMode=0700` |
 | Resolves to | `~/.local/state/snitchwatch` (canonical `/var/home/<u>/…`) | `/var/lib/snitchwatch`, `snitchwatch:snitchwatch`, 0700 |
 | Writable by | the desktop user, who already controls this bridge | only `snitchwatch` (and root). `ProtectSystem=strict` keeps `StateDirectory` writable, so no unit change and `system_package_contract.rs` stays green |
-| Read by root `opensnitchd` | DAC override; the upstream unit has no capability limits (`vendor:daemon/data/init/opensnitchd.service`) | same |
+| Read by root `opensnitchd` | **never** (revised 2026-10-08, security review M3, owner review pending): any of the user's processes could replace a list file with a FIFO (hangs the daemon) or a link to `/dev/zero` (OOM; with `QueueBypass` the firewall fails open, on every boot). The per-user bridge saves subscriptions but writes no list file and installs no rule; every list reads "Blocking with lists needs the system-wide Snitchwatch service; …" | DAC override; the upstream unit has no capability limits (`vendor:daemon/data/init/opensnitchd.service`) |
 
 SELinux is **unverified**, and so is any `ProtectHome=`/`ProtectSystem=`
 drop-in that bazzite-tower adds to opensnitchd. Either would make the
