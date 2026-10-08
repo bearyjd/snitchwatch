@@ -6,9 +6,15 @@
 use serde::{Deserialize, Serialize};
 
 mod blocklist_wire;
+mod verdict_wire;
 pub use blocklist_wire::{
     BlocklistEntry, BlocklistSummary, BLOCKLIST_ENTRIES_PAGE_MAX, ENFORCEMENT_NOT_ENFORCED,
-    ENFORCEMENT_PENDING, ENFORCEMENT_RULE_INSTALLED, MAX_REQUEST_ID_LEN,
+    ENFORCEMENT_PENDING, ENFORCEMENT_RULE_INSTALLED,
+};
+
+pub use verdict_wire::{
+    effective_verdict_duration, AutoAnswer, ConnectionRow, VerdictAction, VerdictDuration,
+    VerdictScope,
 };
 
 use crate::notice::Notice;
@@ -167,6 +173,13 @@ pub enum ServerMessage {
         /// as not persistent.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         storage: Option<StorageStatus>,
+        /// Whether this bridge installs the active profile's rules (issue
+        /// #46 Part 2). `false` from an older bridge, which never did.
+        #[serde(default)]
+        applies_rules: bool,
+        /// Why it doesn't, when it doesn't (per-user mode, no saved state).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        not_applied_reason: Option<String>,
     },
     ProfileChanged {
         active_profile_id: Option<String>,
@@ -318,6 +331,12 @@ pub enum ServerMessage {
         not_sent: u32,
         no_answer: u32,
     },
+    /// The outcome of an `AddRule`/`UpdateRule`/`DeleteRule` that carried a
+    /// `request_id` (rule editor, P2.1), sent to the asking connection only.
+    RuleCommandResult {
+        request_id: String,
+        outcome: RuleCommandOutcome,
+    },
     /// How often each daemon rule decided a connection, as Snitchwatch
     /// counted from the `events` in the daemon's pings (P2.6 Part 1, see
     /// `crate::cache::rule_hits`). Sent at most every 5 seconds and only
@@ -339,6 +358,39 @@ pub enum ServerMessage {
         storage: StorageStatus,
         hits: Vec<RuleHitWire>,
     },
+}
+
+/// What happened to a rule command (P2.1). Every reason is plain text.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(
+    tag = "status",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum RuleCommandOutcome {
+    /// The daemon answered OK (both steps, for a rename).
+    Ok,
+    /// Done, with something the user should know (a renamed rule's old
+    /// file the daemon couldn't remove).
+    OkWithNote { note: String },
+    /// The daemon answered ERROR, or a rename was undone; why.
+    Rejected { reason: String },
+    /// The bridge didn't send it: the rule policy's problems.
+    Refused {
+        problems: Vec<crate::rule_policy::RuleProblem>,
+    },
+    /// No answer in time: it may or may not have been applied.
+    Timeout,
+    /// No firewall service connected; nothing was sent.
+    NoDaemon,
+    /// A rename whose outcome isn't known (see the reason).
+    Unsure { reason: String },
+}
+
+/// Whether a client's request id is usable: 1 to 64 ASCII letters, digits
+/// or `-`. Anything else is treated as absent.
+pub fn valid_request_id(id: &str) -> bool {
+    (1..=64).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
 
 /// One rule's count in [`ServerMessage::RuleHits`], and in the saved hit
@@ -381,15 +433,31 @@ pub enum ClientMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         remember: Option<bool>,
     },
+    /// `request_id` (P2.1, optional; see [`valid_request_id`]) asks for a
+    /// [`ServerMessage::RuleCommandResult`]; `reply` is stamped by
+    /// `ws_server` and never comes from the wire.
     AddRule {
         rule: serde_json::Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+        #[serde(skip)]
+        reply: Option<ReplyTo>,
     },
+    /// A `rule_id` other than `rule.name` renames (P2.1, E1).
     UpdateRule {
         rule_id: String,
         rule: serde_json::Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+        #[serde(skip)]
+        reply: Option<ReplyTo>,
     },
     DeleteRule {
         rule_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+        #[serde(skip)]
+        reply: Option<ReplyTo>,
     },
     GlobalSettings {
         settings: serde_json::Value,
@@ -405,9 +473,8 @@ pub enum ClientMessage {
     RemoveLeftoverBlocklistRules,
     /// Ask for a page of a subscription's hosts; answered with
     /// `SetBlocklistEntries`. `limit` is capped at
-    /// [`BLOCKLIST_ENTRIES_PAGE_MAX`]. `request_id` (at most
-    /// [`MAX_REQUEST_ID_LEN`] bytes, else the request is ignored) comes back
-    /// on the page that answers it.
+    /// [`BLOCKLIST_ENTRIES_PAGE_MAX`]. `request_id` (optional; see
+    /// [`valid_request_id`]) comes back on the page that answers it.
     RequestBlocklistEntries {
         subscription_id: String,
         #[serde(default)]
@@ -434,9 +501,16 @@ pub enum ClientMessage {
         id: String,
     },
     DeactivateProfile,
+    /// `request_id` (optional; see [`valid_request_id`]) asks for a
+    /// [`ServerMessage::RuleCommandResult`]: refused with the profile
+    /// policy's problems, or ok (saved to the profile, not yet installed).
     AddProfileRule {
         profile_id: String,
         rule: ProfileRuleWire,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+        #[serde(skip)]
+        reply: Option<ReplyTo>,
     },
     RemoveProfileRule {
         profile_id: String,
@@ -518,15 +592,42 @@ pub enum ClientMessage {
 
 /// A channel back to one WebSocket connection, stamped on rule import and
 /// export requests by `ws_server` so their answers reach only the GUI that
-/// asked. Never serialized.
+/// asked. Never serialized. Clones share the connection's "stopped reading"
+/// mark, so a GUI that stops reading is waited on once, not per request.
 #[derive(Clone)]
-pub struct ReplyTo(pub tokio::sync::mpsc::Sender<ServerMessage>);
+pub struct ReplyTo {
+    tx: tokio::sync::mpsc::Sender<ServerMessage>,
+    stalled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
 
 impl ReplyTo {
+    /// One connection's channel (call once per connection, then clone).
+    pub fn new(tx: tokio::sync::mpsc::Sender<ServerMessage>) -> Self {
+        Self {
+            tx,
+            stalled: std::sync::Arc::default(),
+        }
+    }
+
     /// Deliver `message`, waiting for room; `false` when the connection is
     /// gone.
     pub async fn send(&self, message: ServerMessage) -> bool {
-        self.0.send(message).await.is_ok()
+        self.tx.send(message).await.is_ok()
+    }
+
+    /// Deliver `message` only if there is room now.
+    pub fn try_send(&self, message: ServerMessage) -> bool {
+        self.tx.try_send(message).is_ok()
+    }
+
+    /// Whether the connection was found not reading its answers.
+    pub fn stalled(&self) -> bool {
+        self.stalled.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub fn mark_stalled(&self) {
+        self.stalled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -538,157 +639,8 @@ impl std::fmt::Debug for ReplyTo {
 
 impl PartialEq for ReplyTo {
     fn eq(&self, other: &Self) -> bool {
-        self.0.same_channel(&other.0)
+        self.tx.same_channel(&other.tx)
     }
-}
-
-/// Resolve [`ClientMessage::SetVerdict`]'s effective duration from the new
-/// `duration` field and the legacy `remember` flag: an explicit duration
-/// always wins; otherwise legacy `remember: true` means [`VerdictDuration::
-/// Always`] (that's exactly what the pre-duration protocol expressed with it)
-/// and anything else is a one-shot verdict.
-pub fn effective_verdict_duration(
-    duration: Option<VerdictDuration>,
-    remember: Option<bool>,
-) -> VerdictDuration {
-    duration.unwrap_or(if remember.unwrap_or(false) {
-        VerdictDuration::Always
-    } else {
-        VerdictDuration::Once
-    })
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "lowercase")]
-pub enum VerdictAction {
-    Allow,
-    Deny,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum VerdictScope {
-    /// Exact destination host only.
-    ThisHost,
-    /// Wildcard the leftmost label of the destination host.
-    AnyHostOnDomain,
-    /// Drop the host operator entirely.
-    AnyHost,
-}
-
-/// How long a verdict's resulting rule should live, per the Little-Snitch-
-/// parity duration selector on the Kirigami shell's pending-decision dialog
-/// ("This time" / "For 5 minutes" / "Until firewall restarts" / "Forever").
-///
-/// Maps onto opensnitchd's native `Rule.duration` semantics
-/// (`vendor/opensnitch/daemon/rule/rule.go`): the daemon defines three named
-/// durations (`once`, `until restart`, `always`) plus arbitrary
-/// Go-`time.ParseDuration`-compatible strings (e.g. `"5m"`) for auto-expiring
-/// temporary rules (`vendor/opensnitch/daemon/rule/loader.go`'s
-/// `scheduleTemporaryRule`). The mapping used by [`Self::daemon_duration_str`]:
-///
-/// | UI option        | Wire value      | Daemon `Rule.duration` |
-/// |-------------------|-----------------|------------------------|
-/// | This time         | `once`          | `"once"`               |
-/// | For 5 minutes     | `five_minutes`  | `"5m"`                 |
-/// | Until firewall restarts | `until_restart` | `"until restart"` |
-/// | Forever           | `always`        | `"always"`             |
-///
-/// The third option used to read "Until quit", though opensnitchd has no
-/// per-process rule lifetime: "until restart" keeps the rule until the daemon
-/// itself restarts, so Kirigami now labels it for that (its QML token is still
-/// `until_quit`). The Tauri shell and the vendored web UI keep their labels as
-/// they are: neither offers a duration selector (they send the legacy
-/// `remember` instead).
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum VerdictDuration {
-    Once,
-    FiveMinutes,
-    UntilRestart,
-    Always,
-}
-
-impl VerdictDuration {
-    /// The exact string opensnitchd's `Rule.duration` field expects.
-    pub fn daemon_duration_str(self) -> &'static str {
-        match self {
-            Self::Once => "once",
-            Self::FiveMinutes => "5m",
-            Self::UntilRestart => "until restart",
-            Self::Always => "always",
-        }
-    }
-
-    /// Whether this duration persists the rule beyond the current connection
-    /// (i.e. anything other than a one-shot decision).
-    pub fn remembers(self) -> bool {
-        !matches!(self, Self::Once)
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct ConnectionRow {
-    pub id: String,
-    pub process: String,
-    pub process_path: Option<String>,
-    pub dst_host: String,
-    pub dst_ip: String,
-    pub dst_port: u16,
-    pub protocol: String,
-    pub direction: String,
-    /// `null` for pending rows, `"allow"` / `"deny"` / `"blocklist"` once decided.
-    /// A `deferred` row may also be `null`: the daemon applied its default
-    /// action and the bridge doesn't know which one that is.
-    pub action: Option<String>,
-    pub bytes_sent: u64,
-    pub bytes_received: u64,
-    pub started_at_ms: i64,
-    /// Name of the opensnitchd rule that decided this connection's `action`,
-    /// if known. `None` while the row is pending (no rule has fired yet —
-    /// that's exactly why the daemon asked). Once decided, this is either the
-    /// synthetic once-off rule name the bridge handed back for an interactive
-    /// verdict (see `translator::verdict::rule_name_for`), or the name of a
-    /// pre-existing rule the daemon itself reports as having matched, via
-    /// `Statistics.events[].rule.name` on a `Ping` call (see
-    /// `translator::connection::event_to_row`). Additive field: old wire
-    /// payloads without it deserialize with `None` via `#[serde(default)]`,
-    /// and it is omitted from serialized JSON when absent so existing
-    /// consumers (the web frontend) that don't know about it are unaffected.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub matched_rule: Option<String>,
-    /// Set when the bridge answered this connection itself rather than a
-    /// person (issue #78). Additive and omitted when absent, like
-    /// `matched_rule`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auto_answer: Option<AutoAnswer>,
-    /// When the bridge answers this pending row itself if nobody does
-    /// (prompt-slot plan Part C), in Unix milliseconds. Only on pending rows.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub answer_deadline_ms: Option<i64>,
-    /// The prompt was put off rather than decided: nobody answered it in
-    /// time, or someone chose "Decide later". A rule can still be made for
-    /// it. Additive, omitted when false.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub deferred: bool,
-}
-
-/// Why the bridge answered a connection without a person (issue #78).
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub enum AutoAnswer {
-    /// Allowed once because filtering was paused: either the prompt was
-    /// already waiting when the pause took effect, or the connection arrived
-    /// during it (`pause_answers`).
-    FilterPaused,
-    /// Nobody answered within `deferred_answers::ANSWER_TIMEOUT`, so the
-    /// daemon applied its default action (prompt-slot plan Part C).
-    NoAnswer,
-    /// A reason this build doesn't know, from a newer bridge. Keeps the row
-    /// readable instead of failing the whole message.
-    #[serde(other)]
-    Unknown,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -740,13 +692,27 @@ pub struct StorageStatus {
 /// type here the same way `BlocklistSummary` is distinct from
 /// `blocklists::store::Subscription` — the wire shape is the stable
 /// contract, the store shape is free to evolve independently).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProfileRuleWire {
     pub id: String,
     pub action: String,
+    /// Part 1's single condition (empty when `operator` is set).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub operand: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub data: String,
+    /// The rule editor's conditions in #48's wire shape (issue #46 Part 2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator: Option<serde_json::Value>,
+    /// Bridge to GUI, while the rule's profile is active: one of the
+    /// `ENFORCEMENT_*` values ("rule_installed" only after the daemon's
+    /// correlated OK). Empty for a profile that isn't active, and from an
+    /// older bridge.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub enforcement: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enforcement_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

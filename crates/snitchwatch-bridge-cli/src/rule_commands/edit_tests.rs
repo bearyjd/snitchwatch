@@ -1,0 +1,135 @@
+//! A refused edit (P2.1 re-review): the daemon deletes an `always` rule's
+//! file before it compiles a temporary replacement (`replaceUserRule`), so
+//! an ERROR there leaves the rule applying without its file. The bridge
+//! saves the rule again as it was, and says so.
+
+use super::tests::*;
+use crate::test_daemon::*;
+use serde_json::json;
+use snitchwatch_bridge::rule_io::export_rule;
+use snitchwatch_bridge::ws_messages::RuleCommandOutcome;
+use snitchwatch_proto::protocol::{Action, Notification};
+
+fn changes(seen: &Seen) -> Vec<(String, String)> {
+    seen.lock()
+        .unwrap()
+        .iter()
+        .map(|n: &Notification| {
+            assert_eq!(n.r#type, Action::ChangeRule as i32);
+            (n.rules[0].name.clone(), n.rules[0].duration.clone())
+        })
+        .collect()
+}
+
+fn broken_timed_edit(old: &snitchwatch_proto::protocol::Rule) -> serde_json::Value {
+    let mut edited = export_rule(old);
+    edited["duration"] = json!("5m");
+    edited["operator"]["operands"][1]["data"] = json!("broken.example");
+    edited
+}
+
+fn reason(outcome: RuleCommandOutcome) -> String {
+    match outcome {
+        RuleCommandOutcome::Rejected { reason } => reason,
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_refused_always_to_timed_edit_saves_the_rule_again() {
+    let old = bound("100-x", "deny");
+    let mut daemon = daemon(vec![old.clone()]);
+    let model = model(std::slice::from_ref(&old));
+    model
+        .lock()
+        .unwrap()
+        .uncompilable
+        .insert("broken.example".into());
+    let seen = run_model(&mut daemon, model.clone());
+    let commands = commands(&daemon);
+    let mut rx = daemon.broadcast.subscribe();
+    commands.try_route(update("100-x", broken_timed_edit(&old), Some("e1")));
+    let reason = reason(result(&mut rx).await);
+    assert!(reason.contains("saved the rule again"), "{reason}");
+    assert_eq!(
+        changes(&seen),
+        vec![
+            ("100-x".to_string(), "5m".to_string()),
+            ("100-x".to_string(), "always".to_string())
+        ]
+    );
+    assert_eq!(files(&model), vec!["100-x"], "the rule's file is back");
+    assert_eq!(model.lock().unwrap().memory["100-x"].action, "deny");
+}
+
+/// With live reload (the daemon's default), the removed file makes the
+/// daemon drop the old rule from memory too; if the restore fails, the rule
+/// may be gone, so it leaves the list and the result says so.
+#[tokio::test]
+async fn a_restore_that_fails_says_the_rule_may_have_stopped_applying() {
+    let old = bound("100-x", "deny");
+    let mut daemon = daemon(vec![old.clone()]);
+    let model = model(std::slice::from_ref(&old));
+    for value in ["broken.example", "example.com"] {
+        model.lock().unwrap().uncompilable.insert(value.into());
+    }
+    run_model(&mut daemon, model.clone());
+    let commands = commands(&daemon);
+    let mut rx = daemon.broadcast.subscribe();
+    commands.try_route(update("100-x", broken_timed_edit(&old), Some("e1")));
+    let reason = reason(result(&mut rx).await);
+    assert!(reason.contains("may have stopped applying"), "{reason}");
+    assert!(applying(&model).is_empty(), "the daemon dropped it");
+    let cached = daemon.cache.lock().unwrap().rules().unwrap().clone();
+    assert!(!cached.contains_key("100-x"), "the list mustn't claim it");
+}
+
+/// An unanswered always-to-timed edit may have removed the file (and so
+/// the rule): it leaves the list, and nothing is resent blind.
+#[tokio::test]
+async fn an_unanswered_always_to_timed_edit_leaves_the_list() {
+    let old = bound("100-x", "deny");
+    let mut daemon = daemon(vec![old.clone()]);
+    let model = model(std::slice::from_ref(&old));
+    model
+        .lock()
+        .unwrap()
+        .silent
+        .insert((Action::ChangeRule as i32, "100-x".into()));
+    let seen = run_model(&mut daemon, model.clone());
+    let commands = commands(&daemon);
+    let mut rx = daemon.broadcast.subscribe();
+    commands.try_route(update("100-x", broken_timed_edit(&old), Some("e1")));
+    match result(&mut rx).await {
+        RuleCommandOutcome::Unsure { reason } => {
+            assert!(reason.contains("may have stopped applying"), "{reason}")
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(seen.lock().unwrap().len(), 1, "no blind resend");
+    let cached = daemon.cache.lock().unwrap().rules().unwrap().clone();
+    assert!(!cached.contains_key("100-x"));
+}
+
+/// An edit that keeps `always` loses no file, so nothing is resent.
+#[tokio::test]
+async fn a_refused_edit_that_keeps_its_file_is_not_resent() {
+    let old = bound("100-x", "deny");
+    let mut daemon = daemon(vec![old.clone()]);
+    let model = model(std::slice::from_ref(&old));
+    model
+        .lock()
+        .unwrap()
+        .uncompilable
+        .insert("broken.example".into());
+    let seen = run_model(&mut daemon, model.clone());
+    let commands = commands(&daemon);
+    let mut rx = daemon.broadcast.subscribe();
+    let mut edited = broken_timed_edit(&old);
+    edited["duration"] = json!("always");
+    commands.try_route(update("100-x", edited, Some("e1")));
+    let reason = reason(result(&mut rx).await);
+    assert!(!reason.contains("again"), "{reason}");
+    assert_eq!(changes(&seen).len(), 1);
+    assert_eq!(files(&model), vec!["100-x"]);
+}

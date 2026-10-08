@@ -356,7 +356,8 @@ fn other_shapes_a_gui_legitimately_sends_pass() {
         op("regexp", "dest.host", r"^(?:[^.]+\.)*example\.com$"),
         op("simple", "dest.host", ""),
         op("network", "dest.network", "192.168.1.5/24"),
-        op("network", "source.network", "::ffff:10.0.0.0/104"),
+        // (An IPv4-mapped network is refused since the re-review; see
+        // `ipv4_mapped_networks_are_refused`.)
         list_op(
             "list",
             vec![
@@ -545,6 +546,19 @@ fn a_packaged_rule_is_read_only_with_fixed_text_and_not_deletable() {
     assert!(!PACKAGED_RULE_REASON.contains("000-"), "fixed text only");
 }
 
+/// Profile rules (issue #46 Part 2) are listed read-only, pointing at the
+/// Profiles page, and only the bridge deletes them.
+#[test]
+fn a_profile_rule_is_read_only_and_not_deletable() {
+    let rule = daemon_rule(
+        "850-profile:home:0000-r1",
+        Some(op("simple", "dest.host", "example.com")),
+    );
+    assert_eq!(read_only_reason(&rule), Some(PROFILE_MANAGED_REASON));
+    assert!(PROFILE_MANAGED_REASON.contains("Profiles page"));
+    assert!(!deletable(&rule));
+}
+
 #[test]
 fn a_daemon_user_name_rule_reported_with_its_uid_is_read_only_but_deletable() {
     let rule = daemon_rule("000-x", Some(op("simple", "user.name", "987")));
@@ -645,4 +659,24 @@ fn a_curated_default_rule_is_read_only_and_not_deletable() {
     );
     assert_eq!(read_only_reason(&curated), Some(CURATED_MANAGED_REASON));
     assert!(!deletable(&curated));
+}
+
+/// Re-review: Go's `IPNet.Contains` reads an IPv4-mapped network as IPv4
+/// with the mask's last 32 bits, so `::ffff:0:0/96` matches every IPv4
+/// address. Such networks are refused; the IPv4 form says what it means.
+#[test]
+fn ipv4_mapped_networks_are_refused() {
+    for data in [
+        "::ffff:0:0/96",
+        "::ffff:10.0.0.0/104",
+        "::ffff:192.168.1.1/128",
+    ] {
+        assert!(refused(leaf("network", "dest.network", data)), "{data}");
+        assert!(refused(leaf("network", "source.network", data)), "{data}");
+    }
+    assert!(
+        !refused(leaf("network", "dest.network", "::/0")),
+        "plain IPv6 stays"
+    );
+    assert!(!refused(leaf("network", "dest.network", "2001:db8::/32")));
 }

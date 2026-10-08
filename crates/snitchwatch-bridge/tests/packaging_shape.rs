@@ -195,11 +195,109 @@ fn bluebuild_recipe_installs_and_enables_opensnitchd() {
         "- opensnitch",
         "type: files",
         "type: systemd",
-        "- opensnitchd.service",
+        // The RPM installs the unit as `opensnitch.service` and ships no
+        // `opensnitchd.service` alias (`vendor:utils/packaging/daemon/rpm/
+        // opensnitch.spec`, issue #92).
+        "- opensnitch.service",
     ] {
         assert!(
             body.contains(needle),
             "bluebuild recipe missing `{needle}`\nbody:\n{body}"
+        );
+    }
+    assert!(
+        !body.contains("opensnitchd.service"),
+        "the RPM has no opensnitchd.service unit (issue #92)"
+    );
+}
+
+/// Issue #92: the layering guide's commands name the RPM's real unit.
+#[test]
+fn the_layering_guide_names_the_rpms_unit() {
+    let body = read("docs/packaging/rpm-ostree-layering.md");
+    assert!(
+        body.contains("systemctl enable --now opensnitch.service"),
+        "{body}"
+    );
+    assert!(
+        !body.contains("opensnitchd.service"),
+        "the RPM has no opensnitchd.service unit (issue #92)"
+    );
+}
+
+/// Lines of `text` that run `systemctl`/`journalctl` against `opensnitchd`
+/// (or `opensnitchd.service`) as the unit name. `opensnitchd` is the daemon's
+/// binary; the unit is `opensnitch.service` (issue #92). Paths such as
+/// `/etc/opensnitchd/`, units such as `snitchwatch-opensnitchd.service`, and
+/// prose that explains the old name without a command don't match.
+fn opensnitchd_unit_commands(text: &str) -> Vec<&str> {
+    let re = regex::Regex::new(
+        r#"\b(systemctl|journalctl)\b.*[\s'"`=]opensnitchd(\.service)?($|[\s'"`;|&)])"#,
+    )
+    .expect("static regex");
+    text.lines().filter(|line| re.is_match(line)).collect()
+}
+
+#[test]
+fn the_unit_name_matcher_flags_only_commands_naming_opensnitchd() {
+    for bad in [
+        "systemctl status opensnitchd    # should be enabled + active",
+        "sudo systemctl restart opensnitchd",
+        "sudo systemctl enable --now opensnitchd.service",
+        "journalctl -u opensnitchd -f",
+        "journalctl -u opensnitchd.service",
+    ] {
+        assert!(!opensnitchd_unit_commands(bad).is_empty(), "missed: {bad}");
+    }
+    for ok in [
+        "systemctl status opensnitch.service",
+        "systemctl is-active opensnitch.service       # -> active",
+        "journalctl -u opensnitch.service",
+        "systemctl --user start snitchwatch-opensnitchd.service",
+        "sudo systemctl restart opensnitch && cat /etc/opensnitchd/default-config.json",
+        "`opensnitchd` is the daemon's binary, not its unit.",
+        "`opensnitch.service`, with no `opensnitchd.service` alias (issue #92).",
+    ] {
+        assert!(opensnitchd_unit_commands(ok).is_empty(), "false hit: {ok}");
+    }
+}
+
+/// Issue #92: no packaging doc or the recipe tells a reader to run
+/// `systemctl`/`journalctl` against the unit that doesn't exist.
+#[test]
+fn packaging_docs_never_run_systemctl_against_opensnitchd() {
+    let mut files = vec![
+        "packaging/README.md".to_string(),
+        "packaging/bluebuild/recipe.yml".to_string(),
+    ];
+    let docs = workspace_file("docs/packaging");
+    for entry in
+        std::fs::read_dir(&docs).unwrap_or_else(|e| panic!("read_dir {}: {e}", docs.display()))
+    {
+        let name = entry.expect("dir entry").file_name();
+        let name = name.to_string_lossy();
+        if name.ends_with(".md") {
+            files.push(format!("docs/packaging/{name}"));
+        }
+    }
+    // A rename must not quietly turn this scan into a no-op.
+    for expected in [
+        "phase2-manual-verification-runbook.md",
+        "rpm-ostree-layering.md",
+    ] {
+        assert!(
+            files.iter().any(|f| f.ends_with(expected)),
+            "{expected} missing from the scan: {files:?}"
+        );
+    }
+
+    for file in &files {
+        let body = read(file);
+        let hits = opensnitchd_unit_commands(&body);
+        assert!(
+            hits.is_empty(),
+            "{file} runs systemctl/journalctl against `opensnitchd`; the unit is \
+             `opensnitch.service` (issue #92): {hits:?}"
         );
     }
 }

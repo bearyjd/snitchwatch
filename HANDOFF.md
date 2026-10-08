@@ -762,7 +762,7 @@ SNITCHWATCH_GRPC_BIND=127.0.0.1:50051 RUST_LOG=debug just run-bridge
 grep -A2 '"Server"' /etc/opensnitchd/default-config.json
 
 # 3. Restart opensnitchd and tail its log for the dial attempt/failure:
-sudo systemctl restart opensnitchd
+sudo systemctl restart opensnitch.service
 sudo tail -f /var/log/opensnitchd.log
 ```
 

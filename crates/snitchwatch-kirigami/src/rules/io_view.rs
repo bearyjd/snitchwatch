@@ -142,7 +142,7 @@ fn row(item: &ImportItem) -> PreviewRow {
 }
 
 /// Where a problem is, in plain words (`None`: the whole rule).
-fn plain_location(path: &str) -> Option<String> {
+pub(crate) fn plain_location(path: &str) -> Option<String> {
     let place = match path {
         "rule" => return None,
         "name" => "name".to_string(),

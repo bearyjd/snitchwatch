@@ -313,39 +313,38 @@ async fn entry_requests_for_unknown_ids_are_dropped() {
     ));
 }
 
-/// Issue #67: the request id comes back on the page. It is GUI-chosen text
-/// that is echoed to every GUI, so a request with an oversize one is not
-/// served at all.
+/// Issue #67: the request id comes back on the page. It is client-chosen text
+/// echoed to every GUI, so it follows the protocol's one rule for request ids
+/// (`valid_request_id`: 1 to 64 ASCII letters, digits or `-`) and anything
+/// else is treated as absent: the page is still served, without an echo.
 #[tokio::test]
-async fn an_entry_request_keeps_its_id_and_an_oversize_id_is_dropped() {
-    use crate::ws_messages::MAX_REQUEST_ID_LEN;
+async fn an_entry_request_keeps_a_valid_id_and_treats_any_other_as_absent() {
     let mgr = manager_with(
         Arc::new(FixtureFetcher::default()),
         &[subscription("known", FAST_URL)],
     );
     let (worker, _rx) = undrained(&mgr, 1);
     let mut events = mgr.subscribe();
-    let request = |request_id: String| ClientMessage::RequestBlocklistEntries {
-        subscription_id: "known".to_string(),
-        offset: 0,
-        limit: None,
-        request_id: Some(request_id),
+    let mut echoed = |request_id: &str| {
+        let message = ClientMessage::RequestBlocklistEntries {
+            subscription_id: "known".to_string(),
+            offset: 0,
+            limit: None,
+            request_id: Some(request_id.to_string()),
+        };
+        assert_eq!(worker.try_route(message), None);
+        match events.try_recv() {
+            Ok(BlocklistEvent::EntriesRequested { request_id, .. }) => request_id,
+            other => panic!("the request was not served: {other:?}"),
+        }
     };
-    assert_eq!(worker.try_route(request("gui-1".into())), None);
-    assert!(matches!(
-        events.try_recv(),
-        Ok(BlocklistEvent::EntriesRequested { request_id: Some(id), .. }) if id == "gui-1"
-    ));
-    assert_eq!(
-        worker.try_route(request("x".repeat(MAX_REQUEST_ID_LEN + 1))),
-        None
-    );
-    assert!(events.try_recv().is_err(), "an oversize id was served");
-    assert_eq!(
-        worker.try_route(request("x".repeat(MAX_REQUEST_ID_LEN))),
-        None
-    );
-    assert!(events.try_recv().is_ok(), "an id at the limit is served");
+    assert_eq!(echoed("gui-1"), Some("gui-1".to_string()));
+    let longest = "x".repeat(64);
+    assert_eq!(echoed(&longest), Some(longest));
+    assert_eq!(echoed(&"x".repeat(65)), None, "too long");
+    assert_eq!(echoed(""), None, "empty");
+    assert_eq!(echoed("gui\n1"), None, "a control character");
+    assert_eq!(echoed("gui 1"), None, "a space");
 }
 
 /// Counts reconcile passes (each ends in `remove_orphans`).

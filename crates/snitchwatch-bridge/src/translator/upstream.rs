@@ -70,9 +70,9 @@ pub fn apply(
                 remember,
             })
         }
-        ClientMessage::AddRule { rule } => Ok(UpstreamEffect::AddRule { rule }),
-        ClientMessage::DeleteRule { rule_id } => Ok(UpstreamEffect::DeleteRule { rule_id }),
-        ClientMessage::UpdateRule { rule_id, rule } => {
+        ClientMessage::AddRule { rule, .. } => Ok(UpstreamEffect::AddRule { rule }),
+        ClientMessage::DeleteRule { rule_id, .. } => Ok(UpstreamEffect::DeleteRule { rule_id }),
+        ClientMessage::UpdateRule { rule_id, rule, .. } => {
             Ok(UpstreamEffect::UpdateRule { rule_id, rule })
         }
         ClientMessage::RequestSnapshot => Ok(UpstreamEffect::SnapshotRequested),
@@ -205,7 +205,9 @@ pub async fn handle_profile_action(
             mgr.deactivate().await?;
             Ok(ProfileActionOutcome::Deactivated)
         }
-        ClientMessage::AddProfileRule { profile_id, rule } => {
+        ClientMessage::AddProfileRule {
+            profile_id, rule, ..
+        } => {
             mgr.add_rule(
                 &profile_id,
                 ProfileRule {
@@ -213,6 +215,7 @@ pub async fn handle_profile_action(
                     action: rule.action,
                     operand: rule.operand,
                     data: rule.data,
+                    operator: rule.operator,
                 },
             )
             .await?;
@@ -307,7 +310,10 @@ mod profile_action_tests {
                     action: "deny".into(),
                     operand: "dest.host".into(),
                     data: "ads.example".into(),
+                    ..Default::default()
                 },
+                request_id: None,
+                reply: None,
             },
         )
         .await
@@ -533,7 +539,15 @@ mod tests {
     fn add_rule_returns_add_rule_effect() {
         let mut cache = ConnectionCache::new(10);
         let rule = serde_json::json!({"name": "block-everything"});
-        let effect = apply(&mut cache, ClientMessage::AddRule { rule: rule.clone() }).unwrap();
+        let effect = apply(
+            &mut cache,
+            ClientMessage::AddRule {
+                rule: rule.clone(),
+                request_id: None,
+                reply: None,
+            },
+        )
+        .unwrap();
         assert_eq!(effect, UpstreamEffect::AddRule { rule });
     }
 

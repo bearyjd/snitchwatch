@@ -397,10 +397,13 @@ mod tests {
                     action: "allow".into(),
                     operand: "dest.host".into(),
                     data: "nas.local".into(),
+                    ..Default::default()
                 }],
                 active: true,
             }],
             storage: None,
+            applies_rules: false,
+            not_applied_reason: None,
         };
         assert!(interests_profiles(&msg));
         assert!(!interests_connections(&msg));
@@ -527,7 +530,11 @@ mod tests {
             other => panic!("expected SubscribeBlocklist, got {other:?}"),
         }
         match decode_client(r#"{"action":"deleteRule","ruleId":"block-ads"}"#).unwrap() {
-            ClientMessage::DeleteRule { rule_id } => assert_eq!(rule_id, "block-ads"),
+            ClientMessage::DeleteRule {
+                rule_id,
+                request_id: None,
+                reply: None,
+            } => assert_eq!(rule_id, "block-ads"),
             other => panic!("expected DeleteRule, got {other:?}"),
         }
     }

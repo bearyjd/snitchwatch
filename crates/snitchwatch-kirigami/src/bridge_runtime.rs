@@ -101,6 +101,8 @@ struct ConnectionState {
     pause_answers_waiting: bool,
     /// The same for `bridge_capabilities::DECIDE_LATER`.
     decide_later: bool,
+    /// This session's waiting prompts, for desktop notifications.
+    pending_rows: pending_rows::PendingRows,
 }
 
 /// Why a UI request was not handed to the currently connected service.
@@ -496,6 +498,7 @@ async fn connect_and_relay(
             incoming = ws.next() => match incoming {
                 Some(Ok(Message::Text(text))) => match serde_json::from_str::<ServerMessage>(&text) {
                     Ok(message) => {
+                        pending_rows::observe(connection, connection_id, &message);
                         forward_shell_message(
                             &message,
                             connection_id,
@@ -574,6 +577,7 @@ fn mark_connected_with(
     state.prompt_slot = prompt_slot;
     state.pause_answers_waiting = pause_answers_waiting;
     state.decide_later = false;
+    state.pending_rows.clear();
     state.connection_id
 }
 
@@ -622,6 +626,7 @@ fn disconnect_and_discard(
         state.prompt_slot = false;
         state.pause_answers_waiting = false;
         state.decide_later = false;
+        state.pending_rows.clear();
     }
     while inbound_rx.try_recv().is_ok() {}
 }
@@ -700,10 +705,6 @@ pub fn handles() -> Option<BridgeHandles> {
     }
 }
 
-pub fn status() -> Option<(bool, String)> {
-    STARTED.get().map(status_of)
-}
-
 /// The link's state and message, or `None` before the runtime was started.
 pub fn link_status() -> Option<LinkStatus> {
     STARTED.get().map(link_of)
@@ -760,6 +761,10 @@ pub use snitchwatch_bridge::filter_pause::PauseState as BridgePauseState;
 pub use snitchwatch_bridge::notice::Notice as BridgeNotice;
 pub use snitchwatch_bridge::tray_state::TrayState as BridgeTrayState;
 
+#[path = "bridge_runtime/pending_rows.rs"]
+mod pending_rows;
+pub use pending_rows::PendingRow;
+
 #[cfg(test)]
 #[path = "bridge_runtime/tests.rs"]
 mod tests;
@@ -779,3 +784,7 @@ mod decide_later_tests;
 #[cfg(test)]
 #[path = "bridge_runtime/pause_answers_tests.rs"]
 mod pause_answers_tests;
+
+#[cfg(test)]
+#[path = "bridge_runtime/notification_action_tests.rs"]
+mod notification_action_tests;

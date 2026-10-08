@@ -188,7 +188,11 @@ async fn a_subscription_installs_its_lists_rules_and_reports_them_installed() {
     assert_eq!(row["deletable"], false);
     bridge
         .inbound_tx
-        .send(ClientMessage::DeleteRule { rule_id: name })
+        .send(ClientMessage::DeleteRule {
+            rule_id: name,
+            request_id: None,
+            reply: None,
+        })
         .await
         .unwrap();
     assert!(

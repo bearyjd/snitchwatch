@@ -9,9 +9,9 @@ now" banner is the honest-ui PR)
 - Part 2: #45 PR B and #48, for `DaemonCommands`, `RulesCache` and
   reconcile.
 
-**Status (2026-10-08):** Part 1 is implemented on
-`fix/46-profile-persistence` (based on `c74d8c7`, after #45 PR B). Part 2
-is not started. See "Part 1 as built" below.
+**Status (2026-10-08):** Part 1 merged (#79). Part 2 is built on
+`feat/46-profile-enforcement`, stacked on the rule editor (#99); see "Part 2
+as designed" and "Part 2 as built" below.
 
 **Priority: lowest of the post-#39 set.** No GUI control can create a
 profile rule, so there is nothing to enforce yet. Persistence is cheap.
@@ -154,6 +154,140 @@ Differences from the design above, and why:
    `850-profile:` prefix (Kirigami `rules/row_store.rs` `Rule::source`).
 10. **Banner.** Remove it only when Part 2 *and* a profile-rule editor ship.
 11. Fix the doc comments listed under Findings.
+
+### Part 2 as designed (2026-10-08, stacked on the rule editor)
+
+Owner decisions: precedence stays false; #82's manual choice is saved with
+its network. This replaces steps 4–11 where they differ.
+
+1. **Reserved prefix.** `rule_name::PROFILE_RULE_NAME_PREFIX`
+   (`850-profile:`) joins `is_reserved_name`, so `DaemonCommands::send`, the
+   editor's gates, imports (`check_rule` refuses it explicitly) and export
+   (left out as managed) can't touch it. `read_only_reason` says the rule
+   is managed on the Profiles page.
+2. **One materialize-and-check function**,
+   `profiles::materializer::materialize_rule(profile_id, rule, seq) ->
+   Result<Rule, Vec<RuleProblem>>`, used by `AddProfileRule`, the enforcer
+   and the Kirigami editor's profile mode. It builds the daemon rule and
+   runs `PolicyProfile::ProfileRule`: the editor's checks, plus `always`,
+   no precedence, no nolog, no empty `dest.host`, a case-sensitive exact
+   `process.path`, no `user.name` (the daemon stores it as a number, so
+   it can never be found in place), and the profile prefix. A profile rule
+   carries the editor's conditions (`operator`, #48 wire shape); a rule
+   saved by Part 1 (`operand`/`data`) becomes one `simple` condition,
+   case-sensitive for `process.path` (#50). An unknown action is refused,
+   no longer folded into deny. A non-case-sensitive pattern is lowercased
+   as the daemon does when it loads it, so the snapshot echoes it.
+3. **`ProfileCommand` / `DaemonCommands::send_profile`**, built like
+   `BlocklistCommand`: crate-private constructors, re-checked at the send
+   point (prefix, `always`, enabled, no precedence, the policy). Deletes
+   only names under the prefix.
+4. **Enforcer** (`profiles/enforcer.rs`), one task. Profile actions only
+   change the store and ask for a pass; a pass also runs after every
+   committed rules snapshot. A pass installs the active profile's rules
+   (one already in the committed snapshot, compared with
+   `rule_io::same_rule`, isn't resent), then deletes cached rules under the
+   prefix that aren't wanted and carry the `source: profile` tag. Nothing
+   is sent while the rule list is unknown. Statuses per rule: pending,
+   "Rule installed" only after a correlated `OK` (or found in place), or
+   not enforced with the reason. Every activation resets them to pending.
+5. **Where it enforces:** the system bridge with a saved store, like the
+   blocklists. Anywhere else every rule is not enforced, with the reason.
+6. **#82:** a manual activate/deactivate saves `(profile, network)` in a
+   `manual_choice` table (schema version 2), with the newest network seen.
+   The choice holds while the observed network equals that network, before
+   and after a restart; a different network clears it and auto-switch
+   decides. Auto-switch acts on a network only after it has been steady
+   for a few seconds (flapping).
+7. **Results.** `AddProfileRule` takes an optional `request_id` and answers
+   with `RuleCommandResult` (refused with the policy's problems, or ok:
+   "saved to the profile", not "installed").
+8. **GUI.** The Profiles page lists each profile's rules with their status,
+   adds rules through the rule editor's sheet in a profile mode, and says
+   profiles are applied (or why not) in fixed text.
+
+### Part 2 as built (2026-10-08)
+
+Built as designed above; where it differs from steps 4–11:
+
+- **One pass, not a sink call per profile.** `ProfileRuleSink::apply(wanted)`
+  installs the active profile's rules and deletes the bridge's other
+  profile rules in one pass, returning one outcome per rule; it replaces
+  `replace_profile_rules(profile_id, rules)`. Passes run on one enforcer
+  task (after each profile action and each committed rules snapshot),
+  never on the pump.
+- **Status is per rule.** `ProfileRuleWire.enforcement`/`enforcementReason`
+  (the blocklists' values: "Rule installed" only after a correlated OK or
+  found in place), and `SetProfiles.appliesRules`/`notAppliedReason` for a
+  bridge that applies none. No `ProfileSummary.enforcement`, and the Active
+  chip is unchanged: each rule says it.
+- **Validation is the `ProfileRule` policy,** not a list of known
+  operands: profile rules carry the editor's conditions (`operator`), and
+  every one passes the editor's checks plus the profile's own (see design
+  step 2). Also refused: `user.name` (the daemon stores the uid, so the
+  rule could never be found in place and would be resent after every
+  snapshot), rule ids outside `[A-Za-z0-9_-]{1,64}`, and more than 64
+  rules in one profile. A Part 1 rule (`operand`/`data`) is one `simple`
+  condition, case-sensitive on `process.path`.
+- **"In place" follows the daemon's echo:** a list operand spelled either
+  way and a non-case-sensitive pattern compared lowercased, as `Compile`
+  stores it, so a pass after a snapshot sends nothing.
+- **Where it applies:** the system bridge with a store it could read. One
+  whose saved profiles can't be read (the store fell back to memory: a
+  newer schema after a rollback, an unreadable row, permissions, a full
+  disk) changes no profile rule at all: with the keep-set unknown a purge
+  would delete the active profile's rules (PR #104 review HIGH, the #45 PR
+  B lesson). Its page says the saved profiles can't be read and earlier
+  rules were left in place. One unreadable row makes the whole store
+  unreadable: skipping it could skip the active profile. The stores wait
+  up to 5 s for a busy database (rusqlite's default, now pinned by a test).
+  The per-user bridge applies none.
+- **After a restart** the active profile's rules start pending, so the
+  first pass records them installed when the snapshot holds them, and
+  sends nothing.
+- **#82 as built:** a manual choice is saved with the newest network
+  reading (a click during the settle time after joining a network keeps
+  that network), or the last settled one, and holds while that network is
+  observed, also after a restart. No network (before Wi-Fi joins, suspend,
+  a drop) is no change: it neither acts nor clears the choice (PR #104
+  review M1). A choice made in this run before any network was seen is
+  kept by the first network that settles; an earlier run's is not.
+- **Profile ids** are plain tokens of at most 64 characters, and creating a
+  profile under an existing id is refused (it would have wiped the
+  profile's rules and active flag, and a pass would then purge them). A
+  repeated rule id in a saved profile installs only its first rule.
+- **Manual choice (#82):** only a different network clears it; with no
+  manual choice saved, the first network after a restart lets auto-switch
+  decide. The choice is saved with the newest network reading, falling back
+  to the last settled one; a choice made with no network is adopted only in
+  the run it was made.
+- **Stable names:** `850-profile:<profile>:<rule id>`, no position, so
+  adding, removing or replacing a rule never renames (rewrites) the others.
+  A Part 1 rule whose id isn't a plain token is refused with a reason
+  rather than risk sharing a name; at most 64 rules of a saved profile are
+  installed, the rest say why.
+- **Profile-mode cautions:** the editor's profile mode takes the import
+  preview's cautions (an allow for every app, a launcher anywhere), so
+  saving one takes the second click (review M2).
+- **Not done (optional in the review):** a minimum gap between
+  auto-switches; the 5 s settle bounds churn for now.
+- **Switching installs first, then deletes.** No moment without the new
+  profile's denies; an old allow that lingers still loses to any deny.
+- **Not removed, replaced:** the "Preview: not applied" banner becomes an
+  Information note keyed on `appliesRules` and a warning keyed on
+  `!appliesRules` with the reason in a PlainText label. The profiles
+  honest-UI guards moved to `tests/honest_ui_profiles_guards.rs`, over a
+  shared `tests/qml_guard_support` module.
+- **The Rules page's Source label** still says "User rules" for a profile
+  rule (no `RuleSource::Profile`); its read-only reason says it is managed
+  on the Profiles page. Follow-up.
+- **Profile ids are validated at `CreateProfile`** (plain tokens, at most
+  64 characters, never an existing id). `CreateProfile` has no reply, so a
+  refusal is only logged; surfacing it on the Profiles page is a follow-up.
+- **Build note:** cxx-qt-build's qmlcachegen output isn't rebuilt when only
+  a Rust QObject's methods change, so stale AOT code calls the wrong method
+  index (a SIGSEGV in an unchanged page). Touch the QML files after
+  changing a QObject's invokables or properties.
 
 ## Tests to write first
 

@@ -15,12 +15,19 @@
 //!    mutates the cache (resolving pending rows by firing the oneshot).
 
 pub mod activation;
+mod busy;
 pub mod cli;
+mod profile_actions;
 pub mod profile_storage;
 mod relays;
+mod replier;
+mod rule_commands;
+mod rule_effect;
 pub mod rule_hits_storage;
 mod rules_import;
 pub mod storage;
+#[cfg(test)]
+mod test_daemon;
 
 use activation::RootUnixIncoming;
 use profile_storage::is_profile_message;
@@ -34,9 +41,7 @@ use snitchwatch_bridge::auth::{self, Token};
 use snitchwatch_bridge::blocklists::worker::{BlocklistTasks, DEFAULT_REFRESH_TICK};
 use snitchwatch_bridge::cache::connections::ConnectionCache;
 use snitchwatch_bridge::cache::rule_hits_handle::RuleHitsHandle;
-use snitchwatch_bridge::cache::rules::{
-    prune_expired_rules_every, publish_rules, settle_rule_command,
-};
+use snitchwatch_bridge::cache::rules::{prune_expired_rules_every, publish_rules};
 use snitchwatch_bridge::daemon_commands::DaemonTransport;
 use snitchwatch_bridge::deferred_answers::ANSWER_TIMEOUT;
 use snitchwatch_bridge::filter_pause::{FilterPause, PauseRequest};
@@ -44,7 +49,6 @@ use snitchwatch_bridge::grpc_server::UiService;
 use snitchwatch_bridge::notice::{Notice, NoticeBus};
 use snitchwatch_bridge::profiles::network_watcher;
 use snitchwatch_bridge::translator::downstream;
-use snitchwatch_bridge::translator::rule_notification::notification_for_effect;
 use snitchwatch_bridge::translator::upstream::{self, UpstreamEffect};
 use snitchwatch_bridge::tray_state::{TrayState, TrayStatePublisher};
 use snitchwatch_bridge::ws_messages::{ClientMessage, ServerMessage};
@@ -163,6 +167,8 @@ pub struct RunningBridge {
     pause_clear_handle: tokio::task::JoinHandle<()>,
     /// The blocklist worker, its refresh loop and event pump (issue #45).
     blocklist_tasks: BlocklistTasks,
+    /// The profile enforcer and auto-switch tasks (issue #46).
+    profile_tasks: Vec<tokio::task::JoinHandle<()>>,
     /// Per-rule hit counts, saved once more at shutdown, and the ticker that
     /// broadcasts and saves them in between.
     rule_hits: RuleHitsHandle,
@@ -184,6 +190,9 @@ impl RunningBridge {
         self.pause_expiry_handle.abort();
         self.pause_clear_handle.abort();
         self.blocklist_tasks.abort();
+        for task in &self.profile_tasks {
+            task.abort();
+        }
         // The ticker first, so no save is started behind this one; `save_now`
         // waits for one already running.
         self.rule_hits_ticker.abort();
@@ -331,11 +340,13 @@ where
     });
     // Taken before the gRPC server starts, so no rules snapshot is missed.
     let rules_synced = ui_service_inner.rules_synced();
+    let profile_rules_synced = ui_service_inner.rules_synced();
 
     // --- BlocklistsManager: persisted and enforced only when `Persistent` ---
     // The profile store opens in the same state directory but tracks its
     // own storage status (issue #46 Part 1).
     let profiles_storage = options.storage.clone();
+    let profiles_mode = options.mode;
     let rule_hits = ui_service_inner.rule_hits_handle();
     rule_hits_storage::configure(&rule_hits, &options.storage);
     let rule_hits_ticker = rule_hits.spawn_ticker();
@@ -345,14 +356,25 @@ where
     };
     let blocklists_mgr = storage::build_blocklists_manager(options, daemon_rules)?;
 
-    // --- ProfilesManager: persisted when `Persistent`, never enforced yet ---
-    let profiles_mgr = profile_storage::build_profiles_manager(profiles_storage)?;
+    // --- ProfilesManager: persisted when `Persistent`, enforced only by the
+    // system bridge (issue #46 Part 2) ---
+    let profiles_mgr = profile_storage::build_profiles_manager(
+        profiles_storage,
+        profiles_mode,
+        storage::DaemonRules {
+            commands: ui_service_inner.daemon_commands(),
+            rules: ui_service_inner.rules_handle(),
+        },
+    )?;
+    let mut profile_tasks = profiles_mgr
+        .clone()
+        .spawn_enforcer(Some(profile_rules_synced));
 
     // Network-driven auto-activation. `connect_watcher` degrades to a no-op
     // watcher (manual-activation-only) if NetworkManager/D-Bus isn't
     // reachable — never fails `run`, never panics.
     let network_watcher = network_watcher::connect_watcher().await;
-    let _profile_auto_switch_handle = profiles_mgr.clone().spawn_auto_switch(network_watcher);
+    profile_tasks.push(profiles_mgr.clone().spawn_auto_switch(network_watcher));
 
     // --- WebSocket server ---------------------------------------------------
     // Generate a fresh handshake token and write it to a file alongside the
@@ -437,11 +459,22 @@ where
     let daemon_commands = ui_service_inner.daemon_commands();
     let daemon_stream_ready = daemon_commands.stream_ready();
     let rules = ui_service_inner.rules_handle();
+    // Names a rule command or an import is changing; neither may race the
+    // other on one name (P2.1).
+    let busy_names = busy::BusyNames::default();
     // Rule import/export (roadmap P2.7): its own task; the pump only routes.
     let rules_import = rules_import::RulesImport::spawn(
         daemon_commands.clone(),
         rules.clone(),
         broadcast_tx.clone(),
+        busy_names.clone(),
+    );
+    // Rule commands (P2.1 editor checks and results); the pump only routes.
+    let rule_commands = rule_commands::RuleCommands::new(
+        daemon_commands.clone(),
+        rules.clone(),
+        broadcast_tx.clone(),
+        busy_names.clone(),
     );
     tokio::spawn(prune_expired_rules_every(
         RULE_EXPIRY_TICK,
@@ -546,6 +579,9 @@ where
             let Some(msg) = rules_import.try_route(msg) else {
                 continue;
             };
+            let Some(msg) = rule_commands.try_route(msg) else {
+                continue;
+            };
             // Special-cased before is_profile_message/upstream::apply — this
             // changes the shared filter pause + tray state, not cache state
             // those own. See docs/superpowers/plans/2026-07-12-tray-filter-off.md.
@@ -612,10 +648,7 @@ where
                 continue;
             }
             if is_profile_message(&msg) {
-                use snitchwatch_bridge::translator::upstream::handle_profile_action;
-                if let Err(e) = handle_profile_action(profiles_for_upstream.clone(), msg).await {
-                    error!(error = %e, "profile action failed");
-                }
+                profile_actions::handle(profiles_for_upstream.clone(), msg, &snapshot_tx).await;
                 continue;
             }
             let effect = {
@@ -695,62 +728,7 @@ where
                     info!(%row_id, "applied verdict and broadcast row update");
                 }
                 Ok(effect) => {
-                    // Rule enable/disable/delete: translate to a daemon
-                    // notification and send it down the outbound Notifications
-                    // stream(s); `DaemonCommands::send` assigns the id. The
-                    // rules cache follows the daemon's OK in reply order; a
-                    // spawned waiter re-broadcasts the unchanged list on any
-                    // other outcome, so the pump never blocks (#48). Anything
-                    // that isn't a rule edit yields `None` and falls through
-                    // to the original log line.
-                    match notification_for_effect(&effect, 0) {
-                        Ok(Some(notification)) => {
-                            let action = notification.r#type;
-                            match commands_for_pump.send(notification) {
-                                Ok(pending) => {
-                                    info!(id = pending.id(), action, "sent rule command to daemon");
-                                    tokio::spawn(settle_rule_command(
-                                        pending,
-                                        rules_for_pump.clone(),
-                                        snapshot_tx.clone(),
-                                        RULE_COMMAND_TIMEOUT,
-                                    ));
-                                }
-                                // No daemon stream took it. Dropping is
-                                // correct — the daemon reloads its own rules on
-                                // connect, so there is nothing to replay. The
-                                // list is re-sent to undo the GUI's optimistic
-                                // change.
-                                Err(e) => {
-                                    warn!(action, error = %e, "rule command dropped");
-                                    publish_rules(&rules_for_pump, &snapshot_tx);
-                                }
-                            }
-                        }
-                        Ok(None) => info!(?effect, "applied upstream effect"),
-                        // A rule the daemon would reject silently (see
-                        // `rule_from_wire`). Never send it, and re-send the
-                        // list to undo the GUI's optimistic change. The rule
-                        // body and name are GUI/daemon-supplied text: log only
-                        // the request kind and the name's length.
-                        Err(e) => {
-                            let (kind, name_len) = match &effect {
-                                UpstreamEffect::AddRule { rule } => (
-                                    "add",
-                                    rule.get("name")
-                                        .and_then(|n| n.as_str())
-                                        .map_or(0, str::len),
-                                ),
-                                UpstreamEffect::UpdateRule { rule_id, .. } => {
-                                    ("update", rule_id.len())
-                                }
-                                UpstreamEffect::DeleteRule { rule_id } => ("delete", rule_id.len()),
-                                _ => ("other", 0),
-                            };
-                            error!(error = %e, kind, name_len, "refusing to send malformed rule to daemon");
-                            publish_rules(&rules_for_pump, &snapshot_tx);
-                        }
-                    }
+                    rule_effect::send(&effect, &commands_for_pump, &rules_for_pump, &snapshot_tx);
                 }
                 Err(e) => error!(error = %e, "upstream apply failed"),
             }
@@ -777,6 +755,7 @@ where
         pause_expiry_handle,
         pause_clear_handle,
         blocklist_tasks,
+        profile_tasks,
         rule_hits,
         rule_hits_ticker,
     })

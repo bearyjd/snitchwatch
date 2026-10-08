@@ -534,26 +534,34 @@ Decided while implementing, against the merged code (base `1c3615c`):
   `LAN`/`MULTICAST` (the bridge can't see the daemon host's alias file), and
   `DaemonCommands::send` refuses what it refuses. The alias tests became
   "refused through the Import path".
-- **Match-all is refused** (review H1), exactly: a rule is refused when
+- **Match-all is refused** (review H1), by a heuristic: a rule is refused when
   none of its conditions narrows it. These don't narrow: `true`; a `/0`
   network; a regexp that matches every one of a few representative
   subjects of its operand (paths, commands, hosts, IPs, ports, protocols,
   IDs, interfaces, environment values), searched unanchored and lowercased
   like the daemon (`/` on a path, `.+` on a host). That probe is a
-  heuristic, not a proof: `\.` on a host still counts as narrowing. An empty `simple` value is refused on every
-  operand except `dest.host` (`EqualFold("", "")` matches everything
-  without the field; an empty host means "no host name").
-- **All-apps means not tied to programs:** only a non-empty `simple`
-  `process.path`, `process.command` or `process.id` condition ties a rule
-  to programs. A `process.parent.path` (the daemon walks every ancestor to
-  PID 1), a `process.env.*` value or a path regexp doesn't, so such a rule
-  is flagged "Applies to all apps" (and an allow starts unticked).
+  heuristic, not a proof: `\.` on a host still counts as narrowing. An
+  IPv4-mapped network (`::ffff:…`) is refused outright (re-review): Go reads
+  `::ffff:0:0/96` as every IPv4 address. An empty `simple` value is refused
+  on every operand except `dest.host` (`EqualFold("", "")` matches
+  everything without the field; an empty `dest.host` matches every
+  connection without a host name).
+- **All-apps means not tied to programs:** only a `simple` `process.path`
+  naming a real program file, or a non-empty `simple` `process.command`,
+  ties a rule to programs. A `process.id` (reused after a reboot), the
+  daemon's "Kernel connection" placeholder, a `process.parent.path` (the
+  daemon walks every ancestor to PID 1), a `process.env.*` value or a path
+  regexp doesn't, so such a rule is flagged "Applies to all apps" (and an
+  allow starts unticked).
 - **Default ticks and cautions are the bridge's** (review H2). An add or
   replace starts unticked, with plain-word reasons, when it is an allow
   that overrides other rules where the old one didn't, or an allow for
   every app; or a replace that turns a deny/reject into an allow, turns it
-  on or off, changes its conditions or how long it lasts; or a replace of
-  an allow that changes its conditions, turns it on, or stops its logging.
+  on or off, changes its conditions or how long it lasts, or stops its
+  logging; or a replace of an allow that changes its conditions, turns it
+  on, makes it permanent, or stops its logging. An allow for an
+  interpreter or launcher (python, a shell, env, perl, ruby, node, flatpak,
+  steam) with no destination condition starts unticked too (re-review).
   A replace carries the rule it overwrites, and the sheet shows it. Changed
   fields and problem locations are plain words ("logging", not `nolog`;
   "condition 2's value", not `operator.list[1].data`).

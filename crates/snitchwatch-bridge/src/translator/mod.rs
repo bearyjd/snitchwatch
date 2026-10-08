@@ -1,6 +1,7 @@
 //! LS ↔ OpenSnitch protocol translation.
 
 pub mod connection;
+pub mod display;
 pub mod downstream;
 pub mod glob;
 pub mod process_binding;

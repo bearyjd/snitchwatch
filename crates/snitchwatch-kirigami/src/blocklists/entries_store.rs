@@ -328,7 +328,7 @@ mod tests {
     fn this_guis_request_id_is_stable_and_short() {
         let id = client_request_id();
         assert_eq!(id, client_request_id());
-        assert!(!id.is_empty() && id.len() <= snitchwatch_bridge::ws_messages::MAX_REQUEST_ID_LEN);
+        assert!(!id.is_empty() && snitchwatch_bridge::ws_messages::valid_request_id(id));
     }
 
     /// Issue #67: pages fetched across a refresh must not be mixed. A later

@@ -35,6 +35,7 @@ harness = false
 
 [dependencies]
 snitchwatch-bridge = { path = "../snitchwatch-bridge", default-features = false }
+# The rule editor reads checked rules' conditions (`protocol::Operator`), and
 # "Make a rule…" builds a daemon `Connection` for the bridge's rule builder.
 snitchwatch-proto = { path = "../snitchwatch-proto" }
 cxx = "=1.0.194"
@@ -51,6 +52,10 @@ regex = { workspace = true }
 anyhow = "1"
 which = "6"
 notify-rust = "4"
+# Our own pending notifications: sent and listened to on one connection,
+# trusting only the notification server (`notification_signals`). The same
+# zbus notify-rust already uses.
+zbus = "5"
 async-trait = { workspace = true }
 reqwest = { workspace = true, features = ["json"] }
 # Reverse-DNS (PTR) lookup for the pending-decision insight panel (Parity 2).

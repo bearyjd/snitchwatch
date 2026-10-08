@@ -135,7 +135,7 @@ fn the_largest_entries_page_fits_one_small_frame() {
             .collect(),
         offset: u64::MAX,
         total: u64::MAX,
-        request_id: Some("r".repeat(MAX_REQUEST_ID_LEN)),
+        request_id: Some("r".repeat(64)),
         last_updated_iso8601: Some("2026-10-08T12:00:00.123456789+00:00".into()),
     };
     let json = serde_json::to_string(&msg).unwrap();

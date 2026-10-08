@@ -269,6 +269,7 @@ async fn pump_authenticated<S, R>(
     let broadcast_rx = handles.broadcast.subscribe();
     // Answers meant for this connection only (rule import/export, P2.7).
     let (reply_tx, reply_rx) = mpsc::channel::<ServerMessage>(REPLY_QUEUE);
+    let reply_to = crate::ws_messages::ReplyTo::new(reply_tx);
     let _session = handles.presence.authenticated_session();
     // Stable while `_session` is held: the generation only advances when the
     // last authenticated session ends.
@@ -288,7 +289,7 @@ async fn pump_authenticated<S, R>(
                 Message::Text(text) => match serde_json::from_str::<ClientMessage>(&text) {
                     Ok(parsed) => {
                         let parsed = stamp_sender(parsed, generation, peer_uid);
-                        let parsed = stamp_reply(parsed, &reply_tx);
+                        let parsed = stamp_reply(parsed, &reply_to);
                         if handles.inbound.send(parsed).await.is_err() {
                             break;
                         }
@@ -341,36 +342,24 @@ async fn forward_outbound<S>(
 /// Answers queued for one connection before its sender waits.
 const REPLY_QUEUE: usize = 32;
 
-/// Give a rule import/export request a channel back to its own connection.
-/// Overwrites whatever it carried; the field is never deserialized anyway.
-fn stamp_reply(message: ClientMessage, reply_tx: &mpsc::Sender<ServerMessage>) -> ClientMessage {
-    let reply = Some(crate::ws_messages::ReplyTo(reply_tx.clone()));
-    match message {
-        ClientMessage::ExportRules { request_id, .. } => {
-            ClientMessage::ExportRules { request_id, reply }
-        }
-        ClientMessage::PreviewRulesImport {
-            request_id,
-            document,
-            ..
-        } => ClientMessage::PreviewRulesImport {
-            request_id,
-            document,
-            reply,
-        },
-        ClientMessage::ApplyRulesImport {
-            request_id,
-            preview_id,
-            include,
-            ..
-        } => ClientMessage::ApplyRulesImport {
-            request_id,
-            preview_id,
-            include,
-            reply,
-        },
-        other => other,
+/// Give a rule import/export request or a rule command a channel back to
+/// its own connection. Overwrites whatever it carried; the field is never
+/// deserialized anyway.
+fn stamp_reply(
+    mut message: ClientMessage,
+    reply_to: &crate::ws_messages::ReplyTo,
+) -> ClientMessage {
+    match &mut message {
+        ClientMessage::AddRule { reply, .. }
+        | ClientMessage::UpdateRule { reply, .. }
+        | ClientMessage::DeleteRule { reply, .. }
+        | ClientMessage::ExportRules { reply, .. }
+        | ClientMessage::PreviewRulesImport { reply, .. }
+        | ClientMessage::ApplyRulesImport { reply, .. }
+        | ClientMessage::AddProfileRule { reply, .. } => *reply = Some(reply_to.clone()),
+        _ => {}
     }
+    message
 }
 
 /// Stamp a pause request with its sender's GUI-session generation, so

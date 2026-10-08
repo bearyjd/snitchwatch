@@ -37,7 +37,7 @@ use crate::blocklists::store::FetchStatus;
 use crate::blocklists::{spawn_event_pump, BlocklistsManager, ReconcileScope};
 use crate::translator::upstream::handle_blocklist_action;
 use crate::ws_messages::{
-    ClientMessage, ServerMessage, BLOCKLIST_ENTRIES_PAGE_MAX, MAX_REQUEST_ID_LEN,
+    valid_request_id, ClientMessage, ServerMessage, BLOCKLIST_ENTRIES_PAGE_MAX,
 };
 
 /// Queued jobs beyond this are refused (a subscribe is shown as refused).
@@ -248,11 +248,10 @@ impl BlocklistWorker {
             } => {
                 // Only known ids reach the bus (and the logs): a GUI-chosen id
                 // can be up to the 1 MiB message limit and contain anything.
-                // The request id is echoed to every GUI, so it is capped too.
-                let id_fits = request_id
-                    .as_ref()
-                    .is_none_or(|id| id.len() <= MAX_REQUEST_ID_LEN);
-                if id_fits && self.mgr.has_subscription(&subscription_id) {
+                // The request id is echoed to every GUI, so an unusable one is
+                // treated as absent, as for every other request id.
+                let request_id = request_id.filter(|id| valid_request_id(id));
+                if self.mgr.has_subscription(&subscription_id) {
                     let limit = limit.unwrap_or(BLOCKLIST_ENTRIES_PAGE_MAX);
                     self.mgr
                         .request_entries(&subscription_id, offset, limit, request_id);

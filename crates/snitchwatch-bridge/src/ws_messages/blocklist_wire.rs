@@ -27,10 +27,6 @@ pub struct BlocklistSummary {
 /// Most hosts in one `SetBlocklistEntries` page (~260 KiB of JSON at most).
 pub const BLOCKLIST_ENTRIES_PAGE_MAX: u32 = 1000;
 
-/// Longest `request_id` of a `RequestBlocklistEntries` the bridge answers: it
-/// is GUI-chosen text that is echoed to every GUI.
-pub const MAX_REQUEST_ID_LEN: usize = 64;
-
 /// [`BlocklistSummary::enforcement`]: not downloaded or pushed yet.
 pub const ENFORCEMENT_PENDING: &str = "pending";
 /// [`BlocklistSummary::enforcement`]: the daemon accepted the list's rule,

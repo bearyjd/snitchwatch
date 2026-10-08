@@ -77,6 +77,8 @@ Kirigami.ScrollablePage {
     property string inspectSource: "user"
     property string inspectBlocklistId: ""
     property bool confirmingDelete: false
+    // Why the rule editor can't change the inspected rule; empty when it can.
+    property string inspectNotEditable: ""
     // Exposed for the headless inspector probe (tests/rules_inspector_qml.rs).
     property alias inspectorSheet: inspector
     property alias inspectorEnabledSwitch: inspectEnabledSwitch
@@ -84,9 +86,14 @@ Kirigami.ScrollablePage {
     property alias rulesList: list
     property alias rulesIo: rulesIo
     property alias importSheet: importSheet
+    property alias ruleEditor: ruleEditor
+    property alias inspectorEditButton: inspectEditButton
     readonly property bool showsAllAppsNotice: !!page.model && page.model.legacyHostOnlyCount > 0
     // Not `ioStatus.visible`: a child of a hidden header always reads false.
     readonly property bool showsIoStatus: rulesIo.statusText.length > 0 && !importSheet.visible
+    // The rule editor's last result once its sheet closed (P2.1).
+    readonly property bool showsEditorStatus: ruleEditorController.statusText.length > 0
+                                              && !ruleEditor.visible
 
     function actionColor(action) {
         return action === "allow" ? Kirigami.Theme.positiveTextColor : Kirigami.Theme.negativeTextColor;
@@ -163,6 +170,30 @@ Kirigami.ScrollablePage {
         simulateSheet.open();
     }
 
+    // The rule editor (P2.1): "New rule…", or a rule for a connection.
+    // `prefillJson` is the simulator's prefill form
+    // (`ConnectionsModel.simulationPrefillJson`); empty for a blank rule.
+    // main.qml's `openRuleEditor` routes here. Returns whether it opened.
+    function openEditor(prefillJson) {
+        return prefillJson ? ruleEditor.startPrefill(prefillJson) : ruleEditor.startNew();
+    }
+
+    function checkEditable() {
+        const json = page.model ? page.model.editableRuleJson(page.inspectName) : "";
+        page.inspectNotEditable = json ? JSON.parse(json).notEditable
+                                       : "Edit isn't available for this rule.";
+    }
+
+    // The inspector's Edit: swap the inspector for the editor.
+    function editInspected() {
+        if (!page.model) return;
+        inspector.close();
+        if (!ruleEditor.startEdit(page.model.editableRuleJson(page.inspectName))) {
+            page.inspectNotEditable = ruleEditorController.statusText;
+            inspector.open();
+        }
+    }
+
     // `rule` is `selectRuleByName`'s JSON shape.
     function fillInspector(rule) {
         page.inspectName = rule.name;
@@ -176,6 +207,7 @@ Kirigami.ScrollablePage {
         page.inspectPrecedence = rule.precedence;
         page.inspectSource = rule.source;
         page.inspectBlocklistId = rule.blocklistId;
+        page.checkEditable();
     }
 
     // The bridge re-sends the whole list after every rule command, whether
@@ -241,6 +273,12 @@ Kirigami.ScrollablePage {
             onClicked: importDialog.open()
         }
         Controls.Button {
+            objectName: "newRule"
+            text: "New rule…"
+            icon.name: "list-add"
+            onClicked: page.openEditor("")
+        }
+        Controls.Button {
             text: "Simulate"
             icon.name: "system-run"
             onClicked: simulateSheet.open()
@@ -252,7 +290,7 @@ Kirigami.ScrollablePage {
     // Below it, what the hit counts are (see the top of this file), then the
     // last import or export outcome.
     header: ColumnLayout {
-        visible: page.showsAllAppsNotice || page.showsIoStatus
+        visible: page.showsAllAppsNotice || page.showsIoStatus || page.showsEditorStatus
             || hitsSummaryLabel.text.length > 0 || hitsStorageLabel.text.length > 0
         spacing: 0
 
@@ -309,6 +347,16 @@ Kirigami.ScrollablePage {
             Layout.margins: Kirigami.Units.smallSpacing
             textFormat: Text.PlainText
             text: rulesIo.statusText
+            wrapMode: Text.Wrap
+        }
+        // The rule editor's last result (P2.1), plain text.
+        Controls.Label {
+            objectName: "ruleEditorStatus"
+            visible: page.showsEditorStatus
+            Layout.fillWidth: true
+            Layout.margins: Kirigami.Units.smallSpacing
+            textFormat: Text.PlainText
+            text: ruleEditorController.statusText
             wrapMode: Text.Wrap
         }
     }
@@ -484,6 +532,7 @@ Kirigami.ScrollablePage {
         page.inspectPrecedence = row.precedence;
         page.inspectSource = row.source;
         page.inspectBlocklistId = row.blocklistId;
+        page.checkEditable();
         page.confirmingDelete = false;
         inspector.open();
     }
@@ -555,6 +604,26 @@ Kirigami.ScrollablePage {
                 Layout.fillWidth: true
             }
 
+            Controls.Button {
+                id: inspectEditButton
+                objectName: "inspectEditButton"
+                Layout.fillWidth: true
+                visible: !page.confirmingDelete
+                enabled: page.inspectNotEditable.length === 0
+                text: "Edit…"
+                icon.name: "document-edit"
+                onClicked: page.editInspected()
+            }
+            // A read-only rule already says why above.
+            Controls.Label {
+                objectName: "inspectNotEditable"
+                visible: page.inspectReadOnlyReason.length === 0 && page.inspectNotEditable.length > 0
+                Layout.fillWidth: true
+                textFormat: Text.PlainText
+                text: page.inspectNotEditable
+                wrapMode: Text.Wrap
+            }
+
             // Two-step confirmation kept inline (no separate dialog type
             // introduced) — mirrors the sheet's existing button-row pattern.
             Controls.Button {
@@ -599,6 +668,17 @@ Kirigami.ScrollablePage {
                 }
             }
         }
+    }
+
+    // Rule editor (P2.1): "New rule…", the inspector's Edit, and
+    // `openEditor` for a connection.
+    RuleEditorController {
+        id: ruleEditorController
+        Component.onCompleted: startBridgeFeed()
+    }
+    RuleEditorSheet {
+        id: ruleEditor
+        controller: ruleEditorController
     }
 
     // Rule-match simulator sheet, opened by the header's "Simulate" button.

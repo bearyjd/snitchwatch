@@ -10,6 +10,7 @@ fn summary(id: &str, active: bool) -> ProfileSummary {
             action: "allow".into(),
             operand: "dest.host".into(),
             data: "nas.local".into(),
+            ..Default::default()
         }],
         active,
     }
@@ -24,8 +25,12 @@ fn set_profiles_serializes_to_camel_case_action() {
             persistent: false,
             reason: Some("profile store: disk full".into()),
         }),
+        applies_rules: false,
+        not_applied_reason: Some("per-user".into()),
     };
     let json = serde_json::to_value(&msg).unwrap();
+    assert_eq!(json["appliesRules"], false);
+    assert_eq!(json["notAppliedReason"], "per-user");
     assert_eq!(json["action"], "setProfiles");
     assert_eq!(json["profiles"][0]["id"], "home");
     assert_eq!(json["profiles"][0]["networkMatchers"][0], "Home*");
@@ -42,8 +47,14 @@ fn set_profiles_from_an_older_bridge_still_parses() {
     let json = r#"{"action":"setProfiles","profiles":[{"id":"a","name":"A",
         "networkMatchers":[],"rules":[],"active":false}]}"#;
     match serde_json::from_str::<ServerMessage>(json).unwrap() {
-        ServerMessage::SetProfiles { profiles, storage } => {
+        ServerMessage::SetProfiles {
+            profiles,
+            storage,
+            applies_rules,
+            ..
+        } => {
             assert_eq!(storage, None);
+            assert!(!applies_rules, "an older bridge applied no profile rules");
             assert_eq!(profiles[0].id, "a");
         }
         other => panic!("expected SetProfiles, got {other:?}"),
@@ -59,6 +70,8 @@ fn set_profiles_round_trips() {
             persistent: true,
             reason: None,
         }),
+        applies_rules: true,
+        not_applied_reason: None,
     };
     let json = serde_json::to_string(&msg).unwrap();
     let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
@@ -127,7 +140,10 @@ fn add_and_remove_profile_rule_round_trip() {
             action: "deny".into(),
             operand: "dest.host".into(),
             data: "ads.example".into(),
+            ..Default::default()
         },
+        request_id: None,
+        reply: None,
     };
     let json = serde_json::to_string(&add).unwrap();
     assert_eq!(serde_json::from_str::<ClientMessage>(&json).unwrap(), add);

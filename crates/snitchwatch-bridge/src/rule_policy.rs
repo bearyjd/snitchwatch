@@ -52,7 +52,34 @@ mod regexp;
 
 pub use narrowing::binds_to_programs;
 
-pub use profile::{validate_user_rule, PolicyProfile, RuleProblem};
+pub use profile::{enable_problems, validate_user_rule, PolicyProfile, RuleProblem};
+
+/// The fixed texts of [`validate_user_rule`]'s problems, for callers that
+/// show or test them.
+pub mod reasons {
+    pub use super::profile::{
+        ACTION_REFUSED, EDITOR_EMPTY_HOST_REFUSED, MATCHES_EVERYTHING, PROFILE_CASE_REFUSED,
+        PROFILE_DURATION_REFUSED, PROFILE_NAME_REFUSED, PROFILE_NOLOG_REFUSED,
+        PROFILE_PRECEDENCE_REFUSED, PROFILE_PREFIX_REQUIRED, PROFILE_USER_NAME_REFUSED,
+    };
+}
+
+/// Parse a rule from the wire shape and check it for `profile`: the one
+/// path the bridge and the GUIs use for a rule written or imported whole.
+/// A wire error is reported as a problem at `rule`.
+pub fn check_wire_rule(
+    value: &serde_json::Value,
+    profile: PolicyProfile,
+) -> Result<Rule, Vec<RuleProblem>> {
+    let rule = crate::rule_wire::rule_from_wire(value).map_err(|reason| {
+        vec![RuleProblem {
+            path: "rule".into(),
+            reason,
+        }]
+    })?;
+    validate_user_rule(&rule, profile)?;
+    Ok(rule)
+}
 
 /// Why a GUI may not change a daemon rule whose operator fails
 /// [`validate_operator`] (a `lists` blocklist rule, a network alias such as
@@ -68,6 +95,12 @@ pub const SHAPE_READ_ONLY_REASON: &str = "Snitchwatch can't change this rule bec
 /// and removes those itself, from the Blocklists page (issue #45).
 pub const BLOCKLIST_MANAGED_REASON: &str =
     "Managed on the Blocklists page. Subscribe to or remove the list there.";
+
+/// Why a GUI may not change or delete a rule under the profile prefix
+/// ([`crate::rule_name::is_reserved_profile_name`]): Snitchwatch installs
+/// and removes those itself while their profile is active (issue #46).
+pub const PROFILE_MANAGED_REASON: &str =
+    "Managed on the Profiles page. It applies while its profile is active.";
 
 /// Why a GUI may not change or delete the packaged fetch rule
 /// ([`crate::rule_name::PACKAGED_FETCH_RULE_NAME`]).
@@ -153,6 +186,9 @@ pub fn validate_operator(op: &Operator) -> Result<(), String> {
 pub fn read_only_reason(rule: &Rule) -> Option<&'static str> {
     if crate::rule_name::is_reserved_blocklist_name(&rule.name) {
         return Some(BLOCKLIST_MANAGED_REASON);
+    }
+    if crate::rule_name::is_reserved_profile_name(&rule.name) {
+        return Some(PROFILE_MANAGED_REASON);
     }
     if rule.name == crate::rule_name::PACKAGED_FETCH_RULE_NAME {
         return Some(PACKAGED_FETCH_RULE_REASON);
@@ -317,9 +353,17 @@ fn is_env_var_name(name: &str) -> bool {
 /// and only fails once it is enabled.
 fn validate_cidr(data: &str) -> Result<(), String> {
     const NOT_A_CIDR: &str = "network operator data is not a CIDR such as 10.0.0.0/8";
+    // Go's `IPNet.Contains` reads a network on an IPv4-mapped address as
+    // IPv4 with the mask's last 32 bits: `::ffff:0:0/96` matches every IPv4
+    // address. Only the IPv4 form says what it means.
+    const MAPPED: &str = "network operator data is an IPv4 network written as IPv6 \
+         (::ffff:…); write it as IPv4, such as 10.0.0.0/8";
     let (addr, prefix) = data.split_once('/').ok_or(NOT_A_CIDR)?;
     let max_prefix = match addr.parse::<std::net::IpAddr>() {
         Ok(std::net::IpAddr::V4(_)) => 32,
+        Ok(std::net::IpAddr::V6(v6)) if v6.to_ipv4_mapped().is_some() => {
+            return Err(MAPPED.to_string())
+        }
         Ok(std::net::IpAddr::V6(_)) => 128,
         Err(_) => return Err(NOT_A_CIDR.to_string()),
     };
@@ -339,3 +383,9 @@ mod profile_tests;
 
 #[cfg(test)]
 mod schema_tests;
+
+#[cfg(test)]
+mod editor_tests;
+
+#[cfg(test)]
+mod profile_rule_tests;

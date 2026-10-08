@@ -398,3 +398,99 @@ Tower VM checks:
 
   **DECIDED (owner, 2026-10-08): (a).** Exact absolute program paths by
   default; path patterns are allowed, with a warning.
+
+## Departures (implementation, 2026-10-08)
+
+Recorded where the built code differs from the design above.
+
+**Bridge:**
+- **Results go to the asking connection only.** They use P2.7's
+  per-connection reply (`ReplyTo`/`Replier`), not a broadcast, so another
+  GUI never sees them. Without a `request_id`, a command behaves as on #48.
+- **A fifth outcome, `unsure { reason }`,** covers a rename whose result
+  isn't known.
+- **Rename failure handling follows the daemon's real order** (PR #99
+  security review). `Loader.Delete` drops a rule from memory *before*
+  removing its file, and only the file removal can fail, so an ERROR on the
+  old rule's delete means it already stopped applying:
+  - nothing is undone (undoing left *neither* rule, the review's HIGH); the
+    old rule leaves the bridge's list, and the result (`okWithNote`) says
+    its file may bring it back when the firewall restarts;
+  - an unanswered or unsent delete leaves both (maybe), and the result says
+    which decides meanwhile (`FindFirstMatch`: the first matching deny,
+    reject or decide-first rule by name; otherwise the allow).
+
+  "Neither" can't result.
+- **A refused edit can't silently lose a rule.** `replaceUserRule` deletes
+  an `always` rule's file before compiling a temporary replacement, and
+  with live reload (on by default) the removal also drops the rule from
+  memory. On ERROR the bridge sends the old rule again (bringing it and its
+  file back) and says so; if that fails, or the edit goes unanswered, the
+  rule leaves the bridge's list and the result says it may have stopped
+  applying (re-review).
+- **Turning a rule on is checked** (review M2): a disabled rule that would
+  match everything (`true`, a `/0` network, an all-matching pattern, only a
+  process hash), has an empty value, or a duration the editor wouldn't
+  write can't be turned on from Snitchwatch. Turning off is never checked.
+- **Expiry stamps follow the daemon's clock** (review M4): only an enabled
+  timed rule gets one, and turning a rule on always stamps it now. After a
+  resync `created` is the daemon's and says nothing about a clock; a row
+  left a little long is safer than an active rule hidden early.
+- **Busy names are shared** (review M5): an add's name, an edit's name, a
+  rename's names and each import rule in flight are held until their
+  replies; the editor and imports refuse a busy name.
+- **The editor refuses** a blank host name (it matches every connection
+  without one) and process ID or environment conditions. Imports keep
+  both, as the import plan records.
+- **An `AddRule` never overwrites.** A name that is cached, hidden (left
+  out of the cache for size) or being renamed is refused, as is a rename
+  onto one. Both names of a rename stay busy until it ends.
+- **Add, edit and rename are refused on the legacy TCP transport.**
+  Another program could pose as the daemon there (#35). Toggles and
+  deletes still go through.
+- **Every `UpdateRule` that isn't a pure toggle needs a cached rule
+  Snitchwatch may change** (`read_only_reason` is `None`). That excludes:
+  - blocklist rules;
+  - the packaged `000-snitchwatch-` rule and curated defaults;
+  - numeric `user.name` rows (#91);
+  - rules hidden for size.
+- **Timed rules are stamped with `created`** when the daemon starts their
+  clock (a new rule, or a changed duration), so the cache expires them
+  when the daemon does. An edit that keeps the same timed duration keeps
+  the cached `created`, because the daemon's old timer still fires
+  (`RulesCache::upsert`).
+- **"Absolute" is `is_bindable_process_path`.** An exact `process.path`
+  must also not be under `/proc`, and must have no `//` and no trailing
+  `/`.
+
+**Kirigami:**
+- **A separate `RuleEditorController`** sends and waits, the way the
+  import does, instead of `RulesModel.submitRule`. `RulesModel` gains only
+  `editableRuleJson(name)`.
+- **The client waits 30 s, not 10 s.** A rename waits for up to three 5 s
+  daemon answers plus the reply. On a timeout the sheet says the change
+  may have been saved; it doesn't say it failed.
+- **Cautions need a second click.** The import preview's `edit_cautions`,
+  checked against the rule being replaced, change Save to "Save anyway".
+  Problems block Save outright.
+- **The builder doesn't offer `process.id` or `process.env.*`.**
+  `process.id` names whatever process gets that number next.
+  - `user.name` offers only an exact match.
+  - Only `dest.network`/`source.network` offer a network.
+- **Prefill uses the simulator's prefill form** (`SimulationForm`). It
+  takes `process.path` only when it is a bindable program path, so not
+  "Kernel connection".
+- **Edit is in the rule inspector,** since a row opens the inspector. It
+  is disabled, with the reason shown, for read-only rules and for rules
+  the editor can't express. Toggle and delete stay available.
+- **One more warning:** a timed rule is removed when its time runs out,
+  and an edit that keeps the same time keeps the original timer.
+- **"Test this rule" is deferred.** It needs the simulator (P2.6) run on a
+  draft.
+- **"Create rule from this connection" isn't added to `ConnectionsPage`.**
+  Prompt-slot C's "Make a rule…" uses the entry point instead:
+  - `main.qml` `openRuleEditor(prefillJson)` goes to the Rules tab and
+    calls `RulesPage.openEditor(prefillJson)`;
+  - this mirrors "Simulate this connection" → `openSimulator`.
+- **`snitchwatch-proto` is a normal Kirigami dependency** (it was
+  dev-only), for reading checked rules' conditions.
