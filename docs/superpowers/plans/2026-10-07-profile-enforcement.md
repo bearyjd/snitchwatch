@@ -232,17 +232,36 @@ Built as designed above; where it differs from steps 4–11:
 - **"In place" follows the daemon's echo:** a list operand spelled either
   way and a non-case-sensitive pattern compared lowercased, as `Compile`
   stores it, so a pass after a snapshot sends nothing.
-- **Where it applies:** the system bridge, also when its profile store fell
-  back to memory (design step 5 said with a saved store only). Such a
-  bridge starts with no active profile, so its first pass removes the
-  rules an earlier run installed; otherwise the page would say profiles
-  aren't applied while those still were. The per-user bridge applies none.
+- **Where it applies:** the system bridge with a store it could read. One
+  whose saved profiles can't be read (the store fell back to memory: a
+  newer schema after a rollback, an unreadable row, permissions, a full
+  disk) changes no profile rule at all: with the keep-set unknown a purge
+  would delete the active profile's rules (PR #104 review HIGH, the #45 PR
+  B lesson). Its page says the saved profiles can't be read and earlier
+  rules were left in place. One unreadable row makes the whole store
+  unreadable: skipping it could skip the active profile. The stores wait
+  up to 5 s for a busy database (rusqlite's default, now pinned by a test).
+  The per-user bridge applies none.
 - **After a restart** the active profile's rules start pending, so the
   first pass records them installed when the snapshot holds them, and
   sends nothing.
-- **#82 as read here:** a saved manual choice holds while its network is
-  observed; with no manual choice saved, the first network reading after a
-  restart is a change like any other and auto-switch decides.
+- **#82 as built:** a manual choice is saved with the last network that
+  settled and holds while that network is observed, also after a restart.
+  No network (before Wi-Fi joins, suspend, a drop) is no change: it neither
+  acts nor clears the choice (PR #104 review M1). A choice made before any
+  network settled is kept by the first one that does. Only a different
+  network clears it; with no manual choice saved, the first network after a
+  restart lets auto-switch decide.
+- **Stable names:** `850-profile:<profile>:<rule id>`, no position, so
+  adding, removing or replacing a rule never renames (rewrites) the others.
+  A Part 1 rule whose id isn't a plain token is refused with a reason
+  rather than risk sharing a name; at most 64 rules of a saved profile are
+  installed, the rest say why.
+- **Profile-mode cautions:** the editor's profile mode takes the import
+  preview's cautions (an allow for every app, a launcher anywhere), so
+  saving one takes the second click (review M2).
+- **Not done (optional in the review):** a minimum gap between
+  auto-switches; the 5 s settle bounds churn for now.
 - **Switching installs first, then deletes.** No moment without the new
   profile's denies; an old allow that lingers still loses to any deny.
 - **Not removed, replaced:** the "Preview: not applied" banner becomes an
