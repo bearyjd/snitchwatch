@@ -51,6 +51,26 @@ pub enum Notice {
     VerdictNotRemembered {
         row_id: u64,
     },
+    /// A prompt that held opensnitchd's single prompt slot was released, and
+    /// meanwhile at least `count` other connections got the firewall's
+    /// default action (`prompt_slot`). Carries no connection data.
+    PromptSlotSummary {
+        row_id: u64,
+        count: u64,
+    },
+}
+
+/// The body of a `Notice::PromptSlotSummary`. Fixed text around a count.
+pub fn prompt_slot_summary_text(count: u64) -> String {
+    let noun = if count == 1 {
+        "connection"
+    } else {
+        "connections"
+    };
+    format!(
+        "While that prompt was open, at least {count} other {noun} got the firewall's \
+         default action."
+    )
 }
 
 pub struct NoticeBus {
@@ -95,6 +115,16 @@ mod tests {
         let got_b = rx_b.recv().await.unwrap();
         assert_eq!(got_a, Notice::DaemonAway);
         assert_eq!(got_b, Notice::DaemonAway);
+    }
+
+    #[test]
+    fn the_prompt_slot_summary_counts_at_least() {
+        assert_eq!(
+            prompt_slot_summary_text(1),
+            "While that prompt was open, at least 1 other connection got the firewall's default \
+             action."
+        );
+        assert!(prompt_slot_summary_text(7).contains("at least 7 other connections"));
     }
 
     #[tokio::test]

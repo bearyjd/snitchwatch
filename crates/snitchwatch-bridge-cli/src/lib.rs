@@ -557,6 +557,8 @@ where
     // `ClientMessage::RecheckDiagnostics` immediately after subscribing,
     // which is the actual startup-report delivery path.
 
+    // Same "grab before into_server()" reason: the snapshot answer.
+    let prompt_slot_for_pump = ui_service_inner.prompt_slot_handle();
     let ui_service = ui_service_inner.into_server();
     let (grpc_shutdown_tx, grpc_shutdown_rx) = oneshot::channel::<()>();
 
@@ -732,6 +734,7 @@ where
                     let _ = snapshot_tx.send(ServerMessage::TrayState {
                         state: tray_pub_for_snapshot.subscribe().borrow().clone(),
                     });
+                    let _ = snapshot_tx.send(prompt_slot_for_pump.message());
                     // Including `paused: false`: a GUI that was away when a
                     // pause ended learns it here. Sent under the cache lock,
                     // like every other pause announcement, so it can't

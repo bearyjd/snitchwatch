@@ -110,6 +110,8 @@ pub struct UiService {
     /// The daemon's rule list (issue #48): staged per connection by
     /// `subscribe`, committed on that connection's HELLO.
     rules: RulesSync,
+    /// Who holds the daemon's single prompt slot (`crate::prompt_slot`).
+    prompt_slot: crate::prompt_slot::PromptSlotHandle,
 }
 
 /// Future-drop cleanup also runs for tonic transport cancellation. A closed
@@ -118,10 +120,27 @@ pub struct UiService {
 struct PendingCleanup {
     cache: Arc<Mutex<ConnectionCache>>,
     row_id: String,
+    slot: crate::prompt_slot::PromptSlotHandle,
+    ask_id: u64,
+}
+
+impl PendingCleanup {
+    /// Marks the prompt as holding the slot. Every exit from here, a dropped
+    /// future included, releases it in `drop`.
+    fn hold(service: &UiService, row_id: String, ask_id: u64, what: String) -> Self {
+        service.prompt_slot.hold(&row_id, what);
+        Self {
+            cache: service.cache.clone(),
+            row_id,
+            slot: service.prompt_slot.clone(),
+            ask_id,
+        }
+    }
 }
 
 impl Drop for PendingCleanup {
     fn drop(&mut self) {
+        self.slot.release(&self.row_id, self.ask_id);
         if let Ok(mut cache) = self.cache.try_lock() {
             cache.cancel_pending(&self.row_id);
         } else {
@@ -143,6 +162,8 @@ impl UiService {
         filter_pause: Arc<FilterPause>,
     ) -> Self {
         let rules = RulesSync::new(broadcast.clone());
+        let prompt_slot =
+            crate::prompt_slot::PromptSlotHandle::new(broadcast.clone(), notice_bus.clone());
         Self {
             cache,
             broadcast,
@@ -158,7 +179,13 @@ impl UiService {
             diagnostics_ctx: Arc::new(OnceLock::new()),
             commands: DaemonCommands::new(DaemonTransport::Tcp, rules.clone()),
             rules,
+            prompt_slot,
         }
+    }
+
+    /// The prompt slot, for the `RequestSnapshot` answer.
+    pub fn prompt_slot_handle(&self) -> crate::prompt_slot::PromptSlotHandle {
+        self.prompt_slot.clone()
     }
 
     pub fn with_client_presence(mut self, presence: ClientPresence) -> Self {
@@ -333,6 +360,11 @@ impl Ui for UiService {
         // decided row so the Connections view's rule-match diagnostics cover
         // every connection, not just the ones the user was prompted for.
         if let Some(stats) = req.stats {
+            self.prompt_slot.observe(
+                stats.rule_misses,
+                stats.uptime,
+                *self.rules.synced().borrow(),
+            );
             let new_rows: Vec<_> = stats.events.iter().filter_map(event_to_row).collect();
             if !new_rows.is_empty() {
                 {
@@ -449,6 +481,7 @@ impl Ui for UiService {
         // the WS degradation notice, notification bodies, and the tray
         // `RecentBlock` tooltip (issue #15) — must get the sanitized form.
         let safe_what = display_summary(&row.process, &row.dst_host);
+        let slot_what = crate::prompt_slot::plain_summary(&row.process, &row.dst_host);
         let row_id = row.id.clone();
         let verdict_rx = {
             let mut cache = self.cache.lock().await;
@@ -470,10 +503,7 @@ impl Ui for UiService {
             });
             receiver
         };
-        let _pending_cleanup = PendingCleanup {
-            cache: self.cache.clone(),
-            row_id: row_id.clone(),
-        };
+        let _pending_cleanup = PendingCleanup::hold(self, row_id.clone(), ask_id, slot_what);
         // Declared after cleanup so cancellation drops the receiver first.
         let mut verdict_rx = verdict_rx;
 
@@ -707,3 +737,7 @@ mod tests;
 #[cfg(test)]
 #[path = "grpc_server/refusal_tests.rs"]
 mod refusal_tests;
+
+#[cfg(test)]
+#[path = "grpc_server/prompt_slot_tests.rs"]
+mod prompt_slot_tests;

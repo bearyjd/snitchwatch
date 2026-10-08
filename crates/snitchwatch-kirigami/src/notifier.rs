@@ -19,6 +19,7 @@ enum NoticeKey {
     FilterPauseExpired,
     DenyScopeNarrowedForRow(u64),
     VerdictNotRememberedForRow(u64),
+    PromptSlotSummaryForRow(u64),
 }
 
 impl From<&Notice> for NoticeKey {
@@ -31,6 +32,7 @@ impl From<&Notice> for NoticeKey {
             Notice::VerdictNotRemembered { row_id } => {
                 NoticeKey::VerdictNotRememberedForRow(*row_id)
             }
+            Notice::PromptSlotSummary { row_id, .. } => NoticeKey::PromptSlotSummaryForRow(*row_id),
         }
     }
 }
@@ -132,5 +134,23 @@ mod tests {
             },
             t0
         ));
+    }
+
+    /// Prompt-slot plan, part A: one summary per released prompt.
+    #[test]
+    fn prompt_slot_summary_cooldown_is_per_prompt() {
+        let mut gate = CooldownGate::with_cooldown(Duration::from_secs(60));
+        let t0 = Instant::now();
+        let first = Notice::PromptSlotSummary {
+            row_id: 1,
+            count: 4,
+        };
+        let second = Notice::PromptSlotSummary {
+            row_id: 2,
+            count: 1,
+        };
+        assert!(gate.should_fire(&first, t0));
+        assert!(gate.should_fire(&second, t0));
+        assert!(!gate.should_fire(&first, t0 + Duration::from_secs(5)));
     }
 }
