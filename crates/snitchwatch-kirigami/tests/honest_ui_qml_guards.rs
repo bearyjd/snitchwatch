@@ -19,6 +19,7 @@ const SIMULATOR_SHEET: &str = include_str!("../qml/RuleSimulatorSheet.qml");
 const IMPORT_SHEET: &str = include_str!("../qml/RulesImportSheet.qml");
 const EDITOR_SHEET: &str = include_str!("../qml/RuleEditorSheet.qml");
 const PENDING_SHEET: &str = include_str!("../qml/PendingDecisionSheet.qml");
+const MAKE_RULE_SHEET: &str = include_str!("../qml/MakeRuleSheet.qml");
 const CONNECTIONS_PAGE: &str = include_str!("../qml/ConnectionsPage.qml");
 const MAIN_QML: &str = include_str!("../qml/main.qml");
 const SIZED_SHEET: &str = include_str!("../qml/SizedOverlaySheet.qml");
@@ -333,6 +334,30 @@ fn connections_page_labels_showing_connection_data_are_plain_text() {
         ],
         10,
     );
+}
+
+/// M1 (PR #108 security review): "Make a rule…" never claims the rule exists
+/// by itself. Its only outcome text is `MakeRuleController`'s, which says
+/// "created" only for the bridge's Ok result, shown as plain text.
+#[test]
+fn make_rule_sheet_says_only_what_the_bridge_answered() {
+    let code = code_lines(MAKE_RULE_SHEET);
+    for claim in ["created", "was sent", "sent to"] {
+        assert!(
+            !code.contains(claim),
+            "MakeRuleSheet.qml says `{claim}` itself; only MakeRuleController's result may"
+        );
+    }
+    assert!(has_line(
+        &code,
+        "readonly property string result: controller.rowId === sheet.rowId ? controller.statusText : \"\""
+    ));
+    let label = blocks(&code, "Controls.Label {")
+        .into_iter()
+        .find(|block| has_line(block, "objectName: \"makeRuleResult\""))
+        .expect("the result label");
+    assert!(has_line(&label, "textFormat: Text.PlainText"), "{label}");
+    assert!(has_line(&label, "text: sheet.result"), "{label}");
 }
 
 /// E3 (PR #108 review): a put-off row's inspector says the firewall may list

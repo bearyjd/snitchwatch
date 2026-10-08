@@ -193,6 +193,40 @@ Controls.ApplicationWindow {
                     probeWindow.check(page.makeRuleSheet.form.visible, "the rule form didn't open");
                     probeWindow.check(!page.makeRuleSheet.blockNote.visible,
                                       "the block note on a default-decided row");
+
+                    // M1: only the bridge's result says the rule exists. No
+                    // bridge runs here, so nothing can be sent.
+                    const sheet = page.makeRuleSheet;
+                    sheet.make("deny");
+                    probeWindow.check(sheet.result === "The rule couldn't be sent."
+                                      && !sheet.controller.created,
+                                      "unsent: " + sheet.result);
+                    // A request the bridge hasn't answered yet.
+                    const pendingId = sheet.controller.begin(page.inspectId);
+                    probeWindow.check(pendingId.length > 0, "no request id");
+                    probeWindow.check(sheet.result === "Sending the rule to the firewall…"
+                                      && !sheet.controller.created,
+                                      "before the result: " + sheet.result);
+                    probeWindow.check(sheet.controller.begin(page.inspectId) === "",
+                                      "a second request while one waits");
+                    sheet.controller.applyServerMessageJson(JSON.stringify({
+                        action: "ruleCommandResult", requestId: pendingId,
+                        outcome: { status: "rejected", reason: "a rule with this name exists" }
+                    }));
+                    probeWindow.check(sheet.result
+                                      === "The rule wasn't created: a rule with this name exists"
+                                      && !sheet.controller.created,
+                                      "refused: " + sheet.result);
+                    const okId = sheet.controller.begin(page.inspectId);
+                    sheet.controller.applyServerMessageJson(JSON.stringify({
+                        action: "ruleCommandResult", requestId: okId, outcome: { status: "ok" }
+                    }));
+                    probeWindow.check(sheet.result === "The rule was created."
+                                      && sheet.controller.created,
+                                      "ok: " + sheet.result);
+                    // Another row's request says nothing here.
+                    sheet.controller.begin("1:rule");
+                    probeWindow.check(sheet.result === "", "another row's status: " + sheet.result);
                     connModel.setGroupedMode(true);
                 } else if (probeWindow.phase === 2) {
                     for (const d of probeWindow.delegates()) {

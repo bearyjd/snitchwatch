@@ -3,11 +3,14 @@
 // decision sheet's scope and remembered durations, sent
 // as one rule (ConnectionsModel.makeRule, Rust `make_rule.rs`) until the rule
 // editor exists. A once-only answer can't be given afterwards, so "This time"
-// isn't offered. Every text here is fixed.
+// isn't offered. Every text here is fixed, and what happened comes only from
+// MakeRuleController: "created" only once the bridge's result is Ok (PR #108
+// security review, M1).
 import QtQuick
 import QtQuick.Layouts
 import QtQuick.Controls as Controls
 import org.kde.kirigami as Kirigami
+import com.snitchwatch.shell
 
 ColumnLayout {
     id: sheet
@@ -22,16 +25,29 @@ ColumnLayout {
     // stays: a matching deny wins over an allow rule, so the sheet says so
     // rather than delete it (PR #98 review).
     property bool blockedForFiveMinutes: false
-    // What the last click did, for the label below.
-    property string result: ""
-    // Exposed for the headless probe (tests/deferred_rows_qml.rs).
+    // What the last request for this row says: sending, its outcome, or that
+    // it couldn't be sent. Empty for another row.
+    readonly property string result: controller.rowId === sheet.rowId ? controller.statusText : ""
+    // Exposed for the headless probes (tests/deferred_rows_qml.rs,
+    // tests/default_action_rows_qml.rs).
     property alias openButton: openButton
     property alias form: form
     property alias blockNote: blockNoteLabel
+    property alias controller: controller
 
-    onRowIdChanged: {
-        form.visible = false;
-        sheet.result = "";
+    onRowIdChanged: form.visible = false
+
+    MakeRuleController {
+        id: controller
+        Component.onCompleted: startBridgeFeed()
+    }
+
+    // The bridge's result never came: give up after a silence.
+    Timer {
+        interval: 1000
+        repeat: true
+        running: controller.busy
+        onTriggered: controller.poll()
     }
 
     Controls.Button {
@@ -97,12 +113,14 @@ ColumnLayout {
             Layout.fillWidth: true
             Controls.Button {
                 Layout.fillWidth: true
+                enabled: !controller.busy
                 text: "Allow"
                 icon.name: "dialog-ok-apply"
                 onClicked: sheet.make("allow")
             }
             Controls.Button {
                 Layout.fillWidth: true
+                enabled: !controller.busy
                 text: "Deny"
                 icon.name: "edit-delete-remove"
                 onClicked: sheet.make("deny")
@@ -121,6 +139,7 @@ ColumnLayout {
     }
 
     Controls.Label {
+        objectName: "makeRuleResult"
         Layout.fillWidth: true
         visible: sheet.result.length > 0
         wrapMode: Text.Wrap
@@ -129,14 +148,17 @@ ColumnLayout {
     }
 
     function make(choice) {
+        const requestId = controller.begin(sheet.rowId);
+        if (requestId === "") {
+            return;
+        }
         const sent = sheet.model !== null
             && sheet.model.makeRule(sheet.rowId, choice, scopeBox.currentValue,
-                                    durationBox.currentValue) === true;
-        sheet.result = sent
-            ? "The rule was sent to the background service."
-            : "The rule couldn't be sent.";
-        if (sent) {
-            form.visible = false;
+                                    durationBox.currentValue, requestId) === true;
+        if (!sent) {
+            controller.notSent();
+            return;
         }
+        form.visible = false;
     }
 }

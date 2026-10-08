@@ -447,11 +447,16 @@ mod tests {
             "this_host",
             "forever",
             1_700_000_000_000,
+            "make-1",
         )
         .expect("a default-decided row gets a rule");
-        let ClientMessage::AddRule { rule, .. } = msg else {
+        let ClientMessage::AddRule {
+            rule, request_id, ..
+        } = msg
+        else {
             panic!("expected AddRule");
         };
+        assert_eq!(request_id.as_deref(), Some("make-1"));
         assert_eq!(rule["action"], "deny");
         let operator = rule["operator"].to_string();
         assert!(

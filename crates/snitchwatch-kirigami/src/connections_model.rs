@@ -244,8 +244,10 @@ pub mod qobject {
         /// "Make a rule…" for row `id` that `make_rule::offers_make_rule`
         /// accepts (put off, or decided by the default action): sends the
         /// rule `crate::make_rule` builds from the sheet's tokens to the
-        /// row's bridge session. False when no rule may be made or it wasn't
-        /// queued.
+        /// row's bridge session, asking for its result under `request_id`
+        /// (`MakeRuleController.begin`). False when no rule may be made or it
+        /// wasn't queued. True only means sent: the result says whether the
+        /// rule was created.
         #[qinvokable]
         #[cxx_name = "makeRule"]
         fn make_rule(
@@ -254,6 +256,7 @@ pub mod qobject {
             choice: &QString,
             scope: &QString,
             duration: &QString,
+            request_id: &QString,
         ) -> bool;
 
         /// Whether `id` names a row that is still awaiting a decision: present
@@ -1029,15 +1032,27 @@ impl qobject::ConnectionsModel {
         choice: &QString,
         scope: &QString,
         duration: &QString,
+        request_id: &QString,
     ) -> bool {
         let id = id.to_string();
         let made_at_ms = now_ms();
         self.store
             .row_by_id(&id)
             .and_then(|row| {
-                let (choice, scope, duration) =
-                    (choice.to_string(), scope.to_string(), duration.to_string());
-                crate::make_rule::add_rule_message(row, &choice, &scope, &duration, made_at_ms)
+                let (choice, scope, duration, request_id) = (
+                    choice.to_string(),
+                    scope.to_string(),
+                    duration.to_string(),
+                    request_id.to_string(),
+                );
+                crate::make_rule::add_rule_message(
+                    row,
+                    &choice,
+                    &scope,
+                    &duration,
+                    made_at_ms,
+                    &request_id,
+                )
             })
             .is_some_and(|msg| crate::bridge_feed::dispatch_for_row(&id, msg))
     }
