@@ -1755,6 +1755,75 @@ async fn an_oversized_snapshot_with_no_list_is_reported_at_once() {
     assert!(cached(&svc).is_unknown());
 }
 
+fn over_limit_counts(rx: &mut broadcast::Receiver<ServerMessage>) -> Vec<Option<u32>> {
+    std::iter::from_fn(|| rx.try_recv().ok())
+        .filter_map(|m| match m {
+            ServerMessage::RulesNotShown {
+                over_limit_total, ..
+            } => Some(over_limit_total),
+            _ => None,
+        })
+        .collect()
+}
+
+/// PR #106 review L1: an oversized snapshot's count is shown only for the
+/// stream that sent it, once it says HELLO, and goes when it closes. On TCP
+/// another connection's HELLO doesn't show it.
+#[tokio::test]
+async fn an_oversized_snapshot_is_counted_only_for_its_own_stream() {
+    use crate::cache::rules::MAX_SNAPSHOT_RULES;
+    let (svc, _cache, mut rx) = rules_service(DaemonTransport::Tcp);
+    let (a, b) = (
+        Some(std::net::SocketAddr::from(([127, 0, 0, 1], 1001))),
+        Some(std::net::SocketAddr::from(([127, 0, 0, 1], 1002))),
+    );
+    svc.rules
+        .stage(a, vec![daemon_rule("x"); MAX_SNAPSHOT_RULES + 1]);
+    let commands = svc.daemon_commands();
+    let (other, _other_rx) = commands.open_stream(b);
+    commands.on_reply(other.id(), &hello());
+    assert_eq!(over_limit_counts(&mut rx), Vec::<Option<u32>>::new());
+    let (own, _own_rx) = commands.open_stream(a);
+    commands.on_reply(own.id(), &hello());
+    let total = u32::try_from(MAX_SNAPSHOT_RULES + 1).unwrap();
+    assert_eq!(over_limit_counts(&mut rx), vec![Some(total)]);
+    drop(own);
+    assert_eq!(
+        over_limit_counts(&mut rx),
+        vec![None],
+        "gone with its stream"
+    );
+}
+
+/// PR #106 review OQ1, the Unix socket's one shared key: a redialled
+/// daemon's old stream says HELLO late and adopts the new stream's
+/// snapshot, then closes; the new stream's own HELLO adopts it again
+/// instead of finding nothing, so the page isn't left empty.
+#[tokio::test]
+async fn a_late_hello_on_the_shared_key_does_not_leave_the_new_stream_without_a_list() {
+    let (svc, _cache, mut rx) = rules_service(DaemonTransport::Unix);
+    let commands = svc.daemon_commands();
+    svc.subscribe(Request::new(with_rules(vec![daemon_rule("old")])))
+        .await
+        .unwrap();
+    let (old, _old_rx) = commands.open_stream(None);
+    svc.subscribe(Request::new(with_rules(vec![daemon_rule("new")])))
+        .await
+        .unwrap();
+    let (new, _new_rx) = commands.open_stream(None);
+    commands.on_reply(old.id(), &hello());
+    assert_eq!(set_rules_names(rx.try_recv().unwrap()), vec!["new"]);
+    drop(old);
+    assert!(cached(&svc).is_unknown(), "withdrawn with the old stream");
+    commands.on_reply(new.id(), &hello());
+    assert_eq!(cached(&svc).snapshot_wire().unwrap().len(), 1);
+    assert!(cached(&svc).contains("new"));
+    // Its own HELLO again adopts nothing new.
+    let synced = *svc.rules.synced().borrow();
+    commands.on_reply(new.id(), &hello());
+    assert_eq!(*svc.rules.synced().borrow(), synced);
+}
+
 #[tokio::test]
 async fn hello_without_a_staged_snapshot_only_makes_its_stream_current() {
     let (svc, _cache, mut rx) = rules_service(DaemonTransport::Unix);

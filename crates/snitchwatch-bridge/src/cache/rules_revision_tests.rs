@@ -165,7 +165,7 @@ fn rules_left_out_of_a_snapshot_keep_their_name_and_size() {
     long.description = "x".repeat(MAX_RULE_FIELD_BYTES + 1);
     let mut nameless = rule("", "always", 1);
     nameless.description = long.description.clone();
-    let snapshot = bounded_snapshot(vec![rule("kept", "always", 1), long, nameless]).unwrap();
+    let snapshot = bounded_snapshot(vec![rule("kept", "always", 1), long, nameless]);
     assert_eq!(snapshot.rules.len(), 1);
     assert_eq!(snapshot.left_out.len(), 2, "every left-out rule is counted");
     assert!(snapshot.left_out["long"] > MAX_RULE_FIELD_BYTES);

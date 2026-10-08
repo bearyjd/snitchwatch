@@ -20,7 +20,10 @@
 //! current at that moment. The list belongs to that stream: when it closes,
 //! or another stream becomes current without a snapshot of its own, the list
 //! is withdrawn (cache `Unknown`, empty `SetRules`) rather than left standing
-//! under a different stream.
+//! under a different stream. A staged snapshot can be adopted again by
+//! another stream of the same connection key (`PendingSnapshots`), so on the
+//! Unix socket a late HELLO from a redialled daemon's old stream can't leave
+//! the new stream without a list.
 //!
 //! **Delivery, by transport.**
 //! - [`DaemonTransport::Tcp`] (legacy per-user mode, `127.0.0.1`): every
@@ -42,8 +45,9 @@
 //!   with a remembered duration also adds that rule to the list shown,
 //!   whichever stream is current (`UiService::verdict_reply`); its name is
 //!   bridge-made and its fields pass the same checks as any prompt answer.
-//!   And a snapshot over the rule limit from any stream sets the count the
-//!   Rules page shows while it has no list ("N rules … none are listed").
+//!   A snapshot over the rule limit is treated like a list: its count
+//!   ("N rules … none are listed") shows only once its own stream says
+//!   HELLO, and goes when that stream closes or stops being current.
 //! - [`DaemonTransport::Unix`] (system mode, root-only socket): commands go
 //!   only to the current stream, and its waiters fail when that stream
 //!   closes.
@@ -53,7 +57,7 @@
 //! The number of open streams is deliberately not capped: on TCP a cap would
 //! let a local process fill it and lock the real daemon's stream out.
 
-use crate::cache::rules::RulesSync;
+use crate::cache::rules::{Adopted, RulesSync};
 use snitchwatch_proto::protocol::{Action, Notification, NotificationReply, NotificationReplyCode};
 use std::collections::HashMap;
 use std::marker::PhantomData;
@@ -375,14 +379,14 @@ impl DaemonCommands {
         inner.next_hello += 1;
         inner.current = Some(stream);
         let committed = self.rules.commit(&BecameCurrent::new(inner, stream, conn));
-        if committed {
+        if committed != Adopted::Nothing {
             inner.committed_by = Some(stream);
         } else if inner.committed_by.is_some_and(|by| by != stream) {
             self.rules.withdraw();
             inner.committed_by = None;
         }
         self.ready.send_modify(|generation| *generation += 1);
-        info!(stream, committed, "daemon stream said HELLO; now current");
+        info!(stream, ?committed, "daemon stream said HELLO; now current");
         true
     }
 

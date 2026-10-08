@@ -26,7 +26,7 @@
 //! `Subscribe` corrects it.
 
 use crate::cache::rule_hits_handle::RuleHitsHandle;
-use crate::daemon_commands::{BecameCurrent, CommandError, ConnKey, PendingReply};
+use crate::daemon_commands::{BecameCurrent, CommandError, ConnKey, PendingReply, StreamId};
 use crate::rule_wire::rule_to_wire;
 use crate::ws_messages::ServerMessage;
 use snitchwatch_proto::protocol::{Action, Notification, Rule};
@@ -91,22 +91,38 @@ struct Expiry {
     at: i64,
 }
 
-/// A `Subscribe` snapshot within the limits, and what it left out.
+/// A `Subscribe` snapshot within the limits, and what it left out; or, for
+/// one over [`MAX_SNAPSHOT_RULES`], only how many rules it had.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct Snapshot {
     pub(crate) rules: Vec<Rule>,
     /// Name (or, for a name no import could use, a NUL-prefixed index) to
     /// encoded size.
     pub(crate) left_out: BTreeMap<String, usize>,
+    /// Set when the snapshot was over [`MAX_SNAPSHOT_RULES`]: none of its
+    /// rules were kept. Staged and adopted like a list, so the count shown
+    /// belongs to the connection that sent it (PR #106 review L1).
+    pub(crate) over_limit: Option<usize>,
 }
 
 impl From<Vec<Rule>> for Snapshot {
     fn from(rules: Vec<Rule>) -> Self {
         Self {
             rules,
-            left_out: BTreeMap::new(),
+            ..Self::default()
         }
     }
+}
+
+/// What a HELLO found staged for its connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Adopted {
+    /// A list, now the cache's.
+    List,
+    /// A snapshot over the rule limit: no list, and its count shown.
+    OverLimit,
+    /// Nothing fresh that this stream hasn't adopted already.
+    Nothing,
 }
 
 impl RulesCache {
@@ -303,32 +319,64 @@ pub(crate) fn parse_duration_secs(duration: &str) -> Option<i64> {
 }
 
 /// Per-connection `ClientConfig.rules` awaiting that connection's HELLO.
+/// A snapshot stays staged after a stream adopts it, until the next one for
+/// its key or [`PENDING_SNAPSHOT_TTL`]: another stream of the same key may
+/// still say HELLO (PR #106 review OQ1). On the Unix socket every stream
+/// shares one key, so a redialled daemon's old stream can say HELLO late,
+/// adopt the new stream's snapshot, and close; the new stream's own HELLO
+/// then adopts it again rather than finding nothing and leaving no list.
+/// On TCP each connection has its own key. A stream never adopts the same
+/// snapshot twice.
 #[derive(Debug, Default)]
 pub struct PendingSnapshots {
-    entries: VecDeque<(ConnKey, Instant, Snapshot)>,
+    entries: VecDeque<Staged>,
+}
+
+#[derive(Debug)]
+struct Staged {
+    key: ConnKey,
+    at: Instant,
+    snapshot: Snapshot,
+    adopted_by: Vec<StreamId>,
 }
 
 impl PendingSnapshots {
     /// Keep only `key`'s latest snapshot, evicting stale entries and then the
     /// oldest key past the cap.
     pub(crate) fn stage(&mut self, key: ConnKey, rules: impl Into<Snapshot>, now: Instant) {
-        self.entries.retain(|(staged, at, _)| {
-            *staged != key && now.saturating_duration_since(*at) <= PENDING_SNAPSHOT_TTL
+        self.entries.retain(|staged| {
+            staged.key != key && now.saturating_duration_since(staged.at) <= PENDING_SNAPSHOT_TTL
         });
-        self.entries.push_back((key, now, rules.into()));
+        self.entries.push_back(Staged {
+            key,
+            at: now,
+            snapshot: rules.into(),
+            adopted_by: Vec::new(),
+        });
         while self.entries.len() > PENDING_SNAPSHOT_CAP {
             self.entries.pop_front();
         }
     }
 
-    /// Remove `key`'s snapshot; `Some` only when it is fresh.
-    pub(crate) fn take_fresh(&mut self, key: &ConnKey, now: Instant) -> Option<Snapshot> {
-        let index = self
-            .entries
-            .iter()
-            .position(|(staged, _, _)| staged == key)?;
-        let (_, staged_at, rules) = self.entries.remove(index)?;
-        (now.saturating_duration_since(staged_at) <= PENDING_SNAPSHOT_TTL).then_some(rules)
+    /// `key`'s snapshot for `stream`: `Some` only when it is fresh and this
+    /// stream hasn't adopted it yet. A stale one is removed.
+    pub(crate) fn adopt_fresh(
+        &mut self,
+        key: &ConnKey,
+        stream: StreamId,
+        now: Instant,
+    ) -> Option<Snapshot> {
+        let index = self.entries.iter().position(|staged| staged.key == *key)?;
+        if now.saturating_duration_since(self.entries[index].at) > PENDING_SNAPSHOT_TTL {
+            self.entries.remove(index);
+            return None;
+        }
+        let staged = &mut self.entries[index];
+        if staged.adopted_by.contains(&stream) {
+            return None;
+        }
+        staged.adopted_by.push(stream);
+        Some(staged.snapshot.clone())
     }
 }
 
@@ -372,16 +420,19 @@ pub(crate) fn within_limits(rule: &Rule) -> bool {
         && rule.operator.as_ref().is_none_or(|op| operator_ok(op, 1))
 }
 
-/// The part of a `Subscribe` snapshot that may be staged: `None` when it has
-/// too many rules, otherwise the rules within the field limits and what was
-/// left out.
-fn bounded_snapshot(rules: Vec<Rule>) -> Option<Snapshot> {
+/// The part of a `Subscribe` snapshot that may be staged: only its count
+/// when it has too many rules, otherwise the rules within the field limits
+/// and what was left out.
+fn bounded_snapshot(rules: Vec<Rule>) -> Snapshot {
     if rules.len() > MAX_SNAPSHOT_RULES {
         warn!(
             count = rules.len(),
-            "daemon rule snapshot too large; not staged"
+            "daemon rule snapshot too large; staged as its count only"
         );
-        return None;
+        return Snapshot {
+            over_limit: Some(rules.len()),
+            ..Snapshot::default()
+        };
     }
     let mut snapshot = Snapshot::default();
     for (index, rule) in rules.into_iter().enumerate() {
@@ -402,7 +453,7 @@ fn bounded_snapshot(rules: Vec<Rule>) -> Option<Snapshot> {
             "left out daemon rules over the size limits"
         );
     }
-    Some(snapshot)
+    snapshot
 }
 
 /// `UiService`'s rule state: the cache, the staged snapshots, a generation
@@ -498,34 +549,40 @@ impl RulesSync {
     }
 
     /// Hold a `Subscribe`'s rules until its connection sends HELLO. An
-    /// oversized snapshot also discards the key's earlier one.
+    /// oversized snapshot is held as its count, replacing the key's earlier
+    /// one like any other.
     pub fn stage(&self, key: ConnKey, rules: Vec<Rule>) {
-        let now = Instant::now();
-        let total = rules.len();
-        let mut pending = lock(&self.pending);
-        match bounded_snapshot(rules) {
-            Some(snapshot) => pending.stage(key, snapshot, now),
-            None => {
-                drop(pending.take_fresh(&key, now));
-                // Shown once there is no list (issue #61): now, if there is
-                // none already, since no commit or withdrawal will follow.
-                let mut cache = lock(&self.cache);
-                cache.over_limit_total = Some(total);
-                if cache.is_unknown() {
-                    let _ = self.broadcast.send(cache.not_shown());
-                }
-            }
-        }
+        let snapshot = bounded_snapshot(rules);
+        lock(&self.pending).stage(key, snapshot, Instant::now());
     }
 
     /// Adopt the connection's fresh staged snapshot, if any, and broadcast
     /// it. `current` proves the HELLO's stream is current and the stream
-    /// lock is held. Returns whether a snapshot was committed.
-    pub(crate) fn commit(&self, current: &BecameCurrent<'_>) -> bool {
-        let staged = lock(&self.pending).take_fresh(&current.conn(), Instant::now());
+    /// lock is held. An oversized snapshot leaves no list and shows its
+    /// count, until its stream closes or stops being current
+    /// ([`Self::withdraw`], PR #106 review L1).
+    pub(crate) fn commit(&self, current: &BecameCurrent<'_>) -> Adopted {
+        let staged =
+            lock(&self.pending).adopt_fresh(&current.conn(), current.stream(), Instant::now());
         let Some(snapshot) = staged else {
-            return false;
+            return Adopted::Nothing;
         };
+        if let Some(total) = snapshot.over_limit {
+            warn!(
+                stream = current.stream(),
+                total, "the daemon's rule snapshot is over the limit"
+            );
+            let mut cache = lock(&self.cache);
+            if !cache.is_unknown() {
+                cache.set_unknown();
+                let _ = self
+                    .broadcast
+                    .send(ServerMessage::SetRules { rules: Vec::new() });
+            }
+            cache.over_limit_total = Some(total);
+            let _ = self.broadcast.send(cache.not_shown());
+            return Adopted::OverLimit;
+        }
         info!(
             stream = current.stream(),
             rules = snapshot.rules.len(),
@@ -539,7 +596,7 @@ impl RulesSync {
         }
         self.publish();
         self.synced.send_modify(|generation| *generation += 1);
-        true
+        Adopted::List
     }
 
     /// The stream the list came from is gone or no longer current: forget
@@ -547,7 +604,12 @@ impl RulesSync {
     /// on under another stream.
     pub(crate) fn withdraw(&self) {
         let mut cache = lock(&self.cache);
+        // An over-limit count belongs to its stream too (PR #106 review L1).
+        let had_count = cache.over_limit_total.take().is_some();
         if cache.is_unknown() {
+            if had_count {
+                let _ = self.broadcast.send(cache.not_shown());
+            }
             return;
         }
         cache.set_unknown();

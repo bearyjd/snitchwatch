@@ -201,16 +201,26 @@ fn key(port: u16) -> ConnKey {
     Some(std::net::SocketAddr::from(([127, 0, 0, 1], port)))
 }
 
+/// A stream adopts its key's latest snapshot once; another stream of the
+/// same key still can (PR #106 review OQ1).
 #[test]
-fn a_key_keeps_only_its_latest_snapshot_and_a_commit_removes_it() {
+fn a_key_keeps_only_its_latest_snapshot_and_each_stream_adopts_it_once() {
     let now = Instant::now();
     let mut pending = PendingSnapshots::default();
     pending.stage(key(1), vec![rule("old", "always", 0)], now);
     pending.stage(key(1), vec![rule("new", "always", 0)], now);
 
-    let taken = pending.take_fresh(&key(1), now).unwrap();
+    let taken = pending.adopt_fresh(&key(1), 1, now).unwrap();
     assert_eq!(taken.rules[0].name, "new");
-    assert_eq!(pending.take_fresh(&key(1), now), None, "taken once");
+    assert_eq!(
+        pending.adopt_fresh(&key(1), 1, now),
+        None,
+        "once per stream"
+    );
+    assert_eq!(
+        pending.adopt_fresh(&key(1), 2, now).unwrap().rules[0].name,
+        "new"
+    );
 }
 
 #[test]
@@ -220,9 +230,9 @@ fn a_fifth_key_evicts_the_oldest() {
     for port in 1..=5 {
         pending.stage(key(port), Vec::new(), now);
     }
-    assert_eq!(pending.take_fresh(&key(1), now), None);
+    assert_eq!(pending.adopt_fresh(&key(1), 1, now), None);
     for port in 2..=5 {
-        assert!(pending.take_fresh(&key(port), now).is_some(), "{port}");
+        assert!(pending.adopt_fresh(&key(port), 1, now).is_some(), "{port}");
     }
 }
 
@@ -233,7 +243,7 @@ fn a_stale_snapshot_is_not_committed_and_is_removed() {
     pending.stage(key(1), Vec::new(), then);
 
     assert_eq!(
-        pending.take_fresh(&key(1), then + Duration::from_secs(31)),
+        pending.adopt_fresh(&key(1), 1, then + Duration::from_secs(31)),
         None
     );
     assert!(pending.entries.is_empty());
@@ -246,7 +256,7 @@ fn staging_evicts_stale_entries_of_other_keys() {
     pending.stage(key(1), Vec::new(), then);
     pending.stage(key(2), Vec::new(), then + Duration::from_secs(31));
     assert_eq!(pending.entries.len(), 1);
-    assert_eq!(pending.entries[0].0, key(2));
+    assert_eq!(pending.entries[0].key, key(2));
 }
 
 fn nested(depth: usize) -> Operator {
@@ -262,7 +272,9 @@ fn nested(depth: usize) -> Operator {
 #[test]
 fn snapshots_and_rules_over_the_size_limits_are_not_staged() {
     let too_many = vec![rule("a", "always", 0); MAX_SNAPSHOT_RULES + 1];
-    assert_eq!(bounded_snapshot(too_many), None);
+    let counted = bounded_snapshot(too_many);
+    assert_eq!(counted.over_limit, Some(MAX_SNAPSHOT_RULES + 1));
+    assert!(counted.rules.is_empty() && counted.left_out.is_empty());
 
     let mut long = rule("long", "always", 0);
     long.description = "x".repeat(MAX_RULE_FIELD_BYTES + 1);
@@ -284,18 +296,37 @@ fn snapshots_and_rules_over_the_size_limits_are_not_staged() {
         deep,
         deepest_allowed,
         wide,
-    ])
-    .unwrap();
+    ]);
+    assert_eq!(kept.over_limit, None);
     let names: Vec<_> = kept.rules.iter().map(|r| r.name.as_str()).collect();
     assert_eq!(names, vec!["ok", "deepest-allowed"]);
 }
 
+/// An oversized snapshot replaces the connection's earlier one with its
+/// count, and a list within the limits replaces the count (PR #106 L1).
 #[test]
-fn an_oversized_snapshot_discards_the_connections_earlier_one() {
-    let sync = RulesSync::new(broadcast::channel(4).0);
+fn an_oversized_snapshot_and_a_list_replace_each_other_per_key() {
+    let (tx, mut rx) = broadcast::channel(4);
+    let sync = RulesSync::new(tx);
     sync.stage(key(1), vec![rule("a", "always", 0)]);
     sync.stage(key(1), vec![rule("a", "always", 0); MAX_SNAPSHOT_RULES + 1]);
-    assert!(lock(&sync.pending).entries.is_empty());
+    {
+        let pending = lock(&sync.pending);
+        assert_eq!(pending.entries.len(), 1);
+        assert_eq!(
+            pending.entries[0].snapshot.over_limit,
+            Some(MAX_SNAPSHOT_RULES + 1)
+        );
+        assert!(pending.entries[0].snapshot.rules.is_empty());
+    }
+    assert!(
+        published(&mut rx).is_empty(),
+        "nothing shown before a HELLO"
+    );
+    sync.stage(key(1), vec![rule("a", "always", 0)]);
+    let pending = lock(&sync.pending);
+    assert_eq!(pending.entries.len(), 1);
+    assert_eq!(pending.entries[0].snapshot.over_limit, None);
 }
 
 #[test]
@@ -305,7 +336,10 @@ fn the_none_key_is_one_shared_key() {
     pending.stage(None, vec![rule("a", "always", 0)], now);
     pending.stage(None, vec![rule("b", "always", 0)], now);
     assert_eq!(pending.entries.len(), 1);
-    assert_eq!(pending.take_fresh(&None, now).unwrap().rules[0].name, "b");
+    assert_eq!(
+        pending.adopt_fresh(&None, 1, now).unwrap().rules[0].name,
+        "b"
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -384,7 +418,7 @@ fn publishing_while_unknown_sends_the_empty_list() {
 fn what_the_list_leaves_out_is_published_with_it() {
     let (tx, mut rx) = broadcast::channel(8);
     let sync = RulesSync::new(tx);
-    sync.stage(None, vec![rule("a", "always", 0); MAX_SNAPSHOT_RULES + 1]);
+    lock(&sync.cache).over_limit_total = Some(MAX_SNAPSHOT_RULES + 1);
     sync.publish();
     let not_shown = |sent: Vec<ServerMessage>| {
         sent.into_iter().find_map(|m| match m {
@@ -403,15 +437,19 @@ fn what_the_list_leaves_out_is_published_with_it() {
     lock(&sync.cache).set_left_out([("long".to_string(), 20_000)].into());
     sync.publish();
     assert_eq!(not_shown(published(&mut rx)), Some((1, None)));
-    // A list is shown: an oversized snapshot staged since isn't counted,
-    // and an adopted list forgets the earlier one.
-    sync.stage(None, vec![rule("a", "always", 0); MAX_SNAPSHOT_RULES + 1]);
+    // A count is shown only with no list, and an adopted list forgets it.
+    lock(&sync.cache).over_limit_total = Some(MAX_SNAPSHOT_RULES + 1);
     sync.publish();
     assert_eq!(not_shown(published(&mut rx)), Some((1, None)));
     lock(&sync.cache).replace_all(Vec::new());
     lock(&sync.cache).set_unknown();
     sync.publish();
     assert_eq!(not_shown(published(&mut rx)), Some((0, None)));
+    // A withdrawal takes the count with it, list or not.
+    lock(&sync.cache).over_limit_total = Some(MAX_SNAPSHOT_RULES + 1);
+    sync.withdraw();
+    assert_eq!(not_shown(published(&mut rx)), Some((0, None)));
+    assert_eq!(lock(&sync.cache).over_limit_total, None);
 }
 
 fn change(rule: Rule) -> Notification {
@@ -495,11 +533,11 @@ fn distinct_connections_never_take_each_others_snapshot() {
     pending.stage(key(1), vec![rule("one", "always", 0)], now);
     pending.stage(key(2), vec![rule("two", "always", 0)], now);
     assert_eq!(
-        pending.take_fresh(&key(1), now).unwrap().rules[0].name,
+        pending.adopt_fresh(&key(1), 1, now).unwrap().rules[0].name,
         "one"
     );
     assert_eq!(
-        pending.take_fresh(&key(2), now).unwrap().rules[0].name,
+        pending.adopt_fresh(&key(2), 2, now).unwrap().rules[0].name,
         "two"
     );
 }
