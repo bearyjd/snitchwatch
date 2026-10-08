@@ -98,7 +98,11 @@ async fn the_expiry_tick_bumps_the_revision() {
         tx.clone(),
         RuleHitsHandle::new(tx),
     ));
-    rx.recv().await.unwrap();
+    // Bounded, so a mutant that prunes nothing fails instead of hanging.
+    tokio::time::timeout(Duration::from_secs(30), rx.recv())
+        .await
+        .expect("the tick never published")
+        .unwrap();
     assert!(lock(&cache).revision() > before);
     tick.abort();
 }

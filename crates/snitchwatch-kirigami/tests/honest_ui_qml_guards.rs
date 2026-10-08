@@ -449,9 +449,10 @@ fn blocklists_page_labels_showing_subscription_data_are_plain_text() {
             "page.inspectLastUpdated",
             "page.inspectLastFailureReason",
             "page.storageReason",
+            "page.leftoverReason",
             "text: host",
         ],
-        12,
+        13,
     );
 }
 
@@ -513,6 +514,27 @@ fn inline_messages_carry_only_fixed_text() {
         checked >= 3,
         "expected the decision-prompt, Blocklists and Profiles InlineMessages, found {checked}"
     );
+}
+
+/// A per-user service reaches the firewall service over the legacy TCP
+/// connection, where nothing is offered to remove (any local process could
+/// pose as the daemon). Its banner says so in fixed text, since there is no
+/// other sign on the page.
+#[test]
+fn the_per_user_banner_says_leftover_rules_cant_be_checked_from_here() {
+    let code = code_lines(BLOCKLISTS_PAGE);
+    let banner = blocks(&code, "Kirigami.InlineMessage {")
+        .into_iter()
+        .find(|block| block.contains("objectName: \"perUserBanner\""))
+        .expect("the per-user banner");
+    let text = text_binding(&banner).unwrap_or_default();
+    assert!(is_fixed_text(&text), "the banner text is fixed:\n{text}");
+    for part in [
+        "rules a system-wide Snitchwatch service left in the firewall can't be checked ",
+        "or removed from here; start the system-wide service to remove them.",
+    ] {
+        assert!(text.contains(part), "banner lacks '{part}':\n{text}");
+    }
 }
 
 #[test]

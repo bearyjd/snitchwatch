@@ -18,9 +18,8 @@ use cxx_qt::CxxQtType;
 use cxx_qt::Threading;
 use cxx_qt_lib::{QByteArray, QHash, QHashPair_i32_QByteArray, QModelIndex, QString, QVariant};
 
-use crate::blocklists::row_store::{
-    enforcement_label, status_label, EntriesStore, SubscriptionsStore,
-};
+use crate::blocklists::entries_store::{client_request_id, EntriesStore};
+use crate::blocklists::row_store::{enforcement_label, status_label, SubscriptionsStore};
 use snitchwatch_bridge::ws_messages::{ClientMessage, ServerMessage};
 
 // Subscription roles.
@@ -73,6 +72,11 @@ pub mod qobject {
         #[qproperty(bool, per_user_blocklists, cxx_name = "perUserBlocklists")]
         #[qproperty(bool, any_over_limit, cxx_name = "anyOverLimit")]
         #[qproperty(bool, storage_unreadable, cxx_name = "storageUnreadable")]
+        /// Blocklist rules Snitchwatch made that this service isn't
+        /// managing (issue #73); `removeLeftoverRules()` deletes them.
+        #[qproperty(i32, leftover_rules, cxx_name = "leftoverRules")]
+        #[qproperty(QString, leftover_cause, cxx_name = "leftoverCause")]
+        #[qproperty(QString, leftover_reason, cxx_name = "leftoverReason")]
         type BlocklistsModel = super::BlocklistsModelRust;
 
         /// Emitted with a JSON-encoded `ClientMessage` (SubscribeBlocklist /
@@ -114,6 +118,12 @@ pub mod qobject {
         /// Unsubscribe an existing blocklist by id (emits UnsubscribeBlocklist).
         #[qinvokable]
         fn unsubscribe(self: Pin<&mut BlocklistsModel>, id: &QString);
+
+        /// Delete the leftover blocklist rules (emits
+        /// RemoveLeftoverBlocklistRules). The page asks the user first.
+        #[qinvokable]
+        #[cxx_name = "removeLeftoverRules"]
+        fn remove_leftover_rules(self: Pin<&mut BlocklistsModel>);
 
         /// Ask for a page of a list's hosts from `offset` (emits
         /// RequestBlocklistEntries). Entries are never pushed unasked.
@@ -170,6 +180,13 @@ pub mod qobject {
         #[qinvokable]
         #[cxx_name = "expectEntries"]
         fn expect_entries(self: Pin<&mut BlocklistEntriesModel>, id: &QString);
+
+        /// The list `id` was downloaded again between two pages (issue #67):
+        /// the entries shown were dropped rather than mixed. The page answers
+        /// with `BlocklistsModel.requestEntries(id, 0)`.
+        #[qsignal]
+        #[cxx_name = "restartRequested"]
+        fn restart_requested(self: Pin<&mut BlocklistEntriesModel>, id: QString);
     }
 
     unsafe extern "RustQt" {
@@ -205,6 +222,9 @@ pub struct BlocklistsModelRust {
     per_user_blocklists: bool,
     any_over_limit: bool,
     storage_unreadable: bool,
+    leftover_rules: i32,
+    leftover_cause: QString,
+    leftover_reason: QString,
 }
 
 impl qobject::BlocklistsModel {
@@ -274,11 +294,17 @@ impl qobject::BlocklistsModel {
         self.emit_client(ClientMessage::UnsubscribeBlocklist { id: id.to_string() });
     }
 
+    fn remove_leftover_rules(self: Pin<&mut Self>) {
+        self.emit_client(ClientMessage::RemoveLeftoverBlocklistRules);
+    }
+
     fn request_entries(self: Pin<&mut Self>, id: &QString, offset: i32) {
         self.emit_client(ClientMessage::RequestBlocklistEntries {
             subscription_id: id.to_string(),
             offset: u64::try_from(offset).unwrap_or(0),
             limit: None,
+            request_id: Some(client_request_id().to_string()),
+            reply: None,
         });
     }
 
@@ -326,6 +352,12 @@ impl qobject::BlocklistsModel {
             let per_user = self.store.per_user();
             let over_limit = self.store.any_over_limit();
             let unreadable = self.store.storage_unreadable();
+            let leftover = i32::try_from(self.store.leftover_rules()).unwrap_or(i32::MAX);
+            self.as_mut().set_leftover_rules(leftover);
+            let leftover_cause = QString::from(self.store.leftover_cause());
+            self.as_mut().set_leftover_cause(leftover_cause);
+            let leftover_reason = QString::from(self.store.leftover_reason());
+            self.as_mut().set_leftover_reason(leftover_reason);
             self.as_mut().set_count(n);
             self.as_mut().set_storage_persistent(persistent);
             self.as_mut().set_storage_reason(reason);
@@ -448,6 +480,7 @@ impl qobject::BlocklistEntriesModel {
             self.as_mut().begin_reset_model();
         }
         let changed = self.as_mut().rust_mut().store.apply(&msg);
+        let restart = self.as_mut().rust_mut().store.take_restart();
         unsafe {
             self.as_mut().end_reset_model();
         }
@@ -460,6 +493,9 @@ impl qobject::BlocklistEntriesModel {
             self.as_mut().set_total(total);
             self.as_mut().set_has_more(has_more);
             self.as_mut().set_subscription_id(sub);
+        }
+        if let Some(id) = restart {
+            self.as_mut().restart_requested(QString::from(&id));
         }
     }
 }

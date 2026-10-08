@@ -36,7 +36,9 @@ use crate::blocklists::fetcher::validate_subscription_url;
 use crate::blocklists::store::FetchStatus;
 use crate::blocklists::{spawn_event_pump, BlocklistsManager, ReconcileScope};
 use crate::translator::upstream::handle_blocklist_action;
-use crate::ws_messages::{ClientMessage, ServerMessage, BLOCKLIST_ENTRIES_PAGE_MAX};
+use crate::ws_messages::{
+    valid_request_id, ClientMessage, ServerMessage, BLOCKLIST_ENTRIES_PAGE_MAX,
+};
 
 /// Queued jobs beyond this are refused (a subscribe is shown as refused).
 pub const JOB_QUEUE_CAPACITY: usize = 64;
@@ -60,6 +62,8 @@ pub enum BlocklistJob {
     RefreshMore {
         tried: Vec<String>,
     },
+    /// The user asked to delete the leftover blocklist rules (issue #73).
+    RemoveLeftovers,
 }
 
 impl BlocklistJob {
@@ -68,6 +72,7 @@ impl BlocklistJob {
         match self {
             BlocklistJob::Subscribe { .. } => "subscribe",
             BlocklistJob::RefreshDue | BlocklistJob::RefreshMore { .. } => "refresh-due",
+            BlocklistJob::RemoveLeftovers => "remove-leftovers",
         }
     }
 }
@@ -231,16 +236,26 @@ impl BlocklistWorker {
                 self.unsubscribe(id);
                 None
             }
+            ClientMessage::RemoveLeftoverBlocklistRules => {
+                self.enqueue(BlocklistJob::RemoveLeftovers);
+                None
+            }
             ClientMessage::RequestBlocklistEntries {
                 subscription_id,
                 offset,
                 limit,
+                request_id,
+                reply,
             } => {
                 // Only known ids reach the bus (and the logs): a GUI-chosen id
                 // can be up to the 1 MiB message limit and contain anything.
+                // The request id is echoed to every GUI, so an unusable one is
+                // treated as absent, as for every other request id.
+                let request_id = request_id.filter(|id| valid_request_id(id));
                 if self.mgr.has_subscription(&subscription_id) {
                     let limit = limit.unwrap_or(BLOCKLIST_ENTRIES_PAGE_MAX);
-                    self.mgr.request_entries(&subscription_id, offset, limit);
+                    self.mgr
+                        .request_entries(&subscription_id, offset, limit, request_id, reply);
                 }
                 None
             }
@@ -277,6 +292,7 @@ async fn run_job(
             }
             lane.request_reconcile(ReconcileScope::CleanUp);
         }
+        BlocklistJob::RemoveLeftovers => mgr.remove_leftover_rules().await,
         BlocklistJob::RefreshDue => refresh_tick(mgr, Vec::new(), requeue).await,
         BlocklistJob::RefreshMore { tried } => refresh_tick(mgr, tried, requeue).await,
     }

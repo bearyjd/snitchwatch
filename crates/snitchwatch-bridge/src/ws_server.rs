@@ -342,8 +342,8 @@ async fn forward_outbound<S>(
 /// Answers queued for one connection before its sender waits.
 const REPLY_QUEUE: usize = 32;
 
-/// Give a rule import/export request or a rule command a channel back to
-/// its own connection. Overwrites whatever it carried; the field is never
+/// Give a rule import/export request, a rule command or a blocklist entries
+/// request a channel back to its own connection. Overwrites whatever it carried; the field is never
 /// deserialized anyway.
 fn stamp_reply(
     mut message: ClientMessage,
@@ -356,7 +356,8 @@ fn stamp_reply(
         | ClientMessage::ExportRules { reply, .. }
         | ClientMessage::PreviewRulesImport { reply, .. }
         | ClientMessage::ApplyRulesImport { reply, .. }
-        | ClientMessage::AddProfileRule { reply, .. } => *reply = Some(reply_to.clone()),
+        | ClientMessage::AddProfileRule { reply, .. }
+        | ClientMessage::RequestBlocklistEntries { reply, .. } => *reply = Some(reply_to.clone()),
         _ => {}
     }
     message
