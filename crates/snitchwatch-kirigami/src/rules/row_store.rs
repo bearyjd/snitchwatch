@@ -427,6 +427,39 @@ mod tests {
         assert_eq!(names(&s), vec!["899-firefox", "999-new"]);
     }
 
+    /// The bridge re-sends the whole list after every rule command, so the
+    /// same list again is not a change: the Rules page keeps what it computed
+    /// from the list (an analysis) only while the list is the same.
+    #[test]
+    fn the_same_list_again_is_not_a_change() {
+        let mut s = RulesStore::new();
+        let list = || {
+            vec![
+                serde_json::to_value(rule("899-firefox", true, "allow")).unwrap(),
+                serde_json::to_value(rule("999-other", true, "deny")).unwrap(),
+            ]
+        };
+        assert!(s.apply(&ServerMessage::SetRules { rules: list() }));
+        assert!(!s.apply(&ServerMessage::SetRules { rules: list() }));
+        assert!(!s.apply(&ServerMessage::UpdateRules {
+            rules: vec![serde_json::to_value(rule("899-firefox", true, "allow")).unwrap()],
+        }));
+        // A change anywhere is one: a field, an addition, a removal.
+        assert!(s.apply(&ServerMessage::UpdateRules {
+            rules: vec![serde_json::to_value(rule("899-firefox", false, "allow")).unwrap()],
+        }));
+        let mut again = list();
+        again.pop();
+        assert!(s.apply(&ServerMessage::SetRules { rules: again }));
+        assert_eq!(names(&s), vec!["899-firefox"]);
+        assert!(s.apply(&ServerMessage::SetRules {
+            rules: vec![
+                serde_json::to_value(rule("899-firefox", true, "allow")).unwrap(),
+                serde_json::to_value(rule("999-other", true, "deny")).unwrap(),
+            ]
+        }));
+    }
+
     /// Issue #48: the bridge re-sends the daemon's full list after every
     /// confirmed or refused command, so a later `SetRules` must replace
     /// rules an earlier `UpdateRules` added (e.g. one the daemon refused).
