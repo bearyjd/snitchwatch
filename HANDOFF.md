@@ -1,4 +1,4 @@
-# Linux App Firewall + Bazzite Security Scanner — Handoff (updated 2026-10-04)
+# Linux App Firewall + Bazzite Security Scanner — Handoff (updated 2026-10-07)
 
 > **Read this first if you're picking this repo up cold.** Everything below
 > the "Current status" section is the *original* handoff from 2026-07-04,
@@ -6,7 +6,60 @@
 > was decided and why, but stale as a status report. Trust this section for
 > "what's true today."
 
-## Start here (2026-10-04, latest)
+## Start here (2026-10-07, latest)
+
+**Bridge v0.1.1 is published** (2026-10-06 UTC, PR #40, tag `v0.1.1` →
+`9fdb336`, Release run `37392835509`): asset
+`snitchwatch-bridge-0.1.1-x86_64.tar.gz`, sha256
+`c78e498cef458859c4d7e488b70200c206cc1c5b9bc2ce266a5968588999cab4`. It is the
+**per-user service** release and carries the `Authenticated` acknowledgement
+the PR #38 GUI requires. Never move or re-cut the tag or replace its assets;
+the system-bridge work below ships separately.
+
+**Draft PR #39 (`feat/system-bridge-sockets`, head `5c2b44a`) is the active
+line of work:** a socket-activated *system* bridge. `opensnitchd` reaches it
+only through root-only `/run/snitchwatch/opensnitchd.sock`; the GUI gets a
+separate socket gated by the `snitchwatch-ui` group; pending requests are
+canceled when the last authenticated GUI disappears. PR #41 (QApplication
+startup fix + KDE 6.11 Flatpak runtime) was merged into #39's branch, not
+`main`. #39 also covers the GUI packaging follow-ups listed on 10-04: the GUI
+builds the bridge without the default `web-ui` feature, and the Flatpak
+manifests use checksum-pinned protoc 29.3 plus pinned Cargo-source
+generation. CI is green on the head (run `37400519780`). Deployment docs are
+on that branch: `docs/packaging/system-bridge-integration.md`,
+`packaging/flatpak/README.md`. The former still calls the `QWidget`/
+`QGuiApplication` default-KDE startup defect unresolved and cites a KDE 6.9
+snapshot; #41 fixed that in code, but default-KDE runtime validation is still
+an open gate below. `origin/fix/system-bridge-0.1.1-reconcile` is identical to
+the #39 head.
+
+- **Remaining gates are tracked in `bearyjd/bazzite-tower`, not here:**
+  `docs/research/snitchwatch-system-bridge.md` → "Consumer rollout gate", as
+  it stands on draft image-candidate PR #76's branch
+  (`feat/snitchwatch-system-image`). Docs PR #75 carries an older version
+  without the `5c2b44a` evidence, and the doc is not on bazzite-tower `main`.
+  Done as of 2026-10-06: reproducible native bridge artifacts at `5c2b44a` and
+  a clean system-profile GUI bundle build on KDE 6.11 / Qt 6.11.2. Open,
+  among others: the downstream OpenSnitch 1.8.0 queue-teardown/shutdown
+  repair (patch under revision; take its current hash from
+  `build_files/firewall/snitchwatch-system-daemon-pins.json` on that branch,
+  since the doc's prose hash can lag), cold first boot of the exact target
+  image with SELinux enforcing, GUI Allow/authorization on default KDE
+  without the four conditional overrides, NFQUEUE/shutdown/NFT behavior,
+  plus the native release/installed-overlay provenance review, transactional
+  migration/rollback with a recorded legacy baseline, and token-rotation/
+  reconnection/stop evidence. The doc's numbered gate list is authoritative;
+  this summary is not exhaustive. Keep #39 in draft until those pass and CI
+  is green on its final head.
+- **Don't move #39's head casually:** bazzite-tower's image candidate pins
+  `5c2b44a` and its tree hash; a new head means re-pinning and re-collecting
+  that evidence.
+- **Issue #35 stays open** until the system bridge is actually deployed (#39
+  does not declare it closed). `DefaultAction` remains `allow`; deny-by-default
+  is a separate policy change after the gates above.
+- Renovate onboarding PR #33 is open and untouched.
+
+## Previously (2026-10-04)
 
 **PR #38 merged (`7d1ba97`): Kirigami now connects to the external,
 token-authenticated bridge service.** Main CI run `37249292846` passed all four
