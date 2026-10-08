@@ -1376,6 +1376,44 @@ mod filtering_pause_tests {
         );
     }
 
+    /// P2.6 Part 1: the largest `RuleHits` the bridge can send (every rule
+    /// it tracks, each name at the length limit and made of characters JSON
+    /// doubles, the widest numbers, a long storage reason) fits one frame of
+    /// a GUI client with tungstenite's default limit (the Kirigami shell's
+    /// `client_async` uses the default config).
+    #[test]
+    fn the_largest_rule_hits_fits_a_gui_clients_frame() {
+        use crate::cache::rule_hits::{MAX_HIT_NAME_BYTES, MAX_TRACKED_RULES};
+        let limit = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
+            .max_frame_size
+            .expect("tungstenite's default has a frame limit");
+        let hits = (0..MAX_TRACKED_RULES)
+            .map(|i| {
+                let stem = format!("{i:05}");
+                let fill = "\"\\".repeat((MAX_HIT_NAME_BYTES - stem.len()) / 2);
+                RuleHitWire {
+                    name: format!("{stem}{fill}"),
+                    count: u64::MAX,
+                    last_hit_unix_ms: i64::MIN,
+                }
+            })
+            .collect();
+        let msg = ServerMessage::RuleHits {
+            since_unix_ms: Some(i64::MIN),
+            lossy: true,
+            last_gap_unix_ms: Some(i64::MIN),
+            storage: StorageStatus {
+                persistent: false,
+                // Two paths at PATH_MAX and an OS error, all escaped.
+                reason: Some("\"".repeat(16 * 1024)),
+                unreadable: false,
+            },
+            hits,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.len() < limit, "{} bytes, limit {limit}", json.len());
+    }
+
     #[test]
     fn rule_hits_round_trips_with_camel_case_keys() {
         let message = ServerMessage::RuleHits {
