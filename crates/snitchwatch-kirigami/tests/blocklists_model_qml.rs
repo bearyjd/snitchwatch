@@ -57,8 +57,10 @@ QtObject {
             action: "setBlocklists",
             blocklists: [
                 { id: "l1", displayName: "Ads", url: "https://example.invalid/ads.txt",
-                  entryCount: 3, status: "ok", lastUpdatedIso8601: null, lastFailureReason: null }
-            ]
+                  entryCount: 3, status: "ok", lastUpdatedIso8601: null, lastFailureReason: null,
+                  enforcement: "not_enforced", enforcementReason: "no rule sink yet" }
+            ],
+            storage: { persistent: true }
         }));
         entries.applyServerMessageJson(JSON.stringify({
             action: "setBlocklistEntries",

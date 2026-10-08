@@ -1,6 +1,8 @@
 //! Integration smoke: the "not enforced" banners on `BlocklistsPage.qml` and
 //! `ProfilesPage.qml` (issues #45/#46) are live, visible and non-dismissable
-//! once the real pages are instantiated; every page's inspector sheet draws its
+//! once the real pages are instantiated — on the Blocklists page, the variant
+//! that says subscriptions are lost on restart until the bridge reports
+//! persistent storage, and the one that doesn't after; every page's inspector sheet draws its
 //! title through `SizedOverlaySheet`'s PlainText header, whose hover tooltip is
 //! an explicit ToolTip with a PlainText content item (issue #51) — including for
 //! a long, markup-named title that actually elides; and the
@@ -170,6 +172,43 @@ Window {
         }
     }
 
+    // The Blocklists header holds two banner variants keyed on storage
+    // (issue #45); exactly one is shown.
+    function checkBlocklistsBanner(page, expectPersistent) {
+        let persistent = null;
+        let memoryOnly = null;
+        for (let i = 0; i < page.header.children.length; i++) {
+            const item = page.header.children[i];
+            if (item.objectName === "persistentStorageBanner") {
+                persistent = item;
+            } else if (item.objectName === "memoryOnlyStorageBanner") {
+                memoryOnly = item;
+            }
+        }
+        if (!persistent || !memoryOnly) {
+            throw new Error("BlocklistsPage: banner variants not found - probe lookup drifted");
+        }
+        const shown = expectPersistent ? persistent : memoryOnly;
+        const hidden = expectPersistent ? memoryOnly : persistent;
+        const name = "BlocklistsPage (persistent=" + expectPersistent + ")";
+        if (shown.visible !== true || hidden.visible !== false) {
+            throw new Error(name + ": wrong banner variant visible");
+        }
+        if (shown.type !== Kirigami.MessageType.Warning) {
+            throw new Error(name + ": banner is not a Warning");
+        }
+        if (shown.showCloseButton) {
+            throw new Error(name + ": banner is dismissable");
+        }
+        if (shown.text.indexOf("not applied") < 0) {
+            throw new Error(name + ": banner text does not say it is not applied: " + shown.text);
+        }
+        if ((shown.text.indexOf("restart") >= 0) === expectPersistent) {
+            throw new Error(name + ": banner gets the restart sentence wrong: " + shown.text);
+        }
+        return shown;
+    }
+
     // Opens the Rules and Connections inspectors on markup-looking data. Done
     // from a Timer, not Component.onCompleted: the order in which a page's and
     // its child model's onCompleted handlers run is undefined, and the rule
@@ -197,7 +236,24 @@ Window {
         repeat: false
         onTriggered: {
             try {
-                checkBanner(blocklistsPage, "BlocklistsPage");
+                // No SetBlocklists yet: not persistent, so "lost on restart".
+                const memoryOnly = checkBlocklistsBanner(blocklistsPage, false);
+                if (memoryOnly.width < blocklistsPage.width - 1 || memoryOnly.height <= 0) {
+                    throw new Error("BlocklistsPage: banner not laid out: " + memoryOnly.width
+                                    + "x" + memoryOnly.height);
+                }
+                blocklistsPage.model.applyServerMessageJson(JSON.stringify({
+                    action: "setBlocklists", blocklists: [], storage: { persistent: true }
+                }));
+                checkBlocklistsBanner(blocklistsPage, true);
+                blocklistsPage.model.applyServerMessageJson(JSON.stringify({
+                    action: "setBlocklists", blocklists: [],
+                    storage: { persistent: false, reason: "blocklist store: <b>locked</b>" }
+                }));
+                checkBlocklistsBanner(blocklistsPage, false);
+                if (blocklistsPage.storageReason !== "blocklist store: <b>locked</b>") {
+                    throw new Error("BlocklistsPage: storage reason not exposed");
+                }
                 checkBanner(profilesPage, "ProfilesPage");
                 if (rulesPage.inspectName !== longRuleName) {
                     throw new Error("RulesPage inspector did not open on the markup-named rule");

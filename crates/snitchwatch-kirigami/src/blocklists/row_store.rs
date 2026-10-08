@@ -12,12 +12,39 @@
 //! with a `beginResetModel`/`endResetModel`. That is always view-correct and
 //! avoids incremental-range bookkeeping that would buy nothing here.
 
-use snitchwatch_bridge::ws_messages::{BlocklistSummary, ServerMessage};
+use snitchwatch_bridge::ws_messages::{
+    BlocklistSummary, ServerMessage, StorageStatus, ENFORCEMENT_PENDING, ENFORCEMENT_RULE_INSTALLED,
+};
 
 /// Ordered list of blocklist subscriptions (the master list).
 #[derive(Debug, Default)]
 pub struct SubscriptionsStore {
     subs: Vec<BlocklistSummary>,
+    /// From the last `SetBlocklists`; `None` until one arrives or from an
+    /// older bridge, which kept subscriptions in memory only.
+    storage: Option<StorageStatus>,
+}
+
+/// The download result as shown to the user. `status` only says whether the
+/// list downloaded, so the label must not read as "working".
+pub fn status_label(status: &str) -> String {
+    match status {
+        "ok" => "Downloaded".to_string(),
+        "pending" => "Downloading".to_string(),
+        "failed" => "Download failed".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// Whether the list blocks anything (issue #45). Only an installed daemon
+/// rule earns more than "not enforced", and even then the daemon may have
+/// loaded 0 entries, so it says "Rule installed", never "Enforced".
+pub fn enforcement_label(sub: &BlocklistSummary) -> &'static str {
+    match sub.enforcement.as_str() {
+        ENFORCEMENT_RULE_INSTALLED => "Rule installed",
+        ENFORCEMENT_PENDING => "Not enforced yet",
+        _ => "Not enforced",
+    }
 }
 
 impl SubscriptionsStore {
@@ -41,12 +68,29 @@ impl SubscriptionsStore {
         self.subs.get(index)
     }
 
+    /// True only when the bridge said its subscriptions survive a restart.
+    pub fn storage_persistent(&self) -> bool {
+        self.storage.as_ref().is_some_and(|s| s.persistent)
+    }
+
+    /// Why the bridge couldn't persist subscriptions, or "".
+    pub fn storage_reason(&self) -> &str {
+        self.storage
+            .as_ref()
+            .and_then(|s| s.reason.as_deref())
+            .unwrap_or("")
+    }
+
     /// Apply one bridge message. Returns `true` if the subscription list
     /// changed (the model wrapper resets on `true`).
     pub fn apply(&mut self, msg: &ServerMessage) -> bool {
         match msg {
-            ServerMessage::SetBlocklists { blocklists } => {
+            ServerMessage::SetBlocklists {
+                blocklists,
+                storage,
+            } => {
                 self.subs = blocklists.clone();
+                self.storage = storage.clone();
                 true
             }
             ServerMessage::SetBlocklistDetails { details } => self.upsert(details.clone()),
@@ -149,7 +193,10 @@ impl EntriesStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use snitchwatch_bridge::ws_messages::BlocklistEntry;
+    use snitchwatch_bridge::ws_messages::{
+        BlocklistEntry, StorageStatus, ENFORCEMENT_NOT_ENFORCED, ENFORCEMENT_PENDING,
+        ENFORCEMENT_RULE_INSTALLED,
+    };
 
     fn summary(id: &str, status: &str, count: i64) -> BlocklistSummary {
         BlocklistSummary {
@@ -160,6 +207,8 @@ mod tests {
             status: status.to_string(),
             last_updated_iso8601: None,
             last_failure_reason: None,
+            enforcement: String::new(),
+            enforcement_reason: None,
         }
     }
 
@@ -172,11 +221,13 @@ mod tests {
         let mut s = SubscriptionsStore::new();
         assert!(s.apply(&ServerMessage::SetBlocklists {
             blocklists: vec![summary("a", "ok", 10), summary("b", "ok", 20)],
+            storage: None,
         }));
         assert_eq!(ids(&s), vec!["a", "b"]);
         // A second SetBlocklists replaces wholesale.
         assert!(s.apply(&ServerMessage::SetBlocklists {
             blocklists: vec![summary("c", "ok", 5)],
+            storage: None,
         }));
         assert_eq!(ids(&s), vec!["c"]);
     }
@@ -186,6 +237,7 @@ mod tests {
         let mut s = SubscriptionsStore::new();
         s.apply(&ServerMessage::SetBlocklists {
             blocklists: vec![summary("a", "ok", 10)],
+            storage: None,
         });
         // Update existing "a".
         assert!(s.apply(&ServerMessage::SetBlocklistDetails {
@@ -204,6 +256,7 @@ mod tests {
         let mut s = SubscriptionsStore::new();
         s.apply(&ServerMessage::SetBlocklists {
             blocklists: vec![summary("a", "ok", 10)],
+            storage: None,
         });
         assert!(s.apply(&ServerMessage::SetBlocklistStatus {
             subscription_id: "a".to_string(),
@@ -222,12 +275,75 @@ mod tests {
         let mut s = SubscriptionsStore::new();
         s.apply(&ServerMessage::SetBlocklists {
             blocklists: vec![summary("a", "ok", 10)],
+            storage: None,
         });
         assert!(!s.apply(&ServerMessage::SetBlocklistStatus {
             subscription_id: "nope".to_string(),
             status: "failed".to_string(),
             last_failure_reason: None,
         }));
+    }
+
+    fn persistent() -> Option<StorageStatus> {
+        Some(StorageStatus {
+            persistent: true,
+            reason: None,
+        })
+    }
+
+    /// Issue #45: the page drops "lost on restart" only for a bridge that
+    /// says its subscriptions persist. Unknown (no message yet, or an older
+    /// bridge) means not persistent.
+    #[test]
+    fn storage_defaults_to_not_persistent_and_follows_set_blocklists() {
+        let mut s = SubscriptionsStore::new();
+        assert!(!s.storage_persistent());
+        assert_eq!(s.storage_reason(), "");
+
+        s.apply(&ServerMessage::SetBlocklists {
+            blocklists: vec![],
+            storage: persistent(),
+        });
+        assert!(s.storage_persistent());
+
+        s.apply(&ServerMessage::SetBlocklists {
+            blocklists: vec![],
+            storage: Some(StorageStatus {
+                persistent: false,
+                reason: Some("blocklist store: disk I/O error".into()),
+            }),
+        });
+        assert!(!s.storage_persistent());
+        assert_eq!(s.storage_reason(), "blocklist store: disk I/O error");
+
+        // An older bridge sends no storage at all.
+        s.apply(&ServerMessage::SetBlocklists {
+            blocklists: vec![],
+            storage: None,
+        });
+        assert!(!s.storage_persistent());
+        assert_eq!(s.storage_reason(), "");
+    }
+
+    /// A downloaded list is labelled as downloaded, never as working or
+    /// enforced: PR A installs no daemon rule.
+    #[test]
+    fn labels_never_claim_enforcement_without_an_installed_rule() {
+        assert_eq!(status_label("ok"), "Downloaded");
+        assert_eq!(status_label("pending"), "Downloading");
+        assert_eq!(status_label("failed"), "Download failed");
+
+        let mut row = summary("a", "ok", 10);
+        for (enforcement, label) in [
+            (ENFORCEMENT_NOT_ENFORCED, "Not enforced"),
+            (ENFORCEMENT_PENDING, "Not enforced yet"),
+            ("", "Not enforced"),
+            ("something-new", "Not enforced"),
+            (ENFORCEMENT_RULE_INSTALLED, "Rule installed"),
+        ] {
+            row.enforcement = enforcement.to_string();
+            assert_eq!(enforcement_label(&row), label, "{enforcement:?}");
+        }
     }
 
     #[test]

@@ -209,12 +209,90 @@ fn assert_preview_banner(page_name: &str, source: &str) {
     );
 }
 
-/// Issues #45/#46: production wires no-op rule sinks and in-memory stores
-/// (`snitchwatch-bridge-cli/src/lib.rs`), so these tabs look functional while
-/// enforcing nothing and forgetting everything on restart.
+/// The one line of `block` that is exactly `line` (trimmed).
+fn has_line(block: &str, line: &str) -> bool {
+    block.lines().any(|l| l.trim() == line)
+}
+
+/// Issue #45 PR A: the bridge persists blocklist subscriptions when it has a
+/// state directory, but still installs no daemon rules. So the Blocklists
+/// header holds two banner variants, keyed on `page.storagePersistent`:
+/// both say "not applied" (and are Warnings, not dismissable, jargon-free);
+/// only the not-persistent one says subscriptions are lost on restart. The
+/// page defaults to not persistent, and the storage problem's reason is data,
+/// so it goes in a PlainText label, never an InlineMessage.
+fn assert_storage_keyed_banner(page_name: &str, source: &str) {
+    let code = code_lines(source);
+    assert!(
+        has_line(
+            &code,
+            "readonly property bool storagePersistent: page.model ? page.model.storagePersistent : false"
+        ),
+        "{page_name} must default to not persistent until the bridge says otherwise"
+    );
+    let header = blocks(&code, "header: ColumnLayout {");
+    assert_eq!(header.len(), 1, "{page_name} lost its banner header");
+    let banners = blocks(&header[0], "Kirigami.InlineMessage {");
+    assert_eq!(
+        banners.len(),
+        2,
+        "{page_name}: expected two banner variants"
+    );
+    for banner in &banners {
+        assert!(
+            banner.contains("type: Kirigami.MessageType.Warning"),
+            "{page_name}'s banner is no longer a Warning:\n{banner}"
+        );
+        assert!(
+            !banner.contains("showCloseButton: true") && !banner.contains("actions:"),
+            "{page_name}'s banner must not be dismissable:\n{banner}"
+        );
+        assert!(
+            banner.contains("not applied"),
+            "{page_name}'s banner must say subscriptions are not applied to the firewall:\n{banner}"
+        );
+        assert!(
+            !banner.contains("bridge"),
+            "{page_name}'s banner uses internal jargon (\"bridge\")"
+        );
+    }
+    let persistent = banners
+        .iter()
+        .find(|b| has_line(b, "visible: page.storagePersistent"))
+        .unwrap_or_else(|| panic!("{page_name}: no banner shown for persistent storage"));
+    let memory_only = banners
+        .iter()
+        .find(|b| has_line(b, "visible: !page.storagePersistent"))
+        .unwrap_or_else(|| panic!("{page_name}: no banner shown for memory-only storage"));
+    assert!(
+        memory_only.contains("restart"),
+        "{page_name}: the memory-only banner must say subscriptions are lost on restart"
+    );
+    assert!(
+        !persistent.contains("restart"),
+        "{page_name}: the persistent banner must not claim subscriptions are lost on restart"
+    );
+    let reasons = blocks(&header[0], "Controls.Label {");
+    assert_eq!(
+        reasons.len(),
+        1,
+        "{page_name}: expected one storage-reason label"
+    );
+    assert!(
+        reasons[0].contains("page.storageReason")
+            && reasons[0].contains("textFormat: Text.PlainText")
+            && reasons[0].contains("!page.storagePersistent"),
+        "{page_name}: the storage reason must be a PlainText label shown only when not \
+         persistent:\n{}",
+        reasons[0]
+    );
+}
+
+/// Issues #45/#46: no daemon rules are installed for blocklists (PR B) or
+/// profiles, so these tabs must say so; profiles are also in memory only.
 #[test]
 fn blocklists_page_warns_it_is_not_enforced() {
-    assert_preview_banner("BlocklistsPage.qml", BLOCKLISTS_PAGE);
+    assert_storage_keyed_banner("BlocklistsPage.qml", BLOCKLISTS_PAGE);
 }
 
 #[test]
@@ -298,13 +376,16 @@ fn blocklists_page_labels_showing_subscription_data_are_plain_text() {
             "row.displayName",
             "row.url",
             "row.status",
+            "row.enforcement",
             "page.inspectUrl",
             "page.inspectStatus",
+            "page.inspectEnforcement",
             "page.inspectLastUpdated",
             "page.inspectLastFailureReason",
+            "page.storageReason",
             "text: host",
         ],
-        8,
+        12,
     );
 }
 
