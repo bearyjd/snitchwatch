@@ -216,13 +216,13 @@ fn every_operand_has_a_positive_and_a_negative_case() {
         case(
             "dest.host empty (bare IP) +",
             simple("dest.host", ""),
-            base_with(|i| i.dest_host = String::new()),
+            base_with(|i| i.dest_host = Some(String::new())),
             true,
         ),
         case(
             "dest.host empty (bare IP) -",
             simple("dest.host", "example.com"),
-            base_with(|i| i.dest_host = String::new()),
+            base_with(|i| i.dest_host = Some(String::new())),
             false,
         ),
         case("dest.port +", simple("dest.port", "443"), base(), true),
@@ -538,4 +538,48 @@ fn a_blank_protocol_is_unknown_not_an_empty_one() {
     }
     // A rule that doesn't look at it is still decided.
     assert!(matched(simple("dest.host", "example.com"), &unknown));
+}
+
+#[test]
+fn an_unknown_destination_host_is_not_evaluated_never_a_verdict() {
+    let unknown = base_with(|i| i.dest_host = None);
+    for operator in [
+        simple("dest.host", "example.com"),
+        simple("dest.host", ""),
+        op("regexp", "dest.host", "^$"),
+        op("regexp", "dest.host", ".*"),
+        op_sensitive("simple", "dest.host", "Example.com"),
+    ] {
+        let result = run(operator.clone(), &unknown);
+        assert_eq!(result.matched_rule, None, "{operator} matched on a guess");
+        assert_eq!(
+            result.unevaluated.len(),
+            1,
+            "{operator}: {:?}",
+            result.unevaluated
+        );
+        assert_eq!(result.unevaluated[0].operand, "dest.host");
+        assert!(result.unevaluated[0].missing.contains("destination host"));
+    }
+    // A rule that doesn't look at the host is still decided, and a failing
+    // member of a list decides it whatever the host is.
+    assert!(matched(simple("protocol", "tcp"), &unknown));
+    let failing = list_op(vec![
+        simple("dest.host", "example.com"),
+        simple("protocol", "udp"),
+    ]);
+    let result = run(failing, &unknown);
+    assert_eq!(result.matched_rule, None);
+    assert!(result.unevaluated.is_empty(), "{:?}", result.unevaluated);
+}
+
+#[test]
+fn a_known_empty_host_is_not_an_unknown_one() {
+    let empty = base_with(|i| i.dest_host = Some(String::new()));
+    assert!(matched(simple("dest.host", ""), &empty));
+    assert!(matched(op("regexp", "dest.host", "^$"), &empty));
+    assert!(!matched(simple("dest.host", "example.com"), &empty));
+    assert!(run(simple("dest.host", "example.com"), &empty)
+        .unevaluated
+        .is_empty());
 }
