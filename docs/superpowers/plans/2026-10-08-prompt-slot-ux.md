@@ -127,28 +127,42 @@ takes it again. Meanwhile every other new connection gets `DefaultAction`:
 ### A. Show who holds the slot and what it costs (BR + UI, S; no owner decision)
 
 1. **`PromptSlot`** (new file `crates/snitchwatch-bridge/src/prompt_slot.rs`):
-   - **State:** `holder: Option<Holder { row_id, process, host, since_ms, misses_at_start: Option<u64> }>`
-     and `last_misses: Option<u64>`.
+   - **State:**
+     `holder: Option<Holder { row_id, process, host, since_ms, misses_baseline: Option<u64>, last_misses: Option<u64>, last_uptime: Option<u64> }>`.
    - **Feeds:**
      - `ask_rule` marks the slot held when it inserts the pending row.
        That is the same point that sends `Notice::Pending`.
      - Every exit releases it: verdict, GUI loss, `PendingCleanup` on
        cancellation. **Release from `PendingCleanup::drop`** so that an
        early return can't leak a holder.
-     - The `ping` handler updates `last_misses` from
-       `stats.rule_misses`.
-   - **`defaulted_since_start()`** is
-     `last_misses - misses_at_start`. It is `None` while either value is
-     unknown.
+     - The `ping` handler passes `stats.rule_misses` and `stats.uptime`
+       in.
+   - **Take the baseline from the first reading *after* the hold starts,
+     never from an older one.** The daemon pings only when there are
+     matched events, so the last reading before the hold can be minutes
+     old.
+     - Right after login, it would include every Ask answered
+       `Unavailable` before a GUI authenticated: exactly the case this
+       part is for.
+     - Misses between the hold starting and that first reading go
+       uncounted, so **the figure is a lower bound: "at least N"**.
+   - **Drop the baseline** (back to `None`, re-taken from the next
+     reading) when:
+     - `uptime` decreases (the daemon restarted, and `rule_misses` is
+       cumulative per daemon process);
+     - #48 commits a new HELLO snapshot during the hold.
+   - **`defaulted_at_least()`** is
+     `last_misses.saturating_sub(misses_baseline)`. It is `None` while
+     either value is unknown, and it never underflows.
    - **Display text.** `process`/`host` go through
      `grpc_server::display_summary`, the existing sanitizer.
 2. **Protocol** (additive; older clients ignore unknown actions):
-   - `ServerMessage::PromptSlot { holder: Option<PromptSlotHolder>, defaulted_approx: Option<u64> }`,
+   - `ServerMessage::PromptSlot { holder: Option<PromptSlotHolder>, defaulted_at_least: Option<u64> }`,
      sent on hold, release and count change;
    - included in the `RequestSnapshot` answer.
 3. **Release summary.** When a holder is released with
-   `defaulted_approx > 0`, send `Notice::PromptSlotSummary { count }`:
-   "While that prompt was open, about N other connections got the
+   `defaulted_at_least > 0`, send `Notice::PromptSlotSummary { count }`:
+   "While that prompt was open, at least N other connections got the
    firewall's default action."
    - **Fixed text.** It carries no connection data.
    - **Build-break edits.** `Notice` is matched exhaustively in the tauri
@@ -160,11 +174,11 @@ takes it again. Meanwhile every other new connection gets `DefaultAction`:
    for older bridges:
    - **Text.** "<process> → <host> is waiting for your answer (Ns). Until
      you answer, other new connections get the firewall's default action
-     (about N so far)." Plain text.
+     (at least N so far)." Plain text.
    - **Actions:** Allow (once), Deny (the inline semantics of
      `2026-10-08-inline-deny-until-restart.md`), Review.
-   - **When the count is `None`,** drop the "about N" clause rather than
-     show 0.
+   - **When the count is `None`,** drop the "at least N" clause rather
+     than show 0.
 
 ### B. Answer from the notification (UI, S; owner question S5 confirms)
 
@@ -225,6 +239,11 @@ takes it again. Meanwhile every other new connection gets `DefaultAction`:
     - an absolute `process.path` (sensitive);
     - optionally a host constraint (`dest.host` simple or regexp);
     - duration `always`;
+    - **`precedence: false`, always.** A precedence allow stops
+      `FindFirstMatch` before any later deny, so it would override
+      blocklist denies. That contradicts the settled "blocklist wins"
+      decision. A non-precedence allow loses to any matching deny,
+      including #45's list rules;
     - a name `snitchwatch-default-<id>`;
     - the description `snitchwatch curated default v1`.
 
@@ -282,8 +301,15 @@ allowlist.
 - hold on insert and release on verdict;
 - release on GUI loss, and on cancellation via `PendingCleanup` (drop the
   future);
-- `defaulted_approx` is `None` until two `rule_misses` readings bracket
-  the hold, then equals the difference;
+- **The baseline is taken after the hold starts:**
+  - a `rule_misses` reading from *before* the hold is not used, so misses
+    from before the GUI authenticated are not counted;
+  - the count is `None` until a reading after the hold exists, then
+    `last − baseline`.
+- **A daemon restart mid-hold** (`uptime` drops, `rule_misses` resets to
+  a smaller value) gives `None` and a fresh baseline, never a huge number
+  from underflow.
+- **A new #48 HELLO commit mid-hold** also resets the baseline.
 - one `PromptSlotSummary` when > 0, none when 0 or unknown;
 - `display_summary` sanitizes a hostile host, using the pattern of the
   `DenyScopeNarrowed` tests;
@@ -329,7 +355,7 @@ Run at low priority (`nice -n 19`), one crate at a time:
 Tower VM checks:
 1. **Log in to a fresh image with the GUI autostarting.**
    - The banner names the first background program holding the slot.
-   - After the next ping, it shows "about N" defaulted connections.
+   - After a later ping, it shows "at least N" defaulted connections.
 2. **A:** answer the prompt; the summary notice appears once.
 3. **B:** with the window hidden, Deny from the notification. The
    inline-deny acceptance check holds.
@@ -339,9 +365,13 @@ Tower VM checks:
 
 ## Risks
 
-- **The count is approximate and late.** It counts every miss (not only
-  busy ones) and arrives on the next ping that carries a matched event.
-  The wording says "about"; never present it as exact.
+- **The count is a late, rough lower bound.**
+  - It misses whatever was defaulted before the first post-hold reading.
+  - It can include a few non-busy misses (a requeue timeout, a failed
+    Ask).
+  - It arrives only with a ping that carries a matched event.
+
+  The wording says "at least"; never present it as exact.
 - **A timeout can preempt a slow user.** Mitigation: a visible countdown,
   and the "Make a rule…" follow-up on the timed-out row.
 - **Notification actions answer prompts outside the main window.** This
@@ -368,8 +398,14 @@ Tower VM checks:
   - P-b: once-deny;
   - P-c: app-bound 5 min deny.
 
-  **Recommendation:** on, 30 s (stock-UI parity), **P-a**. That is
-  today's outcome, 4× sooner, with no decision made for the user.
+  **Recommendation:** on, 30 s (stock-UI parity), **P-a**. It makes no
+  decision for the user.
+  - Under `DefaultAction: allow`, it is today's outcome, 4× sooner.
+  - Under `deny` (the shipped packaging config), the timed-out SYN is
+    dropped. Its retransmit re-asks within about 1 s, the same ping-pong
+    as P-b, so the same program can take the slot straight back.
+  - Choose with that in view. P-c avoids the ping-pong at the price of a
+    5 min block nobody chose.
 - **S2. "Decide later" button semantics.** Options:
   - (a) P-a;
   - (b) block this program for 5 min (P-c, any host) and list it under

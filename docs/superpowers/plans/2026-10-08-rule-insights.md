@@ -132,16 +132,27 @@ Functions are cited by name.
      existing `event_to_row` loop. For each event with a rule, it
      increments that rule name's stat; `last_hit` is from
      `Event.unixnano`.
-   - **Names outside the cache.** Only names present in the `RulesCache`
-     (#48) are kept, which drops once-reply synthetic names. Counts for
-     names not yet cached go into a bounded side map of at most 1 000
-     entries; they move over when `SetRules` brings the name. That covers
-     the window right after start, before the HELLO commit.
+   - **Names outside the cache.**
+     - While the `RulesCache` (#48) is `Synced`, an event whose rule is in
+       the cache counts in the main map.
+     - Anything else goes into a bounded side map of at most 1 000
+       entries: a once-reply synthetic name, a rule the cache doesn't know
+       yet, or any event while the cache is `Unknown`.
+     - At the next snapshot commit, side-map entries whose names are in
+       the snapshot move to the main map. The rest are discarded.
+   - **Pruning happens only on these two signals:**
+     - a new `Synced` snapshot is committed (#48 `RulesSync::commit`):
+       drop main-map names that aren't in it;
+     - a confirmed `DELETE_RULE` (#48 `apply_confirmed`): drop that name.
+
+     **Never prune on `RulesSync::withdraw`.** It sets the cache to
+     `Unknown` and publishes an empty `SetRules` every time the daemon
+     stream closes, which happens on every daemon restart or reconnect.
+     Pruning on it would wipe all counts.
    - **`lossy`** is set when a batch length reaches `max_events` (from
      `daemon_config`, else 150). It never clears for the session.
-   - **Bounds.** At most `MAX_SNAPSHOT_RULES` entries. A rule deleted
-     from the cache is dropped at the next publish. A rename starts at
-     zero.
+   - **Bounds.** At most `MAX_SNAPSHOT_RULES` entries in the main map. A
+     rename starts at zero.
    - **Persistence** is owner question N1. If yes, save a JSON file in
      the bridge state directory (#45 PR A's resolver) every 5 min and on
      shutdown. Load it at start, but only for names that match the first
@@ -244,12 +255,16 @@ Functions are cited by name.
   `b:1`; `last_hit` comes from `unixnano`.
 - **An event without a rule** is ignored, matching `event_to_row`.
 - **A once-reply synthetic name** never appears in `RuleHits` after the
-  cache sync.
-- **Before the cache is synced,** counts are held, then adopted when
-  `SetRules` contains the name.
+  next snapshot commit.
+- **Before the cache is synced,** counts are held in the side map. They
+  are adopted at the commit whose snapshot contains the name.
 - **`lossy`.** A batch of exactly `max_events` sets it. A batch of
   `max_events - 1` doesn't.
-- **Deleting a rule** from the cache drops its entry.
+- **Counts survive a reconnect.** `a:3`, then `RulesSync::withdraw`
+  (cache `Unknown`, empty `SetRules`), then a re-commit containing `a`:
+  `a` is still 3, and hits during the `Unknown` gap are added on adoption.
+- **A re-commit that lacks `b`** drops `b`.
+- **A confirmed `DELETE_RULE`** drops its entry. A rejected one doesn't.
 - **Rate limit.** 50 pings within 5 s produce at most two `RuleHits`
   broadcasts (`tokio::test(start_paused = true)`).
 - **Snapshot.** `RequestSnapshot` includes `RuleHits`.
