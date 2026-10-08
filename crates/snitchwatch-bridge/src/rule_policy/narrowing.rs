@@ -10,10 +10,11 @@
 //! is treated as not narrowing. That is a heuristic, not a proof: the
 //! probes are what a reviewer would try first.
 //!
-//! A rule is tied to programs only by a non-empty `simple` `process.path`,
-//! `process.command` or `process.id`. A `process.parent.path` (the daemon
-//! walks every ancestor, up to PID 1), a `process.env.*` value or a path
-//! regexp can't be shown to name particular programs.
+//! A rule is tied to programs only by a `simple` `process.path` that names a
+//! real program file, or a non-empty `simple` `process.command`. A
+//! `process.id` (reused after a reboot), a `process.parent.path` (the
+//! daemon walks every ancestor, up to PID 1), a `process.env.*` value or a
+//! path regexp can't be shown to name particular programs.
 
 use snitchwatch_proto::protocol::Operator;
 
@@ -78,10 +79,23 @@ pub fn narrows(leaf: &Operator) -> bool {
     }
 }
 
-/// A `/0` network: every address of its family.
+/// A `/0` network: every address of its family. An IPv4-mapped IPv6
+/// network counts as the IPv4 `/(prefix - 96)` the daemon reads it as.
 fn is_zero_prefix(cidr: &str) -> bool {
-    cidr.split_once('/')
-        .is_some_and(|(_, prefix)| prefix.parse::<u8>() == Ok(0))
+    let Some((addr, prefix)) = cidr.split_once('/') else {
+        return false;
+    };
+    let Ok(prefix) = prefix.parse::<u8>() else {
+        return false;
+    };
+    let mapped = addr
+        .parse::<std::net::Ipv6Addr>()
+        .is_ok_and(|v6| v6.to_ipv4_mapped().is_some());
+    if mapped {
+        prefix <= 96
+    } else {
+        prefix == 0
+    }
 }
 
 fn matches_every_probe(leaf: &Operator) -> bool {
@@ -109,14 +123,18 @@ fn matches_every_probe(leaf: &Operator) -> bool {
     })
 }
 
-/// Whether a leaf names particular programs (see the module doc).
+/// Whether a leaf names particular programs (see the module doc): a real
+/// program file's path (not the daemon's "Kernel connection" placeholder)
+/// or a command line. A pid names whatever process gets it next.
 fn binds_programs(leaf: &Operator) -> bool {
-    leaf.r#type == "simple"
-        && !leaf.data.is_empty()
-        && matches!(
-            leaf.operand.as_str(),
-            "process.path" | "process.command" | "process.id"
-        )
+    if leaf.r#type != "simple" || leaf.data.is_empty() {
+        return false;
+    }
+    match leaf.operand.as_str() {
+        "process.path" => crate::translator::process_binding::is_bindable_process_path(&leaf.data),
+        "process.command" => true,
+        _ => false,
+    }
 }
 
 /// Whether an operator (a leaf, or a list ANDing leaves) ties its rule to
@@ -126,5 +144,58 @@ pub fn binds_to_programs(op: &Operator) -> bool {
         op.list.iter().any(binds_programs)
     } else {
         binds_programs(op)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn leaf(r#type: &str, operand: &str, data: &str) -> Operator {
+        Operator {
+            r#type: r#type.into(),
+            operand: operand.into(),
+            data: data.into(),
+            ..Default::default()
+        }
+    }
+
+    /// An IPv4-mapped network the daemon reads as `/(prefix - 96)` of IPv4
+    /// doesn't narrow when that is `/0` (re-review, defence in depth:
+    /// `validate_operator` refuses these anyway).
+    #[test]
+    fn a_mapped_network_wider_than_ipv4_does_not_narrow() {
+        for data in ["::ffff:0:0/96", "::ffff:0.0.0.0/90", "0.0.0.0/0", "::/0"] {
+            assert!(!narrows(&leaf("network", "dest.network", data)), "{data}");
+        }
+        for data in ["::ffff:10.0.0.0/104", "10.0.0.0/8", "2001:db8::/32"] {
+            assert!(narrows(&leaf("network", "dest.network", data)), "{data}");
+        }
+    }
+
+    /// Re-review: a pid names an arbitrary process after a reboot, and the
+    /// daemon's "Kernel connection" placeholder names none.
+    #[test]
+    fn only_a_real_program_identity_ties_a_rule_to_programs() {
+        assert!(binds_to_programs(&leaf(
+            "simple",
+            "process.path",
+            "/usr/bin/curl"
+        )));
+        assert!(binds_to_programs(&leaf(
+            "simple",
+            "process.command",
+            "curl x"
+        )));
+        for (operand, data) in [
+            ("process.id", "4242"),
+            ("process.path", "Kernel connection"),
+            ("process.path", "/proc/self/exe"),
+        ] {
+            assert!(
+                !binds_to_programs(&leaf("simple", operand, data)),
+                "{operand}={data}"
+            );
+        }
     }
 }

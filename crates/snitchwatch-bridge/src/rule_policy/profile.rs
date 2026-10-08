@@ -140,8 +140,9 @@ fn check_import_leaf(path: &str, leaf: &Operator, problems: &mut Vec<RuleProblem
     }
     let data_path = format!("{path}.data");
     // `simpleCmp` is `EqualFold`: an empty value matches every subject that
-    // lacks the field (an unset variable, say). Only an empty host name
-    // means something narrow (a connection with no host name).
+    // lacks the field (an unset variable, say). An empty `dest.host` is the
+    // one kept: it matches every connection without a host name (a bare IP
+    // address), which is broad but what it says.
     if leaf.data.is_empty() && !matches!(leaf.operand.as_str(), "true" | "dest.host") {
         problem(problems, &data_path, EMPTY_VALUE_REFUSED);
         return;

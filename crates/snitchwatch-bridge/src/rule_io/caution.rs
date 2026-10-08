@@ -27,6 +27,43 @@ const DENY_CONDITIONS: &str = "This changes what a blocking rule matches.";
 const ALLOW_CONDITIONS: &str = "This changes what an allow rule matches.";
 const ALLOW_ON: &str = "This turns on an allow rule that was off.";
 const ALLOW_UNLOGGED: &str = "This stops logging the connections an allow rule lets through.";
+const ALLOW_PERMANENT: &str =
+    "This makes an allow rule permanent; it lasted until the firewall restarted.";
+const DENY_UNLOGGED: &str = "This stops logging the connections a blocking rule blocks.";
+const LAUNCHER_ANYWHERE: &str = "This lets a program that runs other programs (a script \
+     interpreter, shell or launcher) reach any destination, and so everything it runs.";
+
+/// Programs that run other programs: allowing one everywhere allows what it
+/// runs too.
+const LAUNCHERS: &[&str] = &[
+    "python", "python3", "bash", "sh", "zsh", "dash", "env", "perl", "ruby", "node", "flatpak",
+    "steam",
+];
+
+fn is_launcher(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    LAUNCHERS.contains(&name)
+        || name
+            .strip_prefix("python3.")
+            .is_some_and(|v| !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// An allow tied to a launcher's path with no destination condition.
+fn launcher_anywhere(rule: &Rule) -> bool {
+    let Some(op) = &rule.operator else {
+        return false;
+    };
+    let leaves: Vec<&Operator> = if op.r#type == "list" {
+        op.list.iter().collect()
+    } else {
+        vec![op]
+    };
+    let launcher = leaves
+        .iter()
+        .any(|l| l.operand == "process.path" && l.r#type == "simple" && is_launcher(&l.data));
+    let destination = leaves.iter().any(|l| l.operand.starts_with("dest."));
+    launcher && !destination
+}
 
 fn blocks(rule: &Rule) -> bool {
     matches!(rule.action.as_str(), "deny" | "reject")
@@ -59,6 +96,9 @@ pub(super) fn cautions(
     if allow && all_apps {
         out.push(ALLOW_ALL_APPS.into());
     }
+    if allow && launcher_anywhere(new) {
+        out.push(LAUNCHER_ANYWHERE.into());
+    }
     let Some(old) = old else { return out };
     if blocks(old) {
         if allow {
@@ -79,6 +119,9 @@ pub(super) fn cautions(
                 lasting(&new.duration)
             ));
         }
+        if new.nolog && !old.nolog {
+            out.push(DENY_UNLOGGED.into());
+        }
     } else if old.action == "allow" && allow {
         if !same_conditions {
             out.push(ALLOW_CONDITIONS.into());
@@ -88,6 +131,9 @@ pub(super) fn cautions(
         }
         if new.nolog && !old.nolog {
             out.push(ALLOW_UNLOGGED.into());
+        }
+        if old.duration != "always" && new.duration == "always" {
+            out.push(ALLOW_PERMANENT.into());
         }
     }
     out

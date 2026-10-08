@@ -317,9 +317,17 @@ fn is_env_var_name(name: &str) -> bool {
 /// and only fails once it is enabled.
 fn validate_cidr(data: &str) -> Result<(), String> {
     const NOT_A_CIDR: &str = "network operator data is not a CIDR such as 10.0.0.0/8";
+    // Go's `IPNet.Contains` reads a network on an IPv4-mapped address as
+    // IPv4 with the mask's last 32 bits: `::ffff:0:0/96` matches every IPv4
+    // address. Only the IPv4 form says what it means.
+    const MAPPED: &str = "network operator data is an IPv4 network written as IPv6 \
+         (::ffff:…); write it as IPv4, such as 10.0.0.0/8";
     let (addr, prefix) = data.split_once('/').ok_or(NOT_A_CIDR)?;
     let max_prefix = match addr.parse::<std::net::IpAddr>() {
         Ok(std::net::IpAddr::V4(_)) => 32,
+        Ok(std::net::IpAddr::V6(v6)) if v6.to_ipv4_mapped().is_some() => {
+            return Err(MAPPED.to_string())
+        }
         Ok(std::net::IpAddr::V6(_)) => 128,
         Err(_) => return Err(NOT_A_CIDR.to_string()),
     };

@@ -50,7 +50,9 @@ pub struct ImportItem {
     /// A replace that loosens: deny/reject to allow, a deny/reject
     /// disabled, or `precedence` added to an allow.
     pub weakens: bool,
-    /// No `process.*` condition at any depth.
+    /// Not tied to particular programs: no condition at any depth that
+    /// `rule_policy::binds_to_programs` counts (a real program file's path,
+    /// or a command line).
     pub applies_to_all_apps: bool,
     pub precedence: bool,
     /// The rule is saved to disk (`always`).

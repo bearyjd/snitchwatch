@@ -403,11 +403,12 @@ fn a_match_everything_condition_next_to_a_narrowing_one_is_accepted() {
 }
 
 #[test]
-fn only_a_simple_path_command_or_id_ties_a_rule_to_programs() {
+fn only_a_simple_path_or_command_ties_a_rule_to_programs() {
     for (op, bound) in [
         (path_leaf(), true),
         (leaf("simple", "process.command", "curl x"), true),
-        (leaf("simple", "process.id", "42"), true),
+        // A pid names whatever process gets it next (re-review).
+        (leaf("simple", "process.id", "42"), false),
         (leaf("regexp", "process.path", "^/usr/bin/curl$"), false),
         (
             leaf("simple", "process.parent.path", "/usr/lib/systemd/systemd"),

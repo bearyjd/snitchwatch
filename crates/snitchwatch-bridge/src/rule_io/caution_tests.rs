@@ -288,3 +288,61 @@ fn a_preview_that_would_overflow_the_daemon_snapshot_is_refused() {
         assert!(!error.describe().is_empty());
     }
 }
+
+// --- Re-review follow-ups ----------------------------------------------------
+
+#[test]
+fn an_allow_made_permanent_or_a_deny_unlogged_starts_unticked() {
+    let mut restart = bound("allow");
+    restart.duration = "until restart".into();
+    assert_cautioned(
+        &preview_one(Some(&restart), export_rule(&bound("allow"))),
+        "permanent",
+    );
+    let deny = bound("deny");
+    assert_cautioned(
+        &preview_one(Some(&deny), with(&deny, |v| v["nolog"] = json!(true))),
+        "stops logging the connections a blocking rule",
+    );
+}
+
+/// An allow for an interpreter or launcher, with no destination, lets
+/// every script or program it runs reach anywhere.
+#[test]
+fn an_allow_for_a_launcher_with_no_destination_starts_unticked() {
+    let launcher = |path: &str, action: &str| {
+        json!({ "name": "100-x", "enabled": true, "action": action, "duration": "always",
+                "operator": { "type": "simple", "operand": "process.path", "data": path,
+                              "sensitive": true } })
+    };
+    for path in [
+        "/usr/bin/python3",
+        "/usr/bin/python3.12",
+        "/usr/bin/bash",
+        "/bin/sh",
+        "/usr/bin/env",
+        "/usr/bin/node",
+        "/usr/bin/flatpak",
+        "/usr/bin/steam",
+    ] {
+        let item = preview_one(None, launcher(path, "allow"));
+        assert!(!item.ticked, "{path}: {item:?}");
+        assert!(
+            item.cautions
+                .iter()
+                .any(|c| c.contains("runs other programs")),
+            "{path}: {:?}",
+            item.cautions
+        );
+    }
+    assert!(preview_one(None, launcher("/usr/bin/curl", "allow")).ticked);
+    assert!(preview_one(None, launcher("/usr/bin/python3", "deny")).ticked);
+    let mut bounded = launcher("/usr/bin/python3", "allow");
+    bounded["operator"] = json!({ "type": "list", "operands": [
+        bounded["operator"].clone(),
+        { "type": "simple", "operand": "dest.host", "data": "pypi.org" } ] });
+    assert!(
+        preview_one(None, bounded).ticked,
+        "a destination narrows it"
+    );
+}
