@@ -272,9 +272,10 @@ async fn client_loop_forwards_authenticated_snapshot_to_the_qml_feed() {
     let bridge = snitchwatch_bridge_cli::run(config.clone())
         .await
         .expect("bridge starts");
-    // Room for the whole snapshot answer (rules and what they leave out,
-    // blocklist leftovers, ...), which grows whenever the bridge adds one and
-    // which this test reads without a lag-recovery path.
+    // Room for the whole snapshot answer, which grows whenever the bridge
+    // adds one (production uses 1,024): rules and what they leave out,
+    // blocklist leftovers, the recommended rules. This test reads it without
+    // a lag-recovery path, and each part is checked.
     let (shell_tx, mut shell_messages) = broadcast::channel(64);
     let (inbound_tx, inbound_rx) = mpsc::channel(1);
     let (tray_tx, _) = watch::channel(ReceivedTrayState {
@@ -308,8 +309,9 @@ async fn client_loop_forwards_authenticated_snapshot_to_the_qml_feed() {
     let mut saw_profiles = false;
     let mut saw_tray = false;
     let mut saw_slot = false;
+    let mut saw_curated = false;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
-    while !(saw_clear && saw_blocklists && saw_profiles && saw_tray && saw_slot) {
+    while !(saw_clear && saw_blocklists && saw_profiles && saw_tray && saw_slot && saw_curated) {
         match tokio::time::timeout_at(deadline, shell_messages.recv())
             .await
             .expect("client did not forward the authenticated snapshot")
@@ -338,6 +340,10 @@ async fn client_loop_forwards_authenticated_snapshot_to_the_qml_feed() {
                 connection_id: 1,
                 message: ServerMessage::PromptSlot { .. },
             } => saw_slot = true,
+            ReceivedServerMessage {
+                connection_id: 1,
+                message: ServerMessage::SetCuratedDefaults { .. },
+            } => saw_curated = true,
             _ => {}
         }
     }

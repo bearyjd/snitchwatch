@@ -12,7 +12,9 @@
 //!   curated rule, not a numeric `user.name` row, not a shape the bridge
 //!   won't send back). A pure toggle (only `enabled` differs) is sent as
 //!   #48 did, except that turning a rule on runs the checks that keep a
-//!   rule from matching everything ([`gates`]); anything else passes the
+//!   rule from matching everything ([`gates`]). A recommended background-
+//!   service rule (prompt-slot D) may only be toggled, and the bridge sends
+//!   the data file's rule, not the GUI's; anything else passes the
 //!   `Editor` profile ([`edit`] restores a rule the daemon dropped the file
 //!   of);
 //! - an update to another name is a rename ([`rename`]): `CHANGE_RULE` the
@@ -27,6 +29,7 @@
 use crate::busy::{BusyGuard, BusyNames};
 use crate::replier::{display_reason, Replier};
 use snitchwatch_bridge::cache::rules::{publish_rules, SharedRulesCache};
+use snitchwatch_bridge::curated::manager::CuratedDefaults;
 use snitchwatch_bridge::daemon_commands::{CommandError, DaemonCommands, SendError};
 use snitchwatch_bridge::rule_policy::RuleProblem;
 use snitchwatch_bridge::ws_messages::{
@@ -44,7 +47,7 @@ mod steps;
 
 use gates::{Command, Plan};
 #[cfg(test)]
-pub(crate) use gates::{BUSY, NAME_TAKEN, TCP_REFUSED};
+pub(crate) use gates::{BUSY, CURATED_INERT_REFUSED, NAME_TAKEN, TCP_REFUSED};
 
 /// How long each daemon answer is awaited (#48's pump uses 5 s).
 const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -57,6 +60,8 @@ pub(crate) struct RuleCommands {
     reply_timeout: Duration,
     /// Names a command or an import is working on; no other may touch them.
     busy: BusyNames,
+    /// The recommended rules: their toggles are refused while it is inert.
+    curated: Option<CuratedDefaults>,
 }
 
 /// Where a command's outcome goes.
@@ -130,6 +135,15 @@ impl RuleCommands {
             broadcast,
             reply_timeout,
             busy,
+            curated: None,
+        }
+    }
+
+    /// Refuse toggles of recommended rules while `curated` changes none.
+    pub(crate) fn with_curated(self, curated: CuratedDefaults) -> Self {
+        Self {
+            curated: Some(curated),
+            ..self
         }
     }
 
@@ -156,7 +170,14 @@ impl RuleCommands {
             other => return Some(other),
         };
         let answer = self.answer(request_id, reply);
-        match gates::plan(&command, &self.commands, &self.rules, &self.busy) {
+        let curated_inert = self.curated.as_ref().is_some_and(CuratedDefaults::is_inert);
+        match gates::plan(
+            &command,
+            &self.commands,
+            &self.rules,
+            &self.busy,
+            curated_inert,
+        ) {
             Err(problems) => {
                 warn!(problems = problems.len(), "refused a rule command");
                 answer.refuse(problems);
@@ -190,6 +211,9 @@ impl RuleCommands {
     fn run(&self, plan: Plan, answer: Answer) {
         let (task, guard) = match plan {
             Plan::Send(notification) => return self.send(notification, answer),
+            Plan::ToggleCurated { name, enabled } => {
+                return self.toggle_curated(&name, enabled, answer)
+            }
             Plan::Add { change, name } => match self.claim(&[&name], &answer) {
                 Some(guard) => (Task::Send(change), Some(guard)),
                 None => return,
@@ -225,6 +249,17 @@ impl RuleCommands {
 
     fn send(&self, notification: Notification, answer: Answer) {
         let sent = self.commands.send(notification);
+        let timeout = self.reply_timeout;
+        tokio::spawn(async move {
+            let outcome = sent_outcome(sent, timeout).await;
+            answer.finish(outcome).await;
+        });
+    }
+
+    /// A recommended rule turned on or off. The daemon's `OK` updates the
+    /// rule list, whose broadcast also refreshes the Recommended page.
+    fn toggle_curated(&self, name: &str, enabled: bool, answer: Answer) {
+        let sent = self.commands.send_curated_toggle(name, enabled);
         let timeout = self.reply_timeout;
         tokio::spawn(async move {
             let outcome = sent_outcome(sent, timeout).await;
@@ -289,3 +324,6 @@ mod edit_tests;
 
 #[cfg(test)]
 mod toggle_tests;
+
+#[cfg(test)]
+mod curated_toggle_tests;

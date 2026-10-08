@@ -15,6 +15,7 @@ fn rule(name: &str, enabled: bool, action: &str) -> Rule {
         read_only_reason: None,
         deletable: None,
         user_names: Default::default(),
+        toggleable: None,
     }
 }
 

@@ -81,6 +81,9 @@ Kirigami.ScrollablePage {
     property string inspectReadOnlyReason: ""
     // A rule read-only only for its conditions can still be deleted.
     property bool inspectDeletable: false
+    // Whether the Enabled switch works: an editable rule, or a recommended
+    // background-service rule, which is otherwise read-only.
+    property bool inspectToggleable: false
     property bool inspectEnabled: true
     property string inspectAction: ""
     property string inspectDuration: ""
@@ -189,6 +192,7 @@ Kirigami.ScrollablePage {
         page.inspectDisplayName = rule.displayName;
         page.inspectReadOnlyReason = rule.readOnlyReason;
         page.inspectDeletable = rule.deletable;
+        page.inspectToggleable = rule.toggleable;
         page.inspectEnabled = rule.enabled;
         page.inspectAction = rule.action;
         page.inspectDuration = rule.duration;
@@ -417,6 +421,7 @@ Kirigami.ScrollablePage {
             required property string displayName
             required property string readOnlyReason
             required property bool deletable
+            required property bool toggleable
             required property bool enabled
             // Named `ruleAction` (not `action`) because `Controls.ItemDelegate`
             // (an `AbstractButton` subclass) already declares a built-in
@@ -584,6 +589,7 @@ Kirigami.ScrollablePage {
         page.inspectDisplayName = row.displayName;
         page.inspectReadOnlyReason = row.readOnlyReason;
         page.inspectDeletable = row.deletable;
+        page.inspectToggleable = row.toggleable;
         page.inspectEnabled = row.enabled;
         page.inspectAction = row.ruleAction;
         page.inspectDuration = row.duration;
@@ -655,7 +661,7 @@ Kirigami.ScrollablePage {
                 Controls.Switch {
                     id: inspectEnabledSwitch
                     Kirigami.FormData.label: "Enabled"
-                    enabled: page.inspectReadOnlyReason.length === 0
+                    enabled: page.inspectToggleable
                     checked: page.inspectEnabled
                     onToggled: page.setInspectEnabled(checked)
                 }

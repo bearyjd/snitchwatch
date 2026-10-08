@@ -17,6 +17,7 @@
 pub mod activation;
 mod busy;
 pub mod cli;
+pub mod curated_storage;
 mod profile_actions;
 pub mod profile_storage;
 mod relays;
@@ -42,6 +43,7 @@ use snitchwatch_bridge::blocklists::worker::{BlocklistTasks, DEFAULT_REFRESH_TIC
 use snitchwatch_bridge::cache::connections::ConnectionCache;
 use snitchwatch_bridge::cache::rule_hits_handle::RuleHitsHandle;
 use snitchwatch_bridge::cache::rules::{prune_expired_rules_every, publish_rules};
+use snitchwatch_bridge::curated::manager::CuratedDefaults;
 use snitchwatch_bridge::daemon_commands::DaemonTransport;
 use snitchwatch_bridge::deferred_answers::ANSWER_TIMEOUT;
 use snitchwatch_bridge::filter_pause::{FilterPause, PauseRequest};
@@ -173,6 +175,10 @@ pub struct RunningBridge {
     /// broadcasts and saves them in between.
     rule_hits: RuleHitsHandle,
     rule_hits_ticker: tokio::task::JoinHandle<()>,
+    /// The recommended rules' reconcile loop (prompt-slot D), and their
+    /// choices, saved once more at shutdown.
+    curated_handle: tokio::task::JoinHandle<()>,
+    curated: CuratedDefaults,
 }
 
 impl RunningBridge {
@@ -190,6 +196,8 @@ impl RunningBridge {
         self.pause_expiry_handle.abort();
         self.pause_clear_handle.abort();
         self.blocklist_tasks.abort();
+        self.curated_handle.abort();
+        self.curated.save_now();
         for task in &self.profile_tasks {
             task.abort();
         }
@@ -342,6 +350,14 @@ where
     // Taken before the gRPC server starts, so no rules snapshot is missed.
     let rules_synced = ui_service_inner.rules_synced();
     let profile_rules_synced = ui_service_inner.rules_synced();
+    let curated_synced = rules_synced.clone();
+    // The recommended background-service rules (prompt-slot D).
+    let curated = CuratedDefaults::new(
+        ui_service_inner.daemon_commands(),
+        ui_service_inner.rules_handle(),
+        broadcast_tx.clone(),
+    );
+    curated_storage::configure(&curated, &options.storage, options.mode);
 
     // --- BlocklistsManager: persisted and enforced only when `Persistent` ---
     // The profile store opens in the same state directory but tracks its
@@ -421,6 +437,7 @@ where
         DEFAULT_REFRESH_TICK,
         Some(rules_synced),
     );
+    let curated_handle = curated.spawn(curated_synced);
     let (ws_shutdown_tx, ws_shutdown_rx) = oneshot::channel::<()>();
 
     tokio::spawn(async move {
@@ -476,7 +493,8 @@ where
         rules.clone(),
         broadcast_tx.clone(),
         busy_names.clone(),
-    );
+    )
+    .with_curated(curated.clone());
     tokio::spawn(prune_expired_rules_every(
         RULE_EXPIRY_TICK,
         Arc::downgrade(&rules),
@@ -570,6 +588,7 @@ where
     let commands_for_pump = daemon_commands;
     let rules_for_pump = rules.clone();
     let blocklist_worker = blocklist_tasks.worker.clone();
+    let curated_for_pump = curated.clone();
     tokio::spawn(async move {
         while let Some(msg) = inbound_rx.recv().await {
             // Blocklist messages go to the single blocklist worker; queueing
@@ -581,6 +600,9 @@ where
                 continue;
             };
             let Some(msg) = rule_commands.try_route(msg) else {
+                continue;
+            };
+            let Some(msg) = curated_for_pump.try_route(msg) else {
                 continue;
             };
             // Special-cased before is_profile_message/upstream::apply — this
@@ -694,6 +716,7 @@ where
                     });
                     prompt_slot_for_pump.announce(&snapshot_tx);
                     rule_hits_for_pump.announce(&snapshot_tx);
+                    curated_for_pump.announce();
                     // Including `paused: false`: a GUI that was away when a
                     // pause ended learns it here. Sent under the cache lock,
                     // like every other pause announcement, so it can't
@@ -759,6 +782,8 @@ where
         profile_tasks,
         rule_hits,
         rule_hits_ticker,
+        curated_handle,
+        curated,
     })
 }
 

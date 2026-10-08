@@ -14,6 +14,7 @@ use qml_guard_support::*;
 
 const BLOCKLISTS_PAGE: &str = include_str!("../qml/BlocklistsPage.qml");
 const PROFILES_PAGE: &str = include_str!("../qml/ProfilesPage.qml");
+const RECOMMENDED_PAGE: &str = include_str!("../qml/RecommendedRulesPage.qml");
 const RULES_PAGE: &str = include_str!("../qml/RulesPage.qml");
 const SIMULATOR_SHEET: &str = include_str!("../qml/RuleSimulatorSheet.qml");
 const IMPORT_SHEET: &str = include_str!("../qml/RulesImportSheet.qml");
@@ -61,6 +62,7 @@ const ALL_QML: &[(&str, &str)] = &[
         "PromptSlotBanner.qml",
         include_str!("../qml/PromptSlotBanner.qml"),
     ),
+    ("RecommendedRulesPage.qml", RECOMMENDED_PAGE),
     ("RuleEditorSheet.qml", EDITOR_SHEET),
     ("RuleSimulatorSheet.qml", SIMULATOR_SHEET),
     ("RulesImportSheet.qml", IMPORT_SHEET),
@@ -456,6 +458,25 @@ fn blocklists_page_labels_showing_subscription_data_are_plain_text() {
     );
 }
 
+/// Prompt-slot D: each entry's program, what it allows, why, its status and
+/// problem, and the bridge's reasons are the bridge's text.
+#[test]
+fn recommended_rules_page_labels_showing_bridge_text_are_plain_text() {
+    assert_data_labels_plain_text(
+        "RecommendedRulesPage.qml",
+        RECOMMENDED_PAGE,
+        &[
+            "row.program",
+            "row.allows",
+            "row.why",
+            "row.statusText",
+            "row.problem",
+            "page.unavailableReason",
+        ],
+        6,
+    );
+}
+
 /// The decision prompt: the connecting program's name and the destination host
 /// (plus the reverse-DNS / RDAP answers, which are fully remote-controlled)
 /// are attacker-influenced text on the one surface the user must read to
@@ -494,6 +515,7 @@ fn inline_messages_carry_only_fixed_text() {
         ("ConnectionsPage.qml", CONNECTIONS_PAGE),
         ("BlocklistsPage.qml", BLOCKLISTS_PAGE),
         ("ProfilesPage.qml", PROFILES_PAGE),
+        ("RecommendedRulesPage.qml", RECOMMENDED_PAGE),
         ("RulesPage.qml", RULES_PAGE),
         ("RuleSimulatorSheet.qml", SIMULATOR_SHEET),
         ("RulesImportSheet.qml", IMPORT_SHEET),
@@ -628,6 +650,7 @@ fn overlay_sheet_titles_are_plain_text() {
         ("ConnectionsPage.qml", CONNECTIONS_PAGE),
         ("BlocklistsPage.qml", BLOCKLISTS_PAGE),
         ("ProfilesPage.qml", PROFILES_PAGE),
+        ("RecommendedRulesPage.qml", RECOMMENDED_PAGE),
         ("RulesPage.qml", RULES_PAGE),
         ("RuleSimulatorSheet.qml", SIMULATOR_SHEET),
         ("RulesImportSheet.qml", IMPORT_SHEET),

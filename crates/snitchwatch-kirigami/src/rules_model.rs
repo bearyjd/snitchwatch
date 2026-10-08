@@ -55,13 +55,15 @@ const ROLE_HIT_BADGE_MS: i32 = 18;
 const ROLE_SHADOW_KIND: i32 = 19;
 const ROLE_SHADOW_TEXT: i32 = 20;
 const ROLE_SHADOW_BY: i32 = 21;
+// Prompt-slot D: a recommended rule is read-only but can be turned on/off.
+const ROLE_TOGGLEABLE: i32 = 22;
 /// How the rule takes part in the daemon's decision (issue #102).
-const ROLE_HOW_IT_DECIDES: i32 = 22;
+const ROLE_HOW_IT_DECIDES: i32 = 23;
 /// The flagged row's badge (issues #44, #64).
-const ROLE_FLAG_BADGE: i32 = 23;
+const ROLE_FLAG_BADGE: i32 = 24;
 /// Where the rule comes from, and its section's heading (`rules::sections`).
-const ROLE_SOURCE_LABEL: i32 = 24;
-const ROLE_SECTION_LABEL: i32 = 25;
+const ROLE_SOURCE_LABEL: i32 = 25;
+const ROLE_SECTION_LABEL: i32 = 26;
 
 #[cxx_qt::bridge]
 pub mod qobject {
@@ -253,6 +255,7 @@ impl qobject::RulesModel {
                 rule.read_only_reason.as_deref().unwrap_or_default(),
             )),
             ROLE_DELETABLE => QVariant::from(&rule.can_delete()),
+            ROLE_TOGGLEABLE => QVariant::from(&rule.can_toggle()),
             // Flagged: all apps (#44), or an unidentified program (#64).
             ROLE_APPLIES_TO_ALL_APPS => QVariant::from(&rule.flagged()),
             ROLE_FLAG_BADGE => QVariant::from(&QString::from(rule.flag_badge())),
@@ -298,6 +301,7 @@ impl qobject::RulesModel {
         roles.insert(ROLE_DISPLAY_NAME, QByteArray::from("displayName"));
         roles.insert(ROLE_READ_ONLY_REASON, QByteArray::from("readOnlyReason"));
         roles.insert(ROLE_DELETABLE, QByteArray::from("deletable"));
+        roles.insert(ROLE_TOGGLEABLE, QByteArray::from("toggleable"));
         roles.insert(ROLE_ENABLED, QByteArray::from("enabled"));
         // Named `ruleAction` (not `action`) because `Controls.ItemDelegate`
         // (an `AbstractButton` subclass) already declares a built-in `action`
@@ -610,7 +614,7 @@ mod role_tests {
             .filter_map(|rest| rest.split("i32 = ").nth(1))
             .map(|value| value.trim_end_matches(';'))
             .collect();
-        assert!(ids.len() >= 26, "found {} role ids", ids.len());
+        assert!(ids.len() >= 27, "found {} role ids", ids.len());
         let unique: std::collections::BTreeSet<_> = ids.iter().collect();
         assert_eq!(unique.len(), ids.len(), "duplicate role ids: {ids:?}");
         let body = source

@@ -473,9 +473,10 @@ impl DaemonCommands {
     /// Defense in depth for every path that builds a command (the GUI's go
     /// through `rule_wire::rule_from_wire` first): a `CHANGE_RULE`'s
     /// operator must pass [`crate::rule_policy::validate_operator`], and no
-    /// rule may carry a reserved name (a blocklist one, or a packaged
-    /// rule's). The bridge's own blocklist rules take
-    /// [`send_blocklist`](Self::send_blocklist) instead; packaged rules are
+    /// rule may carry a reserved name (a blocklist one, a curated default's,
+    /// or a packaged rule's). The bridge's own blocklist rules take
+    /// [`send_blocklist`](Self::send_blocklist) and its curated defaults
+    /// [`send_curated`](Self::send_curated) instead; packaged rules are
     /// never sent.
     pub fn send(&self, notification: Notification) -> Result<PendingReply, SendError> {
         if notification
@@ -635,6 +636,8 @@ impl Drop for PendingReply {
 #[path = "daemon_commands/blocklist_command.rs"]
 mod blocklist_command;
 pub use blocklist_command::BlocklistCommand;
+mod curated_command;
+pub use curated_command::CuratedCommand;
 
 #[path = "daemon_commands/profile_command.rs"]
 mod profile_command;

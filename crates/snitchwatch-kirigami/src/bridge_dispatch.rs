@@ -102,6 +102,16 @@ pub fn interests_traffic(msg: &ServerMessage) -> bool {
     )
 }
 
+/// True when `msg` carries the recommended background-service rules, or
+/// starts a session's snapshot (so `CuratedDefaultsModel`, prompt-slot D,
+/// forgets an earlier bridge's list even when the new one sends none).
+pub fn interests_curated_defaults(msg: &ServerMessage) -> bool {
+    matches!(
+        msg,
+        ServerMessage::SetCuratedDefaults { .. } | ServerMessage::ClearConnectionRows
+    )
+}
+
 /// True when `msg` carries daemon diagnostics report data (drives
 /// `DaemonHealthModel`).
 pub fn interests_diagnostics(msg: &ServerMessage) -> bool {

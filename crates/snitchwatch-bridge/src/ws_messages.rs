@@ -193,6 +193,16 @@ pub enum ServerMessage {
     ProfileChanged {
         active_profile_id: Option<String>,
     },
+    /// The curated default rules for background services and where each
+    /// stands (prompt-slot plan Part D; `bridge_capabilities::CURATED_DEFAULTS`).
+    SetCuratedDefaults {
+        entries: Vec<crate::curated::wire::CuratedDefaultSummary>,
+        storage: StorageStatus,
+        /// Why this bridge never installs them (the per-user bridge, or no
+        /// saved settings); `None` when it does.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        unavailable: Option<String>,
+    },
     SetConnectionsStatus {
         status: ConnectionsStatus,
     },
@@ -586,6 +596,18 @@ pub enum ClientMessage {
     DecideLater {
         row_id: String,
     },
+    /// Turn the curated defaults `ids` on or off (prompt-slot plan Part D).
+    /// Unknown ids are ignored.
+    SetCuratedDefaults {
+        ids: Vec<String>,
+        on: bool,
+    },
+    /// Remove an entry's rule that was edited outside Snitchwatch, after the
+    /// user confirmed (prompt-slot D, code review M2). Only that entry's own
+    /// reserved name is ever deleted; an unknown id does nothing.
+    RemoveCuratedDefault {
+        id: String,
+    },
     /// Rule import/export (roadmap P2.7); handled by bridge-cli's
     /// `rules_import` task, never by `upstream::apply`. `request_id` is the
     /// client's, echoed in the answer; `reply` is stamped by `ws_server`
@@ -711,10 +733,11 @@ pub struct StorageStatus {
     /// or, with `unreadable`, why the saved subscriptions couldn't be read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
-    /// Blocklists only: the saved subscriptions couldn't be read (issue
-    /// #45): Snitchwatch leaves the firewall's blocklist rules as they are
-    /// and installs nothing. Its own state, apart from `persistent`. An
-    /// unreadable profile store is reported as not persistent instead.
+    /// The saved data couldn't be read, so Snitchwatch leaves the firewall's
+    /// rules for it as they are and installs nothing: blocklists (issue
+    /// #45) and the recommended rules' choices (prompt-slot D). Its own
+    /// state, apart from `persistent`. An unreadable profile store is
+    /// reported as not persistent instead.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub unreadable: bool,
 }

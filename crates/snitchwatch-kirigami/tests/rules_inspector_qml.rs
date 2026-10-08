@@ -188,6 +188,33 @@ Window {
                 expect(probeWindow.sent.length === beforeShape + 1
                        && probeWindow.sent[beforeShape].action === "deleteRule",
                        "no delete for a shape-only rule: " + JSON.stringify(probeWindow.sent));
+
+                // Prompt-slot D: a recommended rule is read-only and can't be
+                // deleted, but the bridge says it can be turned on or off.
+                const curated = probeWindow.curl(true);
+                curated.name = "snitchwatch-default-flatpak-flathub";
+                curated.displayName = curated.name;
+                curated.readOnlyReason = "A recommended background-service rule.";
+                curated.deletable = false;
+                curated.toggleable = true;
+                probeWindow.setRules([curated, locked]);
+                expect(page.openRuleByName(curated.name), "recommended rule not listed");
+                expect(sw.enabled, "switch disabled on a recommended rule");
+                expect(!page.inspectorDeleteButton.enabled, "Delete enabled on a recommended rule");
+                const beforeCurated = probeWindow.sent.length;
+                probeWindow.click(sw);
+                expect(probeWindow.sent.length === beforeCurated + 1
+                       && probeWindow.sent[beforeCurated].rule.enabled === false
+                       && probeWindow.sent[beforeCurated].ruleId === curated.name,
+                       "no toggle for a recommended rule: " + JSON.stringify(probeWindow.sent));
+                expect(page.openRuleByName("stock\\ui"), "bad-name rule not listed");
+                expect(!sw.enabled, "stale switch on a read-only rule");
+                rows.currentIndex = 0;
+                page.openInspector(rows.currentItem);
+                expect(sw.enabled, "row path: switch disabled on a recommended rule");
+                rows.currentIndex = 1;
+                page.openInspector(rows.currentItem);
+                expect(!sw.enabled, "row path: stale switch on a read-only rule");
             } finally {
                 Qt.quit();
             }

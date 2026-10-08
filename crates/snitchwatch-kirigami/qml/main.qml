@@ -101,6 +101,12 @@ Kirigami.ApplicationWindow {
         id: profilesModel
     }
 
+    // Recommended background-service rules (prompt-slot D): opt-in rules the
+    // bridge adds and removes; the request signal is routed below.
+    CuratedDefaultsModel {
+        id: curatedDefaultsModel
+    }
+
     // First-run onboarding wizard (Task 12). Owns daemon-detection state; the
     // onboarding page itself is pushed/popped below based on `state`.
     WizardController {
@@ -191,6 +197,7 @@ Kirigami.ApplicationWindow {
         rulesModel.startBridgeFeed();
         trafficModel.startBridgeFeed();
         profilesModel.startBridgeFeed();
+        curatedDefaultsModel.startBridgeFeed();
         geoModel.startBridgeFeed();
         wizardController.probe();
         notificationController.startBridgeFeed();
@@ -216,6 +223,12 @@ Kirigami.ApplicationWindow {
     Connections {
         target: profilesModel
         function onProfileChangeRequested(json) {
+            bridgeFeed.sendClientJson(json);
+        }
+    }
+    Connections {
+        target: curatedDefaultsModel
+        function onCuratedChangeRequested(json) {
             bridgeFeed.sendClientJson(json);
         }
     }
@@ -465,6 +478,12 @@ Kirigami.ApplicationWindow {
         }
     }
     Component {
+        id: recommendedRulesPageComponent
+        RecommendedRulesPage {
+            model: curatedDefaultsModel
+        }
+    }
+    Component {
         id: diagnosticsPageComponent
         DiagnosticsPage {
             controller: settingsController
@@ -512,6 +531,7 @@ Kirigami.ApplicationWindow {
         function onPendingCountChanged() {
             const now = connectionsModel.pendingCount;
             if (now > root.lastPendingCount) {
+                notificationController.noteRaise(root.visible, root.active);
                 root.raiseAndActivate();
             }
             root.lastPendingCount = now;
@@ -618,6 +638,11 @@ Kirigami.ApplicationWindow {
                 text: "Profiles"
                 icon.name: "preferences-system-network"
                 onTriggered: root.pageStack.replace(profilesPageComponent)
+            },
+            Kirigami.Action {
+                text: "Recommended background-service rules"
+                icon.name: "checkmark"
+                onTriggered: root.pageStack.replace(recommendedRulesPageComponent)
             },
             Kirigami.Action {
                 text: "Security Scan"

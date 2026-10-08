@@ -497,10 +497,11 @@ Branch `feat/prompt-slot-autoanswer`.
       - an **unedited** copy under the reserved prefix that is no longer in
         the file, or that exists while the opt-in is off, is deleted with
         `DELETE_RULE`;
-      - **a user-edited copy is never deleted, not even on opt-out.** That
-        means same name, but some field other than `enabled` differs from
-        the data file after list-operand normalisation. It is left alone
-        and flagged ("Edited by you; Snitchwatch won't change it").
+      - **a user-edited copy is not deleted, not even on opt-out** (as of
+        the firewall service's last rule list). That means same name, but
+        some field other than `enabled` differs from the data file after
+        list-operand normalisation. It is left alone and flagged (see "D as
+        implemented" for the wording).
         Deleting it could silently undo a change the user chose, such as
         narrowing a curated allow's scope;
       - nothing outside the prefix is ever deleted.
@@ -523,6 +524,171 @@ Branch `feat/prompt-slot-autoanswer`.
       every KDE app, so an any-host allow for it allows all of them;
     - Flatpak apps report `/app/...` paths that collide across apps
       (P4.2).
+
+#### D as implemented (2026-10-08): departures and the capture
+
+Branch `feat/prompt-slot-curated-defaults`.
+- **Data** (`crates/snitchwatch-bridge/data/curated-defaults-v1.json`,
+  built into the bridge). Each entry has an id, an exact `/usr` program
+  path, exactly one of one host or this computer, one port, `tcp` or `udp`,
+  a plain-text `why`, and the capture `evidence`. Its rule is a list:
+  - `process.path`, simple, case sensitive;
+  - `dest.host` simple, or `dest.ip` regexp `^(127\.0\.0\.1|::1)$`;
+  - `dest.port` simple;
+  - `protocol` regexp `^tcp6?$` or `^udp6?$` (IPv4 and IPv6).
+
+  No wildcards, no host regexps, no any-address entry.
+- **Allowlist.** `curated::check_curated_rule` takes only that shape, in
+  that order, with the description, `allow`, `always` and no precedence:
+  a program under `/usr` but not `/usr/local`, a port of ASCII digits only.
+  It then runs the `Editor` profile. It is applied to the data file (a bad
+  file offers nothing; reconcile then treats recorded copies as retired),
+  and at the send point.
+- **One "unedited" check** (`curated::canonical`, PR #105 review M4).
+  `is_unedited` compares a canonical form that applies opensnitchd
+  v1.8.0's normalisations: a list's operand `list` and its `data` cleared,
+  a case-insensitive regexp lowercased, `created` and `enabled` ignored.
+  Reconcile, the Rules page's toggle, the toggle request and the send path
+  all use it. Every regexp the data file builds is already lowercase
+  (pinned by a test), since `Compile` lowercases in place.
+- **Send path.** `DaemonCommands::send_curated` with a `CuratedCommand`
+  (crate-private constructors, like `BlocklistCommand`). Its `CHANGE_RULE`
+  carries exactly a list entry's rule, apart from `enabled` and `created`
+  (security review L2). `send` still refuses the prefix, and the profile
+  path (`850-profile:`, #104) and this one each refuse the other's names.
+- **Opt-in, per entry.** The choices live in
+  `<state>/curated-defaults.json` (version 2; version 1 is still read),
+  through `state_file` (owner-only, no links, atomic replace). A recorded
+  copy is the canonical form, and must be exactly its entry's rule; one
+  that isn't (a crafted file, or an older list) is dropped with a warning,
+  so that entry's daemon copy reads as edited. Nothing is on by default.
+  Kirigami has a "Recommended background-service rules" page: a switch per
+  entry, "Turn all on" and "Turn all off" (asking only for entries not
+  already that way), and each entry's program, what it allows and why, as
+  plain text.
+- **Reconcile**, as item 13, plus:
+  - Everything is as of the firewall service's last rule list: the cache
+    refreshes only on a reconnect (HELLO) or a confirmed command, so a rule
+    edited on disk is seen at the daemon's next reconnect.
+  - **Inert** (PR #105 review H1). The bridge changes nothing (no command,
+    no choice taken), says why, and reports only what the daemon has
+    ("In the firewall (added earlier)", "differs from this description",
+    "Not added by this Snitchwatch service") when:
+    - it is the per-user bridge (its daemon link is TCP, where an
+      impostor's `OK` would read "Installed"), or has no saved settings;
+    - its choices file can't be read (like #104's unreadable profiles,
+      with `storage.unreadable`): no file is the first run, but a
+      damaged, unknown-version, foreign-mode or linked file is never read
+      as "empty", which would have deleted every enabled rule;
+    - a save fails mid-run.
+
+    The Rules page's toggle of a recommended rule is refused then too.
+  - Choices are taken in memory on the inbound pump and saved by the
+    worker on a blocking thread, one save at a time and never an older
+    version over a newer one, before any command that depends on them.
+  - **No retry loop** (PR #105 re-review HIGH). The worker runs a pass
+    only when something it reads changed: the rule list's revision, its
+    known/withdrawn state, the daemon stream, the choices, inertness, or a
+    removal asked for. A held rule list is published on release only if a
+    confirmed command changed it (all `PublishHold` users, the rule import
+    too). A command that failed (refused, not sent, no answer) is not sent
+    again for that entry until its choice changes or the daemon reconnects;
+    until then the entry keeps its failure status and text. Every GUI
+    request taken (a choice, even an unchanged one, or a removal) counts
+    toward the gate, so each gets a pass, and asking again retries a failed
+    entry once (re-review 2). A full command queue (`NotQueued`, e.g.
+    during a large import) isn't remembered as a failure: the entry reads
+    "busy" and is tried at the next rule-list change. The worker also wakes
+    when a daemon stream becomes current.
+  - **A reconnect mid-pass ends the pass** (re-review 2, M1): its plan was
+    for the old list. Removals not yet sent are decided again against the
+    new list, and each delete is checked against the live copy just before
+    it is sent.
+  - **A first run leaves the firewall alone** (re-review M1). An entry the
+    user never chose (no choices file, e.g. one moved away) whose unedited
+    rule is already in the firewall reads "In the firewall (added
+    earlier)", with its switch on (or "..., turned off on the Rules page",
+    switch off), and nothing is sent until the user turns it off (deleted)
+    or keeps it: a **Keep** button turns it on, which adopts the copy with
+    no command. Only an explicit "off" deletes.
+  - The ids Snitchwatch installed are kept apart from the recorded copies,
+    so a copy dropped as invalid still marks its rule as one Snitchwatch
+    installed: gone from the daemon, it is a removal, not a reinstall
+    (re-review M2).
+  - Just before an install, the live rule list is checked again: a copy
+    that arrived since the pass began is adopted next pass, not
+    overwritten.
+  - "Rule installed" only after the daemon's `OK`; the installed copy is
+    recorded then. Each command is re-checked against the choices just
+    before it is sent, so a choice changed mid-pass wins. A pass holds the
+    rule-list broadcast (one `SetRules` per pass). Every `SetRules` and
+    `UpdateRules` wakes the worker, so a withdrawn list shows "Waiting" and
+    a late `OK` updates the status. An `info!` line names each entry
+    installed, deleted or removed (never the rule body).
+  - A rule installed earlier and missing from a committed snapshot was
+    removed outside the page. It is recorded and not reinstalled until the
+    user turns the entry off and on again; only an off-to-on change
+    forgets the removal, so "Turn all on" doesn't (review M1). The status
+    says "This rule was removed" neutrally.
+  - A copy whose rule differs from the entry reads "The firewall's rule
+    under this name differs from this description and still applies; see
+    the Rules page." It is never deleted by reconcile, but has a
+    **Remove** button (review M2): after a confirmation ("Remove the
+    firewall's rule under this name? It differs from this description and
+    may allow or block something else; see the Rules page."), the bridge
+    sends `DELETE_RULE` for exactly that entry's reserved name, and records
+    it as removed. A name too large for the bridge's list (`left_out`)
+    counts as edited (security review L4). A removal asked for under a
+    list that is then withdrawn is dropped.
+  - A refused delete reads "The firewall service refused to remove the
+    rule." and is tried again after the daemon reconnects or the user
+    changes that entry. A refused Remove keeps that status while the copy
+    is still edited on the same daemon stream (re-review 2, M2).
+  - Follow-up, not in this PR: a rule under the prefix for an entry no
+    longer in the list, with no recorded copy, is left alone and can't be
+    removed from the Recommended page (only from the daemon's own UI or
+    rules folder). A "No longer recommended" list with Remove would cover
+    it.
+  - Not handled in v1: a later data file changing an installed entry. Its
+    old copy then reads as edited and is left alone. A v2 must decide.
+  - Not done: telling a removal from a race. A snapshot staged before an
+    install's `OK` and committed after it can read as a removal. That is
+    rare (a daemon reconnect racing an install) and fails safe: the entry
+    reads "removed" and isn't reinstalled.
+- **Pure toggles.** The Rules page can turn a shipped entry's rule on or
+  off (wire field `toggleable`). The bridge sends the data file's rule,
+  never the GUI's, and only while the daemon's copy is unedited. Adds,
+  edits, renames and deletes under the prefix stay refused. An edited copy
+  keeps the reserved-name reason.
+- **Wire.** `ClientMessage::SetCuratedDefaults { ids, on }` and
+  `RemoveCuratedDefault { id }`; `ServerMessage::SetCuratedDefaults
+  { entries, storage, unavailable }`; capability `curatedDefaults`.
+  Kirigami forgets a session's list when a new session starts, so a bridge
+  without the capability shows "not offered".
+- **VM check (r11), for the PR:** does opensnitchd v1.8.0 refuse
+  `DELETE_RULE` for a rule whose file is already gone (`loader.go` `Delete`
+  returns the `os.Remove` error)? Either way the entry shows the result
+  and the command isn't repeated until the daemon reconnects or the user
+  changes the entry. Also: the status stays "Rule installed" across a
+  daemon restart (the canonical comparison against a real daemon's copy).
+- **Not added: a `user.id` condition.** NetworkManager's check most likely
+  runs as root, but the r10 capture records no uid and this sandbox has no
+  NetworkManager unit to read. r11 should record the uid; then entries
+  whose program always runs as a fixed system user can add it.
+- **The capture** (bazzite-tower r10, idle and after update):
+
+  | Capture entry | v1 | Why |
+  |---|---|---|
+  | `/usr/bin/NetworkManager` → `fedoraproject.org`:80, tcp/tcp6 | included | the connectivity check |
+  | `/usr/bin/chronyc` → `127.0.0.1`/`::1`:323, udp/udp6 | included, this computer only | talks to chronyd |
+  | `/usr/bin/flatpak` → `dl.flathub.org`:443, tcp6 | included | Flathub updates (held in r10, so the update timed out) |
+  | `/usr/lib/systemd/systemd-resolved` → the network's DNS server:53, udp | **excluded, owner question S6** | the server differs per network, so only an any-address allow fits; S3 says host-constrained |
+  | chronyd → NTP servers:123 | pending | chronyd was stopped in the fixture |
+  | rpm-ostree, skopeo | pending r11 | r10 has only skopeo to a local image reference (`127.0.0.1`/`::1`:443) |
+  | fwupd | pending r11 | not in r10 |
+  | tailscaled → `log.tailscale.com` | excluded | optional service |
+  | curl → `10.0.2.2`:49190; `<unknown>` → `10.0.2.2`:51820 udp | excluded | the test harness and its WireGuard check |
+  | kioworker, Steam | excluded | not in the capture; Steam lives under home (no `/usr` path) |
 
 ### E. Daemon-side options (describe only; for bazzite-tower's patch)
 
@@ -732,3 +898,15 @@ Tower VM checks:
     paused)".
   - The pause menu items say so.
   - PR #86's warning stays as a fallback.
+- **S6 (new, from D). A DNS allow for `systemd-resolved`.** On a deny
+  default nothing resolves until the resolver's upstream queries are
+  allowed (`packaging/README.md` says so for the blocklist fetch too). The
+  network's DNS server changes from network to network, so the only rule
+  that fits is `/usr/lib/systemd/systemd-resolved` to any address on UDP
+  port 53. S3 asks for host-constrained rules, so v1 leaves it out.
+  Options:
+  - (a) add it as an opt-in entry ("any address, DNS port only");
+  - (b) ship it in packaging instead, like the fetch rule;
+  - (c) leave DNS to the user.
+
+  **OPEN.**
