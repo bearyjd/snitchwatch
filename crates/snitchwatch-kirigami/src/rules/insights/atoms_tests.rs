@@ -270,3 +270,55 @@ fn the_weakest_proof_in_a_rule_is_the_proof_of_the_rule() {
     ]));
     assert_eq!(covers(&a, &b), Some(Proof::Engine));
 }
+
+#[test]
+fn a_cidr_is_read_the_way_the_daemon_reads_it() {
+    let ip = host_rule(simple("dest.ip", "10.1.2.3"));
+    // /0 covers every address; /32 covers just its own.
+    let everything = host_rule(network("dest.network", "0.0.0.0/0"));
+    assert_eq!(covers(&everything, &ip), Some(Proof::Exact));
+    let one = host_rule(network("dest.network", "10.1.2.3/32"));
+    assert_eq!(covers(&one, &ip), Some(Proof::Exact));
+    assert_eq!(
+        covers(&one, &host_rule(simple("dest.ip", "10.1.2.4"))),
+        None
+    );
+    // Not CIDRs the daemon would load: nothing is proven from them.
+    for bad in [
+        "10.0.0.0/+8",
+        "10.0.0.0/33",
+        "10.0.0.0/",
+        "10.0.0.0",
+        "10.0.0.0/8/8",
+    ] {
+        let a = host_rule(network("dest.network", bad));
+        assert_eq!(covers(&a, &ip), None, "{bad}");
+    }
+}
+
+#[test]
+fn source_addresses_pair_with_source_networks() {
+    let net = host_rule(network("source.network", "192.168.0.0/16"));
+    assert_eq!(
+        covers(&net, &host_rule(simple("source.ip", "192.168.1.5"))),
+        Some(Proof::Exact)
+    );
+    assert_eq!(
+        covers(&net, &host_rule(simple("dest.ip", "192.168.1.5"))),
+        None
+    );
+}
+
+#[test]
+fn the_strongest_premise_for_a_condition_decides_the_proof() {
+    let a = host_rule(regexp("dest.host", r"^.*\.example\.com$"));
+    let b = host_rule(all_of(vec![
+        simple_sensitive("dest.host", "a.example.com"),
+        regexp("dest.host", r"^.*\.example\.com$"),
+    ]));
+    assert_eq!(
+        covers(&a, &b),
+        Some(Proof::Exact),
+        "the identical pattern is exact"
+    );
+}

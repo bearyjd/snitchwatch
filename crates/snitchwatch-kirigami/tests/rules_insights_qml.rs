@@ -266,6 +266,20 @@ Window {
                           "the link opened '" + page.inspectName + "'");
         page.inspectorSheet.close();
 
+        // The bridge re-sends the whole list after every rule command; the
+        // same list again takes nothing back.
+        probeWindow.setRules([
+            probeWindow.rule("100-deny", "deny", "example.com", 40),
+            probeWindow.rule("200-allow", "allow", "example.com", 40),
+            probeWindow.rule("300-solo", "allow", "solo.example", 40),
+            probeWindow.rule("400-quiet", "allow", "quiet.example", 40, { nolog: true }),
+            probeWindow.rule("500-new", "allow", "new.example", 3)
+        ]);
+        probeWindow.check(probeWindow.text(1, "shadowLabel") ===
+                          "Never applies: 100-deny decides these connections instead.",
+                          "a finding went with an unchanged list: '"
+                          + probeWindow.text(1, "shadowLabel") + "'");
+
         // A changed rule list makes the findings untrue: they go, and say so.
         probeWindow.setRules([probeWindow.rule("100-deny", "deny", "example.com", 40)]);
         probeWindow.check(probeWindow.text(0, "shadowLabel") === "", "a finding survived a change");

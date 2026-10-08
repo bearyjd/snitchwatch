@@ -35,6 +35,9 @@ pub fn is_managed(rule: &Rule) -> bool {
 #[path = "insights/atoms_tests.rs"]
 mod atoms_tests;
 #[cfg(test)]
+#[path = "insights/differential_tests.rs"]
+mod differential_tests;
+#[cfg(test)]
 #[path = "insights/hit_badge_tests.rs"]
 mod hit_badge_tests;
 #[cfg(test)]
