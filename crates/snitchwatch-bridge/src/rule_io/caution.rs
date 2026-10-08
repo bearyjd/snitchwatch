@@ -36,16 +36,61 @@ const LAUNCHER_ANYWHERE: &str = "This lets a program that runs other programs (a
 /// Programs that run other programs: allowing one everywhere allows what it
 /// runs too.
 const LAUNCHERS: &[&str] = &[
-    "python", "python3", "bash", "sh", "zsh", "dash", "env", "perl", "ruby", "node", "flatpak",
+    "python",
+    "python3",
+    "bash",
+    "sh",
+    "zsh",
+    "dash",
+    "ksh",
+    "fish",
+    "env",
+    "perl",
+    "ruby",
+    "node",
+    "deno",
+    "bun",
+    "lua",
+    "tclsh",
+    "pwsh",
+    "java",
+    "php",
+    "awk",
+    "gawk",
+    "mawk",
+    "busybox",
+    "toybox",
+    "socat",
+    "nc",
+    "ncat",
+    "netcat",
+    "wine",
+    "wine64",
+    "xargs",
+    "nohup",
+    "sudo",
+    "doas",
+    "pkexec",
+    "systemd-run",
+    "flatpak",
+    "flatpak-spawn",
     "steam",
 ];
 
+/// Versioned names (`python3.12`, `php8.3`) and the dynamic loader
+/// (`ld-linux-x86-64.so.2`, which runs any program given to it).
 fn is_launcher(path: &str) -> bool {
     let name = path.rsplit('/').next().unwrap_or(path);
+    let versioned = |prefix: &str| {
+        name.strip_prefix(prefix)
+            .is_some_and(|v| !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit() || b == b'.'))
+    };
     LAUNCHERS.contains(&name)
-        || name
-            .strip_prefix("python3.")
-            .is_some_and(|v| !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()))
+        || ["python3.", "python", "php", "perl", "ruby", "lua"]
+            .iter()
+            .any(|prefix| versioned(prefix))
+        || name.starts_with("ld-linux")
+        || name.starts_with("ld.so")
 }
 
 /// An allow tied to a launcher's path with no destination condition.
@@ -61,7 +106,10 @@ fn launcher_anywhere(rule: &Rule) -> bool {
     let launcher = leaves
         .iter()
         .any(|l| l.operand == "process.path" && l.r#type == "simple" && is_launcher(&l.data));
-    let destination = leaves.iter().any(|l| l.operand.starts_with("dest."));
+    // A port alone is every host on that port: still anywhere.
+    let destination = leaves
+        .iter()
+        .any(|l| matches!(l.operand.as_str(), "dest.host" | "dest.ip" | "dest.network"));
     launcher && !destination
 }
 

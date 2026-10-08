@@ -269,3 +269,34 @@ fn the_program_warning_ignores_unrelated_problems() {
         result.warnings
     );
 }
+
+/// Re-review LOW: the pattern warning says what a pattern can take in, and
+/// an unanchored pattern warns that it matches longer paths too.
+#[test]
+fn a_program_path_pattern_says_what_it_matches() {
+    let pattern = |value: &str| {
+        draft(vec![
+            condition("process.path", MatchKind::Pattern, value),
+            condition("dest.host", MatchKind::Exact, "example.com"),
+        ])
+    };
+    let warns = |value: &str| check(&pattern(value), None).warnings;
+    let anchored = warns("^/usr/bin/curl$");
+    assert!(
+        anchored
+            .iter()
+            .any(|w| w.contains("shells and interpreters")),
+        "{anchored:?}"
+    );
+    assert!(
+        anchored.iter().all(|w| !w.contains("^ at the start")),
+        "{anchored:?}"
+    );
+    for loose in ["/usr/bin/curl", "^/usr/bin/curl", "/usr/bin/curl$"] {
+        let warnings = warns(loose);
+        assert!(
+            warnings.iter().any(|w| w.contains("^ at the start")),
+            "{loose}: {warnings:?}"
+        );
+    }
+}

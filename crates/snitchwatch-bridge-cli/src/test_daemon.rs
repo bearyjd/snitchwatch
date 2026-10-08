@@ -133,3 +133,113 @@ pub(crate) fn names(seen: &Seen) -> Vec<String> {
         .map(|n| n.rules[0].name.clone())
         .collect()
 }
+
+/// A model of opensnitchd's rule loader (`vendor/opensnitch/daemon/rule/
+/// loader.go`), in its real order, for tests that depend on it:
+/// - `CHANGE_RULE` (`Replace` → `replaceUserRule`): an existing `always`
+///   rule changed to a temporary one loses its file first
+///   (`deleteOldRuleFromDisk`); then an enabled rule is compiled, and a
+///   compile error answers ERROR with the old rule left in memory;
+///   otherwise the rule replaces it in memory and an `always` rule's file
+///   is written (`Save`).
+/// - `DELETE_RULE` (`Delete`): the rule leaves memory first; then an
+///   `always` rule's file is removed, and only that can fail (ERROR).
+#[derive(Debug, Default)]
+pub(crate) struct LoaderModel {
+    /// Rules that apply, by name.
+    pub(crate) memory: std::collections::BTreeMap<String, Rule>,
+    /// Rule files on disk, by name.
+    pub(crate) files: std::collections::BTreeSet<String>,
+    /// A rule whose conditions hold one of these values fails to compile.
+    pub(crate) uncompilable: std::collections::BTreeSet<String>,
+    /// Files that can't be removed.
+    pub(crate) stuck_files: std::collections::BTreeSet<String>,
+    /// `(action, name)` commands that get no answer (and do nothing).
+    pub(crate) silent: std::collections::BTreeSet<(i32, String)>,
+}
+
+pub(crate) type SharedModel = Arc<StdMutex<LoaderModel>>;
+
+fn data_of(op: &Operator) -> Vec<String> {
+    std::iter::once(op.data.clone())
+        .chain(op.list.iter().flat_map(data_of))
+        .collect()
+}
+
+impl LoaderModel {
+    pub(crate) fn with_rules(rules: &[Rule]) -> Self {
+        let mut model = Self::default();
+        for rule in rules {
+            if rule.duration == "always" {
+                model.files.insert(rule.name.clone());
+            }
+            model.memory.insert(rule.name.clone(), rule.clone());
+        }
+        model
+    }
+
+    /// The daemon's answer to one command: `Ok(())` or ERROR text, or
+    /// `None` for no answer.
+    fn apply(&mut self, n: &Notification) -> Option<Result<(), String>> {
+        let rule = n.rules[0].clone();
+        if self.silent.contains(&(n.r#type, rule.name.clone())) {
+            return None;
+        }
+        if n.r#type == snitchwatch_proto::protocol::Action::DeleteRule as i32 {
+            let Some(old) = self.memory.remove(&rule.name) else {
+                return Some(Ok(()));
+            };
+            if old.duration != "always" {
+                return Some(Ok(()));
+            }
+            if self.stuck_files.contains(&rule.name) {
+                return Some(Err("remove: operation not permitted".into()));
+            }
+            self.files.remove(&rule.name);
+            return Some(Ok(()));
+        }
+        if let Some(old) = self.memory.get(&rule.name) {
+            if old.duration == "always" && rule.duration != "always" {
+                self.files.remove(&rule.name);
+            }
+        }
+        let fails = rule.enabled
+            && rule
+                .operator
+                .as_ref()
+                .is_some_and(|op| data_of(op).iter().any(|d| self.uncompilable.contains(d)));
+        if fails {
+            return Some(Err("(2) error compiling rule: bad".into()));
+        }
+        if rule.duration == "always" {
+            self.files.insert(rule.name.clone());
+        }
+        self.memory.insert(rule.name.clone(), rule);
+        Some(Ok(()))
+    }
+}
+
+/// Answer `daemon`'s commands from `model`, as opensnitchd would.
+pub(crate) fn run_model(daemon: &mut Daemon, model: SharedModel) -> Seen {
+    respond_to(daemon, move |n| {
+        model.lock().unwrap().apply(n).map(|outcome| match outcome {
+            Ok(()) => (true, String::new()),
+            Err(text) => (false, text),
+        })
+    })
+    .0
+}
+
+pub(crate) fn model(rules: &[Rule]) -> SharedModel {
+    Arc::new(StdMutex::new(LoaderModel::with_rules(rules)))
+}
+
+/// Names of the rules that apply in `model`.
+pub(crate) fn applying(model: &SharedModel) -> Vec<String> {
+    model.lock().unwrap().memory.keys().cloned().collect()
+}
+
+/// Names of the rule files in `model`.
+pub(crate) fn files(model: &SharedModel) -> Vec<String> {
+    model.lock().unwrap().files.iter().cloned().collect()
+}

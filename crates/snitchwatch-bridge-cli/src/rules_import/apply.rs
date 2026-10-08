@@ -12,6 +12,7 @@
 //! rules in a row get no answer.
 
 use super::Replier;
+use crate::busy::{BusyGuard, BusyNames};
 use crate::replier::display_reason;
 use snitchwatch_bridge::cache::rules::SharedRulesCache;
 use snitchwatch_bridge::daemon_commands::{CommandError, DaemonCommands, SendError};
@@ -40,6 +41,8 @@ const RECONNECTED: &str =
     "The firewall service reconnected during the import, so this rule wasn't sent.";
 const NOT_ANSWERING: &str = "The firewall service stopped answering, so this rule wasn't sent.";
 const ABORTED: &str = "The import stopped because of an internal error, so this rule wasn't sent.";
+pub(crate) const BEING_CHANGED: &str =
+    "Another change to this rule was being saved, so this rule wasn't sent.";
 pub(crate) const CHANGED_SINCE_PREVIEW: &str =
     "This rule changed on the firewall since the preview, so it wasn't sent.";
 
@@ -53,6 +56,9 @@ pub(crate) struct Applier {
     started_on: u64,
     reply_timeout: Duration,
     retry_delay: Duration,
+    /// Names a rule command is changing; each rule's name is held here
+    /// while its own command is in flight.
+    busy: BusyNames,
 }
 
 impl Applier {
@@ -63,6 +69,7 @@ impl Applier {
         preview_id: String,
         reply_timeout: Duration,
         retry_delay: Duration,
+        busy: BusyNames,
     ) -> Self {
         let streams = commands.stream_ready();
         let started_on = *streams.borrow();
@@ -75,6 +82,7 @@ impl Applier {
             started_on,
             reply_timeout,
             retry_delay,
+            busy,
         }
     }
 
@@ -231,24 +239,35 @@ impl Run<'_> {
                     .await;
             }
         };
+        let Some(guard) = self.applier.busy.claim(&[&rule.name]) else {
+            return self.not_sent(&rule.name, BEING_CHANGED).await;
+        };
         let notification = Notification {
             r#type: Action::ChangeRule as i32,
             rules: vec![checked],
             ..Default::default()
         };
-        self.send_with_retries(rule.name, notification).await;
+        self.send_with_retries(rule.name, notification, guard).await;
     }
 
-    async fn send_with_retries(&mut self, name: String, notification: Notification) {
+    /// `guard` holds the rule's name busy until its reply is in.
+    async fn send_with_retries(
+        &mut self,
+        name: String,
+        notification: Notification,
+        guard: BusyGuard,
+    ) {
         let mut retries = 0;
         loop {
             match self.applier.commands.send(notification.clone()) {
                 Ok(pending) => {
                     let timeout = self.applier.reply_timeout;
                     let waiter_name = name.clone();
-                    let handle = self
-                        .in_flight
-                        .spawn(async move { (waiter_name, pending.wait(timeout).await) });
+                    let handle = self.in_flight.spawn(async move {
+                        let reply = pending.wait(timeout).await;
+                        drop(guard);
+                        (waiter_name, reply)
+                    });
                     self.names.insert(handle.id(), name);
                     return;
                 }

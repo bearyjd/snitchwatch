@@ -345,61 +345,20 @@ const REPLY_QUEUE: usize = 32;
 /// Give a rule import/export request or a rule command a channel back to
 /// its own connection. Overwrites whatever it carried; the field is never
 /// deserialized anyway.
-fn stamp_reply(message: ClientMessage, reply_to: &crate::ws_messages::ReplyTo) -> ClientMessage {
-    let reply = Some(reply_to.clone());
-    match message {
-        ClientMessage::AddRule {
-            rule, request_id, ..
-        } => ClientMessage::AddRule {
-            rule,
-            request_id,
-            reply,
-        },
-        ClientMessage::UpdateRule {
-            rule_id,
-            rule,
-            request_id,
-            ..
-        } => ClientMessage::UpdateRule {
-            rule_id,
-            rule,
-            request_id,
-            reply,
-        },
-        ClientMessage::DeleteRule {
-            rule_id,
-            request_id,
-            ..
-        } => ClientMessage::DeleteRule {
-            rule_id,
-            request_id,
-            reply,
-        },
-        ClientMessage::ExportRules { request_id, .. } => {
-            ClientMessage::ExportRules { request_id, reply }
-        }
-        ClientMessage::PreviewRulesImport {
-            request_id,
-            document,
-            ..
-        } => ClientMessage::PreviewRulesImport {
-            request_id,
-            document,
-            reply,
-        },
-        ClientMessage::ApplyRulesImport {
-            request_id,
-            preview_id,
-            include,
-            ..
-        } => ClientMessage::ApplyRulesImport {
-            request_id,
-            preview_id,
-            include,
-            reply,
-        },
-        other => other,
+fn stamp_reply(
+    mut message: ClientMessage,
+    reply_to: &crate::ws_messages::ReplyTo,
+) -> ClientMessage {
+    match &mut message {
+        ClientMessage::AddRule { reply, .. }
+        | ClientMessage::UpdateRule { reply, .. }
+        | ClientMessage::DeleteRule { reply, .. }
+        | ClientMessage::ExportRules { reply, .. }
+        | ClientMessage::PreviewRulesImport { reply, .. }
+        | ClientMessage::ApplyRulesImport { reply, .. } => *reply = Some(reply_to.clone()),
+        _ => {}
     }
+    message
 }
 
 /// Stamp a pause request with its sender's GUI-session generation, so

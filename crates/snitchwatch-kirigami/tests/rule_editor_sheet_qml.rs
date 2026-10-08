@@ -187,6 +187,17 @@ Window {
                 probeWindow.expect(sheet.opened, "another request's result closed the sheet");
                 controller.saved();
                 probeWindow.expect(!sheet.visible, "the confirmation didn't close the sheet");
+                // Its result stays under the page's title, as plain text.
+                let editorStatus = null;
+                for (let i = 0; i < page.header.children.length; i++) {
+                    if (page.header.children[i].objectName === "ruleEditorStatus") {
+                        editorStatus = page.header.children[i];
+                    }
+                }
+                probeWindow.expect(editorStatus !== null && editorStatus.visible
+                    && page.header.visible && editorStatus.text === controller.statusText
+                    && editorStatus.textFormat === Text.PlainText,
+                    "the saved result isn't shown under the title");
 
                 // A connection prefills the draft.
                 probeWindow.expect(page.openEditor(JSON.stringify({ processPath: "/usr/bin/curl",
@@ -194,6 +205,7 @@ Window {
                 probeWindow.expect(sheet.draft.conditions.length === 3,
                     "prefilled conditions: " + sheet.draft.conditions.length);
                 probeWindow.expect(probeWindow.named("editorValue").length === 3, "condition rows");
+                probeWindow.expect(!page.showsEditorStatus, "a new draft clears the old result");
 
                 // Controls follow the draft after the user changed them: a
                 // later draft or a changed operand must not leave a control
@@ -223,6 +235,12 @@ Window {
                     "typing 1h hid the field");
                 probeWindow.expect(lasts.currentIndex === lasts.count - 1, "1h took the preset");
 
+
+                // Cancelled: nothing is left to say under the title.
+                controller.statusText = "Fix the problems listed above first.";
+                probeWindow.named("editorCancel")[0].clicked();
+                probeWindow.expect(!sheet.visible && controller.statusText === ""
+                    && !page.showsEditorStatus, "a cancelled sheet left its status");
             } finally {
                 Qt.quit();
             }

@@ -1,23 +1,24 @@
 //! What a rule command may do, decided before anything is sent (P2.1). See
 //! the parent module's doc for the rules.
 
+use crate::busy::BusyNames;
 use snitchwatch_bridge::cache::rules::{RulesCache, SharedRulesCache};
 use snitchwatch_bridge::daemon_commands::{DaemonCommands, DaemonTransport};
 use snitchwatch_bridge::rule_io::only_enabled_differs;
 use snitchwatch_bridge::rule_policy::{
-    check_wire_rule, read_only_reason, validate_user_rule, PolicyProfile, RuleProblem,
+    check_wire_rule, enable_problems, read_only_reason, validate_user_rule, PolicyProfile,
+    RuleProblem,
 };
 use snitchwatch_bridge::translator::rule_notification::notification_for_effect;
 use snitchwatch_bridge::translator::upstream::UpstreamEffect;
 use snitchwatch_proto::protocol::{Notification, Rule};
-use std::collections::HashSet;
 use std::sync::{Mutex as StdMutex, MutexGuard};
 
 pub(crate) const NAME_TAKEN: &str = "A rule with that name already exists. Choose another name.";
 pub(crate) const TCP_REFUSED: &str = "Adding, editing and renaming rules need the system \
      Snitchwatch service. In this per-user setup another program could pose as the firewall \
      service. You can still turn rules on or off and delete them.";
-pub(crate) const BUSY: &str = "This rule is being renamed. Try again in a moment.";
+pub(crate) const BUSY: &str = "This rule is being changed. Try again in a moment.";
 const NOT_LOADED: &str = "Rules haven't loaded from the firewall yet.";
 const NOT_FOUND: &str = "The firewall has no rule by that name any more.";
 const HIDDEN: &str = "This rule is too large for Snitchwatch to show, so it can't be changed here.";
@@ -36,12 +37,14 @@ pub(super) enum Command {
 }
 
 pub(super) enum Plan {
+    /// A toggle or a delete: one command.
     Send(Notification),
-    Rename {
-        change: Notification,
-        old: String,
-        new: String,
-    },
+    /// A new rule; its name stays busy until the daemon answers.
+    Add { change: Notification, name: String },
+    /// A change under the same name, restored if the daemon drops its file.
+    Edit { change: Notification, old: Rule },
+    /// `change` adds the new name, then the old rule is deleted.
+    Rename { change: Notification, old: Rule },
 }
 
 type Refusal = Vec<RuleProblem>;
@@ -63,13 +66,12 @@ pub(super) fn plan(
     command: &Command,
     commands: &DaemonCommands,
     rules: &SharedRulesCache,
-    busy: &StdMutex<HashSet<String>>,
+    busy: &BusyNames,
 ) -> Result<Plan, Refusal> {
     let on_tcp = commands.transport() == DaemonTransport::Tcp;
-    let is_busy = |name: &str| lock(busy).contains(name);
     match command {
         Command::Delete { rule_id } => {
-            if is_busy(rule_id) {
+            if busy.contains(rule_id) {
                 return Err(refusal("name", BUSY));
             }
             let effect = UpstreamEffect::DeleteRule {
@@ -77,52 +79,87 @@ pub(super) fn plan(
             };
             notification(&effect).map(Plan::Send)
         }
-        Command::Add { rule } => {
-            if on_tcp {
-                return Err(refusal("rule", TCP_REFUSED));
-            }
-            let parsed = check_wire_rule(rule, PolicyProfile::Editor)?;
-            let cache = lock(rules);
-            name_free(&cache, &parsed.name, &is_busy)?;
-            drop(cache);
-            let effect = UpstreamEffect::AddRule { rule: rule.clone() };
-            let mut sent = notification(&effect)?;
-            stamp_created(&mut sent, None);
-            Ok(Plan::Send(sent))
-        }
-        Command::Update { rule_id, rule } => {
-            let cache = lock(rules);
-            let old = changeable(&cache, rule_id, &is_busy)?;
-            let effect = UpstreamEffect::UpdateRule {
-                rule_id: rule_id.clone(),
-                rule: rule.clone(),
-            };
-            let mut sent = notification(&effect)?;
-            let new = &sent.rules[0];
-            if new.name == *rule_id && only_enabled_differs(&old, new) {
-                return Ok(Plan::Send(sent));
-            }
-            if on_tcp {
-                return Err(refusal("rule", TCP_REFUSED));
-            }
-            validate_user_rule(new, PolicyProfile::Editor)?;
-            let new_name = new.name.clone();
-            if new_name != *rule_id {
-                name_free(&cache, &new_name, &is_busy)?;
-            }
-            // A renamed rule is a new rule to the daemon.
-            stamp_created(&mut sent, (new_name == *rule_id).then_some(&old));
-            Ok(if new_name == *rule_id {
-                Plan::Send(sent)
-            } else {
-                Plan::Rename {
-                    change: sent,
-                    old: rule_id.clone(),
-                    new: new_name,
-                }
-            })
-        }
+        Command::Add { rule } => plan_add(rule, on_tcp, rules, busy),
+        Command::Update { rule_id, rule } => plan_update(rule_id, rule, on_tcp, rules, busy),
     }
+}
+
+fn plan_add(
+    rule: &serde_json::Value,
+    on_tcp: bool,
+    rules: &SharedRulesCache,
+    busy: &BusyNames,
+) -> Result<Plan, Refusal> {
+    if on_tcp {
+        return Err(refusal("rule", TCP_REFUSED));
+    }
+    let parsed = check_wire_rule(rule, PolicyProfile::Editor)?;
+    name_free(&lock(rules), &parsed.name, busy)?;
+    let effect = UpstreamEffect::AddRule { rule: rule.clone() };
+    let mut change = notification(&effect)?;
+    stamp_created(&mut change, None);
+    Ok(Plan::Add {
+        change,
+        name: parsed.name,
+    })
+}
+
+fn plan_update(
+    rule_id: &str,
+    rule: &serde_json::Value,
+    on_tcp: bool,
+    rules: &SharedRulesCache,
+    busy: &BusyNames,
+) -> Result<Plan, Refusal> {
+    let cache = lock(rules);
+    let old = changeable(&cache, rule_id, busy)?;
+    let effect = UpstreamEffect::UpdateRule {
+        rule_id: rule_id.to_string(),
+        rule: rule.clone(),
+    };
+    let mut change = notification(&effect)?;
+    let new = change.rules[0].clone();
+    let renamed = new.name != rule_id;
+    if !renamed && only_enabled_differs(&old, &new) {
+        if new.enabled && !old.enabled {
+            may_turn_on(&new)?;
+        }
+        stamp_created(&mut change, Some(&old));
+        return Ok(Plan::Send(change));
+    }
+    if on_tcp {
+        return Err(refusal("rule", TCP_REFUSED));
+    }
+    validate_user_rule(&new, PolicyProfile::Editor)?;
+    if renamed {
+        name_free(&cache, &new.name, busy)?;
+        // A renamed rule is a new rule to the daemon.
+        stamp_created(&mut change, None);
+        return Ok(Plan::Rename { change, old });
+    }
+    stamp_created(&mut change, Some(&old));
+    Ok(Plan::Edit { change, old })
+}
+
+/// Turning a rule on (re-review M2): not when it would match everything,
+/// has an empty value or a duration the editor wouldn't write, whatever
+/// made it. Turning one off is never checked.
+fn may_turn_on(rule: &Rule) -> Result<(), Refusal> {
+    let problems = enable_problems(rule);
+    if problems.is_empty() {
+        return Ok(());
+    }
+    Err(problems
+        .into_iter()
+        .map(|p| RuleProblem {
+            reason: format!(
+                "This rule can't be turned on from Snitchwatch: {}. Edit it first, if \
+                 Snitchwatch can.",
+                p.reason
+            ),
+            ..p
+        })
+        .collect())
 }
 
 /// The daemon notification for an effect; `rule_from_wire`, the reserved
@@ -135,28 +172,20 @@ fn notification(effect: &UpstreamEffect) -> Result<Notification, Refusal> {
     }
 }
 
-/// A new name must be unused: not cached, not hidden, not being renamed.
-fn name_free(
-    cache: &RulesCache,
-    name: &str,
-    is_busy: &impl Fn(&str) -> bool,
-) -> Result<(), Refusal> {
+/// A new name must be unused: not cached, not hidden, not being changed.
+fn name_free(cache: &RulesCache, name: &str, busy: &BusyNames) -> Result<(), Refusal> {
     let rules = cache.rules().ok_or_else(|| refusal("rule", NOT_LOADED))?;
     if rules.contains_key(name) || cache.left_out().contains_key(name) {
         return Err(refusal("name", NAME_TAKEN));
     }
-    if is_busy(name) {
+    if busy.contains(name) {
         return Err(refusal("name", BUSY));
     }
     Ok(())
 }
 
 /// The cached rule `rule_id` names, if Snitchwatch may change it.
-fn changeable(
-    cache: &RulesCache,
-    rule_id: &str,
-    is_busy: &impl Fn(&str) -> bool,
-) -> Result<Rule, Refusal> {
+fn changeable(cache: &RulesCache, rule_id: &str, busy: &BusyNames) -> Result<Rule, Refusal> {
     let rules = cache.rules().ok_or_else(|| refusal("rule", NOT_LOADED))?;
     if cache.left_out().contains_key(rule_id) {
         return Err(refusal("rule", HIDDEN));
@@ -167,20 +196,24 @@ fn changeable(
     if let Some(reason) = read_only_reason(old) {
         return Err(refusal("rule", reason));
     }
-    if is_busy(rule_id) {
+    if busy.contains(rule_id) {
         return Err(refusal("name", BUSY));
     }
     Ok(old.clone())
 }
 
-/// The daemon starts a timed rule's clock when it stores it, and a changed
-/// duration restarts it (`loader.go` `scheduleTemporaryRule`; an unchanged
-/// one keeps its old timer). Stamp `created` so the cache expires it then.
+/// The daemon starts a timed rule's clock when it stores it *enabled*
+/// (`loader.go` `replaceUserRule`), and its timer then removes the rule
+/// unless the duration changed (`scheduleTemporaryRule`). Stamp `created`
+/// so the cache expires it then: for a new rule or a new duration, and for
+/// a rule turned on with no clock already running from an earlier time it
+/// was on (an unstamped one). A disabled rule gets no stamp.
 fn stamp_created(sent: &mut Notification, old: Option<&Rule>) {
     let rule = &mut sent.rules[0];
     let timed = !matches!(rule.duration.as_str(), "always" | "until restart" | "once");
-    let restarted = old.is_none_or(|old| old.duration != rule.duration);
-    if timed && restarted {
+    let starts =
+        old.is_none_or(|old| old.duration != rule.duration || (!old.enabled && old.created == 0));
+    if timed && rule.enabled && starts {
         rule.created = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)

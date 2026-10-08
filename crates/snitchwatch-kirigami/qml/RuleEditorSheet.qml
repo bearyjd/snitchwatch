@@ -145,11 +145,24 @@ SizedOverlaySheet {
         }
     }
 
+    // Closed after a save: its result stays, shown under the Rules page's
+    // title (a renamed rule's note, say). Closed any other way while not
+    // waiting: nothing is left to say.
+    property bool closingSaved: false
+
     Connections {
         target: sheet.controller
         function onSaved() {
+            sheet.closingSaved = true;
             sheet.close();
         }
+    }
+
+    onClosed: {
+        if (!sheet.closingSaved && sheet.controller && !sheet.controller.busy) {
+            sheet.controller.statusText = "";
+        }
+        sheet.closingSaved = false;
     }
 
     Timer {

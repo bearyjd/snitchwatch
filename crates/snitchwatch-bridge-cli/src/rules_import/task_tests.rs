@@ -46,6 +46,7 @@ fn task(daemon: &Daemon, preview_ttl: Duration) -> RulesImport {
             reply_timeout: Duration::from_secs(5),
             retry_delay: Duration::from_millis(10),
             preview_ttl,
+            busy: crate::busy::BusyNames::default(),
         },
     )
 }

@@ -330,3 +330,43 @@ async fn a_rule_the_policy_refuses_at_apply_time_is_not_sent() {
     );
     assert_eq!(names(&seen), vec!["ok"]);
 }
+
+/// A name a rule command is changing (an add, a rename) isn't sent by an
+/// import meanwhile (P2.1 re-review M5), and an import's own rule in flight
+/// keeps its name busy until its reply.
+#[tokio::test]
+async fn a_name_another_change_is_saving_is_not_sent() {
+    let mut daemon = daemon(Vec::new());
+    let (seen, _) = respond(&mut daemon, |_| Some((true, String::new())));
+    let busy = crate::busy::BusyNames::default();
+    let held = busy.claim(&["b"]).unwrap();
+    let applier = Applier::new(
+        daemon.commands.clone(),
+        daemon.cache.clone(),
+        crate::replier::Replier::broadcast(daemon.broadcast.clone()),
+        "p".into(),
+        Duration::from_secs(5),
+        Duration::from_millis(10),
+        busy.clone(),
+    );
+    let mut rx = daemon.broadcast.subscribe();
+    let totals = run(
+        &applier,
+        vec![host_rule("a", "deny"), host_rule("b", "deny")],
+    )
+    .await;
+    assert_eq!(totals.applied, 1);
+    assert_eq!(totals.not_sent, 1);
+    assert_eq!(names(&seen), vec!["a"]);
+    let outcomes = progress(&mut rx);
+    assert!(outcomes.iter().any(|(name, outcome)| name == "b"
+        && *outcome
+            == ImportOutcome::NotSent {
+                reason: apply::BEING_CHANGED.to_string()
+            }));
+    drop(held);
+    assert!(
+        busy.claim(&["a", "b"]).is_some(),
+        "the import let its names go"
+    );
+}

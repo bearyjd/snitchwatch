@@ -52,7 +52,7 @@ mod regexp;
 
 pub use narrowing::binds_to_programs;
 
-pub use profile::{validate_user_rule, PolicyProfile, RuleProblem};
+pub use profile::{enable_problems, validate_user_rule, PolicyProfile, RuleProblem};
 
 /// Parse a rule from the wire shape and check it for `profile`: the one
 /// path the bridge and the GUIs use for a rule written or imported whole.

@@ -98,6 +98,7 @@ pub struct Finished {
 pub fn finished(outcome: &RuleCommandOutcome) -> Finished {
     let (saved, status) = match outcome {
         RuleCommandOutcome::Ok => (true, SAVED.to_string()),
+        RuleCommandOutcome::OkWithNote { note } => (true, note.clone()),
         RuleCommandOutcome::Rejected { reason } => (false, format!("{NOT_SAVED}{reason}")),
         RuleCommandOutcome::Refused { problems } => (
             false,

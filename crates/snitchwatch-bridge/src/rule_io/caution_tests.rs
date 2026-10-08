@@ -324,6 +324,16 @@ fn an_allow_for_a_launcher_with_no_destination_starts_unticked() {
         "/usr/bin/node",
         "/usr/bin/flatpak",
         "/usr/bin/steam",
+        "/usr/lib64/ld-linux-x86-64.so.2",
+        "/usr/bin/busybox",
+        "/usr/bin/java",
+        "/usr/bin/php",
+        "/usr/bin/php8.3",
+        "/usr/bin/gawk",
+        "/usr/bin/socat",
+        "/usr/bin/wine",
+        "/usr/bin/systemd-run",
+        "/usr/bin/flatpak-spawn",
     ] {
         let item = preview_one(None, launcher(path, "allow"));
         assert!(!item.ticked, "{path}: {item:?}");
@@ -344,6 +354,15 @@ fn an_allow_for_a_launcher_with_no_destination_starts_unticked() {
     assert!(
         preview_one(None, bounded).ticked,
         "a destination narrows it"
+    );
+    // A port alone is every host on that port: still anywhere.
+    let mut port_only = launcher("/usr/bin/python3", "allow");
+    port_only["operator"] = json!({ "type": "list", "operands": [
+        port_only["operator"].clone(),
+        { "type": "simple", "operand": "dest.port", "data": "443" } ] });
+    assert!(
+        !preview_one(None, port_only).ticked,
+        "a port alone isn't a destination"
     );
 }
 
