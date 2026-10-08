@@ -11,7 +11,7 @@
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 /// Country info returned by a successful public-IP lookup.
@@ -211,12 +211,36 @@ pub struct DiscoveryOutcome {
     pub available: bool,
 }
 
-/// Run [`super::paths::discover_geoip_db`] and try to open whatever it finds.
+/// Production entry point: reads `$SNITCHWATCH_GEOIP_DB`, `$HOME` and
+/// `$XDG_DATA_HOME` from the process environment — the only place the geo
+/// module does — and runs [`discover_and_open_with`] against the real
+/// filesystem.
+pub fn discover_and_open() -> DiscoveryOutcome {
+    let env_override = std::env::var("SNITCHWATCH_GEOIP_DB").ok();
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+    let xdg_data_home = std::env::var("XDG_DATA_HOME").ok();
+    discover_and_open_with(
+        |p| p.exists(),
+        env_override.as_deref(),
+        &home,
+        xdg_data_home.as_deref(),
+    )
+}
+
+/// Run [`super::paths::discover_with`] and try to open whatever it finds.
 /// Never panics: a missing file yields the no-DB state; a found-but-corrupt
 /// file is logged once and also yields the no-DB state (the classification
 /// of local/private addresses still works either way).
-pub fn discover_and_open() -> DiscoveryOutcome {
-    match super::paths::discover_geoip_db() {
+///
+/// The environment values and the `exists` check are parameters so tests can
+/// drive every outcome without mutating process-global env vars.
+pub fn discover_and_open_with(
+    exists: impl Fn(&Path) -> bool,
+    env_override: Option<&str>,
+    home: &str,
+    xdg_data_home: Option<&str>,
+) -> DiscoveryOutcome {
+    match super::paths::discover_with(exists, env_override, home, xdg_data_home) {
         Some(path) => match MmdbLookup::open(&path) {
             Ok(lookup) => DiscoveryOutcome {
                 lookup: Some(Arc::new(lookup)),
@@ -238,9 +262,7 @@ pub fn discover_and_open() -> DiscoveryOutcome {
             }
         },
         None => {
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-            let xdg_data_home = std::env::var("XDG_DATA_HOME").ok();
-            let suggested = super::paths::default_suggested_path(&home, xdg_data_home.as_deref());
+            let suggested = super::paths::default_suggested_path(home, xdg_data_home);
             tracing::info!(
                 suggested_path = %suggested.display(),
                 "geo: no GeoLite2-Country.mmdb found; geographic breakdown will show \
@@ -405,12 +427,8 @@ mod tests {
 
     #[test]
     fn discover_and_open_degrades_gracefully_with_no_db_anywhere() {
-        // SAFETY (test-only): no other test reads these two vars.
-        std::env::remove_var("SNITCHWATCH_GEOIP_DB");
-        std::env::set_var("HOME", "/nonexistent-home-for-tests");
-        std::env::remove_var("XDG_DATA_HOME");
+        let outcome = discover_and_open_with(|_| false, None, "/nonexistent-home-for-tests", None);
 
-        let outcome = discover_and_open();
         assert!(!outcome.available);
         assert!(outcome.lookup.is_none());
         assert_eq!(
@@ -427,11 +445,14 @@ mod tests {
         let path = dir.path().join("GeoLite2-Country.mmdb");
         std::fs::write(&path, b"not a real mmdb").unwrap();
 
-        // SAFETY (test-only): serialised within this function; no other test
-        // reads SNITCHWATCH_GEOIP_DB concurrently in a way that matters here.
-        std::env::set_var("SNITCHWATCH_GEOIP_DB", &path);
-        let outcome = discover_and_open();
-        std::env::remove_var("SNITCHWATCH_GEOIP_DB");
+        // The override is a parameter, not `$SNITCHWATCH_GEOIP_DB`: no
+        // process-global state is touched, so this can't race other tests.
+        let outcome = discover_and_open_with(
+            |p| p == path,
+            path.to_str(),
+            "/nonexistent-home-for-tests",
+            None,
+        );
 
         assert!(!outcome.available);
         assert!(outcome.lookup.is_none());

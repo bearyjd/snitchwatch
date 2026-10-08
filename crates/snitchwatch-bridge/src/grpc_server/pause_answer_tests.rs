@@ -128,8 +128,8 @@ fn assert_allowed_once_and_not_saved(svc: &UiService, rule: &Rule, messages: &[S
     );
     assert_eq!(
         svc.rules_handle().lock().unwrap().rules(),
-        Some(&Default::default()),
-        "the rules cache is unchanged"
+        Some(&std::collections::BTreeMap::new()),
+        "a once answer must leave the rules cache empty"
     );
 }
 
