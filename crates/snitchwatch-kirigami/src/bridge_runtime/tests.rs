@@ -272,9 +272,10 @@ async fn client_loop_forwards_authenticated_snapshot_to_the_qml_feed() {
     let bridge = snitchwatch_bridge_cli::run(config.clone())
         .await
         .expect("bridge starts");
-    // Room for the whole snapshot, which grows whenever the bridge adds one
-    // (production uses 1,024); each part is checked, the recommended rules
-    // included.
+    // Room for the whole snapshot answer, which grows whenever the bridge
+    // adds one (production uses 1,024): rules and what they leave out,
+    // blocklist leftovers, the recommended rules. This test reads it without
+    // a lag-recovery path, and each part is checked.
     let (shell_tx, mut shell_messages) = broadcast::channel(64);
     let (inbound_tx, inbound_rx) = mpsc::channel(1);
     let (tray_tx, _) = watch::channel(ReceivedTrayState {

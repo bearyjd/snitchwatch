@@ -70,6 +70,10 @@ const ALL_QML: &[(&str, &str)] = &[
     ("RuleSimulatorSheet.qml", SIMULATOR_SHEET),
     ("RulesImportSheet.qml", IMPORT_SHEET),
     (
+        "RulesEmptyPlaceholder.qml",
+        include_str!("../qml/RulesEmptyPlaceholder.qml"),
+    ),
+    (
         "RulesInsightsText.qml",
         include_str!("../qml/RulesInsightsText.qml"),
     ),
@@ -223,7 +227,7 @@ fn blocklists_empty_state_does_not_promise_filtering() {
 /// anything that looks like HTML as rich text. Rule names, operator data and
 /// blocklist ids come from the daemon / subscription URLs, so every label that
 /// shows them must opt into `Text.PlainText`. Numeric / static expressions
-/// (`row.precedence`, `row.enabled`, `sourceLabel(...)`) are intentionally
+/// (`row.precedence`, `row.enabled`) are intentionally
 /// absent from the list.
 #[test]
 fn rules_page_labels_showing_rule_data_are_plain_text() {
@@ -245,6 +249,12 @@ fn rules_page_labels_showing_rule_data_are_plain_text() {
             "page.inspectOperatorSummary",
             // Issue #44: names the destination of an all-apps rule.
             "row.allAppsHint",
+            // Issue #64: the flagged row's badge.
+            "row.flagBadge",
+            // Issue #61: what the list leaves out.
+            "page.model.notShownText",
+            // The inspector's Source, from Rust (`rules::sections`).
+            "page.inspectSourceLabel",
             // P2.7: export/import outcomes, which carry bridge reasons.
             "rulesIo.statusText",
             // P2.1: why the editor can't change a rule (bridge reasons).
@@ -304,6 +314,28 @@ fn editor_sheet_labels_are_all_plain_text_and_checkboxes_carry_no_text() {
             "RuleEditorSheet.qml puts text on a CheckBox (AutoText):\n{block}"
         );
     }
+}
+
+/// Issue #102: only deny, reject and decide-first rules stop opensnitchd's
+/// check, so the inspector never says "first match wins" of every rule.
+#[test]
+fn the_rule_inspector_says_how_each_rule_decides() {
+    let code = code_lines(RULES_PAGE);
+    assert!(
+        !code.contains("first match wins"),
+        "RulesPage.qml claims first match wins"
+    );
+    assert!(code.contains("page.inspectHowItDecides"));
+}
+
+/// Issue #61: "No rules yet" never shows under "N rules aren't listed";
+/// `rules_all_apps_qml` checks the property, this its use.
+#[test]
+fn the_empty_rules_placeholder_follows_what_is_not_listed() {
+    let code = code_lines(RULES_PAGE);
+    assert!(code.contains("visible: page.showsEmptyPlaceholder"));
+    assert!(code.contains("&& !page.showsNotShown"));
+    assert!(code.contains("RulesEmptyPlaceholder {\n            parent: list"));
 }
 
 /// The Simulate sheet shows rule names and operands from the daemon, and

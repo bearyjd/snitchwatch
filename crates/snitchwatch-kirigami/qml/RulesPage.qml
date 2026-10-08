@@ -41,7 +41,7 @@
 // matches everything they do and takes precedence ("Never decides"), or only
 // "May never decide" when the proof leans on the regular-expression engine. It
 // says nothing about what those connections get instead. It checks only
-// conditions Snitchwatch can compare exactly, so no finding is not a guarantee.
+// conditions Snitchwatch can compare, so no finding is not a guarantee.
 // Insights describe; nothing here changes, disables or removes a rule.
 //
 // Names are shown via the `displayName` role (bidi overrides and zero-width
@@ -89,7 +89,10 @@ Kirigami.ScrollablePage {
     property string inspectDuration: ""
     property string inspectOperatorSummary: ""
     property int inspectPrecedence: 0
+    // How the rule takes part in the daemon's decision (issue #102).
+    property string inspectHowItDecides: ""
     property string inspectSource: "user"
+    property string inspectSourceLabel: ""
     property string inspectBlocklistId: ""
     property bool confirmingDelete: false
     // Why the rule editor can't change the inspected rule; empty when it can.
@@ -109,13 +112,15 @@ Kirigami.ScrollablePage {
     // The rule editor's last result once its sheet closed (P2.1).
     readonly property bool showsEditorStatus: ruleEditorController.statusText.length > 0
                                               && !ruleEditor.visible
+    // What the list leaves out (#61); no "No rules yet" while that shows.
+    readonly property bool showsNotShown: !!page.model && page.model.notShownText.length > 0
+    readonly property bool showsEmptyPlaceholder: (!page.model || page.model.count === 0)
+                                                  && !page.showsNotShown
 
+    // `allow`, `deny`, or an unrecognised action (a neutral colour, N4).
     function actionColor(action) {
-        return action === "allow" ? Kirigami.Theme.positiveTextColor : Kirigami.Theme.negativeTextColor;
-    }
-
-    function sourceLabel(source) {
-        return source === "blocklist" ? "Blocklist rules" : "User rules";
+        if (action === "allow") return Kirigami.Theme.positiveTextColor;
+        return action === "deny" ? Kirigami.Theme.negativeTextColor : Kirigami.Theme.neutralTextColor;
     }
 
     // The model's JSON summary of the hit counts; null until the bridge has
@@ -194,7 +199,9 @@ Kirigami.ScrollablePage {
         page.inspectDuration = rule.duration;
         page.inspectOperatorSummary = rule.operatorSummary;
         page.inspectPrecedence = rule.precedence;
+        page.inspectHowItDecides = rule.howItDecides;
         page.inspectSource = rule.source;
+        page.inspectSourceLabel = rule.sourceLabel;
         page.inspectBlocklistId = rule.blocklistId;
         page.checkEditable();
     }
@@ -288,6 +295,7 @@ Kirigami.ScrollablePage {
     // last import or export outcome.
     header: ColumnLayout {
         visible: page.showsAllAppsNotice || page.showsIoStatus || page.showsEditorStatus
+                 || page.showsNotShown
             || hitsSummaryLabel.text.length > 0 || hitsStorageLabel.text.length > 0
             || analysisLabel.text.length > 0
         spacing: 0
@@ -296,8 +304,9 @@ Kirigami.ScrollablePage {
             Layout.fillWidth: true
             visible: page.showsAllAppsNotice
             type: Kirigami.MessageType.Information
-            text: "Some rules saved by earlier Snitchwatch versions apply to all apps, not only "
-                + "the app that asked. They are marked below, each with what deleting it changes."
+            text: "Some rules saved by earlier Snitchwatch versions apply to all apps, or to a "
+                + "program Snitchwatch can't identify, not only the app that asked. They are "
+                + "marked below, each with what deleting it changes."
         }
         // Counts only Snitchwatch's own earlier rules: blocklist or
         // hand-written rules may apply to all apps too, so no "of N".
@@ -309,9 +318,11 @@ Kirigami.ScrollablePage {
             textFormat: Text.PlainText
             text: !page.model ? ""
                 : page.model.legacyHostOnlyCount === 1
-                    ? "1 rule saved by an earlier Snitchwatch version applies to all apps"
+                    ? "1 rule saved by an earlier Snitchwatch version applies to all apps or "
+                      + "to an unidentified program"
                     : page.model.legacyHostOnlyCount
-                      + " rules saved by earlier Snitchwatch versions apply to all apps"
+                      + " rules saved by earlier Snitchwatch versions apply to all apps or to "
+                      + "unidentified programs"
         }
         Controls.Label {
             id: hitsSummaryLabel
@@ -358,6 +369,15 @@ Kirigami.ScrollablePage {
             text: rulesIo.statusText
             wrapMode: Text.Wrap
         }
+        Controls.Label {
+            objectName: "rulesNotShown"
+            visible: page.showsNotShown
+            Layout.fillWidth: true
+            Layout.margins: Kirigami.Units.smallSpacing
+            textFormat: Text.PlainText
+            wrapMode: Text.Wrap
+            text: page.model ? page.model.notShownText : ""
+        }
         // The rule editor's last result (P2.1), plain text.
         Controls.Label {
             objectName: "ruleEditorStatus"
@@ -370,26 +390,23 @@ Kirigami.ScrollablePage {
         }
     }
 
-    Kirigami.PlaceholderMessage {
-        anchors.centerIn: parent
-        width: parent.width - (Kirigami.Units.largeSpacing * 4)
-        visible: !page.model || page.model.count === 0
-        icon.name: "view-list-details"
-        text: "No rules yet"
-        explanation: "Decisions set to “This time” resolve only the current request. Choose a persistent duration, or add a blocklist, to create rules shown here."
-    }
-
     ListView {
         id: list
         model: page.model
         currentIndex: -1
         reuseItems: true
 
-        section.property: "source"
+        RulesEmptyPlaceholder {
+            parent: list
+            visible: page.showsEmptyPlaceholder
+            listed: !!page.model && page.model.listed
+        }
+
+        section.property: "sectionLabel"
         section.criteria: ViewSection.FullString
         section.delegate: Kirigami.ListSectionHeader {
             width: ListView.view ? ListView.view.width : implicitWidth
-            text: page.sourceLabel(section)
+            text: section
         }
 
         delegate: Controls.ItemDelegate {
@@ -418,10 +435,13 @@ Kirigami.ScrollablePage {
             required property string blocklistId
             required property bool appliesToAllApps
             required property string allAppsHint
+            required property string flagBadge
             required property bool hitsCounted
             required property real hitCount
             required property real lastHitMs
             required property string hitsNote
+            required property string howItDecides
+            required property string sourceLabel
             required property string hitBadgeKind
             required property real hitBadgeMs
             required property string shadowKind
@@ -511,8 +531,8 @@ Kirigami.ScrollablePage {
                         text: row.allAppsHint
                         wrapMode: Text.Wrap
                         font: Kirigami.Theme.smallFont
-                        color: row.ruleAction === "allow" ? Kirigami.Theme.neutralTextColor
-                                                          : Kirigami.Theme.negativeTextColor
+                        color: row.ruleAction === "deny" ? Kirigami.Theme.negativeTextColor
+                                                         : Kirigami.Theme.neutralTextColor
                         Layout.fillWidth: true
                     }
                 }
@@ -520,7 +540,8 @@ Kirigami.ScrollablePage {
                 Controls.Label {
                     objectName: "allAppsFlag"
                     visible: row.appliesToAllApps
-                    text: "Applies to all apps"
+                    textFormat: Text.PlainText
+                    text: row.flagBadge
                     color: Kirigami.Theme.neutralTextColor
                     font.bold: true
                     Layout.alignment: Qt.AlignVCenter
@@ -572,7 +593,9 @@ Kirigami.ScrollablePage {
         page.inspectDuration = row.duration;
         page.inspectOperatorSummary = row.operatorSummary;
         page.inspectPrecedence = row.precedence;
+        page.inspectHowItDecides = row.howItDecides;
         page.inspectSource = row.source;
+        page.inspectSourceLabel = row.sourceLabel;
         page.inspectBlocklistId = row.blocklistId;
         page.checkEditable();
         page.confirmingDelete = false;
@@ -600,7 +623,7 @@ Kirigami.ScrollablePage {
                 Controls.Label {
                     Kirigami.FormData.label: "Source"
                     textFormat: Text.PlainText
-                    text: page.sourceLabel(page.inspectSource)
+                    text: page.inspectSourceLabel
                 }
                 Controls.Label {
                     Kirigami.FormData.label: "Action"
@@ -621,9 +644,15 @@ Kirigami.ScrollablePage {
                     wrapMode: Text.Wrap
                 }
                 Controls.Label {
-                    Kirigami.FormData.label: "Precedence"
-                    text: "Position " + (page.inspectPrecedence + 1) + " of " + (page.model ? page.model.count : 0)
-                          + " — evaluated in this order, first match wins"
+                    objectName: "inspectHowItDecides"
+                    Kirigami.FormData.label: "Order"
+                    Layout.fillWidth: true
+                    textFormat: Text.PlainText
+                    wrapMode: Text.Wrap
+                    text: "Position " + (page.inspectPrecedence + 1) + " of "
+                          + (page.model ? page.model.count : 0) + " in the order the firewall "
+                          + "checks rules (turned-off rules are counted, but skipped). "
+                          + page.inspectHowItDecides
                 }
                 Controls.Switch {
                     id: inspectEnabledSwitch

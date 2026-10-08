@@ -26,6 +26,7 @@
 //!   one-directory constraint noted in [`crate::connections`]).
 
 pub mod all_apps;
+pub mod deciding;
 pub mod editor;
 pub mod editor_profile;
 pub mod editor_view;
@@ -33,8 +34,12 @@ pub mod hits;
 pub mod insights;
 pub mod io;
 pub mod io_view;
+pub mod not_shown;
 pub mod row_store;
+pub mod sections;
 pub mod simulator;
+#[cfg(test)]
+mod user_names_tests;
 
 #[cfg(test)]
 mod editor_tests;

@@ -25,6 +25,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use snitchwatch_bridge::rule_name::{is_reserved_curated_name, is_reserved_profile_name};
 use snitchwatch_bridge::ws_messages::ServerMessage;
 
 /// The `z00-blocklist:<list_id>:<kind>` filename band a subscribed
@@ -39,6 +40,9 @@ const BLOCKLIST_RULE_NAME_PREFIX: &str = "z00-blocklist:";
 /// bridge has refreshed every subscription these no longer exist; see the
 /// migration note in `snitchwatch_bridge::blocklists::materializer`.
 const LEGACY_BLOCKLIST_RULE_NAME_PREFIX: &str = "900-blocklist:";
+
+/// [`Rule::normalized_action`] for an action the daemon doesn't recognise.
+pub const UNRECOGNISED_ACTION: &str = "unrecognised";
 
 fn default_enabled() -> bool {
     true
@@ -96,6 +100,13 @@ pub struct Rule {
     /// bridge that predates the field. Never sent back.
     #[serde(skip_serializing)]
     pub deletable: Option<bool>,
+    /// Set by the bridge: account names for the uids this rule's
+    /// `user.name` conditions carry (the daemon reports the uid it
+    /// resolved, #91), keyed by the uid as written. Display only (PR #106
+    /// review M4: the bridge sees the host's accounts, a sandboxed GUI may
+    /// not). Never sent back.
+    #[serde(skip_serializing)]
+    pub user_names: std::collections::BTreeMap<String, String>,
     /// Set by the bridge: whether Snitchwatch may turn this rule on or off.
     /// A recommended background-service rule (prompt-slot D) is read-only
     /// but toggleable. `None` from an older bridge. Never sent back.
@@ -103,13 +114,26 @@ pub struct Rule {
     pub toggleable: Option<bool>,
 }
 
-/// Where a rule originated: authored directly by the user, or installed for
-/// a subscribed blocklist (the `z00-blocklist:<id>:` band, or the legacy
+/// Where a rule originated: authored directly by the user, installed for a
+/// network profile (the `850-profile:` band), or installed for a subscribed
+/// blocklist (the `z00-blocklist:<id>:` band, or the legacy
 /// `900-blocklist:<id>:` band during a migration window).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuleSource {
     User,
-    Blocklist { list_id: String },
+    /// A network profile's rule, in the bridge's `850-profile:` band: the
+    /// same test the bridge makes it read-only by, so the label and the
+    /// read-only reason ("Managed on the Profiles page") always agree.
+    Profile,
+    /// A recommended background-service rule (prompt-slot D): under the
+    /// curated-defaults prefix and one the bridge lets a GUI turn on or off,
+    /// the same test that gives it its read-only reason ("A recommended
+    /// background-service rule"). Another rule under that prefix is only a
+    /// reserved name, and stays a user rule.
+    Recommended,
+    Blocklist {
+        list_id: String,
+    },
 }
 
 impl Rule {
@@ -148,6 +172,10 @@ impl Rule {
             Some(rest) => RuleSource::Blocklist {
                 list_id: rest.split(':').next().unwrap_or("").to_string(),
             },
+            None if is_reserved_profile_name(&self.name) => RuleSource::Profile,
+            None if is_reserved_curated_name(&self.name) && self.toggleable == Some(true) => {
+                RuleSource::Recommended
+            }
             None => RuleSource::User,
         }
     }
@@ -156,14 +184,16 @@ impl Rule {
         matches!(self.source(), RuleSource::Blocklist { .. })
     }
 
-    /// Normalized to exactly `"allow"` or `"deny"` (opensnitchd's `reject`
-    /// action, if ever encountered, is folded into `"deny"` for display —
-    /// same normalization `web/js/rules.js`'s `normalizedRuleAction` does).
+    /// What the daemon does with a match, compared exactly as it compares
+    /// (the simulator's `daemon_action`, PR #106 review N4): `"allow"` for
+    /// exactly `allow`, `"deny"` for exactly `deny` or `reject`, and
+    /// [`UNRECOGNISED_ACTION`] for anything else, which the daemon blocks
+    /// without ending its check (see `rules::deciding`).
     pub fn normalized_action(&self) -> &'static str {
-        if self.action.eq_ignore_ascii_case("allow") {
-            "allow"
+        if matches!(self.action.as_str(), "allow" | "deny" | "reject") {
+            super::simulator::daemon_action(self)
         } else {
-            "deny"
+            UNRECOGNISED_ACTION
         }
     }
 
@@ -172,11 +202,14 @@ impl Rule {
     /// operator, each child joined with `" AND "`. Returns an empty string
     /// for a shape this can't recognize rather than guessing.
     pub fn operator_summary(&self) -> String {
-        summarize_operator(&self.operator)
+        summarize_operator(&self.operator, &self.user_names)
     }
 }
 
-fn summarize_operator(value: &serde_json::Value) -> String {
+fn summarize_operator(
+    value: &serde_json::Value,
+    names: &std::collections::BTreeMap<String, String>,
+) -> String {
     let serde_json::Value::Object(map) = value else {
         return String::new();
     };
@@ -186,7 +219,7 @@ fn summarize_operator(value: &serde_json::Value) -> String {
     if map.len() == 1 {
         if let Some(inner) = map.values().next() {
             if inner.get("operand").is_some() || inner.get("operands").is_some() {
-                return summarize_operator(inner);
+                return summarize_operator(inner, names);
             }
         }
     }
@@ -194,7 +227,7 @@ fn summarize_operator(value: &serde_json::Value) -> String {
     if let Some(operands) = map.get("operands").and_then(|o| o.as_array()) {
         return operands
             .iter()
-            .map(summarize_operator)
+            .map(|member| summarize_operator(member, names))
             .filter(|s| !s.is_empty())
             .collect::<Vec<_>>()
             .join(" AND ");
@@ -204,16 +237,20 @@ fn summarize_operator(value: &serde_json::Value) -> String {
     let data = map.get("data").and_then(|v| v.as_str()).unwrap_or("");
     if operand.is_empty() && data.is_empty() {
         String::new()
+    } else if let Some(name) = names.get(data).filter(|_| operand == "user.name") {
+        // The daemon reports the uid it resolved (#91); the bridge names it.
+        format!("{operand} = {name} ({data})")
     } else {
         format!("{operand} = {data}")
     }
 }
 
 /// Ordered, flat list of rules backing the Rules tab. The server already
-/// sends rules in evaluation order (opensnitchd evaluates alphabetically by
-/// filename and stops at the first match — see the design doc's "Rule
-/// precedence" section), so a rule's index in this store *is* its precedence
-/// position; no separate numeric field is tracked.
+/// sends rules in the order opensnitchd checks them (by name, `sortRules`;
+/// a matching deny, reject or decide-first rule stops the check, and
+/// otherwise the last matching allow decides, see `rules::deciding`), so a
+/// rule's index in this store *is* its position in that order; no separate
+/// numeric field is tracked.
 #[derive(Debug, Default)]
 pub struct RulesStore {
     rules: Vec<Rule>,
@@ -333,7 +370,8 @@ struct FoundRule<'a> {
     deletable: bool,
     toggleable: bool,
     enabled: bool,
-    action: &'static str,
+    /// As shown: `allow`, `deny`, or an unrecognised one with a note.
+    action: String,
     duration: &'a str,
     operator_summary: String,
     /// The rule's position in evaluation order (0-based), i.e. its index in
@@ -341,7 +379,11 @@ struct FoundRule<'a> {
     /// precedence position.
     precedence: usize,
     source: &'static str,
+    /// The inspector's Source (`rules::sections`).
+    source_label: &'static str,
     blocklist_id: String,
+    /// How it takes part in the daemon's decision (issue #102).
+    how_it_decides: &'static str,
 }
 
 /// Look up `name` in `store` and, if found, serialize it to the JSON shape
@@ -351,10 +393,8 @@ struct FoundRule<'a> {
 pub fn found_rule_json(store: &RulesStore, name: &str) -> Option<String> {
     let idx = store.index_of(name)?;
     let rule = store.row(idx)?;
-    let (source, blocklist_id) = match rule.source() {
-        RuleSource::User => ("user", String::new()),
-        RuleSource::Blocklist { list_id } => ("blocklist", list_id),
-    };
+    let from = rule.source();
+    let (source, blocklist_id) = (from.key(), from.blocklist_id());
     let found = FoundRule {
         name: &rule.name,
         display_name: rule.shown_name(),
@@ -362,12 +402,14 @@ pub fn found_rule_json(store: &RulesStore, name: &str) -> Option<String> {
         deletable: rule.can_delete(),
         toggleable: rule.can_toggle(),
         enabled: rule.enabled,
-        action: rule.normalized_action(),
+        action: rule.action_label(),
         duration: &rule.duration,
         operator_summary: rule.operator_summary(),
         precedence: idx,
         source,
+        source_label: rule.source().label(),
         blocklist_id,
+        how_it_decides: super::deciding::how_it_decides(rule),
     };
     serde_json::to_string(&found).ok()
 }

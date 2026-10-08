@@ -6,6 +6,7 @@
 //! `setVerdict` referencing the same row.
 
 use crate::daemon_contract::{is_contract_default_action, is_default_action_rule};
+use crate::translator::verdict::is_answer_name;
 use crate::ws_messages::ConnectionRow;
 use snitchwatch_proto::protocol::{Connection, Event};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -117,9 +118,21 @@ fn normalized_action(action: &str) -> &'static str {
 /// through it unanswered (see `grpc_server::UiService::ping`). Returns
 /// `None` when the event doesn't carry both a connection and a rule — there
 /// is nothing useful to show without both.
-pub fn event_to_row(event: &Event) -> Option<ConnectionRow> {
+///
+/// A once answer isn't listed twice (issue #102): the bridge's own `once`
+/// answer to an Ask decided only the connection the bridge was asked about,
+/// which it already lists as that Ask's row (labelled, for an answer the
+/// filtering pause gave), and the daemon never stores a `once` rule. So such
+/// an event is left out, but only when `listed` says the committed rule list
+/// has no rule of that name (PR #106 review, security L2): with no list
+/// (`None`), or a stored rule of that name, the row is listed. The daemon's
+/// own `once` rules (`ui.client.*`, decided with no Ask row) are listed.
+pub fn event_to_row(event: &Event, listed: impl Fn(&str) -> Option<bool>) -> Option<ConnectionRow> {
     let conn = event.connection.as_ref()?;
     let rule = event.rule.as_ref()?;
+    if rule.duration == "once" && is_answer_name(&rule.name) && listed(&rule.name) == Some(false) {
+        return None;
+    }
     let by_default = is_default_action_rule(rule);
 
     if by_default {
@@ -274,7 +287,7 @@ mod tests {
             rule: Some(sample_rule("899-firefox-allow-out.json", "allow")),
             unixnano: 1_700_000_000_123_456_789,
         };
-        let row = event_to_row(&event).expect("both connection and rule present");
+        let row = event_to_row(&event, |_| Some(false)).expect("both connection and rule present");
         assert!(
             row.id.starts_with("event-1700000000123456789-"),
             "{}",
@@ -301,7 +314,7 @@ mod tests {
             )),
             unixnano: 1,
         };
-        let row = event_to_row(&event).unwrap();
+        let row = event_to_row(&event, |_| Some(false)).unwrap();
         assert_eq!(row.action.as_deref(), Some("deny"));
     }
 
@@ -313,7 +326,76 @@ mod tests {
             rule: Some(sample_rule("899-firefox-allow-out.json", "allow")),
             unixnano: 1,
         };
-        assert!(event_to_row(&event).is_none());
+        assert!(event_to_row(&event, |_| Some(false)).is_none());
+    }
+
+    /// Issue #102: a once answer isn't listed twice. A `once` rule is only
+    /// ever an answer to an Ask (the daemon never stores one), so its event
+    /// is the asked connection again, already listed as its Ask row with
+    /// that row's label ("Allowed once (filtering was paused)", say).
+    #[test]
+    fn a_once_answer_to_an_ask_is_not_listed_twice() {
+        for (name, action) in [
+            ("snitchwatch-allow-github.com-443-0123abcd", "allow"),
+            ("snitchwatch-deny-github.com-443-0123abcd", "deny"),
+        ] {
+            let mut once = sample_rule(name, action);
+            once.duration = "once".into();
+            let event = Event {
+                time: String::new(),
+                connection: Some(sample_connection()),
+                rule: Some(once),
+                unixnano: 1,
+            };
+            assert!(event_to_row(&event, |_| Some(false)).is_none(), "{name}");
+        }
+        let mut kept = sample_rule("snitchwatch-allow-github.com-443-0123abcd", "allow");
+        kept.duration = "until restart".into();
+        let event = Event {
+            time: String::new(),
+            connection: Some(sample_connection()),
+            rule: Some(kept),
+            unixnano: 1,
+        };
+        assert!(
+            event_to_row(&event, |_| Some(true)).is_some(),
+            "a stored rule's events are listed"
+        );
+        // The daemon's own once rules (no GUI connected, an Ask that
+        // failed) have no Ask row in the bridge: listed.
+        let mut daemons = sample_rule("ui.client.disconnected", "allow");
+        daemons.duration = "once".into();
+        let event = Event {
+            rule: Some(daemons),
+            ..event
+        };
+        assert!(event_to_row(&event, |_| Some(false)).is_some());
+    }
+
+    /// PR #106 review, security L2: only an answer the list is known not to
+    /// hold is left out. With no list, or a stored rule of that name (a
+    /// file someone named like an answer), the event is listed.
+    #[test]
+    fn a_once_answer_is_listed_unless_the_list_is_known_not_to_have_it() {
+        let mut once = sample_rule("snitchwatch-deny-github.com-443-0123abcd", "deny");
+        once.duration = "once".into();
+        let event = Event {
+            time: String::new(),
+            connection: Some(sample_connection()),
+            rule: Some(once),
+            unixnano: 1,
+        };
+        assert!(event_to_row(&event, |_| None).is_some(), "no list");
+        assert!(event_to_row(&event, |_| Some(true)).is_some(), "stored");
+        let asked = std::cell::Cell::new(None);
+        event_to_row(&event, |name| {
+            asked.set(Some(name.to_string()));
+            Some(false)
+        });
+        assert_eq!(
+            asked.take().as_deref(),
+            Some("snitchwatch-deny-github.com-443-0123abcd")
+        );
     }
 
     /// The bazzite-tower fork's synthetic rule for a connection that got the
@@ -352,7 +434,7 @@ mod tests {
         for (applied, shown) in [("allow", "allow"), ("deny", "deny"), ("reject", "deny")] {
             let event = event_with(default_action_rule(applied));
             assert!(is_default_action_rule(event.rule.as_ref().unwrap()));
-            let row = event_to_row(&event).expect("connection and rule present");
+            let row = event_to_row(&event, |_| Some(false)).expect("connection and rule present");
             assert_eq!(row.action.as_deref(), Some(shown), "{applied}");
             assert_eq!(row.matched_rule, None, "{applied}: no rule named \"\"");
             assert!(row.decided_by_default, "{applied}");
@@ -373,7 +455,7 @@ mod tests {
         let mut rule = default_action_rule("deny");
         rule.description = String::new();
         assert!(!is_default_action_rule(&rule));
-        let row = event_to_row(&event_with(rule)).unwrap();
+        let row = event_to_row(&event_with(rule), |_| Some(false)).unwrap();
         assert_eq!(row.matched_rule.as_deref(), Some(""));
         assert!(!row.decided_by_default);
         // Only the exact marker counts.
@@ -387,7 +469,7 @@ mod tests {
         let mut rule = default_action_rule("allow");
         rule.name = "copied-description".to_string();
         assert!(!is_default_action_rule(&rule));
-        let row = event_to_row(&event_with(rule)).unwrap();
+        let row = event_to_row(&event_with(rule), |_| Some(false)).unwrap();
         assert_eq!(row.matched_rule.as_deref(), Some("copied-description"));
         assert!(!row.decided_by_default);
     }
@@ -395,7 +477,11 @@ mod tests {
     #[test]
     fn rule_rows_and_ask_rows_are_not_decided_by_default() {
         let event = event_with(sample_rule("899-firefox-allow-out.json", "allow"));
-        assert!(!event_to_row(&event).unwrap().decided_by_default);
+        assert!(
+            !event_to_row(&event, |_| Some(false))
+                .unwrap()
+                .decided_by_default
+        );
         assert!(!connection_to_row(&sample_connection(), 1).decided_by_default);
     }
 
@@ -404,7 +490,8 @@ mod tests {
     #[test]
     fn a_default_action_event_with_an_unexpected_action_folds_to_deny() {
         for action in ["drop", "", "ACCEPT"] {
-            let row = event_to_row(&event_with(default_action_rule(action))).unwrap();
+            let row =
+                event_to_row(&event_with(default_action_rule(action)), |_| Some(false)).unwrap();
             assert_eq!(row.action.as_deref(), Some("deny"), "{action:?}");
             assert!(row.decided_by_default, "{action:?}");
         }
@@ -429,8 +516,8 @@ mod tests {
     #[test]
     fn event_rows_have_distinct_ids_even_at_the_same_time() {
         let event = event_with(sample_rule("899-firefox-allow-out.json", "allow"));
-        let first = event_to_row(&event).unwrap();
-        let second = event_to_row(&event).unwrap();
+        let first = event_to_row(&event, |_| Some(false)).unwrap();
+        let second = event_to_row(&event, |_| Some(false)).unwrap();
         assert_ne!(first.id, second.id);
         for row in [&first, &second] {
             assert!(
@@ -449,6 +536,6 @@ mod tests {
             rule: None,
             unixnano: 1,
         };
-        assert!(event_to_row(&event).is_none());
+        assert!(event_to_row(&event, |_| Some(false)).is_none());
     }
 }

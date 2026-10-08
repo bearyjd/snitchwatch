@@ -14,6 +14,7 @@ fn rule(name: &str, enabled: bool, action: &str) -> Rule {
         display_name: None,
         read_only_reason: None,
         deletable: None,
+        user_names: Default::default(),
         toggleable: None,
     }
 }
@@ -181,13 +182,20 @@ fn legacy_blocklist_band_name_still_detected() {
     assert!(r.is_blocklist_sourced());
 }
 
+/// Compared exactly, as the daemon compares (PR #106 review N4): only
+/// `allow`, `deny` and `reject` are actions it recognises.
 #[test]
-fn normalized_action_folds_unknown_to_deny() {
+fn normalized_action_compares_exactly() {
     assert_eq!(rule("r", true, "allow").normalized_action(), "allow");
-    assert_eq!(rule("r", true, "ALLOW").normalized_action(), "allow");
     assert_eq!(rule("r", true, "deny").normalized_action(), "deny");
     assert_eq!(rule("r", true, "reject").normalized_action(), "deny");
-    assert_eq!(rule("r", true, "").normalized_action(), "deny");
+    for unknown in ["ALLOW", "Deny", "drop", ""] {
+        assert_eq!(
+            rule("r", true, unknown).normalized_action(),
+            UNRECOGNISED_ACTION,
+            "{unknown:?}"
+        );
+    }
 }
 
 #[test]

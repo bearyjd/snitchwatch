@@ -66,6 +66,7 @@ fn all_apps_rows_are_flagged_explained_and_deleted_one_at_a_time() {
     let qml = r#"
 import QtQuick
 import QtQuick.Window
+import org.kde.kirigami as Kirigami
 import com.snitchwatch.shell
 
 Window {
@@ -109,6 +110,22 @@ Window {
             }
         }
         return item.contentItem ? probeWindow.findChild(item.contentItem, name) : null;
+    }
+    function findText(item, text) {
+        if (!item) {
+            return null;
+        }
+        if (item.text === text) {
+            return item;
+        }
+        const kids = item.children || [];
+        for (let i = 0; i < kids.length; i++) {
+            const found = probeWindow.findText(kids[i], text);
+            if (found) {
+                return found;
+            }
+        }
+        return item.contentItem ? probeWindow.findText(item.contentItem, text) : null;
     }
     function rowItem(index) {
         page.rulesList.forceLayout();
@@ -162,7 +179,8 @@ Window {
                 // label must not compare them with every rule (code review C1).
                 const counted = probeWindow.findChild(page.header, "allAppsCount");
                 probeWindow.check(counted && counted.text ===
-                    "3 rules saved by earlier Snitchwatch versions apply to all apps",
+                    "3 rules saved by earlier Snitchwatch versions apply to all apps or to "
+                    + "unidentified programs",
                     "count label: " + (counted ? counted.text : "missing"));
 
                 const denyHint = probeWindow.findChild(probeWindow.rowItem(0), "allAppsHint");
@@ -225,13 +243,82 @@ Window {
                 probeWindow.setRules([probeWindow.rule(deny, "deny", probeWindow.host("github.com"))]);
                 const one = probeWindow.findChild(page.header, "allAppsCount");
                 probeWindow.check(one && one.text ===
-                    "1 rule saved by an earlier Snitchwatch version applies to all apps",
+                    "1 rule saved by an earlier Snitchwatch version applies to all apps or to an "
+                    + "unidentified program",
                     "singular count label: " + (one ? one.text : "missing"));
+
+                // Issue #64: tied to a "program" that isn't a program file.
+                probeWindow.setRules([probeWindow.rule("snitchwatch-allow-x-443-pkernel", "allow",
+                    { type: "list", operands: [
+                        { type: "simple", operand: "process.path", data: "Kernel connection",
+                          sensitive: true },
+                        probeWindow.host("x.example") ] })]);
+                const kernelFlag = probeWindow.findChild(probeWindow.rowItem(0), "allAppsFlag");
+                const kernelHint = probeWindow.findChild(probeWindow.rowItem(0), "allAppsHint");
+                probeWindow.check(kernelFlag && kernelFlag.visible
+                                  && kernelFlag.text === "Program not identified"
+                                  && probeWindow.shown(0, "allAppsDelete") && kernelHint
+                                  && kernelHint.text.indexOf("isn't a program file") >= 0,
+                                  "unidentified program: " + (kernelFlag ? kernelFlag.text : "")
+                                  + " / " + (kernelHint ? kernelHint.text : "missing"));
 
                 // Without flagged rules the notice goes away.
                 probeWindow.setRules([]);
                 probeWindow.check(rulesModel.legacyHostOnlyCount === 0 && !page.header.visible,
                                   "notice stays without flagged rules");
+
+                // N4: an action the daemon doesn't recognise is shown as
+                // written, with a note, in a neutral colour (row and inspector).
+                probeWindow.setRules([probeWindow.rule("100-odd", "drop",
+                                                       probeWindow.host("x.example"))]);
+                const odd = "\"drop\" (unrecognised: blocks)";
+                const oddLabel = probeWindow.findText(probeWindow.rowItem(0), odd);
+                probeWindow.check(oddLabel !== null && oddLabel.textFormat === Text.PlainText
+                                  && Qt.colorEqual(oddLabel.color, page.actionColor(odd))
+                                  && Qt.colorEqual(page.actionColor(odd),
+                                                   Kirigami.Theme.neutralTextColor),
+                                  "unrecognised action label");
+                probeWindow.check(page.openRuleByName("100-odd") && page.inspectAction === odd,
+                                  "inspector action: " + page.inspectAction);
+                page.inspectorSheet.close();
+                probeWindow.setRules([]);
+
+                // Issue #61: what the list leaves out is said under the title.
+                rulesModel.applyServerMessageJson(JSON.stringify({
+                    action: "rulesNotShown", tooLarge: 2, listed: true }));
+                const notShown = probeWindow.findChild(page.header, "rulesNotShown");
+                probeWindow.check(page.header.visible && notShown && notShown.visible
+                                  && notShown.textFormat === Text.PlainText
+                                  && notShown.text.indexOf("2 rules aren't listed") === 0,
+                                  "not-shown label: " + (notShown ? notShown.text : "missing"));
+                rulesModel.applyServerMessageJson(JSON.stringify({
+                    action: "rulesNotShown", tooLarge: 0, listed: true }));
+                probeWindow.check(!page.header.visible, "the not-shown label stays");
+                // With none listed, "No rules yet" would contradict it.
+                const placeholder = probeWindow.findChild(page, "rulesEmptyPlaceholder");
+                rulesModel.applyServerMessageJson(JSON.stringify({
+                    action: "setRules", rules: [] }));
+                rulesModel.applyServerMessageJson(JSON.stringify({
+                    action: "rulesNotShown", tooLarge: 0, listed: true }));
+                probeWindow.check(placeholder && placeholder.visible
+                                  && placeholder.text === "No rules yet", "no placeholder: "
+                                  + (placeholder ? placeholder.visible + " " + placeholder.text
+                                                 : "missing"));
+                rulesModel.applyServerMessageJson(JSON.stringify({
+                    action: "rulesNotShown", tooLarge: 0, overLimitTotal: 12000,
+                    listed: false }));
+                probeWindow.check(!placeholder.visible, "the placeholder says no rules");
+                // With no list from the firewall service: waiting, not "no rules".
+                rulesModel.applyServerMessageJson(JSON.stringify({
+                    action: "rulesNotShown", tooLarge: 0, listed: false }));
+                probeWindow.check(placeholder.visible
+                                  && placeholder.text === "Waiting for the firewall service's rules",
+                                  "waiting placeholder: " + placeholder.text);
+                // A withdrawal's empty list, before its RulesNotShown: no flash (N8).
+                rulesModel.applyServerMessageJson(JSON.stringify({
+                    action: "setRules", rules: [] }));
+                probeWindow.check(placeholder.text === "Waiting for the firewall service's rules",
+                                  "no 'No rules yet' flash: " + placeholder.text);
 
                 if (probeWindow.failures.length > 0) {
                     throw new Error("all-apps probe: " + probeWindow.failures.join("; "));

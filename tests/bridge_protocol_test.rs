@@ -231,8 +231,17 @@ async fn ask_rule_round_trip_inline_deny_until_restart() {
     let mut ws = connect_stream(&bridge.ws_socket_path, bridge.ws_token.as_str()).await;
 
     let grpc_addr = bridge.grpc_endpoint.tcp_addr().unwrap();
+    // A synced rule list, as the daemon sends before it asks: a remembered
+    // answer is announced only to one (PR #106 review H1).
+    let mut mock = MockOpensnitchd::connect(grpc_addr).await.unwrap();
+    mock.subscribe("mock").await.unwrap();
+    let (_reply_tx, _notifications) = mock.open_notifications().await.unwrap();
+    let mut ready = bridge.daemon_stream_ready();
+    tokio::time::timeout(Duration::from_secs(5), ready.wait_for(|g| *g >= 1))
+        .await
+        .expect("the daemon stream never said HELLO")
+        .unwrap();
     let ask = tokio::spawn(async move {
-        let mut mock = MockOpensnitchd::connect(grpc_addr).await.unwrap();
         mock.ask_rule(Connection {
             protocol: "tcp".into(),
             dst_host: "github.com".into(),
@@ -1135,8 +1144,9 @@ async fn daemon_rules_reach_the_gui_and_follow_confirmed_commands() {
     .await
     .unwrap();
 
-    // 2. No setRules yet: nothing is committed before the stream's HELLO.
-    //    trayState is the last message of a snapshot.
+    // 2. No rules yet: nothing is committed before the stream's HELLO, so
+    //    the snapshot's setRules is the empty list (#61: it resets a GUI's
+    //    stale one). trayState is the last message of a snapshot.
     ws.send(Message::Text(
         json!({ "action": "requestSnapshot" }).to_string(),
     ))
@@ -1151,7 +1161,11 @@ async fn daemon_rules_reach_the_gui_and_follow_confirmed_commands() {
                 None => panic!("ws stream ended early"),
             };
             let v: serde_json::Value = serde_json::from_str(&t).unwrap();
-            assert_ne!(v["action"], "setRules", "rules sent before HELLO: {v}");
+            let listed = v["rules"].as_array().is_some_and(|rules| !rules.is_empty());
+            assert!(
+                v["action"] != "setRules" || !listed,
+                "rules sent before HELLO: {v}"
+            );
             if v["action"] == "trayState" {
                 break;
             }

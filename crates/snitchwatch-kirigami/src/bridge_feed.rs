@@ -433,7 +433,9 @@ mod tests {
             unixnano: 123,
             ..Default::default()
         };
-        let mut row = snitchwatch_bridge::translator::connection::event_to_row(&event).unwrap();
+        let mut row =
+            snitchwatch_bridge::translator::connection::event_to_row(&event, |_| Some(false))
+                .unwrap();
         assert!(row.decided_by_default);
         row.id = format!("1:{}", row.id);
         let (session, wire_id) = split_session_row_id(&row.id).unwrap();

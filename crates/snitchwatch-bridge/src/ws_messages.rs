@@ -350,6 +350,19 @@ pub enum ServerMessage {
         not_sent: u32,
         no_answer: u32,
     },
+    /// What the rule list (`SetRules`) leaves out (issue #61), sent after
+    /// every one: `too_large` rules over the per-rule size limits, and
+    /// `over_limit_total`, while there is no list, the number of rules in a
+    /// daemon snapshot over the 10,000 Snitchwatch reads.
+    RulesNotShown {
+        too_large: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        over_limit_total: Option<u32>,
+        /// Whether the bridge has the daemon's rule list: a GUI says it is
+        /// waiting for one rather than "no rules" (PR #106 review).
+        #[serde(default)]
+        listed: bool,
+    },
     /// The outcome of an `AddRule`/`UpdateRule`/`DeleteRule` that carried a
     /// `request_id` (rule editor, P2.1), sent to the asking connection only.
     RuleCommandResult {
@@ -546,9 +559,8 @@ pub enum ClientMessage {
     /// blocklists, profiles, rules). Sent by in-process feed consumers after a
     /// `broadcast::RecvError::Lagged` so a model that skipped delta messages
     /// can recover instead of staying silently stale. Rules are included as
-    /// `SetRules` once a daemon's rule snapshot has been committed during this
-    /// bridge run (`cache::rules`); before that the bridge has no rule list
-    /// to send.
+    /// `SetRules` and `RulesNotShown`; the list is empty until a daemon's
+    /// rule snapshot has been committed (`cache::rules`).
     RequestSnapshot,
     /// Pause or resume interactive filtering (tray "Pause/Resume filtering").
     /// While paused, `opensnitchd`'s own `DefaultAction: deny` is left

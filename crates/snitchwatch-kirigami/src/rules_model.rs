@@ -24,7 +24,7 @@ use crate::rules::hits::{RowHits, RuleHitsView};
 use crate::rules::insights::row::row_insights;
 use crate::rules::insights::shadow::Analysis;
 use crate::rules::insights::state::AnalysisState;
-use crate::rules::row_store::{RuleSource, RulesStore};
+use crate::rules::row_store::RulesStore;
 use crate::rules::simulator::SimulationForm;
 use snitchwatch_bridge::ws_messages::{ClientMessage, ServerMessage};
 
@@ -57,6 +57,13 @@ const ROLE_SHADOW_TEXT: i32 = 20;
 const ROLE_SHADOW_BY: i32 = 21;
 // Prompt-slot D: a recommended rule is read-only but can be turned on/off.
 const ROLE_TOGGLEABLE: i32 = 22;
+/// How the rule takes part in the daemon's decision (issue #102).
+const ROLE_HOW_IT_DECIDES: i32 = 23;
+/// The flagged row's badge (issues #44, #64).
+const ROLE_FLAG_BADGE: i32 = 24;
+/// Where the rule comes from, and its section's heading (`rules::sections`).
+const ROLE_SOURCE_LABEL: i32 = 25;
+const ROLE_SECTION_LABEL: i32 = 26;
 
 #[cxx_qt::bridge]
 pub mod qobject {
@@ -90,6 +97,13 @@ pub mod qobject {
         /// and whether the counts are saved. Empty until a `RuleHits`
         /// arrives from the live session.
         #[qproperty(QString, hits_info_json, cxx_name = "hitsInfoJson")]
+        /// What the list leaves out, as plain text (issue #61); "" when
+        /// nothing is.
+        #[qproperty(QString, not_shown_text, cxx_name = "notShownText")]
+        /// Whether the bridge has the firewall service's rule list: false
+        /// until one arrives, and while the bridge has none (PR #106
+        /// review), so an empty list isn't called "No rules yet".
+        #[qproperty(bool, listed)]
         /// The on-demand rule analysis' state as JSON
         /// (`rules::insights::state`): `idle`, `running`, `done`, `tooMany`
         /// or `stale`, with the count of each kind of finding.
@@ -218,6 +232,11 @@ pub struct RulesModelRust {
     legacy_host_only_count: i32,
     hits: RuleHitsView,
     hits_info_json: QString,
+    not_shown_text: QString,
+    listed: bool,
+    /// Whether a `RulesNotShown` arrived: from then on only it says whether
+    /// there is a list (PR #106 review N8).
+    says_listed: bool,
     analysis: AnalysisState,
     analysis_json: QString,
 }
@@ -240,31 +259,28 @@ impl qobject::RulesModel {
             )),
             ROLE_DELETABLE => QVariant::from(&rule.can_delete()),
             ROLE_TOGGLEABLE => QVariant::from(&rule.can_toggle()),
-            ROLE_APPLIES_TO_ALL_APPS => QVariant::from(&rule.applies_to_all_apps()),
+            // Flagged: all apps (#44), or an unidentified program (#64).
+            ROLE_APPLIES_TO_ALL_APPS => QVariant::from(&rule.flagged()),
+            ROLE_FLAG_BADGE => QVariant::from(&QString::from(rule.flag_badge())),
+            ROLE_SOURCE_LABEL => QVariant::from(&QString::from(rule.source().label())),
+            ROLE_SECTION_LABEL => QVariant::from(&QString::from(
+                &crate::rules::sections::section_label(&self.store, row).unwrap_or_default(),
+            )),
             ROLE_ALL_APPS_HINT => {
                 QVariant::from(&QString::from(&rule.all_apps_hint().unwrap_or_default()))
             }
             ROLE_HITS_COUNTED..=ROLE_HITS_NOTE => self.hits_data(rule, role),
             ROLE_HIT_BADGE_KIND..=ROLE_SHADOW_BY => self.insight_data(rule, role),
             ROLE_ENABLED => QVariant::from(&rule.enabled),
-            ROLE_ACTION => QVariant::from(&QString::from(rule.normalized_action())),
+            ROLE_HOW_IT_DECIDES => {
+                QVariant::from(&QString::from(crate::rules::deciding::how_it_decides(rule)))
+            }
+            ROLE_ACTION => QVariant::from(&QString::from(&rule.action_label())),
             ROLE_DURATION => QVariant::from(&QString::from(&rule.duration)),
             ROLE_OPERATOR_SUMMARY => QVariant::from(&QString::from(&rule.operator_summary())),
             ROLE_PRECEDENCE => QVariant::from(&(row as i32)),
-            ROLE_SOURCE => {
-                let source = match rule.source() {
-                    RuleSource::User => "user",
-                    RuleSource::Blocklist { .. } => "blocklist",
-                };
-                QVariant::from(&QString::from(source))
-            }
-            ROLE_BLOCKLIST_ID => {
-                let id = match rule.source() {
-                    RuleSource::User => String::new(),
-                    RuleSource::Blocklist { list_id } => list_id,
-                };
-                QVariant::from(&QString::from(&id))
-            }
+            ROLE_SOURCE => QVariant::from(&QString::from(rule.source().key())),
+            ROLE_BLOCKLIST_ID => QVariant::from(&QString::from(&rule.source().blocklist_id())),
             _ => QVariant::default(),
         }
     }
@@ -301,6 +317,10 @@ impl qobject::RulesModel {
         roles.insert(ROLE_SHADOW_KIND, QByteArray::from("shadowKind"));
         roles.insert(ROLE_SHADOW_TEXT, QByteArray::from("shadowText"));
         roles.insert(ROLE_SHADOW_BY, QByteArray::from("shadowBy"));
+        roles.insert(ROLE_HOW_IT_DECIDES, QByteArray::from("howItDecides"));
+        roles.insert(ROLE_FLAG_BADGE, QByteArray::from("flagBadge"));
+        roles.insert(ROLE_SOURCE_LABEL, QByteArray::from("sourceLabel"));
+        roles.insert(ROLE_SECTION_LABEL, QByteArray::from("sectionLabel"));
         roles
     }
 
@@ -525,6 +545,20 @@ impl qobject::RulesModel {
             self.refresh_hits();
             return;
         }
+        if let Some(text) = crate::rules::not_shown::not_shown_text(&msg) {
+            self.as_mut().set_not_shown_text(QString::from(&text));
+            if let ServerMessage::RulesNotShown { listed, .. } = msg {
+                self.as_mut().rust_mut().says_listed = true;
+                self.as_mut().set_listed(listed);
+            }
+            return;
+        }
+        if matches!(msg, ServerMessage::SetRules { .. }) && !self.says_listed {
+            // An older bridge sends a list only once it has one. A newer one
+            // follows every list with `RulesNotShown`, which says; so a
+            // withdrawal's empty list never shows "No rules yet" (N8).
+            self.as_mut().set_listed(true);
+        }
         let changed = {
             unsafe {
                 self.as_mut().begin_reset_model();
@@ -555,5 +589,38 @@ impl qobject::RulesModel {
             Ok(json) => self.as_mut().rule_change_requested(QString::from(&json)),
             Err(e) => tracing::error!(error = %e, "RulesModel: client message serialize failed"),
         }
+    }
+}
+
+#[cfg(test)]
+mod role_tests {
+    /// Every role id is distinct (a range arm such as
+    /// `ROLE_HIT_BADGE_KIND..=ROLE_SHADOW_BY` would otherwise swallow
+    /// another role silently), and so is every role name.
+    #[test]
+    fn role_ids_and_names_are_unique() {
+        let source = include_str!("rules_model.rs");
+        let ids: Vec<&str> = source
+            .lines()
+            .filter_map(|line| line.strip_prefix("const ROLE_"))
+            .filter_map(|rest| rest.split("i32 = ").nth(1))
+            .map(|value| value.trim_end_matches(';'))
+            .collect();
+        assert!(ids.len() >= 27, "found {} role ids", ids.len());
+        let unique: std::collections::BTreeSet<_> = ids.iter().collect();
+        assert_eq!(unique.len(), ids.len(), "duplicate role ids: {ids:?}");
+        let body = source
+            .split("fn role_names(&self)")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    }\n").next())
+            .expect("role_names");
+        let names: Vec<&str> = body
+            .split("QByteArray::from(\"")
+            .skip(1)
+            .filter_map(|rest| rest.split('"').next())
+            .collect();
+        assert_eq!(names.len(), ids.len(), "every role has a name");
+        let unique: std::collections::BTreeSet<_> = names.iter().collect();
+        assert_eq!(unique.len(), names.len(), "duplicate role names");
     }
 }

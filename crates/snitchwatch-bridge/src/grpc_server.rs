@@ -13,7 +13,6 @@ use crate::daemon_liveness::StreamGuard;
 use crate::diagnostics::DiagnosticsCtx;
 use crate::filter_pause::FilterPause;
 use crate::notice::NoticeBus;
-use crate::rule_wire::rule_to_wire;
 use crate::translator::connection::{connection_to_row, event_to_row};
 use crate::translator::verdict::{once_rule, verdict_to_rule};
 use crate::tray_state::{TrayState, TrayStatePublisher};
@@ -118,6 +117,9 @@ pub struct UiService {
     /// How long a prompt waits before the bridge answers it itself
     /// (`crate::deferred_answers`).
     answer_timeout: Duration,
+    /// Names `user.name` uids for display (`crate::accounts`); none in
+    /// tests unless one sets a fake.
+    account_lookup: Option<crate::accounts::AccountLookup>,
 }
 
 impl UiService {
@@ -149,7 +151,15 @@ impl UiService {
             prompt_slot,
             daemon_config: Default::default(),
             answer_timeout: crate::deferred_answers::ANSWER_TIMEOUT,
+            account_lookup: None,
         }
+    }
+
+    /// Name `user.name` uids for display with `lookup`
+    /// (`crate::accounts::system_lookup` in production).
+    pub fn with_account_lookup(mut self, lookup: crate::accounts::AccountLookup) -> Self {
+        self.account_lookup = Some(lookup);
+        self
     }
 
     /// Tests shorten the time a prompt waits for a person.
@@ -274,7 +284,16 @@ impl Ui for UiService {
             );
             self.rules
                 .record_hits(&stats.events, stats.uptime, stats.rule_hits);
-            let new_rows: Vec<_> = stats.events.iter().filter_map(event_to_row).collect();
+            let new_rows: Vec<_> = {
+                let rules = self.rules_handle();
+                let rules = rules.lock().unwrap_or_else(|e| e.into_inner());
+                let listed = |name: &str| rules.rules().map(|r| r.contains_key(name));
+                stats
+                    .events
+                    .iter()
+                    .filter_map(|event| event_to_row(event, listed))
+                    .collect()
+            };
             if !new_rows.is_empty() {
                 {
                     let mut cache = self.cache.lock().await;
@@ -475,6 +494,9 @@ impl Ui for UiService {
         // Never log `cfg.config` itself: see `daemon_config`.
         self.daemon_config
             .set(crate::daemon_config::DaemonConfigView::parse(&cfg.config));
+        if let Some(lookup) = &self.account_lookup {
+            self.rules.learn_account_names(lookup, &cfg.rules).await;
+        }
         // Staged until this connection's stream says HELLO (see `cache::rules`).
         self.rules.stage(conn, cfg.rules.clone());
         {

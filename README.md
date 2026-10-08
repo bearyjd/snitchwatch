@@ -310,8 +310,8 @@ past 2,000,000 hosts in total (in subscription order) get no rule.
   everything they do and takes precedence ("Never decides", or "May never
   decide" when the proof rests on a regular expression). It names that rule and
   says nothing about what the connections get instead, since a third rule can
-  decide some of them. It checks only conditions Snitchwatch can compare
-  exactly, so no mark is not a guarantee, and it never changes a rule.
+  decide some of them. It checks only conditions Snitchwatch can
+  compare, so no mark is not a guarantee, and it never changes a rule.
 - The bridge fetches only `https://` URLs, including every redirect, and
   never a loopback, link-local, carrier-grade NAT or other reserved address
   (LAN addresses, RFC 1918 and ULA, are allowed: owner decision,

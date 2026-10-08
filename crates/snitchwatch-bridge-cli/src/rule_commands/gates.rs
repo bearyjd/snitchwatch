@@ -106,8 +106,7 @@ fn plan_add(
     let parsed = check_wire_rule(rule, PolicyProfile::Editor)?;
     name_free(&lock(rules), &parsed.name, busy)?;
     let effect = UpstreamEffect::AddRule { rule: rule.clone() };
-    let mut change = notification(&effect)?;
-    stamp_created(&mut change, None);
+    let change = notification(&effect)?;
     Ok(Plan::Add {
         change,
         name: parsed.name,
@@ -137,14 +136,13 @@ fn plan_update(
         rule_id: rule_id.to_string(),
         rule: rule.clone(),
     };
-    let mut change = notification(&effect)?;
+    let change = notification(&effect)?;
     let new = change.rules[0].clone();
     let renamed = new.name != rule_id;
     if !renamed && only_enabled_differs(&old, &new) {
         if new.enabled && !old.enabled {
             may_turn_on(&new)?;
         }
-        stamp_created(&mut change, Some(&old));
         return Ok(Plan::Send(change));
     }
     if on_tcp {
@@ -153,11 +151,8 @@ fn plan_update(
     validate_user_rule(&new, PolicyProfile::Editor)?;
     if renamed {
         name_free(&cache, &new.name, busy)?;
-        // A renamed rule is a new rule to the daemon.
-        stamp_created(&mut change, None);
         return Ok(Plan::Rename { change, old });
     }
-    stamp_created(&mut change, Some(&old));
     Ok(Plan::Edit { change, old })
 }
 
@@ -249,23 +244,4 @@ fn changeable(cache: &RulesCache, rule_id: &str, busy: &BusyNames) -> Result<Rul
         return Err(refusal("name", BUSY));
     }
     Ok(old.clone())
-}
-
-/// The daemon starts a timed rule's clock when it stores it *enabled*
-/// (`loader.go` `replaceUserRule`), and its timer then removes the rule
-/// unless the duration changed (`scheduleTemporaryRule`). Stamp `created`
-/// so the cache expires it then: for a new rule, a new duration, and every
-/// rule turned on (after a resync `created` is the daemon's, which says
-/// nothing about a clock; a row left a little long is safer than an active
-/// rule hidden early). A disabled rule gets no stamp.
-fn stamp_created(sent: &mut Notification, old: Option<&Rule>) {
-    let rule = &mut sent.rules[0];
-    let timed = !matches!(rule.duration.as_str(), "always" | "until restart" | "once");
-    let starts = old.is_none_or(|old| old.duration != rule.duration || !old.enabled);
-    if timed && rule.enabled && starts {
-        rule.created = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-    }
 }

@@ -98,7 +98,11 @@ async fn the_expiry_tick_bumps_the_revision() {
         tx.clone(),
         RuleHitsHandle::new(tx),
     ));
-    rx.recv().await.unwrap();
+    // Bounded, so a mutant that prunes nothing fails instead of hanging.
+    tokio::time::timeout(Duration::from_secs(30), rx.recv())
+        .await
+        .expect("the tick never published")
+        .unwrap();
     assert!(lock(&cache).revision() > before);
     tick.abort();
 }
@@ -114,6 +118,10 @@ fn withdraw_bumps_the_revision_and_broadcasts_only_once() {
     assert!(lock(&sync.cache).is_unknown());
     assert!(lock(&sync.cache).revision() > before);
     assert!(matches!(rx.try_recv(), Ok(ServerMessage::SetRules { rules }) if rules.is_empty()));
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(ServerMessage::RulesNotShown { .. })
+    ));
 
     sync.withdraw();
     assert!(rx.try_recv().is_err(), "a second withdraw is a no-op");
@@ -142,6 +150,10 @@ fn held_publishes_coalesce_into_one_set_rules() {
         Ok(ServerMessage::SetRules { rules }) => assert_eq!(rules.len(), 2),
         other => panic!("expected one SetRules, got {other:?}"),
     }
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(ServerMessage::RulesNotShown { .. })
+    ));
     assert!(rx.try_recv().is_err(), "exactly one");
 
     sync.apply_confirmed(&change("c"));
@@ -168,7 +180,7 @@ fn rules_left_out_of_a_snapshot_keep_their_name_and_size() {
     long.description = "x".repeat(MAX_RULE_FIELD_BYTES + 1);
     let mut nameless = rule("", "always", 1);
     nameless.description = long.description.clone();
-    let snapshot = bounded_snapshot(vec![rule("kept", "always", 1), long, nameless]).unwrap();
+    let snapshot = bounded_snapshot(vec![rule("kept", "always", 1), long, nameless]);
     assert_eq!(snapshot.rules.len(), 1);
     assert_eq!(snapshot.left_out.len(), 2, "every left-out rule is counted");
     assert!(snapshot.left_out["long"] > MAX_RULE_FIELD_BYTES);

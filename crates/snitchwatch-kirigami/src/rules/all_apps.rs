@@ -16,7 +16,7 @@
 //! an allow — including one for just this host — and other apps are asked.
 
 use super::row_store::{Rule, RulesStore};
-use snitchwatch_bridge::translator::verdict::sanitize_for_display;
+use snitchwatch_bridge::translator::verdict::{sanitize_for_display, strip_display_hazards};
 
 /// The description `snitchwatch_bridge::translator::verdict::verdict_to_rule`
 /// gives every interactive prompt rule (since M1.5).
@@ -25,7 +25,65 @@ const INTERACTIVE_VERDICT_DESCRIPTION: &str = "snitchwatch interactive verdict";
 /// Longest destination shown in a hint (`sanitize_for_display` adds `…`).
 const MAX_TARGET_CHARS: usize = 64;
 
+/// The row badges: a destination-only rule, and one tied to a "program"
+/// that isn't a program file (issue #64).
+pub const ALL_APPS_BADGE: &str = "Applies to all apps";
+pub const UNIDENTIFIED_BADGE: &str = "Program not identified";
+
 impl Rule {
+    /// Flagged on the Rules page: [`Self::applies_to_all_apps`], or a
+    /// Snitchwatch prompt rule tied to a process path that doesn't name a
+    /// real program file (issue #64; #44 Part A refuses those for new
+    /// rules: the daemon's `Kernel connection` placeholder, a bare name,
+    /// `/proc/self/exe`, a memfd).
+    pub fn flagged(&self) -> bool {
+        self.applies_to_all_apps() || self.unidentified_program().is_some()
+    }
+
+    /// The flagged row's badge (empty when not flagged).
+    pub fn flag_badge(&self) -> &'static str {
+        if self.applies_to_all_apps() {
+            ALL_APPS_BADGE
+        } else if self.unidentified_program().is_some() {
+            UNIDENTIFIED_BADGE
+        } else {
+            ""
+        }
+    }
+
+    /// The process path a Snitchwatch prompt rule is tied to that isn't a
+    /// program file, as plain text for a `PlainText` label: display hazards
+    /// stripped, nothing escaped, at most [`MAX_TARGET_CHARS`].
+    fn unidentified_program(&self) -> Option<String> {
+        if self.description != INTERACTIVE_VERDICT_DESCRIPTION {
+            return None;
+        }
+        unbindable_path(&self.operator).map(|path| plain_truncated(&path))
+    }
+
+    /// What deleting a rule tied to an unidentified program changes.
+    fn unidentified_hint(&self, path: &str) -> String {
+        let deny = self.normalized_action() != "allow";
+        let does = if deny { "blocks" } else { "allows" };
+        let tied = if path.is_empty() {
+            format!(
+                "Tied to an empty program path, so it {does} whatever the firewall reports \
+                 with no program, not one app."
+            )
+        } else {
+            format!(
+                "Tied to \"{path}\", which isn't a program file, so it {does} whatever the \
+                 firewall reports under that name, not one app."
+            )
+        };
+        if !self.can_delete() {
+            format!("{tied} Snitchwatch can't delete it; its details say why.")
+        } else if !self.enabled {
+            format!("{tied} It is disabled; deleting it removes it for good.")
+        } else {
+            format!("{tied} Deleting it makes those connections ask again.")
+        }
+    }
     /// A Snitchwatch prompt rule whose operator matches only a destination,
     /// so it applies to every program.
     pub fn applies_to_all_apps(&self) -> bool {
@@ -38,7 +96,11 @@ impl Rule {
     /// flag that `RulesStore::is_deletable` and the row's Delete button use) or a
     /// disabled one is described as it is, never as "Deleting this ...".
     pub fn all_apps_hint(&self) -> Option<String> {
-        let target = self.all_apps_target()?;
+        let Some(target) = self.all_apps_target() else {
+            return self
+                .unidentified_program()
+                .map(|path| self.unidentified_hint(&path));
+        };
         let deny = self.normalized_action() != "allow";
         Some(if !self.can_delete() {
             "This rule applies to every app. Snitchwatch can't delete it; its details say why."
@@ -72,12 +134,9 @@ impl Rule {
 }
 
 impl RulesStore {
-    /// How many rules [`Rule::applies_to_all_apps`] flags.
+    /// How many rules [`Rule::flagged`] flags.
     pub fn legacy_host_only_count(&self) -> usize {
-        self.rules()
-            .iter()
-            .filter(|r| r.applies_to_all_apps())
-            .count()
+        self.rules().iter().filter(|r| r.flagged()).count()
     }
 }
 
@@ -91,6 +150,34 @@ fn mentions_process_path(operator: &serde_json::Value) -> bool {
         serde_json::Value::Array(items) => items.iter().any(mentions_process_path),
         _ => false,
     }
+}
+
+/// `text` without display hazards, cut to [`MAX_TARGET_CHARS`] with `…`.
+fn plain_truncated(text: &str) -> String {
+    let plain = strip_display_hazards(text);
+    match plain.char_indices().nth(MAX_TARGET_CHARS) {
+        Some((cut, _)) => format!("{}…", &plain[..cut]),
+        None => plain,
+    }
+}
+
+/// The first `simple` `process.path` value in `operator` that isn't a real
+/// program file's path (`is_bindable_process_path`, #44 Part A).
+fn unbindable_path(operator: &serde_json::Value) -> Option<String> {
+    use snitchwatch_bridge::translator::process_binding::is_bindable_process_path;
+    let leaves: Vec<&serde_json::Value> = match operator.get("operands").and_then(|o| o.as_array())
+    {
+        Some(members) => members.iter().collect(),
+        None => vec![operator],
+    };
+    leaves.into_iter().find_map(|leaf| {
+        let field = |key: &str| leaf.get(key).and_then(|v| v.as_str());
+        let data = field("data")?;
+        (field("type") == Some("simple")
+            && field("operand") == Some("process.path")
+            && !is_bindable_process_path(data))
+        .then(|| data.to_string())
+    })
 }
 
 /// For a pre-#50 host scope's operator (one leaf: a `list` has type `list`),
@@ -485,5 +572,72 @@ mod tests {
                 )
             );
         }
+    }
+
+    /// Issue #64: a Snitchwatch prompt rule saved before #44 Part A could
+    /// be tied to a "program" that isn't a program file (the daemon's
+    /// `Kernel connection` placeholder, a bare name, `/proc/self/exe`); it
+    /// is flagged like an all-apps rule, with its own badge and hint.
+    #[test]
+    fn rules_tied_to_an_unidentified_program_are_flagged() {
+        let tied = |path: &str, action: &str| {
+            rule(
+                "snitchwatch-allow-github.com-443-px",
+                action,
+                VERDICT,
+                json!({"type": "list", "operands": [
+                    {"type": "simple", "operand": "process.path", "data": path, "sensitive": true},
+                    simple("dest.host", "github.com"),
+                ]}),
+            )
+        };
+        for path in [
+            "Kernel connection",
+            "curl",
+            "/proc/self/exe",
+            "/memfd:x (deleted)",
+            "<unknown>",
+            "a&b",
+        ] {
+            let r = tied(path, "allow");
+            assert!(r.flagged(), "{path}");
+            assert!(!r.applies_to_all_apps(), "{path}");
+            assert_eq!(r.flag_badge(), UNIDENTIFIED_BADGE);
+            let hint = r.all_apps_hint().unwrap();
+            assert!(hint.contains("isn't a program file"), "{hint}");
+            // A PlainText label: shown as it is, never HTML-escaped.
+            assert!(hint.contains(&format!("\"{path}\"")), "{hint}");
+        }
+        let empty = tied("", "allow").all_apps_hint().unwrap();
+        assert!(
+            empty.starts_with("Tied to an empty program path"),
+            "{empty}"
+        );
+        let hazard = tied("cu\u{202e}rl", "allow").all_apps_hint().unwrap();
+        assert!(hazard.contains("\"curl\""), "{hazard}");
+        let long = tied(&"x".repeat(100), "allow").all_apps_hint().unwrap();
+        assert!(
+            long.contains(&format!("\"{}…\"", "x".repeat(MAX_TARGET_CHARS))),
+            "{long}"
+        );
+        let deny = tied("Kernel connection", "deny").all_apps_hint().unwrap();
+        assert!(deny.contains("blocks"), "{deny}");
+        let named = tied("/usr/bin/curl", "allow");
+        assert!(!named.flagged() && named.all_apps_hint().is_none());
+        let foreign = Rule {
+            description: String::new(),
+            ..tied("Kernel connection", "allow")
+        };
+        assert!(!foreign.flagged(), "only Snitchwatch's own prompt rules");
+        let all_apps = host("snitchwatch-allow-github.com-443", "allow", "github.com");
+        assert_eq!(all_apps.flag_badge(), ALL_APPS_BADGE);
+        let mut store = RulesStore::new();
+        store.apply(&ServerMessage::SetRules {
+            rules: vec![
+                serde_json::to_value(tied("Kernel connection", "allow")).unwrap(),
+                serde_json::to_value(all_apps).unwrap(),
+            ],
+        });
+        assert_eq!(store.legacy_host_only_count(), 2);
     }
 }
