@@ -210,19 +210,24 @@ fn classify_one(rule: &CheckedRule, cached: Option<&Rule>) -> ImportItem {
     } else {
         strip_display_hazards(&rule.name)
     };
-    let parsed = match &rule.result {
-        Err(problems) => {
-            return ImportItem {
-                index: rule.index,
-                name: rule.name.clone(),
-                display_name,
-                kind: ImportKind::Refused,
-                problems: problems.clone(),
-                ..empty_item()
-            }
-        }
-        Ok(parsed) => parsed,
+    let item = ImportItem {
+        index: rule.index,
+        name: rule.name.clone(),
+        display_name,
+        ..empty_item()
     };
+    match &rule.result {
+        Err(problems) => ImportItem {
+            kind: ImportKind::Refused,
+            problems: problems.clone(),
+            ..item
+        },
+        Ok(parsed) => classify_parsed(item, parsed, cached),
+    }
+}
+
+/// An accepted rule's kind, flags, cautions and content.
+fn classify_parsed(item: ImportItem, parsed: &Rule, cached: Option<&Rule>) -> ImportItem {
     let changed = cached.map(|old| changed_fields(old, parsed));
     let kind = match &changed {
         None => ImportKind::Add,
@@ -242,15 +247,11 @@ fn classify_one(rule: &CheckedRule, cached: Option<&Rule>) -> ImportItem {
         Vec::new()
     };
     ImportItem {
-        index: rule.index,
-        name: rule.name.clone(),
-        display_name,
         kind,
         changed_fields: changed
             .iter()
-            .map(|f| caution::plain_field(f).to_string())
+            .map(|f| caution::plain_field(f).into())
             .collect(),
-        problems: Vec::new(),
         weakens: kind == ImportKind::Replace && cached.is_some_and(|old| weakens(old, parsed)),
         applies_to_all_apps: all_apps,
         precedence: parsed.precedence,
@@ -266,6 +267,7 @@ fn classify_one(rule: &CheckedRule, cached: Option<&Rule>) -> ImportItem {
         previous: cached
             .filter(|_| kind == ImportKind::Replace)
             .map(|old| caution::previous(old, conditions)),
+        ..item
     }
 }
 

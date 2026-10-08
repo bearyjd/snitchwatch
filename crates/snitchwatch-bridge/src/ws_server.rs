@@ -257,7 +257,7 @@ async fn handle_socket(socket: WebSocket, handles: WsHandles, token: Token, peer
 /// Kept as sibling futures: failure of either direction releases the lease
 /// and drops the other future, even when its peer never sends another frame.
 async fn pump_authenticated<S, R>(
-    mut sender: S,
+    sender: S,
     mut receiver: R,
     handles: WsHandles,
     peer_uid: Option<u32>,
@@ -265,36 +265,15 @@ async fn pump_authenticated<S, R>(
     S: futures_util::Sink<Message> + Unpin,
     R: futures_util::Stream<Item = Result<Message, axum::Error>> + Unpin,
 {
-    use futures_util::{SinkExt, StreamExt};
-    let mut broadcast_rx = handles.broadcast.subscribe();
+    use futures_util::StreamExt;
+    let broadcast_rx = handles.broadcast.subscribe();
     // Answers meant for this connection only (rule import/export, P2.7).
-    let (reply_tx, mut reply_rx) = mpsc::channel::<ServerMessage>(REPLY_QUEUE);
+    let (reply_tx, reply_rx) = mpsc::channel::<ServerMessage>(REPLY_QUEUE);
     let _session = handles.presence.authenticated_session();
     // Stable while `_session` is held: the generation only advances when the
     // last authenticated session ends.
     let generation = handles.presence.current_generation();
-    let outbound = async move {
-        loop {
-            let msg = tokio::select! {
-                biased;
-                received = broadcast_rx.recv() => match received {
-                    Ok(msg) => msg,
-                    Err(_) => break,
-                },
-                Some(msg) = reply_rx.recv() => msg,
-            };
-            let json = match serde_json::to_string(&msg) {
-                Ok(json) => json,
-                Err(error) => {
-                    error!(%error, "failed to serialize ServerMessage");
-                    continue;
-                }
-            };
-            if sender.send(Message::Text(json)).await.is_err() {
-                break;
-            }
-        }
-    };
+    let outbound = forward_outbound(sender, broadcast_rx, reply_rx);
     let inbound = async {
         while let Some(Ok(msg)) = receiver.next().await {
             match msg {
@@ -326,6 +305,38 @@ async fn pump_authenticated<S, R>(
         _ = inbound => {},
     }
     debug!("WS client connection ended");
+}
+
+/// Send this connection everything broadcast, and the answers meant for it
+/// alone, until either ends or the client goes away.
+async fn forward_outbound<S>(
+    mut sender: S,
+    mut broadcast_rx: broadcast::Receiver<ServerMessage>,
+    mut reply_rx: mpsc::Receiver<ServerMessage>,
+) where
+    S: futures_util::Sink<Message> + Unpin,
+{
+    use futures_util::SinkExt;
+    loop {
+        let msg = tokio::select! {
+            biased;
+            received = broadcast_rx.recv() => match received {
+                Ok(msg) => msg,
+                Err(_) => break,
+            },
+            Some(msg) = reply_rx.recv() => msg,
+        };
+        let json = match serde_json::to_string(&msg) {
+            Ok(json) => json,
+            Err(error) => {
+                error!(%error, "failed to serialize ServerMessage");
+                continue;
+            }
+        };
+        if sender.send(Message::Text(json)).await.is_err() {
+            break;
+        }
+    }
 }
 
 /// Answers queued for one connection before its sender waits.

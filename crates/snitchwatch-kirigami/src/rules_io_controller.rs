@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 
 use crate::bridge_runtime::SendClientMessageError;
 use crate::rules::{io, io_view};
-use snitchwatch_bridge::rule_io::OmittedCounts;
+use snitchwatch_bridge::rule_io::{Document, OmittedCounts};
 use snitchwatch_bridge::ws_messages::{ClientMessage, ServerMessage};
 
 /// How long to wait for the bridge between answers before giving up.
@@ -384,18 +384,7 @@ impl qobject::RulesIoController {
         match message {
             ServerMessage::RulesExport {
                 document, omitted, ..
-            } => {
-                let text = io_view::export_text(&document);
-                let rules = document.rules.len();
-                let status = io_view::export_ready(rules, &omitted, text.len());
-                self.as_mut().rust_mut().export = Some(PendingExport {
-                    text,
-                    rules,
-                    omitted,
-                });
-                self.as_mut().finish(&status);
-                self.export_ready();
-            }
+            } => self.on_export(&document, omitted),
             ServerMessage::RulesImportPreview {
                 preview_id, items, ..
             } => {
@@ -425,6 +414,19 @@ impl qobject::RulesIoController {
             }
             _ => {}
         }
+    }
+
+    fn on_export(mut self: Pin<&mut Self>, document: &Document, omitted: OmittedCounts) {
+        let text = io_view::export_text(document);
+        let rules = document.rules.len();
+        let status = io_view::export_ready(rules, &omitted, text.len());
+        self.as_mut().rust_mut().export = Some(PendingExport {
+            text,
+            rules,
+            omitted,
+        });
+        self.as_mut().finish(&status);
+        self.export_ready();
     }
 
     fn start_bridge_feed(self: Pin<&mut Self>) {
