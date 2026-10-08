@@ -10,7 +10,8 @@
 //!
 //! - nothing is shown before a `RuleHits` arrives from the live session (an
 //!   older bridge never sends one), or before counting has started;
-//! - a `nolog` rule is "not counted", never `0`;
+//! - a `nolog` rule is "not counted", never `0`, and so is a rule whose name
+//!   the bridge can't count ([`keepable_name`]);
 //! - the summary says since when the counts run, that they are approximate,
 //!   whether events may be missing and since when, and whether they survive a
 //!   restart of the bridge.
@@ -18,6 +19,7 @@
 use std::collections::HashMap;
 
 use serde::Serialize;
+use snitchwatch_bridge::cache::rule_hits::keepable_name;
 use snitchwatch_bridge::ws_messages::{ServerMessage, StorageStatus};
 
 use crate::rules::row_store::Rule;
@@ -30,6 +32,9 @@ pub enum RowHits {
     /// The daemon reports no events for this rule, so any number would
     /// mislead.
     NotCounted,
+    /// The bridge doesn't count a rule with this name (over 256 bytes, or
+    /// with a control character), so `0` would be false.
+    NameNotCounted,
     Counted {
         count: u64,
         last_hit_unix_ms: i64,
@@ -41,15 +46,19 @@ impl RowHits {
     pub fn note(&self) -> &'static str {
         match self {
             Self::NotCounted => "Not counted: this rule doesn't log",
+            Self::NameNotCounted => {
+                "Not counted: this rule's name is too long or has control characters"
+            }
             _ => "",
         }
     }
 
-    /// The count as the model's `int` role.
-    pub fn count_for_model(&self) -> i32 {
+    /// The count as the model's `real` role: a QML `int` stops at
+    /// 2 147 483 647. Exact up to 2^53.
+    pub fn count_for_model(&self) -> f64 {
         match self {
-            Self::Counted { count, .. } => i32::try_from(*count).unwrap_or(i32::MAX),
-            _ => 0,
+            Self::Counted { count, .. } => *count as f64,
+            _ => 0.0,
         }
     }
 }
@@ -128,6 +137,9 @@ impl RuleHitsView {
         };
         if rule.nolog {
             return RowHits::NotCounted;
+        }
+        if !keepable_name(&rule.name) {
+            return RowHits::NameNotCounted;
         }
         let (count, last_hit_unix_ms) = received.counts.get(&rule.name).copied().unwrap_or((0, 0));
         RowHits::Counted {

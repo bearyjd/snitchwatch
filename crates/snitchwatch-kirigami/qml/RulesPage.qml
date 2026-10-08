@@ -27,9 +27,10 @@
 // connection, and the header says what those numbers are: Snitchwatch's own
 // tally of the daemon's per-ping events, since a time, approximate, and
 // possibly missing some. Nothing is shown until the bridge has sent counts
-// (an older bridge never does), a rule that doesn't log is "not counted"
-// rather than 0, and the header says when the counts don't survive a
-// restart. Every label is PlainText.
+// (an older bridge never does), a rule that doesn't log, or whose name the
+// bridge can't count, is "not counted" rather than 0, the count is a `real`
+// (a QML int stops at 2^31 - 1), and the header says when the counts don't
+// survive a restart. Every label is PlainText.
 //
 // Names are shown via the `displayName` role (bidi overrides and zero-width
 // characters removed by the bridge); `name` stays the rule's identity.
@@ -360,7 +361,7 @@ Kirigami.ScrollablePage {
             required property bool appliesToAllApps
             required property string allAppsHint
             required property bool hitsCounted
-            required property int hitCount
+            required property real hitCount
             required property real lastHitMs
             required property string hitsNote
 
