@@ -26,6 +26,7 @@ fn main() {
             "qml/RulesImportSheet.qml",
             "qml/RuleEditorSheet.qml",
             "qml/ProfilesPage.qml",
+            "qml/RecommendedRulesPage.qml",
             "qml/TrafficPage.qml",
             "qml/OnboardingPage.qml",
             "qml/DiagnosticsPage.qml",
@@ -44,6 +45,7 @@ fn main() {
         .file("src/rules_io_controller.rs")
         .file("src/rule_editor_controller.rs")
         .file("src/profiles_model.rs")
+        .file("src/curated_defaults_model.rs")
         .file("src/traffic_model.rs")
         .file("src/wizard_controller.rs")
         .file("src/settings_controller.rs")

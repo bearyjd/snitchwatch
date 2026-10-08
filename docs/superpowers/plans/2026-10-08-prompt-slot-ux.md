@@ -459,6 +459,68 @@ Branch `feat/prompt-slot-autoanswer`.
     - Flatpak apps report `/app/...` paths that collide across apps
       (P4.2).
 
+#### D as implemented (2026-10-08): departures and the capture
+
+Branch `feat/prompt-slot-curated-defaults`.
+- **Data** (`crates/snitchwatch-bridge/data/curated-defaults-v1.json`,
+  built into the bridge). Each entry has an id, an exact `/usr` program
+  path, exactly one of one host or this computer, one port, `tcp` or `udp`,
+  a plain-text `why`, and the capture `evidence`. Its rule is a list:
+  - `process.path`, simple, case sensitive;
+  - `dest.host` simple, or `dest.ip` regexp `^(127\.0\.0\.1|::1)$`;
+  - `dest.port` simple;
+  - `protocol` regexp `^tcp6?$` or `^udp6?$` (IPv4 and IPv6).
+
+  No wildcards, no host regexps, no any-address entry.
+- **Allowlist.** `curated::check_curated_rule` takes only that shape, in
+  that order, with the description, `allow`, `always` and no precedence,
+  and then runs the `Editor` profile. It is applied to the data file (a bad
+  file offers nothing), to the saved choices, and at the send point.
+- **Send path.** `DaemonCommands::send_curated` with a `CuratedCommand`
+  (crate-private constructors, like `BlocklistCommand`). `send` still
+  refuses the prefix.
+- **Opt-in, per entry.** The choices live in
+  `<state>/curated-defaults.json`, read and written through `state_file`
+  (the hit-count file's checks: owner-only, no links, atomic replace).
+  Nothing is on by default. Kirigami has a "Recommended rules" page: a
+  switch per entry, "Turn all on" and "Turn all off", and each entry's
+  program, what it allows and why, as plain text.
+- **Reconcile**, as item 13, plus:
+  - Only the system bridge with saved settings installs, like blocklists.
+    The per-user bridge's daemon link is TCP, where an impostor's `OK`
+    would read "Installed". Without saved settings, a deletion couldn't be
+    remembered. Both list the entries, refuse requests and say why.
+  - "Rule installed" only after the daemon's `OK`; the installed copy is
+    recorded then.
+  - A rule installed earlier and missing from a committed snapshot was
+    deleted by the user. It is recorded and not reinstalled until the user
+    turns the entry off and on again.
+  - Not handled in v1: a later data file changing an installed entry.
+    The old copy stays. A v2 must decide.
+- **Pure toggles.** The Rules page can turn a shipped entry's rule on or
+  off (wire field `toggleable`). The bridge sends the data file's rule,
+  never the GUI's, and only while the daemon's copy is that rule apart
+  from `enabled` (`curated::toggleable`). Adds, edits, renames and deletes
+  under the prefix stay refused. An edited copy keeps the reserved-name
+  reason.
+- **Wire.** `ClientMessage::SetCuratedDefaults { ids, on }`;
+  `ServerMessage::SetCuratedDefaults { entries, storage, unavailable }`;
+  capability `curatedDefaults`.
+- **The capture** (bazzite-tower r10, idle and after update):
+
+  | Capture entry | v1 | Why |
+  |---|---|---|
+  | `/usr/bin/NetworkManager` → `fedoraproject.org`:80, tcp/tcp6 | included | the connectivity check |
+  | `/usr/bin/chronyc` → `127.0.0.1`/`::1`:323, udp/udp6 | included, this computer only | talks to chronyd |
+  | `/usr/bin/flatpak` → `dl.flathub.org`:443, tcp6 | included | Flathub updates (held in r10, so the update timed out) |
+  | `/usr/lib/systemd/systemd-resolved` → the network's DNS server:53, udp | **excluded, owner question S6** | the server differs per network, so only an any-address allow fits; S3 says host-constrained |
+  | chronyd → NTP servers:123 | pending | chronyd was stopped in the fixture |
+  | rpm-ostree, skopeo | pending r11 | r10 has only skopeo to a local image reference (`127.0.0.1`/`::1`:443) |
+  | fwupd | pending r11 | not in r10 |
+  | tailscaled → `log.tailscale.com` | excluded | optional service |
+  | curl → `10.0.2.2`:49190; `<unknown>` → `10.0.2.2`:51820 udp | excluded | the test harness and its WireGuard check |
+  | kioworker, Steam | excluded | not in the capture; Steam lives under home (no `/usr` path) |
+
 ### E. Daemon-side options (describe only; for bazzite-tower's patch)
 
 None of these adds a UI→daemon notification action. They change daemon
@@ -667,3 +729,15 @@ Tower VM checks:
     paused)".
   - The pause menu items say so.
   - PR #86's warning stays as a fallback.
+- **S6 (new, from D). A DNS allow for `systemd-resolved`.** On a deny
+  default nothing resolves until the resolver's upstream queries are
+  allowed (`packaging/README.md` says so for the blocklist fetch too). The
+  network's DNS server changes from network to network, so the only rule
+  that fits is `/usr/lib/systemd/systemd-resolved` to any address on UDP
+  port 53. S3 asks for host-constrained rules, so v1 leaves it out.
+  Options:
+  - (a) add it as an opt-in entry ("any address, DNS port only");
+  - (b) ship it in packaging instead, like the fetch rule;
+  - (c) leave DNS to the user.
+
+  **OPEN.**

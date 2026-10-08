@@ -272,7 +272,9 @@ async fn client_loop_forwards_authenticated_snapshot_to_the_qml_feed() {
     let bridge = snitchwatch_bridge_cli::run(config.clone())
         .await
         .expect("bridge starts");
-    let (shell_tx, mut shell_messages) = broadcast::channel(8);
+    // Room for the whole snapshot (production uses 1,024): this test reads
+    // it only after the client has forwarded it.
+    let (shell_tx, mut shell_messages) = broadcast::channel(64);
     let (inbound_tx, inbound_rx) = mpsc::channel(1);
     let (tray_tx, _) = watch::channel(ReceivedTrayState {
         connection_id: 0,

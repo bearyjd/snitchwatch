@@ -90,6 +90,11 @@ pub struct Rule {
     /// bridge that predates the field. Never sent back.
     #[serde(skip_serializing)]
     pub deletable: Option<bool>,
+    /// Set by the bridge: whether Snitchwatch may turn this rule on or off.
+    /// A recommended background-service rule (prompt-slot D) is read-only
+    /// but toggleable. `None` from an older bridge. Never sent back.
+    #[serde(skip_serializing)]
+    pub toggleable: Option<bool>,
 }
 
 /// Where a rule originated: authored directly by the user, or installed for
@@ -116,6 +121,12 @@ impl Rule {
     /// read-only.
     pub fn can_delete(&self) -> bool {
         self.deletable.unwrap_or(!self.is_read_only())
+    }
+
+    /// See [`Self::toggleable`]; an older bridge's rule is toggleable unless
+    /// read-only.
+    pub fn can_toggle(&self) -> bool {
+        self.toggleable.unwrap_or(!self.is_read_only())
     }
 
     /// Classify this rule's source by its `name` prefix. Recognizes both the
@@ -285,12 +296,10 @@ impl RulesStore {
     /// the bridge's next `SetRules` arrives, the store still holds the old
     /// value, so a quick second click would otherwise send the same change
     /// twice and leave the rule inverted from what the switch shows (#48).
-    /// Also `None` for a read-only rule: no command is built for it.
+    /// Also `None` for a rule the bridge says can't be toggled: no command
+    /// is built for it.
     pub fn rule_json_with_enabled(&self, name: &str, enabled: bool) -> Option<serde_json::Value> {
-        let mut updated = self
-            .find_by_name(name)
-            .filter(|r| !r.is_read_only())?
-            .clone();
+        let mut updated = self.find_by_name(name).filter(|r| r.can_toggle())?.clone();
         updated.enabled = enabled;
         serde_json::to_value(&updated).ok()
     }
@@ -307,6 +316,7 @@ struct FoundRule<'a> {
     display_name: &'a str,
     read_only_reason: &'a str,
     deletable: bool,
+    toggleable: bool,
     enabled: bool,
     action: &'static str,
     duration: &'a str,
@@ -335,6 +345,7 @@ pub fn found_rule_json(store: &RulesStore, name: &str) -> Option<String> {
         display_name: rule.shown_name(),
         read_only_reason: rule.read_only_reason.as_deref().unwrap_or_default(),
         deletable: rule.can_delete(),
+        toggleable: rule.can_toggle(),
         enabled: rule.enabled,
         action: rule.normalized_action(),
         duration: &rule.duration,
@@ -345,6 +356,10 @@ pub fn found_rule_json(store: &RulesStore, name: &str) -> Option<String> {
     };
     serde_json::to_string(&found).ok()
 }
+
+#[cfg(test)]
+#[path = "row_store_toggle_tests.rs"]
+mod toggle_tests;
 
 #[cfg(test)]
 mod tests {
@@ -363,6 +378,7 @@ mod tests {
             display_name: None,
             read_only_reason: None,
             deletable: None,
+            toggleable: None,
         }
     }
 

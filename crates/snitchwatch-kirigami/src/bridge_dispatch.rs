@@ -100,6 +100,12 @@ pub fn interests_traffic(msg: &ServerMessage) -> bool {
     )
 }
 
+/// True when `msg` carries the recommended background-service rules
+/// (drives `CuratedDefaultsModel`, prompt-slot D).
+pub fn interests_curated_defaults(msg: &ServerMessage) -> bool {
+    matches!(msg, ServerMessage::SetCuratedDefaults { .. })
+}
+
 /// True when `msg` carries daemon diagnostics report data (drives
 /// `DaemonHealthModel`).
 pub fn interests_diagnostics(msg: &ServerMessage) -> bool {
