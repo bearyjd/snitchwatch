@@ -354,6 +354,10 @@ const KNOWN_OPERANDS: &[&str] = &[
     "lists.hash.md5",
 ];
 
+/// Operands `Match` evaluates against a `net.IP` rather than a string
+/// (operator.go `Match`: `OpDstNetwork`, `OpSrcNetwork`, `OpNetLists`).
+const IP_OPERANDS: &[&str] = &["dest.network", "source.network", "lists.nets"];
+
 fn is_known_operand(operand: &str) -> bool {
     KNOWN_OPERANDS.contains(&operand) || operand.starts_with("process.env.")
 }
@@ -412,6 +416,32 @@ fn validate_operator_compiles(op: &snitchwatch_proto::protocol::Operator) -> Res
         }
     }
 
+    // `Match` hands these operands' callbacks a `net.IP` and every other
+    // operand a string, while the callback (chosen by the type) type-asserts
+    // with no recover: `simpleCmp` does `v.(string)`, `cmpNetwork` and the
+    // alias callback `value.(net.IP)`. A mismatch panics the real daemon on
+    // the first matching connection, so it must never pass here.
+    let ip_operand = IP_OPERANDS.contains(&op.operand.as_str());
+    if op.r#type == "network" && !ip_operand {
+        return Err(MockError::InvalidRule(
+            "network type with a string operand would panic the daemon".to_string(),
+        ));
+    }
+    if ip_operand && op.r#type != "network" && op.r#type != "lists" {
+        return Err(MockError::InvalidRule(
+            "an IP operand without the network type would panic the daemon or never match"
+                .to_string(),
+        ));
+    }
+
+    // `Deserialize` (rule.go:113-127) keeps members only for the `list`
+    // type, and only one level deep.
+    if op.r#type != "list" && !op.list.is_empty() {
+        return Err(MockError::InvalidRule(
+            "members of a non-list operator are dropped by the daemon".to_string(),
+        ));
+    }
+
     // `Match` dispatches on the operand (operator.go:340), not the type, so
     // guard either spelling of a list.
     if op.r#type == "list" || op.operand == "list" {
@@ -424,6 +454,13 @@ fn validate_operator_compiles(op: &snitchwatch_proto::protocol::Operator) -> Res
             ));
         }
         for member in &op.list {
+            if member.r#type == "list" || member.operand == "list" {
+                return Err(MockError::InvalidRule(
+                    "nested list: the daemon copies members one level deep, so the inner list \
+                     is empty and matches every connection"
+                        .to_string(),
+                ));
+            }
             validate_operator_compiles(member)?;
         }
     }
@@ -697,6 +734,66 @@ mod tests {
         ]);
         rule.operator.as_mut().unwrap().operand = String::new();
         assert!(validate_rule_shape(&rule).is_ok());
+    }
+
+    // Shapes the real daemon accepts and then panics on (operator.go's
+    // callbacks type-assert what `Match` hands them) or reads as an empty,
+    // match-everything list (`Deserialize` copies members one level deep).
+
+    fn leaf_rule(r#type: &str, operand: &str, data: &str) -> Rule {
+        let mut rule = valid_rule();
+        rule.operator = Some(list_member(r#type, operand, data));
+        rule
+    }
+
+    #[test]
+    fn validate_rule_shape_rejects_a_network_type_with_a_string_operand() {
+        let err = validate_rule_shape(&leaf_rule("network", "dest.ip", "10.0.0.0/8")).unwrap_err();
+        assert!(matches!(err, MockError::InvalidRule(msg) if msg.contains("panic")));
+    }
+
+    #[test]
+    fn validate_rule_shape_rejects_an_ip_operand_without_the_network_type() {
+        for operand in ["dest.network", "source.network", "lists.nets"] {
+            let rule = leaf_rule("simple", operand, "10.0.0.0/8");
+            let err = validate_rule_shape(&rule).unwrap_err();
+            assert!(
+                matches!(&err, MockError::InvalidRule(msg) if msg.contains("panic")),
+                "{operand}: {err:?}"
+            );
+        }
+        assert!(validate_rule_shape(&leaf_rule("network", "dest.network", "10.0.0.0/8")).is_ok());
+        assert!(validate_rule_shape(&leaf_rule("lists", "lists.nets", "/tmp/x")).is_ok());
+    }
+
+    #[test]
+    fn validate_rule_shape_rejects_a_nested_list() {
+        let inner = list_rule(vec![list_member("simple", "dest.host", "example.com")])
+            .operator
+            .unwrap();
+        let rule = list_rule(vec![
+            list_member("simple", "process.path", "/usr/bin/curl"),
+            inner,
+        ]);
+        let err = validate_rule_shape(&rule).unwrap_err();
+        assert!(matches!(err, MockError::InvalidRule(msg) if msg.contains("nested")));
+    }
+
+    #[test]
+    fn validate_rule_shape_rejects_members_on_a_non_list_type() {
+        // Even with operand `list`: Deserialize keeps members only for the
+        // `list` type, so this reaches the daemon as an empty list.
+        for operand in ["list", "dest.host"] {
+            let mut rule = list_rule(vec![list_member("simple", "dest.host", "example.com")]);
+            let op = rule.operator.as_mut().unwrap();
+            op.r#type = "simple".to_string();
+            op.operand = operand.to_string();
+            let err = validate_rule_shape(&rule).unwrap_err();
+            assert!(
+                matches!(&err, MockError::InvalidRule(msg) if msg.contains("dropped")),
+                "{operand}: {err:?}"
+            );
+        }
     }
 
     #[test]

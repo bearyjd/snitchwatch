@@ -40,9 +40,7 @@ pub(crate) fn rule_to_wire(rule: &Rule) -> serde_json::Value {
         // zero-width characters that make a row read as a different rule.
         "displayName": crate::translator::verdict::strip_display_hazards(&rule.name),
         // `null` for every rule a GUI may edit.
-        "readOnlyReason": crate::rule_name::validate_rule_name(&rule.name)
-            .err()
-            .map(|_| READ_ONLY_REASON),
+        "readOnlyReason": crate::rule_policy::read_only_reason(rule),
     })
 }
 
@@ -94,6 +92,8 @@ pub(crate) fn rule_from_wire(v: &serde_json::Value) -> Result<Rule, String> {
     if operator.is_null() {
         return Err("rule.operator is null; the daemon would reject this rule".to_string());
     }
+    let operator = operator_from_wire(operator)?;
+    crate::rule_policy::validate_operator(&operator)?;
 
     Ok(Rule {
         created: 0,
@@ -109,7 +109,7 @@ pub(crate) fn rule_from_wire(v: &serde_json::Value) -> Result<Rule, String> {
             .filter(|s| !s.is_empty())
             .ok_or("rule.duration missing or empty")?
             .to_string(),
-        operator: Some(operator_from_wire(operator)?),
+        operator: Some(operator),
     })
 }
 
@@ -170,6 +170,12 @@ mod tests {
             name: name.to_string(),
             action: "deny".into(),
             duration: "always".into(),
+            operator: Some(snitchwatch_proto::protocol::Operator {
+                r#type: "simple".into(),
+                operand: "dest.host".into(),
+                data: "example.com".into(),
+                ..Default::default()
+            }),
             ..Default::default()
         }
     }
