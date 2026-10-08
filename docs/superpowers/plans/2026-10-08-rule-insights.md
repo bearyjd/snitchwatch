@@ -176,6 +176,51 @@ Functions are cited by name.
      broadcast at most every 5 s and only when something changed;
    - included in the `RequestSnapshot` answer.
 
+**Part 1 as built** (branch `feat/rule-hit-counts`; where it differs from
+the design above, this is what shipped):
+
+- **Files.** Pure state `cache/rule_hits.rs`; the shared handle, ticker and
+  broadcast `cache/rule_hits_handle.rs`; the saved file
+  `cache/rule_hits_file.rs`; `daemon_config.rs` (reads `Stats.MaxEvents`
+  from `ClientConfig.config`, 150 when absent, as `stats.go` does; the
+  prompt-slot plan may extend it); bridge-cli `rule_hits_storage.rs`.
+  Hooks: `RulesSync::commit` and a confirmed `DELETE_RULE` in
+  `apply_confirmed`; nothing on `withdraw`. The Kirigami side is
+  `rules/hits.rs` plus three lines of `RulesModel` and `RulesPage.qml`.
+- **`lossy` is a gap record, and it is saved.** The wire message carries
+  `lossy` and `lastGapUnixMs` (the two never disagree), because "never
+  clears for the session" is not enough once counts survive restarts. A gap
+  is noted when a batch is within one of the daemon's cap, when the daemon's
+  `uptime` drops, when the counts are restored from the file (the bridge was
+  down), when a bound is hit, and for a rule name that is over 256 bytes or
+  has control characters (not counted).
+- **A daemon restart zeroes nothing.** "Uptime drop" is a daemon restart:
+  the events in between are lost, so it records a gap. The counts stay,
+  which is also what "counts survive a reconnect" and N1 require.
+- **Persistence.** One JSON file, `<state>/rule_hits.json` (not SQLite: it
+  needs no queries, and PR #90's `sqlite_file::open_owner_only` was not on
+  the base). Read `O_NOFOLLOW|O_NONBLOCK`; must be a regular file owned by
+  the bridge's user and not writable by others; at most 8 MiB, 10 000
+  entries; names at most 256 bytes. Written to a temp file
+  (`O_EXCL|O_NOFOLLOW`, 0600), synced, renamed. Restored counts wait for
+  the first committed snapshot, which keeps only the names it has, and are
+  saved unchanged meanwhile. A file that can't be read is left alone and the
+  counts stay in memory. A save that fails turns `storage.persistent` off
+  with the reason until one succeeds. Saved every 5 minutes when changed and
+  once at shutdown.
+- **Broadcast.** A 5 s ticker sends the whole state when it changed: at
+  most one `RuleHits` per period, not a leading edge. It is also in every
+  `RequestSnapshot` answer, even before the first ping, and carries
+  `storage` (`persistent`, `reason`) so a GUI can say when counts are not
+  saved. Advertised as the `ruleHits` capability.
+- **GUI.** Nothing is shown until a `RuleHits` arrives from the live
+  session (an older bridge never sends one), nor before counting starts.
+  `nolog` rules read "Not counted: this rule doesn't log", never 0. The
+  header says "Hits counted by Snitchwatch since <time>; approximate.", adds
+  "Some hits may be missing (last noticed <time>)." when `lossy`, and says
+  when the counts are not saved. Every label is PlainText. A count update
+  refreshes only the count roles (`dataChanged`), never a model reset.
+
 ### Part 2: unused and shadowed (Kirigami, Qt-free `rules/insights.rs`)
 
 3. **Hits in the model.** `RulesStore` takes `RuleHits`. `RulesModel`
