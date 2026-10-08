@@ -179,33 +179,35 @@ pub fn resolve_storage_from(
             canonical.display()
         ));
     }
-    if mode == BridgeMode::System {
-        if canonical != Path::new(SYSTEM_STATE_DIR) {
-            return unusable(format!(
-                "unexpected state directory {}",
-                canonical.display()
-            ));
-        }
-        let checked = std::fs::symlink_metadata(&canonical)
-            .map_err(|e| format!("state directory {SYSTEM_STATE_DIR}: {e}"))
-            .and_then(|meta| {
-                let facts = SystemDirFacts {
-                    uid: meta.uid(),
-                    gid: meta.gid(),
-                    mode: meta.mode(),
-                };
-                check_system_state_dir(&facts, effective_ids().0, effective_ids().1)
-            });
-        if let Err(reason) = checked {
-            return unusable(reason);
-        }
+    if mode == BridgeMode::System && canonical != Path::new(SYSTEM_STATE_DIR) {
+        return unusable(format!(
+            "unexpected state directory {}",
+            canonical.display()
+        ));
     }
-    Storage::Persistent(canonical)
+    let (euid, egid) = effective_ids();
+    let checked = std::fs::symlink_metadata(&canonical)
+        .map_err(|e| format!("state directory {}: {e}", canonical.display()))
+        .and_then(|meta| {
+            let facts = DirFacts {
+                uid: meta.uid(),
+                gid: meta.gid(),
+                mode: meta.mode(),
+            };
+            match mode {
+                BridgeMode::System => check_system_state_dir(&facts, euid, egid),
+                BridgeMode::User => check_user_state_dir(&facts, euid, &canonical),
+            }
+        });
+    match checked {
+        Ok(()) => Storage::Persistent(canonical),
+        Err(reason) => unusable(reason),
+    }
 }
 
-/// Ownership and mode of the system state directory.
+/// Ownership and mode of a state directory.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct SystemDirFacts {
+pub(crate) struct DirFacts {
     pub uid: u32,
     pub gid: u32,
     pub mode: u32,
@@ -216,7 +218,7 @@ pub(crate) struct SystemDirFacts {
 /// opensnitchd reads the blocklist files under it, so nobody else may write
 /// there, and the list names aren't anyone else's business either.
 pub(crate) fn check_system_state_dir(
-    facts: &SystemDirFacts,
+    facts: &DirFacts,
     euid: u32,
     egid: u32,
 ) -> std::result::Result<(), String> {
@@ -228,6 +230,34 @@ pub(crate) fn check_system_state_dir(
     if facts.mode & 0o777 != 0o700 {
         return Err(format!(
             "state directory {SYSTEM_STATE_DIR} has mode {:o}, not 700",
+            facts.mode & 0o7777
+        ));
+    }
+    Ok(())
+}
+
+/// A per-user bridge's state directory must be its own user's and not
+/// writable by anyone else: the databases and the SQLite journals beside them
+/// live there, and whoever can write to the directory can plant a file that
+/// SQLite then opens (a FIFO hangs it, a link is followed). Less strict than
+/// the system directory, which root opensnitchd also reads: group and other
+/// may read and enter it.
+pub(crate) fn check_user_state_dir(
+    facts: &DirFacts,
+    euid: u32,
+    dir: &Path,
+) -> std::result::Result<(), String> {
+    if facts.uid != euid {
+        return Err(format!(
+            "state directory {} is not owned by the user running the bridge",
+            dir.display()
+        ));
+    }
+    if facts.mode & 0o022 != 0 {
+        return Err(format!(
+            "state directory {} can be written by other users (mode {:o}); \
+             run chmod go-w on it",
+            dir.display(),
             facts.mode & 0o7777
         ));
     }

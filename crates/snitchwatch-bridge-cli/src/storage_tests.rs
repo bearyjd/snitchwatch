@@ -308,24 +308,24 @@ fn the_system_bridge_creates_the_private_list_directory() {
 /// under it.
 #[test]
 fn the_system_state_directory_must_be_the_services_and_private() {
-    let ok = SystemDirFacts {
+    let ok = DirFacts {
         uid: 991,
         gid: 991,
         mode: 0o40700,
     };
     assert_eq!(check_system_state_dir(&ok, 991, 991), Ok(()));
     for (facts, why) in [
-        (SystemDirFacts { uid: 0, ..ok }, "owner"),
-        (SystemDirFacts { gid: 0, ..ok }, "group"),
+        (DirFacts { uid: 0, ..ok }, "owner"),
+        (DirFacts { gid: 0, ..ok }, "group"),
         (
-            SystemDirFacts {
+            DirFacts {
                 mode: 0o40750,
                 ..ok
             },
             "group-readable",
         ),
         (
-            SystemDirFacts {
+            DirFacts {
                 mode: 0o40701,
                 ..ok
             },
@@ -361,4 +361,165 @@ fn the_per_user_bridge_never_installs_blocklist_rules() {
     assert_eq!(not_enforced(&manager), PER_USER_REASON);
     assert!(!PER_USER_REASON.contains("bridge"), "plain language");
     assert!(!state.join("blocklists").exists());
+}
+
+// ---- a per-user state directory -------------------------------------------
+
+fn dir_with_mode(mode: u32) -> (tempfile::TempDir, PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    std::fs::create_dir(&state).unwrap();
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(mode)).unwrap();
+    let state = state.canonicalize().unwrap();
+    (dir, state)
+}
+
+/// The state directory holds the databases and the SQLite files beside them;
+/// a per-user bridge's directory must be the bridge user's own and not
+/// writable by anyone else, as the system bridge's already has to be.
+#[test]
+fn a_per_user_state_directory_others_can_write_is_unusable() {
+    for mode in [0o775, 0o770, 0o757, 0o707, 0o777, 0o722, 0o702] {
+        let (_dir, state) = dir_with_mode(mode);
+        for storage in [
+            resolve_storage_from(None, os(&state), BridgeMode::User),
+            resolve_storage_from(os(&state), None, BridgeMode::User),
+        ] {
+            let reason = unusable_reason(&storage);
+            assert!(
+                reason.contains("written by other users"),
+                "{mode:o}: {reason}"
+            );
+            assert!(
+                reason.contains(state.to_str().unwrap()),
+                "{mode:o}: {reason}"
+            );
+            assert!(reason.contains("chmod"), "the fix is spelled out: {reason}");
+        }
+    }
+}
+
+#[test]
+fn a_per_user_state_directory_without_group_or_other_write_is_fine() {
+    for mode in [0o700, 0o750, 0o755, 0o705, 0o500] {
+        let (_dir, state) = dir_with_mode(mode);
+        assert_eq!(
+            resolve_storage_from(None, os(&state), BridgeMode::User),
+            Storage::Persistent(state),
+            "{mode:o}"
+        );
+    }
+}
+
+#[test]
+fn a_per_user_state_directory_must_be_the_bridge_users_own() {
+    let facts = DirFacts {
+        uid: 1000,
+        gid: 1000,
+        mode: 0o40700,
+    };
+    let dir = Path::new("/home/u/.local/share/snitchwatch");
+    assert_eq!(check_user_state_dir(&facts, 1000, dir), Ok(()));
+    // The group and mode of the system check do not apply: only the owner
+    // and the write bits.
+    assert_eq!(
+        check_user_state_dir(
+            &DirFacts {
+                gid: 5,
+                mode: 0o40755,
+                ..facts
+            },
+            1000,
+            dir
+        ),
+        Ok(())
+    );
+    let other = check_user_state_dir(&DirFacts { uid: 0, ..facts }, 1000, dir).unwrap_err();
+    assert!(
+        other.contains("not owned by the user running the bridge"),
+        "{other}"
+    );
+    assert!(other.contains(dir.to_str().unwrap()), "{other}");
+    let writable = check_user_state_dir(
+        &DirFacts {
+            mode: 0o40770,
+            ..facts
+        },
+        1000,
+        dir,
+    )
+    .unwrap_err();
+    assert!(writable.contains("written by other users"), "{writable}");
+}
+
+/// The system bridge keeps its own, stricter rule.
+#[test]
+fn system_mode_still_uses_the_system_check() {
+    let (_dir, state) = dir_with_mode(0o775);
+    let storage = resolve_storage_from(None, os(&state), BridgeMode::System);
+    assert!(unusable_reason(&storage).contains("unexpected state directory"));
+}
+
+// ---- a store file SQLite would hang on -------------------------------------
+
+/// Run `f` on its own thread, failing rather than hanging if it never returns.
+fn within<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(f());
+    });
+    match rx.recv_timeout(std::time::Duration::from_secs(5)) {
+        Ok(value) => value,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => panic!("the open hung"),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => panic!("the open panicked"),
+    }
+}
+
+fn mkfifo(path: &Path) {
+    use std::os::unix::ffi::OsStrExt;
+    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+    // SAFETY: a valid NUL-terminated path.
+    assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+}
+
+/// A FIFO named `<db>-journal` used to hang SQLite at startup; the store now
+/// falls back to memory like any other store that can't be opened.
+#[test]
+fn a_fifo_beside_the_blocklist_database_falls_back_to_memory_without_hanging() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().canonicalize().unwrap();
+    mkfifo(&state.join(format!("{BLOCKLIST_DB_FILE}-journal")));
+    let (store, storage) =
+        within(move || open_blocklist_store(Storage::Persistent(state)).unwrap());
+    let reason = unusable_reason(&storage);
+    assert!(reason.starts_with("blocklist store: "), "{reason}");
+    assert!(reason.contains("-journal"), "{reason}");
+    assert!(store.list_subscriptions().unwrap().is_empty());
+}
+
+#[test]
+fn a_symlinked_or_crafted_blocklist_database_falls_back_to_memory() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().canonicalize().unwrap();
+    let db = state.join(BLOCKLIST_DB_FILE);
+    std::os::unix::fs::symlink(state.join("elsewhere"), format!("{}-wal", db.display())).unwrap();
+    let (_, storage) = within({
+        let state = state.clone();
+        move || open_blocklist_store(Storage::Persistent(state)).unwrap()
+    });
+    assert!(unusable_reason(&storage).starts_with("blocklist store: "));
+
+    std::fs::remove_file(format!("{}-wal", db.display())).unwrap();
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute_batch(
+            "CREATE VIEW subscriptions AS WITH RECURSIVE c(x) AS \
+             (SELECT 1 UNION ALL SELECT x + 1 FROM c) SELECT x FROM c;",
+        )
+        .unwrap();
+    let (store, storage) =
+        within(move || open_blocklist_store(Storage::Persistent(state)).unwrap());
+    assert!(unusable_reason(&storage).contains("view named subscriptions"));
+    assert!(store.list_subscriptions().unwrap().is_empty());
 }

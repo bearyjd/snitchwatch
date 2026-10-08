@@ -15,7 +15,7 @@
 use std::path::Path;
 use std::sync::Mutex;
 
-use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -65,6 +65,15 @@ pub enum StoreError {
     NewerSchema(i64),
 }
 
+impl From<crate::sqlite_file::OpenError> for StoreError {
+    fn from(error: crate::sqlite_file::OpenError) -> Self {
+        match error {
+            crate::sqlite_file::OpenError::Sqlite(e) => Self::Sqlite(e),
+            other => Self::Io(other.into_io()),
+        }
+    }
+}
+
 pub struct ProfileStore {
     conn: Mutex<Connection>,
 }
@@ -84,29 +93,10 @@ CREATE TABLE IF NOT EXISTS profiles (
 
 impl ProfileStore {
     /// Open (or create) the database at `path`, owner-only (0600), exactly as
-    /// [`crate::blocklists::store::BlocklistStore::open`] does: the path is
-    /// opened with `O_NOFOLLOW` and must be a regular file; the mode is set
-    /// through that handle. SQLite gives its journal files the database's
-    /// mode.
+    /// [`crate::blocklists::store::BlocklistStore::open`] does, through
+    /// [`crate::sqlite_file::open_owner_only`].
     pub fn open(path: &Path) -> Result<Self, StoreError> {
-        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(path)?;
-        if !file.metadata()?.is_file() {
-            return Err(StoreError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("{} is not a regular file", path.display()),
-            )));
-        }
-        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-        drop(file);
-        let conn = open_connection(path)?;
+        let conn = crate::sqlite_file::open_owner_only(path)?;
         Self::initialize(conn)
     }
 
@@ -120,8 +110,13 @@ impl ProfileStore {
         if version > SCHEMA_VERSION {
             return Err(StoreError::NewerSchema(version));
         }
+        crate::sqlite_file::require_plain_schema(&conn)?;
         conn.execute_batch(SCHEMA)?;
-        conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
+        // Only when it changes: rewriting the same value still writes to the
+        // file, and a store that turns out to be unreadable is left as it is.
+        if version != SCHEMA_VERSION {
+            conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
+        }
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -218,18 +213,6 @@ impl ProfileStore {
         tx.commit()?;
         Ok(())
     }
-}
-
-/// `Connection::open`'s flags without `URI`, plus `NOFOLLOW`: SQLite opens
-/// the path again after [`ProfileStore::open`]'s checks.
-fn open_connection(path: &Path) -> rusqlite::Result<Connection> {
-    Connection::open_with_flags(
-        path,
-        OpenFlags::SQLITE_OPEN_READ_WRITE
-            | OpenFlags::SQLITE_OPEN_CREATE
-            | OpenFlags::SQLITE_OPEN_NO_MUTEX
-            | OpenFlags::SQLITE_OPEN_NOFOLLOW,
-    )
 }
 
 fn row_to_profile(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<Profile, StoreError>> {
@@ -406,8 +389,23 @@ mod tests {
         drop(Connection::open(&target).unwrap());
         let path = dir.path().join("profiles.sqlite3");
         std::os::unix::fs::symlink(&target, &path).unwrap();
-        assert!(open_connection(&path).is_err());
-        assert!(open_connection(&target).is_ok());
+        assert!(crate::sqlite_file::open_connection(&path).is_err());
+        assert!(crate::sqlite_file::open_connection(&target).is_ok());
+    }
+
+    /// Opening a store that is already at the current version must not write
+    /// to it: an unreadable store is left as it is, and `open` is the first
+    /// thing that touches it.
+    #[test]
+    fn reopening_a_current_store_leaves_the_file_byte_for_byte() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("profiles.sqlite3");
+        let store = ProfileStore::open(&path).unwrap();
+        store.upsert_profile(&profile("home", &["Home"])).unwrap();
+        drop(store);
+        let before = std::fs::read(&path).unwrap();
+        drop(ProfileStore::open(&path).unwrap());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 
     #[test]

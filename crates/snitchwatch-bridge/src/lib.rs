@@ -25,6 +25,7 @@ pub mod profiles;
 pub mod rule_name;
 pub mod rule_policy;
 pub mod rule_wire;
+pub mod sqlite_file;
 pub mod translator;
 pub mod tray_state;
 #[cfg(feature = "web-ui")]

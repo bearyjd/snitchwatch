@@ -13,10 +13,13 @@
 //!
 //! A store that can't be opened, or opens but can't be read, falls back to
 //! memory as `Unusable("profile store: …")`, logged at `error!` and shown on
-//! the Profiles page; the file is left as it is. (An unreadable blocklist
-//! store is kept instead, so that its installed rules are never purged;
-//! profiles have no installed rules, and `SetProfiles` reads the store
-//! directly, so an unreadable one would hide every profile.)
+//! the Profiles page. Its contents are left as they are: opening only tightens
+//! the file's mode to 0600 (and writes `user_version` if the file is new or
+//! older), and an unreadable store's reason says so, so the user doesn't
+//! recreate profiles that are still there. (An unreadable blocklist store is
+//! kept instead, so that its installed rules are never purged; profiles have
+//! no installed rules, and `SetProfiles` reads the store directly, so an
+//! unreadable one would hide every profile.)
 
 use std::path::Path;
 use std::sync::Arc;
@@ -53,7 +56,7 @@ fn open_profile_store(storage: Storage) -> Result<(Arc<ProfileStore>, Storage)> 
                     return Ok((Arc::new(store), Storage::Persistent(dir)));
                 }
                 Err(e) => {
-                    let reason = format!("profile store: {e}");
+                    let reason = e.reason();
                     error!(path = %path.display(), %reason, "profiles are kept in memory only");
                     Storage::Ephemeral(EphemeralReason::Unusable(reason))
                 }
@@ -65,10 +68,34 @@ fn open_profile_store(storage: Storage) -> Result<(Arc<ProfileStore>, Storage)> 
     Ok((Arc::new(store), storage))
 }
 
+/// Why the persistent profile store isn't used.
+enum OpenFailure {
+    /// It couldn't be opened (or was refused).
+    Open(StoreError),
+    /// It opened but its profiles can't be read.
+    Unreadable(StoreError),
+}
+
+impl OpenFailure {
+    /// The sentence shown on the Profiles page. For a store that opened but
+    /// can't be read it says the saved profiles are still on disk, so nobody
+    /// recreates them (the next restart would load the old ones again).
+    fn reason(&self) -> String {
+        match self {
+            Self::Open(e) => format!("profile store: {e}"),
+            Self::Unreadable(e) => format!(
+                "profile store: the saved profiles in {PROFILE_DB_FILE} can't be read ({e}). \
+                 They were left as they are, so don't recreate them: fix or move the file and \
+                 restart"
+            ),
+        }
+    }
+}
+
 /// Open the store and read every profile once.
-fn open_readable(path: &Path) -> std::result::Result<ProfileStore, StoreError> {
-    let store = ProfileStore::open(path)?;
-    store.list_profiles()?;
+fn open_readable(path: &Path) -> std::result::Result<ProfileStore, OpenFailure> {
+    let store = ProfileStore::open(path).map_err(OpenFailure::Open)?;
+    store.list_profiles().map_err(OpenFailure::Unreadable)?;
     Ok(store)
 }
 
@@ -157,6 +184,116 @@ mod tests {
             .query_row("SELECT rules FROM profiles", [], |r| r.get(0))
             .unwrap();
         assert_eq!(rules, "not json", "the saved profiles were changed");
+    }
+
+    /// The page shows this reason with an empty list. It must say the saved
+    /// profiles are still there, or the user recreates them and loses them at
+    /// the next restart.
+    #[test]
+    fn an_unreadable_store_says_the_saved_profiles_were_left_as_they_are() {
+        let (_dir, state) = state();
+        let path = state.join(PROFILE_DB_FILE);
+        ProfileStore::open(&path)
+            .unwrap()
+            .upsert_profile(&home())
+            .unwrap();
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute_batch("UPDATE profiles SET rules = 'not json';")
+            .unwrap();
+        let (_, storage) = open_profile_store(Storage::Persistent(state)).unwrap();
+        let reason = unusable_reason(&storage);
+        assert!(reason.starts_with("profile store: "), "{reason}");
+        assert!(reason.contains("left as they are"), "{reason}");
+        assert!(
+            reason.contains("PROFILE_DB_FILE_PLACEHOLDER") || reason.contains(PROFILE_DB_FILE),
+            "{reason}"
+        );
+    }
+
+    /// A store that opens and reads and has nothing to leave alone, or can't
+    /// be opened at all, has no saved profiles to promise anything about.
+    #[test]
+    fn an_unopenable_store_does_not_claim_saved_profiles() {
+        let (_dir, state) = state();
+        std::fs::create_dir(state.join(PROFILE_DB_FILE)).unwrap();
+        let (_, storage) = open_profile_store(Storage::Persistent(state)).unwrap();
+        assert!(!unusable_reason(&storage).contains("left as they are"));
+    }
+
+    /// Opening the store reads the file but never changes it: the saved
+    /// profiles are exactly as they were when the page says so.
+    #[test]
+    fn an_unreadable_store_file_is_byte_for_byte_what_it_was() {
+        let (_dir, state) = state();
+        let path = state.join(PROFILE_DB_FILE);
+        ProfileStore::open(&path)
+            .unwrap()
+            .upsert_profile(&home())
+            .unwrap();
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute_batch("UPDATE profiles SET rules = 'not json';")
+            .unwrap();
+        let before = std::fs::read(&path).unwrap();
+        open_profile_store(Storage::Persistent(state)).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    /// Run `f` on its own thread, failing rather than hanging if it never
+    /// returns.
+    fn within<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(f());
+        });
+        match rx.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok(value) => value,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => panic!("the open hung"),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => panic!("the open panicked"),
+        }
+    }
+
+    /// A FIFO named `<db>-journal` hangs SQLite at startup; the store falls
+    /// back to memory with a plain reason instead.
+    #[test]
+    fn a_fifo_beside_the_profile_database_falls_back_to_memory_without_hanging() {
+        use std::os::unix::ffi::OsStrExt;
+        let (_dir, state) = state();
+        let journal = state.join(format!("{PROFILE_DB_FILE}-journal"));
+        let c_path = std::ffi::CString::new(journal.as_os_str().as_bytes()).unwrap();
+        // SAFETY: a valid NUL-terminated path.
+        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+        let (store, storage) =
+            within(move || open_profile_store(Storage::Persistent(state)).unwrap());
+        let reason = unusable_reason(&storage);
+        assert!(reason.starts_with("profile store: "), "{reason}");
+        assert!(
+            reason.contains("-journal") && reason.contains("regular file"),
+            "{reason}"
+        );
+        assert!(store.list_profiles().unwrap().is_empty());
+    }
+
+    /// A database with a view where the profiles table belongs is refused,
+    /// and left as it is.
+    #[test]
+    fn a_crafted_profile_database_falls_back_to_memory_and_is_left_alone() {
+        let (_dir, state) = state();
+        let path = state.join(PROFILE_DB_FILE);
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute_batch(
+                "CREATE VIEW profiles AS WITH RECURSIVE c(x) AS \
+                 (SELECT 1 UNION ALL SELECT x + 1 FROM c) SELECT x FROM c;",
+            )
+            .unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let (store, storage) =
+            within(move || open_profile_store(Storage::Persistent(state)).unwrap());
+        assert!(unusable_reason(&storage).contains("view named profiles"));
+        assert!(store.list_profiles().unwrap().is_empty());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 
     #[test]
