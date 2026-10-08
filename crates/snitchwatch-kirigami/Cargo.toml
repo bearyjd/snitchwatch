@@ -35,6 +35,8 @@ harness = false
 
 [dependencies]
 snitchwatch-bridge = { path = "../snitchwatch-bridge", default-features = false }
+# The rule editor reads checked rules' conditions (`protocol::Operator`).
+snitchwatch-proto = { path = "../snitchwatch-proto" }
 cxx = "=1.0.194"
 cxx-qt = "=0.9.1"
 cxx-qt-lib = { version = "=0.9.1", features = ["qt_full"] }
@@ -73,6 +75,5 @@ tokio = { version = "1.40", features = ["test-util"] }
 # Live core-loop integration test (tests/live_loop.rs): starts a separate test
 # bridge service and connects through its authenticated Unix WebSocket.
 mock-opensnitchd = { path = "../../tests/mock_opensnitchd" }
-snitchwatch-proto = { path = "../snitchwatch-proto" }
 snitchwatch-bridge-cli = { path = "../snitchwatch-bridge-cli", default-features = false }
 tracing-subscriber = "0.3"
