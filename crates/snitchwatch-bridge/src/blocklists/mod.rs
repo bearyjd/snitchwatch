@@ -128,9 +128,11 @@ pub const AGGREGATE_MAX_HOSTS: u64 = 2_000_000;
 /// (issue #67): twice [`AGGREGATE_MAX_HOSTS`], so lists past that limit can
 /// still be browsed. Every saved host repeats its list's id (up to 81
 /// bytes), so without a bound 32 lists of `format::MAX_ENTRIES` took ~5 GB
-/// of the filesystem that also holds /var/home; this is well under 1 GB. A
-/// download that would pass it is refused and keeps the list's earlier
-/// hosts, like any failed download.
+/// of the filesystem that also holds /var/home. With this bound the worst
+/// case (81-byte ids, 253-byte hosts) is about 1.3 GB and real lists (ids
+/// ~30 bytes, hosts ~25) a few hundred MB. 4,000,000 is a judgement call, not
+/// a measured limit. A download that would pass it is refused and keeps the
+/// list's earlier hosts, like any failed download.
 pub const STORED_MAX_HOSTS: u64 = 4_000_000;
 
 /// How much a [`BlocklistsManager::reconcile_with`] pass does.
