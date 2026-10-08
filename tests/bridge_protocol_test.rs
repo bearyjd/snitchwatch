@@ -214,7 +214,7 @@ async fn deny_round_trip_unary() {
 /// Plan `2026-10-08-inline-deny-until-restart.md`: the Kirigami shell's
 /// inline Deny on a row with an absolute program path, end to end. The GUI
 /// sends exactly the JSON `pending_decision::build_verdict_message` builds
-/// for it (pinned on the Kirigami side by
+/// for it (pinned on the Kirigami side by `inline_deny.rs`'s
 /// `inline_tokens_reach_the_wire_as_until_restart_or_once`), and the daemon
 /// gets a rule it stores until it restarts, bound to the program and host, so
 /// the kernel's SYN retransmit is refused instead of asked about again.

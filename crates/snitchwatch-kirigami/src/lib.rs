@@ -21,6 +21,7 @@ pub mod crash_log;
 pub mod daemon_health_model;
 pub mod geo;
 pub mod geo_model;
+pub(crate) mod inline_deny;
 pub mod insight;
 pub mod insight_model;
 pub mod notification_controller;

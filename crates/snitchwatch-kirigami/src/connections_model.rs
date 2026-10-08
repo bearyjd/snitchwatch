@@ -27,6 +27,7 @@ use cxx_qt_lib::{
 use crate::connections::filter::ConnectionFilter;
 use crate::connections::grouping::{GroupTree, VisibleEntry};
 use crate::connections::row_store::{matched_rule_display, ModelOp, RowStore, Verdict};
+use crate::inline_deny::{self, InlineDeny};
 use crate::pending_decision::VerdictChoice;
 use snitchwatch_bridge::translator::process_binding::is_bindable_process_path;
 use snitchwatch_bridge::ws_messages::{ConnectionRow, ServerMessage};
@@ -230,15 +231,33 @@ pub mod qobject {
         #[cxx_name = "isPendingRow"]
         fn is_pending_row(self: &ConnectionsModel, id: &QString) -> bool;
 
-        /// The duration token the inline/batch buttons send for row `id`
-        /// when the user clicks `choice` (`"allow"`/`"deny"`):
-        /// `"until_quit"` for a Deny on a row whose program file the bridge
-        /// can bind a rule to, `"this_time"` otherwise (including an unknown
-        /// id or choice). See `pending_decision::inline_duration_token`.
-        /// Read-only and never flushes, like `isPendingRow`.
+        /// Inline buttons (`crate::inline_deny`; all read-only, never
+        /// flushing, like `isPendingRow`, since bindings call them).
+        /// `app_bound_rules` is `BridgeFeed.appBoundRulesFor(id)`.
+        ///
+        /// The duration token `choice` (`"allow"`/`"deny"`) sends for row
+        /// `id`: `"until_quit"` or `"this_time"` (also for an unknown choice).
         #[qinvokable]
         #[cxx_name = "inlineDurationFor"]
-        fn inline_duration_for(self: &ConnectionsModel, id: &QString, choice: &QString) -> QString;
+        fn inline_duration_for(
+            self: &ConnectionsModel,
+            id: &QString,
+            choice: &QString,
+            app_bound_rules: bool,
+        ) -> QString;
+
+        /// What a Deny does for row `id`: `"until_restart"`,
+        /// `"program_unknown"` or `"bridge_too_old"`.
+        #[qinvokable]
+        #[cxx_name = "inlineDenyFor"]
+        fn inline_deny_for(self: &ConnectionsModel, id: &QString, app_bound_rules: bool)
+            -> QString;
+
+        /// The first row still pending under process group `key` (what its
+        /// "Deny all" tooltip describes), or `""`.
+        #[qinvokable]
+        #[cxx_name = "firstPendingRowIdForProcess"]
+        fn first_pending_row_id_for_process(self: &ConnectionsModel, key: &QString) -> QString;
 
         /// Issue #18 batch actions: the ids of every row still pending a
         /// decision under process group `key`, JSON-encoded as a plain
@@ -941,11 +960,30 @@ impl qobject::ConnectionsModel {
         self.store.is_pending(&id.to_string()).unwrap_or(false)
     }
 
-    fn inline_duration_for(&self, id: &QString, choice: &QString) -> QString {
+    fn inline_duration_for(
+        &self,
+        id: &QString,
+        choice: &QString,
+        app_bound_rules: bool,
+    ) -> QString {
         let token = VerdictChoice::from_token(&choice.to_string()).map_or("this_time", |choice| {
-            self.store.inline_duration_for(&id.to_string(), choice)
+            inline_deny::duration_token_for_row(
+                &self.store,
+                &id.to_string(),
+                choice,
+                app_bound_rules,
+            )
         });
         QString::from(token)
+    }
+
+    fn inline_deny_for(&self, id: &QString, app_bound_rules: bool) -> QString {
+        QString::from(InlineDeny::for_row(&self.store, &id.to_string(), app_bound_rules).token())
+    }
+
+    fn first_pending_row_id_for_process(&self, key: &QString) -> QString {
+        let ids = self.grouping.pending_row_ids(&key.to_string());
+        QString::from(ids.first().map_or("", String::as_str))
     }
 
     /// Issue #18 batch actions: pending row ids under process group `key`,

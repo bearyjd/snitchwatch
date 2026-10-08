@@ -17,7 +17,7 @@
 //! daemon does, since opensnitchd has no per-process rule lifetime.
 //!
 //! **Inline buttons:** the Connections page's row and process-header buttons
-//! skip the sheet; [`inline_duration_token`] picks their duration.
+//! skip the sheet; `crate::inline_deny` picks their duration.
 //!
 //! **Timeout ownership:** the auto-action countdown stays server-side (the
 //! bridge's `AskRule` pending machinery owns it). The QML sheet only *displays*
@@ -32,7 +32,6 @@
 //! message the WS protocol already defines (now carrying a typed `duration`
 //! field instead of a plain `remember: bool`).
 
-use snitchwatch_bridge::translator::process_binding::is_bindable_process_path;
 use snitchwatch_bridge::ws_messages::{
     ClientMessage, VerdictAction, VerdictDuration, VerdictScope,
 };
@@ -94,32 +93,6 @@ pub(crate) fn parse_duration(token: &str) -> VerdictDuration {
         "until_quit" => VerdictDuration::UntilRestart,
         "forever" => VerdictDuration::Always,
         _ => VerdictDuration::Once,
-    }
-}
-
-/// The duration token the Connections page's inline buttons (a row's
-/// Allow/Deny, a process header's "Allow all"/"Deny all") send for one row
-/// (plan `2026-10-08-inline-deny-until-restart.md`):
-///
-/// * **Deny** with a program path the bridge can bind a rule to
-///   ([`is_bindable_process_path`]) sends `until_quit`, i.e. daemon
-///   `"until restart"`. The daemon doesn't store a `once` rule, so a once-only
-///   deny drops only the packet that asked: the kernel retransmits the SYN
-///   about a second later and the connection is asked about again, or gets
-///   the daemon's default action. The bridge binds the stored rule to the
-///   program and this host.
-/// * **Deny** without such a path sends `this_time`: the bridge would answer
-///   anything longer once anyway (issue #44), and the page says why.
-/// * **Allow** always sends `this_time`, the sheet's default. An accepted SYN
-///   establishes the flow, so once already does what it says, and remembering
-///   an allow is a trust grant an inline click shouldn't make.
-pub(crate) fn inline_duration_token(
-    choice: VerdictChoice,
-    process_path: Option<&str>,
-) -> &'static str {
-    match choice {
-        VerdictChoice::Deny if process_path.is_some_and(is_bindable_process_path) => "until_quit",
-        VerdictChoice::Deny | VerdictChoice::Allow => "this_time",
     }
 }
 
@@ -228,77 +201,6 @@ mod tests {
         assert_eq!(json["verdict"], "allow");
         assert_eq!(json["scope"], "this_host");
         assert_eq!(json["duration"], "once");
-    }
-
-    /// Program paths an inline Deny can't be remembered for: none, the
-    /// daemon's placeholder, a bare comm name, a relative path.
-    const UNBINDABLE_PATHS: [Option<&str>; 5] = [
-        None,
-        Some(""),
-        Some("Kernel connection"),
-        Some("curl"),
-        Some("bin/curl"),
-    ];
-
-    #[test]
-    fn inline_deny_is_remembered_until_restart_only_for_a_bindable_program() {
-        assert_eq!(
-            inline_duration_token(VerdictChoice::Deny, Some("/usr/bin/curl")),
-            "until_quit"
-        );
-        for path in UNBINDABLE_PATHS {
-            assert_eq!(
-                inline_duration_token(VerdictChoice::Deny, path),
-                "this_time",
-                "{path:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn inline_allow_stays_once_for_every_program() {
-        for path in UNBINDABLE_PATHS.into_iter().chain([Some("/usr/bin/curl")]) {
-            assert_eq!(
-                inline_duration_token(VerdictChoice::Allow, path),
-                "this_time",
-                "{path:?}"
-            );
-        }
-    }
-
-    /// `parse_duration` turns any unknown token into `Once`, so check the
-    /// parsed duration and the exact wire JSON, not only the QML token. The
-    /// JSON is what `tests/bridge_protocol_test.rs`'s inline-Deny round trip
-    /// sends.
-    #[test]
-    fn inline_tokens_reach_the_wire_as_until_restart_or_once() {
-        let deny = |path| {
-            build_verdict_message(
-                "r1",
-                "deny",
-                "this_host",
-                inline_duration_token(VerdictChoice::Deny, path),
-            )
-            .unwrap()
-        };
-        let ClientMessage::SetVerdict { duration, .. } = deny(Some("/usr/bin/curl")) else {
-            panic!("expected SetVerdict");
-        };
-        assert_eq!(duration, Some(VerdictDuration::UntilRestart));
-        assert_eq!(
-            serde_json::to_value(deny(Some("/usr/bin/curl"))).unwrap(),
-            serde_json::json!({
-                "action": "setVerdict",
-                "rowId": "r1",
-                "verdict": "deny",
-                "scope": "this_host",
-                "duration": "until_restart",
-            })
-        );
-        let ClientMessage::SetVerdict { duration, .. } = deny(Some("Kernel connection")) else {
-            panic!("expected SetVerdict");
-        };
-        assert_eq!(duration, Some(VerdictDuration::Once));
     }
 
     #[test]

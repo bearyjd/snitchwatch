@@ -71,6 +71,15 @@ pub mod qobject {
             duration: &QString,
         );
 
+        /// Whether the bridge session row `row_id` came from advertised
+        /// app-bound rules and is still the live session — read at click
+        /// time, not polled, so a reconnect to an older bridge can't be
+        /// mistaken for a capable one. False headless or for a malformed id.
+        /// Gates the remembered inline Deny (`crate::inline_deny`).
+        #[qinvokable]
+        #[cxx_name = "appBoundRulesFor"]
+        fn app_bound_rules_for(self: &BridgeFeed, row_id: &QString) -> bool;
+
         /// Issue #44: the bridge answered a remembered verdict for this
         /// connection only, because it couldn't identify the program's file.
         /// `row_id` is session-qualified like `ConnectionsModel`'s ids.
@@ -103,6 +112,14 @@ impl qobject::BridgeFeed {
         };
         self.as_mut().set_ok(ok);
         self.as_mut().set_status_text(QString::from(&msg));
+    }
+
+    fn app_bound_rules_for(&self, row_id: &QString) -> bool {
+        let row_id = row_id.to_string();
+        split_session_row_id(&row_id).is_some_and(|(session, _)| {
+            crate::bridge_runtime::handles()
+                .is_some_and(|handles| handles.advertises_app_bound_rules(session))
+        })
     }
 
     fn send_client_json(self: Pin<&mut Self>, json: &QString) {

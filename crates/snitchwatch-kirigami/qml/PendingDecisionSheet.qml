@@ -48,10 +48,16 @@ ColumnLayout {
     property bool bindableProcessPath: false
     // Exposed for the headless probe (tests/verdict_not_remembered_qml.rs).
     property alias durationSelector: durationBox
-    // Whether the one-time-Deny hint under the Duration box shows. The
-    // Allow/Deny buttons submit at once, so there is no selected action to
-    // key on: it follows the duration alone, and its text names Deny.
-    readonly property bool showDenyOnceHint: durationBox.currentValue === "this_time"
+    // Whether the row's bridge advertised app-bound rules
+    // (`ConnectionsPage.rowAppBoundRules`). Without them a remembered "This
+    // host only" answer covers every app, so the sheet doesn't suggest one.
+    property bool appBoundRules: false
+    // Whether the one-time-Deny hint under the Duration box shows: only where
+    // a longer Deny would be bound to this program. The Allow/Deny buttons
+    // submit at once, so there is no selected action to key on: it follows
+    // the duration, and its text names Deny.
+    readonly property bool showDenyOnceHint: sheet.bindableProcessPath && sheet.appBoundRules
+        && durationBox.currentValue === "this_time"
     // Exposed for the headless probe (tests/inline_verdict_qml.rs).
     property alias denyOnceHint: denyOnceHintLabel
 
@@ -139,8 +145,8 @@ ColumnLayout {
             valueRole: "token"
             // Back-reference: `model[0]`'s token ("this_time") is what
             // `ConnectionsPage.qml`'s inline Allow sends, and `until_quit` is
-            // what its inline Deny sends for a program it can bind a rule to
-            // (`pending_decision.rs` `inline_duration_token`).
+            // what its inline Deny sends for a program it can bind a rule to,
+            // on a bridge that advertised app-bound rules (`inline_deny.rs`).
             model: sheet.bindableProcessPath
                 ? [
                     { label: "This time", token: "this_time" },

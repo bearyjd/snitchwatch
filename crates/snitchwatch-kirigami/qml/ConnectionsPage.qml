@@ -50,18 +50,20 @@ Kirigami.ScrollablePage {
     // mapping stays the single source of the wire shape.
     //
     // Scope is the sheet's default, "This host only". The duration is per row,
-    // from `ConnectionsModel.inlineDurationFor` (`pending_decision.rs`
-    // `inline_duration_token`, plan 2026-10-08-inline-deny-until-restart.md):
+    // from `ConnectionsModel.inlineDurationFor` (Rust `inline_deny.rs`, plan
+    // 2026-10-08-inline-deny-until-restart.md):
     //   * Allow sends "This time", the sheet's default, as before.
     //   * Deny deliberately doesn't. The daemon never stores a once-only rule,
     //     so it would drop only the packet that asked, and the SYN the kernel
     //     resends a second later would get through or be asked about again.
-    //     For a row whose program file is known it sends "until_quit" (daemon
-    //     "until restart"), a rule the bridge binds to the program and this
-    //     host. Otherwise it can only send "This time", and says why.
+    //     It sends "until_quit" (daemon "until restart"), a rule the bridge
+    //     binds to the program and this host, when the row's program file is
+    //     known and its bridge advertised app-bound rules. Otherwise it can
+    //     only send "This time", and says why.
     //
-    // Returns the duration token sent, "" when nothing was sent. Leaves the
-    // explanation to the caller, so a batch explains once.
+    // Returns why a Deny could only apply to this connection
+    // ("program_unknown" / "bridge_too_old"), else "" (also when nothing was
+    // sent). Leaves the explanation to the caller, so a batch explains once.
     function sendInlineVerdict(rowId, choice) {
         if (page.bridgeFeed === null) {
             // Unreachable in the running app (main.qml always injects the
@@ -71,24 +73,31 @@ Kirigami.ScrollablePage {
             console.warn("sendInlineVerdict: no bridgeFeed; verdict dropped for", rowId);
             return "";
         }
-        const duration = page.model ? page.model.inlineDurationFor(rowId, choice) : "this_time";
+        const appBound = page.rowAppBoundRules(rowId);
+        const duration = page.model
+            ? page.model.inlineDurationFor(rowId, choice, appBound) : "this_time";
         page.bridgeFeed.submitVerdict(rowId, choice, "this_host", duration);
-        return duration;
+        if (choice !== "deny" || duration !== "this_time") {
+            return "";
+        }
+        return page.model ? page.model.inlineDenyFor(rowId, appBound) : "program_unknown";
     }
 
-    // Whether an inline `choice` that sent `duration` was a Deny that could
-    // only apply to this connection.
-    function onceOnlyDeny(choice, duration) {
-        return choice === "deny" && duration === "this_time";
+    // Whether `rowId`'s bridge session advertised app-bound rules, asked at
+    // the time of use. Anything else, including a feed without the check,
+    // means no: a bridge before #50/#71 would turn an inline Deny into an
+    // all-apps rule.
+    function rowAppBoundRules(rowId) {
+        return page.bridgeFeed !== null
+            && typeof page.bridgeFeed.appBoundRulesFor === "function"
+            && page.bridgeFeed.appBoundRulesFor(rowId) === true;
     }
 
     // A row's inline Allow/Deny. Also the entry point
     // `tests/inline_verdict_qml.rs` drives, to exercise the click -> submit ->
     // verdict-message path without synthesizing a real mouse click.
     function submitInlineVerdict(rowId, choice) {
-        if (page.onceOnlyDeny(choice, page.sendInlineVerdict(rowId, choice))) {
-            page.showVerdictNotRemembered();
-        }
+        page.explainOnceOnlyDeny(page.sendInlineVerdict(rowId, choice));
     }
 
     // Issue #18 batch actions: parse ConnectionsModel.pendingRowIdsForProcess
@@ -99,7 +108,7 @@ Kirigami.ScrollablePage {
         if (!page.model) {
             return;
         }
-        let onceOnly = false;
+        let onceOnly = "";
         try {
             const ids = JSON.parse(page.model.pendingRowIdsForProcess(processKey));
             for (const id of ids) {
@@ -108,9 +117,7 @@ Kirigami.ScrollablePage {
                 if (sourceSession && !id.startsWith(sourceSession)) {
                     continue;
                 }
-                if (page.onceOnlyDeny(choice, page.sendInlineVerdict(id, choice))) {
-                    onceOnly = true;
-                }
+                onceOnly = page.sendInlineVerdict(id, choice) || onceOnly;
             }
         } catch (e) {
             // Malformed JSON from the model would be a Rust-side bug;
@@ -118,16 +125,43 @@ Kirigami.ScrollablePage {
             // don't swallow it silently.
             console.warn("submitBatchVerdict failed:", e);
         }
-        if (onceOnly) {
-            page.showVerdictNotRemembered();
+        page.explainOnceOnlyDeny(onceOnly);
+    }
+
+    // Why an inline Deny applies to this connection only, for each reason
+    // `inlineDenyFor` gives. Fixed text.
+    function onceOnlyDenySentence(reason) {
+        return reason === "bridge_too_old" ? page.bridgeTooOldSentence : page.notRememberedSentence;
+    }
+
+    function explainOnceOnlyDeny(reason) {
+        if (reason !== "") {
+            page.showPassiveNotice(page.onceOnlyDenySentence(reason));
         }
     }
 
-    // The row Deny button's tooltip: what an inline Deny does for `rowId`.
-    function inlineDenyToolTip(rowId) {
-        return page.model && page.model.inlineDurationFor(rowId, "deny") === "until_quit"
+    // What an inline Deny does for `rowId` (`inlineDenyFor`).
+    function inlineDenyKind(rowId) {
+        return page.model
+            ? page.model.inlineDenyFor(rowId, page.rowAppBoundRules(rowId)) : "program_unknown";
+    }
+
+    // What a row's inline Deny does: its tooltip and accessible description.
+    function inlineDenyText(rowId) {
+        const deny = page.inlineDenyKind(rowId);
+        return deny === "until_restart"
             ? "Blocks this program from this host until the firewall restarts"
-            : page.notRememberedSentence;
+            : page.onceOnlyDenySentence(deny);
+    }
+
+    // The same for a process header's "Deny all". A group is keyed by the
+    // program's path, so its first pending row speaks for all of them.
+    function batchDenyText(processKey) {
+        const deny = page.inlineDenyKind(
+            page.model ? page.model.firstPendingRowIdForProcess(processKey) : "");
+        return deny === "until_restart"
+            ? "Blocks this program from each of these hosts until the firewall restarts"
+            : page.onceOnlyDenySentence(deny);
     }
 
     // Snapshot of the row currently shown in the inspector sheet.
@@ -155,8 +189,13 @@ Kirigami.ScrollablePage {
     // Issue #44: whether an answer for this row's program can be remembered
     // (`rowDetailsJson`'s `bindableProcessPath`); false until known.
     property bool inspectBindableProcessPath: false
-    // Exposed for the headless probe (tests/verdict_not_remembered_qml.rs).
+    // Whether the inspected row's bridge advertised app-bound rules
+    // (`rowAppBoundRules`); false until known.
+    property bool inspectAppBoundRules: false
+    // Exposed for the headless probes (tests/verdict_not_remembered_qml.rs,
+    // tests/inline_verdict_qml.rs).
     property alias decisionSheet: pendingSheet
+    property alias connectionList: list
     // Raw matched-rule name (empty when unknown/not applicable — drives the
     // "Show rule" button's visibility) and its friendly display string (never
     // blank — see `connections::row_store::matched_rule_display`).
@@ -240,13 +279,20 @@ Kirigami.ScrollablePage {
     // connection. Fixed text — the bridge's `RuleRefusal::describe` sentence
     // (a test keeps them equal) — never the wire `reason`.
     readonly property string notRememberedSentence: "Snitchwatch couldn't identify this program's file, so this answer applies only to this connection."
+    // Why an inline Deny applies to this connection only when the row's
+    // bridge didn't advertise app-bound rules (see `rowAppBoundRules`).
+    readonly property string bridgeTooOldSentence: "This firewall bridge is too old to block just this program, so Deny applies to this connection only."
 
     // Issue #44: the bridge answered a remembered verdict for this connection
-    // only, or an inline Deny could only be sent for it.
+    // only.
     function showVerdictNotRemembered() {
+        page.showPassiveNotice(page.notRememberedSentence);
+    }
+
+    function showPassiveNotice(text) {
         const win = Controls.ApplicationWindow.window;
         if (win && typeof win.showPassiveNotification === "function") {
-            win.showPassiveNotification(page.notRememberedSentence, "long");
+            win.showPassiveNotification(text, "long");
         }
     }
 
@@ -359,6 +405,17 @@ Kirigami.ScrollablePage {
             property bool submitted: false
             onRowIdChanged: row.submitted = false
             onPendingChanged: row.submitted = false
+
+            // What this row's Deny, or this header's "Deny all", does: the
+            // buttons' tooltip and accessible description. Empty where the
+            // button is hidden, so other delegates never look it up.
+            readonly property string denyText: !row.isGroupHeader && row.pending
+                ? page.inlineDenyText(row.rowId) : ""
+            readonly property string denyAllText: row.isGroupHeader && row.depth === 0
+                && row.groupPending > 0 ? page.batchDenyText(row.groupKey) : ""
+            // Exposed for the headless probe (tests/inline_verdict_qml.rs).
+            property alias denyButton: rowDenyButton
+            property alias denyAllButton: batchDenyButton
 
             // Single latch-and-dispatch for all 4 verdict buttons. Kept as one
             // function so the re-entry guard can't be present on some sites
@@ -528,11 +585,26 @@ Kirigami.ScrollablePage {
                         onClicked: row.decideOnce("allow", true)
                     }
                     Controls.Button {
+                        id: batchDenyButton
                         flat: true
                         enabled: !row.submitted
                         text: "Deny all (" + row.groupPending + ")"
                         icon.name: "edit-delete-remove"
                         onClicked: row.decideOnce("deny", true)
+                        Accessible.description: row.denyAllText
+
+                        // How long these Denies last (see the row Deny's
+                        // tooltip below).
+                        Controls.ToolTip {
+                            visible: batchDenyButton.hovered
+                            delay: Kirigami.Units.toolTipDelay
+                            contentItem: Controls.Label {
+                                textFormat: Text.PlainText
+                                wrapMode: Text.Wrap
+                                color: palette.toolTipText
+                                text: row.denyAllText
+                            }
+                        }
                     }
                 }
 
@@ -561,10 +633,11 @@ Kirigami.ScrollablePage {
                         text: "Deny"
                         icon.name: "edit-delete-remove"
                         onClicked: row.decideOnce("deny", false)
+                        Accessible.description: row.denyText
 
                         // How long this Deny lasts. An explicit PlainText
                         // contentItem, never the attached `ToolTip.text`
-                        // (issue #51); looked up only while hovered.
+                        // (issue #51).
                         Controls.ToolTip {
                             visible: rowDenyButton.hovered
                             delay: Kirigami.Units.toolTipDelay
@@ -574,7 +647,7 @@ Kirigami.ScrollablePage {
                                 // The style's own tooltip text uses the
                                 // tooltip palette, not the window one.
                                 color: palette.toolTipText
-                                text: rowDenyButton.hovered ? page.inlineDenyToolTip(row.rowId) : ""
+                                text: row.denyText
                             }
                         }
                     }
@@ -625,6 +698,7 @@ Kirigami.ScrollablePage {
         page.inspectMatchedRule = row.matchedRule;
         page.inspectMatchedRuleDisplay = row.matchedRuleDisplay;
         page.applyRowDetails(row.rowId);
+        page.inspectAppBoundRules = page.rowAppBoundRules(row.rowId);
         // The row may be a stale pending one, and with the connection already
         // down no `ok` change follows to catch it.
         page.recheckInspectedRow();
@@ -739,6 +813,7 @@ Kirigami.ScrollablePage {
                 host: page.inspectHost
                 remoteIp: page.inspectIp
                 bindableProcessPath: page.inspectBindableProcessPath
+                appBoundRules: page.inspectAppBoundRules
                 bridgeFeed: page.bridgeFeed
                 onDecided: inspector.close()
             }
