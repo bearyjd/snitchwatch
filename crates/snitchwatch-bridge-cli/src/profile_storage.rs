@@ -8,9 +8,12 @@
 //! either can fall back to memory while the other persists, and each GUI
 //! page is told about its own. Any bridge with a `Persistent` state
 //! directory saves profiles, the per-user one too. Only the system bridge
-//! with a saved store applies the active profile's rules to the firewall
-//! (issue #46 Part 2, like the blocklists); any other installs nothing and
-//! says why on the Profiles page.
+//! applies the active profile's rules to the firewall (issue #46 Part 2);
+//! the per-user one installs nothing and says why on the Profiles page. A
+//! system bridge whose store fell back to memory still applies them: it
+//! starts with no active profile, so its first pass removes the rules an
+//! earlier run installed, and the page never claims profiles aren't applied
+//! while those still are.
 //!
 //! A store that can't be opened, or opens but can't be read, falls back to
 //! memory as `Unusable("profile store: …")`, logged at `error!` and shown on
@@ -38,31 +41,22 @@ use crate::storage::{BridgeMode, DaemonRules, EphemeralReason, Storage};
 pub const PER_USER_REASON: &str = "Profiles are applied to the firewall only by the \
      system-wide Snitchwatch service; in this per-user setup another program could pose as the \
      firewall service.";
-/// Why a bridge that can't save profiles applies none.
-pub const NOT_SAVED_REASON: &str =
-    "Profiles are applied to the firewall only while Snitchwatch can save them.";
 
 /// The profile database's file name inside the state directory.
 pub const PROFILE_DB_FILE: &str = "profiles.sqlite3";
 
 /// The bridge's profile manager: persisted in `<state>/profiles.sqlite3`
 /// when its store opened `Persistent` (in memory otherwise), and applying
-/// the active profile's rules through `daemon` only for the system bridge
-/// with a saved store.
+/// the active profile's rules through `daemon` only for the system bridge.
 pub(crate) fn build_profiles_manager(
     storage: Storage,
     mode: BridgeMode,
     daemon: DaemonRules,
 ) -> Result<Arc<ProfilesManager>> {
     let (store, storage) = open_profile_store(storage)?;
-    let sink: Arc<dyn ProfileRuleSink> = match (&storage, mode) {
-        (Storage::Persistent(_), BridgeMode::System) => {
-            Arc::new(DaemonProfileSink::new(daemon.commands, daemon.rules))
-        }
-        (Storage::Persistent(_), BridgeMode::User) => {
-            Arc::new(NoopProfileRuleSink::new(PER_USER_REASON))
-        }
-        (Storage::Ephemeral(_), _) => Arc::new(NoopProfileRuleSink::new(NOT_SAVED_REASON)),
+    let sink: Arc<dyn ProfileRuleSink> = match mode {
+        BridgeMode::System => Arc::new(DaemonProfileSink::new(daemon.commands, daemon.rules)),
+        BridgeMode::User => Arc::new(NoopProfileRuleSink::new(PER_USER_REASON)),
     };
     let manager = ProfilesManager::new(store)
         .with_storage_status(storage.status())
@@ -343,23 +337,21 @@ mod tests {
         build_profiles_manager(storage, mode, daemon()).unwrap()
     }
 
-    /// Issue #46 Part 2: only the system bridge with a saved store applies
-    /// profile rules; any other says why.
+    /// Issue #46 Part 2: only the system bridge applies profile rules, also
+    /// from a store in memory (whose first pass removes an earlier run's
+    /// rules); the per-user one says why it applies none.
     #[test]
-    fn only_the_system_bridge_with_a_saved_store_applies_profiles() {
+    fn only_the_system_bridge_applies_profiles() {
         let (_dir, state) = state();
         let system = build(Storage::Persistent(state.clone()), BridgeMode::System);
         assert_eq!(system.not_applied_reason(), None);
-        let user = build(Storage::Persistent(state), BridgeMode::User);
-        assert_eq!(user.not_applied_reason().as_deref(), Some(PER_USER_REASON));
         let memory = build(
             Storage::Ephemeral(EphemeralReason::InProcess),
             BridgeMode::System,
         );
-        assert_eq!(
-            memory.not_applied_reason().as_deref(),
-            Some(NOT_SAVED_REASON)
-        );
+        assert_eq!(memory.not_applied_reason(), None);
+        let user = build(Storage::Persistent(state), BridgeMode::User);
+        assert_eq!(user.not_applied_reason().as_deref(), Some(PER_USER_REASON));
     }
 
     #[test]

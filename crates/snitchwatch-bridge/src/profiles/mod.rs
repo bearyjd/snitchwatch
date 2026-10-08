@@ -85,6 +85,23 @@ struct Statuses {
     rules: HashMap<String, Enforcement>,
 }
 
+impl Statuses {
+    /// `active`'s rules, all pending.
+    fn pending(active: Option<&Profile>) -> Self {
+        Self {
+            profile_id: active.map(|p| p.id.clone()),
+            rules: active
+                .map(|p| {
+                    p.rules
+                        .iter()
+                        .map(|r| (r.id.clone(), Enforcement::Pending))
+                        .collect()
+                })
+                .unwrap_or_default(),
+        }
+    }
+}
+
 pub struct ProfilesManager {
     store: Arc<ProfileStore>,
     bus: broadcast::Sender<ProfileEvent>,
@@ -114,6 +131,15 @@ fn lock<T>(mutex: &StdMutex<T>) -> MutexGuard<'_, T> {
 impl ProfilesManager {
     pub fn new(store: Arc<ProfileStore>) -> Self {
         let (bus, _) = broadcast::channel(64);
+        // A profile active before a restart: its rules start pending, so the
+        // first pass records what the firewall holds.
+        let statuses = match store.get_active() {
+            Ok(active) => Statuses::pending(active.as_ref()),
+            Err(e) => {
+                error!(error = %e, "profiles: couldn't read the active profile at start");
+                Statuses::default()
+            }
+        };
         Self {
             store,
             bus,
@@ -126,7 +152,7 @@ impl ProfilesManager {
             switch_lock: Mutex::new(()),
             last_settled: StdMutex::new(None),
             latest_network: StdMutex::new(None),
-            statuses: StdMutex::default(),
+            statuses: StdMutex::new(statuses),
             enforce_requested: Notify::new(),
             pass_lock: Mutex::new(()),
         }
@@ -335,18 +361,7 @@ impl ProfilesManager {
     /// Every rule of a newly active profile starts pending, so the page
     /// never shows a status from an earlier activation.
     fn reset_statuses(&self, active: Option<&Profile>) {
-        let rules = active
-            .map(|p| {
-                p.rules
-                    .iter()
-                    .map(|r| (r.id.clone(), Enforcement::Pending))
-                    .collect()
-            })
-            .unwrap_or_default();
-        *lock(&self.statuses) = Statuses {
-            profile_id: active.map(|p| p.id.clone()),
-            rules,
-        };
+        *lock(&self.statuses) = Statuses::pending(active);
     }
 
     /// One enforcement pass: install the active profile's rules that pass

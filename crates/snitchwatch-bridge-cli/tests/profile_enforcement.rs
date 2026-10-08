@@ -1,8 +1,10 @@
 //! Profile enforcement end to end (issue #46 Part 2): a bridge with a saved
 //! state directory and the mock daemon. Activating a profile installs its
 //! rules, a stray rule the bridge made earlier is deleted after the
-//! daemon's snapshot, and a per-user bridge installs nothing and says why.
+//! daemon's snapshot, a restart finds the rules in place without resending
+//! them, and a per-user bridge installs nothing and says why.
 
+use std::path::Path;
 use std::time::Duration;
 
 use mock_opensnitchd::lists::{spawn_responder, ListsPolicy};
@@ -19,17 +21,16 @@ use snitchwatch_proto::protocol::{Action, ClientConfig, Notification, Operator, 
 use tokio::sync::{broadcast, mpsc};
 
 const WAIT: Duration = Duration::from_secs(10);
+const RULE_NAME: &str = "850-profile:home:0000-r1";
 
-struct Setup {
+struct Bridge {
     _sockets: tempfile::TempDir,
-    _state: tempfile::TempDir,
     bridge: RunningBridge,
     rx: broadcast::Receiver<ServerMessage>,
 }
 
-async fn start(mode: BridgeMode) -> Setup {
+async fn start_on(state: &Path, mode: BridgeMode) -> Bridge {
     let sockets = tempfile::tempdir().unwrap();
-    let state = tempfile::tempdir().unwrap();
     let bridge = run_with_options(
         BridgeConfig {
             grpc_bind: "127.0.0.1:0".parse().unwrap(),
@@ -37,7 +38,7 @@ async fn start(mode: BridgeMode) -> Setup {
             cache_capacity: 64,
         },
         RunOptions {
-            storage: Storage::Persistent(state.path().canonicalize().unwrap()),
+            storage: Storage::Persistent(state.canonicalize().unwrap()),
             blocklist_fetcher: None,
             mode,
         },
@@ -45,9 +46,8 @@ async fn start(mode: BridgeMode) -> Setup {
     .await
     .unwrap();
     let rx = bridge.broadcast_tx.subscribe();
-    Setup {
+    Bridge {
         _sockets: sockets,
-        _state: state,
         bridge,
         rx,
     }
@@ -103,8 +103,33 @@ async fn next_command(seen: &mut mpsc::Receiver<Notification>) -> Notification {
         .unwrap()
 }
 
+async fn nothing_sent(seen: &mut mpsc::Receiver<Notification>) {
+    let sent = tokio::time::timeout(Duration::from_millis(500), seen.recv()).await;
+    assert!(sent.is_err(), "a command reached the daemon: {sent:?}");
+}
+
 async fn send(bridge: &RunningBridge, message: ClientMessage) {
     bridge.inbound_tx.send(message).await.unwrap();
+}
+
+/// Create profile "home" with one deny rule, and activate it.
+async fn activate_home_with_a_rule(b: &mut Bridge) {
+    send(
+        &b.bridge,
+        ClientMessage::CreateProfile {
+            id: "home".into(),
+            name: "Home".into(),
+            network_matchers: vec![],
+        },
+    )
+    .await;
+    send(&b.bridge, add_rule("p1")).await;
+    assert_eq!(result(&mut b.rx).await, RuleCommandOutcome::Ok);
+    send(
+        &b.bridge,
+        ClientMessage::ActivateProfile { id: "home".into() },
+    )
+    .await;
 }
 
 fn add_rule(request_id: &str) -> ClientMessage {
@@ -163,36 +188,7 @@ async fn profiles_until(
     .unwrap_or_else(|_| panic!("timed out: {what}"))
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn an_active_profiles_rules_are_installed_and_strays_deleted() {
-    let mut setup = start(BridgeMode::System).await;
-    let (bridge, rx) = (&setup.bridge, &mut setup.rx);
-    let mut seen = connect(bridge, vec![stray()]).await;
-
-    let purge = next_command(&mut seen).await;
-    assert_eq!(purge.r#type, Action::DeleteRule as i32);
-    assert_eq!(purge.rules[0].name, "850-profile:old:0000-x");
-
-    send(
-        bridge,
-        ClientMessage::CreateProfile {
-            id: "home".into(),
-            name: "Home".into(),
-            network_matchers: vec![],
-        },
-    )
-    .await;
-    send(bridge, add_rule("p1")).await;
-    assert_eq!(result(rx).await, RuleCommandOutcome::Ok);
-    send(bridge, ClientMessage::ActivateProfile { id: "home".into() }).await;
-
-    let install = next_command(&mut seen).await;
-    assert_eq!(install.r#type, Action::ChangeRule as i32);
-    let rule = &install.rules[0];
-    assert_eq!(rule.name, "850-profile:home:0000-r1");
-    assert!(!rule.precedence && rule.duration == "always");
-    mock_opensnitchd::validate_rule_shape(rule).expect("a rule the daemon accepts");
-
+async fn installed(rx: &mut broadcast::Receiver<ServerMessage>) -> Vec<ProfileSummary> {
     let (profiles, _) = profiles_until(rx, "rule installed", |profiles, applies| {
         applies
             && profiles.iter().any(|p| {
@@ -202,51 +198,83 @@ async fn an_active_profiles_rules_are_installed_and_strays_deleted() {
             })
     })
     .await;
-    assert_eq!(profiles[0].rules[0].enforcement_reason, None);
+    profiles
+}
 
-    // The Rules page lists it read-only, managed on the Profiles page.
-    send(bridge, ClientMessage::RequestSnapshot).await;
-    let rules = tokio::time::timeout(WAIT, async {
+/// The Rules page's row for `name`, once a snapshot lists it.
+async fn listed_row(b: &mut Bridge, name: &str) -> serde_json::Value {
+    send(&b.bridge, ClientMessage::RequestSnapshot).await;
+    tokio::time::timeout(WAIT, async {
         loop {
-            if let ServerMessage::SetRules { rules } = rx.recv().await.unwrap() {
-                if let Some(row) = rules
-                    .into_iter()
-                    .find(|r| r["name"] == "850-profile:home:0000-r1")
-                {
+            if let ServerMessage::SetRules { rules } = b.rx.recv().await.unwrap() {
+                if let Some(row) = rules.into_iter().find(|r| r["name"] == name) {
                     return row;
                 }
             }
         }
     })
     .await
-    .expect("no SetRules with the profile rule");
-    assert_eq!(rules["readOnlyReason"], PROFILE_MANAGED_REASON);
+    .expect("no SetRules with the profile rule")
+}
 
-    send(bridge, ClientMessage::DeactivateProfile).await;
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_active_profiles_rules_are_installed_and_strays_deleted() {
+    let state = tempfile::tempdir().unwrap();
+    let mut b = start_on(state.path(), BridgeMode::System).await;
+    let mut seen = connect(&b.bridge, vec![stray()]).await;
+    let purge = next_command(&mut seen).await;
+    assert_eq!(purge.r#type, Action::DeleteRule as i32);
+    assert_eq!(purge.rules[0].name, stray().name);
+
+    activate_home_with_a_rule(&mut b).await;
+    let install = next_command(&mut seen).await;
+    assert_eq!(install.r#type, Action::ChangeRule as i32);
+    let rule = &install.rules[0];
+    assert_eq!(rule.name, RULE_NAME);
+    assert!(!rule.precedence && rule.duration == "always");
+    mock_opensnitchd::validate_rule_shape(rule).expect("a rule the daemon accepts");
+    let profiles = installed(&mut b.rx).await;
+    assert_eq!(profiles[0].rules[0].enforcement_reason, None);
+
+    let row = listed_row(&mut b, RULE_NAME).await;
+    assert_eq!(row["readOnlyReason"], PROFILE_MANAGED_REASON);
+
+    send(&b.bridge, ClientMessage::DeactivateProfile).await;
     let removed = next_command(&mut seen).await;
     assert_eq!(removed.r#type, Action::DeleteRule as i32);
-    assert_eq!(removed.rules[0].name, "850-profile:home:0000-r1");
-    setup.bridge.shutdown();
+    assert_eq!(removed.rules[0].name, RULE_NAME);
+    b.bridge.shutdown();
+}
+
+/// After a restart the active profile's rules, echoed in the daemon's
+/// snapshot, are reported installed and not sent again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_restart_finds_the_rules_in_place_and_resends_nothing() {
+    let state = tempfile::tempdir().unwrap();
+    let mut first = start_on(state.path(), BridgeMode::System).await;
+    let mut seen = connect(&first.bridge, vec![]).await;
+    activate_home_with_a_rule(&mut first).await;
+    let mut echoed = next_command(&mut seen).await.rules[0].clone();
+    installed(&mut first.rx).await;
+    first.bridge.shutdown();
+
+    echoed.created = 1_700_000_000;
+    echoed.operator.as_mut().unwrap().operand = "list".into();
+    let mut second = start_on(state.path(), BridgeMode::System).await;
+    let mut seen = connect(&second.bridge, vec![echoed]).await;
+    send(&second.bridge, ClientMessage::RequestSnapshot).await;
+    installed(&mut second.rx).await;
+    nothing_sent(&mut seen).await;
+    second.bridge.shutdown();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_per_user_bridge_installs_no_profile_rule_and_says_why() {
-    let mut setup = start(BridgeMode::User).await;
-    let (bridge, rx) = (&setup.bridge, &mut setup.rx);
-    let mut seen = connect(bridge, vec![]).await;
-    send(
-        bridge,
-        ClientMessage::CreateProfile {
-            id: "home".into(),
-            name: "Home".into(),
-            network_matchers: vec![],
-        },
-    )
-    .await;
-    send(bridge, add_rule("p1")).await;
-    assert_eq!(result(rx).await, RuleCommandOutcome::Ok);
-    send(bridge, ClientMessage::ActivateProfile { id: "home".into() }).await;
-    let (profiles, reason) = profiles_until(rx, "not applied", |profiles, applies| {
+    let state = tempfile::tempdir().unwrap();
+    let mut b = start_on(state.path(), BridgeMode::User).await;
+    let mut seen = connect(&b.bridge, vec![]).await;
+    activate_home_with_a_rule(&mut b).await;
+    let (profiles, reason) = profiles_until(&mut b.rx, "not applied", |profiles, applies| {
         !applies
             && profiles
                 .iter()
@@ -255,11 +283,6 @@ async fn a_per_user_bridge_installs_no_profile_rule_and_says_why() {
     .await;
     assert!(reason.is_some_and(|r| r.contains("per-user")));
     assert!(profiles[0].rules[0].enforcement_reason.is_some());
-    assert!(
-        tokio::time::timeout(Duration::from_millis(500), seen.recv())
-            .await
-            .is_err(),
-        "nothing reached the daemon"
-    );
-    setup.bridge.shutdown();
+    nothing_sent(&mut seen).await;
+    b.bridge.shutdown();
 }

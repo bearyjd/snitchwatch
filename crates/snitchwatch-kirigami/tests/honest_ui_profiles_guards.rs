@@ -34,38 +34,11 @@ fn the_profiles_page_says_whether_profiles_are_applied() {
     assert_eq!(header.len(), 1, "ProfilesPage.qml lost its banner header");
     let banners = blocks(&header[0], "Kirigami.InlineMessage {");
     assert_eq!(banners.len(), 3, "expected three messages");
-    for banner in &banners {
-        assert!(
-            !banner.contains("showCloseButton: true") && !banner.contains("actions:"),
-            "a profiles message must not be dismissable:\n{banner}"
-        );
-        assert!(!banner.contains("bridge"), "internal jargon:\n{banner}");
-        assert!(
-            !banner.contains("Preview"),
-            "profiles are no preview:\n{banner}"
-        );
-        assert!(
-            is_fixed_text(&text_binding(banner).unwrap_or_default()),
-            "a message carries data:\n{banner}"
-        );
-    }
-    let keyed = |visible: &str, kind: &str, says: &[&str]| {
-        let banner = banners
-            .iter()
-            .find(|b| has_line(b, &format!("visible: {visible}")))
-            .unwrap_or_else(|| panic!("no message keyed on `{visible}`"));
-        assert!(
-            banner.contains(&format!("type: Kirigami.MessageType.{kind}")),
-            "the `{visible}` message must be {kind}:\n{banner}"
-        );
-        for phrase in says {
-            assert!(
-                banner.contains(phrase),
-                "the `{visible}` message must say \"{phrase}\":\n{banner}"
-            );
-        }
-    };
-    keyed(
+    banners
+        .iter()
+        .for_each(|banner| assert_fixed_and_undismissable(banner));
+    assert_keyed(
+        &banners,
         "page.appliesRules",
         "Information",
         &[
@@ -73,17 +46,53 @@ fn the_profiles_page_says_whether_profiles_are_applied() {
             "whether the firewall accepted it",
         ],
     );
-    keyed(
+    assert_keyed(
+        &banners,
         "!page.appliesRules",
         "Warning",
         &["not applied to the firewall", "no firewall rules"],
     );
-    keyed(
+    assert_keyed(
+        &banners,
         "!page.storagePersistent",
         "Warning",
         &["memory only", "restart"],
     );
     assert_header_labels(&blocks(&header[0], "Controls.Label {"));
+}
+
+fn assert_fixed_and_undismissable(banner: &str) {
+    assert!(
+        !banner.contains("showCloseButton: true") && !banner.contains("actions:"),
+        "a profiles message must not be dismissable:\n{banner}"
+    );
+    assert!(!banner.contains("bridge"), "internal jargon:\n{banner}");
+    assert!(
+        !banner.contains("Preview"),
+        "profiles are no preview:\n{banner}"
+    );
+    assert!(
+        is_fixed_text(&text_binding(banner).unwrap_or_default()),
+        "a message carries data:\n{banner}"
+    );
+}
+
+/// The message shown for `visible` is of `kind` and says each phrase.
+fn assert_keyed(banners: &[String], visible: &str, kind: &str, says: &[&str]) {
+    let banner = banners
+        .iter()
+        .find(|b| has_line(b, &format!("visible: {visible}")))
+        .unwrap_or_else(|| panic!("no message keyed on `{visible}`"));
+    assert!(
+        banner.contains(&format!("type: Kirigami.MessageType.{kind}")),
+        "the `{visible}` message must be {kind}:\n{banner}"
+    );
+    for phrase in says {
+        assert!(
+            banner.contains(phrase),
+            "the `{visible}` message must say \"{phrase}\":\n{banner}"
+        );
+    }
 }
 
 /// The header's labels: a fixed-text note shown while profiles are saved,

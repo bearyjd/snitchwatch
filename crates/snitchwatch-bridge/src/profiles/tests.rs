@@ -270,6 +270,33 @@ async fn a_manual_choice_survives_a_restart_on_the_same_network() {
     assert_eq!(moved.store().manual_choice().unwrap(), None);
 }
 
+/// After a restart the active profile's rules start pending, and the first
+/// pass records what the firewall holds: never "not installed" for a rule
+/// that is in place.
+#[tokio::test]
+async fn statuses_follow_the_active_profile_after_a_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("profiles.sqlite3");
+    let before = ProfilesManager::new(Arc::new(ProfileStore::open(&path).unwrap()));
+    before.create_profile("home", "Home", vec![]).await.unwrap();
+    before
+        .add_rule("home", host_rule("r1", "a.example"))
+        .await
+        .unwrap();
+    before.activate("home").await.unwrap();
+    drop(before);
+
+    let sink = Arc::new(CapturingRuleSink::default());
+    let after = ProfilesManager::new(Arc::new(ProfileStore::open(&path).unwrap()))
+        .with_rule_sink(sink.clone());
+    assert_eq!(after.rule_status("home", "r1"), Some(Enforcement::Pending));
+    after.enforce().await;
+    assert!(matches!(
+        after.rule_status("home", "r1"),
+        Some(Enforcement::RuleInstalled { .. })
+    ));
+}
+
 /// A click while a new network is still settling is saved with that
 /// network, so the settled reading doesn't override it.
 #[tokio::test]
