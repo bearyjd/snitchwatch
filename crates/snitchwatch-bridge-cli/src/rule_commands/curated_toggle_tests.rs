@@ -126,3 +126,22 @@ async fn a_profile_rule_is_never_changed_from_the_rules_page() {
     }
     nothing_sent(&mut daemon).await;
 }
+
+/// A bridge whose Recommended page changes nothing (the per-user one, or
+/// unreadable choices) refuses a recommended rule's toggle too.
+#[tokio::test]
+async fn an_inert_bridge_refuses_toggling_a_recommended_rule() {
+    let rule = shipped();
+    let mut daemon = daemon(vec![rule.clone()]);
+    let curated = CuratedDefaults::new(
+        daemon.commands.clone(),
+        daemon.cache.clone(),
+        daemon.broadcast.clone(),
+    );
+    curated.set_unavailable("per-user");
+    let commands = commands(&daemon).with_curated(curated);
+    let mut rx = daemon.broadcast.subscribe();
+    commands.try_route(update(&rule.name, switched(&rule, false), Some("off")));
+    assert_eq!(refused(&result(&mut rx).await), [CURATED_INERT_REFUSED]);
+    nothing_sent(&mut daemon).await;
+}

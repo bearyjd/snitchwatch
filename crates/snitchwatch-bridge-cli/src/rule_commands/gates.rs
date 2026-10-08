@@ -21,6 +21,8 @@ pub(crate) const TCP_REFUSED: &str = "Adding, editing and renaming rules need th
      Snitchwatch service. In this per-user setup another program could pose as the firewall \
      service. You can still turn rules on or off and delete them.";
 pub(crate) const BUSY: &str = "This rule is being changed. Try again in a moment.";
+pub(crate) const CURATED_INERT_REFUSED: &str = "This Snitchwatch service doesn't change \
+     recommended rules; the Recommended background-service rules page says why.";
 const NOT_LOADED: &str = "Rules haven't loaded from the firewall yet.";
 const NOT_FOUND: &str = "The firewall has no rule by that name any more.";
 const HIDDEN: &str = "This rule is too large for Snitchwatch to show, so it can't be changed here.";
@@ -72,6 +74,7 @@ pub(super) fn plan(
     commands: &DaemonCommands,
     rules: &SharedRulesCache,
     busy: &BusyNames,
+    curated_inert: bool,
 ) -> Result<Plan, Refusal> {
     let on_tcp = commands.transport() == DaemonTransport::Tcp;
     match command {
@@ -85,7 +88,9 @@ pub(super) fn plan(
             notification(&effect).map(Plan::Send)
         }
         Command::Add { rule } => plan_add(rule, on_tcp, rules, busy),
-        Command::Update { rule_id, rule } => plan_update(rule_id, rule, on_tcp, rules, busy),
+        Command::Update { rule_id, rule } => {
+            plan_update(rule_id, rule, on_tcp, curated_inert, rules, busy)
+        }
     }
 }
 
@@ -113,11 +118,18 @@ fn plan_update(
     rule_id: &str,
     rule: &serde_json::Value,
     on_tcp: bool,
+    curated_inert: bool,
     rules: &SharedRulesCache,
     busy: &BusyNames,
 ) -> Result<Plan, Refusal> {
     let cache = lock(rules);
     if is_reserved_curated_name(rule_id) {
+        if curated_inert {
+            // Like the Recommended page: a bridge that changes no
+            // recommended rule (the per-user one, or unreadable choices)
+            // doesn't toggle one either.
+            return Err(refusal("rule", CURATED_INERT_REFUSED));
+        }
         return plan_curated_toggle(&cache, rule_id, rule, busy);
     }
     let old = changeable(&cache, rule_id, busy)?;

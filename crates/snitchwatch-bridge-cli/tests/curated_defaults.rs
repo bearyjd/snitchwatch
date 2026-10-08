@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use mock_opensnitchd::lists::{spawn_responder, ListsPolicy};
+use mock_opensnitchd::round_trip::as_daemon_reports;
 use mock_opensnitchd::MockOpensnitchd;
 use snitchwatch_bridge::curated::reconcile::EntryStatus;
 use snitchwatch_bridge::curated::wire::CuratedDefaultSummary;
@@ -247,8 +248,10 @@ async fn a_copy_the_user_edited_is_left_alone() {
     .await;
     drop((daemon, seen));
 
-    // The daemon restarts and reports our copy: nothing to do.
-    let (daemon, mut seen) = connect_daemon(&s.bridge, 2, vec![installed.clone()]).await;
+    // The daemon restarts and reports our copy, in its own shape (code
+    // review M4): nothing to do.
+    let (daemon, mut seen) =
+        connect_daemon(&s.bridge, 2, vec![as_daemon_reports(&installed)]).await;
     nothing_sent(&mut seen).await;
     while s.rx.try_recv().is_ok() {}
     send(&s.bridge, ClientMessage::RequestSnapshot).await;
@@ -256,10 +259,27 @@ async fn a_copy_the_user_edited_is_left_alone() {
         e.status == EntryStatus::Installed
     })
     .await;
+
+    // The Rules page can still turn the daemon's copy off.
+    let mut off = export_rule(&as_daemon_reports(&installed));
+    off["enabled"] = false.into();
+    send(
+        &s.bridge,
+        ClientMessage::UpdateRule {
+            rule_id: FLATPAK_RULE.into(),
+            rule: off,
+            request_id: None,
+            reply: None,
+        },
+    )
+    .await;
+    let toggled = next_command(&mut seen).await;
+    assert_eq!(toggled.r#type, Action::ChangeRule as i32);
+    assert!(!toggled.rules[0].enabled);
     drop((daemon, seen));
 
     // The user changed its port outside Snitchwatch.
-    let mut edited = installed;
+    let mut edited = as_daemon_reports(&installed);
     edited.operator.as_mut().unwrap().list[2].data = "8443".into();
     let (_daemon, mut seen) = connect_daemon(&s.bridge, 3, vec![edited]).await;
     entry_until(&mut s.rx, "edited by you", |e, _| {
@@ -273,4 +293,48 @@ async fn a_copy_the_user_edited_is_left_alone() {
     .await;
     nothing_sent(&mut seen).await;
     s.bridge.shutdown();
+}
+
+/// Code review H1: choices that can't be read leave the firewall as it is.
+#[tokio::test]
+async fn unreadable_choices_leave_the_firewall_as_it_is() {
+    let sockets = tempfile::tempdir().unwrap();
+    let state_dir = tempfile::tempdir().unwrap();
+    let state = state_dir.path().canonicalize().unwrap();
+    std::fs::write(state.join("curated-defaults.json"), "not json").unwrap();
+    let bridge = run_with_options(
+        BridgeConfig {
+            grpc_bind: "127.0.0.1:0".parse().unwrap(),
+            ws_socket_path: sockets.path().join("bridge.sock"),
+            cache_capacity: 64,
+        },
+        RunOptions {
+            storage: Storage::Persistent(state.clone()),
+            blocklist_fetcher: None,
+            mode: BridgeMode::System,
+        },
+    )
+    .await
+    .unwrap();
+    let mut rx = bridge.broadcast_tx.subscribe();
+    let flatpak = snitchwatch_bridge::curated::entries()
+        .iter()
+        .find(|e| e.id == FLATPAK)
+        .unwrap()
+        .rule();
+    let (_daemon, mut seen) = connect_daemon(&bridge, 1, vec![flatpak]).await;
+    send(&bridge, turn(false)).await;
+    let entry = entry_until(&mut rx, "inert", |e, unavailable| {
+        e.status == EntryStatus::InFirewall
+            && unavailable.as_deref()
+                == Some(snitchwatch_bridge::curated::manager::UNREADABLE_REASON)
+    })
+    .await;
+    assert_eq!(entry.status, EntryStatus::InFirewall);
+    nothing_sent(&mut seen).await;
+    assert_eq!(
+        std::fs::read_to_string(state.join("curated-defaults.json")).unwrap(),
+        "not json"
+    );
+    bridge.shutdown();
 }

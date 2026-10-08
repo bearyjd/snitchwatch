@@ -240,8 +240,10 @@ pub struct RunningBridge {
     /// broadcasts and saves them in between.
     rule_hits: RuleHitsHandle,
     rule_hits_ticker: tokio::task::JoinHandle<()>,
-    /// The recommended rules' reconcile loop (prompt-slot D).
+    /// The recommended rules' reconcile loop (prompt-slot D), and their
+    /// choices, saved once more at shutdown.
     curated_handle: tokio::task::JoinHandle<()>,
+    curated: CuratedDefaults,
 }
 
 impl RunningBridge {
@@ -260,6 +262,7 @@ impl RunningBridge {
         self.pause_clear_handle.abort();
         self.blocklist_tasks.abort();
         self.curated_handle.abort();
+        self.curated.save_now();
         for task in &self.profile_tasks {
             task.abort();
         }
@@ -741,7 +744,7 @@ where
     let commands_for_pump = daemon_commands;
     let rules_for_pump = rules.clone();
     let blocklist_worker = blocklist_tasks.worker.clone();
-    let curated_for_pump = curated;
+    let curated_for_pump = curated.clone();
     tokio::spawn(async move {
         while let Some(msg) = inbound_rx.recv().await {
             // Blocklist messages go to the single blocklist worker; queueing
@@ -1024,6 +1027,7 @@ where
         rule_hits,
         rule_hits_ticker,
         curated_handle,
+        curated,
     })
 }
 

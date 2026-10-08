@@ -47,7 +47,7 @@ mod steps;
 
 use gates::{Command, Plan};
 #[cfg(test)]
-pub(crate) use gates::{BUSY, NAME_TAKEN, TCP_REFUSED};
+pub(crate) use gates::{BUSY, CURATED_INERT_REFUSED, NAME_TAKEN, TCP_REFUSED};
 
 /// How long each daemon answer is awaited (#48's pump uses 5 s).
 const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -60,7 +60,7 @@ pub(crate) struct RuleCommands {
     reply_timeout: Duration,
     /// Names a command or an import is working on; no other may touch them.
     busy: BusyNames,
-    /// Told when a recommended rule is turned on or off here.
+    /// The recommended rules: their toggles are refused while it is inert.
     curated: Option<CuratedDefaults>,
 }
 
@@ -139,7 +139,7 @@ impl RuleCommands {
         }
     }
 
-    /// Refresh `curated` after each confirmed toggle of one of its rules.
+    /// Refuse toggles of recommended rules while `curated` changes none.
     pub(crate) fn with_curated(self, curated: CuratedDefaults) -> Self {
         Self {
             curated: Some(curated),
@@ -170,7 +170,14 @@ impl RuleCommands {
             other => return Some(other),
         };
         let answer = self.answer(request_id, reply);
-        match gates::plan(&command, &self.commands, &self.rules, &self.busy) {
+        let curated_inert = self.curated.as_ref().is_some_and(CuratedDefaults::is_inert);
+        match gates::plan(
+            &command,
+            &self.commands,
+            &self.rules,
+            &self.busy,
+            curated_inert,
+        ) {
             Err(problems) => {
                 warn!(problems = problems.len(), "refused a rule command");
                 answer.refuse(problems);
@@ -249,19 +256,13 @@ impl RuleCommands {
         });
     }
 
-    /// A recommended rule turned on or off; the Recommended page is told
-    /// after the daemon's `OK`.
+    /// A recommended rule turned on or off. The daemon's `OK` updates the
+    /// rule list, whose broadcast also refreshes the Recommended page.
     fn toggle_curated(&self, name: &str, enabled: bool, answer: Answer) {
         let sent = self.commands.send_curated_toggle(name, enabled);
         let timeout = self.reply_timeout;
-        let curated = self.curated.clone();
         tokio::spawn(async move {
             let outcome = sent_outcome(sent, timeout).await;
-            if outcome == RuleCommandOutcome::Ok {
-                if let Some(curated) = curated {
-                    curated.refresh();
-                }
-            }
             answer.finish(outcome).await;
         });
     }
