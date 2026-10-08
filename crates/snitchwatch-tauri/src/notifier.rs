@@ -5,6 +5,7 @@
 //! republishes Pending five times for the same row.
 
 use snitchwatch_bridge::notice::Notice;
+use snitchwatch_bridge::translator::process_binding::RuleRefusal;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
@@ -17,6 +18,7 @@ enum NoticeKey {
     DaemonAway,
     FilterPauseExpired,
     DenyScopeNarrowedForRow(u64),
+    VerdictNotRememberedForRow(u64),
 }
 
 impl From<&Notice> for NoticeKey {
@@ -26,6 +28,9 @@ impl From<&Notice> for NoticeKey {
             Notice::DaemonAway => NoticeKey::DaemonAway,
             Notice::FilterPauseExpired => NoticeKey::FilterPauseExpired,
             Notice::DenyScopeNarrowed { row_id, .. } => NoticeKey::DenyScopeNarrowedForRow(*row_id),
+            Notice::VerdictNotRemembered { row_id } => {
+                NoticeKey::VerdictNotRememberedForRow(*row_id)
+            }
         }
     }
 }
@@ -90,24 +95,7 @@ impl Notifier {
     }
 
     fn dispatch(&self, notice: &Notice) {
-        let (summary, body) = match notice {
-            Notice::Pending { process, .. } => (
-                "Snitchwatch — pending decision",
-                format!("{process} is asking to connect"),
-            ),
-            Notice::DaemonAway => (
-                "Snitchwatch — daemon unreachable",
-                "opensnitchd has been unreachable for 30 seconds.".into(),
-            ),
-            Notice::FilterPauseExpired => (
-                "Snitchwatch — filtering resumed",
-                "Your pause timer expired.".into(),
-            ),
-            Notice::DenyScopeNarrowed { what, reason, .. } => (
-                "Snitchwatch — block narrowed",
-                format!("Blocked {what} for this host only — {reason}."),
-            ),
-        };
+        let (summary, body) = notice_text(notice);
         if let Err(err) = notify_rust::Notification::new()
             .summary(summary)
             .body(&body)
@@ -116,6 +104,32 @@ impl Notifier {
         {
             tracing::warn!(?err, "failed to dispatch desktop notification");
         }
+    }
+}
+
+/// Summary and body for one notice.
+fn notice_text(notice: &Notice) -> (&'static str, String) {
+    match notice {
+        Notice::Pending { process, .. } => (
+            "Snitchwatch — pending decision",
+            format!("{process} is asking to connect"),
+        ),
+        Notice::DaemonAway => (
+            "Snitchwatch — daemon unreachable",
+            "opensnitchd has been unreachable for 30 seconds.".into(),
+        ),
+        Notice::FilterPauseExpired => (
+            "Snitchwatch — filtering resumed",
+            "Your pause timer expired.".into(),
+        ),
+        Notice::DenyScopeNarrowed { what, reason, .. } => (
+            "Snitchwatch — block narrowed",
+            format!("Blocked {what} for this host only — {reason}."),
+        ),
+        Notice::VerdictNotRemembered { .. } => (
+            "Snitchwatch — answer not remembered",
+            RuleRefusal::ProcessFileUnknown.describe().into(),
+        ),
     }
 }
 
@@ -163,5 +177,20 @@ mod tests {
         assert!(gate.should_fire(&row_a, t0));
         assert!(gate.should_fire(&row_b, t0));
         assert!(!gate.should_fire(&row_a, t0 + Duration::from_secs(5)));
+    }
+
+    /// Issue #44: one notice per answered row, with the fixed explanation.
+    #[test]
+    fn verdict_not_remembered_is_per_row_and_explains_why() {
+        let mut gate = CooldownGate::with_cooldown(Duration::from_secs(60));
+        let t0 = Instant::now();
+        let row_a = Notice::VerdictNotRemembered { row_id: 1 };
+        let row_b = Notice::VerdictNotRemembered { row_id: 2 };
+        assert!(gate.should_fire(&row_a, t0));
+        assert!(gate.should_fire(&row_b, t0));
+        assert!(!gate.should_fire(&row_a, t0 + Duration::from_secs(5)));
+        let (summary, body) = notice_text(&row_a);
+        assert_eq!(summary, "Snitchwatch — answer not remembered");
+        assert_eq!(body, RuleRefusal::ProcessFileUnknown.describe());
     }
 }

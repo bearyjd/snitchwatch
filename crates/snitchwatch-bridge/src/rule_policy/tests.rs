@@ -4,7 +4,7 @@
 use super::*;
 use crate::cache::connections::Verdict;
 use crate::rule_wire::{rule_from_wire, rule_to_wire};
-use crate::translator::verdict::verdict_to_rule;
+use crate::translator::verdict::{once_rule, verdict_to_rule};
 use crate::ws_messages::{VerdictDuration, VerdictScope};
 use serde_json::{json, Value};
 use snitchwatch_proto::protocol::Connection;
@@ -331,7 +331,10 @@ fn every_verdict_rule_the_bridge_builds_passes_directly_and_after_the_wire() {
             VerdictScope::AnyHost,
         ] {
             for verdict in [Verdict::Allow, Verdict::Deny] {
-                let rule = verdict_to_rule(verdict, VerdictDuration::Always, scope, &conn, 0);
+                // A refused remembered verdict is answered with this
+                // once-only rule instead (issue #44).
+                let rule = verdict_to_rule(verdict, VerdictDuration::Always, scope, &conn, 0)
+                    .unwrap_or_else(|_| once_rule(verdict, scope, &conn, 0));
                 let operator = rule.operator.as_ref().unwrap();
                 seen_types.insert(operator.r#type.clone());
                 seen_types.extend(operator.list.iter().map(|m| m.r#type.clone()));

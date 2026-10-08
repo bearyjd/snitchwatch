@@ -27,6 +27,7 @@ use cxx_qt_lib::{
 use crate::connections::filter::ConnectionFilter;
 use crate::connections::grouping::{GroupTree, VisibleEntry};
 use crate::connections::row_store::{matched_rule_display, ModelOp, RowStore, Verdict};
+use snitchwatch_bridge::translator::process_binding::is_bindable_process_path;
 use snitchwatch_bridge::ws_messages::{ConnectionRow, ServerMessage};
 
 // Role ids exposed to the QML delegate. Flat-mode leaf rows use 0-6; the
@@ -203,7 +204,9 @@ pub mod qobject {
 
         /// Parity 2 (pending-decision insight panel): the destination IP
         /// and byte counters for a single row by id, JSON-encoded as
-        /// `{"dstIp","bytesSent","bytesReceived"}`. The shell only reads
+        /// `{"dstIp","bytesSent","bytesReceived","bindableProcessPath"}`.
+        /// `bindableProcessPath` (issue #44) is the bridge's own rule for
+        /// whether an answer can be remembered for this program. The shell only reads
         /// `dstIp`: the bridge hardcodes the byte counters to 0 and opensnitchd
         /// has no per-connection counters, so QML shows no byte readout or
         /// sparkline (issue #49). The fields stay in the JSON for a future
@@ -905,12 +908,17 @@ impl qobject::ConnectionsModel {
             bytes_sent: u64,
             #[serde(rename = "bytesReceived")]
             bytes_received: u64,
+            #[serde(rename = "bindableProcessPath")]
+            bindable_process_path: bool,
         }
 
         let details = RowDetails {
             dst_ip: &row.dst_ip,
             bytes_sent: row.bytes_sent,
             bytes_received: row.bytes_received,
+            bindable_process_path: is_bindable_process_path(
+                row.process_path.as_deref().unwrap_or_default(),
+            ),
         };
         QString::from(&serde_json::to_string(&details).unwrap_or_else(|e| {
             tracing::error!(error = %e, "ConnectionsModel: row details serialize failed");

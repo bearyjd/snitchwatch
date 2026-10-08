@@ -2,6 +2,8 @@
 //!
 //! - [`row_store`]: pure, Qt-free store for the flat rule list — fully
 //!   unit-tested here.
+//! - [`all_apps`]: flags pre-#50 Snitchwatch prompt rules that match every
+//!   program (issue #44, second half).
 //! - [`simulator`]: pure, Qt-free rule-match simulator (Little-Snitch-parity
 //!   "rule-match diagnostics" simulate panel) — evaluates a candidate
 //!   process/host/port/protocol against `row_store`'s cached rules using
@@ -11,5 +13,6 @@
 //!   with the other `#[cxx_qt::bridge]` files, per the same cxx-qt-build
 //!   one-directory constraint noted in [`crate::connections`]).
 
+pub mod all_apps;
 pub mod row_store;
 pub mod simulator;

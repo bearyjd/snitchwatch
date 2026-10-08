@@ -33,6 +33,9 @@ const ROLE_BLOCKLIST_ID: i32 = 7;
 const ROLE_DISPLAY_NAME: i32 = 8;
 const ROLE_READ_ONLY_REASON: i32 = 9;
 const ROLE_DELETABLE: i32 = 10;
+// Issue #44: a pre-#50 Snitchwatch rule that matches every program.
+const ROLE_APPLIES_TO_ALL_APPS: i32 = 11;
+const ROLE_ALL_APPS_HINT: i32 = 12;
 
 #[cxx_qt::bridge]
 pub mod qobject {
@@ -56,6 +59,9 @@ pub mod qobject {
         #[qml_element]
         #[base = QAbstractListModel]
         #[qproperty(i32, count)]
+        /// How many rules apply to every app (issue #44); see
+        /// `rules::all_apps`.
+        #[qproperty(i32, legacy_host_only_count, cxx_name = "legacyHostOnlyCount")]
         type RulesModel = super::RulesModelRust;
 
         /// Emitted with a JSON-encoded `ClientMessage` (`UpdateRule` /
@@ -153,6 +159,7 @@ pub mod qobject {
 pub struct RulesModelRust {
     store: RulesStore,
     count: i32,
+    legacy_host_only_count: i32,
 }
 
 impl qobject::RulesModel {
@@ -172,6 +179,10 @@ impl qobject::RulesModel {
                 rule.read_only_reason.as_deref().unwrap_or_default(),
             )),
             ROLE_DELETABLE => QVariant::from(&rule.can_delete()),
+            ROLE_APPLIES_TO_ALL_APPS => QVariant::from(&rule.applies_to_all_apps()),
+            ROLE_ALL_APPS_HINT => {
+                QVariant::from(&QString::from(&rule.all_apps_hint().unwrap_or_default()))
+            }
             ROLE_ENABLED => QVariant::from(&rule.enabled),
             ROLE_ACTION => QVariant::from(&QString::from(rule.normalized_action())),
             ROLE_DURATION => QVariant::from(&QString::from(&rule.duration)),
@@ -212,6 +223,11 @@ impl qobject::RulesModel {
         roles.insert(ROLE_PRECEDENCE, QByteArray::from("precedence"));
         roles.insert(ROLE_SOURCE, QByteArray::from("source"));
         roles.insert(ROLE_BLOCKLIST_ID, QByteArray::from("blocklistId"));
+        roles.insert(
+            ROLE_APPLIES_TO_ALL_APPS,
+            QByteArray::from("appliesToAllApps"),
+        );
+        roles.insert(ROLE_ALL_APPS_HINT, QByteArray::from("allAppsHint"));
         roles
     }
 
@@ -318,6 +334,8 @@ impl qobject::RulesModel {
         if changed {
             let n = self.store.len() as i32;
             self.as_mut().set_count(n);
+            let flagged = self.store.legacy_host_only_count() as i32;
+            self.as_mut().set_legacy_host_only_count(flagged);
         }
     }
 

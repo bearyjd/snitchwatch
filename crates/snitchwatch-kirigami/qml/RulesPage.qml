@@ -25,6 +25,12 @@
 //
 // Names are shown via the `displayName` role (bidi overrides and zero-width
 // characters removed by the bridge); `name` stays the rule's identity.
+//
+// Issue #44: rules earlier Snitchwatch versions saved for "This host" / "Any
+// host on this domain" match every program (`rules::all_apps`). Each such row
+// is flagged with what deleting it changes and its own Delete button — one
+// click, one rule. Deliberately no bulk delete: removing a deny can unblock
+// traffic, so every deletion stays a deliberate, per-row choice.
 import QtQuick
 import QtQuick.Layouts
 import QtQuick.Controls as Controls
@@ -187,6 +193,34 @@ Kirigami.ScrollablePage {
         }
     }
 
+    // Issue #44: only when some rules apply to every app. Fixed text; the
+    // count sits in a PlainText label (InlineMessage can't render data).
+    header: ColumnLayout {
+        visible: !!page.model && page.model.legacyHostOnlyCount > 0
+        spacing: 0
+
+        Kirigami.InlineMessage {
+            Layout.fillWidth: true
+            visible: true
+            type: Kirigami.MessageType.Information
+            text: "Some rules saved by earlier Snitchwatch versions apply to all apps, not only "
+                + "the app that asked. They are marked below, each with what deleting it changes."
+        }
+        // Counts only Snitchwatch's own earlier rules: blocklist or
+        // hand-written rules may apply to all apps too, so no "of N".
+        Controls.Label {
+            objectName: "allAppsCount"
+            Layout.fillWidth: true
+            Layout.margins: Kirigami.Units.smallSpacing
+            textFormat: Text.PlainText
+            text: !page.model ? ""
+                : page.model.legacyHostOnlyCount === 1
+                    ? "1 rule saved by an earlier Snitchwatch version applies to all apps"
+                    : page.model.legacyHostOnlyCount
+                      + " rules saved by earlier Snitchwatch versions apply to all apps"
+        }
+    }
+
     Kirigami.PlaceholderMessage {
         anchors.centerIn: parent
         width: parent.width - (Kirigami.Units.largeSpacing * 4)
@@ -232,6 +266,8 @@ Kirigami.ScrollablePage {
             required property int precedence
             required property string source
             required property string blocklistId
+            required property bool appliesToAllApps
+            required property string allAppsHint
 
             onClicked: {
                 list.currentIndex = row.index;
@@ -269,6 +305,38 @@ Kirigami.ScrollablePage {
                         elide: Text.ElideMiddle
                         Layout.fillWidth: true
                     }
+                    // Issue #44: what deleting this all-apps rule changes.
+                    Controls.Label {
+                        objectName: "allAppsHint"
+                        visible: row.appliesToAllApps
+                        textFormat: Text.PlainText
+                        text: row.allAppsHint
+                        wrapMode: Text.Wrap
+                        font: Kirigami.Theme.smallFont
+                        color: row.ruleAction === "allow" ? Kirigami.Theme.neutralTextColor
+                                                          : Kirigami.Theme.negativeTextColor
+                        Layout.fillWidth: true
+                    }
+                }
+
+                Controls.Label {
+                    objectName: "allAppsFlag"
+                    visible: row.appliesToAllApps
+                    text: "Applies to all apps"
+                    color: Kirigami.Theme.neutralTextColor
+                    font.bold: true
+                    Layout.alignment: Qt.AlignVCenter
+                }
+
+                // One click deletes this one rule; the hint above says what
+                // that changes. No confirmation step, no bulk variant.
+                Controls.Button {
+                    objectName: "allAppsDelete"
+                    visible: row.appliesToAllApps && row.deletable
+                    text: "Delete"
+                    icon.name: "edit-delete-remove"
+                    Layout.alignment: Qt.AlignVCenter
+                    onClicked: page.model.deleteRule(row.name)
                 }
 
                 Controls.Label {

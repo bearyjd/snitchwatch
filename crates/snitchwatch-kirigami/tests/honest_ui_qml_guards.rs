@@ -359,8 +359,10 @@ fn rules_page_labels_showing_rule_data_are_plain_text() {
             "page.simulateMatchedRule",
             "page.simulateAction",
             "page.simulateUnsupported",
+            // Issue #44: names the destination of an all-apps rule.
+            "row.allAppsHint",
         ],
-        11,
+        12,
     );
 }
 

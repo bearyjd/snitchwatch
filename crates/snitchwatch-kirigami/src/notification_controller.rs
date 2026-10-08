@@ -25,6 +25,8 @@
 //! *then* the cooldown-gated notification goes out with a "Review" action.
 //! `DaemonAway`/`FilterPauseExpired` are not window-gated (matches the
 //! original `notifier.rs`, which never gated on window visibility for those).
+//! Neither is `VerdictNotRemembered` (issue #44): `ConnectionsPage.qml`'s
+//! in-app message exists only while that page is the current one.
 //!
 //! **"Review" action → raise window.** The action button, when clicked, is
 //! observed on a scratch thread (`NotificationHandle::wait_for_action`
@@ -40,6 +42,7 @@ use tokio::sync::broadcast;
 
 use crate::bridge_runtime::BridgeNotice;
 use crate::notifier::CooldownGate;
+use snitchwatch_bridge::translator::process_binding::RuleRefusal;
 
 /// D-Bus action id for the "Review" button; matched against
 /// `NotificationHandle::wait_for_action`'s callback argument.
@@ -197,28 +200,7 @@ impl qobject::NotificationController {
     /// `wait_for_action` blocks the calling thread until the notification
     /// closes), queuing `reviewRequested` back if the action fires.
     fn dispatch(self: Pin<&mut Self>, notice: BridgeNotice) {
-        let (summary, body, reviewable) = match &notice {
-            BridgeNotice::Pending { process, .. } => (
-                "Snitchwatch — pending decision",
-                format!("{process} is asking to connect"),
-                true,
-            ),
-            BridgeNotice::DaemonAway => (
-                "Snitchwatch — daemon unreachable",
-                "opensnitchd has been unreachable for 30 seconds.".to_string(),
-                false,
-            ),
-            BridgeNotice::FilterPauseExpired => (
-                "Snitchwatch — filtering resumed",
-                "Your pause timer expired.".to_string(),
-                false,
-            ),
-            BridgeNotice::DenyScopeNarrowed { what, reason, .. } => (
-                "Snitchwatch — block narrowed",
-                format!("Blocked {what} for this host only — {reason}."),
-                false,
-            ),
-        };
+        let (summary, body, reviewable) = notice_text(&notice);
 
         let qt_thread = self.qt_thread();
         std::thread::spawn(move || {
@@ -245,5 +227,51 @@ impl qobject::NotificationController {
                 }
             }
         });
+    }
+}
+
+/// Summary, body, and whether the notification offers "Review".
+fn notice_text(notice: &BridgeNotice) -> (&'static str, String, bool) {
+    match notice {
+        BridgeNotice::Pending { process, .. } => (
+            "Snitchwatch — pending decision",
+            format!("{process} is asking to connect"),
+            true,
+        ),
+        BridgeNotice::DaemonAway => (
+            "Snitchwatch — daemon unreachable",
+            "opensnitchd has been unreachable for 30 seconds.".to_string(),
+            false,
+        ),
+        BridgeNotice::FilterPauseExpired => (
+            "Snitchwatch — filtering resumed",
+            "Your pause timer expired.".to_string(),
+            false,
+        ),
+        BridgeNotice::DenyScopeNarrowed { what, reason, .. } => (
+            "Snitchwatch — block narrowed",
+            format!("Blocked {what} for this host only — {reason}."),
+            false,
+        ),
+        BridgeNotice::VerdictNotRemembered { .. } => (
+            "Snitchwatch — answer not remembered",
+            RuleRefusal::ProcessFileUnknown.describe().to_string(),
+            false,
+        ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Issue #44: the fixed explanation, with no "Review" action.
+    #[test]
+    fn verdict_not_remembered_is_explained() {
+        let notice = BridgeNotice::VerdictNotRemembered { row_id: 3 };
+        let (summary, body, reviewable) = notice_text(&notice);
+        assert_eq!(summary, "Snitchwatch — answer not remembered");
+        assert_eq!(body, RuleRefusal::ProcessFileUnknown.describe());
+        assert!(!reviewable);
     }
 }

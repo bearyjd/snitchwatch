@@ -111,6 +111,19 @@ Window {
 
                 // Malformed JSON there must be logged and dropped, not thrown.
                 probeWindow.feed.sendClientJson("{not valid json");
+
+                // Issue #44's verdict-not-remembered relay. main.qml calls it
+                // before every model's feed, so a throw here would stop them
+                // all; with no bridge runtime it logs and returns.
+                probeWindow.feed.startBridgeFeed();
+
+                // ConnectionsPage listens with `ignoreUnknownSignals` (its
+                // component tests use a stub feed), so a renamed signal would
+                // drop the notice silently. The real type must expose it.
+                if (typeof probeWindow.feed.verdictNotRemembered !== "function") {
+                    throw new Error("BridgeFeed has no verdictNotRemembered signal");
+                }
+                probeWindow.feed.verdictNotRemembered.connect(function (rowId) {});
             } finally {
                 Qt.quit();
             }
