@@ -8,6 +8,7 @@
 
 pub mod auth;
 pub mod blocklists;
+pub mod bridge_capabilities;
 pub mod cache;
 pub mod client_presence;
 pub mod daemon_alerts;

@@ -150,7 +150,11 @@ async fn outbound_failure_releases_presence_with_stalled_inbound() {
     .await
     .unwrap();
     let mut admission = presence.admit().unwrap();
-    broadcast.send(ServerMessage::Authenticated).unwrap();
+    broadcast
+        .send(ServerMessage::Authenticated {
+            capabilities: Vec::new(),
+        })
+        .unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(1), pump)
         .await
         .unwrap()
@@ -330,10 +334,16 @@ async fn connection_with_correct_token_round_trips() {
         .expect("should receive authentication acknowledgement")
         .expect("stream should not end")
         .expect("frame should not error");
+    // The acknowledgement advertises app-bound rules (inline-Deny plan):
+    // Kirigami only remembers an inline Deny when it is present.
     assert!(matches!(
         acknowledgement,
         TMessage::Text(ref text)
-            if matches!(serde_json::from_str(text), Ok(ServerMessage::Authenticated))
+            if matches!(
+                serde_json::from_str(text),
+                Ok(ServerMessage::Authenticated { ref capabilities })
+                    if capabilities.iter().any(|c| c == crate::bridge_capabilities::APP_BOUND_RULES)
+            )
     ));
 
     // 2. Now a real ClientMessage should reach `handles.inbound`.

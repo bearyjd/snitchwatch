@@ -236,7 +236,9 @@ async fn handle_socket(socket: WebSocket, handles: WsHandles, token: Token, peer
     // Send an explicit, per-connection acknowledgement before subscribing to
     // broadcast traffic, making it the first server frame after a successful
     // handshake.
-    let authenticated = match serde_json::to_string(&ServerMessage::Authenticated) {
+    let authenticated = match serde_json::to_string(&ServerMessage::Authenticated {
+        capabilities: crate::bridge_capabilities::advertised(),
+    }) {
         Ok(message) => message,
         Err(error) => {
             error!(error = %error, "failed to serialize authentication acknowledgement");

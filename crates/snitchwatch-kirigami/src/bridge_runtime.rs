@@ -406,7 +406,7 @@ async fn await_authentication_ack(
             })?;
         match incoming {
             Some(Ok(Message::Text(text))) => match serde_json::from_str::<ServerMessage>(&text)? {
-                ServerMessage::Authenticated => return Ok(()),
+                ServerMessage::Authenticated { .. } => return Ok(()),
                 other => anyhow::bail!(
                     "bridge sent {:?} before authentication acknowledgement",
                     other

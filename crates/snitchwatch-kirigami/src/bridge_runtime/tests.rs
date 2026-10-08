@@ -58,7 +58,10 @@ async fn accept_authenticated_snapshot(
         "client must re-read the current service token"
     );
     ws.send(Message::Text(
-        serde_json::to_string(&ServerMessage::Authenticated).unwrap(),
+        serde_json::to_string(&ServerMessage::Authenticated {
+            capabilities: Vec::new(),
+        })
+        .unwrap(),
     ))
     .await
     .expect("authentication acknowledgement writes");
@@ -375,7 +378,10 @@ async fn accept_authenticated_snapshot_on(
     let presented = ws.next().await.unwrap().unwrap().into_text().unwrap();
     assert!(token.matches(&presented));
     ws.send(Message::Text(
-        serde_json::to_string(&ServerMessage::Authenticated).unwrap(),
+        serde_json::to_string(&ServerMessage::Authenticated {
+            capabilities: Vec::new(),
+        })
+        .unwrap(),
     ))
     .await
     .unwrap();
@@ -405,7 +411,10 @@ async fn client_stays_pending_until_service_acknowledges_the_token() {
 
         release_ack_rx.await.unwrap();
         ws.send(Message::Text(
-            serde_json::to_string(&ServerMessage::Authenticated).unwrap(),
+            serde_json::to_string(&ServerMessage::Authenticated {
+                capabilities: Vec::new(),
+            })
+            .unwrap(),
         ))
         .await
         .unwrap();

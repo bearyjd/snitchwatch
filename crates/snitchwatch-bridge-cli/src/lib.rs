@@ -1170,7 +1170,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(
-            matches!(ack, Message::Text(ref text) if matches!(serde_json::from_str::<ServerMessage>(text), Ok(ServerMessage::Authenticated)))
+            matches!(ack, Message::Text(ref text) if matches!(serde_json::from_str::<ServerMessage>(text), Ok(ServerMessage::Authenticated { .. })))
         );
 
         let channel = tonic::transport::Endpoint::from_static("http://localhost")
