@@ -96,6 +96,9 @@ Kirigami.ScrollablePage {
     // The rule editor's last result once its sheet closed (P2.1).
     // What the list leaves out (issue #61).
     readonly property bool showsNotShown: !!page.model && page.model.notShownText.length > 0
+    // "No rules yet", but not while the header says rules aren't listed.
+    readonly property bool showsEmptyPlaceholder: (!page.model || page.model.count === 0)
+                                                  && !page.showsNotShown
     readonly property bool showsEditorStatus: ruleEditorController.statusText.length > 0
                                               && !ruleEditor.visible
 
@@ -382,9 +385,10 @@ Kirigami.ScrollablePage {
     }
 
     Kirigami.PlaceholderMessage {
+        objectName: "rulesEmptyPlaceholder"
         anchors.centerIn: parent
         width: parent.width - (Kirigami.Units.largeSpacing * 4)
-        visible: !page.model || page.model.count === 0
+        visible: page.showsEmptyPlaceholder
         icon.name: "view-list-details"
         text: "No rules yet"
         explanation: "Decisions set to “This time” resolve only the current request. Choose a persistent duration, or add a blocklist, to create rules shown here."

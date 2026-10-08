@@ -541,6 +541,15 @@ fn the_rule_inspector_says_how_each_rule_decides() {
     assert!(code.contains("page.inspectHowItDecides"));
 }
 
+/// Issue #61: "No rules yet" never shows under "N rules aren't listed";
+/// `rules_all_apps_qml` checks the property, this its use.
+#[test]
+fn the_empty_rules_placeholder_follows_what_is_not_listed() {
+    let code = code_lines(RULES_PAGE);
+    assert!(code.contains("visible: page.showsEmptyPlaceholder"));
+    assert!(code.contains("&& !page.showsNotShown"));
+}
+
 /// The Simulate sheet shows rule names and operands from the daemon, and
 /// lines the simulator built from them.
 #[test]

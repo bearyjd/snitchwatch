@@ -42,6 +42,8 @@
 //!   with a remembered duration also adds that rule to the list shown,
 //!   whichever stream is current (`UiService::verdict_reply`); its name is
 //!   bridge-made and its fields pass the same checks as any prompt answer.
+//!   And a snapshot over the rule limit from any stream sets the count the
+//!   Rules page shows while it has no list ("N rules … none are listed").
 //! - [`DaemonTransport::Unix`] (system mode, root-only socket): commands go
 //!   only to the current stream, and its waiters fail when that stream
 //!   closes.

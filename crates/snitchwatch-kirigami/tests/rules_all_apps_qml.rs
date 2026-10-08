@@ -267,6 +267,14 @@ Window {
                 rulesModel.applyServerMessageJson(JSON.stringify({
                     action: "rulesNotShown", tooLarge: 0 }));
                 probeWindow.check(!page.header.visible, "the not-shown label stays");
+                // With none listed, "No rules yet" would contradict it.
+                const placeholder = probeWindow.findChild(page, "rulesEmptyPlaceholder");
+                rulesModel.applyServerMessageJson(JSON.stringify({
+                    action: "setRules", rules: [] }));
+                probeWindow.check(placeholder && page.showsEmptyPlaceholder, "no placeholder");
+                rulesModel.applyServerMessageJson(JSON.stringify({
+                    action: "rulesNotShown", tooLarge: 0, overLimitTotal: 12000 }));
+                probeWindow.check(!page.showsEmptyPlaceholder, "the placeholder says no rules");
 
                 if (probeWindow.failures.length > 0) {
                     throw new Error("all-apps probe: " + probeWindow.failures.join("; "));
