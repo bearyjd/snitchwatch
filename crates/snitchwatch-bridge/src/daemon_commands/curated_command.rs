@@ -175,6 +175,9 @@ mod tests {
         let mut renamed = CuratedCommand::install(flatpak());
         renamed.notification.rules[0].name = "my-own-rule".into();
         assert_eq!(renamed.check(), Err(SendError::RefusedOperator));
+        let mut other_delete = CuratedCommand::delete(&flatpak().rule_name()).unwrap();
+        other_delete.notification.rules[0].name = "user-rule".into();
+        assert_eq!(other_delete.check(), Err(SendError::RefusedOperator));
     }
 
     #[test]

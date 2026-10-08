@@ -273,3 +273,17 @@ async fn an_unavailable_bridge_changes_nothing_and_says_why() {
         "nothing saved"
     );
 }
+
+/// Without a choices file (in memory only), nothing is on either.
+#[tokio::test]
+async fn a_bridge_without_a_file_starts_with_nothing_on() {
+    let harness = Harness::new().connect(Daemon::Accept, Vec::new());
+    let curated = CuratedDefaults::new(
+        harness.commands.clone(),
+        harness.rules.cache(),
+        broadcast::channel(64).0,
+    );
+    curated.reconcile().await;
+    assert!(harness.seen().is_empty());
+    assert!(!entry_state(&curated, FLATPAK).on);
+}

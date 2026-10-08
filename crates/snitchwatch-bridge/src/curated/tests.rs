@@ -92,6 +92,8 @@ fn the_allowlist_takes_only_the_exact_curated_shape() {
     assert!(leaf_at(0, &|op| op.data = "/usr/bin/../bin/flatpak".into()).is_err());
     assert!(leaf_at(0, &|op| op.data = "flatpak".into()).is_err());
     assert!(leaf_at(0, &|op| op.sensitive = false).is_err());
+    // A regexp, even one spelling the exact path, matches other programs.
+    assert!(leaf_at(0, &|op| op.r#type = "regexp".into()).is_err());
     assert!(leaf_at(0, &|op| {
         op.r#type = "regexp".into();
         op.data = "^/usr/bin/.*$".into();
@@ -175,4 +177,21 @@ fn a_requested_toggle_is_only_a_change_of_enabled() {
     wider["operator"]["operands"][1]["data"] = "example.org".into();
     assert_eq!(requested_toggle(&current, &wider), None);
     assert_eq!(requested_toggle(&current, &serde_json::json!({})), None);
+}
+
+/// The curated layer's own path check, apart from the editor's.
+#[test]
+fn a_program_is_an_exact_path_under_usr() {
+    assert!(usr_program("/usr/bin/flatpak"));
+    for bad in [
+        "/usr/bin/../bin/flatpak",
+        "/usr/bin/./flatpak",
+        "/usr//bin/flatpak",
+        "/usr/",
+        "/opt/flatpak",
+        "usr/bin/flatpak",
+        "/usr/bin/flat\npak",
+    ] {
+        assert!(!usr_program(bad), "{bad:?}");
+    }
 }

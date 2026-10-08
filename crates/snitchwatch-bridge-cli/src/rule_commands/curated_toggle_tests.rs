@@ -83,5 +83,15 @@ async fn nothing_but_a_toggle_of_a_shipped_rule_gets_through() {
         commands.try_route(attempt);
         assert!(!refused(&result(&mut rx).await).is_empty(), "not refused");
     }
+    // A squatter is refused by the gate, with the reserved-name reason.
+    commands.try_route(update(
+        &squatter.name,
+        switched(&squatter, true),
+        Some("squatter-on"),
+    ));
+    assert_eq!(
+        refused(&result(&mut rx).await),
+        [snitchwatch_bridge::rule_policy::CURATED_MANAGED_REASON]
+    );
     nothing_sent(&mut daemon).await;
 }
