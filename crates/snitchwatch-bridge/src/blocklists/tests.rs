@@ -633,3 +633,84 @@ async fn a_store_error_is_shown_on_the_row() {
     assert_eq!(mgr.refresh_now("tiny").await.unwrap(), failed);
     assert_eq!(mgr.subscription("tiny").unwrap().last_fetch_status, failed);
 }
+
+/// Never finishes a fetch: the bridge is "killed" mid-download.
+struct HangingFetcher {
+    started: tokio::sync::Notify,
+}
+
+#[async_trait]
+impl fetcher::BlocklistFetch for HangingFetcher {
+    async fn fetch(&self, _url: &str) -> fetcher::FetchOutcome {
+        self.started.notify_one();
+        std::future::pending().await
+    }
+}
+
+/// The attempt is recorded before the download starts, so a bridge killed
+/// mid-download (or mid-parse) backs off on restart instead of refetching
+/// the same list at once.
+#[tokio::test]
+async fn an_interrupted_download_is_not_retried_at_once() {
+    let store = store_with("big", &fixture_url("domains-tiny.txt"));
+    let fetcher = Arc::new(HangingFetcher {
+        started: tokio::sync::Notify::new(),
+    });
+    let mgr = Arc::new(BlocklistsManager::new(store.clone()).with_fetcher(fetcher.clone()));
+    let refreshing = {
+        let mgr = mgr.clone();
+        tokio::spawn(async move { mgr.refresh_now("big").await })
+    };
+    fetcher.started.notified().await;
+    refreshing.abort();
+    let _ = refreshing.await;
+    let stored = store.get_subscription("big").unwrap().unwrap();
+    assert!(
+        stored.last_attempt_at.is_some(),
+        "the attempt wasn't saved first"
+    );
+    let restarted = BlocklistsManager::new(store.clone());
+    assert!(
+        restarted.due_subscription_ids().is_empty(),
+        "an interrupted download is retried at once"
+    );
+    // After the backoff it is due again.
+    let mut aged = stored;
+    aged.last_attempt_at = Some(Utc::now() - chrono::Duration::seconds(FAILED_RETRY_SECS + 1));
+    store.upsert_subscription(&aged).unwrap();
+    assert_eq!(
+        BlocklistsManager::new(store).due_subscription_ids(),
+        vec!["big".to_string()]
+    );
+}
+
+/// An interrupted refresh of a list downloaded earlier backs off too.
+#[test]
+fn an_interrupted_refresh_of_a_downloaded_list_backs_off() {
+    let mut sub = Subscription {
+        id: "a".into(),
+        url: "https://x.example/a".into(),
+        display_name: "a".into(),
+        format_hint: None,
+        refresh_interval_secs: 86_400,
+        last_fetched_at: Some(Utc::now() - chrono::Duration::days(2)),
+        last_attempt_at: None,
+        last_fetch_status: FetchStatus::Ok,
+        entry_count: 3,
+    };
+    let store = Arc::new(BlocklistStore::open_in_memory().unwrap());
+    store.upsert_subscription(&sub).unwrap();
+    assert_eq!(
+        BlocklistsManager::new(store.clone()).due_subscription_ids(),
+        vec!["a".to_string()],
+        "two days old: due"
+    );
+    sub.last_attempt_at = Some(Utc::now());
+    store.upsert_subscription(&sub).unwrap();
+    assert!(
+        BlocklistsManager::new(store)
+            .due_subscription_ids()
+            .is_empty(),
+        "attempted just now and never finished: backs off"
+    );
+}

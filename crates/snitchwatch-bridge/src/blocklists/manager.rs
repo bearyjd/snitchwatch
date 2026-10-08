@@ -270,9 +270,19 @@ impl BlocklistsManager {
     /// Download `id` now and update the store, memory and GUIs. A failed
     /// download keeps the cached entries.
     pub async fn refresh_now(&self, id: &str) -> anyhow::Result<FetchStatus> {
-        let Some(sub) = self.subscription(id) else {
+        let Some(mut sub) = self.subscription(id) else {
             anyhow::bail!("unknown subscription: {id}");
         };
+        // Saved before the download: a bridge killed mid-download or
+        // mid-parse backs off on restart instead of retrying at once.
+        sub.last_attempt_at = Some(Utc::now());
+        let row = sub.clone();
+        match self.with_store(move |s| s.update_subscription(&row)).await {
+            Ok(false) => anyhow::bail!("subscription removed: {id}"),
+            Ok(true) => {}
+            Err(e) => error!(%id, error = %e, "couldn't record a download attempt"),
+        }
+        self.cache().insert(sub.id.clone(), sub.clone());
         let outcome = self.fetcher.fetch(&sub.url).await;
         let now = Utc::now();
         match outcome {
@@ -384,16 +394,18 @@ impl BlocklistsManager {
     }
 }
 
+/// Never attempted: due. Last attempt succeeded: due after the refresh
+/// interval. Last attempt failed or never finished (the bridge stopped
+/// mid-download): due after the retry backoff.
 fn is_due(sub: &Subscription, now: DateTime<Utc>) -> bool {
     let Some(attempt) = sub.last_attempt_at.or(sub.last_fetched_at) else {
         return true;
     };
-    match sub.last_fetch_status {
-        FetchStatus::Failed { .. } => {
-            (now - attempt).num_seconds() >= FAILED_RETRY_SECS.min(sub.refresh_interval_secs)
-        }
-        _ => sub
-            .last_fetched_at
-            .is_none_or(|t| (now - t).num_seconds() >= sub.refresh_interval_secs),
+    let succeeded = sub
+        .last_fetched_at
+        .filter(|fetched| *fetched >= attempt && sub.last_fetch_status == FetchStatus::Ok);
+    match succeeded {
+        Some(fetched) => (now - fetched).num_seconds() >= sub.refresh_interval_secs,
+        None => (now - attempt).num_seconds() >= FAILED_RETRY_SECS.min(sub.refresh_interval_secs),
     }
 }

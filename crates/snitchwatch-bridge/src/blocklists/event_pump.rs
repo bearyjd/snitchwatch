@@ -59,7 +59,7 @@ async fn publish(
                 Ok(m) => {
                     let _ = tx.send(m);
                 }
-                Err(e) => warn!(error = %e, %subscription_id, "blocklist entries page failed"),
+                Err(e) => warn!(error = %e, ?subscription_id, "blocklist entries page failed"),
             }
         }
         BlocklistEvent::StatusChanged { subscription_id } => {
@@ -67,7 +67,7 @@ async fn publish(
                 Ok(m) => {
                     let _ = tx.send(m);
                 }
-                Err(e) => warn!(error = %e, %subscription_id, "blocklist status rebuild failed"),
+                Err(e) => warn!(error = %e, ?subscription_id, "blocklist status rebuild failed"),
             }
             // `SetBlocklistStatus` carries no enforcement state; the summary does.
             publish_set_blocklists(mgr, tx).await;

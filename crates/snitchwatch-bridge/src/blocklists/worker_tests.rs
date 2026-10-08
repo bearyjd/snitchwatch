@@ -284,3 +284,29 @@ async fn aborting_the_tasks_stops_them() {
     tasks.abort();
     wait_for("the aborted tasks", || tasks.is_finished()).await;
 }
+
+/// Only a known list's id reaches the event bus (and the logs).
+#[tokio::test]
+async fn entry_requests_for_unknown_ids_are_dropped() {
+    let mgr = manager_with(
+        Arc::new(FixtureFetcher::default()),
+        &[subscription("known", FAST_URL)],
+    );
+    let (worker, _rx) = undrained(&mgr, 1);
+    let mut events = mgr.subscribe();
+    let request = |id: &str| ClientMessage::RequestBlocklistEntries {
+        subscription_id: id.to_string(),
+        offset: 0,
+        limit: None,
+    };
+    assert_eq!(
+        worker.try_route(request("forged\nWARN fake log line")),
+        None
+    );
+    assert!(events.try_recv().is_err(), "an unknown id reached the bus");
+    assert_eq!(worker.try_route(request("known")), None);
+    assert!(matches!(
+        events.try_recv(),
+        Ok(BlocklistEvent::EntriesRequested { subscription_id, .. }) if subscription_id == "known"
+    ));
+}

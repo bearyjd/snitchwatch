@@ -182,8 +182,12 @@ impl BlocklistWorker {
                 offset,
                 limit,
             } => {
-                let limit = limit.unwrap_or(BLOCKLIST_ENTRIES_PAGE_MAX);
-                self.mgr.request_entries(&subscription_id, offset, limit);
+                // Only known ids reach the bus (and the logs): a GUI-chosen id
+                // can be up to the 1 MiB message limit and contain anything.
+                if self.mgr.has_subscription(&subscription_id) {
+                    let limit = limit.unwrap_or(BLOCKLIST_ENTRIES_PAGE_MAX);
+                    self.mgr.request_entries(&subscription_id, offset, limit);
+                }
                 None
             }
             other => Some(other),

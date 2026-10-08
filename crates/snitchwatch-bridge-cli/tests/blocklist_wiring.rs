@@ -129,18 +129,16 @@ async fn snapshot_until(
     }
 }
 
-/// Subscribe while the list is unreachable (so it stays due), restart on the
-/// same state directory: the subscription is still there and the startup
-/// refresh fetches it.
+/// Subscribe and download, restart on the same state directory: the
+/// subscription and its download are still there, and a fresh list is not
+/// downloaded again.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn subscriptions_persist_across_a_restart_and_get_refreshed() {
+async fn subscriptions_persist_across_a_restart() {
     let sockets = tempfile::tempdir().unwrap();
     let state_dir = tempfile::tempdir().unwrap();
     let state = state_dir.path().canonicalize().unwrap();
 
-    // The bridge stops mid-download: the list is stored but never fetched,
-    // so it is due at the next start.
-    let first_fetcher = Arc::new(GatedFetcher::default());
+    let first_fetcher = Arc::new(TestFetcher::default());
     let bridge = run_with_options(
         config(sockets.path()),
         options(Storage::Persistent(state.clone()), first_fetcher.clone()),
@@ -155,11 +153,10 @@ async fn subscriptions_persist_across_a_restart_and_get_refreshed() {
         })
         .await
         .unwrap();
-    tokio::time::timeout(WAIT, first_fetcher.started.notified())
-        .await
-        .expect("the subscribe never started its fetch");
-    let (lists, storage) = snapshot(&bridge, &mut rx).await;
-    assert_eq!(lists.first().map(|l| l.status.as_str()), Some("pending"));
+    let (_, storage) = snapshot_until(&bridge, &mut rx, "the first download", |l| {
+        l.first().is_some_and(|l| l.status == "ok")
+    })
+    .await;
     assert_eq!(
         storage,
         Some(StorageStatus {
@@ -167,7 +164,6 @@ async fn subscriptions_persist_across_a_restart_and_get_refreshed() {
             reason: None
         })
     );
-    assert_eq!(lists.len(), 1);
     bridge.shutdown();
     assert!(state.join("blocklists.sqlite3").is_file());
 
@@ -179,32 +175,53 @@ async fn subscriptions_persist_across_a_restart_and_get_refreshed() {
     .await
     .unwrap();
     let mut rx = bridge.broadcast_tx.subscribe();
+    let (restored, _) = snapshot(&bridge, &mut rx).await;
+    // Give the startup refresh tick its chance: a fresh list isn't due.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    bridge.shutdown();
+    assert_eq!(second_fetcher.calls(LIST_URL), 0);
+    assert_eq!(restored.len(), 1);
+    assert_eq!(restored[0].url, LIST_URL);
+    assert_eq!(restored[0].status, "ok");
+    assert_eq!(restored[0].entry_count, 2);
+    // Downloaded, but PR A installs no daemon rule.
+    assert_eq!(restored[0].enforcement, ENFORCEMENT_NOT_ENFORCED);
+    assert_eq!(
+        restored[0].enforcement_reason.as_deref(),
+        Some("Blocking isn't available yet")
+    );
+}
+
+/// A stored list that was never downloaded is fetched by the refresh loop's
+/// first tick at startup.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_due_stored_subscription_is_refreshed_at_startup() {
+    let sockets = tempfile::tempdir().unwrap();
+    let state_dir = tempfile::tempdir().unwrap();
+    let state = state_dir.path().canonicalize().unwrap();
+    seed_never_downloaded(&state);
+    let fetcher = Arc::new(TestFetcher::default());
+    let bridge = run_with_options(
+        config(sockets.path()),
+        options(Storage::Persistent(state), fetcher.clone()),
+    )
+    .await
+    .unwrap();
+    let mut rx = bridge.broadcast_tx.subscribe();
     let (refreshed, _) = snapshot_until(&bridge, &mut rx, "the startup refresh", |l| {
         l.first().is_some_and(|l| l.status == "ok")
     })
     .await;
     bridge.shutdown();
-    assert_eq!(second_fetcher.calls(LIST_URL), 1);
-    assert_eq!(refreshed.len(), 1);
-    assert_eq!(refreshed[0].url, LIST_URL);
+    assert_eq!(fetcher.calls(LIST_URL), 1);
     assert_eq!(refreshed[0].entry_count, 2);
-    // Downloaded, but PR A installs no daemon rule.
-    assert_eq!(refreshed[0].enforcement, ENFORCEMENT_NOT_ENFORCED);
-    assert_eq!(
-        refreshed[0].enforcement_reason.as_deref(),
-        Some("Blocking isn't available yet")
-    );
 }
 
-/// L7: the blocklist worker and refresh loop start only once nothing else
-/// can fail; a failed start leaves no task downloading in the background.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_failed_start_runs_no_blocklist_tasks() {
-    let state_dir = tempfile::tempdir().unwrap();
-    let state = state_dir.path().canonicalize().unwrap();
-    {
-        let store = BlocklistStore::open(&state.join("blocklists.sqlite3")).unwrap();
-        let due = snitchwatch_bridge::blocklists::store::Subscription {
+/// Store one subscription to [`LIST_URL`] that was never attempted.
+fn seed_never_downloaded(state: &Path) {
+    let store = BlocklistStore::open(&state.join("blocklists.sqlite3")).unwrap();
+    store
+        .upsert_subscription(&snitchwatch_bridge::blocklists::store::Subscription {
             id: "due".into(),
             url: LIST_URL.into(),
             display_name: "due".into(),
@@ -214,9 +231,17 @@ async fn a_failed_start_runs_no_blocklist_tasks() {
             last_attempt_at: None,
             last_fetch_status: snitchwatch_bridge::blocklists::store::FetchStatus::Pending,
             entry_count: 0,
-        };
-        store.upsert_subscription(&due).unwrap();
-    }
+        })
+        .unwrap();
+}
+
+/// L7: the blocklist worker and refresh loop start only once nothing else
+/// can fail; a failed start leaves no task downloading in the background.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_start_runs_no_blocklist_tasks() {
+    let state_dir = tempfile::tempdir().unwrap();
+    let state = state_dir.path().canonicalize().unwrap();
+    seed_never_downloaded(&state);
     // The socket's parent is a regular file: writing the token fails.
     let sockets = tempfile::tempdir().unwrap();
     let not_a_dir = sockets.path().join("file");

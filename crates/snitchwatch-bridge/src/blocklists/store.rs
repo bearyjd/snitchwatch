@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use chrono::{DateTime, Utc};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,7 +116,7 @@ impl BlocklistStore {
         }
         file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
         drop(file);
-        let conn = Connection::open(path)?;
+        let conn = open_connection(path)?;
         Self::initialize(conn)
     }
 
@@ -298,6 +298,18 @@ impl BlocklistStore {
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
     }
+}
+
+/// `Connection::open`'s flags without `URI`, plus `NOFOLLOW`: SQLite opens
+/// the path again after [`BlocklistStore::open`]'s checks.
+fn open_connection(path: &Path) -> rusqlite::Result<Connection> {
+    Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE
+            | OpenFlags::SQLITE_OPEN_CREATE
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )
 }
 
 fn update_row(conn: &Connection, sub: &Subscription) -> rusqlite::Result<usize> {
@@ -509,6 +521,19 @@ mod tests {
         assert!(BlocklistStore::open(&path).is_err());
         let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o644, "the symlink target was modified");
+    }
+
+    /// S7 follow-up: SQLite re-opens the path itself after the `O_NOFOLLOW`
+    /// check, so it must refuse a symlink too (a swap in between).
+    #[test]
+    fn sqlite_itself_refuses_a_symlinked_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("elsewhere.sqlite3");
+        drop(Connection::open(&target).unwrap());
+        let path = dir.path().join("blocklists.sqlite3");
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+        assert!(open_connection(&path).is_err());
+        assert!(open_connection(&target).is_ok());
     }
 
     #[test]
