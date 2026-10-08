@@ -41,6 +41,10 @@
 //!   it restarted, and what happened in between is unknown. The counts are
 //!   **kept**;
 //! - the counts were restored from a file (the bridge was down meanwhile);
+//! - a counted rule left a committed snapshot without a confirmed
+//!   `DELETE_RULE` or an expiry of ours (those drop its count first, and are
+//!   no gap): it may come back with its old `created` and no count, so
+//!   nothing from before is trusted ([`RuleHits::adopt_snapshot`]);
 //! - a bound below was hit, or a rule name was too long to keep.
 //!
 //! **Which map an event lands in.** An event whose rule the bridge's rule
@@ -49,7 +53,7 @@
 //! rule the cache doesn't know yet, or any event while the cache is
 //! `Unknown` (between a daemon stream closing and the next snapshot). A
 //! committed snapshot moves the side entries it names into the main map and
-//! forgets the rest, and drops main-map names it lacks. A confirmed
+//! forgets the rest, and drops main-map names it lacks (a gap, above). A confirmed
 //! `DELETE_RULE` drops that name, and so does a temporary rule that expired
 //! (`RulesCache::prune_expired`, or a remembered verdict that replaces it
 //! before the prune: prompt rules are named deterministically, so a re-made
@@ -218,6 +222,12 @@ impl RuleHits {
         let before = self.main.len();
         self.main.retain(|name, _| known(name));
         let mut changed = self.main.len() != before;
+        if changed {
+            // A counted rule left the list, and with it its hits. Were it to
+            // come back (with its old `created`) it would look as if it had
+            // never been hit: nothing from before this moment is trusted.
+            self.note_gap(now_ms);
+        }
         let waiting = std::mem::take(&mut self.side);
         let restored = std::mem::take(&mut self.restored);
         for (name, stat) in waiting.into_iter().chain(restored) {

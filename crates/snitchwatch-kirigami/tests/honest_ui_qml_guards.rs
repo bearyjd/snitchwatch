@@ -66,6 +66,10 @@ const ALL_QML: &[(&str, &str)] = &[
     ("RuleEditorSheet.qml", EDITOR_SHEET),
     ("RuleSimulatorSheet.qml", SIMULATOR_SHEET),
     ("RulesImportSheet.qml", IMPORT_SHEET),
+    (
+        "RulesInsightsText.qml",
+        include_str!("../qml/RulesInsightsText.qml"),
+    ),
     ("RulesPage.qml", RULES_PAGE),
     ("ScannerPage.qml", include_str!("../qml/ScannerPage.qml")),
     ("SizedOverlaySheet.qml", SIZED_SHEET),
@@ -244,8 +248,10 @@ fn rules_page_labels_showing_rule_data_are_plain_text() {
             "page.inspectNotEditable",
             // P2.1: the editor's last result (bridge reasons).
             "ruleEditorController.statusText",
+            // P2.6: a finding names the covering rule, which is rule data.
+            "row.shadowText",
         ],
-        11,
+        12,
     );
 }
 

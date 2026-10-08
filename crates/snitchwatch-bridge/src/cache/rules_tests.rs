@@ -66,6 +66,18 @@ fn upsert_and_remove_do_nothing_while_unknown() {
     assert!(cache.is_unknown());
 }
 
+/// A committed snapshot is the daemon's word on every rule's age, however old:
+/// only a confirmed change (`upsert_at`) restamps.
+#[test]
+fn a_committed_snapshot_keeps_the_daemons_created() {
+    let cache = synced(vec![
+        rule("a", "always", T - 90 * 86_400),
+        rule("b", "until restart", T - 5),
+    ]);
+    assert_eq!(get(&cache, "a").created, T - 90 * 86_400);
+    assert_eq!(get(&cache, "b").created, T - 5);
+}
+
 #[test]
 fn upsert_keeps_the_cached_created_only_when_the_incoming_one_is_zero() {
     let mut cache = synced(vec![rule("a", "5m", T)]);
@@ -77,6 +89,51 @@ fn upsert_keeps_the_cached_created_only_when_the_incoming_one_is_zero() {
     assert_eq!(names(&cache), vec!["a", "new"]);
     cache.remove("a");
     assert_eq!(names(&cache), vec!["new"]);
+}
+
+/// The daemon rebuilds a rule from every `CHANGE_RULE` (`rule.Create` stamps
+/// `Created` with the time of the change), so a permanent rule the GUI edits
+/// or re-enables is new as far as its age goes. Keeping the old `created` made
+/// a 40-day-old rule just edited read "unused for 14 days" at once (the
+/// Rules page's badge needs the age).
+#[test]
+fn a_permanent_rule_the_gui_changes_is_stamped_now_as_the_daemon_stamps_it() {
+    for duration in ["always", "until restart"] {
+        let mut cache = synced(vec![rule("a", duration, T - 40 * 86_400)]);
+        cache.upsert_at(rule("a", duration, 0), T);
+        assert_eq!(get(&cache, "a").created, T, "{duration}");
+    }
+}
+
+#[test]
+fn a_permanent_rule_new_to_the_cache_without_a_stamp_is_stamped_now_too() {
+    let mut cache = synced(Vec::new());
+    cache.upsert_at(rule("fresh", "always", 0), T);
+    assert_eq!(get(&cache, "fresh").created, T);
+}
+
+#[test]
+fn a_stamp_the_rule_already_has_is_kept() {
+    let mut cache = synced(vec![rule("a", "always", T - 100)]);
+    cache.upsert_at(rule("a", "always", T - 5), T);
+    assert_eq!(get(&cache, "a").created, T - 5);
+}
+
+#[test]
+fn a_confirmed_change_to_a_permanent_rule_restamps_it_but_a_timed_one_keeps_its_clock() {
+    let mut cache = synced(vec![
+        rule("perm", "always", T - 40 * 86_400),
+        rule("timed", "5m", T - 100),
+    ]);
+    let change = |name: &str, duration: &str| Notification {
+        r#type: Action::ChangeRule as i32,
+        rules: vec![rule(name, duration, 0)],
+        ..Default::default()
+    };
+    cache.apply_confirmed_at(&change("perm", "always"), T);
+    cache.apply_confirmed_at(&change("timed", "5m"), T);
+    assert_eq!(get(&cache, "perm").created, T);
+    assert_eq!(get(&cache, "timed").created, T - 100);
 }
 
 #[test]

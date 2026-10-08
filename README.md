@@ -265,7 +265,27 @@ past 2,000,000 hosts in total (in subscription order) get no rule.
   that still exist in the daemon's first rule list after a restart keep
   theirs; without a state directory they are kept in memory and the page
   says so. A count belongs to a rule's name: editing a rule keeps it, and a
-  deleted or expired rule loses it.
+  deleted or expired rule loses it. Switching profiles deletes the old
+  profile's `850-profile:` rules and installs the new one's: that is not a
+  gap (nothing else's count is affected), and a rule that comes back counts
+  from zero and from the time it came back.
+  One limit: a rule with no counted hits that leaves the list and comes
+  back from outside Snitchwatch (a rule file restored, say) with its old
+  creation time leaves no gap, so after more than 14 days away it reads "Unused"
+  at once. Only a rule that had counted hits records a gap when it goes.
+  A rule with no counted hits gets a badge: "Unused" only when the counts
+  are saved and 14 days have passed since the latest of when counting began,
+  when the rule was created and the bridge's last gap in the counting (a
+  restart, say); otherwise "No hits since <time>", from that moment. The
+  header says "Hits may be missing before <time>" for the last gap. A rule
+  edited or re-enabled counts as new (the daemon restamps it), and a counted
+  rule that leaves the daemon's rule list records a gap. "Analyze rules" marks
+  rules that can never decide a connection because another one matches
+  everything they do and takes precedence ("Never decides", or "May never
+  decide" when the proof rests on a regular expression). It names that rule and
+  says nothing about what the connections get instead, since a third rule can
+  decide some of them. It checks only conditions Snitchwatch can compare
+  exactly, so no mark is not a guarantee, and it never changes a rule.
 - The bridge fetches only `https://` URLs, including every redirect, and
   never a loopback, link-local, carrier-grade NAT or other reserved address
   (LAN addresses, RFC 1918 and ULA, are allowed: owner decision,

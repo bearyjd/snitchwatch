@@ -22,6 +22,7 @@ use serde::Serialize;
 use snitchwatch_bridge::cache::rule_hits::keepable_name;
 use snitchwatch_bridge::ws_messages::{ServerMessage, StorageStatus};
 
+use crate::rules::insights::hit_badge::UNUSED_WINDOW_MS;
 use crate::rules::row_store::Rule;
 
 /// What a rule row shows.
@@ -85,6 +86,22 @@ struct Info<'a> {
     last_gap_ms: i64,
     persistent: bool,
     storage_reason: &'a str,
+    /// How long a rule must go without hits to be called unused
+    /// ([`UNUSED_WINDOW_MS`]), so the page's wording takes it from here.
+    unused_window_ms: i64,
+}
+
+/// How the counts were made: what a "no hits" badge needs to know to be
+/// honest (`rules::insights::hit_badge`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Counting {
+    pub since_unix_ms: i64,
+    /// The counts are saved across restarts of the bridge.
+    pub persistent: bool,
+    /// Hits may be missing from the counts.
+    pub lossy: bool,
+    /// When the bridge last noticed a gap, if it said.
+    pub last_gap_unix_ms: Option<i64>,
 }
 
 #[derive(Debug, Default)]
@@ -148,6 +165,17 @@ impl RuleHitsView {
         }
     }
 
+    /// How the counts were made, once counting has started.
+    pub fn counting(&self) -> Option<Counting> {
+        let received = self.received.as_ref()?;
+        Some(Counting {
+            since_unix_ms: received.since_unix_ms?,
+            persistent: received.storage.persistent,
+            lossy: received.lossy,
+            last_gap_unix_ms: received.last_gap_unix_ms,
+        })
+    }
+
     pub fn info_json(&self) -> String {
         let info = match &self.received {
             None => Info {
@@ -158,6 +186,7 @@ impl RuleHitsView {
                 last_gap_ms: 0,
                 persistent: false,
                 storage_reason: "",
+                unused_window_ms: UNUSED_WINDOW_MS,
             },
             Some(r) => Info {
                 available: true,
@@ -167,6 +196,7 @@ impl RuleHitsView {
                 last_gap_ms: r.last_gap_unix_ms.unwrap_or(0),
                 persistent: r.storage.persistent,
                 storage_reason: r.storage.reason.as_deref().unwrap_or_default(),
+                unused_window_ms: UNUSED_WINDOW_MS,
             },
         };
         serde_json::to_string(&info).unwrap_or_default()

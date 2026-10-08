@@ -62,7 +62,7 @@ fn is_env_trim(c: char) -> bool {
 
 // ---- parsing ----------------------------------------------------------------
 
-pub(super) enum Operator {
+pub(in crate::rules) enum Operator {
     /// The `true` operand.
     True,
     /// Every member must match.
@@ -75,7 +75,7 @@ pub(super) enum Operator {
     },
 }
 
-pub(super) struct Leaf {
+pub(in crate::rules) struct Leaf {
     kind: Kind,
     operand: String,
     data: String,
@@ -84,7 +84,7 @@ pub(super) struct Leaf {
 
 /// The operator `type`, which decides *how* the operand's value is compared.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Kind {
+pub(in crate::rules) enum Kind {
     Simple,
     Regexp,
     Network,
@@ -94,7 +94,7 @@ enum Kind {
 /// Read one operator from a rule's `operator` JSON: the flat shape opensnitchd
 /// uses (`{"type","operand","data","sensitive","list"}`), tolerating the
 /// bridge's older externally-tagged one.
-pub(super) fn parse(value: &Value) -> Operator {
+pub(in crate::rules) fn parse(value: &Value) -> Operator {
     let Some(obj) = value.as_object() else {
         return unreadable("<unrecognized operator shape>");
     };
@@ -175,6 +175,25 @@ fn unreadable(what: &str) -> Operator {
     Operator::Unsupported {
         operand: what.to_string(),
         reason: UNREADABLE,
+    }
+}
+
+impl Leaf {
+    /// What the rule-insights analysis (`rules::insights`) reads of a leaf.
+    pub(in crate::rules) fn kind(&self) -> Kind {
+        self.kind
+    }
+
+    pub(in crate::rules) fn operand(&self) -> &str {
+        &self.operand
+    }
+
+    pub(in crate::rules) fn data(&self) -> &str {
+        &self.data
+    }
+
+    pub(in crate::rules) fn sensitive(&self) -> bool {
+        self.sensitive
     }
 }
 
