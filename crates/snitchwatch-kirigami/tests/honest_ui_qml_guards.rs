@@ -362,10 +362,15 @@ fn make_rule_sheet_says_only_what_the_bridge_answered() {
 
 /// E3 (PR #108 review): a put-off row's inspector says the firewall may list
 /// the same connection again. One fixed sentence, plain text, shown only
-/// where the row model says so.
+/// where the row model says so (ConnectionsPage passes `rowDetailsJson`'s
+/// `alsoListedByDefault` in).
 #[test]
 fn the_two_rows_hint_is_one_fixed_plain_text_line() {
-    let code = code_lines(CONNECTIONS_PAGE);
+    assert!(has_line(
+        &code_lines(CONNECTIONS_PAGE),
+        "alsoListedByDefault: page.inspectAlsoListedByDefault"
+    ));
+    let code = code_lines(MAKE_RULE_SHEET);
     let hints: Vec<String> = blocks(&code, "Controls.Label {")
         .into_iter()
         .filter(|block| has_line(block, "id: alsoListedNote"))
@@ -374,7 +379,7 @@ fn the_two_rows_hint_is_one_fixed_plain_text_line() {
     let hint = &hints[0];
     assert!(has_line(hint, "textFormat: Text.PlainText"), "{hint}");
     assert!(
-        has_line(hint, "visible: page.inspectAlsoListedByDefault"),
+        has_line(hint, "visible: sheet.alsoListedByDefault"),
         "{hint}"
     );
     let binding = text_binding(hint).expect("the hint has a text");

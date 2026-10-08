@@ -21,6 +21,10 @@ ColumnLayout {
     // Whether the row's program has a file a rule can be bound to
     // (`rowDetailsJson`'s `bindableProcessPath`, issue #44).
     property bool bindableProcessPath: false
+    // E3: whether the firewall may list this put-off connection again as
+    // decided by its default action (`outcome::may_be_listed_again`); the
+    // bridge can't match the two rows (plan 2026-10-08-default-applied-events.md).
+    property bool alsoListedByDefault: false
     // Whether "Decide later" blocked the program for 5 minutes. That block
     // stays: a matching deny wins over an allow rule, so the sheet says so
     // rather than delete it (PR #98 review).
@@ -34,6 +38,7 @@ ColumnLayout {
     property alias form: form
     property alias blockNote: blockNoteLabel
     property alias controller: controller
+    property alias alsoListedNote: alsoListedNote
 
     onRowIdChanged: form.visible = false
 
@@ -48,6 +53,17 @@ ColumnLayout {
         repeat: true
         running: controller.busy
         onTriggered: controller.poll()
+    }
+
+    Controls.Label {
+        id: alsoListedNote
+        Layout.fillWidth: true
+        visible: sheet.alsoListedByDefault
+        wrapMode: Text.Wrap
+        opacity: 0.7
+        textFormat: Text.PlainText
+        text: "The firewall may also list this connection, and its retries, separately "
+            + "as decided by its default action."
     }
 
     Controls.Button {

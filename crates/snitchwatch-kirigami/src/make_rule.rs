@@ -164,6 +164,7 @@ impl MakeRuleWait {
         self.waiting = Some((request_id, row_id, now));
     }
 
+    #[cfg(test)]
     pub(crate) fn is_waiting(&self) -> bool {
         self.waiting.is_some()
     }
