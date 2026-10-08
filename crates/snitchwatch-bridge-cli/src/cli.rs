@@ -68,11 +68,11 @@ ENVIRONMENT (all optional):
                             /run/snitchwatch/opensnitchd.sock and
                             /run/snitchwatch/bridge.sock. Only UID 0 may use gRPC.
                             Token: /run/snitchwatch-auth/token (mode 0640).
-    STATE_DIRECTORY         Where blocklist subscriptions persist (set by systemd's
-                            StateDirectory=; system mode accepts only
-                            /var/lib/snitchwatch)
+    STATE_DIRECTORY         Where blocklist subscriptions and profiles persist
+                            (set by systemd's StateDirectory=; system mode
+                            accepts only /var/lib/snitchwatch)
     SNITCHWATCH_STATE_DIR   Used when STATE_DIRECTORY is unset. With neither,
-                            subscriptions are kept in memory only.
+                            subscriptions and profiles are kept in memory only.
 
 GUI CLIENT ENVIRONMENT:
     SNITCHWATCH_SYSTEM_BRIDGE=1 Select /run/snitchwatch/bridge.sock

@@ -36,6 +36,7 @@ use tracing::{info, warn};
 use crate::profiles::materializer::{materialize_profile, MaterializedRule};
 use crate::profiles::network_watcher::NetworkWatcher;
 use crate::profiles::store::{Profile, ProfileRule, ProfileStore, StoreError};
+use crate::ws_messages::StorageStatus;
 
 /// Events emitted whenever profile state changes. The translator subscribes
 /// and rebroadcasts as `SetProfiles` / `ProfileChanged` over the WS.
@@ -63,7 +64,8 @@ pub trait ProfileRuleSink: Send + Sync + 'static {
     ) -> anyhow::Result<()>;
 }
 
-/// No-op sink used when no real sink has been wired in.
+/// No-op sink: the bridge's production sink until issue #46 Part 2, so
+/// activating a profile installs no daemon rule (the Profiles page says so).
 pub struct NoopProfileRuleSink;
 
 #[async_trait]
@@ -89,6 +91,7 @@ pub struct ProfilesManager {
     store: Arc<ProfileStore>,
     bus: broadcast::Sender<ProfileEvent>,
     rule_sink: Arc<dyn ProfileRuleSink>,
+    storage: StorageStatus,
     /// `true` once a manual `activate()` call has pinned the active profile
     /// against auto-switching, until the network identity next changes. See
     /// module docs.
@@ -105,6 +108,11 @@ impl ProfilesManager {
             store,
             bus,
             rule_sink: Arc::new(NoopProfileRuleSink),
+            storage: StorageStatus {
+                unreadable: false,
+                persistent: false,
+                reason: None,
+            },
             manual_pin: AtomicBool::new(false),
             last_seen_network: Mutex::new(None),
         }
@@ -113,6 +121,17 @@ impl ProfilesManager {
     pub fn with_rule_sink(mut self, sink: Arc<dyn ProfileRuleSink>) -> Self {
         self.rule_sink = sink;
         self
+    }
+
+    /// Record whether [`store`](Self::store) outlives the bridge process.
+    /// Sent to GUIs with every `SetProfiles` (issue #46 Part 1).
+    pub fn with_storage_status(mut self, storage: StorageStatus) -> Self {
+        self.storage = storage;
+        self
+    }
+
+    pub fn storage_status(&self) -> &StorageStatus {
+        &self.storage
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<ProfileEvent> {

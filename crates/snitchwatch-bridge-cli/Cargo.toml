@@ -33,6 +33,8 @@ libc = "0.2"
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# Plants an unreadable row in a saved profile store (issue #46).
+rusqlite = { workspace = true }
 async-trait = { workspace = true }
 mock-opensnitchd = { path = "../../tests/mock_opensnitchd" }
 futures-util = { workspace = true }

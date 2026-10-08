@@ -481,6 +481,10 @@ fn only_main_and_run_system_resolve_the_state_directory() {
         ("main.rs", &main),
         ("activation.rs", &code(include_str!("../src/activation.rs"))),
         ("cli.rs", &code(include_str!("../src/cli.rs"))),
+        (
+            "profile_storage.rs",
+            &code(include_str!("../src/profile_storage.rs")),
+        ),
     ] {
         for forbidden in ["var_os(\"STATE_DIRECTORY\")", "var(\"STATE_DIRECTORY\")"] {
             assert!(!source.contains(forbidden), "{name} reads STATE_DIRECTORY");
@@ -498,6 +502,11 @@ fn only_main_and_run_system_resolve_the_state_directory() {
     assert!(
         !include_str!("../src/activation.rs").contains("resolve_storage"),
         "activation.rs resolves storage"
+    );
+    // Issue #46: profiles use the storage `run_with_incoming` was given.
+    assert!(
+        !code(include_str!("../src/profile_storage.rs")).contains("resolve_storage("),
+        "profile_storage.rs resolves storage"
     );
     let storage = code(include_str!("../src/storage.rs"));
     assert_eq!(
