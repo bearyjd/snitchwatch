@@ -8,7 +8,8 @@ security PR's `rule_policy.rs` (branch `fix/rule-operator-validation`).
 **Size:** M overall, as four bridge/UI PRs (A–D) plus a daemon-side note
 (E).
 - A and B need no owner decision beyond wording.
-- C and D are blocked on the owner questions at the end.
+- C and D were blocked on the owner questions at the end. All of them
+  (S1–S5, plus #78) are **DECIDED (owner, 2026-10-08)**, as recommended.
 - E is a description for bazzite-tower, not work for this repo.
 
 ## Citation convention
@@ -190,7 +191,7 @@ takes it again. Meanwhile every other new connection gets `DefaultAction`:
    - **When the count is `None`,** drop the "at least N" clause rather
      than show 0.
 
-### B. Answer from the notification (UI, S; owner question S5 confirms)
+### B. Answer from the notification (UI, S; owner question S5 decided: yes)
 
 5. `notification_controller.rs` `dispatch` adds "Allow once" and "Deny"
    actions next to "Review" for `Notice::Pending`.
@@ -203,7 +204,7 @@ takes it again. Meanwhile every other new connection gets `DefaultAction`:
      the inspector does since #56.
 6. **No remembered Allow from a notification.** Only Allow-once.
 
-### C. Bridge auto-answer and "Decide later" (BR + UI, M; blocked on S1/S2)
+### C. Bridge auto-answer and "Decide later" (BR + UI, M; S1/S2 decided: P-a after 30 s, "Decide later" = P-c)
 
 7. **Auto-answer.** `ask_rule`'s `tokio::select!` gains a third arm,
    `sleep(ANSWER_TIMEOUT)`. It cancels the pending row through the same
@@ -238,11 +239,13 @@ takes it again. Meanwhile every other new connection gets `DefaultAction`:
     - a field that is missing or the wrong type is `None`;
     - the raw string is never logged.
 11. **Unchanged interactions.**
-    - The paused branch (#47) answers before insertion.
+    - The paused branch (#47) answers before insertion. Pausing also
+      answers every prompt that is already waiting (#78, decided; see the
+      owner questions).
     - GUI loss still returns `Unavailable`.
     - The 120 s daemon deadline can no longer be reached.
 
-### D. Curated defaults for background services (data + BR, M; blocked on S3, the security PR's `rule_policy.rs`, and the reserved-prefix refusal)
+### D. Curated defaults for background services (data + BR, M; S3 decided; still blocked on the security PR's `rule_policy.rs` and the reserved-prefix refusal)
 
 12. **Data file.** `crates/snitchwatch-bridge/data/curated-defaults-v1.json`
     lists app-bound **allow** rules. Each has:
@@ -461,6 +464,10 @@ Tower VM checks:
     as P-b, so the same program can take the slot straight back.
   - Choose with that in view. P-c avoids the ping-pong at the price of a
     5 min block nobody chose.
+
+  **DECIDED (owner, 2026-10-08): as recommended (on, 30 s, P-a).** An
+  unanswered prompt is answered ONCE after 30 s with the daemon's
+  `DefaultAction` for that connection, and listed in Connections.
 - **S2. "Decide later" button semantics.** Options:
   - (a) P-a;
   - (b) block this program for 5 min (P-c, any host) and list it under
@@ -469,6 +476,9 @@ Tower VM checks:
 
   **Recommendation: (b).** It is the only option that stops a background
   program from taking the slot right back, and it fails closed.
+
+  **DECIDED (owner, 2026-10-08): (b).** "Decide later" blocks that program
+  for 5 minutes, then asks again.
 - **S3. Curated defaults.** Decide:
   - opt-in (an onboarding checkbox) or on by default;
   - which programs (from the capture spike);
@@ -478,13 +488,36 @@ Tower VM checks:
 
   **Recommendation:** opt-in; system paths under `/usr` only in v1;
   host-constrained `kioworker`/Steam; no per-user regexps in v1.
+
+  **DECIDED (owner, 2026-10-08): as recommended.** Curated defaults for
+  background services are opt-in, `/usr` paths only. (The rest of the
+  recommendation stands with it: host-constrained `kioworker`/Steam, no
+  per-user regexps in v1.)
 - **S4. May we ask bazzite-tower for E2** ("drop while busy")?
   - E2 changes daemon behaviour under both `DefaultAction` values, which
     is why it needs your OK.
   - The rest needs no decision: we ask tower for E3 (visibility only, no
     behaviour change), and offer E1 upstream as the #1644 fix.
   - **Recommendation:** yes, after VM timing at login.
+
+  **DECIDED (owner, 2026-10-08): yes.** Ask bazzite-tower for E2 ("drop
+  while busy") as a daemon option, **OFF by default**. E3 (default-applied
+  events) was requested too. Both were sent to tower on 2026-10-08.
 - **S5 (borderline). Answering from desktop notifications.** May the
   notification carry Allow-once/Deny, or only "Review"?
   **Recommendation:** Allow-once and Deny; never a remembered Allow from
   a notification.
+
+  **DECIDED (owner, 2026-10-08): yes.** Answer from desktop notifications
+  with Allow once and Deny only.
+- **#78. Pausing filtering while prompts are waiting.** Not one of the
+  questions above. It is recorded here because it shares the
+  prompt-answering path.
+
+  **DECIDED (owner, 2026-10-08).** Pausing auto-answers every waiting
+  prompt with Allow once, through the same path as the Allow-once button,
+  and never persisted as a rule.
+  - Rows answered this way are labelled "Allowed once (filtering was
+    paused)".
+  - The pause menu items say so.
+  - PR #86's warning stays as a fallback.

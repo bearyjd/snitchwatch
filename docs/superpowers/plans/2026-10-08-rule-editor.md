@@ -148,7 +148,7 @@ policy).
      - durations `always`, `until restart` and the `parse_duration_secs`
        grammar (make it `pub(crate)` and reuse it), with at least 10 s and
        at most 365 days;
-     - a `simple` `process.path` must be absolute (owner question E2);
+     - a `simple` `process.path` must be absolute (owner question E2, decided 2026-10-08);
      - `protocol` must be a short lowercase token (`[a-z0-9]{1,16}`).
    - **When it applies:**
      - **every `AddRule`;**
@@ -395,3 +395,6 @@ Tower VM checks:
   **Recommendation: (a).** Patterns are how power users cover per-user
   installs (Steam under `~`), and they're explicit authoring, not a
   daemon fallback value.
+
+  **DECIDED (owner, 2026-10-08): (a).** Exact absolute program paths by
+  default; path patterns are allowed, with a warning.

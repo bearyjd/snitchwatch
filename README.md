@@ -239,7 +239,8 @@ past 2,000,000 hosts in total (in subscription order) get no rule.
   network, auto-switch activates it.
 - The bridge fetches only `https://` URLs, including every redirect, and
   never a loopback, link-local, carrier-grade NAT or other reserved address
-  (LAN addresses are allowed for now). There is no `http://` or `file://`
+  (LAN addresses, RFC 1918 and ULA, are allowed: owner decision,
+  2026-10-08). There is no `http://` or `file://`
   path, so a local plain-HTTP fixture server can't be subscribed to.
 - Lists are capped at 64 MiB and 1,000,000 hosts, and at 32 subscriptions.
   Hosts are sent to GUIs a page at a time, on request

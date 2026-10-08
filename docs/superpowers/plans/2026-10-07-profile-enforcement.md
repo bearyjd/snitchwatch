@@ -204,12 +204,21 @@ Manual VM check for Part 2:
   `precedence: false` (the materializer emits no precedence at all),
   consistent with "blocklist wins", and only fixes the docs. Part 1 does not
   touch the materializer; decide before Part 2.
-- **A saved manual pick vs. auto-switch at startup (open).** The active
+
+  **DECIDED (owner, 2026-10-08): precedence stays false.** Denies and
+  blocklists win over profile allows. The materializer keeps emitting no
+  precedence.
+- **A saved manual pick vs. auto-switch at startup (was open).** The active
   profile now survives a restart, but the auto-switch loop's first network
   observation after a start counts as a network change: if a *different*
   profile's matchers match the current network, it is activated, replacing
   a manual pick saved before the restart. The pin itself is not persisted.
   Harmless while nothing is enforced; decide with Part 2.
+
+  **DECIDED (owner, 2026-10-08; also issue #82).** Persist the manual
+  profile choice together with the network it was made on. Auto-switch only
+  on a real network change, so the first reading after a restart on that
+  same network never replaces the manual pick.
 - **Rule churn.** Auto-switch on NetworkManager changes now rewrites
   firewall rules. Debounce flapping networks in Part 2.
 - **Is Part 2 worth doing before P2.1?** It would ship an enforcement path

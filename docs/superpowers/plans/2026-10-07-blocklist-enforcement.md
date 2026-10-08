@@ -26,6 +26,19 @@ and #50.
   `FindFirstMatch`, ~497-515).
 - Exceptions are explicit `precedence: true` allows. They are out of scope.
 
+**Confirmed by the owner (2026-10-08).** These calls were made during the
+overnight build (#69, #76) and left open for owner review. All three are
+now confirmed:
+- **Enforced only by the system bridge.** A per-user bridge saves
+  subscriptions but writes no list file and installs no rule (see the
+  state-directory table below).
+- **At most 2,000,000 hosts in total** across every installed list
+  (`AGGREGATE_MAX_HOSTS`). Lists past it, in subscription order, get no
+  files and no rule. The root daemon holds each list in memory (~200 MB at
+  that size) and runs with `QueueBypass`, so an OOM kill would let traffic
+  through unfiltered.
+- **LAN fetch targets stay allowed** (see "Internal fetches" under Risks).
+
 ## Citation convention
 
 - `main:` means `670f42c`. Functions and tests are cited by name. Line
@@ -230,7 +243,7 @@ starts persisting ids.
 | Unit | `packaging/systemd/snitchwatch-bridge.service` `StateDirectory=snitchwatch` | `packaging/system/snitchwatch-system-bridge.service` `StateDirectory=snitchwatch`, `StateDirectoryMode=0700` |
 | Resolves to | `~/.local/state/snitchwatch` (canonical `/var/home/<u>/…`) | `/var/lib/snitchwatch`, `snitchwatch:snitchwatch`, 0700 |
 | Writable by | the desktop user, who already controls this bridge | only `snitchwatch` (and root). `ProtectSystem=strict` keeps `StateDirectory` writable, so no unit change and `system_package_contract.rs` stays green |
-| Read by root `opensnitchd` | **never** (revised 2026-10-08, security review M3, owner review pending): any of the user's processes could replace a list file with a FIFO (hangs the daemon) or a link to `/dev/zero` (OOM; with `QueueBypass` the firewall fails open, on every boot). The per-user bridge saves subscriptions but writes no list file and installs no rule; every list reads "Blocking with lists needs the system-wide Snitchwatch service; …" | DAC override; the upstream unit has no capability limits (`vendor:daemon/data/init/opensnitchd.service`) |
+| Read by root `opensnitchd` | **never** (revised 2026-10-08, security review M3; confirmed by the owner 2026-10-08): any of the user's processes could replace a list file with a FIFO (hangs the daemon) or a link to `/dev/zero` (OOM; with `QueueBypass` the firewall fails open, on every boot). The per-user bridge saves subscriptions but writes no list file and installs no rule; every list reads "Blocking with lists needs the system-wide Snitchwatch service; …" | DAC override; the upstream unit has no capability limits (`vendor:daemon/data/init/opensnitchd.service`) |
 
 SELinux is **unverified**, and so is any `ProtectHome=`/`ProtectSystem=`
 drop-in that bazzite-tower adds to opensnitchd. Either would make the
@@ -450,6 +463,12 @@ Manual check in a disposable VM, in both modes:
   internal `https` endpoints, and hostname-like tokens from the response
   show up as entries. Consider rejecting loopback and private-range
   targets. Owner's call.
+
+  **DECIDED (owner, 2026-10-08).** Keep allowing blocklist URLs that
+  resolve to LAN ranges (RFC 1918 and ULA), because LAN-hosted lists are
+  legitimate. Loopback, link-local and the other reserved ranges stay
+  refused. `ALLOW_LAN_TARGETS = true` in
+  `crates/snitchwatch-bridge/src/blocklists/fetch_guard.rs` stays as is.
 - **Exact-match semantics under-block ABP lists.** Say so in the UI copy.
 - **File-conflict hot spots:**
   - bridge-cli `run_with_incoming` and the pump, with #48, #47 and #46;

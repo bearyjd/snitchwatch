@@ -17,8 +17,8 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 
 /// RFC 1918 (10/8, 172.16/12, 192.168/16) and ULA (fc00::/7) addresses.
-/// Allowed for now: LAN-hosted lists are legitimate. Owner decision pending
-/// (issue #45); setting this to `false` blocks them everywhere.
+/// Allowed: LAN-hosted lists are legitimate (owner decision, 2026-10-08,
+/// issue #45); setting this to `false` blocks them everywhere.
 const ALLOW_LAN_TARGETS: bool = true;
 
 /// Shown when a URL names a refused address (no detail, see the module doc).

@@ -48,7 +48,8 @@ The GUI couldn't tell which bridge it had, because
 bridge, one inline Deny would store an **all-apps** deny until restart,
 while the tooltip said "Blocks this program".
 
-**Decision: a fail-safe capability handshake.**
+**Decision: a fail-safe capability handshake** (made overnight;
+**confirmed by the owner, 2026-10-08**).
 
 - **Bridge.** `Authenticated { capabilities }` is an additive field. It is
   omitted when empty, and a missing list means empty. The bridge advertises
