@@ -704,7 +704,8 @@ pub struct ConnectionRow {
     /// verdict (see `translator::verdict::rule_name_for`), or the name of a
     /// pre-existing rule the daemon itself reports as having matched, via
     /// `Statistics.events[].rule.name` on a `Ping` call (see
-    /// `translator::connection::event_to_row`). Additive field: old wire
+    /// `translator::connection::event_to_row`). `None` on a
+    /// `decided_by_default` row: no rule decided it. Additive field: old wire
     /// payloads without it deserialize with `None` via `#[serde(default)]`,
     /// and it is omitted from serialized JSON when absent so existing
     /// consumers (the web frontend) that don't know about it are unaffected.
@@ -724,6 +725,13 @@ pub struct ConnectionRow {
     /// it. Additive, omitted when false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub deferred: bool,
+    /// No rule matched: the firewall's default action decided this
+    /// connection, as the daemon reported it (E3, plan
+    /// `2026-10-08-default-applied-events.md`). `action` is the action it
+    /// applied and `matched_rule` is `None`. Never inferred from a missing
+    /// `matched_rule`. Additive, omitted when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub decided_by_default: bool,
 }
 
 /// Why the bridge answered a connection without a person (issue #78).
@@ -875,6 +883,7 @@ mod tests {
                 auto_answer: None,
                 answer_deadline_ms: None,
                 deferred: false,
+                decided_by_default: false,
             }],
         };
 
@@ -1010,6 +1019,7 @@ mod tests {
             auto_answer: None,
             answer_deadline_ms: None,
             deferred: false,
+            decided_by_default: false,
         };
         let json = serde_json::to_value(&row).unwrap();
         assert_eq!(json["matchedRule"], "899-firefox-allow-out.json");
@@ -1038,6 +1048,44 @@ mod tests {
         });
         let parsed: ConnectionRow = serde_json::from_value(json).unwrap();
         assert_eq!(parsed.matched_rule, None);
+        assert!(!parsed.decided_by_default);
+    }
+
+    /// E3 (plan `2026-10-08-default-applied-events.md`): additive like
+    /// `deferred`, absent unless set.
+    #[test]
+    fn decided_by_default_is_sent_only_when_set_and_has_no_rule() {
+        let row = ConnectionRow {
+            id: "event-1".to_string(),
+            process: "curl".to_string(),
+            process_path: Some("/usr/bin/curl".to_string()),
+            dst_host: "example.com".to_string(),
+            dst_ip: "93.184.216.34".to_string(),
+            dst_port: 443,
+            protocol: "tcp".to_string(),
+            direction: "outgoing".to_string(),
+            action: Some("deny".to_string()),
+            bytes_sent: 0,
+            bytes_received: 0,
+            started_at_ms: 1,
+            matched_rule: None,
+            auto_answer: None,
+            answer_deadline_ms: None,
+            deferred: false,
+            decided_by_default: true,
+        };
+        let json = serde_json::to_value(&row).unwrap();
+        assert_eq!(json["decidedByDefault"], true);
+        assert!(json.get("matchedRule").is_none(), "{json}");
+        let parsed: ConnectionRow = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed, row);
+
+        let plain = ConnectionRow {
+            decided_by_default: false,
+            ..row
+        };
+        let json = serde_json::to_value(&plain).unwrap();
+        assert!(json.get("decidedByDefault").is_none(), "{json}");
     }
 
     #[test]

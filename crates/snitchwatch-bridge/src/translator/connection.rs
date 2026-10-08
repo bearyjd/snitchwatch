@@ -6,13 +6,14 @@
 //! `setVerdict` referencing the same row.
 
 use crate::ws_messages::ConnectionRow;
-use snitchwatch_proto::protocol::{Connection, Event};
+use snitchwatch_proto::protocol::{Connection, Event, Rule};
 
 pub const ASK_ROW_PREFIX: &str = "ask-";
 /// Id prefix for rows synthesized from a daemon-reported `Event` (see
-/// [`event_to_row`]) — connections the daemon already matched against an
-/// existing rule and reports via `Statistics.events` on a `Ping` call, as
-/// opposed to `ASK_ROW_PREFIX` rows the daemon is actively prompting for.
+/// [`event_to_row`]) — connections the daemon already decided, by an
+/// existing rule or (with the bazzite-tower fork) by its default action, and
+/// reports via `Statistics.events` on a `Ping` call, as opposed to
+/// `ASK_ROW_PREFIX` rows the daemon is actively prompting for.
 pub const EVENT_ROW_PREFIX: &str = "event-";
 
 pub fn ask_row_id(notification_id: u64) -> String {
@@ -76,7 +77,23 @@ pub fn connection_to_row(conn: &Connection, notification_id: u64) -> ConnectionR
         auto_answer: None,
         answer_deadline_ms: None,
         deferred: false,
+        decided_by_default: false,
     }
+}
+
+/// The description the bazzite-tower opensnitchd fork gives the synthetic
+/// rule of a connection that got the daemon's `DefaultAction` (E3, plan
+/// `2026-10-08-default-applied-events.md`). Such an event grows the daemon's
+/// `rule_misses`, never `rule_hits`.
+pub const DEFAULT_ACTION_MARKER: &str = "snitchwatch:default-action";
+
+/// Whether `rule` is the fork's synthetic default-action rule: named `""`
+/// **and** described by exactly [`DEFAULT_ACTION_MARKER`]. Stock v1.8.0 never
+/// emits one, but it can load a hand-written rule named `""`, whose events
+/// are real rule hits, so the name alone is not enough; and a named rule
+/// that copied the description is still that rule.
+pub fn is_default_action_rule(rule: &Rule) -> bool {
+    rule.name.is_empty() && rule.description == DEFAULT_ACTION_MARKER
 }
 
 /// Normalize a daemon-reported rule action string the same way
@@ -93,22 +110,27 @@ fn normalized_action(action: &str) -> &'static str {
 
 /// Translate a daemon-reported `Event` (a `Connection` paired with the `Rule`
 /// that decided it) into a *decided* `ConnectionRow` carrying that rule's
-/// name in `matched_rule`.
+/// name in `matched_rule`. A default-action event
+/// ([`is_default_action_rule`]) instead has no `matched_rule` and is marked
+/// `decided_by_default`, with the action the default applied.
 ///
 /// The daemon includes recent `Event`s in `Statistics.events` on its
 /// periodic `Ping` calls — this is how the bridge learns about connections
-/// that matched a pre-existing rule and therefore never went through the
-/// interactive `AskRule` flow (see `grpc_server::UiService::ping`). Returns
-/// `None` when the event doesn't carry both a connection and the rule that
-/// matched it — there is nothing useful to show without both.
+/// that matched a pre-existing rule, or (fork) got the default action, and
+/// therefore never went through the interactive `AskRule` flow or went
+/// through it unanswered (see `grpc_server::UiService::ping`). Returns
+/// `None` when the event doesn't carry both a connection and a rule — there
+/// is nothing useful to show without both.
 pub fn event_to_row(event: &Event) -> Option<ConnectionRow> {
     let conn = event.connection.as_ref()?;
     let rule = event.rule.as_ref()?;
+    let by_default = is_default_action_rule(rule);
 
     let mut row = connection_to_row(conn, 0);
     row.id = format!("{EVENT_ROW_PREFIX}{}", event.unixnano);
     row.action = Some(normalized_action(&rule.action).to_string());
-    row.matched_rule = Some(rule.name.clone());
+    row.matched_rule = (!by_default).then(|| rule.name.clone());
+    row.decided_by_default = by_default;
     row.started_at_ms = event.unixnano / 1_000_000;
     Some(row)
 }
@@ -265,6 +287,90 @@ mod tests {
             unixnano: 1,
         };
         assert!(event_to_row(&event).is_none());
+    }
+
+    /// The bazzite-tower fork's synthetic rule for a connection that got the
+    /// daemon's `DefaultAction` (plan `2026-10-08-default-applied-events.md`).
+    fn default_action_rule(action: &str) -> snitchwatch_proto::protocol::Rule {
+        snitchwatch_proto::protocol::Rule {
+            created: 1_700_000_000,
+            name: String::new(),
+            description: DEFAULT_ACTION_MARKER.to_string(),
+            enabled: true,
+            precedence: false,
+            nolog: false,
+            action: action.to_string(),
+            duration: "once".to_string(),
+            operator: Some(snitchwatch_proto::protocol::Operator {
+                r#type: "simple".to_string(),
+                operand: "true".to_string(),
+                data: String::new(),
+                sensitive: false,
+                list: vec![],
+            }),
+        }
+    }
+
+    fn event_with(rule: snitchwatch_proto::protocol::Rule) -> Event {
+        Event {
+            time: String::new(),
+            connection: Some(sample_connection()),
+            rule: Some(rule),
+            unixnano: 1_700_000_000_123_456_789,
+        }
+    }
+
+    #[test]
+    fn the_marker_is_the_agreed_string() {
+        assert_eq!(DEFAULT_ACTION_MARKER, "snitchwatch:default-action");
+    }
+
+    #[test]
+    fn a_default_action_event_is_decided_by_the_default_not_a_rule() {
+        for (applied, shown) in [("allow", "allow"), ("deny", "deny"), ("reject", "deny")] {
+            let event = event_with(default_action_rule(applied));
+            assert!(is_default_action_rule(event.rule.as_ref().unwrap()));
+            let row = event_to_row(&event).expect("connection and rule present");
+            assert_eq!(row.action.as_deref(), Some(shown), "{applied}");
+            assert_eq!(row.matched_rule, None, "{applied}: no rule named \"\"");
+            assert!(row.decided_by_default, "{applied}");
+            assert!(!row.deferred);
+            assert_eq!(row.id, "event-1700000000123456789");
+            assert_eq!(row.started_at_ms, 1_700_000_000_123);
+        }
+    }
+
+    #[test]
+    fn an_unmarked_rule_named_empty_keeps_todays_row() {
+        // Stock v1.8.0 can load a hand-written rule file named "": its
+        // events are real rule hits.
+        let mut rule = default_action_rule("deny");
+        rule.description = String::new();
+        assert!(!is_default_action_rule(&rule));
+        let row = event_to_row(&event_with(rule)).unwrap();
+        assert_eq!(row.matched_rule.as_deref(), Some(""));
+        assert!(!row.decided_by_default);
+        // Only the exact marker counts.
+        let mut rule = default_action_rule("deny");
+        rule.description = "Snitchwatch:default-action ".to_string();
+        assert!(!is_default_action_rule(&rule));
+    }
+
+    #[test]
+    fn a_named_rule_with_the_marker_description_is_an_ordinary_rule() {
+        let mut rule = default_action_rule("allow");
+        rule.name = "copied-description".to_string();
+        assert!(!is_default_action_rule(&rule));
+        let row = event_to_row(&event_with(rule)).unwrap();
+        assert_eq!(row.matched_rule.as_deref(), Some("copied-description"));
+        assert!(!row.decided_by_default);
+    }
+
+    #[test]
+    fn rule_rows_and_ask_rows_are_not_decided_by_default() {
+        let event = event_with(sample_rule("899-firefox-allow-out.json", "allow"));
+        assert!(!event_to_row(&event).unwrap().decided_by_default);
+        assert!(!connection_to_row(&sample_connection(), 1).decided_by_default);
     }
 
     #[test]

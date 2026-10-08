@@ -260,10 +260,12 @@ impl Ui for UiService {
         // The daemon's periodic Ping carries `Statistics.events`: recent
         // connections it matched (and decided) against a *pre-existing*
         // rule, entirely without going through the interactive `AskRule`
-        // flow above. This is the only place the bridge learns about that
-        // traffic and the rule name that governed it — surface each as a
-        // decided row so the Connections view's rule-match diagnostics cover
-        // every connection, not just the ones the user was prompted for.
+        // flow above, and, with the bazzite-tower fork, connections its
+        // default action decided (E3, `event_to_row`). This is the only place
+        // the bridge learns about that traffic and what governed it —
+        // surface each as a decided row so the Connections view's rule-match
+        // diagnostics cover every connection, not just the ones the user was
+        // prompted for.
         if let Some(stats) = req.stats {
             self.prompt_slot.observe(
                 stats.rule_misses,

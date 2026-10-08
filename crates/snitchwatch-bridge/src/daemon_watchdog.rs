@@ -154,6 +154,7 @@ mod tests {
             auto_answer: None,
             answer_deadline_ms: None,
             deferred: false,
+            decided_by_default: false,
         };
         let _verdict_rx = cache.lock().await.insert_pending(row);
         rx.changed().await.unwrap();
@@ -240,6 +241,7 @@ mod tests {
             auto_answer: None,
             answer_deadline_ms: None,
             deferred: false,
+            decided_by_default: false,
         };
         let _verdict_rx = cache.lock().await.insert_pending(row);
         // The insert republished; mark that version seen before waiting.
