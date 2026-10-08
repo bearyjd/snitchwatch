@@ -170,8 +170,9 @@ it that way. So the GUI sees `user.name = <uid>`.
     bridge's TCP/TCP6 443. Each condition has a connection that differs
     only there and must not match.
 - Bridge unit tests:
-  - `rule_wire`: the disk and compiled forms through
-    `rule_to_wire`/`rule_from_wire`;
+  - `rule_wire`: the disk and compiled forms go through `rule_to_wire`.
+    Both get the fixed read-only text and `deletable: false`.
+    `notification_for_effect` refuses the row when a GUI echoes it back;
   - `rule_policy`: the numeric `user.name` guard, and packaged rules being
     read-only and not deletable;
   - `rule_name`: what the prefix does and doesn't reserve;
