@@ -2,26 +2,32 @@
 //! user's choices (prompt-slot plan Part D, item 13). Pure: the caller
 //! sends the commands and records their replies.
 //!
+//! All of it is as of the firewall service's last rule list: the bridge
+//! learns of a rule changed on disk only when the daemon reconnects or
+//! confirms a command.
 //! - An entry the user turned on that the daemon lacks is installed.
-//! - Once installed, an entry that disappears was deleted outside
-//!   Snitchwatch. It is recorded and **never reinstalled** until the user
-//!   turns it on again (#62's requirement; plan item 13).
-//! - An entry the user turned off is deleted, but only an **unedited** copy:
-//!   same as what was installed, apart from `enabled`. A copy someone
-//!   edited is left alone and flagged, even on opt-out.
+//! - Once installed, an entry that disappears was removed outside the
+//!   Recommended page. It is recorded and **not reinstalled** until the
+//!   user turns it off and on again (#62's requirement; plan item 13).
+//! - An entry the user turned off is deleted, but only an **unedited** copy
+//!   ([`is_unedited`]). A copy someone edited is left alone and flagged,
+//!   even on opt-out; so is a copy too large for the bridge's list (left
+//!   out of the snapshot, security review L4).
 //! - A rule under the prefix that is no longer in the data file is deleted
-//!   only if it is a copy Snitchwatch installed and nobody edited.
+//!   only if it is a copy Snitchwatch recorded installing, unedited.
 //! - Nothing outside the prefix is ever touched.
 //!
 //! Callers run this only on a known rule list (never while the rules cache
-//! is `Unknown`).
+//! is `Unknown`), and only while the bridge may change rules
+//! ([`inert_statuses`] otherwise).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
-use snitchwatch_proto::protocol::{Operator, Rule};
+use snitchwatch_proto::protocol::Rule;
 
-use super::store::{Choices, InstalledCopy};
+use super::canonical::is_unedited;
+use super::store::Choices;
 use super::CuratedEntry;
 use crate::rule_name::CURATED_DEFAULT_RULE_NAME_PREFIX;
 
@@ -40,9 +46,12 @@ pub enum CuratedAction {
 pub enum EntryStatus {
     /// The daemon's rule list isn't known yet: nothing is done.
     Waiting,
-    /// This bridge doesn't install recommended rules (see the message's
-    /// `unavailable`): nothing is done.
+    /// This bridge changes no recommended rules (see the message's
+    /// `unavailable`), and the daemon has no rule under this name.
     Unavailable,
+    /// This bridge changes no recommended rules, and the daemon has this
+    /// entry's rule, unedited (added earlier).
+    InFirewall,
     /// Not turned on, and not in the daemon.
     Off,
     /// Turned on; the rule is being installed.
@@ -53,11 +62,11 @@ pub enum EntryStatus {
     InstalledButOff,
     /// Turned off; the rule is being removed.
     Removing,
-    /// The daemon's rule differs from what Snitchwatch installed (apart from
-    /// `enabled`): left alone.
+    /// The daemon's rule under this name differs from the entry (or is too
+    /// large to read): left alone, and it still applies.
     EditedByYou,
-    /// Installed once, then deleted outside Snitchwatch: not reinstalled
-    /// until turned on again.
+    /// Installed once, then removed outside the Recommended page (or with
+    /// its Remove button): not reinstalled until turned off and on again.
     DeletedOutside,
     /// Turned on, but the install failed (see the entry's problem).
     NotInstalled,
@@ -68,26 +77,34 @@ pub enum EntryStatus {
     Unknown,
 }
 
+/// The daemon's side of a plan: its rules, and the names it has that were
+/// too large to keep (`RulesCache::left_out`).
+#[derive(Debug, Clone, Copy)]
+pub struct DaemonRules<'a> {
+    pub rules: &'a BTreeMap<String, Rule>,
+    pub left_out: &'a BTreeSet<String>,
+}
+
 /// What reconcile decided.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Plan {
     /// The choices to keep: installed copies adopted or forgotten, and
-    /// deletions noticed.
+    /// removals noticed.
     pub choices: Choices,
     pub actions: Vec<CuratedAction>,
     pub statuses: BTreeMap<String, EntryStatus>,
 }
 
-/// Plan reconcile for `entries` against the daemon's `rules`.
-pub fn plan(entries: &[CuratedEntry], rules: &BTreeMap<String, Rule>, choices: &Choices) -> Plan {
+/// Plan reconcile for `entries` against the daemon's rules.
+pub fn plan(entries: &[CuratedEntry], daemon: DaemonRules<'_>, choices: &Choices) -> Plan {
     let mut next = choices.clone();
     let mut actions = Vec::new();
     let mut statuses = BTreeMap::new();
     for entry in entries {
-        let status = plan_entry(entry, rules, choices, &mut next, &mut actions);
+        let status = plan_entry(entry, daemon, choices, &mut next, &mut actions);
         statuses.insert(entry.id.clone(), status);
     }
-    for (name, rule) in rules {
+    for (name, rule) in daemon.rules {
         let Some(id) = name.strip_prefix(CURATED_DEFAULT_RULE_NAME_PREFIX) else {
             continue;
         };
@@ -95,11 +112,7 @@ pub fn plan(entries: &[CuratedEntry], rules: &BTreeMap<String, Rule>, choices: &
             continue;
         }
         // No longer offered: delete it only if it is our unedited copy.
-        if choices
-            .installed
-            .get(id)
-            .is_some_and(|copy| copy.matches(rule))
-        {
+        if is_unedited(None, choices.installed.get(id), rule) {
             actions.push(CuratedAction::Delete {
                 id: id.to_string(),
                 name: name.clone(),
@@ -109,7 +122,7 @@ pub fn plan(entries: &[CuratedEntry], rules: &BTreeMap<String, Rule>, choices: &
     // Forget copies of entries that are gone from both the file and the
     // daemon.
     next.installed.retain(|id, copy| {
-        entries.iter().any(|entry| &entry.id == id) || rules.contains_key(&copy.name)
+        entries.iter().any(|entry| &entry.id == id) || daemon.rules.contains_key(&copy.name)
     });
     Plan {
         choices: next,
@@ -120,14 +133,18 @@ pub fn plan(entries: &[CuratedEntry], rules: &BTreeMap<String, Rule>, choices: &
 
 fn plan_entry(
     entry: &CuratedEntry,
-    rules: &BTreeMap<String, Rule>,
+    daemon: DaemonRules<'_>,
     choices: &Choices,
     next: &mut Choices,
     actions: &mut Vec<CuratedAction>,
 ) -> EntryStatus {
     let name = entry.rule_name();
+    if daemon.left_out.contains(&name) {
+        // Present but unreadable: never installed or deleted over.
+        return EntryStatus::EditedByYou;
+    }
     let enabled = choices.enabled.contains(&entry.id);
-    let Some(present) = rules.get(&name) else {
+    let Some(present) = daemon.rules.get(&name) else {
         let was_installed = next.installed.remove(&entry.id).is_some();
         if !enabled {
             return EntryStatus::Off;
@@ -139,16 +156,11 @@ fn plan_entry(
         actions.push(CuratedAction::Install(entry.id.clone()));
         return EntryStatus::Installing;
     };
-    let reference = choices
-        .installed
-        .get(&entry.id)
-        .cloned()
-        .unwrap_or_else(|| InstalledCopy::of(&entry.rule()));
-    if !reference.matches(present) {
+    if !is_unedited(Some(entry), None, present) {
         return EntryStatus::EditedByYou;
     }
     // Our unedited copy (adopted if the record was lost).
-    next.installed.insert(entry.id.clone(), reference);
+    *next = next.installed(&entry.id, &entry.rule());
     next.deleted_by_user.remove(&entry.id);
     if !enabled {
         actions.push(CuratedAction::Delete {
@@ -164,39 +176,26 @@ fn plan_entry(
     }
 }
 
-/// A rule's meaning apart from `enabled` and `created`: what it does, for
-/// how long, and its conditions as a set (the daemon may report a list's
-/// members in another order, and fills a list's `data`).
-pub(crate) fn same_ignoring_enabled(a: &Rule, b: &Rule) -> bool {
-    shape(a) == shape(b)
-}
-
-type Leaf = (String, String, String, bool);
-
-fn shape(rule: &Rule) -> (&str, &str, &str, bool, bool, Vec<Leaf>) {
-    let mut leaves: Vec<Leaf> = match &rule.operator {
-        None => Vec::new(),
-        Some(op) if op.r#type == "list" => op.list.iter().map(leaf_shape).collect(),
-        Some(op) => vec![leaf_shape(op)],
-    };
-    leaves.sort();
-    (
-        rule.action.as_str(),
-        rule.duration.as_str(),
-        rule.description.as_str(),
-        rule.precedence,
-        rule.nolog,
-        leaves,
-    )
-}
-
-fn leaf_shape(op: &Operator) -> Leaf {
-    (
-        op.r#type.clone(),
-        op.operand.clone(),
-        op.data.clone(),
-        op.sensitive,
-    )
+/// Where each entry stands while the bridge changes nothing (the per-user
+/// bridge, or choices it can't read or save): what the daemon has, and
+/// nothing more.
+pub fn inert_statuses(
+    entries: &[CuratedEntry],
+    daemon: DaemonRules<'_>,
+) -> BTreeMap<String, EntryStatus> {
+    entries
+        .iter()
+        .map(|entry| {
+            let name = entry.rule_name();
+            let status = match daemon.rules.get(&name) {
+                _ if daemon.left_out.contains(&name) => EntryStatus::EditedByYou,
+                Some(rule) if is_unedited(Some(entry), None, rule) => EntryStatus::InFirewall,
+                Some(_) => EntryStatus::EditedByYou,
+                None => EntryStatus::Unavailable,
+            };
+            (entry.id.clone(), status)
+        })
+        .collect()
 }
 
 #[cfg(test)]

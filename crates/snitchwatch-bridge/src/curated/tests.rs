@@ -114,6 +114,7 @@ fn the_allowlist_takes_only_the_exact_curated_shape() {
     // The port and the transport.
     assert!(leaf_at(2, &|op| op.data = "0".into()).is_err());
     assert!(leaf_at(2, &|op| op.data = "1-65535".into()).is_err());
+    assert!(leaf_at(2, &|op| op.data = "+443".into()).is_err());
     assert!(leaf_at(3, &|op| op.data = "^.*$".into()).is_err());
     // Nothing else.
     assert!(changed(&|rule| {
@@ -189,6 +190,7 @@ fn a_program_is_an_exact_path_under_usr() {
         "/usr//bin/flatpak",
         "/usr/",
         "/opt/flatpak",
+        "/usr/local/bin/flatpak",
         "usr/bin/flatpak",
         "/usr/bin/flat\npak",
     ] {

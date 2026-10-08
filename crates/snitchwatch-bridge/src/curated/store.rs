@@ -1,11 +1,22 @@
 //! The user's curated-defaults choices, kept with the other bridge state:
-//! which entries they turned on, the copy Snitchwatch installed of each
-//! (to tell an edited rule from ours), and which were deleted outside
-//! Snitchwatch (never reinstalled until turned on again).
+//! which entries they turned on, the copy Snitchwatch installed of each (in
+//! [`CanonicalRule`] form, to tell its own copy from an edited one), and
+//! which were removed outside the Recommended page (never reinstalled until
+//! turned off and on again).
 //!
 //! Saved as one small JSON file through [`crate::state_file`] (owner-only,
-//! no links, no FIFOs, atomic replace). A file that fails any check is an
-//! error: the caller keeps the choices in memory and leaves the file alone.
+//! no links, no FIFOs, atomic replace). Reading:
+//! - no file is the first run: nothing on;
+//! - a file that fails a file check, isn't JSON of a known version, or has
+//!   unknown fields is an **error**, and the caller changes nothing in the
+//!   firewall (code review H1);
+//! - inside a readable file, an id that isn't an entry id, or a recorded
+//!   copy that isn't exactly that entry's rule (or, for an entry no longer
+//!   in the list, a curated rule), is dropped with a warning (lenient: a
+//!   copy from an older list then reads as edited, so it is left alone).
+//!
+//! Version 1 (the wire JSON of each copy) is still read; version 2 is
+//! written.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
@@ -13,6 +24,10 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use snitchwatch_proto::protocol::Rule;
+
+use super::canonical::{canonical, CanonicalRule};
+use crate::rule_name::CURATED_DEFAULT_RULE_NAME_PREFIX;
+use crate::state_file::invalid;
 
 /// Everything the curated defaults remember.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -22,18 +37,20 @@ pub struct Choices {
     /// the user says so.
     pub enabled: BTreeSet<String>,
     /// What Snitchwatch installed, by entry id.
-    pub installed: BTreeMap<String, InstalledCopy>,
-    /// Entries installed once and then deleted outside Snitchwatch.
+    pub installed: BTreeMap<String, CanonicalRule>,
+    /// Entries whose rule was removed outside the Recommended page, or by
+    /// its Remove button.
     pub deleted_by_user: BTreeSet<String>,
 }
 
 impl Choices {
-    /// The user turned `id` on. A deletion they made earlier no longer
-    /// holds: they asked for it again.
+    /// The user turned `id` on. Only a change from off forgets a removal:
+    /// "Turn all on" over an entry already on reinstalls nothing (M1).
     pub fn enable(&self, id: &str) -> Self {
         let mut next = self.clone();
-        next.enabled.insert(id.to_string());
-        next.deleted_by_user.remove(id);
+        if next.enabled.insert(id.to_string()) {
+            next.deleted_by_user.remove(id);
+        }
         next
     }
 
@@ -46,8 +63,7 @@ impl Choices {
     /// Record a confirmed install of `rule` for `id`.
     pub fn installed(&self, id: &str, rule: &Rule) -> Self {
         let mut next = self.clone();
-        next.installed
-            .insert(id.to_string(), InstalledCopy::of(rule));
+        next.installed.insert(id.to_string(), canonical(rule));
         next
     }
 
@@ -57,29 +73,13 @@ impl Choices {
         next.installed.remove(id);
         next
     }
-}
 
-/// The rule Snitchwatch sent for an entry, in the wire shape.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct InstalledCopy {
-    pub name: String,
-    pub rule: serde_json::Value,
-}
-
-impl InstalledCopy {
-    pub fn of(rule: &Rule) -> Self {
-        Self {
-            name: rule.name.clone(),
-            rule: crate::rule_wire::rule_to_wire(rule),
-        }
-    }
-
-    /// Whether the daemon's `rule` is this copy, apart from `enabled`.
-    pub fn matches(&self, rule: &Rule) -> bool {
-        rule.name == self.name
-            && crate::rule_wire::rule_from_wire(&self.rule)
-                .is_ok_and(|ours| super::reconcile::same_ignoring_enabled(&ours, rule))
+    /// Record that the user had `id`'s rule removed: never reinstalled until
+    /// they turn it off and on again.
+    pub fn user_removed(&self, id: &str) -> Self {
+        let mut next = self.removed(id);
+        next.deleted_by_user.insert(id.to_string());
+        next
     }
 }
 
@@ -88,7 +88,7 @@ pub const FILE_NAME: &str = "curated-defaults.json";
 /// Far more than the choices for a few hundred entries.
 const MAX_FILE_BYTES: u64 = 512 * 1024;
 const MAX_IDS: usize = 256;
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -97,63 +97,127 @@ struct FileFormat {
     choices: Choices,
 }
 
-/// The saved choices; `None` when there is no file.
+/// Version 1: each installed copy as the GUI wire JSON.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct FileFormatV1 {
+    #[allow(dead_code)]
+    version: u32,
+    choices: ChoicesV1,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase", default, deny_unknown_fields)]
+struct ChoicesV1 {
+    enabled: BTreeSet<String>,
+    installed: BTreeMap<String, InstalledCopyV1>,
+    deleted_by_user: BTreeSet<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct InstalledCopyV1 {
+    #[allow(dead_code)]
+    name: String,
+    rule: serde_json::Value,
+}
+
+#[derive(Deserialize)]
+struct Versioned {
+    version: u32,
+}
+
+/// The saved choices; `None` when there is no file. The error carries the
+/// detail for the log; GUIs get a fixed reason.
 pub fn load(path: &Path) -> io::Result<Option<Choices>> {
     let Some(bytes) = crate::state_file::read(path, MAX_FILE_BYTES)? else {
         return Ok(None);
     };
-    let format: FileFormat = serde_json::from_slice(&bytes)
-        .map_err(|_| crate::state_file::invalid("couldn't parse the file"))?;
-    if format.version != VERSION {
-        return Err(crate::state_file::invalid("unsupported version"));
+    let parse_error = |e: serde_json::Error| invalid(format!("couldn't parse the file: {e}"));
+    let Versioned { version } = serde_json::from_slice(&bytes).map_err(parse_error)?;
+    let choices = match version {
+        1 => from_v1(serde_json::from_slice::<FileFormatV1>(&bytes).map_err(parse_error)?),
+        VERSION => {
+            serde_json::from_slice::<FileFormat>(&bytes)
+                .map_err(parse_error)?
+                .choices
+        }
+        other => return Err(invalid(format!("unsupported version {other}"))),
+    };
+    let count = choices.enabled.len() + choices.deleted_by_user.len() + choices.installed.len();
+    if count > 3 * MAX_IDS {
+        return Err(invalid("the file lists too many entries"));
     }
-    validate(&format.choices)?;
-    Ok(Some(format.choices))
+    Ok(Some(lenient(choices)))
 }
 
-/// Replace the file with `choices`, atomically.
+fn from_v1(file: FileFormatV1) -> Choices {
+    let installed = file
+        .choices
+        .installed
+        .into_iter()
+        .filter_map(|(id, copy)| {
+            let rule = crate::rule_wire::rule_from_wire(&copy.rule).ok()?;
+            Some((id, canonical(&rule)))
+        })
+        .collect();
+    Choices {
+        enabled: file.choices.enabled,
+        installed,
+        deleted_by_user: file.choices.deleted_by_user,
+    }
+}
+
+/// Drop what isn't valid, with a warning; keep the rest.
+fn lenient(choices: Choices) -> Choices {
+    let next = cleaned(choices.clone());
+    if next != choices {
+        tracing::warn!("curated defaults: ignored saved ids or copies that aren't valid");
+    }
+    next
+}
+
+fn cleaned(choices: Choices) -> Choices {
+    let valid = |id: &String| super::valid_id(id);
+    Choices {
+        enabled: choices.enabled.into_iter().filter(valid).collect(),
+        deleted_by_user: choices.deleted_by_user.into_iter().filter(valid).collect(),
+        installed: choices
+            .installed
+            .into_iter()
+            .filter(|(id, copy)| valid_copy(id, copy))
+            .collect(),
+    }
+}
+
+/// A recorded copy is the entry's exact rule (security review L2: a crafted
+/// copy can't make a different port or host read as unedited); for an id
+/// no longer in the list, a curated rule of that name (only ever used to
+/// delete an identical rule under the prefix).
+fn valid_copy(id: &str, copy: &CanonicalRule) -> bool {
+    if !super::valid_id(id) || copy.name != format!("{CURATED_DEFAULT_RULE_NAME_PREFIX}{id}") {
+        return false;
+    }
+    match super::entries().iter().find(|entry| entry.id == id) {
+        Some(entry) => *copy == canonical(&entry.rule()),
+        None => super::check_curated_rule(&copy.to_rule()).is_ok(),
+    }
+}
+
+/// Replace the file with `choices`, atomically. Refuses what `load` would
+/// drop: the bridge only writes what it made.
 pub fn save(path: &Path, choices: &Choices) -> io::Result<()> {
-    validate(choices)?;
+    if cleaned(choices.clone()) != *choices {
+        return Err(invalid("the choices hold an invalid id or copy"));
+    }
     let bytes = serde_json::to_vec(&FileFormat {
         version: VERSION,
         choices: choices.clone(),
     })?;
     if bytes.len() as u64 > MAX_FILE_BYTES {
-        return Err(crate::state_file::invalid(
-            "the choices are too large to save",
-        ));
+        return Err(invalid("the choices are too large to save"));
     }
     crate::state_file::write(path, &bytes)
-}
-
-/// Every id is an entry id; every installed copy is a curated rule of the
-/// name its id gives (what `save` writes, `load` accepts).
-fn validate(choices: &Choices) -> io::Result<()> {
-    let ids = choices
-        .enabled
-        .iter()
-        .chain(&choices.deleted_by_user)
-        .chain(choices.installed.keys());
-    let count = choices.enabled.len() + choices.deleted_by_user.len() + choices.installed.len();
-    if count > 3 * MAX_IDS || !ids.into_iter().all(|id| super::valid_id(id)) {
-        return Err(crate::state_file::invalid(
-            "the file lists an invalid entry id",
-        ));
-    }
-    for (id, copy) in &choices.installed {
-        let rule = crate::rule_wire::rule_from_wire(&copy.rule)
-            .map_err(|_| crate::state_file::invalid("an installed copy isn't a rule"))?;
-        let expected = format!("{}{id}", crate::rule_name::CURATED_DEFAULT_RULE_NAME_PREFIX);
-        if copy.name != expected
-            || rule.name != expected
-            || super::check_curated_rule(&rule).is_err()
-        {
-            return Err(crate::state_file::invalid(
-                "an installed copy isn't a curated default",
-            ));
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]

@@ -9,22 +9,29 @@ use snitchwatch_proto::protocol::{
     Action, Notification, NotificationReply, NotificationReplyCode, Rule,
 };
 
-const FLATPAK: &str = "flatpak-flathub";
-const FLATPAK_RULE: &str = "snitchwatch-default-flatpak-flathub";
+pub(super) const FLATPAK: &str = "flatpak-flathub";
+pub(super) const FLATPAK_RULE: &str = "snitchwatch-default-flatpak-flathub";
 
-#[derive(Clone, Copy)]
-enum Daemon {
+/// How the scripted daemon answers; changeable while it runs.
+#[derive(Clone, Copy, PartialEq)]
+pub(super) enum Daemon {
     Accept,
     Refuse,
+    RefuseDeletes,
 }
 
-struct Harness {
+pub(super) struct Harness {
     _state: tempfile::TempDir,
-    file: PathBuf,
-    commands: DaemonCommands,
-    rules: RulesSync,
-    seen: Arc<Mutex<Vec<Notification>>>,
-    stream: Option<(StreamRegistration, u64)>,
+    pub(super) file: PathBuf,
+    pub(super) commands: DaemonCommands,
+    pub(super) rules: RulesSync,
+    /// The bridge's one broadcast, as in production.
+    pub(super) broadcast: broadcast::Sender<ServerMessage>,
+    pub(super) seen: Arc<Mutex<Vec<Notification>>>,
+    pub(super) policy: Arc<Mutex<Daemon>>,
+    /// While set, the daemon waits for it before answering the next command.
+    pub(super) hold: Arc<Mutex<Option<Arc<tokio::sync::Notify>>>>,
+    pub(super) stream: Option<(StreamRegistration, u64)>,
 }
 
 fn reply(id: u64, ok: bool) -> NotificationReply {
@@ -40,37 +47,48 @@ fn reply(id: u64, ok: bool) -> NotificationReply {
 }
 
 impl Harness {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/t");
         std::fs::create_dir_all(&base).unwrap();
         let state = tempfile::tempdir_in(base).unwrap();
         let file = state.path().canonicalize().unwrap().join(store::FILE_NAME);
-        let rules = RulesSync::new(broadcast::channel(64).0);
+        let broadcast = broadcast::channel(256).0;
+        let rules = RulesSync::new(broadcast.clone());
         Self {
             _state: state,
             file,
             commands: DaemonCommands::new(DaemonTransport::Unix, rules.clone()),
             rules,
+            broadcast,
             seen: Arc::default(),
+            policy: Arc::new(Mutex::new(Daemon::Accept)),
+            hold: Arc::default(),
             stream: None,
         }
     }
 
     /// A daemon whose rule list is `snapshot`, answering as `daemon`.
-    fn connect(mut self, daemon: Daemon, snapshot: Vec<Rule>) -> Self {
+    pub(super) fn connect(mut self, daemon: Daemon, snapshot: Vec<Rule>) -> Self {
+        *self.policy.lock().unwrap() = daemon;
         self.rules.stage(None, snapshot);
         let (stream, mut rx) = self.commands.open_stream(None);
         let stream_id = stream.id();
         self.commands.on_reply(stream_id, &reply(0, true));
         let commands = self.commands.clone();
-        let seen = self.seen.clone();
+        let (seen, policy, hold) = (self.seen.clone(), self.policy.clone(), self.hold.clone());
         tokio::spawn(async move {
             while let Some(command) = rx.recv().await {
                 seen.lock().unwrap().push(command.clone());
-                commands.on_reply(
-                    stream_id,
-                    &reply(command.id, matches!(daemon, Daemon::Accept)),
-                );
+                let gate = hold.lock().unwrap().take();
+                if let Some(gate) = gate {
+                    gate.notified().await;
+                }
+                let ok = match *policy.lock().unwrap() {
+                    Daemon::Accept => true,
+                    Daemon::Refuse => false,
+                    Daemon::RefuseDeletes => command.r#type != Action::DeleteRule as i32,
+                };
+                commands.on_reply(stream_id, &reply(command.id, ok));
             }
         });
         self.stream = Some((stream, stream_id));
@@ -78,23 +96,23 @@ impl Harness {
     }
 
     /// The daemon restarts with rule list `snapshot` (a new HELLO).
-    fn resync(&self, snapshot: Vec<Rule>) {
+    pub(super) fn resync(&self, snapshot: Vec<Rule>) {
         self.rules.stage(None, snapshot);
         let (_, stream_id) = self.stream.as_ref().unwrap();
         self.commands.on_reply(*stream_id, &reply(0, true));
     }
 
-    fn curated(&self) -> CuratedDefaults {
+    pub(super) fn curated(&self) -> CuratedDefaults {
         let curated = CuratedDefaults::new(
             self.commands.clone(),
             self.rules.cache(),
-            broadcast::channel(64).0,
+            self.broadcast.clone(),
         );
         curated.attach_file(self.file.clone());
         curated
     }
 
-    fn seen(&self) -> Vec<(i32, String)> {
+    pub(super) fn seen(&self) -> Vec<(i32, String)> {
         self.seen
             .lock()
             .unwrap()
@@ -104,7 +122,7 @@ impl Harness {
     }
 }
 
-fn turn(curated: &CuratedDefaults, id: &str, on: bool) {
+pub(super) fn turn(curated: &CuratedDefaults, id: &str, on: bool) {
     let routed = curated.try_route(ClientMessage::SetCuratedDefaults {
         ids: vec![id.into()],
         on,
@@ -112,7 +130,7 @@ fn turn(curated: &CuratedDefaults, id: &str, on: bool) {
     assert!(routed.is_none(), "the worker takes its own message");
 }
 
-fn entry_state(curated: &CuratedDefaults, id: &str) -> CuratedDefaultSummary {
+pub(super) fn entry_state(curated: &CuratedDefaults, id: &str) -> CuratedDefaultSummary {
     match curated.message() {
         ServerMessage::SetCuratedDefaults { entries, .. } => {
             entries.into_iter().find(|e| e.id == id).unwrap()
@@ -121,7 +139,7 @@ fn entry_state(curated: &CuratedDefaults, id: &str) -> CuratedDefaultSummary {
     }
 }
 
-fn flatpak_rule() -> Rule {
+pub(super) fn flatpak_rule() -> Rule {
     entries().iter().find(|e| e.id == FLATPAK).unwrap().rule()
 }
 
@@ -164,7 +182,10 @@ async fn an_entry_turned_on_is_installed_and_reported_only_after_the_daemons_ok(
     // Saved: on, and the copy that was installed.
     let saved = store::load(&harness.file).unwrap().unwrap();
     assert!(saved.enabled.contains(FLATPAK));
-    assert!(saved.installed[FLATPAK].matches(&flatpak_rule()));
+    assert_eq!(
+        saved.installed[FLATPAK],
+        crate::curated::canonical::canonical(&flatpak_rule())
+    );
 }
 
 #[tokio::test]

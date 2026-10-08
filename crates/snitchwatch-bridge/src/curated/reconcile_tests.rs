@@ -15,6 +15,19 @@ fn daemon(rules: &[Rule]) -> BTreeMap<String, Rule> {
         .collect()
 }
 
+const NONE_LEFT_OUT: &BTreeSet<String> = &BTreeSet::new();
+
+fn plan(entries: &[CuratedEntry], rules: &BTreeMap<String, Rule>, choices: &Choices) -> Plan {
+    super::plan(
+        entries,
+        DaemonRules {
+            rules,
+            left_out: NONE_LEFT_OUT,
+        },
+        choices,
+    )
+}
+
 fn status(plan: &Plan, id: &str) -> EntryStatus {
     plan.statuses[id]
 }
@@ -178,23 +191,42 @@ fn an_unrecorded_copy_matching_the_file_is_adopted() {
     assert_eq!(status(&plan, "flatpak-flathub"), EntryStatus::Installed);
 }
 
+/// Security review L4: a curated name too large for the bridge's list is
+/// treated as edited: never installed over, never deleted.
 #[test]
-fn the_comparison_ignores_member_order_and_enabled_only() {
-    let ours = flatpak().rule();
-    let mut reordered = ours.clone();
-    reordered.operator.as_mut().unwrap().list.reverse();
-    reordered.enabled = false;
-    reordered.created = 1_700_000_000;
-    assert!(same_ignoring_enabled(&ours, &reordered));
-    for change in [
-        |r: &mut Rule| r.action = "deny".into(),
-        |r: &mut Rule| r.duration = "until restart".into(),
-        |r: &mut Rule| r.precedence = true,
-        |r: &mut Rule| r.description = "mine".into(),
-        |r: &mut Rule| r.operator.as_mut().unwrap().list[0].sensitive = false,
-    ] {
-        let mut edited = ours.clone();
-        change(&mut edited);
-        assert!(!same_ignoring_enabled(&ours, &edited));
+fn a_rule_too_large_to_read_is_left_alone() {
+    let name = flatpak().rule_name();
+    let left_out = BTreeSet::from([name]);
+    let on = Choices::default().enable("flatpak-flathub");
+    let side = DaemonRules {
+        rules: &BTreeMap::new(),
+        left_out: &left_out,
+    };
+    for choices in [on.clone(), on.disable("flatpak-flathub")] {
+        let plan = super::plan(entries(), side, &choices);
+        assert!(plan.actions.is_empty(), "{:?}", plan.actions);
+        assert_eq!(status(&plan, "flatpak-flathub"), EntryStatus::EditedByYou);
     }
+    assert_eq!(
+        inert_statuses(entries(), side)["flatpak-flathub"],
+        EntryStatus::EditedByYou
+    );
+}
+
+/// Security review L3: an inert bridge says what the daemon has.
+#[test]
+fn an_inert_bridge_reports_what_the_daemon_has() {
+    let mut edited = entries()[0].rule();
+    edited.precedence = true;
+    let rules = daemon(&[flatpak().rule(), edited]);
+    let statuses = inert_statuses(
+        entries(),
+        DaemonRules {
+            rules: &rules,
+            left_out: NONE_LEFT_OUT,
+        },
+    );
+    assert_eq!(statuses["flatpak-flathub"], EntryStatus::InFirewall);
+    assert_eq!(statuses[&entries()[0].id], EntryStatus::EditedByYou);
+    assert_eq!(statuses["chronyc-local"], EntryStatus::Unavailable);
 }

@@ -103,7 +103,8 @@ pub fn apply(
         // (`deferred_answers::decide_later`).
         | ClientMessage::DecideLater { .. }
         // Routed to the curated defaults' worker before this point.
-        | ClientMessage::SetCuratedDefaults { .. } => Ok(UpstreamEffect::None),
+        | ClientMessage::SetCuratedDefaults { .. }
+        | ClientMessage::RemoveCuratedDefault { .. } => Ok(UpstreamEffect::None),
     }
 }
 

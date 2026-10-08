@@ -18,6 +18,7 @@
 //! under the prefix only in exactly the shape [`CuratedEntry::rule`] builds,
 //! and only if it also passes the rule editor's policy checks.
 
+pub mod canonical;
 pub mod manager;
 pub mod reconcile;
 pub mod store;
@@ -95,6 +96,9 @@ struct DataFile {
 
 /// The entries offered. An invalid data file is a build mistake the tests
 /// catch; at run time it offers nothing rather than something unchecked.
+/// Reconcile then treats every recorded copy as retired: an unedited one is
+/// deleted, an edited one left alone (the safe direction: no allow stays
+/// that the bridge can no longer describe).
 pub fn entries() -> &'static [CuratedEntry] {
     static ENTRIES: OnceLock<Vec<CuratedEntry>> = OnceLock::new();
     ENTRIES.get_or_init(|| {
@@ -105,21 +109,19 @@ pub fn entries() -> &'static [CuratedEntry] {
     })
 }
 
-/// Whether a GUI may turn the daemon's `rule` on or off: an entry's rule
-/// exactly as the data file builds it, apart from `enabled`. A copy edited
-/// outside Snitchwatch, or a rule squatting on the prefix, is left alone.
+/// Whether a GUI may turn the daemon's `rule` on or off: an entry's rule,
+/// unedited ([`canonical::is_unedited`]). A copy edited outside
+/// Snitchwatch, or a rule squatting on the prefix, is left alone.
 pub fn toggleable(rule: &Rule) -> bool {
     entry_for_rule_name(&rule.name)
-        .is_some_and(|entry| reconcile::same_ignoring_enabled(&entry.rule(), rule))
+        .is_some_and(|entry| canonical::is_unedited(Some(entry), None, rule))
 }
 
 /// The `enabled` a GUI's wire rule asks for, if it is `current` apart from
 /// `enabled` (same name, same everything else); `None` otherwise.
 pub fn requested_toggle(current: &Rule, wire: &serde_json::Value) -> Option<bool> {
     let wanted = crate::rule_wire::rule_from_wire(wire).ok()?;
-    let pure =
-        wanted.name == current.name && crate::rule_io::only_enabled_differs(current, &wanted);
-    pure.then_some(wanted.enabled)
+    (canonical::canonical(&wanted) == canonical::canonical(current)).then_some(wanted.enabled)
 }
 
 /// The entry whose rule is called `name`.
@@ -236,9 +238,10 @@ pub(crate) fn valid_id(id: &str) -> bool {
         && !id.ends_with('-')
 }
 
-/// An exact absolute program path under `/usr` (#44's bindable-path rule).
+/// An exact absolute program path under `/usr`, not `/usr/local` (#44's
+/// bindable-path rule): a program the system image ships.
 fn usr_program(path: &str) -> bool {
-    path.starts_with("/usr/") && is_bindable_process_path(path)
+    path.starts_with("/usr/") && !path.starts_with("/usr/local/") && is_bindable_process_path(path)
 }
 
 /// One plain host name: lowercase labels of letters, digits and dashes,
@@ -268,7 +271,8 @@ fn plain_text(text: &str) -> bool {
 /// The curated-specific allowlist. A rule under the reserved prefix is sent
 /// only if it is an `always`, non-precedence `allow` with our description,
 /// whose conditions are exactly: an exact `/usr` program path (case
-/// sensitive); one plain host or this computer; one port; one transport. It must also pass the rule editor's policy checks.
+/// sensitive); one plain host or this computer; one port; one transport.
+/// It must also pass the rule editor's policy checks.
 pub fn check_curated_rule(rule: &Rule) -> Result<(), String> {
     let id = rule
         .name
@@ -320,6 +324,7 @@ fn check_leaves(leaves: &[Operator]) -> Result<(), String> {
         Some(op)
             if op.r#type == "simple"
                 && op.operand == "dest.port"
+                && op.data.bytes().all(|b| b.is_ascii_digit())
                 && op.data.parse::<u16>().is_ok_and(|port| port != 0)
                 && !op.data.starts_with('0') => {}
         _ => return Err("the port condition isn't one port".into()),

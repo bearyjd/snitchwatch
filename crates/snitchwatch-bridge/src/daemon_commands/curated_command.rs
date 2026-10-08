@@ -16,9 +16,10 @@
 //! ([`DaemonCommands::send_curated_toggle`]), never add, edit or delete one.
 //!
 //! [`check`](CuratedCommand::check) re-validates at the send point: a
-//! `CHANGE_RULE` carries exactly one rule that passes
-//! `curated::check_curated_rule` (the curated-specific allowlist plus the
-//! rule editor's checks); a `DELETE_RULE` names one rule under the prefix.
+//! `CHANGE_RULE` carries exactly one rule, a list entry's own (apart from
+//! `enabled` and `created`), that also passes `curated::check_curated_rule`
+//! (the curated-specific allowlist plus the rule editor's checks); a
+//! `DELETE_RULE` names one rule under the prefix.
 
 use snitchwatch_proto::protocol::{Action, Notification, Rule};
 
@@ -100,6 +101,12 @@ impl CuratedCommand {
         if self.notification.r#type != Action::ChangeRule as i32 {
             return Err(SendError::NotAllowed);
         }
+        // Exactly a list entry's rule (security review L2), and the shape.
+        let exact = entry_for_rule_name(&rule.name)
+            .is_some_and(|entry| crate::curated::canonical::is_unedited(Some(entry), None, rule));
+        if !exact {
+            return Err(SendError::RefusedOperator);
+        }
         check_curated_rule(rule).map_err(|_| SendError::RefusedOperator)
     }
 }
@@ -122,8 +129,8 @@ impl DaemonCommands {
     /// A GUI's pure toggle of the curated rule `name` (plan item 13): the
     /// data file's rule, sent only while the daemon's cached copy is that
     /// rule apart from `enabled`. The GUI supplies nothing else, so it can't
-    /// add, widen or keep alive any other rule under the prefix. [`SendError::ReservedName`] unless the cached rule is
-    /// [`toggleable`].
+    /// add, widen or keep alive any other rule under the prefix.
+    /// [`SendError::ReservedName`] unless the cached rule is [`toggleable`].
     pub fn send_curated_toggle(
         &self,
         name: &str,
@@ -178,6 +185,20 @@ mod tests {
         let mut other_delete = CuratedCommand::delete(&flatpak().rule_name()).unwrap();
         other_delete.notification.rules[0].name = "user-rule".into();
         assert_eq!(other_delete.check(), Err(SendError::RefusedOperator));
+        // Security review L2: still the curated shape, but not the list's
+        // rule (another port, or another entry's name), is refused too.
+        let mut other_port = CuratedCommand::install(flatpak());
+        other_port.notification.rules[0]
+            .operator
+            .as_mut()
+            .unwrap()
+            .list[2]
+            .data = "8443".into();
+        assert!(check_curated_rule(other_port.rule().unwrap()).is_ok());
+        assert_eq!(other_port.check(), Err(SendError::RefusedOperator));
+        let mut unlisted = CuratedCommand::install(flatpak());
+        unlisted.notification.rules[0].name = "snitchwatch-default-unlisted".into();
+        assert_eq!(unlisted.check(), Err(SendError::RefusedOperator));
     }
 
     #[test]
