@@ -25,9 +25,15 @@
 //! "unused" by 14 days instead of ruling it out for good, and an old gap
 //! costs nothing.
 //!
-//! One thing the badge cannot know: when the rule was last *enabled*. A rule
-//! turned on yesterday shows as unused if it has been created for 14 days. The
-//! wording stays literal ("no hits counted in the last 14 days").
+//! What the badge cannot know: when the rule was last *enabled*, or put back
+//! by something other than Snitchwatch. An edit or re-enable made here
+//! restamps its `created` (the daemon rebuilds the rule and the bridge follows,
+//! `RulesCache::upsert`), which starts a new period. One made by editing the
+//! rule file does not, and a rule that was away and returns with its old
+//! `created` leaves a gap only if it had counted hits (the bridge's
+//! `adopt_snapshot`): one with none that returns after 14 days reads
+//! "Unused" at once. The wording stays literal ("no hits counted in the last
+//! 14 days").
 
 use super::is_managed;
 use crate::rules::hits::{RowHits, RuleHitsView};
