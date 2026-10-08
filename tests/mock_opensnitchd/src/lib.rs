@@ -173,13 +173,14 @@ impl MockOpensnitchd {
         Ok(rule)
     }
 
-    /// Like [`Self::ask_rule`], but the deadline travels on the wire as a
-    /// `grpc-timeout` header, the way grpc-go's `context.WithTimeout` does.
-    /// When it expires the client cancels the RPC (`RST_STREAM`), so the
-    /// bridge sees its handler future dropped. `ask_rule`'s local
-    /// `tokio::time::timeout` never reaches the server that way. An expired
-    /// deadline surfaces as `MockError::Rpc` with `Cancelled` or
-    /// `DeadlineExceeded`.
+    /// Like [`Self::ask_rule`], but the deadline is sent as a `grpc-timeout`
+    /// header, the way grpc-go's `context.WithTimeout` carries it, instead of
+    /// being a local `tokio::time::timeout` the server never hears about.
+    /// In tonic 0.12 `Request::set_timeout` only sets that header; tonic's
+    /// `GrpcTimeout` layer enforces it on both the client channel and the
+    /// server, so when it expires the bridge's handler future is dropped,
+    /// whichever side's timer fires first. An expired deadline surfaces as
+    /// `MockError::Rpc` with `Cancelled` or `DeadlineExceeded`.
     pub async fn ask_rule_with_deadline(
         &mut self,
         conn: Connection,

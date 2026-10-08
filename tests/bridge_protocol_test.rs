@@ -817,19 +817,19 @@ async fn next_server_message(ws: &mut WebSocketStream<UnixStream>) -> ServerMess
 
 /// Issue #49 ("stuck pending rows"), end to end: opensnitchd gives every
 /// `AskRule` a 120 s context deadline and then applies its default action.
-/// grpc-go sends that deadline as `grpc-timeout` and resets the stream when
-/// it fires, so the bridge learns the prompt is dead only because its handler
-/// future is dropped (`grpc_server::PendingCleanup`). The GUI here is
-/// authenticated but never answers, which is exactly what left the row
-/// pending before #39.
+/// The bridge learns the prompt is dead only because its handler future is
+/// dropped (`grpc_server::PendingCleanup`), as when a grpc-go call is
+/// cancelled. The GUI here is authenticated but never answers, which is
+/// exactly what left the row pending before #39.
 ///
 /// Asserts what that GUI is shown: the row appears, then is removed, and the
 /// tray returns to `Idle`. A verdict that arrives after the removal must
 /// change nothing: no `UpdateConnectionRows`, no `UpdateRules`.
 ///
-/// The deadline is 300 ms rather than 120 s. It exercises the same
-/// cancellation path, since `MockOpensnitchd::ask_rule_with_deadline` puts it
-/// on the wire instead of timing out locally.
+/// The deadline is 300 ms rather than 120 s. `MockOpensnitchd::
+/// ask_rule_with_deadline` sends it as a `grpc-timeout` header, which tonic's
+/// timeout layer enforces by dropping the handler future (see that method),
+/// so the same cleanup runs. It does not time out locally.
 #[tokio::test]
 async fn ask_rule_deadline_removes_row_for_silent_gui_and_rejects_late_verdict() {
     let dir = tempfile::tempdir().unwrap();
