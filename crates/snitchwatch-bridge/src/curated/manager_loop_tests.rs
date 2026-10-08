@@ -6,11 +6,28 @@ use super::*;
 use snitchwatch_proto::protocol::{Action, Rule};
 use std::os::unix::fs::PermissionsExt;
 
-/// The real worker, left running against `harness` for `ms`.
-async fn run_worker_for(harness: &Harness, curated: &CuratedDefaults, ms: u64) {
-    let worker = curated.spawn(harness.rules.synced());
-    tokio::time::sleep(Duration::from_millis(ms)).await;
-    worker.abort();
+/// How long a hot loop gets to show itself once the worker has settled:
+/// unbounded re-sending ran thousands of commands in this time (PR #105
+/// re-review), while a correct worker sends nothing more.
+const SETTLE: Duration = Duration::from_millis(400);
+
+/// Wait, by observation rather than wall time, until `done` holds; a slow
+/// runner only makes this take longer.
+async fn eventually(what: &str, done: impl Fn() -> bool) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !done() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("timed out waiting for {what}"));
+}
+
+fn passes(curated: &CuratedDefaults) -> u64 {
+    curated
+        .inner
+        .passes
+        .load(std::sync::atomic::Ordering::SeqCst)
 }
 
 fn edited(id: &str) -> Rule {
@@ -25,12 +42,14 @@ async fn a_refused_install_is_sent_once_not_in_a_loop() {
     let harness = Harness::new().connect(Daemon::Refuse, Vec::new());
     let curated = harness.curated();
     turn(&curated, FLATPAK, true);
-    run_worker_for(&harness, &curated, 300).await;
+    let worker = curated.spawn(harness.rules.synced());
+    eventually("the install's refusal", || {
+        entry_state(&curated, FLATPAK).status == EntryStatus::NotInstalled
+    })
+    .await;
+    tokio::time::sleep(SETTLE).await;
+    worker.abort();
     assert_eq!(harness.seen().len(), 1, "{} sends", harness.seen().len());
-    assert_eq!(
-        entry_state(&curated, FLATPAK).status,
-        EntryStatus::NotInstalled
-    );
 }
 
 #[tokio::test]
@@ -38,12 +57,14 @@ async fn a_refused_delete_is_sent_once_not_in_a_loop() {
     let harness = Harness::new().connect(Daemon::RefuseDeletes, vec![flatpak_rule()]);
     let curated = harness.curated();
     turn(&curated, FLATPAK, false);
-    run_worker_for(&harness, &curated, 300).await;
+    let worker = curated.spawn(harness.rules.synced());
+    eventually("the delete's refusal", || {
+        entry_state(&curated, FLATPAK).status == EntryStatus::NotRemoved
+    })
+    .await;
+    tokio::time::sleep(SETTLE).await;
+    worker.abort();
     assert_eq!(harness.seen().len(), 1, "{} sends", harness.seen().len());
-    assert_eq!(
-        entry_state(&curated, FLATPAK).status,
-        EntryStatus::NotRemoved
-    );
 }
 
 /// A choice changed after a failure tries again, once.
@@ -67,11 +88,18 @@ async fn a_new_choice_tries_a_failed_command_again() {
 async fn a_first_run_sends_nothing_for_a_copy_already_there() {
     let harness = Harness::new().connect(Daemon::Accept, vec![flatpak_rule()]);
     let curated = harness.curated();
-    run_worker_for(&harness, &curated, 200).await;
+    let worker = curated.spawn(harness.rules.synced());
+    eventually("the first pass", || {
+        entry_state(&curated, FLATPAK).status == EntryStatus::InFirewall
+    })
+    .await;
+    tokio::time::sleep(SETTLE).await;
+    worker.abort();
     assert!(harness.seen().is_empty(), "{:?}", harness.seen());
-    let state = entry_state(&curated, FLATPAK);
-    assert_eq!(state.status, EntryStatus::InFirewall);
-    assert!(state.on, "the switch shows the rule active");
+    assert!(
+        entry_state(&curated, FLATPAK).on,
+        "the switch shows the rule active"
+    );
 }
 
 /// LOW-2: a save that fails after an `OK` stops the rest of the pass
@@ -156,13 +184,7 @@ async fn a_withdrawn_list_drops_queued_removals() {
 }
 
 async fn wait_until(done: impl Fn() -> bool) {
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while !done() {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("timed out");
+    eventually("the first command", done).await;
 }
 
 /// The pass gate: rule-list broadcasts that change nothing a pass reads run
@@ -172,22 +194,22 @@ async fn broadcasts_that_change_nothing_run_no_pass() {
     let harness = Harness::new().connect(Daemon::Accept, Vec::new());
     let curated = harness.curated();
     let worker = curated.spawn(harness.rules.synced());
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    let before = curated
-        .inner
-        .passes
-        .load(std::sync::atomic::Ordering::SeqCst);
+    eventually("the first pass", || passes(&curated) >= 1).await;
+    tokio::time::sleep(SETTLE).await;
+    let before = passes(&curated);
     for _ in 0..50 {
         let _ = harness
             .broadcast
             .send(ServerMessage::SetRules { rules: Vec::new() });
         tokio::task::yield_now().await;
     }
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // The worker read them all (it is the broadcast's only receiver).
+    eventually("the worker to read the broadcasts", || {
+        harness.broadcast.is_empty()
+    })
+    .await;
+    tokio::time::sleep(SETTLE).await;
     worker.abort();
-    let after = curated
-        .inner
-        .passes
-        .load(std::sync::atomic::Ordering::SeqCst);
+    let after = passes(&curated);
     assert_eq!(after, before, "{} passes for nothing", after - before);
 }
