@@ -56,7 +56,15 @@ async fn pausing_answers_a_waiting_ask_allow_once_and_labels_its_row() {
     ws.send(Message::Text(bridge.ws_token.as_str().to_string()))
         .await
         .unwrap();
-    assert_eq!(next_frame(&mut ws).await["action"], "authenticated");
+    let ack = next_frame(&mut ws).await;
+    assert_eq!(ack["action"], "authenticated");
+    assert!(
+        ack["capabilities"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("pauseAnswersWaiting")),
+        "{ack}"
+    );
 
     let grpc_addr = bridge.grpc_endpoint.tcp_addr().unwrap();
     let ask = tokio::spawn(async move {
@@ -91,22 +99,24 @@ async fn pausing_answers_a_waiting_ask_allow_once_and_labels_its_row() {
     assert_eq!(rule.action, "allow");
     assert_eq!(rule.duration, "once");
 
-    // The answered row, then the pause state, then the slot's release (sent
-    // once the Ask's reply is built, so after any rule it would have saved).
-    let mut frames = frames_until(&mut ws, "updateConnectionRows").await;
-    let updated = &frames.last().unwrap()["rows"][0];
+    // The answered row, the pause state and the slot's release (sent once the
+    // Ask's reply is built, so after any rule it would have saved). They come
+    // from different tasks, so no order between them is promised: read until
+    // all three are in.
+    let is_update = |f: &Value| f["action"] == "updateConnectionRows";
+    let is_pause_state = |f: &Value| f["action"] == "filterPauseState";
+    let is_release = |f: &Value| f["action"] == "promptSlot" && f["holders"] == 0;
+    let mut frames = Vec::new();
+    while !(frames.iter().any(is_update)
+        && frames.iter().any(is_pause_state)
+        && frames.iter().any(is_release))
+    {
+        frames.push(next_frame(&mut ws).await);
+    }
+    let updated = &frames.iter().find(|f| is_update(f)).unwrap()["rows"][0];
     assert_eq!(updated["id"], row_id.as_str());
     assert_eq!(updated["action"], "allow");
     assert_eq!(updated["autoAnswer"], "filterPaused");
-    frames.extend(frames_until(&mut ws, "filterPauseState").await);
-    loop {
-        let frame = next_frame(&mut ws).await;
-        let released = frame["action"] == "promptSlot" && frame["holders"] == 0;
-        frames.push(frame);
-        if released {
-            break;
-        }
-    }
     assert!(
         !frames.iter().any(|f| f["action"] == "updateRules"),
         "a once answer must not be saved as a rule: {frames:?}"

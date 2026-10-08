@@ -1,7 +1,8 @@
 //! Issue #78 through `ask_rule`: a pause answers the prompts already waiting
 //! Allow once (never a saved rule) and labels their rows, an Ask that reaches
 //! the cache as the pause lands is allowed rather than left waiting, and a
-//! prompt admitted under another GUI session's generation is not answered.
+//! prompt is left waiting when the pause is not in force at the scan: set by
+//! another GUI session's generation, resumed, or expired.
 
 use super::*;
 use crate::cache::connections::Verdict;
@@ -87,6 +88,34 @@ async fn reply(ask: tokio::task::JoinHandle<Result<Response<Rule>, Status>>) -> 
         .unwrap()
         .unwrap()
         .into_inner()
+}
+
+/// A GUI's own Deny once on a still-waiting prompt ends its Ask, and the row
+/// carries no pause label: only the pause's answers do.
+async fn deny_by_hand(
+    cache: &Mutex<ConnectionCache>,
+    ask: tokio::task::JoinHandle<Result<Response<Rule>, Status>>,
+    row_id: &str,
+) {
+    cache
+        .lock()
+        .await
+        .resolve(
+            row_id,
+            Verdict::Deny,
+            VerdictDuration::Once,
+            VerdictScope::ThisHost,
+        )
+        .unwrap();
+    assert_eq!(reply(ask).await.action, "deny");
+    let cache = cache.lock().await;
+    let row = cache
+        .rows()
+        .iter()
+        .find(|row| row.id == row_id)
+        .expect("the answered row is still listed");
+    assert_eq!(row.action.as_deref(), Some("deny"));
+    assert_eq!(row.auto_answer, None, "a GUI's own Deny is not a pause's");
 }
 
 fn assert_allowed_once_and_not_saved(svc: &UiService, rule: &Rule, messages: &[ServerMessage]) {
@@ -181,17 +210,68 @@ async fn a_pause_left_by_a_departed_gui_session_answers_nothing() {
         "GUI A's pause answered GUI B's prompt"
     );
     assert_eq!(cache.lock().await.pending_count(), 1);
-    cache
-        .lock()
-        .await
-        .resolve(
-            &pending.id,
-            Verdict::Deny,
-            VerdictDuration::Once,
-            VerdictScope::ThisHost,
-        )
-        .unwrap();
-    assert_eq!(reply(ask).await.action, "deny");
+    deny_by_hand(&cache, ask, &pending.id).await;
+}
+
+/// The scan found nothing to answer and the prompt is still waiting.
+async fn assert_scan_leaves_waiting(
+    svc: &UiService,
+    cache: &Mutex<ConnectionCache>,
+    rx: &mut broadcast::Receiver<ServerMessage>,
+    why: &str,
+) {
+    assert_eq!(
+        answer_waiting(&svc.filter_pause, cache, &svc.broadcast).await,
+        0,
+        "{why}"
+    );
+    assert_eq!(cache.lock().await.pending_count(), 1, "{why}");
+    assert!(
+        !drain(rx)
+            .iter()
+            .any(|m| matches!(m, ServerMessage::UpdateConnectionRows { .. })),
+        "{why}: the scan answered a row"
+    );
+}
+
+#[tokio::test]
+async fn a_resume_before_the_scan_leaves_a_waiting_prompt_pending() {
+    let (svc, cache, mut rx, _notices) = service();
+    let presence = svc.client_presence();
+    let _gui = presence.authenticated_session();
+    let ask = spawn_ask(&svc, "resumed.example.com");
+    let pending = inserted(&mut rx).await;
+
+    pause_from(&svc, presence.current_generation());
+    crate::client_presence::apply_pause_request(
+        &presence,
+        &svc.filter_pause,
+        PauseRequest::Resume,
+        Some(presence.current_generation()),
+        None,
+    );
+    assert!(!svc.filter_pause.is_active_now());
+
+    assert_scan_leaves_waiting(&svc, &cache, &mut rx, "a resumed pause").await;
+    deny_by_hand(&cache, ask, &pending.id).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_expired_pause_at_the_scan_leaves_a_waiting_prompt_pending() {
+    let (svc, cache, mut rx, _notices) = service();
+    let presence = svc.client_presence();
+    let _gui = presence.authenticated_session();
+    let ask = spawn_ask(&svc, "expired.example.com");
+    let pending = inserted(&mut rx).await;
+
+    pause_from(&svc, presence.current_generation());
+    // Nothing clears the pause here (no expiry task runs in this test): it is
+    // still set, and only its deadline has passed.
+    tokio::time::advance(Duration::from_secs(301)).await;
+    assert!(!svc.filter_pause.is_active_now());
+
+    assert_scan_leaves_waiting(&svc, &cache, &mut rx, "an expired pause").await;
+    deny_by_hand(&cache, ask, &pending.id).await;
 }
 
 #[tokio::test]
