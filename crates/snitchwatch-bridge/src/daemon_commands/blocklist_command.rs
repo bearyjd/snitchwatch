@@ -340,8 +340,10 @@ mod tests {
     }
 
     /// On the Unix socket it goes to the stream whose snapshot the cache
-    /// holds; a stream that said HELLO without one withdraws that snapshot,
-    /// and then nothing is sent at all.
+    /// holds. A later stream's HELLO adopts the snapshot still staged under
+    /// the socket's one key (PR #106 OQ1) and holds it from then on; once
+    /// that stream is gone the snapshot is withdrawn, and then nothing is
+    /// sent at all.
     #[tokio::test]
     async fn a_leftover_delete_goes_only_to_the_stream_whose_snapshot_is_held() {
         let rules = RulesSync::new(broadcast::channel(8).0);
@@ -354,11 +356,15 @@ mod tests {
 
         let (second, mut second_rx) = commands.open_stream(None);
         commands.on_reply(second.id(), &hello());
+        assert!(commands.send_leftover_delete(the_delete()).is_ok());
+        assert!(second_rx.try_recv().is_ok(), "the stream that holds it now");
+        assert!(first_rx.try_recv().is_err());
+
+        drop(second);
         assert!(matches!(
             commands.send_leftover_delete(the_delete()),
             Err(SendError::NoDaemon)
         ));
-        assert!(second_rx.try_recv().is_err());
         assert!(first_rx.try_recv().is_err());
     }
 
