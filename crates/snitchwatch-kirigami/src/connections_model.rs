@@ -26,6 +26,7 @@ use cxx_qt_lib::{
 
 use crate::connections::filter::ConnectionFilter;
 use crate::connections::grouping::{GroupTree, VisibleEntry};
+use crate::connections::outcome::{is_pending, outcome_text};
 use crate::connections::row_store::{matched_rule_display, ModelOp, RowStore, Verdict};
 use crate::inline_deny::{self, InlineDeny};
 use crate::pending_decision::VerdictChoice;
@@ -67,6 +68,14 @@ const ROLE_MATCHED_RULE_DISPLAY: i32 = 19;
 const ROLE_SOURCE_SESSION: i32 = 20;
 /// The bridge allowed this row once because filtering was paused (#78).
 const ROLE_ANSWERED_WHILE_PAUSED: i32 = 21;
+/// A deferred row's verdict label (`connections::outcome::outcome_text`);
+/// empty otherwise. Prompt-slot plan Part C.
+const ROLE_OUTCOME_TEXT: i32 = 22;
+/// When the bridge answers a pending row itself, in Unix ms; -1 if never.
+/// A `real`: epoch milliseconds overflow a QML `int`.
+const ROLE_ANSWER_DEADLINE_MS: i32 = 23;
+/// The prompt was put off, so "Make a rule…" is offered.
+const ROLE_DEFERRED: i32 = 24;
 
 #[cxx_qt::bridge]
 pub mod qobject {
@@ -229,6 +238,20 @@ pub mod qobject {
         #[cxx_name = "simulationPrefillJson"]
         fn simulation_prefill_json(self: &ConnectionsModel, id: &QString) -> QString;
 
+        /// "Make a rule…" for put-off row `id` (prompt-slot plan Part C):
+        /// sends the rule `crate::make_rule` builds from the sheet's tokens
+        /// to the row's bridge session. False when no rule may be made or it
+        /// wasn't queued.
+        #[qinvokable]
+        #[cxx_name = "makeRule"]
+        fn make_rule(
+            self: &ConnectionsModel,
+            id: &QString,
+            choice: &QString,
+            scope: &QString,
+            duration: &QString,
+        ) -> bool;
+
         /// Whether `id` names a row that is still awaiting a decision: present
         /// in the store (independent of the active filter) with no action
         /// yet. `false` for an unknown id. The inspector re-checks this when
@@ -375,7 +398,7 @@ fn collect_new_pending_ids(msgs: &[ServerMessage]) -> Vec<String> {
         .flat_map(|msg| match msg {
             ServerMessage::InsertConnectionRows { rows } => rows
                 .iter()
-                .filter(|r| r.action.is_none())
+                .filter(|r| is_pending(r))
                 .map(|r| r.id.clone())
                 .collect::<Vec<_>>(),
             _ => Vec::new(),
@@ -536,10 +559,10 @@ impl qobject::ConnectionsModel {
             ROLE_PORT => QVariant::from(&(row.dst_port as i32)),
             ROLE_PROTOCOL => QVariant::from(&QString::from(&row.protocol)),
             ROLE_VERDICT => {
-                let v = Verdict::from_action(row.action.as_deref());
+                let v = Verdict::of(row);
                 QVariant::from(&QString::from(v.as_token()))
             }
-            ROLE_PENDING => QVariant::from(&row.action.is_none()),
+            ROLE_PENDING => QVariant::from(&is_pending(row)),
             ROLE_DEPTH => QVariant::from(&0i32),
             ROLE_IS_GROUP_HEADER => QVariant::from(&false),
             ROLE_EXPANDED => QVariant::from(&false),
@@ -556,6 +579,9 @@ impl qobject::ConnectionsModel {
             }
             ROLE_MATCHED_RULE_DISPLAY => QVariant::from(&QString::from(&matched_rule_display(row))),
             ROLE_ANSWERED_WHILE_PAUSED => QVariant::from(&answered_while_paused(row)),
+            ROLE_OUTCOME_TEXT => QVariant::from(&QString::from(outcome_text(row))),
+            ROLE_ANSWER_DEADLINE_MS => QVariant::from(&answer_deadline_ms(row)),
+            ROLE_DEFERRED => QVariant::from(&row.deferred),
             _ => QVariant::default(),
         }
     }
@@ -590,6 +616,12 @@ impl qobject::ConnectionsModel {
             ROLE_ANSWERED_WHILE_PAUSED,
             QByteArray::from("answeredWhilePaused"),
         );
+        roles.insert(ROLE_OUTCOME_TEXT, QByteArray::from("outcomeText"));
+        roles.insert(
+            ROLE_ANSWER_DEADLINE_MS,
+            QByteArray::from("answerDeadlineMs"),
+        );
+        roles.insert(ROLE_DEFERRED, QByteArray::from("deferred"));
         roles
     }
 
@@ -986,6 +1018,25 @@ impl qobject::ConnectionsModel {
         self.store.is_pending(&id.to_string()).unwrap_or(false)
     }
 
+    fn make_rule(
+        &self,
+        id: &QString,
+        choice: &QString,
+        scope: &QString,
+        duration: &QString,
+    ) -> bool {
+        let id = id.to_string();
+        let made_at_ms = now_ms();
+        self.store
+            .row_by_id(&id)
+            .and_then(|row| {
+                let (choice, scope, duration) =
+                    (choice.to_string(), scope.to_string(), duration.to_string());
+                crate::make_rule::add_rule_message(row, &choice, &scope, &duration, made_at_ms)
+            })
+            .is_some_and(|msg| crate::bridge_feed::dispatch_for_row(&id, msg))
+    }
+
     fn inline_duration_for(
         &self,
         id: &QString,
@@ -1167,12 +1218,7 @@ impl qobject::ConnectionsModel {
             self.store.visible_len() as i32
         };
         let total = self.store.len() as i32;
-        let pending = self
-            .store
-            .rows()
-            .iter()
-            .filter(|r| r.action.is_none())
-            .count() as i32;
+        let pending = self.store.rows().iter().filter(|r| is_pending(r)).count() as i32;
         // `totalCount` stays the whole store so the view can distinguish
         // empty from filtered.
         self.as_mut().set_count(visible);
@@ -1191,6 +1237,10 @@ impl qobject::ConnectionsModel {
 /// Whether a filtering pause answered the row (issue #78).
 fn answered_while_paused(row: &ConnectionRow) -> bool {
     row.auto_answer == Some(AutoAnswer::FilterPaused)
+}
+
+fn answer_deadline_ms(row: &ConnectionRow) -> f64 {
+    row.answer_deadline_ms.map_or(-1.0, |ms| ms as f64)
 }
 
 /// Read one role of a grouped-projection [`VisibleEntry`] into the QVariant
@@ -1221,8 +1271,11 @@ fn grouped_entry_data(entry: &VisibleEntry, role: i32, store: &RowStore) -> QVar
             ROLE_GROUP_ALLOWED => QVariant::from(&(counts.allowed as i32)),
             ROLE_GROUP_DENIED => QVariant::from(&(counts.denied as i32)),
             ROLE_GROUP_BLOCKLISTED => QVariant::from(&(counts.blocklisted as i32)),
-            ROLE_MATCHED_RULE | ROLE_MATCHED_RULE_DISPLAY => QVariant::from(&QString::from("")),
-            ROLE_ANSWERED_WHILE_PAUSED => QVariant::from(&false),
+            ROLE_MATCHED_RULE | ROLE_MATCHED_RULE_DISPLAY | ROLE_OUTCOME_TEXT => {
+                QVariant::from(&QString::from(""))
+            }
+            ROLE_ANSWERED_WHILE_PAUSED | ROLE_DEFERRED => QVariant::from(&false),
+            ROLE_ANSWER_DEADLINE_MS => QVariant::from(&-1.0f64),
             _ => QVariant::default(),
         },
         VisibleEntry::DomainHeader {
@@ -1249,8 +1302,11 @@ fn grouped_entry_data(entry: &VisibleEntry, role: i32, store: &RowStore) -> QVar
             ROLE_GROUP_ALLOWED => QVariant::from(&(counts.allowed as i32)),
             ROLE_GROUP_DENIED => QVariant::from(&(counts.denied as i32)),
             ROLE_GROUP_BLOCKLISTED => QVariant::from(&(counts.blocklisted as i32)),
-            ROLE_MATCHED_RULE | ROLE_MATCHED_RULE_DISPLAY => QVariant::from(&QString::from("")),
-            ROLE_ANSWERED_WHILE_PAUSED => QVariant::from(&false),
+            ROLE_MATCHED_RULE | ROLE_MATCHED_RULE_DISPLAY | ROLE_OUTCOME_TEXT => {
+                QVariant::from(&QString::from(""))
+            }
+            ROLE_ANSWERED_WHILE_PAUSED | ROLE_DEFERRED => QVariant::from(&false),
+            ROLE_ANSWER_DEADLINE_MS => QVariant::from(&-1.0f64),
             _ => QVariant::default(),
         },
         VisibleEntry::Row { id, .. } => {
@@ -1264,10 +1320,10 @@ fn grouped_entry_data(entry: &VisibleEntry, role: i32, store: &RowStore) -> QVar
                 ROLE_PORT => QVariant::from(&(row.dst_port as i32)),
                 ROLE_PROTOCOL => QVariant::from(&QString::from(&row.protocol)),
                 ROLE_VERDICT => {
-                    let v = Verdict::from_action(row.action.as_deref());
+                    let v = Verdict::of(row);
                     QVariant::from(&QString::from(v.as_token()))
                 }
-                ROLE_PENDING => QVariant::from(&row.action.is_none()),
+                ROLE_PENDING => QVariant::from(&is_pending(row)),
                 ROLE_DEPTH => QVariant::from(&2i32),
                 ROLE_IS_GROUP_HEADER => QVariant::from(&false),
                 ROLE_EXPANDED => QVariant::from(&false),
@@ -1286,6 +1342,9 @@ fn grouped_entry_data(entry: &VisibleEntry, role: i32, store: &RowStore) -> QVar
                     QVariant::from(&QString::from(&matched_rule_display(row)))
                 }
                 ROLE_ANSWERED_WHILE_PAUSED => QVariant::from(&answered_while_paused(row)),
+                ROLE_OUTCOME_TEXT => QVariant::from(&QString::from(outcome_text(row))),
+                ROLE_ANSWER_DEADLINE_MS => QVariant::from(&answer_deadline_ms(row)),
+                ROLE_DEFERRED => QVariant::from(&row.deferred),
                 _ => QVariant::default(),
             }
         }
@@ -1368,6 +1427,8 @@ mod tests {
             started_at_ms: 0,
             matched_rule: None,
             auto_answer: None,
+            answer_deadline_ms: None,
+            deferred: false,
         }
     }
 

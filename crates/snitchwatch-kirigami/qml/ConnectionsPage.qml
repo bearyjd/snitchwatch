@@ -83,7 +83,15 @@ Kirigami.ScrollablePage {
     // when it opened, so for a withdrawn prompt it would still read "pending".
     readonly property string inspectVerdictText: page.inspectNoLongerPending
         ? "no longer pending"
-        : (page.inspectPending ? "pending" : page.inspectVerdict)
+        : (page.inspectPending ? "pending"
+           : page.inspectOutcomeText !== "" ? page.inspectOutcomeText : page.inspectVerdict)
+    // Prompt-slot plan Part C, copied from the row like the rest: when the
+    // bridge answers it (-1: never), a put-off row's label, whether it was put
+    // off ("Make a rule…"), and whether its session takes "Decide later".
+    property real inspectDeadlineMs: -1
+    property string inspectOutcomeText: ""
+    property bool inspectDeferred: false
+    property bool inspectDecideLater: false
     // Parity 2 (pending-decision insight panel) — pulled from
     // `ConnectionsModel.rowDetailsJson` alongside the rest of the inspector
     // snapshot. Per-connection byte counters are deliberately not surfaced:
@@ -98,6 +106,7 @@ Kirigami.ScrollablePage {
     // Exposed for the headless probes (tests/verdict_not_remembered_qml.rs,
     // tests/inline_verdict_qml.rs).
     property alias decisionSheet: pendingSheet
+    property alias makeRuleSheet: makeRuleSheet
     property alias connectionList: list
     // Raw matched-rule name (empty when unknown/not applicable — drives the
     // "Show rule" button's visibility) and its friendly display string (never
@@ -297,6 +306,12 @@ Kirigami.ScrollablePage {
             // The bridge allowed this row once because filtering was paused
             // (issue #78). Always false on headers.
             required property bool answeredWhilePaused
+            // Prompt-slot plan Part C: a put-off row's label (empty
+            // otherwise), when the bridge answers a pending one (-1: never),
+            // and whether it was put off.
+            required property string outcomeText
+            required property real answerDeadlineMs
+            required property bool deferred
 
             // Issue #18 double-submit guard: the inline/batch buttons stay
             // visible until the round trip flips `pending` to false, so a
@@ -336,6 +351,9 @@ Kirigami.ScrollablePage {
             // Basic/Fusion/Material/Universal styles — while the underlying
             // MouseArea correctly stays silent. So the TapHandler was pure
             // double-dispatch and is gone; plain `onClicked` is sufficient.
+            readonly property bool decideLaterOffered: !row.isGroupHeader && row.pending
+                && verdictHelper.rowDecideLater(row.rowId)
+
             function decideOnce(choice, batch) {
                 if (row.submitted) {
                     return;
@@ -343,6 +361,9 @@ Kirigami.ScrollablePage {
                 row.submitted = true;
                 if (batch) {
                     page.submitBatchVerdict(row.groupKey, choice, row.sourceSession);
+                } else if (choice === "later") {
+                    // Part C "Decide later": not a verdict QML builds.
+                    verdictHelper.decideLater(row.rowId);
                 } else {
                     page.submitInlineVerdict(row.rowId, choice);
                 }
@@ -422,6 +443,7 @@ Kirigami.ScrollablePage {
                     visible: !row.isGroupHeader
                     textFormat: Text.PlainText
                     text: row.pending ? "pending"
+                        : row.outcomeText !== "" ? row.outcomeText
                         : row.answeredWhilePaused ? "Allowed once (filtering was paused)"
                         : row.verdict
                     color: page.verdictColor(row.verdict)
@@ -559,6 +581,12 @@ Kirigami.ScrollablePage {
                             }
                         }
                     }
+                    DecideLaterButton {
+                        objectName: "decideLaterButton"
+                        visible: row.decideLaterOffered
+                        enabled: !row.submitted
+                        onClicked: row.decideOnce("later", false)
+                    }
                 }
             }
         }
@@ -605,8 +633,12 @@ Kirigami.ScrollablePage {
         page.inspectPending = row.pending;
         page.inspectMatchedRule = row.matchedRule;
         page.inspectMatchedRuleDisplay = row.matchedRuleDisplay;
+        page.inspectDeadlineMs = row.answerDeadlineMs > 0 ? row.answerDeadlineMs : -1;
+        page.inspectOutcomeText = row.outcomeText || "";
+        page.inspectDeferred = row.deferred === true;
         page.applyRowDetails(row.rowId);
         page.inspectAppBoundRules = verdictHelper.rowAppBoundRules(row.rowId);
+        page.inspectDecideLater = verdictHelper.rowDecideLater(row.rowId);
         // The row may be a stale pending one, and with the connection already
         // down no `ok` change follows to catch it.
         page.recheckInspectedRow();
@@ -733,8 +765,22 @@ Kirigami.ScrollablePage {
                 remoteIp: page.inspectIp
                 bindableProcessPath: page.inspectBindableProcessPath
                 appBoundRules: page.inspectAppBoundRules
+                deadlineMs: page.inspectDeadlineMs
+                decideLater: page.inspectDecideLater
                 bridgeFeed: page.bridgeFeed
                 onDecided: inspector.close()
+                onExplained: text => page.showPassiveNotice(text)
+            }
+
+            // Part C: a put-off connection can still get a rule.
+            MakeRuleSheet {
+                id: makeRuleSheet
+                Layout.fillWidth: true
+                visible: page.inspectDeferred
+                rowId: page.inspectId
+                model: page.model
+                bindableProcessPath: page.inspectBindableProcessPath
+                blockedForFiveMinutes: page.inspectMatchedRule.length > 0
             }
         }
     }

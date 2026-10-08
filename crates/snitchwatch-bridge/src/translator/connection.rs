@@ -74,6 +74,8 @@ pub fn connection_to_row(conn: &Connection, notification_id: u64) -> ConnectionR
         // user's verdict becomes the governing rule.
         matched_rule: None,
         auto_answer: None,
+        answer_deadline_ms: None,
+        deferred: false,
     }
 }
 

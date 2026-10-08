@@ -100,6 +100,26 @@ QtObject {
         verdicts.explain(verdicts.send(rowId, choice));
     }
 
+    // Prompt-slot plan Part C. "Decide later" is offered only while
+    // `rowId`'s bridge session takes it; Rust checks again before sending.
+    // Reading `ok` makes bindings follow the connection.
+    readonly property string decideLaterNotSentSentence: "The connection to the background service was lost, so Decide later wasn't sent."
+    function rowDecideLater(rowId) {
+        return verdicts.bridgeFeed !== null && verdicts.bridgeFeed.ok !== false
+            && typeof verdicts.bridgeFeed.decideLaterFor === "function"
+            && verdicts.bridgeFeed.decideLaterFor(rowId) === true;
+    }
+
+    function decideLater(rowId) {
+        if (verdicts.bridgeFeed === null) {
+            console.warn("InlineVerdicts.decideLater: no bridgeFeed; dropped for", rowId);
+            return;
+        }
+        if (verdicts.bridgeFeed.decideLater(rowId) === false) {
+            verdicts.explained(verdicts.decideLaterNotSentSentence);
+        }
+    }
+
     // Issue #18 batch actions: the same choice for every pending row under
     // process group `processKey`, each with its own duration. No new WS
     // protocol — this is just N SetVerdict messages.

@@ -98,6 +98,20 @@ pub mod qobject {
         #[cxx_name = "appBoundRulesFor"]
         fn app_bound_rules_for(self: &BridgeFeed, row_id: &QString) -> bool;
 
+        /// Whether row `row_id`'s live bridge session takes "Decide later"
+        /// (`bridge_capabilities::DECIDE_LATER`, prompt-slot plan Part C),
+        /// read at the time of use like `appBoundRulesFor`.
+        #[qinvokable]
+        #[cxx_name = "decideLaterFor"]
+        fn decide_later_for(self: &BridgeFeed, row_id: &QString) -> bool;
+
+        /// "Decide later" for row `row_id`: its bridge blocks the program for
+        /// 5 minutes, or gives the daemon no answer when it can't name the
+        /// program. Returns whether it was queued for the row's live session.
+        #[qinvokable]
+        #[cxx_name = "decideLater"]
+        fn decide_later(self: Pin<&mut BridgeFeed>, row_id: &QString) -> bool;
+
         /// Issue #44: the bridge answered a remembered verdict for this
         /// connection only, because it couldn't identify the program's file.
         /// `row_id` is session-qualified like `ConnectionsModel`'s ids.
@@ -160,6 +174,20 @@ impl qobject::BridgeFeed {
             crate::bridge_runtime::handles().as_ref(),
             &row_id.to_string(),
         )
+    }
+
+    fn decide_later_for(&self, row_id: &QString) -> bool {
+        decide_later_for_row(
+            crate::bridge_runtime::handles().as_ref(),
+            &row_id.to_string(),
+        )
+    }
+
+    fn decide_later(self: Pin<&mut Self>, row_id: &QString) -> bool {
+        let msg = snitchwatch_bridge::ws_messages::ClientMessage::DecideLater {
+            row_id: row_id.to_string(),
+        };
+        dispatch(msg, false)
     }
 
     fn send_client_json(self: Pin<&mut Self>, json: &QString) {
@@ -301,7 +329,16 @@ pub(crate) fn dispatch_to(
         }
         msg = limited;
     }
-    if let snitchwatch_bridge::ws_messages::ClientMessage::SetVerdict { row_id, .. } = &mut msg {
+    // Prompt-slot plan Part C: only a session that advertised it gets a
+    // "Decide later", whatever QML offered.
+    if let snitchwatch_bridge::ws_messages::ClientMessage::DecideLater { row_id } = &msg {
+        if !decide_later_for_row(Some(handles), row_id) {
+            tracing::warn!(%row_id, "BridgeFeed: Decide later for a bridge session without it; dropped");
+            return Err(crate::bridge_runtime::SendClientMessageError::StaleSession);
+        }
+    }
+    use snitchwatch_bridge::ws_messages::ClientMessage::{DecideLater, SetVerdict};
+    if let SetVerdict { row_id, .. } | DecideLater { row_id } = &mut msg {
         let Some((session, wire_id)) = split_session_row_id(row_id) else {
             return Err(crate::bridge_runtime::SendClientMessageError::StaleSession);
         };
@@ -309,6 +346,40 @@ pub(crate) fn dispatch_to(
         handles.try_send_for_session(session, msg)
     } else {
         handles.try_send(msg)
+    }
+}
+
+/// Send `msg`, which names no row itself (`AddRule` from "Make a rule…"),
+/// to the bridge session row `row_id` came from. False without a runtime,
+/// for a malformed id, or once that session is gone.
+pub(crate) fn dispatch_for_row(
+    row_id: &str,
+    msg: snitchwatch_bridge::ws_messages::ClientMessage,
+) -> bool {
+    let Some(handles) = crate::bridge_runtime::handles() else {
+        tracing::warn!("BridgeFeed: bridge not running; dropping client message");
+        return false;
+    };
+    let Some((session, _)) = split_session_row_id(row_id) else {
+        return false;
+    };
+    match handles.try_send_for_session(session, msg) {
+        Ok(()) => true,
+        Err(error) => {
+            tracing::warn!(error = %error, "BridgeFeed: client mutation dropped");
+            false
+        }
+    }
+}
+
+/// Whether row `row_id`'s bridge session is live and takes "Decide later".
+pub(crate) fn decide_later_for_row(
+    handles: Option<&crate::bridge_runtime::BridgeHandles>,
+    row_id: &str,
+) -> bool {
+    match (handles, split_session_row_id(row_id)) {
+        (Some(handles), Some((session, _))) => handles.advertises_decide_later(session),
+        _ => false,
     }
 }
 

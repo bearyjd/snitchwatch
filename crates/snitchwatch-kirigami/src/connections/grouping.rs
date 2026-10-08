@@ -232,7 +232,7 @@ impl GroupTree {
     /// `RowStore::insert_rows`/`update_rows`'s "existing id = update in
     /// place" semantics.
     pub fn upsert_row(&mut self, row: &ConnectionRow) {
-        let verdict = Verdict::from_action(row.action.as_deref());
+        let verdict = Verdict::of(row);
         let pkey = process_key(row);
         let dkey = domain_key(row);
         let bytes_sent = row.bytes_sent;
@@ -474,7 +474,7 @@ impl GroupTree {
     // --- internal helpers ---------------------------------------------
 
     fn insert_into_group(&mut self, pkey: &str, dkey: &str, row: &ConnectionRow) {
-        let verdict = Verdict::from_action(row.action.as_deref());
+        let verdict = Verdict::of(row);
         if !self.processes.contains_key(pkey) {
             self.process_order.push(pkey.to_string());
             self.processes.insert(
@@ -570,6 +570,8 @@ mod tests {
             started_at_ms: 0,
             matched_rule: None,
             auto_answer: None,
+            answer_deadline_ms: None,
+            deferred: false,
         }
     }
 

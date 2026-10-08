@@ -9,4 +9,5 @@
 
 pub mod filter;
 pub mod grouping;
+pub mod outcome;
 pub mod row_store;
