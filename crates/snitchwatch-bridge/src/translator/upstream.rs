@@ -6,8 +6,7 @@
 
 use std::sync::Arc;
 
-use crate::blocklists::fetcher::validate_subscription_url;
-use crate::blocklists::BlocklistsManager;
+use crate::blocklists::{BlocklistsManager, SubscribeOutcome};
 use crate::cache::connections::{ConnectionCache, Verdict};
 use crate::profiles::store::ProfileRule;
 use crate::profiles::ProfilesManager;
@@ -84,6 +83,7 @@ pub fn apply(
         ClientMessage::GlobalSettings { .. }
         | ClientMessage::SubscribeBlocklist { .. }
         | ClientMessage::UnsubscribeBlocklist { .. }
+        | ClientMessage::RequestBlocklistEntries { .. }
         | ClientMessage::CreateProfile { .. }
         | ClientMessage::UpdateProfile { .. }
         | ClientMessage::DeleteProfile { .. }
@@ -104,8 +104,12 @@ pub enum BlocklistActionOutcome {
     Subscribed {
         id: String,
     },
-    /// The URL failed [`validate_subscription_url`]; nothing was stored and
-    /// GUIs were told why.
+    /// The URL was already subscribed: no change, no download.
+    AlreadySubscribed {
+        id: String,
+    },
+    /// Refused (bad URL, too many lists, id clash, store error); nothing was
+    /// stored and GUIs were told why.
     Rejected {
         reason: String,
     },
@@ -116,20 +120,23 @@ pub enum BlocklistActionOutcome {
 }
 
 /// Route a blocklist ClientMessage to the appropriate BlocklistsManager method.
-/// Subscribe validates the URL first (https, a host, at most 2048 bytes); a
-/// bad URL becomes a visible failure and is never stored.
+/// Subscribe validates the URL first (https, a host, an allowed address, at
+/// most 2048 bytes); a refused subscribe becomes a visible row and is never
+/// stored. Subscribing to an existing URL changes nothing.
 pub async fn handle_blocklist_action(
     mgr: Arc<BlocklistsManager>,
     action: ClientMessage,
 ) -> anyhow::Result<BlocklistActionOutcome> {
     match action {
-        ClientMessage::SubscribeBlocklist { url } => match validate_subscription_url(&url) {
-            Ok(valid) => {
-                let id = mgr.add_subscription(valid.as_str()).await?;
+        ClientMessage::SubscribeBlocklist { url } => match mgr.subscribe_url(&url).await {
+            SubscribeOutcome::Added(id) => {
                 let _ = mgr.refresh_now(&id).await;
                 Ok(BlocklistActionOutcome::Subscribed { id })
             }
-            Err(reason) => {
+            SubscribeOutcome::AlreadySubscribed(id) => {
+                Ok(BlocklistActionOutcome::AlreadySubscribed { id })
+            }
+            SubscribeOutcome::Refused(reason) => {
                 tracing::warn!(%reason, "refused blocklist subscription");
                 mgr.reject_subscription(&url, &reason);
                 Ok(BlocklistActionOutcome::Rejected { reason })

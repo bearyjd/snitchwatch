@@ -10,20 +10,30 @@
 //! (issue #45):
 //! - `https` only, including every redirect hop (`https_only` on the client,
 //!   plus an explicit scheme check in [`fetch`]); there is no `file://` path;
+//! - only addresses [`fetch_guard::is_allowed_fetch_target`] allows (no
+//!   loopback, link-local, CGNAT, …), checked on resolution and for IP
+//!   literals at validation and on every redirect; no proxy;
 //! - at most [`MAX_REDIRECTS`] redirects and [`FETCH_TIMEOUT`] per fetch;
-//! - the body is read chunk by chunk against a running [`MAX_BODY_BYTES`]
-//!   cap, so a chunked or endless body stops at the cap instead of being
-//!   buffered whole.
+//! - the decoded body is read chunk by chunk against a running
+//!   [`MAX_BODY_BYTES`] cap (so a gzip bomb stops too), and a list holds at
+//!   most `format::MAX_ENTRIES` hosts;
+//! - transport and HTTP errors reach the user as one generic reason; the
+//!   detail is only logged.
 //!
 //! Tests that need list content without a network implement
 //! [`BlocklistFetch`] themselves (see `BlocklistsManager::with_fetcher`).
 
+use std::net::IpAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use reqwest::{redirect, Client};
 use tracing::{debug, warn};
 
-use crate::blocklists::format::{parse, sniff_format, ListFormat};
+use crate::blocklists::fetch_guard::{
+    check_literal_host, is_allowed_fetch_target, GuardedResolver,
+};
+use crate::blocklists::format::{parse, sniff_format, ListFormat, TooManyEntries};
 
 #[derive(Debug, Clone)]
 pub enum FetchOutcome {
@@ -37,52 +47,81 @@ pub enum FetchOutcome {
 }
 
 pub const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
-/// Hard cap on a list body, enforced while streaming (64 MiB).
+/// Hard cap on a (decoded) list body, enforced while streaming (64 MiB).
 pub const MAX_BODY_BYTES: u64 = 64 * 1024 * 1024;
 /// Longest subscription URL accepted.
 pub const MAX_URL_LEN: usize = 2048;
 pub const MAX_REDIRECTS: usize = 5;
+/// The only reason a GUI sees for a transport, TLS, redirect or HTTP error.
+pub const DOWNLOAD_FAILED_REASON: &str = "Couldn't download the list";
 
-/// The production client configuration. Tests that talk to a local TLS server
-/// start from this and add only trust for the test certificate.
-pub fn client_builder() -> reqwest::ClientBuilder {
+/// The production client: [`client_builder_with`] the production address
+/// policy.
+pub fn build_client() -> Client {
+    client_builder_with(is_allowed_fetch_target)
+        .build()
+        .expect("reqwest client builds")
+}
+
+/// The client configuration, parameterized only by the address policy so the
+/// local-server tests can allow their own loopback address.
+pub(crate) fn client_builder_with(allow: fn(IpAddr) -> bool) -> reqwest::ClientBuilder {
     Client::builder()
         .timeout(FETCH_TIMEOUT)
         .https_only(true)
-        .redirect(redirect::Policy::limited(MAX_REDIRECTS))
+        .no_proxy()
+        .dns_resolver(Arc::new(GuardedResolver { allow }))
+        .redirect(redirect::Policy::custom(move |attempt| {
+            if attempt.previous().len() >= MAX_REDIRECTS {
+                attempt.error("too many redirects")
+            } else if let Err(reason) = check_literal_host(attempt.url(), allow) {
+                attempt.error(reason)
+            } else {
+                attempt.follow()
+            }
+        }))
         .user_agent(concat!("snitchwatch/", env!("CARGO_PKG_VERSION")))
 }
 
-pub fn build_client() -> Client {
-    client_builder().build().expect("reqwest client builds")
+/// A subscription URL must be `https`, name a host that isn't a refused IP
+/// literal, and be at most [`MAX_URL_LEN`] bytes. Returns the parsed URL or a
+/// user-facing reason.
+pub fn validate_subscription_url(url: &str) -> Result<reqwest::Url, String> {
+    validate_with(url, is_allowed_fetch_target)
 }
 
-/// A subscription URL must be `https`, name a host, and be at most
-/// [`MAX_URL_LEN`] bytes. Returns the parsed URL or a user-facing reason.
-pub fn validate_subscription_url(url: &str) -> Result<reqwest::Url, String> {
+fn validate_with(url: &str, allow: fn(IpAddr) -> bool) -> Result<reqwest::Url, String> {
     if url.len() > MAX_URL_LEN {
-        return Err(format!("URL is longer than {MAX_URL_LEN} characters"));
+        return Err(format!(
+            "URL not allowed: it is longer than {MAX_URL_LEN} characters"
+        ));
     }
-    let parsed = reqwest::Url::parse(url).map_err(|e| format!("not a valid URL: {e}"))?;
+    let parsed =
+        reqwest::Url::parse(url).map_err(|_| "URL not allowed: not a valid URL".to_string())?;
     if parsed.scheme() != "https" {
-        return Err("only https:// blocklist URLs are allowed".to_string());
+        return Err("URL not allowed: only https:// addresses are supported".to_string());
     }
     if parsed.host_str().is_none_or(str::is_empty) {
-        return Err("URL has no host".to_string());
+        return Err("URL not allowed: it has no host".to_string());
     }
+    check_literal_host(&parsed, allow)?;
     Ok(parsed)
 }
 
-/// Fetch and parse a list with the production body cap.
-pub async fn fetch(client: &Client, url: &str) -> FetchOutcome {
-    fetch_with_cap(client, url, MAX_BODY_BYTES).await
+/// Fetch and parse a list with the production body cap and address policy.
+pub(crate) async fn fetch(client: &Client, url: &str) -> FetchOutcome {
+    fetch_checked(client, url, MAX_BODY_BYTES, is_allowed_fetch_target).await
 }
 
-/// [`fetch`] with an explicit body cap, so tests can prove the streaming cap
-/// with a small one.
-pub async fn fetch_with_cap(client: &Client, url: &str, max_body_bytes: u64) -> FetchOutcome {
+/// [`fetch`] with an explicit body cap and address policy (tests).
+pub(crate) async fn fetch_checked(
+    client: &Client,
+    url: &str,
+    max_body_bytes: u64,
+    allow: fn(IpAddr) -> bool,
+) -> FetchOutcome {
     debug!(url, "blocklist fetch begin");
-    let parsed = match validate_subscription_url(url) {
+    let parsed = match validate_with(url, allow) {
         Ok(parsed) => parsed,
         Err(reason) => return FetchOutcome::Failed { reason },
     };
@@ -90,22 +129,17 @@ pub async fn fetch_with_cap(client: &Client, url: &str, max_body_bytes: u64) -> 
         Ok(r) => r,
         Err(e) => {
             warn!(url, error = %e, "blocklist fetch transport error");
-            return FetchOutcome::Failed {
-                reason: format!("transport: {e}"),
-            };
+            return download_failed();
         }
     };
     let status = resp.status();
     if !status.is_success() {
         warn!(url, %status, "blocklist fetch non-2xx");
-        return FetchOutcome::Failed {
-            reason: format!("HTTP {}", status.as_u16()),
-        };
+        return download_failed();
     }
     if let Some(declared) = resp.content_length().filter(|n| *n > max_body_bytes) {
-        return FetchOutcome::Failed {
-            reason: format!("body too large: {declared} bytes (limit {max_body_bytes})"),
-        };
+        warn!(url, declared, "blocklist body declared over the cap");
+        return too_large(max_body_bytes);
     }
     let mut body: Vec<u8> = Vec::new();
     loop {
@@ -113,21 +147,42 @@ pub async fn fetch_with_cap(client: &Client, url: &str, max_body_bytes: u64) -> 
             Ok(Some(chunk)) => {
                 if body.len() as u64 + chunk.len() as u64 > max_body_bytes {
                     warn!(url, max_body_bytes, "blocklist body exceeds cap; aborted");
-                    return FetchOutcome::Failed {
-                        reason: format!("body too large: over {max_body_bytes} bytes"),
-                    };
+                    return too_large(max_body_bytes);
                 }
                 body.extend_from_slice(&chunk);
             }
             Ok(None) => break,
             Err(e) => {
-                return FetchOutcome::Failed {
-                    reason: format!("read body: {e}"),
-                };
+                warn!(url, error = %e, "blocklist body read failed");
+                return download_failed();
             }
         }
     }
-    process_body(&String::from_utf8_lossy(&body))
+    // Parsing a large list is CPU work: keep it off the async threads.
+    tokio::task::spawn_blocking(move || process_body(&String::from_utf8_lossy(&body)))
+        .await
+        .unwrap_or_else(|e| {
+            warn!(url, error = %e, "blocklist parse task failed");
+            download_failed()
+        })
+}
+
+fn download_failed() -> FetchOutcome {
+    FetchOutcome::Failed {
+        reason: DOWNLOAD_FAILED_REASON.to_string(),
+    }
+}
+
+fn too_large(max_body_bytes: u64) -> FetchOutcome {
+    const MIB: u64 = 1024 * 1024;
+    let limit = if max_body_bytes >= MIB && max_body_bytes.is_multiple_of(MIB) {
+        format!("{} MiB", max_body_bytes / MIB)
+    } else {
+        format!("{max_body_bytes} bytes")
+    };
+    FetchOutcome::Failed {
+        reason: format!("The list is too large (over {limit})"),
+    }
 }
 
 /// Where a [`BlocklistsManager`](crate::blocklists::BlocklistsManager) gets
@@ -170,9 +225,17 @@ impl BlocklistFetch for HttpsFetcher {
 
 pub fn process_body(body: &str) -> FetchOutcome {
     let format = sniff_format(body);
-    let hosts = parse(format, body);
-    FetchOutcome::Ok { hosts, format }
+    match parse(format, body) {
+        Ok(hosts) => FetchOutcome::Ok { hosts, format },
+        Err(TooManyEntries { limit }) => FetchOutcome::Failed {
+            reason: format!("The list has too many entries (more than {limit})"),
+        },
+    }
 }
+
+#[cfg(test)]
+#[path = "fetcher_tls_tests.rs"]
+mod tls_tests;
 
 #[cfg(test)]
 mod tests {
@@ -312,6 +375,17 @@ mod tests {
     fn https_fetcher_is_object_safe() {
         let fetcher: std::sync::Arc<dyn BlocklistFetch> = std::sync::Arc::new(HttpsFetcher::new());
         drop(fetcher);
+    }
+
+    /// Issue #45: a list over the entry limit fails with a clear status.
+    #[test]
+    fn a_list_over_the_entry_limit_fails() {
+        use crate::blocklists::format::MAX_ENTRIES;
+        let body: String = (0..=MAX_ENTRIES).map(|i| format!("h{i}.x\n")).collect();
+        match process_body(&body) {
+            FetchOutcome::Failed { reason } => assert!(reason.contains("too many entries")),
+            FetchOutcome::Ok { hosts, .. } => panic!("accepted {} hosts", hosts.len()),
+        }
     }
 
     #[test]

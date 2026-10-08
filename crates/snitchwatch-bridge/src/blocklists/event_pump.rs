@@ -45,15 +45,22 @@ async fn publish(
 ) {
     match event {
         BlocklistEvent::SubscriptionsChanged => publish_set_blocklists(mgr, tx).await,
-        BlocklistEvent::EntriesChanged { subscription_id } => {
-            match downstream::build_set_blocklist_entries(mgr, &subscription_id).await {
+        // Only the summary (entry count, status): entries go out a page at a
+        // time, on request (issue #45).
+        BlocklistEvent::EntriesChanged { .. } => publish_set_blocklists(mgr, tx).await,
+        BlocklistEvent::EntriesRequested {
+            subscription_id,
+            offset,
+            limit,
+        } => {
+            match downstream::build_blocklist_entries_page(mgr, &subscription_id, offset, limit)
+                .await
+            {
                 Ok(m) => {
                     let _ = tx.send(m);
                 }
-                Err(e) => warn!(error = %e, %subscription_id, "blocklist entries rebuild failed"),
+                Err(e) => warn!(error = %e, %subscription_id, "blocklist entries page failed"),
             }
-            // The summary's entry count changed too.
-            publish_set_blocklists(mgr, tx).await;
         }
         BlocklistEvent::StatusChanged { subscription_id } => {
             match downstream::build_set_blocklist_status(mgr, &subscription_id).await {
@@ -123,7 +130,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_rejected_subscription_is_shown_as_a_failed_row() {
+    async fn a_rejected_subscription_is_shown_as_a_refused_row() {
         let mgr = manager();
         let (tx, mut rx) = broadcast::channel(16);
         let pump = spawn_event_pump(mgr.clone(), tx);
@@ -136,7 +143,7 @@ mod tests {
         match msg {
             ServerMessage::SetBlocklistDetails { details } => {
                 assert_eq!(details.url, "http://x.example/hosts");
-                assert_eq!(details.status, "failed");
+                assert_eq!(details.status, "refused");
                 assert_eq!(details.last_failure_reason.as_deref(), Some("only https"));
             }
             other => panic!("expected SetBlocklistDetails, got {other:?}"),

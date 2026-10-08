@@ -8,7 +8,6 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -30,11 +29,9 @@ const LIST_URL: &str = "https://lists.invalid/ads.txt";
 const LIST_BODY: &str = "0.0.0.0 ads.example\n0.0.0.0 tracker.example\n";
 const WAIT: Duration = Duration::from_secs(10);
 
-/// Serves [`LIST_BODY`] for every URL, or fails while `offline` is set.
-/// Counts calls per URL.
+/// Serves [`LIST_BODY`] for every URL. Counts calls per URL.
 #[derive(Default)]
 struct TestFetcher {
-    offline: AtomicBool,
     calls: Mutex<HashMap<String, usize>>,
 }
 
@@ -53,11 +50,6 @@ impl BlocklistFetch for TestFetcher {
             .unwrap()
             .entry(url.to_string())
             .or_default() += 1;
-        if self.offline.load(Ordering::SeqCst) {
-            return FetchOutcome::Failed {
-                reason: "offline".into(),
-            };
-        }
         process_body(LIST_BODY)
     }
 }
@@ -145,8 +137,9 @@ async fn subscriptions_persist_across_a_restart_and_get_refreshed() {
     let state_dir = tempfile::tempdir().unwrap();
     let state = state_dir.path().canonicalize().unwrap();
 
-    let first_fetcher = Arc::new(TestFetcher::default());
-    first_fetcher.offline.store(true, Ordering::SeqCst);
+    // The bridge stops mid-download: the list is stored but never fetched,
+    // so it is due at the next start.
+    let first_fetcher = Arc::new(GatedFetcher::default());
     let bridge = run_with_options(
         config(sockets.path()),
         options(Storage::Persistent(state.clone()), first_fetcher.clone()),
@@ -161,11 +154,11 @@ async fn subscriptions_persist_across_a_restart_and_get_refreshed() {
         })
         .await
         .unwrap();
-    let (lists, storage) = snapshot_until(&bridge, &mut rx, "the failed first fetch", |l| {
-        l.first().is_some_and(|l| l.status == "failed")
-    })
-    .await;
-    assert_eq!(first_fetcher.calls(LIST_URL), 1);
+    tokio::time::timeout(WAIT, first_fetcher.started.notified())
+        .await
+        .expect("the subscribe never started its fetch");
+    let (lists, storage) = snapshot(&bridge, &mut rx).await;
+    assert_eq!(lists.first().map(|l| l.status.as_str()), Some("pending"));
     assert_eq!(
         storage,
         Some(StorageStatus {
@@ -198,7 +191,7 @@ async fn subscriptions_persist_across_a_restart_and_get_refreshed() {
     assert_eq!(refreshed[0].enforcement, ENFORCEMENT_NOT_ENFORCED);
     assert_eq!(
         refreshed[0].enforcement_reason.as_deref(),
-        Some("no rule sink yet")
+        Some("Blocking isn't available yet")
     );
 }
 

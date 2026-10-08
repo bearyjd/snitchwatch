@@ -1,6 +1,6 @@
 //! End-to-end: a real WS client connects to the bridge, subscribes to a
-//! fixture blocklist, and receives SetBlocklists + SetBlocklistEntries
-//! messages. No network: the list comes from a test-only fetcher, because
+//! fixture blocklist, receives SetBlocklists (never an unrequested entry
+//! list) and then the SetBlocklistEntries page it asks for. No network: the list comes from a test-only fetcher, because
 //! production fetches only `https` and has no file-reading path (issue #45).
 
 use std::sync::Arc;
@@ -82,38 +82,64 @@ async fn subscribe_blocklist_via_ws_yields_entries() {
         .await
         .unwrap();
 
-    // Collect messages until we see a populated SetBlocklists and SetBlocklistEntries.
-    let mut saw_set = false;
-    let mut saw_entries = false;
+    // Entries are never broadcast: only the summary arrives on its own.
+    let mut list_id = None;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    while tokio::time::Instant::now() < deadline && !(saw_set && saw_entries) {
-        let read = tokio::time::timeout(Duration::from_secs(2), ws.next()).await;
-        let msg = match read {
-            Ok(Some(Ok(Message::Text(text)))) => {
-                match serde_json::from_str::<ServerMessage>(&text) {
-                    Ok(m) => m,
-                    Err(_) => continue,
-                }
-            }
-            _ => continue,
-        };
-        match msg {
-            ServerMessage::SetBlocklists { ref blocklists, .. }
+    while tokio::time::Instant::now() < deadline && list_id.is_none() {
+        match next_message(&mut ws).await {
+            Some(ServerMessage::SetBlocklists { ref blocklists, .. })
                 if blocklists.iter().any(|b| b.entry_count > 0) =>
             {
                 // Downloaded, but PR A installs no daemon rule: never "enforced".
                 assert!(blocklists
                     .iter()
                     .all(|b| b.enforcement == ENFORCEMENT_NOT_ENFORCED));
-                saw_set = true;
+                list_id = Some(blocklists[0].id.clone());
             }
-            ServerMessage::SetBlocklistEntries { ref entries, .. } if !entries.is_empty() => {
-                assert!(entries.iter().any(|e| e.host == "doubleclick.net"));
-                saw_entries = true;
+            Some(ServerMessage::SetBlocklistEntries { .. }) => {
+                panic!("entries were broadcast without a request (issue #45)")
             }
             _ => {}
         }
     }
-    assert!(saw_set, "never received populated SetBlocklists");
-    assert!(saw_entries, "never received SetBlocklistEntries");
+    let list_id = list_id.expect("never received a populated SetBlocklists");
+
+    // The inspector asks for a page.
+    let request = ClientMessage::RequestBlocklistEntries {
+        subscription_id: list_id.clone(),
+        offset: 0,
+        limit: None,
+    };
+    ws.send(Message::Text(serde_json::to_string(&request).unwrap()))
+        .await
+        .unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "never received the requested SetBlocklistEntries page"
+        );
+        if let Some(ServerMessage::SetBlocklistEntries {
+            subscription_id,
+            entries,
+            offset,
+            total,
+        }) = next_message(&mut ws).await
+        {
+            assert_eq!(subscription_id, list_id);
+            assert_eq!(offset, 0);
+            assert_eq!(total, entries.len() as u64);
+            assert!(entries.iter().any(|e| e.host == "doubleclick.net"));
+            break;
+        }
+    }
+}
+
+async fn next_message(
+    ws: &mut tokio_tungstenite::WebSocketStream<UnixStream>,
+) -> Option<ServerMessage> {
+    match tokio::time::timeout(Duration::from_secs(2), ws.next()).await {
+        Ok(Some(Ok(Message::Text(text)))) => serde_json::from_str(&text).ok(),
+        _ => None,
+    }
 }

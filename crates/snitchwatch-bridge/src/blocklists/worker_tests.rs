@@ -40,8 +40,26 @@ impl BlocklistFetch for GatedFetcher {
     }
 }
 
-fn manager_with(fetcher: Arc<dyn BlocklistFetch>) -> Arc<BlocklistsManager> {
+fn subscription(id: &str, url: &str) -> Subscription {
+    Subscription {
+        id: id.into(),
+        url: url.into(),
+        display_name: id.into(),
+        format_hint: None,
+        refresh_interval_secs: 86_400,
+        last_fetched_at: None,
+        last_attempt_at: None,
+        last_fetch_status: FetchStatus::Pending,
+        entry_count: 0,
+    }
+}
+
+/// A manager over a store already holding `subs`.
+fn manager_with(fetcher: Arc<dyn BlocklistFetch>, subs: &[Subscription]) -> Arc<BlocklistsManager> {
     let store = Arc::new(BlocklistStore::open_in_memory().unwrap());
+    for sub in subs {
+        store.upsert_subscription(sub).unwrap();
+    }
     Arc::new(BlocklistsManager::new(store).with_fetcher(fetcher))
 }
 
@@ -59,7 +77,7 @@ async fn wait_for(what: &str, mut done: impl FnMut() -> bool) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn jobs_run_in_order_with_one_fetch_at_a_time() {
     let fetcher = Arc::new(GatedFetcher::default());
-    let mgr = manager_with(fetcher.clone());
+    let mgr = manager_with(fetcher.clone(), &[]);
     let (worker, handle) = BlocklistWorker::spawn(mgr.clone());
 
     assert!(worker.enqueue(BlocklistJob::Subscribe {
@@ -87,12 +105,39 @@ async fn jobs_run_in_order_with_one_fetch_at_a_time() {
         vec![SLOW_URL.to_string(), FAST_URL.to_string()]
     );
     assert_eq!(fetcher.max_in_flight.load(Ordering::SeqCst), 1);
-    assert_eq!(mgr.store().list_subscriptions().unwrap().len(), 2);
+    assert_eq!(mgr.subscriptions().len(), 2);
+}
+
+/// S3: scheduled refreshes don't hold the queue. A subscribe queued while
+/// one scheduled download runs goes before the next scheduled one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_subscribe_goes_between_scheduled_refreshes() {
+    const OTHER_DUE: &str = "https://z-due.invalid/other.txt";
+    const NEW: &str = "https://new.invalid/new.txt";
+    let fetcher = Arc::new(GatedFetcher::default());
+    let mgr = manager_with(
+        fetcher.clone(),
+        &[subscription("a", SLOW_URL), subscription("b", OTHER_DUE)],
+    );
+    let (worker, handle) = BlocklistWorker::spawn(mgr.clone());
+    assert!(worker.enqueue(BlocklistJob::RefreshDue));
+    fetcher.started.notified().await;
+    assert!(worker.enqueue(BlocklistJob::Subscribe { url: NEW.into() }));
+    fetcher.gate.notify_one();
+    wait_for("three fetches", || {
+        fetcher.finished.lock().unwrap().len() == 3
+    })
+    .await;
+    handle.abort();
+    assert_eq!(
+        *fetcher.finished.lock().unwrap(),
+        vec![SLOW_URL.to_string(), NEW.to_string(), OTHER_DUE.to_string()]
+    );
 }
 
 #[tokio::test]
 async fn try_route_queues_blocklist_messages_and_returns_the_rest() {
-    let mgr = manager_with(Arc::new(FixtureFetcher::default()));
+    let mgr = manager_with(Arc::new(FixtureFetcher::default()), &[]);
     let (worker, handle) = BlocklistWorker::spawn(mgr.clone());
     assert_eq!(
         worker.try_route(ClientMessage::Undo),
@@ -104,32 +149,35 @@ async fn try_route_queues_blocklist_messages_and_returns_the_rest() {
         }),
         None
     );
-    wait_for("the subscription", || {
-        mgr.store().list_subscriptions().unwrap().len() == 1
-    })
-    .await;
-    let id = mgr.store().list_subscriptions().unwrap()[0].id.clone();
+    wait_for("the subscription", || mgr.subscriptions().len() == 1).await;
+    let id = mgr.subscriptions()[0].id.clone();
     assert_eq!(
         worker.try_route(ClientMessage::UnsubscribeBlocklist { id }),
         None
     );
-    wait_for("the unsubscribe", || {
-        mgr.store().list_subscriptions().unwrap().is_empty()
-    })
-    .await;
+    wait_for("the unsubscribe", || mgr.subscriptions().is_empty()).await;
     handle.abort();
+}
+
+/// A worker handle whose queue nothing drains, so tests can fill it.
+fn undrained(
+    mgr: &Arc<BlocklistsManager>,
+    capacity: usize,
+) -> (BlocklistWorker, mpsc::Receiver<BlocklistJob>) {
+    let (tx, rx) = mpsc::channel(capacity);
+    let worker = BlocklistWorker {
+        tx,
+        mgr: mgr.clone(),
+        unsubscribes: Default::default(),
+    };
+    (worker, rx)
 }
 
 /// A full queue refuses the subscribe visibly instead of blocking the caller.
 #[tokio::test]
 async fn a_full_queue_rejects_a_subscribe_without_blocking() {
-    let mgr = manager_with(Arc::new(FixtureFetcher::default()));
-    // No worker task: nothing drains the queue.
-    let (tx, _rx) = mpsc::channel(1);
-    let worker = BlocklistWorker {
-        tx,
-        mgr: mgr.clone(),
-    };
+    let mgr = manager_with(Arc::new(FixtureFetcher::default()), &[]);
+    let (worker, _rx) = undrained(&mgr, 1);
     let mut events = mgr.subscribe();
     assert!(worker.enqueue(BlocklistJob::RefreshDue));
     assert!(!worker.enqueue(BlocklistJob::Subscribe {
@@ -141,23 +189,77 @@ async fn a_full_queue_rejects_a_subscribe_without_blocking() {
     ));
 }
 
+/// S5: a bad URL is refused before it takes a queue slot.
+#[tokio::test]
+async fn a_bad_url_is_refused_before_queueing() {
+    let mgr = manager_with(Arc::new(FixtureFetcher::default()), &[]);
+    let (worker, mut rx) = undrained(&mgr, 4);
+    let mut events = mgr.subscribe();
+    let long = format!("https://x.example/{}", "a".repeat(10_000));
+    for url in ["http://x.example/hosts", long.as_str()] {
+        assert_eq!(
+            worker.try_route(ClientMessage::SubscribeBlocklist { url: url.into() }),
+            None
+        );
+        match events.try_recv() {
+            Ok(BlocklistEvent::SubscriptionRejected { url, .. }) => {
+                assert!(url.len() <= crate::blocklists::fetcher::MAX_URL_LEN)
+            }
+            other => panic!("expected SubscriptionRejected, got {other:?}"),
+        }
+    }
+    assert!(rx.try_recv().is_err(), "a refused URL was queued");
+}
+
+/// S3: an unsubscribe is never dropped, even with the job queue full, and
+/// runs before the queued jobs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unsubscribe_is_never_dropped_and_goes_first() {
+    let fetcher = Arc::new(GatedFetcher::default());
+    let mgr = manager_with(fetcher.clone(), &[subscription("keep-out", FAST_URL)]);
+    let (worker, handle) = BlocklistWorker::spawn(mgr.clone());
+    // Block the worker on a slow subscribe, then fill the queue with
+    // scheduled refreshes (which would download the due "keep-out" list).
+    assert!(worker.enqueue(BlocklistJob::Subscribe {
+        url: SLOW_URL.into()
+    }));
+    fetcher.started.notified().await;
+    while worker.enqueue(BlocklistJob::RefreshDue) {}
+    worker.unsubscribe("keep-out".into());
+    fetcher.gate.notify_one();
+    wait_for("the unsubscribe", || !mgr.has_subscription("keep-out")).await;
+    // Let the queued refreshes drain: none of them may find "keep-out".
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    handle.abort();
+    assert_eq!(
+        *fetcher.finished.lock().unwrap(),
+        vec![SLOW_URL.to_string()]
+    );
+}
+
+/// Unsubscribing an id that isn't stored (a refused row) just resends the
+/// list, so the row disappears.
+#[tokio::test]
+async fn unsubscribing_an_unknown_id_resends_the_list() {
+    let mgr = manager_with(Arc::new(FixtureFetcher::default()), &[]);
+    let (worker, _rx) = undrained(&mgr, 1);
+    let mut events = mgr.subscribe();
+    worker.unsubscribe("never-stored".into());
+    assert!(matches!(
+        events.try_recv(),
+        Ok(BlocklistEvent::SubscriptionsChanged)
+    ));
+    assert!(worker.unsubscribes.pop().is_none());
+}
+
 /// The refresh loop only enqueues `RefreshDue`; the worker fetches.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn refresh_loop_drives_pending_subscriptions_through_the_worker() {
     let fetcher = Arc::new(FixtureFetcher::default());
-    let mgr = manager_with(fetcher.clone());
-    mgr.store()
-        .upsert_subscription(&Subscription {
-            id: "tiny".into(),
-            url: fixture_url("domains-tiny.txt"),
-            display_name: "tiny".into(),
-            format_hint: None,
-            refresh_interval_secs: 86_400,
-            last_fetched_at: None,
-            last_fetch_status: FetchStatus::Pending,
-            entry_count: 0,
-        })
-        .unwrap();
+    let mgr = manager_with(
+        fetcher.clone(),
+        &[subscription("tiny", &fixture_url("domains-tiny.txt"))],
+    );
     let (worker, handle) = BlocklistWorker::spawn(mgr.clone());
     let refresh = worker.spawn_refresh_loop(Duration::from_millis(50));
     wait_for("the scheduled refresh", || {
@@ -172,4 +274,13 @@ async fn refresh_loop_drives_pending_subscriptions_through_the_worker() {
     refresh.abort();
     handle.abort();
     assert_eq!(fetcher.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn aborting_the_tasks_stops_them() {
+    let mgr = manager_with(Arc::new(FixtureFetcher::default()), &[]);
+    let (tx, _rx) = broadcast::channel(4);
+    let tasks = BlocklistTasks::spawn(mgr, tx, Duration::from_secs(3600));
+    tasks.abort();
+    wait_for("the aborted tasks", || tasks.is_finished()).await;
 }

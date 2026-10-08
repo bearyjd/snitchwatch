@@ -104,6 +104,23 @@ fn service_is_unprivileged_socket_activation_only() {
     );
 }
 
+/// Issue #45: both bridge units cap the bridge's memory, so a hostile or
+/// oversized blocklist can't take the desktop down with it.
+#[test]
+fn both_bridge_units_cap_memory() {
+    for unit in [
+        "packaging/system/snitchwatch-system-bridge.service",
+        "packaging/systemd/snitchwatch-bridge.service",
+    ] {
+        let body = file(unit);
+        let lines = active_lines(&body);
+        assert!(
+            lines.contains(&"MemoryMax=512M"),
+            "{unit} missing MemoryMax=512M"
+        );
+    }
+}
+
 #[test]
 fn sysusers_and_stager_keep_enrollment_and_install_offline() {
     let users_body = file("packaging/system/snitchwatch.conf.sysusers");

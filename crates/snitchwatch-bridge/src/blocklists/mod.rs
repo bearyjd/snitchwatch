@@ -7,28 +7,21 @@
 //! yet: the default [`NoopRuleSink`] reports every list as not enforced.
 
 pub mod event_pump;
+pub mod fetch_guard;
 pub mod fetcher;
 pub mod format;
+mod manager;
 pub mod materializer;
 pub mod store;
 pub mod worker;
 
 pub use event_pump::spawn_event_pump;
-
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, MutexGuard};
+pub use manager::{BlocklistsManager, SubscribeOutcome};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use tokio::sync::broadcast;
-use tracing::{info, warn};
 
-use crate::blocklists::fetcher::{
-    validate_subscription_url, BlocklistFetch, FetchOutcome, HttpsFetcher,
-};
-use crate::blocklists::materializer::{materialize_batch, MaterializedRule};
-use crate::blocklists::store::{BlocklistStore, FetchStatus, Subscription};
-use crate::ws_messages::StorageStatus;
+use crate::blocklists::materializer::MaterializedRule;
 
 /// Events emitted whenever blocklist state changes. [`spawn_event_pump`]
 /// rebroadcasts them as `SetBlocklists` / `SetBlocklistEntries` / … over the WS.
@@ -42,10 +35,18 @@ pub enum BlocklistEvent {
         subscription_id: String,
     },
     /// A subscribe request was refused before anything was stored (a bad URL,
-    /// or the worker queue was full). Shown to the user, never persisted.
+    /// too many lists, or the worker queue was full). Shown to the user,
+    /// never persisted.
     SubscriptionRejected {
         url: String,
         reason: String,
+    },
+    /// A GUI asked for a page of a subscription's hosts. Entries are only
+    /// ever sent a page at a time, on request (issue #45).
+    EntriesRequested {
+        subscription_id: String,
+        offset: u64,
+        limit: u32,
     },
 }
 
@@ -66,10 +67,18 @@ pub enum Enforcement {
     },
 }
 
-/// Why every list is unenforced until PR B wires a daemon sink.
-pub const NO_RULE_SINK_REASON: &str = "no rule sink yet";
+/// Why every list is unenforced until PR B wires a daemon sink. Shown to the
+/// user.
+pub const NO_RULE_SINK_REASON: &str = "Blocking isn't available yet";
 /// Enforcement reason for a subscription whose first download failed.
-pub const NOT_DOWNLOADED_REASON: &str = "list not downloaded";
+pub const NOT_DOWNLOADED_REASON: &str = "The list hasn't been downloaded";
+/// Fetch status reason when a downloaded list couldn't be written.
+pub const STORE_ERROR_REASON: &str = "Couldn't save the list";
+/// Most subscriptions one bridge keeps (each can hold `format::MAX_ENTRIES`).
+pub const MAX_SUBSCRIPTIONS: usize = 32;
+/// A list whose last download failed is retried after this long (or its own
+/// refresh interval, if shorter), not on every scheduler tick.
+pub const FAILED_RETRY_SECS: i64 = 60 * 60;
 /// Sink that receives materialized deny rules after a successful blocklist
 /// refresh. The default implementation is [`NoopRuleSink`]; replace it with
 /// [`BlocklistsManager::with_rule_sink`] to wire in the real opensnitchd writer.
@@ -94,6 +103,13 @@ pub const NOT_DOWNLOADED_REASON: &str = "list not downloaded";
 #[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait RuleSink: Send + Sync + 'static {
+    /// False for a sink that installs nothing ([`NoopRuleSink`]). The manager
+    /// then skips materializing rules (hundreds of bytes per host) and
+    /// reports every list as [`NO_RULE_SINK_REASON`].
+    fn installs_rules(&self) -> bool {
+        true
+    }
+
     async fn replace_blocklist_rules(
         &self,
         list_id: &str,
@@ -101,13 +117,17 @@ pub trait RuleSink: Send + Sync + 'static {
     ) -> anyhow::Result<()>;
 }
 
-/// Sink used when no real sink has been wired in. It installs nothing, so it
-/// fails every push with [`NO_RULE_SINK_REASON`]: the manager must never
-/// report a list as installed when no rule reached the daemon.
+/// Sink used when no real sink has been wired in. It installs nothing: it
+/// says so through [`RuleSink::installs_rules`], and fails any push with
+/// [`NO_RULE_SINK_REASON`]. The manager never reports such a list installed.
 pub struct NoopRuleSink;
 
 #[async_trait]
 impl RuleSink for NoopRuleSink {
+    fn installs_rules(&self) -> bool {
+        false
+    }
+
     async fn replace_blocklist_rules(
         &self,
         _list_id: &str,
@@ -117,222 +137,17 @@ impl RuleSink for NoopRuleSink {
     }
 }
 
-pub struct BlocklistsManager {
-    store: Arc<BlocklistStore>,
-    bus: broadcast::Sender<BlocklistEvent>,
-    fetcher: Arc<dyn BlocklistFetch>,
-    rule_sink: Arc<dyn RuleSink>,
-    storage: StorageStatus,
-    enforcement: Mutex<HashMap<String, Enforcement>>,
-}
-
-impl BlocklistsManager {
-    pub fn new(store: Arc<BlocklistStore>) -> Self {
-        let (bus, _) = broadcast::channel(64);
-        Self {
-            store,
-            bus,
-            fetcher: Arc::new(HttpsFetcher::new()),
-            rule_sink: Arc::new(NoopRuleSink),
-            storage: StorageStatus {
-                persistent: false,
-                reason: None,
-            },
-            enforcement: Mutex::new(HashMap::new()),
-        }
-    }
-
-    /// Replace the default no-op rule sink with a real implementation.
-    pub fn with_rule_sink(mut self, sink: Arc<dyn RuleSink>) -> Self {
-        self.rule_sink = sink;
-        self
-    }
-
-    /// Replace the default [`HttpsFetcher`]. Tests only: production never
-    /// sets a fetcher, so it has no non-https fetch path.
-    pub fn with_fetcher(mut self, fetcher: Arc<dyn BlocklistFetch>) -> Self {
-        self.fetcher = fetcher;
-        self
-    }
-
-    /// Record whether [`store`](Self::store) outlives the bridge process. Sent
-    /// to GUIs with every `SetBlocklists`.
-    pub fn with_storage_status(mut self, storage: StorageStatus) -> Self {
-        self.storage = storage;
-        self
-    }
-
-    pub fn storage_status(&self) -> &StorageStatus {
-        &self.storage
-    }
-
-    pub fn subscribe(&self) -> broadcast::Receiver<BlocklistEvent> {
-        self.bus.subscribe()
-    }
-
-    pub fn store(&self) -> &Arc<BlocklistStore> {
-        &self.store
-    }
-
-    /// The subscription's current enforcement state ([`Enforcement::Pending`]
-    /// until its first refresh).
-    pub fn enforcement(&self, id: &str) -> Enforcement {
-        self.enforcement_map()
-            .get(id)
-            .cloned()
-            .unwrap_or(Enforcement::Pending)
-    }
-
-    fn enforcement_map(&self) -> MutexGuard<'_, HashMap<String, Enforcement>> {
-        self.enforcement
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
-    /// Add a subscription record (does not fetch). Use [`refresh_now`] to pull.
-    /// Refuses (and stores nothing for) a URL that
-    /// [`validate_subscription_url`] rejects.
-    pub async fn add_subscription(&self, url: &str) -> anyhow::Result<String> {
-        let url = validate_subscription_url(url)
-            .map_err(|reason| anyhow::anyhow!("refused blocklist URL: {reason}"))?;
-        let url = url.as_str();
-        let id = derive_id(url);
-        let display_name = derive_display_name(url);
-        let sub = Subscription {
-            id: id.clone(),
-            url: url.to_string(),
-            display_name,
-            format_hint: None,
-            refresh_interval_secs: 86_400,
-            last_fetched_at: None,
-            last_fetch_status: FetchStatus::Pending,
-            entry_count: 0,
-        };
-        self.store.upsert_subscription(&sub)?;
-        let _ = self.bus.send(BlocklistEvent::SubscriptionsChanged);
-        Ok(id)
-    }
-
-    /// Tell GUIs a subscribe request was refused. Nothing is stored.
-    pub fn reject_subscription(&self, url: &str, reason: &str) {
-        let _ = self.bus.send(BlocklistEvent::SubscriptionRejected {
-            url: url.to_string(),
-            reason: reason.to_string(),
-        });
-    }
-
-    pub async fn remove_subscription(&self, id: &str) -> anyhow::Result<()> {
-        self.store.delete_subscription(id)?;
-        self.enforcement_map().remove(id);
-        let _ = self.bus.send(BlocklistEvent::SubscriptionsChanged);
-        Ok(())
-    }
-
-    /// Pull a subscription synchronously and update the store + bus accordingly.
-    pub async fn refresh_now(&self, id: &str) -> anyhow::Result<FetchStatus> {
-        let Some(mut sub) = self.store.get_subscription(id)? else {
-            anyhow::bail!("unknown subscription: {id}");
-        };
-        let outcome = self.fetcher.fetch(&sub.url).await;
-        let new_status = match outcome {
-            FetchOutcome::Ok { hosts, .. } => {
-                let host_refs: Vec<&str> = hosts.iter().map(String::as_str).collect();
-                self.store.replace_entries(&sub.id, &host_refs)?;
-                sub.entry_count = host_refs.len() as i64;
-                sub.last_fetched_at = Some(Utc::now());
-                sub.last_fetch_status = FetchStatus::Ok;
-                self.store.upsert_subscription(&sub)?;
-                let materialized = materialize_batch(&sub.id, &hosts);
-                let enforcement = match self
-                    .rule_sink
-                    .replace_blocklist_rules(&sub.id, materialized)
-                    .await
-                {
-                    Ok(()) => Enforcement::RuleInstalled { at: Utc::now() },
-                    Err(e) => {
-                        warn!(id = %sub.id, error = %e, "rule sink push failed; entries cached but not enforced");
-                        Enforcement::NotEnforced {
-                            reason: e.to_string(),
-                        }
-                    }
-                };
-                self.enforcement_map().insert(sub.id.clone(), enforcement);
-                let _ = self.bus.send(BlocklistEvent::EntriesChanged {
-                    subscription_id: sub.id.clone(),
-                });
-                let _ = self.bus.send(BlocklistEvent::StatusChanged {
-                    subscription_id: sub.id.clone(),
-                });
-                info!(id = %sub.id, count = host_refs.len(), "blocklist refreshed");
-                FetchStatus::Ok
-            }
-            FetchOutcome::Failed { reason } => {
-                sub.last_fetch_status = FetchStatus::Failed {
-                    reason: reason.clone(),
-                };
-                self.store.upsert_subscription(&sub)?;
-                // A previous push stays in effect; only a never-pushed list
-                // changes state.
-                self.enforcement_map()
-                    .entry(sub.id.clone())
-                    .or_insert_with(|| Enforcement::NotEnforced {
-                        reason: NOT_DOWNLOADED_REASON.to_string(),
-                    });
-                let _ = self.bus.send(BlocklistEvent::StatusChanged {
-                    subscription_id: sub.id.clone(),
-                });
-                warn!(id = %sub.id, %reason, "blocklist refresh failed; cache preserved");
-                FetchStatus::Failed { reason }
-            }
-        };
-        Ok(new_status)
-    }
-
-    /// Refresh every subscription whose interval has elapsed (or that was never
-    /// fetched), one at a time. Run as the worker's `RefreshDue` job.
-    pub async fn refresh_due(&self) {
-        let due = match self.due_subscriptions() {
-            Ok(d) => d,
-            Err(e) => {
-                warn!(error = %e, "blocklist scheduler: store read failed");
-                return;
-            }
-        };
-        for id in due {
-            if let Err(e) = self.refresh_now(&id).await {
-                warn!(%id, error = %e, "scheduled refresh failed");
-            }
-        }
-    }
-
-    fn due_subscriptions(&self) -> Result<Vec<String>, store::StoreError> {
-        let now = Utc::now();
-        let subs = self.store.list_subscriptions()?;
-        Ok(subs
-            .into_iter()
-            .filter(|s| match s.last_fetched_at {
-                None => true,
-                Some(t) => {
-                    let elapsed = (now - t).num_seconds();
-                    elapsed >= s.refresh_interval_secs
-                }
-            })
-            .map(|s| s.id)
-            .collect())
-    }
-}
-
 /// Longest sanitized stem kept in an id. Ids become rule names and (PR B) list
 /// directory names, so a 2 KiB URL must not produce a 2 KiB id.
 const MAX_ID_STEM_CHARS: usize = 64;
 
-/// `<sanitized stem>-<8 hex of SHA-256(url)>`. The hash keeps two URLs that
-/// end in the same file name (`…/hosts`) apart; the result only ever contains
-/// `[A-Za-z0-9_-]`.
+/// `<sanitized stem>-<16 hex (64 bits) of SHA-256(url)>`. The hash keeps two
+/// URLs that end in the same file name (`…/hosts`) apart; the result only ever
+/// contains `[A-Za-z0-9_-]`. A collision is still refused at subscribe time.
 pub(crate) fn derive_id(url: &str) -> String {
     use sha2::{Digest, Sha256};
     let digest = Sha256::digest(url.as_bytes());
-    let hash: String = digest[..4].iter().map(|b| format!("{b:02x}")).collect();
+    let hash: String = digest[..8].iter().map(|b| format!("{b:02x}")).collect();
     format!("{}-{hash}", sanitized_stem(url))
 }
 
@@ -439,6 +254,7 @@ pub mod test_helpers {
                     format_hint: None,
                     refresh_interval_secs: 86_400,
                     last_fetched_at: None,
+                    last_attempt_at: None,
                     last_fetch_status: FetchStatus::Ok,
                     entry_count: *n_entries as i64,
                 })

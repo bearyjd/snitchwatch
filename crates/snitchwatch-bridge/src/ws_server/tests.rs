@@ -459,3 +459,34 @@ async fn without_web_ui_static_routes_are_not_served() {
         );
     }
 }
+
+/// Issue #45 (S5): a client frame over [`MAX_CLIENT_MESSAGE_BYTES`] ends the
+/// connection instead of being buffered and parsed (axum's default is
+/// 64 MiB).
+#[tokio::test]
+async fn an_oversized_client_message_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let token = Token::generate();
+    let (path, _broadcast_tx, mut inbound_rx, _join) =
+        spawn_server_with_inbound(&dir, token.clone()).await;
+    let mut ws = connect(&path).await;
+    ws.send(TMessage::Text(token.as_str().to_string()))
+        .await
+        .unwrap();
+    let _ack = ws.next().await;
+
+    let huge = serde_json::json!({
+        "action": "subscribeBlocklist",
+        "url": format!("https://x.example/{}", "a".repeat(MAX_CLIENT_MESSAGE_BYTES)),
+    });
+    let _ = ws.send(TMessage::Text(huge.to_string())).await;
+    let received =
+        tokio::time::timeout(std::time::Duration::from_millis(500), inbound_rx.recv()).await;
+    assert!(
+        !matches!(received, Ok(Some(_))),
+        "an oversized message reached the bridge"
+    );
+    // A normal-size message right after it still fits the limit.
+    let small = serde_json::json!({ "action": "undo" });
+    assert!(MAX_CLIENT_MESSAGE_BYTES > small.to_string().len());
+}

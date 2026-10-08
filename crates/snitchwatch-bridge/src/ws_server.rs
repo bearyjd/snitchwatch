@@ -181,13 +181,19 @@ impl WsServer {
     }
 }
 
+/// Largest WebSocket message (and frame) a client may send. Client messages
+/// are small (a blocklist URL is at most 2 KiB); axum's default is 64 MiB.
+pub const MAX_CLIENT_MESSAGE_BYTES: usize = 1024 * 1024;
+
 async fn ws_handler(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
     peer: Option<Extension<PeerUid>>,
 ) -> impl IntoResponse {
     let peer_uid = peer.and_then(|Extension(PeerUid(uid))| uid);
-    ws.on_upgrade(move |socket| handle_socket(socket, state.handles, state.token, peer_uid))
+    ws.max_message_size(MAX_CLIENT_MESSAGE_BYTES)
+        .max_frame_size(MAX_CLIENT_MESSAGE_BYTES)
+        .on_upgrade(move |socket| handle_socket(socket, state.handles, state.token, peer_uid))
 }
 
 /// Wait for the handshake token as the first WS frame. Returns `true` if the

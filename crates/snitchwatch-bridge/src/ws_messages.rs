@@ -104,9 +104,17 @@ pub enum ServerMessage {
     SetBlocklistDetails {
         details: BlocklistSummary,
     },
+    /// One page (at most [`BLOCKLIST_ENTRIES_PAGE_MAX`] hosts, starting at
+    /// `offset`) of a subscription's `total` hosts, sent only in answer to
+    /// `RequestBlocklistEntries` (issue #45: a whole list in one frame
+    /// overflowed GUI clients).
     SetBlocklistEntries {
         subscription_id: String,
         entries: Vec<BlocklistEntry>,
+        #[serde(default)]
+        offset: u64,
+        #[serde(default)]
+        total: u64,
     },
     SetBlocklistEntryLocation {
         subscription_id: String,
@@ -259,6 +267,16 @@ pub enum ClientMessage {
     },
     UnsubscribeBlocklist {
         id: String,
+    },
+    /// Ask for a page of a subscription's hosts; answered with
+    /// `SetBlocklistEntries`. `limit` is capped at
+    /// [`BLOCKLIST_ENTRIES_PAGE_MAX`].
+    RequestBlocklistEntries {
+        subscription_id: String,
+        #[serde(default)]
+        offset: u64,
+        #[serde(default)]
+        limit: Option<u32>,
     },
     CreateProfile {
         id: String,
@@ -483,6 +501,9 @@ pub struct BlocklistSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enforcement_reason: Option<String>,
 }
+
+/// Most hosts in one `SetBlocklistEntries` page (~260 KiB of JSON at most).
+pub const BLOCKLIST_ENTRIES_PAGE_MAX: u32 = 1000;
 
 /// [`BlocklistSummary::enforcement`]: not downloaded or pushed yet.
 pub const ENFORCEMENT_PENDING: &str = "pending";
@@ -872,6 +893,8 @@ mod blocklist_message_tests {
     #[test]
     fn set_blocklist_entries_carries_strongly_typed_entries() {
         let msg = ServerMessage::SetBlocklistEntries {
+            offset: 0,
+            total: 2,
             subscription_id: "stevenblack".into(),
             entries: vec![
                 BlocklistEntry {
@@ -886,6 +909,38 @@ mod blocklist_message_tests {
         assert_eq!(json["action"], "setBlocklistEntries");
         assert_eq!(json["subscriptionId"], "stevenblack");
         assert_eq!(json["entries"][0]["host"], "doubleclick.net");
+    }
+
+    /// Issue #45 (S2): the largest possible entries page (every host at the
+    /// 253-byte maximum) stays far below a GUI client's 16 MiB frame limit.
+    #[test]
+    fn the_largest_entries_page_fits_one_small_frame() {
+        let host = format!("{}.example", "a".repeat(245));
+        let msg = ServerMessage::SetBlocklistEntries {
+            subscription_id: "x".repeat(81),
+            entries: (0..BLOCKLIST_ENTRIES_PAGE_MAX)
+                .map(|_| BlocklistEntry { host: host.clone() })
+                .collect(),
+            offset: u64::MAX,
+            total: u64::MAX,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.len() < 1024 * 1024, "{} bytes", json.len());
+    }
+
+    #[test]
+    fn request_blocklist_entries_parses_with_defaults() {
+        let parsed: ClientMessage =
+            serde_json::from_str(r#"{"action":"requestBlocklistEntries","subscriptionId":"a"}"#)
+                .unwrap();
+        assert_eq!(
+            parsed,
+            ClientMessage::RequestBlocklistEntries {
+                subscription_id: "a".into(),
+                offset: 0,
+                limit: None,
+            }
+        );
     }
 
     #[test]

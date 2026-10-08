@@ -1,0 +1,399 @@
+//! [`BlocklistsManager`]: subscriptions, refreshes and their in-memory state.
+//!
+//! The subscriptions table is mirrored in memory, so summaries for GUIs (and
+//! the bridge's snapshot path) never wait on the store lock while a large
+//! list is being written. Store work runs on the blocking pool.
+
+use std::collections::{BTreeMap, HashMap};
+use std::sync::{Arc, Mutex, MutexGuard};
+
+use chrono::{DateTime, Utc};
+use tokio::sync::broadcast;
+use tracing::{error, info, warn};
+
+use crate::blocklists::fetcher::{
+    validate_subscription_url, BlocklistFetch, FetchOutcome, HttpsFetcher, MAX_URL_LEN,
+};
+use crate::blocklists::materializer::materialize_batch;
+use crate::blocklists::store::{BlocklistStore, FetchStatus, StoreError, Subscription};
+use crate::blocklists::{
+    derive_display_name, derive_id, BlocklistEvent, Enforcement, NoopRuleSink, RuleSink,
+    FAILED_RETRY_SECS, MAX_SUBSCRIPTIONS, NOT_DOWNLOADED_REASON, NO_RULE_SINK_REASON,
+    STORE_ERROR_REASON,
+};
+use crate::ws_messages::{StorageStatus, BLOCKLIST_ENTRIES_PAGE_MAX};
+
+/// Result of [`BlocklistsManager::subscribe_url`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SubscribeOutcome {
+    Added(String),
+    /// The same URL is already subscribed; nothing changed.
+    AlreadySubscribed(String),
+    /// Nothing was stored; the reason is shown to the user.
+    Refused(String),
+}
+
+pub struct BlocklistsManager {
+    store: Arc<BlocklistStore>,
+    bus: broadcast::Sender<BlocklistEvent>,
+    fetcher: Arc<dyn BlocklistFetch>,
+    rule_sink: Arc<dyn RuleSink>,
+    storage: StorageStatus,
+    enforcement: Mutex<HashMap<String, Enforcement>>,
+    /// Mirror of the subscriptions table, by id.
+    subscriptions: Mutex<BTreeMap<String, Subscription>>,
+}
+
+impl BlocklistsManager {
+    pub fn new(store: Arc<BlocklistStore>) -> Self {
+        let (bus, _) = broadcast::channel(64);
+        let subscriptions = match store.list_subscriptions() {
+            Ok(subs) => subs.into_iter().map(|s| (s.id.clone(), s)).collect(),
+            Err(e) => {
+                error!(error = %e, "blocklist store unreadable; starting with no subscriptions");
+                BTreeMap::new()
+            }
+        };
+        Self {
+            store,
+            bus,
+            fetcher: Arc::new(HttpsFetcher::new()),
+            rule_sink: Arc::new(NoopRuleSink),
+            storage: StorageStatus {
+                persistent: false,
+                reason: None,
+            },
+            enforcement: Mutex::new(HashMap::new()),
+            subscriptions: Mutex::new(subscriptions),
+        }
+    }
+
+    /// Replace the default no-op rule sink with a real implementation.
+    pub fn with_rule_sink(mut self, sink: Arc<dyn RuleSink>) -> Self {
+        self.rule_sink = sink;
+        self
+    }
+
+    /// Replace the default [`HttpsFetcher`]. Tests only: production never
+    /// sets a fetcher, so it has no non-https fetch path.
+    pub fn with_fetcher(mut self, fetcher: Arc<dyn BlocklistFetch>) -> Self {
+        self.fetcher = fetcher;
+        self
+    }
+
+    /// Record whether [`store`](Self::store) outlives the bridge process. Sent
+    /// to GUIs with every `SetBlocklists`.
+    pub fn with_storage_status(mut self, storage: StorageStatus) -> Self {
+        self.storage = storage;
+        self
+    }
+
+    pub fn storage_status(&self) -> &StorageStatus {
+        &self.storage
+    }
+
+    pub fn subscribe(&self) -> broadcast::Receiver<BlocklistEvent> {
+        self.bus.subscribe()
+    }
+
+    pub fn store(&self) -> &Arc<BlocklistStore> {
+        &self.store
+    }
+
+    /// Every subscription, by id, from memory (never waits on the store).
+    pub fn subscriptions(&self) -> Vec<Subscription> {
+        self.cache().values().cloned().collect()
+    }
+
+    pub fn subscription(&self, id: &str) -> Option<Subscription> {
+        self.cache().get(id).cloned()
+    }
+
+    pub fn has_subscription(&self, id: &str) -> bool {
+        self.cache().contains_key(id)
+    }
+
+    /// The subscription's enforcement state. Without a sink that installs
+    /// rules, every list is "Blocking isn't available yet", including after
+    /// a restart.
+    pub fn enforcement(&self, id: &str) -> Enforcement {
+        self.enforcement_map()
+            .get(id)
+            .cloned()
+            .unwrap_or_else(|| self.default_enforcement())
+    }
+
+    fn default_enforcement(&self) -> Enforcement {
+        if self.rule_sink.installs_rules() {
+            Enforcement::Pending
+        } else {
+            Enforcement::NotEnforced {
+                reason: NO_RULE_SINK_REASON.to_string(),
+            }
+        }
+    }
+
+    fn enforcement_map(&self) -> MutexGuard<'_, HashMap<String, Enforcement>> {
+        self.enforcement
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn cache(&self) -> MutexGuard<'_, BTreeMap<String, Subscription>> {
+        self.subscriptions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Run `work` against the store on the blocking pool.
+    async fn with_store<T, F>(&self, work: F) -> Result<T, StoreError>
+    where
+        T: Send + 'static,
+        F: FnOnce(&BlocklistStore) -> Result<T, StoreError> + Send + 'static,
+    {
+        let store = self.store.clone();
+        tokio::task::spawn_blocking(move || work(&store))
+            .await
+            .map_err(|e| StoreError::Io(std::io::Error::other(e)))?
+    }
+
+    /// Store a new subscription (does not fetch). Refuses, storing nothing, a
+    /// URL [`validate_subscription_url`] rejects, a 33rd list, and an id
+    /// already used by a different URL. The same URL again is a no-op.
+    pub async fn subscribe_url(&self, url: &str) -> SubscribeOutcome {
+        let url = match validate_subscription_url(url) {
+            Ok(parsed) => parsed.to_string(),
+            Err(reason) => return SubscribeOutcome::Refused(reason),
+        };
+        let id = derive_id(&url);
+        {
+            let cache = self.cache();
+            if let Some(existing) = cache.get(&id) {
+                return if existing.url == url {
+                    SubscribeOutcome::AlreadySubscribed(id)
+                } else {
+                    SubscribeOutcome::Refused(
+                        "Couldn't add this list: another list has the same ID".to_string(),
+                    )
+                };
+            }
+            if cache.len() >= MAX_SUBSCRIPTIONS {
+                return SubscribeOutcome::Refused(format!(
+                    "Too many blocklists (at most {MAX_SUBSCRIPTIONS})"
+                ));
+            }
+        }
+        let sub = Subscription {
+            id: id.clone(),
+            display_name: derive_display_name(&url),
+            url,
+            format_hint: None,
+            refresh_interval_secs: 86_400,
+            last_fetched_at: None,
+            last_attempt_at: None,
+            last_fetch_status: FetchStatus::Pending,
+            entry_count: 0,
+        };
+        let row = sub.clone();
+        if let Err(e) = self.with_store(move |s| s.upsert_subscription(&row)).await {
+            error!(%id, error = %e, "couldn't store blocklist subscription");
+            return SubscribeOutcome::Refused("Couldn't save the subscription".to_string());
+        }
+        self.cache().insert(id.clone(), sub);
+        let _ = self.bus.send(BlocklistEvent::SubscriptionsChanged);
+        SubscribeOutcome::Added(id)
+    }
+
+    /// [`subscribe_url`](Self::subscribe_url) as a `Result`: the id, or the
+    /// refusal reason as an error.
+    pub async fn add_subscription(&self, url: &str) -> anyhow::Result<String> {
+        match self.subscribe_url(url).await {
+            SubscribeOutcome::Added(id) | SubscribeOutcome::AlreadySubscribed(id) => Ok(id),
+            SubscribeOutcome::Refused(reason) => anyhow::bail!("refused blocklist URL: {reason}"),
+        }
+    }
+
+    /// Tell GUIs a subscribe request was refused. Nothing is stored; the URL
+    /// echoed back is capped.
+    pub fn reject_subscription(&self, url: &str, reason: &str) {
+        let _ = self.bus.send(BlocklistEvent::SubscriptionRejected {
+            url: url.chars().take(MAX_URL_LEN).collect(),
+            reason: reason.to_string(),
+        });
+    }
+
+    /// Resend the subscription list (e.g. to clear a refused row).
+    pub fn announce_subscriptions(&self) {
+        let _ = self.bus.send(BlocklistEvent::SubscriptionsChanged);
+    }
+
+    pub async fn remove_subscription(&self, id: &str) -> anyhow::Result<()> {
+        let owned = id.to_string();
+        self.with_store(move |s| s.delete_subscription(&owned))
+            .await?;
+        self.cache().remove(id);
+        self.enforcement_map().remove(id);
+        let _ = self.bus.send(BlocklistEvent::SubscriptionsChanged);
+        Ok(())
+    }
+
+    /// Ask the event pump for a page of `id`'s hosts (at most
+    /// [`BLOCKLIST_ENTRIES_PAGE_MAX`]).
+    pub fn request_entries(&self, id: &str, offset: u64, limit: u32) {
+        let _ = self.bus.send(BlocklistEvent::EntriesRequested {
+            subscription_id: id.to_string(),
+            offset,
+            limit,
+        });
+    }
+
+    /// A page of `id`'s hosts and its total entry count. Never more than
+    /// [`BLOCKLIST_ENTRIES_PAGE_MAX`] hosts.
+    pub async fn entries_page(
+        &self,
+        id: &str,
+        offset: u64,
+        limit: u32,
+    ) -> anyhow::Result<(Vec<String>, u64)> {
+        let total = self
+            .subscription(id)
+            .map(|s| u64::try_from(s.entry_count).unwrap_or(0))
+            .ok_or_else(|| anyhow::anyhow!("unknown subscription: {id}"))?;
+        let limit = limit.clamp(1, BLOCKLIST_ENTRIES_PAGE_MAX);
+        let owned = id.to_string();
+        let hosts = self
+            .with_store(move |s| s.list_entries_page(&owned, offset, limit))
+            .await?;
+        Ok((hosts, total))
+    }
+
+    /// Download `id` now and update the store, memory and GUIs. A failed
+    /// download keeps the cached entries.
+    pub async fn refresh_now(&self, id: &str) -> anyhow::Result<FetchStatus> {
+        let Some(sub) = self.subscription(id) else {
+            anyhow::bail!("unknown subscription: {id}");
+        };
+        let outcome = self.fetcher.fetch(&sub.url).await;
+        let now = Utc::now();
+        match outcome {
+            FetchOutcome::Ok { hosts, .. } => Ok(self.store_download(sub, hosts, now).await),
+            FetchOutcome::Failed { reason } => {
+                let mut updated = sub;
+                updated.last_attempt_at = Some(now);
+                updated.last_fetch_status = FetchStatus::Failed {
+                    reason: reason.clone(),
+                };
+                let row = updated.clone();
+                match self.with_store(move |s| s.update_subscription(&row)).await {
+                    Ok(false) => return Ok(updated.last_fetch_status),
+                    Ok(true) => {}
+                    Err(e) => {
+                        error!(id = %updated.id, error = %e, "couldn't record a failed download")
+                    }
+                }
+                if self.rule_sink.installs_rules() {
+                    self.enforcement_map()
+                        .entry(updated.id.clone())
+                        .or_insert_with(|| Enforcement::NotEnforced {
+                            reason: NOT_DOWNLOADED_REASON.to_string(),
+                        });
+                }
+                self.cache().insert(updated.id.clone(), updated.clone());
+                let _ = self.bus.send(BlocklistEvent::StatusChanged {
+                    subscription_id: updated.id.clone(),
+                });
+                warn!(id = %updated.id, %reason, "blocklist refresh failed; cache preserved");
+                Ok(FetchStatus::Failed { reason })
+            }
+        }
+    }
+
+    async fn store_download(
+        &self,
+        sub: Subscription,
+        hosts: Vec<String>,
+        now: DateTime<Utc>,
+    ) -> FetchStatus {
+        let mut updated = sub;
+        updated.entry_count = hosts.len() as i64;
+        updated.last_fetched_at = Some(now);
+        updated.last_attempt_at = Some(now);
+        updated.last_fetch_status = FetchStatus::Ok;
+        // Skipped while nothing can install rules: ~600 B per host for nothing.
+        let rules = self
+            .rule_sink
+            .installs_rules()
+            .then(|| materialize_batch(&updated.id, &hosts));
+        let row = updated.clone();
+        let count = hosts.len();
+        match self
+            .with_store(move |s| s.replace_entries_and_update(&row, &hosts))
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => return FetchStatus::Ok,
+            Err(e) => {
+                error!(id = %updated.id, error = %e, "couldn't store a downloaded blocklist");
+                updated.entry_count = self.subscription(&updated.id).map_or(0, |s| s.entry_count);
+                updated.last_fetched_at = None;
+                updated.last_fetch_status = FetchStatus::Failed {
+                    reason: STORE_ERROR_REASON.to_string(),
+                };
+                let status = updated.last_fetch_status.clone();
+                let id = updated.id.clone();
+                self.cache().insert(id.clone(), updated);
+                let _ = self.bus.send(BlocklistEvent::StatusChanged {
+                    subscription_id: id,
+                });
+                return status;
+            }
+        }
+        let id = updated.id.clone();
+        self.cache().insert(id.clone(), updated);
+        if let Some(rules) = rules {
+            let enforcement = match self.rule_sink.replace_blocklist_rules(&id, rules).await {
+                Ok(()) => Enforcement::RuleInstalled { at: Utc::now() },
+                Err(e) => {
+                    warn!(%id, error = %e, "rule sink push failed; entries cached but not enforced");
+                    Enforcement::NotEnforced {
+                        reason: e.to_string(),
+                    }
+                }
+            };
+            self.enforcement_map().insert(id.clone(), enforcement);
+        }
+        let _ = self.bus.send(BlocklistEvent::EntriesChanged {
+            subscription_id: id.clone(),
+        });
+        let _ = self.bus.send(BlocklistEvent::StatusChanged {
+            subscription_id: id.clone(),
+        });
+        info!(%id, count, "blocklist refreshed");
+        FetchStatus::Ok
+    }
+
+    /// Ids whose refresh interval elapsed, that were never downloaded, or
+    /// whose failed download is past its retry backoff.
+    pub fn due_subscription_ids(&self) -> Vec<String> {
+        let now = Utc::now();
+        self.cache()
+            .values()
+            .filter(|s| is_due(s, now))
+            .map(|s| s.id.clone())
+            .collect()
+    }
+}
+
+fn is_due(sub: &Subscription, now: DateTime<Utc>) -> bool {
+    let Some(attempt) = sub.last_attempt_at.or(sub.last_fetched_at) else {
+        return true;
+    };
+    match sub.last_fetch_status {
+        FetchStatus::Failed { .. } => {
+            (now - attempt).num_seconds() >= FAILED_RETRY_SECS.min(sub.refresh_interval_secs)
+        }
+        _ => sub
+            .last_fetched_at
+            .is_none_or(|t| (now - t).num_seconds() >= sub.refresh_interval_secs),
+    }
+}
