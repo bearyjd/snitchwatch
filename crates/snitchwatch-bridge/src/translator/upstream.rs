@@ -375,10 +375,11 @@ mod tests {
     use super::*;
     use crate::ws_messages::{ConnectionRow, VerdictDuration, VerdictScope};
 
-    fn make_pending(cache: &mut ConnectionCache, id: &str) {
-        // The returned verdict receiver is intentionally dropped: these tests
-        // only exercise `upstream::apply`, not the oneshot round-trip.
-        drop(cache.insert_pending(ConnectionRow {
+    fn make_pending(
+        cache: &mut ConnectionCache,
+        id: &str,
+    ) -> tokio::sync::oneshot::Receiver<crate::cache::connections::VerdictResolution> {
+        cache.insert_pending(ConnectionRow {
             id: id.to_string(),
             process: "p".to_string(),
             process_path: None,
@@ -392,13 +393,13 @@ mod tests {
             bytes_received: 0,
             started_at_ms: 0,
             matched_rule: None,
-        }));
+        })
     }
 
     #[test]
     fn set_verdict_resolves_pending_row() {
         let mut cache = ConnectionCache::new(10);
-        make_pending(&mut cache, "p1");
+        let _rpc = make_pending(&mut cache, "p1");
         let effect = apply(
             &mut cache,
             ClientMessage::SetVerdict {
@@ -428,7 +429,7 @@ mod tests {
     #[test]
     fn set_verdict_with_a_persistent_duration_reports_remember_true() {
         let mut cache = ConnectionCache::new(10);
-        make_pending(&mut cache, "p1");
+        let _rpc = make_pending(&mut cache, "p1");
         let effect = apply(
             &mut cache,
             ClientMessage::SetVerdict {
@@ -444,6 +445,28 @@ mod tests {
             UpstreamEffect::VerdictApplied { remember, .. } => assert!(remember),
             other => panic!("unexpected effect: {:?}", other),
         }
+    }
+
+    #[test]
+    fn late_persistent_verdict_after_rpc_drop_has_no_upstream_effect() {
+        let mut cache = ConnectionCache::new(10);
+        drop(make_pending(&mut cache, "cancelled"));
+        let result = apply(
+            &mut cache,
+            ClientMessage::SetVerdict {
+                row_id: "cancelled".into(),
+                verdict: VerdictAction::Allow,
+                scope: VerdictScope::AnyHost,
+                duration: Some(VerdictDuration::Always),
+                remember: None,
+            },
+        );
+        assert!(
+            result.is_err(),
+            "no VerdictApplied/rule effect is permitted"
+        );
+        assert_eq!(cache.pending_count(), 0);
+        assert!(cache.is_empty(), "no decided history row is permitted");
     }
 
     #[test]

@@ -92,8 +92,8 @@ Kirigami.Page {
                 switch (page.controller ? page.controller.state : "") {
                 case "unitMissing": return "Daemon not installed";
                 case "unitInactive": return "Daemon not running";
-                case "unreachableRetrying": return "Waiting for the daemon";
-                default: return "Checking daemon status…";
+                case "unreachableRetrying": return "Waiting for the bridge";
+                default: return "Checking bridge connection…";
                 }
             }
         }
@@ -138,7 +138,8 @@ Kirigami.Page {
             Controls.Button {
                 text: "Start daemon"
                 icon.name: "media-playback-start"
-                visible: page.controller && page.controller.state === "unitInactive"
+                visible: page.controller && (page.controller.state === "unitInactive"
+                         || page.controller.state === "unreachableRetrying")
                 enabled: page.controller && !page.controller.busy
                 onClicked: page.controller.startUnit()
             }

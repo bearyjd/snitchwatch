@@ -51,10 +51,12 @@ packaging/
 │   └── files/system/etc/opensnitchd/default-config.json  # fail-closed daemon config (canonical)
 ├── flatpak/
 │   ├── org.snitchwatch.Snitchwatch.yml             # GUI-only Flatpak manifest (no --share=network)
+│   ├── org.snitchwatch.Snitchwatch.system.yml      # alternative system-bridge profile (same app-id)
 │   ├── org.snitchwatch.Snitchwatch.desktop
 │   └── org.snitchwatch.Snitchwatch.metainfo.xml
-└── systemd/
-    └── snitchwatch-bridge.service                  # host-side bridge, systemd --user
+├── systemd/
+│   └── snitchwatch-bridge.service                  # legacy host-side user bridge
+└── system/                                         # pending system-bridge overlay
 ```
 
 ## Build (needs tooling absent from CI)
@@ -68,12 +70,17 @@ correct artifacts and their syntax is validated in CI (YAML/JSON parse +
 # Batteries-included image (needs the bluebuild CLI + podman/buildah):
 bluebuild build packaging/bluebuild/recipe.yml
 
-# GUI Flatpak (needs flatpak-builder + the KDE runtime, org.kde.Platform):
-python3 flatpak-cargo-generator.py Cargo.lock \
-  -o packaging/flatpak/generated-cargo-sources.json
-flatpak run org.flatpak.Builder --user --install --force-clean \
+# GUI Flatpak (prepare pinned Cargo inputs as documented in flatpak/README.md):
+python3 packaging/flatpak/generate-cargo-sources.py \
+  --generator /path/to/preparation/flatpak-cargo-generator.py
+flatpak-builder --user --disable-cache \
   build-dir packaging/flatpak/org.snitchwatch.Snitchwatch.yml
 ```
+
+See [`flatpak/README.md`](flatpak/README.md) for the pinned generator,
+declared build-only protoc/mold inputs, clean build procedure and evidence
+requirements. The build command above exports locally and does not install
+or launch the GUI.
 
 ## Pre-built bridge tarball (image-baked bridge)
 
@@ -100,3 +107,15 @@ need a real Bazzite host (bluebuild image build, Flatpak build, live
 opensnitchd dial-in, the closed-window fail-open fix, and the tray-state
 transitions added 2026-07-12), see
 [`../docs/packaging/phase2-manual-verification-runbook.md`](../docs/packaging/phase2-manual-verification-runbook.md).
+
+## System-bridge overlay (pending a new release)
+
+[`system/`](system/) is a separate, socket-activated system deployment for
+the dedicated `snitchwatch` account. It is intentionally not substituted for
+the legacy user-service assets above until a bridge release carries the new
+binary contract. See
+[`../docs/packaging/system-bridge-integration.md`](../docs/packaging/system-bridge-integration.md)
+for the trust boundary, deterministic image staging, desktop-group enrollment,
+and Flatpak migration checks. Use `flatpak/org.snitchwatch.Snitchwatch.system.yml`
+only for that system deployment; it deliberately shares the primary profile's
+app-id and is not coinstallable with it.

@@ -62,16 +62,31 @@ ENVIRONMENT (all optional):
     SNITCHWATCH_GRPC_BIND   gRPC bind address (default: 127.0.0.1:0)
     SNITCHWATCH_WS_SOCKET   Unix domain socket path for the WS server
                             (default: $XDG_RUNTIME_DIR/snitchwatch/bridge.sock)
+    SNITCHWATCH_SYSTEM_BRIDGE=1  Require systemd socket activation (no TCP fallback)
+                            Any other value is an error; unset selects legacy mode.
+                            Named grpc/gui listeners must use
+                            /run/snitchwatch/opensnitchd.sock and
+                            /run/snitchwatch/bridge.sock. Only UID 0 may use gRPC.
+                            Token: /run/snitchwatch-auth/token (mode 0640).
+
+GUI CLIENT ENVIRONMENT:
+    SNITCHWATCH_SYSTEM_BRIDGE=1 Select /run/snitchwatch/bridge.sock
+                               (otherwise $XDG_RUNTIME_DIR/snitchwatch/bridge.sock)
+    SNITCHWATCH_WS_SOCKET      Override the selected client socket
+    SNITCHWATCH_WS_TOKEN_PATH  Override the token file path
+                               (custom socket paths use a sibling token by default)
+                               System socket uses /run/snitchwatch-auth/token.
 
 OUTPUT:
     On startup these lines are printed to stdout so wrapping processes can
     discover where the bridge is listening:
 
     GRPC_LISTEN_ADDR=<addr>
+    GRPC_SOCKET_PATH=<path> (system mode, instead of GRPC_LISTEN_ADDR)
     WS_SOCKET_PATH=<path>
     WS_TOKEN_PATH=<path>
 
-    The token file is written with mode 0600 next to the socket.
+    In legacy mode the token file is written with mode 0600 next to the socket.
 ",
         version = version_line()
     )

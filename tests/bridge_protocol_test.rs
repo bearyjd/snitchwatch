@@ -35,6 +35,18 @@ async fn connect_stream(socket_path: &std::path::Path, token: &str) -> WebSocket
     ws.send(Message::Text(token.to_string()))
         .await
         .expect("token handshake send failed");
+    let ack = tokio::time::timeout(Duration::from_secs(2), ws.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let Message::Text(text) = ack else {
+        panic!("expected authenticated ACK")
+    };
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&text).unwrap()["action"],
+        "authenticated"
+    );
     ws
 }
 
@@ -57,7 +69,7 @@ async fn ask_rule_round_trip_unary() {
     let mut ws = connect_stream(&bridge.ws_socket_path, bridge.ws_token.as_str()).await;
 
     // 3. Spawn an opensnitchd mock client and fire AskRule in the background.
-    let grpc_addr = bridge.grpc_addr;
+    let grpc_addr = bridge.grpc_endpoint.tcp_addr().unwrap();
     let ask_handle = tokio::spawn(async move {
         let mut mock = MockOpensnitchd::connect(grpc_addr).await.unwrap();
         mock.ask_rule(Connection {
@@ -152,7 +164,7 @@ async fn deny_round_trip_unary() {
 
     let mut ws = connect_stream(&bridge.ws_socket_path, bridge.ws_token.as_str()).await;
 
-    let grpc_addr = bridge.grpc_addr;
+    let grpc_addr = bridge.grpc_endpoint.tcp_addr().unwrap();
     let ask_handle = tokio::spawn(async move {
         let mut mock = MockOpensnitchd::connect(grpc_addr).await.unwrap();
         mock.ask_rule(Connection {
@@ -211,7 +223,7 @@ async fn diagnostics_report_reflects_firewall_down_after_subscribe() {
 
     let mut ws = connect_stream(&bridge.ws_socket_path, bridge.ws_token.as_str()).await;
 
-    let grpc_addr = bridge.grpc_addr;
+    let grpc_addr = bridge.grpc_endpoint.tcp_addr().unwrap();
     let subscribe_handle = tokio::spawn(async move {
         let mut mock = MockOpensnitchd::connect(grpc_addr).await.unwrap();
         mock.subscribe_with_config(snitchwatch_proto::protocol::ClientConfig {
@@ -283,7 +295,9 @@ async fn idle_daemon_with_open_notifications_stream_stays_reachable() {
     // Mock opensnitchd connects and opens the Notifications stream, but
     // never calls ping() — exactly the idle-but-connected shape observed
     // live from a real daemon.
-    let mut mock = MockOpensnitchd::connect(bridge.grpc_addr).await.unwrap();
+    let mut mock = MockOpensnitchd::connect(bridge.grpc_endpoint.tcp_addr().unwrap())
+        .await
+        .unwrap();
     let (_reply_tx, _count_rx) = mock.open_notifications().await.unwrap();
 
     // Mark the current value seen (Idle, from bridge startup) so a later
@@ -356,7 +370,9 @@ async fn notifications_stream_close_triggers_down_transition_within_one_tick() {
     };
     let mut bridge = run(cfg).await.expect("bridge run failed");
 
-    let mut mock = MockOpensnitchd::connect(bridge.grpc_addr).await.unwrap();
+    let mut mock = MockOpensnitchd::connect(bridge.grpc_endpoint.tcp_addr().unwrap())
+        .await
+        .unwrap();
     let (reply_tx, _count_rx) = mock.open_notifications().await.unwrap();
 
     // Let last_activity age well past DAEMON_DOWN_TIMEOUT while the stream
@@ -424,7 +440,9 @@ async fn generic_alert_fails_ebpf_check_persists_across_subscribe_clears_on_rech
 
     let mut ws = connect_stream(&bridge.ws_socket_path, bridge.ws_token.as_str()).await;
 
-    let mut mock = MockOpensnitchd::connect(bridge.grpc_addr).await.unwrap();
+    let mut mock = MockOpensnitchd::connect(bridge.grpc_endpoint.tcp_addr().unwrap())
+        .await
+        .unwrap();
 
     // vendor/opensnitch/daemon/main.go:645 — the real string opensnitchd
     // v1.8.0 sends on this exact failure.
@@ -569,7 +587,9 @@ async fn rule_update_and_delete_reach_the_daemon_as_notifications() {
 
     // The stream must be open *before* the effect is sent: the bridge
     // broadcasts to whoever is subscribed and replays nothing.
-    let mut mock = MockOpensnitchd::connect(bridge.grpc_addr).await.unwrap();
+    let mut mock = MockOpensnitchd::connect(bridge.grpc_endpoint.tcp_addr().unwrap())
+        .await
+        .unwrap();
     let (_reply_tx, mut notifications) = mock.open_notifications().await.unwrap();
 
     // Shaped exactly like `RulesStore::toggled_rule_json` output: the full
@@ -644,5 +664,133 @@ async fn rule_update_and_delete_reach_the_daemon_as_notifications() {
         "notification ids must increase so daemon replies can be correlated"
     );
 
+    bridge.shutdown();
+}
+
+#[tokio::test]
+async fn no_gui_ask_is_unavailable_despite_internal_bridge_consumers() {
+    let dir = tempfile::tempdir().unwrap();
+    let bridge = run(BridgeConfig {
+        grpc_bind: "127.0.0.1:0".parse().unwrap(),
+        ws_socket_path: dir.path().join("bridge.sock"),
+        cache_capacity: 64,
+    })
+    .await
+    .unwrap();
+    let mut observer = bridge.broadcast_tx.subscribe();
+    let mut client = snitchwatch_proto::protocol::ui_client::UiClient::connect(format!(
+        "http://{}",
+        bridge.grpc_endpoint.tcp_addr().unwrap()
+    ))
+    .await
+    .unwrap();
+    let status = tokio::time::timeout(
+        Duration::from_secs(2),
+        client.ask_rule(Connection::default()),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(status.code(), tonic::Code::Unavailable);
+    assert_eq!(*bridge.tray_rx.borrow(), TrayState::Idle);
+    while let Ok(message) = observer.try_recv() {
+        assert!(!matches!(
+            message,
+            ServerMessage::InsertConnectionRows { .. }
+        ));
+    }
+    bridge.shutdown();
+}
+
+#[tokio::test]
+async fn last_real_gui_disconnect_removes_prompt_and_rejects_late_persistent_verdict() {
+    let dir = tempfile::tempdir().unwrap();
+    let bridge = run(BridgeConfig {
+        grpc_bind: "127.0.0.1:0".parse().unwrap(),
+        ws_socket_path: dir.path().join("bridge.sock"),
+        cache_capacity: 64,
+    })
+    .await
+    .unwrap();
+    let mut observer = bridge.broadcast_tx.subscribe();
+    let mut gui = connect_stream(&bridge.ws_socket_path, bridge.ws_token.as_str()).await;
+    let mut client = snitchwatch_proto::protocol::ui_client::UiClient::connect(format!(
+        "http://{}",
+        bridge.grpc_endpoint.tcp_addr().unwrap()
+    ))
+    .await
+    .unwrap();
+    let ask = tokio::spawn(async move {
+        client
+            .ask_rule(Connection {
+                dst_host: "disconnect.test".into(),
+                dst_ip: "192.0.2.15".into(),
+                dst_port: 8443,
+                process_path: "/usr/bin/curl".into(),
+                ..Default::default()
+            })
+            .await
+    });
+    let id = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let ServerMessage::InsertConnectionRows { rows } = observer.recv().await.unwrap() {
+                break rows[0].id.clone();
+            }
+        }
+    })
+    .await
+    .unwrap();
+    gui.close(None).await.unwrap();
+    let status = tokio::time::timeout(Duration::from_secs(2), ask)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(status.code(), tonic::Code::Unavailable);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let ServerMessage::RemoveConnectionRows { ids } = observer.recv().await.unwrap() {
+                if ids.contains(&id) {
+                    break;
+                }
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(*bridge.tray_rx.borrow(), TrayState::Idle);
+    let mut reconnected = connect_stream(&bridge.ws_socket_path, bridge.ws_token.as_str()).await;
+    reconnected
+        .send(Message::Text(
+            json!({
+                "action": "setVerdict", "rowId": id, "verdict": "allow",
+                "scope": "any_host", "duration": "always"
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+    reconnected
+        .send(Message::Text(
+            json!({"action": "requestSnapshot"}).to_string(),
+        ))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        let mut cleared = false;
+        loop {
+            match observer.recv().await.unwrap() {
+                ServerMessage::ClearConnectionRows => cleared = true,
+                ServerMessage::InsertConnectionRows { rows } => assert!(rows.is_empty()),
+                ServerMessage::UpdateRules { .. } | ServerMessage::UpdateConnectionRows { .. } => {
+                    panic!("late verdict produced rule/history effects")
+                }
+                ServerMessage::DiagnosticsReport { .. } if cleared => break,
+                _ => {}
+            }
+        }
+    })
+    .await
+    .unwrap();
     bridge.shutdown();
 }

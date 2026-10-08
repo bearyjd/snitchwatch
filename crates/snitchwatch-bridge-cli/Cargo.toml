@@ -29,7 +29,12 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 serde_json = { workspace = true }
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = { workspace = true }
 mock-opensnitchd = { path = "../../tests/mock_opensnitchd" }
+futures-util = { workspace = true }
+tokio-tungstenite = { workspace = true }
+hyper-util = { version = "0.1", features = ["tokio"] }
+tower = { version = "0.4", features = ["util"] }

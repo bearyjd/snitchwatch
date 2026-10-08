@@ -14,6 +14,8 @@
 //!   SNITCHWATCH_GRPC_BIND   gRPC bind address (default: 127.0.0.1:0)
 //!   SNITCHWATCH_WS_SOCKET   Unix domain socket path for the WS server
 //!                           (default: $XDG_RUNTIME_DIR/snitchwatch/bridge.sock)
+//!   SNITCHWATCH_SYSTEM_BRIDGE=1  Strict systemd socket activation: root-only
+//!                           daemon Unix socket and group-accessible GUI socket.
 //!
 //! On startup the CLI prints machine-parseable lines to stdout so test
 //! harnesses and wrapping processes (and the GUI shell) can discover the
@@ -22,6 +24,8 @@
 //!   GRPC_LISTEN_ADDR=<addr>
 //!   WS_SOCKET_PATH=<path>
 //!   WS_TOKEN_PATH=<path>
+//! System mode reports GRPC_SOCKET_PATH instead of GRPC_LISTEN_ADDR and writes
+//! its token to /run/snitchwatch-auth/token with mode 0640.
 //!
 //! The token file is written with mode 0600 under the same directory the
 //! socket lives in.
@@ -33,7 +37,7 @@ use std::io::{ErrorKind, Write};
 
 use anyhow::{Context, Result};
 use snitchwatch_bridge_cli::cli::{self, EarlyExit};
-use snitchwatch_bridge_cli::{run, BridgeConfig};
+use snitchwatch_bridge_cli::{activation, run, run_system, BridgeConfig, GrpcEndpoint};
 use tracing::info;
 
 fn main() -> Result<()> {
@@ -78,12 +82,20 @@ async fn run_bridge() -> Result<()> {
         )
         .init();
 
-    let config = BridgeConfig::from_env()?;
-    let bridge = run(config).await?;
+    let bridge = match std::env::var_os("SNITCHWATCH_SYSTEM_BRIDGE") {
+        Some(mode) if mode == std::ffi::OsStr::new("1") => {
+            run_system(activation::load().context("system socket activation failed")?).await?
+        }
+        Some(_) => anyhow::bail!("SNITCHWATCH_SYSTEM_BRIDGE must be 1 when set"),
+        None => run(BridgeConfig::from_env()?).await?,
+    };
 
     // Machine-parseable lines for test harnesses / the GUI launcher. Order
     // matters: opensnitchd wrappers grep for GRPC_LISTEN_ADDR first.
-    println!("GRPC_LISTEN_ADDR={}", bridge.grpc_addr);
+    match &bridge.grpc_endpoint {
+        GrpcEndpoint::Tcp(addr) => println!("GRPC_LISTEN_ADDR={addr}"),
+        GrpcEndpoint::Unix(path) => println!("GRPC_SOCKET_PATH={}", path.display()),
+    }
     println!("WS_SOCKET_PATH={}", bridge.ws_socket_path.display());
     println!("WS_TOKEN_PATH={}", bridge.ws_token_path.display());
 

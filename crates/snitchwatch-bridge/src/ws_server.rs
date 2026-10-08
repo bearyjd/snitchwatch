@@ -46,6 +46,8 @@ use tracing::{debug, error, info, warn};
 pub struct WsHandles {
     /// Server pushes broadcast to all connected clients.
     pub broadcast: broadcast::Sender<ServerMessage>,
+    /// Authenticated external sessions only, never broadcast subscribers.
+    pub presence: crate::client_presence::ClientPresence,
     /// Inbound client messages get forwarded here for the bridge to act on.
     pub inbound: mpsc::Sender<ClientMessage>,
     /// Shared blocklists manager — provides subscription state to WS handlers.
@@ -226,46 +228,53 @@ async fn handle_socket(socket: WebSocket, handles: WsHandles, token: Token) {
         return;
     }
 
-    let mut broadcast_rx = handles.broadcast.subscribe();
+    pump_authenticated(sender, receiver, handles).await;
+}
 
-    // Outbound task: forward broadcast messages to this client.
-    let outbound = tokio::spawn(async move {
+/// Kept as sibling futures: failure of either direction releases the lease
+/// and drops the other future, even when its peer never sends another frame.
+async fn pump_authenticated<S, R>(mut sender: S, mut receiver: R, handles: WsHandles)
+where
+    S: futures_util::Sink<Message> + Unpin,
+    R: futures_util::Stream<Item = Result<Message, axum::Error>> + Unpin,
+{
+    use futures_util::{SinkExt, StreamExt};
+    let mut broadcast_rx = handles.broadcast.subscribe();
+    let _session = handles.presence.authenticated_session();
+    let outbound = async move {
         while let Ok(msg) = broadcast_rx.recv().await {
             let json = match serde_json::to_string(&msg) {
-                Ok(j) => j,
-                Err(e) => {
-                    error!(error = %e, "failed to serialize ServerMessage");
+                Ok(json) => json,
+                Err(error) => {
+                    error!(%error, "failed to serialize ServerMessage");
                     continue;
                 }
             };
             if sender.send(Message::Text(json)).await.is_err() {
-                debug!("WS client disconnected (outbound)");
                 break;
             }
         }
-    });
-
-    // Inbound loop: parse client messages and forward to the bridge. Only
-    // reachable once the handshake above has succeeded.
-    while let Some(Ok(msg)) = receiver.next().await {
-        match msg {
-            Message::Text(text) => match serde_json::from_str::<ClientMessage>(&text) {
-                Ok(parsed) => {
-                    if handles.inbound.send(parsed).await.is_err() {
-                        debug!("inbound channel closed; dropping client");
-                        break;
+    };
+    let inbound = async {
+        while let Some(Ok(msg)) = receiver.next().await {
+            match msg {
+                Message::Text(text) => match serde_json::from_str::<ClientMessage>(&text) {
+                    Ok(parsed) => {
+                        if handles.inbound.send(parsed).await.is_err() {
+                            break;
+                        }
                     }
-                }
-                Err(e) => {
-                    error!(error = %e, raw = %text, "failed to parse ClientMessage");
-                }
-            },
-            Message::Close(_) => break,
-            _ => {}
+                    Err(error) => error!(%error, "failed to parse ClientMessage"),
+                },
+                Message::Close(_) => break,
+                _ => {}
+            }
         }
+    };
+    tokio::select! {
+        _ = outbound => {},
+        _ = inbound => {},
     }
-
-    outbound.abort();
     debug!("WS client connection ended");
 }
 
@@ -287,6 +296,7 @@ pub async fn serve_with_blocklists(
     )));
     let handles = WsHandles {
         broadcast: broadcast_tx.clone(),
+        presence: Default::default(),
         inbound: inbound_tx,
         blocklists: blocklists.clone(),
         profiles,
@@ -388,6 +398,7 @@ mod tests {
             Arc::new(crate::profiles::store::ProfileStore::open_in_memory().unwrap());
         WsHandles {
             broadcast: broadcast_tx,
+            presence: Default::default(),
             inbound: inbound_tx,
             blocklists: Arc::new(BlocklistsManager::new(store)),
             profiles: Arc::new(crate::profiles::ProfilesManager::new(profile_store)),
@@ -413,6 +424,7 @@ mod tests {
             Arc::new(crate::profiles::store::ProfileStore::open_in_memory().unwrap());
         let handles = WsHandles {
             broadcast: broadcast_tx.clone(),
+            presence: Default::default(),
             inbound: inbound_tx,
             blocklists: Arc::new(BlocklistsManager::new(store)),
             profiles: Arc::new(crate::profiles::ProfilesManager::new(profile_store)),
@@ -447,6 +459,85 @@ mod tests {
             }
         }
         panic!("failed to connect to unix socket: {last_err:?}");
+    }
+
+    #[tokio::test]
+    async fn only_acknowledged_authenticated_clients_establish_presence() {
+        let dir = tempfile::tempdir().unwrap();
+        let handles = default_handles();
+        let presence = handles.presence.clone();
+        let token = Token::generate();
+        let path = socket_path(&dir);
+        let server = WsServer::new(path.clone(), token.clone(), handles);
+        let listener = server.bind().await.unwrap();
+        let server = tokio::spawn(server.serve(listener));
+        let mut stalled = connect(&path).await;
+        assert!(presence.admit().is_none());
+        let mut invalid = connect(&path).await;
+        invalid
+            .send(TMessage::Text("invalid-token".into()))
+            .await
+            .unwrap();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(1), invalid.next())
+            .await
+            .unwrap();
+        assert!(presence.admit().is_none());
+        let mut first = connect(&path).await;
+        first
+            .send(TMessage::Text(token.as_str().into()))
+            .await
+            .unwrap();
+        let ack = first.next().await.unwrap().unwrap();
+        assert!(matches!(ack, TMessage::Text(ref text) if text.contains("authenticated")));
+        let mut second = connect(&path).await;
+        second
+            .send(TMessage::Text(token.as_str().into()))
+            .await
+            .unwrap();
+        let _ = second.next().await.unwrap().unwrap();
+        let mut admitted = presence.admit().unwrap();
+        first.close(None).await.unwrap();
+        // Second authenticated client keeps the request admitted; stalled
+        // and invalid transports must not affect this count.
+        tokio::task::yield_now().await;
+        assert!(admitted.while_current(|| ()).is_some());
+        second.close(None).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), admitted.lost())
+            .await
+            .unwrap();
+        assert!(presence.admit().is_none());
+        stalled.close(None).await.unwrap();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn outbound_failure_releases_presence_with_stalled_inbound() {
+        let handles = default_handles();
+        let presence = handles.presence.clone();
+        let broadcast = handles.broadcast.clone();
+        let failing_sink = Box::pin(futures_util::sink::unfold(
+            (),
+            |(), _message: Message| async {
+                Err::<(), std::io::Error>(std::io::Error::other("outbound failed"))
+            },
+        ));
+        let never_receives = futures_util::stream::pending::<Result<Message, axum::Error>>();
+        let pump = tokio::spawn(pump_authenticated(failing_sink, never_receives, handles));
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while presence.admit().is_none() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let mut admission = presence.admit().unwrap();
+        broadcast.send(ServerMessage::Authenticated).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), pump)
+            .await
+            .unwrap()
+            .unwrap();
+        admission.lost().await;
+        assert!(presence.admit().is_none());
     }
 
     #[tokio::test]
