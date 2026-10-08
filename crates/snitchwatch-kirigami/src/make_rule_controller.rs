@@ -150,7 +150,7 @@ impl qobject::MakeRuleController {
     /// The wait ended: say how, for the row it was about.
     fn finish(mut self: Pin<&mut Self>, row_id: String, done: Finished) {
         self.as_mut().set_row_id(QString::from(&row_id));
-        self.as_mut().set_created(done.created);
+        self.as_mut().set_created(done.saved);
         self.as_mut().set_busy(false);
         self.as_mut().set_status_text(QString::from(&done.status));
         self.finished(QString::from(&row_id), QString::from(&done.status));

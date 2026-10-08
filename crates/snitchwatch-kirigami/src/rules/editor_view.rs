@@ -110,45 +110,100 @@ pub struct Finished {
     pub status: String,
 }
 
-pub fn finished(outcome: &RuleCommandOutcome) -> Finished {
+/// What a rule command's result says, per sheet (the editor's
+/// [`EDITOR_WORDING`], "Make a rule…"'s own). Plain text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Wording {
+    /// Ok.
+    pub saved: &'static str,
+    /// Starts a rejection's reason.
+    pub not_saved: &'static str,
+    /// Starts a policy refusal's problems.
+    pub not_sent: &'static str,
+    /// No firewall service.
+    pub no_daemon: &'static str,
+    /// The bridge's own timeout, and no result in time.
+    pub unknown: &'static str,
+    /// OkWithNote: the note after `saved` (true), or the note alone.
+    pub note_after_saved: bool,
+}
+
+pub const EDITOR_WORDING: Wording = Wording {
+    saved: SAVED,
+    not_saved: NOT_SAVED,
+    not_sent: NOT_SENT,
+    no_daemon: NO_DAEMON,
+    unknown: UNKNOWN,
+    note_after_saved: false,
+};
+
+/// What `outcome` says in `wording`.
+pub fn finished_with(outcome: &RuleCommandOutcome, wording: &Wording) -> Finished {
     let (saved, status) = match outcome {
-        RuleCommandOutcome::Ok => (true, SAVED.to_string()),
+        RuleCommandOutcome::Ok => (true, wording.saved.to_string()),
+        RuleCommandOutcome::OkWithNote { note } if wording.note_after_saved => {
+            (true, format!("{} {note}", wording.saved))
+        }
         RuleCommandOutcome::OkWithNote { note } => (true, note.clone()),
-        RuleCommandOutcome::Rejected { reason } => (false, format!("{NOT_SAVED}{reason}")),
+        RuleCommandOutcome::Rejected { reason } => {
+            (false, format!("{}{reason}", wording.not_saved))
+        }
         RuleCommandOutcome::Refused { problems } => (
             false,
-            format!("{NOT_SENT}{}", plain_problems(problems).join(" ")),
+            format!("{}{}", wording.not_sent, plain_problems(problems).join(" ")),
         ),
-        RuleCommandOutcome::Timeout => (false, UNKNOWN.to_string()),
-        RuleCommandOutcome::NoDaemon => (false, NO_DAEMON.to_string()),
+        RuleCommandOutcome::Timeout => (false, wording.unknown.to_string()),
+        RuleCommandOutcome::NoDaemon => (false, wording.no_daemon.to_string()),
         RuleCommandOutcome::Unsure { reason } => (false, reason.clone()),
     };
     Finished { saved, status }
+}
+
+/// The editor's [`finished_with`].
+pub fn finished(outcome: &RuleCommandOutcome) -> Finished {
+    finished_with(outcome, &EDITOR_WORDING)
 }
 
 /// How long to wait for a result before giving up. A rename waits for up to
 /// three daemon answers (5 s each) plus the reply, so well above that.
 pub const NO_ANSWER_AFTER: Duration = Duration::from_secs(30);
 
-/// The request the editor is waiting for, if any.
-#[derive(Debug, Default)]
-pub struct Pending {
-    waiting: Option<(String, Instant)>,
+/// The one request a sheet is waiting for, if any, with what the sheet
+/// keeps about it (`Tag`: nothing for the editor; the row for "Make a
+/// rule…").
+#[derive(Debug)]
+pub struct Pending<Tag = ()> {
+    waiting: Option<(String, Tag, Instant)>,
 }
 
-impl Pending {
-    /// `request_id` was sent at `now`.
-    pub fn sent(&mut self, request_id: String, now: Instant) {
-        self.waiting = Some((request_id, now));
+impl<Tag> Default for Pending<Tag> {
+    fn default() -> Self {
+        Self { waiting: None }
+    }
+}
+
+impl<Tag> Pending<Tag> {
+    /// `request_id`, about `tag`, was sent at `now`.
+    pub fn sent_with(&mut self, request_id: String, tag: Tag, now: Instant) {
+        self.waiting = Some((request_id, tag, now));
     }
 
     pub fn is_waiting(&self) -> bool {
         self.waiting.is_some()
     }
 
-    /// The finished command, when `message` is the awaited result; the wait
-    /// ends there.
-    pub fn on_message(&mut self, message: &ServerMessage) -> Option<Finished> {
+    /// The send failed: nothing to wait for.
+    pub fn abandon(&mut self) {
+        self.waiting = None;
+    }
+
+    /// The tag and what the result says in `wording`, when `message` is the
+    /// awaited result; the wait ends there.
+    pub fn result_with(
+        &mut self,
+        message: &ServerMessage,
+        wording: &Wording,
+    ) -> Option<(Tag, Finished)> {
         let ServerMessage::RuleCommandResult {
             request_id,
             outcome,
@@ -156,26 +211,56 @@ impl Pending {
         else {
             return None;
         };
-        let (awaited, _) = self.waiting.as_ref()?;
+        let (awaited, _, _) = self.waiting.as_ref()?;
         if awaited != request_id {
             return None;
         }
-        self.waiting = None;
-        Some(finished(outcome))
+        let (_, tag, _) = self.waiting.take()?;
+        Some((tag, finished_with(outcome, wording)))
+    }
+
+    /// Give up after `after` of silence, or at once when `gone(tag)`: the
+    /// change may or may not have been made (`wording.unknown`).
+    pub fn expired_with(
+        &mut self,
+        now: Instant,
+        after: Duration,
+        gone: impl Fn(&Tag) -> bool,
+        wording: &Wording,
+    ) -> Option<(Tag, Finished)> {
+        let (_, tag, sent_at) = self.waiting.as_ref()?;
+        if !gone(tag) && now.duration_since(*sent_at) <= after {
+            return None;
+        }
+        let (_, tag, _) = self.waiting.take()?;
+        Some((
+            tag,
+            Finished {
+                saved: false,
+                status: wording.unknown.to_string(),
+            },
+        ))
+    }
+}
+
+impl Pending {
+    /// `request_id` was sent at `now`.
+    pub fn sent(&mut self, request_id: String, now: Instant) {
+        self.sent_with(request_id, (), now);
+    }
+
+    /// The finished command, when `message` is the awaited result; the wait
+    /// ends there.
+    pub fn on_message(&mut self, message: &ServerMessage) -> Option<Finished> {
+        self.result_with(message, &EDITOR_WORDING)
+            .map(|(_, done)| done)
     }
 
     /// Give up after [`NO_ANSWER_AFTER`] of silence: the change may or may
     /// not have been made.
     pub fn poll(&mut self, now: Instant) -> Option<Finished> {
-        let (_, sent_at) = self.waiting.as_ref()?;
-        if now.duration_since(*sent_at) <= NO_ANSWER_AFTER {
-            return None;
-        }
-        self.waiting = None;
-        Some(Finished {
-            saved: false,
-            status: UNKNOWN.to_string(),
-        })
+        self.expired_with(now, NO_ANSWER_AFTER, |_| false, &EDITOR_WORDING)
+            .map(|(_, done)| done)
     }
 }
 

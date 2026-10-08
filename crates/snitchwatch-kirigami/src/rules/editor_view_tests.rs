@@ -248,3 +248,51 @@ fn request_ids_are_valid_distinct_and_prefixed() {
         );
     }
 }
+
+/// The wait "Make a rule…" shares: a tag rides along, the wording is the
+/// caller's, and `gone` ends the wait before the deadline.
+#[test]
+fn a_tagged_wait_returns_its_tag_in_the_callers_wording() {
+    let start = Instant::now();
+    let wording = Wording {
+        saved: "Made.",
+        note_after_saved: true,
+        ..EDITOR_WORDING
+    };
+    let ok = ServerMessage::RuleCommandResult {
+        request_id: "7-1".into(),
+        outcome: RuleCommandOutcome::Ok,
+    };
+    let mut pending: Pending<&str> = Pending::default();
+    pending.sent_with("7-1".into(), "row-a", start);
+    assert_eq!(
+        pending.result_with(&ok, &wording),
+        Some((
+            "row-a",
+            Finished {
+                saved: true,
+                status: "Made.".into()
+            }
+        ))
+    );
+    assert_eq!(
+        finished_with(
+            &RuleCommandOutcome::OkWithNote {
+                note: "Note.".into()
+            },
+            &wording
+        )
+        .status,
+        "Made. Note."
+    );
+    pending.sent_with("7-2".into(), "row-b", start);
+    assert_eq!(
+        pending.expired_with(start, NO_ANSWER_AFTER, |_| false, &wording),
+        None
+    );
+    let (tag, done) = pending
+        .expired_with(start, NO_ANSWER_AFTER, |tag| *tag == "row-b", &wording)
+        .expect("gone ends the wait at once");
+    assert_eq!(tag, "row-b");
+    assert_eq!(done.status, UNKNOWN);
+}
