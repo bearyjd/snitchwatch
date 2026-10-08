@@ -2,6 +2,8 @@
 //! (`strings.EqualFold`), `reCmp` (lowercase subject, pattern lowercased at
 //! `Compile`) and `hashCmp` (`vendor/opensnitch/daemon/rule/operator.go`).
 
+use super::re2;
+
 /// `Operator.simpleCmp`: `strings.EqualFold` unless `sensitive`, then `==`.
 pub(super) fn simple_cmp(subject: &str, data: &str, sensitive: bool) -> bool {
     if sensitive {
@@ -17,17 +19,43 @@ pub(super) fn hash_cmp(subject: &str, data: &str) -> bool {
     subject.is_empty() || subject == data
 }
 
-/// `Operator.reCmp` with the pattern as `Compile` leaves it: unless
-/// `sensitive`, both the pattern *source* and the subject are lowercased (so
-/// `\D` becomes `\d`). The match is unanchored. A pattern that doesn't
-/// compile never matches: opensnitchd refuses to load such a rule.
-pub(super) fn regexp_cmp(subject: &str, pattern: &str, sensitive: bool) -> bool {
-    let (subject, pattern) = if sensitive {
-        (subject.to_string(), pattern.to_string())
-    } else {
-        (go_to_lower(subject), go_to_lower(pattern))
-    };
-    regex::Regex::new(&pattern).is_ok_and(|re| re.is_match(&subject))
+/// The compiled form of a `regexp` operator, as `Operator.Compile` and
+/// `reCmp` leave it: unless `sensitive`, the pattern source and the subject
+/// are both lowercased (so `\D` becomes `\d`), and the match is unanchored.
+pub(super) struct Regexp {
+    re: regex::Regex,
+    sensitive: bool,
+}
+
+/// Compiled-program size cap: bounded repeats such as `{1,253}` need more
+/// than the crate's 10 MiB default, and rules opensnitchd already accepted
+/// must not be misread as a miss for being big.
+const REGEX_SIZE_LIMIT: usize = 64 * 1024 * 1024;
+
+impl Regexp {
+    /// `None` when the `regex` crate can't compile the pattern. opensnitchd
+    /// compiled it (a rule that fails there is never loaded), so this is a
+    /// difference between the two engines, not a pattern that cannot match.
+    pub(super) fn compile(pattern: &str, sensitive: bool) -> Option<Self> {
+        let pattern = if sensitive {
+            pattern.to_string()
+        } else {
+            go_to_lower(pattern)
+        };
+        let re = regex::RegexBuilder::new(&re2::to_regex_crate(&pattern))
+            .size_limit(REGEX_SIZE_LIMIT)
+            .build()
+            .ok()?;
+        Some(Self { re, sensitive })
+    }
+
+    pub(super) fn is_match(&self, subject: &str) -> bool {
+        if self.sensitive {
+            self.re.is_match(subject)
+        } else {
+            self.re.is_match(&go_to_lower(subject))
+        }
+    }
 }
 
 /// `strings.EqualFold`: Unicode simple case folding, char by char.

@@ -95,7 +95,9 @@ impl SimulationForm {
             "off" => (Some(false), None),
             "on" => (
                 Some(true),
-                text(&self.md5).map(|md5| BTreeMap::from([("md5".to_string(), md5)])),
+                // The daemon records lowercase hex and compares exactly.
+                text(&self.md5)
+                    .map(|md5| BTreeMap::from([("md5".to_string(), md5.to_lowercase())])),
             ),
             "on-none" => (Some(true), Some(BTreeMap::new())),
             _ => (None, None),
@@ -253,7 +255,7 @@ mod tests {
         );
 
         // On, with the program's checksum typed in.
-        let input = form(serde_json::json!({"checksums": "on", "md5": " abc "}));
+        let input = form(serde_json::json!({"checksums": "on", "md5": " ABC "}));
         assert_eq!(input.checksums_enabled, Some(true));
         let sums = input.checksums.expect("checksums known");
         assert_eq!(sums.get("md5").map(String::as_str), Some("abc"));

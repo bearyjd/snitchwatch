@@ -320,6 +320,14 @@ fn network_operands_use_cidr_math_and_the_daemons_alias_table() {
         ("dest.network", "MULTICAST", "224.0.0.251", true),
         ("dest.network", "MULTICAST", "ff02::fb", true),
         ("dest.network", "MULTICAST", "10.0.0.1", false),
+        // A v4-mapped CIDR is read as the IPv4 network it names
+        // (`IPNet.Contains` takes `To4()` of both and the low 32 mask bits)...
+        ("dest.network", "::ffff:0:0/96", "8.8.8.8", true),
+        ("dest.network", "::ffff:10.0.0.0/104", "10.1.2.3", true),
+        ("dest.network", "::ffff:10.0.0.0/104", "11.0.0.1", false),
+        // ...unless the prefix is short enough that masking clears the
+        // `ffff` marker, which leaves a plain IPv6 network.
+        ("dest.network", "::ffff:0:0/95", "8.8.8.8", false),
         ("source.network", "10.0.0.0/8", "10.1.2.3", true),
         ("source.network", "10.0.0.0/8", "11.1.2.3", false),
         ("source.network", "LAN", "192.168.0.7", true),
@@ -453,11 +461,137 @@ fn regexp_lowercasing_also_rewrites_class_escapes_like_the_daemon() {
 }
 
 #[test]
-fn regexp_is_unanchored_and_an_invalid_pattern_never_matches() {
+fn regexp_is_unanchored() {
     assert!(matched(op("regexp", "process.path", "curl"), &base()));
     assert!(!matched(op("regexp", "process.path", "^curl"), &base()));
-    // Opensnitchd would refuse to load this rule at Compile().
-    assert!(!matched(op("regexp", "process.path", "(unclosed"), &base()));
+}
+
+#[test]
+fn a_pattern_the_simulators_engine_cannot_compile_is_unsupported_never_a_miss() {
+    // Every cached enabled rule already compiled under RE2 (the loader skips
+    // rules that fail), so a failure here is a syntax difference between
+    // engines, not a rule that cannot match. `\Q..\E` is RE2-only.
+    for operator in [
+        op_sensitive("regexp", "process.path", r"\Q/usr/bin\E/curl"),
+        op("regexp", "process.path", "(unclosed"),
+    ] {
+        let result = run(operator.clone(), &base());
+        assert_eq!(result.matched_rule, None, "{operator}");
+        assert_eq!(result.unsupported_operands.len(), 1, "{operator}");
+        let u = &result.unsupported_operands[0];
+        assert_eq!(u.operand, "process.path");
+        assert!(u.reason.contains("RE2"), "{}", u.reason);
+    }
+}
+
+#[test]
+fn a_big_bounded_repeat_still_compiles() {
+    // Hostname-shaped patterns with `{1,253}` blow past the regex crate's
+    // default 10 MiB program limit when `\w` is the Unicode class.
+    let pattern = op("regexp", "dest.host", r"^[\w.-]{1,253}$");
+    let host = |n: usize| base_with(|i| i.dest_host = "a".repeat(n));
+    assert!(matched(pattern.clone(), &host(253)));
+    assert!(!matched(pattern.clone(), &host(254)));
+    assert!(!matched(pattern, &host(0)));
+}
+
+#[test]
+fn a_unicode_class_repeat_needs_more_than_the_default_program_size() {
+    // `\pL` stays a Unicode class under RE2; repeated up to RE2's limit of
+    // 1000 it is far past the regex crate's 10 MiB default program size.
+    let pattern = op_sensitive("regexp", "process.path", r"^\pL{1,1000}$");
+    let at = |p: &str| base_with(|i| i.process_path = Some(p.to_string()));
+    let result = run(pattern.clone(), &at("éa"));
+    assert_eq!(result.matched_rule.as_deref(), Some("r"), "{result:?}");
+    assert!(!matched(pattern, &at("é1")));
+}
+
+#[test]
+fn re2_reads_escaped_punctuation_and_an_unparsed_repeat_as_literals() {
+    // RE2: a backslash before punctuation is that character (`\<` is `<`, not
+    // a word-boundary assertion), and `{,2}` isn't a repeat, so it is text.
+    let cases: &[(&str, &str, bool)] = &[
+        ("a<b", r"a\<b", true),
+        ("a>b", r"a\>b", true),
+        ("ab", r"a\<b", false),
+        ("x{,2}", r"^x{,2}$", true),
+        ("xx", r"^x{,2}$", false),
+        ("x", r"^x{,2}$", false),
+        ("xxx", r"^x{2,3}$", true),
+    ];
+    for (subject, pattern, expected) in cases {
+        let input = base_with(|i| i.process_path = Some(subject.to_string()));
+        assert_eq!(
+            matched(op_sensitive("regexp", "process.path", pattern), &input),
+            *expected,
+            "{pattern} vs {subject:?}"
+        );
+    }
+}
+
+#[test]
+fn re2_perl_classes_are_ascii_only() {
+    // RE2's `\w \d \s \b` are ASCII; Rust's are Unicode (and its `\s`
+    // includes `\v` and NBSP). (subject, pattern, expected)
+    let cases: &[(&str, &str, bool)] = &[
+        ("/home/josé/bin", r"^/home/\w+/bin$", false),
+        ("/home/jose/bin", r"^/home/\w+/bin$", true),
+        ("\u{663}\u{664}", r"^\d+$", false), // Arabic-Indic digits
+        ("34", r"^\d+$", true),
+        ("\u{a0}", r"^\S+$", true), // NBSP is not RE2 space
+        ("\u{a0}", r"^\s+$", false),
+        ("\u{b}", r"^\s$", false), // \v is not RE2 space
+        (" \t\n\r\u{c}", r"^\s+$", true),
+        ("é", r"^\W$", true),
+        ("é", r"^\D$", true),
+        ("é", r"^[^\w]$", true),
+        ("é", r"^[\W]$", true),
+        ("é", r"^[\w]$", false),
+        ("é", r"\bé\b", false), // ASCII word boundary: é is not a word char
+        ("aé", r"a\b", true),
+        ("a_1", r"^[\w]+$", true),
+        ("a.b-c", r"^[\w.-]+$", true),
+        ("a b", r"^[^\s]+$", false),
+        ("é", r"^[^\w]+$", true),
+    ];
+    for (subject, pattern, expected) in cases {
+        let input = base_with(|i| i.process_path = Some(subject.to_string()));
+        // Sensitive, so the pattern isn't lowercased and `\W` stays `\W`.
+        assert_eq!(
+            matched(op_sensitive("regexp", "process.path", pattern), &input),
+            *expected,
+            "{pattern} vs {subject:?}"
+        );
+    }
+}
+
+#[test]
+fn a_bracket_inside_a_class_is_a_literal_like_in_go() {
+    // Go: `[[a]]` is the class {'[', 'a'} followed by a literal `]`; the
+    // regex crate would read a nested class.
+    let at = |p: &str| base_with(|i| i.process_path = Some(p.to_string()));
+    let pattern = op_sensitive("regexp", "process.path", r"^[[a]]$");
+    assert!(matched(pattern.clone(), &at("[]")));
+    assert!(matched(pattern.clone(), &at("a]")));
+    assert!(!matched(pattern, &at("a")));
+    // A POSIX class still works, and a leading `]` is a literal.
+    assert!(matched(
+        op_sensitive("regexp", "process.path", r"^[[:alpha:]]+$"),
+        &at("abc")
+    ));
+    assert!(matched(
+        op_sensitive("regexp", "process.path", r"^[]a]+$"),
+        &at("]a]")
+    ));
+}
+
+#[test]
+fn escaped_backslashes_are_not_read_as_classes() {
+    // `\\w` is a literal backslash then `w`.
+    let at = |p: &str| base_with(|i| i.process_path = Some(p.to_string()));
+    let pattern = op_sensitive("regexp", "process.path", r"^\\w$");
+    assert!(matched(pattern.clone(), &at("\\w")));
+    assert!(!matched(pattern, &at("a")));
 }
 
 #[test]
@@ -544,17 +678,57 @@ fn hash_matches_every_program_while_checksums_are_off() {
 }
 
 #[test]
-fn hash_with_unknown_checksum_setting_matches_with_a_may_warning() {
-    let result = run(hash_rule(), &with_checksums(None, None));
-    assert_eq!(result.matched_rule.as_deref(), Some("r"));
+fn hash_with_the_checksum_setting_unknown_is_decided_only_when_on_and_off_agree() {
+    // Off always matches; so the rule is decided only if the checksums-on
+    // answer is a match too.
+    let hit = run(
+        hash_rule(),
+        &with_checksums(None, Some(&[("md5", "deadbeef")])),
+    );
+    assert_eq!(hit.matched_rule.as_deref(), Some("r"));
+    assert!(hit.unevaluated.is_empty());
+
+    let none_recorded = run(hash_rule(), &with_checksums(None, Some(&[])));
+    assert_eq!(none_recorded.matched_rule.as_deref(), Some("r"));
     assert!(
-        result
+        none_recorded
             .warnings
             .iter()
-            .any(|w| w.contains("may match every program")),
+            .any(|w| w.contains("no recorded checksum")),
         "{:?}",
-        result.warnings
+        none_recorded.warnings
     );
+
+    // On: a mismatch. Off: a match. Not decidable.
+    let miss = run(
+        hash_rule(),
+        &with_checksums(None, Some(&[("md5", "cafebabe")])),
+    );
+    assert_eq!(miss.matched_rule, None);
+    assert_eq!(miss.unevaluated.len(), 1);
+    assert_eq!(miss.unevaluated[0].operand, "process.hash.md5");
+    assert!(miss.unevaluated[0].missing.contains("checksums are on"));
+}
+
+#[test]
+fn hash_with_nothing_known_about_checksums_is_not_a_default_match() {
+    // The form's default: checksum setting and checksum both unknown.
+    let result = run(hash_rule(), &with_checksums(None, None));
+    assert_eq!(result.matched_rule, None);
+    assert_eq!(result.unevaluated.len(), 1);
+    assert!(result.unevaluated[0].missing.contains("checksums are on"));
+}
+
+#[test]
+fn a_hash_deny_does_not_decide_while_the_checksum_setting_is_unknown() {
+    let rules = vec![
+        deny("100-deny-hash", hash_rule()),
+        allow("200-allow", simple("dest.host", "example.com")),
+    ];
+    let result = simulate(&store_with(rules), &with_checksums(None, None));
+    assert_eq!(result.matched_rule.as_deref(), Some("200-allow"));
+    assert_eq!(result.unevaluated.len(), 1);
+    assert_eq!(result.unevaluated[0].rule, "100-deny-hash");
 }
 
 #[test]

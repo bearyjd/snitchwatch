@@ -5,7 +5,7 @@
 //! (`net.ParseCIDR`); the compared address is the connection's `DstIP` /
 //! `SrcIP`. Everything here uses `std::net` plus prefix math.
 
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv6Addr};
 
 /// `vendor/opensnitch/daemon/data/network_aliases.json` as `LoadAliases`
 /// leaves it in `AliasIPCache`: entries `net.ParseCIDR` rejects are skipped.
@@ -59,8 +59,7 @@ struct Cidr {
 }
 
 /// `net.ParseCIDR`: an address, `/`, and a decimal prefix length for that
-/// family. (IPv4-mapped notation such as `::ffff:10.0.0.0/104` is not
-/// special-cased.)
+/// family.
 fn parse_cidr(text: &str) -> Option<Cidr> {
     let (addr, prefix) = text.split_once('/')?;
     let addr: IpAddr = addr.parse().ok()?;
@@ -69,10 +68,27 @@ fn parse_cidr(text: &str) -> Option<Cidr> {
     }
     let prefix: u8 = prefix.parse().ok()?;
     let max = if addr.is_ipv4() { 32 } else { 128 };
-    (prefix <= max).then_some(Cidr { addr, prefix })
+    (prefix <= max).then(|| Cidr::new(addr, prefix))
 }
 
 impl Cidr {
+    /// `ParseCIDR` masks the host bits, and `IPNet.Contains` then reads a
+    /// network whose masked address is v4-mapped (`::ffff:a.b.c.d`) as the
+    /// IPv4 network it names: `To4()` of the address and the low 32 bits of
+    /// the mask. A prefix too short to keep the `ffff` marker stays IPv6.
+    fn new(addr: IpAddr, prefix: u8) -> Self {
+        if let IpAddr::V6(v6) = addr {
+            let mask = u128::MAX.checked_shl(128 - u32::from(prefix)).unwrap_or(0);
+            if let Some(v4) = Ipv6Addr::from(u128::from(v6) & mask).to_ipv4_mapped() {
+                return Self {
+                    addr: IpAddr::V4(v4),
+                    prefix: prefix.saturating_sub(96),
+                };
+            }
+        }
+        Self { addr, prefix }
+    }
+
     /// `IPNet.Contains`: same family, and the first `prefix` bits agree (so
     /// the host bits typed in the CIDR don't matter).
     fn contains(&self, ip: IpAddr) -> bool {

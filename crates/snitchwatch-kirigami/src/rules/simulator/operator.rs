@@ -24,8 +24,7 @@ const DEST_IP: &str = "destination IP";
 const IFACE_IN: &str = "inbound interface";
 const IFACE_OUT: &str = "outbound interface";
 const CHECKSUM: &str = "program checksum";
-const BAD_SRC_IP: &str = "a valid source IP address (the text entered isn't one)";
-const BAD_DEST_IP: &str = "a valid destination IP address (the text entered isn't one)";
+const CHECKSUMS_ON: &str = "whether checksums are on";
 
 // Why an operand can't be simulated at all.
 const USER_NAME: &str = "resolved to a numeric user id on the daemon host when the rule loads, \
@@ -38,14 +37,14 @@ const UNKNOWN_NETWORK: &str = "not a CIDR or one of the default aliases (LAN, MU
 const NESTED_LIST: &str = "a list inside a list: opensnitchd compiles only one level of members \
      (and drops a nested list's members for rules sent over gRPC), so it fails or matches \
      everything instead of ANDing them";
+const REGEX_ENGINE: &str = "this regular expression compiled in opensnitchd (Go RE2) but not in \
+     the simulator's engine, whose syntax differs, so it can't be evaluated here";
 const UNKNOWN_TYPE: &str = "a condition type opensnitchd 1.8.0 doesn't load";
 const LEGACY_SHAPE: &str = "a legacy rule shape the simulator doesn't read";
 const UNREADABLE: &str = "the condition's shape isn't recognised";
 
 // Notes on a verdict that leans on how opensnitchd treats hash conditions.
 const HASH_OFF: &str = "Hash conditions match every program while checksums are off.";
-const HASH_UNKNOWN: &str = "Hash conditions may match every program: it isn't known whether \
-     checksums are on, and while they are off a hash condition always matches.";
 const HASH_NONE_RECORDED: &str =
     "A program with no recorded checksum matches hash conditions, even with checksums on.";
 
@@ -93,35 +92,35 @@ pub(super) fn parse(value: &Value) -> Operator {
     let Some(obj) = value.as_object() else {
         return unreadable("<unrecognized operator shape>");
     };
-
-    if obj.len() == 1 {
-        if let Some((tag, inner)) = obj.iter().next() {
-            if inner.get("operand").is_some() || inner.get("operands").is_some() {
-                return parse_tagged(tag, inner);
-            }
-        }
+    if let Some((tag, inner)) = single_tagged_variant(obj) {
+        return parse_tagged(tag, inner);
     }
 
-    let text = |key: &str| obj.get(key).and_then(Value::as_str).unwrap_or("");
-    let operand = text("operand");
+    let operand = obj.get("operand").and_then(Value::as_str).unwrap_or("");
     let kind = obj.get("type").and_then(Value::as_str).unwrap_or("simple");
 
     // `Compile` rewrites a list's operand to `list`, and `Match` tests
     // `true` and `list` before anything else.
-    if kind == "list" {
-        return Operator::List(parse_children(
-            obj.get("list").or_else(|| obj.get("operands")),
-        ));
+    if kind == "list" || operand == "list" {
+        let members = obj.get("list").or_else(|| obj.get("operands"));
+        return Operator::List(parse_children(members));
     }
     if operand == "true" {
         return Operator::True;
     }
-    if operand == "list" {
-        return Operator::List(parse_children(
-            obj.get("list").or_else(|| obj.get("operands")),
-        ));
-    }
+    parse_leaf(obj, kind, operand)
+}
 
+/// The bridge's older externally-tagged shape: `{"simple": {"operand": ..}}`.
+fn single_tagged_variant(obj: &serde_json::Map<String, Value>) -> Option<(&String, &Value)> {
+    if obj.len() != 1 {
+        return None;
+    }
+    let (tag, inner) = obj.iter().next()?;
+    (inner.get("operand").is_some() || inner.get("operands").is_some()).then_some((tag, inner))
+}
+
+fn parse_leaf(obj: &serde_json::Map<String, Value>, kind: &str, operand: &str) -> Operator {
     let kind = match kind {
         "simple" => Kind::Simple,
         "regexp" => Kind::Regexp,
@@ -137,7 +136,11 @@ pub(super) fn parse(value: &Value) -> Operator {
     Operator::Leaf(Leaf {
         kind,
         operand: operand.to_string(),
-        data: text("data").to_string(),
+        data: obj
+            .get("data")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
         sensitive: obj
             .get("sensitive")
             .and_then(Value::as_bool)
@@ -184,6 +187,8 @@ pub(super) enum Gap {
     Unevaluated {
         operand: String,
         missing: &'static str,
+        /// Typed but unusable, rather than left blank.
+        invalid: bool,
     },
     /// An operand the simulator can't evaluate at all.
     Unsupported {
@@ -221,10 +226,20 @@ impl Outcome {
     }
 
     fn unevaluated(operand: &str, missing: &'static str) -> Self {
+        Self::gap(operand, missing, false)
+    }
+
+    /// The input was typed but isn't usable (not an IP address).
+    fn invalid(operand: &str, input: &'static str) -> Self {
+        Self::gap(operand, input, true)
+    }
+
+    fn gap(operand: &str, missing: &'static str, invalid: bool) -> Self {
         Self {
             gaps: vec![Gap::Unevaluated {
                 operand: operand.to_string(),
                 missing,
+                invalid,
             }],
             ..Self::definite(Truth::Unknown)
         }
@@ -304,31 +319,58 @@ fn evaluate_leaf(leaf: &Leaf, input: &SimulationInput) -> Outcome {
         "user.name" => Outcome::unsupported(operand, USER_NAME),
         "process.parent.path" => parent_path(leaf, input),
         "process.hash.md5" | "process.hash.sha1" => hash(leaf, input),
-        "dest.network" => network_operand(leaf, input.dest_ip.as_deref(), DEST_IP, BAD_DEST_IP),
-        "source.network" => network_operand(leaf, input.src_ip.as_deref(), SRC_IP, BAD_SRC_IP),
+        "dest.network" => network_operand(leaf, input.dest_ip.as_deref(), DEST_IP),
+        "source.network" => network_operand(leaf, input.src_ip.as_deref(), SRC_IP),
         _ => match (text_subject(operand, input), leaf.kind) {
             (Subject::NotAnOperand, _) => Outcome::definite(Truth::No),
             (_, Kind::Network | Kind::Lists) => Outcome::unsupported(operand, BAD_PAIRING),
             (Subject::Missing(what), _) => Outcome::unevaluated(operand, what),
-            (Subject::Known(subject), _) => text_outcome(leaf, &subject),
+            (Subject::Invalid(what), _) => Outcome::invalid(operand, what),
+            (Subject::Known(subject), _) => match Matcher::new(leaf) {
+                Ok(matcher) => Outcome::from_bool(matcher.matches(&subject)),
+                Err(reason) => Outcome::unsupported(operand, reason),
+            },
         },
     }
 }
 
-/// The comparison the operator's type makes, or the pairing failure for a
-/// type that can't compare text.
-fn text_outcome(leaf: &Leaf, subject: &str) -> Outcome {
-    match text_cmp(leaf, subject) {
-        Some(matched) => Outcome::from_bool(matched),
-        None => Outcome::unsupported(&leaf.operand, BAD_PAIRING),
-    }
+/// How the operator's type compares a string, built once per leaf (a regexp
+/// is compiled once however many strings — ancestors, checksums — it meets).
+enum Matcher {
+    Simple { data: String, sensitive: bool },
+    Regexp(compare::Regexp),
 }
 
-fn text_cmp(leaf: &Leaf, subject: &str) -> Option<bool> {
-    match leaf.kind {
-        Kind::Simple => Some(compare::simple_cmp(subject, &leaf.data, leaf.sensitive)),
-        Kind::Regexp => Some(compare::regexp_cmp(subject, &leaf.data, leaf.sensitive)),
-        Kind::Network | Kind::Lists => None,
+impl Matcher {
+    /// `Err` is why the leaf can't be evaluated: a type that can't compare
+    /// text, or a pattern the simulator's regexp engine can't compile.
+    fn new(leaf: &Leaf) -> Result<Self, &'static str> {
+        match leaf.kind {
+            Kind::Simple => Ok(Self::Simple {
+                data: leaf.data.clone(),
+                sensitive: leaf.sensitive,
+            }),
+            Kind::Regexp => compare::Regexp::compile(&leaf.data, leaf.sensitive)
+                .map(Self::Regexp)
+                .ok_or(REGEX_ENGINE),
+            Kind::Network | Kind::Lists => Err(BAD_PAIRING),
+        }
+    }
+
+    fn matches(&self, subject: &str) -> bool {
+        match self {
+            Self::Simple { data, sensitive } => compare::simple_cmp(subject, data, *sensitive),
+            Self::Regexp(re) => re.is_match(subject),
+        }
+    }
+
+    /// The comparison for a recorded checksum: `hashCmp` (exact, and an
+    /// empty hash is a fake match) for the `simple` type.
+    fn matches_hash(&self, checksum: &str) -> bool {
+        match self {
+            Self::Simple { data, .. } => compare::hash_cmp(checksum, data),
+            Self::Regexp(re) => re.is_match(checksum),
+        }
     }
 }
 
@@ -336,6 +378,8 @@ enum Subject {
     Known(String),
     /// An input the caller left unknown.
     Missing(&'static str),
+    /// An input that was typed but isn't usable.
+    Invalid(&'static str),
     NotAnOperand,
 }
 
@@ -351,10 +395,10 @@ fn text_subject(operand: &str, input: &SimulationInput) -> Subject {
         "process.command" => known_or(input.command.as_ref(), COMMAND),
         "process.id" => known_or(input.pid, PID),
         "dest.host" => Subject::Known(input.dest_host.clone()),
-        "dest.ip" => ip_subject(input.dest_ip.as_deref(), DEST_IP, BAD_DEST_IP),
+        "dest.ip" => ip_subject(input.dest_ip.as_deref(), DEST_IP),
         "dest.port" => Subject::Known(input.dest_port.to_string()),
         "user.id" => known_or(input.uid, UID),
-        "source.ip" => ip_subject(input.src_ip.as_deref(), SRC_IP, BAD_SRC_IP),
+        "source.ip" => ip_subject(input.src_ip.as_deref(), SRC_IP),
         "source.port" => known_or(input.src_port, SRC_PORT),
         "protocol" => Subject::Known(input.protocol.clone()),
         "iface.in" => known_or(input.iface_in.as_ref(), IFACE_IN),
@@ -376,12 +420,12 @@ fn text_subject(operand: &str, input: &SimulationInput) -> Subject {
 }
 
 /// `net.IP.String()` of the typed address.
-fn ip_subject(text: Option<&str>, missing: &'static str, invalid: &'static str) -> Subject {
+fn ip_subject(text: Option<&str>, input: &'static str) -> Subject {
     match text {
-        None => Subject::Missing(missing),
+        None => Subject::Missing(input),
         Some(text) => match network::parse_ip(text) {
             Some(ip) => Subject::Known(ip.to_string()),
-            None => Subject::Missing(invalid),
+            None => Subject::Invalid(input),
         },
     }
 }
@@ -391,70 +435,84 @@ fn parent_path(leaf: &Leaf, input: &SimulationInput) -> Outcome {
     let Some(ancestors) = &input.parent_paths else {
         return Outcome::unevaluated(&leaf.operand, PARENT_PATHS);
     };
-    let mut matched = false;
-    for path in ancestors {
-        match text_cmp(leaf, path) {
-            Some(true) => {
-                matched = true;
-                break;
-            }
-            Some(false) => {}
-            None => return Outcome::unsupported(&leaf.operand, BAD_PAIRING),
-        }
+    match Matcher::new(leaf) {
+        Ok(matcher) => Outcome::from_bool(ancestors.iter().any(|path| matcher.matches(path))),
+        Err(reason) => Outcome::unsupported(&leaf.operand, reason),
     }
-    Outcome::from_bool(matched)
 }
 
-/// The `process.hash.*` branch of `Match`: `ret` starts `true`; with
-/// checksums off it stays `true`; with them on, it is overwritten while
-/// iterating the process's checksums — **every** algorithm's value, whatever
-/// the operand's — so a process with none still matches.
+/// The `process.hash.*` branch of `Match`. With checksums off it is always
+/// `true`; with them on, see [`hash_with_checksums_on`]. When it isn't known
+/// whether they are on, the rule is decided only if both answers agree.
 fn hash(leaf: &Leaf, input: &SimulationInput) -> Outcome {
     match input.checksums_enabled {
-        Some(false) => return Outcome::yes_with(HASH_OFF),
-        None => return Outcome::yes_with(HASH_UNKNOWN),
-        Some(true) => {}
+        Some(false) => Outcome::yes_with(HASH_OFF),
+        Some(true) => hash_with_checksums_on(leaf, input),
+        None => hash_with_checksum_setting_unknown(leaf, input),
     }
+}
+
+/// Off always matches, so with the setting unknown the condition matches only
+/// if it matches with checksums on, too; anything else depends on a setting
+/// the caller doesn't know. (Treating "unknown" as a match would let every
+/// hash rule decide by default, including a hash deny stopping the scan.)
+fn hash_with_checksum_setting_unknown(leaf: &Leaf, input: &SimulationInput) -> Outcome {
+    let on = hash_with_checksums_on(leaf, input);
+    if on.truth == Truth::Yes {
+        return on;
+    }
+    let mut gaps = vec![Gap::Unevaluated {
+        operand: leaf.operand.clone(),
+        missing: CHECKSUMS_ON,
+        invalid: false,
+    }];
+    gaps.extend(
+        on.gaps
+            .into_iter()
+            .filter(|gap| matches!(gap, Gap::Unsupported { .. })),
+    );
+    Outcome {
+        truth: Truth::Unknown,
+        gaps,
+        warnings: Vec::new(),
+    }
+}
+
+/// `ret` starts `true` and is overwritten only while iterating the process's
+/// checksums — **every** algorithm's value, whatever the operand's — so a
+/// process with none still matches.
+fn hash_with_checksums_on(leaf: &Leaf, input: &SimulationInput) -> Outcome {
     let Some(checksums) = &input.checksums else {
         return Outcome::unevaluated(&leaf.operand, CHECKSUM);
     };
     if checksums.is_empty() {
         return Outcome::yes_with(HASH_NONE_RECORDED);
     }
-    for value in checksums.values() {
-        let matched = match leaf.kind {
-            // `hashCmp`: exact, and an empty hash is a fake match.
-            Kind::Simple if value.is_empty() => return Outcome::yes_with(HASH_NONE_RECORDED),
-            Kind::Simple => compare::hash_cmp(value, &leaf.data),
-            Kind::Regexp => compare::regexp_cmp(value, &leaf.data, leaf.sensitive),
-            Kind::Network | Kind::Lists => return Outcome::unsupported(&leaf.operand, BAD_PAIRING),
-        };
-        if matched {
-            return Outcome::definite(Truth::Yes);
-        }
+    let matcher = match Matcher::new(leaf) {
+        Ok(matcher) => matcher,
+        Err(reason) => return Outcome::unsupported(&leaf.operand, reason),
+    };
+    if leaf.kind == Kind::Simple && checksums.values().any(String::is_empty) {
+        // `hashCmp`'s fake match for an empty hash.
+        return Outcome::yes_with(HASH_NONE_RECORDED);
     }
-    Outcome::definite(Truth::No)
+    Outcome::from_bool(checksums.values().any(|sum| matcher.matches_hash(sum)))
 }
 
 /// `dest.network` / `source.network`: `Match` passes a `net.IP`, which only
 /// the `network` type can compare. `simple` would panic in the daemon; `reCmp`
 /// sees a non-string and returns false.
-fn network_operand(
-    leaf: &Leaf,
-    ip: Option<&str>,
-    missing: &'static str,
-    invalid: &'static str,
-) -> Outcome {
+fn network_operand(leaf: &Leaf, ip: Option<&str>, input: &'static str) -> Outcome {
     match leaf.kind {
         Kind::Network => {}
         Kind::Regexp => return Outcome::definite(Truth::No),
         Kind::Simple | Kind::Lists => return Outcome::unsupported(&leaf.operand, BAD_PAIRING),
     }
     let Some(text) = ip else {
-        return Outcome::unevaluated(&leaf.operand, missing);
+        return Outcome::unevaluated(&leaf.operand, input);
     };
     let Some(ip) = network::parse_ip(text) else {
-        return Outcome::unevaluated(&leaf.operand, invalid);
+        return Outcome::invalid(&leaf.operand, input);
     };
     match network::contains(&leaf.data, ip) {
         Some(inside) => Outcome::from_bool(inside),

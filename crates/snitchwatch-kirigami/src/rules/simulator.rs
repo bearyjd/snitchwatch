@@ -28,8 +28,9 @@
 //!     simply `false`.
 //!   * **Comparisons**: `simple` is `strings.EqualFold` (Unicode case
 //!     folding) unless `sensitive`; `regexp` lowercases both the pattern
-//!     source and the subject unless `sensitive`, and is unanchored; `network`
-//!     is CIDR membership or one of the daemon's aliases. See [`compare`] and
+//!     source and the subject unless `sensitive`, is unanchored, and reads
+//!     `\w \d \s \b` as RE2 does (ASCII only, see [`re2`]); `network` is CIDR
+//!     membership or one of the daemon's aliases. See [`compare`] and
 //!     [`network`].
 //!
 //! ## Every operand opensnitchd v1.8.0 evaluates
@@ -40,7 +41,9 @@
 //! `protocol`, `iface.in`/`out`, `list` and `true`. Hash conditions follow the
 //! daemon's quirk: they match every program while checksums are off, and a
 //! program with no checksum matches them even with checksums on — which is why
-//! such a verdict carries a warning.
+//! such a verdict carries a warning. While it isn't known whether checksums
+//! are on, a hash condition is decided only if both answers agree (off always
+//! matches), so it is never a match by default.
 //!
 //! ## Unknown inputs and operands that can't be simulated
 //!
@@ -52,8 +55,10 @@
 //!
 //! Some conditions can't be simulated at all, each with its own reason:
 //! `user.name` (opensnitchd resolves it to a uid on the daemon host when the
-//! rule loads), `lists.*` (the list files live on the daemon host) and a list
-//! nested in a list. They are reported in [`SimulationResult::unsupported_operands`], never as a
+//! rule loads), `lists.*` (the list files live on the daemon host), a list
+//! nested in a list, and a regular expression the `regex` crate can't compile
+//! although RE2 did (every cached enabled rule compiled under RE2, so that is
+//! an engine difference, never "can't match"). They are reported in [`SimulationResult::unsupported_operands`], never as a
 //! match.
 //!
 //! Every result is a [`SimulationResult`] — a simulation over cached data, not
@@ -70,6 +75,7 @@ mod compare;
 mod form;
 mod network;
 mod operator;
+mod re2;
 #[cfg(test)]
 mod tests;
 
@@ -130,6 +136,9 @@ pub struct Unevaluated {
     pub operand: String,
     /// The input it lacked, e.g. `"user ID"`.
     pub missing: String,
+    /// The input was typed but isn't usable (not an IP address), as opposed
+    /// to left blank.
+    pub invalid: bool,
 }
 
 /// Outcome of [`simulate`]. Always labelled as a simulation — never a live
@@ -165,54 +174,78 @@ fn stops_scan(rule: &Rule) -> bool {
     rule.precedence || rule.action == "deny" || rule.action == "reject"
 }
 
-/// Simulate matching `input` against `store`'s cached, enabled rules using
-/// opensnitchd's exact precedence semantics (see module docs).
-pub fn simulate(store: &RulesStore, input: &SimulationInput) -> SimulationResult {
-    let mut active: Vec<&Rule> = store.rules().iter().filter(|r| r.enabled).collect();
-    active.sort_by(|a, b| a.name.cmp(&b.name));
+/// The verdict opensnitchd applies for a matching rule: `acceptOrDeny`
+/// accepts only for exactly `allow` and drops anything else.
+fn daemon_action(rule: &Rule) -> &'static str {
+    if rule.action == "allow" {
+        "allow"
+    } else {
+        "deny"
+    }
+}
 
-    let mut decider: Option<(usize, &Rule, Vec<&'static str>)> = None;
-    let mut undecided: Vec<(usize, &Rule, Vec<Gap>)> = Vec::new();
-    for (position, rule) in active.iter().enumerate() {
+/// What a scan over the enabled rules found.
+struct Scan<'a> {
+    /// The rule that decides: its scan position, and notes on how it matched.
+    decider: Option<(usize, &'a Rule, Vec<&'static str>)>,
+    /// Rules whose conditions couldn't be decided, with why. Treated as
+    /// non-matching.
+    undecided: Vec<(usize, &'a Rule, Vec<Gap>)>,
+}
+
+/// `Loader.FindFirstMatch` over `active`, which is already in evaluation
+/// order.
+fn scan<'a>(active: &[&'a Rule], input: &SimulationInput) -> Scan<'a> {
+    let mut found = Scan {
+        decider: None,
+        undecided: Vec::new(),
+    };
+    for (position, &rule) in active.iter().enumerate() {
         let outcome = evaluate(&parse(&rule.operator), input);
         match outcome.truth {
             Truth::No => {}
-            Truth::Unknown => undecided.push((position, rule, outcome.gaps)),
+            Truth::Unknown => found.undecided.push((position, rule, outcome.gaps)),
             Truth::Yes => {
-                decider = Some((position, rule, outcome.warnings));
+                found.decider = Some((position, rule, outcome.warnings));
                 if stops_scan(rule) {
                     break;
                 }
             }
         }
     }
+    found
+}
 
-    // A rule whose conditions couldn't be decided is treated as a non-match.
-    // Report it only if it could have changed the verdict: a stop rule
-    // anywhere in the scan could have ended it, but an allow earlier than the
-    // deciding rule would just have been replaced by it.
-    let decider_position = decider.as_ref().map(|(position, _, _)| *position);
+/// What the undecided rules that could have changed the verdict lacked. A
+/// stop rule anywhere in the scan could have ended it, but an allow earlier
+/// than the deciding rule would just have been replaced by it.
+fn gaps_that_matter(found: &Scan) -> (Vec<Unsupported>, Vec<Unevaluated>) {
+    let decider_position = found.decider.as_ref().map(|(position, _, _)| *position);
     let mut unsupported = BTreeSet::new();
     let mut unevaluated = Vec::new();
     let mut seen = BTreeSet::new();
-    for (position, rule, gaps) in undecided {
-        let could_matter = stops_scan(rule) || decider_position.is_none_or(|d| position > d);
-        if !could_matter {
+    for (position, rule, gaps) in &found.undecided {
+        if !(stops_scan(rule) || decider_position.is_none_or(|d| *position > d)) {
             continue;
         }
         for gap in gaps {
             match gap {
                 Gap::Unsupported { operand, reason } => {
                     unsupported.insert(Unsupported {
-                        operand,
+                        operand: operand.clone(),
                         reason: reason.to_string(),
                     });
                 }
-                Gap::Unevaluated { operand, missing } => {
+                Gap::Unevaluated {
+                    operand,
+                    missing,
+                    invalid,
+                } => {
                     let entry = Unevaluated {
                         rule: rule.shown_name().to_string(),
-                        operand,
+                        operand: operand.clone(),
                         missing: missing.to_string(),
+                        invalid: *invalid,
                     };
                     if seen.insert(entry.clone()) {
                         unevaluated.push(entry);
@@ -221,24 +254,32 @@ pub fn simulate(store: &RulesStore, input: &SimulationInput) -> SimulationResult
             }
         }
     }
+    (unsupported.into_iter().collect(), unevaluated)
+}
 
-    let unsupported_operands = unsupported.into_iter().collect();
-    match decider {
-        Some((_, rule, warnings)) => SimulationResult {
-            matched_rule: Some(rule.shown_name().to_string()),
-            action: Some(rule.normalized_action().to_string()),
-            precedence: store.index_of(&rule.name),
-            unsupported_operands,
-            unevaluated,
-            warnings: warnings.into_iter().map(str::to_string).collect(),
-        },
-        None => SimulationResult {
-            matched_rule: None,
-            action: None,
-            precedence: None,
-            unsupported_operands,
-            unevaluated,
-            warnings: Vec::new(),
-        },
+/// Simulate matching `input` against `store`'s cached, enabled rules using
+/// opensnitchd's exact precedence semantics (see module docs).
+pub fn simulate(store: &RulesStore, input: &SimulationInput) -> SimulationResult {
+    let mut active: Vec<&Rule> = store.rules().iter().filter(|r| r.enabled).collect();
+    active.sort_by(|a, b| a.name.cmp(&b.name));
+
+    let found = scan(&active, input);
+    let (unsupported_operands, unevaluated) = gaps_that_matter(&found);
+    let (matched_rule, action, precedence, warnings) = match found.decider {
+        Some((_, rule, warnings)) => (
+            Some(rule.shown_name().to_string()),
+            Some(daemon_action(rule).to_string()),
+            store.index_of(&rule.name),
+            warnings.into_iter().map(str::to_string).collect(),
+        ),
+        None => (None, None, None, Vec::new()),
+    };
+    SimulationResult {
+        matched_rule,
+        action,
+        precedence,
+        unsupported_operands,
+        unevaluated,
+        warnings,
     }
 }

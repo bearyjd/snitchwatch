@@ -217,7 +217,12 @@ fn an_invalid_ip_is_reported_as_unevaluated_not_compared() {
     let result = run(simple("dest.ip", "not-an-ip"), &input);
     assert_eq!(result.matched_rule, None);
     assert_eq!(result.unevaluated.len(), 1);
-    assert!(result.unevaluated[0].missing.contains("valid"));
+    // Typed but not an address: its own wording, not "left blank".
+    assert!(result.unevaluated[0].invalid);
+    assert!(result.unevaluated[0].missing.contains("destination IP"));
+    // A blank one is the other kind.
+    let blank = run(simple("dest.ip", "10.0.0.1"), &base());
+    assert!(!blank.unevaluated[0].invalid);
 }
 
 #[test]
@@ -440,4 +445,30 @@ fn rule_names_in_results_are_the_display_names() {
     assert_eq!(result.matched_rule.as_deref(), Some("evilrule"));
     assert_eq!(result.unevaluated.len(), 1);
     assert_eq!(result.unevaluated[0].rule, "eviluid");
+}
+
+#[test]
+fn the_shown_action_is_compared_exactly_like_the_daemon_does() {
+    // `acceptOrDeny`: `r.Action == rule.Allow` accepts; anything else drops.
+    let shown = |action: &str| {
+        let rule = rule_with("r", true, action, false, simple("true", ""));
+        simulate(&store_with(vec![rule]), &base()).action
+    };
+    assert_eq!(shown("allow").as_deref(), Some("allow"));
+    assert_eq!(shown("deny").as_deref(), Some("deny"));
+    assert_eq!(shown("reject").as_deref(), Some("deny"));
+    assert_eq!(shown("ALLOW").as_deref(), Some("deny"));
+    assert_eq!(shown("").as_deref(), Some("deny"));
+}
+
+#[test]
+fn an_action_spelled_differently_does_not_stop_the_scan() {
+    // `FindFirstMatch` stops only on exactly "deny"/"reject".
+    let rules = vec![
+        rule_with("100-odd", true, "Deny", false, simple("true", "")),
+        allow("200-allow", simple("true", "")),
+    ];
+    let (rule, action) = decided(rules, &base());
+    assert_eq!(rule.as_deref(), Some("200-allow"));
+    assert_eq!(action.as_deref(), Some("allow"));
 }

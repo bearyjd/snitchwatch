@@ -12,6 +12,7 @@
 const BLOCKLISTS_PAGE: &str = include_str!("../qml/BlocklistsPage.qml");
 const PROFILES_PAGE: &str = include_str!("../qml/ProfilesPage.qml");
 const RULES_PAGE: &str = include_str!("../qml/RulesPage.qml");
+const SIMULATOR_SHEET: &str = include_str!("../qml/RuleSimulatorSheet.qml");
 const PENDING_SHEET: &str = include_str!("../qml/PendingDecisionSheet.qml");
 const CONNECTIONS_PAGE: &str = include_str!("../qml/ConnectionsPage.qml");
 const MAIN_QML: &str = include_str!("../qml/main.qml");
@@ -42,6 +43,7 @@ const ALL_QML: &[(&str, &str)] = &[
     ),
     ("PendingDecisionSheet.qml", PENDING_SHEET),
     ("ProfilesPage.qml", PROFILES_PAGE),
+    ("RuleSimulatorSheet.qml", SIMULATOR_SHEET),
     ("RulesPage.qml", RULES_PAGE),
     ("ScannerPage.qml", include_str!("../qml/ScannerPage.qml")),
     ("SizedOverlaySheet.qml", SIZED_SHEET),
@@ -360,16 +362,29 @@ fn rules_page_labels_showing_rule_data_are_plain_text() {
             "page.inspectAction",
             "page.inspectDuration",
             "page.inspectOperatorSummary",
-            "page.simulateMatchedRule",
-            "page.simulateAction",
-            "page.simulateUnsupported",
-            // The simulator's lines name rules and operands from the daemon.
-            "page.simulateUnevaluated",
-            "page.simulateWarnings",
             // Issue #44: names the destination of an all-apps rule.
             "row.allAppsHint",
         ],
-        14,
+        10,
+    );
+}
+
+/// The Simulate sheet shows rule names and operands from the daemon, and
+/// lines the simulator built from them.
+#[test]
+fn simulator_sheet_labels_showing_rule_data_are_plain_text() {
+    assert_data_labels_plain_text(
+        "RuleSimulatorSheet.qml",
+        SIMULATOR_SHEET,
+        &[
+            "sheet.simulateMatchedRule",
+            "sheet.simulateAction",
+            "sheet.simulateUnsupported",
+            "sheet.simulateUnevaluated",
+            "sheet.simulateInvalid",
+            "sheet.simulateWarnings",
+        ],
+        6,
     );
 }
 
@@ -473,6 +488,7 @@ fn inline_messages_carry_only_fixed_text() {
         ("BlocklistsPage.qml", BLOCKLISTS_PAGE),
         ("ProfilesPage.qml", PROFILES_PAGE),
         ("RulesPage.qml", RULES_PAGE),
+        ("RuleSimulatorSheet.qml", SIMULATOR_SHEET),
     ] {
         for block in blocks(&code_lines(source), "Kirigami.InlineMessage {") {
             checked += 1;
@@ -583,6 +599,7 @@ fn overlay_sheet_titles_are_plain_text() {
         ("BlocklistsPage.qml", BLOCKLISTS_PAGE),
         ("ProfilesPage.qml", PROFILES_PAGE),
         ("RulesPage.qml", RULES_PAGE),
+        ("RuleSimulatorSheet.qml", SIMULATOR_SHEET),
     ] {
         assert!(
             !code_lines(source).contains("Kirigami.OverlaySheet {"),
