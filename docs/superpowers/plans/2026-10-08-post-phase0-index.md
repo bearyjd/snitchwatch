@@ -60,7 +60,7 @@ No plan needs `CHANGE_CONFIG`, `TASK_START` or `RELOAD_FW_RULES`.
 | Item | Plan | Size | Depends on | Owner questions |
 |---|---|---|---|---|
 | 9a inline Deny until restart | `2026-10-08-inline-deny-until-restart.md` | S | **#44 Part A** (bridge refusal of non-absolute paths, `bindableProcessPath` role, `&str` predicate) | none (D1–D3 decided) |
-| 9b prompt slot | `2026-10-08-prompt-slot-ux.md` | M (A, B: S each; C, D: M) | A/B: #44 Part A (shared `Notice` sites) and the inline-Deny plan (shared Deny semantics). C: S1/S2 answered. D: the security PR's `rule_policy.rs`, the capture spike, S3 | S1, S2, S3, S4 (daemon option), S5 |
+| 9b prompt slot | `2026-10-08-prompt-slot-ux.md` | M (A, B: S each; C, D: M) | A/B: #44 Part A (shared `Notice` sites) and the inline-Deny plan (shared Deny semantics). C: S1/S2 answered. D: the security PR's `rule_policy.rs`, the `snitchwatch-default-` prefix refusal (P2.7/P2.1's profile layer, or D's own check if it lands first), the capture spike, S3 | S1, S2, S3, S4 (daemon option), S5 |
 | P2.7 import/export | `2026-10-08-rule-import-export.md` | S–M | the security PR's `rule_policy.rs` | none (X1–X4 decided) |
 | P2.6 insights | `2026-10-08-rule-insights.md` | M (3 PRs) | none for any part now that #48 is merged. N1 persistence needs #45 PR A's state dir | N1 (N2 decided) |
 | P2.1 rule editor | `2026-10-08-rule-editor.md` | M–L | the security PR's `rule_policy.rs`; P2.7's profile layer if it lands first | E2 (E1, E3 decided) |
@@ -99,8 +99,9 @@ Existing plans this builds on:
 7. **P2.1 editor**, last of the three. It adds the `Editor` profile and
    `request_id`/`RuleCommandResult`. **#46 Part 2** follows it.
 8. **Prompt-slot C** once S1/S2 are answered (it edits `ask_rule`, so
-   rebase on #44 Part A). **Prompt-slot D** once `rule_policy.rs` exists
-   and S3 is answered.
+   rebase on #44 Part A). **Prompt-slot D** once `rule_policy.rs` exists,
+   the `snitchwatch-default-` prefix is refused for GUI-authored rules
+   (P2.7/P2.1, or D adds it), and S3 is answered.
 
 #45 PR B can land any time now. It doesn't lift the `lists.*` refusal in
 the editor or import: list rules stay authored by #45's materializer only.

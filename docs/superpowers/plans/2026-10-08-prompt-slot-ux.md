@@ -242,7 +242,7 @@ takes it again. Meanwhile every other new connection gets `DefaultAction`:
     - GUI loss still returns `Unavailable`.
     - The 120 s daemon deadline can no longer be reached.
 
-### D. Curated defaults for background services (data + BR, M; blocked on S3 and the security PR's `rule_policy.rs`)
+### D. Curated defaults for background services (data + BR, M; blocked on S3, the security PR's `rule_policy.rs`, and the reserved-prefix refusal)
 
 12. **Data file.** `crates/snitchwatch-bridge/data/curated-defaults-v1.json`
     lists app-bound **allow** rules. Each has:
@@ -261,9 +261,15 @@ takes it again. Meanwhile every other new connection gets `DefaultAction`:
     and the profile layer P2.7 adds, checked by a unit test over the data
     file.
     - **Reserved prefix.** `snitchwatch-default-` joins `z00-blocklist:`
-      and `900-blocklist:` as a bridge-owned prefix. The P2.7/P2.1 profile
-      layers refuse it for user-authored and imported rules. P2.7's export
-      leaves it out, because those rules come back from the data file.
+      and `900-blocklist:` as a bridge-owned prefix. P2.7's export leaves
+      it out, because those rules come back from the data file.
+      - **D must not land without a refusal of that prefix for GUI-authored
+        `AddRule`/`UpdateRule`.** Otherwise a user could create a
+        `snitchwatch-default-…` rule that D's reconcile would treat as its
+        own.
+      - The P2.7/P2.1 profile layers provide the refusal. If D lands before
+        either, D adds the prefix check itself, in the pump's rule-effect
+        arm, before `notification_for_effect`.
 13. **Installed via `CHANGE_RULE`** through #48's `DaemonCommands`,
     reconciled like #45 PR B.
     - **When reconciliation runs:**
@@ -274,12 +280,16 @@ takes it again. Meanwhile every other new connection gets `DefaultAction`:
       - never while the cache is `Unknown`.
     - **What it does:**
       - an entry missing from the daemon is installed;
-      - a name under the reserved prefix that is no longer in the file, or
-        that exists while the opt-in is off, is deleted with `DELETE_RULE`.
-        Nothing outside the prefix is ever deleted;
-      - a user-edited copy is left alone and flagged. That means same name,
-        any field other than `enabled` different after list-operand
-        normalisation.
+      - an **unedited** copy under the reserved prefix that is no longer in
+        the file, or that exists while the opt-in is off, is deleted with
+        `DELETE_RULE`;
+      - **a user-edited copy is never deleted, not even on opt-out.** That
+        means same name, but some field other than `enabled` differs from
+        the data file after list-operand normalisation. It is left alone
+        and flagged ("Edited by you; Snitchwatch won't change it").
+        Deleting it could silently undo a change the user chose, such as
+        narrowing a curated allow's scope;
+      - nothing outside the prefix is ever deleted.
 14. **Content.** It comes from the first-boot capture spike (roadmap §6
     item 5): on a fresh tower VM image, record every program that asks in
     the first 10 minutes after login. Known hard cases go to the owner
@@ -370,6 +380,10 @@ allowlist.
   P2.7/P2.1 profile layers refuse that prefix for authored rules;
 - reconcile runs on a `synced()` bump and on an opt-in toggle, and not
   while the cache is `Unknown`;
+- **opt-out:** removes unedited copies only. An edited copy survives,
+  flagged;
+- with D's own prefix check (when it lands before P2.7/P2.1), an `AddRule`
+  named `snitchwatch-default-x` is refused and the mock receives nothing;
 - reconcile with the mock daemon:
   - install sends only `CHANGE_RULE`;
   - removal sends only `DELETE_RULE`;
