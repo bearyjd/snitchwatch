@@ -126,15 +126,30 @@ impl RulesCache {
         }
     }
 
-    /// Insert or replace by name. When the rule is already cached and the
-    /// incoming `created` is 0 (every GUI toggle goes through
-    /// `rule_from_wire`, which zeroes it), the cached `created` is kept: the
-    /// daemon's original expiry timer still fires on the original schedule.
+    /// Insert or replace by name. Every GUI change goes through
+    /// `rule_from_wire`, which zeroes `created`; what the cache shows then
+    /// follows the daemon:
+    /// - a **permanent** rule (`always`, `until restart`) is stamped now: the
+    ///   daemon rebuilds the rule from every `CHANGE_RULE`
+    ///   (`rule.Create` stamps `Created`), so an edited or re-enabled rule is
+    ///   new as far as its age goes (the Rules page needs that to not call it
+    ///   unused);
+    /// - a **timed** rule that is already cached keeps its cached `created`:
+    ///   the daemon's original expiry timer still fires on the original
+    ///   schedule.
+    ///
     /// A no-op while `Unknown`: one rule is not the full list.
-    pub fn upsert(&mut self, mut rule: Rule) {
+    pub fn upsert(&mut self, rule: Rule) {
+        self.upsert_at(rule, now_secs());
+    }
+
+    /// [`upsert`](Self::upsert) at a given time.
+    pub fn upsert_at(&mut self, mut rule: Rule, now_secs: i64) {
         let Some(rules) = &mut self.rules else { return };
         if rule.created == 0 {
-            if let Some(cached) = rules.get(&rule.name) {
+            if matches!(rule.duration.as_str(), "always" | "until restart") {
+                rule.created = now_secs;
+            } else if let Some(cached) = rules.get(&rule.name) {
                 rule.created = cached.created;
             }
         }
@@ -186,9 +201,14 @@ impl RulesCache {
     /// Apply a command the daemon answered `OK`: `CHANGE_RULE` upserts its
     /// rules, `DELETE_RULE` removes them by name.
     pub fn apply_confirmed(&mut self, sent: &Notification) {
+        self.apply_confirmed_at(sent, now_secs());
+    }
+
+    /// [`apply_confirmed`](Self::apply_confirmed) at a given time.
+    pub fn apply_confirmed_at(&mut self, sent: &Notification, now_secs: i64) {
         if sent.r#type == Action::ChangeRule as i32 {
             for rule in &sent.rules {
-                self.upsert(rule.clone());
+                self.upsert_at(rule.clone(), now_secs);
             }
         } else if sent.r#type == Action::DeleteRule as i32 {
             for rule in &sent.rules {
@@ -196,6 +216,13 @@ impl RulesCache {
             }
         }
     }
+}
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+        .unwrap_or(0)
 }
 
 /// When a temporary rule (`loader.go` `isTemporary`: not `once`,

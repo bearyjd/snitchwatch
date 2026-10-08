@@ -60,6 +60,10 @@ const ALL_QML: &[(&str, &str)] = &[
     ("RuleEditorSheet.qml", EDITOR_SHEET),
     ("RuleSimulatorSheet.qml", SIMULATOR_SHEET),
     ("RulesImportSheet.qml", IMPORT_SHEET),
+    (
+        "RulesInsightsText.qml",
+        include_str!("../qml/RulesInsightsText.qml"),
+    ),
     ("RulesPage.qml", RULES_PAGE),
     ("ScannerPage.qml", include_str!("../qml/ScannerPage.qml")),
     ("SizedOverlaySheet.qml", SIZED_SHEET),

@@ -121,85 +121,12 @@ Kirigami.ScrollablePage {
         ? JSON.parse(page.model.hitsInfoJson) : null
 
     function formatTime(ms) {
-        return new Date(ms).toLocaleString(Qt.locale(), Locale.ShortFormat);
-    }
-
-    // Empty when this bridge sends no counts.
-    function hitsSummaryText(info) {
-        if (!info || !info.available) return "";
-        if (!info.counting) {
-            return "Hit counts start when the firewall first reports statistics.";
-        }
-        let text = "Hits counted by Snitchwatch since " + page.formatTime(info.sinceMs)
-            + "; approximate.";
-        if (info.lossy) {
-            // The gap is a moment, not a state: hits before it may be missing,
-            // and a long-past one says nothing is known since.
-            if (info.lastGapMs > 0) {
-                text += " Hits may be missing before " + page.formatTime(info.lastGapMs) + ".";
-                if (Date.now() - info.lastGapMs >= 14 * 86400000) {
-                    text += " No gap noticed since.";
-                }
-            } else {
-                text += " Some hits may be missing.";
-            }
-        }
-        return text;
-    }
-
-    function hitsStorageText(info) {
-        if (!info || !info.available || info.persistent) return "";
-        return info.storageReason.length > 0
-            ? "Hit counts are not saved across restarts: " + info.storageReason
-            : "Hit counts are not saved across restarts.";
-    }
-
-    function hitsRowText(counted, count, lastMs, note, badgeKind, badgeMs) {
-        if (note.length > 0) return note;
-        if (!counted) return "";
-        if (count === 0) {
-            switch (badgeKind) {
-            case "unused":
-                return "Unused: no hits counted in the last 14 days";
-            case "since":
-                return "No hits since " + page.formatTime(badgeMs);
-            case "sinceMissed":
-                return "No hits since " + page.formatTime(badgeMs)
-                    + "; some may have been missed";
-            default:
-                return "No hits counted";
-            }
-        }
-        return count + (count === 1 ? " hit" : " hits")
-            + (lastMs > 0 ? ", last " + page.formatTime(lastMs) : "");
+        return insightsText.formatTime(ms);
     }
 
     // The on-demand analysis' state; null before the model has one.
     readonly property var analysisInfo: !!page.model && page.model.analysisJson.length > 0
         ? JSON.parse(page.model.analysisJson) : null
-
-    function analysisText(info) {
-        if (!info) return "";
-        switch (info.state) {
-        case "running":
-            return "Analyzing rules...";
-        case "tooMany":
-            return "Too many rules to analyze: " + info.enabled + " are enabled and the limit is "
-                + info.limit + ".";
-        case "stale":
-            return "The rules changed after the analysis. Choose Analyze rules to run it again.";
-        case "done": {
-            const found = info.neverDecides + info.mayBeShadowed;
-            const caveat = " Snitchwatch checks only conditions it can compare exactly.";
-            return found === 0
-                ? "No rules found that can never decide a connection." + caveat
-                : found + (found === 1 ? " rule" : " rules")
-                    + " may never decide a connection (marked below)." + caveat;
-        }
-        default:
-            return "";
-        }
-    }
 
     // Rule-match diagnostics' "Show rule" jump target (called by main.qml
     // after navigating here from ConnectionsPage's inspector). Re-populates
@@ -391,7 +318,7 @@ Kirigami.ScrollablePage {
             textFormat: Text.PlainText
             wrapMode: Text.Wrap
             font: Kirigami.Theme.smallFont
-            text: page.hitsSummaryText(page.hitsInfo)
+            text: insightsText.hitsSummaryText(page.hitsInfo)
         }
         Controls.Label {
             id: hitsStorageLabel
@@ -403,7 +330,7 @@ Kirigami.ScrollablePage {
             wrapMode: Text.Wrap
             font: Kirigami.Theme.smallFont
             color: Kirigami.Theme.neutralTextColor
-            text: page.hitsStorageText(page.hitsInfo)
+            text: insightsText.hitsStorageText(page.hitsInfo)
         }
         Controls.Label {
             id: analysisLabel
@@ -414,7 +341,7 @@ Kirigami.ScrollablePage {
             textFormat: Text.PlainText
             wrapMode: Text.Wrap
             font: Kirigami.Theme.smallFont
-            text: page.analysisText(page.analysisInfo)
+            text: insightsText.analysisText(page.analysisInfo)
         }
         // The last export or import outcome (P2.7), plain text.
         Controls.Label {
@@ -538,7 +465,7 @@ Kirigami.ScrollablePage {
                         objectName: "hitsLabel"
                         visible: text.length > 0
                         textFormat: Text.PlainText
-                        text: page.hitsRowText(row.hitsCounted, row.hitCount, row.lastHitMs,
+                        text: insightsText.hitsRowText(row.hitsCounted, row.hitCount, row.lastHitMs,
                                                row.hitsNote, row.hitBadgeKind, row.hitBadgeMs)
                         opacity: row.hitBadgeKind === "unused" ? 1.0 : 0.7
                         color: row.hitBadgeKind === "unused" ? Kirigami.Theme.neutralTextColor
@@ -779,6 +706,10 @@ Kirigami.ScrollablePage {
 
     // Rule editor (P2.1): "New rule…", the inspector's Edit, and
     // `openEditor` for a connection.
+    RulesInsightsText {
+        id: insightsText
+    }
+
     RuleEditorController {
         id: ruleEditorController
         Component.onCompleted: startBridgeFeed()

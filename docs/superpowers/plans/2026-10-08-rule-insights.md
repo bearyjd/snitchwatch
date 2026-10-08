@@ -302,10 +302,12 @@ the design above, this is what shipped):
        it.
      - A stop rule **B** never decides when an *earlier* stop rule A
        covers it.
-   - **Findings:**
-     - "Redundant: <A> already decides these connections the same way"
-       when the actions match;
-     - "Never applies: <A> decides first" when they differ.
+   - **Findings** (as built: one claim, see "Part 2 as built"):
+     - "Never decides: <A> matches every connection this rule does and
+       takes precedence";
+     - the earlier "Redundant ... the same way" / "Never applies ... decides
+       first" split was dropped: only "B never decides" is proven, not who
+       decides or with what verdict.
 
      Each finding names A and links to its row.
    - **Cost.** O(n²) over enabled rules. Run it on demand ("Analyze
@@ -341,10 +343,17 @@ the design above, this is what shipped):
   rules and `A` is earlier; or both are non-stop and `A` is later. `A` must be
   enabled, **`always`** (a timed or `until restart` rule ends, and so does the
   shadowing) and made only of modelled conditions. A proof from exact
-  comparisons is "Redundant: A already decides these connections the same way"
-  or "Never applies: A decides these connections instead"; a proof that uses
-  the simulator's regular-expression engine is only "May be shadowed by A"
-  (Go's RE2 differs for rare constructs). Not modelled, so never covering:
+  comparisons is "Never decides: A matches every connection this rule does
+  and takes precedence"; a proof that uses the simulator's regular-expression
+  engine is only "May never decide: A appears to ...". **Only that is
+  claimed**: not who decides those connections, and never "the same way". A
+  third rule matching only some of them (a precedence allow on the same host
+  and one port) can decide those, and so can a stop rule earlier than `A`; the
+  review's example, `100-b allow x`, `200-a allow x`, `300-d deny x`, names
+  `300-d` for both allows. **Which rule is named:** for a non-stop `B`, the
+  earliest covering stop rule (it ends the scan for every connection `B`
+  matches), else the last covering non-stop rule (what replaces `B`); for a
+  stop `B`, the earliest covering stop rule. Not modelled, so never covering:
   `lists.*`, `process.hash.*`, `user.name`, `iface.*`, `process.env.*`,
   `process.parent.path`, aliases (they are whatever the daemon host's alias
   file says; only an identical alias implies itself), IPv6 networks, nested
@@ -353,8 +362,17 @@ the design above, this is what shipped):
   letter (Go folds U+017F with `s` but `ToLower` leaves it); and an
   insensitive literal never implies a sensitive condition.
 - **Staleness.** A result belongs to the rule list it was computed from; a
-  list change (or one during the run) drops the findings and says "The rules
-  changed after the analysis. Analyze again."
+  list change (or one during the run) drops the findings, tells the run to
+  stop, and says "The rules changed after the analysis. Choose Analyze rules to
+  run it again." Asking again clears the rows at once.
+- **Age and counts across edits (review).** The daemon rebuilds a rule from
+  every `CHANGE_RULE` and stamps `Created` with the time of the change, so the
+  bridge's cache does the same for a permanent rule (`always`, `until
+  restart`) the GUI edits or re-enables; a timed rule keeps its cached
+  `created` (its expiry timer keeps its schedule). Without that, a 40-day-old
+  rule just edited read "unused for 14 days". A counted rule that leaves a
+  committed snapshot loses its count and records a gap, so it cannot return
+  with its old `created` and no history and read "unused" at once.
 - **Wording.** Every label is PlainText. Nothing says a rule was or will be
   removed, disabled or changed.
 
@@ -475,8 +493,8 @@ Tower VM checks:
    shows about 20 and "Last used" is current.
 2. **`nolog`.** A `nolog` rule shows "Not counted".
 3. **Shadowing.** Add a host-wide deny for `example.com` and an app-bound
-   allow for curl → `example.com`. The allow is reported "Never applies"
-   because of the deny, and `curl` is indeed blocked.
+   allow for curl → `example.com`. The allow is reported "Never decides"
+   with the deny named, and `curl` is indeed blocked.
 
 ## Risks
 

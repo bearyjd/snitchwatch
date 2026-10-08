@@ -22,6 +22,7 @@ fn main() {
             "qml/MakeRuleSheet.qml",
             "qml/BlocklistsPage.qml",
             "qml/RulesPage.qml",
+            "qml/RulesInsightsText.qml",
             "qml/RuleSimulatorSheet.qml",
             "qml/RulesImportSheet.qml",
             "qml/RuleEditorSheet.qml",

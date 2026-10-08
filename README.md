@@ -265,11 +265,15 @@ past 2,000,000 hosts in total (in subscription order) get no rule.
   are saved and 14 days have passed since the latest of when counting began,
   when the rule was created and the bridge's last gap in the counting (a
   restart, say); otherwise "No hits since <time>", from that moment. The
-  header says "Hits may be missing before <time>" for the last gap. "Analyze rules" marks rules that
-  can never decide a connection because another one covers them ("Redundant",
-  "Never applies", or "May be shadowed" when the proof rests on a regular
-  expression). It checks only conditions Snitchwatch can compare exactly, so
-  no mark is not a guarantee, and it never changes a rule.
+  header says "Hits may be missing before <time>" for the last gap. A rule
+  edited or re-enabled counts as new (the daemon restamps it), and a counted
+  rule that leaves the daemon's rule list records a gap. "Analyze rules" marks
+  rules that can never decide a connection because another one matches
+  everything they do and takes precedence ("Never decides", or "May never
+  decide" when the proof rests on a regular expression). It names that rule and
+  says nothing about what the connections get instead, since a third rule can
+  decide some of them. It checks only conditions Snitchwatch can compare
+  exactly, so no mark is not a guarantee, and it never changes a rule.
 - The bridge fetches only `https://` URLs, including every redirect, and
   never a loopback, link-local, carrier-grade NAT or other reserved address
   (LAN addresses, RFC 1918 and ULA, are allowed: owner decision,

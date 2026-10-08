@@ -197,6 +197,12 @@ impl RuleHits {
         let before = self.main.len();
         self.main.retain(|name, _| known(name));
         let mut changed = self.main.len() != before;
+        if changed {
+            // A counted rule left the list, and with it its hits. Were it to
+            // come back (with its old `created`) it would look as if it had
+            // never been hit: nothing from before this moment is trusted.
+            self.note_gap(now_ms);
+        }
         let waiting = std::mem::take(&mut self.side);
         let restored = std::mem::take(&mut self.restored);
         for (name, stat) in waiting.into_iter().chain(restored) {
