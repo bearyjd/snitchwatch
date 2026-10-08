@@ -376,6 +376,20 @@ Branch `feat/prompt-slot-autoanswer`.
 - **Version skew.** A GUI older than this shows a deferred row with no known
   action as pending. With a parseable daemon config, that row always has an
   action.
+- **PR #98 security review fixes.**
+  - Make a rule on a row with no hostname matches `dest.ip`. The bridge
+    shows the IP as the row's host, and `dest.host == <ip>` never matches.
+  - A made rule's name ends in `-made-<unix ms>`, so its `CHANGE_RULE`
+    can't replace the prompt's own rule, e.g. the 5-minute block.
+  - Labels say the block applies "on every host, even ones you allowed": a
+    matching deny wins over an allow rule. Make a rule leaves that block in
+    place and says so.
+  - `daemon_config` parses the daemon's whole `Config` the way Go does:
+    keys matched case-insensitively, `null` and unknown keys ignored. A
+    type error anywhere, or two keys for one setting, means nothing is
+    known, because the daemon then keeps its previous default action.
+  - The decision sheet says when an answer or "Decide later" couldn't be
+    sent.
 
 ### D. Curated defaults for background services (data + BR, M; S3 decided; still blocked on the security PR's `rule_policy.rs` and the reserved-prefix refusal)
 

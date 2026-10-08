@@ -289,6 +289,16 @@ async fn decide_later_blocks_a_bindable_program_for_five_minutes() {
         ("simple", "process.path", "/usr/bin/curl"),
         "the program alone, any host"
     );
+    // AskRule replies skip `rule_policy`, so pin what it would check: a
+    // valid operator, an exact path match, and no reserved name.
+    crate::rule_policy::validate_operator(&operator).unwrap();
+    assert!(operator.sensitive, "a case-folded path compare");
+    assert!(
+        !crate::rule_name::is_reserved_name(&rule.name),
+        "{}",
+        rule.name
+    );
+    crate::rule_name::validate_rule_name(&rule.name).unwrap();
 
     let messages = drain(&mut rx);
     assert!(

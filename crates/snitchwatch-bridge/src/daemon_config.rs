@@ -2,9 +2,14 @@
 //! the JSON string in `ClientConfig.config` that `subscribe` receives
 //! (prompt-slot plan, item 10).
 //!
-//! Parsed defensively: a field that is missing or has the wrong type is
-//! `None`, and malformed JSON gives an all-`None` view. The raw string is
-//! never logged; it holds the daemon's server address and TLS paths.
+//! Parsed the way the daemon parses it (`vendor:daemon/ui/config/config.go`
+//! `Parse`, Go's `encoding/json`): into the daemon's whole `Config`, keys
+//! matched case-insensitively, `null` ignored, unknown keys ignored. If the
+//! daemon's parse would fail, a value of the wrong type anywhere, it keeps
+//! its *previous* default action, which the bridge can't know. So any parse
+//! error, or two keys for one setting, gives an all-`None` view: the row
+//! then says "the firewall's default action". The raw string is never
+//! logged; it holds the daemon's server address and TLS paths.
 //!
 //! **What `default_action` means while a GUI is connected.** When an
 //! `AskRule` fails, the daemon applies `clientConnectedRule.Action`
@@ -17,7 +22,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 /// The settings the bridge uses. Each is `None` when the daemon's config
 /// lacks it or gives it the wrong type.
@@ -33,21 +38,21 @@ pub struct DaemonConfigView {
 
 impl DaemonConfigView {
     pub fn parse(raw: &str) -> Self {
-        let Ok(config) = serde_json::from_str::<Value>(raw) else {
+        let config = serde_json::from_str::<Value>(raw)
+            .ok()
+            .and_then(fold_keys)
+            .filter(structs_are_objects)
+            .and_then(|folded| serde_json::from_value::<GoConfig>(folded).ok());
+        let Some(config) = config else {
             return Self::default();
         };
         Self {
-            default_action: config
-                .get("DefaultAction")
-                .and_then(Value::as_str)
-                .map(str::to_owned),
+            default_action: config.defaultaction,
             max_events: config
-                .pointer("/Stats/MaxEvents")
-                .and_then(Value::as_u64)
+                .stats
+                .and_then(|stats| stats.maxevents)
                 .and_then(|n| u32::try_from(n).ok()),
-            checksums_enabled: config
-                .pointer("/Rules/EnableChecksums")
-                .and_then(Value::as_bool),
+            checksums_enabled: config.rules.and_then(|rules| rules.enablechecksums),
         }
     }
 
@@ -64,6 +69,181 @@ impl DaemonConfigView {
         }
     }
 }
+
+/// `value` with every object key case-folded as Go matches struct fields
+/// (`ſ` folds to `s`; the Kelvin sign lowercases to `k`). `None` when two
+/// keys of one object fold together: which one the daemon used is unclear.
+fn fold_keys(value: Value) -> Option<Value> {
+    match value {
+        Value::Object(object) => {
+            let mut folded = Map::new();
+            for (key, value) in object {
+                let key: String = key
+                    .chars()
+                    .flat_map(char::to_lowercase)
+                    .map(|c| if c == '\u{17f}' { 's' } else { c })
+                    .collect();
+                if folded.insert(key, fold_keys(value)?).is_some() {
+                    return None;
+                }
+            }
+            Some(Value::Object(folded))
+        }
+        Value::Array(items) => items
+            .into_iter()
+            .map(fold_keys)
+            .collect::<Option<Vec<_>>>()
+            .map(Value::Array),
+        other => Some(other),
+    }
+}
+
+/// Whether every Go struct in `config` is a JSON object (or `null`). serde
+/// would also read a struct from an array of its fields; Go wouldn't.
+fn structs_are_objects(config: &Value) -> bool {
+    fn object_or_null(value: Option<&Value>) -> bool {
+        matches!(value, None | Some(Value::Null) | Some(Value::Object(_)))
+    }
+    let Value::Object(top) = config else {
+        return false;
+    };
+    let nested = [
+        "fwoptions",
+        "audit",
+        "ebpf",
+        "server",
+        "rules",
+        "internal",
+        "stats",
+        "tasks",
+    ];
+    let server = top.get("server");
+    let auth = server.and_then(|server| server.get("authentication"));
+    let loggers_ok = match server.and_then(|server| server.get("loggers")) {
+        None | Some(Value::Null) => true,
+        Some(Value::Array(items)) => items.iter().all(|item| object_or_null(Some(item))),
+        Some(_) => true, // not an array: the typed parse refuses it
+    };
+    nested.iter().all(|key| object_or_null(top.get(*key)))
+        && object_or_null(auth)
+        && object_or_null(auth.and_then(|auth| auth.get("tlsoptions")))
+        && loggers_ok
+}
+
+// The daemon's `config.Config` and every type inside it, field for field
+// (`vendor:daemon/ui/config/config.go`, `procmon/audit`, `procmon/ebpf`,
+// `statistics`, `log/loggers`), with keys already folded. Go's `int` is
+// 64-bit. `Option` lets `null` and absent keys through, as Go does.
+// Most fields are read only to check their type, as the daemon's parse does.
+mod go {
+    #![allow(dead_code)]
+    use serde::Deserialize;
+
+    #[derive(Deserialize)]
+    pub(super) struct GoConfig {
+        loglevel: Option<i32>,
+        firewall: Option<String>,
+        pub(super) defaultaction: Option<String>,
+        defaultduration: Option<String>,
+        procmonitormethod: Option<String>,
+        fwoptions: Option<GoFwOptions>,
+        audit: Option<GoAudit>,
+        ebpf: Option<GoEbpf>,
+        server: Option<GoServer>,
+        pub(super) rules: Option<GoRules>,
+        internal: Option<GoInternal>,
+        pub(super) stats: Option<GoStats>,
+        tasks: Option<GoTasks>,
+        interceptunknown: Option<bool>,
+        logutc: Option<bool>,
+        logmicro: Option<bool>,
+    }
+
+    #[derive(Deserialize)]
+    pub(super) struct GoFwOptions {
+        firewall: Option<String>,
+        configpath: Option<String>,
+        monitorinterval: Option<String>,
+        queuenum: Option<u16>,
+        queuebypass: Option<bool>,
+    }
+
+    #[derive(Deserialize)]
+    pub(super) struct GoAudit {
+        audispsocketpath: Option<String>,
+    }
+
+    #[derive(Deserialize)]
+    pub(super) struct GoEbpf {
+        modulespath: Option<String>,
+        ringbuffsize: Option<i64>,
+        eventsworkers: Option<i64>,
+        queueeventssize: Option<i64>,
+    }
+
+    #[derive(Deserialize)]
+    pub(super) struct GoServer {
+        address: Option<String>,
+        authentication: Option<GoAuth>,
+        logfile: Option<String>,
+        loggers: Option<Vec<Option<GoLogger>>>,
+    }
+
+    #[derive(Deserialize)]
+    pub(super) struct GoAuth {
+        r#type: Option<String>,
+        tlsoptions: Option<GoTls>,
+    }
+
+    #[derive(Deserialize)]
+    pub(super) struct GoTls {
+        cacert: Option<String>,
+        servercert: Option<String>,
+        serverkey: Option<String>,
+        clientcert: Option<String>,
+        clientkey: Option<String>,
+        clientauthtype: Option<String>,
+        skipverify: Option<bool>,
+    }
+
+    #[derive(Deserialize)]
+    pub(super) struct GoLogger {
+        name: Option<String>,
+        format: Option<String>,
+        protocol: Option<String>,
+        server: Option<String>,
+        writetimeout: Option<String>,
+        connecttimeout: Option<String>,
+        tag: Option<String>,
+        workers: Option<i64>,
+        maxconnectattempts: Option<u16>,
+    }
+
+    #[derive(Deserialize)]
+    pub(super) struct GoRules {
+        path: Option<String>,
+        pub(super) enablechecksums: Option<bool>,
+    }
+
+    #[derive(Deserialize)]
+    pub(super) struct GoInternal {
+        gcpercent: Option<i64>,
+        flushconnsonstart: Option<bool>,
+    }
+
+    #[derive(Deserialize)]
+    pub(super) struct GoStats {
+        pub(super) maxevents: Option<i64>,
+        maxstats: Option<i64>,
+        workers: Option<i64>,
+    }
+
+    #[derive(Deserialize)]
+    pub(super) struct GoTasks {
+        configpath: Option<String>,
+    }
+}
+use go::GoConfig;
 
 /// The view from the latest `subscribe`, shared between the gRPC service
 /// (which writes it) and whoever labels a default-action answer. `None`
@@ -138,6 +318,66 @@ mod tests {
             DaemonConfigView::parse(not_objects),
             DaemonConfigView::default()
         );
+    }
+
+    #[test]
+    fn keys_match_case_insensitively_as_go_does() {
+        let view = DaemonConfigView::parse(
+            r#"{"defaultaction": "deny", "STATS": {"maxevents": 7}, "Rules": {"enableChecksums": true}}"#,
+        );
+        assert_eq!(view.default_action.as_deref(), Some("deny"));
+        assert_eq!(view.max_events, Some(7));
+        assert_eq!(view.checksums_enabled, Some(true));
+        let long_s = DaemonConfigView::parse("{\"Stats\": {\"MaxEvent\u{17f}\": 9}}");
+        assert_eq!(long_s.max_events, Some(9));
+    }
+
+    #[test]
+    fn a_type_error_anywhere_means_nothing_is_known() {
+        // The daemon's parse fails, so it keeps its previous default action.
+        for raw in [
+            r#"{"DefaultAction": "deny", "LogLevel": "verbose"}"#,
+            r#"{"DefaultAction": "deny", "Server": {"Address": 5}}"#,
+            r#"{"DefaultAction": "deny", "FwOptions": {"QueueNum": -1}}"#,
+            r#"{"DefaultAction": "deny", "FwOptions": {"QueueNum": 70000}}"#,
+            r#"{"DefaultAction": "deny", "Server": {"Loggers": [{"Workers": "4"}]}}"#,
+            r#"{"DefaultAction": "deny", "Stats": {"MaxEvents": 1.5}}"#,
+            r#"{"DefaultAction": "deny", "Ebpf": []}"#,
+            r#"{"DefaultAction": "deny", "Ebpf": ["/lib", 1, 2, 3]}"#,
+            r#"{"DefaultAction": "deny", "Server": {"Loggers": [["a"]]}}"#,
+            r#"{"DefaultAction": "deny", "Server": {"Authentication": {"TLSOptions": [""]}}}"#,
+            r#"{"DefaultAction": "deny", "LogLevel": 3000000000}"#,
+        ] {
+            assert_eq!(
+                DaemonConfigView::parse(raw),
+                DaemonConfigView::default(),
+                "{raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn two_keys_for_one_setting_are_ambiguous() {
+        for raw in [
+            r#"{"DefaultAction": "allow", "defaultaction": "deny"}"#,
+            r#"{"DefaultAction": "deny", "Stats": {"MaxEvents": 1, "maxEvents": 2}}"#,
+        ] {
+            assert_eq!(
+                DaemonConfigView::parse(raw),
+                DaemonConfigView::default(),
+                "{raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn null_and_unknown_keys_are_ignored_as_go_does() {
+        let view = DaemonConfigView::parse(
+            r#"{"DefaultAction": "deny", "Stats": null, "Server": {"Loggers": [null]},
+                "SomethingNewer": {"x": [1, "y"]}}"#,
+        );
+        assert_eq!(view.default_action.as_deref(), Some("deny"));
+        assert_eq!(view.max_events, None);
     }
 
     #[test]

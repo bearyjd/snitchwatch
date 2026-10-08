@@ -52,19 +52,24 @@ Controls.ApplicationWindow {
     property int phase: 0
     property int waits: 0
 
-    function showPassiveNotification(message, timeout) {}
+    property var shown: []
+    function showPassiveNotification(message, timeout) {
+        probeWindow.shown.push(message);
+    }
 
     // Session 1 takes "Decide later"; session 2 is an older bridge.
     QtObject {
         id: feedStub
         property bool ok: true
+        // Whether an answer can be queued.
+        property bool queue: true
         property var later: []
-        function submitVerdict(rowId, choice, scope, duration, bindable) { return true; }
+        function submitVerdict(rowId, choice, scope, duration, bindable) { return feedStub.queue; }
         function appBoundRulesFor(rowId) { return true; }
         function decideLaterFor(rowId) { return rowId.startsWith("1:"); }
         function decideLater(rowId) {
             feedStub.later.push(rowId);
-            return true;
+            return feedStub.queue;
         }
     }
 
@@ -139,7 +144,7 @@ Controls.ApplicationWindow {
         "1:to-allow": "Not answered in time: usually allowed (the firewall's default action)",
         "1:to-deny": "Not answered in time: denied (the firewall's default action)",
         "1:to-unknown": "Not answered in time: the firewall's default action",
-        "1:later-blocked": "Decided later: blocked this program for 5 minutes",
+        "1:later-blocked": "Decided later: blocked this program for 5 minutes on every host, even ones you allowed",
         "1:later-default": "Decided later: the firewall's default action",
         "1:later-kernel": "Decided later: usually allowed (the firewall's default action)"
     })
@@ -216,6 +221,18 @@ Controls.ApplicationWindow {
                                       "the sheet doesn't offer Decide later");
                     probeWindow.check(!page.makeRuleSheet.visible, "Make a rule on a pending row");
 
+                    // An answer the sheet couldn't queue says so.
+                    feedStub.queue = false;
+                    page.decisionSheet.putOff();
+                    page.decisionSheet.submit("allow");
+                    feedStub.queue = true;
+                    feedStub.later = ["1:wait"];
+                    probeWindow.check(JSON.stringify(probeWindow.shown) === JSON.stringify([
+                        "The connection to the background service was lost, so Decide later wasn't sent.",
+                        "The connection to the background service was lost, so this answer wasn't sent."
+                    ]), "sheet failures said " + JSON.stringify(probeWindow.shown));
+                    probeWindow.shown = [];
+
                     // An older bridge: no button, and no countdown to show.
                     page.openInspector(probeWindow.rowDelegate("2:old"));
                     probeWindow.check(page.decisionSheet.decideLater === false,
@@ -236,6 +253,12 @@ Controls.ApplicationWindow {
                     page.makeRuleSheet.make("deny");
                     probeWindow.check(page.makeRuleSheet.result === "The rule couldn't be sent.",
                                       "make result " + page.makeRuleSheet.result);
+                    probeWindow.check(!page.makeRuleSheet.blockNote.visible,
+                                      "the block note on a row with no block");
+                    page.openInspector(probeWindow.rowDelegate("1:later-blocked"));
+                    page.makeRuleSheet.openButton.clicked();
+                    probeWindow.check(page.makeRuleSheet.blockNote.visible,
+                                      "no note that the 5-minute block stays");
                     page.openInspector(probeWindow.rowDelegate("1:later-kernel"));
                     probeWindow.check(page.makeRuleSheet.visible
                                       && !page.makeRuleSheet.openButton.visible,

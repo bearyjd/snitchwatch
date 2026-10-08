@@ -1026,16 +1026,13 @@ impl qobject::ConnectionsModel {
         duration: &QString,
     ) -> bool {
         let id = id.to_string();
-        let now_secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
+        let made_at_ms = now_ms();
         self.store
             .row_by_id(&id)
             .and_then(|row| {
                 let (choice, scope, duration) =
                     (choice.to_string(), scope.to_string(), duration.to_string());
-                crate::make_rule::add_rule_message(row, &choice, &scope, &duration, now_secs)
+                crate::make_rule::add_rule_message(row, &choice, &scope, &duration, made_at_ms)
             })
             .is_some_and(|msg| crate::bridge_feed::dispatch_for_row(&id, msg))
     }
