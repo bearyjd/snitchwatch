@@ -245,9 +245,9 @@ pub mod qobject {
         /// accepts (put off, or decided by the default action): sends the
         /// rule `crate::make_rule` builds from the sheet's tokens to the
         /// row's bridge session, asking for its result under `request_id`
-        /// (`MakeRuleController.begin`). False when no rule may be made or it
-        /// wasn't queued. True only means sent: the result says whether the
-        /// rule was created.
+        /// (`MakeRuleController.begin`). Empty when it was queued (which only
+        /// means sent: the result says whether the rule was created);
+        /// otherwise why not, as plain text (`make_rule::send_problem`).
         #[qinvokable]
         #[cxx_name = "makeRule"]
         fn make_rule(
@@ -257,7 +257,7 @@ pub mod qobject {
             scope: &QString,
             duration: &QString,
             request_id: &QString,
-        ) -> bool;
+        ) -> QString;
 
         /// Whether `id` names a row that is still awaiting a decision: present
         /// in the store (independent of the active filter) with no action
@@ -1033,28 +1033,29 @@ impl qobject::ConnectionsModel {
         scope: &QString,
         duration: &QString,
         request_id: &QString,
-    ) -> bool {
+    ) -> QString {
         let id = id.to_string();
         let made_at_ms = now_ms();
-        self.store
-            .row_by_id(&id)
-            .and_then(|row| {
-                let (choice, scope, duration, request_id) = (
-                    choice.to_string(),
-                    scope.to_string(),
-                    duration.to_string(),
-                    request_id.to_string(),
-                );
-                crate::make_rule::add_rule_message(
-                    row,
-                    &choice,
-                    &scope,
-                    &duration,
-                    made_at_ms,
-                    &request_id,
-                )
-            })
-            .is_some_and(|msg| crate::bridge_feed::dispatch_for_row(&id, msg))
+        let message = self.store.row_by_id(&id).and_then(|row| {
+            let (choice, scope, duration, request_id) = (
+                choice.to_string(),
+                scope.to_string(),
+                duration.to_string(),
+                request_id.to_string(),
+            );
+            crate::make_rule::add_rule_message(
+                row,
+                &choice,
+                &scope,
+                &duration,
+                made_at_ms,
+                &request_id,
+            )
+        });
+        let problem = crate::make_rule::send_problem(message, |msg| {
+            crate::bridge_feed::dispatch_for_row(&id, msg)
+        });
+        QString::from(problem.unwrap_or(""))
     }
 
     fn inline_duration_for(

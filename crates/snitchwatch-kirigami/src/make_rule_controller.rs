@@ -12,10 +12,9 @@
 use core::pin::Pin;
 use cxx_qt::{CxxQtType, Threading};
 use cxx_qt_lib::QString;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use crate::make_rule::{Finished, MakeRuleWait, NOT_SENT, SENDING};
+use crate::make_rule::{Ending, Finished, MakeRuleWait, NOT_SENT, NO_ANSWER_AFTER, SENDING};
 use snitchwatch_bridge::ws_messages::ServerMessage;
 
 #[cxx_qt::bridge]
@@ -39,6 +38,15 @@ pub mod qobject {
         #[qproperty(bool, created)]
         type MakeRuleController = super::MakeRuleControllerRust;
 
+        /// A request about row `row_id` ended: `ending` is
+        /// `make_rule::Ending` (0 not created, 1 created, 2 unknown). No
+        /// text: the reasons are bridge text and stay in the sheet's
+        /// plain-text result, and `MakeRuleOutcomes.qml` turns this into one
+        /// of three fixed notices when that row isn't on screen (PR #111
+        /// review, H1).
+        #[qsignal]
+        fn finished(self: Pin<&mut MakeRuleController>, row_id: QString, ending: i32);
+
         /// Feed the bridge's `RuleCommandResult`s to this controller.
         #[qinvokable]
         #[cxx_name = "startBridgeFeed"]
@@ -49,14 +57,24 @@ pub mod qobject {
         #[qinvokable]
         fn begin(self: Pin<&mut MakeRuleController>, row_id: &QString) -> QString;
 
-        /// The request `begin` started wasn't sent.
+        /// The request `begin` started wasn't sent, because of `reason`
+        /// (`ConnectionsModel.makeRule`'s answer; empty: the generic text).
         #[qinvokable]
         #[cxx_name = "notSent"]
-        fn not_sent(self: Pin<&mut MakeRuleController>);
+        fn not_sent(self: Pin<&mut MakeRuleController>, reason: &QString);
 
         /// Give up waiting after a silence (called by a one-second QML timer).
         #[qinvokable]
         fn poll(self: Pin<&mut MakeRuleController>);
+
+        /// TEST ONLY: wait `ms` milliseconds for a result instead of
+        /// `make_rule::NO_ANSWER_AFTER`, so a headless probe can see a
+        /// silence end the wait. No shipped QML calls it (a guard in
+        /// `honest_ui_qml_guards.rs`), so the app always waits the full
+        /// deadline (PR #111 review, L4).
+        #[qinvokable]
+        #[cxx_name = "shortenDeadlineForTests"]
+        fn shorten_deadline_for_tests(self: Pin<&mut MakeRuleController>, ms: i32);
 
         /// One bridge message as JSON (the headless probes' feed).
         #[qinvokable]
@@ -68,27 +86,27 @@ pub mod qobject {
 }
 
 /// Rust-side state for [`qobject::MakeRuleController`].
-#[derive(Default)]
 pub struct MakeRuleControllerRust {
     busy: bool,
     status_text: QString,
     row_id: QString,
     created: bool,
+    /// [`NO_ANSWER_AFTER`], except in the probes.
+    no_answer_after: Duration,
     wait: MakeRuleWait,
 }
 
-fn next_request_id() -> String {
-    static NEXT: AtomicU64 = AtomicU64::new(1);
-    format!(
-        "make-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    )
-}
-
-/// Only results, the same filter as the rule editor's feed.
-fn interests_make_rule(message: &ServerMessage) -> bool {
-    matches!(message, ServerMessage::RuleCommandResult { .. })
+impl Default for MakeRuleControllerRust {
+    fn default() -> Self {
+        Self {
+            busy: false,
+            status_text: QString::default(),
+            row_id: QString::default(),
+            created: false,
+            no_answer_after: NO_ANSWER_AFTER,
+            wait: MakeRuleWait::default(),
+        }
+    }
 }
 
 impl qobject::MakeRuleController {
@@ -96,7 +114,7 @@ impl qobject::MakeRuleController {
         if self.busy {
             return QString::from("");
         }
-        let request_id = next_request_id();
+        let request_id = crate::rule_commands::next_request_id("make");
         self.as_mut()
             .rust_mut()
             .wait
@@ -108,26 +126,48 @@ impl qobject::MakeRuleController {
         QString::from(&request_id)
     }
 
-    fn not_sent(mut self: Pin<&mut Self>) {
+    fn not_sent(mut self: Pin<&mut Self>, reason: &QString) {
         self.as_mut().rust_mut().wait.abandon();
         self.as_mut().set_created(false);
         self.as_mut().set_busy(false);
-        self.set_status_text(QString::from(NOT_SENT));
+        let status = if reason.is_empty() {
+            QString::from(NOT_SENT)
+        } else {
+            reason.clone()
+        };
+        self.set_status_text(status);
     }
 
     fn poll(mut self: Pin<&mut Self>) {
-        let gave_up = self.as_mut().rust_mut().wait.poll(Instant::now());
-        if let Some((row_id, done)) = gave_up {
-            self.finish(row_id, done);
+        let after = self.no_answer_after;
+        let handles = crate::bridge_runtime::handles();
+        let is_current = |session| {
+            handles
+                .as_ref()
+                .is_some_and(|h| h.is_current_session(session))
+        };
+        let gave_up = self
+            .as_mut()
+            .rust_mut()
+            .wait
+            .poll(Instant::now(), after, is_current);
+        if let Some((row_id, done, ending)) = gave_up {
+            self.finish(row_id, done, ending);
         }
     }
 
+    fn shorten_deadline_for_tests(mut self: Pin<&mut Self>, ms: i32) {
+        self.as_mut().rust_mut().no_answer_after =
+            Duration::from_millis(u64::try_from(ms).unwrap_or(0));
+    }
+
     /// The wait ended: say how, for the row it was about.
-    fn finish(mut self: Pin<&mut Self>, row_id: String, done: Finished) {
+    fn finish(mut self: Pin<&mut Self>, row_id: String, done: Finished, ending: Ending) {
         self.as_mut().set_row_id(QString::from(&row_id));
-        self.as_mut().set_created(done.created);
+        self.as_mut().set_created(done.saved);
         self.as_mut().set_busy(false);
-        self.set_status_text(QString::from(&done.status));
+        self.as_mut().set_status_text(QString::from(&done.status));
+        self.finished(QString::from(&row_id), ending as i32);
     }
 
     fn apply_server_message_json(self: Pin<&mut Self>, json: &QString) {
@@ -139,57 +179,16 @@ impl qobject::MakeRuleController {
 
     fn on_message(mut self: Pin<&mut Self>, message: ServerMessage) {
         let done = self.as_mut().rust_mut().wait.on_message(&message);
-        if let Some((row_id, done)) = done {
-            self.finish(row_id, done);
+        if let Some((row_id, done, ending)) = done {
+            self.finish(row_id, done, ending);
         }
     }
 
     fn start_bridge_feed(self: Pin<&mut Self>) {
-        let Some(handles) = crate::bridge_runtime::handles() else {
-            tracing::warn!("MakeRuleController: bridge not running; no rule can be made");
-            return;
-        };
-        let qt_thread = self.qt_thread();
-        let session_handles = handles.clone();
-        crate::bridge_dispatch::spawn_feed(
-            &handles,
+        crate::result_feed::spawn_result_feed(
+            self.qt_thread(),
             "MakeRuleController",
-            interests_make_rule,
-            move |connection_id, message, _json| {
-                let session_handles = session_handles.clone();
-                let message = message.clone();
-                let _ = qt_thread.queue(move |qobject| {
-                    if session_handles.is_current_session(connection_id) {
-                        qobject.on_message(message);
-                    }
-                });
-            },
+            Self::on_message,
         );
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn request_ids_are_valid_and_distinct() {
-        let (a, b) = (next_request_id(), next_request_id());
-        assert_ne!(a, b);
-        for id in [&a, &b] {
-            assert!(
-                snitchwatch_bridge::ws_messages::valid_request_id(id),
-                "{id}"
-            );
-        }
-    }
-
-    #[test]
-    fn the_feed_takes_only_results() {
-        assert!(interests_make_rule(&ServerMessage::RuleCommandResult {
-            request_id: "make-1".into(),
-            outcome: snitchwatch_bridge::ws_messages::RuleCommandOutcome::Ok,
-        }));
-        assert!(!interests_make_rule(&ServerMessage::ClearConnectionRows));
     }
 }

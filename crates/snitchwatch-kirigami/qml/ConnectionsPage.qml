@@ -110,6 +110,9 @@ Kirigami.ScrollablePage {
     // tests/inline_verdict_qml.rs).
     property alias decisionSheet: pendingSheet
     property alias makeRuleSheet: makeRuleSheet
+    property alias inspectorSheet: inspector
+    // The window's MakeRuleController (main.qml), for the Make a rule sheet.
+    property var makeRuleController: null
     property alias connectionList: list
     // Raw matched-rule name (empty when unknown/not applicable — drives the
     // "Show rule" button's visibility) and its friendly display string (never
@@ -788,6 +791,7 @@ Kirigami.ScrollablePage {
                 model: page.model
                 bindableProcessPath: page.inspectBindableProcessPath
                 alsoListedByDefault: page.inspectAlsoListedByDefault
+                controller: page.makeRuleController
                 blockedForFiveMinutes: page.inspectMatchedRule.length > 0
             }
         }

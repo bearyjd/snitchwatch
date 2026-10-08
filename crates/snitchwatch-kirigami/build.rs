@@ -20,6 +20,7 @@ fn main() {
             "qml/PendingDecisionSheet.qml",
             "qml/DecideLaterButton.qml",
             "qml/MakeRuleSheet.qml",
+            "qml/MakeRuleOutcomes.qml",
             "qml/BlocklistsPage.qml",
             "qml/RulesPage.qml",
             "qml/RulesInsightsText.qml",

@@ -5,7 +5,9 @@
 // editor exists. A once-only answer can't be given afterwards, so "This time"
 // isn't offered. Every text here is fixed, and what happened comes only from
 // MakeRuleController: "created" only once the bridge's result is Ok (PR #108
-// security review, M1).
+// security review, M1). The controller is the window's (main.qml), so a
+// request outlives this page; MakeRuleOutcomes.qml polls it and gives the
+// fixed off-screen notice.
 import QtQuick
 import QtQuick.Layouts
 import QtQuick.Controls as Controls
@@ -29,30 +31,25 @@ ColumnLayout {
     // stays: a matching deny wins over an allow rule, so the sheet says so
     // rather than delete it (PR #98 review).
     property bool blockedForFiveMinutes: false
+    // The window's MakeRuleController (main.qml); null in probes without one.
+    property var controller: null
     // What the last request for this row says: sending, its outcome, or that
     // it couldn't be sent. Empty for another row.
-    readonly property string result: controller.rowId === sheet.rowId ? controller.statusText : ""
+    readonly property string result: !!sheet.controller && sheet.controller.rowId === sheet.rowId
+        ? sheet.controller.statusText : ""
     // Exposed for the headless probes (tests/deferred_rows_qml.rs,
     // tests/default_action_rows_qml.rs).
     property alias openButton: openButton
     property alias form: form
     property alias blockNote: blockNoteLabel
-    property alias controller: controller
     property alias alsoListedNote: alsoListedNote
+    property alias busyElsewhereNote: busyElsewhereNote
 
     onRowIdChanged: form.visible = false
 
-    MakeRuleController {
-        id: controller
-        Component.onCompleted: startBridgeFeed()
-    }
-
-    // The bridge's result never came: give up after a silence.
-    Timer {
-        interval: 1000
-        repeat: true
-        running: controller.busy
-        onTriggered: controller.poll()
+    // Whether `rowId`'s outcome shows here now: the inspector is open on it.
+    function shows(rowId) {
+        return sheet.visible && sheet.rowId === rowId;
     }
 
     Controls.Label {
@@ -129,14 +126,14 @@ ColumnLayout {
             Layout.fillWidth: true
             Controls.Button {
                 Layout.fillWidth: true
-                enabled: !controller.busy
+                enabled: !!sheet.controller && !sheet.controller.busy
                 text: "Allow"
                 icon.name: "dialog-ok-apply"
                 onClicked: sheet.make("allow")
             }
             Controls.Button {
                 Layout.fillWidth: true
-                enabled: !controller.busy
+                enabled: !!sheet.controller && !sheet.controller.busy
                 text: "Deny"
                 icon.name: "edit-delete-remove"
                 onClicked: sheet.make("deny")
@@ -155,6 +152,17 @@ ColumnLayout {
     }
 
     Controls.Label {
+        id: busyElsewhereNote
+        objectName: "makeRuleBusyElsewhere"
+        Layout.fillWidth: true
+        visible: form.visible && sheet.bindableProcessPath && !!sheet.controller && sheet.controller.busy && sheet.controller.rowId !== sheet.rowId
+        wrapMode: Text.Wrap
+        opacity: 0.7
+        textFormat: Text.PlainText
+        text: "Another rule is still being sent. Try again in a moment."
+    }
+
+    Controls.Label {
         objectName: "makeRuleResult"
         Layout.fillWidth: true
         visible: sheet.result.length > 0
@@ -164,15 +172,22 @@ ColumnLayout {
     }
 
     function make(choice) {
-        const requestId = controller.begin(sheet.rowId);
+        if (!sheet.controller) {
+            return;
+        }
+        const requestId = sheet.controller.begin(sheet.rowId);
         if (requestId === "") {
             return;
         }
-        const sent = sheet.model !== null
-            && sheet.model.makeRule(sheet.rowId, choice, scopeBox.currentValue,
-                                    durationBox.currentValue, requestId) === true;
-        if (!sent) {
-            controller.notSent();
+        if (sheet.model === null) {
+            sheet.controller.notSent("");
+            return;
+        }
+        // Empty when sent; otherwise why not.
+        const problem = sheet.model.makeRule(sheet.rowId, choice, scopeBox.currentValue,
+                                             durationBox.currentValue, requestId);
+        if (problem !== "") {
+            sheet.controller.notSent(problem);
             return;
         }
         form.visible = false;
