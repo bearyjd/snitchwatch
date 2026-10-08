@@ -104,7 +104,7 @@ Kirigami.ScrollablePage {
             Layout.fillWidth: true
             type: Kirigami.MessageType.Warning
             visible: page.anyNotEnforced
-            text: "Some blocklists are not blocking anything right now. Open a list to see why."
+            text: "Some blocklists aren't confirmed to be blocking. Open a list to see why."
         }
         Kirigami.InlineMessage {
             objectName: "memoryOnlyStorageBanner"
@@ -114,6 +114,15 @@ Kirigami.ScrollablePage {
             text: "Blocklist subscriptions are kept in memory only, so they can't be applied to "
                 + "the firewall and are lost when Snitchwatch's background service restarts (for "
                 + "example on logout or reboot)."
+        }
+        Controls.Label {
+            objectName: "exactMatchNote"
+            Layout.fillWidth: true
+            Layout.margins: Kirigami.Units.smallSpacing
+            visible: page.model && page.model.count > 0
+            wrapMode: Text.Wrap
+            opacity: 0.7
+            text: "Hosts are matched by exact name, not subdomains."
         }
         Controls.Label {
             Layout.fillWidth: true
@@ -132,7 +141,7 @@ Kirigami.ScrollablePage {
         icon.name: "edit-delete"
         text: "No blocklist subscriptions yet"
         explanation: "Subscribe to a blocklist URL above to block its hosts for every app. "
-            + "Hosts are matched by exact name, not their subdomains."
+            + "Hosts are matched by exact name, not subdomains."
     }
 
     ListView {

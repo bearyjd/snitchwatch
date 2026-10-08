@@ -14,14 +14,15 @@
 //! `MAX_SUBSCRIPTIONS` entries) that the worker drains before each job. They
 //! are never dropped and never block the caller.
 //!
-//! Reconciles (issue #45 PR B) take the same lane as one coalescing flag,
-//! set after each committed daemon rules snapshot
-//! ([`BlocklistTasks::spawn`]'s `rules_synced`) and after each subscribe or
-//! unsubscribe: however many requests pile up, one pass runs, after any
-//! pending unsubscribes.
+//! Reconciles (issue #45 PR B) take the same lane as one coalescing request
+//! of the widest [`ReconcileScope`] asked for: `Full` after each committed
+//! daemon rules snapshot ([`BlocklistTasks::spawn`]'s `rules_synced`) and
+//! each refresh tick (so refused or timed-out lists are retried), `CleanUp`
+//! after each subscribe or unsubscribe. However many requests pile up, one
+//! pass runs, after any pending unsubscribes.
 
 use std::collections::BTreeSet;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -30,7 +31,7 @@ use tokio::task::JoinHandle;
 use tracing::warn;
 
 use crate::blocklists::fetcher::validate_subscription_url;
-use crate::blocklists::{spawn_event_pump, BlocklistsManager};
+use crate::blocklists::{spawn_event_pump, BlocklistsManager, ReconcileScope};
 use crate::translator::upstream::handle_blocklist_action;
 use crate::ws_messages::{ClientMessage, ServerMessage, BLOCKLIST_ENTRIES_PAGE_MAX};
 
@@ -66,18 +67,30 @@ impl BlocklistJob {
 #[derive(Default)]
 struct UnsubscribeLane {
     ids: Mutex<BTreeSet<String>>,
-    reconcile: AtomicBool,
+    /// 0: none; otherwise the widest [`ReconcileScope`] asked for.
+    reconcile: AtomicU8,
     wake: Notify,
 }
 
+const RECONCILE_CLEAN_UP: u8 = 1;
+const RECONCILE_FULL: u8 = 2;
+
 impl UnsubscribeLane {
-    fn request_reconcile(&self) {
-        self.reconcile.store(true, Ordering::SeqCst);
+    fn request_reconcile(&self, scope: ReconcileScope) {
+        let level = match scope {
+            ReconcileScope::CleanUp => RECONCILE_CLEAN_UP,
+            ReconcileScope::Full => RECONCILE_FULL,
+        };
+        self.reconcile.fetch_max(level, Ordering::SeqCst);
         self.wake.notify_one();
     }
 
-    fn take_reconcile(&self) -> bool {
-        self.reconcile.swap(false, Ordering::SeqCst)
+    fn take_reconcile(&self) -> Option<ReconcileScope> {
+        match self.reconcile.swap(0, Ordering::SeqCst) {
+            0 => None,
+            RECONCILE_CLEAN_UP => Some(ReconcileScope::CleanUp),
+            _ => Some(ReconcileScope::Full),
+        }
     }
 
     fn push(&self, id: String) {
@@ -124,10 +137,10 @@ impl BlocklistWorker {
                     {
                         warn!(error = %e, "blocklist unsubscribe failed");
                     }
-                    lane.request_reconcile();
+                    lane.request_reconcile(ReconcileScope::CleanUp);
                 }
-                if lane.take_reconcile() {
-                    worker_mgr.reconcile().await;
+                if let Some(scope) = lane.take_reconcile() {
+                    worker_mgr.reconcile_with(scope).await;
                     continue;
                 }
                 tokio::select! {
@@ -174,8 +187,8 @@ impl BlocklistWorker {
 
     /// Reconcile the daemon's blocklist rules at the next chance (see the
     /// module doc). Never blocks; repeated requests coalesce.
-    pub fn request_reconcile(&self) {
-        self.unsubscribes.request_reconcile();
+    pub fn request_reconcile(&self, scope: ReconcileScope) {
+        self.unsubscribes.request_reconcile(scope);
     }
 
     /// Unsubscribe `id` ahead of queued jobs. An unknown id (e.g. a refused
@@ -250,9 +263,12 @@ async fn run_job(
             if let Err(e) = handle_blocklist_action(mgr.clone(), action).await {
                 warn!(error = %e, "blocklist subscribe failed");
             }
-            lane.request_reconcile();
+            lane.request_reconcile(ReconcileScope::CleanUp);
         }
         BlocklistJob::RefreshDue => {
+            // Retries lists the daemon refused or didn't answer for, every
+            // tick, whether or not one is due for download.
+            lane.request_reconcile(ReconcileScope::Full);
             let due = mgr.due_subscription_ids();
             let Some(first) = due.first() else { return };
             if let Err(e) = mgr.refresh_now(first).await {
@@ -295,7 +311,7 @@ impl BlocklistTasks {
             let trigger = worker.clone();
             handles.push(tokio::spawn(async move {
                 while synced.changed().await.is_ok() {
-                    trigger.request_reconcile();
+                    trigger.request_reconcile(ReconcileScope::Full);
                 }
             }));
         }

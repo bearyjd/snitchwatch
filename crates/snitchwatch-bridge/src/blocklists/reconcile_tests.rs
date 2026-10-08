@@ -8,12 +8,14 @@ use chrono::Utc;
 
 use super::store::{BlocklistStore, FetchStatus, Subscription};
 use super::*;
+use crate::ws_messages::StorageStatus;
 
 #[derive(Default)]
 struct ScriptedSink {
     unknown: bool,
     current: Vec<&'static str>,
     unavailable: Option<&'static str>,
+    refuse: Option<&'static str>,
     pushes: StdMutex<Vec<(String, usize)>>,
     removed: StdMutex<Vec<String>>,
     orphan_passes: StdMutex<Vec<Vec<String>>>,
@@ -38,9 +40,10 @@ impl RuleSink for ScriptedSink {
             .lock()
             .unwrap()
             .push((list_id.to_string(), hosts.len()));
-        match self.unavailable {
-            Some(reason) => Err(NotInstalled::daemon_unavailable(reason)),
-            None => Ok(()),
+        match (self.unavailable, self.refuse) {
+            (Some(reason), _) => Err(NotInstalled::daemon_unavailable(reason)),
+            (None, Some(reason)) => Err(NotInstalled::new(reason)),
+            (None, None) => Ok(()),
         }
     }
 
@@ -145,15 +148,21 @@ async fn every_downloaded_list_not_installed_is_pushed_from_the_store() {
     assert!(pushed(&current).is_empty());
 }
 
+/// Review H1: after a restart, a list the daemon already holds unchanged
+/// (its committed snapshot, its file) is reported installed without a push.
 #[tokio::test]
-async fn a_list_current_on_the_daemon_is_still_pushed_until_confirmed_in_this_run() {
+async fn a_list_already_current_on_the_daemon_is_installed_without_a_push() {
     let sink = Arc::new(ScriptedSink {
         current: vec!["ads"],
         ..Default::default()
     });
     let mgr = manager(sink.clone(), &["ads"]);
     mgr.reconcile().await;
-    assert_eq!(pushed(&sink), vec![("ads".to_string(), 2)]);
+    assert!(pushed(&sink).is_empty());
+    assert!(matches!(
+        mgr.enforcement("ads"),
+        Enforcement::RuleInstalled { .. }
+    ));
 }
 
 #[tokio::test]
@@ -196,4 +205,162 @@ async fn unsubscribing_removes_the_lists_rules_through_the_sink() {
     mgr.remove_subscription("ads").await.unwrap();
     assert_eq!(*sink.removed.lock().unwrap(), vec!["ads".to_string()]);
     assert!(mgr.subscription("ads").is_none());
+}
+
+fn subscription(id: &str, entry_count: i64) -> Subscription {
+    Subscription {
+        id: id.into(),
+        url: format!("https://example.invalid/{id}"),
+        display_name: id.into(),
+        format_hint: None,
+        refresh_interval_secs: 86_400,
+        last_fetched_at: Some(Utc::now()),
+        last_attempt_at: None,
+        last_fetch_status: FetchStatus::Ok,
+        entry_count,
+    }
+}
+
+/// Review M2: a store that can't be read must not look like "no
+/// subscriptions": reconcile would then delete every blocklist rule and
+/// file. Nothing is deleted, and the page says why.
+#[tokio::test]
+async fn an_unreadable_store_deletes_nothing_and_says_so() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("blocklists.sqlite3");
+    BlocklistStore::open(&path)
+        .unwrap()
+        .upsert_subscription(&subscription("ads", 2))
+        .unwrap();
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .execute(
+            "UPDATE subscriptions SET refresh_interval_secs = 'garbled'",
+            [],
+        )
+        .unwrap();
+    let sink = Arc::new(ScriptedSink::default());
+    let mgr = BlocklistsManager::new(Arc::new(BlocklistStore::open(&path).unwrap()))
+        .with_rule_sink(sink.clone())
+        .with_storage_status(StorageStatus {
+            persistent: true,
+            reason: None,
+        });
+    mgr.reconcile().await;
+    assert!(
+        sink.orphan_passes.lock().unwrap().is_empty(),
+        "rules were purged"
+    );
+    let status = mgr.storage_status();
+    assert!(!status.persistent);
+    assert!(
+        status
+            .reason
+            .as_deref()
+            .is_some_and(|r| r.starts_with("Couldn't read the saved blocklists")),
+        "{status:?}"
+    );
+}
+
+/// Review M1: opensnitchd keeps every list in memory and fails open if it
+/// is killed, so lists past [`AGGREGATE_MAX_HOSTS`] in total, in the order
+/// they were subscribed, get no files and no rule.
+#[tokio::test]
+async fn lists_past_the_total_size_limit_get_no_rule_in_subscription_order() {
+    let store = Arc::new(BlocklistStore::open_in_memory().unwrap());
+    // Subscription (insertion) order differs from id order on purpose.
+    for (id, count) in [
+        ("zz-first", 1_500_000),
+        ("aa-second", 600_000),
+        ("mm-third", 400_000),
+    ] {
+        store.upsert_subscription(&subscription(id, count)).unwrap();
+        store
+            .replace_entries(id, &["a.example", "b.example"])
+            .unwrap();
+        // `replace_entries` counts the two rows; the size is what matters.
+        store.upsert_subscription(&subscription(id, count)).unwrap();
+    }
+    let sink = Arc::new(ScriptedSink::default());
+    let mgr = BlocklistsManager::new(store).with_rule_sink(sink.clone());
+    mgr.reconcile().await;
+    assert_eq!(pushed(&sink), vec![("zz-first".to_string(), 2)]);
+    let mut removed = sink.removed.lock().unwrap().clone();
+    removed.sort();
+    assert_eq!(removed, vec!["aa-second", "mm-third"]);
+    for id in ["aa-second", "mm-third"] {
+        match mgr.enforcement(id) {
+            Enforcement::NotEnforced { reason } => assert!(
+                reason.starts_with("over the total blocklist size limit"),
+                "{id}: {reason}"
+            ),
+            other => panic!("{id}: {other:?}"),
+        }
+    }
+    assert_eq!(AGGREGATE_MAX_HOSTS, 2_000_000);
+}
+
+/// The same limit on a download: a list that doesn't fit after the lists
+/// subscribed before it is never pushed.
+#[tokio::test]
+async fn a_download_past_the_total_size_limit_is_not_pushed() {
+    use super::test_helpers::{fixture_url, FixtureFetcher};
+    let store = Arc::new(BlocklistStore::open_in_memory().unwrap());
+    store
+        .upsert_subscription(&subscription("big", AGGREGATE_MAX_HOSTS as i64))
+        .unwrap();
+    let mut tiny = subscription("tiny", 0);
+    tiny.url = fixture_url("domains-tiny.txt");
+    tiny.last_fetched_at = None;
+    store.upsert_subscription(&tiny).unwrap();
+    let sink = Arc::new(ScriptedSink::default());
+    let mgr = BlocklistsManager::new(store)
+        .with_fetcher(Arc::new(FixtureFetcher::default()))
+        .with_rule_sink(sink.clone());
+    assert_eq!(mgr.refresh_now("tiny").await.unwrap(), FetchStatus::Ok);
+    assert!(pushed(&sink).is_empty());
+    assert!(matches!(
+        mgr.enforcement("tiny"),
+        Enforcement::NotEnforced { reason } if reason.starts_with("over the total blocklist size limit")
+    ));
+}
+
+/// Review (code M): a list the daemon refused is retried by a full
+/// reconcile (a new daemon connection, a refresh tick), not by the
+/// clean-up after a subscription change, so one subscribe sends one try.
+#[tokio::test]
+async fn only_a_full_reconcile_retries_a_refused_list() {
+    let sink = Arc::new(ScriptedSink {
+        refuse: Some("lists operators are not accepted from the UI"),
+        ..Default::default()
+    });
+    let mgr = manager(sink.clone(), &["ads"]);
+    mgr.reconcile_with(ReconcileScope::Full).await;
+    assert_eq!(pushed(&sink).len(), 1);
+    mgr.reconcile_with(ReconcileScope::CleanUp).await;
+    assert_eq!(
+        pushed(&sink).len(),
+        1,
+        "the clean-up retried a refused list"
+    );
+    mgr.reconcile_with(ReconcileScope::Full).await;
+    assert_eq!(pushed(&sink).len(), 2);
+}
+
+/// An unchanged download still reaches the sink, so a refused or timed-out
+/// install is retried on every refresh.
+#[tokio::test]
+async fn every_refresh_reaches_the_sink_even_when_unchanged() {
+    use super::test_helpers::{fixture_url, FixtureFetcher};
+    let store = Arc::new(BlocklistStore::open_in_memory().unwrap());
+    let mut tiny = subscription("tiny", 0);
+    tiny.url = fixture_url("domains-tiny.txt");
+    store.upsert_subscription(&tiny).unwrap();
+    let sink = Arc::new(ScriptedSink::default());
+    let mgr = BlocklistsManager::new(store)
+        .with_fetcher(Arc::new(FixtureFetcher::default()))
+        .with_rule_sink(sink.clone());
+    mgr.refresh_now("tiny").await.unwrap();
+    mgr.refresh_now("tiny").await.unwrap();
+    assert_eq!(pushed(&sink).len(), 2);
 }

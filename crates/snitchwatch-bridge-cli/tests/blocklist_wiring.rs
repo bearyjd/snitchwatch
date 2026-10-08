@@ -17,10 +17,11 @@ use snitchwatch_bridge::blocklists::fetcher::{process_body, BlocklistFetch, Fetc
 use snitchwatch_bridge::blocklists::store::BlocklistStore;
 use snitchwatch_bridge::ws_messages::{
     BlocklistSummary, ClientMessage, ServerMessage, StorageStatus, VerdictAction, VerdictDuration,
-    VerdictScope, ENFORCEMENT_PENDING,
+    VerdictScope, ENFORCEMENT_NOT_ENFORCED,
 };
 use snitchwatch_bridge_cli::{
-    run, run_with_options, BridgeConfig, EphemeralReason, RunOptions, RunningBridge, Storage,
+    run, run_with_options, BridgeConfig, BridgeMode, EphemeralReason, RunOptions, RunningBridge,
+    Storage, PER_USER_REASON,
 };
 use snitchwatch_proto::protocol::Connection;
 use tokio::sync::{broadcast, Notify};
@@ -83,6 +84,7 @@ fn options(storage: Storage, fetcher: Arc<dyn BlocklistFetch>) -> RunOptions {
     RunOptions {
         storage,
         blocklist_fetcher: Some(fetcher),
+        mode: BridgeMode::User,
     }
 }
 
@@ -184,10 +186,13 @@ async fn subscriptions_persist_across_a_restart() {
     assert_eq!(restored[0].url, LIST_URL);
     assert_eq!(restored[0].status, "ok");
     assert_eq!(restored[0].entry_count, 2);
-    // Downloaded, but no daemon has connected to install its rule yet
-    // (issue #45 PR B: "Rule installed" only after the daemon's OK).
-    assert_eq!(restored[0].enforcement, ENFORCEMENT_PENDING);
-    assert_eq!(restored[0].enforcement_reason, None);
+    // Downloaded, but a per-user bridge never installs blocklist rules
+    // (issue #45 review M3); it says why.
+    assert_eq!(restored[0].enforcement, ENFORCEMENT_NOT_ENFORCED);
+    assert_eq!(
+        restored[0].enforcement_reason.as_deref(),
+        Some(PER_USER_REASON)
+    );
 }
 
 /// A stored list that was never downloaded is fetched by the refresh loop's
@@ -455,6 +460,19 @@ fn only_main_and_run_system_resolve_the_state_directory() {
         "lib.rs resolves storage outside run_system"
     );
     assert_eq!(main.matches("resolve_storage(").count(), 1);
+    // Issue #45 review M3: only the system bridge installs blocklist rules,
+    // and only `run_system` may say it is one.
+    assert!(
+        !main.contains("BridgeMode::System"),
+        "main.rs runs a per-user bridge as the system one"
+    );
+    let run_system = &lib[start..end];
+    assert!(run_system.contains("mode: BridgeMode::System"));
+    assert_eq!(
+        lib.matches("BridgeMode::System").count(),
+        run_system.matches("BridgeMode::System").count(),
+        "lib.rs says BridgeMode::System outside run_system"
+    );
     for (name, source) in [
         ("lib.rs", &lib),
         ("main.rs", &main),

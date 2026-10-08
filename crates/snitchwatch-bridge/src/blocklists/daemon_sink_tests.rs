@@ -88,6 +88,31 @@ impl Harness {
         self
     }
 
+    /// A new bridge run over the same list directory: fresh commands, rules
+    /// cache and confirmations.
+    fn restart(self) -> Self {
+        let rules = RulesSync::new(broadcast::channel(64).0);
+        Self {
+            _state: self._state,
+            dir: self.dir,
+            commands: DaemonCommands::new(DaemonTransport::Unix, rules.clone()),
+            rules,
+            seen: Arc::default(),
+            _stream: None,
+        }
+    }
+
+    /// The rule the bridge installs for `id`'s `kind`.
+    fn bridge_rule(&self, id: &str, kind: ListKind) -> Rule {
+        let list = IdComponent::from_id(id);
+        crate::blocklists::materializer::materialize_list_rule(
+            &list,
+            kind,
+            &self.dir.kind_dir(&list, kind),
+        )
+        .into()
+    }
+
     fn sink(&self) -> DaemonRuleSink {
         DaemonRuleSink::new(self.dir.clone(), self.commands.clone(), self.rules.cache())
             .with_timeout(Duration::from_millis(300))
@@ -130,6 +155,15 @@ fn change(name: &str) -> (i32, String) {
 
 fn delete(name: &str) -> (i32, String) {
     (Action::DeleteRule as i32, name.to_string())
+}
+
+/// A per-host rule as earlier builds named and tagged them.
+fn legacy_rule(name: &str) -> Rule {
+    Rule {
+        description: r#"{"snitchwatch":{"source":"blocklist","list_id":"x","entry":"x.example"}}"#
+            .into(),
+        ..user_rule(name)
+    }
 }
 
 fn user_rule(name: &str) -> Rule {
@@ -301,8 +335,10 @@ async fn a_list_that_loses_its_ips_deletes_that_rule_then_its_directory() {
 #[tokio::test]
 async fn legacy_rules_of_the_list_are_deleted_and_user_rules_kept() {
     let snapshot = vec![
-        user_rule(&format!("z00-blocklist:{ADS}:0001-x.example")),
-        user_rule(&format!("900-blocklist:{ADS}:0002-y.example")),
+        legacy_rule(&format!("z00-blocklist:{ADS}:0001-x.example")),
+        legacy_rule(&format!("900-blocklist:{ADS}:0002-y.example")),
+        // Under the list's prefix, but not made by Snitchwatch: left alone.
+        user_rule(&format!("z00-blocklist:{ADS}:0003-z.example")),
         user_rule("899-user"),
         user_rule("z00-blocklist:other:domains"),
     ];
@@ -376,11 +412,12 @@ async fn unsubscribing_deletes_the_rules_first_then_the_directory() {
 
 #[tokio::test]
 async fn orphaned_rules_and_directories_are_removed_subscribed_ones_kept() {
+    let h = Harness::new();
     let snapshot = vec![
-        user_rule("z00-blocklist:gone:domains"),
+        h.bridge_rule("gone", ListKind::Domains),
         user_rule("899-user"),
     ];
-    let h = Harness::new().connect(Daemon::Accept, snapshot);
+    let h = h.connect(Daemon::Accept, snapshot);
     let sink = h.sink();
     sink.replace_blocklist_rules(ADS, hosts(&["a.example"]))
         .await
@@ -435,4 +472,110 @@ async fn is_current_needs_the_cached_rule_and_its_file() {
     )
     .unwrap();
     assert!(!sink.is_current(ADS), "a missing file must be rewritten");
+}
+
+/// Review L3: the orphan purge deletes only rules Snitchwatch made (its
+/// `lists` shape, or the blocklist description tag), whatever their name.
+#[tokio::test]
+async fn the_orphan_purge_leaves_rules_snitchwatch_did_not_make() {
+    let h = Harness::new();
+    let snapshot = vec![
+        h.bridge_rule("gone", ListKind::Domains),
+        legacy_rule("900-blocklist:gone:0001-x.example"),
+        user_rule("z00-blocklist:foreign:domains"),
+    ];
+    let h = h.connect(Daemon::Accept, snapshot);
+    h.sink().remove_orphans(&[]).await;
+    let deleted: Vec<_> = h.seen().iter().map(|s| kind_of(&s.command)).collect();
+    assert_eq!(
+        deleted,
+        vec![
+            delete("900-blocklist:gone:0001-x.example"),
+            delete("z00-blocklist:gone:domains"),
+        ]
+    );
+    assert!(h
+        .cached()
+        .unwrap()
+        .contains(&"z00-blocklist:foreign:domains".to_string()));
+}
+
+/// Review H1: after a bridge restart, rules the daemon's committed snapshot
+/// already holds unchanged, over files that are unchanged, are neither
+/// resent nor rewritten (no restart storm of `CHANGE_RULE`s and re-reads).
+#[tokio::test]
+async fn a_restart_with_the_rules_in_the_snapshot_resends_and_rewrites_nothing() {
+    let h = Harness::new().connect(Daemon::Accept, Vec::new());
+    let hosts_now = hosts(&["a.example", "203.0.113.7"]);
+    h.sink()
+        .replace_blocklist_rules(ADS, hosts_now.clone())
+        .await
+        .unwrap();
+    let list = IdComponent::from_id(ADS);
+    let files: Vec<_> = ListKind::ALL
+        .into_iter()
+        .map(|kind| h.dir.kind_dir(&list, kind).join(kind.file_name()))
+        .collect();
+    let inodes = |files: &[std::path::PathBuf]| -> Vec<u64> {
+        use std::os::unix::fs::MetadataExt;
+        files
+            .iter()
+            .map(|f| std::fs::metadata(f).unwrap().ino())
+            .collect()
+    };
+    let before = inodes(&files);
+    let snapshot: Vec<Rule> = ListKind::ALL
+        .into_iter()
+        .map(|kind| h.bridge_rule(ADS, kind))
+        .collect();
+
+    let h = h.restart().connect(Daemon::Accept, snapshot);
+    let sink = h.sink();
+    assert!(sink.is_current(ADS), "the daemon already holds both rules");
+    sink.replace_blocklist_rules(ADS, hosts_now).await.unwrap();
+    assert!(h.seen().is_empty(), "{:?}", h.seen());
+    assert_eq!(
+        inodes(&files),
+        before,
+        "unchanged list files were rewritten"
+    );
+}
+
+/// Review L1: a rule whose directory isn't under the root the sink pinned
+/// never leaves the bridge.
+#[tokio::test]
+async fn a_rule_outside_the_pinned_list_root_is_refused() {
+    let h = Harness::new().connect(Daemon::Accept, Vec::new());
+    let _sink = h.sink();
+    let other_state = tempfile::tempdir().unwrap();
+    let other = ListDir::open(&other_state.path().canonicalize().unwrap()).unwrap();
+    let command = BlocklistCommand::install(&IdComponent::from_id(ADS), ListKind::Domains, &other);
+    assert_eq!(
+        h.commands.send_blocklist(command).err(),
+        Some(SendError::RefusedOperator)
+    );
+    assert!(h.seen().is_empty());
+}
+
+/// A rule found in place in the snapshot counts as confirmed: if the
+/// daemon's list later goes Unknown (it restarted), a refresh still reports
+/// the list installed instead of "rules unknown".
+#[tokio::test]
+async fn a_rule_found_in_the_snapshot_stays_confirmed_while_the_list_is_unknown() {
+    let h = Harness::new().connect(Daemon::Accept, Vec::new());
+    h.sink()
+        .replace_blocklist_rules(ADS, hosts(&["a.example"]))
+        .await
+        .unwrap();
+    let snapshot = vec![h.bridge_rule(ADS, ListKind::Domains)];
+    let h = h.restart().connect(Daemon::Accept, snapshot);
+    let sink = h.sink();
+    sink.replace_blocklist_rules(ADS, hosts(&["a.example"]))
+        .await
+        .unwrap();
+    h.rules.withdraw();
+    sink.replace_blocklist_rules(ADS, hosts(&["b.example"]))
+        .await
+        .unwrap();
+    assert!(h.seen().is_empty(), "{:?}", h.seen());
 }

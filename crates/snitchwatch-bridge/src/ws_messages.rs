@@ -529,9 +529,9 @@ pub const BLOCKLIST_ENTRIES_PAGE_MAX: u32 = 1000;
 
 /// [`BlocklistSummary::enforcement`]: not downloaded or pushed yet.
 pub const ENFORCEMENT_PENDING: &str = "pending";
-/// [`BlocklistSummary::enforcement`]: the daemon accepted the list's rule.
-/// The daemon may still have loaded 0 entries, so GUIs say "Rule installed",
-/// never "Enforced".
+/// [`BlocklistSummary::enforcement`]: the daemon accepted the list's rule,
+/// or already held it unchanged. The daemon may still have loaded 0
+/// entries, so GUIs say "Rule installed", never "Enforced".
 pub const ENFORCEMENT_RULE_INSTALLED: &str = "rule_installed";
 /// [`BlocklistSummary::enforcement`]: nothing blocks this list's hosts; see
 /// `enforcement_reason`.

@@ -10,7 +10,7 @@
 //!   way bazzite-tower's patched daemon does until it has the path contract.
 
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use snitchwatch_proto::protocol::{
     Action, Notification, NotificationReply, NotificationReplyCode, Rule,
@@ -130,8 +130,39 @@ fn is_lists_change(n: &Notification) -> bool {
 pub fn spawn_responder(
     policy: ListsPolicy,
     replies: mpsc::Sender<NotificationReply>,
-    mut inbound: mpsc::Receiver<Notification>,
+    inbound: mpsc::Receiver<Notification>,
 ) -> mpsc::Receiver<Notification> {
+    respond(policy, replies, inbound, |n| n.clone())
+}
+
+/// [`spawn_responder`], also reporting, for each `DELETE_RULE` of a
+/// blocklist rule, whether `<lists_root>/<list>` still existed when the
+/// command arrived (before it was answered); `true` for anything else.
+pub fn spawn_observing_responder(
+    policy: ListsPolicy,
+    lists_root: PathBuf,
+    replies: mpsc::Sender<NotificationReply>,
+    inbound: mpsc::Receiver<Notification>,
+) -> mpsc::Receiver<(Notification, bool)> {
+    respond(policy, replies, inbound, move |n| {
+        let existed = n.r#type != Action::DeleteRule as i32
+            || n.rules.iter().all(|rule| {
+                let list = rule
+                    .name
+                    .strip_prefix("z00-blocklist:")
+                    .and_then(|rest| rest.split(':').next());
+                list.is_none_or(|list| lists_root.join(list).exists())
+            });
+        (n.clone(), existed)
+    })
+}
+
+fn respond<T: Send + 'static>(
+    policy: ListsPolicy,
+    replies: mpsc::Sender<NotificationReply>,
+    mut inbound: mpsc::Receiver<Notification>,
+    observe: impl Fn(&Notification) -> T + Send + 'static,
+) -> mpsc::Receiver<T> {
     let (seen_tx, seen_rx) = mpsc::channel(64);
     tokio::spawn(async move {
         while let Some(n) = inbound.recv().await {
@@ -153,7 +184,7 @@ pub fn spawn_responder(
                 },
                 data: refusal.unwrap_or_default(),
             };
-            let _ = seen_tx.send(n).await;
+            let _ = seen_tx.send(observe(&n)).await;
             if replies.send(reply).await.is_err() {
                 return;
             }

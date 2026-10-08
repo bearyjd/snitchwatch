@@ -203,8 +203,8 @@ Window {
                 throw new Error(name + ": banner is dismissable");
             }
         }
-        if (notEnforced.text.indexOf("not blocking") < 0) {
-            throw new Error(name + ": warning does not say lists are not blocking");
+        if (notEnforced.text.indexOf("confirmed") < 0) {
+            throw new Error(name + ": warning does not say lists aren't confirmed as blocking");
         }
         if (memoryOnly.text.indexOf("restart") < 0) {
             throw new Error(name + ": memory-only warning lacks the restart sentence");

@@ -350,16 +350,21 @@ async fn each_committed_rules_snapshot_triggers_a_reconcile() {
     let (tx, _rx) = broadcast::channel(16);
     let (synced_tx, synced) = tokio::sync::watch::channel(0u64);
     let tasks = BlocklistTasks::spawn(mgr, tx, Duration::from_secs(3600), Some(synced));
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    assert_eq!(sink.passes.load(Ordering::SeqCst), 0, "no snapshot yet");
-    synced_tx.send_modify(|g| *g += 1);
-    wait_for("the first reconcile", || {
+    // The refresh loop's first tick (at start) reconciles once.
+    wait_for("the startup tick's reconcile", || {
         sink.passes.load(Ordering::SeqCst) == 1
     })
     .await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(sink.passes.load(Ordering::SeqCst), 1, "no snapshot yet");
     synced_tx.send_modify(|g| *g += 1);
-    wait_for("the second reconcile", || {
+    wait_for("the first snapshot's reconcile", || {
         sink.passes.load(Ordering::SeqCst) == 2
+    })
+    .await;
+    synced_tx.send_modify(|g| *g += 1);
+    wait_for("the second snapshot's reconcile", || {
+        sink.passes.load(Ordering::SeqCst) == 3
     })
     .await;
     tasks.abort();
@@ -387,5 +392,19 @@ async fn subscribing_and_unsubscribing_trigger_a_reconcile() {
     })
     .await;
     assert!(mgr.subscriptions().is_empty());
+    handle.abort();
+}
+
+/// Review (code M): a scheduled refresh tick also reconciles, so a list the
+/// daemon refused or didn't answer for is retried without a restart.
+#[tokio::test]
+async fn a_refresh_tick_triggers_a_full_reconcile() {
+    let (mgr, sink) = counted_manager();
+    let (worker, handle) = BlocklistWorker::spawn(mgr);
+    assert!(worker.enqueue(BlocklistJob::RefreshDue));
+    wait_for("the refresh tick's reconcile", || {
+        sink.passes.load(Ordering::SeqCst) == 1
+    })
+    .await;
     handle.abort();
 }

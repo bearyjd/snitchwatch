@@ -214,6 +214,9 @@ pub struct DaemonCommands {
     inner: Arc<StdMutex<Inner>>,
     ready: Arc<watch::Sender<u64>>,
     rules: RulesSync,
+    /// The one list directory root a [`BlocklistCommand`] may point at, set
+    /// once by the blocklist sink; until then none is sent.
+    blocklist_root: Arc<std::sync::OnceLock<std::path::PathBuf>>,
 }
 
 /// Keeps a stream registered; dropping it closes the stream (also on a
@@ -250,6 +253,7 @@ impl DaemonCommands {
             })),
             ready: Arc::new(watch::channel(0).0),
             rules,
+            blocklist_root: Arc::default(),
         }
     }
 

@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use mock_opensnitchd::lists::{
-    spawn_responder, validate_blocklist_rule, ListsPolicy, LISTS_REFUSAL,
+    spawn_observing_responder, spawn_responder, validate_blocklist_rule, ListsPolicy, LISTS_REFUSAL,
 };
 use mock_opensnitchd::MockOpensnitchd;
 use snitchwatch_bridge::blocklists::fetcher::{process_body, BlocklistFetch, FetchOutcome};
@@ -17,7 +17,8 @@ use snitchwatch_bridge::ws_messages::{
     ENFORCEMENT_RULE_INSTALLED,
 };
 use snitchwatch_bridge_cli::{
-    run_with_options, BridgeConfig, EphemeralReason, RunOptions, RunningBridge, Storage,
+    run_with_options, BridgeConfig, BridgeMode, EphemeralReason, RunOptions, RunningBridge,
+    Storage, PER_USER_REASON,
 };
 use snitchwatch_proto::protocol::{Action, Notification};
 use tokio::sync::{broadcast, mpsc};
@@ -44,6 +45,10 @@ struct Setup {
 }
 
 async fn start(persistent: bool) -> Setup {
+    start_as(persistent, BridgeMode::System).await
+}
+
+async fn start_as(persistent: bool, mode: BridgeMode) -> Setup {
     let sockets = tempfile::tempdir().unwrap();
     let state_dir = tempfile::tempdir().unwrap();
     let state = state_dir.path().canonicalize().unwrap();
@@ -61,6 +66,7 @@ async fn start(persistent: bool) -> Setup {
         RunOptions {
             storage,
             blocklist_fetcher: Some(Arc::new(Fetcher)),
+            mode,
         },
     )
     .await
@@ -192,7 +198,32 @@ async fn a_subscription_installs_its_lists_rules_and_reports_them_installed() {
         "a GUI's delete of a blocklist rule reached the daemon"
     );
 
-    // Unsubscribe: both rules are deleted, then the list's directory.
+    setup.bridge.shutdown();
+}
+
+/// Unsubscribe deletes both rules while the list's directory still exists,
+/// and only then removes the directory.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unsubscribing_deletes_the_rules_before_the_list_directory() {
+    let mut setup = start(true).await;
+    let (state, bridge, rx) = (setup.state.clone(), &setup.bridge, &mut setup.rx);
+    let mut daemon = MockOpensnitchd::connect(bridge.grpc_endpoint.tcp_addr().unwrap())
+        .await
+        .unwrap();
+    daemon.subscribe("mock").await.unwrap();
+    let (replies, inbound) = daemon.open_notifications().await.unwrap();
+    let mut seen =
+        spawn_observing_responder(ListsPolicy::Accept, lists_root(&state), replies, inbound);
+    let mut ready = bridge.daemon_stream_ready();
+    tokio::time::timeout(WAIT, ready.wait_for(|g| *g >= 1))
+        .await
+        .expect("no HELLO")
+        .unwrap();
+    subscribe(bridge).await;
+    let list = list_until(rx, "rule installed", |l| {
+        l.enforcement == ENFORCEMENT_RULE_INSTALLED
+    })
+    .await;
     let list_dir = lists_root(&state).join(&list.id);
     assert!(list_dir.is_dir());
     bridge
@@ -202,14 +233,24 @@ async fn a_subscription_installs_its_lists_rules_and_reports_them_installed() {
         })
         .await
         .unwrap();
-    for kind in ["domains", "ips"] {
-        let delete = next_command(&mut seen).await;
-        assert_eq!(delete.r#type, Action::DeleteRule as i32);
-        assert_eq!(
-            delete.rules[0].name,
-            format!("z00-blocklist:{}:{kind}", list.id)
-        );
+    let mut deleted = Vec::new();
+    while deleted.len() < 2 {
+        let (command, dir_existed) = tokio::time::timeout(WAIT, seen.recv())
+            .await
+            .expect("no DELETE_RULE")
+            .unwrap();
+        if command.r#type == Action::DeleteRule as i32 {
+            assert!(dir_existed, "the list directory went before its rule");
+            deleted.push(command.rules[0].name.clone());
+        }
     }
+    assert_eq!(
+        deleted,
+        vec![
+            format!("z00-blocklist:{}:domains", list.id),
+            format!("z00-blocklist:{}:ips", list.id),
+        ]
+    );
     let deadline = tokio::time::Instant::now() + WAIT;
     while list_dir.exists() {
         assert!(
@@ -225,7 +266,7 @@ async fn a_subscription_installs_its_lists_rules_and_reports_them_installed() {
 async fn a_daemon_that_refuses_lists_rules_leaves_the_list_not_enforced_saying_why() {
     let mut setup = start(true).await;
     let (bridge, rx) = (&setup.bridge, &mut setup.rx);
-    let (_daemon, _seen) =
+    let (_daemon, mut seen) =
         connect_daemon(bridge, ListsPolicy::RefuseLists(LISTS_REFUSAL.into())).await;
     subscribe(bridge).await;
     let list = list_until(rx, "a refusal", |l| {
@@ -238,6 +279,14 @@ async fn a_daemon_that_refuses_lists_rules_leaves_the_list_not_enforced_saying_w
         "{reason}"
     );
     assert!(reason.contains(LISTS_REFUSAL), "{reason}");
+    // One subscribe, one try: the clean-up reconcile after it doesn't retry
+    // (a refresh tick or a new daemon connection does).
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let mut changes = 0;
+    while let Ok(command) = seen.try_recv() {
+        changes += usize::from(command.r#type == Action::ChangeRule as i32);
+    }
+    assert_eq!(changes, 1, "a refused list was retried at once");
     setup.bridge.shutdown();
 }
 
@@ -290,5 +339,27 @@ async fn without_a_state_directory_no_file_or_rule_is_installed() {
         "a rule was sent without a state directory"
     );
     assert_eq!(std::fs::read_dir(&state).unwrap().count(), 0);
+    setup.bridge.shutdown();
+}
+
+/// Review M3: a per-user bridge saves subscriptions but installs nothing:
+/// root opensnitchd must not read files the user's other apps can replace.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_per_user_bridge_installs_no_file_or_rule() {
+    let mut setup = start_as(true, BridgeMode::User).await;
+    let (state, bridge, rx) = (setup.state.clone(), &setup.bridge, &mut setup.rx);
+    let (_daemon, mut seen) = connect_daemon(bridge, ListsPolicy::Accept).await;
+    subscribe(bridge).await;
+    let list = list_until(rx, "downloaded", |l| l.status == "ok").await;
+    assert_eq!(list.enforcement, ENFORCEMENT_NOT_ENFORCED);
+    assert_eq!(list.enforcement_reason.as_deref(), Some(PER_USER_REASON));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(500), seen.recv())
+            .await
+            .is_err(),
+        "a per-user bridge sent a rule"
+    );
+    assert!(!lists_root(&state).exists());
+    assert!(state.join("blocklists.sqlite3").is_file(), "still saved");
     setup.bridge.shutdown();
 }

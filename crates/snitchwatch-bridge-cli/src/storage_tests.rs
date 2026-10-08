@@ -191,6 +191,7 @@ fn the_manager_reports_the_resolved_storage() {
         RunOptions {
             storage: Storage::Persistent(state.clone()),
             blocklist_fetcher: None,
+            mode: BridgeMode::User,
         },
         daemon(),
     )
@@ -203,6 +204,7 @@ fn the_manager_reports_the_resolved_storage() {
         RunOptions {
             storage: Storage::Persistent(state),
             blocklist_fetcher: None,
+            mode: BridgeMode::User,
         },
         daemon(),
     )
@@ -215,6 +217,7 @@ fn the_manager_reports_the_resolved_storage() {
         .is_some_and(|r| r.starts_with("blocklist store: ")));
 
     let in_process = build_blocklists_manager(RunOptions::in_process(), daemon()).unwrap();
+    assert_eq!(RunOptions::in_process().mode, BridgeMode::User);
     assert!(!in_process.storage_status().persistent);
 }
 
@@ -249,6 +252,7 @@ fn ephemeral_storage_installs_nothing_and_says_why() {
             RunOptions {
                 storage,
                 blocklist_fetcher: None,
+                mode: BridgeMode::System,
             },
             daemon(),
         )
@@ -265,6 +269,7 @@ fn ephemeral_storage_installs_nothing_and_says_why() {
         RunOptions {
             storage: Storage::Persistent(state.clone()),
             blocklist_fetcher: None,
+            mode: BridgeMode::System,
         },
         daemon(),
     )
@@ -274,7 +279,7 @@ fn ephemeral_storage_installs_nothing_and_says_why() {
 }
 
 #[test]
-fn persistent_storage_creates_the_private_list_directory() {
+fn the_system_bridge_creates_the_private_list_directory() {
     use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
     let state = dir.path().canonicalize().unwrap();
@@ -282,6 +287,7 @@ fn persistent_storage_creates_the_private_list_directory() {
         RunOptions {
             storage: Storage::Persistent(state.clone()),
             blocklist_fetcher: None,
+            mode: BridgeMode::System,
         },
         daemon(),
     )
@@ -326,4 +332,30 @@ fn the_system_state_directory_must_be_the_services_and_private() {
         let err = check_system_state_dir(&facts, 991, 991).unwrap_err();
         assert!(err.contains(SYSTEM_STATE_DIR), "{why}: {err}");
     }
+}
+
+/// Review M3: root opensnitchd would read per-user list files that any of
+/// the user's processes can replace (a FIFO hangs it, a link to /dev/zero
+/// exhausts its memory and, with `QueueBypass`, fails open). Only the system
+/// bridge installs blocklist rules; a per-user one writes no list file.
+#[test]
+fn the_per_user_bridge_never_installs_blocklist_rules() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().canonicalize().unwrap();
+    let manager = build_blocklists_manager(
+        RunOptions {
+            storage: Storage::Persistent(state.clone()),
+            blocklist_fetcher: None,
+            mode: BridgeMode::User,
+        },
+        daemon(),
+    )
+    .unwrap();
+    assert!(
+        manager.storage_status().persistent,
+        "subscriptions are still saved"
+    );
+    assert_eq!(not_enforced(&manager), PER_USER_REASON);
+    assert!(!PER_USER_REASON.contains("bridge"), "plain language");
+    assert!(!state.join("blocklists").exists());
 }

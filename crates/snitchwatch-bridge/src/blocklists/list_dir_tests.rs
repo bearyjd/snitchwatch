@@ -337,3 +337,91 @@ fn removing_a_symlinked_list_removes_the_link_only() {
     assert!(elsewhere.path().join("keep.list").exists());
     assert!(std::fs::symlink_metadata(state.join("blocklists/ads")).is_err());
 }
+
+/// Review L5: a hostile list must not be able to block the gateway, local
+/// DNS or anything else on the machine's own networks.
+#[test]
+fn ips_on_local_special_or_reserved_networks_are_dropped() {
+    let dropped = [
+        "10.0.0.1",
+        "172.16.5.4",
+        "172.31.255.255",
+        "192.168.1.1",
+        "169.254.1.1",
+        "100.64.0.1",
+        "100.127.255.254",
+        "224.0.0.251",
+        "239.255.255.250",
+        "240.0.0.1",
+        "255.255.255.255",
+        "0.0.0.0",
+        "0.1.2.3",
+        "127.0.0.53",
+    ];
+    let kept = [
+        "203.0.113.7",
+        "8.8.8.8",
+        "100.63.255.255",
+        "100.128.0.1",
+        "172.15.0.1",
+        "172.32.0.1",
+    ];
+    let entries = classify(
+        dropped
+            .iter()
+            .chain(kept.iter())
+            .map(|s| s.to_string())
+            .collect(),
+    );
+    assert_eq!(entries.ips, hosts(&kept));
+    assert!(entries.domains.is_empty(), "{:?}", entries.domains);
+}
+
+/// Review L1: the daemon uses `data` as a glob (`<data>/*.*`), so a state
+/// path with glob metacharacters (an unclosed `[` can hang it) or that isn't
+/// UTF-8 is refused.
+#[test]
+fn a_state_path_the_daemon_would_read_as_a_glob_is_refused() {
+    let (_t, state) = state();
+    for name in ["a[b", "a*b", "a?b", "a\\b", "a]b"] {
+        let dir = state.join(name);
+        std::fs::create_dir(&dir).unwrap();
+        assert!(ListDir::open(&dir).is_err(), "{name}");
+        assert!(!dir.join("blocklists").exists(), "{name}");
+    }
+    use std::os::unix::ffi::OsStrExt;
+    let odd = state.join(std::ffi::OsStr::from_bytes(b"a\xffb"));
+    std::fs::create_dir(&odd).unwrap();
+    assert!(ListDir::open(&odd).is_err(), "non-UTF-8");
+}
+
+/// Review H1: an unchanged list is not rewritten (the daemon would re-read
+/// every list on any change), a changed one is, atomically.
+#[test]
+fn an_unchanged_list_is_not_rewritten() {
+    let (_t, state) = state();
+    let dir = ListDir::open(&state).unwrap();
+    let id = IdComponent::from_id("ads");
+    let file = dir.kind_dir(&id, ListKind::Domains).join("domains.list");
+    let inode = |p: &Path| std::fs::metadata(p).unwrap().ino();
+    assert!(dir
+        .write_list(&id, ListKind::Domains, &hosts(&["a.example"]))
+        .unwrap());
+    let first = inode(&file);
+    assert!(!dir
+        .write_list(&id, ListKind::Domains, &hosts(&["a.example"]))
+        .unwrap());
+    assert_eq!(inode(&file), first, "an identical list was rewritten");
+    assert!(dir
+        .write_list(&id, ListKind::Domains, &hosts(&["b.example"]))
+        .unwrap());
+    assert_ne!(inode(&file), first);
+    // Same length, different bytes: still rewritten.
+    assert!(dir
+        .write_list(&id, ListKind::Domains, &hosts(&["c.example"]))
+        .unwrap());
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        "0.0.0.0 c.example\n"
+    );
+}

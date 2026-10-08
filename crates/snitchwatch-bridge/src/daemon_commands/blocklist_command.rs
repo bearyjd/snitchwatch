@@ -16,9 +16,11 @@
 //! ```
 //!
 //! [`check`](BlocklistCommand::check) re-validates the shape at the send
-//! point anyway, so a later change to the constructors can't widen it.
+//! point anyway, so a later change to the constructors can't widen it, and
+//! pins `data` to the list root the sink set once with
+//! [`DaemonCommands::pin_blocklist_root`]; before that, nothing is sent.
 
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 
 use snitchwatch_proto::protocol::{Action, Notification, Rule};
 
@@ -41,8 +43,7 @@ impl BlocklistCommand {
         Self::change(materialize_list_rule(list, kind, &dir.kind_dir(list, kind)).into())
     }
 
-    /// `CHANGE_RULE` for a rule [`install`](Self::install) built earlier.
-    pub(crate) fn change(rule: Rule) -> Self {
+    fn change(rule: Rule) -> Self {
         Self {
             notification: Notification {
                 r#type: Action::ChangeRule as i32,
@@ -75,8 +76,9 @@ impl BlocklistCommand {
         self.notification.rules.first()
     }
 
-    /// Exactly what the constructors build, or an error.
-    fn check(&self) -> Result<(), SendError> {
+    /// Exactly what the constructors build for the list root `root`, or an
+    /// error.
+    fn check(&self, root: &Path) -> Result<(), SendError> {
         let [rule] = self.notification.rules.as_slice() else {
             return Err(SendError::RefusedOperator);
         };
@@ -101,7 +103,7 @@ impl BlocklistCommand {
                 && op.list.is_empty()
                 && !op.sensitive
                 && ListKind::from_operand(&op.operand)
-                    .is_some_and(|kind| data_matches(&op.data, kind, &rule.name))
+                    .is_some_and(|kind| data_matches(&op.data, kind, &rule.name, root))
         });
         if shape_ok && operator_ok {
             Ok(())
@@ -111,9 +113,10 @@ impl BlocklistCommand {
     }
 }
 
-/// `data` is `/…/blocklists/<list>/<kind>`: absolute, normal components
-/// only, no trailing slash, and the rule is named for that list and kind.
-fn data_matches(data: &str, kind: ListKind, name: &str) -> bool {
+/// `data` is exactly `<root>/<list>/<kind>`: absolute, normal components
+/// only, no trailing slash, under the pinned root, and the rule is named for
+/// that list and kind.
+fn data_matches(data: &str, kind: ListKind, name: &str, root: &Path) -> bool {
     let Some(relative) = data.strip_prefix('/') else {
         return false;
     };
@@ -132,25 +135,39 @@ fn data_matches(data: &str, kind: ListKind, name: &str) -> bool {
     {
         return false;
     }
-    let names: Vec<&str> = path
-        .iter()
-        .rev()
-        .take(3)
-        .filter_map(|c| c.to_str())
-        .collect();
-    let [kind_dir, list, root] = names.as_slice() else {
+    let Ok(below_root) = path.strip_prefix(root) else {
         return false;
     };
-    *kind_dir == kind.dir_name()
-        && *root == LISTS_DIR_NAME
+    let names: Vec<&str> = below_root.iter().filter_map(|c| c.to_str()).collect();
+    let [list, kind_dir] = names.as_slice() else {
+        return false;
+    };
+    root.file_name().is_some_and(|n| n == LISTS_DIR_NAME)
+        && *kind_dir == kind.dir_name()
         && IdComponent::parse(list).is_some_and(|list| list_rule_name(&list, kind) == name)
 }
 
 impl DaemonCommands {
+    /// Pin the list directory root every [`BlocklistCommand`] must point
+    /// under. Set once; a second, different root is refused (and returned).
+    pub(crate) fn pin_blocklist_root(&self, root: &Path) -> Result<(), PathBuf> {
+        let pinned = self.blocklist_root.get_or_init(|| root.to_path_buf());
+        if pinned == root {
+            Ok(())
+        } else {
+            Err(pinned.clone())
+        }
+    }
+
     /// Send a blocklist rule command. The only path a `lists` operator or a
     /// blocklist rule name may take to the daemon; see the module doc.
+    /// Nothing is sent before [`pin_blocklist_root`](Self::pin_blocklist_root).
     pub fn send_blocklist(&self, command: BlocklistCommand) -> Result<PendingReply, SendError> {
-        command.check()?;
+        let root = self
+            .blocklist_root
+            .get()
+            .ok_or(SendError::RefusedOperator)?;
+        command.check(root)?;
         self.dispatch(command.notification)
     }
 }
@@ -165,13 +182,11 @@ mod tests {
         (state, dir)
     }
 
-    fn installed() -> (tempfile::TempDir, BlocklistCommand) {
+    fn installed() -> (tempfile::TempDir, ListDir, BlocklistCommand) {
         let (state, dir) = dir();
         let list = IdComponent::from_id("ads");
-        (
-            state,
-            BlocklistCommand::install(&list, ListKind::Domains, &dir),
-        )
+        let command = BlocklistCommand::install(&list, ListKind::Domains, &dir);
+        (state, dir, command)
     }
 
     #[test]
@@ -180,11 +195,14 @@ mod tests {
         for id in ["ads", "a/b", &"x".repeat(200)] {
             let list = IdComponent::from_id(id);
             for kind in ListKind::ALL {
-                assert_eq!(BlocklistCommand::install(&list, kind, &dir).check(), Ok(()));
+                let command = BlocklistCommand::install(&list, kind, &dir);
+                assert_eq!(command.check(dir.root()), Ok(()));
             }
         }
-        assert!(BlocklistCommand::delete("z00-blocklist:ads:domains").is_some());
-        assert!(BlocklistCommand::delete("900-blocklist:ads:0001-x").is_some());
+        for name in ["z00-blocklist:ads:domains", "900-blocklist:ads:0001-x"] {
+            let delete = BlocklistCommand::delete(name).unwrap();
+            assert_eq!(delete.check(dir.root()), Ok(()));
+        }
     }
 
     #[test]
@@ -194,10 +212,22 @@ mod tests {
         }
     }
 
+    /// Review L1: the data path is pinned to the sink's own root, not just
+    /// its last three components.
+    #[test]
+    fn a_rule_for_another_root_is_refused() {
+        let (_state, _dir, command) = installed();
+        let (_other_state, other) = dir();
+        assert!(command.check(other.root()).is_err());
+        assert!(command
+            .check(Path::new("/var/lib/snitchwatch/blocklists"))
+            .is_err());
+    }
+
     #[test]
     fn every_widened_shape_is_refused() {
         type Tamper = fn(&mut Rule);
-        let tampers: [(&str, Tamper); 12] = [
+        let tampers: [(&str, Tamper); 13] = [
             ("allow", |r| r.action = "allow".into()),
             ("temporary", |r| r.duration = "5m".into()),
             ("disabled", |r| r.enabled = false),
@@ -221,28 +251,34 @@ mod tests {
             ("relative", |r| {
                 r.operator.as_mut().unwrap().data = "blocklists/ads/domains".into()
             }),
+            ("same tail, other root", |r| {
+                r.operator.as_mut().unwrap().data = "/tmp/x/blocklists/ads/domains".into()
+            }),
         ];
         for (what, tamper) in tampers {
-            let (_state, mut command) = installed();
+            let (_state, dir, mut command) = installed();
             tamper(&mut command.notification.rules[0]);
-            assert!(command.check().is_err(), "{what} passed");
+            assert!(command.check(dir.root()).is_err(), "{what} passed");
         }
-        let (_state, mut command) = installed();
+        let (_state, dir, mut command) = installed();
         command
             .notification
             .rules
             .push(command.notification.rules[0].clone());
-        assert!(command.check().is_err(), "two rules passed");
-        let (_state, mut command) = installed();
+        assert!(command.check(dir.root()).is_err(), "two rules passed");
+        let (_state, dir, mut command) = installed();
         command.notification.r#type = Action::ChangeConfig as i32;
-        assert!(command.check().is_err(), "CHANGE_CONFIG passed");
-        let (_state, mut command) = installed();
+        assert!(command.check(dir.root()).is_err(), "CHANGE_CONFIG passed");
+        let (_state, dir, mut command) = installed();
         let data = &mut command.notification.rules[0]
             .operator
             .as_mut()
             .unwrap()
             .data;
         data.push('/');
-        assert!(command.check().is_err(), "a trailing slash passed");
+        assert!(
+            command.check(dir.root()).is_err(),
+            "a trailing slash passed"
+        );
     }
 }

@@ -99,6 +99,7 @@ async fn run_bridge() -> Result<()> {
             let options = RunOptions {
                 storage: resolve_storage(BridgeMode::User),
                 blocklist_fetcher: None,
+                mode: BridgeMode::User,
             };
             run_with_options(BridgeConfig::from_env()?, options).await?
         }

@@ -58,9 +58,10 @@ pub enum BlocklistEvent {
 pub enum Enforcement {
     /// Not downloaded or pushed to a sink yet.
     Pending,
-    /// The list files were written and the daemon replied OK to every rule.
+    /// The list files were written and the daemon replied OK to every rule,
+    /// or its committed rule snapshot already held each one unchanged.
     /// Shown as "Rule installed", not "Enforced": the daemon may still load
-    /// 0 entries (a wrong path, `ProtectHome=`, SELinux) without saying so.
+    /// 0 entries (a wrong path, SELinux) without saying so.
     RuleInstalled {
         at: DateTime<Utc>,
     },
@@ -80,6 +81,24 @@ pub const NO_HOSTS_REASON: &str = "The list has no hosts Snitchwatch can block";
 pub const STORE_ERROR_REASON: &str = "Couldn't save the list";
 /// Most subscriptions one bridge keeps (each can hold `format::MAX_ENTRIES`).
 pub const MAX_SUBSCRIPTIONS: usize = 32;
+/// Most hosts, summed over every subscription, the bridge asks opensnitchd
+/// to hold. The root daemon keeps each `lists` rule's entries in an
+/// in-memory Go map, at roughly 100 bytes per host with map overhead, so
+/// this is a ~200 MB budget. It runs with `QueueBypass`, so an OOM kill
+/// would let traffic through unfiltered while it restarts. Lists past the
+/// limit, in the order they were subscribed, get no files and no rule.
+pub const AGGREGATE_MAX_HOSTS: u64 = 2_000_000;
+
+/// How much a [`BlocklistsManager::reconcile_with`] pass does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ReconcileScope {
+    /// After a subscribe or unsubscribe: install lists not tried yet in
+    /// this run, and remove orphans. A list just tried isn't tried again.
+    CleanUp,
+    /// After a committed daemon rules snapshot or a refresh tick: also
+    /// retry every list that isn't installed (refused, timed out).
+    Full,
+}
 /// A list whose last download failed is retried after this long (or its own
 /// refresh interval, if shorter), not on every scheduler tick.
 pub const FAILED_RETRY_SECS: i64 = 60 * 60;
@@ -134,8 +153,8 @@ pub trait RuleSink: Send + Sync + 'static {
         true
     }
 
-    /// Whether `list_id`'s rules were confirmed during this run and are
-    /// still exactly in place, with their files: nothing to reconcile.
+    /// Whether `list_id`'s rules are in place with their files (the daemon's
+    /// committed snapshot holds each unchanged): nothing to reconcile.
     fn is_current(&self, _list_id: &str) -> bool {
         false
     }

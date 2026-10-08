@@ -2,19 +2,23 @@
 //! rules over files the bridge writes (issue #45 PR B).
 //!
 //! Install, for one list:
-//! 1. write its list files ([`ListDir::write_list`]); on failure send
-//!    nothing;
+//! 1. write its list files ([`ListDir::write_list`], which leaves an
+//!    unchanged file alone); on failure send nothing;
 //! 2. `CHANGE_RULE` each kind's rule through
 //!    [`DaemonCommands::send_blocklist`] and wait for the reply. Only an
-//!    `OK` for every rule counts; a rule confirmed earlier in this run and
-//!    still identical in the daemon's list isn't resent (the daemon re-reads
-//!    a changed file by itself every 4 s);
-//! 3. delete the list's other rules (a kind it no longer has, legacy
-//!    per-host rules), then the directories of kinds it no longer has.
+//!    `OK` counts, unless the rule is already in place: identical in the
+//!    daemon's committed rule snapshot (or, while there is none, confirmed
+//!    earlier in this run) with its list file present. The daemon re-reads a
+//!    changed file by itself every 4 s, so a refresh resends nothing, and a
+//!    bridge restart doesn't resend every rule;
+//! 3. delete the list's other rules Snitchwatch made (a kind it no longer
+//!    has, legacy per-host rules), then the directories of kinds it no
+//!    longer has.
 //!
 //! Remove deletes the rules first, then the list's directory. Nothing is
 //! sent while the daemon's rule list is unknown (cache `Unknown`): the
-//! reconcile after its next snapshot does it.
+//! reconcile after its next snapshot does it. Only rules Snitchwatch made
+//! ([`made_by_bridge`]) are ever deleted on the strength of the cache.
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex as StdMutex, MutexGuard};
@@ -22,9 +26,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use snitchwatch_proto::protocol::Rule;
-use tracing::warn;
+use tracing::{error, warn};
 
-use crate::blocklists::list_dir::{classify, IdComponent, ListDir};
+use crate::blocklists::list_dir::{classify, IdComponent, ListDir, ListEntries};
 use crate::blocklists::materializer::{
     list_of_rule_name, list_rule_name, owned_rule_name_prefixes, ListKind,
 };
@@ -38,6 +42,11 @@ use crate::rule_name::is_reserved_blocklist_name;
 /// which only notices between its 4 s polls (`operator_lists.go`).
 pub const BLOCKLIST_COMMAND_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// The rules cache is `Unknown`: no daemon connected, or its rule snapshot
+/// was over the size Snitchwatch reads (`MAX_SNAPSHOT_RULES`).
+const RULES_UNKNOWN_REASON: &str = "Snitchwatch doesn't have the firewall service's rule list \
+     yet (it isn't connected, or it has more rules than Snitchwatch reads); blocking starts \
+     once it does";
 const NOT_CONNECTED_REASON: &str =
     "The firewall service isn't connected; blocking starts once it connects";
 /// Longest daemon refusal text shown to the user, in characters.
@@ -53,7 +62,15 @@ pub struct DaemonRuleSink {
 }
 
 impl DaemonRuleSink {
+    /// Also pins `dir`'s root as the only one `commands` sends blocklist
+    /// rules for.
     pub fn new(dir: ListDir, commands: DaemonCommands, rules: SharedRulesCache) -> Self {
+        if let Err(pinned) = commands.pin_blocklist_root(dir.root()) {
+            error!(
+                pinned = %pinned.display(),
+                "another blocklist root is pinned; this sink's rules will be refused"
+            );
+        }
         Self {
             dir: Arc::new(dir),
             commands,
@@ -80,34 +97,48 @@ impl DaemonRuleSink {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// Cached rule names under a blocklist prefix, or `None` while Unknown.
-    fn cached_blocklist_names(&self) -> Option<Vec<String>> {
+    /// Cached rules under a blocklist name, or `None` while Unknown.
+    fn cached_blocklist_rules(&self) -> Option<Vec<Rule>> {
         match &*self.cache() {
             RulesCache::Unknown => None,
             RulesCache::Synced(rules) => Some(
                 rules
-                    .keys()
-                    .filter(|name| is_reserved_blocklist_name(name))
+                    .values()
+                    .filter(|rule| is_reserved_blocklist_name(&rule.name))
                     .cloned()
                     .collect(),
             ),
         }
     }
 
-    /// Confirmed in this run and, when the daemon's list is known, still in
-    /// it unchanged.
-    fn in_place(&self, rule: &Rule) -> bool {
-        let confirmed = self
-            .confirmed()
-            .get(&rule.name)
-            .is_some_and(|sent| same_rule(sent, rule));
-        confirmed
-            && match &*self.cache() {
-                RulesCache::Unknown => true,
-                RulesCache::Synced(rules) => rules
-                    .get(&rule.name)
-                    .is_some_and(|cached| same_rule(cached, rule)),
-            }
+    /// Names of cached rules of `list` (either band) that Snitchwatch made.
+    fn cached_rules_of(&self, list: &IdComponent) -> Vec<String> {
+        let prefixes = owned_rule_name_prefixes(list);
+        self.cached_blocklist_rules()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|rule| prefixes.iter().any(|p| rule.name.starts_with(p.as_str())))
+            .filter(made_by_bridge_logged)
+            .map(|rule| rule.name)
+            .collect()
+    }
+
+    /// The kind's rule is in place and its list file is there: identical in
+    /// the daemon's committed snapshot, or, while the cache is Unknown,
+    /// confirmed in this run.
+    fn in_place(&self, list: &IdComponent, kind: ListKind, rule: &Rule) -> bool {
+        if !self.dir.has_list(list, kind) {
+            return false;
+        }
+        match &*self.cache() {
+            RulesCache::Synced(rules) => rules
+                .get(&rule.name)
+                .is_some_and(|cached| same_rule(cached, rule)),
+            RulesCache::Unknown => self
+                .confirmed()
+                .get(&rule.name)
+                .is_some_and(|sent| same_rule(sent, rule)),
+        }
     }
 
     async fn send(&self, command: BlocklistCommand) -> Result<(), NotInstalled> {
@@ -123,11 +154,14 @@ impl DaemonRuleSink {
         let Some(rule) = command.rule().cloned() else {
             return Err(NotInstalled::new("Snitchwatch built no rule for this list"));
         };
-        if self.in_place(&rule) {
+        if self.in_place(list, kind, &rule) {
+            // Found in the snapshot counts as confirmed, for when the
+            // daemon's list is next Unknown.
+            self.confirmed().insert(rule.name.clone(), rule);
             return Ok(());
         }
-        if self.cached_blocklist_names().is_none() {
-            return Err(NotInstalled::daemon_unavailable(NOT_CONNECTED_REASON));
+        if !self.daemon_rules_known() {
+            return Err(NotInstalled::daemon_unavailable(RULES_UNKNOWN_REASON));
         }
         self.send(command).await?;
         self.confirmed().insert(rule.name.clone(), rule);
@@ -162,28 +196,78 @@ impl DaemonRuleSink {
             .await
             .map_err(std::io::Error::other)?
     }
+
+    /// Write the non-empty kinds' files; returns those kinds.
+    async fn write_files(
+        &self,
+        list: &IdComponent,
+        entries: ListEntries,
+    ) -> Result<Vec<ListKind>, NotInstalled> {
+        let kinds: Vec<ListKind> = ListKind::ALL
+            .into_iter()
+            .filter(|kind| !entries.get(*kind).is_empty())
+            .collect();
+        let (list, written) = (list.clone(), kinds.clone());
+        self.files(move |dir| {
+            written
+                .iter()
+                .try_for_each(|kind| dir.write_list(&list, *kind, entries.get(*kind)).map(drop))
+        })
+        .await
+        .map_err(|e| {
+            NotInstalled::new(format!(
+                "Couldn't save the list for the firewall service: {e}"
+            ))
+        })?;
+        Ok(kinds)
+    }
+
+    /// Delete the list's rules Snitchwatch made that aren't for `kinds`,
+    /// then the directories of the other kinds.
+    async fn remove_other_kinds(
+        &self,
+        list: &IdComponent,
+        kinds: &[ListKind],
+    ) -> Result<(), NotInstalled> {
+        let wanted: BTreeSet<String> = kinds.iter().map(|k| list_rule_name(list, *k)).collect();
+        let stale = self
+            .cached_rules_of(list)
+            .into_iter()
+            .filter(|name| !wanted.contains(name));
+        self.delete(stale).await?;
+        let gone: Vec<ListKind> = ListKind::ALL
+            .into_iter()
+            .filter(|kind| !kinds.contains(kind))
+            .collect();
+        let list = list.clone();
+        self.files(move |dir| {
+            gone.iter()
+                .try_for_each(|kind| dir.remove_kind(&list, *kind))
+        })
+        .await
+        .map_err(|e| NotInstalled::new(format!("Couldn't remove an old list file: {e}")))
+    }
 }
 
 #[async_trait]
 impl RuleSink for DaemonRuleSink {
     fn daemon_rules_known(&self) -> bool {
-        self.cached_blocklist_names().is_some()
+        !matches!(&*self.cache(), RulesCache::Unknown)
     }
 
     fn is_current(&self, list_id: &str) -> bool {
         let list = IdComponent::from_id(list_id);
-        let installed: Vec<Rule> = ListKind::ALL
+        let kinds: Vec<ListKind> = ListKind::ALL
             .into_iter()
             .filter(|kind| self.dir.has_list(&list, *kind))
-            .filter_map(|kind| {
-                BlocklistCommand::install(&list, kind, &self.dir)
-                    .rule()
-                    .cloned()
-            })
             .collect();
-        !installed.is_empty()
+        !kinds.is_empty()
             && self.daemon_rules_known()
-            && installed.iter().all(|rule| self.in_place(rule))
+            && kinds.iter().all(|kind| {
+                BlocklistCommand::install(&list, *kind, &self.dir)
+                    .rule()
+                    .is_some_and(|rule| self.in_place(&list, *kind, rule))
+            })
     }
 
     async fn replace_blocklist_rules(
@@ -192,47 +276,11 @@ impl RuleSink for DaemonRuleSink {
         hosts: Vec<String>,
     ) -> Result<(), NotInstalled> {
         let list = IdComponent::from_id(list_id);
-        let entries = classify(hosts);
-        let kinds: Vec<ListKind> = ListKind::ALL
-            .into_iter()
-            .filter(|kind| !entries.get(*kind).is_empty())
-            .collect();
-        let (writer_list, writer_kinds) = (list.clone(), kinds.clone());
-        self.files(move |dir| {
-            writer_kinds
-                .iter()
-                .try_for_each(|kind| dir.write_list(&writer_list, *kind, entries.get(*kind)))
-        })
-        .await
-        .map_err(|e| {
-            NotInstalled::new(format!(
-                "Couldn't save the list for the firewall service: {e}"
-            ))
-        })?;
-
+        let kinds = self.write_files(&list, classify(hosts)).await?;
         for kind in &kinds {
             self.install(&list, *kind).await?;
         }
-        let wanted: BTreeSet<String> = kinds.iter().map(|k| list_rule_name(&list, *k)).collect();
-        let prefixes = owned_rule_name_prefixes(&list);
-        let stale = self
-            .cached_blocklist_names()
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|name| prefixes.iter().any(|p| name.starts_with(p.as_str())))
-            .filter(|name| !wanted.contains(name));
-        self.delete(stale).await?;
-        let gone: Vec<ListKind> = ListKind::ALL
-            .into_iter()
-            .filter(|kind| !kinds.contains(kind))
-            .collect();
-        let remover_list = list.clone();
-        self.files(move |dir| {
-            gone.iter()
-                .try_for_each(|kind| dir.remove_kind(&remover_list, *kind))
-        })
-        .await
-        .map_err(|e| NotInstalled::new(format!("Couldn't remove an old list file: {e}")))?;
+        self.remove_other_kinds(&list, &kinds).await?;
         if kinds.is_empty() {
             return Err(NotInstalled::new(NO_HOSTS_REASON));
         }
@@ -241,17 +289,16 @@ impl RuleSink for DaemonRuleSink {
 
     async fn remove_blocklist_rules(&self, list_id: &str) -> Result<(), NotInstalled> {
         let list = IdComponent::from_id(list_id);
-        let prefixes = owned_rule_name_prefixes(&list);
-        let mut names: BTreeSet<String> = ListKind::ALL
-            .into_iter()
-            .map(|kind| list_rule_name(&list, kind))
-            .collect();
-        names.extend(
-            self.cached_blocklist_names()
-                .unwrap_or_default()
+        // With the daemon's list known, delete what it holds of ours; without
+        // it, our own two names (a delete of a missing rule is a no-op).
+        let names: BTreeSet<String> = if self.daemon_rules_known() {
+            self.cached_rules_of(&list).into_iter().collect()
+        } else {
+            ListKind::ALL
                 .into_iter()
-                .filter(|name| prefixes.iter().any(|p| name.starts_with(p.as_str()))),
-        );
+                .map(|kind| list_rule_name(&list, kind))
+                .collect()
+        };
         let deleted = self.delete(names).await;
         // Even when the daemon is gone: a rule left behind then reads an
         // empty directory, and the next reconcile deletes it.
@@ -263,20 +310,25 @@ impl RuleSink for DaemonRuleSink {
 
     async fn remove_orphans(&self, keep: &[String]) {
         let keep: BTreeSet<IdComponent> = keep.iter().map(|id| IdComponent::from_id(id)).collect();
-        let Some(cached) = self.cached_blocklist_names() else {
+        let Some(cached) = self.cached_blocklist_rules() else {
             return;
         };
-        let orphans = cached.into_iter().filter(|name| {
-            let kept = list_of_rule_name(name)
-                .and_then(IdComponent::parse)
-                .filter(|list| keep.contains(list));
-            match kept {
-                Some(list) => !ListKind::ALL
-                    .into_iter()
-                    .any(|kind| list_rule_name(&list, kind) == *name),
-                None => true,
-            }
-        });
+        let orphans: Vec<String> = cached
+            .into_iter()
+            .filter(|rule| {
+                let kept = list_of_rule_name(&rule.name)
+                    .and_then(IdComponent::parse)
+                    .filter(|list| keep.contains(list));
+                match kept {
+                    Some(list) => !ListKind::ALL
+                        .into_iter()
+                        .any(|kind| list_rule_name(&list, kind) == rule.name),
+                    None => true,
+                }
+            })
+            .filter(made_by_bridge_logged)
+            .map(|rule| rule.name)
+            .collect();
         if let Err(e) = self.delete(orphans).await {
             warn!(reason = %e.reason, "stopped deleting orphaned blocklist rules");
             return;
@@ -295,6 +347,31 @@ impl RuleSink for DaemonRuleSink {
             warn!(error = %e, "couldn't remove orphaned blocklist files");
         }
     }
+}
+
+/// Whether Snitchwatch made a rule under a blocklist name: its `lists` deny
+/// shape, or the blocklist tag in its description (legacy per-host rules).
+/// Anything else under the prefix was made by someone else and is never
+/// deleted on the strength of its name.
+pub fn made_by_bridge(rule: &Rule) -> bool {
+    let tagged = serde_json::from_str::<serde_json::Value>(&rule.description)
+        .is_ok_and(|v| v["snitchwatch"]["source"] == "blocklist");
+    let shaped = rule.action == "deny"
+        && rule.operator.as_ref().is_some_and(|op| {
+            op.r#type == "lists" && ListKind::from_operand(&op.operand).is_some()
+        });
+    tagged || shaped
+}
+
+fn made_by_bridge_logged(rule: &Rule) -> bool {
+    let made = made_by_bridge(rule);
+    if !made {
+        warn!(
+            name_len = rule.name.len(),
+            "leaving a blocklist-named rule Snitchwatch didn't make"
+        );
+    }
+    made
 }
 
 /// The fields that decide what a rule does; `created` and `description`

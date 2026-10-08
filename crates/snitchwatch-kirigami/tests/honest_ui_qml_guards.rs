@@ -272,9 +272,10 @@ fn assert_enforcement_keyed_banners(page_name: &str, source: &str) {
         .iter()
         .find(|b| has_line(b, "visible: page.anyNotEnforced"))
         .unwrap_or_else(|| panic!("{page_name}: no warning keyed on unenforced lists"));
+    // A pending list isn't known not to block, only not confirmed to.
     assert!(
-        not_enforced.contains("not blocking"),
-        "{page_name}: the unenforced warning must say lists are not blocking:\n{not_enforced}"
+        not_enforced.contains("confirmed") && !not_enforced.contains("not blocking anything"),
+        "{page_name}: the warning must say lists aren't confirmed as blocking:\n{not_enforced}"
     );
     let memory_only = banners
         .iter()
@@ -284,19 +285,33 @@ fn assert_enforcement_keyed_banners(page_name: &str, source: &str) {
         memory_only.contains("restart"),
         "{page_name}: the memory-only warning must say subscriptions are lost on restart"
     );
-    let reasons = blocks(&header[0], "Controls.Label {");
+    let labels = blocks(&header[0], "Controls.Label {");
+    let reasons: Vec<_> = labels
+        .iter()
+        .filter(|l| l.contains("page.storageReason"))
+        .collect();
     assert_eq!(
         reasons.len(),
         1,
         "{page_name}: expected one storage-reason label"
     );
     assert!(
-        reasons[0].contains("page.storageReason")
-            && reasons[0].contains("textFormat: Text.PlainText")
+        reasons[0].contains("textFormat: Text.PlainText")
             && reasons[0].contains("!page.storagePersistent"),
         "{page_name}: the storage reason must be a PlainText label shown only when not \
          persistent:\n{}",
         reasons[0]
+    );
+    // `lists.domains` is an exact lookup: say so whenever there are lists,
+    // not only in the empty state.
+    let exact = labels
+        .iter()
+        .find(|l| l.contains("exact name"))
+        .unwrap_or_else(|| panic!("{page_name}: no exact-name note in the header"));
+    assert!(
+        exact.contains("not subdomains")
+            && has_line(exact, "visible: page.model && page.model.count > 0"),
+        "{page_name}: the exact-name note must show whenever lists exist:\n{exact}"
     );
 }
 

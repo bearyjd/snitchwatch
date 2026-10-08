@@ -8,6 +8,7 @@ use crate::blocklists::list_dir::{IdComponent, ListDir};
 use crate::blocklists::materializer::ListKind;
 use crate::cache::rules::RulesCache;
 use snitchwatch_proto::protocol::{Action, Operator, Rule};
+use std::path::Path;
 use tokio::sync::broadcast;
 
 fn current_stream(commands: &DaemonCommands) -> (StreamRegistration, mpsc::Receiver<Notification>) {
@@ -135,6 +136,20 @@ async fn an_internal_blocklist_command_is_sent_and_its_ok_reaches_the_rules_cach
     rules.stage(None, Vec::new());
     let (stream, mut rx) = current_stream(&commands);
     let list = IdComponent::from_id("ads-0123456789abcdef");
+    // Review L1: nothing is sent before the sink pins its list root.
+    assert_eq!(
+        commands
+            .send_blocklist(BlocklistCommand::install(&list, ListKind::Domains, &dir))
+            .err(),
+        Some(SendError::RefusedOperator)
+    );
+    commands.pin_blocklist_root(dir.root()).unwrap();
+    assert!(
+        commands
+            .pin_blocklist_root(Path::new("/elsewhere/blocklists"))
+            .is_err(),
+        "the root is pinned once"
+    );
 
     let pending = commands
         .send_blocklist(BlocklistCommand::install(&list, ListKind::Domains, &dir))

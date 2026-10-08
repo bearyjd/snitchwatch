@@ -18,7 +18,9 @@ pub mod activation;
 pub mod cli;
 pub mod storage;
 
-pub use storage::{resolve_storage, BridgeMode, EphemeralReason, RunOptions, Storage};
+pub use storage::{
+    resolve_storage, BridgeMode, EphemeralReason, RunOptions, Storage, PER_USER_REASON,
+};
 
 use anyhow::{Context, Result};
 use snitchwatch_bridge::auth::{self, Token};
@@ -294,6 +296,7 @@ pub async fn run_system(listeners: activation::ActivatedListeners) -> Result<Run
         RunOptions {
             storage: resolve_storage(BridgeMode::System),
             blocklist_fetcher: None,
+            mode: BridgeMode::System,
         },
     )
     .await

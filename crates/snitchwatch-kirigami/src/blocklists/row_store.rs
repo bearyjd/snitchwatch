@@ -43,7 +43,7 @@ pub fn status_label(status: &str) -> String {
 pub fn enforcement_label(sub: &BlocklistSummary) -> &'static str {
     match sub.enforcement.as_str() {
         ENFORCEMENT_RULE_INSTALLED => "Rule installed",
-        ENFORCEMENT_PENDING => "Not enforced yet",
+        ENFORCEMENT_PENDING => "Not confirmed yet",
         _ => "Not enforced",
     }
 }
@@ -398,7 +398,7 @@ mod tests {
         let mut row = summary("a", "ok", 10);
         for (enforcement, label) in [
             (ENFORCEMENT_NOT_ENFORCED, "Not enforced"),
-            (ENFORCEMENT_PENDING, "Not enforced yet"),
+            (ENFORCEMENT_PENDING, "Not confirmed yet"),
             ("", "Not enforced"),
             ("something-new", "Not enforced"),
             (ENFORCEMENT_RULE_INSTALLED, "Rule installed"),

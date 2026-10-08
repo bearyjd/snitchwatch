@@ -9,10 +9,12 @@
 //! prompts: it becomes [`EphemeralReason::Unusable`], is logged at `error!`
 //! and is shown to the user through `SetBlocklists.storage`.
 //!
-//! Blocklists are enforced (issue #45 PR B) only with a `Persistent` store:
-//! the daemon's rules point at list files under `<state>/blocklists`, which
-//! must outlive the bridge process. Otherwise every list reports
-//! "no state directory: <reason>".
+//! Blocklists are enforced (issue #45 PR B) only by the **system** bridge
+//! with a `Persistent` store: the daemon's rules point at list files under
+//! `<state>/blocklists`, which must outlive the bridge process and be
+//! writable by nobody but the service account. Without a state directory
+//! every list reports "no state directory: <reason>"; a per-user bridge
+//! reports [`PER_USER_REASON`].
 
 use std::ffi::OsString;
 use std::os::unix::fs::MetadataExt;
@@ -35,6 +37,12 @@ use tracing::{error, info, warn};
 pub const SYSTEM_STATE_DIR: &str = "/var/lib/snitchwatch";
 /// The blocklist database's file name inside the state directory.
 pub const BLOCKLIST_DB_FILE: &str = "blocklists.sqlite3";
+/// Why a per-user bridge installs no blocklist rule. Root opensnitchd would
+/// read list files that any of the user's processes could replace (a FIFO
+/// hangs it; a link to `/dev/zero` exhausts its memory, and with
+/// `QueueBypass` the firewall fails open on every boot after).
+pub const PER_USER_REASON: &str = "Blocking with lists needs the system-wide Snitchwatch \
+     service; this per-user service can't keep the list files safe from other apps.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EphemeralReason {
@@ -99,6 +107,9 @@ pub struct RunOptions {
     /// Tests only. `None` means the production https fetcher; `main.rs`
     /// never sets this.
     pub blocklist_fetcher: Option<Arc<dyn BlocklistFetch>>,
+    /// Which bridge this is. Only [`BridgeMode::System`] installs
+    /// blocklist rules; only `run_system` (and tests) pass it.
+    pub mode: BridgeMode,
 }
 
 impl RunOptions {
@@ -108,6 +119,7 @@ impl RunOptions {
         Self {
             storage: Storage::Ephemeral(EphemeralReason::InProcess),
             blocklist_fetcher: None,
+            mode: BridgeMode::User,
         }
     }
 }
@@ -236,14 +248,17 @@ pub(crate) struct DaemonRules {
 }
 
 /// The bridge's blocklist manager: persisted in `<state>/blocklists.sqlite3`
-/// and enforced through `daemon` when the store opened `Persistent`, in
-/// memory and not enforced otherwise.
+/// when the store opened `Persistent` (in memory otherwise), and enforced
+/// through `daemon` only for the system bridge with a persistent store.
 pub(crate) fn build_blocklists_manager(
     options: RunOptions,
     daemon: DaemonRules,
 ) -> Result<Arc<BlocklistsManager>> {
     let (store, storage) = open_blocklist_store(options.storage)?;
     let sink: Arc<dyn RuleSink> = match &storage {
+        Storage::Persistent(_) if options.mode != BridgeMode::System => {
+            Arc::new(NoopRuleSink::new(PER_USER_REASON))
+        }
         Storage::Persistent(dir) => match ListDir::open(dir) {
             Ok(lists) => Arc::new(DaemonRuleSink::new(lists, daemon.commands, daemon.rules)),
             Err(e) => {

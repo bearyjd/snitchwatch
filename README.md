@@ -202,18 +202,27 @@ just reached from this shell's own **Settings & Diagnostics** page instead.
 
 ## M4 — Subscribe to a blocklist
 
-Snitchwatch ships its own blocklist subscription manager (issue #45). Each
+Snitchwatch ships its own blocklist subscription manager (issue #45). With
+the **system** Snitchwatch service (`snitchwatch-system-bridge.service`), each
 subscribed list becomes one opensnitchd deny rule per kind,
 `z00-blocklist:<id>:domains` (`lists.domains`) and, for lists with IPv4
 entries, `z00-blocklist:<id>:ips` (`lists.ips`), reading files the bridge
 writes under `<state>/blocklists/<id>/` (directories 0700, files 0600; the
 path contract is in `crates/snitchwatch-bridge/src/blocklists/list_dir.rs`).
 **The blocklist wins:** a matching deny beats every allow that isn't a
-`precedence` rule. Hosts match by exact name, not subdomains.
+`precedence` rule. Hosts match by exact name, not subdomains. IPs on local,
+private, CGNAT, multicast or reserved networks are never blocked, and lists
+past 2,000,000 hosts in total (in subscription order) get no rule.
 
-- A list reads "Rule installed" only after opensnitchd answered `OK` to its
-  rule(s); anything else (no daemon, a refusal, no state directory) reads
-  "Not enforced" with the reason, and the page warns while any list is.
+- A per-user bridge saves subscriptions but installs **no** blocklist rule:
+  root opensnitchd would read list files any of your apps could replace.
+
+- A list reads "Rule installed" only once opensnitchd answered `OK` to its
+  rule(s) or already holds them unchanged; anything else (no daemon, a
+  refusal, no state directory, a per-user bridge) reads "Not enforced" or
+  "Not confirmed yet" with the reason, and the page warns while any list
+  does. Refused or unanswered lists are retried on every refresh tick and
+  daemon reconnect.
   "Rule installed" still isn't proof the daemon loaded the hosts: check
   `journalctl -u opensnitchd | grep "domains loaded"`.
 - These rules are read-only on the Rules page ("Managed on the Blocklists
