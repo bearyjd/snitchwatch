@@ -209,7 +209,7 @@ fn leaf(r#type: &str, operand: &str, data: &str, sensitive: bool) -> Operator {
     }
 }
 
-fn valid_id(id: &str) -> bool {
+pub(crate) fn valid_id(id: &str) -> bool {
     (1..=48).contains(&id.len())
         && id
             .bytes()
@@ -265,7 +265,8 @@ pub fn check_curated_rule(rule: &Rule) -> Result<(), String> {
         return Err("the description isn't a curated default's".into());
     }
     let op = rule.operator.as_ref().ok_or("the rule has no conditions")?;
-    if op.r#type != "list" || op.operand != "list" {
+    // The wire shape reports a list's operand empty.
+    if op.r#type != "list" || !(op.operand.is_empty() || op.operand == "list") {
         return Err("a curated default's conditions are one list".into());
     }
     check_leaves(&op.list)?;
