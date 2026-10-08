@@ -407,4 +407,7 @@ mod reconcile_tests;
 mod backoff_tests;
 
 #[cfg(test)]
+mod cap_tests;
+
+#[cfg(test)]
 mod leftover_manager_tests;

@@ -7,8 +7,8 @@ use tracing::{error, warn};
 use super::BlocklistsManager;
 use crate::blocklists::store::Subscription;
 use crate::blocklists::{
-    thousands, BlocklistEvent, Enforcement, NotInstalled, ReconcileScope, AGGREGATE_MAX_HOSTS,
-    OVER_LIMIT_REASON_PREFIX, STORE_ERROR_REASON,
+    thousands, BlocklistEvent, Enforcement, NotInstalled, ReconcileScope, OVER_LIMIT_REASON_PREFIX,
+    STORE_ERROR_REASON,
 };
 
 impl BlocklistsManager {
@@ -31,18 +31,43 @@ impl BlocklistsManager {
         for sub in self.subscriptions_in_order() {
             total = total.saturating_add(u64::try_from(sub.entry_count).unwrap_or(0));
             if sub.id == id {
-                return (total > AGGREGATE_MAX_HOSTS).then(|| {
+                return (total > self.aggregate_cap).then(|| {
                     format!(
                         "{OVER_LIMIT_REASON_PREFIX}: this list and the ones subscribed before it \
                          hold {} hosts; Snitchwatch applies at most {}. Remove a list to make \
                          room.",
                         thousands(total),
-                        thousands(AGGREGATE_MAX_HOSTS)
+                        thousands(self.aggregate_cap)
                     )
                 });
             }
         }
         None
+    }
+
+    /// Lists other than `except` that the lists' current sizes put past the
+    /// total size limit are taken off the daemon now and told why, unless they
+    /// already were. `except` (a list just refreshed) is installed or demoted
+    /// by the caller, after this.
+    pub(super) async fn demote_lists_past_the_limit(&self, except: &str) {
+        for sub in self.subscriptions_in_order() {
+            if sub.id == except {
+                continue;
+            }
+            let Some(reason) = self.over_aggregate_cap(&sub.id) else {
+                continue;
+            };
+            let already = matches!(self.enforcement(&sub.id),
+                Enforcement::NotEnforced { reason } if reason.starts_with(OVER_LIMIT_REASON_PREFIX));
+            if already {
+                continue;
+            }
+            let outcome = self.remove_over_limit(&sub.id, reason).await;
+            self.record_install(&sub.id, &outcome);
+            let _ = self.bus.send(BlocklistEvent::StatusChanged {
+                subscription_id: sub.id.clone(),
+            });
+        }
     }
 
     /// Past the total size limit, remove what `id` had and say why.

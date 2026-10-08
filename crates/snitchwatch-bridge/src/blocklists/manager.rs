@@ -18,8 +18,8 @@ use crate::blocklists::leftover::LeftoverRules;
 use crate::blocklists::store::{BlocklistStore, FetchStatus, StoreError, Subscription};
 use crate::blocklists::{
     derive_display_name, derive_id, BlocklistEvent, Enforcement, NoopRuleSink, NotInstalled,
-    RuleSink, FAILED_RETRY_SECS, MAX_SUBSCRIPTIONS, NOT_DOWNLOADED_REASON, STORE_ERROR_REASON,
-    UNREADABLE_STORE_REASON,
+    RuleSink, AGGREGATE_MAX_HOSTS, FAILED_RETRY_SECS, MAX_SUBSCRIPTIONS, NOT_DOWNLOADED_REASON,
+    STORE_ERROR_REASON, UNREADABLE_STORE_REASON,
 };
 use crate::ws_messages::{StorageStatus, BLOCKLIST_ENTRIES_PAGE_MAX};
 
@@ -58,6 +58,8 @@ pub struct BlocklistsManager {
     refusals: Mutex<HashMap<String, backoff::Refusal>>,
     /// The time of day, replaceable in tests.
     clock: Clock,
+    /// [`AGGREGATE_MAX_HOSTS`], lowered in tests.
+    aggregate_cap: u64,
 }
 
 type Clock = Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>;
@@ -97,6 +99,7 @@ impl BlocklistsManager {
             leftover_announced: Mutex::new(None),
             refusals: Mutex::new(HashMap::new()),
             clock: Arc::new(Utc::now),
+            aggregate_cap: AGGREGATE_MAX_HOSTS,
         };
         let storage = manager.storage.clone();
         manager.with_storage_status(storage)
@@ -108,6 +111,13 @@ impl BlocklistsManager {
     /// [`daemon_sink::DaemonRuleSink`]: crate::blocklists::daemon_sink::DaemonRuleSink
     pub fn with_rule_sink(mut self, sink: Arc<dyn RuleSink>) -> Self {
         self.rule_sink = sink;
+        self
+    }
+
+    /// A lower total size limit. Tests only.
+    #[cfg(test)]
+    pub(crate) fn with_aggregate_cap(mut self, cap: u64) -> Self {
+        self.aggregate_cap = cap;
         self
     }
 
@@ -520,6 +530,10 @@ impl BlocklistsManager {
         let id = updated.id.clone();
         self.cache().insert(id.clone(), updated);
         if self.installs_rules() {
+            // This list may have grown past what later lists left room for:
+            // take those off the daemon before this one's files change, so it
+            // never holds more than the limit, even for a moment.
+            self.demote_lists_past_the_limit(&id).await;
             let outcome = self.install(&id, hosts).await;
             self.record_install(&id, &outcome);
         }
