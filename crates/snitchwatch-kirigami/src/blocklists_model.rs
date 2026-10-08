@@ -59,12 +59,14 @@ pub mod qobject {
         /// Blocklist subscription master list, bound by `BlocklistsPage.qml`.
         /// `storagePersistent` / `storageReason` mirror the last
         /// `SetBlocklists.storage` (issue #45); false / "" until one arrives.
+        /// `anyNotEnforced`: some list isn't "rule installed" (issue #45).
         #[qobject]
         #[qml_element]
         #[base = QAbstractListModel]
         #[qproperty(i32, count)]
         #[qproperty(bool, storage_persistent, cxx_name = "storagePersistent")]
         #[qproperty(QString, storage_reason, cxx_name = "storageReason")]
+        #[qproperty(bool, any_not_enforced, cxx_name = "anyNotEnforced")]
         type BlocklistsModel = super::BlocklistsModelRust;
 
         /// Emitted with a JSON-encoded `ClientMessage` (SubscribeBlocklist /
@@ -193,6 +195,7 @@ pub struct BlocklistsModelRust {
     count: i32,
     storage_persistent: bool,
     storage_reason: QString,
+    any_not_enforced: bool,
 }
 
 impl qobject::BlocklistsModel {
@@ -310,9 +313,11 @@ impl qobject::BlocklistsModel {
             let n = self.store.len() as i32;
             let persistent = self.store.storage_persistent();
             let reason = QString::from(self.store.storage_reason());
+            let any_not_enforced = self.store.any_not_enforced();
             self.as_mut().set_count(n);
             self.as_mut().set_storage_persistent(persistent);
             self.as_mut().set_storage_reason(reason);
+            self.as_mut().set_any_not_enforced(any_not_enforced);
         }
     }
 

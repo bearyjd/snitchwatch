@@ -14,12 +14,10 @@ use tracing::{error, info, warn};
 use crate::blocklists::fetcher::{
     validate_subscription_url, BlocklistFetch, FetchOutcome, HttpsFetcher, MAX_URL_LEN,
 };
-use crate::blocklists::materializer::materialize_batch;
 use crate::blocklists::store::{BlocklistStore, FetchStatus, StoreError, Subscription};
 use crate::blocklists::{
-    derive_display_name, derive_id, BlocklistEvent, Enforcement, NoopRuleSink, RuleSink,
-    FAILED_RETRY_SECS, MAX_SUBSCRIPTIONS, NOT_DOWNLOADED_REASON, NO_RULE_SINK_REASON,
-    STORE_ERROR_REASON,
+    derive_display_name, derive_id, BlocklistEvent, Enforcement, NoopRuleSink, NotInstalled,
+    RuleSink, FAILED_RETRY_SECS, MAX_SUBSCRIPTIONS, NOT_DOWNLOADED_REASON, STORE_ERROR_REASON,
 };
 use crate::ws_messages::{StorageStatus, BLOCKLIST_ENTRIES_PAGE_MAX};
 
@@ -58,7 +56,7 @@ impl BlocklistsManager {
             store,
             bus,
             fetcher: Arc::new(HttpsFetcher::new()),
-            rule_sink: Arc::new(NoopRuleSink),
+            rule_sink: Arc::new(NoopRuleSink::default()),
             storage: StorageStatus {
                 persistent: false,
                 reason: None,
@@ -68,7 +66,10 @@ impl BlocklistsManager {
         }
     }
 
-    /// Replace the default no-op rule sink with a real implementation.
+    /// Replace the default no-op rule sink: a [`daemon_sink::DaemonRuleSink`]
+    /// with a state directory, a `NoopRuleSink` saying why without one.
+    ///
+    /// [`daemon_sink::DaemonRuleSink`]: crate::blocklists::daemon_sink::DaemonRuleSink
     pub fn with_rule_sink(mut self, sink: Arc<dyn RuleSink>) -> Self {
         self.rule_sink = sink;
         self
@@ -114,8 +115,8 @@ impl BlocklistsManager {
     }
 
     /// The subscription's enforcement state. Without a sink that installs
-    /// rules, every list is "Blocking isn't available yet", including after
-    /// a restart.
+    /// rules, every list reports the sink's reason, including after a
+    /// restart.
     pub fn enforcement(&self, id: &str) -> Enforcement {
         self.enforcement_map()
             .get(id)
@@ -124,13 +125,28 @@ impl BlocklistsManager {
     }
 
     fn default_enforcement(&self) -> Enforcement {
-        if self.rule_sink.installs_rules() {
-            Enforcement::Pending
-        } else {
-            Enforcement::NotEnforced {
-                reason: NO_RULE_SINK_REASON.to_string(),
-            }
+        match self.rule_sink.unavailable_reason() {
+            Some(reason) => Enforcement::NotEnforced { reason },
+            None => Enforcement::Pending,
         }
+    }
+
+    fn installs_rules(&self) -> bool {
+        self.rule_sink.unavailable_reason().is_none()
+    }
+
+    /// Record a sink outcome (the caller tells GUIs).
+    fn record_install(&self, id: &str, outcome: &Result<(), NotInstalled>) {
+        let enforcement = match outcome {
+            Ok(()) => Enforcement::RuleInstalled { at: Utc::now() },
+            Err(e) => {
+                warn!(%id, reason = %e.reason, "blocklist not enforced");
+                Enforcement::NotEnforced {
+                    reason: e.reason.clone(),
+                }
+            }
+        };
+        self.enforcement_map().insert(id.to_string(), enforcement);
     }
 
     fn enforcement_map(&self) -> MutexGuard<'_, HashMap<String, Enforcement>> {
@@ -227,6 +243,9 @@ impl BlocklistsManager {
         let _ = self.bus.send(BlocklistEvent::SubscriptionsChanged);
     }
 
+    /// Forget `id`, then delete its daemon rules and only then its files
+    /// (issue #45). A rule the daemon couldn't delete now is an orphan the
+    /// next [`reconcile`](Self::reconcile) deletes.
     pub async fn remove_subscription(&self, id: &str) -> anyhow::Result<()> {
         let owned = id.to_string();
         self.with_store(move |s| s.delete_subscription(&owned))
@@ -234,7 +253,53 @@ impl BlocklistsManager {
         self.cache().remove(id);
         self.enforcement_map().remove(id);
         let _ = self.bus.send(BlocklistEvent::SubscriptionsChanged);
+        if self.installs_rules() {
+            if let Err(e) = self.rule_sink.remove_blocklist_rules(id).await {
+                warn!(%id, reason = %e.reason, "couldn't remove an unsubscribed list's rules");
+            }
+        }
         Ok(())
+    }
+
+    /// Bring the daemon in line with the subscriptions (issue #45 PR B):
+    /// install every downloaded list whose rules aren't confirmed and in
+    /// place, then delete rules and files of lists no longer subscribed.
+    /// Does nothing while the daemon's rule list is unknown, and stops at
+    /// the first list the daemon can't be reached for.
+    pub async fn reconcile(&self) {
+        if !self.installs_rules() || !self.rule_sink.daemon_rules_known() {
+            return;
+        }
+        for sub in self.subscriptions() {
+            if sub.last_fetched_at.is_none() {
+                continue;
+            }
+            let installed = matches!(self.enforcement(&sub.id), Enforcement::RuleInstalled { .. });
+            if installed && self.rule_sink.is_current(&sub.id) {
+                continue;
+            }
+            let id = sub.id.clone();
+            let outcome = match self.with_store(move |s| s.list_entries(&id)).await {
+                Ok(hosts) => self.rule_sink.replace_blocklist_rules(&sub.id, hosts).await,
+                Err(e) => {
+                    error!(id = %sub.id, error = %e, "couldn't read a stored blocklist");
+                    Err(NotInstalled::new(STORE_ERROR_REASON))
+                }
+            };
+            let stop = matches!(&outcome, Err(e) if e.daemon_unavailable);
+            self.record_install(&sub.id, &outcome);
+            let _ = self.bus.send(BlocklistEvent::StatusChanged {
+                subscription_id: sub.id.clone(),
+            });
+            if stop {
+                return;
+            }
+        }
+        if !self.rule_sink.daemon_rules_known() {
+            return;
+        }
+        let keep: Vec<String> = self.cache().keys().cloned().collect();
+        self.rule_sink.remove_orphans(&keep).await;
     }
 
     /// Ask the event pump for a page of `id`'s hosts (at most
@@ -301,7 +366,7 @@ impl BlocklistsManager {
                         error!(id = %updated.id, error = %e, "couldn't record a failed download")
                     }
                 }
-                if self.rule_sink.installs_rules() {
+                if self.installs_rules() {
                     self.enforcement_map()
                         .entry(updated.id.clone())
                         .or_insert_with(|| Enforcement::NotEnforced {
@@ -329,19 +394,19 @@ impl BlocklistsManager {
         updated.last_fetched_at = Some(now);
         updated.last_attempt_at = Some(now);
         updated.last_fetch_status = FetchStatus::Ok;
-        // Skipped while nothing can install rules: ~600 B per host for nothing.
-        let rules = self
-            .rule_sink
-            .installs_rules()
-            .then(|| materialize_batch(&updated.id, &hosts));
         let row = updated.clone();
         let count = hosts.len();
-        match self
-            .with_store(move |s| s.replace_entries_and_update(&row, &hosts))
+        // The hosts come back out of the blocking task for the sink, so up
+        // to `MAX_ENTRIES` strings are never cloned.
+        let hosts = match self
+            .with_store(move |s| {
+                s.replace_entries_and_update(&row, &hosts)
+                    .map(|ok| (ok, hosts))
+            })
             .await
         {
-            Ok(true) => {}
-            Ok(false) => return FetchStatus::Ok,
+            Ok((true, hosts)) => hosts,
+            Ok((false, _)) => return FetchStatus::Ok,
             Err(e) => {
                 error!(id = %updated.id, error = %e, "couldn't store a downloaded blocklist");
                 updated.entry_count = self.subscription(&updated.id).map_or(0, |s| s.entry_count);
@@ -357,20 +422,12 @@ impl BlocklistsManager {
                 });
                 return status;
             }
-        }
+        };
         let id = updated.id.clone();
         self.cache().insert(id.clone(), updated);
-        if let Some(rules) = rules {
-            let enforcement = match self.rule_sink.replace_blocklist_rules(&id, rules).await {
-                Ok(()) => Enforcement::RuleInstalled { at: Utc::now() },
-                Err(e) => {
-                    warn!(%id, error = %e, "rule sink push failed; entries cached but not enforced");
-                    Enforcement::NotEnforced {
-                        reason: e.to_string(),
-                    }
-                }
-            };
-            self.enforcement_map().insert(id.clone(), enforcement);
+        if self.installs_rules() {
+            let outcome = self.rule_sink.replace_blocklist_rules(&id, hosts).await;
+            self.record_install(&id, &outcome);
         }
         let _ = self.bus.send(BlocklistEvent::EntriesChanged {
             subscription_id: id.clone(),

@@ -218,14 +218,19 @@ fn has_line(block: &str, line: &str) -> bool {
     block.lines().any(|l| l.trim() == line)
 }
 
-/// Issue #45 PR A: the bridge persists blocklist subscriptions when it has a
-/// state directory, but still installs no daemon rules. So the Blocklists
-/// header holds two banner variants, keyed on `page.storagePersistent`:
-/// both say "not applied" (and are Warnings, not dismissable, jargon-free);
-/// only the not-persistent one says subscriptions are lost on restart. The
-/// page defaults to not persistent, and the storage problem's reason is data,
-/// so it goes in a PlainText label, never an InlineMessage.
-fn assert_storage_keyed_banner(page_name: &str, source: &str) {
+/// Issue #45 PR B: blocklists are enforced through daemon rules, but only a
+/// list whose rule the daemon accepted says so. The Blocklists header holds
+/// two warnings, neither dismissable nor jargon-laden:
+/// - one keyed on `page.anyNotEnforced` (any list not "rule installed",
+///   defaulting to false only while there is no model), saying lists are
+///   not blocking and where to see why;
+/// - one keyed on `!page.storagePersistent`, saying subscriptions are lost
+///   on restart.
+///
+/// No warning may still claim blocklists are never applied ("Preview", "not
+/// applied to the firewall yet"). The storage problem's reason is data, so
+/// it goes in a PlainText label, never an InlineMessage.
+fn assert_enforcement_keyed_banners(page_name: &str, source: &str) {
     let code = code_lines(source);
     assert!(
         has_line(
@@ -234,14 +239,17 @@ fn assert_storage_keyed_banner(page_name: &str, source: &str) {
         ),
         "{page_name} must default to not persistent until the bridge says otherwise"
     );
+    assert!(
+        has_line(
+            &code,
+            "readonly property bool anyNotEnforced: page.model ? page.model.anyNotEnforced : false"
+        ),
+        "{page_name} must take whether any list is unenforced from the model"
+    );
     let header = blocks(&code, "header: ColumnLayout {");
     assert_eq!(header.len(), 1, "{page_name} lost its banner header");
     let banners = blocks(&header[0], "Kirigami.InlineMessage {");
-    assert_eq!(
-        banners.len(),
-        2,
-        "{page_name}: expected two banner variants"
-    );
+    assert_eq!(banners.len(), 2, "{page_name}: expected two warnings");
     for banner in &banners {
         assert!(
             banner.contains("type: Kirigami.MessageType.Warning"),
@@ -252,29 +260,29 @@ fn assert_storage_keyed_banner(page_name: &str, source: &str) {
             "{page_name}'s banner must not be dismissable:\n{banner}"
         );
         assert!(
-            banner.contains("not applied"),
-            "{page_name}'s banner must say subscriptions are not applied to the firewall:\n{banner}"
-        );
-        assert!(
             !banner.contains("bridge"),
             "{page_name}'s banner uses internal jargon (\"bridge\")"
         );
+        assert!(
+            !banner.contains("Preview") && !banner.contains("not applied to the firewall yet"),
+            "{page_name}: blocklists are enforced now; no banner may say they never are:\n{banner}"
+        );
     }
-    let persistent = banners
+    let not_enforced = banners
         .iter()
-        .find(|b| has_line(b, "visible: page.storagePersistent"))
-        .unwrap_or_else(|| panic!("{page_name}: no banner shown for persistent storage"));
+        .find(|b| has_line(b, "visible: page.anyNotEnforced"))
+        .unwrap_or_else(|| panic!("{page_name}: no warning keyed on unenforced lists"));
+    assert!(
+        not_enforced.contains("not blocking"),
+        "{page_name}: the unenforced warning must say lists are not blocking:\n{not_enforced}"
+    );
     let memory_only = banners
         .iter()
         .find(|b| has_line(b, "visible: !page.storagePersistent"))
-        .unwrap_or_else(|| panic!("{page_name}: no banner shown for memory-only storage"));
+        .unwrap_or_else(|| panic!("{page_name}: no warning shown for memory-only storage"));
     assert!(
         memory_only.contains("restart"),
-        "{page_name}: the memory-only banner must say subscriptions are lost on restart"
-    );
-    assert!(
-        !persistent.contains("restart"),
-        "{page_name}: the persistent banner must not claim subscriptions are lost on restart"
+        "{page_name}: the memory-only warning must say subscriptions are lost on restart"
     );
     let reasons = blocks(&header[0], "Controls.Label {");
     assert_eq!(
@@ -292,13 +300,14 @@ fn assert_storage_keyed_banner(page_name: &str, source: &str) {
     );
 }
 
-/// Issues #45/#46: no daemon rules are installed for blocklists (PR B) or
-/// profiles, so these tabs must say so; profiles are also in memory only.
+/// Issue #45: a blocklist row says "Rule installed" only for a list the
+/// daemon accepted; every other list is called out at the top of the page.
 #[test]
-fn blocklists_page_warns_it_is_not_enforced() {
-    assert_storage_keyed_banner("BlocklistsPage.qml", BLOCKLISTS_PAGE);
+fn blocklists_page_warns_while_any_list_is_not_enforced() {
+    assert_enforcement_keyed_banners("BlocklistsPage.qml", BLOCKLISTS_PAGE);
 }
 
+/// Issue #46: profiles install no daemon rules and are kept in memory only.
 #[test]
 fn profiles_page_warns_it_is_not_enforced() {
     assert_preview_banner("ProfilesPage.qml", PROFILES_PAGE);

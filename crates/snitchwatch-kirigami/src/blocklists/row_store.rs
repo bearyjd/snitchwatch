@@ -69,6 +69,15 @@ impl SubscriptionsStore {
         self.subs.get(index)
     }
 
+    /// True while some list isn't reported "rule installed" (issue #45): the
+    /// page warns until every list's rule was accepted by the daemon. An
+    /// older bridge, which sends no enforcement, counts as not enforced.
+    pub fn any_not_enforced(&self) -> bool {
+        self.subs
+            .iter()
+            .any(|sub| sub.enforcement != ENFORCEMENT_RULE_INSTALLED)
+    }
+
     /// True only when the bridge said its subscriptions survive a restart.
     pub fn storage_persistent(&self) -> bool {
         self.storage.as_ref().is_some_and(|s| s.persistent)
@@ -397,6 +406,35 @@ mod tests {
             row.enforcement = enforcement.to_string();
             assert_eq!(enforcement_label(&row), label, "{enforcement:?}");
         }
+    }
+
+    /// Issue #45 PR B: the page-level warning shows while any list isn't
+    /// reported "rule installed", including an older bridge's (no field).
+    #[test]
+    fn any_not_enforced_is_true_until_every_list_has_an_installed_rule() {
+        let mut s = SubscriptionsStore::new();
+        assert!(!s.any_not_enforced(), "no lists, nothing to warn about");
+        let mut installed = summary("a", "ok", 10);
+        installed.enforcement = ENFORCEMENT_RULE_INSTALLED.to_string();
+        for other in [
+            ENFORCEMENT_NOT_ENFORCED,
+            ENFORCEMENT_PENDING,
+            "",
+            "something-new",
+        ] {
+            let mut row = summary("b", "ok", 10);
+            row.enforcement = other.to_string();
+            s.apply(&ServerMessage::SetBlocklists {
+                blocklists: vec![installed.clone(), row],
+                storage: None,
+            });
+            assert!(s.any_not_enforced(), "{other:?}");
+        }
+        s.apply(&ServerMessage::SetBlocklists {
+            blocklists: vec![installed],
+            storage: None,
+        });
+        assert!(!s.any_not_enforced());
     }
 
     #[test]

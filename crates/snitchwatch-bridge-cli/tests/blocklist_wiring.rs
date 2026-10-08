@@ -17,7 +17,7 @@ use snitchwatch_bridge::blocklists::fetcher::{process_body, BlocklistFetch, Fetc
 use snitchwatch_bridge::blocklists::store::BlocklistStore;
 use snitchwatch_bridge::ws_messages::{
     BlocklistSummary, ClientMessage, ServerMessage, StorageStatus, VerdictAction, VerdictDuration,
-    VerdictScope, ENFORCEMENT_NOT_ENFORCED,
+    VerdictScope, ENFORCEMENT_PENDING,
 };
 use snitchwatch_bridge_cli::{
     run, run_with_options, BridgeConfig, EphemeralReason, RunOptions, RunningBridge, Storage,
@@ -184,12 +184,10 @@ async fn subscriptions_persist_across_a_restart() {
     assert_eq!(restored[0].url, LIST_URL);
     assert_eq!(restored[0].status, "ok");
     assert_eq!(restored[0].entry_count, 2);
-    // Downloaded, but PR A installs no daemon rule.
-    assert_eq!(restored[0].enforcement, ENFORCEMENT_NOT_ENFORCED);
-    assert_eq!(
-        restored[0].enforcement_reason.as_deref(),
-        Some("Blocking isn't available yet")
-    );
+    // Downloaded, but no daemon has connected to install its rule yet
+    // (issue #45 PR B: "Rule installed" only after the daemon's OK).
+    assert_eq!(restored[0].enforcement, ENFORCEMENT_PENDING);
+    assert_eq!(restored[0].enforcement_reason, None);
 }
 
 /// A stored list that was never downloaded is fetched by the refresh loop's

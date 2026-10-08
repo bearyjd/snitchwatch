@@ -202,9 +202,22 @@ just reached from this shell's own **Settings & Diagnostics** page instead.
 
 ## M4 — Subscribe to a blocklist
 
-Snitchwatch ships its own blocklist subscription manager. Today it downloads
-and stores lists, but **installs no deny rules in opensnitchd yet** (issue #45
-PR B): the Blocklists page says "Blocking isn't available yet" on every list.
+Snitchwatch ships its own blocklist subscription manager (issue #45). Each
+subscribed list becomes one opensnitchd deny rule per kind,
+`z00-blocklist:<id>:domains` (`lists.domains`) and, for lists with IPv4
+entries, `z00-blocklist:<id>:ips` (`lists.ips`), reading files the bridge
+writes under `<state>/blocklists/<id>/` (directories 0700, files 0600; the
+path contract is in `crates/snitchwatch-bridge/src/blocklists/list_dir.rs`).
+**The blocklist wins:** a matching deny beats every allow that isn't a
+`precedence` rule. Hosts match by exact name, not subdomains.
+
+- A list reads "Rule installed" only after opensnitchd answered `OK` to its
+  rule(s); anything else (no daemon, a refusal, no state directory) reads
+  "Not enforced" with the reason, and the page warns while any list is.
+  "Rule installed" still isn't proof the daemon loaded the hosts: check
+  `journalctl -u opensnitchd | grep "domains loaded"`.
+- These rules are read-only on the Rules page ("Managed on the Blocklists
+  page"); no GUI can add, change or delete a rule named `z00-blocklist:…`.
 
 - Subscriptions persist in `blocklists.sqlite3` (mode 0600) under the state
   directory: `$STATE_DIRECTORY` (set by both systemd units), else

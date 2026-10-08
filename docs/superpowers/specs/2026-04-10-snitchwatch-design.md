@@ -191,7 +191,7 @@ filename = f"{999 - score:03d}-{slug}.json"
 # higher specificity → lower number → evaluated first
 ```
 
-Blocklist rules are locked to the `900–999` band so user rules always win — denying github.com via a blocklist still loses to allowing Firefox to github.com.
+~~Blocklist rules are locked to the `900–999` band so user rules always win.~~ **Superseded (issue #45, owner decision 2026-10-07): the blocklist wins.** opensnitchd keeps scanning after a non-precedence allow and stops at the first matching deny (`vendor:daemon/rule/loader.go` `FindFirstMatch`), so no name band can make a user allow beat a blocklist deny. Each subscription is one non-precedence `lists.*` deny rule (`z00-blocklist:<id>:domains`/`:ips`); an exception needs an explicit `precedence: true` allow (out of scope for now). See `docs/superpowers/plans/2026-10-07-blocklist-enforcement.md`.
 
 ### Ask-on-new mechanism
 

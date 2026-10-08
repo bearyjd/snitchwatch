@@ -1,8 +1,9 @@
 //! Integration smoke: the "not enforced" banners on `BlocklistsPage.qml` and
 //! `ProfilesPage.qml` (issues #45/#46) are live, visible and non-dismissable
-//! once the real pages are instantiated — on the Blocklists page, the variant
-//! that says subscriptions are lost on restart until the bridge reports
-//! persistent storage, and the one that doesn't after; every page's inspector sheet draws its
+//! once the real pages are instantiated — on the Blocklists page, the warning
+//! that subscriptions are lost on restart until the bridge reports
+//! persistent storage, and the "not blocking" warning exactly while some list
+//! isn't "rule installed"; every page's inspector sheet draws its
 //! title through `SizedOverlaySheet`'s PlainText header, whose hover tooltip is
 //! an explicit ToolTip with a PlainText content item (issue #51) — including for
 //! a long, markup-named title that actually elides; and the
@@ -172,41 +173,55 @@ Window {
         }
     }
 
-    // The Blocklists header holds two banner variants keyed on storage
-    // (issue #45); exactly one is shown.
-    function checkBlocklistsBanner(page, expectPersistent) {
-        let persistent = null;
+    // The Blocklists header holds two warnings (issue #45): "not blocking"
+    // while some list isn't "rule installed", and "lost on restart" while
+    // storage isn't persistent. Returns the visible ones.
+    function checkBlocklistsBanners(page, expectPersistent, expectNotEnforced) {
+        let notEnforced = null;
         let memoryOnly = null;
         for (let i = 0; i < page.header.children.length; i++) {
             const item = page.header.children[i];
-            if (item.objectName === "persistentStorageBanner") {
-                persistent = item;
+            if (item.objectName === "notEnforcedBanner") {
+                notEnforced = item;
             } else if (item.objectName === "memoryOnlyStorageBanner") {
                 memoryOnly = item;
             }
         }
-        if (!persistent || !memoryOnly) {
-            throw new Error("BlocklistsPage: banner variants not found - probe lookup drifted");
+        if (!notEnforced || !memoryOnly) {
+            throw new Error("BlocklistsPage: banners not found - probe lookup drifted");
         }
-        const shown = expectPersistent ? persistent : memoryOnly;
-        const hidden = expectPersistent ? memoryOnly : persistent;
-        const name = "BlocklistsPage (persistent=" + expectPersistent + ")";
-        if (shown.visible !== true || hidden.visible !== false) {
-            throw new Error(name + ": wrong banner variant visible");
+        const name = "BlocklistsPage (persistent=" + expectPersistent
+            + ", notEnforced=" + expectNotEnforced + ")";
+        if (memoryOnly.visible !== !expectPersistent || notEnforced.visible !== expectNotEnforced) {
+            throw new Error(name + ": wrong banners visible");
         }
-        if (shown.type !== Kirigami.MessageType.Warning) {
-            throw new Error(name + ": banner is not a Warning");
+        for (const banner of [notEnforced, memoryOnly]) {
+            if (banner.type !== Kirigami.MessageType.Warning) {
+                throw new Error(name + ": banner is not a Warning");
+            }
+            if (banner.showCloseButton) {
+                throw new Error(name + ": banner is dismissable");
+            }
         }
-        if (shown.showCloseButton) {
-            throw new Error(name + ": banner is dismissable");
+        if (notEnforced.text.indexOf("not blocking") < 0) {
+            throw new Error(name + ": warning does not say lists are not blocking");
         }
-        if (shown.text.indexOf("not applied") < 0) {
-            throw new Error(name + ": banner text does not say it is not applied: " + shown.text);
+        if (memoryOnly.text.indexOf("restart") < 0) {
+            throw new Error(name + ": memory-only warning lacks the restart sentence");
         }
-        if ((shown.text.indexOf("restart") >= 0) === expectPersistent) {
-            throw new Error(name + ": banner gets the restart sentence wrong: " + shown.text);
+        return [notEnforced, memoryOnly].filter(b => b.visible);
+    }
+
+    function laidOut(page, banner) {
+        if (banner.width < page.width - 1 || banner.height <= 0) {
+            throw new Error("BlocklistsPage: banner not laid out: " + banner.width
+                            + "x" + banner.height);
         }
-        return shown;
+    }
+
+    function list(enforcement) {
+        return { id: "ads", displayName: "ads", url: "https://x.example/ads", entryCount: 2,
+                 status: "ok", enforcement: enforcement };
     }
 
     // Opens the Rules and Connections inspectors on markup-looking data. Done
@@ -236,21 +251,29 @@ Window {
         repeat: false
         onTriggered: {
             try {
-                // No SetBlocklists yet: not persistent, so "lost on restart".
-                const memoryOnly = checkBlocklistsBanner(blocklistsPage, false);
-                if (memoryOnly.width < blocklistsPage.width - 1 || memoryOnly.height <= 0) {
-                    throw new Error("BlocklistsPage: banner not laid out: " + memoryOnly.width
-                                    + "x" + memoryOnly.height);
-                }
+                // No SetBlocklists yet: not persistent, so "lost on restart";
+                // no lists, so nothing to call unenforced.
+                laidOut(blocklistsPage, checkBlocklistsBanners(blocklistsPage, false, false)[0]);
+                const persistent = { persistent: true };
                 blocklistsPage.model.applyServerMessageJson(JSON.stringify({
-                    action: "setBlocklists", blocklists: [], storage: { persistent: true }
+                    action: "setBlocklists", blocklists: [], storage: persistent
                 }));
-                checkBlocklistsBanner(blocklistsPage, true);
+                checkBlocklistsBanners(blocklistsPage, true, false);
+                blocklistsPage.model.applyServerMessageJson(JSON.stringify({
+                    action: "setBlocklists", blocklists: [list("not_enforced")], storage: persistent
+                }));
+                // Shown at once; laid out only after the next polish, so not
+                // measured here (the memory-only one above is).
+                checkBlocklistsBanners(blocklistsPage, true, true);
+                blocklistsPage.model.applyServerMessageJson(JSON.stringify({
+                    action: "setBlocklists", blocklists: [list("rule_installed")], storage: persistent
+                }));
+                checkBlocklistsBanners(blocklistsPage, true, false);
                 blocklistsPage.model.applyServerMessageJson(JSON.stringify({
                     action: "setBlocklists", blocklists: [],
                     storage: { persistent: false, reason: "blocklist store: <b>locked</b>" }
                 }));
-                checkBlocklistsBanner(blocklistsPage, false);
+                checkBlocklistsBanners(blocklistsPage, false, false);
                 if (blocklistsPage.storageReason !== "blocklist store: <b>locked</b>") {
                     throw new Error("BlocklistsPage: storage reason not exposed");
                 }
@@ -308,7 +331,7 @@ Window {
         bad_lines.is_empty(),
         "QML runtime error(s) or warning(s) reported against the probe URL or one of the shell's \
          pages — a broken page binding / anchor loop, or the probe Timer's own banner \
-         assertions (visible / Warning / no close button / laid out / says \"not applied\"). \
+         assertions (visible / Warning / no close button / laid out / wording). \
          Captured stderr:\n{}",
         bad_lines.join("\n")
     );

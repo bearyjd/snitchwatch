@@ -13,12 +13,19 @@
 //! Unsubscribes take a separate lane: a set of known ids (so at most
 //! `MAX_SUBSCRIPTIONS` entries) that the worker drains before each job. They
 //! are never dropped and never block the caller.
+//!
+//! Reconciles (issue #45 PR B) take the same lane as one coalescing flag,
+//! set after each committed daemon rules snapshot
+//! ([`BlocklistTasks::spawn`]'s `rules_synced`) and after each subscribe or
+//! unsubscribe: however many requests pile up, one pass runs, after any
+//! pending unsubscribes.
 
 use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use tokio::sync::{broadcast, mpsc, Notify};
+use tokio::sync::{broadcast, mpsc, watch, Notify};
 use tokio::task::JoinHandle;
 use tracing::warn;
 
@@ -54,14 +61,25 @@ impl BlocklistJob {
     }
 }
 
-/// Pending unsubscribes: ids of known subscriptions, deduplicated.
+/// Pending unsubscribes (ids of known subscriptions, deduplicated) and
+/// whether a reconcile was asked for.
 #[derive(Default)]
 struct UnsubscribeLane {
     ids: Mutex<BTreeSet<String>>,
+    reconcile: AtomicBool,
     wake: Notify,
 }
 
 impl UnsubscribeLane {
+    fn request_reconcile(&self) {
+        self.reconcile.store(true, Ordering::SeqCst);
+        self.wake.notify_one();
+    }
+
+    fn take_reconcile(&self) -> bool {
+        self.reconcile.swap(false, Ordering::SeqCst)
+    }
+
     fn push(&self, id: String) {
         self.ids
             .lock()
@@ -106,12 +124,17 @@ impl BlocklistWorker {
                     {
                         warn!(error = %e, "blocklist unsubscribe failed");
                     }
+                    lane.request_reconcile();
+                }
+                if lane.take_reconcile() {
+                    worker_mgr.reconcile().await;
+                    continue;
                 }
                 tokio::select! {
                     biased;
                     _ = lane.wake.notified() => {}
                     job = rx.recv() => match job {
-                        Some(job) => run_job(&worker_mgr, job, &requeue).await,
+                        Some(job) => run_job(&worker_mgr, job, &requeue, &lane).await,
                         None => break,
                     },
                 }
@@ -147,6 +170,12 @@ impl BlocklistWorker {
                 false
             }
         }
+    }
+
+    /// Reconcile the daemon's blocklist rules at the next chance (see the
+    /// module doc). Never blocks; repeated requests coalesce.
+    pub fn request_reconcile(&self) {
+        self.unsubscribes.request_reconcile();
     }
 
     /// Unsubscribe `id` ahead of queued jobs. An unknown id (e.g. a refused
@@ -213,6 +242,7 @@ async fn run_job(
     mgr: &Arc<BlocklistsManager>,
     job: BlocklistJob,
     requeue: &mpsc::WeakSender<BlocklistJob>,
+    lane: &UnsubscribeLane,
 ) {
     match job {
         BlocklistJob::Subscribe { url } => {
@@ -220,6 +250,7 @@ async fn run_job(
             if let Err(e) = handle_blocklist_action(mgr.clone(), action).await {
                 warn!(error = %e, "blocklist subscribe failed");
             }
+            lane.request_reconcile();
         }
         BlocklistJob::RefreshDue => {
             let due = mgr.due_subscription_ids();
@@ -238,26 +269,37 @@ async fn run_job(
     }
 }
 
-/// The bridge's blocklist background tasks: the event pump, the worker and
-/// its refresh loop. Abort them with [`abort`](Self::abort) on shutdown.
+/// The bridge's blocklist background tasks: the event pump, the worker, its
+/// refresh loop and the reconcile trigger. Abort them with
+/// [`abort`](Self::abort) on shutdown.
 pub struct BlocklistTasks {
     pub worker: BlocklistWorker,
     handles: Vec<JoinHandle<()>>,
 }
 
 impl BlocklistTasks {
+    /// `rules_synced` is the daemon rules cache's commit generation
+    /// (`UiService::rules_synced`): every bump asks for a reconcile. Take it
+    /// before the gRPC server starts, so no commit is missed.
     pub fn spawn(
         mgr: Arc<BlocklistsManager>,
         broadcast_tx: broadcast::Sender<ServerMessage>,
         refresh_tick: Duration,
+        rules_synced: Option<watch::Receiver<u64>>,
     ) -> Self {
         let events = spawn_event_pump(mgr.clone(), broadcast_tx);
         let (worker, worker_handle) = BlocklistWorker::spawn(mgr);
         let refresh = worker.spawn_refresh_loop(refresh_tick);
-        Self {
-            worker,
-            handles: vec![events, worker_handle, refresh],
+        let mut handles = vec![events, worker_handle, refresh];
+        if let Some(mut synced) = rules_synced {
+            let trigger = worker.clone();
+            handles.push(tokio::spawn(async move {
+                while synced.changed().await.is_ok() {
+                    trigger.request_reconcile();
+                }
+            }));
         }
+        Self { worker, handles }
     }
 
     pub fn abort(&self) {

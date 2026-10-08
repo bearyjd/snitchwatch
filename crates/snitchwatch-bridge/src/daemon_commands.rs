@@ -95,6 +95,14 @@ pub enum SendError {
     NotAllowed,
     /// A rule name fails [`crate::rule_name::validate_rule_name`].
     InvalidRuleName,
+    /// A rule name under a blocklist prefix outside
+    /// [`DaemonCommands::send_blocklist`] (issue #45).
+    ReservedName,
+    /// A `CHANGE_RULE` whose operator is missing or fails
+    /// [`crate::rule_policy::validate_operator`] (a `lists` operator among
+    /// others), or a [`BlocklistCommand`] that isn't what its constructors
+    /// build.
+    RefusedOperator,
     /// No stream to send to: none open (TCP), or no current one (Unix).
     NoDaemon,
     /// Every target stream's queue was full or closing.
@@ -108,6 +116,8 @@ impl std::fmt::Display for SendError {
             Self::InvalidRuleName => {
                 "a rule name could leave the daemon's rules directory; refused"
             }
+            Self::ReservedName => "a blocklist rule name; only blocklists may use it",
+            Self::RefusedOperator => "a rule condition the bridge won't send; refused",
             Self::NoDaemon => "no daemon connected",
             Self::NotQueued => "no daemon stream could queue the command",
         })
@@ -350,7 +360,36 @@ impl DaemonCommands {
 
     /// Send a command, replacing its id with the next one. See the module
     /// doc for which streams receive it.
-    pub fn send(&self, mut notification: Notification) -> Result<PendingReply, SendError> {
+    ///
+    /// Defense in depth for every path that builds a command (the GUI's go
+    /// through `rule_wire::rule_from_wire` first): a `CHANGE_RULE`'s
+    /// operator must pass [`crate::rule_policy::validate_operator`], and no
+    /// rule may carry a blocklist name. The bridge's own blocklist rules
+    /// take [`send_blocklist`](Self::send_blocklist) instead.
+    pub fn send(&self, notification: Notification) -> Result<PendingReply, SendError> {
+        if notification
+            .rules
+            .iter()
+            .any(|rule| crate::rule_name::is_reserved_blocklist_name(&rule.name))
+        {
+            warn!("refusing to send a rule command under a blocklist rule name");
+            return Err(SendError::ReservedName);
+        }
+        if notification.r#type == Action::ChangeRule as i32
+            && notification.rules.iter().any(|rule| {
+                rule.operator
+                    .as_ref()
+                    .is_none_or(|op| crate::rule_policy::validate_operator(op).is_err())
+            })
+        {
+            warn!("refusing to send a rule whose condition the bridge won't send");
+            return Err(SendError::RefusedOperator);
+        }
+        self.dispatch(notification)
+    }
+
+    /// The checks every command passes, then delivery.
+    fn dispatch(&self, mut notification: Notification) -> Result<PendingReply, SendError> {
         if !ALLOWED_ACTIONS
             .iter()
             .any(|action| *action as i32 == notification.r#type)
@@ -361,8 +400,7 @@ impl DaemonCommands {
             );
             return Err(SendError::NotAllowed);
         }
-        // Defense in depth for every path that builds a command: the root
-        // daemon turns the name into a file path.
+        // The root daemon turns the name into a file path.
         if let Some(error) = notification
             .rules
             .iter()
@@ -510,6 +548,14 @@ impl Drop for PendingReply {
     }
 }
 
+#[path = "daemon_commands/blocklist_command.rs"]
+mod blocklist_command;
+pub use blocklist_command::BlocklistCommand;
+
 #[cfg(test)]
 #[path = "daemon_commands/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "daemon_commands/send_policy_tests.rs"]
+mod send_policy_tests;

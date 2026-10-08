@@ -340,8 +340,31 @@ where
             .with_filter_pause(filter_pause.clone()),
     ));
 
-    // --- BlocklistsManager: persisted only for a `Persistent` storage ---
-    let blocklists_mgr = storage::build_blocklists_manager(options)?;
+    // The daemon side comes first: the blocklist sink sends through its rule
+    // commands (#45). Nothing here spawns or serves yet.
+    let client_presence = snitchwatch_bridge::client_presence::ClientPresence::default();
+    let notice_bus = Arc::new(NoticeBus::new());
+    let ui_service_inner = UiService::new(
+        cache.clone(),
+        broadcast_tx.clone(),
+        tray_pub.clone(),
+        notice_bus.clone(),
+        filter_pause.clone(),
+    )
+    .with_client_presence(client_presence.clone())
+    .with_daemon_transport(match grpc_endpoint {
+        GrpcEndpoint::Tcp(_) => DaemonTransport::Tcp,
+        GrpcEndpoint::Unix(_) => DaemonTransport::Unix,
+    });
+    // Taken before the gRPC server starts, so no rules snapshot is missed.
+    let rules_synced = ui_service_inner.rules_synced();
+
+    // --- BlocklistsManager: persisted and enforced only when `Persistent` ---
+    let daemon_rules = storage::DaemonRules {
+        commands: ui_service_inner.daemon_commands(),
+        rules: ui_service_inner.rules_handle(),
+    };
+    let blocklists_mgr = storage::build_blocklists_manager(options, daemon_rules)?;
 
     // --- ProfilesManager (in-memory store; callers may swap in a persisted one) ---
     let profiles_store =
@@ -375,7 +398,6 @@ where
         auth::write_token_file(&token, &ws_token_path).context("failed to write token file")?;
     }
 
-    let client_presence = snitchwatch_bridge::client_presence::ClientPresence::default();
     let ws_handles = WsHandles {
         broadcast: broadcast_tx.clone(),
         presence: client_presence.clone(),
@@ -397,6 +419,7 @@ where
         blocklists_mgr.clone(),
         broadcast_tx.clone(),
         DEFAULT_REFRESH_TICK,
+        Some(rules_synced),
     );
     let (ws_shutdown_tx, ws_shutdown_rx) = oneshot::channel::<()>();
 
@@ -414,7 +437,6 @@ where
     });
 
     // --- gRPC Ui server -----------------------------------------------------
-    let notice_bus = Arc::new(NoticeBus::new());
     let tray_rx = tray_pub.subscribe();
     let notice_rx = notice_bus.subscribe();
 
@@ -490,18 +512,6 @@ where
         ))
     };
 
-    let ui_service_inner = UiService::new(
-        cache.clone(),
-        broadcast_tx.clone(),
-        tray_pub.clone(),
-        notice_bus.clone(),
-        filter_pause.clone(),
-    )
-    .with_client_presence(client_presence.clone())
-    .with_daemon_transport(match grpc_endpoint {
-        GrpcEndpoint::Tcp(_) => DaemonTransport::Tcp,
-        GrpcEndpoint::Unix(_) => DaemonTransport::Unix,
-    });
     // Grabbed before `.into_server()` consumes `ui_service_inner` — the
     // daemon-down watchdog below needs this to watch daemon liveness.
     let liveness = ui_service_inner.liveness_handle();

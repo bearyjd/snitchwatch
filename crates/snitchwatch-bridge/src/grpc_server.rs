@@ -187,6 +187,12 @@ impl UiService {
         self.rules.cache()
     }
 
+    /// Generation bumped each time a daemon rule snapshot is committed: the
+    /// blocklist reconcile trigger (issue #45).
+    pub fn rules_synced(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.rules.synced()
+    }
+
     /// Convenience: wrap into a tonic `UiServer<UiService>` ready for
     /// `Server::builder().add_service(...)`.
     /// The decode limit is explicit: it bounds one `Subscribe` rule snapshot.

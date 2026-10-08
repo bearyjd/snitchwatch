@@ -8,15 +8,25 @@
 //! A storage problem never stops the bridge, which must stay up to answer
 //! prompts: it becomes [`EphemeralReason::Unusable`], is logged at `error!`
 //! and is shown to the user through `SetBlocklists.storage`.
+//!
+//! Blocklists are enforced (issue #45 PR B) only with a `Persistent` store:
+//! the daemon's rules point at list files under `<state>/blocklists`, which
+//! must outlive the bridge process. Otherwise every list reports
+//! "no state directory: <reason>".
 
 use std::ffi::OsString;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use snitchwatch_bridge::blocklists::daemon_sink::DaemonRuleSink;
 use snitchwatch_bridge::blocklists::fetcher::BlocklistFetch;
+use snitchwatch_bridge::blocklists::list_dir::ListDir;
 use snitchwatch_bridge::blocklists::store::BlocklistStore;
-use snitchwatch_bridge::blocklists::BlocklistsManager;
+use snitchwatch_bridge::blocklists::{BlocklistsManager, NoopRuleSink, RuleSink};
+use snitchwatch_bridge::cache::rules::SharedRulesCache;
+use snitchwatch_bridge::daemon_commands::DaemonCommands;
 use snitchwatch_bridge::ws_messages::StorageStatus;
 use tracing::{error, info, warn};
 
@@ -34,6 +44,16 @@ pub enum EphemeralReason {
     NotConfigured,
     /// A state directory was configured but can't be used.
     Unusable(String),
+}
+
+impl std::fmt::Display for EphemeralReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InProcess => f.write_str("in-process"),
+            Self::NotConfigured => f.write_str("not configured"),
+            Self::Unusable(reason) => f.write_str(reason),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -144,24 +164,102 @@ pub fn resolve_storage_from(
             canonical.display()
         ));
     }
-    if mode == BridgeMode::System && canonical != Path::new(SYSTEM_STATE_DIR) {
-        return unusable(format!(
-            "unexpected state directory {}",
-            canonical.display()
-        ));
+    if mode == BridgeMode::System {
+        if canonical != Path::new(SYSTEM_STATE_DIR) {
+            return unusable(format!(
+                "unexpected state directory {}",
+                canonical.display()
+            ));
+        }
+        let checked = std::fs::symlink_metadata(&canonical)
+            .map_err(|e| format!("state directory {SYSTEM_STATE_DIR}: {e}"))
+            .and_then(|meta| {
+                let facts = SystemDirFacts {
+                    uid: meta.uid(),
+                    gid: meta.gid(),
+                    mode: meta.mode(),
+                };
+                check_system_state_dir(&facts, effective_ids().0, effective_ids().1)
+            });
+        if let Err(reason) = checked {
+            return unusable(reason);
+        }
     }
     Storage::Persistent(canonical)
+}
+
+/// Ownership and mode of the system state directory.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SystemDirFacts {
+    pub uid: u32,
+    pub gid: u32,
+    pub mode: u32,
+}
+
+/// [`SYSTEM_STATE_DIR`] must be the service account's own (`User=`/`Group=`
+/// of the unit, which systemd's `StateDirectory=` sets) and mode 0700: root
+/// opensnitchd reads the blocklist files under it, so nobody else may write
+/// there, and the list names aren't anyone else's business either.
+pub(crate) fn check_system_state_dir(
+    facts: &SystemDirFacts,
+    euid: u32,
+    egid: u32,
+) -> std::result::Result<(), String> {
+    if facts.uid != euid || facts.gid != egid {
+        return Err(format!(
+            "state directory {SYSTEM_STATE_DIR} is not owned by the service account"
+        ));
+    }
+    if facts.mode & 0o777 != 0o700 {
+        return Err(format!(
+            "state directory {SYSTEM_STATE_DIR} has mode {:o}, not 700",
+            facts.mode & 0o7777
+        ));
+    }
+    Ok(())
+}
+
+fn effective_ids() -> (u32, u32) {
+    // SAFETY: geteuid/getegid take no arguments, touch no memory and always
+    // succeed.
+    unsafe { (libc::geteuid(), libc::getegid()) }
 }
 
 fn unusable(reason: String) -> Storage {
     Storage::Ephemeral(EphemeralReason::Unusable(reason))
 }
 
+/// What a persistent bridge's blocklist rules are sent through (issue #45).
+pub(crate) struct DaemonRules {
+    pub commands: DaemonCommands,
+    pub rules: SharedRulesCache,
+}
+
 /// The bridge's blocklist manager: persisted in `<state>/blocklists.sqlite3`
-/// when `options.storage` is `Persistent`, in memory otherwise.
-pub(crate) fn build_blocklists_manager(options: RunOptions) -> Result<Arc<BlocklistsManager>> {
+/// and enforced through `daemon` when the store opened `Persistent`, in
+/// memory and not enforced otherwise.
+pub(crate) fn build_blocklists_manager(
+    options: RunOptions,
+    daemon: DaemonRules,
+) -> Result<Arc<BlocklistsManager>> {
     let (store, storage) = open_blocklist_store(options.storage)?;
-    let mut manager = BlocklistsManager::new(store).with_storage_status(storage.status());
+    let sink: Arc<dyn RuleSink> = match &storage {
+        Storage::Persistent(dir) => match ListDir::open(dir) {
+            Ok(lists) => Arc::new(DaemonRuleSink::new(lists, daemon.commands, daemon.rules)),
+            Err(e) => {
+                error!(error = %e, "blocklist folder unusable; blocklists are not enforced");
+                Arc::new(NoopRuleSink::new(format!(
+                    "Couldn't use the blocklist folder: {e}"
+                )))
+            }
+        },
+        Storage::Ephemeral(reason) => {
+            Arc::new(NoopRuleSink::new(format!("no state directory: {reason}")))
+        }
+    };
+    let mut manager = BlocklistsManager::new(store)
+        .with_storage_status(storage.status())
+        .with_rule_sink(sink);
     if let Some(fetcher) = options.blocklist_fetcher {
         manager = manager.with_fetcher(fetcher);
     }

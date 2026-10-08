@@ -17,7 +17,8 @@
 // `lastUpdated` / `lastFailureReason` roles by the Rust row store — no
 // fetch-status logic lives in QML. `status` is only the download result;
 // whether a list blocks anything is the separate `enforcementLabel` role
-// (issue #45), which never says more than "Rule installed".
+// (issue #45), which never says more than "Rule installed": the firewall
+// service accepted the list's rule, and may still have loaded 0 hosts.
 import QtQuick
 import QtQuick.Layouts
 import QtQuick.Controls as Controls
@@ -49,6 +50,8 @@ Kirigami.ScrollablePage {
     // older bridge all mean "kept in memory only".
     readonly property bool storagePersistent: page.model ? page.model.storagePersistent : false
     readonly property string storageReason: page.model ? page.model.storageReason : ""
+    // Some list isn't "Rule installed" (issue #45); each row says why.
+    readonly property bool anyNotEnforced: page.model ? page.model.anyNotEnforced : false
 
     function statusColor(status) {
         switch (status) {
@@ -85,33 +88,32 @@ Kirigami.ScrollablePage {
         }
     }
 
-    // Issue #45: the bridge installs no daemon rules for blocklists yet (PR B
-    // will), so a subscription here blocks nothing. It persists only when the
-    // bridge has a state directory. Exactly one variant is shown, keyed on
-    // `storagePersistent`; neither is dismissable (no close button, no
-    // actions). Both keep "not applied" until PR B removes them. The storage
-    // problem's reason is data, so it goes in a PlainText label, never in an
-    // InlineMessage (issue #51).
+    // Issue #45: each list becomes a firewall rule that blocks its hosts for
+    // every app, but only a row reading "Rule installed" is one the firewall
+    // service accepted. While any list isn't, a warning says so (each row's
+    // details say why). Subscriptions persist only when Snitchwatch's
+    // background service has a state directory; without one, a second
+    // warning says they are lost on restart. Neither is dismissable (no
+    // close button, no actions). The storage problem's reason is data, so it
+    // goes in a PlainText label, never in an InlineMessage (issue #51).
     header: ColumnLayout {
         spacing: 0
 
         Kirigami.InlineMessage {
-            objectName: "persistentStorageBanner"
+            objectName: "notEnforcedBanner"
             Layout.fillWidth: true
             type: Kirigami.MessageType.Warning
-            visible: page.storagePersistent
-            text: "Preview: blocklist subscriptions are saved, but they are not applied to the "
-                + "firewall yet, so they do not block anything."
+            visible: page.anyNotEnforced
+            text: "Some blocklists are not blocking anything right now. Open a list to see why."
         }
         Kirigami.InlineMessage {
             objectName: "memoryOnlyStorageBanner"
             Layout.fillWidth: true
             type: Kirigami.MessageType.Warning
             visible: !page.storagePersistent
-            text: "Preview: blocklist subscriptions are shown here but are not applied to the "
-                + "firewall yet, so they do not block anything. They are also kept in memory only, "
-                + "so they are lost when Snitchwatch's background service restarts (for example "
-                + "on logout or reboot)."
+            text: "Blocklist subscriptions are kept in memory only, so they can't be applied to "
+                + "the firewall and are lost when Snitchwatch's background service restarts (for "
+                + "example on logout or reboot)."
         }
         Controls.Label {
             Layout.fillWidth: true
@@ -129,7 +131,8 @@ Kirigami.ScrollablePage {
         visible: !page.model || page.model.count === 0
         icon.name: "edit-delete"
         text: "No blocklist subscriptions yet"
-        explanation: "Subscribe to a blocklist URL above to preview its host list."
+        explanation: "Subscribe to a blocklist URL above to block its hosts for every app. "
+            + "Hosts are matched by exact name, not their subdomains."
     }
 
     ListView {

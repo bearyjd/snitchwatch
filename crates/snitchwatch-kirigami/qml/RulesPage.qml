@@ -4,16 +4,16 @@
 // `RulesModel`, with a Kirigami.OverlaySheet detail view for enable/disable +
 // delete + precedence display.
 //
-// Grouping: per the design doc's "blocklist verdict type" section, every
-// subscribed blocklist entry is materialized into a deny rule in the
-// `z00-blocklist:<id>:` filename band. Those rules are the SAME underlying
-// deny rules already shown in full (per-host) on the Blocklists tab, so this
-// page groups them into their own "Blocklist rules" section — via
-// ListView.section keyed on the model's `source` role — rendered visually
-// muted (reduced opacity, no operator-summary line) rather than repeating
-// per-host detail that would just confuse the two tabs' purposes. User rules
-// always evaluate first regardless (see the design doc's specificity
-// section), independent of this display grouping.
+// Grouping: each subscribed blocklist is one deny rule per list kind
+// (`z00-blocklist:<id>:domains`, and `…:ips` for lists with IP addresses),
+// reading the list's hosts from a file (issue #45). Their hosts are shown on
+// the Blocklists tab, so this page groups the rules into their own
+// "Blocklist rules" section — via ListView.section keyed on the model's
+// `source` role — rendered visually muted (reduced opacity, no
+// operator-summary line). They are read-only here ("Managed on the
+// Blocklists page", from the bridge's `readOnlyReason`) and can't be
+// deleted here. A matching blocklist deny wins over every allow that isn't
+// a precedence rule, whatever the order shown.
 //
 // setEnabled/deleteRule are plain qinvokables on `RulesModel`; they emit
 // `ruleChangeRequested` with a JSON-encoded `ClientMessage` for the live
