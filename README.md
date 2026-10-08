@@ -244,11 +244,14 @@ past 2,000,000 hosts in total (in subscription order) get no rule.
   swap it, so point `SNITCHWATCH_STATE_DIR` only at a directory whose parents
   only you and root can write to (anything under your home directory, as
   usual). Profiles and the active-profile choice persist the same way,
-  in `profiles.sqlite3` (issue #46); profiles are not applied to the
-  firewall yet, and the Profiles page says so. A manual choice can still be
-  replaced at startup: the bridge's first network reading after a restart
-  counts as a network change, so if a different profile matches the current
-  network, auto-switch activates it.
+  in `profiles.sqlite3` (issue #46). The system bridge applies the active
+  profile's rules to the firewall (`850-profile:` rules, which the Rules
+  page lists read-only); a per-user bridge applies none, and the Profiles
+  page says so. A profile rule never decides before other rules: blocking
+  rules and blocklists win over a profile's allow. A manual choice is saved
+  with the network it was made on and holds while the bridge sees that
+  network, also after a restart (issue #82); auto-switch acts on a network
+  only once it has stayed the same for a few seconds.
 - The Rules page shows how often each rule decided a connection (issue
   P2.6, Part 1). opensnitchd reports no per-rule counts, so the bridge
   tallies the events in the daemon's pings: the numbers are approximate and

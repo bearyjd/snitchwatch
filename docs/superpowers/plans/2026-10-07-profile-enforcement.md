@@ -9,9 +9,9 @@ now" banner is the honest-ui PR)
 - Part 2: #45 PR B and #48, for `DaemonCommands`, `RulesCache` and
   reconcile.
 
-**Status (2026-10-08):** Part 1 merged (#79). Part 2 is in progress on
+**Status (2026-10-08):** Part 1 merged (#79). Part 2 is built on
 `feat/46-profile-enforcement`, stacked on the rule editor (#99); see "Part 2
-as designed" below.
+as designed" and "Part 2 as built" below.
 
 **Priority: lowest of the post-#39 set.** No GUI control can create a
 profile rule, so there is nothing to enforce yet. Persistence is cheap.
@@ -205,6 +205,50 @@ its network. This replaces steps 4–11 where they differ.
 8. **GUI.** The Profiles page lists each profile's rules with their status,
    adds rules through the rule editor's sheet in a profile mode, and says
    profiles are applied (or why not) in fixed text.
+
+### Part 2 as built (2026-10-08)
+
+Built as designed above; where it differs from steps 4–11:
+
+- **One pass, not a sink call per profile.** `ProfileRuleSink::apply(wanted)`
+  installs the active profile's rules and deletes the bridge's other
+  profile rules in one pass, returning one outcome per rule; it replaces
+  `replace_profile_rules(profile_id, rules)`. Passes run on one enforcer
+  task (after each profile action and each committed rules snapshot),
+  never on the pump.
+- **Status is per rule.** `ProfileRuleWire.enforcement`/`enforcementReason`
+  (the blocklists' values: "Rule installed" only after a correlated OK or
+  found in place), and `SetProfiles.appliesRules`/`notAppliedReason` for a
+  bridge that applies none. No `ProfileSummary.enforcement`, and the Active
+  chip is unchanged: each rule says it.
+- **Validation is the `ProfileRule` policy,** not a list of known
+  operands: profile rules carry the editor's conditions (`operator`), and
+  every one passes the editor's checks plus the profile's own (see design
+  step 2). Also refused: `user.name` (the daemon stores the uid, so the
+  rule could never be found in place and would be resent after every
+  snapshot), rule ids outside `[A-Za-z0-9_-]{1,64}`, and more than 64
+  rules in one profile. A Part 1 rule (`operand`/`data`) is one `simple`
+  condition, case-sensitive on `process.path`.
+- **"In place" follows the daemon's echo:** a list operand spelled either
+  way and a non-case-sensitive pattern compared lowercased, as `Compile`
+  stores it, so a pass after a snapshot sends nothing.
+- **Switching installs first, then deletes.** No moment without the new
+  profile's denies; an old allow that lingers still loses to any deny.
+- **Not removed, replaced:** the "Preview: not applied" banner becomes an
+  Information note keyed on `appliesRules` and a warning keyed on
+  `!appliesRules` with the reason in a PlainText label. The profiles
+  honest-UI guards moved to `tests/honest_ui_profiles_guards.rs`, over a
+  shared `tests/qml_guard_support` module.
+- **The Rules page's Source label** still says "User rules" for a profile
+  rule (no `RuleSource::Profile`); its read-only reason says it is managed
+  on the Profiles page. Follow-up.
+- **Profile ids aren't validated at `CreateProfile`** (as before): a very
+  long id makes each rule's name too long, and the rule is refused with
+  that reason rather than installed.
+- **Build note:** cxx-qt-build's qmlcachegen output isn't rebuilt when only
+  a Rust QObject's methods change, so stale AOT code calls the wrong method
+  index (a SIGSEGV in an unchanged page). Touch the QML files after
+  changing a QObject's invokables or properties.
 
 ## Tests to write first
 
