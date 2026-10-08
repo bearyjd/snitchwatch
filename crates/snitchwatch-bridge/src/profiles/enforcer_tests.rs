@@ -91,7 +91,7 @@ fn reply(id: u64, outcome: Result<(), &str>) -> NotificationReply {
     }
 }
 
-fn wanted(profile: &str, id: &str, seq: usize, host: &str) -> Rule {
+fn wanted(profile: &str, id: &str, host: &str) -> Rule {
     let rule = ProfileRule {
         id: id.into(),
         action: "deny".into(),
@@ -99,7 +99,7 @@ fn wanted(profile: &str, id: &str, seq: usize, host: &str) -> Rule {
         data: host.into(),
         operator: None,
     };
-    materialize_rule(profile, &rule, seq).unwrap()
+    materialize_rule(profile, &rule).unwrap()
 }
 
 const CHANGE: i32 = Action::ChangeRule as i32;
@@ -115,8 +115,8 @@ fn installed(outcomes: &[Enforcement]) -> bool {
 async fn wanted_rules_are_installed_only_after_the_daemons_ok() {
     let h = Harness::new().connect(Daemon::Accept, vec![]);
     let rules = vec![
-        wanted("home", "r1", 0, "a.example"),
-        wanted("home", "r2", 1, "b.example"),
+        wanted("home", "r1", "a.example"),
+        wanted("home", "r2", "b.example"),
     ];
     let outcomes = h.sink().apply(&rules).await;
     assert!(installed(&outcomes), "{outcomes:?}");
@@ -145,7 +145,7 @@ async fn a_rule_already_in_the_snapshot_is_not_resent() {
             { "type": "regexp", "operand": "dest.host", "data": "^Example\\.COM$" },
         ] })),
     };
-    let wanted = materialize_rule("home", &rule, 0).unwrap();
+    let wanted = materialize_rule("home", &rule).unwrap();
     let mut echoed = wanted.clone();
     let op = echoed.operator.as_mut().unwrap();
     op.operand = "list".into();
@@ -160,10 +160,7 @@ async fn a_rule_already_in_the_snapshot_is_not_resent() {
 #[tokio::test]
 async fn a_daemon_refusal_is_shown_as_plain_text() {
     let h = Harness::new().connect(Daemon::Refuse("bad \u{202e}rule"), vec![]);
-    let outcomes = h
-        .sink()
-        .apply(&[wanted("home", "r1", 0, "a.example")])
-        .await;
+    let outcomes = h.sink().apply(&[wanted("home", "r1", "a.example")]).await;
     match &outcomes[0] {
         Enforcement::NotEnforced { reason } => {
             assert!(reason.contains("bad rule"), "{reason}");
@@ -175,11 +172,11 @@ async fn a_daemon_refusal_is_shown_as_plain_text() {
 
 #[tokio::test]
 async fn a_silent_daemon_stops_the_pass_and_deletes_nothing() {
-    let stray = wanted("old", "x", 0, "x.example");
+    let stray = wanted("old", "x", "x.example");
     let h = Harness::new().connect(Daemon::Silent, vec![stray]);
     let rules = vec![
-        wanted("home", "r1", 0, "a.example"),
-        wanted("home", "r2", 1, "b.example"),
+        wanted("home", "r1", "a.example"),
+        wanted("home", "r2", "b.example"),
     ];
     let outcomes = h.sink().apply(&rules).await;
     assert!(
@@ -198,10 +195,7 @@ async fn a_silent_daemon_stops_the_pass_and_deletes_nothing() {
 #[tokio::test]
 async fn nothing_is_sent_while_the_daemons_rules_are_unknown() {
     let h = Harness::new().connect_unsynced(Daemon::Accept);
-    let outcomes = h
-        .sink()
-        .apply(&[wanted("home", "r1", 0, "a.example")])
-        .await;
+    let outcomes = h.sink().apply(&[wanted("home", "r1", "a.example")]).await;
     assert!(
         matches!(&outcomes[0], Enforcement::Unconfirmed { .. }),
         "{outcomes:?}"
@@ -212,10 +206,10 @@ async fn nothing_is_sent_while_the_daemons_rules_are_unknown() {
 /// Only rules the bridge made are deleted: the prefix and the profile tag.
 #[tokio::test]
 async fn the_purge_deletes_only_the_bridges_other_profile_rules() {
-    let keep = wanted("home", "r1", 0, "a.example");
-    let stray = wanted("old", "x", 0, "x.example");
+    let keep = wanted("home", "r1", "a.example");
+    let stray = wanted("old", "x", "x.example");
     let untagged = Rule {
-        name: "850-profile:someone:0000-y".into(),
+        name: "850-profile:someone:y".into(),
         description: String::new(),
         ..stray.clone()
     };
@@ -235,8 +229,8 @@ async fn the_purge_deletes_only_the_bridges_other_profile_rules() {
 
 #[tokio::test]
 async fn deactivating_deletes_every_rule_the_bridge_made() {
-    let a = wanted("home", "r1", 0, "a.example");
-    let b = wanted("home", "r2", 1, "b.example");
+    let a = wanted("home", "r1", "a.example");
+    let b = wanted("home", "r2", "b.example");
     let h = Harness::new().connect(Daemon::Accept, vec![a.clone(), b.clone()]);
     assert!(h.sink().apply(&[]).await.is_empty());
     let mut deleted: Vec<String> = h.seen().into_iter().map(|(_, name)| name).collect();
@@ -247,7 +241,7 @@ async fn deactivating_deletes_every_rule_the_bridge_made() {
 #[tokio::test]
 async fn the_noop_sink_says_why_nothing_is_installed() {
     let sink = NoopProfileRuleSink::new("per-user mode");
-    let outcomes = sink.apply(&[wanted("home", "r1", 0, "a.example")]).await;
+    let outcomes = sink.apply(&[wanted("home", "r1", "a.example")]).await;
     assert_eq!(
         outcomes,
         vec![Enforcement::NotEnforced {

@@ -10,10 +10,12 @@
 //! directory saves profiles, the per-user one too. Only the system bridge
 //! applies the active profile's rules to the firewall (issue #46 Part 2);
 //! the per-user one installs nothing and says why on the Profiles page. A
-//! system bridge whose store fell back to memory still applies them: it
-//! starts with no active profile, so its first pass removes the rules an
-//! earlier run installed, and the page never claims profiles aren't applied
-//! while those still are.
+//! system bridge whose saved profiles can't be read (its store fell back to
+//! memory) changes no profile rule at all: with the keep-set unknown, a
+//! purge would delete the active profile's rules, the user's denies among
+//! them (the #45 PR B lesson). It installs nothing, deletes nothing, and
+//! the page says so. A store with one unreadable row counts as unreadable
+//! as a whole: skipping the row could skip the active profile.
 //!
 //! A store that can't be opened, or opens but can't be read, falls back to
 //! memory as `Unusable("profile store: …")`, logged at `error!` and shown on
@@ -37,6 +39,11 @@ use tracing::{error, info};
 
 use crate::storage::{BridgeMode, DaemonRules, EphemeralReason, Storage};
 
+/// Why a system bridge whose saved profiles can't be read changes none.
+pub const UNREADABLE_REASON: &str = "Snitchwatch can't read its saved profiles (profiles.sqlite3 \
+     in its state folder), so it changes no profile rules: rules it installed earlier were left \
+     in place. Fix or move that file, then restart Snitchwatch's background service.";
+
 /// Why a per-user bridge applies no profile rules.
 pub const PER_USER_REASON: &str = "Profiles are applied to the firewall only by the \
      system-wide Snitchwatch service; in this per-user setup another program could pose as the \
@@ -47,16 +54,22 @@ pub const PROFILE_DB_FILE: &str = "profiles.sqlite3";
 
 /// The bridge's profile manager: persisted in `<state>/profiles.sqlite3`
 /// when its store opened `Persistent` (in memory otherwise), and applying
-/// the active profile's rules through `daemon` only for the system bridge.
+/// the active profile's rules through `daemon` only for the system bridge
+/// with a store it could read.
 pub(crate) fn build_profiles_manager(
     storage: Storage,
     mode: BridgeMode,
     daemon: DaemonRules,
 ) -> Result<Arc<ProfilesManager>> {
     let (store, storage) = open_profile_store(storage)?;
-    let sink: Arc<dyn ProfileRuleSink> = match mode {
-        BridgeMode::System => Arc::new(DaemonProfileSink::new(daemon.commands, daemon.rules)),
-        BridgeMode::User => Arc::new(NoopProfileRuleSink::new(PER_USER_REASON)),
+    let sink: Arc<dyn ProfileRuleSink> = match (mode, &storage) {
+        (BridgeMode::System, Storage::Persistent(_)) => {
+            Arc::new(DaemonProfileSink::new(daemon.commands, daemon.rules))
+        }
+        (BridgeMode::System, Storage::Ephemeral(_)) => {
+            Arc::new(NoopProfileRuleSink::new(UNREADABLE_REASON))
+        }
+        (BridgeMode::User, _) => Arc::new(NoopProfileRuleSink::new(PER_USER_REASON)),
     };
     let manager = ProfilesManager::new(store)
         .with_storage_status(storage.status())
@@ -345,13 +358,42 @@ mod tests {
         let (_dir, state) = state();
         let system = build(Storage::Persistent(state.clone()), BridgeMode::System);
         assert_eq!(system.not_applied_reason(), None);
+        let user = build(Storage::Persistent(state), BridgeMode::User);
+        assert_eq!(user.not_applied_reason().as_deref(), Some(PER_USER_REASON));
+    }
+
+    /// PR #104 review HIGH: a system bridge whose saved profiles can't be
+    /// read must not purge: with the keep-set unknown it installs nothing
+    /// and deletes nothing, and says why (the #45 PR B lesson).
+    #[test]
+    fn a_system_bridge_that_cant_read_its_profiles_changes_no_profile_rule() {
         let memory = build(
             Storage::Ephemeral(EphemeralReason::InProcess),
             BridgeMode::System,
         );
-        assert_eq!(memory.not_applied_reason(), None);
-        let user = build(Storage::Persistent(state), BridgeMode::User);
-        assert_eq!(user.not_applied_reason().as_deref(), Some(PER_USER_REASON));
+        assert_eq!(
+            memory.not_applied_reason().as_deref(),
+            Some(UNREADABLE_REASON)
+        );
+        // One bad row makes the whole store unreadable (the safe choice:
+        // a skipped row could be the active profile's).
+        let (_dir, state) = state();
+        let path = state.join(PROFILE_DB_FILE);
+        ProfileStore::open(&path)
+            .unwrap()
+            .upsert_profile(&home())
+            .unwrap();
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute_batch("UPDATE profiles SET rules = 'not json';")
+            .unwrap();
+        let unreadable = build(Storage::Persistent(state), BridgeMode::System);
+        assert!(!unreadable.storage_status().persistent);
+        assert_eq!(
+            unreadable.not_applied_reason().as_deref(),
+            Some(UNREADABLE_REASON)
+        );
+        assert!(UNREADABLE_REASON.contains("left in place"));
     }
 
     #[test]

@@ -74,7 +74,7 @@ async fn a_pass_installs_the_active_profiles_rules_and_records_their_status() {
     assert_eq!(mgr.rule_status("home", "r1"), Some(Enforcement::Pending));
 
     mgr.enforce().await;
-    assert_eq!(sink.last().unwrap(), vec!["850-profile:home:0000-r1"]);
+    assert_eq!(sink.last().unwrap(), vec!["850-profile:home:r1"]);
     assert!(matches!(
         mgr.rule_status("home", "r1"),
         Some(Enforcement::RuleInstalled { .. })
@@ -103,7 +103,7 @@ async fn a_refused_saved_rule_is_not_installed_and_says_why() {
         .unwrap();
     mgr.activate("home").await.unwrap();
     mgr.enforce().await;
-    assert_eq!(sink.last().unwrap(), vec!["850-profile:home:0000-r1"]);
+    assert_eq!(sink.last().unwrap(), vec!["850-profile:home:r1"]);
     match mgr.rule_status("home", "r2") {
         Some(Enforcement::NotEnforced { reason }) => {
             assert!(reason.starts_with("Not installed: "), "{reason}");
@@ -132,7 +132,7 @@ async fn switching_or_deactivating_changes_what_a_pass_wants() {
         "a new activation starts pending"
     );
     mgr.enforce().await;
-    assert_eq!(sink.last().unwrap(), vec!["850-profile:office:0000-o1"]);
+    assert_eq!(sink.last().unwrap(), vec!["850-profile:office:o1"]);
     mgr.deactivate().await.unwrap();
     mgr.enforce().await;
     assert_eq!(sink.last().unwrap(), Vec::<String>::new());
@@ -184,6 +184,32 @@ async fn add_rule_refuses_what_the_bridge_wouldnt_install() {
     assert_eq!(stored.len(), MAX_RULES_PER_PROFILE);
 }
 
+/// PR #104 review: a Part 1 profile may hold more rules than one may now;
+/// only the first 64 are installed, and the rest say why.
+#[tokio::test]
+async fn a_pass_installs_at_most_64_rules_of_a_saved_profile() {
+    let (mgr, sink) = with_sink();
+    let rules = (0..70)
+        .map(|i| host_rule(&format!("r{i}"), "x.example"))
+        .collect();
+    mgr.store()
+        .upsert_profile(&Profile {
+            id: "home".into(),
+            name: "Home".into(),
+            network_matchers: vec![],
+            rules,
+            active: false,
+        })
+        .unwrap();
+    mgr.activate("home").await.unwrap();
+    mgr.enforce().await;
+    assert_eq!(sink.last().unwrap().len(), MAX_RULES_PER_PROFILE);
+    match mgr.rule_status("home", "r69") {
+        Some(Enforcement::NotEnforced { reason }) => assert!(reason.contains("64"), "{reason}"),
+        other => panic!("{other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn auto_switch_activates_the_matching_profile_on_a_network_change() {
     let mgr = manager();
@@ -210,7 +236,6 @@ async fn auto_switch_activates_the_matching_profile_on_a_network_change() {
 async fn a_manual_choice_holds_on_its_network_until_the_network_changes() {
     let mgr = manager();
     two_profiles(&mgr).await;
-    mgr.note_network(Some("Home-5G".into()));
     mgr.on_network_observed(Some("Home-5G".into()))
         .await
         .unwrap();
@@ -238,7 +263,6 @@ async fn a_manual_choice_survives_a_restart_on_the_same_network() {
     let open = || ProfilesManager::new(Arc::new(ProfileStore::open(&path).unwrap()));
     let before = open();
     two_profiles(&before).await;
-    before.note_network(Some("Home-5G".into()));
     before
         .on_network_observed(Some("Home-5G".into()))
         .await
@@ -297,18 +321,90 @@ async fn statuses_follow_the_active_profile_after_a_restart() {
     ));
 }
 
-/// A click while a new network is still settling is saved with that
-/// network, so the settled reading doesn't override it.
+/// PR #104 review M1: losing the network (a reboot before Wi-Fi joins,
+/// suspend, a drop) is no network change: it neither acts nor clears the
+/// manual choice. Only a different network does.
 #[tokio::test]
-async fn a_click_during_the_settle_time_is_saved_with_the_newest_network() {
+async fn no_network_neither_acts_nor_clears_the_manual_choice() {
     let mgr = manager();
     two_profiles(&mgr).await;
-    mgr.note_network(Some("Office-Guest".into()));
-    mgr.activate("home").await.unwrap();
-    mgr.on_network_observed(Some("Office-Guest".into()))
+    mgr.on_network_observed(Some("Home-5G".into()))
         .await
         .unwrap();
-    assert_eq!(active(&mgr).as_deref(), Some("home"));
+    mgr.activate("office").await.unwrap();
+    mgr.on_network_observed(None).await.unwrap();
+    assert!(
+        mgr.store().manual_choice().unwrap().is_some(),
+        "None cleared it"
+    );
+    mgr.on_network_observed(Some("Home-5G".into()))
+        .await
+        .unwrap();
+    assert_eq!(active(&mgr).as_deref(), Some("office"));
+    mgr.on_network_observed(None).await.unwrap();
+    mgr.on_network_observed(Some("Home-Guest".into()))
+        .await
+        .unwrap();
+    assert_eq!(
+        active(&mgr).as_deref(),
+        Some("home"),
+        "a different network decides"
+    );
+}
+
+/// The choice is saved with the last settled network, never an unsettled
+/// one or none; a choice made with no network known yet is kept by the
+/// first network that settles.
+#[tokio::test]
+async fn a_choice_is_saved_with_the_last_settled_network() {
+    let mgr = manager();
+    two_profiles(&mgr).await;
+    mgr.on_network_observed(Some("Home-5G".into()))
+        .await
+        .unwrap();
+    mgr.activate("office").await.unwrap();
+    let saved = mgr.store().manual_choice().unwrap().unwrap();
+    assert_eq!(saved.network.as_deref(), Some("Home-5G"));
+
+    let fresh = manager();
+    two_profiles(&fresh).await;
+    fresh.on_network_observed(None).await.unwrap();
+    fresh.activate("home").await.unwrap();
+    assert_eq!(
+        fresh.store().manual_choice().unwrap().unwrap().network,
+        None
+    );
+    fresh
+        .on_network_observed(Some("Office-Guest".into()))
+        .await
+        .unwrap();
+    assert_eq!(active(&fresh).as_deref(), Some("home"), "the click held");
+    let adopted = fresh.store().manual_choice().unwrap().unwrap();
+    assert_eq!(adopted.network.as_deref(), Some("Office-Guest"));
+}
+
+/// A reboot before Wi-Fi joins: the first readings are no network, then the
+/// network the choice was made on.
+#[tokio::test]
+async fn a_restart_without_a_network_yet_keeps_the_choice() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("profiles.sqlite3");
+    let open = || ProfilesManager::new(Arc::new(ProfileStore::open(&path).unwrap()));
+    let before = open();
+    two_profiles(&before).await;
+    before
+        .on_network_observed(Some("Home-5G".into()))
+        .await
+        .unwrap();
+    before.activate("office").await.unwrap();
+    drop(before);
+    let after = open();
+    after.on_network_observed(None).await.unwrap();
+    after
+        .on_network_observed(Some("Home-5G".into()))
+        .await
+        .unwrap();
+    assert_eq!(active(&after).as_deref(), Some("office"));
 }
 
 /// A flapping network is acted on once it settles, not on every change.

@@ -258,6 +258,18 @@ mod tests {
     /// SQLite deletes a `-journal` or `-wal` beside an *empty* database
     /// without reading it, so a FIFO only hangs it next to one that has a
     /// table: the fixtures make one first.
+    /// PR #104 review: a store busy at start (another process, a backup)
+    /// waits instead of failing the open at once.
+    #[test]
+    fn stores_wait_for_a_busy_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = open_owner_only(&dir.path().join("x.sqlite3")).unwrap();
+        let ms: i64 = conn
+            .query_row("PRAGMA busy_timeout", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(ms, 5000);
+    }
+
     #[test]
     fn a_fifo_sidecar_is_refused_without_hanging() {
         for suffix in SUFFIXES {

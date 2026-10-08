@@ -56,8 +56,12 @@ pub fn check_profile(draft: &RuleDraft, profile_id: &str) -> EditorCheck {
     if normalized.action == "allow" {
         result.warnings.push(ALLOW_LOSES.into());
     }
-    if let Err(problems) = materialize_rule(profile_id, &profile_rule(draft), 0) {
-        result.problems = plain_problems(&problems);
+    match materialize_rule(profile_id, &profile_rule(draft)) {
+        Err(problems) => result.problems = plain_problems(&problems),
+        // The import preview's cautions (an allow for every app, a launcher
+        // anywhere, …) take the second click, as for any new rule:
+        // auto-switch would otherwise install one silently (PR #104 review).
+        Ok(rule) => result.cautions = snitchwatch_bridge::rule_io::edit_cautions(None, &rule),
     }
     result
 }
@@ -177,6 +181,31 @@ mod tests {
             warnings.iter().all(|w| !w.contains("Lost when")),
             "{warnings:?}"
         );
+    }
+
+    /// PR #104 review M2: an allow that applies to every app (a port only)
+    /// carries the import preview's caution, so saving it takes the second
+    /// click; auto-switch would otherwise install it silently.
+    #[test]
+    fn an_all_apps_profile_allow_needs_the_second_click() {
+        let all_apps = RuleDraft {
+            action: "allow".into(),
+            conditions: vec![condition("dest.port", MatchKind::Exact, "443", false)],
+            ..new_draft()
+        };
+        let checked = check_profile(&all_apps, "home");
+        assert!(checked.problems.is_empty(), "{:?}", checked.problems);
+        assert!(
+            !checked.cautions.is_empty(),
+            "no caution for an all-apps allow"
+        );
+        assert_eq!(
+            crate::rules::editor_view::may_submit(&checked, false),
+            Err(crate::rules::editor_view::CONFIRM_CAUTIONS)
+        );
+        assert!(check_profile(&curl("a.example"), "home")
+            .cautions
+            .is_empty());
     }
 
     #[test]

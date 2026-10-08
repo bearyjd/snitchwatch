@@ -6,7 +6,7 @@
 //!
 //! - [`ProfilesManager::activate`] / [`ProfilesManager::deactivate`] (the
 //!   Profiles page) are **manual**: the choice is saved together with the
-//!   newest network the bridge has seen ([`store::ManualChoice`]).
+//!   last network that settled ([`store::ManualChoice`]).
 //! - Auto-switching ([`ProfilesManager::spawn_auto_switch`]) acts on a
 //!   network only once it has stayed the same for a few seconds
 //!   ([`tasks::NETWORK_SETTLE`]), and only when it differs from the
@@ -48,6 +48,7 @@ use crate::profiles::materializer::{materialize_profile, materialize_rule, valid
 use crate::profiles::store::{ManualChoice, Profile, ProfileRule, ProfileStore, StoreError};
 use crate::rule_policy::RuleProblem;
 use crate::ws_messages::StorageStatus;
+use snitchwatch_proto::protocol::Rule;
 
 /// Most rules one profile holds.
 pub const MAX_RULES_PER_PROFILE: usize = 64;
@@ -58,6 +59,7 @@ pub const NO_SINK_REASON: &str = "Profiles aren't applied to the firewall by thi
 
 const RULE_ID_REFUSED: &str = "a profile rule's id must be 1 to 64 letters, digits, - or _";
 const TOO_MANY_RULES: &str = "a profile holds at most 64 rules";
+const OVER_CAP: &str = "a profile holds at most 64 rules; this one wasn't installed";
 
 /// Events emitted whenever profile state changes. The translator subscribes
 /// and rebroadcasts as `SetProfiles` / `ProfileChanged` over the WS.
@@ -110,12 +112,9 @@ pub struct ProfilesManager {
     /// Serializes manual choices and network observations, so an
     /// auto-switch can't land between a click and its saved choice.
     switch_lock: Mutex<()>,
-    /// The last settled network auto-switching acted on; `None` until the
-    /// first one since the bridge started.
-    last_settled: StdMutex<Option<Option<String>>>,
-    /// The newest network seen, settled or not: what a manual choice is
-    /// saved with.
-    latest_network: StdMutex<Option<String>>,
+    /// The last network that settled (what a manual choice is saved with);
+    /// `None` until one has since the bridge started.
+    last_settled: StdMutex<Option<String>>,
     statuses: StdMutex<Statuses>,
     enforce_requested: Notify,
     /// One enforcement pass at a time.
@@ -151,7 +150,6 @@ impl ProfilesManager {
             },
             switch_lock: Mutex::new(()),
             last_settled: StdMutex::new(None),
-            latest_network: StdMutex::new(None),
             statuses: StdMutex::new(statuses),
             enforce_requested: Notify::new(),
             pass_lock: Mutex::new(()),
@@ -218,6 +216,7 @@ impl ProfilesManager {
         name: &str,
         network_matchers: Vec<String>,
     ) -> Result<(), ProfilesError> {
+        let _switch = self.switch_lock.lock().await;
         self.store.upsert_profile(&Profile {
             id: id.to_string(),
             name: name.to_string(),
@@ -235,6 +234,9 @@ impl ProfilesManager {
         name: &str,
         network_matchers: Vec<String>,
     ) -> Result<(), ProfilesError> {
+        // Under the switch lock, so a concurrent (de)activation can't be
+        // lost or doubled by saving a stale `active` flag.
+        let _switch = self.switch_lock.lock().await;
         let mut existing = self.profile(id)?;
         existing.name = name.to_string();
         existing.network_matchers = network_matchers;
@@ -273,6 +275,7 @@ impl ProfilesManager {
     /// install it (the `ProfileRule` policy, through
     /// [`materializer::materialize_rule`]).
     pub async fn add_rule(&self, profile_id: &str, rule: ProfileRule) -> Result<(), ProfilesError> {
+        let _switch = self.switch_lock.lock().await;
         let mut profile = self.profile(profile_id)?;
         if !valid_rule_id(&rule.id) {
             return Err(refused("id", RULE_ID_REFUSED));
@@ -281,8 +284,7 @@ impl ProfilesManager {
         if profile.rules.len() >= MAX_RULES_PER_PROFILE {
             return Err(refused("rule", TOO_MANY_RULES));
         }
-        let seq = profile.rules.len();
-        materialize_rule(profile_id, &rule, seq).map_err(ProfilesError::Refused)?;
+        materialize_rule(profile_id, &rule).map_err(ProfilesError::Refused)?;
         let rule_id = rule.id.clone();
         profile.rules.push(rule);
         self.store.upsert_profile(&profile)?;
@@ -297,6 +299,7 @@ impl ProfilesManager {
     }
 
     pub async fn remove_rule(&self, profile_id: &str, rule_id: &str) -> Result<(), ProfilesError> {
+        let _switch = self.switch_lock.lock().await;
         let mut profile = self.profile(profile_id)?;
         profile.rules.retain(|r| r.id != rule_id);
         self.store.upsert_profile(&profile)?;
@@ -324,7 +327,7 @@ impl ProfilesManager {
     }
 
     fn save_manual_choice(&self, profile_id: Option<&str>) -> Result<(), ProfilesError> {
-        let network = lock(&self.latest_network).clone();
+        let network = lock(&self.last_settled).clone();
         self.store.set_manual_choice(&ManualChoice {
             profile_id: profile_id.map(str::to_string),
             network,
@@ -378,7 +381,7 @@ impl ProfilesManager {
         };
         let materialized = active
             .as_ref()
-            .map(|p| materialize_profile(&p.id, &p.rules))
+            .map(|p| capped(materialize_profile(&p.id, &p.rules)))
             .unwrap_or_default();
         let wanted: Vec<_> = materialized
             .iter()
@@ -430,39 +433,47 @@ impl ProfilesManager {
 }
 
 impl ProfilesManager {
-    /// The newest network seen, settled or not (what a manual choice is
-    /// saved with).
-    pub fn note_network(&self, network: Option<String>) {
-        *lock(&self.latest_network) = network;
-    }
-
     /// Act on a network that stayed the same for the settle time (the
-    /// auto-switch task calls this; tests call it directly). Nothing happens
-    /// for the network last acted on, nor while a manual choice made on
-    /// this network holds (issue #82, also right after a restart). Another
-    /// network clears the choice, and the first profile whose matchers
-    /// match it is activated; none matching leaves the active one.
+    /// auto-switch task calls this; tests call it directly). No network (a
+    /// reboot before Wi-Fi joins, suspend, a drop) is no change: nothing
+    /// happens. Nothing happens either for the network last acted on, nor
+    /// while a manual choice made on this network holds (issue #82, also
+    /// after a restart); a choice made with no network known yet is kept by
+    /// the first network that settles. A different network clears the
+    /// choice, and the first profile whose matchers match it is activated;
+    /// none matching leaves the active one.
     pub async fn on_network_observed(&self, network: Option<String>) -> Result<(), ProfilesError> {
+        let Some(network) = network else {
+            return Ok(());
+        };
         let _switch = self.switch_lock.lock().await;
         {
             let mut last = lock(&self.last_settled);
-            if last.as_ref() == Some(&network) {
+            if last.as_deref() == Some(network.as_str()) {
                 return Ok(());
             }
             *last = Some(network.clone());
         }
         if let Some(choice) = self.store.manual_choice()? {
-            if choice.network == network {
-                return Ok(());
+            match &choice.network {
+                None => {
+                    let kept = ManualChoice {
+                        network: Some(network),
+                        ..choice
+                    };
+                    self.store.set_manual_choice(&kept)?;
+                    return Ok(());
+                }
+                Some(made_on) if *made_on == network => return Ok(()),
+                Some(_) => self.store.clear_manual_choice()?,
             }
-            self.store.clear_manual_choice()?;
         }
         let profiles = self.store.list_profiles()?;
         let candidates: Vec<(&str, &[String])> = profiles
             .iter()
             .map(|p| (p.id.as_str(), p.network_matchers.as_slice()))
             .collect();
-        let Some(matched) = matcher::find_matching_profile(candidates, network.as_deref()) else {
+        let Some(matched) = matcher::find_matching_profile(candidates, Some(&network)) else {
             return Ok(());
         };
         let already = self.store.get_active()?.is_some_and(|p| p.id == matched);
@@ -471,6 +482,20 @@ impl ProfilesManager {
         }
         self.activate_inner(&matched)
     }
+}
+
+/// At most [`MAX_RULES_PER_PROFILE`] rules are installed; Part 1 took any
+/// number, so the rest of a saved profile say why they aren't.
+fn capped(
+    mut materialized: Vec<(String, Result<Rule, Vec<RuleProblem>>)>,
+) -> Vec<(String, Result<Rule, Vec<RuleProblem>>)> {
+    for (_, rule) in materialized.iter_mut().skip(MAX_RULES_PER_PROFILE) {
+        *rule = Err(vec![RuleProblem {
+            path: "rule".into(),
+            reason: OVER_CAP.into(),
+        }]);
+    }
+    materialized
 }
 
 fn refused(path: &str, reason: &str) -> ProfilesError {

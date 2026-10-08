@@ -14,8 +14,8 @@
 //! ```
 //!
 //! [`check`](ProfileCommand::check) re-validates at the send point: a
-//! `CHANGE_RULE` must be a rule the bridge made (the prefix and the profile
-//! tag) that passes the `ProfileRule` policy (`always`, no precedence, no
+//! `CHANGE_RULE` must be an enabled rule the bridge made (the prefix and the
+//! profile tag) that passes the `ProfileRule` policy (`always`, no precedence, no
 //! nolog, …); a `DELETE_RULE` names a rule under the prefix and nothing else.
 
 use snitchwatch_proto::protocol::{Action, Notification, Rule};
@@ -83,7 +83,8 @@ impl ProfileCommand {
         if self.notification.r#type != Action::ChangeRule as i32 {
             return Err(SendError::NotAllowed);
         }
-        if made_by_bridge(rule) && validate_user_rule(rule, PolicyProfile::ProfileRule).is_ok() {
+        let shaped = rule.enabled && made_by_bridge(rule);
+        if shaped && validate_user_rule(rule, PolicyProfile::ProfileRule).is_ok() {
             Ok(())
         } else {
             Err(SendError::RefusedOperator)
@@ -114,7 +115,7 @@ mod tests {
             data: "x.example".into(),
             operator: None,
         };
-        materialize_rule("home", &rule, 0).unwrap()
+        materialize_rule("home", &rule).unwrap()
     }
 
     #[test]
@@ -145,6 +146,11 @@ mod tests {
         .is_some());
         assert!(refused(Rule {
             description: String::new(),
+            ..base.clone()
+        })
+        .is_some());
+        assert!(refused(Rule {
+            enabled: false,
             ..base.clone()
         })
         .is_some());

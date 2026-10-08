@@ -21,7 +21,7 @@ use snitchwatch_proto::protocol::{Action, ClientConfig, Notification, Operator, 
 use tokio::sync::{broadcast, mpsc};
 
 const WAIT: Duration = Duration::from_secs(10);
-const RULE_NAME: &str = "850-profile:home:0000-r1";
+const RULE_NAME: &str = "850-profile:home:r1";
 
 struct Bridge {
     _sockets: tempfile::TempDir,

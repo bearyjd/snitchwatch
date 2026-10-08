@@ -35,9 +35,9 @@ fn reasons(result: Result<Rule, Vec<RuleProblem>>) -> Vec<String> {
 
 #[test]
 fn a_rule_is_installed_in_the_profile_band_as_always_without_precedence() {
-    let rule = materialize_rule("home", &legacy("r1", "allow", "dest.host", "nas.local"), 0)
+    let rule = materialize_rule("home", &legacy("r1", "allow", "dest.host", "nas.local"))
         .expect("installable");
-    assert_eq!(rule.name, "850-profile:home:0000-r1");
+    assert_eq!(rule.name, "850-profile:home:r1");
     assert_eq!(rule.action, "allow");
     assert_eq!(rule.duration, "always");
     assert!(rule.enabled && !rule.precedence && !rule.nolog);
@@ -54,12 +54,10 @@ fn a_saved_program_path_is_matched_case_exactly() {
     let path = materialize_rule(
         "home",
         &legacy("r1", "deny", "process.path", "/usr/bin/curl"),
-        0,
     )
     .unwrap();
     assert!(path.operator.unwrap().sensitive);
-    let host =
-        materialize_rule("home", &legacy("r2", "deny", "dest.host", "x.example"), 1).unwrap();
+    let host = materialize_rule("home", &legacy("r2", "deny", "dest.host", "x.example")).unwrap();
     assert!(!host.operator.unwrap().sensitive);
 }
 
@@ -69,8 +67,8 @@ fn an_edited_rule_keeps_its_conditions() {
         { "type": "simple", "operand": "process.path", "data": "/usr/bin/curl", "sensitive": true },
         { "type": "regexp", "operand": "dest.host", "data": "^(.+\\.)?example\\.com$" },
     ] });
-    let rule = materialize_rule("home", &edited("r1", "reject", operator), 3).unwrap();
-    assert_eq!(rule.name, "850-profile:home:0003-r1");
+    let rule = materialize_rule("home", &edited("r1", "reject", operator)).unwrap();
+    assert_eq!(rule.name, "850-profile:home:r1");
     assert_eq!(rule.action, "reject");
     let op = rule.operator.unwrap();
     assert_eq!(op.r#type, "list");
@@ -86,7 +84,6 @@ fn a_rule_the_policy_refuses_is_not_installed() {
     let empty_host = reasons(materialize_rule(
         "home",
         &legacy("r1", "deny", "dest.host", ""),
-        0,
     ));
     assert!(
         empty_host.iter().any(|r| r == EDITOR_EMPTY_HOST_REFUSED),
@@ -95,7 +92,6 @@ fn a_rule_the_policy_refuses_is_not_installed() {
     let unknown_action = reasons(materialize_rule(
         "home",
         &legacy("r1", "drop", "dest.host", "x.example"),
-        0,
     ));
     assert!(
         unknown_action.iter().any(|r| r == ACTION_REFUSED),
@@ -108,7 +104,6 @@ fn a_rule_the_policy_refuses_is_not_installed() {
             "allow",
             json!({ "type": "simple", "operand": "true", "data": "" }),
         ),
-        0,
     ));
     assert!(
         everything.iter().any(|r| r == MATCHES_EVERYTHING),
@@ -117,17 +112,12 @@ fn a_rule_the_policy_refuses_is_not_installed() {
     let user = reasons(materialize_rule(
         "home",
         &legacy("r1", "deny", "user.name", "alice"),
-        0,
     ));
     assert!(
         user.iter().any(|r| r == PROFILE_USER_NAME_REFUSED),
         "{user:?}"
     );
-    let broken = reasons(materialize_rule(
-        "home",
-        &edited("r1", "deny", json!("x")),
-        0,
-    ));
+    let broken = reasons(materialize_rule("home", &edited("r1", "deny", json!("x"))));
     assert!(!broken.is_empty());
 }
 
@@ -145,8 +135,7 @@ fn rule_ids_are_short_plain_tokens() {
 /// cache: the profile prefix *and* the profile tag.
 #[test]
 fn made_by_bridge_needs_the_prefix_and_the_tag() {
-    let ours =
-        materialize_rule("home", &legacy("r1", "deny", "dest.host", "x.example"), 0).unwrap();
+    let ours = materialize_rule("home", &legacy("r1", "deny", "dest.host", "x.example")).unwrap();
     assert!(made_by_bridge(&ours));
     let untagged = Rule {
         description: String::new(),
@@ -167,7 +156,7 @@ fn made_by_bridge_needs_the_prefix_and_the_tag() {
 
 #[test]
 fn profile_band_sorts_before_blocklist_band() {
-    let profile_name = rule_name("home", "r1", 0);
+    let profile_name = rule_name("home", "r1");
     let blocklist_name = crate::blocklists::materializer::list_rule_name(
         &crate::blocklists::list_dir::IdComponent::from_id("ads"),
         crate::blocklists::materializer::ListKind::Domains,
@@ -178,7 +167,7 @@ fn profile_band_sorts_before_blocklist_band() {
 
 #[test]
 fn ids_with_special_chars_are_sanitized_in_the_name() {
-    let name = rule_name("ho/me:x", "r/1", 0);
+    let name = rule_name("ho/me:x", "r1");
     assert!(!name.contains('/'), "{name}");
     assert!(name.starts_with("850-profile:ho_me_x:"), "{name}");
 }
@@ -193,7 +182,34 @@ fn materialize_profile_keeps_order_and_each_outcome() {
     let out = materialize_profile("home", &rules);
     let ids: Vec<&str> = out.iter().map(|(id, _)| id.as_str()).collect();
     assert_eq!(ids, ["r1", "r2", "r3"]);
-    assert!(out[0].1.as_ref().unwrap().name.contains("0000"));
+    assert_eq!(out[0].1.as_ref().unwrap().name, "850-profile:home:r1");
     assert!(out[1].1.is_err());
-    assert!(out[2].1.as_ref().unwrap().name.contains("0002"));
+    assert_eq!(out[2].1.as_ref().unwrap().name, "850-profile:home:r3");
+}
+
+/// PR #104 review: a rule's name doesn't depend on its position, so
+/// removing or replacing one never renames (rewrites) the others; a Part 1
+/// id that isn't a plain token is refused rather than risk a shared name.
+#[test]
+fn names_are_stable_and_unusable_ids_are_refused() {
+    let rules = vec![
+        legacy("r1", "deny", "dest.host", "a.example"),
+        legacy("r2", "deny", "dest.host", "b.example"),
+    ];
+    let before = materialize_profile("home", &rules);
+    let after = materialize_profile("home", &rules[1..]);
+    assert_eq!(
+        before[1].1.as_ref().unwrap().name,
+        after[0].1.as_ref().unwrap().name
+    );
+    for id in ["a/b", "a b", ""] {
+        let found = reasons(materialize_rule(
+            "home",
+            &legacy(id, "deny", "dest.host", "x.example"),
+        ));
+        assert!(
+            found.iter().any(|r| r == RULE_ID_UNUSABLE),
+            "{id}: {found:?}"
+        );
+    }
 }

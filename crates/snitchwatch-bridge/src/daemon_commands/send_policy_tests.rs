@@ -133,7 +133,7 @@ async fn a_blocklist_rule_name_is_refused_at_send_whatever_the_command() {
 async fn a_profile_rule_name_is_refused_at_send_whatever_the_command() {
     let (commands, _rules) = fixture();
     let (_stream, mut rx) = current_stream(&commands);
-    let name = "850-profile:home:0000-r1";
+    let name = "850-profile:home:r1";
     assert_eq!(
         commands.send(change(name, Some(host("x.example")))).err(),
         Some(SendError::ReservedName)
@@ -263,7 +263,6 @@ async fn send_profile_checks_what_it_sends() {
             data: "x.example".into(),
             operator: None,
         },
-        0,
     )
     .unwrap();
     let decides_first = snitchwatch_proto::protocol::Rule {

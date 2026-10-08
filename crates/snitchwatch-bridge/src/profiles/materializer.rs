@@ -12,7 +12,7 @@
 //!
 //! ## Band placement
 //!
-//! Profile rules are named `850-profile:<profile>:<seq04>-<rule>`
+//! Profile rules are named `850-profile:<profile>:<rule>`
 //! ([`crate::rule_name::PROFILE_RULE_NAME_PREFIX`], reserved: only the
 //! bridge sends rules under it). The band sorts before the blocklist band
 //! (`z00-blocklist:`, and the legacy `900-blocklist:`), but sort order only
@@ -34,6 +34,10 @@ use crate::rule_policy::{validate_user_rule, PolicyProfile, RuleProblem};
 /// The band prefix, under its Part 1 name.
 pub const PROFILE_BAND_PREFIX: &str = PROFILE_RULE_NAME_PREFIX;
 
+/// Why a saved rule whose id isn't a plain token isn't installed.
+pub const RULE_ID_UNUSABLE: &str = "this rule's id can't be used in a firewall rule name; \
+     remove the rule and add it again";
+
 /// Longest profile rule id (`AddProfileRule`).
 pub const MAX_RULE_ID_LEN: usize = 64;
 
@@ -46,22 +50,27 @@ pub fn valid_rule_id(id: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
-/// The daemon rule name for a profile's rule at position `seq`.
-pub fn rule_name(profile_id: &str, rule_id: &str, seq: usize) -> String {
+/// The daemon rule name for a profile's rule: stable, so adding, removing
+/// or replacing one rule never renames (and rewrites) the others.
+pub fn rule_name(profile_id: &str, rule_id: &str) -> String {
     format!(
-        "{PROFILE_RULE_NAME_PREFIX}{}:{seq:04}-{}",
+        "{PROFILE_RULE_NAME_PREFIX}{}:{}",
         sanitize_id(profile_id),
         sanitize_id(rule_id)
     )
 }
 
-/// The daemon rule for one of `profile_id`'s rules, at position `seq`, or
-/// why it can't be installed.
-pub fn materialize_rule(
-    profile_id: &str,
-    rule: &ProfileRule,
-    seq: usize,
-) -> Result<Rule, Vec<RuleProblem>> {
+/// The daemon rule for one of `profile_id`'s rules, or why it can't be
+/// installed.
+pub fn materialize_rule(profile_id: &str, rule: &ProfileRule) -> Result<Rule, Vec<RuleProblem>> {
+    if !valid_rule_id(&rule.id) {
+        // Part 1 took any id; one that isn't a plain token could name the
+        // same rule as another.
+        return Err(vec![RuleProblem {
+            path: "id".into(),
+            reason: RULE_ID_UNUSABLE.into(),
+        }]);
+    }
     let operator = conditions(rule).map_err(|reason| {
         vec![RuleProblem {
             path: "operator".into(),
@@ -78,7 +87,7 @@ pub fn materialize_rule(
     .to_string();
     let materialized = Rule {
         created: 0,
-        name: rule_name(profile_id, &rule.id, seq),
+        name: rule_name(profile_id, &rule.id),
         description,
         enabled: true,
         precedence: false,
@@ -114,8 +123,7 @@ pub fn materialize_profile(
 ) -> Vec<(String, Result<Rule, Vec<RuleProblem>>)> {
     rules
         .iter()
-        .enumerate()
-        .map(|(seq, rule)| (rule.id.clone(), materialize_rule(profile_id, rule, seq)))
+        .map(|rule| (rule.id.clone(), materialize_rule(profile_id, rule)))
         .collect()
 }
 
