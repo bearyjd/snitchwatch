@@ -1,4 +1,5 @@
-//! Where the bridge keeps blocklist subscriptions (issue #45 PR A).
+//! Where the bridge keeps blocklist subscriptions (issue #45 PR A) and, through
+//! [`crate::profile_storage`], profiles (issue #46 Part 1).
 //!
 //! The state directory is resolved **once**, by [`resolve_storage`], called
 //! only from `main.rs` (per-user bridge) and [`run_system`](crate::run_system).
@@ -7,7 +8,8 @@
 //!
 //! A storage problem never stops the bridge, which must stay up to answer
 //! prompts: it becomes [`EphemeralReason::Unusable`], is logged at `error!`
-//! and is shown to the user through `SetBlocklists.storage`.
+//! and is shown to the user through `SetBlocklists.storage` and
+//! `SetProfiles.storage`.
 //!
 //! Blocklists are enforced (issue #45 PR B) only by the **system** bridge
 //! with a `Persistent` store: the daemon's rules point at list files under
@@ -133,16 +135,17 @@ pub fn resolve_storage(mode: BridgeMode) -> Storage {
         mode,
     );
     match &storage {
-        Storage::Persistent(dir) => info!(state_dir = %dir.display(), "blocklists are persisted"),
-        Storage::Ephemeral(EphemeralReason::Unusable(reason)) => {
-            error!(%reason, "state directory unusable; blocklists are kept in memory only")
+        Storage::Persistent(dir) => {
+            info!(state_dir = %dir.display(), "blocklists and profiles are persisted")
         }
-        Storage::Ephemeral(reason) => {
-            warn!(
-                ?reason,
-                "no state directory; blocklists are kept in memory only"
-            )
-        }
+        Storage::Ephemeral(EphemeralReason::Unusable(reason)) => error!(
+            %reason,
+            "state directory unusable; blocklists and profiles are kept in memory only"
+        ),
+        Storage::Ephemeral(reason) => warn!(
+            ?reason,
+            "no state directory; blocklists and profiles are kept in memory only"
+        ),
     }
     storage
 }

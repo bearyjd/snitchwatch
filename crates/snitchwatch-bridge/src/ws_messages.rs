@@ -139,6 +139,11 @@ pub enum ServerMessage {
     },
     SetProfiles {
         profiles: Vec<ProfileSummary>,
+        /// Whether profiles and the active-profile choice survive a bridge
+        /// restart (issue #46). `None` from an older bridge; GUIs treat that
+        /// as not persistent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        storage: Option<StorageStatus>,
     },
     ProfileChanged {
         active_profile_id: Option<String>,
@@ -537,20 +542,22 @@ pub const ENFORCEMENT_RULE_INSTALLED: &str = "rule_installed";
 /// `enforcement_reason`.
 pub const ENFORCEMENT_NOT_ENFORCED: &str = "not_enforced";
 
-/// Where the bridge keeps blocklist subscriptions.
+/// Where the bridge keeps blocklist subscriptions (`SetBlocklists`) or
+/// profiles (`SetProfiles`); each store reports its own.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StorageStatus {
-    /// True only when subscriptions are saved in a state directory and
-    /// survive a restart.
+    /// True only when the data is saved in a state directory and survives a
+    /// restart.
     pub persistent: bool,
     /// Why storage is not persistent, when it was configured but unusable,
     /// or, with `unreadable`, why the saved subscriptions couldn't be read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
-    /// The saved subscriptions couldn't be read (issue #45): Snitchwatch
-    /// leaves the firewall's blocklist rules as they are and installs
-    /// nothing. Its own state, apart from `persistent`.
+    /// Blocklists only: the saved subscriptions couldn't be read (issue
+    /// #45): Snitchwatch leaves the firewall's blocklist rules as they are
+    /// and installs nothing. Its own state, apart from `persistent`. An
+    /// unreadable profile store is reported as not persistent instead.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub unreadable: bool,
 }
@@ -1010,6 +1017,11 @@ mod profile_message_tests {
     fn set_profiles_serializes_to_camel_case_action() {
         let msg = ServerMessage::SetProfiles {
             profiles: vec![summary("home", true)],
+            storage: Some(StorageStatus {
+                unreadable: false,
+                persistent: false,
+                reason: Some("profile store: disk full".into()),
+            }),
         };
         let json = serde_json::to_value(&msg).unwrap();
         assert_eq!(json["action"], "setProfiles");
@@ -1017,12 +1029,34 @@ mod profile_message_tests {
         assert_eq!(json["profiles"][0]["networkMatchers"][0], "Home*");
         assert_eq!(json["profiles"][0]["rules"][0]["operand"], "dest.host");
         assert_eq!(json["profiles"][0]["active"], true);
+        assert_eq!(json["storage"]["persistent"], false);
+        assert_eq!(json["storage"]["reason"], "profile store: disk full");
+    }
+
+    /// Issue #46: an older bridge sends no `storage`; GUIs treat that as not
+    /// persistent.
+    #[test]
+    fn set_profiles_from_an_older_bridge_still_parses() {
+        let json = r#"{"action":"setProfiles","profiles":[{"id":"a","name":"A",
+            "networkMatchers":[],"rules":[],"active":false}]}"#;
+        match serde_json::from_str::<ServerMessage>(json).unwrap() {
+            ServerMessage::SetProfiles { profiles, storage } => {
+                assert_eq!(storage, None);
+                assert_eq!(profiles[0].id, "a");
+            }
+            other => panic!("expected SetProfiles, got {other:?}"),
+        }
     }
 
     #[test]
     fn set_profiles_round_trips() {
         let msg = ServerMessage::SetProfiles {
             profiles: vec![summary("home", false)],
+            storage: Some(StorageStatus {
+                unreadable: false,
+                persistent: true,
+                reason: None,
+            }),
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
