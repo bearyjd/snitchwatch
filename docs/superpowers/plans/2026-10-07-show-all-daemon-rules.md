@@ -113,15 +113,31 @@ makes, and a GUI that connects or reconnects receives the full list.
 2. **Ingest on `Subscribe`** (`grpc_server.rs` `subscribe`).
    - `UiService` creates the cache internally and exposes `rules_handle()`
      (the accessor pattern of `notifications_handle`).
-   - `subscribe()` records the request's connection identity as the
-     snapshot's source:
+   - `subscribe()` does **not** write the cache directly. It stores
+     `cfg.rules` as the **pending snapshot for that connection** (latest
+     one wins per connection), keyed by connection identity:
      - TCP (legacy mode): `request.remote_addr()`.
-     - Unix (system mode): only root peers get through
-       `RootUnixIncoming`. Tonic's `UdsConnectInfo` for an unnamed client
-       socket probably carries no usable per-connection id (**verify**). If
-       it doesn't, treat every root peer as the same source. It then calls
-     `replace_all(cfg.rules)`, broadcasts `SetRules`, and bumps a
-     `watch<u64>` "rules synced" generation.
+     - Unix (system mode): only root peers get through `RootUnixIncoming`.
+       Tonic's `UdsConnectInfo` for an unnamed client socket probably has
+       no usable per-connection id (**verify**). If it doesn't, key every
+       root peer the same.
+   - **Commit on HELLO.** When a HELLO (step 4) makes that connection's
+     stream current, the pending snapshot from the same connection is
+     committed:
+     1. `replace_all(snapshot)`;
+     2. broadcast `SetRules`;
+     3. bump the `watch<u64>` "rules synced" generation.
+
+     The generation therefore moves only at commit time, which is also
+     when #45's reconcile may run, since it waits for rules synced *and*
+     `stream_ready`.
+   - **Why commit on HELLO.** The daemon always calls `Subscribe` on a
+     new connection *before* that connection's stream sends HELLO
+     (`Client.Subscribe` → `listenForNotifications`). An old stream may
+     also stay open until the 10 s HTTP/2 keepalive notices it's dead. So
+     a redial's snapshot must be held, not dropped, until its own HELLO
+     arrives. `Subscribe` is one-shot, so a dropped snapshot would leave
+     the cache stale until the next reconnect.
    - The echoed `ClientConfig` is unchanged.
 3. **Remembered verdicts** (`ask_rule`).
    - `upsert(rule.clone())` before the existing `UpdateRules` broadcast.
@@ -143,16 +159,25 @@ makes, and a GUI that connects or reconnects receives the full list.
      on the current stream. Replies from other streams are logged and
      dropped. When the current stream ends, every outstanding waiter fails
      with `StreamClosed` and `current_stream` is cleared.
-   - **Snapshot source:** a `Subscribe` snapshot is accepted as the cache
-     source only if it comes from the same connection as the current
-     stream, or, before any HELLO, from the first subscriber. A later
-     `Subscribe` from a different connection is logged and ignored until
-     that connection's stream sends a HELLO.
+   - **Snapshot source:** only a snapshot from the connection whose
+     stream is current is ever committed to the cache (step 2, commit on
+     HELLO). Snapshots from other connections stay pending and are dropped
+     when their connection closes.
      - This narrows impersonation in legacy TCP mode (a second local
-       "daemon" can't answer or redirect commands meant for the first) but
-       cannot close it. A spoofer that connects first, or after the real
-       daemon drops, still wins. The real fix is #35, which system mode's
-       root-only Unix socket already provides.
+       "daemon" can't answer or redirect commands meant for the current
+       stream) but cannot close it. A spoofer whose HELLO is the most recent
+       still wins. The real fix is #35, which system mode's root-only Unix
+       socket already provides.
+   - **Mock change (required):** `MockOpensnitchd::open_notifications`
+     must send `NotificationReply { id: 0, code: OK }` as its first message,
+     as the real daemon's `listenForNotifications` does. Without it, no mock
+     stream ever becomes current: commands stop reaching the mock, and
+     #45's `stream_ready` gate never opens.
+     - Existing protocol tests that open mock notifications and must keep
+       passing: `idle_daemon_with_open_notifications_stream_stays_reachable`,
+       `notifications_stream_close_triggers_down_transition_within_one_tick`,
+       and `rule_update_and_delete_reach_the_daemon_as_notifications`.
+     - Check whether any test asserts on the first reply the bridge sees.
    - **API:**
      - `send(Notification) -> Result<PendingReply, NoDaemon>`;
      - `PendingReply::wait(timeout)` returns `Ok`, `Rejected(data)`,
@@ -199,19 +224,26 @@ makes, and a GUI that connects or reconnects receives the full list.
   - commands go only to the current stream;
   - stream close fails pending waiters;
   - `send` with no current stream returns `NoDaemon`.
-- **`subscribe`:**
-  - with three rules, it broadcasts one name-sorted `SetRules`;
-  - a second `Subscribe` from another connection, after a HELLO on the
-    first, does not replace the cache.
+- **`subscribe` and commit on HELLO:**
+  - with three rules, a `Subscribe` followed by a HELLO from the same
+    connection broadcasts one name-sorted `SetRules`, and "rules synced"
+    moves only at the HELLO;
+  - **redial with a stale stream:** connection 1 has subscribed, sent its
+    HELLO, and its stream stays open. Connection 2 subscribes with
+    different rules, then sends its HELLO. Connection 2's snapshot is
+    adopted, and commands now go to stream 2;
+  - a `Subscribe` from a connection that never sends a HELLO never replaces
+    the cache.
 - **`ask_rule`:** a remembered verdict upserts. `Once` does not.
 
 **Protocol test** (`tests/bridge_protocol_test.rs`, modelled on
 `rule_update_and_delete_reach_the_daemon_as_notifications`):
 
 1. `MockOpensnitchd::subscribe_with_config` with two rules.
-2. An authenticated WS client sends `RequestSnapshot` and receives
-   `SetRules` with both.
-3. The mock opens notifications (sends HELLO).
+2. An authenticated WS client sends `RequestSnapshot`: no `SetRules` yet,
+   because the cache is still `Unknown`.
+3. The mock opens notifications. With this plan's mock change, that sends
+   HELLO, so the client receives `SetRules` with both rules.
 4. `UpdateRule` (disable) with the mock replying OK gives `SetRules` with
    the rule disabled.
 5. `DeleteRule` with an ERROR reply gives `SetRules` unchanged.

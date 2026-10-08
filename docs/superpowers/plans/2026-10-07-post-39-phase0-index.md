@@ -39,7 +39,7 @@ Several plans edit those QML files and its guard tests
 | Issue | Plan | Size | Depends on |
 |---|---|---|---|
 | #49 (3rd bullet) | `2026-10-07-stuck-pending-rows-after-39.md`. Bridge side **fixed by #39** (`PendingCleanup`; test `tonic_request_deadline_cleans_pending_with_silent_authenticated_gui`). Left: an end-to-end test, a GUI re-check of the open inspector on remove, clear and reconnect, and a VM check | S | honest-ui |
-| #48 | `2026-10-07-show-all-daemon-rules.md`. `RulesCache` from `Subscribe`, preserving `created` on toggles; `DaemonCommands` reply correlation tied to the current HELLO stream; rules in the snapshot | M | honest-ui |
+| #48 | `2026-10-07-show-all-daemon-rules.md`. `RulesCache` from `Subscribe`, committed when that connection sends HELLO and preserving `created` on toggles; `DaemonCommands` reply correlation tied to the current HELLO stream; the mock sends HELLO; rules in the snapshot | M | honest-ui |
 | #47 | `2026-10-07-timed-filter-pause.md`. `FilterPause` with 5/30/60 min, ported into `apply_pause_request`/`clear_pause_on_last_session_loss`; sender-generation stamp closes the queued-pause race; pause-aware tray choke point | S–M | — |
 | #44 (2nd half) | `2026-10-07-app-bound-prompt-scopes-part2.md`. **A:** no remembered rule unless `process_path` is absolute (once-only reply plus explanation). **B:** flag pre-#50 host-only rules, with one-click delete per row and an explicit unblock warning on deny rows | S + S | A: none (rebase on #47/#48). B: #48 |
 | #45 | `2026-10-07-blocklist-enforcement.md`. **PR A:** https-only bounded fetcher, a test fetch hook, a single worker, stable ids, persistence, honest status. **PR B:** `lists.domains` list directory, sink, reconcile, banner removal | S–M, then M | A: honest-ui. B: #48 |
@@ -79,7 +79,7 @@ Several plans edit those QML files and its guard tests
 | `translator/downstream.rs` | | | | | | ✓ `build_set_blocklists`/`_status` | | ✓ `build_set_profiles` |
 | `blocklists/*` (`fetcher.rs`, `mod.rs`, `materializer.rs`) | | | | | | ✓ | ✓ | |
 | `profiles/*` | | | | | | | | ✓ |
-| `tests/bridge_protocol_test.rs`, `tests/mock_opensnitchd` | ✓ | ✓ | | ✓ | | | ✓ | |
+| `tests/bridge_protocol_test.rs`, `tests/mock_opensnitchd` (#48: `open_notifications` sends HELLO) | ✓ | ✓ | | ✓ | | | ✓ | |
 | QML: `ConnectionsPage` / `PendingDecisionSheet` | ✓ | | | ✓ | | | | |
 | QML: `RulesPage` | | | | | ✓ | | ✓ comment | |
 | QML: `BlocklistsPage` and guards | | | | | | ✓ wording | ✓ | |

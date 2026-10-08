@@ -173,7 +173,18 @@ starts persisting ids.
   `SNITCHWATCH_STATE_DIR` override. It canonicalizes the path, because
   `/home` is a symlink to `/var/home` on Bazzite and the rule `data` must
   be byte-stable. It then calls `run_with_options`.
-- `run_system` requires the resolved path to equal `/var/lib/snitchwatch`.
+- `run_system` handles three cases:
+  - resolved path equals `/var/lib/snitchwatch`: use it;
+  - set but different: log an error and use in-memory stores;
+  - **unset**: in-memory stores, with `NotEnforced("no state directory")`.
+
+  None of these is a startup error: the bridge must stay up to answer
+  prompts.
+- `run_with_incoming` gains a `state_dir: Option<PathBuf>` parameter, next
+  to `system_token_path`. Its call sites are `run`, `run_system` and the
+  bridge-cli test that calls it directly (the activated-Unix
+  `ask_rule` round trip in `lib.rs`'s test module). They pass `None`,
+  except where a test wants persistence.
 - Tests that spawn the binary as a subprocess set `STATE_DIRECTORY` and
   `SNITCHWATCH_STATE_DIR` to a tempdir with `Command::env`.
 - A source-guard test asserts that only `main.rs` and `run_system` call the
