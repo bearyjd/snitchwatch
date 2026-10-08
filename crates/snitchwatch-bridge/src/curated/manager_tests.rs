@@ -4,6 +4,7 @@
 use super::*;
 use crate::cache::rules::RulesSync;
 use crate::curated::check_curated_rule;
+use crate::curated::wire::CuratedDefaultSummary;
 use crate::daemon_commands::{DaemonTransport, StreamRegistration};
 use snitchwatch_proto::protocol::{
     Action, Notification, NotificationReply, NotificationReplyCode, Rule,

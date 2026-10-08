@@ -23,7 +23,7 @@
 //!   saved all leave the firewall as it is: no command is sent, no choice
 //!   is taken, and the GUI is told why.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
@@ -32,14 +32,20 @@ use tokio::sync::{broadcast, watch, Notify};
 use tracing::{error, info, warn};
 
 use super::canonical::is_unedited;
+use super::entries;
 use super::reconcile::{inert_statuses, plan, CuratedAction, DaemonRules, EntryStatus};
-use super::store::{self, Choices};
-use super::wire::CuratedDefaultSummary;
-use super::{entries, CuratedEntry};
+use super::store;
 use crate::cache::rules::SharedRulesCache;
-use crate::daemon_commands::{CommandError, CuratedCommand, DaemonCommands, SendError};
+use crate::daemon_commands::{CuratedCommand, DaemonCommands};
 use crate::rule_name::CURATED_DEFAULT_RULE_NAME_PREFIX;
 use crate::ws_messages::{ClientMessage, ServerMessage, StorageStatus};
+
+#[path = "manager_state.rs"]
+mod state;
+use state::{
+    command_problem, fail, keep, save_in_order, send_problem, show_removal_failures, still_edited,
+    summary, without_failed, Problem, Refusal, SaveJob, State,
+};
 
 /// How long a curated rule command waits for the daemon's reply.
 pub const COMMAND_TIMEOUT: Duration = Duration::from_secs(15);
@@ -47,9 +53,10 @@ pub const COMMAND_TIMEOUT: Duration = Duration::from_secs(15);
 /// Why nothing changes when the saved choices can't be read.
 pub const UNREADABLE_REASON: &str = "Snitchwatch can't read its saved choices for recommended \
      rules (curated-defaults.json in its state folder), so it adds and removes none: rules \
-     already in the firewall were left in place. Repairing the file restores your choices. \
-     Without it, Snitchwatch starts with no choices: recommended rules already in the firewall \
-     stay as they are until you turn each one on or off.";
+     already in the firewall were left in place. Repair the file, then restart Snitchwatch's \
+     background service to restore your choices. Without the file, Snitchwatch starts the next \
+     time with no choices: recommended rules already in the firewall stay as they are until you \
+     turn each one on or off.";
 
 /// Why nothing changes once the choices couldn't be saved.
 pub const SAVE_FAILED_REASON: &str = "Snitchwatch couldn't save its choices for recommended \
@@ -77,33 +84,6 @@ struct Inner {
     passes: std::sync::atomic::AtomicU64,
 }
 
-struct State {
-    choices: Choices,
-    statuses: BTreeMap<String, EntryStatus>,
-    problems: BTreeMap<String, &'static str>,
-    /// Commands that failed, by entry id: not sent again until the entry's
-    /// choice changes or the daemon reconnects.
-    failures: BTreeMap<String, Failure>,
-    /// Entries the user confirmed removing (edited copies, M2).
-    removals: BTreeSet<String>,
-    file: Option<PathBuf>,
-    storage: StorageStatus,
-    /// Why nothing is ever installed or removed here; `None` when it is.
-    inert: Option<String>,
-    /// Bumped on every change of `choices`; `saved` is the last one saved.
-    version: u64,
-    saved: u64,
-}
-
-/// A failed command for an entry, and when it failed.
-#[derive(Debug, Clone, Copy)]
-struct Failure {
-    /// The daemon stream's generation (`DaemonCommands::stream_ready`).
-    generation: u64,
-    status: EntryStatus,
-    problem: &'static str,
-}
-
 /// What a reconcile pass reads; a pass runs only when it changed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PassKey {
@@ -112,7 +92,8 @@ struct PassKey {
     generation: u64,
     version: u64,
     inert: bool,
-    removals: bool,
+    /// GUI requests taken, so each one gets a pass (re-review 2, HIGH).
+    requests: u64,
 }
 
 fn lock(state: &Mutex<State>) -> MutexGuard<'_, State> {
@@ -131,22 +112,7 @@ impl CuratedDefaults {
                 commands,
                 rules,
                 broadcast,
-                state: Mutex::new(State {
-                    choices: Choices::default(),
-                    statuses: BTreeMap::new(),
-                    problems: BTreeMap::new(),
-                    failures: BTreeMap::new(),
-                    removals: BTreeSet::new(),
-                    file: None,
-                    storage: StorageStatus {
-                        persistent: false,
-                        reason: None,
-                        unreadable: false,
-                    },
-                    inert: None,
-                    version: 0,
-                    saved: 0,
-                }),
+                state: Mutex::new(State::new()),
                 wake: Notify::new(),
                 last: Mutex::new(None),
                 saver: Mutex::new(0),
@@ -216,6 +182,7 @@ impl CuratedDefaults {
             if state.inert.is_some() {
                 false
             } else {
+                state.requests += 1;
                 let mut choices = state.choices.clone();
                 for entry in entries().iter().filter(|entry| ids.contains(&entry.id)) {
                     choices = if on {
@@ -242,7 +209,8 @@ impl CuratedDefaults {
         let mut state = lock(&self.inner.state);
         if state.inert.is_none() && entries().iter().any(|entry| entry.id == id) {
             state.removals.insert(id.to_string());
-            state.failures.remove(id);
+            state.removal_failures.remove(id);
+            state.requests += 1;
             drop(state);
             self.inner.wake.notify_one();
         }
@@ -306,7 +274,7 @@ impl CuratedDefaults {
             generation,
             version: state.version,
             inert: state.inert.is_some(),
-            removals: !state.removals.is_empty(),
+            requests: state.requests,
         }
     }
 
@@ -318,6 +286,7 @@ impl CuratedDefaults {
         // GUIs get the starting state with their snapshot.
         *self.last() = Some(self.message());
         let mut lists = self.inner.broadcast.subscribe();
+        let mut ready = self.inner.commands.stream_ready();
         tokio::spawn(async move {
             let mut last_pass: Option<PassKey> = None;
             loop {
@@ -334,6 +303,10 @@ impl CuratedDefaults {
                     tokio::select! {
                         () = this.inner.wake.notified() => break,
                         changed = synced.changed() => match changed {
+                            Ok(()) => break,
+                            Err(_) => return,
+                        },
+                        changed = ready.changed() => match changed {
                             Ok(()) => break,
                             Err(_) => return,
                         },
@@ -386,12 +359,14 @@ impl CuratedDefaults {
             if state.inert.is_some() {
                 state.statuses = inert_statuses(entries(), daemon);
                 state.removals.clear();
+                state.removal_failures.clear();
                 (Vec::new(), BTreeSet::new())
             } else {
                 let planned = plan(entries(), daemon, &state.choices);
                 state.statuses = planned.statuses;
                 keep(&mut state, planned.choices);
                 let actions = without_failed(&mut state, planned.actions, generation);
+                show_removal_failures(&mut state, daemon, generation);
                 (actions, std::mem::take(&mut state.removals))
             }
         };
@@ -402,8 +377,19 @@ impl CuratedDefaults {
         }
         // One rule-list broadcast for the pass (if any command changed it).
         let _hold = self.inner.commands.hold_rule_publishes();
-        for id in removals {
+        // A reconnect mid-pass ends the pass: its plan is for the old list,
+        // and a follow-up pass plans for the new one (re-review 2, M1).
+        let mut removals = removals.into_iter();
+        while let Some(id) = removals.next() {
             if self.is_inert() {
+                break;
+            }
+            if self.generation() != generation {
+                // Asked for, not yet sent: the follow-up pass decides them
+                // against the new list.
+                let mut state = lock(&self.inner.state);
+                state.removals.insert(id);
+                state.removals.extend(removals);
                 break;
             }
             self.remove(&id, daemon, generation).await;
@@ -411,6 +397,9 @@ impl CuratedDefaults {
             self.announce_changed();
         }
         for action in actions {
+            if self.generation() != generation {
+                break;
+            }
             if !self.still_wanted(&action) {
                 continue;
             }
@@ -435,10 +424,30 @@ impl CuratedDefaults {
                 drop(state);
                 wanted && self.still_missing(&format!("{CURATED_DEFAULT_RULE_NAME_PREFIX}{id}"))
             }
-            CuratedAction::Delete { id, .. } => {
-                !state.choices.enabled.contains(id) || !entries().iter().any(|e| &e.id == id)
+            CuratedAction::Delete { id, name } => {
+                let wanted =
+                    !state.choices.enabled.contains(id) || !entries().iter().any(|e| &e.id == id);
+                let recorded = state.choices.installed.get(id).cloned();
+                drop(state);
+                wanted && self.still_unedited(id, name, recorded.as_ref())
             }
         }
+    }
+
+    /// The live list's copy under `name` is still unedited: a copy edited
+    /// since the pass began is left alone.
+    fn still_unedited(
+        &self,
+        id: &str,
+        name: &str,
+        recorded: Option<&super::canonical::CanonicalRule>,
+    ) -> bool {
+        let entry = entries().iter().find(|entry| entry.id == id);
+        let cache = self.inner.rules.lock().unwrap_or_else(|e| e.into_inner());
+        cache
+            .rules()
+            .and_then(|rules| rules.get(name))
+            .is_some_and(|rule| is_unedited(entry, recorded, rule))
     }
 
     /// The live list still lacks `name` (code review LOW-7): a copy that
@@ -492,7 +501,7 @@ impl CuratedDefaults {
                     Done::Install(_) => EntryStatus::NotInstalled,
                     Done::Delete => EntryStatus::NotRemoved,
                 };
-                fail(&mut state, &id, status, problem, generation);
+                fail(&mut state, false, &id, status, problem, generation);
             }
         }
     }
@@ -505,12 +514,7 @@ impl CuratedDefaults {
             return;
         };
         let name = entry.rule_name();
-        let edited = daemon.left_out.contains(&name)
-            || daemon
-                .rules
-                .get(&name)
-                .is_some_and(|rule| !is_unedited(Some(entry), None, rule));
-        if !edited {
+        if !still_edited(id, daemon) {
             warn!(entry = %id, "removal asked for a rule that isn't an edited copy; ignored");
             return;
         }
@@ -529,13 +533,21 @@ impl CuratedDefaults {
                     EntryStatus::Off
                 };
                 keep(&mut state, choices);
+                state.removal_failures.remove(id);
                 state.statuses.insert(id.to_string(), status);
             }
-            Err(problem) => fail(&mut state, id, EntryStatus::NotRemoved, problem, generation),
+            Err(problem) => fail(
+                &mut state,
+                true,
+                id,
+                EntryStatus::NotRemoved,
+                problem,
+                generation,
+            ),
         }
     }
 
-    async fn send(&self, command: CuratedCommand, refusal: Refusal) -> Result<(), &'static str> {
+    async fn send(&self, command: CuratedCommand, refusal: Refusal) -> Result<(), Problem> {
         match self.inner.commands.send_curated(command) {
             Ok(reply) => reply
                 .wait(COMMAND_TIMEOUT)
@@ -552,7 +564,7 @@ impl CuratedDefaults {
             return;
         };
         let inner = self.inner.clone();
-        let saved = tokio::task::spawn_blocking(move || save_in_order(&inner, job))
+        let saved = tokio::task::spawn_blocking(move || save_in_order(&inner.saver, job))
             .await
             .unwrap_or_else(|e| Err(std::io::Error::other(e.to_string())));
         self.saved(saved);
@@ -594,7 +606,7 @@ impl CuratedDefaults {
     /// state lock, and never over a newer save.
     pub fn save_now(&self) {
         if let Some(job) = self.save_job() {
-            let saved = save_in_order(&self.inner, job);
+            let saved = save_in_order(&self.inner.saver, job);
             self.saved(saved);
         }
     }
@@ -604,125 +616,6 @@ impl CuratedDefaults {
 enum Done {
     Install(Box<snitchwatch_proto::protocol::Rule>),
     Delete,
-}
-
-struct SaveJob {
-    file: PathBuf,
-    choices: Choices,
-    version: u64,
-}
-
-/// Save `job` unless a newer version is already written; one at a time.
-fn save_in_order(inner: &Inner, job: SaveJob) -> std::io::Result<u64> {
-    let mut written = inner.saver.lock().unwrap_or_else(|e| e.into_inner());
-    if *written >= job.version {
-        return Ok(*written);
-    }
-    store::save(&job.file, &job.choices)?;
-    *written = job.version;
-    Ok(job.version)
-}
-
-/// Take `choices`, if they changed; the worker saves them.
-fn keep(state: &mut State, choices: Choices) {
-    if state.choices != choices {
-        state.choices = choices;
-        state.version += 1;
-    }
-}
-
-/// Record a failed command for `id`.
-fn fail(state: &mut State, id: &str, status: EntryStatus, problem: &'static str, generation: u64) {
-    state.statuses.insert(id.to_string(), status);
-    state.problems.insert(id.to_string(), problem);
-    state.failures.insert(
-        id.to_string(),
-        Failure {
-            generation,
-            status,
-            problem,
-        },
-    );
-}
-
-/// The planned actions, less those that failed for the same entry on the
-/// same daemon stream (shown as failed again); an entry with nothing to do
-/// forgets its failure.
-fn without_failed(
-    state: &mut State,
-    actions: Vec<CuratedAction>,
-    generation: u64,
-) -> Vec<CuratedAction> {
-    let acted: BTreeSet<String> = actions.iter().map(action_id).collect();
-    state
-        .failures
-        .retain(|id, failure| acted.contains(id) && failure.generation == generation);
-    let mut kept = Vec::new();
-    for action in actions {
-        let id = action_id(&action);
-        match state.failures.get(&id).copied() {
-            Some(failure) => {
-                state.statuses.insert(id.clone(), failure.status);
-                state.problems.insert(id, failure.problem);
-            }
-            None => kept.push(action),
-        }
-    }
-    kept
-}
-
-fn action_id(action: &CuratedAction) -> String {
-    match action {
-        CuratedAction::Install(id) | CuratedAction::Delete { id, .. } => id.clone(),
-    }
-}
-
-fn summary(entry: &CuratedEntry, state: &State, rules_known: bool) -> CuratedDefaultSummary {
-    let status = if rules_known {
-        state
-            .statuses
-            .get(&entry.id)
-            .copied()
-            .unwrap_or(EntryStatus::Off)
-    } else {
-        EntryStatus::Waiting
-    };
-    // An undecided entry already in the firewall reads as on: it is active.
-    let on = state.choices.enabled.contains(&entry.id) || status == EntryStatus::InFirewall;
-    CuratedDefaultSummary {
-        id: entry.id.clone(),
-        program: entry.path.clone(),
-        allows: entry.allows(),
-        why: entry.why.clone(),
-        on,
-        status,
-        problem: state.problems.get(&entry.id).map(|p| p.to_string()),
-    }
-}
-
-/// What a refusal refused.
-#[derive(Clone, Copy)]
-enum Refusal {
-    Add,
-    Remove,
-}
-
-fn send_problem(error: SendError) -> &'static str {
-    match error {
-        SendError::NoDaemon | SendError::NotQueued => "The firewall service isn't connected.",
-        _ => "Snitchwatch refused to send this rule.",
-    }
-}
-
-fn command_problem(error: CommandError, refusal: Refusal) -> &'static str {
-    match (error, refusal) {
-        (CommandError::Rejected(_), Refusal::Add) => "The firewall service refused the rule.",
-        (CommandError::Rejected(_), Refusal::Remove) => {
-            "The firewall service refused to remove the rule."
-        }
-        (CommandError::Timeout, _) => "The firewall service didn't answer.",
-        (CommandError::StreamClosed, _) => "The firewall service disconnected.",
-    }
 }
 
 #[cfg(test)]
@@ -736,3 +629,7 @@ mod safety_tests;
 #[cfg(test)]
 #[path = "manager_loop_tests.rs"]
 mod loop_tests;
+
+#[cfg(test)]
+#[path = "manager_gate_tests.rs"]
+mod gate_tests;

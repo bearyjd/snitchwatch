@@ -16,7 +16,8 @@ pub struct CuratedDefaultSummary {
     pub allows: String,
     /// Why it is offered.
     pub why: String,
-    /// The user turned it on. Off unless they did.
+    /// On: the user turned it on, or, not chosen yet, its rule is already
+    /// in the firewall and enabled. Off otherwise.
     pub on: bool,
     pub status: EntryStatus,
     /// Why the last command for it failed, in fixed text.

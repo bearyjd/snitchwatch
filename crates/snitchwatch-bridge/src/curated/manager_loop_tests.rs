@@ -164,9 +164,12 @@ async fn an_inert_bridge_queues_no_removal() {
     std::fs::write(&harness.file, "not json").unwrap();
     let curated = harness.curated();
     curated.try_route(ClientMessage::RemoveCuratedDefault { id: FLATPAK.into() });
-    assert!(
-        !curated.pass_key().removals,
-        "a removal was queued while inert"
+    let queued = !lock(&curated.inner.state).removals.is_empty();
+    assert!(!queued, "a removal was queued while inert");
+    assert_eq!(
+        curated.pass_key().requests,
+        0,
+        "a request was taken while inert"
     );
     curated.reconcile().await;
     assert!(harness.seen().is_empty());
@@ -182,7 +185,7 @@ async fn a_withdrawn_list_drops_queued_removals() {
     curated.try_route(ClientMessage::RemoveCuratedDefault { id: FLATPAK.into() });
     drop(harness.stream.take());
     curated.reconcile().await;
-    assert!(!curated.pass_key().removals);
+    assert!(lock(&curated.inner.state).removals.is_empty());
 }
 
 async fn wait_until(done: impl Fn() -> bool) {

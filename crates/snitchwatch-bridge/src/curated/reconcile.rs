@@ -52,9 +52,11 @@ pub enum EntryStatus {
     /// This bridge changes no recommended rules (see the message's
     /// `unavailable`), and the daemon has no rule under this name.
     Unavailable,
-    /// The daemon has this entry's rule, unedited (added earlier), and
-    /// this bridge changes none, or the user hasn't chosen yet.
+    /// The daemon has this entry's rule, unedited (added earlier) and
+    /// enabled, and this bridge changes none, or the user hasn't chosen yet.
     InFirewall,
+    /// The same, but the rule is turned off on the Rules page.
+    InFirewallButOff,
     /// Not turned on, and not in the daemon.
     Off,
     /// Turned on; the rule is being installed.
@@ -174,7 +176,7 @@ fn plan_entry(
         // Undecided (a first run, or a file that was moved away): an
         // unedited copy already there is left as it is until the user
         // turns it on (adopt) or off (delete). Re-review M1.
-        return EntryStatus::InFirewall;
+        return in_firewall(present);
     }
     // Our unedited copy (adopted if the record was lost).
     *next = next.installed(&entry.id, &entry.rule());
@@ -206,13 +208,23 @@ pub fn inert_statuses(
             let name = entry.rule_name();
             let status = match daemon.rules.get(&name) {
                 _ if daemon.left_out.contains(&name) => EntryStatus::EditedByYou,
-                Some(rule) if is_unedited(Some(entry), None, rule) => EntryStatus::InFirewall,
+                Some(rule) if is_unedited(Some(entry), None, rule) => in_firewall(rule),
                 Some(_) => EntryStatus::EditedByYou,
                 None => EntryStatus::Unavailable,
             };
             (entry.id.clone(), status)
         })
         .collect()
+}
+
+/// An unedited copy left as it is, enabled or turned off on the Rules page
+/// (re-review 2, M3: its switch then reads off).
+fn in_firewall(rule: &Rule) -> EntryStatus {
+    if rule.enabled {
+        EntryStatus::InFirewall
+    } else {
+        EntryStatus::InFirewallButOff
+    }
 }
 
 #[cfg(test)]

@@ -279,3 +279,28 @@ fn an_installed_id_without_its_copy_is_still_not_reinstalled() {
         EntryStatus::DeletedOutside
     );
 }
+
+/// Re-review 2, M3: an undecided copy turned off on the Rules page has its
+/// own status (its switch reads off), here and on an inert bridge.
+#[test]
+fn an_undecided_copy_turned_off_reads_as_off() {
+    let off = Rule {
+        enabled: false,
+        ..flatpak().rule()
+    };
+    let rules = daemon(&[off]);
+    let planned = plan(entries(), &rules, &Choices::default());
+    assert!(planned.actions.is_empty());
+    assert_eq!(
+        status(&planned, "flatpak-flathub"),
+        EntryStatus::InFirewallButOff
+    );
+    let inert = inert_statuses(
+        entries(),
+        DaemonRules {
+            rules: &rules,
+            left_out: NONE_LEFT_OUT,
+        },
+    );
+    assert_eq!(inert["flatpak-flathub"], EntryStatus::InFirewallButOff);
+}
