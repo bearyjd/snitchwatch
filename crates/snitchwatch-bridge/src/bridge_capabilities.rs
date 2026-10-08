@@ -29,6 +29,12 @@ pub const PAUSE_ANSWERS_WAITING: &str = "pauseAnswersWaiting";
 /// no counts at all.
 pub const RULE_HITS: &str = "ruleHits";
 
+/// The bridge answers a prompt nobody answers after
+/// `deferred_answers::ANSWER_TIMEOUT` (pending rows carry
+/// `answerDeadlineMs`), and accepts `ClientMessage::DecideLater`
+/// (prompt-slot plan Part C). Implies [`APP_BOUND_RULES`].
+pub const DECIDE_LATER: &str = "decideLater";
+
 /// What this bridge advertises to every authenticated client.
 pub fn advertised() -> Vec<String> {
     vec![
@@ -36,6 +42,7 @@ pub fn advertised() -> Vec<String> {
         PROMPT_SLOT.to_string(),
         PAUSE_ANSWERS_WAITING.to_string(),
         RULE_HITS.to_string(),
+        DECIDE_LATER.to_string(),
     ]
 }
 
@@ -70,7 +77,7 @@ mod tests {
     }
 
     #[test]
-    fn this_bridge_advertises_app_bound_rules_the_prompt_slot_pause_answers_and_rule_hits() {
+    fn this_bridge_advertises_its_capabilities() {
         let ack: serde_json::Value = serde_json::from_str(&current_ack()).unwrap();
         assert_eq!(
             ack,
@@ -80,7 +87,8 @@ mod tests {
                     "appBoundRules",
                     "promptSlot",
                     "pauseAnswersWaiting",
-                    "ruleHits"
+                    "ruleHits",
+                    "decideLater"
                 ],
             })
         );

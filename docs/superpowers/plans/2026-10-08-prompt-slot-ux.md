@@ -339,6 +339,58 @@ Branch `feat/78-pause-answers-waiting`, after #86; owner decision: option 1.
     - GUI loss still returns `Unavailable`.
     - The 120 s daemon deadline can no longer be reached.
 
+#### C as implemented (2026-10-08): departures
+
+Branch `feat/prompt-slot-autoanswer`.
+- **Daemon facts checked** (`vendor:daemon/main.go`, `ui/client.go`,
+  `ui/notifications.go`).
+  - A failed `AskRule` gets `applyDefaultAction`, with no rule stored and no
+    disconnect.
+  - While a GUI is connected, that action comes from the `DefaultAction` of
+    the config the GUI echoes back in `Subscribe`. The bridge echoes the
+    daemon's own config.
+  - So `daemon_config` names the row's action only for `allow`, `deny` and
+    `reject` (shown as deny). Anything else names none.
+- **Rows are kept, not removed.** `ConnectionCache::defer_pending` takes a
+  prompt out of pending like `cancel_pending`, so a verdict that already won
+  is kept. The row stays listed with `deferred: true` and its
+  `answerDeadlineMs` cleared.
+  - Timed-out rows also carry `autoAnswer: "noAnswer"`, the extension point
+    #78 added.
+- **"Decide later" is a bridge message**, `ClientMessage::DecideLater`,
+  gated on a new `decideLater` capability.
+  - The bridge picks the policy: P-c when the row's program path is
+    bindable, P-a at once otherwise.
+  - A plain `SetVerdict` could neither mark the row deferred nor give the
+    daemon no answer at once.
+  - Kirigami's `dispatch_to` checks the capability again and routes the
+    message to the row's session. Without the capability, the sheet says
+    plainly that nothing can put the prompt off.
+- **Make a rule…** builds the rule in Kirigami with the bridge crate's own
+  `verdict_to_rule` and sends it as `AddRule`.
+  - It is offered only for a deferred row with a bindable program, and only
+    with remembered durations.
+- **Wording.** Labels say "usually allowed" for an allow, because requeued
+  packets can drop under chain churn (tower's r8). They never name an action
+  the bridge didn't report.
+- **Version skew.** A GUI older than this shows a deferred row with no known
+  action as pending. With a parseable daemon config, that row always has an
+  action.
+- **PR #98 security review fixes.**
+  - Make a rule on a row with no hostname matches `dest.ip`. The bridge
+    shows the IP as the row's host, and `dest.host == <ip>` never matches.
+  - A made rule's name ends in `-made-<unix ms>`, so its `CHANGE_RULE`
+    can't replace the prompt's own rule, e.g. the 5-minute block.
+  - Labels say the block applies "on every host, even ones you allowed": a
+    matching deny wins over an allow rule. Make a rule leaves that block in
+    place and says so.
+  - `daemon_config` parses the daemon's whole `Config` the way Go does:
+    keys matched case-insensitively, `null` and unknown keys ignored. A
+    type error anywhere, or two keys for one setting, means nothing is
+    known, because the daemon then keeps its previous default action.
+  - The decision sheet says when an answer or "Decide later" couldn't be
+    sent.
+
 ### D. Curated defaults for background services (data + BR, M; S3 decided; still blocked on the security PR's `rule_policy.rs` and the reserved-prefix refusal)
 
 12. **Data file.** `crates/snitchwatch-bridge/data/curated-defaults-v1.json`

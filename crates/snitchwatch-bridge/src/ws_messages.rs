@@ -518,6 +518,13 @@ pub enum ClientMessage {
         sender_uid: Option<u32>,
     },
     RecheckDiagnostics,
+    /// "Decide later" on a pending row (prompt-slot plan Part C): the bridge
+    /// blocks the program for 5 minutes, or gives the daemon no answer when
+    /// it can't name the program. Only for bridges advertising
+    /// `bridge_capabilities::DECIDE_LATER`.
+    DecideLater {
+        row_id: String,
+    },
     /// Rule import/export (roadmap P2.7); handled by bridge-cli's
     /// `rules_import` task, never by `upstream::apply`. `request_id` is the
     /// client's, echoed in the answer; `reply` is stamped by `ws_server`
@@ -698,6 +705,8 @@ pub struct ConnectionRow {
     pub protocol: String,
     pub direction: String,
     /// `null` for pending rows, `"allow"` / `"deny"` / `"blocklist"` once decided.
+    /// A `deferred` row may also be `null`: the daemon applied its default
+    /// action and the bridge doesn't know which one that is.
     pub action: Option<String>,
     pub bytes_sent: u64,
     pub bytes_received: u64,
@@ -720,6 +729,15 @@ pub struct ConnectionRow {
     /// `matched_rule`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_answer: Option<AutoAnswer>,
+    /// When the bridge answers this pending row itself if nobody does
+    /// (prompt-slot plan Part C), in Unix milliseconds. Only on pending rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer_deadline_ms: Option<i64>,
+    /// The prompt was put off rather than decided: nobody answered it in
+    /// time, or someone chose "Decide later". A rule can still be made for
+    /// it. Additive, omitted when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub deferred: bool,
 }
 
 /// Why the bridge answered a connection without a person (issue #78).
@@ -730,6 +748,9 @@ pub enum AutoAnswer {
     /// already waiting when the pause took effect, or the connection arrived
     /// during it (`pause_answers`).
     FilterPaused,
+    /// Nobody answered within `deferred_answers::ANSWER_TIMEOUT`, so the
+    /// daemon applied its default action (prompt-slot plan Part C).
+    NoAnswer,
     /// A reason this build doesn't know, from a newer bridge. Keeps the row
     /// readable instead of failing the whole message.
     #[serde(other)]
@@ -880,6 +901,8 @@ mod tests {
                 started_at_ms: 1_700_000_000_000,
                 matched_rule: None,
                 auto_answer: None,
+                answer_deadline_ms: None,
+                deferred: false,
             }],
         };
 
@@ -1013,6 +1036,8 @@ mod tests {
             started_at_ms: 1_700_000_000_000,
             matched_rule: Some("899-firefox-allow-out.json".to_string()),
             auto_answer: None,
+            answer_deadline_ms: None,
+            deferred: false,
         };
         let json = serde_json::to_value(&row).unwrap();
         assert_eq!(json["matchedRule"], "899-firefox-allow-out.json");

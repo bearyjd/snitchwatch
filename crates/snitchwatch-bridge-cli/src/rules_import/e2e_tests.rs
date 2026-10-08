@@ -129,6 +129,7 @@ async fn setup(rules: Vec<Rule>) -> Setup {
         None,
         None,
         RunOptions::in_process(),
+        crate::ANSWER_TIMEOUT,
     )
     .await
     .unwrap();

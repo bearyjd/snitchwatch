@@ -98,7 +98,10 @@ pub fn apply(
         // Routed to bridge-cli's `rules_import` task before this point.
         | ClientMessage::ExportRules { .. }
         | ClientMessage::PreviewRulesImport { .. }
-        | ClientMessage::ApplyRulesImport { .. } => Ok(UpstreamEffect::None),
+        | ClientMessage::ApplyRulesImport { .. }
+        // Intercepted by the pump too: it needs the daemon's settings
+        // (`deferred_answers::decide_later`).
+        | ClientMessage::DecideLater { .. } => Ok(UpstreamEffect::None),
     }
 }
 
@@ -453,6 +456,8 @@ mod tests {
             started_at_ms: 0,
             matched_rule: None,
             auto_answer: None,
+            answer_deadline_ms: None,
+            deferred: false,
         })
     }
 

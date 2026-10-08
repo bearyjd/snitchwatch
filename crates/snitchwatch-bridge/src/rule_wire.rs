@@ -20,7 +20,7 @@ pub const READ_ONLY_REASON: &str = "Snitchwatch can't change or delete this rule
 /// desktop Rules model consumes. Persistent interactive verdicts originate in
 /// this gRPC reply, rather than in an upstream `SetRules` push, so without
 /// this conversion the daemon saves a rule the UI never learns about.
-pub(crate) fn rule_to_wire(rule: &Rule) -> serde_json::Value {
+pub fn rule_to_wire(rule: &Rule) -> serde_json::Value {
     serde_json::json!({
         "name": rule.name,
         "enabled": rule.enabled,

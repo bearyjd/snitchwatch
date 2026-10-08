@@ -112,6 +112,12 @@ pub struct UiService {
     rules: RulesSync,
     /// Who holds the daemon's single prompt slot (`crate::prompt_slot`).
     prompt_slot: crate::prompt_slot::PromptSlotHandle,
+    /// The daemon's own settings from its latest `subscribe`
+    /// (`crate::daemon_config`).
+    daemon_config: crate::daemon_config::SharedDaemonConfig,
+    /// How long a prompt waits before the bridge answers it itself
+    /// (`crate::deferred_answers`).
+    answer_timeout: Duration,
 }
 
 /// Future-drop cleanup also runs for tonic transport cancellation. A closed
@@ -180,7 +186,20 @@ impl UiService {
             commands: DaemonCommands::new(DaemonTransport::Tcp, rules.clone()),
             rules,
             prompt_slot,
+            daemon_config: Default::default(),
+            answer_timeout: crate::deferred_answers::ANSWER_TIMEOUT,
         }
+    }
+
+    /// Tests shorten the time a prompt waits for a person.
+    pub fn with_answer_timeout(mut self, timeout: Duration) -> Self {
+        self.answer_timeout = timeout;
+        self
+    }
+
+    /// The daemon's settings from its latest `subscribe`.
+    pub fn daemon_config_handle(&self) -> crate::daemon_config::SharedDaemonConfig {
+        self.daemon_config.clone()
     }
 
     /// The prompt slot, for the `RequestSnapshot` answer.
@@ -513,6 +532,9 @@ impl Ui for UiService {
                     now_secs,
                 )));
             }
+            // Pending from here: the bridge answers it at this deadline if
+            // nobody does (`deferred_answers`).
+            let row = crate::deferred_answers::with_answer_deadline(row, self.answer_timeout);
             let receiver = cache
                 .insert_admitted(row.clone(), admission.clone(), self.broadcast.clone())
                 .ok_or_else(|| {
@@ -532,20 +554,12 @@ impl Ui for UiService {
             receiver
         };
         let _pending_cleanup = PendingCleanup::hold(self, row_id.clone(), ask_id, slot_what);
-        // Declared after cleanup so cancellation drops the receiver first.
-        let mut verdict_rx = verdict_rx;
-
-        let resolution = tokio::select! {
-            resolution = &mut verdict_rx => resolution,
-            _ = admission.lost() => {
-                if self.cache.lock().await.cancel_pending(&row_id) {
-                    return Err(Status::unavailable("last authenticated GUI session disconnected"));
-                }
-                // A verdict serialized before the loss already settled this Ask.
-                verdict_rx.await
-            }
-        }
-        .map_err(|_| Status::unavailable("pending Ask cancelled before resolution"))?;
+        // Moved in after cleanup is held, so cancellation drops the receiver
+        // first.
+        let resolution = self
+            .wait_for_answer(&row_id, &mut admission, verdict_rx)
+            .await
+            .map_err(answer_wait::Unanswered::into_status)?;
 
         if resolution.verdict == Verdict::Deny {
             self.publish_recent_block(safe_what.clone()).await;
@@ -607,6 +621,9 @@ impl Ui for UiService {
         let conn = request.remote_addr();
         let cfg = request.into_inner();
         info!(client = %cfg.name, version = %cfg.version, "client subscribed");
+        // Never log `cfg.config` itself: see `daemon_config`.
+        self.daemon_config
+            .set(crate::daemon_config::DaemonConfigView::parse(&cfg.config));
         // Staged until this connection's stream says HELLO (see `cache::rules`).
         self.rules.stage(conn, cfg.rules.clone());
         {
@@ -758,6 +775,9 @@ pub(crate) fn display_summary(process: &str, dst_host: &str) -> String {
     )
 }
 
+#[path = "grpc_server/answer_wait.rs"]
+mod answer_wait;
+
 #[cfg(test)]
 #[path = "grpc_server/tests.rs"]
 mod tests;
@@ -777,3 +797,7 @@ mod rule_hits_tests;
 #[cfg(test)]
 #[path = "grpc_server/pause_answer_tests.rs"]
 mod pause_answer_tests;
+
+#[cfg(test)]
+#[path = "grpc_server/answer_timeout_tests.rs"]
+mod answer_timeout_tests;
