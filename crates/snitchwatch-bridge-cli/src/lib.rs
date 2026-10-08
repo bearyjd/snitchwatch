@@ -16,11 +16,13 @@
 
 pub mod activation;
 pub mod cli;
+pub mod storage;
+
+pub use storage::{resolve_storage, BridgeMode, EphemeralReason, RunOptions, Storage};
 
 use anyhow::{Context, Result};
 use snitchwatch_bridge::auth::{self, Token};
-use snitchwatch_bridge::blocklists::store::BlocklistStore;
-use snitchwatch_bridge::blocklists::BlocklistsManager;
+use snitchwatch_bridge::blocklists::worker::{BlocklistTasks, DEFAULT_REFRESH_TICK};
 use snitchwatch_bridge::cache::connections::ConnectionCache;
 use snitchwatch_bridge::cache::rules::{
     prune_expired_rules_every, publish_rules, settle_rule_command,
@@ -217,6 +219,8 @@ pub struct RunningBridge {
     /// The last-loss pause clear (`clear_pause_on_last_session_loss`). It
     /// holds the cache and broadcast sender, so stop it with the bridge.
     pause_clear_handle: tokio::task::JoinHandle<()>,
+    /// The blocklist worker, its refresh loop and event pump (issue #45).
+    blocklist_tasks: BlocklistTasks,
 }
 
 impl RunningBridge {
@@ -233,6 +237,7 @@ impl RunningBridge {
         self.watchdog_handle.abort();
         self.pause_expiry_handle.abort();
         self.pause_clear_handle.abort();
+        self.blocklist_tasks.abort();
         if let Some(tx) = self.ws_shutdown_tx.take() {
             let _ = tx.send(());
         }
@@ -246,7 +251,16 @@ impl RunningBridge {
 ///
 /// Both the WebSocket server and the gRPC `Ui` server are bound and accepting
 /// connections by the time this returns. opensnitchd can dial in immediately.
+///
+/// For in-process callers (tests, the Tauri shell): blocklists are never
+/// persisted ([`RunOptions::in_process`]).
 pub async fn run(config: BridgeConfig) -> Result<RunningBridge> {
+    run_with_options(config, RunOptions::in_process()).await
+}
+
+/// [`run`] with explicit [`RunOptions`]: `main.rs` passes the resolved state
+/// directory; tests may also inject a blocklist fetcher.
+pub async fn run_with_options(config: BridgeConfig, options: RunOptions) -> Result<RunningBridge> {
     let grpc_listener = tokio::net::TcpListener::bind(config.grpc_bind)
         .await
         .with_context(|| format!("failed to bind gRPC listener on {}", config.grpc_bind))?;
@@ -257,6 +271,7 @@ pub async fn run(config: BridgeConfig) -> Result<RunningBridge> {
         tokio_stream::wrappers::TcpListenerStream::new(grpc_listener),
         None,
         None,
+        options,
     )
     .await
 }
@@ -276,6 +291,10 @@ pub async fn run_system(listeners: activation::ActivatedListeners) -> Result<Run
         RootUnixIncoming(listeners.grpc),
         Some(listeners.gui),
         Some(PathBuf::from(activation::TOKEN_PATH)),
+        RunOptions {
+            storage: resolve_storage(BridgeMode::System),
+            blocklist_fetcher: None,
+        },
     )
     .await
 }
@@ -286,6 +305,7 @@ async fn run_with_incoming<I, IO>(
     incoming: I,
     activated_ws: Option<UnixListener>,
     system_token_path: Option<PathBuf>,
+    options: RunOptions,
 ) -> Result<RunningBridge>
 where
     I: tokio_stream::Stream<Item = std::io::Result<IO>> + Send + 'static,
@@ -320,11 +340,13 @@ where
             .with_filter_pause(filter_pause.clone()),
     ));
 
-    // --- BlocklistsManager (in-memory store; callers may swap in a persisted one) ---
-    let blocklists_store = Arc::new(
-        BlocklistStore::open_in_memory().context("failed to open in-memory blocklist store")?,
+    // --- BlocklistsManager: persisted only for a `Persistent` storage ---
+    let blocklists_mgr = storage::build_blocklists_manager(options)?;
+    let blocklist_tasks = BlocklistTasks::spawn(
+        blocklists_mgr.clone(),
+        broadcast_tx.clone(),
+        DEFAULT_REFRESH_TICK,
     );
-    let blocklists_mgr = Arc::new(BlocklistsManager::new(blocklists_store));
 
     // --- ProfilesManager (in-memory store; callers may swap in a persisted one) ---
     let profiles_store =
@@ -560,7 +582,7 @@ where
     });
 
     // --- Profile events → SetProfiles / ProfileChanged broadcasts -----------
-    // Mirrors `ws_server::serve_with_blocklists`'s blocklist-event pump: the
+    // Mirrors `snitchwatch_bridge::blocklists::spawn_event_pump`: the
     // manager owns no knowledge of the WS wire format, so this is where its
     // internal `ProfileEvent`s become the typed `ServerMessage`s every
     // consumer (WS clients, the in-process Kirigami shell) sees.
@@ -605,8 +627,14 @@ where
     let diagnostics_ctx_for_pump = diagnostics_ctx.clone();
     let commands_for_pump = daemon_commands;
     let rules_for_pump = rules.clone();
+    let blocklist_worker = blocklist_tasks.worker.clone();
     tokio::spawn(async move {
         while let Some(msg) = inbound_rx.recv().await {
+            // Blocklist messages go to the single blocklist worker; queueing
+            // never waits on a fetch (issue #45).
+            let Some(msg) = blocklist_worker.try_route(msg) else {
+                continue;
+            };
             // Special-cased before is_profile_message/upstream::apply — this
             // changes the shared filter pause + tray state, not cache state
             // those own. See docs/superpowers/plans/2026-07-12-tray-filter-off.md.
@@ -845,6 +873,7 @@ where
         watchdog_handle,
         pause_expiry_handle,
         pause_clear_handle,
+        blocklist_tasks,
     })
 }
 
@@ -1106,6 +1135,7 @@ mod tests {
             RootUnixIncoming(grpc_listener),
             Some(gui_listener),
             Some(token_path.clone()),
+            RunOptions::in_process(),
         )
         .await
         .unwrap();

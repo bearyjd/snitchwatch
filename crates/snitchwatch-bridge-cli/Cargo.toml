@@ -33,6 +33,7 @@ libc = "0.2"
 
 [dev-dependencies]
 tempfile = { workspace = true }
+async-trait = { workspace = true }
 mock-opensnitchd = { path = "../../tests/mock_opensnitchd" }
 futures-util = { workspace = true }
 tokio-tungstenite = { workspace = true }

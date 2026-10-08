@@ -16,6 +16,11 @@
 //!                           (default: $XDG_RUNTIME_DIR/snitchwatch/bridge.sock)
 //!   SNITCHWATCH_SYSTEM_BRIDGE=1  Strict systemd socket activation: root-only
 //!                           daemon Unix socket and group-accessible GUI socket.
+//!   STATE_DIRECTORY         Set by systemd's `StateDirectory=`: where blocklist
+//!                           subscriptions persist (`blocklists.sqlite3`). The
+//!                           system bridge accepts only /var/lib/snitchwatch.
+//!   SNITCHWATCH_STATE_DIR   Used when STATE_DIRECTORY is unset. With neither,
+//!                           subscriptions are kept in memory only.
 //!
 //! On startup the CLI prints machine-parseable lines to stdout so test
 //! harnesses and wrapping processes (and the GUI shell) can discover the
@@ -37,7 +42,10 @@ use std::io::{ErrorKind, Write};
 
 use anyhow::{Context, Result};
 use snitchwatch_bridge_cli::cli::{self, EarlyExit};
-use snitchwatch_bridge_cli::{activation, run, run_system, BridgeConfig, GrpcEndpoint};
+use snitchwatch_bridge_cli::{
+    activation, resolve_storage, run_system, run_with_options, BridgeConfig, BridgeMode,
+    GrpcEndpoint, RunOptions,
+};
 use tracing::info;
 
 fn main() -> Result<()> {
@@ -87,7 +95,13 @@ async fn run_bridge() -> Result<()> {
             run_system(activation::load().context("system socket activation failed")?).await?
         }
         Some(_) => anyhow::bail!("SNITCHWATCH_SYSTEM_BRIDGE must be 1 when set"),
-        None => run(BridgeConfig::from_env()?).await?,
+        None => {
+            let options = RunOptions {
+                storage: resolve_storage(BridgeMode::User),
+                blocklist_fetcher: None,
+            };
+            run_with_options(BridgeConfig::from_env()?, options).await?
+        }
     };
 
     // Machine-parseable lines for test harnesses / the GUI launcher. Order

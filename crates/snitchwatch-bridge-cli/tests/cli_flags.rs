@@ -9,11 +9,12 @@
 //! 3. The no-argument path still starts the bridge and prints its discovery
 //!    lines, i.e. the early exit didn't change the default behavior.
 //!
-//! Every child runs fully isolated: `current_dir` and `XDG_RUNTIME_DIR` are a
-//! fresh temp dir, the WS socket is a *relative* path (stays well under the
-//! 108-byte `sun_path` limit), and the gRPC bind is ephemeral. Nothing here
-//! may ever touch a live bridge's `$XDG_RUNTIME_DIR/snitchwatch/` or
-//! `127.0.0.1:50051`.
+//! Every child runs fully isolated: a cleared environment (so no inherited
+//! `SNITCHWATCH_*` or `STATE_DIRECTORY`), `current_dir` and `XDG_RUNTIME_DIR`
+//! are a fresh temp dir, the WS socket is a *relative* path (stays well under
+//! the 108-byte `sun_path` limit), and the gRPC bind is ephemeral. Nothing
+//! here may ever touch a live bridge's `$XDG_RUNTIME_DIR/snitchwatch/`,
+//! state directory or `127.0.0.1:50051`.
 
 use std::io::{BufRead, BufReader, Read};
 use std::net::SocketAddr;
@@ -40,9 +41,10 @@ fn isolated_command(dir: &Path, args: &[&str]) -> Command {
     let mut cmd = Command::new(BIN);
     cmd.args(args)
         .current_dir(dir)
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
         .env("SNITCHWATCH_WS_SOCKET", "./bridge.sock")
         .env("SNITCHWATCH_GRPC_BIND", "127.0.0.1:0")
-        .env_remove("SNITCHWATCH_SYSTEM_BRIDGE")
         .env("XDG_RUNTIME_DIR", dir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
