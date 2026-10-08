@@ -19,6 +19,7 @@ use cxx_qt::Threading;
 use cxx_qt_lib::{QByteArray, QHash, QHashPair_i32_QByteArray, QModelIndex, QString, QVariant};
 
 use crate::rules::row_store::{RuleSource, RulesStore};
+use crate::rules::simulator::SimulationForm;
 use snitchwatch_bridge::ws_messages::{ClientMessage, ServerMessage};
 
 // Roles.
@@ -123,23 +124,19 @@ pub mod qobject {
         fn select_rule_by_name(self: Pin<&mut RulesModel>, name: &QString) -> QString;
 
         /// Rule-match simulator (Little-Snitch-parity "Simulate" panel on
-        /// `RulesPage.qml`): evaluate a candidate process/host/port/protocol
-        /// against the currently cached rules using opensnitchd's own
-        /// precedence semantics (see `rules::simulator`'s module docs for
-        /// exactly what is and isn't reproduced). Pure, synchronous,
-        /// in-memory evaluation over already-cached data — never touches the
-        /// network or the Qt event loop's async machinery, so it's safe to
-        /// call directly from QML. Returns a JSON-encoded
-        /// `rules::simulator::SimulationResult`.
+        /// `RulesPage.qml`): evaluate a candidate connection against the
+        /// currently cached rules the way opensnitchd v1.8.0 does (see
+        /// `rules::simulator`'s module docs for exactly what is and isn't
+        /// reproduced). `form_json` is the sheet's fields as typed, one JSON
+        /// object (`rules::simulator::SimulationForm`); a blank advanced
+        /// field means unknown. Pure, synchronous, in-memory evaluation over
+        /// already-cached data — never touches the network or the Qt event
+        /// loop's async machinery, so it's safe to call directly from QML.
+        /// Returns a JSON-encoded `rules::simulator::SimulationResult`, or an
+        /// empty string if `form_json` isn't a form.
         #[qinvokable]
         #[cxx_name = "simulate"]
-        fn simulate(
-            self: &RulesModel,
-            process_path: &QString,
-            dest_host: &QString,
-            dest_port: i32,
-            protocol: &QString,
-        ) -> QString;
+        fn simulate(self: &RulesModel, form_json: &QString) -> QString;
     }
 
     unsafe extern "RustQt" {
@@ -272,20 +269,15 @@ impl qobject::RulesModel {
         }
     }
 
-    fn simulate(
-        &self,
-        process_path: &QString,
-        dest_host: &QString,
-        dest_port: i32,
-        protocol: &QString,
-    ) -> QString {
-        let input = crate::rules::simulator::SimulationInput {
-            process_path: process_path.to_string(),
-            dest_host: dest_host.to_string(),
-            dest_port: dest_port.clamp(0, u16::MAX as i32) as u16,
-            protocol: protocol.to_string(),
+    fn simulate(&self, form_json: &QString) -> QString {
+        let form = match serde_json::from_str::<SimulationForm>(&form_json.to_string()) {
+            Ok(form) => form,
+            Err(e) => {
+                tracing::warn!(error = %e, "RulesModel: bad simulate form JSON");
+                return QString::from("");
+            }
         };
-        let result = crate::rules::simulator::simulate(&self.store, &input);
+        let result = crate::rules::simulator::simulate(&self.store, &form.to_input());
         match serde_json::to_string(&result) {
             Ok(json) => QString::from(&json),
             Err(e) => {

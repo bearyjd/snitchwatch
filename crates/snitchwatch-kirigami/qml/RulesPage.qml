@@ -74,7 +74,18 @@ Kirigami.ScrollablePage {
     property string simulateMatchedRule: ""
     property string simulateAction: ""
     property int simulatePrecedence: -1
-    property var simulateUnsupported: []
+    // The three below are plain-text lines built from the simulator's result
+    // (rule names are data, so they only ever go into PlainText labels).
+    // Operands that can't be simulated, with the reason.
+    property string simulateUnsupported: ""
+    // Conditions left undecided because an advanced input was blank.
+    property string simulateUnevaluated: ""
+    // Notes on how the deciding rule matched (hash conditions).
+    property string simulateWarnings: ""
+    // Exposed for the headless simulator probe
+    // (tests/rules_simulator_advanced_qml.rs).
+    property alias simulateUidField: simUid
+    property alias simulateChecksumsBox: simChecksums
 
     function actionColor(action) {
         return action === "allow" ? Kirigami.Theme.positiveTextColor : Kirigami.Theme.negativeTextColor;
@@ -155,19 +166,42 @@ Kirigami.ScrollablePage {
     // against the sheet's candidate inputs and populate the result section.
     function runSimulation() {
         if (!page.model) return;
-        const json = page.model.simulate(
-            simProcessPath.text,
-            simHost.text,
-            simPort.value,
-            simProtocol.currentText
-        );
+        const json = page.model.simulate(JSON.stringify({
+            processPath: simProcessPath.text,
+            destHost: simHost.text,
+            destPort: simPort.value,
+            protocol: simProtocol.currentText,
+            parentPaths: simParentPaths.text,
+            command: simCommand.text,
+            pid: simPid.text,
+            uid: simUid.text,
+            env: simEnv.text,
+            srcIp: simSrcIp.text,
+            srcPort: simSrcPort.text,
+            destIp: simDestIp.text,
+            ifaceIn: simIfaceIn.text,
+            ifaceOut: simIfaceOut.text,
+            checksums: simChecksums.modes[simChecksums.currentIndex],
+            md5: simMd5.text
+        }));
         if (!json) return;
         const result = JSON.parse(json);
         page.simulateMatchedRule = result.matchedRule || "";
         page.simulateAction = result.action || "";
         page.simulatePrecedence = (result.precedence === undefined || result.precedence === null)
             ? -1 : result.precedence;
-        page.simulateUnsupported = result.unsupportedOperands || [];
+        page.simulateUnsupported = (result.unsupportedOperands || [])
+            .map(function (u) { return u.operand + " — " + u.reason; })
+            .join("\n");
+        const undecided = result.unevaluated || [];
+        const shown = undecided.slice(0, 10).map(function (u) {
+            return u.rule + ": " + u.operand + " — input missing: " + u.missing;
+        });
+        if (undecided.length > shown.length) {
+            shown.push("and " + (undecided.length - shown.length) + " more");
+        }
+        page.simulateUnevaluated = shown.join("\n");
+        page.simulateWarnings = (result.warnings || []).join("\n");
         page.simulateRan = true;
     }
 
@@ -512,7 +546,7 @@ Kirigami.ScrollablePage {
                 wrapMode: Text.Wrap
                 opacity: 0.7
                 font: Kirigami.Theme.smallFont
-                text: "Evaluates a candidate connection against the currently cached rules, using opensnitchd's own precedence rules. This is a simulation over cached data, not a live daemon verdict."
+                text: "Evaluates a candidate connection against the currently cached rules, using opensnitchd's own precedence rules. This is a simulation over cached data, not a live daemon verdict. A blank field is unknown, so rules with a condition on it are reported as not evaluated instead of being guessed; the one exception is the destination host, where blank means a connection to a bare IP address."
             }
 
             Kirigami.FormLayout {
@@ -540,7 +574,119 @@ Kirigami.ScrollablePage {
                 Controls.ComboBox {
                     id: simProtocol
                     Kirigami.FormData.label: "Protocol"
-                    model: ["tcp", "udp"]
+                    // opensnitchd names IPv6 flows tcp6/udp6/...; a rule for
+                    // `tcp` does not match `tcp6`.
+                    model: ["tcp", "tcp6", "udp", "udp6", "udplite", "udplite6",
+                            "sctp", "sctp6", "icmp", "icmp6"]
+                }
+            }
+
+            Controls.Button {
+                Layout.fillWidth: true
+                text: advancedInputs.visible ? "Hide advanced inputs" : "Advanced inputs"
+                icon.name: advancedInputs.visible ? "arrow-up" : "arrow-down"
+                onClicked: advancedInputs.visible = !advancedInputs.visible
+            }
+
+            // Everything opensnitchd can match on beyond the four fields
+            // above. Every field here is optional: blank means UNKNOWN (the
+            // simulator reports rules that need it as not evaluated, it never
+            // guesses). `runSimulation` sends them as typed.
+            ColumnLayout {
+                id: advancedInputs
+                Layout.fillWidth: true
+                visible: false
+                spacing: Kirigami.Units.largeSpacing
+
+                Controls.Label {
+                    Layout.fillWidth: true
+                    wrapMode: Text.Wrap
+                    opacity: 0.7
+                    font: Kirigami.Theme.smallFont
+                    text: "Everything else opensnitchd can match on. Leave a field blank if you don't know it."
+                }
+
+                Kirigami.FormLayout {
+                    Layout.fillWidth: true
+
+                    Controls.TextArea {
+                        id: simParentPaths
+                        Kirigami.FormData.label: "Parent programs"
+                        placeholderText: "One path per line, nearest first"
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: Kirigami.Units.gridUnit * 4
+                    }
+                    Controls.TextField {
+                        id: simCommand
+                        Kirigami.FormData.label: "Command line"
+                        placeholderText: "/usr/bin/curl -s https://github.com"
+                        Layout.fillWidth: true
+                    }
+                    Controls.TextField {
+                        id: simPid
+                        Kirigami.FormData.label: "Process ID"
+                        validator: IntValidator { bottom: 0; top: 2147483647 }
+                        Layout.fillWidth: true
+                    }
+                    Controls.TextField {
+                        id: simUid
+                        Kirigami.FormData.label: "User ID"
+                        placeholderText: "1000"
+                        validator: IntValidator { bottom: 0; top: 2147483647 }
+                        Layout.fillWidth: true
+                    }
+                    Controls.TextArea {
+                        id: simEnv
+                        Kirigami.FormData.label: "Environment"
+                        placeholderText: "NAME=value, one per line; variables not listed count as unset"
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: Kirigami.Units.gridUnit * 4
+                    }
+                    Controls.TextField {
+                        id: simSrcIp
+                        Kirigami.FormData.label: "Source IP"
+                        placeholderText: "192.168.1.10"
+                        Layout.fillWidth: true
+                    }
+                    Controls.TextField {
+                        id: simSrcPort
+                        Kirigami.FormData.label: "Source port"
+                        validator: IntValidator { bottom: 0; top: 65535 }
+                        Layout.fillWidth: true
+                    }
+                    Controls.TextField {
+                        id: simDestIp
+                        Kirigami.FormData.label: "Destination IP"
+                        placeholderText: "93.184.216.34"
+                        Layout.fillWidth: true
+                    }
+                    Controls.TextField {
+                        id: simIfaceIn
+                        Kirigami.FormData.label: "Inbound interface"
+                        placeholderText: "eth0"
+                        Layout.fillWidth: true
+                    }
+                    Controls.TextField {
+                        id: simIfaceOut
+                        Kirigami.FormData.label: "Outbound interface"
+                        placeholderText: "eth0"
+                        Layout.fillWidth: true
+                    }
+                    Controls.ComboBox {
+                        id: simChecksums
+                        Kirigami.FormData.label: "Checksums"
+                        // Parallel to `modes`, which is what the simulator reads.
+                        readonly property var modes: ["unknown", "off", "on", "on-none"]
+                        model: ["Unknown", "Off", "On, program's MD5 below",
+                                "On, program has none recorded"]
+                    }
+                    Controls.TextField {
+                        id: simMd5
+                        Kirigami.FormData.label: "Program MD5"
+                        placeholderText: "Leave blank if unknown"
+                        enabled: simChecksums.currentIndex === 2
+                        Layout.fillWidth: true
+                    }
                 }
             }
 
@@ -564,6 +710,13 @@ Kirigami.ScrollablePage {
                 Controls.Label {
                     Layout.fillWidth: true
                     wrapMode: Text.Wrap
+                    opacity: 0.7
+                    font: Kirigami.Theme.smallFont
+                    text: "Simulated result: not a live daemon verdict."
+                }
+                Controls.Label {
+                    Layout.fillWidth: true
+                    wrapMode: Text.Wrap
                     font.bold: true
                     textFormat: Text.PlainText
                     text: page.simulateMatchedRule.length > 0
@@ -581,14 +734,35 @@ Kirigami.ScrollablePage {
                 }
                 Controls.Label {
                     Layout.fillWidth: true
+                    visible: page.simulateWarnings.length > 0
+                    wrapMode: Text.Wrap
+                    opacity: 0.8
+                    font: Kirigami.Theme.smallFont
+                    color: Kirigami.Theme.neutralTextColor
+                    textFormat: Text.PlainText
+                    text: page.simulateWarnings
+                }
+                Controls.Label {
+                    Layout.fillWidth: true
+                    visible: page.simulateUnevaluated.length > 0
+                    wrapMode: Text.Wrap
+                    opacity: 0.8
+                    font: Kirigami.Theme.smallFont
+                    color: Kirigami.Theme.neutralTextColor
+                    textFormat: Text.PlainText
+                    text: "Not evaluated, because an input was left blank. The result assumes these rules did not match:\n"
+                          + page.simulateUnevaluated
+                }
+                Controls.Label {
+                    Layout.fillWidth: true
                     visible: page.simulateUnsupported.length > 0
                     wrapMode: Text.Wrap
                     opacity: 0.8
                     font: Kirigami.Theme.smallFont
                     color: Kirigami.Theme.neutralTextColor
                     textFormat: Text.PlainText
-                    text: "Note: this simulator doesn't evaluate " + page.simulateUnsupported.join(", ")
-                          + " — the result may not reflect real daemon behaviour for rules using them."
+                    text: "Can't simulate these conditions. The result assumes the rules using them did not match:\n"
+                          + page.simulateUnsupported
                 }
             }
         }

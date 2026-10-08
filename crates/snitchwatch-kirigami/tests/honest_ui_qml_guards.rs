@@ -363,10 +363,13 @@ fn rules_page_labels_showing_rule_data_are_plain_text() {
             "page.simulateMatchedRule",
             "page.simulateAction",
             "page.simulateUnsupported",
+            // The simulator's lines name rules and operands from the daemon.
+            "page.simulateUnevaluated",
+            "page.simulateWarnings",
             // Issue #44: names the destination of an all-apps rule.
             "row.allAppsHint",
         ],
-        12,
+        14,
     );
 }
 
