@@ -255,11 +255,17 @@ mod tests {
     }
 
     /// A FIFO named `<db>-journal` hangs SQLite at startup; the store falls
-    /// back to memory with a plain reason instead.
+    /// back to memory with a plain reason instead. SQLite deletes a journal
+    /// beside an empty database unread, so the store is saved once first:
+    /// that is the case that hangs.
     #[test]
     fn a_fifo_beside_the_profile_database_falls_back_to_memory_without_hanging() {
         use std::os::unix::ffi::OsStrExt;
         let (_dir, state) = state();
+        ProfileStore::open(&state.join(PROFILE_DB_FILE))
+            .unwrap()
+            .upsert_profile(&home())
+            .unwrap();
         let journal = state.join(format!("{PROFILE_DB_FILE}-journal"));
         let c_path = std::ffi::CString::new(journal.as_os_str().as_bytes()).unwrap();
         // SAFETY: a valid NUL-terminated path.

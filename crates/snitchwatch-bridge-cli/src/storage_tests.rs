@@ -508,6 +508,66 @@ fn securing_a_state_directory_refuses_a_symlink_and_a_file() {
     assert!(secure_user_state_dir(&file, effective_ids().0).is_err());
 }
 
+/// What `f` logs, formatted as the bridge's log lines are, without colour.
+fn captured_logs(f: impl FnOnce()) -> String {
+    #[derive(Clone, Default)]
+    struct Buffer(Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for Buffer {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let buffer = Buffer::default();
+    let writer = buffer.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_writer(move || writer.clone())
+        .finish();
+    // While only one subscriber exists, tracing asks the *current thread's*
+    // whether a log line is wanted the first time that line runs, and caches
+    // the answer for every thread. Another test meeting the same `warn!`
+    // first, on its own thread with no subscriber, would then silence it
+    // here. With a second one alive tracing asks all of them instead.
+    let _second = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+    tracing::subscriber::with_default(subscriber, f);
+    let bytes = buffer.0.lock().unwrap().clone();
+    String::from_utf8(bytes).unwrap()
+}
+
+/// Changing a directory's mode is something the user didn't ask for, on a
+/// directory they may share on purpose: it is a warning, and it says which
+/// write access went.
+#[test]
+fn tightening_a_state_directory_is_a_warning_that_says_what_was_removed() {
+    for (mode, removed, kept) in [
+        (0o775, "removed group write access", "other"),
+        (0o757, "removed other write access", "group"),
+        (0o777, "removed group and other write access", ""),
+    ] {
+        let (_dir, state) = dir_with_mode(mode);
+        let logs = captured_logs(|| {
+            assert_eq!(secure_user_state_dir(&state, effective_ids().0), Ok(()));
+        });
+        assert!(logs.contains(" WARN "), "{mode:o}: {logs}");
+        assert!(logs.contains(removed), "{mode:o}: {logs}");
+        if !kept.is_empty() {
+            assert!(
+                !logs.contains(&format!("removed {kept}")),
+                "{mode:o}: {logs}"
+            );
+        }
+    }
+    let (_dir, state) = dir_with_mode(0o755);
+    let logs = captured_logs(|| {
+        assert_eq!(secure_user_state_dir(&state, effective_ids().0), Ok(()));
+    });
+    assert!(!logs.contains("removed"), "nothing to remove: {logs}");
+}
+
 /// The system bridge keeps its own, stricter rule.
 #[test]
 fn system_mode_still_uses_the_system_check() {
@@ -539,11 +599,14 @@ fn mkfifo(path: &Path) {
 }
 
 /// A FIFO named `<db>-journal` used to hang SQLite at startup; the store now
-/// falls back to memory like any other store that can't be opened.
+/// falls back to memory like any other store that can't be opened. SQLite
+/// deletes a journal beside an empty database unread, so the store is saved
+/// once first: that is the case that hangs.
 #[test]
 fn a_fifo_beside_the_blocklist_database_falls_back_to_memory_without_hanging() {
     let dir = tempfile::tempdir().unwrap();
     let state = dir.path().canonicalize().unwrap();
+    drop(BlocklistStore::open(&state.join(BLOCKLIST_DB_FILE)).unwrap());
     mkfifo(&state.join(format!("{BLOCKLIST_DB_FILE}-journal")));
     let (store, storage) =
         within(move || open_blocklist_store(Storage::Persistent(state)).unwrap());

@@ -11,6 +11,18 @@
 //! and is shown to the user through `SetBlocklists.storage` and
 //! `SetProfiles.storage`.
 //!
+//! Only the state directory itself is checked, not its parents. Whoever can
+//! write to a parent can rename the directory away and put their own in its
+//! place, after the check, and SQLite opens its files by path for as long as
+//! the bridge runs. The system bridge's `/var/lib` parents are root's. A
+//! per-user bridge trusts that nobody but the user and root can write above
+//! its directory, which holds under a home directory; the README says so.
+//! Walking the parents was judged disproportionate: a umask of 002 makes
+//! `~/.local` and `~/.local/share` group-writable (by the user's own private
+//! group), so a strict walk would push those users to memory-only storage,
+//! and telling a private group from a shared one means reading the group
+//! database.
+//!
 //! Blocklists are enforced (issue #45 PR B) only by the **system** bridge
 //! with a `Persistent` store: the daemon's rules point at list files under
 //! `<state>/blocklists`, which must outlive the bridge process and be
@@ -305,11 +317,17 @@ pub(crate) fn secure_user_state_dir(dir: &Path, euid: u32) -> std::result::Resul
                     dir.display()
                 )
             })?;
-        info!(
+        let removed = match (facts.mode & 0o020 != 0, facts.mode & 0o002 != 0) {
+            (true, true) => "group and other write",
+            (true, false) => "group write",
+            _ => "other write",
+        };
+        warn!(
             state_dir = %dir.display(),
             from = format_args!("{:o}", facts.mode & 0o7777),
             to = format_args!("{mode:o}"),
-            "dropped group and other write access to the state directory"
+            "removed {removed} access to the state directory, which holds the bridge's \
+             databases"
         );
     }
     Ok(())
