@@ -44,6 +44,7 @@ fn main() {
         .file("src/rules_model.rs")
         .file("src/rules_io_controller.rs")
         .file("src/rule_editor_controller.rs")
+        .file("src/make_rule_controller.rs")
         .file("src/profiles_model.rs")
         .file("src/curated_defaults_model.rs")
         .file("src/traffic_model.rs")

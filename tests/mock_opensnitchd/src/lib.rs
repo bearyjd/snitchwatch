@@ -12,8 +12,8 @@ pub mod round_trip;
 
 use snitchwatch_proto::protocol::ui_client::UiClient;
 use snitchwatch_proto::protocol::{
-    Alert, ClientConfig, Connection, MsgResponse, Notification, NotificationReply,
-    NotificationReplyCode, PingReply, PingRequest, Rule,
+    Alert, ClientConfig, Connection, Event, MsgResponse, Notification, NotificationReply,
+    NotificationReplyCode, Operator, PingReply, PingRequest, Rule,
 };
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -558,6 +558,45 @@ fn validate_rule_name(name: &str) -> Result<(), MockError> {
     Ok(())
 }
 
+/// The description the bazzite-tower opensnitchd fork gives the synthetic
+/// rule of a connection its `DefaultAction` decided (E3, plan
+/// `docs/superpowers/plans/2026-10-08-default-applied-events.md`). Kept here
+/// as the fork's side of the contract; a test checks it against the bridge's.
+pub const DEFAULT_ACTION_MARKER: &str = "snitchwatch:default-action";
+
+/// The `Statistics.events[]` entry the fork appends when no rule matched
+/// `conn` and its `DefaultAction` decided it (an Ask failed or timed out, or
+/// the prompt slot was busy). `action` is the action it applied: `allow`,
+/// `deny` or `reject`. Stock v1.8.0 appends nothing for such a connection.
+///
+/// Each one grows the daemon's `rule_misses`, never `rule_hits`, so a ping
+/// carrying it must count it there. `time` is left empty: the bridge reads
+/// `unixnano` only.
+pub fn default_action_event(conn: Connection, action: &str, unixnano: i64) -> Event {
+    Event {
+        time: String::new(),
+        connection: Some(conn),
+        rule: Some(Rule {
+            created: unixnano / 1_000_000_000,
+            name: String::new(),
+            description: DEFAULT_ACTION_MARKER.to_string(),
+            enabled: true,
+            precedence: false,
+            nolog: false,
+            action: action.to_string(),
+            duration: "once".to_string(),
+            operator: Some(Operator {
+                r#type: "simple".to_string(),
+                operand: "true".to_string(),
+                data: String::new(),
+                sensitive: false,
+                list: vec![],
+            }),
+        }),
+        unixnano,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -924,5 +963,39 @@ mod tests {
         let mut rule = valid_rule();
         rule.operator.as_mut().unwrap().operand = "process.env.PATH".to_string();
         assert!(validate_rule_shape(&rule).is_ok());
+    }
+
+    // -- E3: the fork's default-applied event ------------------------------
+
+    #[test]
+    fn a_default_action_event_has_the_agreed_shape() {
+        let conn = Connection {
+            dst_host: "example.com".into(),
+            ..Default::default()
+        };
+        let event = default_action_event(conn.clone(), "reject", 1_700_000_000_123_456_789);
+        assert_eq!(event.connection, Some(conn));
+        assert_eq!(event.unixnano, 1_700_000_000_123_456_789);
+        let rule = event.rule.unwrap();
+        assert_eq!(rule.name, "");
+        assert_eq!(rule.description, "snitchwatch:default-action");
+        assert_eq!(rule.action, "reject");
+        assert_eq!(rule.duration, "once");
+        assert!(rule.enabled && !rule.precedence && !rule.nolog);
+        assert_eq!(rule.created, 1_700_000_000);
+        let op = rule.operator.as_ref().unwrap();
+        assert_eq!(
+            (op.r#type.as_str(), op.operand.as_str(), op.data.as_str()),
+            ("simple", "true", "")
+        );
+        assert!(!op.sensitive && op.list.is_empty());
+        // The bridge recognizes it as exactly that.
+        assert_eq!(
+            DEFAULT_ACTION_MARKER,
+            snitchwatch_bridge::daemon_contract::DEFAULT_ACTION_MARKER
+        );
+        assert!(snitchwatch_bridge::daemon_contract::is_default_action_rule(
+            &rule
+        ));
     }
 }

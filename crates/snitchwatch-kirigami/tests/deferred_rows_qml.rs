@@ -244,6 +244,12 @@ Controls.ApplicationWindow {
                     page.openInspector(probeWindow.rowDelegate("1:to-allow"));
                     probeWindow.check(page.inspectVerdictText === probeWindow.labels["1:to-allow"],
                                       "inspector verdict " + page.inspectVerdictText);
+                    // E3: the daemon may list this connection again, decided by default.
+                    probeWindow.check(page.makeRuleSheet.alsoListedNote.visible
+                                      && page.makeRuleSheet.alsoListedNote.text === "The firewall may also list this connection, and its retries, separately as decided by its default action."
+                                      && page.makeRuleSheet.alsoListedNote.textFormat === Text.PlainText,
+                                      "two-rows hint: " + page.makeRuleSheet.alsoListedNote.visible + " '"
+                                      + page.makeRuleSheet.alsoListedNote.text + "'");
                     probeWindow.check(page.makeRuleSheet.visible
                                       && page.makeRuleSheet.openButton.visible,
                                       "no Make a rule for a put-off row");
@@ -256,6 +262,8 @@ Controls.ApplicationWindow {
                     probeWindow.check(!page.makeRuleSheet.blockNote.visible,
                                       "the block note on a row with no block");
                     page.openInspector(probeWindow.rowDelegate("1:later-blocked"));
+                    probeWindow.check(!page.makeRuleSheet.alsoListedNote.visible,
+                                      "two-rows hint on a row a rule decided");
                     page.makeRuleSheet.openButton.clicked();
                     probeWindow.check(page.makeRuleSheet.blockNote.visible,
                                       "no note that the 5-minute block stays");

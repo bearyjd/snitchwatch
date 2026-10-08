@@ -27,7 +27,9 @@ use cxx_qt_lib::{
 use crate::connections::filter::ConnectionFilter;
 use crate::connections::grouping::{GroupTree, VisibleEntry};
 use crate::connections::outcome::{is_pending, outcome_text};
-use crate::connections::row_store::{matched_rule_display, ModelOp, RowStore, Verdict};
+use crate::connections::row_store::{
+    matched_rule_display, matched_rule_name, ModelOp, RowStore, Verdict,
+};
 use crate::inline_deny::{self, InlineDeny};
 use crate::pending_decision::VerdictChoice;
 use snitchwatch_bridge::translator::process_binding::is_bindable_process_path;
@@ -68,14 +70,15 @@ const ROLE_MATCHED_RULE_DISPLAY: i32 = 19;
 const ROLE_SOURCE_SESSION: i32 = 20;
 /// The bridge allowed this row once because filtering was paused (#78).
 const ROLE_ANSWERED_WHILE_PAUSED: i32 = 21;
-/// A deferred row's verdict label (`connections::outcome::outcome_text`);
-/// empty otherwise. Prompt-slot plan Part C.
+/// A deferred row's verdict label (`connections::outcome::outcome_text`),
+/// or a default-decided row's (E3); empty otherwise. Prompt-slot plan Part C.
 const ROLE_OUTCOME_TEXT: i32 = 22;
 /// When the bridge answers a pending row itself, in Unix ms; -1 if never.
 /// A `real`: epoch milliseconds overflow a QML `int`.
 const ROLE_ANSWER_DEADLINE_MS: i32 = 23;
-/// The prompt was put off, so "Make a rule…" is offered.
-const ROLE_DEFERRED: i32 = 24;
+/// "Make a rule…" is offered (`make_rule::offers_make_rule`): the prompt was
+/// put off, or the firewall's default action decided the row (E3).
+const ROLE_MAKE_RULE_OFFERED: i32 = 24;
 
 #[cxx_qt::bridge]
 pub mod qobject {
@@ -238,10 +241,13 @@ pub mod qobject {
         #[cxx_name = "simulationPrefillJson"]
         fn simulation_prefill_json(self: &ConnectionsModel, id: &QString) -> QString;
 
-        /// "Make a rule…" for put-off row `id` (prompt-slot plan Part C):
-        /// sends the rule `crate::make_rule` builds from the sheet's tokens
-        /// to the row's bridge session. False when no rule may be made or it
-        /// wasn't queued.
+        /// "Make a rule…" for row `id` that `make_rule::offers_make_rule`
+        /// accepts (put off, or decided by the default action): sends the
+        /// rule `crate::make_rule` builds from the sheet's tokens to the
+        /// row's bridge session, asking for its result under `request_id`
+        /// (`MakeRuleController.begin`). False when no rule may be made or it
+        /// wasn't queued. True only means sent: the result says whether the
+        /// rule was created.
         #[qinvokable]
         #[cxx_name = "makeRule"]
         fn make_rule(
@@ -250,6 +256,7 @@ pub mod qobject {
             choice: &QString,
             scope: &QString,
             duration: &QString,
+            request_id: &QString,
         ) -> bool;
 
         /// Whether `id` names a row that is still awaiting a decision: present
@@ -574,14 +581,12 @@ impl qobject::ConnectionsModel {
             | ROLE_GROUP_ALLOWED
             | ROLE_GROUP_DENIED
             | ROLE_GROUP_BLOCKLISTED => QVariant::from(&0i32),
-            ROLE_MATCHED_RULE => {
-                QVariant::from(&QString::from(row.matched_rule.as_deref().unwrap_or("")))
-            }
+            ROLE_MATCHED_RULE => QVariant::from(&QString::from(matched_rule_name(row))),
             ROLE_MATCHED_RULE_DISPLAY => QVariant::from(&QString::from(&matched_rule_display(row))),
             ROLE_ANSWERED_WHILE_PAUSED => QVariant::from(&answered_while_paused(row)),
             ROLE_OUTCOME_TEXT => QVariant::from(&QString::from(outcome_text(row))),
             ROLE_ANSWER_DEADLINE_MS => QVariant::from(&answer_deadline_ms(row)),
-            ROLE_DEFERRED => QVariant::from(&row.deferred),
+            ROLE_MAKE_RULE_OFFERED => QVariant::from(&crate::make_rule::offers_make_rule(row)),
             _ => QVariant::default(),
         }
     }
@@ -621,7 +626,7 @@ impl qobject::ConnectionsModel {
             ROLE_ANSWER_DEADLINE_MS,
             QByteArray::from("answerDeadlineMs"),
         );
-        roles.insert(ROLE_DEFERRED, QByteArray::from("deferred"));
+        roles.insert(ROLE_MAKE_RULE_OFFERED, QByteArray::from("makeRuleOffered"));
         roles
     }
 
@@ -987,6 +992,8 @@ impl qobject::ConnectionsModel {
             bytes_received: u64,
             #[serde(rename = "bindableProcessPath")]
             bindable_process_path: bool,
+            #[serde(rename = "alsoListedByDefault")]
+            also_listed_by_default: bool,
         }
 
         let details = RowDetails {
@@ -996,6 +1003,7 @@ impl qobject::ConnectionsModel {
             bindable_process_path: is_bindable_process_path(
                 row.process_path.as_deref().unwrap_or_default(),
             ),
+            also_listed_by_default: crate::connections::outcome::may_be_listed_again(row),
         };
         QString::from(&serde_json::to_string(&details).unwrap_or_else(|e| {
             tracing::error!(error = %e, "ConnectionsModel: row details serialize failed");
@@ -1024,15 +1032,27 @@ impl qobject::ConnectionsModel {
         choice: &QString,
         scope: &QString,
         duration: &QString,
+        request_id: &QString,
     ) -> bool {
         let id = id.to_string();
         let made_at_ms = now_ms();
         self.store
             .row_by_id(&id)
             .and_then(|row| {
-                let (choice, scope, duration) =
-                    (choice.to_string(), scope.to_string(), duration.to_string());
-                crate::make_rule::add_rule_message(row, &choice, &scope, &duration, made_at_ms)
+                let (choice, scope, duration, request_id) = (
+                    choice.to_string(),
+                    scope.to_string(),
+                    duration.to_string(),
+                    request_id.to_string(),
+                );
+                crate::make_rule::add_rule_message(
+                    row,
+                    &choice,
+                    &scope,
+                    &duration,
+                    made_at_ms,
+                    &request_id,
+                )
             })
             .is_some_and(|msg| crate::bridge_feed::dispatch_for_row(&id, msg))
     }
@@ -1274,7 +1294,7 @@ fn grouped_entry_data(entry: &VisibleEntry, role: i32, store: &RowStore) -> QVar
             ROLE_MATCHED_RULE | ROLE_MATCHED_RULE_DISPLAY | ROLE_OUTCOME_TEXT => {
                 QVariant::from(&QString::from(""))
             }
-            ROLE_ANSWERED_WHILE_PAUSED | ROLE_DEFERRED => QVariant::from(&false),
+            ROLE_ANSWERED_WHILE_PAUSED | ROLE_MAKE_RULE_OFFERED => QVariant::from(&false),
             ROLE_ANSWER_DEADLINE_MS => QVariant::from(&-1.0f64),
             _ => QVariant::default(),
         },
@@ -1305,7 +1325,7 @@ fn grouped_entry_data(entry: &VisibleEntry, role: i32, store: &RowStore) -> QVar
             ROLE_MATCHED_RULE | ROLE_MATCHED_RULE_DISPLAY | ROLE_OUTCOME_TEXT => {
                 QVariant::from(&QString::from(""))
             }
-            ROLE_ANSWERED_WHILE_PAUSED | ROLE_DEFERRED => QVariant::from(&false),
+            ROLE_ANSWERED_WHILE_PAUSED | ROLE_MAKE_RULE_OFFERED => QVariant::from(&false),
             ROLE_ANSWER_DEADLINE_MS => QVariant::from(&-1.0f64),
             _ => QVariant::default(),
         },
@@ -1335,16 +1355,14 @@ fn grouped_entry_data(entry: &VisibleEntry, role: i32, store: &RowStore) -> QVar
                 | ROLE_GROUP_ALLOWED
                 | ROLE_GROUP_DENIED
                 | ROLE_GROUP_BLOCKLISTED => QVariant::from(&0i32),
-                ROLE_MATCHED_RULE => {
-                    QVariant::from(&QString::from(row.matched_rule.as_deref().unwrap_or("")))
-                }
+                ROLE_MATCHED_RULE => QVariant::from(&QString::from(matched_rule_name(row))),
                 ROLE_MATCHED_RULE_DISPLAY => {
                     QVariant::from(&QString::from(&matched_rule_display(row)))
                 }
                 ROLE_ANSWERED_WHILE_PAUSED => QVariant::from(&answered_while_paused(row)),
                 ROLE_OUTCOME_TEXT => QVariant::from(&QString::from(outcome_text(row))),
                 ROLE_ANSWER_DEADLINE_MS => QVariant::from(&answer_deadline_ms(row)),
-                ROLE_DEFERRED => QVariant::from(&row.deferred),
+                ROLE_MAKE_RULE_OFFERED => QVariant::from(&crate::make_rule::offers_make_rule(row)),
                 _ => QVariant::default(),
             }
         }
@@ -1429,6 +1447,7 @@ mod tests {
             auto_answer: None,
             answer_deadline_ms: None,
             deferred: false,
+            decided_by_default: false,
         }
     }
 

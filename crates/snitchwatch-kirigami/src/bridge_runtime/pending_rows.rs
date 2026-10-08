@@ -124,6 +124,7 @@ mod tests {
             auto_answer: None,
             answer_deadline_ms: None,
             deferred,
+            decided_by_default: false,
         }
     }
 
