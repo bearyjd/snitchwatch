@@ -991,8 +991,10 @@ mod tests {
         // The bridge recognizes it as exactly that.
         assert_eq!(
             DEFAULT_ACTION_MARKER,
-            snitchwatch_bridge::translator::connection::DEFAULT_ACTION_MARKER
+            snitchwatch_bridge::daemon_contract::DEFAULT_ACTION_MARKER
         );
-        assert!(snitchwatch_bridge::translator::connection::is_default_action_rule(&rule));
+        assert!(snitchwatch_bridge::daemon_contract::is_default_action_rule(
+            &rule
+        ));
     }
 }

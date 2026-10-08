@@ -14,6 +14,7 @@ pub mod client_presence;
 pub mod daemon_alerts;
 pub mod daemon_commands;
 pub mod daemon_config;
+pub mod daemon_contract;
 pub mod daemon_liveness;
 pub mod daemon_watchdog;
 pub mod deferred_answers;

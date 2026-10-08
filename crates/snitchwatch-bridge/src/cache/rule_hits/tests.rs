@@ -481,7 +481,7 @@ fn marked(unixnano: i64) -> Event {
     Event {
         rule: Some(Rule {
             name: String::new(),
-            description: crate::translator::connection::DEFAULT_ACTION_MARKER.to_string(),
+            description: crate::daemon_contract::DEFAULT_ACTION_MARKER.to_string(),
             action: "deny".to_string(),
             duration: "once".to_string(),
             enabled: true,

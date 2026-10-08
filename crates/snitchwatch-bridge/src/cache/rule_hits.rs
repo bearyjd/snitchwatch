@@ -69,7 +69,7 @@ use std::collections::BTreeMap;
 use snitchwatch_proto::protocol::Event;
 
 use crate::cache::rules::MAX_SNAPSHOT_RULES;
-use crate::translator::connection::is_default_action_rule;
+use crate::daemon_contract::is_default_action_rule;
 use crate::ws_messages::RuleHitWire;
 
 /// Most names waiting for a snapshot at once.

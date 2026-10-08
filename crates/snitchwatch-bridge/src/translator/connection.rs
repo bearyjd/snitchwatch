@@ -5,8 +5,9 @@
 //! as a stable correlation handle so the WS client can later send back a
 //! `setVerdict` referencing the same row.
 
+use crate::daemon_contract::is_default_action_rule;
 use crate::ws_messages::ConnectionRow;
-use snitchwatch_proto::protocol::{Connection, Event, Rule};
+use snitchwatch_proto::protocol::{Connection, Event};
 
 pub const ASK_ROW_PREFIX: &str = "ask-";
 /// Id prefix for rows synthesized from a daemon-reported `Event` (see
@@ -81,21 +82,6 @@ pub fn connection_to_row(conn: &Connection, notification_id: u64) -> ConnectionR
     }
 }
 
-/// The description the bazzite-tower opensnitchd fork gives the synthetic
-/// rule of a connection that got the daemon's `DefaultAction` (E3, plan
-/// `2026-10-08-default-applied-events.md`). Such an event grows the daemon's
-/// `rule_misses`, never `rule_hits`.
-pub const DEFAULT_ACTION_MARKER: &str = "snitchwatch:default-action";
-
-/// Whether `rule` is the fork's synthetic default-action rule: named `""`
-/// **and** described by exactly [`DEFAULT_ACTION_MARKER`]. Stock v1.8.0 never
-/// emits one, but it can load a hand-written rule named `""`, whose events
-/// are real rule hits, so the name alone is not enough; and a named rule
-/// that copied the description is still that rule.
-pub fn is_default_action_rule(rule: &Rule) -> bool {
-    rule.name.is_empty() && rule.description == DEFAULT_ACTION_MARKER
-}
-
 /// Normalize a daemon-reported rule action string the same way
 /// `snitchwatch-kirigami`'s `rules::row_store::Rule::normalized_action` does:
 /// exactly `"allow"` or `"deny"`, folding anything else (opensnitchd's
@@ -111,7 +97,7 @@ fn normalized_action(action: &str) -> &'static str {
 /// Translate a daemon-reported `Event` (a `Connection` paired with the `Rule`
 /// that decided it) into a *decided* `ConnectionRow` carrying that rule's
 /// name in `matched_rule`. A default-action event
-/// ([`is_default_action_rule`]) instead has no `matched_rule` and is marked
+/// (`daemon_contract::is_default_action_rule`) instead has no `matched_rule` and is marked
 /// `decided_by_default`, with the action the default applied.
 ///
 /// The daemon includes recent `Event`s in `Statistics.events` on its
@@ -138,6 +124,7 @@ pub fn event_to_row(event: &Event) -> Option<ConnectionRow> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::daemon_contract::DEFAULT_ACTION_MARKER;
 
     fn sample_connection() -> Connection {
         Connection {
@@ -318,11 +305,6 @@ mod tests {
             rule: Some(rule),
             unixnano: 1_700_000_000_123_456_789,
         }
-    }
-
-    #[test]
-    fn the_marker_is_the_agreed_string() {
-        assert_eq!(DEFAULT_ACTION_MARKER, "snitchwatch:default-action");
     }
 
     #[test]
