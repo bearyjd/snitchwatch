@@ -14,14 +14,17 @@ use super::SimulationInput;
 /// Fields as typed in the Simulate sheet.
 ///
 /// **A blank field means unknown**, so conditions that need it are reported as
-/// not evaluated. The one exception is the destination host: a blank one is
-/// the empty `DstHost` a bare-IP connection has. The destination port always
-/// has a value; a blank protocol is unknown like the rest.
+/// not evaluated. That includes the destination host; `dest_host_empty` is how
+/// a connection is said to have no host name at all (the empty `DstHost` a
+/// bare-IP connection has). The destination port always has a value.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct SimulationForm {
     pub process_path: String,
     pub dest_host: String,
+    /// The connection is known to have no host name (a bare IP address); the
+    /// `destHost` text is then ignored.
+    pub dest_host_empty: bool,
     pub dest_port: i64,
     pub protocol: String,
     /// One ancestor path per line, nearest first.
@@ -48,7 +51,7 @@ impl SimulationForm {
         let (checksums_enabled, checksums) = self.checksum_state();
         SimulationInput {
             process_path: text(&self.process_path),
-            dest_host: self.dest_host.trim().to_string(),
+            dest_host: self.host(),
             dest_port: self.dest_port.clamp(0, i64::from(u16::MAX)) as u16,
             protocol: text(&self.protocol),
             parent_paths: self.ancestors(),
@@ -63,6 +66,16 @@ impl SimulationForm {
             iface_out: text(&self.iface_out),
             checksums,
             checksums_enabled,
+        }
+    }
+
+    /// The destination host: the known empty one when "no host name" is
+    /// ticked, else the typed text, else unknown.
+    fn host(&self) -> Option<String> {
+        if self.dest_host_empty {
+            Some(String::new())
+        } else {
+            text(&self.dest_host)
         }
     }
 
@@ -131,7 +144,7 @@ mod tests {
     }
 
     #[test]
-    fn a_blank_form_is_all_unknown_except_the_host_and_port() {
+    fn a_blank_form_is_all_unknown_except_the_port() {
         let input = form(serde_json::json!({}));
         assert_eq!(input, SimulationInput::default());
         assert_eq!(input.protocol, None);
@@ -160,14 +173,42 @@ mod tests {
     }
 
     #[test]
-    fn basic_fields_are_trimmed_and_a_blank_host_is_a_known_empty_host() {
+    fn basic_fields_are_trimmed() {
         let input = form(serde_json::json!({
-            "processPath": "  /usr/bin/curl ", "destHost": "", "destPort": 443, "protocol": " tcp "
+            "processPath": "  /usr/bin/curl ", "destHost": " github.com ", "destPort": 443,
+            "protocol": " tcp "
         }));
         assert_eq!(input.process_path.as_deref(), Some("/usr/bin/curl"));
-        assert_eq!(input.dest_host, "");
+        assert_eq!(input.dest_host.as_deref(), Some("github.com"));
         assert_eq!(input.dest_port, 443);
         assert_eq!(input.protocol.as_deref(), Some("tcp"));
+    }
+
+    #[test]
+    fn a_blank_host_is_unknown_and_only_the_no_host_name_flag_makes_it_empty() {
+        // Blank, or spaces: nobody has said what the host is.
+        for host in ["", "   "] {
+            assert_eq!(
+                form(serde_json::json!({"destHost": host})).dest_host,
+                None,
+                "{host:?}"
+            );
+        }
+        // "No host name" is the known empty `DstHost` of a bare-IP connection...
+        assert_eq!(
+            form(serde_json::json!({"destHostEmpty": true})).dest_host,
+            Some(String::new())
+        );
+        // ...and wins over whatever text is left in the field.
+        assert_eq!(
+            form(serde_json::json!({"destHostEmpty": true, "destHost": "github.com"})).dest_host,
+            Some(String::new())
+        );
+        // Unticked, the text is the host.
+        assert_eq!(
+            form(serde_json::json!({"destHostEmpty": false, "destHost": "github.com"})).dest_host,
+            Some("github.com".to_string())
+        );
     }
 
     #[test]

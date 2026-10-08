@@ -129,7 +129,10 @@ Window {
                         // the daemon's DstHost is empty, so dstHost carries the IP.
                         probeWindow.connection("r2", null, "10.0.0.5", "10.0.0.5", 53, "udp"),
                         probeWindow.connection("r3", "/usr/bin/dig", "", "", 53, "udplite6"),
-                        probeWindow.connection("r4", "/usr/bin/x", "x.example", "1.2.3.4", 80, "gre")
+                        probeWindow.connection("r4", "/usr/bin/x", "x.example", "1.2.3.4", 80, "gre"),
+                        // The bridge puts the IP in the host when the daemon had none.
+                        probeWindow.connection("r5", "/usr/bin/dig", "10.0.0.9", "10.0.0.9", 53, "udp"),
+                        probeWindow.connection("r6", "/usr/bin/nc", "10.0.0.9", "10.0.0.9", 443, "tcp")
                     ]
                 }));
                 rulesModel.applyServerMessageJson(JSON.stringify({
@@ -160,6 +163,7 @@ Window {
                 probeWindow.field("simUid").text = "1000";
                 probeWindow.field("simEnv").text = "A=b";
                 probeWindow.field("simChecksums").currentIndex = 1;
+                probeWindow.field("simHostEmpty").checked = true;
 
                 // A row that carries everything it can.
                 probeWindow.simulateRow({ id: "r1", process: "curl", dstHost: "github.com",
@@ -168,6 +172,8 @@ Window {
                 probeWindow.expect(probeWindow.field("simProcessPath").text === "/usr/bin/curl",
                     "path: " + probeWindow.field("simProcessPath").text);
                 probeWindow.expect(probeWindow.field("simHost").text === "github.com", "host");
+                probeWindow.expect(probeWindow.field("simHostEmpty").checked === false,
+                    "no host name stayed ticked through the prefill");
                 probeWindow.expect(probeWindow.field("simDestIp").text === "140.82.112.3", "ip");
                 probeWindow.expect(probeWindow.field("simPort").value === 443, "port");
                 probeWindow.expect(probeWindow.field("simProtocol").currentValue === "tcp", "protocol");
@@ -199,6 +205,35 @@ Window {
                 probeWindow.expect(sheet.simulateUnevaluated.indexOf("100-path") >= 0,
                     "an unknown path should leave the rule not evaluated, not a miss: "
                     + sheet.simulateUnevaluated);
+
+                // A DNS query whose name is the IP: the host is unknown, so a
+                // rule on the host is not evaluated. The same IP in the host
+                // on another port is the bridge's stand-in for "no host name".
+                rulesModel.applyServerMessageJson(JSON.stringify({
+                    action: "setRules",
+                    rules: [probeWindow.rule("100-host", "deny", "dest.host", "10.0.0.9")]
+                }));
+                probeWindow.simulateRow({ id: "r5", process: "dig", dstHost: "10.0.0.9",
+                                          dstPort: 53, protocol: "udp" });
+                probeWindow.expect(probeWindow.field("simHost").text === ""
+                                   && probeWindow.field("simHostEmpty").checked === false,
+                    "r5: host should be unknown");
+                sheet.runSimulation();
+                probeWindow.expect(sheet.simulateMatchedRule === ""
+                                   && sheet.simulateUnevaluated.indexOf("100-host") >= 0,
+                    "r5: an unknown host should leave the rule not evaluated: " + sheet.simulateUnevaluated);
+                probeWindow.simulateRow({ id: "r6", process: "nc", dstHost: "10.0.0.9",
+                                          dstPort: 443, protocol: "tcp" });
+                probeWindow.expect(probeWindow.field("simHost").text === ""
+                                   && probeWindow.field("simHostEmpty").checked === true,
+                    "r6: host should be known empty");
+                sheet.runSimulation();
+                probeWindow.expect(sheet.simulateMatchedRule === "" && sheet.simulateUnevaluated === "",
+                    "r6: an empty host is known, so the rule just doesn't match: " + sheet.simulateUnevaluated);
+                // Ticking the box disables the text, and a prefill clears it.
+                sheet.prefill({});
+                probeWindow.expect(probeWindow.field("simHostEmpty").checked === false,
+                    "an empty prefill left the box ticked");
 
                 // No destination IP known, and an IPv6-flavoured protocol.
                 probeWindow.simulateRow({ id: "r3", process: "dig", dstHost: "",

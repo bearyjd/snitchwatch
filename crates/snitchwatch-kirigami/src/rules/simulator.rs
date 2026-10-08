@@ -89,14 +89,15 @@ pub use prefill::DAEMON_PROTOCOLS;
 
 /// The candidate connection to evaluate against the cached rule set.
 ///
-/// The destination host and port are always known (a blank host is the empty
-/// `DstHost` of a bare-IP connection). Every other field is `None` when
+/// The destination port is always known. Every other field is `None` when
 /// **unknown** — not "empty" — so conditions on it are reported as not
-/// evaluated instead of being guessed.
+/// evaluated instead of being guessed. That includes the destination host:
+/// `Some("")` is the known empty `DstHost` of a bare-IP connection, and `None`
+/// is a host nobody knows.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SimulationInput {
     pub process_path: Option<String>,
-    pub dest_host: String,
+    pub dest_host: Option<String>,
     pub dest_port: u16,
     /// As opensnitchd names it: `tcp`, `tcp6`, `udp`, `udp6`, `udplite`,
     /// `sctp`, `icmp`, `icmp6`... Matched like the daemon's `protocol`
