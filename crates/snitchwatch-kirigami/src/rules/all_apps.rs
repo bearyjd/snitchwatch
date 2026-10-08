@@ -16,7 +16,7 @@
 //! an allow — including one for just this host — and other apps are asked.
 
 use super::row_store::{Rule, RulesStore};
-use snitchwatch_bridge::translator::verdict::sanitize_for_display;
+use snitchwatch_bridge::translator::verdict::{sanitize_for_display, strip_display_hazards};
 
 /// The description `snitchwatch_bridge::translator::verdict::verdict_to_rule`
 /// gives every interactive prompt rule (since M1.5).
@@ -52,22 +52,30 @@ impl Rule {
     }
 
     /// The process path a Snitchwatch prompt rule is tied to that isn't a
-    /// program file, as display text.
+    /// program file, as plain text for a `PlainText` label: display hazards
+    /// stripped, nothing escaped, at most [`MAX_TARGET_CHARS`].
     fn unidentified_program(&self) -> Option<String> {
         if self.description != INTERACTIVE_VERDICT_DESCRIPTION {
             return None;
         }
-        unbindable_path(&self.operator).map(|path| sanitize_for_display(&path, MAX_TARGET_CHARS))
+        unbindable_path(&self.operator).map(|path| plain_truncated(&path))
     }
 
     /// What deleting a rule tied to an unidentified program changes.
     fn unidentified_hint(&self, path: &str) -> String {
         let deny = self.normalized_action() != "allow";
-        let tied = format!(
-            "Tied to \"{path}\", which isn't a program file, so it {} whatever the firewall \
-             reports under that name, not one app.",
-            if deny { "blocks" } else { "allows" }
-        );
+        let does = if deny { "blocks" } else { "allows" };
+        let tied = if path.is_empty() {
+            format!(
+                "Tied to an empty program path, so it {does} whatever the firewall reports \
+                 with no program, not one app."
+            )
+        } else {
+            format!(
+                "Tied to \"{path}\", which isn't a program file, so it {does} whatever the \
+                 firewall reports under that name, not one app."
+            )
+        };
         if !self.can_delete() {
             format!("{tied} Snitchwatch can't delete it; its details say why.")
         } else if !self.enabled {
@@ -141,6 +149,15 @@ fn mentions_process_path(operator: &serde_json::Value) -> bool {
         }
         serde_json::Value::Array(items) => items.iter().any(mentions_process_path),
         _ => false,
+    }
+}
+
+/// `text` without display hazards, cut to [`MAX_TARGET_CHARS`] with `…`.
+fn plain_truncated(text: &str) -> String {
+    let plain = strip_display_hazards(text);
+    match plain.char_indices().nth(MAX_TARGET_CHARS) {
+        Some((cut, _)) => format!("{}…", &plain[..cut]),
+        None => plain,
     }
 }
 
@@ -579,6 +596,8 @@ mod tests {
             "curl",
             "/proc/self/exe",
             "/memfd:x (deleted)",
+            "<unknown>",
+            "a&b",
         ] {
             let r = tied(path, "allow");
             assert!(r.flagged(), "{path}");
@@ -586,7 +605,21 @@ mod tests {
             assert_eq!(r.flag_badge(), UNIDENTIFIED_BADGE);
             let hint = r.all_apps_hint().unwrap();
             assert!(hint.contains("isn't a program file"), "{hint}");
+            // A PlainText label: shown as it is, never HTML-escaped.
+            assert!(hint.contains(&format!("\"{path}\"")), "{hint}");
         }
+        let empty = tied("", "allow").all_apps_hint().unwrap();
+        assert!(
+            empty.starts_with("Tied to an empty program path"),
+            "{empty}"
+        );
+        let hazard = tied("cu\u{202e}rl", "allow").all_apps_hint().unwrap();
+        assert!(hazard.contains("\"curl\""), "{hazard}");
+        let long = tied(&"x".repeat(100), "allow").all_apps_hint().unwrap();
+        assert!(
+            long.contains(&format!("\"{}…\"", "x".repeat(MAX_TARGET_CHARS))),
+            "{long}"
+        );
         let deny = tied("Kernel connection", "deny").all_apps_hint().unwrap();
         assert!(deny.contains("blocks"), "{deny}");
         let named = tied("/usr/bin/curl", "allow");

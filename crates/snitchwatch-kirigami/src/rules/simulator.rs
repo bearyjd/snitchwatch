@@ -177,13 +177,13 @@ pub struct SimulationResult {
 /// Whether a matching rule ends the scan (`FindFirstMatch`): `reject`,
 /// `deny` or `precedence`. The action is compared as opensnitchd does,
 /// exactly.
-fn stops_scan(rule: &Rule) -> bool {
+pub(crate) fn stops_scan(rule: &Rule) -> bool {
     rule.precedence || rule.action == "deny" || rule.action == "reject"
 }
 
 /// The verdict opensnitchd applies for a matching rule: `acceptOrDeny`
 /// accepts only for exactly `allow` and drops anything else.
-fn daemon_action(rule: &Rule) -> &'static str {
+pub(crate) fn daemon_action(rule: &Rule) -> &'static str {
     if rule.action == "allow" {
         "allow"
     } else {
