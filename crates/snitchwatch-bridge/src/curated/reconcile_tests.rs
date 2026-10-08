@@ -145,10 +145,15 @@ fn only_our_own_rules_are_ever_deleted() {
         name: "snitchwatch-default-retired".into(),
         ..flatpak().rule()
     };
+    // A profile's rule (#46 Part 2), even one shaped like ours.
+    let profile = Rule {
+        name: "850-profile:home:0000-flatpak-flathub".into(),
+        ..flatpak().rule()
+    };
     let choices = Choices::default().installed("retired", &retired);
     let plan = plan(
         entries(),
-        &daemon(&[user_rule, squatter, retired]),
+        &daemon(&[user_rule, squatter, retired, profile]),
         &choices,
     );
     assert_eq!(

@@ -95,3 +95,34 @@ async fn nothing_but_a_toggle_of_a_shipped_rule_gets_through() {
     );
     nothing_sent(&mut daemon).await;
 }
+
+/// A profile's rule (#46 Part 2) can't be toggled, edited, renamed or
+/// deleted from a GUI either; the curated toggle exception doesn't reach it.
+#[tokio::test]
+async fn a_profile_rule_is_never_changed_from_the_rules_page() {
+    let profile = Rule {
+        name: "850-profile:home:0000-r1".into(),
+        description: r#"{"snitchwatch":{"source":"profile"}}"#.into(),
+        ..shipped()
+    };
+    let mut daemon = daemon(vec![profile.clone()]);
+    let commands = commands(&daemon);
+    let mut rx = daemon.broadcast.subscribe();
+    let mut renamed = switched(&profile, true);
+    renamed["name"] = json!("my-copy");
+    let attempts = [
+        update(&profile.name, switched(&profile, false), Some("toggle")),
+        update(&profile.name, renamed, Some("rename")),
+        ClientMessage::DeleteRule {
+            rule_id: profile.name.clone(),
+            request_id: Some("delete".into()),
+            reply: None,
+        },
+        add(switched(&profile, true), Some("add")),
+    ];
+    for attempt in attempts {
+        commands.try_route(attempt);
+        assert!(!refused(&result(&mut rx).await).is_empty(), "not refused");
+    }
+    nothing_sent(&mut daemon).await;
+}

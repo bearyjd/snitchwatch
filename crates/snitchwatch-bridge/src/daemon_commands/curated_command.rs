@@ -263,4 +263,49 @@ mod tests {
         }
         assert!(rx.try_recv().is_err(), "nothing else sent");
     }
+
+    /// The profile enforcer and the curated reconcile each send only under
+    /// their own prefix: neither path can carry the other's rules.
+    #[tokio::test]
+    async fn the_curated_and_profile_paths_never_carry_each_others_rules() {
+        use crate::daemon_commands::ProfileCommand;
+        use crate::profiles::materializer::materialize_rule;
+        use crate::profiles::store::ProfileRule;
+
+        let profile_rule = materialize_rule(
+            "home",
+            &ProfileRule {
+                id: "r1".into(),
+                action: "deny".into(),
+                operand: "dest.host".into(),
+                data: "x.example".into(),
+                operator: None,
+            },
+        )
+        .unwrap();
+        let curated_rule = flatpak().rule();
+        let (commands, mut rx, _stream) =
+            connected(vec![profile_rule.clone(), curated_rule.clone()]);
+
+        // Curated path: no profile name, deleted or installed.
+        assert!(CuratedCommand::delete(&profile_rule.name).is_none());
+        let mut renamed = CuratedCommand::install(flatpak());
+        renamed.notification.rules[0].name = profile_rule.name.clone();
+        assert!(commands.send_curated(renamed).is_err());
+        assert!(commands
+            .send_curated_toggle(&profile_rule.name, false)
+            .is_err());
+        // Profile path: no curated name, deleted or installed.
+        assert!(ProfileCommand::delete(&curated_rule.name).is_none());
+        assert_eq!(
+            commands
+                .send_profile(ProfileCommand::install(curated_rule.clone()))
+                .err(),
+            Some(SendError::ReservedName)
+        );
+        assert!(!crate::profiles::materializer::made_by_bridge(
+            &curated_rule
+        ));
+        assert!(rx.try_recv().is_err(), "nothing sent");
+    }
 }
