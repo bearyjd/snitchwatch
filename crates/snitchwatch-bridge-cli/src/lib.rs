@@ -169,6 +169,10 @@ pub struct RunningBridge {
     pub tray_rx: watch::Receiver<TrayState>,
     /// Receiver for desktop notifications published by the bridge.
     pub notice_rx: broadcast::Receiver<Notice>,
+    /// Authenticated GUI sessions. The WS server registers each client after
+    /// its handshake; in-process callers (tests) register one directly to
+    /// exercise GUI-gated paths such as prompts and pausing.
+    pub client_presence: snitchwatch_bridge::client_presence::ClientPresence,
     ws_shutdown_tx: Option<oneshot::Sender<()>>,
     grpc_shutdown_tx: Option<oneshot::Sender<()>>,
     /// The daemon-down watchdog task (`daemon_watchdog::run`). It has no
@@ -380,12 +384,13 @@ where
     // bridge start, matching every other in-memory bridge state.
     let filtering_paused = Arc::new(std::sync::atomic::AtomicBool::new(false));
     // ...and is cleared when the last authenticated GUI leaves, so a pause
-    // never re-arms for the next GUI to connect (issue #47).
+    // doesn't carry over to the next GUI to connect (issue #47; see
+    // `apply_pause_request` for the one remaining race).
     {
         let cache = cache.clone();
         tokio::spawn(
             snitchwatch_bridge::client_presence::clear_pause_on_last_session_loss(
-                client_presence.clone(),
+                client_presence.session_losses(),
                 filtering_paused.clone(),
                 move || {
                     let cache = cache.clone();
@@ -402,7 +407,7 @@ where
         notice_bus.clone(),
         filtering_paused.clone(),
     )
-    .with_client_presence(client_presence);
+    .with_client_presence(client_presence.clone());
     // Grabbed before `.into_server()` consumes `ui_service_inner` — the
     // daemon-down watchdog below needs this to watch daemon liveness.
     let liveness = ui_service_inner.liveness_handle();
@@ -524,6 +529,7 @@ where
     let tray_pub_for_pause = tray_pub.clone();
     let tray_pub_for_snapshot = tray_pub.clone();
     let filtering_paused_for_pump = filtering_paused.clone();
+    let presence_for_pump = client_presence.clone();
     let diagnostics_ctx_for_pump = diagnostics_ctx.clone();
     let notifications_for_pump = notifications_tx.clone();
     let notification_id_for_pump = notification_id.clone();
@@ -533,7 +539,13 @@ where
             // toggles a shared flag + tray state, not cache state those own.
             // See docs/superpowers/plans/2026-07-12-tray-filter-off.md.
             if let ClientMessage::SetFilteringPaused { paused } = msg {
-                filtering_paused_for_pump.store(paused, std::sync::atomic::Ordering::Relaxed);
+                // Goes through `apply_pause_request`: a pause queued by a GUI
+                // that has since disconnected must not take effect (#47).
+                let paused = snitchwatch_bridge::client_presence::apply_pause_request(
+                    &presence_for_pump,
+                    &filtering_paused_for_pump,
+                    paused,
+                );
                 if paused {
                     tray_pub_for_pause.set(TrayState::FilterOff);
                 } else {
@@ -707,6 +719,7 @@ where
         inbound_tx,
         tray_rx,
         notice_rx,
+        client_presence,
         ws_shutdown_tx: Some(ws_shutdown_tx),
         grpc_shutdown_tx: Some(grpc_shutdown_tx),
         watchdog_handle,
@@ -1328,6 +1341,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pause_request_without_an_authenticated_gui_is_ignored() {
+        // A pause still queued when its GUI disconnected arrives with no
+        // session; it must not re-arm the pause for the next GUI (#47).
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = BridgeConfig {
+            grpc_bind: "127.0.0.1:0".parse().unwrap(),
+            ws_socket_path: dir.path().join("bridge.sock"),
+            cache_capacity: 64,
+        };
+        let mut bridge = run(cfg).await.expect("run failed");
+
+        bridge
+            .inbound_tx
+            .send(ClientMessage::SetFilteringPaused { paused: true })
+            .await
+            .expect("inbound channel closed");
+        // Give the pump time to apply it with no session (an applied pause
+        // would show FilterOff), then let a GUI arrive: it must not inherit
+        // a pause either. Registering before the pump ran would be the
+        // documented per-session-tagging gap, not this case.
+        let _ = tokio::time::timeout(Duration::from_millis(300), bridge.tray_rx.changed()).await;
+        assert_ne!(*bridge.tray_rx.borrow(), TrayState::FilterOff);
+        let _gui = bridge.client_presence.authenticated_session();
+        let _ = tokio::time::timeout(Duration::from_millis(300), bridge.tray_rx.changed()).await;
+        assert_ne!(*bridge.tray_rx.borrow(), TrayState::FilterOff);
+
+        bridge.shutdown();
+    }
+
+    #[tokio::test]
     async fn set_filtering_paused_toggles_tray_state() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = BridgeConfig {
@@ -1336,6 +1379,8 @@ mod tests {
             cache_capacity: 64,
         };
         let mut bridge = run(cfg).await.expect("run failed");
+        // A pause only takes effect while a GUI is authenticated (#47).
+        let _gui = bridge.client_presence.authenticated_session();
 
         bridge
             .inbound_tx

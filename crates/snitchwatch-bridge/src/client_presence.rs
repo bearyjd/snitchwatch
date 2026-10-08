@@ -32,6 +32,12 @@ impl ClientPresence {
         SessionLease(self.clone())
     }
 
+    /// Changes each time the last authenticated session ends. Subscribe
+    /// before spawning a watcher so no loss slips past an unpolled task.
+    pub fn session_losses(&self) -> watch::Receiver<u64> {
+        self.losses.subscribe()
+    }
+
     pub fn admit(&self) -> Option<Admission> {
         let state = self.state.lock().unwrap();
         (state.clients > 0).then(|| Admission {
@@ -46,24 +52,51 @@ impl ClientPresence {
 /// session ends. A pause is that GUI user's choice; left set, it would re-arm
 /// for whichever GUI authenticates next (in system mode possibly a different
 /// `snitchwatch-ui` member) while the tray may already show Idle.
-/// `on_cleared` runs after each loss that actually cleared a pause; the bridge
-/// uses it to resync the tray. Ends when every `ClientPresence` is dropped.
+/// `losses` comes from [`ClientPresence::session_losses`]. `on_cleared` runs
+/// after each loss that actually cleared a pause; the bridge uses it to
+/// resync the tray. Ends when every `ClientPresence` is dropped.
+///
+/// A pause request still queued when its GUI left is handled by
+/// [`apply_pause_request`], which every pause must go through.
 pub async fn clear_pause_on_last_session_loss<F, Fut>(
-    presence: ClientPresence,
+    mut losses: watch::Receiver<u64>,
     paused: Arc<AtomicBool>,
     on_cleared: F,
 ) where
     F: Fn() -> Fut,
     Fut: Future<Output = ()>,
 {
-    let mut losses = presence.losses.subscribe();
-    drop(presence);
     while losses.changed().await.is_ok() {
         if paused.swap(false, Ordering::SeqCst) {
             tracing::info!("last authenticated GUI session ended; filtering pause cleared");
             on_cleared().await;
         }
     }
+}
+
+/// Apply a GUI's pause/resume request and return the pause state that took
+/// effect. A pause only takes effect while a GUI is authenticated: a request
+/// still queued when its sender disconnected arrives after
+/// [`clear_pause_on_last_session_loss`] already ran, so it would otherwise
+/// re-arm the pause with no GUI attached (issue #47). The flag is set
+/// *before* the presence check, so a last-session loss racing this call is
+/// caught either here or by the cleanup task.
+///
+/// Remaining gap: if another GUI authenticates before a departed GUI's
+/// queued pause is applied, the new GUI inherits that pause. Closing it
+/// needs per-session message tagging.
+pub fn apply_pause_request(
+    presence: &ClientPresence,
+    paused: &AtomicBool,
+    requested: bool,
+) -> bool {
+    paused.store(requested, Ordering::SeqCst);
+    if requested && presence.admit().is_none() {
+        paused.store(false, Ordering::SeqCst);
+        tracing::info!("pause request ignored: no authenticated GUI session");
+        return false;
+    }
+    requested
 }
 
 pub struct SessionLease(ClientPresence);
@@ -135,7 +168,7 @@ mod tests {
         let first = presence.authenticated_session();
         let second = presence.authenticated_session();
         tokio::spawn(clear_pause_on_last_session_loss(
-            presence.clone(),
+            presence.session_losses(),
             paused.clone(),
             move || {
                 let cleared_tx = cleared_tx.clone();
@@ -161,6 +194,23 @@ mod tests {
         assert!(!paused.load(std::sync::atomic::Ordering::SeqCst));
     }
 
+    #[test]
+    fn a_pause_request_takes_effect_only_with_an_authenticated_gui() {
+        // A pause queued by a GUI that has since disconnected must not take
+        // effect with no GUI attached; the cleanup task already ran and would
+        // never clear it (issue #47).
+        let presence = ClientPresence::default();
+        let paused = std::sync::atomic::AtomicBool::new(false);
+        assert!(!apply_pause_request(&presence, &paused, true));
+        assert!(!paused.load(std::sync::atomic::Ordering::SeqCst));
+
+        let _gui = presence.authenticated_session();
+        assert!(apply_pause_request(&presence, &paused, true));
+        assert!(paused.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(!apply_pause_request(&presence, &paused, false));
+        assert!(!paused.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
     #[tokio::test]
     async fn last_session_loss_without_a_pause_does_not_report_a_clear() {
         let presence = ClientPresence::default();
@@ -168,7 +218,7 @@ mod tests {
         let (cleared_tx, mut cleared_rx) = tokio::sync::mpsc::unbounded_channel();
         let session = presence.authenticated_session();
         tokio::spawn(clear_pause_on_last_session_loss(
-            presence.clone(),
+            presence.session_losses(),
             paused.clone(),
             move || {
                 let cleared_tx = cleared_tx.clone();

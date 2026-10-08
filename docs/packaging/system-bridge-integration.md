@@ -33,9 +33,11 @@ acknowledgement. Internal broadcast subscribers do not establish GUI presence.
 An Ask without an authenticated session returns gRPC `Unavailable` before
 creating a pending row, so OpenSnitch applies its own configured default
 action. This holds while filtering is paused too: a pause only auto-allows
-while at least one GUI is authenticated, and the bridge clears it when the
-last authenticated session ends, so it never re-arms for the next GUI to
-connect. The bridge does not duplicate policy or translate reject into deny.
+while at least one GUI is authenticated. The bridge clears it when the last
+authenticated session ends and ignores a pause request that arrives with no
+GUI attached, so a pause doesn't carry over to the next GUI. One race remains:
+a pause still queued from a GUI that just left can apply if another GUI
+authenticates first (closing it needs per-session message tagging). The bridge does not duplicate policy or translate reject into deny.
 
 When the last client disconnects, existing pending requests are canceled even
 if a new client immediately reconnects. RPC cancellation removes its pending
