@@ -36,10 +36,11 @@ use snitchwatch_bridge::ws_messages::{
     valid_request_id, ClientMessage, ConnectionRow, RuleCommandOutcome, ServerMessage,
 };
 use snitchwatch_proto::protocol::Connection;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::pending_decision::{parse_duration, parse_scope, VerdictChoice};
-pub(crate) use crate::rules::editor_view::NO_ANSWER_AFTER;
+pub(crate) use crate::rules::editor_view::{Finished, NO_ANSWER_AFTER};
+use crate::rules::editor_view::{Pending, Wording};
 
 /// While the bridge hasn't answered yet.
 pub(crate) const SENDING: &str = "Sending the rule to the firewall…";
@@ -111,93 +112,116 @@ pub(crate) fn add_rule_message(
     })
 }
 
-/// How a "Make a rule…" request ended, as the sheet says it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Finished {
-    pub created: bool,
-    pub status: String,
+/// What the sheet says when the rule wasn't sent, or `None` when `send`
+/// queued it: [`NOT_SENT`] when no rule may be made (`message` is `None`),
+/// otherwise the rule editor's text for why it wasn't queued.
+pub(crate) fn send_problem(
+    message: Option<ClientMessage>,
+    send: impl FnOnce(ClientMessage) -> Result<(), crate::bridge_runtime::SendClientMessageError>,
+) -> Option<&'static str> {
+    let Some(message) = message else {
+        return Some(NOT_SENT);
+    };
+    send(message).err().map(crate::rule_commands::not_sent_text)
 }
 
-impl Finished {
-    pub(crate) fn created(status: &str) -> Self {
-        Self {
-            created: true,
-            status: status.to_owned(),
-        }
-    }
+/// "Make a rule…"'s wording of a result: [`CREATED`] only for Ok.
+const WORDING: Wording = Wording {
+    saved: CREATED,
+    not_saved: NOT_CREATED,
+    not_sent: REFUSED,
+    no_daemon: NO_DAEMON,
+    unknown: NO_ANSWER,
+    note_after_saved: true,
+};
 
-    fn not_created(status: String) -> Self {
-        Self {
-            created: false,
-            status,
-        }
-    }
-}
-
-/// What the sheet says for the bridge's `outcome`. Plain text.
+/// What the sheet says for the bridge's `outcome` (what [`MakeRuleWait`]
+/// finishes with). Plain text; `saved` means the rule was created.
+#[cfg(test)]
 pub(crate) fn outcome_status(outcome: &RuleCommandOutcome) -> Finished {
+    crate::rules::editor_view::finished_with(outcome, &WORDING)
+}
+
+/// How a request ended, for the off-screen notice (`MakeRuleOutcomes.qml`
+/// reads these numbers): only Ok is created, and when the outcome isn't
+/// known (no result in time, the session gone, the bridge's own timeout or
+/// an unsure result) it is unknown, never "not created" (PR #111).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Ending {
+    NotCreated = 0,
+    Created = 1,
+    Unknown = 2,
+}
+
+/// The [`Ending`] of the bridge's `outcome`.
+pub(crate) fn ending_of(outcome: &RuleCommandOutcome) -> Ending {
     match outcome {
-        RuleCommandOutcome::Ok => Finished::created(CREATED),
-        RuleCommandOutcome::OkWithNote { note } => Finished::created(&format!("{CREATED} {note}")),
-        RuleCommandOutcome::Rejected { reason } => {
-            Finished::not_created(format!("{NOT_CREATED}{reason}"))
-        }
-        RuleCommandOutcome::Refused { problems } => Finished::not_created(format!(
-            "{REFUSED}{}",
-            crate::rules::editor::plain_problems(problems).join(" ")
-        )),
-        RuleCommandOutcome::Timeout => Finished::not_created(NO_ANSWER.to_owned()),
-        RuleCommandOutcome::NoDaemon => Finished::not_created(NO_DAEMON.to_owned()),
-        RuleCommandOutcome::Unsure { reason } => Finished::not_created(reason.clone()),
+        RuleCommandOutcome::Ok | RuleCommandOutcome::OkWithNote { .. } => Ending::Created,
+        RuleCommandOutcome::Timeout | RuleCommandOutcome::Unsure { .. } => Ending::Unknown,
+        RuleCommandOutcome::Rejected { .. }
+        | RuleCommandOutcome::Refused { .. }
+        | RuleCommandOutcome::NoDaemon => Ending::NotCreated,
     }
 }
 
-/// The one "Make a rule…" request waiting for the bridge's result: its id,
-/// the row it is for, and when it was sent.
-#[derive(Debug, Default)]
-pub(crate) struct MakeRuleWait {
-    waiting: Option<(String, String, Instant)>,
+/// The row a request is about, and the row's bridge session (from its
+/// local id).
+#[derive(Debug)]
+struct RowTag {
+    row_id: String,
+    session: Option<u64>,
 }
+
+/// The one "Make a rule…" request waiting for the bridge's result.
+#[derive(Debug, Default)]
+pub(crate) struct MakeRuleWait(Pending<RowTag>);
 
 impl MakeRuleWait {
     pub(crate) fn begin(&mut self, request_id: String, row_id: String, now: Instant) {
-        self.waiting = Some((request_id, row_id, now));
+        let session =
+            crate::rule_commands::split_session_row_id(&row_id).map(|(session, _)| session);
+        self.0
+            .sent_with(request_id, RowTag { row_id, session }, now);
     }
 
     #[cfg(test)]
     pub(crate) fn is_waiting(&self) -> bool {
-        self.waiting.is_some()
+        self.0.is_waiting()
     }
 
     /// The send failed: nothing to wait for.
     pub(crate) fn abandon(&mut self) {
-        self.waiting = None;
+        self.0.abandon();
     }
 
     /// The row and how it ended, when `message` is the awaited result.
-    pub(crate) fn on_message(&mut self, message: &ServerMessage) -> Option<(String, Finished)> {
-        let ServerMessage::RuleCommandResult {
-            request_id,
-            outcome,
-        } = message
-        else {
+    pub(crate) fn on_message(
+        &mut self,
+        message: &ServerMessage,
+    ) -> Option<(String, Finished, Ending)> {
+        let ServerMessage::RuleCommandResult { outcome, .. } = message else {
             return None;
         };
-        if self.waiting.as_ref()?.0 != *request_id {
-            return None;
-        }
-        let (_, row_id, _) = self.waiting.take()?;
-        Some((row_id, outcome_status(outcome)))
+        let ending = ending_of(outcome);
+        self.0
+            .result_with(message, &WORDING)
+            .map(|(tag, done)| (tag.row_id, done, ending))
     }
 
-    /// Gives up after [`NO_ANSWER_AFTER`] of silence.
-    pub(crate) fn poll(&mut self, now: Instant) -> Option<(String, Finished)> {
-        let (_, _, sent_at) = self.waiting.as_ref()?;
-        if now.duration_since(*sent_at) <= NO_ANSWER_AFTER {
-            return None;
-        }
-        let (_, row_id, _) = self.waiting.take()?;
-        Some((row_id, Finished::not_created(NO_ANSWER.to_owned())))
+    /// Gives up after `after` of silence ([`NO_ANSWER_AFTER`] outside the
+    /// probes), or at once when the row's bridge session isn't
+    /// `is_current` any more: a result goes only to the connection that
+    /// asked, so after a reconnect none can come.
+    pub(crate) fn poll(
+        &mut self,
+        now: Instant,
+        after: Duration,
+        is_current: impl Fn(u64) -> bool,
+    ) -> Option<(String, Finished, Ending)> {
+        let gone = |tag: &RowTag| tag.session.is_some_and(|session| !is_current(session));
+        self.0
+            .expired_with(now, after, gone, &WORDING)
+            .map(|(tag, done)| (tag.row_id, done, Ending::Unknown))
     }
 }
 
@@ -466,11 +490,18 @@ mod tests {
         assert!(wait
             .on_message(&ServerMessage::ClearConnectionRows)
             .is_none());
-        let (row, done) = wait
+        let (row, done, ending) = wait
             .on_message(&result("make-1", RuleCommandOutcome::Ok))
             .unwrap();
         assert_eq!(row, "1:ask-1");
-        assert_eq!(done, Finished::created(CREATED));
+        assert_eq!(ending, Ending::Created);
+        assert_eq!(
+            done,
+            Finished {
+                saved: true,
+                status: CREATED.into()
+            }
+        );
         assert!(!wait.is_waiting());
     }
 
@@ -498,16 +529,62 @@ mod tests {
         for (outcome, text) in cases {
             let mut wait = MakeRuleWait::default();
             wait.begin("make-1".into(), "1:event-5-1".into(), Instant::now());
-            let (_, done) = wait.on_message(&result("make-1", outcome)).unwrap();
-            assert!(!done.created, "{text}");
+            let (_, done, ending) = wait.on_message(&result("make-1", outcome)).unwrap();
+            assert!(!done.saved, "{text}");
+            assert_ne!(ending, Ending::Created, "{text}");
             assert_eq!(done.status, text);
         }
         let refused = outcome_status(&RuleCommandOutcome::Refused { problems: vec![] });
-        assert!(!refused.created);
+        assert!(!refused.saved);
         assert!(
             refused.status.starts_with("The rule wasn't sent: "),
             "{}",
             refused.status
+        );
+    }
+
+    /// The bridge's own policy problems, in the editor's plain words.
+    #[test]
+    fn a_policy_refusal_lists_its_problems() {
+        let refused = outcome_status(&RuleCommandOutcome::Refused {
+            problems: vec![
+                snitchwatch_bridge::rule_policy::RuleProblem {
+                    path: "name".into(),
+                    reason: "a rule with this name exists".into(),
+                },
+                snitchwatch_bridge::rule_policy::RuleProblem {
+                    path: "operator.list[1].data".into(),
+                    reason: "not a port".into(),
+                },
+            ],
+        });
+        assert!(!refused.saved);
+        assert!(
+            refused.status.starts_with("The rule wasn't sent: "),
+            "{}",
+            refused.status
+        );
+        assert!(
+            refused.status.contains("not a port (condition 2's value)"),
+            "{}",
+            refused.status
+        );
+        assert!(
+            refused.status.contains("a rule with this name exists"),
+            "{}",
+            refused.status
+        );
+    }
+
+    #[test]
+    fn ok_with_a_note_is_created_and_keeps_the_note() {
+        let done = outcome_status(&RuleCommandOutcome::OkWithNote {
+            note: "The old file couldn't be removed.".into(),
+        });
+        assert!(done.saved);
+        assert_eq!(
+            done.status,
+            "The rule was created. The old file couldn't be removed."
         );
     }
 
@@ -516,17 +593,127 @@ mod tests {
         let now = Instant::now();
         let mut wait = MakeRuleWait::default();
         wait.begin("make-1".into(), "1:ask-1".into(), now);
-        assert!(wait.poll(now + NO_ANSWER_AFTER).is_none(), "not yet");
-        let (row, done) = wait
-            .poll(now + NO_ANSWER_AFTER + Duration::from_secs(1))
+        assert!(
+            wait.poll(now + NO_ANSWER_AFTER, NO_ANSWER_AFTER, |_| true)
+                .is_none(),
+            "not yet"
+        );
+        let (row, done, ending) = wait
+            .poll(
+                now + NO_ANSWER_AFTER + Duration::from_secs(1),
+                NO_ANSWER_AFTER,
+                |_| true,
+            )
             .unwrap();
         assert_eq!(row, "1:ask-1");
-        assert!(!done.created);
+        assert_eq!(ending, Ending::Unknown, "it may have been created");
+        assert!(!done.saved);
         assert_eq!(done.status, NO_ANSWER);
         // A late Ok after giving up changes nothing.
         assert!(wait
             .on_message(&result("make-1", RuleCommandOutcome::Ok))
             .is_none());
+    }
+
+    /// The off-screen notice's three cases (PR #111): created only for Ok,
+    /// unknown when the outcome isn't known, not created otherwise.
+    #[test]
+    fn each_result_ends_as_created_not_created_or_unknown() {
+        use snitchwatch_bridge::rule_policy::RuleProblem;
+        let cases = [
+            (RuleCommandOutcome::Ok, Ending::Created),
+            (
+                RuleCommandOutcome::OkWithNote { note: "n".into() },
+                Ending::Created,
+            ),
+            (
+                RuleCommandOutcome::Rejected { reason: "r".into() },
+                Ending::NotCreated,
+            ),
+            (
+                RuleCommandOutcome::Refused {
+                    problems: vec![RuleProblem {
+                        path: "name".into(),
+                        reason: "taken".into(),
+                    }],
+                },
+                Ending::NotCreated,
+            ),
+            (RuleCommandOutcome::NoDaemon, Ending::NotCreated),
+            (RuleCommandOutcome::Timeout, Ending::Unknown),
+            (
+                RuleCommandOutcome::Unsure { reason: "u".into() },
+                Ending::Unknown,
+            ),
+        ];
+        for (outcome, want) in cases {
+            assert_eq!(ending_of(&outcome), want, "{outcome:?}");
+        }
+        assert_eq!(
+            [Ending::NotCreated, Ending::Created, Ending::Unknown].map(|e| e as i32),
+            [0, 1, 2],
+            "the numbers MakeRuleOutcomes.qml reads"
+        );
+    }
+
+    #[test]
+    fn a_shorter_deadline_ends_the_wait_sooner() {
+        let now = Instant::now();
+        let mut wait = MakeRuleWait::default();
+        wait.begin("make-1".into(), "1:ask-1".into(), now);
+        let short = Duration::from_millis(50);
+        assert!(wait.poll(now + short, short, |_| true).is_none());
+        let (_, done, ending) = wait
+            .poll(now + Duration::from_millis(51), short, |_| true)
+            .unwrap();
+        assert_eq!(done.status, NO_ANSWER);
+        assert_eq!(ending, Ending::Unknown);
+    }
+
+    /// A result goes only to the connection that asked; once the row's
+    /// bridge session is gone it can't come, so the wait ends at once.
+    #[test]
+    fn a_reconnect_ends_the_wait_at_once() {
+        let now = Instant::now();
+        let mut wait = MakeRuleWait::default();
+        wait.begin("make-1".into(), "3:ask-1".into(), now);
+        assert!(wait
+            .poll(now, NO_ANSWER_AFTER, |session| session == 3)
+            .is_none());
+        let (row, done, ending) = wait.poll(now, NO_ANSWER_AFTER, |_| false).unwrap();
+        assert_eq!(row, "3:ask-1");
+        assert_eq!(ending, Ending::Unknown);
+        assert!(!done.saved);
+        assert_eq!(done.status, NO_ANSWER);
+        // A row id naming no session waits for the deadline only.
+        wait.begin("make-2".into(), "probe-row".into(), now);
+        assert!(wait.poll(now, NO_ANSWER_AFTER, |_| false).is_none());
+    }
+
+    #[test]
+    fn a_rule_that_was_not_sent_says_why() {
+        use crate::bridge_runtime::SendClientMessageError as E;
+        use crate::rule_commands::{NOT_CONNECTED, QUEUE_FULL};
+        let message = || {
+            add_rule_message(
+                &deferred_row(Some("/usr/bin/curl")),
+                "deny",
+                "this_host",
+                "forever",
+                0,
+                "make-1",
+            )
+        };
+        assert_eq!(send_problem(message(), |_| Ok(())), None);
+        assert_eq!(send_problem(message(), |_| Err(E::Full)), Some(QUEUE_FULL));
+        assert_eq!(
+            send_problem(message(), |_| Err(E::StaleSession)),
+            Some(NOT_CONNECTED)
+        );
+        assert_eq!(
+            send_problem(None, |_| panic!("nothing to send")),
+            Some(NOT_SENT)
+        );
     }
 
     #[test]

@@ -9,7 +9,12 @@
 //!     rule name;
 //!   * no rule action that assumes a named rule ("Show rule") is offered for
 //!     such a row, but "Make a rule…" is, as for a put-off row; a
-//!     rule-matched row still gets none.
+//!     rule-matched row still gets none;
+//!   * "Make a rule…" says only what the bridge answered, in place; an
+//!     outcome off screen (another row, the inspector closed, the page gone)
+//!     comes as one of three FIXED notices, never the bridge's text (PR #111
+//!     review, H1). The controller and `MakeRuleOutcomes` live at window
+//!     level, as in main.qml, and outlive the page (OQ1).
 //!
 //! Failures are collected and thrown against the probe's URL, which the
 //! stderr capture turns into an assertion; it also catches a delegate whose
@@ -51,8 +56,12 @@ Controls.ApplicationWindow {
 
     property var failures: []
     property int phase: 0
+    property int waits: 0
 
-    function showPassiveNotification(message, timeout) {}
+    property var shown: []
+    function showPassiveNotification(message, timeout) {
+        probeWindow.shown.push(message);
+    }
 
     QtObject {
         id: feedStub
@@ -63,14 +72,43 @@ Controls.ApplicationWindow {
         function decideLater(rowId) { return true; }
     }
 
-    ConnectionsPage {
-        id: page
-        anchors.fill: parent
-        bridgeFeed: feedStub
-        model: ConnectionsModel {
-            id: connModel
+    // Window-level, as in main.qml: they outlive the page (PR #111, OQ1).
+    ConnectionsModel {
+        id: connModel
+    }
+    MakeRuleController {
+        id: windowController
+    }
+    property var notices: []
+    MakeRuleOutcomes {
+        id: outcomes
+        controller: windowController
+        shownInPlace: function (rowId) {
+            return !!probeWindow.page && probeWindow.page.makeRuleSheet.shows(rowId);
+        }
+        onNotice: text => probeWindow.notices.push(text)
+    }
+    readonly property string createdNotice: "The rule was created."
+    readonly property string notCreatedNotice: "A rule couldn't be created. Open that connection to see why."
+    readonly property string unknownNotice: "The firewall service didn't confirm the rule. Open that "
+        + "connection to see more."
+    readonly property string noAnswer: "No answer from the firewall in time. The rule may have "
+        + "been created; check the Rules page."
+
+    Component {
+        id: pageComponent
+        ConnectionsPage {
+            bridgeFeed: feedStub
+            model: connModel
+            makeRuleController: windowController
         }
     }
+    Loader {
+        id: pageLoader
+        anchors.fill: parent
+        sourceComponent: pageComponent
+    }
+    readonly property var page: pageLoader.item
 
     function check(ok, what) {
         if (!ok) {
@@ -110,6 +148,15 @@ Controls.ApplicationWindow {
             }
         }
         return null;
+    }
+    function result(requestId, outcome) {
+        windowController.applyServerMessageJson(JSON.stringify({
+            action: "ruleCommandResult", requestId: requestId, outcome: outcome
+        }));
+    }
+    function checkNotices(want, when) {
+        probeWindow.check(JSON.stringify(probeWindow.notices) === JSON.stringify(want),
+                          when + ": notices " + JSON.stringify(probeWindow.notices));
     }
 
     // Row id -> [list label, inspector Matched rule, "Show rule" target,
@@ -198,50 +245,121 @@ Controls.ApplicationWindow {
                     // bridge runs here, so nothing can be sent.
                     const sheet = page.makeRuleSheet;
                     sheet.make("deny");
-                    probeWindow.check(sheet.result === "The rule couldn't be sent."
-                                      && !sheet.controller.created,
+                    probeWindow.check(sheet.result === "Snitchwatch isn't connected to its service, so nothing was sent."
+                                      && !windowController.created,
                                       "unsent: " + sheet.result);
                     // A request the bridge hasn't answered yet.
-                    const pendingId = sheet.controller.begin(page.inspectId);
+                    const pendingId = windowController.begin(page.inspectId);
                     probeWindow.check(pendingId.length > 0, "no request id");
                     probeWindow.check(sheet.result === "Sending the rule to the firewall…"
-                                      && !sheet.controller.created,
+                                      && !windowController.created,
                                       "before the result: " + sheet.result);
-                    probeWindow.check(sheet.controller.begin(page.inspectId) === "",
+                    probeWindow.check(windowController.begin(page.inspectId) === "",
                                       "a second request while one waits");
-                    sheet.controller.applyServerMessageJson(JSON.stringify({
-                        action: "ruleCommandResult", requestId: pendingId,
-                        outcome: { status: "rejected", reason: "a rule with this name exists" }
-                    }));
+                    probeWindow.result(pendingId, { status: "rejected",
+                                                    reason: "<b>a rule with this name exists</b>" });
                     probeWindow.check(sheet.result
-                                      === "The rule wasn't created: a rule with this name exists"
-                                      && !sheet.controller.created,
+                                      === "The rule wasn't created: <b>a rule with this name exists</b>"
+                                      && !windowController.created,
                                       "refused: " + sheet.result);
-                    const okId = sheet.controller.begin(page.inspectId);
-                    sheet.controller.applyServerMessageJson(JSON.stringify({
-                        action: "ruleCommandResult", requestId: okId, outcome: { status: "ok" }
-                    }));
+                    const okId = windowController.begin(page.inspectId);
+                    probeWindow.check(windowController.busy && !sheet.busyElsewhereNote.visible,
+                                      "busy-elsewhere note for this row's own request");
+                    probeWindow.result(okId, { status: "ok" });
                     probeWindow.check(sheet.result === "The rule was created."
-                                      && sheet.controller.created,
+                                      && windowController.created,
                                       "ok: " + sheet.result);
-                    // Another row's request says nothing here.
-                    sheet.controller.begin("1:rule");
+                    // Outcomes shown in place are no notices.
+                    probeWindow.checkNotices([], "on screen");
+
+                    // Another row's request says nothing here. (A row id
+                    // naming no session, so only the deadline can end it.)
+                    windowController.begin("probe-row");
                     probeWindow.check(sheet.result === "", "another row's status: " + sheet.result);
-                    connModel.setGroupedMode(true);
+                    probeWindow.check(sheet.busyElsewhereNote.visible
+                                      && sheet.busyElsewhereNote.text
+                                         === "Another rule is still being sent. Try again in a moment.",
+                                      "no busy-elsewhere note while another row's rule waits");
+                    // Only beside the form (L5).
+                    sheet.form.visible = false;
+                    probeWindow.check(!sheet.busyElsewhereNote.visible, "busy note without the form");
+                    sheet.form.visible = true;
+                    probeWindow.result("unrelated", { status: "ok" });
+                    probeWindow.check(windowController.busy, "an unrelated result ended the wait");
+                    // A silence ends it after the deadline, not before (L3).
+                    windowController.shortenDeadlineForTests(50);
+                    windowController.poll();
+                    probeWindow.check(windowController.busy, "gave up before the deadline");
+                    probeWindow.waits = 0;
+                } else if (probeWindow.phase === 2 && windowController.busy
+                           && probeWindow.waits++ < 40) {
+                    windowController.poll();
+                    return;
                 } else if (probeWindow.phase === 2) {
+                    probeWindow.check(!windowController.busy && !windowController.created
+                                      && windowController.statusText === probeWindow.noAnswer,
+                                      "after a silence: busy " + windowController.busy + " '"
+                                      + windowController.statusText + "'");
+                    probeWindow.check(!page.makeRuleSheet.busyElsewhereNote.visible,
+                                      "busy-elsewhere note after the wait ended");
+                    windowController.shortenDeadlineForTests(30000);
+                    // Its row wasn't on screen: a fixed notice, never the text.
+                    probeWindow.checkNotices([probeWindow.unknownNotice], "after a silence");
+
+                    // L2: a row of a session that isn't live (no bridge runs
+                    // here) ends its wait at the first poll, deadline or not.
+                    windowController.begin("1:default-deny");
+                    windowController.poll();
+                    probeWindow.check(!windowController.busy
+                                      && windowController.statusText === probeWindow.noAnswer,
+                                      "a gone session still waits: " + windowController.busy);
+                    probeWindow.checkNotices([probeWindow.unknownNotice,
+                                              probeWindow.unknownNotice], "a gone session");
+
+                    // L1: the inspector closes while its row's rule waits.
+                    page.inspectorSheet.close();
+                    probeWindow.waits = 0;
+                } else if (probeWindow.phase === 3 && page.makeRuleSheet.visible
+                           && probeWindow.waits++ < 20) {
+                    return;
+                } else if (probeWindow.phase === 3) {
+                    probeWindow.check(!page.makeRuleSheet.visible, "the inspector didn't close");
+                    const id = windowController.begin("1:default-stray");
+                    probeWindow.result(id, { status: "rejected", reason: "<img src=x>" });
+                    probeWindow.checkNotices([probeWindow.unknownNotice,
+                                              probeWindow.unknownNotice,
+                                              probeWindow.notCreatedNotice], "inspector closed");
+                    connModel.setGroupedMode(true);
+                } else if (probeWindow.phase === 4) {
                     for (const d of probeWindow.delegates()) {
                         if (d.isGroupHeader && d.depth === 0 && !d.expanded) {
                             connModel.toggleProcessGroup(d.groupKey);
                         }
                     }
-                } else if (probeWindow.phase === 3) {
+                } else if (probeWindow.phase === 5) {
                     for (const d of probeWindow.delegates()) {
                         if (d.isGroupHeader && d.depth === 1 && !d.expanded) {
                             connModel.toggleDomainGroup(d.groupParentKey, d.groupKey);
                         }
                     }
-                } else {
+                } else if (probeWindow.phase === 6) {
                     probeWindow.checkLabels("grouped");
+                    // OQ1: the page goes (the drawer's replace destroys it)
+                    // while a request waits; its outcome still arrives.
+                    probeWindow.pendingAfterPage = windowController.begin("1:default-allow");
+                    pageLoader.active = false;
+                } else {
+                    probeWindow.check(probeWindow.page === null, "the page is still there");
+                    probeWindow.result(probeWindow.pendingAfterPage, { status: "ok" });
+                    probeWindow.check(!windowController.busy && windowController.created,
+                                      "the controller lost the request");
+                    probeWindow.checkNotices([probeWindow.unknownNotice,
+                                              probeWindow.unknownNotice,
+                                              probeWindow.notCreatedNotice,
+                                              probeWindow.createdNotice], "page gone");
+                    probeWindow.check(probeWindow.shown.length === 0,
+                                      "a sheet notice besides the fixed ones: "
+                                      + JSON.stringify(probeWindow.shown));
                     done = true;
                 }
                 probeWindow.phase++;
@@ -263,6 +381,7 @@ Controls.ApplicationWindow {
             }
         }
     }
+    property string pendingAfterPage: ""
 }
 "#;
 

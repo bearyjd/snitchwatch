@@ -13,18 +13,14 @@ use core::pin::Pin;
 use cxx_qt::{CxxQtType, Threading};
 use cxx_qt_lib::QString;
 use serde_json::Value;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
-use crate::bridge_runtime::SendClientMessageError;
 use crate::rules::editor::{self, RuleDraft};
 use crate::rules::editor_profile;
 use crate::rules::editor_view;
 use crate::rules::simulator::SimulationForm;
 use snitchwatch_bridge::ws_messages::{ClientMessage, ServerMessage};
 
-const NOT_CONNECTED: &str = "Snitchwatch isn't connected to its service, so nothing was sent.";
-const QUEUE_FULL: &str = "Snitchwatch is busy, so nothing was sent. Try again in a moment.";
 const SAVING: &str = "Saving…";
 /// A profile rule is saved, not yet installed: the Profiles page shows
 /// whether the firewall has it.
@@ -141,23 +137,11 @@ pub struct RuleEditorControllerRust {
     pending: editor_view::Pending,
 }
 
-fn next_request_id() -> String {
-    static NEXT: AtomicU64 = AtomicU64::new(1);
-    format!(
-        "edit-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    )
-}
-
 fn send(message: ClientMessage) -> Result<(), &'static str> {
-    let handles = crate::bridge_runtime::handles().ok_or(NOT_CONNECTED)?;
-    handles.try_send(message).map_err(|error| match error {
-        SendClientMessageError::Full => QUEUE_FULL,
-        SendClientMessageError::Disconnected
-        | SendClientMessageError::Stopped
-        | SendClientMessageError::StaleSession => NOT_CONNECTED,
-    })
+    let handles = crate::bridge_runtime::handles().ok_or(crate::rule_commands::NOT_CONNECTED)?;
+    handles
+        .try_send(message)
+        .map_err(crate::rule_commands::not_sent_text)
 }
 
 fn draft_json(draft: &RuleDraft) -> QString {
@@ -282,7 +266,7 @@ impl qobject::RuleEditorController {
             self.set_status(reason);
             return false;
         }
-        let request_id = next_request_id();
+        let request_id = crate::rule_commands::next_request_id("edit");
         let editing = self.editing_name.to_string();
         let profile = self.profile_id.to_string();
         let message = if profile.is_empty() {
@@ -339,25 +323,10 @@ impl qobject::RuleEditorController {
     }
 
     fn start_bridge_feed(self: Pin<&mut Self>) {
-        let Some(handles) = crate::bridge_runtime::handles() else {
-            tracing::warn!("RuleEditorController: bridge not running; the editor can't save");
-            return;
-        };
-        let qt_thread = self.qt_thread();
-        let session_handles = handles.clone();
-        crate::bridge_dispatch::spawn_feed(
-            &handles,
+        crate::result_feed::spawn_result_feed(
+            self.qt_thread(),
             "RuleEditorController",
-            editor_view::interests_rule_editor,
-            move |connection_id, message, _json| {
-                let session_handles = session_handles.clone();
-                let message = message.clone();
-                let _ = qt_thread.queue(move |qobject| {
-                    if session_handles.is_current_session(connection_id) {
-                        qobject.on_message(message);
-                    }
-                });
-            },
+            Self::on_message,
         );
     }
 }

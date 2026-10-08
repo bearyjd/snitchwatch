@@ -81,10 +81,16 @@ Controls.ApplicationWindow {
         property string text: "holder"
     }
 
+    // The window's, as in main.qml.
+    MakeRuleController {
+        id: windowController
+    }
+
     ConnectionsPage {
         id: page
         anchors.fill: parent
         bridgeFeed: feedStub
+        makeRuleController: windowController
         model: ConnectionsModel {
             id: connModel
         }
@@ -257,7 +263,8 @@ Controls.ApplicationWindow {
                     probeWindow.check(page.makeRuleSheet.form.visible, "the rule form didn't open");
                     // No bridge runs here, so nothing can be sent.
                     page.makeRuleSheet.make("deny");
-                    probeWindow.check(page.makeRuleSheet.result === "The rule couldn't be sent.",
+                    probeWindow.check(page.makeRuleSheet.result
+                                      === "Snitchwatch isn't connected to its service, so nothing was sent.",
                                       "make result " + page.makeRuleSheet.result);
                     probeWindow.check(!page.makeRuleSheet.blockNote.visible,
                                       "the block note on a row with no block");

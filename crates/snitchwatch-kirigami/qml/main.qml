@@ -64,6 +64,23 @@ Kirigami.ApplicationWindow {
     }
     property var connectionsModelRef: connectionsModel
 
+    // "Make a rule…" requests (PR #111 review, OQ1). Owned here, not by the
+    // Connections page: the drawer's pageStack.replace destroys that page, and
+    // a request's outcome must still arrive. The notice is fixed text only.
+    MakeRuleController {
+        id: makeRuleController
+        Component.onCompleted: startBridgeFeed()
+    }
+    property var makeRuleControllerRef: makeRuleController
+    MakeRuleOutcomes {
+        controller: makeRuleController
+        shownInPlace: function (rowId) {
+            const page = root.pageStack.currentItem;
+            return !!page && !!page.makeRuleSheet && page.makeRuleSheet.shows(rowId);
+        }
+        onNotice: text => root.showPassiveNotification(text, "long")
+    }
+
     // Per-country geographic breakdown (Geo panel). Same lifetime/ownership
     // shape as connectionsModel; outbound feed started alongside the others
     // below via startBridgeFeed().
@@ -434,6 +451,7 @@ Kirigami.ApplicationWindow {
         ConnectionsPage {
             model: root.connectionsModelRef
             bridgeFeed: root.bridgeFeedRef
+            makeRuleController: root.makeRuleControllerRef
 
             // Rule-match diagnostics "Show rule" jump (Parity 4): navigate to
             // the Rules tab and open the matched rule's detail sheet

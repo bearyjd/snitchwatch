@@ -160,8 +160,9 @@ fn only_the_awaited_result_finishes_the_wait() {
         None
     );
 
-    assert!(interests_rule_editor(&result("x", RuleCommandOutcome::Ok)));
-    assert!(!interests_rule_editor(&ServerMessage::SetRules {
+    use crate::rule_commands::interests_rule_results;
+    assert!(interests_rule_results(&result("x", RuleCommandOutcome::Ok)));
+    assert!(!interests_rule_results(&ServerMessage::SetRules {
         rules: vec![]
     }));
 }
@@ -220,4 +221,52 @@ fn a_cached_rule_is_edited_in_its_wire_form() {
         locked.not_editable
     );
     assert!(editable_in(&store, "899-missing").is_none());
+}
+
+/// The wait "Make a rule…" shares: a tag rides along, the wording is the
+/// caller's, and `gone` ends the wait before the deadline.
+#[test]
+fn a_tagged_wait_returns_its_tag_in_the_callers_wording() {
+    let start = Instant::now();
+    let wording = Wording {
+        saved: "Made.",
+        note_after_saved: true,
+        ..EDITOR_WORDING
+    };
+    let ok = ServerMessage::RuleCommandResult {
+        request_id: "7-1".into(),
+        outcome: RuleCommandOutcome::Ok,
+    };
+    let mut pending: Pending<&str> = Pending::default();
+    pending.sent_with("7-1".into(), "row-a", start);
+    assert_eq!(
+        pending.result_with(&ok, &wording),
+        Some((
+            "row-a",
+            Finished {
+                saved: true,
+                status: "Made.".into()
+            }
+        ))
+    );
+    assert_eq!(
+        finished_with(
+            &RuleCommandOutcome::OkWithNote {
+                note: "Note.".into()
+            },
+            &wording
+        )
+        .status,
+        "Made. Note."
+    );
+    pending.sent_with("7-2".into(), "row-b", start);
+    assert_eq!(
+        pending.expired_with(start, NO_ANSWER_AFTER, |_| false, &wording),
+        None
+    );
+    let (tag, done) = pending
+        .expired_with(start, NO_ANSWER_AFTER, |tag| *tag == "row-b", &wording)
+        .expect("gone ends the wait at once");
+    assert_eq!(tag, "row-b");
+    assert_eq!(done.status, UNKNOWN);
 }
