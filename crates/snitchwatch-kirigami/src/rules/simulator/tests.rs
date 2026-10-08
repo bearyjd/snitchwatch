@@ -64,7 +64,7 @@ fn base() -> SimulationInput {
         process_path: Some("/usr/bin/curl".to_string()),
         dest_host: "example.com".to_string(),
         dest_port: 443,
-        protocol: "tcp".to_string(),
+        protocol: Some("tcp".to_string()),
         ..Default::default()
     }
 }

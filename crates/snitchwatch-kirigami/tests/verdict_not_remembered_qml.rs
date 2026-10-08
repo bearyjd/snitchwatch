@@ -79,7 +79,7 @@ Controls.ApplicationWindow {
         id: feedStub
         property bool ok: true
         signal verdictNotRemembered(string rowId)
-        function submitVerdict(rowId, choice, scope, duration) {
+        function submitVerdict(rowId, choice, scope, duration, bindableProcessPath) {
             probeWindow.submitted.push({ rowId: rowId, duration: duration });
         }
         // A bridge with app-bound rules, so the sheet's durations depend on

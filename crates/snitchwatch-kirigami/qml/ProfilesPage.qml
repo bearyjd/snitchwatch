@@ -35,6 +35,12 @@ Kirigami.ScrollablePage {
     property bool inspectActive: false
     property bool confirmingDelete: false
 
+    // Where the bridge keeps profiles (`SetProfiles.storage`, issue #46). Not
+    // persistent until the bridge says so: no model, no message yet, or an
+    // older bridge all mean "kept in memory only".
+    readonly property bool storagePersistent: page.model ? page.model.storagePersistent : false
+    readonly property string storageReason: page.model ? page.model.storageReason : ""
+
     // New-profile creation box lives in the page header, mirroring
     // BlocklistsPage's subscribe box placement.
     titleDelegate: RowLayout {
@@ -62,19 +68,53 @@ Kirigami.ScrollablePage {
         }
     }
 
-    // Issue #46: the shipped bridge wires a no-op profile rule sink and an
-    // in-memory profile store (`snitchwatch-bridge-cli/src/lib.rs`), so
-    // activating a profile materializes no daemon rules and profiles are
-    // forgotten on restart. Deliberately unconditional and non-dismissable
-    // (no close button, no actions) until a real sink + persisted store land
-    // — then delete this banner.
-    header: Kirigami.InlineMessage {
-        type: Kirigami.MessageType.Warning
-        visible: true
-        text: "Preview: profiles are shown here but are not applied to the firewall yet, so "
-            + "activating one does not change any rules. Profiles are also kept in memory only, "
-            + "so they are lost when Snitchwatch's background service restarts (for example "
-            + "on logout or reboot)."
+    // Issue #46: the shipped bridge wires a no-op profile rule sink
+    // (`NoopProfileRuleSink`), so activating a profile installs no firewall
+    // rule. The first warning is unconditional and stays until profiles are
+    // enforced and can hold rules of their own (#46 Part 2, with a rule
+    // editor). Profiles are saved only when the bridge says so
+    // (`SetProfiles.storage`); otherwise the second warning says they are
+    // lost on restart. Fixed-text warnings, none dismissable (no close
+    // button, no actions); the storage problem's reason is data, so it goes
+    // in a PlainText label, never in an InlineMessage (issue #51).
+    header: ColumnLayout {
+        spacing: 0
+
+        Kirigami.InlineMessage {
+            objectName: "notAppliedBanner"
+            Layout.fillWidth: true
+            type: Kirigami.MessageType.Warning
+            visible: true
+            text: "Preview: profiles are not applied to the firewall yet. Activating one installs "
+                + "no firewall rules, so it changes nothing that is allowed or blocked. That comes "
+                + "with a way to add rules to a profile."
+        }
+        Kirigami.InlineMessage {
+            objectName: "memoryOnlyStorageBanner"
+            Layout.fillWidth: true
+            type: Kirigami.MessageType.Warning
+            visible: !page.storagePersistent
+            text: "Profiles are kept in memory only, so they are lost when Snitchwatch's "
+                + "background service restarts (for example on logout or reboot)."
+        }
+        Controls.Label {
+            objectName: "savedNote"
+            Layout.fillWidth: true
+            Layout.margins: Kirigami.Units.smallSpacing
+            visible: page.storagePersistent
+            wrapMode: Text.Wrap
+            opacity: 0.7
+            text: "Profiles are saved, so they are kept when Snitchwatch's background service "
+                + "restarts."
+        }
+        Controls.Label {
+            Layout.fillWidth: true
+            Layout.margins: Kirigami.Units.smallSpacing
+            visible: page.storageReason.length > 0
+            textFormat: Text.PlainText
+            wrapMode: Text.Wrap
+            text: "Details: " + page.storageReason
+        }
     }
 
     Kirigami.PlaceholderMessage {

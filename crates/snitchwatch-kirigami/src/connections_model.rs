@@ -219,6 +219,14 @@ pub mod qobject {
         #[cxx_name = "rowDetailsJson"]
         fn row_details_json(self: &ConnectionsModel, id: &QString) -> QString;
 
+        /// "Simulate this connection": the Simulate sheet's fields for row
+        /// `id`, JSON-encoded (`rules::simulator::SimulationForm`). Only what
+        /// the row carries is set; every other field is a blank string, which
+        /// the simulator reads as unknown. `"{}"` for an unknown id.
+        #[qinvokable]
+        #[cxx_name = "simulationPrefillJson"]
+        fn simulation_prefill_json(self: &ConnectionsModel, id: &QString) -> QString;
+
         /// Whether `id` names a row that is still awaiting a decision: present
         /// in the store (independent of the active filter) with no action
         /// yet. `false` for an unknown id. The inspector re-checks this when
@@ -952,6 +960,17 @@ impl qobject::ConnectionsModel {
         };
         QString::from(&serde_json::to_string(&details).unwrap_or_else(|e| {
             tracing::error!(error = %e, "ConnectionsModel: row details serialize failed");
+            "{}".to_string()
+        }))
+    }
+
+    fn simulation_prefill_json(&self, id: &QString) -> QString {
+        let Some(row) = self.store.row_by_id(&id.to_string()) else {
+            return QString::from("{}");
+        };
+        let form = crate::rules::simulator::SimulationForm::for_connection(row);
+        QString::from(&serde_json::to_string(&form).unwrap_or_else(|e| {
+            tracing::error!(error = %e, "ConnectionsModel: simulation prefill serialize failed");
             "{}".to_string()
         }))
     }

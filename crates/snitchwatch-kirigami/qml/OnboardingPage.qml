@@ -102,6 +102,9 @@ Kirigami.Page {
             Layout.fillWidth: true
             wrapMode: Text.WordWrap
             horizontalAlignment: Text.AlignHCenter
+            // May carry the daemon probe's error message (issue #51).
+            textFormat: Text.PlainText
+            objectName: "wizardDetail"
             text: page.controller ? page.controller.detail : ""
         }
 

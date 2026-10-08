@@ -32,15 +32,28 @@ Kirigami.ScrollablePage {
         }
     }
 
-    header: Kirigami.InlineMessage {
-        anchors {
-            left: parent.left
-            right: parent.right
-            margins: Kirigami.Units.smallSpacing
-        }
-        type: Kirigami.MessageType.Error
+    // `errorText` includes the scanner's stderr and binary path, so it sits
+    // in a PlainText label, never in the InlineMessage (issue #51).
+    header: ColumnLayout {
         visible: page.controller && page.controller.errorText.length > 0
-        text: page.controller ? page.controller.errorText : ""
+        spacing: Kirigami.Units.smallSpacing
+
+        Kirigami.InlineMessage {
+            Layout.fillWidth: true
+            Layout.margins: Kirigami.Units.smallSpacing
+            visible: true
+            type: Kirigami.MessageType.Error
+            text: "The deep scan failed."
+        }
+        Controls.Label {
+            Layout.fillWidth: true
+            Layout.leftMargin: Kirigami.Units.largeSpacing
+            Layout.rightMargin: Kirigami.Units.largeSpacing
+            wrapMode: Text.Wrap
+            textFormat: Text.PlainText
+            objectName: "scannerErrorText"
+            text: page.controller ? page.controller.errorText : ""
+        }
     }
 
     ColumnLayout {
@@ -124,8 +137,11 @@ Kirigami.ScrollablePage {
         Repeater {
             model: section.entries
             delegate: Controls.Label {
+                objectName: "scannerFindingPath"
                 Layout.fillWidth: true
                 wrapMode: Text.Wrap
+                // Host file paths: anyone can name a file to look like markup.
+                textFormat: Text.PlainText
                 text: "• " + modelData.path + (modelData.detail ? " — " + modelData.detail : "")
             }
         }

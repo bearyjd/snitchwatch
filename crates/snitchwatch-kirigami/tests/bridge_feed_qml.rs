@@ -14,8 +14,8 @@
 //!   * the `BridgeFeed` cxx-qt wrapper registers as a QML type and
 //!     instantiates (a null root means it failed to register or compile), and
 //!   * `submitVerdict` is callable from QML with its documented four-token
-//!     signature plus the row's `bindableProcessPath` flag (a different arity
-//!     throws) and drives the real
+//!     signature plus the row's `bindableProcessPath` flag (too few arguments
+//!     throw) and drives the real
 //!     `pending_decision::build_verdict_message` path without panicking (a
 //!     Rust panic inside the invokable aborts this test binary), and
 //!   * an unrecognised choice token is *rejected in Rust* rather than

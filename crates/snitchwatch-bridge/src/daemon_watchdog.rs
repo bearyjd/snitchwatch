@@ -7,8 +7,9 @@
 //! daemon therefore stays connected but silent, so `grpc_server.rs`'s
 //! `DaemonLiveness` tracks *any* inbound gRPC activity plus the long-lived
 //! `Notifications` stream's open/closed state; this module polls that for
-//! staleness and republishes `TrayState::DaemonDown` (or, on recovery,
-//! whatever `Idle`/`Pending(n)` the cache actually holds).
+//! staleness and records it in the cache, whose derived tray state then shows
+//! `TrayState::DaemonDown` through every resync until recovery (issue #58),
+//! and then whatever the pending rows and the pause call for.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -17,7 +18,7 @@ use tokio::sync::{broadcast, Mutex as TokioMutex};
 
 use crate::cache::connections::ConnectionCache;
 use crate::daemon_liveness::DaemonLiveness;
-use crate::tray_state::{TrayState, TrayStatePublisher};
+use crate::tray_state::TrayStatePublisher;
 
 /// 10x the ~1s ping cadence observed in `vendor/opensnitch/daemon/ui/client.go`
 /// — generous enough to absorb a dropped ping or scheduling jitter without
@@ -46,7 +47,11 @@ pub async fn run(
         let down_now = liveness.is_down(Instant::now(), DAEMON_DOWN_TIMEOUT);
 
         if down_now && !was_down {
-            tray_pub.set(TrayState::DaemonDown);
+            {
+                let mut cache = cache.lock().await;
+                cache.set_daemon_down(true);
+                tray_pub.set(cache.tray_state());
+            }
             // The last-known firewall status came from opensnitchd itself;
             // now that the daemon is unreachable it's stale, not current —
             // clear it so `report()` doesn't claim the firewall is still
@@ -59,7 +64,11 @@ pub async fn run(
             // Recovered — show what the cache actually holds, not a
             // hardcoded Idle (there may be pending rows queued up from
             // before the outage, or new ones that arrived while "down").
-            cache.lock().await.resync_tray_state();
+            {
+                let mut cache = cache.lock().await;
+                cache.set_daemon_down(false);
+                tray_pub.set(cache.tray_state());
+            }
             let _ = broadcast_tx.send(crate::ws_messages::ServerMessage::DiagnosticsReport {
                 checks: diagnostics_ctx.report(),
             });
@@ -71,6 +80,7 @@ pub async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tray_state::TrayState;
     use std::sync::Mutex as StdMutex;
 
     #[tokio::test(start_paused = true)]
@@ -174,6 +184,64 @@ mod tests {
         rx.changed().await.unwrap();
         assert_eq!(*rx.borrow(), TrayState::Pending(1));
 
+        watchdog.abort();
+    }
+
+    /// Issue #58: once the watchdog has reported the daemon down, a resync
+    /// (a new prompt here) can't put the tray back to `Pending`.
+    #[tokio::test(start_paused = true)]
+    async fn a_resync_during_an_outage_keeps_the_tray_on_daemon_down() {
+        let liveness = DaemonLiveness::new_stale_for_test(
+            Instant::now(),
+            DAEMON_DOWN_TIMEOUT + Duration::from_secs(1),
+        );
+        let tray_pub = Arc::new(TrayStatePublisher::new());
+        let cache = Arc::new(TokioMutex::new(ConnectionCache::with_tray_publisher(
+            64,
+            tray_pub.clone(),
+        )));
+        let mut rx = tray_pub.subscribe();
+        let (broadcast_tx, _) = tokio::sync::broadcast::channel(16);
+        let probe: Arc<dyn crate::diagnostics::kernel_probe::KernelProbe> =
+            Arc::new(crate::diagnostics::kernel_probe::testing::FakeKernelProbe::all_ok());
+        let diagnostics_ctx = Arc::new(crate::diagnostics::DiagnosticsCtx::new(
+            liveness.clone(),
+            Arc::new(StdMutex::new(None)),
+            probe,
+            Arc::new(crate::daemon_alerts::DaemonAlertStore::new()),
+        ));
+        let watchdog = tokio::spawn(run(
+            liveness.clone(),
+            tray_pub.clone(),
+            cache.clone(),
+            diagnostics_ctx,
+            broadcast_tx,
+        ));
+        rx.changed().await.unwrap();
+        assert_eq!(*rx.borrow(), TrayState::DaemonDown);
+
+        let row = crate::ws_messages::ConnectionRow {
+            id: "1".to_string(),
+            process: "firefox".to_string(),
+            process_path: None,
+            dst_host: "example.com".to_string(),
+            dst_ip: "1.1.1.1".to_string(),
+            dst_port: 443,
+            protocol: "tcp".to_string(),
+            direction: "outgoing".to_string(),
+            action: None,
+            bytes_sent: 0,
+            bytes_received: 0,
+            started_at_ms: 0,
+            matched_rule: None,
+        };
+        let _verdict_rx = cache.lock().await.insert_pending(row);
+        // The insert republished; mark that version seen before waiting.
+        assert_eq!(*rx.borrow_and_update(), TrayState::DaemonDown);
+
+        liveness.touch();
+        rx.changed().await.unwrap();
+        assert_eq!(*rx.borrow(), TrayState::Pending(1));
         watchdog.abort();
     }
 

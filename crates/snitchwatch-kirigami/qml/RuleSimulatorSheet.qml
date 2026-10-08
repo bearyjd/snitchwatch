@@ -47,6 +47,13 @@ SizedOverlaySheet {
         || sheet.simulateUnevaluated.length > 0
         || sheet.simulateInvalid.length > 0
 
+    // The protocol names opensnitchd gives a connection
+    // (`rules::simulator::DAEMON_PROTOCOLS`).
+    readonly property var protocolNames: ["tcp", "tcp6", "udp", "udp6", "udplite",
+                                          "udplite6", "sctp", "sctp6", "icmp", "icmp6"]
+    // Set by `prefill`: the inputs came from a connection, not from typing.
+    property bool prefilled: false
+
     function actionColor(action) {
         return action === "allow" ? Kirigami.Theme.positiveTextColor : Kirigami.Theme.negativeTextColor;
     }
@@ -60,6 +67,39 @@ SizedOverlaySheet {
         return shown.join("\n");
     }
 
+    // Fill the inputs from `fields` (the keys `runSimulation` sends; see
+    // `rules::simulator::SimulationForm`) and forget the last result. This is
+    // a reset first: every field not in `fields` goes back to blank, which is
+    // unknown, so nothing an earlier run left in the sheet is taken for a
+    // fact about this connection.
+    function prefill(fields) {
+        const given = fields || {};
+        const texts = {
+            processPath: simProcessPath, destHost: simHost, parentPaths: simParentPaths,
+            command: simCommand, pid: simPid, uid: simUid, env: simEnv, srcIp: simSrcIp,
+            srcPort: simSrcPort, destIp: simDestIp, ifaceIn: simIfaceIn,
+            ifaceOut: simIfaceOut, md5: simMd5
+        };
+        for (const key in texts) {
+            texts[key].text = given[key] || "";
+        }
+        simPort.value = given.destPort === undefined ? 443 : given.destPort;
+        const protocol = simProtocol.indexOfValue(given.protocol || "");
+        simProtocol.currentIndex = protocol >= 0 ? protocol : 0;
+        simChecksums.currentIndex = Math.max(0, simChecksums.modes.indexOf(given.checksums || "unknown"));
+        // Show the advanced section when something in it was filled in.
+        advancedInputs.visible = !!given.destIp;
+        sheet.prefilled = Object.keys(given).length > 0;
+        sheet.simulateRan = false;
+        sheet.simulateMatchedRule = "";
+        sheet.simulateAction = "";
+        sheet.simulatePrecedence = -1;
+        sheet.simulateUnsupported = "";
+        sheet.simulateUnevaluated = "";
+        sheet.simulateInvalid = "";
+        sheet.simulateWarnings = "";
+    }
+
     // Run the rule-match simulator (Qt-free logic in `rules::simulator`)
     // against the sheet's inputs and populate the result section.
     function runSimulation() {
@@ -68,7 +108,7 @@ SizedOverlaySheet {
             processPath: simProcessPath.text,
             destHost: simHost.text,
             destPort: simPort.value,
-            protocol: simProtocol.currentText,
+            protocol: simProtocol.currentValue,
             parentPaths: simParentPaths.text,
             command: simCommand.text,
             pid: simPid.text,
@@ -117,7 +157,16 @@ SizedOverlaySheet {
             wrapMode: Text.Wrap
             opacity: 0.7
             font: Kirigami.Theme.smallFont
-            text: "Regular expressions are matched the way opensnitchd's Go engine (RE2) does, as closely as this simulator can. A pattern it can't read, including one with a character class that has punctuation or a literal dash in it, is reported as not simulated."
+            text: "Regular expressions are matched the way opensnitchd's Go engine (RE2) does, as closely as this simulator can. A pattern it can't read is reported as not simulated. Inside [...], only these are simulated: a leading ^, ASCII letters and digits, ranges between two of them (a-z, 0-9), single punctuation marks other than \\ [ ] ^ and -, \\d \\w \\s and their capitals, and POSIX classes such as [:alpha:]. Anything else in a class, such as a dash outside a range, an escaped punctuation mark like \\., a space or non-ASCII text, is reported as not simulated."
+        }
+
+        Controls.Label {
+            Layout.fillWidth: true
+            visible: sheet.prefilled
+            textFormat: Text.PlainText
+            wrapMode: Text.Wrap
+            font: Kirigami.Theme.smallFont
+            text: "Started from the connection you chose. What it doesn't say was left blank, which means unknown."
         }
 
         Kirigami.FormLayout {
@@ -125,18 +174,21 @@ SizedOverlaySheet {
 
             Controls.TextField {
                 id: simProcessPath
+                objectName: "simProcessPath"
                 Kirigami.FormData.label: "Process path"
                 placeholderText: "/usr/bin/curl"
                 Layout.fillWidth: true
             }
             Controls.TextField {
                 id: simHost
+                objectName: "simHost"
                 Kirigami.FormData.label: "Destination host"
                 placeholderText: "github.com"
                 Layout.fillWidth: true
             }
             Controls.SpinBox {
                 id: simPort
+                objectName: "simPort"
                 Kirigami.FormData.label: "Destination port"
                 from: 0
                 to: 65535
@@ -144,11 +196,17 @@ SizedOverlaySheet {
             }
             Controls.ComboBox {
                 id: simProtocol
+                objectName: "simProtocol"
                 Kirigami.FormData.label: "Protocol"
-                // opensnitchd names IPv6 flows tcp6/udp6/...; a rule for
-                // `tcp` does not match `tcp6`.
-                model: ["tcp", "tcp6", "udp", "udp6", "udplite", "udplite6",
-                        "sctp", "sctp6", "icmp", "icmp6"]
+                textRole: "label"
+                valueRole: "value"
+                // opensnitchd names IPv6 flows tcp6/udp6/...; a rule for `tcp`
+                // does not match `tcp6`. The first entry is a protocol that
+                // isn't known (a blank value), which "Simulate this
+                // connection" selects when the connection doesn't say.
+                model: [{ label: "unknown", value: "" }].concat(
+                    sheet.protocolNames.map(function (name) { return { label: name, value: name }; }))
+                currentIndex: 1
             }
         }
 
@@ -207,6 +265,7 @@ SizedOverlaySheet {
                 }
                 Controls.TextArea {
                     id: simEnv
+                    objectName: "simEnv"
                     Kirigami.FormData.label: "Environment"
                     placeholderText: "NAME=value, one per line"
                     Layout.fillWidth: true

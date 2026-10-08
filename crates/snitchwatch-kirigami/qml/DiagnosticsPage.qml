@@ -44,8 +44,10 @@ Kirigami.ScrollablePage {
             }
 
             Controls.Label {
+                objectName: "autostartError"
                 Kirigami.FormData.label: "Status"
                 visible: page.controller && page.controller.autostartError.length > 0
+                textFormat: Text.PlainText
                 text: page.controller ? page.controller.autostartError : ""
                 color: Kirigami.Theme.negativeTextColor
                 wrapMode: Text.Wrap
@@ -87,18 +89,24 @@ Kirigami.ScrollablePage {
             }
         }
 
+        // The detail names a file path, so it sits in the PlainText label
+        // below, never in the InlineMessage (issue #51).
         Kirigami.InlineMessage {
             Layout.fillWidth: true
             visible: page.controller && page.controller.coexistenceConflict
             type: Kirigami.MessageType.Warning
-            text: page.controller ? page.controller.coexistenceDetail : ""
+            text: "The upstream OpenSnitch UI is also set up on this system."
         }
 
         Controls.Label {
+            objectName: "coexistenceDetail"
             Layout.fillWidth: true
-            visible: page.controller && !page.controller.coexistenceConflict
+            wrapMode: Text.Wrap
+            textFormat: Text.PlainText
             text: page.controller ? page.controller.coexistenceDetail : ""
-            opacity: 0.7
+            // Dimmed as background text, but not when there is a conflict: the
+            // instructions are what the user needs then.
+            opacity: page.controller && page.controller.coexistenceConflict ? 1 : 0.7
         }
 
         Kirigami.Separator {
@@ -136,6 +144,8 @@ Kirigami.ScrollablePage {
             wrapMode: Controls.TextArea.NoWrap
             font.family: "monospace"
             selectByMouse: true
+            // Panic messages can quote any text the app handled (issue #51).
+            textFormat: TextEdit.PlainText
             text: page.controller ? page.controller.crashLogText : ""
         }
     }

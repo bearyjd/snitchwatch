@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use super::SimulationInput;
 
@@ -15,9 +15,9 @@ use super::SimulationInput;
 ///
 /// **A blank field means unknown**, so conditions that need it are reported as
 /// not evaluated. The one exception is the destination host: a blank one is
-/// the empty `DstHost` a bare-IP connection has. The port and protocol always
-/// have a value.
-#[derive(Debug, Clone, Default, Deserialize)]
+/// the empty `DstHost` a bare-IP connection has. The destination port always
+/// has a value; a blank protocol is unknown like the rest.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct SimulationForm {
     pub process_path: String,
@@ -50,7 +50,7 @@ impl SimulationForm {
             process_path: text(&self.process_path),
             dest_host: self.dest_host.trim().to_string(),
             dest_port: self.dest_port.clamp(0, i64::from(u16::MAX)) as u16,
-            protocol: self.protocol.trim().to_string(),
+            protocol: text(&self.protocol),
             parent_paths: self.ancestors(),
             command: text(&self.command),
             pid: number(&self.pid),
@@ -131,9 +131,10 @@ mod tests {
     }
 
     #[test]
-    fn a_blank_form_is_all_unknown_except_the_basic_fields() {
+    fn a_blank_form_is_all_unknown_except_the_host_and_port() {
         let input = form(serde_json::json!({}));
         assert_eq!(input, SimulationInput::default());
+        assert_eq!(input.protocol, None);
         assert_eq!(input.parent_paths, None);
         assert_eq!(input.command, None);
         assert_eq!(input.pid, None);
@@ -166,7 +167,7 @@ mod tests {
         assert_eq!(input.process_path.as_deref(), Some("/usr/bin/curl"));
         assert_eq!(input.dest_host, "");
         assert_eq!(input.dest_port, 443);
-        assert_eq!(input.protocol, "tcp");
+        assert_eq!(input.protocol.as_deref(), Some("tcp"));
     }
 
     #[test]
