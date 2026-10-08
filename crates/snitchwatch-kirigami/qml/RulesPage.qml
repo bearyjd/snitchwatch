@@ -31,7 +31,15 @@
 // is flagged with what deleting it changes and its own Delete button — one
 // click, one rule. Deliberately no bulk delete: removing a deny can unblock
 // traffic, so every deletion stays a deliberate, per-row choice.
+//
+// Rule import/export (roadmap P2.7): "Export…" saves the firewall's user
+// rules through a file dialog; "Import…" reads a rules file and opens
+// `RulesImportSheet` with the bridge's dry-run preview. The GUI reads and
+// writes the files; the bridge checks every rule. Import never deletes.
+// The buttons stay enabled while the list is empty: the bridge says when
+// the firewall's rules haven't loaded (its answer shows below the title).
 import QtQuick
+import QtQuick.Dialogs
 import QtQuick.Layouts
 import QtQuick.Controls as Controls
 import org.kde.kirigami as Kirigami
@@ -65,6 +73,11 @@ Kirigami.ScrollablePage {
     property alias inspectorEnabledSwitch: inspectEnabledSwitch
     property alias inspectorDeleteButton: inspectDeleteButton
     property alias rulesList: list
+    property alias rulesIo: rulesIo
+    property alias importSheet: importSheet
+    readonly property bool showsAllAppsNotice: !!page.model && page.model.legacyHostOnlyCount > 0
+    // Not `ioStatus.visible`: a child of a hidden header always reads false.
+    readonly property bool showsIoStatus: rulesIo.statusText.length > 0 && !importSheet.visible
 
     function actionColor(action) {
         return action === "allow" ? Kirigami.Theme.positiveTextColor : Kirigami.Theme.negativeTextColor;
@@ -157,6 +170,20 @@ Kirigami.ScrollablePage {
             Layout.fillWidth: true
         }
         Controls.Button {
+            objectName: "exportRules"
+            text: "Export…"
+            icon.name: "document-export"
+            enabled: !rulesIo.busy
+            onClicked: rulesIo.requestExport()
+        }
+        Controls.Button {
+            objectName: "importRules"
+            text: "Import…"
+            icon.name: "document-import"
+            enabled: !rulesIo.busy && !rulesIo.applying
+            onClicked: importDialog.open()
+        }
+        Controls.Button {
             text: "Simulate"
             icon.name: "system-run"
             onClicked: simulateSheet.open()
@@ -166,12 +193,12 @@ Kirigami.ScrollablePage {
     // Issue #44: only when some rules apply to every app. Fixed text; the
     // count sits in a PlainText label (InlineMessage can't render data).
     header: ColumnLayout {
-        visible: !!page.model && page.model.legacyHostOnlyCount > 0
+        visible: page.showsAllAppsNotice || page.showsIoStatus
         spacing: 0
 
         Kirigami.InlineMessage {
             Layout.fillWidth: true
-            visible: true
+            visible: page.showsAllAppsNotice
             type: Kirigami.MessageType.Information
             text: "Some rules saved by earlier Snitchwatch versions apply to all apps, not only "
                 + "the app that asked. They are marked below, each with what deleting it changes."
@@ -180,6 +207,7 @@ Kirigami.ScrollablePage {
         // hand-written rules may apply to all apps too, so no "of N".
         Controls.Label {
             objectName: "allAppsCount"
+            visible: page.showsAllAppsNotice
             Layout.fillWidth: true
             Layout.margins: Kirigami.Units.smallSpacing
             textFormat: Text.PlainText
@@ -188,6 +216,17 @@ Kirigami.ScrollablePage {
                     ? "1 rule saved by an earlier Snitchwatch version applies to all apps"
                     : page.model.legacyHostOnlyCount
                       + " rules saved by earlier Snitchwatch versions apply to all apps"
+        }
+        // The last export or import outcome (P2.7), plain text.
+        Controls.Label {
+            id: ioStatus
+            objectName: "rulesIoStatus"
+            visible: page.showsIoStatus
+            Layout.fillWidth: true
+            Layout.margins: Kirigami.Units.smallSpacing
+            textFormat: Text.PlainText
+            text: rulesIo.statusText
+            wrapMode: Text.Wrap
         }
     }
 
@@ -466,5 +505,38 @@ Kirigami.ScrollablePage {
     RuleSimulatorSheet {
         id: simulateSheet
         model: page.model
+    }
+
+    // Rule import/export (P2.7).
+    RulesIoController {
+        id: rulesIo
+        Component.onCompleted: startBridgeFeed()
+        onExportReady: exportDialog.open()
+    }
+    // Gives up on an answer that never comes (an older bridge).
+    Timer {
+        interval: 1000
+        repeat: true
+        running: rulesIo.busy
+        onTriggered: rulesIo.poll()
+    }
+    FileDialog {
+        id: exportDialog
+        title: "Export rules"
+        fileMode: FileDialog.SaveFile
+        defaultSuffix: "json"
+        nameFilters: ["Snitchwatch rules (*.json)"]
+        onAccepted: rulesIo.writeExport(selectedFile)
+    }
+    FileDialog {
+        id: importDialog
+        title: "Import rules"
+        fileMode: FileDialog.OpenFile
+        nameFilters: ["Snitchwatch rules (*.json)"]
+        onAccepted: rulesIo.readImport(selectedFile)
+    }
+    RulesImportSheet {
+        id: importSheet
+        controller: rulesIo
     }
 }

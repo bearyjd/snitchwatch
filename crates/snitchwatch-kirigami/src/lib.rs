@@ -32,6 +32,7 @@ pub mod pending_decision;
 pub mod profiles;
 pub mod profiles_model;
 pub mod rules;
+pub mod rules_io_controller;
 pub mod rules_model;
 pub mod scanner;
 pub mod scanner_controller;

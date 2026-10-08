@@ -13,6 +13,7 @@ const BLOCKLISTS_PAGE: &str = include_str!("../qml/BlocklistsPage.qml");
 const PROFILES_PAGE: &str = include_str!("../qml/ProfilesPage.qml");
 const RULES_PAGE: &str = include_str!("../qml/RulesPage.qml");
 const SIMULATOR_SHEET: &str = include_str!("../qml/RuleSimulatorSheet.qml");
+const IMPORT_SHEET: &str = include_str!("../qml/RulesImportSheet.qml");
 const PENDING_SHEET: &str = include_str!("../qml/PendingDecisionSheet.qml");
 const CONNECTIONS_PAGE: &str = include_str!("../qml/ConnectionsPage.qml");
 const MAIN_QML: &str = include_str!("../qml/main.qml");
@@ -44,6 +45,7 @@ const ALL_QML: &[(&str, &str)] = &[
     ("PendingDecisionSheet.qml", PENDING_SHEET),
     ("ProfilesPage.qml", PROFILES_PAGE),
     ("RuleSimulatorSheet.qml", SIMULATOR_SHEET),
+    ("RulesImportSheet.qml", IMPORT_SHEET),
     ("RulesPage.qml", RULES_PAGE),
     ("ScannerPage.qml", include_str!("../qml/ScannerPage.qml")),
     ("SizedOverlaySheet.qml", SIZED_SHEET),
@@ -391,9 +393,35 @@ fn rules_page_labels_showing_rule_data_are_plain_text() {
             "page.inspectOperatorSummary",
             // Issue #44: names the destination of an all-apps rule.
             "row.allAppsHint",
+            // P2.7: export/import outcomes, which carry bridge reasons.
+            "rulesIo.statusText",
         ],
-        10,
+        11,
     );
+}
+
+/// The import preview shows names, conditions and reasons from an untrusted
+/// file and the firewall service, so every label in it is plain text, and no
+/// checkbox carries text (a CheckBox's text is AutoText).
+#[test]
+fn import_sheet_labels_are_all_plain_text_and_checkboxes_carry_no_text() {
+    let code = code_lines(IMPORT_SHEET);
+    let labels = blocks(&code, "Controls.Label {");
+    assert!(labels.len() >= 12, "found {} labels", labels.len());
+    for block in &labels {
+        assert!(
+            block.contains("textFormat: Text.PlainText"),
+            "RulesImportSheet.qml has a label without PlainText:\n{block}"
+        );
+    }
+    let checkboxes = blocks(&code, "Controls.CheckBox {");
+    assert!(!checkboxes.is_empty());
+    for block in checkboxes {
+        assert!(
+            text_binding(&block).is_none(),
+            "RulesImportSheet.qml puts text on a CheckBox (AutoText):\n{block}"
+        );
+    }
 }
 
 /// The Simulate sheet shows rule names and operands from the daemon, and
@@ -516,6 +544,7 @@ fn inline_messages_carry_only_fixed_text() {
         ("ProfilesPage.qml", PROFILES_PAGE),
         ("RulesPage.qml", RULES_PAGE),
         ("RuleSimulatorSheet.qml", SIMULATOR_SHEET),
+        ("RulesImportSheet.qml", IMPORT_SHEET),
     ] {
         for block in blocks(&code_lines(source), "Kirigami.InlineMessage {") {
             checked += 1;
@@ -627,6 +656,7 @@ fn overlay_sheet_titles_are_plain_text() {
         ("ProfilesPage.qml", PROFILES_PAGE),
         ("RulesPage.qml", RULES_PAGE),
         ("RuleSimulatorSheet.qml", SIMULATOR_SHEET),
+        ("RulesImportSheet.qml", IMPORT_SHEET),
     ] {
         assert!(
             !code_lines(source).contains("Kirigami.OverlaySheet {"),
