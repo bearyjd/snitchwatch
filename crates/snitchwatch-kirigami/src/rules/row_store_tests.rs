@@ -14,6 +14,7 @@ fn rule(name: &str, enabled: bool, action: &str) -> Rule {
         display_name: None,
         read_only_reason: None,
         deletable: None,
+        toggleable: None,
     }
 }
 

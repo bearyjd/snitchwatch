@@ -367,7 +367,8 @@ async fn an_apply_publishes_the_rule_list_once() {
 /// sent with what is known.
 #[tokio::test]
 async fn an_apply_that_ends_early_still_frees_the_task_and_reports() {
-    let daemon = daemon(Vec::new());
+    let mut daemon = daemon(Vec::new());
+    crate::test_daemon::respond(&mut daemon, |_| Some((true, String::new())));
     let mut rx = daemon.broadcast.subscribe();
     let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
     let mut guard = ApplyRun::new(
@@ -376,6 +377,15 @@ async fn an_apply_that_ends_early_still_frees_the_task_and_reports() {
         Replier::broadcast(daemon.broadcast.clone()),
         "p".into(),
     );
+    // One rule confirmed while the list is held (PR #105 re-review: a hold
+    // publishes only a list a confirmed command changed).
+    let change = snitchwatch_proto::protocol::Notification {
+        r#type: snitchwatch_proto::protocol::Action::ChangeRule as i32,
+        rules: vec![crate::test_daemon::host_rule("100-x", "allow")],
+        ..Default::default()
+    };
+    let sent = daemon.commands.send(change).unwrap();
+    sent.wait(Duration::from_secs(5)).await.unwrap();
     guard.totals.applied = 3;
     drop(guard);
     assert!(!running.load(std::sync::atomic::Ordering::SeqCst));
@@ -398,6 +408,33 @@ async fn an_apply_that_ends_early_still_frees_the_task_and_reports() {
         }
     }
     assert!(saw_rules && saw_result);
+}
+
+/// An apply that confirmed nothing frees the task and reports, and
+/// publishes no rule list: nothing in it changed.
+#[tokio::test]
+async fn an_apply_that_confirmed_nothing_publishes_no_rule_list() {
+    let daemon = daemon(Vec::new());
+    let mut rx = daemon.broadcast.subscribe();
+    let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let guard = ApplyRun::new(
+        running.clone(),
+        daemon.commands.hold_rule_publishes(),
+        Replier::broadcast(daemon.broadcast.clone()),
+        "p".into(),
+    );
+    drop(guard);
+    assert!(!running.load(std::sync::atomic::Ordering::SeqCst));
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let mut saw_result = false;
+    while let Ok(message) = rx.try_recv() {
+        assert!(
+            !matches!(message, ServerMessage::SetRules { .. }),
+            "published"
+        );
+        saw_result |= matches!(message, ServerMessage::RulesImportResult { .. });
+    }
+    assert!(saw_result);
 }
 
 /// A GUI that stops reading its answers costs one wait, not one per

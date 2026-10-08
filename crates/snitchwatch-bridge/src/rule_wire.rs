@@ -49,6 +49,9 @@ pub fn rule_to_wire(rule: &Rule) -> serde_json::Value {
         // Separate from `readOnlyReason`: a rule read-only only for its
         // conditions can still be deleted by name.
         "deletable": crate::rule_policy::deletable(rule),
+        // Whether a GUI may turn it on or off: a recommended rule is
+        // read-only but can still be toggled.
+        "toggleable": crate::rule_policy::toggleable(rule),
     })
 }
 

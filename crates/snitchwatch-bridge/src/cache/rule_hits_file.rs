@@ -24,22 +24,21 @@
 //! accepts.
 
 use std::collections::HashSet;
-use std::fs;
-use std::io::{self, Read, Write};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
-use std::path::{Path, PathBuf};
+use std::io;
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
 use crate::cache::rule_hits::{keepable_name, Saved, MAX_FUTURE_SKEW_MS, MAX_TRACKED_RULES};
-use crate::sqlite_file::{file_problem, FileFacts};
+use crate::state_file::invalid;
+#[cfg(test)]
+pub(crate) use crate::state_file::{temp_path, Facts};
 use crate::ws_messages::RuleHitWire;
 
 /// The largest file read or written. At the limits (10 000 entries, names of
 /// 256 bytes, every byte a quote or backslash that JSON doubles, maximal
 /// counts) a file is about 6 MB.
 pub const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
-const FILE_MODE: u32 = 0o600;
 const VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,45 +51,11 @@ struct FileFormat {
     hits: Vec<RuleHitWire>,
 }
 
-/// What `fstat` says about the opened file.
-#[derive(Debug, Clone, Copy)]
-struct Facts {
-    is_file: bool,
-    uid: u32,
-    links: u64,
-    mode: u32,
-    len: u64,
-}
-
-fn invalid(message: impl Into<String>) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, message.into())
-}
-
 /// Reads the saved counts; `None` when there is no file.
 pub fn load(path: &Path) -> io::Result<Option<Saved>> {
-    let file = match fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
-        .open(path)
-    {
-        Ok(file) => file,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(e),
+    let Some(bytes) = crate::state_file::read(path, MAX_FILE_BYTES)? else {
+        return Ok(None);
     };
-    let meta = file.metadata()?;
-    let facts = Facts {
-        is_file: meta.is_file(),
-        uid: meta.uid(),
-        links: meta.nlink(),
-        mode: meta.mode(),
-        len: meta.len(),
-    };
-    check_facts(&facts, effective_uid())?;
-    let mut bytes = Vec::new();
-    file.take(MAX_FILE_BYTES + 1).read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > MAX_FILE_BYTES {
-        return Err(invalid("the file is too large"));
-    }
     let format: FileFormat = serde_json::from_slice(&bytes)
         .map_err(|e| invalid(format!("couldn't parse the file: {e}")))?;
     validate(&format, now_ms())?;
@@ -114,65 +79,12 @@ pub fn save(path: &Path, saved: &Saved) -> io::Result<()> {
     if bytes.len() as u64 > MAX_FILE_BYTES {
         return Err(invalid("the counts are too large to save"));
     }
-    match fs::symlink_metadata(path) {
-        Ok(meta) if !meta.is_file() => return Err(invalid("the file is not a regular file")),
-        Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
-        _ => {}
-    }
-    let temp = temp_path(path);
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(FILE_MODE)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(&temp)?;
-    let written = file
-        .set_permissions(fs::Permissions::from_mode(FILE_MODE))
-        .and_then(|()| file.write_all(&bytes))
-        .and_then(|()| file.sync_all());
-    if let Err(e) = written {
-        let _ = fs::remove_file(&temp);
-        return Err(e);
-    }
-    if let Err(e) = fs::rename(&temp, path) {
-        let _ = fs::remove_file(&temp);
-        return Err(e);
-    }
-    let dir = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
-        .open(dir)?
-        .sync_all()
+    crate::state_file::write(path, &bytes)
 }
 
-/// A temp file name no other save uses: this process's id and a random
-/// number.
-fn temp_path(path: &Path) -> PathBuf {
-    let name = path.file_name().unwrap_or_default().to_string_lossy();
-    let unique = rand::random::<u64>();
-    path.with_file_name(format!(".{name}.{}.{unique:016x}.tmp", std::process::id()))
-}
-
+#[cfg(test)]
 fn check_facts(facts: &Facts, euid: u32) -> io::Result<()> {
-    let file = FileFacts {
-        regular: facts.is_file,
-        uid: facts.uid,
-        links: facts.links,
-    };
-    if let Some(why) = file_problem(&file, euid) {
-        return Err(invalid(format!("the file {why}")));
-    }
-    if facts.mode & 0o022 != 0 {
-        return Err(invalid("the file is writable by other users"));
-    }
-    if facts.len > MAX_FILE_BYTES {
-        return Err(invalid("the file is too large"));
-    }
-    Ok(())
+    crate::state_file::check_facts(facts, euid, MAX_FILE_BYTES)
 }
 
 /// Whether a time is one this bridge could have recorded by `now_ms`.
@@ -212,12 +124,6 @@ fn validate(format: &FileFormat, now_ms: i64) -> io::Result<()> {
         }
     }
     Ok(())
-}
-
-fn effective_uid() -> u32 {
-    // SAFETY: geteuid takes no arguments, touches no memory and always
-    // succeeds.
-    unsafe { libc::geteuid() }
 }
 
 fn now_ms() -> i64 {

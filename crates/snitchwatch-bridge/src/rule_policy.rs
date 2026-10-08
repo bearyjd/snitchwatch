@@ -114,11 +114,15 @@ pub const PACKAGED_RULE_REASON: &str =
      delete it.";
 
 /// Why a GUI may not change or delete a rule under the curated-defaults
-/// prefix ([`crate::rule_name::CURATED_DEFAULT_RULE_NAME_PREFIX`]). No such
-/// rules exist before prompt-slot D, so this says what is true today: the
-/// name is reserved.
+/// prefix ([`crate::rule_name::CURATED_DEFAULT_RULE_NAME_PREFIX`]) that
+/// isn't a shipped entry's rule in its curated shape: the name is reserved.
 pub const CURATED_MANAGED_REASON: &str = "This name is reserved for Snitchwatch's own rules, so \
      Snitchwatch won't change or delete it. The rule still applies.";
+
+/// Why a GUI may only turn a recommended background-service rule (prompt-
+/// slot D) on or off: Snitchwatch adds and removes it.
+pub const CURATED_DEFAULT_REASON: &str = "A recommended background-service rule. You can turn \
+     it on or off here; add or remove it on the Recommended background-service rules page.";
 
 /// Operands whose value the daemon passes as a `net.IP`; only the `network`
 /// type can compare one.
@@ -197,7 +201,11 @@ pub fn read_only_reason(rule: &Rule) -> Option<&'static str> {
         return Some(PACKAGED_RULE_REASON);
     }
     if crate::rule_name::is_reserved_curated_name(&rule.name) {
-        return Some(CURATED_MANAGED_REASON);
+        return Some(if crate::curated::toggleable(rule) {
+            CURATED_DEFAULT_REASON
+        } else {
+            CURATED_MANAGED_REASON
+        });
     }
     if crate::rule_name::validate_rule_name(&rule.name).is_err() {
         return Some(crate::rule_wire::READ_ONLY_REASON);
@@ -206,6 +214,13 @@ pub fn read_only_reason(rule: &Rule) -> Option<&'static str> {
         Some(op) if validate_operator(op).is_ok() => None,
         _ => Some(SHAPE_READ_ONLY_REASON),
     }
+}
+
+/// Whether a GUI may turn a daemon rule on or off: any rule it may edit,
+/// and a shipped curated default ([`crate::curated::toggleable`]), whose
+/// toggle the bridge builds from its own cached copy.
+pub fn toggleable(rule: &Rule) -> bool {
+    read_only_reason(rule).is_none() || crate::curated::toggleable(rule)
 }
 
 /// Whether a GUI may delete a daemon rule. `DELETE_RULE` carries only the

@@ -31,7 +31,7 @@ use crate::rule_wire::rule_to_wire;
 use crate::ws_messages::ServerMessage;
 use snitchwatch_proto::protocol::{Action, Notification, Rule};
 use std::collections::{BTreeMap, VecDeque};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, MutexGuard, Weak};
 use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, watch};
@@ -371,16 +371,20 @@ pub struct RulesSync {
     hits: RuleHitsHandle,
     /// Live [`PublishHold`]s; see [`RulesSync::hold_publishes`].
     holds: Arc<AtomicUsize>,
+    /// A confirmed command changed the cache while a hold was alive.
+    held_changes: Arc<AtomicBool>,
 }
 
 /// While any is alive, confirmed commands update the cache without
-/// broadcasting `SetRules`; dropping the last one broadcasts the list once.
+/// broadcasting `SetRules`; dropping the last one broadcasts the list once,
+/// and only if a confirmed command changed it meanwhile (a pass whose
+/// commands all failed must not wake every listener, PR #105 re-review).
 pub struct PublishHold(RulesSync);
 
 impl Drop for PublishHold {
     fn drop(&mut self) {
         if self.0.holds.fetch_sub(1, Ordering::SeqCst) == 1 {
-            self.0.publish();
+            self.0.publish_held_changes();
         }
     }
 }
@@ -394,6 +398,7 @@ impl RulesSync {
             hits: RuleHitsHandle::new(broadcast.clone()),
             broadcast,
             holds: Arc::default(),
+            held_changes: Arc::default(),
         }
     }
 
@@ -500,6 +505,18 @@ impl RulesSync {
             }
         }
         if self.holds.load(Ordering::SeqCst) == 0 {
+            self.publish();
+        } else {
+            self.held_changes.store(true, Ordering::SeqCst);
+            // The last hold may have dropped since the load above.
+            if self.holds.load(Ordering::SeqCst) == 0 {
+                self.publish_held_changes();
+            }
+        }
+    }
+
+    fn publish_held_changes(&self) {
+        if self.held_changes.swap(false, Ordering::SeqCst) {
             self.publish();
         }
     }

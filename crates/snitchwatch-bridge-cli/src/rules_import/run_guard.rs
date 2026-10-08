@@ -10,7 +10,8 @@ use crate::replier::Replier;
 
 /// Owns a running apply's state. [`finish`](Self::finish) ends it; so does
 /// dropping it (its task panicked or was cancelled): either way the held
-/// rule list is published once, the import is freed for the next apply, and
+/// rule list is published once (if a confirmed rule changed it), the import
+/// is freed for the next apply, and
 /// a `RulesImportResult` with the totals so far is sent, waiting briefly for
 /// room rather than being dropped.
 pub(crate) struct ApplyRun {

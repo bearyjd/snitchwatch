@@ -99,7 +99,13 @@ fn export_round_trips_without_display_fields() {
     let exported = export(&cache, 42).unwrap();
     assert_eq!(exported.omitted, OmittedCounts::default());
     let text = serde_json::to_string(&exported.document).unwrap();
-    for display in ["displayName", "readOnlyReason", "deletable", "created"] {
+    for display in [
+        "displayName",
+        "readOnlyReason",
+        "deletable",
+        "toggleable",
+        "created",
+    ] {
         assert!(!text.contains(display), "{display} leaked into {text}");
     }
     let parsed = parse_document_text(&text).unwrap();

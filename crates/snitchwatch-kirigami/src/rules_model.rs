@@ -55,6 +55,8 @@ const ROLE_HIT_BADGE_MS: i32 = 18;
 const ROLE_SHADOW_KIND: i32 = 19;
 const ROLE_SHADOW_TEXT: i32 = 20;
 const ROLE_SHADOW_BY: i32 = 21;
+// Prompt-slot D: a recommended rule is read-only but can be turned on/off.
+const ROLE_TOGGLEABLE: i32 = 22;
 
 #[cxx_qt::bridge]
 pub mod qobject {
@@ -237,6 +239,7 @@ impl qobject::RulesModel {
                 rule.read_only_reason.as_deref().unwrap_or_default(),
             )),
             ROLE_DELETABLE => QVariant::from(&rule.can_delete()),
+            ROLE_TOGGLEABLE => QVariant::from(&rule.can_toggle()),
             ROLE_APPLIES_TO_ALL_APPS => QVariant::from(&rule.applies_to_all_apps()),
             ROLE_ALL_APPS_HINT => {
                 QVariant::from(&QString::from(&rule.all_apps_hint().unwrap_or_default()))
@@ -272,6 +275,7 @@ impl qobject::RulesModel {
         roles.insert(ROLE_DISPLAY_NAME, QByteArray::from("displayName"));
         roles.insert(ROLE_READ_ONLY_REASON, QByteArray::from("readOnlyReason"));
         roles.insert(ROLE_DELETABLE, QByteArray::from("deletable"));
+        roles.insert(ROLE_TOGGLEABLE, QByteArray::from("toggleable"));
         roles.insert(ROLE_ENABLED, QByteArray::from("enabled"));
         // Named `ruleAction` (not `action`) because `Controls.ItemDelegate`
         // (an `AbstractButton` subclass) already declares a built-in `action`
