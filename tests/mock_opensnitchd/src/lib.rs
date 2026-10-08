@@ -291,7 +291,8 @@ pub fn validate_rule_shape(rule: &Rule) -> Result<(), MockError> {
 const KNOWN_OPERATOR_TYPES: &[&str] = &["simple", "regexp", "complex", "list", "network", "lists"];
 
 /// Mirrors `Operator.Compile()` (operator.go:109-214) for the subset this
-/// bridge actually emits (`simple`/`regexp` — see `translator::verdict`).
+/// bridge actually emits (`simple`/`regexp`, and since issue #44 a `list`
+/// of those — see `translator::verdict`).
 /// Not a full port: `network`/`lists` compilation depends on daemon-local
 /// state (alias cache, loaded blocklists) this mock has no access to, and
 /// this bridge never emits those types for an `AskRule` reply, so they're
@@ -373,6 +374,20 @@ fn validate_operator_compiles(op: &snitchwatch_proto::protocol::Operator) -> Res
             return Err(MockError::InvalidRule(format!(
                 "operator.data does not compile as a regexp: {e}"
             )));
+        }
+    }
+
+    if op.r#type == "list" {
+        // loader.go:413-420 compiles every member of a `list`, and
+        // listMatch (operator.go:327-333) starts from `true`, so a list with
+        // no members would match every connection.
+        if op.list.is_empty() {
+            return Err(MockError::InvalidRule(
+                "list operator has no members".to_string(),
+            ));
+        }
+        for member in &op.list {
+            validate_operator_compiles(member)?;
         }
     }
 
@@ -550,6 +565,73 @@ mod tests {
         op.r#type = "regexp".to_string();
         op.data = r"^(?:[^.]+\.)*example\.com$".to_string();
         assert!(validate_rule_shape(&rule).is_ok());
+    }
+
+    // Issue #44: `ThisHost` / `AnyHostOnDomain` verdicts nest the host
+    // operator inside a `list`, so the canary must reach list members the
+    // way loader.go:413-420 compiles each of them.
+
+    fn list_member(
+        r#type: &str,
+        operand: &str,
+        data: &str,
+    ) -> snitchwatch_proto::protocol::Operator {
+        snitchwatch_proto::protocol::Operator {
+            r#type: r#type.to_string(),
+            operand: operand.to_string(),
+            data: data.to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn list_rule(members: Vec<snitchwatch_proto::protocol::Operator>) -> Rule {
+        let mut rule = valid_rule();
+        rule.operator = Some(snitchwatch_proto::protocol::Operator {
+            r#type: "list".to_string(),
+            operand: "list".to_string(),
+            list: members,
+            ..Default::default()
+        });
+        rule
+    }
+
+    #[test]
+    fn validate_rule_shape_accepts_a_process_bound_host_list() {
+        let rule = list_rule(vec![
+            list_member("simple", "process.path", "/usr/bin/curl"),
+            list_member("regexp", "dest.host", r"^(?:[^.]+\.)*example\.com$"),
+        ]);
+        assert!(validate_rule_shape(&rule).is_ok());
+    }
+
+    #[test]
+    fn validate_rule_shape_rejects_an_uncompilable_regexp_inside_a_list() {
+        let rule = list_rule(vec![
+            list_member("simple", "process.path", "/usr/bin/curl"),
+            list_member("regexp", "dest.host", "(unclosed"),
+        ]);
+        let err = validate_rule_shape(&rule).unwrap_err();
+        assert!(matches!(err, MockError::InvalidRule(msg) if msg.contains("does not compile")));
+    }
+
+    #[test]
+    fn validate_rule_shape_rejects_an_unknown_operand_inside_a_list() {
+        let rule = list_rule(vec![
+            list_member("simple", "process.path", "/usr/bin/curl"),
+            list_member("simple", "dest.hostname", "example.com"),
+        ]);
+        let err = validate_rule_shape(&rule).unwrap_err();
+        assert!(
+            matches!(err, MockError::InvalidRule(msg) if msg.contains("unknown operator operand"))
+        );
+    }
+
+    #[test]
+    fn validate_rule_shape_rejects_an_empty_list() {
+        // listMatch (operator.go:327-333) starts from `true`, so a list with
+        // no members would match every connection.
+        let err = validate_rule_shape(&list_rule(Vec::new())).unwrap_err();
+        assert!(matches!(err, MockError::InvalidRule(msg) if msg.contains("no members")));
     }
 
     #[test]

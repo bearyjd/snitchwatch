@@ -9,8 +9,12 @@
 //! argument with no validation; `vendor/opensnitch/daemon/dns/track.go:47`
 //! takes DNS answer names straight from a hostile server). Every function in
 //! this module that touches `dst_host` must treat it as hostile input.
-//! `conn.process_path` is NOT in this class — it's daemon-attested from
-//! `/proc/<pid>/exe`.
+//! `conn.process_path` is NOT in this class — the daemon reports it, normally
+//! from `/proc/<pid>/exe`. It is not a verified program identity, though:
+//! it's the path as seen in the process's own mount namespace, and when
+//! `exe` can't be read the daemon falls back to the process-settable `comm`,
+//! argv\[0\], or a placeholder such as `Kernel connection`
+//! (`daemon/procmon/details.go`). Rules bound to it are as strong as that.
 //!
 //! The M0 spike taught us things about `Rule`:
 //!   - `created` is a unix-seconds int64.
@@ -98,12 +102,16 @@ fn sanitize_host_for_rule_name(raw: &str) -> String {
 /// Issue #44: the program part of an app-bound rule's name. The readable
 /// part is the executable's basename; the digest covers the **full raw
 /// path**, so `/usr/bin/curl` and `/tmp/curl` never share a name.
-/// `process_path` is daemon-attested (see module doc), but any local user
-/// picks the basenames of their own binaries, so it gets the same
-/// `[A-Za-z0-9.-]` neutralization as a hostile host.
+/// `process_path` comes from the daemon (see module doc), but any local
+/// user picks the names of their own binaries — and the daemon can fall back
+/// to a process-chosen name — so it gets the same `[A-Za-z0-9.-]`
+/// neutralization as a hostile host.
 fn sanitize_process_for_rule_name(process_path: &str) -> String {
     const MAX_BASE_LEN: usize = 32;
-    let basename = process_path.rsplit('/').next().unwrap_or(process_path);
+    let basename = match process_path.rfind('/') {
+        Some(slash) => &process_path[slash + 1..],
+        None => process_path,
+    };
     rule_name_component(basename, process_path, "process", MAX_BASE_LEN)
 }
 
@@ -529,8 +537,8 @@ fn any_host_on_domain_operator_checked(conn: &Connection) -> (Operator, Option<S
 /// [`this_host_operator`] when the process path is unknown, rather than risk
 /// an operator that matches every connection from every process.
 ///
-/// `conn.process_path` is daemon-attested (`/proc/<pid>/exe`), NOT hostile
-/// input like `dst_host` — see module doc.
+/// `conn.process_path` is reported by the daemon, NOT hostile input like
+/// `dst_host` — see module doc for what it is and isn't.
 fn any_host_operator_checked(conn: &Connection) -> (Operator, Option<ScopeDegradation>) {
     if conn.process_path.is_empty() {
         tracing::warn!(
@@ -544,10 +552,18 @@ fn any_host_operator_checked(conn: &Connection) -> (Operator, Option<ScopeDegrad
             Some(ScopeDegradation::ProcessPathUnavailable),
         );
     }
-    (
-        simple_operator("process.path", conn.process_path.as_str()),
-        None,
-    )
+    (process_path_operator(conn), None)
+}
+
+/// Exact, **case-sensitive** match on the executable path. A non-sensitive
+/// simple operator compares with Unicode case folding (`strings.EqualFold`,
+/// `operator.go` `simpleCmp`), which Linux paths don't have — `/tmp/ſcript`
+/// would match a rule for `/tmp/script`.
+fn process_path_operator(conn: &Connection) -> Operator {
+    Operator {
+        sensitive: true,
+        ..simple_operator("process.path", conn.process_path.as_str())
+    }
 }
 
 fn build_operator_checked(
@@ -570,15 +586,23 @@ fn build_operator_checked(
 /// remembered allow into an allow for all of them.
 ///
 /// opensnitchd ANDs `list` members (`daemon/rule/operator.go` `listMatch`,
-/// short-circuiting, so the cheap exact `process.path` compare goes first),
+/// short-circuiting, so the exact `process.path` compare goes first),
 /// compiles each member when the rule is loaded, and ignores `data` for a
-/// `list`. `conn.process_path` is daemon-attested — see module doc.
+/// `list`. This binds to the executable *path* the daemon reports, which is
+/// as strong as the daemon's process identity and no stronger — see module
+/// doc.
 ///
 /// An empty `process_path` keeps the host-only fallback for now: refusing
 /// instead changes the contract `grpc_server.rs` relies on, which is the
 /// second half of issue #44.
 fn bind_to_process(host: Operator, conn: &Connection) -> Operator {
     if conn.process_path.is_empty() {
+        tracing::warn!(
+            dst_host = %conn.dst_host,
+            dst_ip = %conn.dst_ip,
+            "host-scoped verdict with an empty process_path; emitting a \
+             process-agnostic rule (issue #44 second half)"
+        );
         return host;
     }
     Operator {
@@ -586,10 +610,7 @@ fn bind_to_process(host: Operator, conn: &Connection) -> Operator {
         operand: "list".to_string(),
         data: String::new(),
         sensitive: false,
-        list: vec![
-            simple_operator("process.path", conn.process_path.as_str()),
-            host,
-        ],
+        list: vec![process_path_operator(conn), host],
     }
 }
 
@@ -1183,6 +1204,21 @@ mod tests {
         assert_eq!(op.r#type, "simple");
         assert_eq!(op.operand, "process.path");
         assert_eq!(op.data, "/usr/bin/curl");
+        // A non-sensitive simple operator compares with Unicode case folding
+        // (`strings.EqualFold`, operator.go:224-226); Linux paths aren't.
+        assert!(op.sensitive, "process.path must match case-sensitively");
+    }
+
+    #[test]
+    fn any_host_scope_names_the_rule_after_its_program() {
+        let rule = verdict_to_rule(
+            Verdict::Allow,
+            VerdictDuration::Always,
+            VerdictScope::AnyHost,
+            &sample_connection(),
+            0,
+        );
+        assert!(rule.name.contains("-pcurl-"), "got: {}", rule.name);
     }
 
     #[test]
@@ -1218,6 +1254,10 @@ mod tests {
         assert_eq!(process.r#type, "simple");
         assert_eq!(process.operand, "process.path");
         assert_eq!(process.data, process_path);
+        assert!(
+            process.sensitive,
+            "process.path must match case-sensitively"
+        );
         op.list[1].clone()
     }
 
@@ -1308,10 +1348,12 @@ mod tests {
         }
     }
 
-    // -- issue #44: process-bound rules need process-distinct names. The
-    // daemon keys persisted rules by name, so two programs' rules for the
-    // same verdict/host/port sharing one would let the later silently
-    // replace the earlier — MEDIUM-2's collision class, across programs. --
+    // -- issue #44: process-bound rules need process-distinct names. If two
+    // programs' rules for the same verdict/host/port shared a name, the
+    // daemon would store the second as `<name>-2` (`setUniqueName`,
+    // loader.go:332-341) while the bridge and the Rules page still call it
+    // `<name>` — so a later toggle or delete there would edit the *other*
+    // program's rule. --
 
     #[test]
     fn rule_name_for_distinguishes_programs_for_the_same_host_and_port() {
@@ -1334,12 +1376,12 @@ mod tests {
 
     #[test]
     fn rule_name_for_without_a_process_keeps_the_host_only_name() {
+        // Pinned literally (digest = first 8 bytes of SHA-256("github.com"),
+        // computed outside this crate) so the shared-sanitizer refactor
+        // can't silently rename existing rules.
         assert_eq!(
             rule_name_for(Verdict::Deny, "github.com", 443, ""),
-            format!(
-                "snitchwatch-deny-{}-443",
-                sanitize_host_for_rule_name("github.com")
-            )
+            "snitchwatch-deny-github.com-3aeb002460381c6f-443"
         );
     }
 

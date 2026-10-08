@@ -30,22 +30,45 @@ the host/domain**, and rules for different programs never share a name.
    opensnitchd ANDs list members (`daemon/rule/operator.go` `listMatch`),
    compiles each member on load (`loader.go:413-420`), and copies members
    from the proto in `Deserialize` (`rule.go:113-127`). `process.path`
-   first so the cheap exact compare short-circuits. Degradation reporting
-   (`scope_degradation`) is unchanged — it reads the second tuple element.
-   The bridge's wire format (`operator_to_wire` / `operator_from_wire`) and
-   the Kirigami row store and simulator already handle list operators.
+   first so its exact compare short-circuits, and **case-sensitive**
+   (`sensitive: true`): a non-sensitive simple operator compares with
+   Unicode case folding (`strings.EqualFold`). The same applies to the
+   `AnyHost` scope's existing `process.path` operator (added during
+   review). Degradation reporting (`scope_degradation`) is unchanged — it
+   reads the second tuple element. The bridge's wire format
+   (`operator_to_wire` / `operator_from_wire`) and the Kirigami row store
+   and simulator already handle list operators.
 2. **Rule name.** `rule_name_for(verdict, host, port)` gains a
    `process_path: &str` argument. When non-empty it appends
    `-p<sanitized basename>-<16 hex of SHA-256(raw path)>`; when empty the
-   name is byte-identical to today's. Without this, two programs allowed
-   to the same `host:port` would share a name and the later rule would
-   silently replace the earlier in opensnitchd — the collision class issue
-   #14's security review (MEDIUM-2) already fixed for hosts.
+   name is byte-identical to today's. Without this, two programs' rules for
+   the same verdict and `host:port` would share a name: the daemon stores
+   the second as `<name>-2` (`setUniqueName`, `loader.go:332-341`) while
+   the bridge and Rules page still call it `<name>`, so a later toggle or
+   delete edits the other program's rule. `AnyHost` rule names gain the
+   same component.
 3. **Call sites.** `verdict_to_rule` passes `conn.process_path`;
    `ConnectionCache::resolve` (`cache/connections.rs`) passes the row's
    `process_path` so `matched_rule` keeps matching the real rule name.
    #39 adds no calls to either function and its nearest
    `cache/connections.rs` hunk ends above this call site.
+
+## Behavior changes and limits (for release notes)
+
+- Host-only rules users already saved keep matching every program: new
+  names never replace them. Users should delete and re-answer them.
+- A "This host" **Deny** now blocks only the asking program, not every
+  program reaching that host.
+- Binding is to the executable *path* the daemon reports, not a verified
+  program: it's the path in the process's own mount namespace (so a
+  bind-mount or another Flatpak at the same `/app/...` path inherits the
+  rule), interpreters share their interpreter's path, and when
+  `/proc/<pid>/exe` is unreadable the daemon falls back to `comm`/argv[0]
+  or a placeholder. AppImages run from a random `/tmp/.mount_*` path, so
+  their saved rules stop matching after a relaunch.
+- The mock daemon's rule validator now recurses into `list` members and
+  rejects an empty list (which opensnitchd's `listMatch` would treat as
+  matching everything).
 
 ## Tests (write first)
 

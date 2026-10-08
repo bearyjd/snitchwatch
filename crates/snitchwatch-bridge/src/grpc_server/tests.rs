@@ -776,6 +776,39 @@ async fn second_deny_within_ttl_supersedes_first_blocks_revert_timer() {
     assert_eq!(*tray_rx.borrow(), TrayState::Idle);
 }
 
+#[test]
+fn process_bound_verdict_rule_survives_the_wire_round_trip() {
+    // Issue #44: toggling a rule in the GUI sends its wire shape back through
+    // `rule_from_wire` as a CHANGE_RULE, which the daemon applies wholesale —
+    // so the process binding must come back intact, case sensitivity included.
+    let conn = Connection {
+        protocol: "tcp".into(),
+        dst_host: "example.com".into(),
+        dst_ip: "93.184.216.34".into(),
+        dst_port: 443,
+        process_path: "/usr/bin/curl".into(),
+        ..Default::default()
+    };
+    let rule = crate::translator::verdict::verdict_to_rule(
+        Verdict::Allow,
+        VerdictDuration::Always,
+        VerdictScope::ThisHost,
+        &conn,
+        0,
+    );
+    let back = rule_from_wire(&rule_to_wire(&rule)).unwrap();
+    assert_eq!(back.name, rule.name);
+    let op = back.operator.unwrap();
+    assert_eq!(op.r#type, "list");
+    assert_eq!(op.list.len(), 2, "{op:?}");
+    let (process, host) = (&op.list[0], &op.list[1]);
+    assert_eq!(process.operand, "process.path");
+    assert_eq!(process.data, "/usr/bin/curl");
+    assert!(process.sensitive);
+    assert_eq!(host.operand, "dest.host");
+    assert_eq!(host.data, "example.com");
+}
+
 #[tokio::test]
 async fn ask_rule_auto_allows_immediately_when_filtering_paused() {
     let tray_pub = Arc::new(crate::tray_state::TrayStatePublisher::new());
