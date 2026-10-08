@@ -78,12 +78,19 @@ pub struct Rule {
     /// rule's identity in every command, so this is never sent back.
     #[serde(skip_serializing)]
     pub display_name: Option<String>,
-    /// Set by the bridge when Snitchwatch can't edit this rule (a name the
-    /// bridge refuses to send back to the daemon); a plain-language reason
-    /// for the user. The row stays visible — the daemon still enforces it —
-    /// but no command is ever emitted for it. Never sent back.
+    /// Set by the bridge when Snitchwatch can't edit this rule (a name or
+    /// conditions the bridge refuses to send back to the daemon); a
+    /// plain-language reason for the user. The row stays visible — the
+    /// daemon still enforces it — but no change is emitted for it; see
+    /// [`Self::deletable`] for Delete. Never sent back.
     #[serde(skip_serializing)]
     pub read_only_reason: Option<String>,
+    /// Set by the bridge: whether Snitchwatch may delete this rule. A rule
+    /// read-only only for its conditions still can (a delete names the rule
+    /// and nothing else); one read-only for its name can't. `None` from a
+    /// bridge that predates the field. Never sent back.
+    #[serde(skip_serializing)]
+    pub deletable: Option<bool>,
 }
 
 /// Where a rule originated: authored directly by the user, or materialized
@@ -104,6 +111,12 @@ impl Rule {
 
     pub fn is_read_only(&self) -> bool {
         self.read_only_reason.is_some()
+    }
+
+    /// See [`Self::deletable`]; an older bridge's rule is deletable unless
+    /// read-only.
+    pub fn can_delete(&self) -> bool {
+        self.deletable.unwrap_or(!self.is_read_only())
     }
 
     /// Classify this rule's source by its `name` prefix. Recognizes both the
@@ -258,10 +271,10 @@ impl RulesStore {
         true
     }
 
-    /// Whether a rule may be deleted from Snitchwatch: known and not
-    /// read-only.
+    /// Whether a rule may be deleted from Snitchwatch: known and
+    /// [`Rule::can_delete`].
     pub fn is_deletable(&self, name: &str) -> bool {
-        self.find_by_name(name).is_some_and(|r| !r.is_read_only())
+        self.find_by_name(name).is_some_and(Rule::can_delete)
     }
 
     /// Build the full rule payload setting `name`'s `enabled` flag to
@@ -294,6 +307,7 @@ struct FoundRule<'a> {
     name: &'a str,
     display_name: &'a str,
     read_only_reason: &'a str,
+    deletable: bool,
     enabled: bool,
     action: &'static str,
     duration: &'a str,
@@ -321,6 +335,7 @@ pub fn found_rule_json(store: &RulesStore, name: &str) -> Option<String> {
         name: &rule.name,
         display_name: rule.shown_name(),
         read_only_reason: rule.read_only_reason.as_deref().unwrap_or_default(),
+        deletable: rule.can_delete(),
         enabled: rule.enabled,
         action: rule.normalized_action(),
         duration: &rule.duration,
@@ -348,6 +363,7 @@ mod tests {
             nolog: false,
             display_name: None,
             read_only_reason: None,
+            deletable: None,
         }
     }
 
@@ -659,6 +675,44 @@ mod tests {
         assert_eq!(editable["readOnlyReason"], "");
         let sent = serde_json::to_value(&s.rules()[0]).unwrap();
         assert!(sent.get("readOnlyReason").is_none(), "never sent back");
+    }
+
+    /// A rule read-only only for its conditions can still be deleted: a
+    /// delete names the rule and nothing else. A bad name can't be.
+    #[test]
+    fn delete_follows_the_bridges_deletable_flag() {
+        let mut s = RulesStore::new();
+        let mut shape = serde_json::to_value(rule("899-lan", true, "allow")).unwrap();
+        shape["readOnlyReason"] = "Snitchwatch can't change this rule.".into();
+        shape["deletable"] = true.into();
+        let mut name = serde_json::to_value(rule("stock\\ui", true, "deny")).unwrap();
+        name["readOnlyReason"] = "Snitchwatch can't change or delete this rule.".into();
+        name["deletable"] = false.into();
+        let mut legacy_locked = serde_json::to_value(rule("old-locked", true, "deny")).unwrap();
+        legacy_locked["readOnlyReason"] = "Snitchwatch can't edit this rule.".into();
+        let legacy = serde_json::to_value(rule("old-editable", true, "deny")).unwrap();
+        s.apply(&ServerMessage::SetRules {
+            rules: vec![shape, name, legacy_locked, legacy],
+        });
+
+        assert!(s.is_deletable("899-lan"));
+        assert!(
+            s.rule_json_with_enabled("899-lan", false).is_none(),
+            "still read-only"
+        );
+        assert!(!s.is_deletable("stock\\ui"));
+        // A bridge that predates the flag: deletable unless read-only.
+        assert!(!s.is_deletable("old-locked"));
+        assert!(s.is_deletable("old-editable"));
+
+        let found = |name: &str| -> serde_json::Value {
+            serde_json::from_str(&found_rule_json(&s, name).unwrap()).unwrap()
+        };
+        assert_eq!(found("899-lan")["deletable"], true);
+        assert_eq!(found("stock\\ui")["deletable"], false);
+        assert_eq!(found("old-editable")["deletable"], true);
+        let sent = serde_json::to_value(&s.rules()[0]).unwrap();
+        assert!(sent.get("deletable").is_none(), "never sent back");
     }
 
     #[test]

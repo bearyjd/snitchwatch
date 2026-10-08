@@ -32,6 +32,7 @@ const ROLE_SOURCE: i32 = 6;
 const ROLE_BLOCKLIST_ID: i32 = 7;
 const ROLE_DISPLAY_NAME: i32 = 8;
 const ROLE_READ_ONLY_REASON: i32 = 9;
+const ROLE_DELETABLE: i32 = 10;
 
 #[cxx_qt::bridge]
 pub mod qobject {
@@ -170,6 +171,7 @@ impl qobject::RulesModel {
             ROLE_READ_ONLY_REASON => QVariant::from(&QString::from(
                 rule.read_only_reason.as_deref().unwrap_or_default(),
             )),
+            ROLE_DELETABLE => QVariant::from(&rule.can_delete()),
             ROLE_ENABLED => QVariant::from(&rule.enabled),
             ROLE_ACTION => QVariant::from(&QString::from(rule.normalized_action())),
             ROLE_DURATION => QVariant::from(&QString::from(&rule.duration)),
@@ -198,6 +200,7 @@ impl qobject::RulesModel {
         roles.insert(ROLE_NAME, QByteArray::from("name"));
         roles.insert(ROLE_DISPLAY_NAME, QByteArray::from("displayName"));
         roles.insert(ROLE_READ_ONLY_REASON, QByteArray::from("readOnlyReason"));
+        roles.insert(ROLE_DELETABLE, QByteArray::from("deletable"));
         roles.insert(ROLE_ENABLED, QByteArray::from("enabled"));
         // Named `ruleAction` (not `action`) because `Controls.ItemDelegate`
         // (an `AbstractButton` subclass) already declares a built-in `action`

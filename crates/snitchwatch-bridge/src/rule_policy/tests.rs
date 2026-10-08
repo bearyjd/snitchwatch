@@ -524,3 +524,20 @@ fn a_proto_hash_leaf_and_hash_only_list_are_refused() {
     ];
     assert!(validate_operator(&list_op("list", members)).is_err());
 }
+
+// --- Delete stays available for a rule refused only for its shape ---------
+
+#[test]
+fn a_shape_only_refusal_stays_deletable_but_a_bad_name_does_not() {
+    let shape = daemon_rule("899-lan", Some(op("network", "dest.network", "LAN")));
+    let wire = rule_to_wire(&shape);
+    assert_eq!(wire["readOnlyReason"], SHAPE_READ_ONLY_REASON);
+    assert_eq!(wire["deletable"], true);
+    assert!(SHAPE_READ_ONLY_REASON.contains("can still delete"));
+
+    let bad_name = daemon_rule("a/b", Some(op("simple", "dest.host", "example.com")));
+    assert_eq!(rule_to_wire(&bad_name)["deletable"], false);
+
+    let editable = daemon_rule("899-ok", Some(op("simple", "dest.host", "example.com")));
+    assert_eq!(rule_to_wire(&editable)["deletable"], true);
+}

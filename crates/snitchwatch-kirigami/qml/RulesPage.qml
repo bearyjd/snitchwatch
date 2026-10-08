@@ -44,6 +44,8 @@ Kirigami.ScrollablePage {
     // Non-empty when Snitchwatch can't edit the rule (the bridge's reason);
     // the rule is still shown because the daemon still enforces it.
     property string inspectReadOnlyReason: ""
+    // A rule read-only only for its conditions can still be deleted.
+    property bool inspectDeletable: false
     property bool inspectEnabled: true
     property string inspectAction: ""
     property string inspectDuration: ""
@@ -55,6 +57,8 @@ Kirigami.ScrollablePage {
     // Exposed for the headless inspector probe (tests/rules_inspector_qml.rs).
     property alias inspectorSheet: inspector
     property alias inspectorEnabledSwitch: inspectEnabledSwitch
+    property alias inspectorDeleteButton: inspectDeleteButton
+    property alias rulesList: list
 
     // Simulate panel state (rule-match diagnostics' "Simulate" sheet — see
     // `rules::simulator` module docs for exactly what semantics are
@@ -98,6 +102,7 @@ Kirigami.ScrollablePage {
         page.inspectName = rule.name;
         page.inspectDisplayName = rule.displayName;
         page.inspectReadOnlyReason = rule.readOnlyReason;
+        page.inspectDeletable = rule.deletable;
         page.inspectEnabled = rule.enabled;
         page.inspectAction = rule.action;
         page.inspectDuration = rule.duration;
@@ -214,6 +219,7 @@ Kirigami.ScrollablePage {
             required property string name
             required property string displayName
             required property string readOnlyReason
+            required property bool deletable
             required property bool enabled
             // Named `ruleAction` (not `action`) because `Controls.ItemDelegate`
             // (an `AbstractButton` subclass) already declares a built-in
@@ -293,6 +299,7 @@ Kirigami.ScrollablePage {
         page.inspectName = row.name;
         page.inspectDisplayName = row.displayName;
         page.inspectReadOnlyReason = row.readOnlyReason;
+        page.inspectDeletable = row.deletable;
         page.inspectEnabled = row.enabled;
         page.inspectAction = row.ruleAction;
         page.inspectDuration = row.duration;
@@ -374,9 +381,10 @@ Kirigami.ScrollablePage {
             // Two-step confirmation kept inline (no separate dialog type
             // introduced) — mirrors the sheet's existing button-row pattern.
             Controls.Button {
+                id: inspectDeleteButton
                 Layout.fillWidth: true
                 visible: !page.confirmingDelete
-                enabled: page.inspectReadOnlyReason.length === 0
+                enabled: page.inspectDeletable
                 text: "Delete rule"
                 icon.name: "edit-delete-remove"
                 onClicked: page.confirmingDelete = true

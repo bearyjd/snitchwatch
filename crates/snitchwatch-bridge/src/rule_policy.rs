@@ -43,14 +43,14 @@ use crate::cache::rules::{MAX_OPERATOR_LIST_LEN, MAX_RULE_FIELD_BYTES};
 
 mod regexp;
 
-/// Why a GUI may not edit a daemon rule whose operator fails
+/// Why a GUI may not change a daemon rule whose operator fails
 /// [`validate_operator`] (a `lists` blocklist rule, a network alias such as
-/// `LAN`, or a shape the daemon can't evaluate). The rule is still listed;
-/// the bridge refuses to send it back in a change, and the GUI also disables
-/// Delete for it (a delete is by name only, so the bridge would forward one).
-pub const SHAPE_READ_ONLY_REASON: &str = "Snitchwatch can't change or delete this rule because \
-     of its conditions (a rule type, condition or network alias Snitchwatch won't send back to \
-     the firewall service). The rule still applies.";
+/// `LAN`, or a shape the daemon can't evaluate). The rule is still listed,
+/// the bridge refuses to send it back in a change, and it stays
+/// [`deletable`]: a delete names the rule and nothing else.
+pub const SHAPE_READ_ONLY_REASON: &str = "Snitchwatch can't change this rule because of its \
+     conditions (a rule type, condition or network alias Snitchwatch won't send back to the \
+     firewall service). The rule still applies; you can still delete it.";
 
 /// Operands whose value the daemon passes as a `net.IP`; only the `network`
 /// type can compare one.
@@ -123,6 +123,14 @@ pub fn read_only_reason(rule: &Rule) -> Option<&'static str> {
         Some(op) if validate_operator(op).is_ok() => None,
         _ => Some(SHAPE_READ_ONLY_REASON),
     }
+}
+
+/// Whether a GUI may delete a daemon rule. `DELETE_RULE` carries only the
+/// name (`Loader.Delete` never reads the operator), so this is the name
+/// check `notification_for_effect` applies to a `DeleteRule`: a rule
+/// read-only only for its conditions stays deletable.
+pub fn deletable(rule: &Rule) -> bool {
+    crate::rule_name::validate_rule_name(&rule.name).is_ok()
 }
 
 fn validate_list(op: &Operator) -> Result<(), String> {

@@ -148,6 +148,43 @@ Window {
                 rulesModel.deleteRule("stock\\ui");
                 expect(probeWindow.sent.length === before,
                        "a command was emitted for a read-only rule: " + JSON.stringify(probeWindow.sent));
+                expect(!page.inspectorDeleteButton.enabled, "Delete enabled on a bad-name rule");
+
+                // Read-only only for its conditions: no toggle, but Delete
+                // works (a delete names the rule and nothing else). The
+                // bad-name rule is opened in between, through both fill
+                // paths, so a value left over from the last rule shows up.
+                const shape = probeWindow.curl(true);
+                shape.name = "899-lan";
+                shape.displayName = "899-lan";
+                shape.readOnlyReason = "Snitchwatch can't change this rule.";
+                shape.deletable = true;
+                locked.deletable = false;
+                probeWindow.setRules([shape, locked]);
+                expect(page.openRuleByName("899-lan"), "shape-only rule not listed");
+                expect(!sw.enabled, "switch enabled on a shape-only read-only rule");
+                expect(page.inspectorDeleteButton.enabled, "Delete disabled on a shape-only rule");
+                expect(page.openRuleByName("stock\\ui"), "bad-name rule not listed");
+                expect(!page.inspectorDeleteButton.enabled, "stale Delete on a bad-name rule");
+                const rows = page.rulesList;
+                expect(rows.count === 2, "rows not created: " + rows.count);
+                rows.currentIndex = 0;
+                expect(rows.currentItem !== null, "no delegate for the shape-only rule");
+                page.openInspector(rows.currentItem);
+                expect(page.inspectorDeleteButton.enabled, "row path: Delete disabled on a shape-only rule");
+                rows.currentIndex = 1;
+                page.openInspector(rows.currentItem);
+                expect(!page.inspectorDeleteButton.enabled, "row path: Delete enabled on a bad-name rule");
+                const beforeShape = probeWindow.sent.length;
+                page.setInspectEnabled(false);
+                rulesModel.setEnabled("899-lan", false);
+                expect(probeWindow.sent.length === beforeShape, "a change was emitted for a read-only rule");
+                rulesModel.deleteRule("stock\\ui");
+                expect(probeWindow.sent.length === beforeShape, "a delete was emitted for a bad-name rule");
+                rulesModel.deleteRule("899-lan");
+                expect(probeWindow.sent.length === beforeShape + 1
+                       && probeWindow.sent[beforeShape].action === "deleteRule",
+                       "no delete for a shape-only rule: " + JSON.stringify(probeWindow.sent));
             } finally {
                 Qt.quit();
             }

@@ -41,6 +41,9 @@ pub(crate) fn rule_to_wire(rule: &Rule) -> serde_json::Value {
         "displayName": crate::translator::verdict::strip_display_hazards(&rule.name),
         // `null` for every rule a GUI may edit.
         "readOnlyReason": crate::rule_policy::read_only_reason(rule),
+        // Separate from `readOnlyReason`: a rule read-only only for its
+        // conditions can still be deleted by name.
+        "deletable": crate::rule_policy::deletable(rule),
     })
 }
 
