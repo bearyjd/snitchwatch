@@ -473,17 +473,33 @@ Kirigami.ApplicationWindow {
                 text: root.visible ? "Hide window" : "Show window"
                 onTriggered: root.visible ? root.hide() : root.raiseAndActivate()
             }
-            // Pause/resume filtering (Phase 6 tray-state follow-up). Only
-            // shown for the two tokens this action actually applies to —
-            // "reconnect" (DaemonDown) and "default" have no filtering
-            // toggle to offer. See tray_controller.rs's toggleFiltering doc.
-            Labs.MenuItem {
+            // Timed pause (issue #47): every pause ends on its own, and the
+            // bridge accepts only these three lengths. Only shown for the
+            // two tokens a pause action applies to — "reconnect"
+            // (DaemonDown) and "default" have none to offer. See
+            // tray_controller.rs's pauseFor/resume docs.
+            Labs.Menu {
+                title: "Pause filtering"
                 visible: trayController.menuLabel === "pause_filtering"
-                    || trayController.menuLabel === "resume_filtering"
-                text: trayController.menuLabel === "pause_filtering"
-                    ? "Pause filtering"
+                Labs.MenuItem {
+                    text: "For 5 minutes"
+                    onTriggered: trayController.pauseFor(300)
+                }
+                Labs.MenuItem {
+                    text: "For 30 minutes"
+                    onTriggered: trayController.pauseFor(1800)
+                }
+                Labs.MenuItem {
+                    text: "For 1 hour"
+                    onTriggered: trayController.pauseFor(3600)
+                }
+            }
+            Labs.MenuItem {
+                visible: trayController.menuLabel === "resume_filtering"
+                text: trayController.pausedUntil
+                    ? "Resume filtering (until " + trayController.pausedUntil + ")"
                     : "Resume filtering"
-                onTriggered: trayController.toggleFiltering(trayController.menuLabel === "pause_filtering")
+                onTriggered: trayController.resume()
             }
             Labs.MenuItem {
                 separator: true

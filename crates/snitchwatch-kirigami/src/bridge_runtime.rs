@@ -49,10 +49,26 @@ pub struct ReceivedTrayState {
     pub state: BridgeTrayState,
 }
 
+/// Session-labelled filter-pause state (issue #47), routed and guarded the
+/// same way as [`ReceivedTrayState`].
+#[derive(Clone, Debug)]
+pub struct ReceivedPauseState {
+    pub connection_id: u64,
+    pub state: BridgePauseState,
+}
+
 #[derive(Clone, Debug)]
 pub struct ReceivedNotice {
     pub connection_id: u64,
     pub notice: BridgeNotice,
+}
+
+/// Senders for the shell state the runtime forwards next to the model feed:
+/// tray state, desktop notices and filter-pause state.
+struct ShellFeeds {
+    tray_tx: watch::Sender<ReceivedTrayState>,
+    notice_tx: broadcast::Sender<ReceivedNotice>,
+    pause_tx: watch::Sender<ReceivedPauseState>,
 }
 
 struct QueuedClientMessage {
@@ -162,6 +178,7 @@ struct ClientRuntime {
     status: Arc<Mutex<String>>,
     tray_tx: watch::Sender<ReceivedTrayState>,
     notice_tx: broadcast::Sender<ReceivedNotice>,
+    pause_tx: watch::Sender<ReceivedPauseState>,
     // Runtime must outlive its reconnect task. The task is intentionally
     // detached: GUI shutdown drops the process and hence this runtime.
     _runtime: Runtime,
@@ -231,6 +248,10 @@ fn start_inner() -> anyhow::Result<ClientRuntime> {
         state: BridgeTrayState::Idle,
     });
     let (notice_tx, _) = broadcast::channel(64);
+    let (pause_tx, _) = watch::channel(ReceivedPauseState {
+        connection_id: 0,
+        state: BridgePauseState::NOT_PAUSED,
+    });
     let status = Arc::new(Mutex::new("Connecting to bridge service…".to_string()));
     let connection = Arc::new(Mutex::new(ConnectionState::default()));
     let handles = BridgeHandles {
@@ -244,8 +265,11 @@ fn start_inner() -> anyhow::Result<ClientRuntime> {
         broadcast_tx,
         inbound_rx,
         status.clone(),
-        tray_tx.clone(),
-        notice_tx.clone(),
+        ShellFeeds {
+            tray_tx: tray_tx.clone(),
+            notice_tx: notice_tx.clone(),
+            pause_tx: pause_tx.clone(),
+        },
         connection,
     ));
     Ok(ClientRuntime {
@@ -253,6 +277,7 @@ fn start_inner() -> anyhow::Result<ClientRuntime> {
         status,
         tray_tx,
         notice_tx,
+        pause_tx,
         _runtime: runtime,
     })
 }
@@ -269,8 +294,7 @@ async fn client_loop(
     broadcast_tx: broadcast::Sender<ReceivedServerMessage>,
     mut inbound_rx: mpsc::Receiver<QueuedClientMessage>,
     status: Arc<Mutex<String>>,
-    tray_tx: watch::Sender<ReceivedTrayState>,
-    notice_tx: broadcast::Sender<ReceivedNotice>,
+    shell: ShellFeeds,
     connection: Arc<Mutex<ConnectionState>>,
 ) {
     loop {
@@ -279,8 +303,7 @@ async fn client_loop(
             &broadcast_tx,
             &mut inbound_rx,
             &status,
-            &tray_tx,
-            &notice_tx,
+            &shell,
             &connection,
         )
         .await
@@ -305,8 +328,7 @@ async fn connect_and_relay(
     broadcast_tx: &broadcast::Sender<ReceivedServerMessage>,
     inbound_rx: &mut mpsc::Receiver<QueuedClientMessage>,
     status: &Arc<Mutex<String>>,
-    tray_tx: &watch::Sender<ReceivedTrayState>,
-    notice_tx: &broadcast::Sender<ReceivedNotice>,
+    shell: &ShellFeeds,
     connection: &Arc<Mutex<ConnectionState>>,
 ) -> anyhow::Result<()> {
     let token_path = token_path(socket_path);
@@ -348,7 +370,13 @@ async fn connect_and_relay(
             incoming = ws.next() => match incoming {
                 Some(Ok(Message::Text(text))) => {
                     let message: ServerMessage = serde_json::from_str(&text)?;
-                    forward_shell_message(&message, connection_id, tray_tx, notice_tx);
+                    forward_shell_message(
+                        &message,
+                        connection_id,
+                        &shell.tray_tx,
+                        &shell.notice_tx,
+                        &shell.pause_tx,
+                    );
                     let _ = broadcast_tx.send(ReceivedServerMessage { connection_id, message });
                 }
                 Some(Ok(Message::Close(_))) | None => anyhow::bail!("bridge closed the WebSocket"),
@@ -423,8 +451,21 @@ fn forward_shell_message(
     connection_id: u64,
     tray_tx: &watch::Sender<ReceivedTrayState>,
     notice_tx: &broadcast::Sender<ReceivedNotice>,
+    pause_tx: &watch::Sender<ReceivedPauseState>,
 ) {
     match message {
+        ServerMessage::FilterPauseState {
+            paused,
+            expires_at_unix_ms,
+        } => {
+            let _ = pause_tx.send_replace(ReceivedPauseState {
+                connection_id,
+                state: BridgePauseState {
+                    paused: *paused,
+                    expires_at_unix_ms: *expires_at_unix_ms,
+                },
+            });
+        }
         ServerMessage::TrayState { state } => {
             let _ = tray_tx.send_replace(ReceivedTrayState {
                 connection_id,
@@ -469,6 +510,13 @@ pub fn tray_rx() -> Option<watch::Receiver<ReceivedTrayState>> {
     }
 }
 
+pub fn pause_rx() -> Option<watch::Receiver<ReceivedPauseState>> {
+    match STARTED.get()? {
+        Outcome::Running(runtime) => Some(runtime.pause_tx.subscribe()),
+        Outcome::Failed(_) => None,
+    }
+}
+
 pub fn notice_rx() -> Option<broadcast::Receiver<ReceivedNotice>> {
     match STARTED.get()? {
         Outcome::Running(runtime) => Some(runtime.notice_tx.subscribe()),
@@ -490,6 +538,7 @@ fn status_of(outcome: &Outcome) -> (bool, String) {
     }
 }
 
+pub use snitchwatch_bridge::filter_pause::PauseState as BridgePauseState;
 pub use snitchwatch_bridge::notice::Notice as BridgeNotice;
 pub use snitchwatch_bridge::tray_state::TrayState as BridgeTrayState;
 
@@ -578,6 +627,7 @@ mod tests {
             state: BridgeTrayState::Idle,
         });
         let (notice_tx, mut notice_rx) = broadcast::channel(4);
+        let (pause_tx, mut pause_rx) = pause_channel();
 
         forward_shell_message(
             &ServerMessage::TrayState {
@@ -586,6 +636,7 @@ mod tests {
             1,
             &tray_tx,
             &notice_tx,
+            &pause_tx,
         );
         tray_rx.changed().await.expect("tray sender is alive");
         assert_eq!(tray_rx.borrow().connection_id, 1);
@@ -602,10 +653,46 @@ mod tests {
             1,
             &tray_tx,
             &notice_tx,
+            &pause_tx,
         );
         let received = notice_rx.recv().await.unwrap();
         assert_eq!(received.connection_id, 1);
         assert_eq!(received.notice, notice);
+
+        // Issue #47: the pause state and its end time reach the tray too.
+        forward_shell_message(
+            &ServerMessage::FilterPauseState {
+                paused: true,
+                expires_at_unix_ms: Some(1_800_000_300_000),
+            },
+            1,
+            &tray_tx,
+            &notice_tx,
+            &pause_tx,
+        );
+        assert!(
+            pause_rx.has_changed().unwrap(),
+            "FilterPauseState was not routed to the pause feed"
+        );
+        let received = pause_rx.borrow_and_update().clone();
+        assert_eq!(received.connection_id, 1);
+        assert_eq!(
+            received.state,
+            BridgePauseState {
+                paused: true,
+                expires_at_unix_ms: Some(1_800_000_300_000),
+            }
+        );
+    }
+
+    fn pause_channel() -> (
+        watch::Sender<ReceivedPauseState>,
+        watch::Receiver<ReceivedPauseState>,
+    ) {
+        watch::channel(ReceivedPauseState {
+            connection_id: 0,
+            state: BridgePauseState::NOT_PAUSED,
+        })
     }
 
     #[tokio::test]
@@ -711,8 +798,11 @@ mod tests {
             shell_tx,
             inbound_rx,
             status,
-            tray_tx,
-            notice_tx,
+            ShellFeeds {
+                tray_tx,
+                notice_tx,
+                pause_tx: pause_channel().0,
+            },
             connection.clone(),
         ));
 
@@ -809,8 +899,11 @@ mod tests {
                 &broadcast_tx,
                 &mut inbound_rx,
                 &client_status,
-                &tray_tx,
-                &notice_tx,
+                &ShellFeeds {
+                    tray_tx,
+                    notice_tx,
+                    pause_tx: pause_channel().0,
+                },
                 &client_connection,
             )
             .await
@@ -875,8 +968,11 @@ mod tests {
             broadcast_tx,
             inbound_rx,
             status,
-            tray_tx,
-            notice_tx,
+            ShellFeeds {
+                tray_tx,
+                notice_tx,
+                pause_tx: pause_channel().0,
+            },
             connection.clone(),
         ));
 
@@ -951,8 +1047,11 @@ mod tests {
             broadcast_tx,
             inbound_rx,
             status,
-            tray_tx,
-            notice_tx,
+            ShellFeeds {
+                tray_tx,
+                notice_tx,
+                pause_tx: pause_channel().0,
+            },
             connection,
         ));
 
