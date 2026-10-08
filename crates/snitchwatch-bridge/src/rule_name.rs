@@ -15,6 +15,24 @@
 /// filename, and the bridge's own generated names reach about 140 bytes.
 pub const MAX_RULE_NAME_BYTES: usize = 200;
 
+/// Name prefix of the rules Snitchwatch installs for blocklist subscriptions
+/// (`z00-blocklist:<list>:<kind>`, issue #45). Reserved: a GUI can't add,
+/// change or delete a rule under it, so it can't replace a blocklist's deny
+/// with an allow of the same name. Those rules are managed on the
+/// Blocklists page.
+pub const BLOCKLIST_RULE_NAME_PREFIX: &str = "z00-blocklist:";
+
+/// The band earlier builds used for the same rules. Reserved too: the
+/// bridge's reconcile purges rules under it, so a GUI must not be able to
+/// create one.
+pub const LEGACY_BLOCKLIST_RULE_NAME_PREFIX: &str = "900-blocklist:";
+
+/// Whether `name` is under a blocklist prefix only the bridge may use.
+pub fn is_reserved_blocklist_name(name: &str) -> bool {
+    name.starts_with(BLOCKLIST_RULE_NAME_PREFIX)
+        || name.starts_with(LEGACY_BLOCKLIST_RULE_NAME_PREFIX)
+}
+
 /// Reject a rule name that could escape the daemon's rules directory or
 /// isn't a sane single filename. The error never echoes the name: it is
 /// attacker-influenced and error strings reach logs and the GUI.

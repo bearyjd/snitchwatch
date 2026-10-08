@@ -7,6 +7,8 @@
 //! the same RPCs the real daemon would: `ping`, `subscribe`, `ask_rule`,
 //! `notifications`, `post_alert`.
 
+pub mod lists;
+
 use snitchwatch_proto::protocol::ui_client::UiClient;
 use snitchwatch_proto::protocol::{
     Alert, ClientConfig, Connection, MsgResponse, Notification, NotificationReply,

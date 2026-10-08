@@ -111,6 +111,13 @@ Kirigami.ScrollablePage {
     // since this page has no direct reference to the Rules tab's model/page.
     signal showRuleRequested(string ruleName)
 
+    // "Simulate this connection": the inspector's button asks the model for the
+    // row's known fields (`ConnectionsModel.simulationPrefillJson`; anything
+    // the row doesn't carry stays blank, which the simulator reads as
+    // unknown) and emits them. main.qml routes this to the Rules tab's
+    // Simulate sheet, which this page has no reference to.
+    signal simulateConnectionRequested(string prefillJson)
+
     // Verdict token -> accent colour. Kept in QML since it's pure presentation.
     function verdictColor(verdict) {
         switch (verdict) {
@@ -679,6 +686,17 @@ Kirigami.ScrollablePage {
                 icon.name: "view-list-details"
                 onClicked: {
                     page.showRuleRequested(page.inspectMatchedRule);
+                    inspector.close();
+                }
+            }
+
+            Controls.Button {
+                objectName: "simulateConnectionButton"
+                Layout.fillWidth: true
+                text: "Simulate this connection"
+                icon.name: "system-run"
+                onClicked: {
+                    page.simulateConnectionRequested(page.model.simulationPrefillJson(page.inspectId));
                     inspector.close();
                 }
             }

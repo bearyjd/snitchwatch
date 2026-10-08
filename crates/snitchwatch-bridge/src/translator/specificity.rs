@@ -15,8 +15,12 @@
 //! Higher specificity → lower number → evaluated first.
 //!
 //! Blocklist rules use an alpha prefix ("z00".."z99") so every blocklist
-//! filename sorts AFTER every user filename — user rules always win. See
-//! `BLOCKLIST_BAND_PREFIX`.
+//! filename sorts AFTER every user filename. That only orders them: it does
+//! not make user rules win. opensnitchd keeps scanning after a
+//! non-precedence allow and stops at the first matching deny
+//! (`vendor:daemon/rule/loader.go` `FindFirstMatch`), so a blocklist deny
+//! beats every allow except a `precedence: true` one (issue #45: the
+//! blocklist wins). See `BLOCKLIST_BAND_PREFIX`.
 
 use serde::{Deserialize, Serialize};
 
@@ -38,8 +42,9 @@ pub const SCORE_MAX: u32 = SCORE_PROCESS + SCORE_HOST_EXACT + SCORE_PORT + SCORE
 
 /// Filename prefix used for blocklist rules. Alpha char ('z') sorts after
 /// any 3-digit numeric prefix used by user rules ("000".."999"), so every
-/// blocklist filename is evaluated *after* every user filename. This is
-/// how user rules always win conflicts with blocklists.
+/// blocklist filename is evaluated *after* every user filename. A matching
+/// blocklist deny still wins over a non-precedence user allow (see the
+/// module doc).
 pub const BLOCKLIST_BAND_PREFIX: &str = "z";
 
 pub fn score(inputs: &SpecificityInputs) -> u32 {
@@ -142,8 +147,9 @@ mod tests {
             BLOCKLIST_BAND_PREFIX,
             p
         );
-        // User rules always win: every blocklist prefix sorts AFTER the
-        // weakest user prefix ("999"), so user rules are evaluated first.
+        // Every blocklist prefix sorts AFTER the weakest user prefix ("999"),
+        // so user rules are evaluated first (which decides between allows,
+        // not between an allow and a blocklist deny).
         let weakest_user = user_rule_prefix(&inputs(false, false, false, false, false));
         assert!(
             blocklist_rule_prefix(0) > weakest_user,

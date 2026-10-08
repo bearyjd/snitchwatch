@@ -540,6 +540,41 @@ fn a_proto_hash_leaf_and_hash_only_list_are_refused() {
     assert!(validate_operator(&list_op("list", members)).is_err());
 }
 
+// --- Blocklist rules are managed on the Blocklists page (issue #45) -------
+
+#[test]
+fn a_blocklist_rule_is_read_only_and_not_deletable_from_the_rules_page() {
+    for name in [
+        "z00-blocklist:ads-0123456789abcdef:domains",
+        "z00-blocklist:x:ips",
+        "900-blocklist:ads:0001-x.example",
+    ] {
+        for operator in [
+            Some(op(
+                "lists",
+                "lists.domains",
+                "/var/lib/snitchwatch/blocklists/x",
+            )),
+            Some(op("simple", "dest.host", "example.com")),
+        ] {
+            let rule = daemon_rule(name, operator);
+            assert_eq!(read_only_reason(&rule), Some(BLOCKLIST_MANAGED_REASON));
+            assert!(!deletable(&rule), "{name}");
+            let wire = rule_to_wire(&rule);
+            assert_eq!(wire["readOnlyReason"], BLOCKLIST_MANAGED_REASON);
+            assert_eq!(wire["deletable"], false);
+        }
+    }
+    assert!(BLOCKLIST_MANAGED_REASON.starts_with("Managed on the Blocklists page"));
+    assert!(!BLOCKLIST_MANAGED_REASON.contains("can't"));
+    let look_alike = daemon_rule(
+        "z00-blocklisted",
+        Some(op("simple", "dest.host", "example.com")),
+    );
+    assert_eq!(read_only_reason(&look_alike), None);
+    assert!(deletable(&look_alike));
+}
+
 // --- Delete stays available for a rule refused only for its shape ---------
 
 #[test]

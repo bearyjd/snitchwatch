@@ -46,6 +46,7 @@ fn enforcement_wire(enforcement: Enforcement) -> (String, Option<String>) {
         Enforcement::Pending => (ENFORCEMENT_PENDING.to_string(), None),
         Enforcement::RuleInstalled { .. } => (ENFORCEMENT_RULE_INSTALLED.to_string(), None),
         Enforcement::NotEnforced { reason } => (ENFORCEMENT_NOT_ENFORCED.to_string(), Some(reason)),
+        Enforcement::Unconfirmed { reason } => (ENFORCEMENT_PENDING.to_string(), Some(reason)),
     }
 }
 
@@ -130,7 +131,10 @@ pub async fn build_set_profiles(mgr: &ProfilesManager) -> anyhow::Result<ServerM
             active: p.active,
         })
         .collect();
-    Ok(ServerMessage::SetProfiles { profiles })
+    Ok(ServerMessage::SetProfiles {
+        profiles,
+        storage: Some(mgr.storage_status().clone()),
+    })
 }
 
 pub fn build_profile_changed(active_profile_id: Option<String>) -> ServerMessage {
@@ -141,6 +145,7 @@ pub fn build_profile_changed(active_profile_id: Option<String>) -> ServerMessage
 mod profile_emission_tests {
     use super::*;
     use crate::profiles::store::{Profile, ProfileStore};
+    use crate::ws_messages::StorageStatus;
     use std::sync::Arc;
 
     #[tokio::test]
@@ -158,11 +163,33 @@ mod profile_emission_tests {
         let mgr = ProfilesManager::new(store);
         let msg = build_set_profiles(&mgr).await.unwrap();
         match msg {
-            ServerMessage::SetProfiles { profiles } => {
+            ServerMessage::SetProfiles { profiles, storage } => {
                 assert_eq!(profiles.len(), 1);
                 assert_eq!(profiles[0].id, "home");
                 assert!(profiles[0].active);
+                assert_eq!(
+                    storage.map(|s| s.persistent),
+                    Some(false),
+                    "the default manager is not persistent"
+                );
             }
+            other => panic!("expected SetProfiles, got {other:?}"),
+        }
+    }
+
+    /// Issue #46 Part 1: GUIs learn from every `SetProfiles` whether
+    /// profiles survive a restart, and why not.
+    #[tokio::test]
+    async fn set_profiles_carries_the_managers_storage_status() {
+        let store = Arc::new(ProfileStore::open_in_memory().unwrap());
+        let status = StorageStatus {
+            unreadable: false,
+            persistent: false,
+            reason: Some("profile store: disk full".into()),
+        };
+        let mgr = ProfilesManager::new(store).with_storage_status(status.clone());
+        match build_set_profiles(&mgr).await.unwrap() {
+            ServerMessage::SetProfiles { storage, .. } => assert_eq!(storage, Some(status)),
             other => panic!("expected SetProfiles, got {other:?}"),
         }
     }

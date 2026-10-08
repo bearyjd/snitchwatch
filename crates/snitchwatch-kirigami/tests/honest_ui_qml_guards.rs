@@ -12,6 +12,7 @@
 const BLOCKLISTS_PAGE: &str = include_str!("../qml/BlocklistsPage.qml");
 const PROFILES_PAGE: &str = include_str!("../qml/ProfilesPage.qml");
 const RULES_PAGE: &str = include_str!("../qml/RulesPage.qml");
+const SIMULATOR_SHEET: &str = include_str!("../qml/RuleSimulatorSheet.qml");
 const PENDING_SHEET: &str = include_str!("../qml/PendingDecisionSheet.qml");
 const CONNECTIONS_PAGE: &str = include_str!("../qml/ConnectionsPage.qml");
 const MAIN_QML: &str = include_str!("../qml/main.qml");
@@ -42,6 +43,7 @@ const ALL_QML: &[(&str, &str)] = &[
     ),
     ("PendingDecisionSheet.qml", PENDING_SHEET),
     ("ProfilesPage.qml", PROFILES_PAGE),
+    ("RuleSimulatorSheet.qml", SIMULATOR_SHEET),
     ("RulesPage.qml", RULES_PAGE),
     ("ScannerPage.qml", include_str!("../qml/ScannerPage.qml")),
     ("SizedOverlaySheet.qml", SIZED_SHEET),
@@ -179,69 +181,41 @@ fn assert_data_labels_plain_text(
     );
 }
 
-/// The banner must be an `InlineMessage` of type Warning, shown
-/// unconditionally and without a close button — a dismissable "this isn't
-/// enforced" notice defeats its purpose.
-fn assert_preview_banner(page_name: &str, source: &str) {
-    let code = code_lines(source);
-    let start = code
-        .find("Kirigami.InlineMessage {")
-        .unwrap_or_else(|| panic!("{page_name} lost its not-enforced InlineMessage banner"));
-    let banner = &code[start..];
-    let banner = &banner[..banner.find("\n    }").unwrap_or(banner.len())];
-    assert!(
-        banner.contains("type: Kirigami.MessageType.Warning"),
-        "{page_name}'s banner is no longer a Warning"
-    );
-    assert!(
-        banner.contains("visible: true"),
-        "{page_name}'s banner must be unconditionally visible"
-    );
-    assert!(
-        !banner.contains("showCloseButton: true") && !banner.contains("actions:"),
-        "{page_name}'s banner must not be dismissable"
-    );
-    assert!(
-        banner.contains("not applied") && banner.contains("restart"),
-        "{page_name}'s banner must say the data is not applied to the firewall and is lost on \
-         restart"
-    );
-    assert!(
-        !banner.contains("bridge"),
-        "{page_name}'s banner uses internal jargon (\"bridge\"); say \"Snitchwatch's \
-         background service\" instead"
-    );
-}
-
 /// The one line of `block` that is exactly `line` (trimmed).
 fn has_line(block: &str, line: &str) -> bool {
     block.lines().any(|l| l.trim() == line)
 }
 
-/// Issue #45 PR A: the bridge persists blocklist subscriptions when it has a
-/// state directory, but still installs no daemon rules. So the Blocklists
-/// header holds two banner variants, keyed on `page.storagePersistent`:
-/// both say "not applied" (and are Warnings, not dismissable, jargon-free);
-/// only the not-persistent one says subscriptions are lost on restart. The
-/// page defaults to not persistent, and the storage problem's reason is data,
-/// so it goes in a PlainText label, never an InlineMessage.
-fn assert_storage_keyed_banner(page_name: &str, source: &str) {
+/// Issue #45 PR B: blocklists are enforced through daemon rules, but only a
+/// list whose rule the daemon accepted says so. The Blocklists header holds
+/// two warnings, neither dismissable nor jargon-laden:
+/// - one keyed on `page.anyNotEnforced` (any list not "rule installed",
+///   defaulting to false only while there is no model), saying lists are
+///   not blocking and where to see why;
+/// - one keyed on `!page.storagePersistent`, saying subscriptions are lost
+///   on restart.
+///
+/// No warning may still claim blocklists are never applied ("Preview", "not
+/// applied to the firewall yet"). The storage problem's reason is data, so
+/// it goes in a PlainText label, never an InlineMessage.
+fn assert_enforcement_keyed_banners(page_name: &str, source: &str) {
     let code = code_lines(source);
-    assert!(
-        has_line(
-            &code,
-            "readonly property bool storagePersistent: page.model ? page.model.storagePersistent : false"
-        ),
-        "{page_name} must default to not persistent until the bridge says otherwise"
-    );
+    for (property, default) in [
+        ("storagePersistent", "false"),
+        ("storageUnreadable", "false"),
+        ("anyNotEnforced", "false"),
+        ("perUserBlocklists", "false"),
+        ("anyOverLimit", "false"),
+    ] {
+        let line = format!(
+            "readonly property bool {property}: page.model ? page.model.{property} : {default}"
+        );
+        assert!(has_line(&code, &line), "{page_name} must declare `{line}`");
+    }
     let header = blocks(&code, "header: ColumnLayout {");
     assert_eq!(header.len(), 1, "{page_name} lost its banner header");
     let banners = blocks(&header[0], "Kirigami.InlineMessage {");
-    assert_eq!(
-        banners.len(),
-        2,
-        "{page_name}: expected two banner variants"
-    );
+    assert_eq!(banners.len(), 5, "{page_name}: expected five warnings");
     for banner in &banners {
         assert!(
             banner.contains("type: Kirigami.MessageType.Warning"),
@@ -252,56 +226,170 @@ fn assert_storage_keyed_banner(page_name: &str, source: &str) {
             "{page_name}'s banner must not be dismissable:\n{banner}"
         );
         assert!(
-            banner.contains("not applied"),
-            "{page_name}'s banner must say subscriptions are not applied to the firewall:\n{banner}"
-        );
-        assert!(
             !banner.contains("bridge"),
             "{page_name}'s banner uses internal jargon (\"bridge\")"
         );
+        assert!(
+            !banner.contains("Preview") && !banner.contains("not applied to the firewall yet"),
+            "{page_name}: blocklists are enforced now; no banner may say they never are:\n{banner}"
+        );
     }
-    let persistent = banners
-        .iter()
-        .find(|b| has_line(b, "visible: page.storagePersistent"))
-        .unwrap_or_else(|| panic!("{page_name}: no banner shown for persistent storage"));
-    let memory_only = banners
-        .iter()
-        .find(|b| has_line(b, "visible: !page.storagePersistent"))
-        .unwrap_or_else(|| panic!("{page_name}: no banner shown for memory-only storage"));
-    assert!(
-        memory_only.contains("restart"),
-        "{page_name}: the memory-only banner must say subscriptions are lost on restart"
+    let keyed = |visible: &str, says: &[&str]| {
+        let banner = banners
+            .iter()
+            .find(|b| has_line(b, &format!("visible: {visible}")))
+            .unwrap_or_else(|| panic!("{page_name}: no warning keyed on `{visible}`"));
+        for phrase in says {
+            assert!(
+                banner.contains(phrase),
+                "{page_name}: the `{visible}` warning must say \"{phrase}\":\n{banner}"
+            );
+        }
+    };
+    // A pending list isn't known not to block, only not confirmed to.
+    keyed("page.anyNotEnforced", &["aren't confirmed"]);
+    keyed(
+        "page.perUserBlocklists",
+        &["system-wide", "doesn't apply blocklists"],
     );
-    assert!(
-        !persistent.contains("restart"),
-        "{page_name}: the persistent banner must not claim subscriptions are lost on restart"
+    keyed("page.anyOverLimit", &["2,000,000", "aren't applied"]);
+    keyed(
+        "page.storageUnreadable",
+        &["couldn't read its saved blocklists"],
     );
-    let reasons = blocks(&header[0], "Controls.Label {");
+    keyed("!page.storagePersistent", &["restart"]);
+    let labels = blocks(&header[0], "Controls.Label {");
+    let reasons: Vec<_> = labels
+        .iter()
+        .filter(|l| l.contains("page.storageReason"))
+        .collect();
     assert_eq!(
         reasons.len(),
         1,
         "{page_name}: expected one storage-reason label"
     );
     assert!(
-        reasons[0].contains("page.storageReason")
-            && reasons[0].contains("textFormat: Text.PlainText")
-            && reasons[0].contains("!page.storagePersistent"),
-        "{page_name}: the storage reason must be a PlainText label shown only when not \
-         persistent:\n{}",
+        reasons[0].contains("textFormat: Text.PlainText"),
+        "{page_name}: the storage reason must be a PlainText label:\n{}",
+        reasons[0]
+    );
+    // `lists.domains` is an exact lookup: say so whenever there are lists,
+    // not only in the empty state.
+    let exact = labels
+        .iter()
+        .find(|l| l.contains("exact name"))
+        .unwrap_or_else(|| panic!("{page_name}: no exact-name note in the header"));
+    assert!(
+        exact.contains("not subdomains")
+            && has_line(exact, "visible: page.model && page.model.count > 0"),
+        "{page_name}: the exact-name note must show whenever lists exist:\n{exact}"
+    );
+}
+
+/// Issue #45: a blocklist row says "Rule installed" only for a list the
+/// daemon accepted; every other list is called out at the top of the page.
+#[test]
+fn blocklists_page_warns_while_any_list_is_not_enforced() {
+    assert_enforcement_keyed_banners("BlocklistsPage.qml", BLOCKLISTS_PAGE);
+}
+
+/// Issue #46 Part 1: profiles are saved when the bridge says so, but never
+/// applied to the firewall. The Profiles header holds two fixed-text
+/// warnings, neither dismissable nor jargon-laden:
+/// - one shown unconditionally (`visible: true`), saying profiles are not
+///   applied to the firewall and activating one installs no rules, until
+///   profiles can hold rules of their own;
+/// - one keyed on `!page.storagePersistent` (false only while there is no
+///   model), saying profiles are lost on restart;
+///
+/// plus a note keyed on `page.storagePersistent` saying they are saved, and
+/// the storage problem's reason in a PlainText label (data never goes in an
+/// InlineMessage, issue #51).
+fn assert_profiles_banners(page_name: &str, source: &str) {
+    let code = code_lines(source);
+    for line in [
+        "readonly property bool storagePersistent: page.model ? page.model.storagePersistent : false",
+        "readonly property string storageReason: page.model ? page.model.storageReason : \"\"",
+    ] {
+        assert!(has_line(&code, line), "{page_name} must declare `{line}`");
+    }
+    let header = blocks(&code, "header: ColumnLayout {");
+    assert_eq!(header.len(), 1, "{page_name} lost its banner header");
+    let banners = blocks(&header[0], "Kirigami.InlineMessage {");
+    assert_eq!(banners.len(), 2, "{page_name}: expected two warnings");
+    assert_plain_warnings(page_name, &banners);
+    let keyed = |visible: &str, says: &[&str]| {
+        let banner = banners
+            .iter()
+            .find(|b| has_line(b, &format!("visible: {visible}")))
+            .unwrap_or_else(|| panic!("{page_name}: no warning keyed on `{visible}`"));
+        for phrase in says {
+            assert!(
+                banner.contains(phrase),
+                "{page_name}: the `{visible}` warning must say \"{phrase}\":\n{banner}"
+            );
+        }
+    };
+    keyed(
+        "true",
+        &["not applied to the firewall", "no firewall rules"],
+    );
+    keyed("!page.storagePersistent", &["memory only", "restart"]);
+    assert_profiles_storage_labels(page_name, &blocks(&header[0], "Controls.Label {"));
+}
+
+/// Every banner is a Warning, can't be dismissed and says "Snitchwatch's
+/// background service", not "bridge".
+fn assert_plain_warnings(page_name: &str, banners: &[String]) {
+    for banner in banners {
+        assert!(
+            banner.contains("type: Kirigami.MessageType.Warning"),
+            "{page_name}'s banner is no longer a Warning:\n{banner}"
+        );
+        assert!(
+            !banner.contains("showCloseButton: true") && !banner.contains("actions:"),
+            "{page_name}'s banner must not be dismissable:\n{banner}"
+        );
+        assert!(
+            !banner.contains("bridge"),
+            "{page_name}'s banner uses internal jargon (\"bridge\"); say \"Snitchwatch's \
+             background service\" instead"
+        );
+    }
+}
+
+/// The Profiles header's labels: a fixed-text note shown while profiles are
+/// saved, and exactly one PlainText label for the storage reason.
+fn assert_profiles_storage_labels(page_name: &str, labels: &[String]) {
+    let saved = labels
+        .iter()
+        .find(|l| has_line(l, "visible: page.storagePersistent"))
+        .unwrap_or_else(|| panic!("{page_name}: no note saying profiles are saved"));
+    assert!(
+        saved.contains("are saved") && is_fixed_text(&text_binding(saved).unwrap_or_default()),
+        "{page_name}: the saved note must be fixed text saying profiles are saved:\n{saved}"
+    );
+    let reasons: Vec<_> = labels
+        .iter()
+        .filter(|l| l.contains("page.storageReason"))
+        .collect();
+    assert_eq!(
+        reasons.len(),
+        1,
+        "{page_name}: expected one storage-reason label"
+    );
+    assert!(
+        reasons[0].contains("textFormat: Text.PlainText"),
+        "{page_name}: the storage reason must be a PlainText label:\n{}",
         reasons[0]
     );
 }
 
-/// Issues #45/#46: no daemon rules are installed for blocklists (PR B) or
-/// profiles, so these tabs must say so; profiles are also in memory only.
-#[test]
-fn blocklists_page_warns_it_is_not_enforced() {
-    assert_storage_keyed_banner("BlocklistsPage.qml", BLOCKLISTS_PAGE);
-}
-
+/// Issue #46: profiles install no daemon rules, and are lost on restart
+/// unless the bridge says they are saved.
 #[test]
 fn profiles_page_warns_it_is_not_enforced() {
-    assert_preview_banner("ProfilesPage.qml", PROFILES_PAGE);
+    assert_profiles_banners("ProfilesPage.qml", PROFILES_PAGE);
 }
 
 /// Issue #45 (S2): the bridge never pushes a whole entry list (it overflowed
@@ -360,13 +448,29 @@ fn rules_page_labels_showing_rule_data_are_plain_text() {
             "page.inspectAction",
             "page.inspectDuration",
             "page.inspectOperatorSummary",
-            "page.simulateMatchedRule",
-            "page.simulateAction",
-            "page.simulateUnsupported",
             // Issue #44: names the destination of an all-apps rule.
             "row.allAppsHint",
         ],
-        12,
+        10,
+    );
+}
+
+/// The Simulate sheet shows rule names and operands from the daemon, and
+/// lines the simulator built from them.
+#[test]
+fn simulator_sheet_labels_showing_rule_data_are_plain_text() {
+    assert_data_labels_plain_text(
+        "RuleSimulatorSheet.qml",
+        SIMULATOR_SHEET,
+        &[
+            "sheet.simulateMatchedRule",
+            "sheet.simulateAction",
+            "sheet.simulateUnsupported",
+            "sheet.simulateUnevaluated",
+            "sheet.simulateInvalid",
+            "sheet.simulateWarnings",
+        ],
+        6,
     );
 }
 
@@ -421,8 +525,8 @@ fn profiles_page_labels_showing_profile_data_are_plain_text() {
     assert_data_labels_plain_text(
         "ProfilesPage.qml",
         PROFILES_PAGE,
-        &["row.name", "row.networkMatchers"],
-        2,
+        &["row.name", "row.networkMatchers", "page.storageReason"],
+        3,
     );
 }
 
@@ -465,6 +569,7 @@ fn inline_messages_carry_only_fixed_text() {
         ("BlocklistsPage.qml", BLOCKLISTS_PAGE),
         ("ProfilesPage.qml", PROFILES_PAGE),
         ("RulesPage.qml", RULES_PAGE),
+        ("RuleSimulatorSheet.qml", SIMULATOR_SHEET),
     ] {
         for block in blocks(&code_lines(source), "Kirigami.InlineMessage {") {
             checked += 1;
@@ -575,6 +680,7 @@ fn overlay_sheet_titles_are_plain_text() {
         ("BlocklistsPage.qml", BLOCKLISTS_PAGE),
         ("ProfilesPage.qml", PROFILES_PAGE),
         ("RulesPage.qml", RULES_PAGE),
+        ("RuleSimulatorSheet.qml", SIMULATOR_SHEET),
     ] {
         assert!(
             !code_lines(source).contains("Kirigami.OverlaySheet {"),

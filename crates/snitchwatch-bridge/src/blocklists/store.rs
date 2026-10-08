@@ -241,6 +241,17 @@ impl BlocklistStore {
         Ok(rows)
     }
 
+    /// Subscription ids in the order they were first stored (an upsert
+    /// keeps a row's place).
+    pub fn subscription_order(&self) -> Result<Vec<String>, StoreError> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare("SELECT id FROM subscriptions ORDER BY rowid")?;
+        let ids = stmt
+            .query_map([], |row| row.get(0))?
+            .collect::<Result<Vec<String>, _>>()?;
+        Ok(ids)
+    }
+
     pub fn delete_subscription(&self, id: &str) -> Result<(), StoreError> {
         let conn = self.lock()?;
         conn.execute("DELETE FROM subscriptions WHERE id = ?1", params![id])?;

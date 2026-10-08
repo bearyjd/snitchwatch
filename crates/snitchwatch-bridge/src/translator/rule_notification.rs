@@ -40,10 +40,14 @@ pub fn notification_for_effect(
     let (action, rules) = match effect {
         // The daemon has no "add"; `Replace` creates a rule that doesn't exist
         // yet, so both add and update are CHANGE_RULE.
-        UpstreamEffect::AddRule { rule } | UpstreamEffect::UpdateRule { rule, .. } => (
-            Action::ChangeRule,
-            vec![crate::rule_wire::rule_from_wire(rule)?],
-        ),
+        UpstreamEffect::AddRule { rule } | UpstreamEffect::UpdateRule { rule, .. } => {
+            if let UpstreamEffect::UpdateRule { rule_id, .. } = effect {
+                refuse_blocklist_name(rule_id)?;
+            }
+            let rule = crate::rule_wire::rule_from_wire(rule)?;
+            refuse_blocklist_name(&rule.name)?;
+            (Action::ChangeRule, vec![rule])
+        }
         // DELETE_RULE reads only `rul.Name`
         // (`vendor/opensnitch/daemon/ui/notifications.go:132`), so a name-only
         // Rule is correct and complete here. Deliberately NOT routed through
@@ -55,6 +59,7 @@ pub fn notification_for_effect(
             }
             // The daemon deletes `rulesDir + "/" + name + ".json"` as root.
             crate::rule_name::validate_rule_name(rule_id)?;
+            refuse_blocklist_name(rule_id)?;
             (
                 Action::DeleteRule,
                 vec![Rule {
@@ -72,6 +77,16 @@ pub fn notification_for_effect(
         rules,
         ..Default::default()
     }))
+}
+
+/// Issue #45: blocklist rules are installed and removed by the bridge only
+/// (`DaemonCommands::send` refuses them too). The error never echoes the
+/// name.
+fn refuse_blocklist_name(name: &str) -> Result<(), String> {
+    if crate::rule_name::is_reserved_blocklist_name(name) {
+        return Err("blocklist rules are managed on the Blocklists page".to_string());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -126,15 +141,51 @@ mod tests {
     #[test]
     fn delete_rule_sends_a_name_only_rule() {
         let effect = UpstreamEffect::DeleteRule {
-            rule_id: "z00-blocklist:ads:0001-x.example".to_string(),
+            rule_id: "899-firefox".to_string(),
         };
         let ntf = notification_for_effect(&effect, 2).unwrap().unwrap();
 
         assert_eq!(ntf.r#type, Action::DeleteRule as i32);
         assert_eq!(ntf.rules.len(), 1);
-        assert_eq!(ntf.rules[0].name, "z00-blocklist:ads:0001-x.example");
+        assert_eq!(ntf.rules[0].name, "899-firefox");
         // No operator needed, and requiring one would make delete impossible.
         assert!(ntf.rules[0].operator.is_none());
+    }
+
+    /// Issue #45 PR B: blocklist rules are managed on the Blocklists page. A
+    /// GUI's allow under a blocklist rule's name would replace its deny.
+    #[test]
+    fn a_gui_can_never_add_update_or_delete_a_blocklist_rule() {
+        for name in [
+            "z00-blocklist:ads-0123456789abcdef:domains",
+            "900-blocklist:ads:0001-x.example",
+        ] {
+            let effects = [
+                UpstreamEffect::AddRule {
+                    rule: wire_rule(name, true),
+                },
+                UpstreamEffect::UpdateRule {
+                    rule_id: name.to_string(),
+                    rule: wire_rule(name, false),
+                },
+                // Renaming a rule into the band, or out of it.
+                UpstreamEffect::UpdateRule {
+                    rule_id: "899-firefox".to_string(),
+                    rule: wire_rule(name, true),
+                },
+                UpstreamEffect::UpdateRule {
+                    rule_id: name.to_string(),
+                    rule: wire_rule("899-firefox", true),
+                },
+                UpstreamEffect::DeleteRule {
+                    rule_id: name.to_string(),
+                },
+            ];
+            for effect in effects {
+                let err = notification_for_effect(&effect, 1).unwrap_err();
+                assert!(err.contains("Blocklists page"), "{effect:?}: {err}");
+            }
+        }
     }
 
     #[test]

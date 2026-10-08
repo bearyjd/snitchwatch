@@ -1,15 +1,19 @@
 //! Bridge-owned blocklist subscriptions, fetch loop, and rule materialization.
 //!
-//! Production wiring (issue #45 PR A): one [`worker::BlocklistWorker`] runs
-//! every subscribe, unsubscribe and scheduled refresh in order, so at most one
-//! (bounded, https-only) fetch is in flight; [`spawn_event_pump`] turns
-//! [`BlocklistEvent`]s into `ServerMessage`s. No daemon rules are installed
-//! yet: the default [`NoopRuleSink`] reports every list as not enforced.
+//! Production wiring (issue #45): one [`worker::BlocklistWorker`] runs every
+//! subscribe, unsubscribe, scheduled refresh and reconcile in order, so at
+//! most one (bounded, https-only) fetch is in flight; [`spawn_event_pump`]
+//! turns [`BlocklistEvent`]s into `ServerMessage`s. With a state directory,
+//! [`daemon_sink::DaemonRuleSink`] installs each list as opensnitchd
+//! `lists.*` deny rules over files in [`list_dir`]; without one, the
+//! [`NoopRuleSink`] reports every list as not enforced, and why.
 
+pub mod daemon_sink;
 pub mod event_pump;
 pub mod fetch_guard;
 pub mod fetcher;
 pub mod format;
+pub mod list_dir;
 mod manager;
 pub mod materializer;
 pub mod store;
@@ -20,8 +24,6 @@ pub use manager::{BlocklistsManager, SubscribeOutcome};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-
-use crate::blocklists::materializer::MaterializedRule;
 
 /// Events emitted whenever blocklist state changes. [`spawn_event_pump`]
 /// rebroadcasts them as `SetBlocklists` / `SetBlocklistEntries` / … over the WS.
@@ -56,84 +58,205 @@ pub enum BlocklistEvent {
 pub enum Enforcement {
     /// Not downloaded or pushed to a sink yet.
     Pending,
-    /// The sink accepted the rules: the daemon replied OK and (PR B) the list
-    /// file was written. Shown as "Rule installed", not "Enforced": the daemon
-    /// may still load 0 entries.
+    /// The list files were written and the daemon replied OK to every rule,
+    /// or its committed rule snapshot already held each one unchanged.
+    /// Shown as "Rule installed", not "Enforced": the daemon may still load
+    /// 0 entries (a wrong path, SELinux) without saying so.
     RuleInstalled {
         at: DateTime<Utc>,
     },
     NotEnforced {
         reason: String,
     },
+    /// Not known either way: the daemon's rule list is unknown or it didn't
+    /// answer. Shown as "Not confirmed yet", with the reason.
+    Unconfirmed {
+        reason: String,
+    },
 }
 
-/// Why every list is unenforced until PR B wires a daemon sink. Shown to the
-/// user.
+/// Why a list is unenforced when no sink was wired in at all (in-process
+/// test helpers). Shown to the user.
 pub const NO_RULE_SINK_REASON: &str = "Blocking isn't available yet";
 /// Enforcement reason for a subscription whose first download failed.
 pub const NOT_DOWNLOADED_REASON: &str = "The list hasn't been downloaded";
+/// Enforcement reason for a downloaded list with nothing a rule can match.
+pub const NO_HOSTS_REASON: &str = "The list has no hosts Snitchwatch can block";
+/// Enforcement reason for every list while the saved subscriptions can't be
+/// read: the size limit can't count the rules already installed, so nothing
+/// is installed or removed.
+pub const UNREADABLE_STORE_REASON: &str = "Snitchwatch couldn't read its saved blocklists, so it \
+     isn't changing any blocklist rules the firewall already has.";
+/// How the reason of a list past [`AGGREGATE_MAX_HOSTS`] starts (GUIs key a
+/// warning on it).
+pub const OVER_LIMIT_REASON_PREFIX: &str = "Over the total blocklist size limit";
+/// Enforcement reason for every list of a per-user bridge (GUIs key a
+/// warning on it). Root opensnitchd would read list files any of the user's
+/// processes could replace (a FIFO hangs it; a link to `/dev/zero` exhausts
+/// its memory, and with `QueueBypass` the firewall fails open on every boot
+/// after).
+pub const PER_USER_REASON: &str = "Blocking with lists needs the system-wide Snitchwatch \
+     service; this per-user service can't keep the list files safe from other apps.";
+
+/// `2000000` as `2,000,000`.
+pub(crate) fn thousands(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
 /// Fetch status reason when a downloaded list couldn't be written.
 pub const STORE_ERROR_REASON: &str = "Couldn't save the list";
 /// Most subscriptions one bridge keeps (each can hold `format::MAX_ENTRIES`).
 pub const MAX_SUBSCRIPTIONS: usize = 32;
+/// Most hosts, summed over every subscription, the bridge asks opensnitchd
+/// to hold. The root daemon keeps each `lists` rule's entries in an
+/// in-memory Go map, at roughly 100 bytes per host with map overhead, so
+/// this is a ~200 MB budget. It runs with `QueueBypass`, so an OOM kill
+/// would let traffic through unfiltered while it restarts. Lists past the
+/// limit, in the order they were subscribed, get no files and no rule.
+pub const AGGREGATE_MAX_HOSTS: u64 = 2_000_000;
+
+/// How much a [`BlocklistsManager::reconcile_with`] pass does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ReconcileScope {
+    /// After a subscribe or unsubscribe: install lists not tried yet in
+    /// this run, and remove orphans. A list just tried isn't tried again.
+    CleanUp,
+    /// After a committed daemon rules snapshot or a refresh tick: also
+    /// retry every list that isn't installed (refused, timed out).
+    Full,
+}
 /// A list whose last download failed is retried after this long (or its own
 /// refresh interval, if shorter), not on every scheduler tick.
 pub const FAILED_RETRY_SECS: i64 = 60 * 60;
-/// Sink that receives materialized deny rules after a successful blocklist
-/// refresh. The default implementation is [`NoopRuleSink`]; replace it with
-/// [`BlocklistsManager::with_rule_sink`] to wire in the real opensnitchd writer.
+/// Why a sink didn't install a list's rules. Shown to the user.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotInstalled {
+    pub reason: String,
+    /// The daemon is unreachable or didn't answer: a reconcile pass stops
+    /// here instead of trying every other list too.
+    pub daemon_unavailable: bool,
+}
+
+impl NotInstalled {
+    pub fn new(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+            daemon_unavailable: false,
+        }
+    }
+
+    pub fn daemon_unavailable(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+            daemon_unavailable: true,
+        }
+    }
+}
+
+/// Where a subscription's hosts go to be enforced (issue #45 PR B). The
+/// production implementation is [`daemon_sink::DaemonRuleSink`]: one
+/// `lists.*` deny rule per list kind, pointing at files it writes. The
+/// default is [`NoopRuleSink`], which installs nothing and says why.
 ///
-/// ## Replace contract (migration-critical)
-///
-/// `replace_blocklist_rules` has *replace* — not merely *add* — semantics: the
-/// daemon's set of rules for `list_id` must end up **exactly** `rules`. An
-/// implementation must therefore delete every existing rule whose name starts
-/// with any prefix in
-/// [`materializer::owned_blocklist_rule_name_prefixes`](crate::blocklists::materializer::owned_blocklist_rule_name_prefixes)
-/// (that set spans both the current `"z00-blocklist:"` band and the legacy
-/// `"900-blocklist:"` band) before installing `rules`. That is what migrates a
-/// daemon off the old band: because the band move changes each rule's *name*,
-/// the new rules do not overwrite the old ones by name, so the stale
-/// old-prefix denies must be purged explicitly. See
-/// [`materializer`](crate::blocklists::materializer)'s "Legacy band migration"
-/// note. The `refresh_removes_legacy_band_rules` test exercises a sink that
-/// honors this contract end-to-end.
+/// `replace_blocklist_rules` has *replace* semantics: afterwards the daemon
+/// holds exactly the list's current rules (a stale kind's rule, or a legacy
+/// per-host rule, is deleted).
 // clippy 1.99's `double_must_use` fires on async_trait's generated
 // `#[must_use]` methods (they return an already-must_use boxed future).
 #[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait RuleSink: Send + Sync + 'static {
-    /// False for a sink that installs nothing ([`NoopRuleSink`]). The manager
-    /// then skips materializing rules (hundreds of bytes per host) and
-    /// reports every list as [`NO_RULE_SINK_REASON`].
-    fn installs_rules(&self) -> bool {
+    /// `Some(reason)` for a sink that installs nothing ([`NoopRuleSink`]):
+    /// every list is reported not enforced with that reason, and the
+    /// manager never pushes to it or reconciles.
+    fn unavailable_reason(&self) -> Option<String> {
+        None
+    }
+
+    /// Whether the daemon's rule list is known (a committed snapshot).
+    /// Reconcile never runs while it isn't.
+    fn daemon_rules_known(&self) -> bool {
         true
     }
 
+    /// Whether `list_id`'s rules are in place with their files (the daemon's
+    /// committed snapshot holds each unchanged): nothing to reconcile.
+    fn is_current(&self, _list_id: &str) -> bool {
+        false
+    }
+
+    /// Whether `list_id`'s files were written or checked against its hosts
+    /// in this run and are still there: its rules can then be resent with
+    /// [`reinstall_blocklist_rules`](Self::reinstall_blocklist_rules),
+    /// without reading its hosts again.
+    fn files_verified(&self, _list_id: &str) -> bool {
+        false
+    }
+
+    /// Resend `list_id`'s rules over its checked files (see
+    /// [`files_verified`](Self::files_verified)).
+    async fn reinstall_blocklist_rules(&self, _list_id: &str) -> Result<(), NotInstalled> {
+        Err(NotInstalled::new(NO_RULE_SINK_REASON))
+    }
+
+    /// Install `hosts` for `list_id`, replacing what was there. `Ok` only
+    /// once the daemon confirmed every rule (or already had them, confirmed
+    /// earlier in this run).
     async fn replace_blocklist_rules(
         &self,
         list_id: &str,
-        rules: Vec<MaterializedRule>,
-    ) -> anyhow::Result<()>;
+        hosts: Vec<String>,
+    ) -> Result<(), NotInstalled>;
+
+    /// Delete `list_id`'s rules from the daemon, then its files.
+    async fn remove_blocklist_rules(&self, _list_id: &str) -> Result<(), NotInstalled> {
+        Ok(())
+    }
+
+    /// Delete every blocklist rule and directory that doesn't belong to one
+    /// of `keep`.
+    async fn remove_orphans(&self, _keep: &[String]) {}
 }
 
-/// Sink used when no real sink has been wired in. It installs nothing: it
-/// says so through [`RuleSink::installs_rules`], and fails any push with
-/// [`NO_RULE_SINK_REASON`]. The manager never reports such a list installed.
-pub struct NoopRuleSink;
+/// Sink used when no rule can be installed: it says why through
+/// [`RuleSink::unavailable_reason`] and refuses every push with that reason.
+pub struct NoopRuleSink {
+    reason: String,
+}
+
+impl NoopRuleSink {
+    pub fn new(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+        }
+    }
+}
+
+impl Default for NoopRuleSink {
+    fn default() -> Self {
+        Self::new(NO_RULE_SINK_REASON)
+    }
+}
 
 #[async_trait]
 impl RuleSink for NoopRuleSink {
-    fn installs_rules(&self) -> bool {
-        false
+    fn unavailable_reason(&self) -> Option<String> {
+        Some(self.reason.clone())
     }
 
     async fn replace_blocklist_rules(
         &self,
         _list_id: &str,
-        _rules: Vec<MaterializedRule>,
-    ) -> anyhow::Result<()> {
-        anyhow::bail!(NO_RULE_SINK_REASON)
+        _hosts: Vec<String>,
+    ) -> Result<(), NotInstalled> {
+        Err(NotInstalled::new(self.reason.clone()))
     }
 }
 
@@ -271,3 +394,6 @@ pub mod test_helpers {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod reconcile_tests;

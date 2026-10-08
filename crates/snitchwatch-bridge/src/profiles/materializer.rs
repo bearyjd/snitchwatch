@@ -2,18 +2,15 @@
 //!
 //! ## Band placement
 //!
-//! `translator::specificity` documents an **alpha** band (`"z00".."z99"`) for
-//! blocklist rules, so that every blocklist filename sorts after every possible
-//! user-rule filename (`"789".."999"`) and user rules always win.
-//! [`crate::blocklists::materializer`] now emits that band (`"z00-blocklist:"`).
-//!
-//! Profile rule overrides must sort *before* (lower prefix, higher precedence
-//! than) both blocklist-sourced denies and low-specificity user rules, so this
-//! module places them in a `"850-profile:"` band. `'8' < '9' < 'z'`, so the
-//! profiles band sorts before the current blocklist band (`"z00-blocklist:"`)
-//! **and** before the legacy `"900-blocklist:"` band a not-yet-migrated daemon
-//! may still hold — profile overrides win over blocklist denies in either case.
-//! The `profile_band_sorts_before_blocklist_band` test asserts this.
+//! Profile rule overrides are placed in a `"850-profile:"` band, which sorts
+//! before the blocklist band (`"z00-blocklist:"`, and the legacy
+//! `"900-blocklist:"`) and before low-specificity user rules. Sort order only
+//! decides which of several matching *allows* applies: opensnitchd keeps
+//! scanning after a non-precedence allow and stops at the first matching
+//! deny (`vendor:daemon/rule/loader.go` `FindFirstMatch`), so a profile
+//! allow does **not** win over a blocklist deny (issue #45: the blocklist
+//! wins). Only a `precedence: true` rule would. The
+//! `profile_band_sorts_before_blocklist_band` test asserts the sort order.
 //!
 //! Filename layout: `850-profile:<sanitized_id>:<seq04>-<rule_id>.json`
 //! (`.json` suffix stripped by the daemon on load, matching
@@ -28,8 +25,8 @@ use crate::profiles::store::ProfileRule;
 
 /// Band prefix used for profile-materialized rules. Sorts before the current
 /// blocklist band (`"z00-blocklist:"`) and the legacy `"900-blocklist:"` band
-/// alike (`'8' < '9' < 'z'`), so profile rule overrides always win over
-/// blocklist-sourced denies — see the module docs above.
+/// alike (`'8' < '9' < 'z'`); see the module docs for why that doesn't let a
+/// profile allow beat a blocklist deny.
 pub const PROFILE_BAND_PREFIX: &str = "850-profile:";
 
 /// Plain-data shape mirroring the subset of `protocol::ui::Rule` needed to
@@ -158,13 +155,14 @@ mod tests {
 
     #[test]
     fn profile_band_sorts_before_blocklist_band() {
-        // The profiles band must sort (lexicographically, by rule filename)
-        // before every blocklist-band filename, so profile overrides always
-        // win over blocklist-sourced denies — for both the current "z00-" band
-        // and the legacy "900-" band a not-yet-migrated daemon may still hold.
+        // The profiles band sorts (lexicographically, by rule filename)
+        // before every blocklist-band filename, current "z00-" and legacy
+        // "900-" alike. (Sort order doesn't let an allow beat a deny.)
         let profile_name = materialize_rule("home", &rule("r1", "deny"), 0).name;
-        let blocklist_name =
-            crate::blocklists::materializer::materialize_entry("ads", "x.example", 0).name;
+        let blocklist_name = crate::blocklists::materializer::list_rule_name(
+            &crate::blocklists::list_dir::IdComponent::from_id("ads"),
+            crate::blocklists::materializer::ListKind::Domains,
+        );
         assert!(
             blocklist_name.starts_with("z00-blocklist:"),
             "blocklist rule should be in the current z00 band: {blocklist_name}"

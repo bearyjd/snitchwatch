@@ -50,6 +50,22 @@ QtObject {
             && verdicts.bridgeFeed.appBoundRulesFor(rowId) === true;
     }
 
+    // Whether `rowId`'s program has a file a rule can be bound to
+    // (`rowDetailsJson`'s `bindableProcessPath`). Sent with every verdict:
+    // Rust sends a remembered one once-only without it. Anything else,
+    // including a missing model or row, means no.
+    function rowBindableProcessPath(rowId) {
+        if (!verdicts.model) {
+            return false;
+        }
+        try {
+            return JSON.parse(verdicts.model.rowDetailsJson(rowId)).bindableProcessPath === true;
+        } catch (e) {
+            console.warn("InlineVerdicts.rowBindableProcessPath failed:", e);
+            return false;
+        }
+    }
+
     // Sends `choice` for `rowId`. Returns why a Deny applies to this
     // connection only — "not_sent", "program_unknown" or "bridge_too_old" —
     // else "". Leaves the explanation to the caller, so a batch explains once.
@@ -65,7 +81,8 @@ QtObject {
         const appBound = verdicts.rowAppBoundRules(rowId);
         const duration = verdicts.model
             ? verdicts.model.inlineDurationFor(rowId, choice, appBound) : "this_time";
-        const queued = verdicts.bridgeFeed.submitVerdict(rowId, choice, "this_host", duration);
+        const queued = verdicts.bridgeFeed.submitVerdict(rowId, choice, "this_host", duration,
+                                                         verdicts.rowBindableProcessPath(rowId));
         if (choice !== "deny") {
             return "";
         }

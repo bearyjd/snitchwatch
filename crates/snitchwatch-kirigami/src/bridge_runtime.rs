@@ -648,3 +648,7 @@ pub use snitchwatch_bridge::tray_state::TrayState as BridgeTrayState;
 #[cfg(test)]
 #[path = "bridge_runtime/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "bridge_runtime/verdict_gate_tests.rs"]
+mod verdict_gate_tests;

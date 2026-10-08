@@ -783,8 +783,9 @@ tests/                        # bridge_protocol_test.rs, mock_opensnitchd, tauri
 web/                          # vendored Little-Snitch-for-Linux-style frontend (rebranded)
 ```
 
-Blocklist subscription (M4) is done: fetch → parse → materialize into
-opensnitchd's `900-blocklist:<name>:` rule band, pushed live over WS.
+Blocklist subscription (M4): fetch → parse → store, then (issue #45 PR B)
+one `lists.*` deny rule per list kind (`z00-blocklist:<id>:domains`/`:ips`)
+over bridge-written list files, only with a state directory.
 
 ## Component B: Immutable-OS Security Scanner — not started, design-only
 

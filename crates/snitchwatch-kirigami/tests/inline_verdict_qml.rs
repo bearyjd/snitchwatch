@@ -138,14 +138,14 @@ Controls.ApplicationWindow {
         property bool ok: true
         property bool queue: true
 
-        function submitVerdict(rowId, choice, scope, duration) {
+        function submitVerdict(rowId, choice, scope, duration, bindable) {
             if (choice === "allow") {
                 feedStub.allowCount++;
             } else if (choice === "deny") {
                 feedStub.denyCount++;
             }
             feedStub.submitted.push({ rowId: rowId, choice: choice, scope: scope,
-                                      duration: duration });
+                                      duration: duration, bindable: bindable });
             return feedStub.queue;
         }
         function appBoundRulesFor(rowId) {
@@ -236,6 +236,15 @@ Controls.ApplicationWindow {
         probeWindow.check(JSON.stringify(got) === JSON.stringify(expected.slice().sort()),
                           what + ": sent " + JSON.stringify(got));
     }
+    // The sends since the last `expectSent` carried exactly these
+    // `bindableProcessPath` flags ("id=true|false", any order). The Rust gate
+    // trusts them, so a constant here would undo the inline Deny's
+    // `until_quit` (or let an unidentifiable program through).
+    function expectBindable(expected, what) {
+        const got = feedStub.submitted.map(s => s.rowId + "=" + s.bindable).sort();
+        probeWindow.check(JSON.stringify(got) === JSON.stringify(expected.slice().sort()),
+                          what + ": bindable " + JSON.stringify(got));
+    }
     // The notifications shown since the last call are exactly `expected`.
     function expectShown(expected, what) {
         const got = probeWindow.shown.slice(probeWindow.shownMark);
@@ -271,9 +280,11 @@ Controls.ApplicationWindow {
 
         probeWindow.expectSent(() => page.submitInlineVerdict("abs", "deny"),
                                ["abs deny this_host/until_quit"], "abs inline Deny");
+        probeWindow.expectBindable(["abs=true"], "abs inline Deny");
         probeWindow.expectShown([], "a remembered inline Deny");
         probeWindow.expectSent(() => page.submitInlineVerdict("kernel", "deny"),
                                ["kernel deny this_host/this_time"], "kernel inline Deny");
+        probeWindow.expectBindable(["kernel=false"], "kernel inline Deny");
         probeWindow.expectShown([probeWindow.sentence], "a once-only inline Deny");
         probeWindow.expectSent(() => {
             page.submitInlineVerdict("abs", "allow");
@@ -285,6 +296,7 @@ Controls.ApplicationWindow {
         probeWindow.expectSent(() => page.submitBatchVerdict("/usr/bin/wget", "deny"),
                                ["w1 deny this_host/until_quit", "w2 deny this_host/until_quit"],
                                "wget Deny all");
+        probeWindow.expectBindable(["w1=true", "w2=true"], "wget Deny all");
         probeWindow.expectSent(() => page.submitBatchVerdict("/usr/bin/wget", "allow"),
                                ["w1 allow this_host/this_time", "w2 allow this_host/this_time"],
                                "wget Allow all");
@@ -292,6 +304,7 @@ Controls.ApplicationWindow {
         probeWindow.expectSent(() => page.submitBatchVerdict("Kernel connection", "deny"),
                                ["kernel deny this_host/this_time", "k2 deny this_host/this_time"],
                                "kernel Deny all");
+        probeWindow.expectBindable(["kernel=false", "k2=false"], "kernel Deny all");
         probeWindow.expectShown([probeWindow.sentence], "a once-only Deny all (explained once)");
 
         probeWindow.expectText(page.inlineVerdicts.denyText("abs"), probeWindow.untilRestart, "abs tooltip");

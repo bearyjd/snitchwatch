@@ -59,12 +59,20 @@ pub mod qobject {
         /// Blocklist subscription master list, bound by `BlocklistsPage.qml`.
         /// `storagePersistent` / `storageReason` mirror the last
         /// `SetBlocklists.storage` (issue #45); false / "" until one arrives.
+        /// `anyNotEnforced`: some list isn't "rule installed" for another
+        /// reason than `perUserBlocklists` or `anyOverLimit`; and
+        /// `storageUnreadable`: the saved subscriptions couldn't be read
+        /// (issue #45).
         #[qobject]
         #[qml_element]
         #[base = QAbstractListModel]
         #[qproperty(i32, count)]
         #[qproperty(bool, storage_persistent, cxx_name = "storagePersistent")]
         #[qproperty(QString, storage_reason, cxx_name = "storageReason")]
+        #[qproperty(bool, any_not_enforced, cxx_name = "anyNotEnforced")]
+        #[qproperty(bool, per_user_blocklists, cxx_name = "perUserBlocklists")]
+        #[qproperty(bool, any_over_limit, cxx_name = "anyOverLimit")]
+        #[qproperty(bool, storage_unreadable, cxx_name = "storageUnreadable")]
         type BlocklistsModel = super::BlocklistsModelRust;
 
         /// Emitted with a JSON-encoded `ClientMessage` (SubscribeBlocklist /
@@ -193,6 +201,10 @@ pub struct BlocklistsModelRust {
     count: i32,
     storage_persistent: bool,
     storage_reason: QString,
+    any_not_enforced: bool,
+    per_user_blocklists: bool,
+    any_over_limit: bool,
+    storage_unreadable: bool,
 }
 
 impl qobject::BlocklistsModel {
@@ -310,9 +322,17 @@ impl qobject::BlocklistsModel {
             let n = self.store.len() as i32;
             let persistent = self.store.storage_persistent();
             let reason = QString::from(self.store.storage_reason());
+            let any_not_enforced = self.store.any_not_enforced();
+            let per_user = self.store.per_user();
+            let over_limit = self.store.any_over_limit();
+            let unreadable = self.store.storage_unreadable();
             self.as_mut().set_count(n);
             self.as_mut().set_storage_persistent(persistent);
             self.as_mut().set_storage_reason(reason);
+            self.as_mut().set_any_not_enforced(any_not_enforced);
+            self.as_mut().set_per_user_blocklists(per_user);
+            self.as_mut().set_any_over_limit(over_limit);
+            self.as_mut().set_storage_unreadable(unreadable);
         }
     }
 

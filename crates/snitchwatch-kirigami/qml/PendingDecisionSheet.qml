@@ -45,18 +45,33 @@ ColumnLayout {
     // own absolute-path rule). Without it only "This time" is offered: the
     // bridge would answer anything longer once anyway. False by default, so a
     // caller that never sets it can't offer a duration that won't be kept.
+    // `submit()` also sends it to `BridgeFeed.submitVerdict`, whose Rust gate
+    // sends a remembered verdict once-only without it.
     property bool bindableProcessPath: false
     // Exposed for the headless probe (tests/verdict_not_remembered_qml.rs).
     property alias durationSelector: durationBox
     // Whether the row's bridge advertised app-bound rules
-    // (`ConnectionsPage.rowAppBoundRules`). Without them a remembered "This
-    // host only" answer covers every app, so the sheet doesn't suggest one.
+    // (`InlineVerdicts.rowAppBoundRules`, the inline Deny's per-session
+    // check). Without them a remembered "This host only" or "Any host on this
+    // domain" answer covers every app (issue #72).
     property bool appBoundRules: false
+    // Exposed for the headless probe (tests/sheet_old_bridge_qml.rs).
+    property alias scopeSelector: scopeBox
+    property alias oldBridgeNote: oldBridgeNoteLabel
+    // Whether an answer can be remembered for this row and scope: the program
+    // must be identifiable (#44), and unless the scope is "Any host" (a rule
+    // on the program alone, even on older bridges), its bridge must bind host
+    // rules to the program (#72). Otherwise only "This time" is offered, and
+    // `submit()` sends it whatever the selector holds.
+    readonly property bool remembers: sheet.bindableProcessPath
+        && (sheet.appBoundRules || scopeBox.currentValue === "any_host")
+    // The #44 note covers an unidentifiable program; this one an old bridge.
+    readonly property bool showOldBridgeNote: sheet.bindableProcessPath && !sheet.remembers
     // Whether the one-time-Deny hint under the Duration box shows: only where
-    // a longer Deny would be bound to this program. The Allow/Deny buttons
-    // submit at once, so there is no selected action to key on: it follows
-    // the duration, and its text names Deny.
-    readonly property bool showDenyOnceHint: sheet.bindableProcessPath && sheet.appBoundRules
+    // a longer Deny is offered (`remembers`). The Allow/Deny buttons submit at
+    // once, so there is no selected action to key on: it follows the
+    // duration, and its text names Deny.
+    readonly property bool showDenyOnceHint: sheet.remembers
         && durationBox.currentValue === "this_time"
     // Exposed for the headless probe (tests/inline_verdict_qml.rs).
     property alias denyOnceHint: denyOnceHintLabel
@@ -147,7 +162,7 @@ ColumnLayout {
             // `ConnectionsPage.qml`'s inline Allow sends, and `until_quit` is
             // what its inline Deny sends for a program it can bind a rule to,
             // on a bridge that advertised app-bound rules (`inline_deny.rs`).
-            model: sheet.bindableProcessPath
+            model: sheet.remembers
                 ? [
                     { label: "This time", token: "this_time" },
                     { label: "For 5 minutes", token: "for_5_minutes" },
@@ -182,6 +197,18 @@ ColumnLayout {
         font: Kirigami.Theme.smallFont
         textFormat: Text.PlainText
         text: "Snitchwatch couldn't identify this program's file, so this answer applies only to this connection."
+    }
+
+    // Issue #72: why a host-scoped answer can't be remembered on this bridge.
+    Controls.Label {
+        id: oldBridgeNoteLabel
+        Layout.fillWidth: true
+        visible: sheet.showOldBridgeNote
+        wrapMode: Text.Wrap
+        opacity: 0.7
+        font: Kirigami.Theme.smallFont
+        textFormat: Text.PlainText
+        text: "This firewall bridge is too old to limit a rule to just this program, so with this scope it can only answer this connection. Update Snitchwatch's background service to remember answers."
     }
 
     // Countdown display only — never a client-side timer.
@@ -260,11 +287,15 @@ ColumnLayout {
     }
 
     function submit(action) {
-        // Issue #44: never ask to remember an answer for a program the bridge
-        // can't bind a rule to, whatever the selector holds.
-        const duration = sheet.bindableProcessPath ? durationBox.currentValue : "this_time";
+        // Issues #44 and #72: never ask to remember an answer the bridge can't
+        // bind to this program, whatever the selector holds. `remembers`
+        // reads the scope sent below.
+        const duration = sheet.remembers ? durationBox.currentValue : "this_time";
         if (sheet.bridgeFeed !== null) {
-            sheet.bridgeFeed.submitVerdict(sheet.rowId, action, scopeBox.currentValue, duration);
+            // `bindableProcessPath`, not `remembers`: Rust gates on this flag
+            // again, and must not depend on this sheet's own gate.
+            sheet.bridgeFeed.submitVerdict(sheet.rowId, action, scopeBox.currentValue, duration,
+                                           sheet.bindableProcessPath);
         } else {
             // Unreachable in the running app; logged rather than dropped
             // silently so a mis-wired container can't lose a decision without

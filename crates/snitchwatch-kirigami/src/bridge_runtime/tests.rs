@@ -226,18 +226,18 @@ async fn disconnect_discards_queued_actions_and_rejects_new_ones() {
     // Both generic JSON and typed QML submissions converge on dispatch_to.
     // Held-open dialogs retain 1:1 even after new service rows reuse ID 1.
     assert_eq!(
-        crate::bridge_feed::dispatch_to(&handles, verdict("1:1")),
+        crate::bridge_feed::dispatch_to(&handles, verdict("1:1"), true),
         Err(SendClientMessageError::StaleSession)
     );
     assert_eq!(
-        crate::bridge_feed::dispatch_to(&handles, verdict("1")),
+        crate::bridge_feed::dispatch_to(&handles, verdict("1"), true),
         Err(SendClientMessageError::StaleSession)
     );
     assert!(matches!(
         inbound_rx.try_recv(),
         Err(mpsc::error::TryRecvError::Empty)
     ));
-    crate::bridge_feed::dispatch_to(&handles, verdict("2:1"))
+    crate::bridge_feed::dispatch_to(&handles, verdict("2:1"), true)
         .expect("new snapshot's identical wire row ID remains actionable");
     let fresh_verdict = inbound_rx.recv().await.unwrap();
     assert_eq!(fresh_verdict.connection_id, 2);

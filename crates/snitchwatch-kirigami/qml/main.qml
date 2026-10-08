@@ -399,6 +399,13 @@ Kirigami.ApplicationWindow {
                 const rulesPage = root.pageStack.replace(rulesPageComponent);
                 rulesPage.openRuleByName(ruleName);
             }
+
+            // "Simulate this connection": same route, to the Simulate sheet,
+            // prefilled with what the inspected row carries.
+            onSimulateConnectionRequested: function(prefillJson) {
+                const rulesPage = root.pageStack.replace(rulesPageComponent);
+                rulesPage.openSimulator(prefillJson);
+            }
         }
     }
     Component {
