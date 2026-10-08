@@ -6,7 +6,6 @@
 
 use super::*;
 use crate::cache::connections::Verdict;
-use crate::cache::rules::RulesCache;
 use crate::filter_pause::PauseRequest;
 use crate::notice::Notice;
 use crate::pause_answers::{allow_waiting, answer_waiting};
@@ -128,8 +127,9 @@ fn assert_allowed_once_and_not_saved(svc: &UiService, rule: &Rule, messages: &[S
         "a once answer must not be saved as a rule: {messages:?}"
     );
     assert_eq!(
-        *svc.rules_handle().lock().unwrap(),
-        RulesCache::Synced(Default::default())
+        svc.rules_handle().lock().unwrap().rules(),
+        Some(&std::collections::BTreeMap::new()),
+        "a once answer must leave the rules cache empty"
     );
 }
 
