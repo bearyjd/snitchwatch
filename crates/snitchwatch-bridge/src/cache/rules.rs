@@ -48,7 +48,7 @@ pub const MAX_SNAPSHOT_RULES: usize = 10_000;
 /// duration, operator type/operand/data), in bytes.
 pub const MAX_RULE_FIELD_BYTES: usize = 16 * 1024;
 /// Most members a list operator may have, and how deeply lists may nest.
-const MAX_OPERATOR_LIST_LEN: usize = 64;
+pub(crate) const MAX_OPERATOR_LIST_LEN: usize = 64;
 const MAX_OPERATOR_DEPTH: usize = 4;
 
 /// Shared handle to the cache. A std mutex: every operation is synchronous.
