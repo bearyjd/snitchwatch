@@ -4,7 +4,7 @@
 //! the profile's vocabulary would also refuse the shape).
 
 use super::profile::*;
-use super::validate_operator;
+use super::{binds_to_programs, validate_operator};
 use snitchwatch_proto::protocol::{Operator, Rule};
 
 fn leaf(r#type: &str, operand: &str, data: &str) -> Operator {
@@ -208,7 +208,7 @@ fn ports_and_ids_must_be_decimal_and_in_range() {
         ("dest.port", "70000", PORT_REFUSED),
         ("source.port", "-1", PORT_REFUSED),
         ("dest.port", "0x50", PORT_REFUSED),
-        ("dest.port", "", PORT_REFUSED),
+        ("dest.port", "", EMPTY_VALUE_REFUSED),
         ("process.id", "12a", ID_REFUSED),
         ("user.id", "-5", ID_REFUSED),
         ("user.id", "99999999999", ID_REFUSED),
@@ -245,6 +245,7 @@ fn bridge_owned_and_unsafe_names_are_refused() {
         ("z00-blocklist:ads:domains", BLOCKLIST_NAME_REFUSED),
         ("900-blocklist:ads:domains", BLOCKLIST_NAME_REFUSED),
         ("snitchwatch-default-steam", CURATED_NAME_REFUSED),
+        ("000-snitchwatch-fetch", PACKAGED_NAME_REFUSED),
     ] {
         let mut r = rule(path_leaf());
         r.name = name.into();
@@ -332,5 +333,93 @@ fn problems_never_echo_the_rule_text() {
     for problem in problems {
         let text = format!("{} {}", problem.path, problem.reason).to_lowercase();
         assert!(!text.contains("marker"), "{problem:?}");
+    }
+}
+
+// --- Match-all shapes beyond `true` (P2.7 review H1) ----------------------
+
+#[test]
+fn an_empty_simple_value_is_refused_except_for_dest_host() {
+    for operand in [
+        "process.env.ZZZ",
+        "process.path",
+        "dest.ip",
+        "user.id",
+        "protocol",
+    ] {
+        let r = rule(list(vec![
+            leaf("simple", "dest.port", "443"),
+            leaf("simple", operand, ""),
+        ]));
+        let problems = import(&r).expect_err(operand);
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.reason == EMPTY_VALUE_REFUSED && p.path == "operator.list[1].data"),
+            "{operand}: {problems:?}"
+        );
+    }
+    // An empty dest.host is the daemon's match for a connection with no
+    // host name: it narrows.
+    assert_eq!(import(&rule(leaf("simple", "dest.host", ""))), Ok(()));
+}
+
+#[test]
+fn rules_whose_conditions_all_match_everything_are_refused() {
+    for op in [
+        leaf("regexp", "process.path", "/"),
+        leaf("regexp", "process.parent.path", "^/"),
+        leaf("regexp", "dest.host", ".+"),
+        leaf("regexp", "process.command", "[a-z]"),
+        leaf("network", "dest.network", "0.0.0.0/0"),
+        leaf("network", "source.network", "::/0"),
+        list(vec![
+            leaf("regexp", "process.path", "/"),
+            leaf("network", "dest.network", "0.0.0.0/0"),
+        ]),
+    ] {
+        assert_eq!(validate_operator(&op), Ok(()), "{op:?}");
+        refused_with(&rule(op), MATCHES_EVERYTHING);
+    }
+}
+
+#[test]
+fn a_match_everything_condition_next_to_a_narrowing_one_is_accepted() {
+    for op in [
+        list(vec![path_leaf(), leaf("regexp", "dest.host", ".+")]),
+        list(vec![
+            path_leaf(),
+            leaf("network", "dest.network", "0.0.0.0/0"),
+        ]),
+        list(vec![
+            leaf("regexp", "process.path", "/"),
+            leaf("simple", "dest.port", "443"),
+        ]),
+        leaf("regexp", "process.path", "^/usr/bin/curl$"),
+        leaf("regexp", "dest.host", "^(?:[^.]+\\.)*example\\.com$"),
+    ] {
+        assert_eq!(import(&rule(op.clone())), Ok(()), "{op:?}");
+    }
+}
+
+#[test]
+fn only_a_simple_path_command_or_id_ties_a_rule_to_programs() {
+    for (op, bound) in [
+        (path_leaf(), true),
+        (leaf("simple", "process.command", "curl x"), true),
+        (leaf("simple", "process.id", "42"), true),
+        (leaf("regexp", "process.path", "^/usr/bin/curl$"), false),
+        (
+            leaf("simple", "process.parent.path", "/usr/lib/systemd/systemd"),
+            false,
+        ),
+        (leaf("simple", "process.env.HOME", "/root"), false),
+        (leaf("simple", "dest.host", "example.com"), false),
+        (
+            list(vec![leaf("simple", "dest.port", "443"), path_leaf()]),
+            true,
+        ),
+    ] {
+        assert_eq!(binds_to_programs(&op), bound, "{op:?}");
     }
 }

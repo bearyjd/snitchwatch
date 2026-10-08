@@ -535,6 +535,7 @@ Kirigami.ScrollablePage {
         defaultSuffix: "json"
         nameFilters: ["Snitchwatch rules (*.json)"]
         onAccepted: rulesIo.writeExport(selectedFile)
+        onRejected: rulesIo.exportCancelled()
     }
     FileDialog {
         id: importDialog

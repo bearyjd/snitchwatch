@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use cxx_qt_lib::{QByteArray, QGuiApplication, QQmlApplicationEngine, QUrl};
-use snitchwatch_bridge::rule_io::{ImportItem, ImportKind};
+use snitchwatch_bridge::rule_io::{ImportItem, ImportKind, PreviousRule};
 use snitchwatch_bridge::rule_policy::RuleProblem;
 
 #[allow(unused_imports)]
@@ -40,6 +40,9 @@ fn item(name: &str, kind: ImportKind, action: &str) -> ImportItem {
         description: String::new(),
         nolog: false,
         conditions: vec!["process.path is /usr/bin/<b>curl</b>".into()],
+        ticked: matches!(kind, ImportKind::Add | ImportKind::Replace),
+        cautions: Vec::new(),
+        previous: None,
     }
 }
 
@@ -53,22 +56,35 @@ fn preview_json() -> String {
     let items = vec![
         // Ticked: a deny.
         item("<b>evil</b>-deny", ImportKind::Add, "deny"),
-        // Unticked: an allow for every app.
+        // Unticked by the bridge: an allow for every app.
         ImportItem {
             applies_to_all_apps: true,
             persists: false,
+            ticked: false,
+            cautions: vec!["This allow applies to every app.".into()],
             ..item("allow-all", ImportKind::Add, "allow")
         },
-        // Unticked: loosens a rule.
+        // Unticked by the bridge: loosens a rule; shows what it replaces.
         ImportItem {
             weakens: true,
             changed_fields: vec!["action".into()],
+            ticked: false,
+            cautions: vec!["This turns a blocking rule into an allow.".into()],
+            previous: Some(PreviousRule {
+                enabled: true,
+                action: "deny".into(),
+                duration: "always".into(),
+                description: String::new(),
+                precedence: false,
+                nolog: false,
+                conditions: vec!["dest.host is <i>old</i>.example".into()],
+            }),
             ..item("swap", ImportKind::Replace, "allow")
         },
         item("same", ImportKind::Unchanged, "deny"),
         refused,
     ];
-    serde_json::to_string(&snitchwatch_kirigami::rules::io::group(&items)).unwrap()
+    serde_json::to_string(&snitchwatch_kirigami::rules::io_view::group(&items)).unwrap()
 }
 
 #[test]
@@ -173,6 +189,9 @@ Window {
                 probeWindow.expect(probeWindow.named("importBadge")
                     .some(function (b) { return b.text === "Applies to all apps"; }),
                     "all-apps badge");
+                probeWindow.expect(probeWindow.named("importPrevious")
+                    .some(function (p) { return p.visible && p.text === "Action: deny"; }),
+                    "the replaced rule is shown");
 
                 // The count follows the ticks.
                 sheet.setTicked("allow-all", true);

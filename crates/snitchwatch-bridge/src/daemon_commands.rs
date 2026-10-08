@@ -265,6 +265,11 @@ impl DaemonCommands {
         self.ready.subscribe()
     }
 
+    /// How the daemon reaches this bridge.
+    pub fn transport(&self) -> DaemonTransport {
+        lock(&self.inner).transport
+    }
+
     /// Coalesce the `SetRules` broadcasts of confirmed commands until the
     /// hold drops (a rule import, P2.7); see [`RulesSync::hold_publishes`].
     pub fn hold_rule_publishes(&self) -> crate::cache::rules::PublishHold {
@@ -380,9 +385,9 @@ impl DaemonCommands {
         if notification
             .rules
             .iter()
-            .any(|rule| crate::rule_name::is_reserved_blocklist_name(&rule.name))
+            .any(|rule| crate::rule_name::is_reserved_name(&rule.name))
         {
-            warn!("refusing to send a rule command under a blocklist rule name");
+            warn!("refusing to send a rule command under a reserved rule name");
             return Err(SendError::ReservedName);
         }
         if notification.r#type == Action::ChangeRule as i32

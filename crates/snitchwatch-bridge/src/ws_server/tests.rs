@@ -536,3 +536,64 @@ async fn pump_drops_an_oversized_frame_before_parsing_it() {
     );
     pump.abort();
 }
+
+/// Rule import/export (P2.7 review #8): an import request is stamped with a
+/// channel back to its own connection, and what is sent on it reaches that
+/// connection only, never the broadcast.
+#[tokio::test]
+async fn import_requests_carry_a_reply_channel_to_their_connection() {
+    let (inbound_tx, mut inbound_rx) = mpsc::channel(16);
+    let handles = WsHandles {
+        inbound: inbound_tx,
+        ..default_handles()
+    };
+    let frames = futures_util::stream::iter(vec![Ok(Message::Text(
+        r#"{"action":"exportRules","requestId":"r1"}"#.to_string(),
+    ))])
+    .chain(futures_util::stream::pending());
+    let (sink_tx, mut sink_rx) = mpsc::channel::<Message>(16);
+    let sink = Box::pin(futures_util::sink::unfold(
+        sink_tx,
+        |tx, message: Message| async move {
+            tx.send(message)
+                .await
+                .map_err(|_| std::io::Error::other("closed"))?;
+            Ok::<_, std::io::Error>(tx)
+        },
+    ));
+    let pump = tokio::spawn(pump_authenticated(sink, Box::pin(frames), handles, None));
+
+    let request = tokio::time::timeout(std::time::Duration::from_secs(2), inbound_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let ClientMessage::ExportRules {
+        request_id,
+        reply: Some(reply),
+    } = request
+    else {
+        panic!("no reply channel: {request:?}");
+    };
+    assert_eq!(request_id, "r1");
+    assert!(
+        reply
+            .send(ServerMessage::RulesExportUnavailable {
+                request_id: "r1".into(),
+                reason: "x".into(),
+            })
+            .await
+    );
+    let Message::Text(text) =
+        tokio::time::timeout(std::time::Duration::from_secs(2), sink_rx.recv())
+            .await
+            .unwrap()
+            .unwrap()
+    else {
+        panic!("not text")
+    };
+    assert!(
+        text.contains("rulesExportUnavailable") && text.contains("r1"),
+        "{text}"
+    );
+    pump.abort();
+}

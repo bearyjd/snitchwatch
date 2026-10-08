@@ -7,9 +7,12 @@
 // unchanged rules, and refused ones with each reason. Nothing is deleted:
 // rules missing from the file stay as they are.
 //
-// Default ticks come from the Rust side: adds and replaces start ticked,
-// except a replace that loosens a rule, an allow that overrides other rules,
-// and an allow that applies to every app, which start unticked with a reason.
+// Default ticks and their reasons come from the bridge: adds and replaces
+// start ticked, except a replace that loosens or changes a blocking rule or
+// widens an allow, an allow that overrides other rules, and an allow that
+// applies to every app, which start unticked with a reason. A replace also
+// shows the rule it overwrites. At most 2,000 changes are applied at once
+// (the bridge's `MAX_APPLY_RULES`).
 //
 // Every label is plain text: names, conditions and reasons come from the file
 // or the firewall service. Checkboxes carry no text; the name sits in a
@@ -34,6 +37,8 @@ SizedOverlaySheet {
     property var results: ({})
     property bool showUnchanged: false
     readonly property int tickedCount: sheet.countTicked()
+    // The bridge refuses more in one apply (`rules_import::MAX_APPLY_RULES`).
+    readonly property int maxApply: 2000
 
     function load() {
         const json = sheet.controller ? sheet.controller.previewJson : "";
@@ -138,6 +143,28 @@ SizedOverlaySheet {
                     textFormat: Text.PlainText
                     text: modelData
                     font: Kirigami.Theme.smallFont
+                    wrapMode: Text.Wrap
+                }
+            }
+            Controls.Label {
+                objectName: "importPreviousHeading"
+                visible: change.row.previous.length > 0
+                textFormat: Text.PlainText
+                text: "It replaces this rule:"
+                font: Kirigami.Theme.smallFont
+                opacity: 0.8
+            }
+            Repeater {
+                model: change.row.previous
+                delegate: Controls.Label {
+                    required property string modelData
+                    objectName: "importPrevious"
+                    Layout.fillWidth: true
+                    Layout.leftMargin: Kirigami.Units.largeSpacing
+                    textFormat: Text.PlainText
+                    text: modelData
+                    font: Kirigami.Theme.smallFont
+                    opacity: 0.8
                     wrapMode: Text.Wrap
                 }
             }
@@ -264,11 +291,23 @@ SizedOverlaySheet {
             wrapMode: Text.Wrap
         }
 
+        Controls.Label {
+            objectName: "importTooMany"
+            visible: sheet.tickedCount > sheet.maxApply
+            Layout.fillWidth: true
+            textFormat: Text.PlainText
+            text: "Apply at most 2,000 changes at once. Untick some, apply, then import the "
+                + "file again for the rest."
+            color: Kirigami.Theme.neutralTextColor
+            wrapMode: Text.Wrap
+        }
+
         Controls.Button {
             objectName: "importApply"
             Layout.fillWidth: true
             visible: !sheet.controller || !sheet.controller.applied
-            enabled: sheet.tickedCount > 0 && !!sheet.controller && !sheet.controller.busy
+            enabled: sheet.tickedCount > 0 && sheet.tickedCount <= sheet.maxApply
+                     && !!sheet.controller && !sheet.controller.busy
             text: sheet.tickedCount === 1 ? "Apply 1 change" : "Apply " + sheet.tickedCount + " changes"
             icon.name: "dialog-ok-apply"
             onClicked: sheet.applyTicked()

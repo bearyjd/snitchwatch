@@ -29,10 +29,12 @@ use crate::rule_policy::{validate_user_rule, PolicyProfile, RuleProblem};
 use serde::{Deserialize, Serialize};
 use snitchwatch_proto::protocol::Rule;
 
+mod caution;
+mod limits;
 mod preview;
 pub use preview::{
-    check_rules, classify, preview, CheckedRule, ImportItem, ImportKind, ImportPreview,
-    DUPLICATE_NAME,
+    check_rules, classify, preview, same_rule, CheckedRule, ImportItem, ImportKind, ImportPreview,
+    PreviousRule, DUPLICATE_NAME, HIDDEN_NAME,
 };
 
 pub const FORMAT: &str = "snitchwatch.rules";
@@ -86,7 +88,7 @@ impl DocumentError {
         match self {
             Self::TooLarge => {
                 "This file is too large to import. Snitchwatch imports files of up to 960 KiB, \
-                 which is about 1,000 to 2,000 rules."
+                 which is about 2,000 to 3,500 rules."
             }
             Self::NotJson => "This file isn't valid JSON.",
             Self::NotRulesFile => "This isn't a Snitchwatch rules file.",
@@ -108,13 +110,35 @@ impl ExportUnavailable {
     pub const REASON: &'static str = "Rules haven't loaded from the firewall yet.";
 }
 
-/// The cache has no daemon rule list to compare an import against.
+/// Why a preview was refused as a whole.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PreviewUnavailable;
+pub enum PreviewError {
+    /// The cache has no daemon rule list to compare against.
+    Unavailable,
+    /// The firewall's rules plus the new ones would pass the 10,000 the
+    /// bridge loads.
+    TooManyRules,
+    /// They would pass what the bridge accepts from the daemon in one
+    /// snapshot.
+    SnapshotTooLarge,
+}
 
-impl PreviewUnavailable {
-    pub const REASON: &'static str =
-        "Rules haven't loaded from the firewall yet, so the import can't be compared.";
+impl PreviewError {
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::Unavailable => {
+                "Rules haven't loaded from the firewall yet, so the import can't be compared."
+            }
+            Self::TooManyRules => {
+                "With these rules the firewall would have more than 10,000, which is more than \
+                 Snitchwatch can load. Nothing was imported."
+            }
+            Self::SnapshotTooLarge => {
+                "With these rules the firewall's rule list would be too large for Snitchwatch to \
+                 load. Nothing was imported."
+            }
+        }
+    }
 }
 
 /// Rules left out of an export, by why.
@@ -245,8 +269,8 @@ pub fn check_rule_for_apply(rule: &Rule) -> Result<Rule, Vec<RuleProblem>> {
 
 /// Rules Snitchwatch installs itself: blocklists and curated defaults.
 fn is_bridge_owned(name: &str) -> bool {
-    crate::rule_name::is_reserved_blocklist_name(name)
-        || name.starts_with(crate::rule_name::CURATED_DEFAULT_RULE_NAME_PREFIX)
+    crate::rule_name::is_reserved_name(name)
+        || name.starts_with(crate::rule_policy::PACKAGED_RULE_NAME_PREFIX)
 }
 
 /// Parse a document from file text, refusing an oversized one before any
@@ -260,16 +284,18 @@ pub fn parse_document_text(text: &str) -> Result<Document, DocumentError> {
 }
 
 /// Check a document's envelope. Its rules are checked by [`preview`].
-pub fn parse_document(value: serde_json::Value) -> Result<Document, DocumentError> {
+pub fn parse_document(mut value: serde_json::Value) -> Result<Document, DocumentError> {
     // Format and version first, so a newer file says so rather than
     // tripping over a key this version doesn't know.
     let format = value.get("format").and_then(|f| f.as_str());
     if format != Some(FORMAT) {
         return Err(DocumentError::NotRulesFile);
     }
-    match value.get("version").and_then(|v| v.as_u64()) {
-        Some(1) => {}
-        Some(v) if v > 1 => return Err(DocumentError::Newer),
+    // JSON Schema reads `1.0` as the integer 1, so this does too.
+    match value.get("version").and_then(|v| v.as_f64()) {
+        Some(v) if v.fract() != 0.0 => return Err(DocumentError::UnsupportedVersion),
+        Some(v) if v == f64::from(VERSION) => value["version"] = VERSION.into(),
+        Some(v) if v > f64::from(VERSION) => return Err(DocumentError::Newer),
         _ => return Err(DocumentError::UnsupportedVersion),
     }
     let document: Document = serde_json::from_value(value).map_err(|_| DocumentError::Malformed)?;
@@ -284,3 +310,6 @@ mod tests;
 
 #[cfg(test)]
 mod protocol_tests;
+
+#[cfg(test)]
+mod caution_tests;

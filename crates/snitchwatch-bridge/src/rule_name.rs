@@ -33,6 +33,13 @@ pub const LEGACY_BLOCKLIST_RULE_NAME_PREFIX: &str = "900-blocklist:";
 /// away as, one of those.
 pub const CURATED_DEFAULT_RULE_NAME_PREFIX: &str = "snitchwatch-default-";
 
+/// Whether `name` is under a prefix only Snitchwatch itself may use
+/// (blocklist rules and curated defaults). `DaemonCommands::send` refuses
+/// every command for such a name.
+pub fn is_reserved_name(name: &str) -> bool {
+    is_reserved_blocklist_name(name) || name.starts_with(CURATED_DEFAULT_RULE_NAME_PREFIX)
+}
+
 /// Whether `name` is under a blocklist prefix only the bridge may use.
 pub fn is_reserved_blocklist_name(name: &str) -> bool {
     name.starts_with(BLOCKLIST_RULE_NAME_PREFIX)

@@ -184,3 +184,21 @@ async fn an_internal_blocklist_command_is_sent_and_its_ok_reaches_the_rules_cach
     assert!(commands.send_blocklist(delete).is_ok());
     assert_eq!(rx.try_recv().unwrap().r#type, Action::DeleteRule as i32);
 }
+
+/// Curated default rules (`snitchwatch-default-`) are Snitchwatch's own:
+/// no GUI command and no import may add, change or delete one (P2.7 review).
+#[tokio::test]
+async fn a_curated_default_name_is_refused_at_send() {
+    let (commands, _rules) = fixture();
+    let (_stream, mut rx) = current_stream(&commands);
+    for notification in [
+        change("snitchwatch-default-steam", Some(host("steam.example"))),
+        delete("snitchwatch-default-steam"),
+    ] {
+        assert_eq!(
+            commands.send(notification).err(),
+            Some(SendError::ReservedName)
+        );
+    }
+    assert!(rx.try_recv().is_err(), "nothing reached the daemon");
+}

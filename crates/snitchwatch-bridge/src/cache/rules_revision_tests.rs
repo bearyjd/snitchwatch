@@ -146,3 +146,37 @@ fn held_publishes_coalesce_into_one_set_rules() {
     sync.apply_confirmed(&change("c"));
     assert!(matches!(rx.try_recv(), Ok(ServerMessage::SetRules { .. })));
 }
+
+/// A daemon rule over the field limits is left out of the list, but its
+/// name and size are kept: an import must not overwrite it unseen (P2.7
+/// review M1), and the snapshot-size estimate must count it (M3).
+#[test]
+fn rules_left_out_of_a_snapshot_keep_their_name_and_size() {
+    let mut long = rule("long", "always", 1);
+    long.description = "x".repeat(MAX_RULE_FIELD_BYTES + 1);
+    let mut nameless = rule("", "always", 1);
+    nameless.description = long.description.clone();
+    let snapshot = bounded_snapshot(vec![rule("kept", "always", 1), long, nameless]).unwrap();
+    assert_eq!(snapshot.rules.len(), 1);
+    assert_eq!(snapshot.left_out.len(), 2, "every left-out rule is counted");
+    assert!(snapshot.left_out["long"] > MAX_RULE_FIELD_BYTES);
+
+    let mut cache = RulesCache::default();
+    cache.replace_all(snapshot.rules);
+    cache.set_left_out(snapshot.left_out);
+    assert!(cache.left_out().contains_key("long"));
+    assert!(!cache.rules().unwrap().contains_key("long"));
+
+    // A confirmed change or delete of that name means the daemon now holds
+    // what the bridge sent, or nothing.
+    cache.upsert(rule("long", "always", 0));
+    assert!(!cache.left_out().contains_key("long"));
+    let mut again = RulesCache::default();
+    again.replace_all(Vec::new());
+    again.set_left_out([("big".to_string(), 20_000)].into());
+    let before = again.revision();
+    again.remove("big");
+    assert!(again.left_out().is_empty() && again.revision() > before);
+    again.set_unknown();
+    assert!(again.left_out().is_empty());
+}

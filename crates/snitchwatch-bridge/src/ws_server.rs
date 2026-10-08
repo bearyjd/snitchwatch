@@ -267,12 +267,22 @@ async fn pump_authenticated<S, R>(
 {
     use futures_util::{SinkExt, StreamExt};
     let mut broadcast_rx = handles.broadcast.subscribe();
+    // Answers meant for this connection only (rule import/export, P2.7).
+    let (reply_tx, mut reply_rx) = mpsc::channel::<ServerMessage>(REPLY_QUEUE);
     let _session = handles.presence.authenticated_session();
     // Stable while `_session` is held: the generation only advances when the
     // last authenticated session ends.
     let generation = handles.presence.current_generation();
     let outbound = async move {
-        while let Ok(msg) = broadcast_rx.recv().await {
+        loop {
+            let msg = tokio::select! {
+                biased;
+                received = broadcast_rx.recv() => match received {
+                    Ok(msg) => msg,
+                    Err(_) => break,
+                },
+                Some(msg) = reply_rx.recv() => msg,
+            };
             let json = match serde_json::to_string(&msg) {
                 Ok(json) => json,
                 Err(error) => {
@@ -299,6 +309,7 @@ async fn pump_authenticated<S, R>(
                 Message::Text(text) => match serde_json::from_str::<ClientMessage>(&text) {
                     Ok(parsed) => {
                         let parsed = stamp_sender(parsed, generation, peer_uid);
+                        let parsed = stamp_reply(parsed, &reply_tx);
                         if handles.inbound.send(parsed).await.is_err() {
                             break;
                         }
@@ -315,6 +326,41 @@ async fn pump_authenticated<S, R>(
         _ = inbound => {},
     }
     debug!("WS client connection ended");
+}
+
+/// Answers queued for one connection before its sender waits.
+const REPLY_QUEUE: usize = 32;
+
+/// Give a rule import/export request a channel back to its own connection.
+/// Overwrites whatever it carried; the field is never deserialized anyway.
+fn stamp_reply(message: ClientMessage, reply_tx: &mpsc::Sender<ServerMessage>) -> ClientMessage {
+    let reply = Some(crate::ws_messages::ReplyTo(reply_tx.clone()));
+    match message {
+        ClientMessage::ExportRules { request_id, .. } => {
+            ClientMessage::ExportRules { request_id, reply }
+        }
+        ClientMessage::PreviewRulesImport {
+            request_id,
+            document,
+            ..
+        } => ClientMessage::PreviewRulesImport {
+            request_id,
+            document,
+            reply,
+        },
+        ClientMessage::ApplyRulesImport {
+            request_id,
+            preview_id,
+            include,
+            ..
+        } => ClientMessage::ApplyRulesImport {
+            request_id,
+            preview_id,
+            include,
+            reply,
+        },
+        other => other,
+    }
 }
 
 /// Stamp a pause request with its sender's GUI-session generation, so

@@ -4,36 +4,41 @@
 //! The GUI reads and writes the files (the system bridge runs as its own
 //! user and can't reach a home directory; under Flatpak the file dialogs go
 //! through the portal); the bridge validates. The Qt-free parts live in
-//! [`crate::rules::io`]: the bounded read, the owner-only write, the
-//! preview's grouping and default ticks.
+//! [`crate::rules::io`] (the bounded read, the owner-only write) and
+//! [`crate::rules::io_view`] (the preview rows and texts).
 //!
-//! Every `ServerMessage` is broadcast to every GUI, so this controller acts
-//! only on the answer it is waiting for, and only from the live bridge
-//! session. A preview is applied on the session it came from
+//! The bridge answers only the connection that asked, echoing each
+//! request's id (an apply's progress and result carry its preview id); this
+//! controller still acts only on the answer it is waiting for, from the live
+//! bridge session. A preview is applied on the session it came from
 //! (`try_send_for_session`), so a reconnect can't apply it to another
-//! bridge. Every string it exposes is plain text for `Text.PlainText`
-//! labels.
+//! bridge. Per-rule outcomes are collected and handed to QML on the
+//! one-second poll. Every string it exposes is plain text for
+//! `Text.PlainText` labels.
 
 use core::pin::Pin;
 use cxx_qt::{CxxQtType, Threading};
 use cxx_qt_lib::{QString, QUrl};
-use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::bridge_runtime::SendClientMessageError;
-use crate::rules::io;
+use crate::rules::{io, io_view};
+use snitchwatch_bridge::rule_io::OmittedCounts;
 use snitchwatch_bridge::ws_messages::{ClientMessage, ServerMessage};
 
 /// How long to wait for the bridge between answers before giving up.
 const NO_ANSWER_AFTER: Duration = Duration::from_secs(30);
 
 const NOT_CONNECTED: &str = "Snitchwatch isn't connected to its service, so nothing was sent.";
-const STALE_SESSION: &str =
-    "The Snitchwatch service restarted since the preview. Import the file again.";
+const STALE_SESSION: &str = "The connection to the Snitchwatch service was reset after the \
+     preview. Import the file again.";
 const QUEUE_FULL: &str = "Snitchwatch is busy. Try again in a moment.";
 const NO_ANSWER: &str = "No answer from the Snitchwatch service. It may be too old to import \
-     or export rules.";
+     or export rules, or the answer was lost; try again.";
+const NO_RESULT: &str = "The import's result wasn't received. Check the Rules page for what \
+     was applied.";
 const NOTHING_TO_SAVE: &str = "There is no export to save. Export again.";
 const NO_PREVIEW: &str = "There is no import preview to apply. Import the file again.";
 
@@ -95,6 +100,11 @@ pub mod qobject {
         #[cxx_name = "writeExport"]
         fn write_export(self: Pin<&mut RulesIoController>, url: &QUrl) -> bool;
 
+        /// The save dialog was cancelled: drop the export and say so.
+        #[qinvokable]
+        #[cxx_name = "exportCancelled"]
+        fn export_cancelled(self: Pin<&mut RulesIoController>);
+
         /// Read `url` (at most the import cap, a regular file, JSON) and ask
         /// the bridge for a preview.
         #[qinvokable]
@@ -106,7 +116,8 @@ pub mod qobject {
         #[qinvokable]
         fn apply(self: Pin<&mut RulesIoController>, names_json: &QString) -> bool;
 
-        /// Give up waiting after a silence (called by a QML timer).
+        /// Hand collected outcomes to QML, and give up waiting after a
+        /// silence (called by a one-second QML timer).
         #[qinvokable]
         fn poll(self: Pin<&mut RulesIoController>);
     }
@@ -114,13 +125,25 @@ pub mod qobject {
     impl cxx_qt::Threading for RulesIoController {}
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 enum Waiting {
     #[default]
     Nothing,
-    Export,
-    Preview,
-    Apply,
+    /// An answer to this request id.
+    Request(String),
+    /// The progress and result of applying a preview (or the apply's
+    /// refusal).
+    Apply {
+        preview_id: String,
+        request_id: String,
+    },
+}
+
+/// A received export, until it is saved or dropped.
+struct PendingExport {
+    text: String,
+    rules: usize,
+    omitted: OmittedCounts,
 }
 
 /// Rust-side state for [`qobject::RulesIoController`].
@@ -134,11 +157,19 @@ pub struct RulesIoControllerRust {
     applied: bool,
     waiting: Waiting,
     last_answer: Option<Instant>,
-    /// The received export, pretty-printed, until it is saved.
-    export_text: Option<String>,
+    export: Option<PendingExport>,
     /// The preview's bridge session and id.
     preview: Option<(Option<u64>, String)>,
-    results: BTreeMap<String, String>,
+    progress: io_view::ProgressLog,
+}
+
+fn next_request_id() -> String {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    format!(
+        "{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    )
 }
 
 fn send(message: ClientMessage, session: Option<u64>) -> Result<(), &'static str> {
@@ -171,6 +202,7 @@ impl qobject::RulesIoController {
     }
 
     fn finish(mut self: Pin<&mut Self>, status: &str) {
+        self.as_mut().flush_progress();
         self.as_mut().rust_mut().waiting = Waiting::Nothing;
         self.as_mut().rust_mut().last_answer = None;
         self.as_mut().set_busy(false);
@@ -178,14 +210,25 @@ impl qobject::RulesIoController {
         self.set_status(status);
     }
 
+    fn flush_progress(mut self: Pin<&mut Self>) {
+        if let Some(json) = self.as_mut().rust_mut().progress.take_json() {
+            self.set_results_json(QString::from(&json));
+        }
+    }
+
     fn request_export(mut self: Pin<&mut Self>) {
         if self.busy {
             return;
         }
-        self.as_mut().rust_mut().export_text = None;
-        match send(ClientMessage::ExportRules, None) {
+        self.as_mut().rust_mut().export = None;
+        let request_id = next_request_id();
+        let message = ClientMessage::ExportRules {
+            request_id: request_id.clone(),
+            reply: None,
+        };
+        match send(message, None) {
             Ok(()) => self.begin(
-                Waiting::Export,
+                Waiting::Request(request_id),
                 "Asking the firewall service for its rules…",
             ),
             Err(error) => self.set_status(error),
@@ -193,25 +236,29 @@ impl qobject::RulesIoController {
     }
 
     fn write_export(mut self: Pin<&mut Self>, url: &QUrl) -> bool {
-        let Some(text) = self.export_text.clone() else {
+        let Some(export) = self.as_mut().rust_mut().export.take() else {
             self.set_status(NOTHING_TO_SAVE);
             return false;
         };
-        let Some(path) = local_path(url) else {
-            self.set_status(io::FileError::NotLocal.describe());
-            return false;
-        };
-        match io::write_export_file(Path::new(&path), &text) {
+        let written = local_path(url)
+            .ok_or(io::FileError::NotLocal)
+            .and_then(|path| io::write_export_file(Path::new(&path), &export.text));
+        match written {
             Ok(()) => {
-                self.as_mut().rust_mut().export_text = None;
-                let status = format!("{} Saved.", self.status_text);
-                self.set_status(&status);
+                self.set_status(&io_view::export_saved(export.rules, &export.omitted));
                 true
             }
             Err(error) => {
-                self.set_status(error.describe());
+                let status = io_view::export_failed(error.describe(), &export.omitted);
+                self.set_status(&status);
                 false
             }
+        }
+    }
+
+    fn export_cancelled(mut self: Pin<&mut Self>) {
+        if self.as_mut().rust_mut().export.take().is_some() {
+            self.set_status(io_view::export_cancelled());
         }
     }
 
@@ -219,10 +266,11 @@ impl qobject::RulesIoController {
         if self.busy {
             return false;
         }
+        let request_id = next_request_id();
         let request = local_path(url)
             .ok_or(io::FileError::NotLocal)
             .and_then(|path| io::read_import_file(Path::new(&path)))
-            .and_then(io::preview_request);
+            .and_then(|document| io::preview_request(request_id.clone(), document));
         let request = match request {
             Ok(request) => request,
             Err(error) => {
@@ -234,7 +282,7 @@ impl qobject::RulesIoController {
         self.as_mut().set_preview_json(QString::from(""));
         match send(request, None) {
             Ok(()) => {
-                self.begin(Waiting::Preview, "Checking the file…");
+                self.begin(Waiting::Request(request_id), "Checking the file…");
                 true
             }
             Err(error) => {
@@ -257,17 +305,24 @@ impl qobject::RulesIoController {
             return false;
         };
         let count = include.len();
+        let request_id = next_request_id();
         let message = ClientMessage::ApplyRulesImport {
-            preview_id,
+            request_id: request_id.clone(),
+            preview_id: preview_id.clone(),
             include,
+            reply: None,
         };
         match send(message, session) {
             Ok(()) => {
-                self.as_mut().rust_mut().results.clear();
-                self.as_mut().set_results_json(QString::from("{}"));
+                self.as_mut().rust_mut().progress.clear();
+                self.as_mut().flush_progress();
                 self.as_mut().set_applying(true);
                 let status = format!("Applying {count} rule changes…");
-                self.begin(Waiting::Apply, &status);
+                let waiting = Waiting::Apply {
+                    preview_id,
+                    request_id,
+                };
+                self.begin(waiting, &status);
                 true
             }
             Err(error) => {
@@ -277,12 +332,17 @@ impl qobject::RulesIoController {
         }
     }
 
-    fn poll(self: Pin<&mut Self>) {
+    fn poll(mut self: Pin<&mut Self>) {
+        self.as_mut().flush_progress();
         let silent = self
             .last_answer
             .is_some_and(|at| at.elapsed() > NO_ANSWER_AFTER);
         if self.busy && silent {
-            self.finish(NO_ANSWER);
+            let status = match self.waiting {
+                Waiting::Apply { .. } => NO_RESULT,
+                _ => NO_ANSWER,
+            };
+            self.finish(status);
         }
     }
 
@@ -293,49 +353,74 @@ impl qobject::RulesIoController {
         }
     }
 
+    /// Whether `message` answers what this controller waits for.
+    fn awaited(&self, message: &ServerMessage) -> bool {
+        match (&self.waiting, message) {
+            (
+                Waiting::Request(id),
+                ServerMessage::RulesExport { request_id, .. }
+                | ServerMessage::RulesExportUnavailable { request_id, .. }
+                | ServerMessage::RulesImportPreview { request_id, .. }
+                | ServerMessage::RulesImportRefused { request_id, .. },
+            ) => request_id == id,
+            (
+                Waiting::Apply { request_id, .. },
+                ServerMessage::RulesImportRefused { request_id: id, .. },
+            ) => id == request_id,
+            (
+                Waiting::Apply { preview_id, .. },
+                ServerMessage::RulesImportProgress { preview_id: id, .. }
+                | ServerMessage::RulesImportResult { preview_id: id, .. },
+            ) => id == preview_id,
+            _ => false,
+        }
+    }
+
     fn on_message(mut self: Pin<&mut Self>, message: ServerMessage, session: Option<u64>) {
-        match (self.waiting, message) {
-            (Waiting::Export, ServerMessage::RulesExport { document, omitted }) => {
-                let text = serde_json::to_string_pretty(&document).unwrap_or_default();
-                let summary = io::export_summary(document.rules.len(), &omitted, text.len());
-                self.as_mut().rust_mut().export_text = Some(text);
-                self.as_mut().finish(&summary);
+        if !self.awaited(&message) {
+            return;
+        }
+        self.as_mut().rust_mut().last_answer = Some(Instant::now());
+        match message {
+            ServerMessage::RulesExport {
+                document, omitted, ..
+            } => {
+                let text = io_view::export_text(&document);
+                let rules = document.rules.len();
+                let status = io_view::export_ready(rules, &omitted, text.len());
+                self.as_mut().rust_mut().export = Some(PendingExport {
+                    text,
+                    rules,
+                    omitted,
+                });
+                self.as_mut().finish(&status);
                 self.export_ready();
             }
-            (Waiting::Export, ServerMessage::RulesExportUnavailable { reason }) => {
-                self.finish(&reason)
-            }
-            (Waiting::Preview, ServerMessage::RulesImportPreview { preview_id, items }) => {
-                let view = serde_json::to_string(&io::group(&items)).unwrap_or_default();
+            ServerMessage::RulesImportPreview {
+                preview_id, items, ..
+            } => {
+                let view = serde_json::to_string(&io_view::group(&items)).unwrap_or_default();
                 self.as_mut().rust_mut().preview = Some((session, preview_id));
                 self.as_mut().set_applied(false);
                 self.as_mut().set_preview_json(QString::from(&view));
                 self.as_mut().finish("");
                 self.preview_ready();
             }
-            (Waiting::Preview | Waiting::Apply, ServerMessage::RulesImportRefused { reason }) => {
-                self.finish(&reason)
+            ServerMessage::RulesExportUnavailable { reason, .. }
+            | ServerMessage::RulesImportRefused { reason, .. } => self.finish(&reason),
+            ServerMessage::RulesImportProgress { name, outcome, .. } => {
+                let text = io_view::outcome_text(&outcome);
+                self.as_mut().rust_mut().progress.record(name, text);
             }
-            (Waiting::Apply, ServerMessage::RulesImportProgress { name, outcome }) => {
-                self.as_mut().rust_mut().last_answer = Some(Instant::now());
-                self.as_mut()
-                    .rust_mut()
-                    .results
-                    .insert(name, io::outcome_text(&outcome));
-                let json = serde_json::to_string(&self.results).unwrap_or_default();
-                self.set_results_json(QString::from(&json));
-            }
-            (
-                Waiting::Apply,
-                ServerMessage::RulesImportResult {
-                    applied,
-                    rejected,
-                    not_sent,
-                    no_answer,
-                },
-            ) => {
+            ServerMessage::RulesImportResult {
+                applied,
+                rejected,
+                not_sent,
+                no_answer,
+                ..
+            } => {
                 self.as_mut().set_applied(true);
-                let summary = io::result_summary(applied, rejected, not_sent, no_answer);
+                let summary = io_view::result_summary(applied, rejected, not_sent, no_answer);
                 self.finish(&summary);
             }
             _ => {}
@@ -352,7 +437,7 @@ impl qobject::RulesIoController {
         crate::bridge_dispatch::spawn_feed(
             &handles,
             "RulesIoController",
-            io::interests_rules_io,
+            io_view::interests_rules_io,
             move |connection_id, message, _json| {
                 let session_handles = session_handles.clone();
                 let message = message.clone();

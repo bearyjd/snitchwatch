@@ -591,3 +591,13 @@ fn a_shape_only_refusal_stays_deletable_but_a_bad_name_does_not() {
     let editable = daemon_rule("899-ok", Some(op("simple", "dest.host", "example.com")));
     assert_eq!(rule_to_wire(&editable)["deletable"], true);
 }
+
+#[test]
+fn a_curated_default_rule_is_read_only_and_not_deletable() {
+    let curated = daemon_rule(
+        "snitchwatch-default-steam",
+        Some(op("simple", "dest.host", "steam.example")),
+    );
+    assert_eq!(read_only_reason(&curated), Some(CURATED_MANAGED_REASON));
+    assert!(!deletable(&curated));
+}

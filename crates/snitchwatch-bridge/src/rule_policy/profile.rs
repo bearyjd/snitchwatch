@@ -35,14 +35,23 @@ pub const BLOCKLIST_NAME_REFUSED: &str = "names starting with z00-blocklist: or 
      belong to Snitchwatch's blocklist rules";
 pub const CURATED_NAME_REFUSED: &str =
     "names starting with snitchwatch-default- belong to Snitchwatch's own default rules";
+/// Rules Snitchwatch ships ready-made (the packaged fetch rule). The PR that
+/// adds them reserves the prefix in `rule_name.rs` for every GUI command;
+/// until it lands, import and export refuse it here.
+pub const PACKAGED_RULE_NAME_PREFIX: &str = "000-snitchwatch-";
+pub const PACKAGED_NAME_REFUSED: &str =
+    "names starting with 000-snitchwatch- belong to rules Snitchwatch ships";
 pub const ACTION_REFUSED: &str = "the action must be allow, deny or reject";
 pub const DURATION_REFUSED: &str = "only rules that last always or until the firewall restarts \
      can be imported; once and timed rules can't";
 pub const TOO_LARGE: &str = "a field is over 16 KiB, or the conditions nest too deeply";
 pub const HASH_REFUSED: &str = "process hash conditions can't be imported: the firewall service \
      treats them as matching every program while it doesn't compute checksums";
-pub const MATCHES_EVERYTHING: &str =
-    "this rule matches every connection (its only condition is \"true\"); it can't be imported";
+pub const MATCHES_EVERYTHING: &str = "this rule matches every connection: none of its \
+     conditions narrows it (\"true\", a /0 network, or a pattern that matches everything); it \
+     can't be imported";
+pub const EMPTY_VALUE_REFUSED: &str =
+    "an empty value matches far more than it looks; only a host name may be empty";
 pub const PORT_REFUSED: &str = "a port must be a whole number from 0 to 65535";
 pub const ID_REFUSED: &str = "a process or user ID must be a whole number";
 
@@ -86,6 +95,9 @@ fn check_import(rule: &Rule, problems: &mut Vec<RuleProblem>) {
     {
         problem(problems, "name", CURATED_NAME_REFUSED);
     }
+    if rule.name.starts_with(PACKAGED_RULE_NAME_PREFIX) {
+        problem(problems, "name", PACKAGED_NAME_REFUSED);
+    }
     if !matches!(rule.action.as_str(), "allow" | "deny" | "reject") {
         problem(problems, "action", ACTION_REFUSED);
     }
@@ -109,8 +121,11 @@ fn check_import_operator(op: &Operator, problems: &mut Vec<RuleProblem>) {
     } else {
         vec![("operator".to_string(), op)]
     };
-    // Members are ANDed: a list narrows as soon as one member isn't `true`.
-    if leaves.iter().all(|(_, leaf)| leaf.operand == "true") {
+    // Members are ANDed: a list narrows as soon as one member does.
+    if !leaves
+        .iter()
+        .any(|(_, leaf)| super::narrowing::narrows(leaf))
+    {
         problem(problems, "operator", MATCHES_EVERYTHING);
     }
     for (path, leaf) in leaves {
@@ -127,6 +142,13 @@ fn check_import_leaf(path: &str, leaf: &Operator, problems: &mut Vec<RuleProblem
         return;
     }
     let data_path = format!("{path}.data");
+    // `simpleCmp` is `EqualFold`: an empty value matches every subject that
+    // lacks the field (an unset variable, say). Only an empty host name
+    // means something narrow (a connection with no host name).
+    if leaf.data.is_empty() && !matches!(leaf.operand.as_str(), "true" | "dest.host") {
+        problem(problems, &data_path, EMPTY_VALUE_REFUSED);
+        return;
+    }
     match leaf.operand.as_str() {
         "source.port" | "dest.port" if !is_decimal::<u16>(&leaf.data) => {
             problem(problems, &data_path, PORT_REFUSED)

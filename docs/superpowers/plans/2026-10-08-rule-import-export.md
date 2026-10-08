@@ -485,6 +485,14 @@ Tower VM checks:
    bridge**: the tower daemon's own refusal is never exercised. The
    daemon log shows only `CHANGE_RULE`.
 
+Flatpak checks (manual, not verified from this sandbox):
+5. Export through the portal's save dialog: the file lands where chosen,
+   mode 0600, with no `.<name>.*.tmp` file left beside it. The export is
+   written to a new file in the same directory and renamed into place; if
+   the document portal refuses that file, the export fails with "The file
+   couldn't be saved there." (never a readable file).
+6. Import through the portal's open dialog reads the chosen file.
+
 ## Risks
 
 - **Regex dialects differ.** Go RE2 and the Rust `regex` crate disagree
@@ -518,21 +526,73 @@ Decided while implementing, against the merged code (base `1c3615c`):
   the owner). `ws_handler` already caps every client message at
   `MAX_CLIENT_MESSAGE_BYTES` = 1 MiB (#45 PR A), and a security limit isn't
   raised for this. `rule_io::MAX_DOCUMENT_BYTES` = 1 MiB − 64 KiB envelope
-  slack. An exported rule takes about 850 bytes (program, host and port) or
-  400 (host only), so a file holds about 1,000 to 2,000 rules; the GUI's
-  refusal and the export summary say so. `pump_authenticated` still drops
-  an over-cap frame before parsing it.
+  slack. Exports are compact JSON: a rule takes about 500 bytes (program,
+  host and port) or 285 (host only), so a file holds about 2,000 to 3,500
+  rules; the GUI's refusal and the export summary say so.
+  `pump_authenticated` still drops an over-cap frame before parsing it.
 - **Network aliases are refused.** The merged `validate_operator` refuses
   `LAN`/`MULTICAST` (the bridge can't see the daemon host's alias file), and
   `DaemonCommands::send` refuses what it refuses. The alias tests became
   "refused through the Import path".
-- **Match-all is refused.** A rule whose only condition is `true`, or a list
-  of only `true`, is refused on import; `true` next to a narrowing condition
-  is fine. A `/0` network counts as narrowing.
+- **Match-all is refused** (review H1), exactly: a rule is refused when
+  none of its conditions narrows it. These don't narrow: `true`; a `/0`
+  network; a regexp that matches every one of a few representative
+  subjects of its operand (paths, commands, hosts, IPs, ports, protocols,
+  IDs, interfaces, environment values), searched unanchored and lowercased
+  like the daemon (`/` on a path, `.+` on a host). That probe is a
+  heuristic, not a proof. An empty `simple` value is refused on every
+  operand except `dest.host` (`EqualFold("", "")` matches everything
+  without the field; an empty host means "no host name").
+- **All-apps means not tied to programs:** only a non-empty `simple`
+  `process.path`, `process.command` or `process.id` condition ties a rule
+  to programs. A `process.parent.path` (the daemon walks every ancestor to
+  PID 1), a `process.env.*` value or a path regexp doesn't, so such a rule
+  is flagged "Applies to all apps" (and an allow starts unticked).
+- **Default ticks and cautions are the bridge's** (review H2). An add or
+  replace starts unticked, with plain-word reasons, when it is an allow
+  that overrides other rules where the old one didn't, or an allow for
+  every app; or a replace that turns a deny/reject into an allow, turns it
+  on or off, changes its conditions or how long it lasts; or a replace of
+  an allow that changes its conditions, turns it on, or stops its logging.
+  A replace carries the rule it overwrites, and the sheet shows it. Changed
+  fields are plain words ("logging", not `nolog`).
+- **Hidden rules and the list's size** (review M1, M3). Daemon rules the
+  cache leaves out for the size limits keep their name and size; importing
+  one of those names is refused. A preview is refused when the firewall's
+  rules plus the adds would pass 10,000, or the daemon snapshot would pass
+  4 MiB less a 256 KiB margin (protobuf sizes plus 16 bytes per rule). An
+  apply sends at most 2,000 rules.
+- **Each send is checked again** (review M2): the daemon rule must still be
+  what the preview compared (or still absent), and the daemon stream the
+  one the apply began on; otherwise the rule isn't sent ("changed since the
+  preview") or the import stops. Twenty unanswered rules in a row stop it.
+  A drop guard owns the apply: whatever ends it publishes the held rules,
+  frees the import, and sends the result.
+- **Not on the TCP transport** (review M5): export, preview and apply are
+  refused on the legacy per-user transport until #35.
+- **Answers go to the asking GUI only** (review #8): each request carries
+  a `requestId` the answer echoes; progress and result carry the
+  `previewId`. `ws_server` stamps import requests with a channel back to
+  their connection; an in-process sender gets them on the broadcast.
+- **Reserved names:** `snitchwatch-default-` is refused at the send point
+  for every GUI command (and its rules are read-only, not deletable);
+  `000-snitchwatch-` (the packaged fetch rule's prefix, reserved at the
+  send point by its own PR) is refused on import and left out of exports.
+- **Version and `enabled`:** `version: 1.0` is version 1, as in JSON Schema;
+  an imported rule must say `enabled` (the GUI's rule shape defaults it on,
+  `rule_from_wire` off). A test ties the schema's enums, caps and reserved
+  prefixes to the code.
+- **Export file:** compact JSON, written to a new file
+  (`O_CREAT|O_EXCL|O_NOFOLLOW`, 0600), synced and renamed into place. The
+  GUI says "Ready to save N rules" before the dialog and "Nothing was saved"
+  on cancel, and keeps the left-out counts when a write fails. Daemon
+  errors are shown with hidden characters stripped and shortened, never
+  HTML-escaped.
 - **`SendError` has six variants.** `ReservedName` and `RefusedOperator` are
   reported as refused, like `InvalidRuleName`.
-- **Protocol additions:** `RulesImportRefused { reason }` (preview or apply
-  refused as a whole) and `noAnswer` in `RulesImportResult`.
+- **Protocol additions:** `RulesImportRefused { requestId, reason }`
+  (preview or apply refused as a whole) and `noAnswer` in
+  `RulesImportResult`.
 - **Export also leaves out rules the import would refuse** (aliases, `true`,
   hash conditions), counted per category. `source.daemonVersion` is left
   empty: the bridge doesn't keep the daemon version.
@@ -544,9 +604,13 @@ Decided while implementing, against the merged code (base `1c3615c`):
 - **`SetRules` is coalesced during an apply** (`RulesSync::hold_publishes`):
   one full list per confirmed rule would cost O(n²) serialization in every
   GUI. The user's own toggles show once the apply ends.
-- **Tests:** the bridge integration tests are their own target
-  (`tests/rules_io_test.rs`); the busy queue and the expiry-tick staleness
-  are unit tests against a real `DaemonCommands`.
+- **Tests:** the end-to-end flows run on the Unix transport in bridge-cli
+  (`rules_import::e2e_tests`, a daemon socket that accepts any peer);
+  `tests/rules_io_test.rs` checks the TCP refusal. The busy queue, the
+  expiry-tick staleness and the reconnect stop are unit tests against a
+  real `DaemonCommands`.
+- **Follow-ups, by design:** any cache change between preview and apply
+  makes the apply stale (coarse, on purpose).
 
 ## OWNER QUESTIONS
 

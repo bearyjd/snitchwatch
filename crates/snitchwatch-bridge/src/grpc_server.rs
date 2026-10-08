@@ -48,7 +48,7 @@ const RECENT_BLOCK_TTL: Duration = Duration::from_secs(5);
 /// Largest daemon message decoded (tonic's own default, made explicit). The
 /// biggest is a `Subscribe` carrying the full rule list, which
 /// `cache::rules::MAX_SNAPSHOT_RULES` bounds again after decoding.
-const MAX_DAEMON_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
+pub(crate) const MAX_DAEMON_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
 
 /// Bridge-side gRPC server state. Handed to `UiServer::new` for tonic.
 #[derive(Clone)]

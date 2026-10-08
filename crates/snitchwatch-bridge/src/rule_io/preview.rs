@@ -4,7 +4,8 @@
 //! compiles regexps) without the cache; [`classify`] compares the result
 //! with the cached rules, under the cache lock, cheaply.
 
-use super::{Document, PreviewUnavailable};
+use super::caution;
+use super::{Document, PreviewError};
 use crate::cache::rules::RulesCache;
 use crate::rule_policy::{validate_user_rule, PolicyProfile, RuleProblem};
 use crate::translator::verdict::strip_display_hazards;
@@ -13,6 +14,9 @@ use snitchwatch_proto::protocol::{Operator, Rule};
 use std::collections::{BTreeMap, HashMap};
 
 pub const DUPLICATE_NAME: &str = "the file has more than one rule with this name";
+pub const ENABLED_MISSING: &str = "the rule doesn't say whether it is on or off";
+pub const HIDDEN_NAME: &str = "the firewall already has a rule with this name that is too large \
+     for Snitchwatch to show, so importing would replace it unseen";
 
 /// What applying a previewed rule would do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -56,6 +60,27 @@ pub struct ImportItem {
     pub action: String,
     pub duration: String,
     pub description: String,
+    pub nolog: bool,
+    pub conditions: Vec<String>,
+    /// Whether the row starts ticked: an add or replace with no caution.
+    pub ticked: bool,
+    /// Why it starts unticked, in plain words.
+    #[serde(default)]
+    pub cautions: Vec<String>,
+    /// The rule a replace overwrites, as it is now.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous: Option<PreviousRule>,
+}
+
+/// The cached rule a replace would overwrite.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviousRule {
+    pub enabled: bool,
+    pub action: String,
+    pub duration: String,
+    pub description: String,
+    pub precedence: bool,
     pub nolog: bool,
     pub conditions: Vec<String>,
 }
@@ -117,6 +142,18 @@ fn check_rule(index: u32, value: &serde_json::Value) -> CheckedRule {
             path: "rule".into(),
             reason,
         }]),
+        // `rule_from_wire` reads a missing `enabled` as off and the GUI's
+        // rule shape as on: an imported rule must say.
+        Ok(_)
+            if !value
+                .get("enabled")
+                .is_some_and(serde_json::Value::is_boolean) =>
+        {
+            Err(vec![RuleProblem {
+                path: "enabled".into(),
+                reason: ENABLED_MISSING.into(),
+            }])
+        }
         Ok(rule) => validate_user_rule(&rule, PolicyProfile::Import).map(|()| rule),
     };
     CheckedRule {
@@ -130,13 +167,26 @@ fn check_rule(index: u32, value: &serde_json::Value) -> CheckedRule {
 pub fn classify(
     checked: &[CheckedRule],
     cache: &RulesCache,
-) -> Result<ImportPreview, PreviewUnavailable> {
-    let cached = cache.rules().ok_or(PreviewUnavailable)?;
+) -> Result<ImportPreview, PreviewError> {
+    let cached = cache.rules().ok_or(PreviewError::Unavailable)?;
+    let left_out = cache.left_out();
     let mut applicable = BTreeMap::new();
     let items = checked
         .iter()
         .map(|rule| {
-            let item = classify_one(rule, cached.get(&rule.name));
+            let item = if left_out.contains_key(&rule.name) {
+                let hidden = CheckedRule {
+                    index: rule.index,
+                    name: rule.name.clone(),
+                    result: Err(vec![RuleProblem {
+                        path: "name".into(),
+                        reason: HIDDEN_NAME.into(),
+                    }]),
+                };
+                classify_one(&hidden, None)
+            } else {
+                classify_one(rule, cached.get(&rule.name))
+            };
             if matches!(item.kind, ImportKind::Add | ImportKind::Replace) {
                 if let Ok(parsed) = &rule.result {
                     applicable.insert(parsed.name.clone(), parsed.clone());
@@ -145,14 +195,12 @@ pub fn classify(
             item
         })
         .collect();
+    super::limits::check_totals(cached, left_out, &applicable)?;
     Ok(ImportPreview { items, applicable })
 }
 
 /// [`check_rules`] then [`classify`].
-pub fn preview(
-    document: &Document,
-    cache: &RulesCache,
-) -> Result<ImportPreview, PreviewUnavailable> {
+pub fn preview(document: &Document, cache: &RulesCache) -> Result<ImportPreview, PreviewError> {
     classify(&check_rules(document), cache)
 }
 
@@ -175,21 +223,36 @@ fn classify_one(rule: &CheckedRule, cached: Option<&Rule>) -> ImportItem {
         }
         Ok(parsed) => parsed,
     };
-    let changed_fields = cached.map(|old| changed_fields(old, parsed));
-    let kind = match &changed_fields {
+    let changed = cached.map(|old| changed_fields(old, parsed));
+    let kind = match &changed {
         None => ImportKind::Add,
         Some(fields) if fields.is_empty() => ImportKind::Unchanged,
         Some(_) => ImportKind::Replace,
+    };
+    let changed = changed.unwrap_or_default();
+    let all_apps = !parsed
+        .operator
+        .as_ref()
+        .is_some_and(crate::rule_policy::binds_to_programs);
+    let change = matches!(kind, ImportKind::Add | ImportKind::Replace);
+    let cautions = if change {
+        let same_conditions = !changed.contains(&"conditions");
+        caution::cautions(cached, parsed, all_apps, same_conditions)
+    } else {
+        Vec::new()
     };
     ImportItem {
         index: rule.index,
         name: rule.name.clone(),
         display_name,
         kind,
-        changed_fields: changed_fields.unwrap_or_default(),
+        changed_fields: changed
+            .iter()
+            .map(|f| caution::plain_field(f).to_string())
+            .collect(),
         problems: Vec::new(),
         weakens: kind == ImportKind::Replace && cached.is_some_and(|old| weakens(old, parsed)),
-        applies_to_all_apps: !parsed.operator.as_ref().is_some_and(has_process_operand),
+        applies_to_all_apps: all_apps,
         precedence: parsed.precedence,
         persists: parsed.duration == "always",
         enabled: parsed.enabled,
@@ -198,6 +261,11 @@ fn classify_one(rule: &CheckedRule, cached: Option<&Rule>) -> ImportItem {
         description: strip_display_hazards(&parsed.description),
         nolog: parsed.nolog,
         conditions: parsed.operator.as_ref().map(conditions).unwrap_or_default(),
+        ticked: change && cautions.is_empty(),
+        cautions,
+        previous: cached
+            .filter(|_| kind == ImportKind::Replace)
+            .map(|old| caution::previous(old, conditions)),
     }
 }
 
@@ -219,16 +287,29 @@ fn empty_item() -> ImportItem {
         description: String::new(),
         nolog: false,
         conditions: Vec::new(),
+        ticked: false,
+        cautions: Vec::new(),
+        previous: None,
+    }
+}
+
+/// Whether two optional rules have the same content (see [`changed_fields`]):
+/// how an apply checks a rule is still what the preview compared against.
+pub fn same_rule(a: Option<&Rule>, b: Option<&Rule>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => changed_fields(a, b).is_empty(),
+        _ => false,
     }
 }
 
 /// Fields that differ, ignoring `created` (the daemon stamps it) and the
 /// spelling of a list operator (see [`normalised_operator`]).
-fn changed_fields(old: &Rule, new: &Rule) -> Vec<String> {
+fn changed_fields(old: &Rule, new: &Rule) -> Vec<&'static str> {
     let mut changed = Vec::new();
-    let mut differs = |field: &str, same: bool| {
+    let mut differs = |field: &'static str, same: bool| {
         if !same {
-            changed.push(field.to_string());
+            changed.push(field);
         }
     };
     differs("enabled", old.enabled == new.enabled);
@@ -271,10 +352,6 @@ fn weakens(old: &Rule, new: &Rule) -> bool {
     let precedence_added =
         new.action == "allow" && new.precedence && !(old.action == "allow" && old.precedence);
     deny_to_allow || deny_disabled || precedence_added
-}
-
-fn has_process_operand(op: &Operator) -> bool {
-    op.operand.starts_with("process.") || op.list.iter().any(has_process_operand)
 }
 
 /// One plain-text line per leaf condition.

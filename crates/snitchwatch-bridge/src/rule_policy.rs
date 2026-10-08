@@ -41,10 +41,13 @@ use snitchwatch_proto::protocol::{Operator, Rule};
 
 use crate::cache::rules::{MAX_OPERATOR_LIST_LEN, MAX_RULE_FIELD_BYTES};
 
+mod narrowing;
 mod profile;
 mod regexp;
 
-pub use profile::{validate_user_rule, PolicyProfile, RuleProblem};
+pub use narrowing::binds_to_programs;
+
+pub use profile::{validate_user_rule, PolicyProfile, RuleProblem, PACKAGED_RULE_NAME_PREFIX};
 
 /// Why a GUI may not change a daemon rule whose operator fails
 /// [`validate_operator`] (a `lists` blocklist rule, a network alias such as
@@ -60,6 +63,11 @@ pub const SHAPE_READ_ONLY_REASON: &str = "Snitchwatch can't change this rule bec
 /// and removes those itself, from the Blocklists page (issue #45).
 pub const BLOCKLIST_MANAGED_REASON: &str =
     "Managed on the Blocklists page. Subscribe to or remove the list there.";
+
+/// Why a GUI may not change or delete a curated default rule
+/// ([`crate::rule_name::CURATED_DEFAULT_RULE_NAME_PREFIX`]): Snitchwatch
+/// installs and reconciles those itself.
+pub const CURATED_MANAGED_REASON: &str = "Snitchwatch manages this rule itself.";
 
 /// Operands whose value the daemon passes as a `net.IP`; only the `network`
 /// type can compare one.
@@ -128,6 +136,9 @@ pub fn read_only_reason(rule: &Rule) -> Option<&'static str> {
     if crate::rule_name::is_reserved_blocklist_name(&rule.name) {
         return Some(BLOCKLIST_MANAGED_REASON);
     }
+    if crate::rule_name::is_reserved_name(&rule.name) {
+        return Some(CURATED_MANAGED_REASON);
+    }
     if crate::rule_name::validate_rule_name(&rule.name).is_err() {
         return Some(crate::rule_wire::READ_ONLY_REASON);
     }
@@ -144,7 +155,7 @@ pub fn read_only_reason(rule: &Rule) -> Option<&'static str> {
 /// removed from the Blocklists page instead.
 pub fn deletable(rule: &Rule) -> bool {
     crate::rule_name::validate_rule_name(&rule.name).is_ok()
-        && !crate::rule_name::is_reserved_blocklist_name(&rule.name)
+        && !crate::rule_name::is_reserved_name(&rule.name)
 }
 
 fn validate_list(op: &Operator) -> Result<(), String> {
@@ -289,3 +300,6 @@ mod tests;
 
 #[cfg(test)]
 mod profile_tests;
+
+#[cfg(test)]
+mod schema_tests;

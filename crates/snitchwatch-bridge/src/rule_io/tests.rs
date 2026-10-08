@@ -142,6 +142,11 @@ fn export_leaves_out_and_counts_what_import_would_refuse() {
             leaf("simple", "dest.host", "s"),
         ),
         daemon_rule(
+            "000-snitchwatch-fetch",
+            "allow",
+            leaf("simple", "dest.host", "f"),
+        ),
+        daemon_rule(
             "stock\\ui",
             "deny",
             leaf("simple", "dest.host", "a.example"),
@@ -162,7 +167,7 @@ fn export_leaves_out_and_counts_what_import_would_refuse() {
         OmittedCounts {
             once: 1,
             timed: 1,
-            managed: 3,
+            managed: 4,
             unsupported_name: 1,
             unsupported_rule: 2,
         }
@@ -236,6 +241,37 @@ fn a_document_over_the_size_cap_is_refused_before_parsing() {
     };
 }
 
+/// JSON Schema reads `1.0` as the integer 1; so does the parser.
+#[test]
+fn a_version_written_as_a_float_is_version_1() {
+    let mut doc = document(Vec::new());
+    doc["version"] = json!(1.0);
+    assert!(parse_document(doc).is_ok());
+    let mut newer = document(Vec::new());
+    newer["version"] = json!(2.0);
+    assert_eq!(parse_document(newer), Err(DocumentError::Newer));
+    let mut fraction = document(Vec::new());
+    fraction["version"] = json!(1.5);
+    assert_eq!(
+        parse_document(fraction),
+        Err(DocumentError::UnsupportedVersion)
+    );
+}
+
+/// A rule must say whether it is on: the GUI's rule shape defaults a
+/// missing `enabled` to on, `rule_from_wire` to off (review #16).
+#[test]
+fn a_rule_without_enabled_is_refused() {
+    let mut rule = host_rule("100-x", "deny");
+    rule.as_object_mut().unwrap().remove("enabled");
+    let items = previewed(document(vec![rule]), &synced(Vec::new()));
+    assert_eq!(items[0].kind, ImportKind::Refused);
+    assert!(
+        items[0].problems.iter().any(|p| p.path == "enabled"),
+        "{items:?}"
+    );
+}
+
 #[test]
 fn envelope_errors_never_echo_the_file() {
     let mut doc = document(Vec::new());
@@ -251,7 +287,7 @@ fn preview_is_refused_while_rules_are_unknown() {
     let doc = parse_document(document(Vec::new())).unwrap();
     assert_eq!(
         preview(&doc, &RulesCache::default()).unwrap_err(),
-        PreviewUnavailable
+        PreviewError::Unavailable
     );
 }
 
@@ -293,7 +329,7 @@ fn preview_classifies_add_replace_unchanged_and_refused() {
     assert_eq!(item(&items, "010-same").kind, ImportKind::Unchanged);
     let replace = item(&items, "020-changed");
     assert_eq!(replace.kind, ImportKind::Replace);
-    assert_eq!(replace.changed_fields, vec!["description", "nolog"]);
+    assert_eq!(replace.changed_fields, vec!["description", "logging"]);
     assert_eq!(item(&items, "030-new").kind, ImportKind::Add);
     let refused = item(&items, "z00-blocklist:x:domains");
     assert_eq!(refused.kind, ImportKind::Refused);

@@ -24,13 +24,13 @@
   "$defs": {
     "rule": {
       "type": "object",
-      "required": ["name", "action", "duration", "operator"],
+      "required": ["name", "enabled", "action", "duration", "operator"],
       "properties": {
         "name": {
           "type": "string",
           "minLength": 1,
           "maxLength": 200,
-          "not": { "pattern": "^(z00-blocklist:|900-blocklist:|snitchwatch-default-)|[/\\\\]" }
+          "not": { "pattern": "^(z00-blocklist:|900-blocklist:|snitchwatch-default-|000-snitchwatch-)|[/\\\\]" }
         },
         "enabled": { "type": "boolean" },
         "action": { "enum": ["allow", "deny", "reject"] },
