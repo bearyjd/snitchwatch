@@ -418,6 +418,18 @@ fn make_rule_sheet_says_only_what_the_bridge_answered() {
     );
 }
 
+/// L4 (PR #111 review): the shortened deadline is for the headless probes
+/// only; the app always waits `NO_ANSWER_AFTER` for a rule command result.
+#[test]
+fn no_shipped_qml_shortens_the_make_rule_deadline() {
+    for (name, source) in ALL_QML {
+        assert!(
+            !source.contains("shortenDeadlineForTests"),
+            "{name} shortens MakeRuleController's deadline; only the probes may"
+        );
+    }
+}
+
 /// H1 (PR #111 review): a passive notification renders rich text, and a
 /// refusal's reason is bridge text, so the notice for an outcome off screen is
 /// one of two FIXED strings. `finished` carries no text at all; the reason

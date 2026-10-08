@@ -285,7 +285,7 @@ Controls.ApplicationWindow {
                     probeWindow.result("unrelated", { status: "ok" });
                     probeWindow.check(windowController.busy, "an unrelated result ended the wait");
                     // A silence ends it after the deadline, not before (L3).
-                    windowController.noAnswerAfterMs = 50;
+                    windowController.shortenDeadlineForTests(50);
                     windowController.poll();
                     probeWindow.check(windowController.busy, "gave up before the deadline");
                     probeWindow.waits = 0;
@@ -300,7 +300,7 @@ Controls.ApplicationWindow {
                                       + windowController.statusText + "'");
                     probeWindow.check(!page.makeRuleSheet.busyElsewhereNote.visible,
                                       "busy-elsewhere note after the wait ended");
-                    windowController.noAnswerAfterMs = 30000;
+                    windowController.shortenDeadlineForTests(30000);
                     // Its row wasn't on screen: a fixed notice, never the text.
                     probeWindow.checkNotices([probeWindow.notCreatedNotice], "after a silence");
 

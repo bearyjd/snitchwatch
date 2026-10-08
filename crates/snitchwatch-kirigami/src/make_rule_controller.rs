@@ -37,10 +37,6 @@ pub mod qobject {
         #[qproperty(QString, row_id, cxx_name = "rowId")]
         /// Whether the last request's result was Ok.
         #[qproperty(bool, created)]
-        /// How long to wait for the result, in milliseconds
-        /// (`make_rule::NO_ANSWER_AFTER`). Only the headless probes change
-        /// it, to see a silence end the wait.
-        #[qproperty(i32, no_answer_after_ms, cxx_name = "noAnswerAfterMs")]
         type MakeRuleController = super::MakeRuleControllerRust;
 
         /// A request about row `row_id` ended; `created` when the bridge said
@@ -70,6 +66,15 @@ pub mod qobject {
         #[qinvokable]
         fn poll(self: Pin<&mut MakeRuleController>);
 
+        /// TEST ONLY: wait `ms` milliseconds for a result instead of
+        /// `make_rule::NO_ANSWER_AFTER`, so a headless probe can see a
+        /// silence end the wait. No shipped QML calls it (a guard in
+        /// `honest_ui_qml_guards.rs`), so the app always waits the full
+        /// deadline (PR #111 review, L4).
+        #[qinvokable]
+        #[cxx_name = "shortenDeadlineForTests"]
+        fn shorten_deadline_for_tests(self: Pin<&mut MakeRuleController>, ms: i32);
+
         /// One bridge message as JSON (the headless probes' feed).
         #[qinvokable]
         #[cxx_name = "applyServerMessageJson"]
@@ -85,7 +90,8 @@ pub struct MakeRuleControllerRust {
     status_text: QString,
     row_id: QString,
     created: bool,
-    no_answer_after_ms: i32,
+    /// [`NO_ANSWER_AFTER`], except in the probes.
+    no_answer_after: Duration,
     wait: MakeRuleWait,
 }
 
@@ -96,7 +102,7 @@ impl Default for MakeRuleControllerRust {
             status_text: QString::default(),
             row_id: QString::default(),
             created: false,
-            no_answer_after_ms: i32::try_from(NO_ANSWER_AFTER.as_millis()).unwrap_or(i32::MAX),
+            no_answer_after: NO_ANSWER_AFTER,
             wait: MakeRuleWait::default(),
         }
     }
@@ -132,7 +138,7 @@ impl qobject::MakeRuleController {
     }
 
     fn poll(mut self: Pin<&mut Self>) {
-        let after = Duration::from_millis(u64::try_from(self.no_answer_after_ms).unwrap_or(0));
+        let after = self.no_answer_after;
         let handles = crate::bridge_runtime::handles();
         let is_current = |session| {
             handles
@@ -147,6 +153,11 @@ impl qobject::MakeRuleController {
         if let Some((row_id, done)) = gave_up {
             self.finish(row_id, done);
         }
+    }
+
+    fn shorten_deadline_for_tests(mut self: Pin<&mut Self>, ms: i32) {
+        self.as_mut().rust_mut().no_answer_after =
+            Duration::from_millis(u64::try_from(ms).unwrap_or(0));
     }
 
     /// The wait ended: say how, for the row it was about.
