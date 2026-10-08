@@ -174,6 +174,7 @@ Kirigami.ApplicationWindow {
     // to start, so a degraded bridge still yields a working (if empty) window.
     Component.onCompleted: {
         bridgeFeed.refresh();
+        bridgeFeed.startBridgeFeed();
         connectionsModel.startBridgeFeed();
         blocklistsModel.startBridgeFeed();
         blocklistEntriesModel.startBridgeFeed();

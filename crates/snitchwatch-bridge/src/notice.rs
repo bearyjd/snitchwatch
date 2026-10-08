@@ -40,6 +40,17 @@ pub enum Notice {
         what: String,
         reason: String,
     },
+    /// The user asked to remember an answer, but the daemon reported no
+    /// absolute executable path for the connection, so the bridge answered
+    /// it once instead (issue #44; see
+    /// `translator::process_binding::RuleRefusal`). For a user who answered
+    /// with the window hidden; the client-facing signal is
+    /// `ws_messages::ServerMessage::VerdictNotRemembered`, broadcast
+    /// alongside. Carries no connection data: the explanation is
+    /// `RuleRefusal::describe`'s fixed sentence.
+    VerdictNotRemembered {
+        row_id: u64,
+    },
 }
 
 pub struct NoticeBus {

@@ -45,6 +45,7 @@
 //! `Type` is `"simple"`/`"regexp"`, `Operand` is `"dest.host"`/`"dest.ip"`/
 //! `"process.path"`.
 
+use super::process_binding::{bindable_process_path, is_bindable_process_path, RuleRefusal};
 use crate::cache::connections::Verdict;
 use crate::ws_messages::{VerdictDuration, VerdictScope};
 use snitchwatch_proto::protocol::{Connection, Operator, Rule};
@@ -170,27 +171,54 @@ fn rule_name_component(
 /// still hostile input (see module doc) and is sanitized via
 /// [`sanitize_host_for_rule_name`] before it becomes part of a filename.
 ///
-/// `process_path` is the connection's raw `process_path` (empty when the
-/// daemon couldn't attribute one). Issue #44 binds rules to their program,
-/// so a non-empty path appends `-p<program component>`; an empty path
-/// yields exactly the pre-#44 host-only name.
+/// `process_path` is the connection's raw `process_path`. Issue #44 binds
+/// rules to their program, so a path [`is_bindable_process_path`] accepts
+/// appends `-p<program component>`; any other path (empty, a daemon
+/// placeholder, a bare comm name) yields exactly the host-only name, which is
+/// also the only operator such a connection can get.
 pub fn rule_name_for(verdict: Verdict, host: &str, port: u16, process_path: &str) -> String {
     let host_name = format!(
         "snitchwatch-{}-{}-{port}",
         verdict_action_str(verdict),
         sanitize_host_for_rule_name(host)
     );
-    if process_path.is_empty() {
-        host_name
-    } else {
+    if is_bindable_process_path(process_path) {
         format!(
             "{host_name}-p{}",
             sanitize_process_for_rule_name(process_path)
         )
+    } else {
+        host_name
     }
 }
 
+/// The `AskRule` reply for an interactive verdict.
+///
+/// Issue #44: a remembered rule (any duration but `Once`) must be bound to an
+/// absolute executable path, so for a connection without one this returns
+/// [`RuleRefusal::ProcessFileUnknown`] instead of degrading to a rule that
+/// matches every program. The caller then answers with [`once_rule`].
 pub fn verdict_to_rule(
+    verdict: Verdict,
+    duration: VerdictDuration,
+    scope: VerdictScope,
+    conn: &Connection,
+    now_secs: i64,
+) -> Result<Rule, RuleRefusal> {
+    if duration.remembers() && bindable_process_path(conn).is_none() {
+        return Err(RuleRefusal::ProcessFileUnknown);
+    }
+    Ok(build_rule(verdict, duration, scope, conn, now_secs))
+}
+
+/// A one-shot reply: the daemon applies it to this connection and never
+/// stores it (`vendor:daemon/rule/loader.go` `addUserRule`). Infallible, for
+/// the paused auto-allow and for answering a [`RuleRefusal`].
+pub fn once_rule(verdict: Verdict, scope: VerdictScope, conn: &Connection, now_secs: i64) -> Rule {
+    build_rule(verdict, VerdictDuration::Once, scope, conn, now_secs)
+}
+
+fn build_rule(
     verdict: Verdict,
     duration: VerdictDuration,
     scope: VerdictScope,
@@ -249,7 +277,8 @@ pub enum ScopeDegradation {
     /// `dst_host` has no label beyond its own registrable domain (eTLD+1) —
     /// see [`any_host_on_domain_operator_checked`]'s doc comment.
     AtOrAboveRegistrableDomain,
-    /// `conn.process_path` is empty.
+    /// `conn.process_path` is not an absolute path (see
+    /// `process_binding::is_bindable_process_path`).
     ProcessPathUnavailable,
 }
 
@@ -543,17 +572,19 @@ fn any_host_on_domain_operator_checked(conn: &Connection) -> (Operator, Option<S
 /// `AnyHost` scope: the daemon has no "match everything" operator (`operator`
 /// is mandatory), so this scopes the rule to the process instead — Little
 /// Snitch's "allow this app to connect anywhere" semantics. Degrades to
-/// [`this_host_operator`] when the process path is unknown, rather than risk
-/// an operator that matches every connection from every process.
+/// [`this_host_operator`] when the process path isn't bindable, rather than
+/// risk an operator that matches every connection from every process. Since
+/// issue #44's second half that fallback only ever builds a once-only reply:
+/// [`verdict_to_rule`] refuses to remember it.
 ///
 /// `conn.process_path` is reported by the daemon, NOT hostile input like
 /// `dst_host` — see module doc for what it is and isn't.
 fn any_host_operator_checked(conn: &Connection) -> (Operator, Option<ScopeDegradation>) {
-    if conn.process_path.is_empty() {
+    if bindable_process_path(conn).is_none() {
         tracing::warn!(
             dst_host = %conn.dst_host,
             dst_ip = %conn.dst_ip,
-            "AnyHost verdict scope requested with an empty process_path; \
+            "AnyHost verdict scope requested without an absolute process_path; \
              degrading to ThisHost rather than emit an unscoped rule"
         );
         return (
@@ -601,17 +632,12 @@ fn build_operator_checked(
 /// as strong as the daemon's process identity and no stronger — see module
 /// doc.
 ///
-/// An empty `process_path` keeps the host-only fallback for now: refusing
-/// instead changes the contract `grpc_server.rs` relies on, which is the
-/// second half of issue #44.
+/// A path that isn't bindable keeps the bare host operator. That is only
+/// reachable for a once-only reply: [`verdict_to_rule`] refuses to remember
+/// such a rule (issue #44, second half).
 fn bind_to_process(host: Operator, conn: &Connection) -> Operator {
-    if conn.process_path.is_empty() {
-        tracing::warn!(
-            dst_host = %conn.dst_host,
-            dst_ip = %conn.dst_ip,
-            "host-scoped verdict with an empty process_path; emitting a \
-             process-agnostic rule (issue #44 second half)"
-        );
+    if bindable_process_path(conn).is_none() {
+        tracing::debug!("host-scoped once-only reply without an absolute process_path");
         return host;
     }
     Operator {
@@ -622,6 +648,11 @@ fn bind_to_process(host: Operator, conn: &Connection) -> Operator {
         list: vec![process_path_operator(conn), host],
     }
 }
+
+/// Issue #44, second half: the absolute-path gate (kept out of `tests` below,
+/// which already holds the rest of this module's cases).
+#[cfg(test)]
+mod refusal_tests;
 
 #[cfg(test)]
 mod tests {
@@ -640,9 +671,8 @@ mod tests {
 
     #[test]
     fn allow_verdict_produces_allow_rule_with_once_duration() {
-        let rule = verdict_to_rule(
+        let rule = once_rule(
             Verdict::Allow,
-            VerdictDuration::Once,
             VerdictScope::ThisHost,
             &sample_connection(),
             1_700_000_000,
@@ -656,9 +686,8 @@ mod tests {
 
     #[test]
     fn deny_verdict_produces_deny_rule() {
-        let rule = verdict_to_rule(
+        let rule = once_rule(
             Verdict::Deny,
-            VerdictDuration::Once,
             VerdictScope::ThisHost,
             &sample_connection(),
             1_700_000_000,
@@ -670,9 +699,8 @@ mod tests {
 
     #[test]
     fn rule_name_includes_remote_host_for_traceability() {
-        let rule = verdict_to_rule(
+        let rule = once_rule(
             Verdict::Allow,
-            VerdictDuration::Once,
             VerdictScope::ThisHost,
             &sample_connection(),
             0,
@@ -688,13 +716,7 @@ mod tests {
         // identical for the same inputs, or the "Show rule" jump would land
         // on a rule that doesn't exist.
         let conn = sample_connection();
-        let rule = verdict_to_rule(
-            Verdict::Allow,
-            VerdictDuration::Once,
-            VerdictScope::ThisHost,
-            &conn,
-            1_700_000_000,
-        );
+        let rule = once_rule(Verdict::Allow, VerdictScope::ThisHost, &conn, 1_700_000_000);
         let name = rule_name_for(
             Verdict::Allow,
             &conn.dst_host,
@@ -714,7 +736,8 @@ mod tests {
             (VerdictDuration::Always, "always"),
         ];
         for (duration, expected) in cases {
-            let rule = verdict_to_rule(Verdict::Allow, duration, VerdictScope::ThisHost, &conn, 0);
+            let rule = verdict_to_rule(Verdict::Allow, duration, VerdictScope::ThisHost, &conn, 0)
+                .expect("absolute process path");
             assert_eq!(rule.duration, expected, "duration mapping for {duration:?}");
         }
     }
@@ -730,13 +753,7 @@ mod tests {
             VerdictScope::AnyHostOnDomain,
             VerdictScope::AnyHost,
         ] {
-            let rule = verdict_to_rule(
-                Verdict::Allow,
-                VerdictDuration::Once,
-                scope,
-                &sample_connection(),
-                0,
-            );
+            let rule = once_rule(Verdict::Allow, scope, &sample_connection(), 0);
             assert!(
                 rule.operator.is_some(),
                 "scope {scope:?} produced a None operator"
@@ -746,9 +763,8 @@ mod tests {
 
     #[test]
     fn this_host_scope_matches_on_dest_host() {
-        let rule = verdict_to_rule(
+        let rule = once_rule(
             Verdict::Allow,
-            VerdictDuration::Once,
             VerdictScope::ThisHost,
             &sample_connection(),
             0,
@@ -763,13 +779,7 @@ mod tests {
     fn this_host_scope_falls_back_to_dest_ip_when_host_is_empty() {
         let mut conn = sample_connection();
         conn.dst_host = String::new();
-        let rule = verdict_to_rule(
-            Verdict::Allow,
-            VerdictDuration::Once,
-            VerdictScope::ThisHost,
-            &conn,
-            0,
-        );
+        let rule = once_rule(Verdict::Allow, VerdictScope::ThisHost, &conn, 0);
         let op = process_bound_host_member(rule, "/usr/bin/curl");
         assert_eq!(op.r#type, "simple");
         assert_eq!(op.operand, "dest.ip");
@@ -780,13 +790,7 @@ mod tests {
     fn any_host_on_domain_scope_wildcards_the_leftmost_label() {
         let mut conn = sample_connection();
         conn.dst_host = "www.example.com".to_string();
-        let rule = verdict_to_rule(
-            Verdict::Allow,
-            VerdictDuration::Once,
-            VerdictScope::AnyHostOnDomain,
-            &conn,
-            0,
-        );
+        let rule = once_rule(Verdict::Allow, VerdictScope::AnyHostOnDomain, &conn, 0);
         let op = process_bound_host_member(rule, "/usr/bin/curl");
         assert_eq!(op.r#type, "regexp");
         assert_eq!(op.operand, "dest.host");
@@ -816,13 +820,7 @@ mod tests {
         // character in the first place, since the allowed charset has none.
         let mut conn = sample_connection();
         conn.dst_host = "a.b+c.example.com".to_string();
-        let rule = verdict_to_rule(
-            Verdict::Allow,
-            VerdictDuration::Once,
-            VerdictScope::AnyHostOnDomain,
-            &conn,
-            0,
-        );
+        let rule = once_rule(Verdict::Allow, VerdictScope::AnyHostOnDomain, &conn, 0);
         let op = process_bound_host_member(rule, "/usr/bin/curl");
         assert_eq!(op.r#type, "simple", "must degrade, not wildcard");
         assert_eq!(op.operand, "dest.host");
@@ -835,13 +833,7 @@ mod tests {
         // the regex any-character metacharacter.
         let mut conn = sample_connection();
         conn.dst_host = "www.example.co.uk".to_string();
-        let rule = verdict_to_rule(
-            Verdict::Allow,
-            VerdictDuration::Once,
-            VerdictScope::AnyHostOnDomain,
-            &conn,
-            0,
-        );
+        let rule = once_rule(Verdict::Allow, VerdictScope::AnyHostOnDomain, &conn, 0);
         let op = process_bound_host_member(rule, "/usr/bin/curl");
         let re = regex::Regex::new(&op.data).unwrap();
         assert!(re.is_match("example.co.uk"));
@@ -855,13 +847,7 @@ mod tests {
     fn any_host_on_domain_scope_degrades_to_this_host_for_single_label_host() {
         let mut conn = sample_connection();
         conn.dst_host = "localhost".to_string();
-        let rule = verdict_to_rule(
-            Verdict::Allow,
-            VerdictDuration::Once,
-            VerdictScope::AnyHostOnDomain,
-            &conn,
-            0,
-        );
+        let rule = once_rule(Verdict::Allow, VerdictScope::AnyHostOnDomain, &conn, 0);
         let op = process_bound_host_member(rule, "/usr/bin/curl");
         // Never a bare wildcard-everything pattern.
         assert_ne!(
@@ -878,13 +864,7 @@ mod tests {
         // `example.com` (via the `github.com` fixture) IS its own
         // registrable domain (eTLD+1) — nothing to safely wildcard.
         let conn = sample_connection(); // dst_host = "github.com"
-        let rule = verdict_to_rule(
-            Verdict::Allow,
-            VerdictDuration::Once,
-            VerdictScope::AnyHostOnDomain,
-            &conn,
-            0,
-        );
+        let rule = once_rule(Verdict::Allow, VerdictScope::AnyHostOnDomain, &conn, 0);
         let op = process_bound_host_member(rule, "/usr/bin/curl");
         assert_eq!(op.r#type, "simple");
         assert_eq!(op.operand, "dest.host");
@@ -895,13 +875,7 @@ mod tests {
     fn any_host_on_domain_scope_degrades_to_this_host_for_bare_ip() {
         let mut conn = sample_connection();
         conn.dst_host = "203.0.113.5".to_string();
-        let rule = verdict_to_rule(
-            Verdict::Allow,
-            VerdictDuration::Once,
-            VerdictScope::AnyHostOnDomain,
-            &conn,
-            0,
-        );
+        let rule = once_rule(Verdict::Allow, VerdictScope::AnyHostOnDomain, &conn, 0);
         let op = rule.operator.unwrap();
         assert_ne!(
             op.r#type, "regexp",
@@ -917,13 +891,7 @@ mod tests {
         // which used to slip past a naive `labels.len() < 3` guard.
         let mut conn = sample_connection();
         conn.dst_host = ".example.com".to_string();
-        let rule = verdict_to_rule(
-            Verdict::Allow,
-            VerdictDuration::Once,
-            VerdictScope::AnyHostOnDomain,
-            &conn,
-            0,
-        );
+        let rule = once_rule(Verdict::Allow, VerdictScope::AnyHostOnDomain, &conn, 0);
         let op = process_bound_host_member(rule, "/usr/bin/curl");
         assert_eq!(op.r#type, "simple", "must degrade, not wildcard");
     }
@@ -935,13 +903,7 @@ mod tests {
         // zero traffic).
         let mut conn = sample_connection();
         conn.dst_host = "example.com.".to_string();
-        let rule = verdict_to_rule(
-            Verdict::Allow,
-            VerdictDuration::Once,
-            VerdictScope::AnyHostOnDomain,
-            &conn,
-            0,
-        );
+        let rule = once_rule(Verdict::Allow, VerdictScope::AnyHostOnDomain, &conn, 0);
         let op = process_bound_host_member(rule, "/usr/bin/curl");
         assert_eq!(op.r#type, "simple", "must degrade, not wildcard");
     }
@@ -952,13 +914,7 @@ mod tests {
     fn any_host_on_domain_scope_wildcards_multi_label_etld_correctly() {
         let mut conn = sample_connection();
         conn.dst_host = "www.example.co.uk".to_string();
-        let rule = verdict_to_rule(
-            Verdict::Allow,
-            VerdictDuration::Once,
-            VerdictScope::AnyHostOnDomain,
-            &conn,
-            0,
-        );
+        let rule = once_rule(Verdict::Allow, VerdictScope::AnyHostOnDomain, &conn, 0);
         let op = process_bound_host_member(rule, "/usr/bin/curl");
         assert_eq!(op.r#type, "regexp");
         assert_eq!(op.data, r"^(?:[^.]+\.)*example\.co\.uk$");
@@ -971,13 +927,7 @@ mod tests {
         // (labels.len() < 3) would have wrongly allowed this.
         let mut conn = sample_connection();
         conn.dst_host = "shop.co.uk".to_string();
-        let rule = verdict_to_rule(
-            Verdict::Allow,
-            VerdictDuration::Once,
-            VerdictScope::AnyHostOnDomain,
-            &conn,
-            0,
-        );
+        let rule = once_rule(Verdict::Allow, VerdictScope::AnyHostOnDomain, &conn, 0);
         let op = process_bound_host_member(rule, "/usr/bin/curl");
         assert_eq!(op.r#type, "simple", "must degrade, not wildcard");
         assert_eq!(op.data, "shop.co.uk");
@@ -990,13 +940,7 @@ mod tests {
         // wildcarding it would match every GitHub Pages site.
         let mut conn = sample_connection();
         conn.dst_host = "user.github.io".to_string();
-        let rule = verdict_to_rule(
-            Verdict::Allow,
-            VerdictDuration::Once,
-            VerdictScope::AnyHostOnDomain,
-            &conn,
-            0,
-        );
+        let rule = once_rule(Verdict::Allow, VerdictScope::AnyHostOnDomain, &conn, 0);
         let op = process_bound_host_member(rule, "/usr/bin/curl");
         assert_eq!(op.r#type, "simple", "must degrade, not wildcard");
         assert_eq!(op.data, "user.github.io");
@@ -1013,13 +957,7 @@ mod tests {
         // GitHub Pages site.
         let mut conn = sample_connection();
         conn.dst_host = "USER.GITHUB.IO".to_string();
-        let rule = verdict_to_rule(
-            Verdict::Allow,
-            VerdictDuration::Once,
-            VerdictScope::AnyHostOnDomain,
-            &conn,
-            0,
-        );
+        let rule = once_rule(Verdict::Allow, VerdictScope::AnyHostOnDomain, &conn, 0);
         let op = process_bound_host_member(rule, "/usr/bin/curl");
         assert_eq!(op.r#type, "simple", "must degrade, not wildcard");
     }
@@ -1028,13 +966,7 @@ mod tests {
     fn any_host_on_domain_scope_degrades_for_uppercase_two_label_etld_host() {
         let mut conn = sample_connection();
         conn.dst_host = "SHOP.CO.UK".to_string();
-        let rule = verdict_to_rule(
-            Verdict::Allow,
-            VerdictDuration::Once,
-            VerdictScope::AnyHostOnDomain,
-            &conn,
-            0,
-        );
+        let rule = once_rule(Verdict::Allow, VerdictScope::AnyHostOnDomain, &conn, 0);
         let op = process_bound_host_member(rule, "/usr/bin/curl");
         assert_eq!(op.r#type, "simple", "must degrade, not wildcard");
     }
@@ -1046,13 +978,7 @@ mod tests {
         // over-correct into degrading every non-lowercase host.
         let mut conn = sample_connection();
         conn.dst_host = "Www.Example.Com".to_string();
-        let rule = verdict_to_rule(
-            Verdict::Allow,
-            VerdictDuration::Once,
-            VerdictScope::AnyHostOnDomain,
-            &conn,
-            0,
-        );
+        let rule = once_rule(Verdict::Allow, VerdictScope::AnyHostOnDomain, &conn, 0);
         let op = process_bound_host_member(rule, "/usr/bin/curl");
         assert_eq!(op.r#type, "regexp");
         assert_eq!(op.data, r"^(?:[^.]+\.)*example\.com$");
@@ -1062,13 +988,7 @@ mod tests {
     fn any_host_on_domain_scope_wildcards_uppercase_multi_label_etld_correctly() {
         let mut conn = sample_connection();
         conn.dst_host = "WWW.EXAMPLE.CO.UK".to_string();
-        let rule = verdict_to_rule(
-            Verdict::Allow,
-            VerdictDuration::Once,
-            VerdictScope::AnyHostOnDomain,
-            &conn,
-            0,
-        );
+        let rule = once_rule(Verdict::Allow, VerdictScope::AnyHostOnDomain, &conn, 0);
         let op = process_bound_host_member(rule, "/usr/bin/curl");
         assert_eq!(op.r#type, "regexp");
         assert_eq!(op.data, r"^(?:[^.]+\.)*example\.co\.uk$");
@@ -1121,12 +1041,20 @@ mod tests {
         assert!(reason.is_none());
     }
 
+    /// Issue #44: the once-only reply for a connection without an absolute
+    /// path still narrows an `AnyHost` deny to this host, and says so.
     #[test]
-    fn deny_verdict_any_host_degradation_is_surfaced_when_process_path_empty() {
+    fn deny_verdict_any_host_degradation_is_surfaced_without_an_absolute_path() {
         let mut conn = sample_connection();
-        conn.process_path = String::new();
-        let reason = scope_degradation(VerdictScope::AnyHost, Verdict::Deny, &conn);
-        assert!(reason.is_some());
+        for path in ["", "Kernel connection"] {
+            conn.process_path = path.to_string();
+            let reason = scope_degradation(VerdictScope::AnyHost, Verdict::Deny, &conn);
+            assert_eq!(
+                reason,
+                Some(ScopeDegradation::ProcessPathUnavailable),
+                "{path:?}"
+            );
+        }
     }
 
     // -- FIX 1: rule name sanitization ------------------------------------
@@ -1202,9 +1130,8 @@ mod tests {
 
     #[test]
     fn any_host_scope_matches_on_process_path() {
-        let rule = verdict_to_rule(
+        let rule = once_rule(
             Verdict::Allow,
-            VerdictDuration::Once,
             VerdictScope::AnyHost,
             &sample_connection(),
             0,
@@ -1226,25 +1153,31 @@ mod tests {
             VerdictScope::AnyHost,
             &sample_connection(),
             0,
-        );
+        )
+        .expect("absolute process path");
         assert!(rule.name.contains("-pcurl-"), "got: {}", rule.name);
     }
 
+    /// Issue #44: with no process path, an `AnyHost` answer is never
+    /// remembered, and its once-only reply is never an operator matching
+    /// every process (which an empty `process.path` would amount to).
     #[test]
-    fn any_host_scope_degrades_to_this_host_when_process_path_is_empty() {
+    fn any_host_scope_is_once_only_and_host_bound_when_process_path_is_empty() {
         let mut conn = sample_connection();
         conn.process_path = String::new();
-        let rule = verdict_to_rule(
-            Verdict::Allow,
-            VerdictDuration::Once,
-            VerdictScope::AnyHost,
-            &conn,
-            0,
+        assert_eq!(
+            verdict_to_rule(
+                Verdict::Allow,
+                VerdictDuration::Always,
+                VerdictScope::AnyHost,
+                &conn,
+                0
+            ),
+            Err(RuleRefusal::ProcessFileUnknown)
         );
-        let op = rule.operator.unwrap();
-        // Never an operator matching every process (which is what an empty
-        // process.path data would functionally amount to).
-        assert_ne!(op.operand, "process.path");
+        let op = once_rule(Verdict::Allow, VerdictScope::AnyHost, &conn, 0)
+            .operator
+            .unwrap();
         assert_eq!(op.operand, "dest.host");
         assert_eq!(op.data, "github.com");
     }
@@ -1278,7 +1211,8 @@ mod tests {
             VerdictScope::ThisHost,
             &sample_connection(),
             0,
-        );
+        )
+        .expect("absolute process path");
         let host = process_bound_host_member(rule, "/usr/bin/curl");
         assert_eq!(host.r#type, "simple");
         assert_eq!(host.operand, "dest.host");
@@ -1295,7 +1229,8 @@ mod tests {
             VerdictScope::ThisHost,
             &conn,
             0,
-        );
+        )
+        .expect("absolute process path");
         let host = process_bound_host_member(rule, "/usr/bin/curl");
         assert_eq!(host.operand, "dest.ip");
         assert_eq!(host.data, "140.82.121.4");
@@ -1311,7 +1246,8 @@ mod tests {
             VerdictScope::AnyHostOnDomain,
             &conn,
             0,
-        );
+        )
+        .expect("absolute process path");
         let host = process_bound_host_member(rule, "/usr/bin/curl");
         assert_eq!(host.r#type, "regexp");
         assert_eq!(host.operand, "dest.host");
@@ -1335,23 +1271,26 @@ mod tests {
             VerdictScope::AnyHostOnDomain,
             &conn,
             0,
-        );
+        )
+        .expect("absolute process path");
         let host = process_bound_host_member(rule, "/usr/bin/curl");
         assert_eq!(host.operand, "dest.host");
         assert_eq!(host.data, "example.com");
     }
 
+    /// Issue #44, second half: the host-only fallback a host scope used to
+    /// remember for an unknown program now only answers this connection.
     #[test]
-    fn host_scopes_keep_the_host_only_fallback_when_process_path_is_empty() {
-        // Deliberately unchanged here: refusing instead of degrading changes
-        // the contract `grpc_server.rs` relies on, and is the second half of
-        // issue #44 (after draft PR #39 merges). This test pins today's
-        // fallback so that change is a visible, intentional edit.
+    fn host_scopes_refuse_to_remember_a_rule_without_a_process_path() {
         let mut conn = sample_connection();
         conn.process_path = String::new();
         for scope in [VerdictScope::ThisHost, VerdictScope::AnyHostOnDomain] {
-            let rule = verdict_to_rule(Verdict::Allow, VerdictDuration::Always, scope, &conn, 0);
-            let op = rule.operator.unwrap();
+            assert_eq!(
+                verdict_to_rule(Verdict::Allow, VerdictDuration::Always, scope, &conn, 0),
+                Err(RuleRefusal::ProcessFileUnknown),
+                "scope {scope:?}"
+            );
+            let op = once_rule(Verdict::Allow, scope, &conn, 0).operator.unwrap();
             assert_eq!(op.operand, "dest.host", "scope {scope:?}: {op:?}");
             assert!(op.list.is_empty(), "scope {scope:?}: {op:?}");
         }
@@ -1414,7 +1353,8 @@ mod tests {
             VerdictScope::ThisHost,
             &conn,
             0,
-        );
+        )
+        .expect("absolute process path");
         assert_eq!(
             rule.name,
             rule_name_for(Verdict::Allow, "github.com", 443, "/usr/bin/curl")

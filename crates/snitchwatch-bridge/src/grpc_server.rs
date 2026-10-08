@@ -4,7 +4,7 @@
 //! Replaces the M1 dial-out flow that lived in the now-deleted
 //! `grpc_client.rs` and `translator/downstream.rs` envelope hack.
 
-use crate::cache::connections::{ConnectionCache, Verdict};
+use crate::cache::connections::{ConnectionCache, Verdict, VerdictResolution};
 use crate::cache::rules::{RulesSync, SharedRulesCache};
 use crate::client_presence::ClientPresence;
 use crate::daemon_alerts::DaemonAlertStore;
@@ -15,9 +15,9 @@ use crate::filter_pause::FilterPause;
 use crate::notice::NoticeBus;
 use crate::rule_wire::rule_to_wire;
 use crate::translator::connection::{connection_to_row, event_to_row};
-use crate::translator::verdict::verdict_to_rule;
+use crate::translator::verdict::{once_rule, verdict_to_rule};
 use crate::tray_state::{TrayState, TrayStatePublisher};
-use crate::ws_messages::{ServerMessage, VerdictDuration};
+use crate::ws_messages::ServerMessage;
 use snitchwatch_proto::protocol::ui_server::{Ui, UiServer};
 use snitchwatch_proto::protocol::{
     Action, Alert, ClientConfig, Connection, MsgResponse, Notification, NotificationReply,
@@ -232,6 +232,61 @@ impl UiService {
     /// generation no longer matches) — the newer block's own timer owns the
     /// eventual revert, so the tray never flickers back to a stale display
     /// mid-block.
+    /// The `AskRule` reply for a resolved verdict.
+    ///
+    /// A one-shot reply is deliberately absent from Rules. Every remembered
+    /// rule is an active daemon rule, including a five-minute or
+    /// until-restart rule, and must be visible/editable immediately rather
+    /// than waiting for a daemon-side rule-list push that may never come.
+    /// May diverge on the daemon's `setUniqueName`; see `cache::rules`.
+    ///
+    /// Issue #44: a remembered verdict `verdict_to_rule` refuses (no absolute
+    /// process path) is answered once instead, never cached or announced as
+    /// a rule, and every client is told why.
+    fn verdict_reply(
+        &self,
+        resolution: VerdictResolution,
+        conn: &Connection,
+        row_id: String,
+        ask_id: u64,
+        now_secs: i64,
+    ) -> Rule {
+        let refusal = match verdict_to_rule(
+            resolution.verdict,
+            resolution.duration,
+            resolution.scope,
+            conn,
+            now_secs,
+        ) {
+            Ok(rule) => {
+                if resolution.duration.remembers() {
+                    self.rules.upsert(rule.clone());
+                    if self.broadcast.receiver_count() > 0 {
+                        if let Err(e) = self.broadcast.send(ServerMessage::UpdateRules {
+                            rules: vec![rule_to_wire(&rule)],
+                        }) {
+                            warn!(error = %e, "persistent verdict rule broadcast failed");
+                        }
+                    }
+                }
+                return rule;
+            }
+            Err(refusal) => refusal,
+        };
+
+        if self.broadcast.receiver_count() > 0 {
+            if let Err(e) = self.broadcast.send(ServerMessage::VerdictNotRemembered {
+                row_id,
+                reason: refusal.describe().to_string(),
+            }) {
+                warn!(error = %e, "verdict-not-remembered broadcast send failed");
+            }
+        }
+        self.notice_bus
+            .send(crate::notice::Notice::VerdictNotRemembered { row_id: ask_id });
+        once_rule(resolution.verdict, resolution.scope, conn, now_secs)
+    }
+
     fn publish_recent_block(&self, what: String) {
         let generation = self.block_generation.fetch_add(1, Ordering::SeqCst) + 1;
         self.tray_pub.set(TrayState::RecentBlock {
@@ -367,9 +422,8 @@ impl Ui for UiService {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs() as i64)
                 .unwrap_or(0);
-            return Ok(Response::new(verdict_to_rule(
+            return Ok(Response::new(once_rule(
                 Verdict::Allow,
-                VerdictDuration::Once,
                 crate::ws_messages::VerdictScope::ThisHost,
                 &conn,
                 now_secs,
@@ -474,31 +528,9 @@ impl Ui for UiService {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
-        let rule = verdict_to_rule(
-            resolution.verdict,
-            resolution.duration,
-            resolution.scope,
-            &conn,
-            now_secs,
-        );
-
-        // A one-shot reply is deliberately absent from Rules. Every other
-        // duration is an active daemon rule, including a five-minute or
-        // until-restart rule, and must be visible/editable immediately rather
-        // than waiting for a daemon-side rule-list push that may never come.
-        // May diverge on the daemon's `setUniqueName`; see `cache::rules`.
-        if resolution.duration.remembers() {
-            self.rules.upsert(rule.clone());
-        }
-        if resolution.duration.remembers() && self.broadcast.receiver_count() > 0 {
-            if let Err(e) = self.broadcast.send(ServerMessage::UpdateRules {
-                rules: vec![rule_to_wire(&rule)],
-            }) {
-                warn!(error = %e, "persistent verdict rule broadcast failed");
-            }
-        }
-
-        Ok(Response::new(rule))
+        Ok(Response::new(self.verdict_reply(
+            resolution, &conn, row_id, ask_id, now_secs,
+        )))
     }
 
     async fn subscribe(
@@ -663,3 +695,7 @@ pub(crate) fn display_summary(process: &str, dst_host: &str) -> String {
 #[cfg(test)]
 #[path = "grpc_server/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "grpc_server/refusal_tests.rs"]
+mod refusal_tests;

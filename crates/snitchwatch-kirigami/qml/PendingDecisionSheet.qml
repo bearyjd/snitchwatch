@@ -40,6 +40,14 @@ ColumnLayout {
     property string remoteIp: ""
     // Server-owned countdown to the automatic fallback action. Negative hides it.
     property int remainingSeconds: -1
+    // Issue #44: whether the bridge can remember an answer for this program
+    // (`ConnectionsModel.rowDetailsJson`'s `bindableProcessPath`, the bridge's
+    // own absolute-path rule). Without it only "This time" is offered: the
+    // bridge would answer anything longer once anyway. False by default, so a
+    // caller that never sets it can't offer a duration that won't be kept.
+    property bool bindableProcessPath: false
+    // Exposed for the headless probe (tests/verdict_not_remembered_qml.rs).
+    property alias durationSelector: durationBox
 
     // Live-wiring hub (Task 13), injected from ConnectionsPage. When set, a
     // submitted verdict's JSON is routed to the bridge's inbound pump. Null in
@@ -126,13 +134,27 @@ ColumnLayout {
             // default `ConnectionsPage.qml`'s inline Allow/Deny buttons
             // hardcode (`submitInlineVerdict`), same rationale as
             // `scopeBox`'s model comment above.
-            model: [
-                { label: "This time", token: "this_time" },
-                { label: "For 5 minutes", token: "for_5_minutes" },
-                { label: "Until quit", token: "until_quit" },
-                { label: "Forever", token: "forever" }
-            ]
+            model: sheet.bindableProcessPath
+                ? [
+                    { label: "This time", token: "this_time" },
+                    { label: "For 5 minutes", token: "for_5_minutes" },
+                    { label: "Until quit", token: "until_quit" },
+                    { label: "Forever", token: "forever" }
+                ]
+                : [{ label: "This time", token: "this_time" }]
         }
+    }
+
+    // Issue #44: why only "This time" is offered. The bridge's
+    // `RuleRefusal::describe` sentence, verbatim (a test keeps them equal).
+    Controls.Label {
+        Layout.fillWidth: true
+        visible: !sheet.bindableProcessPath
+        wrapMode: Text.Wrap
+        opacity: 0.7
+        font: Kirigami.Theme.smallFont
+        textFormat: Text.PlainText
+        text: "Snitchwatch couldn't identify this program's file, so this answer applies only to this connection."
     }
 
     // Countdown display only — never a client-side timer.
@@ -211,9 +233,11 @@ ColumnLayout {
     }
 
     function submit(action) {
+        // Issue #44: never ask to remember an answer for a program the bridge
+        // can't bind a rule to, whatever the selector holds.
+        const duration = sheet.bindableProcessPath ? durationBox.currentValue : "this_time";
         if (sheet.bridgeFeed !== null) {
-            sheet.bridgeFeed.submitVerdict(
-                sheet.rowId, action, scopeBox.currentValue, durationBox.currentValue);
+            sheet.bridgeFeed.submitVerdict(sheet.rowId, action, scopeBox.currentValue, duration);
         } else {
             // Unreachable in the running app; logged rather than dropped
             // silently so a mis-wired container can't lose a decision without

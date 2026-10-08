@@ -17,10 +17,14 @@
 //! The outbound direction (bridge → models) is *not* here: each model owns its
 //! own `startBridgeFeed()` feed task, because each must run its `RowStore`
 //! mutations behind its own `QAbstractListModel` begin/end signals on the Qt
-//! thread. This object never touches the models directly.
+//! thread. This object never touches the models directly. The one outbound
+//! event it relays is model-free: `verdictNotRemembered` (issue #44), which
+//! `ConnectionsPage.qml` turns into a passive notification.
 
 use core::pin::Pin;
+use cxx_qt::Threading;
 use cxx_qt_lib::QString;
+use snitchwatch_bridge::ws_messages::ServerMessage;
 
 #[cxx_qt::bridge]
 pub mod qobject {
@@ -66,7 +70,22 @@ pub mod qobject {
             scope: &QString,
             duration: &QString,
         );
+
+        /// Issue #44: the bridge answered a remembered verdict for this
+        /// connection only, because it couldn't identify the program's file.
+        /// `row_id` is session-qualified like `ConnectionsModel`'s ids.
+        #[qsignal]
+        #[cxx_name = "verdictNotRemembered"]
+        fn verdict_not_remembered(self: Pin<&mut BridgeFeed>, row_id: QString);
+
+        /// Start relaying `verdictNotRemembered`. No-op when the bridge isn't
+        /// running. Called from `main.qml`'s `Component.onCompleted`.
+        #[qinvokable]
+        #[cxx_name = "startBridgeFeed"]
+        fn start_bridge_feed(self: Pin<&mut BridgeFeed>);
     }
+
+    impl cxx_qt::Threading for BridgeFeed {}
 }
 
 /// Rust-side state for [`qobject::BridgeFeed`].
@@ -114,6 +133,50 @@ impl qobject::BridgeFeed {
                 tracing::warn!(choice = %choice.to_string(), "BridgeFeed: unrecognised verdict choice")
             }
         }
+    }
+
+    fn start_bridge_feed(self: Pin<&mut Self>) {
+        let Some(handles) = crate::bridge_runtime::handles() else {
+            tracing::warn!("BridgeFeed: bridge not running; verdict notices disabled");
+            return;
+        };
+        let qt_thread = self.qt_thread();
+        // An event, not state: no snapshot resync, so a lag only skips some.
+        let mut rx = handles.subscribe();
+        let runtime = handles.runtime().clone();
+        runtime.spawn(async move {
+            use tokio::sync::broadcast::error::RecvError;
+            loop {
+                let received = match rx.recv().await {
+                    Ok(received) => received,
+                    Err(RecvError::Lagged(_)) => continue,
+                    Err(RecvError::Closed) => break,
+                };
+                let connection_id = received.connection_id;
+                let Some(row_id) = verdict_not_remembered_row(connection_id, &received.message)
+                else {
+                    continue;
+                };
+                let session_handles = handles.clone();
+                let _ = qt_thread.queue(move |qobject| {
+                    if session_handles.is_current_session(connection_id) {
+                        qobject.verdict_not_remembered(QString::from(&row_id));
+                    }
+                });
+            }
+        });
+    }
+}
+
+/// The session-qualified row id (`<connection>:<wire id>`, as
+/// `ConnectionsModel` stores it) of a `VerdictNotRemembered`, or `None` for
+/// any other message.
+fn verdict_not_remembered_row(connection_id: u64, msg: &ServerMessage) -> Option<String> {
+    match msg {
+        ServerMessage::VerdictNotRemembered { row_id, .. } => {
+            Some(format!("{connection_id}:{row_id}"))
+        }
+        _ => None,
     }
 }
 
@@ -169,5 +232,23 @@ mod tests {
         for id in ["7", "0:7", "invalid:7", "2:"] {
             assert_eq!(split_session_row_id(id), None);
         }
+    }
+
+    #[test]
+    fn only_verdict_not_remembered_is_relayed_with_a_qualified_row_id() {
+        let msg = ServerMessage::VerdictNotRemembered {
+            row_id: "7".into(),
+            reason: "fixed".into(),
+        };
+        assert_eq!(verdict_not_remembered_row(2, &msg), Some("2:7".to_string()));
+        let other = ServerMessage::DenyScopeNarrowed {
+            row_id: "7".into(),
+            reason: "fixed".into(),
+        };
+        assert_eq!(verdict_not_remembered_row(2, &other), None);
+        assert_eq!(
+            verdict_not_remembered_row(2, &ServerMessage::ClearConnectionRows),
+            None
+        );
     }
 }

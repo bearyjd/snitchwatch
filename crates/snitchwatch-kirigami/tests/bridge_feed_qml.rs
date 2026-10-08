@@ -111,6 +111,11 @@ Window {
 
                 // Malformed JSON there must be logged and dropped, not thrown.
                 probeWindow.feed.sendClientJson("{not valid json");
+
+                // Issue #44's verdict-not-remembered relay. main.qml calls it
+                // before every model's feed, so a throw here would stop them
+                // all; with no bridge runtime it logs and returns.
+                probeWindow.feed.startBridgeFeed();
             } finally {
                 Qt.quit();
             }

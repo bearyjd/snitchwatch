@@ -18,6 +18,7 @@ enum NoticeKey {
     DaemonAway,
     FilterPauseExpired,
     DenyScopeNarrowedForRow(u64),
+    VerdictNotRememberedForRow(u64),
 }
 
 impl From<&Notice> for NoticeKey {
@@ -27,6 +28,9 @@ impl From<&Notice> for NoticeKey {
             Notice::DaemonAway => NoticeKey::DaemonAway,
             Notice::FilterPauseExpired => NoticeKey::FilterPauseExpired,
             Notice::DenyScopeNarrowed { row_id, .. } => NoticeKey::DenyScopeNarrowedForRow(*row_id),
+            Notice::VerdictNotRemembered { row_id } => {
+                NoticeKey::VerdictNotRememberedForRow(*row_id)
+            }
         }
     }
 }
@@ -108,5 +112,25 @@ mod tests {
         assert!(gate.should_fire(&row_a, t0));
         assert!(gate.should_fire(&row_b, t0));
         assert!(!gate.should_fire(&row_a, t0 + Duration::from_secs(5)));
+    }
+
+    /// Issue #44: each answered row gets its own notice.
+    #[test]
+    fn verdict_not_remembered_cooldown_is_per_row() {
+        let mut gate = CooldownGate::with_cooldown(Duration::from_secs(60));
+        let t0 = Instant::now();
+        let row_a = Notice::VerdictNotRemembered { row_id: 1 };
+        let row_b = Notice::VerdictNotRemembered { row_id: 2 };
+        assert!(gate.should_fire(&row_a, t0));
+        assert!(gate.should_fire(&row_b, t0));
+        assert!(!gate.should_fire(&row_a, t0 + Duration::from_secs(5)));
+        assert!(gate.should_fire(
+            &Notice::DenyScopeNarrowed {
+                row_id: 1,
+                what: String::new(),
+                reason: String::new(),
+            },
+            t0
+        ));
     }
 }

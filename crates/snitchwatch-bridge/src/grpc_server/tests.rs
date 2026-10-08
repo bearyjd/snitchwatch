@@ -861,7 +861,8 @@ fn process_bound_verdict_rule_survives_the_wire_round_trip() {
         VerdictScope::ThisHost,
         &conn,
         0,
-    );
+    )
+    .expect("absolute process path");
     let back = crate::rule_wire::rule_from_wire(&crate::rule_wire::rule_to_wire(&rule)).unwrap();
     assert_eq!(back.name, rule.name);
     let op = back.operator.unwrap();

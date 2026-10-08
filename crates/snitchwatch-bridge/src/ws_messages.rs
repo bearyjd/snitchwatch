@@ -172,6 +172,17 @@ pub enum ServerMessage {
         row_id: String,
         reason: String,
     },
+    /// A remembered verdict for `row_id` was answered for this connection
+    /// only: the daemon reported no absolute executable path, so no rule
+    /// could be bound to the program (issue #44, second half — see
+    /// `translator::process_binding::RuleRefusal`). `reason` is always
+    /// `RuleRefusal::describe`'s fixed sentence. A Snitchwatch-specific
+    /// extension like `DenyScopeNarrowed`; sent alongside the desktop
+    /// `Notice::VerdictNotRemembered`.
+    VerdictNotRemembered {
+        row_id: String,
+        reason: String,
+    },
     /// Daemon-reported aggregate counters from `Statistics` on a `Ping` call
     /// (issue #19). The `Connection` proto carries no byte counters, so the
     /// Traffic tab is rebuilt around these daemon-side aggregates instead of

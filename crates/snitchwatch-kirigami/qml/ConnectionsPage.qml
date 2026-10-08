@@ -116,6 +116,11 @@ Kirigami.ScrollablePage {
     // snapshot. Per-connection byte counters are deliberately not surfaced:
     // the bridge reports them as a hardcoded 0 (issue #49).
     property string inspectIp: ""
+    // Issue #44: whether an answer for this row's program can be remembered
+    // (`rowDetailsJson`'s `bindableProcessPath`); false until known.
+    property bool inspectBindableProcessPath: false
+    // Exposed for the headless probe (tests/verdict_not_remembered_qml.rs).
+    property alias decisionSheet: pendingSheet
     // Raw matched-rule name (empty when unknown/not applicable — drives the
     // "Show rule" button's visibility) and its friendly display string (never
     // blank — see `connections::row_store::matched_rule_display`).
@@ -189,6 +194,21 @@ Kirigami.ScrollablePage {
             if (page.bridgeFeed.ok === false) {
                 page.recheckInspectedRow();
             }
+        }
+        function onVerdictNotRemembered(rowId) {
+            page.showVerdictNotRemembered();
+        }
+    }
+
+    // Issue #44: the bridge answered a remembered verdict for this connection
+    // only. Fixed text — the bridge's `RuleRefusal::describe` sentence (a test
+    // keeps them equal) — never the wire `reason`.
+    function showVerdictNotRemembered() {
+        const win = Controls.ApplicationWindow.window;
+        if (win && typeof win.showPassiveNotification === "function") {
+            win.showPassiveNotification(
+                "Snitchwatch couldn't identify this program's file, so this answer applies only to this connection.",
+                "long");
         }
     }
 
@@ -561,12 +581,14 @@ Kirigami.ScrollablePage {
     // since this is a decorative side-channel, never a blocker.
     function applyRowDetails(id) {
         page.inspectIp = "";
+        page.inspectBindableProcessPath = false;
         if (!page.model) {
             return;
         }
         try {
             const details = JSON.parse(page.model.rowDetailsJson(id));
             page.inspectIp = details.dstIp || "";
+            page.inspectBindableProcessPath = details.bindableProcessPath === true;
         } catch (e) {
             // Leave the defaults above.
         }
@@ -654,12 +676,14 @@ Kirigami.ScrollablePage {
             // server-side; these buttons call the bridge's verdict path once
             // pending_decision.rs is wired to the injected model.
             PendingDecisionSheet {
+                id: pendingSheet
                 Layout.fillWidth: true
                 visible: page.inspectPending
                 rowId: page.inspectId
                 process: page.inspectProcess
                 host: page.inspectHost
                 remoteIp: page.inspectIp
+                bindableProcessPath: page.inspectBindableProcessPath
                 bridgeFeed: page.bridgeFeed
                 onDecided: inspector.close()
             }
