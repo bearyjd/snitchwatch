@@ -2,12 +2,15 @@
 //!
 //! - [`row_store`]: pure, Qt-free store for the flat profile list — fully
 //!   unit-tested here.
+//! - [`rules_view`]: a profile's rules and their status as the page lists
+//!   them (issue #46 Part 2).
 //! - The cxx-qt `QAbstractListModel` wrapper that binds this to QML lives in
 //!   the top-level [`crate::profiles_model`] module (kept flat under `src/`
 //!   with the other `#[cxx_qt::bridge]` files, per the same cxx-qt-build
 //!   one-directory constraint noted in [`crate::connections`]).
 
 pub mod row_store;
+pub mod rules_view;
 
 /// Split a comma-separated network-matcher editor string into trimmed,
 /// non-empty glob patterns. Shared by `ProfilesModel`'s create/update
