@@ -301,8 +301,9 @@ Kirigami.ScrollablePage {
             Layout.fillWidth: true
             visible: page.showsAllAppsNotice
             type: Kirigami.MessageType.Information
-            text: "Some rules saved by earlier Snitchwatch versions apply to all apps, not only "
-                + "the app that asked. They are marked below, each with what deleting it changes."
+            text: "Some rules saved by earlier Snitchwatch versions apply to all apps, or to a "
+                + "program Snitchwatch can't identify, not only the app that asked. They are "
+                + "marked below, each with what deleting it changes."
         }
         // Counts only Snitchwatch's own earlier rules: blocklist or
         // hand-written rules may apply to all apps too, so no "of N".
@@ -314,9 +315,11 @@ Kirigami.ScrollablePage {
             textFormat: Text.PlainText
             text: !page.model ? ""
                 : page.model.legacyHostOnlyCount === 1
-                    ? "1 rule saved by an earlier Snitchwatch version applies to all apps"
+                    ? "1 rule saved by an earlier Snitchwatch version applies to all apps or "
+                      + "to an unidentified program"
                     : page.model.legacyHostOnlyCount
-                      + " rules saved by earlier Snitchwatch versions apply to all apps"
+                      + " rules saved by earlier Snitchwatch versions apply to all apps or to "
+                      + "unidentified programs"
         }
         Controls.Label {
             id: hitsSummaryLabel
@@ -411,6 +414,7 @@ Kirigami.ScrollablePage {
             required property string blocklistId
             required property bool appliesToAllApps
             required property string allAppsHint
+            required property string flagBadge
             required property bool hitsCounted
             required property real hitCount
             required property real lastHitMs
@@ -483,7 +487,8 @@ Kirigami.ScrollablePage {
                 Controls.Label {
                     objectName: "allAppsFlag"
                     visible: row.appliesToAllApps
-                    text: "Applies to all apps"
+                    textFormat: Text.PlainText
+                    text: row.flagBadge
                     color: Kirigami.Theme.neutralTextColor
                     font.bold: true
                     Layout.alignment: Qt.AlignVCenter

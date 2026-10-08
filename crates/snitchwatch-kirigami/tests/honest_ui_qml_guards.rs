@@ -466,6 +466,8 @@ fn rules_page_labels_showing_rule_data_are_plain_text() {
             "page.inspectOperatorSummary",
             // Issue #44: names the destination of an all-apps rule.
             "row.allAppsHint",
+            // Issue #64: the flagged row's badge.
+            "row.flagBadge",
             // P2.7: export/import outcomes, which carry bridge reasons.
             "rulesIo.statusText",
             // P2.1: why the editor can't change a rule (bridge reasons).

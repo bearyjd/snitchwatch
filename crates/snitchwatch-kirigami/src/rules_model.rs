@@ -47,6 +47,8 @@ const ROLE_LAST_HIT_MS: i32 = 15;
 const ROLE_HITS_NOTE: i32 = 16;
 /// How the rule takes part in the daemon's decision (issue #102).
 const ROLE_HOW_IT_DECIDES: i32 = 17;
+/// The flagged row's badge (issues #44, #64).
+const ROLE_FLAG_BADGE: i32 = 18;
 
 #[cxx_qt::bridge]
 pub mod qobject {
@@ -216,7 +218,9 @@ impl qobject::RulesModel {
                 rule.read_only_reason.as_deref().unwrap_or_default(),
             )),
             ROLE_DELETABLE => QVariant::from(&rule.can_delete()),
-            ROLE_APPLIES_TO_ALL_APPS => QVariant::from(&rule.applies_to_all_apps()),
+            // Flagged: all apps (#44), or an unidentified program (#64).
+            ROLE_APPLIES_TO_ALL_APPS => QVariant::from(&rule.flagged()),
+            ROLE_FLAG_BADGE => QVariant::from(&QString::from(rule.flag_badge())),
             ROLE_ALL_APPS_HINT => {
                 QVariant::from(&QString::from(&rule.all_apps_hint().unwrap_or_default()))
             }
@@ -274,6 +278,7 @@ impl qobject::RulesModel {
         roles.insert(ROLE_LAST_HIT_MS, QByteArray::from("lastHitMs"));
         roles.insert(ROLE_HITS_NOTE, QByteArray::from("hitsNote"));
         roles.insert(ROLE_HOW_IT_DECIDES, QByteArray::from("howItDecides"));
+        roles.insert(ROLE_FLAG_BADGE, QByteArray::from("flagBadge"));
         roles
     }
 

@@ -162,7 +162,8 @@ Window {
                 // label must not compare them with every rule (code review C1).
                 const counted = probeWindow.findChild(page.header, "allAppsCount");
                 probeWindow.check(counted && counted.text ===
-                    "3 rules saved by earlier Snitchwatch versions apply to all apps",
+                    "3 rules saved by earlier Snitchwatch versions apply to all apps or to "
+                    + "unidentified programs",
                     "count label: " + (counted ? counted.text : "missing"));
 
                 const denyHint = probeWindow.findChild(probeWindow.rowItem(0), "allAppsHint");
@@ -225,8 +226,24 @@ Window {
                 probeWindow.setRules([probeWindow.rule(deny, "deny", probeWindow.host("github.com"))]);
                 const one = probeWindow.findChild(page.header, "allAppsCount");
                 probeWindow.check(one && one.text ===
-                    "1 rule saved by an earlier Snitchwatch version applies to all apps",
+                    "1 rule saved by an earlier Snitchwatch version applies to all apps or to an "
+                    + "unidentified program",
                     "singular count label: " + (one ? one.text : "missing"));
+
+                // Issue #64: tied to a "program" that isn't a program file.
+                probeWindow.setRules([probeWindow.rule("snitchwatch-allow-x-443-pkernel", "allow",
+                    { type: "list", operands: [
+                        { type: "simple", operand: "process.path", data: "Kernel connection",
+                          sensitive: true },
+                        probeWindow.host("x.example") ] })]);
+                const kernelFlag = probeWindow.findChild(probeWindow.rowItem(0), "allAppsFlag");
+                const kernelHint = probeWindow.findChild(probeWindow.rowItem(0), "allAppsHint");
+                probeWindow.check(kernelFlag && kernelFlag.visible
+                                  && kernelFlag.text === "Program not identified"
+                                  && probeWindow.shown(0, "allAppsDelete") && kernelHint
+                                  && kernelHint.text.indexOf("isn't a program file") >= 0,
+                                  "unidentified program: " + (kernelFlag ? kernelFlag.text : "")
+                                  + " / " + (kernelHint ? kernelHint.text : "missing"));
 
                 // Without flagged rules the notice goes away.
                 probeWindow.setRules([]);
