@@ -41,6 +41,15 @@ impl Verdict {
     }
 }
 
+/// Whether the daemon may list `row`'s connection, and its retries, again as
+/// rows decided by its default action (E3; the inspector's two-rows hint): a
+/// put-off row the default action settled, i.e. without a rule on record
+/// ("Decide later"'s 5-minute block has one). The bridge can't match the two
+/// (plan `2026-10-08-default-applied-events.md`).
+pub fn may_be_listed_again(row: &ConnectionRow) -> bool {
+    row.deferred && row.matched_rule.is_none()
+}
+
 /// The verdict label of a deferred row or a row decided by the firewall's
 /// default action; empty for every other row.
 pub fn outcome_text(row: &ConnectionRow) -> &'static str {
@@ -192,6 +201,33 @@ mod tests {
         assert_eq!(Verdict::of(&by_default(Some("deny"))), Verdict::Denied);
         // A plain decided row keeps its verdict label.
         assert_eq!(outcome_text(&row(Some("deny"), false)), "");
+    }
+
+    /// The two-rows hint (PR #108 review): a put-off row the default action
+    /// settled may have a twin the daemon reports (E3). Not a "Decide later"
+    /// block, which a rule decided, nor a default-decided row itself.
+    #[test]
+    fn only_a_put_off_row_without_a_rule_may_be_listed_again() {
+        let timed_out = ConnectionRow {
+            auto_answer: Some(AutoAnswer::NoAnswer),
+            ..row(Some("deny"), true)
+        };
+        assert!(may_be_listed_again(&timed_out));
+        assert!(
+            may_be_listed_again(&row(None, true)),
+            "Decide later, no program"
+        );
+        let blocked = ConnectionRow {
+            matched_rule: Some("deny-curl".into()),
+            ..row(Some("deny"), true)
+        };
+        assert!(!may_be_listed_again(&blocked));
+        assert!(!may_be_listed_again(&row(Some("deny"), false)));
+        let by_default = ConnectionRow {
+            decided_by_default: true,
+            ..row(Some("deny"), false)
+        };
+        assert!(!may_be_listed_again(&by_default));
     }
 
     /// The flag always means "decided, no rule" (PR #108 review), even on a

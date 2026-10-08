@@ -180,6 +180,8 @@ Controls.ApplicationWindow {
                                           id + ": Show rule for '" + page.inspectMatchedRule + "'");
                         probeWindow.check(!page.inspectPending && !page.decisionSheet.visible,
                                           id + ": offered a decision");
+                        // The two-rows hint is for the put-off twin, not these.
+                        probeWindow.check(!page.alsoListedNote.visible, id + ": two-rows hint");
                         probeWindow.check(page.makeRuleSheet.visible === want[3]
                                           && page.makeRuleSheet.openButton.visible === want[3],
                                           id + ": Make a rule offered " + page.makeRuleSheet.visible);

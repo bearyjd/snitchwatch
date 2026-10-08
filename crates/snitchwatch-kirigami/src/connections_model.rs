@@ -989,6 +989,8 @@ impl qobject::ConnectionsModel {
             bytes_received: u64,
             #[serde(rename = "bindableProcessPath")]
             bindable_process_path: bool,
+            #[serde(rename = "alsoListedByDefault")]
+            also_listed_by_default: bool,
         }
 
         let details = RowDetails {
@@ -998,6 +1000,7 @@ impl qobject::ConnectionsModel {
             bindable_process_path: is_bindable_process_path(
                 row.process_path.as_deref().unwrap_or_default(),
             ),
+            also_listed_by_default: crate::connections::outcome::may_be_listed_again(row),
         };
         QString::from(&serde_json::to_string(&details).unwrap_or_else(|e| {
             tracing::error!(error = %e, "ConnectionsModel: row details serialize failed");

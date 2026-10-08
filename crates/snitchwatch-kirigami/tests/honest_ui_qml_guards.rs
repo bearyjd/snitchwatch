@@ -335,6 +335,34 @@ fn connections_page_labels_showing_connection_data_are_plain_text() {
     );
 }
 
+/// E3 (PR #108 review): a put-off row's inspector says the firewall may list
+/// the same connection again. One fixed sentence, plain text, shown only
+/// where the row model says so.
+#[test]
+fn the_two_rows_hint_is_one_fixed_plain_text_line() {
+    let code = code_lines(CONNECTIONS_PAGE);
+    let hints: Vec<String> = blocks(&code, "Controls.Label {")
+        .into_iter()
+        .filter(|block| has_line(block, "id: alsoListedNote"))
+        .collect();
+    assert_eq!(hints.len(), 1, "expected one two-rows hint label");
+    let hint = &hints[0];
+    assert!(has_line(hint, "textFormat: Text.PlainText"), "{hint}");
+    assert!(
+        has_line(hint, "visible: page.inspectAlsoListedByDefault"),
+        "{hint}"
+    );
+    let binding = text_binding(hint).expect("the hint has a text");
+    assert!(is_fixed_text(&binding), "{binding}");
+    // The literals joined, as the label renders them.
+    let shown: String = binding.split('"').skip(1).step_by(2).collect();
+    assert_eq!(
+        shown,
+        "The firewall may also list this connection, and its retries, separately as decided \
+         by its default action."
+    );
+}
+
 /// Blocklist names, URLs, fetch-failure reasons and (above all) the host
 /// entries are fetched from remote subscription URLs.
 #[test]

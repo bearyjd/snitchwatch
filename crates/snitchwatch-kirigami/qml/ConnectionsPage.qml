@@ -101,6 +101,10 @@ Kirigami.ScrollablePage {
     // Issue #44: whether an answer for this row's program can be remembered
     // (`rowDetailsJson`'s `bindableProcessPath`); false until known.
     property bool inspectBindableProcessPath: false
+    // E3: whether the daemon may list the inspected put-off row's connection
+    // again as decided by its default action (`rowDetailsJson`'s
+    // `alsoListedByDefault`); false until known.
+    property bool inspectAlsoListedByDefault: false
     // Whether the inspected row's bridge advertised app-bound rules
     // (`InlineVerdicts.rowAppBoundRules`); false until known.
     property bool inspectAppBoundRules: false
@@ -108,6 +112,7 @@ Kirigami.ScrollablePage {
     // tests/inline_verdict_qml.rs).
     property alias decisionSheet: pendingSheet
     property alias makeRuleSheet: makeRuleSheet
+    property alias alsoListedNote: alsoListedNote
     property alias connectionList: list
     // Raw matched-rule name (empty when unknown/not applicable — drives the
     // "Show rule" button's visibility) and its friendly display string (never
@@ -653,6 +658,7 @@ Kirigami.ScrollablePage {
     function applyRowDetails(id) {
         page.inspectIp = "";
         page.inspectBindableProcessPath = false;
+        page.inspectAlsoListedByDefault = false;
         if (!page.model) {
             return;
         }
@@ -660,6 +666,7 @@ Kirigami.ScrollablePage {
             const details = JSON.parse(page.model.rowDetailsJson(id));
             page.inspectIp = details.dstIp || "";
             page.inspectBindableProcessPath = details.bindableProcessPath === true;
+            page.inspectAlsoListedByDefault = details.alsoListedByDefault === true;
         } catch (e) {
             // Leave the defaults above.
         }
@@ -772,6 +779,20 @@ Kirigami.ScrollablePage {
                 bridgeFeed: page.bridgeFeed
                 onDecided: inspector.close()
                 onExplained: text => page.showPassiveNotice(text)
+            }
+
+            // E3: the bridge can't match a put-off row to the row the daemon
+            // reports once its default action applied, so say there may be
+            // two (plan 2026-10-08-default-applied-events.md).
+            Controls.Label {
+                id: alsoListedNote
+                Layout.fillWidth: true
+                visible: page.inspectAlsoListedByDefault
+                wrapMode: Text.Wrap
+                opacity: 0.7
+                textFormat: Text.PlainText
+                text: "The firewall may also list this connection, and its retries, separately "
+                    + "as decided by its default action."
             }
 
             // Part C: a put-off connection can still get a rule, and so can
