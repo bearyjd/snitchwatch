@@ -268,6 +268,7 @@ fn send_error_outcome(error: SendError) -> RuleCommandOutcome {
         SendError::NotAllowed
         | SendError::InvalidRuleName
         | SendError::ReservedName
+        | SendError::NotOnThisTransport
         | SendError::RefusedOperator => RuleCommandOutcome::Refused {
             problems: vec![RuleProblem {
                 path: "rule".into(),

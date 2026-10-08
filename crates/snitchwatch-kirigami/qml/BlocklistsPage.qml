@@ -57,6 +57,22 @@ Kirigami.ScrollablePage {
     readonly property bool perUserBlocklists: page.model ? page.model.perUserBlocklists : false
     readonly property bool anyOverLimit: page.model ? page.model.anyOverLimit : false
     readonly property bool storageUnreadable: page.model ? page.model.storageUnreadable : false
+    // Blocklist rules Snitchwatch made that this service isn't managing
+    // (issue #73: no state directory, a per-user service, an unreadable
+    // store). They keep blocking; the Rules page won't touch them, so this
+    // page offers to remove them.
+    readonly property int leftoverRules: page.model ? page.model.leftoverRules : 0
+    // Why nothing manages them, and how the last removal went (bridge text,
+    // shown in PlainText labels only).
+    readonly property string leftoverCause: page.model ? page.model.leftoverCause : ""
+    readonly property string leftoverReason: page.model ? page.model.leftoverReason : ""
+    // With an unreadable store the rules are probably lists the user still
+    // subscribes to: the page says so, and what removing them does.
+    readonly property bool leftoversProbablyWanted: page.leftoverCause === "store_unreadable"
+    function leftoverNoun() {
+        return page.leftoverRules === 1 ? "1 blocklist rule" : page.leftoverRules + " blocklist rules";
+    }
+    property bool confirmingLeftover: false
 
     function statusColor(status) {
         switch (status) {
@@ -113,13 +129,94 @@ Kirigami.ScrollablePage {
             text: "Snitchwatch couldn't read its saved blocklists, so it isn't changing any "
                 + "blocklist rules the firewall already has."
         }
+        // Issue #73. The count is data, so it sits in a PlainText label.
+        ColumnLayout {
+            objectName: "leftoverNotice"
+            Layout.fillWidth: true
+            Layout.margins: Kirigami.Units.smallSpacing
+            visible: page.leftoverRules > 0
+            spacing: Kirigami.Units.smallSpacing
+
+            Controls.Label {
+                objectName: "leftoverText"
+                Layout.fillWidth: true
+                textFormat: Text.PlainText
+                wrapMode: Text.Wrap
+                color: Kirigami.Theme.neutralTextColor
+                text: page.leftoversProbablyWanted
+                    ? page.leftoverNoun() + " made by Snitchwatch "
+                      + (page.leftoverRules === 1 ? "is" : "are") + " in the firewall, and "
+                      + (page.leftoverRules === 1 ? "is" : "are") + " probably "
+                      + (page.leftoverRules === 1 ? "a list" : "lists") + " you still subscribe to: "
+                      + "Snitchwatch can't read its saved blocklists, so it isn't changing "
+                      + (page.leftoverRules === 1 ? "it" : "them") + ". It checks them only when "
+                      + "it starts. Removing " + (page.leftoverRules === 1 ? "it" : "them")
+                      + " turns that blocking off; it comes back only if the saved blocklists "
+                      + "can be read after a restart, and if they are damaged it stays off."
+                    : (page.leftoverRules === 1
+                       ? "1 blocklist rule made by Snitchwatch is still in the firewall"
+                       : page.leftoverRules + " blocklist rules made by Snitchwatch are still in "
+                         + "the firewall")
+                      + ", but this service isn't managing " + (page.leftoverRules === 1 ? "it" : "them")
+                      + ", so " + (page.leftoverRules === 1 ? "it keeps" : "they keep")
+                      + " blocking the hosts of lists you may no longer have."
+            }
+            Controls.Button {
+                objectName: "removeLeftovers"
+                visible: !page.confirmingLeftover
+                text: "Remove these rules"
+                icon.name: "edit-delete-remove"
+                onClicked: page.confirmingLeftover = true
+            }
+            // A removal that failed, or left some behind.
+            Controls.Label {
+                objectName: "leftoverReasonText"
+                Layout.fillWidth: true
+                visible: page.leftoverReason.length > 0
+                textFormat: Text.PlainText
+                wrapMode: Text.Wrap
+                color: Kirigami.Theme.negativeTextColor
+                text: page.leftoverReason
+            }
+            RowLayout {
+                visible: page.confirmingLeftover
+                spacing: Kirigami.Units.largeSpacing
+                Controls.Label {
+                    objectName: "leftoverConfirmText"
+                    Layout.fillWidth: true
+                    wrapMode: Text.Wrap
+                    text: page.leftoversProbablyWanted
+                        ? "Remove them? The hosts they block will no longer be blocked until "
+                          + "Snitchwatch is restarted with readable saved blocklists, and not at "
+                          + "all if they are damaged."
+                        : "Remove them from the firewall? The hosts they blocked will no longer "
+                          + "be blocked."
+                }
+                Controls.Button {
+                    objectName: "cancelRemoveLeftovers"
+                    text: "Cancel"
+                    onClicked: page.confirmingLeftover = false
+                }
+                Controls.Button {
+                    objectName: "confirmRemoveLeftovers"
+                    text: "Confirm remove"
+                    icon.name: "edit-delete-remove"
+                    onClicked: {
+                        page.model.removeLeftoverRules();
+                        page.confirmingLeftover = false;
+                    }
+                }
+            }
+        }
         Kirigami.InlineMessage {
             objectName: "perUserBanner"
             Layout.fillWidth: true
             type: Kirigami.MessageType.Warning
             visible: page.perUserBlocklists
             text: "This Snitchwatch service runs for your user only, so it doesn't apply blocklists "
-                + "to the firewall. That needs the system-wide Snitchwatch service."
+                + "to the firewall. That needs the system-wide Snitchwatch service. Blocklist "
+                + "rules a system-wide Snitchwatch service left in the firewall can't be checked "
+                + "or removed from here; start the system-wide service to remove them."
         }
         Kirigami.InlineMessage {
             objectName: "overLimitBanner"
@@ -270,6 +367,18 @@ Kirigami.ScrollablePage {
             page.model.requestEntries(row.listId, 0);
         }
         inspector.open();
+    }
+
+    // The list was downloaded again between two pages (issue #67): the model
+    // dropped the hosts it held rather than mix old and new ones, so ask for
+    // the list from its start.
+    Connections {
+        target: page.entriesModel
+        function onRestartRequested(id) {
+            if (page.model && id === page.inspectId) {
+                page.model.requestEntries(id, 0);
+            }
+        }
     }
 
     // Subscription detail + entries. Kept as an OverlaySheet, same as

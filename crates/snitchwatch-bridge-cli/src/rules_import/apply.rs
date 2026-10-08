@@ -293,7 +293,7 @@ impl Run<'_> {
                     self.stop = Some(NO_DAEMON);
                     return self.not_sent(&name, NO_DAEMON).await;
                 }
-                Err(SendError::NotAllowed) => {
+                Err(SendError::NotAllowed | SendError::NotOnThisTransport) => {
                     error!("an import built a command DaemonCommands won't send; stopping");
                     self.stop = Some(ABORTED);
                     return self.not_sent(&name, ABORTED).await;

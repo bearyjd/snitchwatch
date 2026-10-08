@@ -38,6 +38,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use snitchwatch_bridge::blocklists::daemon_sink::DaemonRuleSink;
 use snitchwatch_bridge::blocklists::fetcher::BlocklistFetch;
+use snitchwatch_bridge::blocklists::leftover::LeftoverRules;
 use snitchwatch_bridge::blocklists::list_dir::ListDir;
 use snitchwatch_bridge::blocklists::store::BlocklistStore;
 use snitchwatch_bridge::blocklists::{BlocklistsManager, NoopRuleSink, RuleSink};
@@ -357,6 +358,9 @@ pub(crate) fn build_blocklists_manager(
     daemon: DaemonRules,
 ) -> Result<Arc<BlocklistsManager>> {
     let (store, storage) = open_blocklist_store(options.storage)?;
+    // Whatever the sink below ends up being, the daemon's rule list and
+    // command channel are how leftover rules are found and removed.
+    let leftover = LeftoverRules::new(daemon.commands.clone(), daemon.rules.clone());
     let sink: Arc<dyn RuleSink> = match &storage {
         Storage::Persistent(_) if options.mode != BridgeMode::System => {
             Arc::new(NoopRuleSink::new(PER_USER_REASON))
@@ -376,7 +380,8 @@ pub(crate) fn build_blocklists_manager(
     };
     let mut manager = BlocklistsManager::new(store)
         .with_storage_status(storage.status())
-        .with_rule_sink(sink);
+        .with_rule_sink(sink)
+        .with_leftover_rules(leftover);
     if let Some(fetcher) = options.blocklist_fetcher {
         manager = manager.with_fetcher(fetcher);
     }

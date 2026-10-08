@@ -35,6 +35,11 @@ pub const RULE_HITS: &str = "ruleHits";
 /// (prompt-slot plan Part C). Implies [`APP_BOUND_RULES`].
 pub const DECIDE_LATER: &str = "decideLater";
 
+/// The bridge sends `SetBlocklistLeftovers` (issue #73). A bridge without it
+/// never says "none left", so a client must not keep a count an earlier
+/// bridge sent.
+pub const BLOCKLIST_LEFTOVERS: &str = "blocklistLeftovers";
+
 /// What this bridge advertises to every authenticated client.
 pub fn advertised() -> Vec<String> {
     vec![
@@ -43,6 +48,7 @@ pub fn advertised() -> Vec<String> {
         PAUSE_ANSWERS_WAITING.to_string(),
         RULE_HITS.to_string(),
         DECIDE_LATER.to_string(),
+        BLOCKLIST_LEFTOVERS.to_string(),
     ]
 }
 
@@ -88,7 +94,8 @@ mod tests {
                     "promptSlot",
                     "pauseAnswersWaiting",
                     "ruleHits",
-                    "decideLater"
+                    "decideLater",
+                    "blocklistLeftovers"
                 ],
             })
         );

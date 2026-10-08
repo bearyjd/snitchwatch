@@ -5,6 +5,19 @@
 
 use serde::{Deserialize, Serialize};
 
+mod blocklist_wire;
+mod verdict_wire;
+pub use blocklist_wire::{
+    BlocklistEntry, BlocklistSummary, BLOCKLIST_ENTRIES_PAGE_MAX, ENFORCEMENT_NOT_ENFORCED,
+    ENFORCEMENT_PENDING, ENFORCEMENT_RULE_INSTALLED, LEFTOVER_CAUSE_NO_STATE_DIR,
+    LEFTOVER_CAUSE_STORE_UNREADABLE,
+};
+
+pub use verdict_wire::{
+    effective_verdict_duration, AutoAnswer, ConnectionRow, VerdictAction, VerdictDuration,
+    VerdictScope,
+};
+
 use crate::notice::Notice;
 use crate::tray_state::TrayState;
 
@@ -114,10 +127,31 @@ pub enum ServerMessage {
     SetBlocklistDetails {
         details: BlocklistSummary,
     },
+    /// How many blocklist rules Snitchwatch made are still in the firewall
+    /// with nothing managing them (issue #73): this service has no state
+    /// directory, is a per-user one, or can't read its saved subscriptions.
+    /// Sent after every `SetBlocklists`; `0` clears the page's notice. The
+    /// user can remove them with `RemoveLeftoverBlocklistRules`. Additive:
+    /// older clients ignore it. `cause` says why nothing manages them (one of
+    /// the `LEFTOVER_CAUSE_*` values; a client treats one it doesn't know
+    /// like none), because with an unreadable store they are probably lists
+    /// the user still subscribes to. `reason` is how the last removal went
+    /// when it didn't fully succeed: plain text, absent otherwise.
+    SetBlocklistLeftovers {
+        count: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cause: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
     /// One page (at most [`BLOCKLIST_ENTRIES_PAGE_MAX`] hosts, starting at
     /// `offset`) of a subscription's `total` hosts, sent only in answer to
     /// `RequestBlocklistEntries` (issue #45: a whole list in one frame
-    /// overflowed GUI clients).
+    /// overflowed GUI clients). Sent to every connected GUI, so
+    /// `request_id` echoes the request it answers (issue #67): a GUI keeps
+    /// only its own pages. `last_updated_iso8601` is when the list was last
+    /// downloaded: pages of one list with different values come from
+    /// different contents, and a GUI starts over rather than mix them.
     SetBlocklistEntries {
         subscription_id: String,
         entries: Vec<BlocklistEntry>,
@@ -125,6 +159,10 @@ pub enum ServerMessage {
         offset: u64,
         #[serde(default)]
         total: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        last_updated_iso8601: Option<String>,
     },
     SetBlocklistEntryLocation {
         subscription_id: String,
@@ -439,15 +477,26 @@ pub enum ClientMessage {
     UnsubscribeBlocklist {
         id: String,
     },
+    /// Delete the leftover blocklist rules `SetBlocklistLeftovers` counts.
+    /// Ignored while this service manages its blocklist rules.
+    RemoveLeftoverBlocklistRules,
     /// Ask for a page of a subscription's hosts; answered with
     /// `SetBlocklistEntries`. `limit` is capped at
-    /// [`BLOCKLIST_ENTRIES_PAGE_MAX`].
+    /// [`BLOCKLIST_ENTRIES_PAGE_MAX`]. `request_id` (optional; see
+    /// [`valid_request_id`]) comes back on the page that answers it. The
+    /// page goes only to the connection that asked (`reply`, stamped by
+    /// `ws_server`, never from the wire); a request with no connection (an
+    /// in-process sender) is answered on the broadcast.
     RequestBlocklistEntries {
         subscription_id: String,
         #[serde(default)]
         offset: u64,
         #[serde(default)]
         limit: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+        #[serde(skip)]
+        reply: Option<ReplyTo>,
     },
     CreateProfile {
         id: String,
@@ -594,6 +643,12 @@ impl ReplyTo {
         self.stalled
             .store(true, std::sync::atomic::Ordering::SeqCst);
     }
+
+    /// The connection took an answer again: it is reading after all.
+    pub fn clear_stalled(&self) {
+        self.stalled
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 impl std::fmt::Debug for ReplyTo {
@@ -606,163 +661,6 @@ impl PartialEq for ReplyTo {
     fn eq(&self, other: &Self) -> bool {
         self.tx.same_channel(&other.tx)
     }
-}
-
-/// Resolve [`ClientMessage::SetVerdict`]'s effective duration from the new
-/// `duration` field and the legacy `remember` flag: an explicit duration
-/// always wins; otherwise legacy `remember: true` means [`VerdictDuration::
-/// Always`] (that's exactly what the pre-duration protocol expressed with it)
-/// and anything else is a one-shot verdict.
-pub fn effective_verdict_duration(
-    duration: Option<VerdictDuration>,
-    remember: Option<bool>,
-) -> VerdictDuration {
-    duration.unwrap_or(if remember.unwrap_or(false) {
-        VerdictDuration::Always
-    } else {
-        VerdictDuration::Once
-    })
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "lowercase")]
-pub enum VerdictAction {
-    Allow,
-    Deny,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum VerdictScope {
-    /// Exact destination host only.
-    ThisHost,
-    /// Wildcard the leftmost label of the destination host.
-    AnyHostOnDomain,
-    /// Drop the host operator entirely.
-    AnyHost,
-}
-
-/// How long a verdict's resulting rule should live, per the Little-Snitch-
-/// parity duration selector on the Kirigami shell's pending-decision dialog
-/// ("This time" / "For 5 minutes" / "Until firewall restarts" / "Forever").
-///
-/// Maps onto opensnitchd's native `Rule.duration` semantics
-/// (`vendor/opensnitch/daemon/rule/rule.go`): the daemon defines three named
-/// durations (`once`, `until restart`, `always`) plus arbitrary
-/// Go-`time.ParseDuration`-compatible strings (e.g. `"5m"`) for auto-expiring
-/// temporary rules (`vendor/opensnitch/daemon/rule/loader.go`'s
-/// `scheduleTemporaryRule`). The mapping used by [`Self::daemon_duration_str`]:
-///
-/// | UI option        | Wire value      | Daemon `Rule.duration` |
-/// |-------------------|-----------------|------------------------|
-/// | This time         | `once`          | `"once"`               |
-/// | For 5 minutes     | `five_minutes`  | `"5m"`                 |
-/// | Until firewall restarts | `until_restart` | `"until restart"` |
-/// | Forever           | `always`        | `"always"`             |
-///
-/// The third option used to read "Until quit", though opensnitchd has no
-/// per-process rule lifetime: "until restart" keeps the rule until the daemon
-/// itself restarts, so Kirigami now labels it for that (its QML token is still
-/// `until_quit`). The Tauri shell and the vendored web UI keep their labels as
-/// they are: neither offers a duration selector (they send the legacy
-/// `remember` instead).
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum VerdictDuration {
-    Once,
-    FiveMinutes,
-    UntilRestart,
-    Always,
-}
-
-impl VerdictDuration {
-    /// The exact string opensnitchd's `Rule.duration` field expects.
-    pub fn daemon_duration_str(self) -> &'static str {
-        match self {
-            Self::Once => "once",
-            Self::FiveMinutes => "5m",
-            Self::UntilRestart => "until restart",
-            Self::Always => "always",
-        }
-    }
-
-    /// Whether this duration persists the rule beyond the current connection
-    /// (i.e. anything other than a one-shot decision).
-    pub fn remembers(self) -> bool {
-        !matches!(self, Self::Once)
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct ConnectionRow {
-    pub id: String,
-    pub process: String,
-    pub process_path: Option<String>,
-    pub dst_host: String,
-    pub dst_ip: String,
-    pub dst_port: u16,
-    pub protocol: String,
-    pub direction: String,
-    /// `null` for pending rows, `"allow"` / `"deny"` / `"blocklist"` once decided.
-    /// A `deferred` row may also be `null`: the daemon applied its default
-    /// action and the bridge doesn't know which one that is.
-    pub action: Option<String>,
-    pub bytes_sent: u64,
-    pub bytes_received: u64,
-    pub started_at_ms: i64,
-    /// Name of the opensnitchd rule that decided this connection's `action`,
-    /// if known. `None` while the row is pending (no rule has fired yet —
-    /// that's exactly why the daemon asked). Once decided, this is either the
-    /// synthetic once-off rule name the bridge handed back for an interactive
-    /// verdict (see `translator::verdict::rule_name_for`), or the name of a
-    /// pre-existing rule the daemon itself reports as having matched, via
-    /// `Statistics.events[].rule.name` on a `Ping` call (see
-    /// `translator::connection::event_to_row`). `None` on a
-    /// `decided_by_default` row: no rule decided it. Additive field: old wire
-    /// payloads without it deserialize with `None` via `#[serde(default)]`,
-    /// and it is omitted from serialized JSON when absent so existing
-    /// consumers (the web frontend) that don't know about it are unaffected.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub matched_rule: Option<String>,
-    /// Set when the bridge answered this connection itself rather than a
-    /// person (issue #78). Additive and omitted when absent, like
-    /// `matched_rule`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auto_answer: Option<AutoAnswer>,
-    /// When the bridge answers this pending row itself if nobody does
-    /// (prompt-slot plan Part C), in Unix milliseconds. Only on pending rows.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub answer_deadline_ms: Option<i64>,
-    /// The prompt was put off rather than decided: nobody answered it in
-    /// time, or someone chose "Decide later". A rule can still be made for
-    /// it. Additive, omitted when false.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub deferred: bool,
-    /// No rule matched: the firewall's default action decided this
-    /// connection, as the daemon reported it (E3, plan
-    /// `2026-10-08-default-applied-events.md`). `action` is the action it
-    /// applied and `matched_rule` is `None`. Never inferred from a missing
-    /// `matched_rule`. Additive, omitted when false.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub decided_by_default: bool,
-}
-
-/// Why the bridge answered a connection without a person (issue #78).
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub enum AutoAnswer {
-    /// Allowed once because filtering was paused: either the prompt was
-    /// already waiting when the pause took effect, or the connection arrived
-    /// during it (`pause_answers`).
-    FilterPaused,
-    /// Nobody answered within `deferred_answers::ANSWER_TIMEOUT`, so the
-    /// daemon applied its default action (prompt-slot plan Part C).
-    NoAnswer,
-    /// A reason this build doesn't know, from a newer bridge. Keeps the row
-    /// readable instead of failing the whole message.
-    #[serde(other)]
-    Unknown,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -789,40 +687,6 @@ pub struct AboutInfo {
     pub ebpf_commit: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BlocklistSummary {
-    pub id: String,
-    pub display_name: String,
-    pub url: String,
-    pub entry_count: i64,
-    /// The download result (`pending` / `ok` / `failed`), not enforcement.
-    pub status: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub last_updated_iso8601: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub last_failure_reason: Option<String>,
-    /// One of the `ENFORCEMENT_*` values. Empty from an older bridge, which
-    /// enforced nothing.
-    #[serde(default)]
-    pub enforcement: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub enforcement_reason: Option<String>,
-}
-
-/// Most hosts in one `SetBlocklistEntries` page (~260 KiB of JSON at most).
-pub const BLOCKLIST_ENTRIES_PAGE_MAX: u32 = 1000;
-
-/// [`BlocklistSummary::enforcement`]: not downloaded or pushed yet.
-pub const ENFORCEMENT_PENDING: &str = "pending";
-/// [`BlocklistSummary::enforcement`]: the daemon accepted the list's rule,
-/// or already held it unchanged. The daemon may still have loaded 0
-/// entries, so GUIs say "Rule installed", never "Enforced".
-pub const ENFORCEMENT_RULE_INSTALLED: &str = "rule_installed";
-/// [`BlocklistSummary::enforcement`]: nothing blocks this list's hosts; see
-/// `enforcement_reason`.
-pub const ENFORCEMENT_NOT_ENFORCED: &str = "not_enforced";
-
 /// Where the bridge keeps blocklist subscriptions (`SetBlocklists`) or
 /// profiles (`SetProfiles`); each store reports its own.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -841,12 +705,6 @@ pub struct StorageStatus {
     /// unreadable profile store is reported as not persistent instead.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub unreadable: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BlocklistEntry {
-    pub host: String,
 }
 
 /// One rule override within a profile, as carried over the wire (mirrors
@@ -888,859 +746,16 @@ pub struct ProfileSummary {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn server_message_round_trips_via_json() {
-        let msg = ServerMessage::InsertConnectionRows {
-            rows: vec![ConnectionRow {
-                id: "r1".to_string(),
-                process: "firefox".to_string(),
-                process_path: Some("/usr/bin/firefox".to_string()),
-                dst_host: "github.com".to_string(),
-                dst_ip: "140.82.121.4".to_string(),
-                dst_port: 443,
-                protocol: "tcp".to_string(),
-                direction: "outgoing".to_string(),
-                action: None,
-                bytes_sent: 0,
-                bytes_received: 0,
-                started_at_ms: 1_700_000_000_000,
-                matched_rule: None,
-                auto_answer: None,
-                answer_deadline_ms: None,
-                deferred: false,
-                decided_by_default: false,
-            }],
-        };
-
-        let json = serde_json::to_string(&msg).unwrap();
-        assert!(json.contains(r#""action":"insertConnectionRows""#));
-        assert!(json.contains(r#""dstHost":"github.com""#));
-        assert!(
-            !json.contains("matchedRule"),
-            "matchedRule must be omitted when None, so old web-frontend consumers are unaffected: {json}"
-        );
-
-        let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed, msg);
-    }
-
-    #[test]
-    fn authenticated_ack_is_a_backward_compatible_wire_extension() {
-        let message = ServerMessage::Authenticated {
-            capabilities: Vec::new(),
-        };
-        let json = serde_json::to_string(&message).unwrap();
-        assert_eq!(json, r#"{"action":"authenticated"}"#);
-        assert_eq!(
-            serde_json::from_str::<ServerMessage>(&json).unwrap(),
-            message
-        );
-    }
-
-    #[test]
-    fn deny_scope_narrowed_round_trips_via_json() {
-        // Issue #14 security review round 2, HIGH: this must be a real
-        // wire-protocol message the WS client actually receives, not just a
-        // desktop-notification side channel.
-        let msg = ServerMessage::DenyScopeNarrowed {
-            row_id: "ask-7".to_string(),
-            reason: "the destination host has no subdomain that can be safely wildcarded below \
-                     its public suffix"
-                .to_string(),
-        };
-
-        let json = serde_json::to_string(&msg).unwrap();
-        assert!(json.contains(r#""action":"denyScopeNarrowed""#));
-        assert!(json.contains(r#""rowId":"ask-7""#));
-
-        let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed, msg);
-    }
-
-    #[test]
-    fn shell_state_extensions_round_trip_via_json() {
-        let tray = ServerMessage::TrayState {
-            state: TrayState::Pending(3),
-        };
-        let notice = ServerMessage::Notice {
-            notice: Notice::Pending {
-                row_id: 42,
-                process: "firefox".into(),
-            },
-        };
-
-        for message in [tray, notice] {
-            let json = serde_json::to_string(&message).unwrap();
-            let decoded: ServerMessage = serde_json::from_str(&json).unwrap();
-            assert_eq!(decoded, message);
-        }
-    }
-
-    #[test]
-    fn legacy_web_dispatcher_ignores_shell_only_wire_extensions() {
-        // The bundled legacy web client has an explicit default branch for
-        // unknown server actions. Keep the extension discriminators absent
-        // from its known-action switch: authenticated native shells consume
-        // them, while old web clients continue their normal message loop.
-        let legacy_dispatcher = include_str!("../../../web/js/app.js");
-        assert!(legacy_dispatcher.contains("function handleServerCommand(messageArray)"));
-        assert!(legacy_dispatcher
-            .contains("default:\n          console.warn(\"Unknown msg from server\""));
-
-        for message in [
-            ServerMessage::Authenticated {
-                capabilities: crate::bridge_capabilities::advertised(),
-            },
-            ServerMessage::TrayState {
-                state: TrayState::Idle,
-            },
-            ServerMessage::Notice {
-                notice: Notice::DaemonAway,
-            },
-            ServerMessage::FilterPauseState {
-                paused: false,
-                expires_at_unix_ms: None,
-            },
-            crate::prompt_slot::PromptSlot::default().message(),
-            ServerMessage::RuleHits {
-                since_unix_ms: None,
-                lossy: false,
-                last_gap_unix_ms: None,
-                storage: StorageStatus {
-                    persistent: false,
-                    reason: None,
-                    unreadable: false,
-                },
-                hits: Vec::new(),
-            },
-        ] {
-            let action = serde_json::to_value(message).unwrap()["action"]
-                .as_str()
-                .unwrap()
-                .to_owned();
-            assert!(
-                !legacy_dispatcher.contains(&format!("case \"{action}\"")),
-                "legacy web client must treat {action} as an ignorable unknown action"
-            );
-        }
-    }
-
-    #[test]
-    fn connection_row_carries_matched_rule_when_decided() {
-        let row = ConnectionRow {
-            id: "r1".to_string(),
-            process: "firefox".to_string(),
-            process_path: Some("/usr/bin/firefox".to_string()),
-            dst_host: "github.com".to_string(),
-            dst_ip: "140.82.121.4".to_string(),
-            dst_port: 443,
-            protocol: "tcp".to_string(),
-            direction: "outgoing".to_string(),
-            action: Some("allow".to_string()),
-            bytes_sent: 0,
-            bytes_received: 0,
-            started_at_ms: 1_700_000_000_000,
-            matched_rule: Some("899-firefox-allow-out.json".to_string()),
-            auto_answer: None,
-            answer_deadline_ms: None,
-            deferred: false,
-            decided_by_default: false,
-        };
-        let json = serde_json::to_value(&row).unwrap();
-        assert_eq!(json["matchedRule"], "899-firefox-allow-out.json");
-
-        let parsed: ConnectionRow = serde_json::from_value(json).unwrap();
-        assert_eq!(parsed, row);
-    }
-
-    #[test]
-    fn connection_row_without_matched_rule_field_defaults_to_none() {
-        // Simulates an old wire payload (or a hand-authored test fixture)
-        // that predates this field entirely.
-        let json = serde_json::json!({
-            "id": "r1",
-            "process": "firefox",
-            "processPath": null,
-            "dstHost": "github.com",
-            "dstIp": "140.82.121.4",
-            "dstPort": 443,
-            "protocol": "tcp",
-            "direction": "outgoing",
-            "action": null,
-            "bytesSent": 0,
-            "bytesReceived": 0,
-            "startedAtMs": 0
-        });
-        let parsed: ConnectionRow = serde_json::from_value(json).unwrap();
-        assert_eq!(parsed.matched_rule, None);
-        assert!(!parsed.decided_by_default);
-    }
-
-    /// E3 (plan `2026-10-08-default-applied-events.md`): additive like
-    /// `deferred`, absent unless set.
-    #[test]
-    fn decided_by_default_is_sent_only_when_set_and_has_no_rule() {
-        let row = ConnectionRow {
-            id: "event-1".to_string(),
-            process: "curl".to_string(),
-            process_path: Some("/usr/bin/curl".to_string()),
-            dst_host: "example.com".to_string(),
-            dst_ip: "93.184.216.34".to_string(),
-            dst_port: 443,
-            protocol: "tcp".to_string(),
-            direction: "outgoing".to_string(),
-            action: Some("deny".to_string()),
-            bytes_sent: 0,
-            bytes_received: 0,
-            started_at_ms: 1,
-            matched_rule: None,
-            auto_answer: None,
-            answer_deadline_ms: None,
-            deferred: false,
-            decided_by_default: true,
-        };
-        let json = serde_json::to_value(&row).unwrap();
-        assert_eq!(json["decidedByDefault"], true);
-        assert!(json.get("matchedRule").is_none(), "{json}");
-        let parsed: ConnectionRow = serde_json::from_value(json).unwrap();
-        assert_eq!(parsed, row);
-
-        let plain = ConnectionRow {
-            decided_by_default: false,
-            ..row
-        };
-        let json = serde_json::to_value(&plain).unwrap();
-        assert!(json.get("decidedByDefault").is_none(), "{json}");
-    }
-
-    #[test]
-    fn move_connection_rows_preserves_upstream_typo() {
-        let msg = ServerMessage::MoveConnetionRows {
-            ids: vec!["r1".to_string()],
-        };
-        let json = serde_json::to_string(&msg).unwrap();
-        assert!(
-            json.contains(r#""action":"moveConnetionRows""#),
-            "must preserve upstream LS typo: {}",
-            json
-        );
-    }
-
-    #[test]
-    fn client_set_verdict_parses() {
-        let json = r#"{
-            "action": "setVerdict",
-            "rowId": "r1",
-            "verdict": "allow",
-            "scope": "this_host",
-            "duration": "always"
-        }"#;
-        let parsed: ClientMessage = serde_json::from_str(json).unwrap();
-        match parsed {
-            ClientMessage::SetVerdict {
-                row_id,
-                verdict,
-                scope,
-                duration,
-                remember,
-            } => {
-                assert_eq!(row_id, "r1");
-                assert_eq!(verdict, VerdictAction::Allow);
-                assert_eq!(scope, VerdictScope::ThisHost);
-                assert_eq!(duration, Some(VerdictDuration::Always));
-                assert_eq!(remember, None);
-            }
-            _ => panic!("wrong variant"),
-        }
-    }
-
-    #[test]
-    fn client_set_verdict_parses_legacy_remember_shape() {
-        // The pre-duration wire shape the vendored web/ frontend still sends.
-        let json = r#"{
-            "action": "setVerdict",
-            "rowId": "r1",
-            "verdict": "deny",
-            "scope": "this_host",
-            "remember": true
-        }"#;
-        let parsed: ClientMessage = serde_json::from_str(json).unwrap();
-        match parsed {
-            ClientMessage::SetVerdict {
-                duration, remember, ..
-            } => {
-                assert_eq!(duration, None);
-                assert_eq!(remember, Some(true));
-                assert_eq!(
-                    effective_verdict_duration(duration, remember),
-                    VerdictDuration::Always
-                );
-            }
-            _ => panic!("wrong variant"),
-        }
-    }
-
-    #[test]
-    fn effective_verdict_duration_folds_legacy_and_new() {
-        use VerdictDuration::*;
-        // Explicit duration always wins, even over remember.
-        assert_eq!(
-            effective_verdict_duration(Some(FiveMinutes), Some(true)),
-            FiveMinutes
-        );
-        // Legacy remember semantics.
-        assert_eq!(effective_verdict_duration(None, Some(true)), Always);
-        assert_eq!(effective_verdict_duration(None, Some(false)), Once);
-        // Neither present: the safe default.
-        assert_eq!(effective_verdict_duration(None, None), Once);
-    }
-
-    #[test]
-    fn verdict_duration_maps_to_daemon_strings() {
-        assert_eq!(VerdictDuration::Once.daemon_duration_str(), "once");
-        assert_eq!(VerdictDuration::FiveMinutes.daemon_duration_str(), "5m");
-        assert_eq!(
-            VerdictDuration::UntilRestart.daemon_duration_str(),
-            "until restart"
-        );
-        assert_eq!(VerdictDuration::Always.daemon_duration_str(), "always");
-
-        assert!(!VerdictDuration::Once.remembers());
-        assert!(VerdictDuration::FiveMinutes.remembers());
-        assert!(VerdictDuration::UntilRestart.remembers());
-        assert!(VerdictDuration::Always.remembers());
-    }
-
-    #[test]
-    fn verdict_duration_wire_tokens_are_snake_case() {
-        assert_eq!(
-            serde_json::to_value(VerdictDuration::FiveMinutes).unwrap(),
-            "five_minutes"
-        );
-        assert_eq!(
-            serde_json::to_value(VerdictDuration::UntilRestart).unwrap(),
-            "until_restart"
-        );
-    }
-}
+mod tests;
 
 #[cfg(test)]
-mod blocklist_message_tests {
-    use super::*;
-
-    #[test]
-    fn set_blocklists_serializes_to_camel_case_action() {
-        let msg = ServerMessage::SetBlocklists {
-            blocklists: vec![BlocklistSummary {
-                id: "stevenblack".into(),
-                display_name: "StevenBlack".into(),
-                url: "https://x.example/hosts".into(),
-                entry_count: 1234,
-                status: "ok".into(),
-                last_updated_iso8601: Some("2026-04-11T12:00:00Z".into()),
-                last_failure_reason: None,
-                enforcement: ENFORCEMENT_NOT_ENFORCED.into(),
-                enforcement_reason: Some("no rule sink yet".into()),
-            }],
-            storage: Some(StorageStatus {
-                unreadable: false,
-                persistent: false,
-                reason: Some("blocklist store: disk full".into()),
-            }),
-        };
-        let json = serde_json::to_value(&msg).unwrap();
-        assert_eq!(json["action"], "setBlocklists");
-        assert_eq!(json["blocklists"][0]["id"], "stevenblack");
-        assert_eq!(json["blocklists"][0]["displayName"], "StevenBlack");
-        assert_eq!(json["blocklists"][0]["entryCount"], 1234);
-        assert_eq!(json["blocklists"][0]["enforcement"], "not_enforced");
-        assert_eq!(
-            json["blocklists"][0]["enforcementReason"],
-            "no rule sink yet"
-        );
-        assert_eq!(json["storage"]["persistent"], false);
-        assert_eq!(json["storage"]["reason"], "blocklist store: disk full");
-    }
-
-    /// An older bridge sends neither `storage` nor the enforcement fields.
-    #[test]
-    fn set_blocklists_from_an_older_bridge_still_parses() {
-        let json = r#"{"action":"setBlocklists","blocklists":[{"id":"a","displayName":"A",
-            "url":"https://x.example/a","entryCount":1,"status":"ok"}]}"#;
-        match serde_json::from_str::<ServerMessage>(json).unwrap() {
-            ServerMessage::SetBlocklists {
-                blocklists,
-                storage,
-            } => {
-                assert_eq!(storage, None);
-                assert_eq!(blocklists[0].enforcement, "");
-                assert_eq!(blocklists[0].enforcement_reason, None);
-            }
-            other => panic!("expected SetBlocklists, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn set_blocklist_entries_carries_strongly_typed_entries() {
-        let msg = ServerMessage::SetBlocklistEntries {
-            offset: 0,
-            total: 2,
-            subscription_id: "stevenblack".into(),
-            entries: vec![
-                BlocklistEntry {
-                    host: "doubleclick.net".into(),
-                },
-                BlocklistEntry {
-                    host: "google-analytics.com".into(),
-                },
-            ],
-        };
-        let json = serde_json::to_value(&msg).unwrap();
-        assert_eq!(json["action"], "setBlocklistEntries");
-        assert_eq!(json["subscriptionId"], "stevenblack");
-        assert_eq!(json["entries"][0]["host"], "doubleclick.net");
-    }
-
-    /// Issue #45 (S2): the largest possible entries page (every host at the
-    /// 253-byte maximum) stays far below a GUI client's 16 MiB frame limit.
-    #[test]
-    fn the_largest_entries_page_fits_one_small_frame() {
-        let host = format!("{}.example", "a".repeat(245));
-        let msg = ServerMessage::SetBlocklistEntries {
-            subscription_id: "x".repeat(81),
-            entries: (0..BLOCKLIST_ENTRIES_PAGE_MAX)
-                .map(|_| BlocklistEntry { host: host.clone() })
-                .collect(),
-            offset: u64::MAX,
-            total: u64::MAX,
-        };
-        let json = serde_json::to_string(&msg).unwrap();
-        assert!(json.len() < 1024 * 1024, "{} bytes", json.len());
-    }
-
-    #[test]
-    fn request_blocklist_entries_parses_with_defaults() {
-        let parsed: ClientMessage =
-            serde_json::from_str(r#"{"action":"requestBlocklistEntries","subscriptionId":"a"}"#)
-                .unwrap();
-        assert_eq!(
-            parsed,
-            ClientMessage::RequestBlocklistEntries {
-                subscription_id: "a".into(),
-                offset: 0,
-                limit: None,
-            }
-        );
-    }
-
-    #[test]
-    fn subscribe_blocklist_action_round_trips() {
-        let action = ClientMessage::SubscribeBlocklist {
-            url: "https://x.example/hosts".into(),
-        };
-        let json = serde_json::to_string(&action).unwrap();
-        let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed, action);
-    }
-}
+mod blocklist_message_tests;
 
 #[cfg(test)]
-mod profile_message_tests {
-    use super::*;
-
-    fn summary(id: &str, active: bool) -> ProfileSummary {
-        ProfileSummary {
-            id: id.into(),
-            name: "At Home".into(),
-            network_matchers: vec!["Home*".into()],
-            rules: vec![ProfileRuleWire {
-                id: "r1".into(),
-                action: "allow".into(),
-                operand: "dest.host".into(),
-                data: "nas.local".into(),
-                ..Default::default()
-            }],
-            active,
-        }
-    }
-
-    #[test]
-    fn set_profiles_serializes_to_camel_case_action() {
-        let msg = ServerMessage::SetProfiles {
-            profiles: vec![summary("home", true)],
-            storage: Some(StorageStatus {
-                unreadable: false,
-                persistent: false,
-                reason: Some("profile store: disk full".into()),
-            }),
-            applies_rules: false,
-            not_applied_reason: Some("per-user".into()),
-        };
-        let json = serde_json::to_value(&msg).unwrap();
-        assert_eq!(json["appliesRules"], false);
-        assert_eq!(json["notAppliedReason"], "per-user");
-        assert_eq!(json["action"], "setProfiles");
-        assert_eq!(json["profiles"][0]["id"], "home");
-        assert_eq!(json["profiles"][0]["networkMatchers"][0], "Home*");
-        assert_eq!(json["profiles"][0]["rules"][0]["operand"], "dest.host");
-        assert_eq!(json["profiles"][0]["active"], true);
-        assert_eq!(json["storage"]["persistent"], false);
-        assert_eq!(json["storage"]["reason"], "profile store: disk full");
-    }
-
-    /// Issue #46: an older bridge sends no `storage`; GUIs treat that as not
-    /// persistent.
-    #[test]
-    fn set_profiles_from_an_older_bridge_still_parses() {
-        let json = r#"{"action":"setProfiles","profiles":[{"id":"a","name":"A",
-            "networkMatchers":[],"rules":[],"active":false}]}"#;
-        match serde_json::from_str::<ServerMessage>(json).unwrap() {
-            ServerMessage::SetProfiles {
-                profiles,
-                storage,
-                applies_rules,
-                ..
-            } => {
-                assert_eq!(storage, None);
-                assert!(!applies_rules, "an older bridge applied no profile rules");
-                assert_eq!(profiles[0].id, "a");
-            }
-            other => panic!("expected SetProfiles, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn set_profiles_round_trips() {
-        let msg = ServerMessage::SetProfiles {
-            profiles: vec![summary("home", false)],
-            storage: Some(StorageStatus {
-                unreadable: false,
-                persistent: true,
-                reason: None,
-            }),
-            applies_rules: true,
-            not_applied_reason: None,
-        };
-        let json = serde_json::to_string(&msg).unwrap();
-        let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed, msg);
-    }
-
-    #[test]
-    fn profile_changed_round_trips_with_and_without_active_id() {
-        let with_id = ServerMessage::ProfileChanged {
-            active_profile_id: Some("home".into()),
-        };
-        let json = serde_json::to_string(&with_id).unwrap();
-        assert!(json.contains(r#""action":"profileChanged""#));
-        assert_eq!(
-            serde_json::from_str::<ServerMessage>(&json).unwrap(),
-            with_id
-        );
-
-        let none = ServerMessage::ProfileChanged {
-            active_profile_id: None,
-        };
-        let json = serde_json::to_string(&none).unwrap();
-        assert_eq!(serde_json::from_str::<ServerMessage>(&json).unwrap(), none);
-    }
-
-    #[test]
-    fn create_profile_round_trips() {
-        let action = ClientMessage::CreateProfile {
-            id: "home".into(),
-            name: "At Home".into(),
-            network_matchers: vec!["Home*".into()],
-        };
-        let json = serde_json::to_string(&action).unwrap();
-        assert!(json.contains(r#""action":"createProfile""#));
-        assert!(json.contains(r#""networkMatchers""#));
-        assert_eq!(
-            serde_json::from_str::<ClientMessage>(&json).unwrap(),
-            action
-        );
-    }
-
-    #[test]
-    fn activate_and_deactivate_profile_round_trip() {
-        let activate = ClientMessage::ActivateProfile { id: "home".into() };
-        let json = serde_json::to_string(&activate).unwrap();
-        assert_eq!(
-            serde_json::from_str::<ClientMessage>(&json).unwrap(),
-            activate
-        );
-
-        let deactivate = ClientMessage::DeactivateProfile;
-        let json = serde_json::to_string(&deactivate).unwrap();
-        assert_eq!(json, r#"{"action":"deactivateProfile"}"#);
-        assert_eq!(
-            serde_json::from_str::<ClientMessage>(&json).unwrap(),
-            deactivate
-        );
-    }
-
-    #[test]
-    fn add_and_remove_profile_rule_round_trip() {
-        let add = ClientMessage::AddProfileRule {
-            profile_id: "home".into(),
-            rule: ProfileRuleWire {
-                id: "r1".into(),
-                action: "deny".into(),
-                operand: "dest.host".into(),
-                data: "ads.example".into(),
-                ..Default::default()
-            },
-            request_id: None,
-            reply: None,
-        };
-        let json = serde_json::to_string(&add).unwrap();
-        assert_eq!(serde_json::from_str::<ClientMessage>(&json).unwrap(), add);
-
-        let remove = ClientMessage::RemoveProfileRule {
-            profile_id: "home".into(),
-            rule_id: "r1".into(),
-        };
-        let json = serde_json::to_string(&remove).unwrap();
-        assert_eq!(
-            serde_json::from_str::<ClientMessage>(&json).unwrap(),
-            remove
-        );
-    }
-}
+mod profile_message_tests;
 
 #[cfg(test)]
-mod filtering_pause_tests {
-    use super::*;
-
-    fn set_filtering_paused(paused: bool, duration_secs: Option<u64>) -> ClientMessage {
-        ClientMessage::SetFilteringPaused {
-            paused,
-            duration_secs,
-            sender_generation: None,
-            sender_uid: None,
-        }
-    }
-
-    #[test]
-    fn client_set_filtering_paused_round_trips() {
-        let msg = set_filtering_paused(true, Some(1800));
-        let json = serde_json::to_string(&msg).unwrap();
-        assert_eq!(
-            json,
-            r#"{"action":"setFilteringPaused","paused":true,"durationSecs":1800}"#
-        );
-        assert_eq!(serde_json::from_str::<ClientMessage>(&json).unwrap(), msg);
-
-        let resume = set_filtering_paused(false, None);
-        let json = serde_json::to_string(&resume).unwrap();
-        assert_eq!(json, r#"{"action":"setFilteringPaused","paused":false}"#);
-        assert_eq!(
-            serde_json::from_str::<ClientMessage>(&json).unwrap(),
-            resume
-        );
-    }
-
-    #[test]
-    fn legacy_pause_without_a_duration_still_parses() {
-        assert_eq!(
-            serde_json::from_str::<ClientMessage>(
-                r#"{"action":"setFilteringPaused","paused":true}"#
-            )
-            .unwrap(),
-            set_filtering_paused(true, None)
-        );
-    }
-
-    #[test]
-    fn a_client_cannot_supply_the_sender_generation() {
-        let parsed: ClientMessage = serde_json::from_str(
-            r#"{"action":"setFilteringPaused","paused":true,"durationSecs":300,"senderGeneration":7,"senderUid":0}"#,
-        )
-        .unwrap();
-        assert_eq!(parsed, set_filtering_paused(true, Some(300)));
-
-        let stamped = ClientMessage::SetFilteringPaused {
-            paused: true,
-            duration_secs: Some(300),
-            sender_generation: Some(7),
-            sender_uid: Some(0),
-        };
-        let json = serde_json::to_string(&stamped).unwrap();
-        assert!(
-            !json.contains("sender"),
-            "stamp leaked onto the wire: {json}"
-        );
-    }
-
-    /// P2.6 Part 1: the largest `RuleHits` the bridge can send (every rule
-    /// it tracks, each name at the length limit and made of characters JSON
-    /// doubles, the widest numbers, a long storage reason) fits one frame of
-    /// a GUI client with tungstenite's default limit (the Kirigami shell's
-    /// `client_async` uses the default config).
-    #[test]
-    fn the_largest_rule_hits_fits_a_gui_clients_frame() {
-        use crate::cache::rule_hits::{MAX_HIT_NAME_BYTES, MAX_TRACKED_RULES};
-        let limit = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
-            .max_frame_size
-            .expect("tungstenite's default has a frame limit");
-        let hits = (0..MAX_TRACKED_RULES)
-            .map(|i| {
-                let stem = format!("{i:05}");
-                let fill = "\"\\".repeat((MAX_HIT_NAME_BYTES - stem.len()) / 2);
-                RuleHitWire {
-                    name: format!("{stem}{fill}"),
-                    count: u64::MAX,
-                    last_hit_unix_ms: i64::MIN,
-                }
-            })
-            .collect();
-        let msg = ServerMessage::RuleHits {
-            since_unix_ms: Some(i64::MIN),
-            lossy: true,
-            last_gap_unix_ms: Some(i64::MIN),
-            storage: StorageStatus {
-                persistent: false,
-                // Two paths at PATH_MAX and an OS error, all escaped.
-                reason: Some("\"".repeat(16 * 1024)),
-                unreadable: false,
-            },
-            hits,
-        };
-        let json = serde_json::to_string(&msg).unwrap();
-        assert!(json.len() < limit, "{} bytes, limit {limit}", json.len());
-    }
-
-    #[test]
-    fn rule_hits_round_trips_with_camel_case_keys() {
-        let message = ServerMessage::RuleHits {
-            since_unix_ms: Some(1_800_000_000_000),
-            lossy: true,
-            last_gap_unix_ms: Some(1_800_000_100_000),
-            storage: StorageStatus {
-                persistent: false,
-                reason: Some("no state directory".into()),
-                unreadable: false,
-            },
-            hits: vec![RuleHitWire {
-                name: "000-allow-curl".into(),
-                count: 7,
-                last_hit_unix_ms: 1_800_000_050_000,
-            }],
-        };
-        let json = serde_json::to_value(&message).unwrap();
-        assert_eq!(
-            json,
-            serde_json::json!({
-                "action": "ruleHits",
-                "sinceUnixMs": 1_800_000_000_000_i64,
-                "lossy": true,
-                "lastGapUnixMs": 1_800_000_100_000_i64,
-                "storage": {"persistent": false, "reason": "no state directory"},
-                "hits": [{"name": "000-allow-curl", "count": 7, "lastHitUnixMs": 1_800_000_050_000_i64}],
-            })
-        );
-        assert_eq!(
-            serde_json::from_value::<ServerMessage>(json).unwrap(),
-            message
-        );
-    }
-
-    #[test]
-    fn filter_pause_state_round_trips() {
-        let paused = ServerMessage::FilterPauseState {
-            paused: true,
-            expires_at_unix_ms: Some(1_800_000_300_000),
-        };
-        let json = serde_json::to_string(&paused).unwrap();
-        assert_eq!(
-            json,
-            r#"{"action":"filterPauseState","paused":true,"expiresAtUnixMs":1800000300000}"#
-        );
-        assert_eq!(
-            serde_json::from_str::<ServerMessage>(&json).unwrap(),
-            paused
-        );
-
-        let not_paused = ServerMessage::FilterPauseState {
-            paused: false,
-            expires_at_unix_ms: None,
-        };
-        let json = serde_json::to_string(&not_paused).unwrap();
-        assert_eq!(
-            serde_json::from_str::<ServerMessage>(&json).unwrap(),
-            not_paused
-        );
-    }
-
-    #[test]
-    fn diagnostics_report_round_trips() {
-        let msg = ServerMessage::DiagnosticsReport {
-            checks: vec![
-                DiagnosticCheck {
-                    kind: CheckKind::DaemonReachable,
-                    status: CheckStatus::Ok,
-                },
-                DiagnosticCheck {
-                    kind: CheckKind::EbpfSupport,
-                    status: CheckStatus::Failed {
-                        detail: "no BTF".to_string(),
-                    },
-                },
-                DiagnosticCheck {
-                    kind: CheckKind::FirewallRunning,
-                    status: CheckStatus::Unknown,
-                },
-            ],
-        };
-        let json = serde_json::to_string(&msg).unwrap();
-        assert!(json.contains("\"action\":\"diagnosticsReport\""));
-        let round_tripped: ServerMessage = serde_json::from_str(&json).unwrap();
-        assert_eq!(round_tripped, msg);
-    }
-
-    #[test]
-    fn recheck_diagnostics_round_trips() {
-        let msg = ClientMessage::RecheckDiagnostics;
-        let json = serde_json::to_string(&msg).unwrap();
-        assert!(json.contains("\"action\":\"recheckDiagnostics\""));
-        let round_tripped: ClientMessage = serde_json::from_str(&json).unwrap();
-        assert_eq!(round_tripped, msg);
-    }
-}
+mod filtering_pause_tests;
 
 #[cfg(test)]
-mod daemon_statistics_message_tests {
-    use super::*;
-
-    #[test]
-    fn daemon_statistics_round_trips_via_json() {
-        let msg = ServerMessage::DaemonStatistics {
-            daemon_version: "1.8.0".to_string(),
-            uptime: 3661,
-            rules: 12,
-            connections: 4200,
-            ignored: 10,
-            accepted: 4000,
-            dropped: 200,
-            rule_hits: 3900,
-            rule_misses: 300,
-        };
-        let json = serde_json::to_value(&msg).unwrap();
-        assert_eq!(json["action"], "daemonStatistics");
-        assert_eq!(json["daemonVersion"], "1.8.0");
-        assert_eq!(json["uptime"], 3661);
-        assert_eq!(json["rules"], 12);
-        assert_eq!(json["connections"], 4200);
-        assert_eq!(json["ignored"], 10);
-        assert_eq!(json["accepted"], 4000);
-        assert_eq!(json["dropped"], 200);
-        assert_eq!(json["ruleHits"], 3900);
-        assert_eq!(json["ruleMisses"], 300);
-
-        let parsed: ServerMessage = serde_json::from_value(json).unwrap();
-        assert_eq!(parsed, msg);
-    }
-}
+mod daemon_statistics_message_tests;

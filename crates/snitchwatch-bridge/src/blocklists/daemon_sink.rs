@@ -22,7 +22,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex as StdMutex, MutexGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use snitchwatch_proto::protocol::Rule;
@@ -49,6 +49,15 @@ const RULES_UNKNOWN_REASON: &str = "Snitchwatch doesn't have the firewall servic
      once it does";
 const NOT_CONNECTED_REASON: &str =
     "The firewall service isn't connected; blocking starts once it connects";
+/// How long an unsubscribed list's files are kept at least: longer than
+/// opensnitchd's 30 s per-path reload limit, so a quick resubscribe finds its
+/// files in place (issue #73). They go at the first orphan purge after that,
+/// so "at least" five minutes, not exactly.
+pub const RELEASE_GRACE: Duration = Duration::from_secs(5 * 60);
+/// Most unsubscribed lists whose files are kept at once. Past it a release
+/// removes the files at once, so unsubscribing and resubscribing many lists
+/// can't pile directories up for the grace.
+const MAX_RELEASED_LISTS: usize = 32;
 /// Longest daemon refusal text shown to the user, in characters.
 const MAX_DAEMON_TEXT_CHARS: usize = 200;
 
@@ -64,6 +73,10 @@ pub struct DaemonRuleSink {
     verified: StdMutex<HashMap<IdComponent, Vec<ListKind>>>,
     /// Blocklist-named rules Snitchwatch didn't make, already logged.
     warned: StdMutex<BTreeSet<String>>,
+    /// Lists unsubscribed in this run whose rules are gone but whose files are
+    /// kept, and since when ([`RELEASE_GRACE`]).
+    released: StdMutex<HashMap<IdComponent, Instant>>,
+    release_grace: Duration,
 }
 
 impl DaemonRuleSink {
@@ -84,7 +97,21 @@ impl DaemonRuleSink {
             confirmed: StdMutex::default(),
             verified: StdMutex::default(),
             warned: StdMutex::default(),
+            released: StdMutex::default(),
+            release_grace: RELEASE_GRACE,
         }
+    }
+
+    /// How long released lists keep their files. Tests.
+    pub fn with_release_grace(mut self, grace: Duration) -> Self {
+        self.release_grace = grace;
+        self
+    }
+
+    fn released(&self) -> MutexGuard<'_, HashMap<IdComponent, Instant>> {
+        self.released
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn verified(&self) -> MutexGuard<'_, HashMap<IdComponent, Vec<ListKind>>> {
@@ -198,8 +225,13 @@ impl DaemonRuleSink {
     }
 
     /// Delete `names`, stopping at the first the daemon can't be reached
-    /// for. A refused delete is logged and skipped.
-    async fn delete(&self, names: impl IntoIterator<Item = String>) -> Result<(), NotInstalled> {
+    /// for. A refused delete is logged and skipped; the names it was refused
+    /// for come back.
+    async fn delete(
+        &self,
+        names: impl IntoIterator<Item = String>,
+    ) -> Result<Vec<String>, NotInstalled> {
+        let mut refused = Vec::new();
         for name in names {
             let Some(command) = BlocklistCommand::delete(&name) else {
                 continue;
@@ -209,10 +241,13 @@ impl DaemonRuleSink {
                     self.confirmed().remove(&name);
                 }
                 Err(e) if e.daemon_unavailable => return Err(e),
-                Err(e) => warn!(reason = %e.reason, "daemon refused to delete a blocklist rule"),
+                Err(e) => {
+                    warn!(reason = %e.reason, "daemon refused to delete a blocklist rule");
+                    refused.push(name);
+                }
             }
         }
-        Ok(())
+        Ok(refused)
     }
 
     /// Blocking file work on the blocking pool.
@@ -227,6 +262,20 @@ impl DaemonRuleSink {
     }
 
     /// Write the non-empty kinds' files; returns those kinds.
+    /// What to delete for `list`: with the daemon's rule list known, what it
+    /// holds of ours; without it, our own two names (a delete of a missing
+    /// rule is a no-op).
+    fn rule_names_to_delete(&self, list: &IdComponent) -> BTreeSet<String> {
+        if self.daemon_rules_known() {
+            self.cached_rules_of(list).into_iter().collect()
+        } else {
+            ListKind::ALL
+                .into_iter()
+                .map(|kind| list_rule_name(list, kind))
+                .collect()
+        }
+    }
+
     async fn write_files(
         &self,
         list: &IdComponent,
@@ -266,18 +315,30 @@ impl DaemonRuleSink {
             .cached_rules_of(list)
             .into_iter()
             .filter(|name| !wanted.contains(name));
-        self.delete(stale).await?;
+        let refused = self.delete(stale).await?;
         let gone: Vec<ListKind> = ListKind::ALL
             .into_iter()
             .filter(|kind| !kinds.contains(kind))
             .collect();
         let list = list.clone();
+        // The list's own rules are in; trouble here is a cleanup left to do,
+        // not a refusal of the list.
         self.files(move |dir| {
             gone.iter()
                 .try_for_each(|kind| dir.remove_kind(&list, *kind))
         })
         .await
-        .map_err(|e| NotInstalled::new(format!("Couldn't remove an old list file: {e}")))
+        .map_err(|e| {
+            NotInstalled::cleanup_pending(format!("Couldn't remove an old list file: {e}"))
+        })?;
+        if refused.is_empty() {
+            return Ok(());
+        }
+        Err(NotInstalled::cleanup_pending(format!(
+            "The firewall service refused to delete {} old rule(s) for hosts the list no longer \
+             has; they match nothing now, and Snitchwatch will try again",
+            refused.len()
+        )))
     }
 }
 
@@ -319,7 +380,10 @@ impl RuleSink for DaemonRuleSink {
         for kind in &kinds {
             self.install(&list, *kind).await?;
         }
-        Ok(())
+        // The install that wrote these files may have been refused before it
+        // got to the kinds the list no longer has; finish that now, or a stale
+        // `ips.list` keeps blocking hosts the list dropped (issue #73).
+        self.remove_other_kinds(&list, &kinds).await
     }
 
     async fn replace_blocklist_rules(
@@ -328,6 +392,8 @@ impl RuleSink for DaemonRuleSink {
         hosts: Vec<String>,
     ) -> Result<(), NotInstalled> {
         let list = IdComponent::from_id(list_id);
+        // Subscribed (again): its files are wanted.
+        self.released().remove(&list);
         let kinds = self.write_files(&list, classify(hosts)).await?;
         for kind in &kinds {
             self.install(&list, *kind).await?;
@@ -339,26 +405,49 @@ impl RuleSink for DaemonRuleSink {
         Ok(())
     }
 
-    async fn remove_blocklist_rules(&self, list_id: &str) -> Result<(), NotInstalled> {
+    async fn release_blocklist_rules(&self, list_id: &str) -> Result<(), NotInstalled> {
         let list = IdComponent::from_id(list_id);
-        // With the daemon's list known, delete what it holds of ours; without
-        // it, our own two names (a delete of a missing rule is a no-op).
-        let names: BTreeSet<String> = if self.daemon_rules_known() {
-            self.cached_rules_of(&list).into_iter().collect()
-        } else {
-            ListKind::ALL
-                .into_iter()
-                .map(|kind| list_rule_name(&list, kind))
-                .collect()
-        };
+        let names = self.rule_names_to_delete(&list);
         let deleted = self.delete(names).await;
         self.verified().remove(&list);
+        let failure = match deleted {
+            Ok(refused) if refused.is_empty() => return self.keep_files_for_now(list).await,
+            Ok(refused) => NotInstalled::new(format!(
+                "The firewall service refused to delete {} rule(s) of the list",
+                refused.len()
+            )),
+            Err(unreachable) => unreachable,
+        };
+        // A rule the daemon couldn't be told to delete, or refused to, must
+        // not go on blocking a list the user dropped: without its files it
+        // reads nothing, and the next reconcile deletes it. The daemon isn't
+        // asked a second time.
+        self.remove_blocklist_files(list_id).await.and(Err(failure))
+    }
+
+    async fn remove_blocklist_rules(&self, list_id: &str) -> Result<(), NotInstalled> {
+        let list = IdComponent::from_id(list_id);
+        let names = self.rule_names_to_delete(&list);
+        let deleted = self.delete(names).await;
         // Even when the daemon is gone: a rule left behind then reads an
         // empty directory, and the next reconcile deletes it.
+        self.remove_blocklist_files(list_id).await?;
+        deleted.map(drop)
+    }
+
+    async fn retry_cleanup(&self, list_id: &str) -> Result<(), NotInstalled> {
+        let list = IdComponent::from_id(list_id);
+        let kinds = self.verified().get(&list).cloned().unwrap_or_default();
+        self.remove_other_kinds(&list, &kinds).await
+    }
+
+    async fn remove_blocklist_files(&self, list_id: &str) -> Result<(), NotInstalled> {
+        let list = IdComponent::from_id(list_id);
+        self.verified().remove(&list);
+        self.released().remove(&list);
         self.files(move |dir| dir.remove_list(&list))
             .await
-            .map_err(|e| NotInstalled::new(format!("Couldn't remove the list's files: {e}")))?;
-        deleted
+            .map_err(|e| NotInstalled::new(format!("Couldn't remove the list's files: {e}")))
     }
 
     async fn remove_orphans(&self, keep: &[String]) {
@@ -366,7 +455,58 @@ impl RuleSink for DaemonRuleSink {
         let Some(cached) = self.cached_blocklist_rules() else {
             return;
         };
-        let orphans: Vec<String> = cached
+        let orphans = self.orphan_rule_names(cached, &keep);
+        if let Err(e) = self.delete(orphans).await {
+            warn!(reason = %e.reason, "stopped deleting orphaned blocklist rules");
+            return;
+        }
+        self.verified().retain(|list, _| keep.contains(list));
+        // Directories of lists released a moment ago stay (see `RELEASE_GRACE`);
+        // any other directory nobody subscribes to goes.
+        let kept_for_now = self.released_within_grace(&keep);
+        let removed = self
+            .files(move |dir| {
+                for list in dir.lists()? {
+                    if !keep.contains(&list) && !kept_for_now.contains(&list) {
+                        dir.remove_list(&list)?;
+                    }
+                }
+                Ok(())
+            })
+            .await;
+        if let Err(e) = removed {
+            warn!(error = %e, "couldn't remove orphaned blocklist files");
+        }
+    }
+}
+
+impl DaemonRuleSink {
+    /// Keep a released list's files, noting when, unless too many are kept
+    /// already: then they go now. Notes older than the grace are dropped
+    /// first, so they can't pile up between purges.
+    async fn keep_files_for_now(&self, list: IdComponent) -> Result<(), NotInstalled> {
+        let now = Instant::now();
+        let kept = {
+            let mut released = self.released();
+            released.retain(|_, at| now.saturating_duration_since(*at) < self.release_grace);
+            let room = released.len() < MAX_RELEASED_LISTS;
+            if room {
+                released.insert(list.clone(), now);
+            }
+            room
+        };
+        if kept {
+            return Ok(());
+        }
+        self.files(move |dir| dir.remove_list(&list))
+            .await
+            .map_err(|e| NotInstalled::new(format!("Couldn't remove the list's files: {e}")))
+    }
+
+    /// The cached rules whose lists aren't in `keep`, or that are for a kind
+    /// of a kept list it no longer has; only ones Snitchwatch made.
+    fn orphan_rule_names(&self, cached: Vec<Rule>, keep: &BTreeSet<IdComponent>) -> Vec<String> {
+        cached
             .into_iter()
             .filter(|rule| {
                 let kept = list_of_rule_name(&rule.name)
@@ -381,25 +521,23 @@ impl RuleSink for DaemonRuleSink {
             })
             .filter(|rule| self.ours(rule))
             .map(|rule| rule.name)
-            .collect();
-        if let Err(e) = self.delete(orphans).await {
-            warn!(reason = %e.reason, "stopped deleting orphaned blocklist rules");
-            return;
-        }
-        self.verified().retain(|list, _| keep.contains(list));
-        let removed = self
-            .files(move |dir| {
-                for list in dir.lists()? {
-                    if !keep.contains(&list) {
-                        dir.remove_list(&list)?;
-                    }
-                }
-                Ok(())
-            })
-            .await;
-        if let Err(e) = removed {
-            warn!(error = %e, "couldn't remove orphaned blocklist files");
-        }
+            .collect()
+    }
+
+    /// The released lists still inside the grace. A list in `keep` is
+    /// subscribed again, so no longer released.
+    fn released_within_grace(&self, keep: &BTreeSet<IdComponent>) -> BTreeSet<IdComponent> {
+        let now = Instant::now();
+        let mut waiting = BTreeSet::new();
+        self.released().retain(|list, at| {
+            let within =
+                !keep.contains(list) && now.saturating_duration_since(*at) < self.release_grace;
+            if within {
+                waiting.insert(list.clone());
+            }
+            within
+        });
+        waiting
     }
 }
 
@@ -463,4 +601,8 @@ fn command_failure(error: CommandError) -> NotInstalled {
 
 #[cfg(test)]
 #[path = "daemon_sink_tests.rs"]
-mod tests;
+pub(in crate::blocklists) mod tests;
+
+#[cfg(test)]
+#[path = "daemon_sink_followup_tests.rs"]
+mod followup_tests;
