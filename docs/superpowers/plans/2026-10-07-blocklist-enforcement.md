@@ -279,6 +279,21 @@ is only "rule installed" (A6).
 
 ### PR B: install the rules (after #48)
 
+**B0. Ephemeral storage installs nothing.** PR B's sink and reconcile are
+wired **only** when the blocklist store's mode is `Persistent(dir)`. With
+`Ephemeral(reason)`:
+- the bridge writes **no** list files and installs no rule;
+- it keeps the no-op sink, and reconcile does not run;
+- every subscription reports `NotEnforced("no state directory: <reason>")`.
+  The reason is `in-process`, `not configured`, or the `Unusable` text;
+- the banner and row status say so.
+
+A daemon rule must point at a directory that outlives the bridge process,
+and an ephemeral bridge has none. This covers `run()` callers (tests, the
+Tauri shell) and misconfigured services. PR B's tests use
+`Persistent(tempdir)`, plus one test asserting the `Ephemeral` status and
+that no file was written.
+
 **B1. List directory** (`blocklists/list_dir.rs`).
 - Layout: `<state>/blocklists/<id>/domains.list`, with directories at 0700
   and files at 0600.

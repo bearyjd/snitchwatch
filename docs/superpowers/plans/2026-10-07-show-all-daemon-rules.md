@@ -156,8 +156,13 @@ makes, and a GUI that connects or reconnects receives the full list.
    `run_with_incoming`.
    - **Stream identity:** each `notifications()` call gets a stream id from
      a counter, and records its `ConnKey` (`request.remote_addr()`).
-     `DaemonCommands` keeps `current_stream: Option<StreamId>`. A HELLO
-     (id 0) on stream N makes N current (step 2).
+     `DaemonCommands` keeps the set of **open** streams, each with the
+     sequence number of its HELLO, if it has sent one.
+     - **Current stream:** the open stream with the newest HELLO. A HELLO
+       (id 0) on stream N makes N current (step 2).
+     - **When the current stream closes,** the current stream falls back to
+       the newest *still-open* stream that sent a HELLO, or to none. The
+       fallback commits no snapshot and leaves the cache as it is.
    - **Outbound, by transport** (`UiService::with_daemon_transport(…)`, set
      by `run` and `run_system`):
      - **TCP (legacy per-user mode):** commands keep **fanning out to every
@@ -167,15 +172,27 @@ makes, and a GUI that connects or reconnects receives the full list.
        current stream. Every peer is root, so there is no impersonation to
        defend against.
    - **Replies (both modes):** a non-zero reply resolves its waiter only if
-     it arrives on the **current** stream. Other streams' replies are logged
-     and ignored. When the current stream ends, outstanding waiters fail
-     with `StreamClosed` and `current_stream` is cleared.
+     it arrives on the stream that is current **at reply time**. Other
+     streams' replies are logged and ignored. Waiters are not tied to a
+     stream.
+   - **When streams close:**
+     - **TCP mode:** in-flight waiters stay pending while any stream
+       remains open; fan-out already delivered their command to every
+       stream. They fail with `StreamClosed` only when no stream is left.
+     - **Unix mode:** the command went only to the old current stream, so
+       its in-flight waiters fail with `StreamClosed` when that stream
+       closes.
    - **Snapshot source:** only the current stream's connection can commit a
      snapshot (step 2).
-   - **What this does and doesn't buy in TCP mode.** A fake local "daemon"
-     can no longer stop the real daemon from receiving commands, because of
-     the fan-out. But a fake that subscribes and then sends a *later* HELLO
-     becomes current. That lets it:
+   - **What this does and doesn't buy in TCP mode.** A fake local
+     "daemon" cannot stop the real daemon from receiving commands:
+     - fan-out still delivers every command to every open stream;
+     - `send` returns `NoDaemon` only when *no* stream is open;
+     - a fake that sends a HELLO and then closes just hands "current" back
+       to the real daemon's still-open stream.
+
+     But while a fake that subscribed and sent a *later* HELLO stays
+     connected, it is current. That lets it:
      - replace the Rules list shown to the user;
      - answer replies, faking "rule installed" for #45/#46.
 
@@ -190,15 +207,19 @@ makes, and a GUI that connects or reconnects receives the full list.
      `rule_update_and_delete_reach_the_daemon_as_notifications`.
      - Add a **`pub`** accessor, `RunningBridge::daemon_stream_ready() -> watch::Receiver<u64>`.
        It must not be `#[cfg(test)]`: the `tests/` crate can't see those.
-     - Tests await a change on it before sending.
+     - Tests wait with a **level check**, for example
+       `ready.wait_for(|g| *g >= 1).await`, not "await a change". A plain
+       `changed()` hangs if the HELLO was already handled before the test
+       subscribed.
      - Protocol tests that open mock notifications and must stay green:
        - `idle_daemon_with_open_notifications_stream_stays_reachable`;
        - `notifications_stream_close_triggers_down_transition_within_one_tick`;
        - `rule_update_and_delete_reach_the_daemon_as_notifications`, which
          must await readiness.
    - **API:**
-     - `send(Notification) -> Result<PendingReply, NoDaemon>`, where
-       `NoDaemon` means there is no current stream;
+     - `send(Notification) -> Result<PendingReply, NoDaemon>`. `NoDaemon`
+       means **no open stream at all** in TCP mode, and no current stream
+       in Unix mode;
      - `PendingReply::wait(timeout)` returns `Ok`, `Rejected(data)`,
        `Timeout` or `StreamClosed`.
    - #45 and #46 use this to report whether a rule is installed.
@@ -242,8 +263,19 @@ makes, and a GUI that connects or reconnects receives the full list.
     arriving on stream 1 is ignored (that waiter times out);
   - **TCP transport:** a command reaches both open streams (fan-out kept);
   - **Unix transport:** a command reaches only the current stream;
-  - stream close fails pending waiters;
-  - `send` with no current stream returns `NoDaemon`.
+  - **TCP fallback, new command:**
+    1. S1 sends a HELLO, then S2 sends a HELLO (S2 is current);
+    2. S2 closes;
+    3. a new command still reaches S1, and S1's OK resolves it.
+  - **TCP fallback, in-flight command:** a command sent while S2 is current
+    is still resolved by S1's OK after S2 closes.
+  - **TCP, last stream:** when the last open stream closes, in-flight
+    waiters fail with `StreamClosed`, and the next `send` returns
+    `NoDaemon`.
+  - **TCP, no HELLO yet:** with a stream open that has not sent a HELLO,
+    `send` fans out and does not return `NoDaemon`.
+  - **Unix:** closing the current stream fails its waiters, and `send`
+    with no current stream returns `NoDaemon`.
 - **`subscribe` and commit on HELLO:**
   - with three rules, a `Subscribe` followed by a HELLO from the same
     connection broadcasts one name-sorted `SetRules`; "rules synced" moves
@@ -274,7 +306,8 @@ makes, and a GUI that connects or reconnects receives the full list.
    because the cache is still `Unknown`.
 3. The mock opens notifications. With this plan's mock change, that sends
    HELLO, so the client receives `SetRules` with both rules.
-4. Await `RunningBridge::daemon_stream_ready()`.
+4. Wait on `RunningBridge::daemon_stream_ready()` with
+   `wait_for(|g| *g >= 1)`.
 5. `UpdateRule` (disable) with the mock replying OK gives `SetRules` with
    the rule disabled.
 6. `DeleteRule` with an ERROR reply gives `SetRules` unchanged.
@@ -309,12 +342,16 @@ Manual VM check:
 - **Residual impersonation risk in legacy TCP mode** (until #35 retires
   the TCP transport for the per-user bridge).
   - Any local user can connect to `127.0.0.1:50051`, call `Subscribe` and
-    send a later HELLO. Their stream then becomes current, so they can:
+    send a later HELLO. **While that connection stays open**, their stream
+    is current, so they can:
     - replace the Rules list the GUI shows;
     - answer command replies, so #45/#46 report "rule installed" for a
       rule the real daemon may have rejected.
-  - The real daemon still receives every command, because TCP mode keeps
-    the fan-out.
+  - The real daemon still receives every command. TCP mode keeps the
+    fan-out, `NoDaemon` requires zero open streams, and when the impostor
+    disconnects, the current stream falls back to the daemon's still-open
+    stream. The impostor cannot cut the daemon off; it can only spoof
+    what the GUI is told.
   - Today that same user can already send fake `AskRule` prompts and fake
     stats on that port (#35). This adds rule-list and status spoofing
     to that existing exposure.
