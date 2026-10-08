@@ -32,6 +32,7 @@ use snitchwatch_bridge::cache::rules::{
 };
 use snitchwatch_bridge::cache::traffic_tracker::TrafficTracker;
 use snitchwatch_bridge::daemon_commands::DaemonTransport;
+use snitchwatch_bridge::deferred_answers::ANSWER_TIMEOUT;
 use snitchwatch_bridge::filter_pause::{FilterPause, PauseRequest};
 use snitchwatch_bridge::grpc_server::UiService;
 use snitchwatch_bridge::notice::{Notice, NoticeBus};
@@ -262,6 +263,24 @@ pub async fn run(config: BridgeConfig) -> Result<RunningBridge> {
 /// [`run`] with explicit [`RunOptions`]: `main.rs` passes the resolved state
 /// directory; tests may also inject a blocklist fetcher.
 pub async fn run_with_options(config: BridgeConfig, options: RunOptions) -> Result<RunningBridge> {
+    run_tcp(config, options, ANSWER_TIMEOUT).await
+}
+
+/// [`run`] with a shorter wait before the bridge answers a prompt nobody
+/// answers (`snitchwatch_bridge::deferred_answers`), for tests that watch
+/// one time out.
+pub async fn run_with_answer_timeout(
+    config: BridgeConfig,
+    answer_timeout: std::time::Duration,
+) -> Result<RunningBridge> {
+    run_tcp(config, RunOptions::in_process(), answer_timeout).await
+}
+
+async fn run_tcp(
+    config: BridgeConfig,
+    options: RunOptions,
+    answer_timeout: std::time::Duration,
+) -> Result<RunningBridge> {
     let grpc_listener = tokio::net::TcpListener::bind(config.grpc_bind)
         .await
         .with_context(|| format!("failed to bind gRPC listener on {}", config.grpc_bind))?;
@@ -273,6 +292,7 @@ pub async fn run_with_options(config: BridgeConfig, options: RunOptions) -> Resu
         None,
         None,
         options,
+        answer_timeout,
     )
     .await
 }
@@ -297,6 +317,7 @@ pub async fn run_system(listeners: activation::ActivatedListeners) -> Result<Run
             blocklist_fetcher: None,
             mode: BridgeMode::System,
         },
+        ANSWER_TIMEOUT,
     )
     .await
 }
@@ -308,6 +329,7 @@ async fn run_with_incoming<I, IO>(
     activated_ws: Option<UnixListener>,
     system_token_path: Option<PathBuf>,
     options: RunOptions,
+    answer_timeout: std::time::Duration,
 ) -> Result<RunningBridge>
 where
     I: tokio_stream::Stream<Item = std::io::Result<IO>> + Send + 'static,
@@ -354,6 +376,7 @@ where
         filter_pause.clone(),
     )
     .with_client_presence(client_presence.clone())
+    .with_answer_timeout(answer_timeout)
     .with_daemon_transport(match grpc_endpoint {
         GrpcEndpoint::Tcp(_) => DaemonTransport::Tcp,
         GrpcEndpoint::Unix(_) => DaemonTransport::Unix,
@@ -559,6 +582,7 @@ where
 
     // Same "grab before into_server()" reason: the snapshot answer.
     let prompt_slot_for_pump = ui_service_inner.prompt_slot_handle();
+    let daemon_config_for_pump = ui_service_inner.daemon_config_handle();
     let ui_service = ui_service_inner.into_server();
     let (grpc_shutdown_tx, grpc_shutdown_rx) = oneshot::channel::<()>();
 
@@ -684,6 +708,21 @@ where
                 // GUI and the tray show the state that is actually in effect.
                 announce_pause_state(&filter_pause_for_pump, &cache_for_upstream, &snapshot_tx)
                     .await;
+                continue;
+            }
+            if let ClientMessage::DecideLater { row_id } = &msg {
+                // Needs the daemon's settings, which `upstream::apply` doesn't
+                // have (prompt-slot plan Part C).
+                if let Err(e) = snitchwatch_bridge::deferred_answers::decide_later(
+                    &cache_for_upstream,
+                    &daemon_config_for_pump,
+                    &snapshot_tx,
+                    row_id,
+                )
+                .await
+                {
+                    warn!(error = %e, "decide later not applied");
+                }
                 continue;
             }
             if let ClientMessage::RecheckDiagnostics = msg {
@@ -1162,6 +1201,7 @@ mod tests {
             Some(gui_listener),
             Some(token_path.clone()),
             RunOptions::in_process(),
+            ANSWER_TIMEOUT,
         )
         .await
         .unwrap();
@@ -1488,6 +1528,8 @@ mod tests {
             started_at_ms: 0,
             matched_rule: None,
             auto_answer: None,
+            answer_deadline_ms: None,
+            deferred: false,
         };
         bridge
             .broadcast_tx

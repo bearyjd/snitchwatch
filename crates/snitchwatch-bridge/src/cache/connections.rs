@@ -238,6 +238,7 @@ impl ConnectionCache {
                 row.dst_port,
                 row.process_path.as_deref().unwrap_or(""),
             ));
+            row.answer_deadline_ms = None;
             Ok(())
         } else {
             Err(CacheError::NotFound(row_id.to_string()))
@@ -255,6 +256,37 @@ impl ConnectionCache {
         self.rows.retain(|row| row.id != row_id);
         self.republish_pending_count();
         true
+    }
+
+    /// Put off an unresolved prompt without a verdict (prompt-slot plan
+    /// Part C). Like [`Self::cancel_pending`], a verdict that already won is
+    /// preserved, but the row stays listed: deferred, with `action` (the
+    /// daemon's default action, when known) and `why`. Dropping the verdict
+    /// sender makes the waiting `AskRule` give the daemon no answer.
+    pub(crate) fn defer_pending(
+        &mut self,
+        row_id: &str,
+        action: Option<&str>,
+        why: Option<crate::ws_messages::AutoAnswer>,
+    ) -> Option<ConnectionRow> {
+        self.pending.remove(row_id)?;
+        self.republish_pending_count();
+        let row = self.rows.iter_mut().find(|row| row.id == row_id)?;
+        *row = ConnectionRow {
+            action: action.map(str::to_owned),
+            auto_answer: why,
+            answer_deadline_ms: None,
+            deferred: true,
+            ..row.clone()
+        };
+        Some(row.clone())
+    }
+
+    /// Mark a row resolved by "Decide later" as deferred and return it.
+    pub(crate) fn mark_deferred(&mut self, row_id: &str) -> Option<ConnectionRow> {
+        let row = self.rows.iter_mut().find(|row| row.id == row_id)?;
+        row.deferred = true;
+        Some(row.clone())
     }
 
     fn publish_cancellation(
@@ -346,6 +378,8 @@ mod tests {
             started_at_ms: 0,
             matched_rule: None,
             auto_answer: None,
+            answer_deadline_ms: None,
+            deferred: false,
         }
     }
 
@@ -551,6 +585,8 @@ mod tray_state_tests {
             started_at_ms: 0,
             matched_rule: None,
             auto_answer: None,
+            answer_deadline_ms: None,
+            deferred: false,
         }
     }
 

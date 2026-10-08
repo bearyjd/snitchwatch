@@ -115,6 +115,9 @@ pub struct UiService {
     /// The daemon's own settings from its latest `subscribe`
     /// (`crate::daemon_config`).
     daemon_config: crate::daemon_config::SharedDaemonConfig,
+    /// How long a prompt waits before the bridge answers it itself
+    /// (`crate::deferred_answers`).
+    answer_timeout: Duration,
 }
 
 /// Future-drop cleanup also runs for tonic transport cancellation. A closed
@@ -184,7 +187,14 @@ impl UiService {
             rules,
             prompt_slot,
             daemon_config: Default::default(),
+            answer_timeout: crate::deferred_answers::ANSWER_TIMEOUT,
         }
+    }
+
+    /// Tests shorten the time a prompt waits for a person.
+    pub fn with_answer_timeout(mut self, timeout: Duration) -> Self {
+        self.answer_timeout = timeout;
+        self
     }
 
     /// The daemon's settings from its latest `subscribe`.
@@ -504,6 +514,9 @@ impl Ui for UiService {
                     now_secs,
                 )));
             }
+            // Pending from here: the bridge answers it at this deadline if
+            // nobody does (`deferred_answers`).
+            let row = crate::deferred_answers::with_answer_deadline(row, self.answer_timeout);
             let receiver = cache
                 .insert_admitted(row.clone(), admission.clone(), self.broadcast.clone())
                 .ok_or_else(|| {
@@ -523,20 +536,12 @@ impl Ui for UiService {
             receiver
         };
         let _pending_cleanup = PendingCleanup::hold(self, row_id.clone(), ask_id, slot_what);
-        // Declared after cleanup so cancellation drops the receiver first.
-        let mut verdict_rx = verdict_rx;
-
-        let resolution = tokio::select! {
-            resolution = &mut verdict_rx => resolution,
-            _ = admission.lost() => {
-                if self.cache.lock().await.cancel_pending(&row_id) {
-                    return Err(Status::unavailable("last authenticated GUI session disconnected"));
-                }
-                // A verdict serialized before the loss already settled this Ask.
-                verdict_rx.await
-            }
-        }
-        .map_err(|_| Status::unavailable("pending Ask cancelled before resolution"))?;
+        // Moved in after cleanup is held, so cancellation drops the receiver
+        // first.
+        let resolution = self
+            .wait_for_answer(&row_id, &mut admission, verdict_rx)
+            .await
+            .map_err(answer_wait::Unanswered::into_status)?;
 
         if resolution.verdict == Verdict::Deny {
             self.publish_recent_block(safe_what.clone()).await;
@@ -751,6 +756,9 @@ pub(crate) fn display_summary(process: &str, dst_host: &str) -> String {
         crate::translator::verdict::sanitize_for_display(dst_host, 64)
     )
 }
+
+#[path = "grpc_server/answer_wait.rs"]
+mod answer_wait;
 
 #[cfg(test)]
 #[path = "grpc_server/tests.rs"]

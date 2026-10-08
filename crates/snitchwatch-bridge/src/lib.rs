@@ -16,6 +16,7 @@ pub mod daemon_commands;
 pub mod daemon_config;
 pub mod daemon_liveness;
 pub mod daemon_watchdog;
+pub mod deferred_answers;
 pub mod diagnostics;
 pub mod error;
 pub mod filter_pause;

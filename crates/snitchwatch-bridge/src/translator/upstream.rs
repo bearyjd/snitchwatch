@@ -94,7 +94,10 @@ pub fn apply(
         | ClientMessage::Undo
         | ClientMessage::Redo
         | ClientMessage::SetFilteringPaused { .. }
-        | ClientMessage::RecheckDiagnostics => Ok(UpstreamEffect::None),
+        | ClientMessage::RecheckDiagnostics
+        // Intercepted by the pump too: it needs the daemon's settings
+        // (`deferred_answers::decide_later`).
+        | ClientMessage::DecideLater { .. } => Ok(UpstreamEffect::None),
     }
 }
 
@@ -443,6 +446,8 @@ mod tests {
             started_at_ms: 0,
             matched_rule: None,
             auto_answer: None,
+            answer_deadline_ms: None,
+            deferred: false,
         })
     }
 
