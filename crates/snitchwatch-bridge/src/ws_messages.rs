@@ -307,6 +307,11 @@ pub enum ClientMessage {
         /// client cannot supply it. `None` for in-process senders.
         #[serde(skip)]
         sender_generation: Option<u64>,
+        /// The sender's uid (`SO_PEERCRED`), stamped alongside
+        /// `sender_generation` so the outcome log names who paused. Never on
+        /// the wire either.
+        #[serde(skip)]
+        sender_uid: Option<u32>,
     },
     RecheckDiagnostics,
 }
@@ -956,6 +961,7 @@ mod filtering_pause_tests {
             paused,
             duration_secs,
             sender_generation: None,
+            sender_uid: None,
         }
     }
 
@@ -992,7 +998,7 @@ mod filtering_pause_tests {
     #[test]
     fn a_client_cannot_supply_the_sender_generation() {
         let parsed: ClientMessage = serde_json::from_str(
-            r#"{"action":"setFilteringPaused","paused":true,"durationSecs":300,"senderGeneration":7}"#,
+            r#"{"action":"setFilteringPaused","paused":true,"durationSecs":300,"senderGeneration":7,"senderUid":0}"#,
         )
         .unwrap();
         assert_eq!(parsed, set_filtering_paused(true, Some(300)));
@@ -1001,10 +1007,11 @@ mod filtering_pause_tests {
             paused: true,
             duration_secs: Some(300),
             sender_generation: Some(7),
+            sender_uid: Some(0),
         };
         let json = serde_json::to_string(&stamped).unwrap();
         assert!(
-            !json.contains("enderGeneration"),
+            !json.contains("sender"),
             "stamp leaked onto the wire: {json}"
         );
     }

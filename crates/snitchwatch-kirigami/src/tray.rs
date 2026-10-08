@@ -85,6 +85,7 @@ pub fn build_set_filtering_paused_json(paused: bool, duration_secs: Option<u64>)
         paused,
         duration_secs,
         sender_generation: None,
+        sender_uid: None,
     })
     .expect("ClientMessage::SetFilteringPaused always serializes")
 }
@@ -221,6 +222,7 @@ mod tests {
                 paused: true,
                 duration_secs: Some(1800),
                 sender_generation: None,
+                sender_uid: None,
             }
         );
         assert_eq!(

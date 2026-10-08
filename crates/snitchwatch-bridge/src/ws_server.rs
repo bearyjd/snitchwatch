@@ -303,8 +303,9 @@ async fn pump_authenticated<S, R>(
 
 /// Stamp a pause request with its sender's GUI-session generation, so
 /// `client_presence::apply_pause_request` ignores it once every GUI of that
-/// generation has left (issue #47), and log who asked. Overwrites whatever
-/// the message carried; the field is never deserialized from the wire anyway.
+/// generation has left (issue #47), and with its uid, so the outcome log
+/// names who asked. Overwrites whatever the message carried; neither field is
+/// ever deserialized from the wire anyway.
 fn stamp_sender(message: ClientMessage, generation: u64, peer_uid: Option<u32>) -> ClientMessage {
     match message {
         ClientMessage::SetFilteringPaused {
@@ -312,7 +313,7 @@ fn stamp_sender(message: ClientMessage, generation: u64, peer_uid: Option<u32>) 
             duration_secs,
             ..
         } => {
-            info!(
+            debug!(
                 uid = ?peer_uid,
                 session_generation = generation,
                 paused,
@@ -323,6 +324,7 @@ fn stamp_sender(message: ClientMessage, generation: u64, peer_uid: Option<u32>) 
                 paused,
                 duration_secs,
                 sender_generation: Some(generation),
+                sender_uid: peer_uid,
             }
         }
         other => other,
@@ -633,12 +635,15 @@ mod tests {
             .expect("pause request was not forwarded")
             .unwrap();
         assert_eq!(presence.current_generation(), 1);
+        use std::os::unix::fs::MetadataExt;
+        let own_uid = fs::metadata(dir.path()).unwrap().uid();
         assert_eq!(
             received,
             ClientMessage::SetFilteringPaused {
                 paused: true,
                 duration_secs: Some(1800),
                 sender_generation: Some(1),
+                sender_uid: Some(own_uid),
             }
         );
         server.abort();

@@ -586,18 +586,9 @@ where
                 paused,
                 duration_secs,
                 sender_generation,
+                sender_uid,
             } = msg
             {
-                if sender_generation.is_none() {
-                    // WebSocket sessions are stamped and logged with their
-                    // peer uid by `ws_server`; only in-process senders aren't.
-                    info!(
-                        sender = "in-process",
-                        paused,
-                        ?duration_secs,
-                        "filtering pause change requested"
-                    );
-                }
                 // Every pause goes through `apply_pause_request` (#47): it is
                 // timed, and it applies only while its sender's GUI session
                 // generation is current.
@@ -606,6 +597,7 @@ where
                     &filter_pause_for_pump,
                     PauseRequest::from_wire(paused, duration_secs),
                     sender_generation,
+                    sender_uid,
                 );
                 // Always, even for an ignored or rejected request, so every
                 // GUI and the tray show the state that is actually in effect.
@@ -1462,6 +1454,7 @@ mod tests {
             paused,
             duration_secs,
             sender_generation: None,
+            sender_uid: None,
         }
     }
 

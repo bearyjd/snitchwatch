@@ -109,7 +109,8 @@ pub async fn clear_pause_on_last_session_loss<F, Fut>(
 /// queued when every GUI left is ignored, even if another GUI has
 /// authenticated since (issue #47). An unstamped request (`None`) comes from
 /// an in-process sender with no WebSocket session; it applies only while a
-/// GUI is authenticated.
+/// GUI is authenticated. `sender_uid` only labels the outcome log: `None`
+/// with `sender_generation: None` is an in-process sender.
 ///
 /// The pause is set under the presence lock, so it is never active with zero
 /// sessions: a racing last-session loss either prevents the set or follows
@@ -119,9 +120,16 @@ pub fn apply_pause_request(
     pause: &FilterPause,
     request: PauseRequest,
     sender_generation: Option<u64>,
+    sender_uid: Option<u32>,
 ) -> PauseState {
     let PauseRequest::Pause(duration) = request else {
-        pause.resume();
+        let cleared = pause.resume();
+        tracing::info!(
+            uid = ?sender_uid,
+            ?sender_generation,
+            cleared,
+            "filtering pause resumed"
+        );
         return pause.state();
     };
     let outcome = match sender_generation {
@@ -134,11 +142,24 @@ pub fn apply_pause_request(
     };
     match outcome {
         None => tracing::info!(
+            uid = ?sender_uid,
             ?sender_generation,
+            ?duration,
             "pause request ignored: its GUI session is gone"
         ),
-        Some(Err(rejected)) => tracing::warn!(%rejected, "pause request rejected"),
-        Some(Ok(_)) => {}
+        Some(Err(rejected)) => tracing::warn!(
+            uid = ?sender_uid,
+            ?sender_generation,
+            %rejected,
+            "pause request rejected"
+        ),
+        Some(Ok(state)) => tracing::info!(
+            uid = ?sender_uid,
+            ?sender_generation,
+            ?duration,
+            expires_at_unix_ms = ?state.expires_at_unix_ms,
+            "filtering paused"
+        ),
     }
     pause.state()
 }
@@ -266,13 +287,17 @@ mod tests {
         // never clear it (issue #47).
         let presence = ClientPresence::default();
         let pause = FilterPause::new();
-        assert!(!apply_pause_request(&presence, &pause, pause_for_thirty_minutes(), None).paused);
+        assert!(
+            !apply_pause_request(&presence, &pause, pause_for_thirty_minutes(), None, None).paused
+        );
         assert!(!pause.is_active_now());
 
         let _gui = presence.authenticated_session();
-        assert!(apply_pause_request(&presence, &pause, pause_for_thirty_minutes(), None).paused);
+        assert!(
+            apply_pause_request(&presence, &pause, pause_for_thirty_minutes(), None, None).paused
+        );
         assert!(pause.is_active_now());
-        assert!(!apply_pause_request(&presence, &pause, PauseRequest::Resume, None).paused);
+        assert!(!apply_pause_request(&presence, &pause, PauseRequest::Resume, None, None).paused);
         assert!(!pause.is_active_now());
     }
 
@@ -287,19 +312,32 @@ mod tests {
         drop(gui_a);
         let _gui_b = presence.authenticated_session();
 
-        let state =
-            apply_pause_request(&presence, &pause, pause_for_thirty_minutes(), Some(stamp_a));
+        let state = apply_pause_request(
+            &presence,
+            &pause,
+            pause_for_thirty_minutes(),
+            Some(stamp_a),
+            None,
+        );
         assert!(!state.paused, "B must not inherit A's queued pause");
         assert!(!pause.is_active_now());
 
         // B's own stamped request, and an unstamped in-process request, apply.
         let stamp_b = presence.current_generation();
         assert!(
-            apply_pause_request(&presence, &pause, pause_for_thirty_minutes(), Some(stamp_b))
-                .paused
+            apply_pause_request(
+                &presence,
+                &pause,
+                pause_for_thirty_minutes(),
+                Some(stamp_b),
+                None
+            )
+            .paused
         );
         pause.resume();
-        assert!(apply_pause_request(&presence, &pause, pause_for_thirty_minutes(), None).paused);
+        assert!(
+            apply_pause_request(&presence, &pause, pause_for_thirty_minutes(), None, None).paused
+        );
     }
 
     #[tokio::test]
@@ -311,13 +349,25 @@ mod tests {
         let losses = presence.session_losses();
         let gui_a = presence.authenticated_session();
         let stamp_a = presence.current_generation();
-        apply_pause_request(&presence, &pause, pause_for_thirty_minutes(), Some(stamp_a));
+        apply_pause_request(
+            &presence,
+            &pause,
+            pause_for_thirty_minutes(),
+            Some(stamp_a),
+            None,
+        );
         drop(gui_a);
         let _gui_b = presence.authenticated_session();
         let stamp_b = presence.current_generation();
         assert!(
-            apply_pause_request(&presence, &pause, pause_for_thirty_minutes(), Some(stamp_b))
-                .paused
+            apply_pause_request(
+                &presence,
+                &pause,
+                pause_for_thirty_minutes(),
+                Some(stamp_b),
+                None
+            )
+            .paused
         );
 
         let (cleared_tx, mut cleared_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -349,8 +399,14 @@ mod tests {
         let stamp_b = presence.current_generation();
         drop(gui_b);
         assert!(
-            apply_pause_request(&presence, &pause, pause_for_thirty_minutes(), Some(stamp_b))
-                .paused
+            apply_pause_request(
+                &presence,
+                &pause,
+                pause_for_thirty_minutes(),
+                Some(stamp_b),
+                None
+            )
+            .paused
         );
     }
 
@@ -360,7 +416,7 @@ mod tests {
         let pause = FilterPause::new();
         let _gui = presence.authenticated_session();
         let request = PauseRequest::Pause(std::time::Duration::from_secs(7200));
-        assert!(!apply_pause_request(&presence, &pause, request, None).paused);
+        assert!(!apply_pause_request(&presence, &pause, request, None, None).paused);
         assert!(!pause.is_active_now());
     }
 

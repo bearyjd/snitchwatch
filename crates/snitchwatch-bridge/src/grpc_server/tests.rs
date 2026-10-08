@@ -1013,6 +1013,7 @@ async fn a_departed_guis_pause_does_not_auto_allow_for_the_next_gui() {
         &svc.filter_pause,
         crate::filter_pause::PauseRequest::Pause(Duration::from_secs(300)),
         Some(presence.current_generation()),
+        None,
     );
     drop(gui_a); // No clear task in this test: the gap stays open.
     let _gui_b = presence.authenticated_session();
