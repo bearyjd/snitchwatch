@@ -120,13 +120,17 @@ async fn only_an_enabled_timed_rule_gets_an_expiry_stamp() {
     assert!((now() - stamped).abs() < 5, "turned on: {stamped}");
 }
 
+/// After a resync every rule's `created` is the daemon's, which says
+/// nothing about a clock: turning a timed rule on always stamps it now, so
+/// the list can't hide an active rule early (a leftover row is the safer
+/// mistake).
 #[tokio::test]
-async fn turning_a_timed_rule_back_on_keeps_its_running_clock() {
-    let started = now() - 60;
+async fn turning_a_timed_rule_on_stamps_it_now_even_after_a_resync() {
+    let stale = now() - 4 * 60;
     let rule = Rule {
         enabled: false,
         duration: "5m".into(),
-        created: started,
+        created: stale,
         ..bound("100-x", "deny")
     };
     let mut daemon = daemon(vec![rule.clone()]);
@@ -135,9 +139,34 @@ async fn turning_a_timed_rule_back_on_keeps_its_running_clock() {
     let mut rx = daemon.broadcast.subscribe();
     commands.try_route(update("100-x", switched(&rule, true), Some("a")));
     assert_eq!(result(&mut rx).await, RuleCommandOutcome::Ok);
-    assert_eq!(seen.lock().unwrap()[0].rules[0].created, 0, "not restamped");
-    let cached = daemon.cache.lock().unwrap().rules().unwrap()["100-x"].created;
-    assert_eq!(cached, started);
+    let sent = seen.lock().unwrap()[0].rules[0].created;
+    assert!((now() - sent).abs() < 5, "stamped now: {sent}");
+    let mut cache = daemon.cache.lock().unwrap();
+    assert!(
+        cache.prune_expired(now() + 2 * 60).is_empty(),
+        "still listed two minutes on"
+    );
+}
+
+/// An edit can take two steps (refused, then the old rule restored): its
+/// rule takes no other command meanwhile.
+#[tokio::test]
+async fn an_edit_keeps_its_rule_busy_until_it_ends() {
+    let rule = bound("100-x", "deny");
+    let mut daemon = daemon(vec![rule.clone()]);
+    let commands = commands(&daemon);
+    let mut rx = daemon.broadcast.subscribe();
+    let mut edited = export_rule(&rule);
+    edited["action"] = json!("reject");
+    commands.try_route(update("100-x", edited, Some("e1")));
+    commands.try_route(update("100-x", switched(&rule, false), Some("t1")));
+    let (id, outcome) = result_within(&mut rx, Duration::from_secs(5))
+        .await
+        .unwrap();
+    assert_eq!(id, "t1");
+    assert!(refused(&outcome).iter().any(|r| r == BUSY), "{outcome:?}");
+    let first = daemon.rx.recv().await.unwrap();
+    assert_eq!(first.rules[0].action, "reject");
 }
 
 /// An add's name stays busy until the daemon answers: a second add, or a

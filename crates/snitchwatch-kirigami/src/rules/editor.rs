@@ -448,7 +448,29 @@ fn unanchored_path_pattern(condition: &Condition) -> bool {
         condition.operand.as_str(),
         "process.path" | "process.parent.path"
     ) && condition.kind == MatchKind::Pattern
-        && !(condition.value.starts_with('^') && condition.value.ends_with('$'))
+        && !anchored(&condition.value)
+}
+
+/// `^…$` around the whole pattern: no `|` outside brackets or parentheses
+/// (`^a|b$` is `^a` or `b$`), and the final `$` not escaped.
+fn anchored(pattern: &str) -> bool {
+    let Some(body) = pattern.strip_prefix('^').and_then(|p| p.strip_suffix('$')) else {
+        return false;
+    };
+    let (mut depth, mut class, mut escaped) = (0i32, false, false);
+    for c in body.chars() {
+        match c {
+            _ if escaped => escaped = false,
+            '\\' => escaped = true,
+            '[' if !class => class = true,
+            ']' if class => class = false,
+            '(' if !class => depth += 1,
+            ')' if !class => depth -= 1,
+            '|' if !class && depth == 0 => return false,
+            _ => {}
+        }
+    }
+    !escaped
 }
 
 fn warnings(draft: &RuleDraft) -> Vec<String> {

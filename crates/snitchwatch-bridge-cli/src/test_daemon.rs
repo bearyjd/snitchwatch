@@ -144,6 +144,10 @@ pub(crate) fn names(seen: &Seen) -> Vec<String> {
 ///   is written (`Save`).
 /// - `DELETE_RULE` (`Delete`): the rule leaves memory first; then an
 ///   `always` rule's file is removed, and only that can fail (ERROR).
+/// - Live reload (on by default, `main.go`): a removed rule file makes the
+///   watcher drop that rule from memory if it is still an `always` rule
+///   (`liveReloadWorker` → `deleteRule`). Modelled as happening before the
+///   command's answer.
 #[derive(Debug, Default)]
 pub(crate) struct LoaderModel {
     /// Rules that apply, by name.
@@ -156,6 +160,8 @@ pub(crate) struct LoaderModel {
     pub(crate) stuck_files: std::collections::BTreeSet<String>,
     /// `(action, name)` commands that get no answer (and do nothing).
     pub(crate) silent: std::collections::BTreeSet<(i32, String)>,
+    /// The daemon runs with `-no-live-reload`.
+    pub(crate) no_live_reload: bool,
 }
 
 pub(crate) type SharedModel = Arc<StdMutex<LoaderModel>>;
@@ -198,9 +204,10 @@ impl LoaderModel {
             self.files.remove(&rule.name);
             return Some(Ok(()));
         }
+        let mut file_removed = false;
         if let Some(old) = self.memory.get(&rule.name) {
             if old.duration == "always" && rule.duration != "always" {
-                self.files.remove(&rule.name);
+                file_removed = self.files.remove(&rule.name);
             }
         }
         let fails = rule.enabled
@@ -209,6 +216,9 @@ impl LoaderModel {
                 .as_ref()
                 .is_some_and(|op| data_of(op).iter().any(|d| self.uncompilable.contains(d)));
         if fails {
+            if file_removed {
+                self.watcher_saw_removal(&rule.name);
+            }
             return Some(Err("(2) error compiling rule: bad".into()));
         }
         if rule.duration == "always" {
@@ -216,6 +226,19 @@ impl LoaderModel {
         }
         self.memory.insert(rule.name.clone(), rule);
         Some(Ok(()))
+    }
+}
+
+impl LoaderModel {
+    /// The live-reload watcher's Remove reaction (`deleteRule`).
+    fn watcher_saw_removal(&mut self, name: &str) {
+        let always = self
+            .memory
+            .get(name)
+            .is_some_and(|r| r.duration == "always");
+        if !self.no_live_reload && always {
+            self.memory.remove(name);
+        }
     }
 }
 

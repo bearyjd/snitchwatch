@@ -421,20 +421,24 @@ Recorded where the built code differs from the design above.
     reject or decide-first rule by name; otherwise the allow).
 
   "Neither" can't result.
-- **A refused edit can't silently lose a rule's file.** `replaceUserRule`
-  deletes an `always` rule's file before compiling a temporary
-  replacement; on ERROR the bridge sends the old rule again (which writes
-  the file back) and says so, or says it now lasts only until a restart.
+- **A refused edit can't silently lose a rule.** `replaceUserRule` deletes
+  an `always` rule's file before compiling a temporary replacement, and
+  with live reload (on by default) the removal also drops the rule from
+  memory. On ERROR the bridge sends the old rule again (bringing it and its
+  file back) and says so; if that fails, or the edit goes unanswered, the
+  rule leaves the bridge's list and the result says it may have stopped
+  applying (re-review).
 - **Turning a rule on is checked** (review M2): a disabled rule that would
   match everything (`true`, a `/0` network, an all-matching pattern, only a
   process hash), has an empty value, or a duration the editor wouldn't
   write can't be turned on from Snitchwatch. Turning off is never checked.
 - **Expiry stamps follow the daemon's clock** (review M4): only an enabled
-  timed rule gets one; turning a rule on stamps it unless a clock from an
-  earlier time it was on still runs (its stamp is kept).
-- **Busy names are shared** (review M5): an add's name, a rename's names and
-  each import rule in flight are held until their replies; the editor and
-  imports refuse a busy name.
+  timed rule gets one, and turning a rule on always stamps it now. After a
+  resync `created` is the daemon's and says nothing about a clock; a row
+  left a little long is safer than an active rule hidden early.
+- **Busy names are shared** (review M5): an add's name, an edit's name, a
+  rename's names and each import rule in flight are held until their
+  replies; the editor and imports refuse a busy name.
 - **The editor refuses** a blank host name (it matches every connection
   without one) and process ID or environment conditions. Imports keep
   both, as the import plan records.

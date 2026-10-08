@@ -205,14 +205,14 @@ fn changeable(cache: &RulesCache, rule_id: &str, busy: &BusyNames) -> Result<Rul
 /// The daemon starts a timed rule's clock when it stores it *enabled*
 /// (`loader.go` `replaceUserRule`), and its timer then removes the rule
 /// unless the duration changed (`scheduleTemporaryRule`). Stamp `created`
-/// so the cache expires it then: for a new rule or a new duration, and for
-/// a rule turned on with no clock already running from an earlier time it
-/// was on (an unstamped one). A disabled rule gets no stamp.
+/// so the cache expires it then: for a new rule, a new duration, and every
+/// rule turned on (after a resync `created` is the daemon's, which says
+/// nothing about a clock; a row left a little long is safer than an active
+/// rule hidden early). A disabled rule gets no stamp.
 fn stamp_created(sent: &mut Notification, old: Option<&Rule>) {
     let rule = &mut sent.rules[0];
     let timed = !matches!(rule.duration.as_str(), "always" | "until restart" | "once");
-    let starts =
-        old.is_none_or(|old| old.duration != rule.duration || (!old.enabled && old.created == 0));
+    let starts = old.is_none_or(|old| old.duration != rule.duration || !old.enabled);
     if timed && rule.enabled && starts {
         rule.created = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

@@ -194,7 +194,10 @@ impl RuleCommands {
                 Some(guard) => (Task::Send(change), Some(guard)),
                 None => return,
             },
-            Plan::Edit { change, old } => (Task::Edit(change, old), None),
+            Plan::Edit { change, old } => match self.claim(&[&old.name], &answer) {
+                Some(guard) => (Task::Edit(change, old), Some(guard)),
+                None => return,
+            },
             Plan::Rename { change, old } => {
                 let new = change.rules[0].name.clone();
                 match self.claim(&[&old.name, &new], &answer) {
@@ -208,7 +211,9 @@ impl RuleCommands {
         tokio::spawn(async move {
             let outcome = match task {
                 Task::Send(change) => sent_outcome(commands.send(change), timeout).await,
-                Task::Edit(change, old) => edit::run(&commands, timeout, change, &old).await,
+                Task::Edit(change, old) => {
+                    edit::run(&commands, &rules, timeout, change, &old).await
+                }
                 Task::Rename(change, old) => {
                     rename::run(&commands, &rules, timeout, change, &old).await
                 }
