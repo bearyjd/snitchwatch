@@ -402,4 +402,87 @@ mod tests {
         });
         assert_eq!(store.legacy_host_only_count(), 2);
     }
+
+    /// The fetch rule the system image ships, as opensnitchd reports it:
+    /// enabled with `compiled_uid` (the uid `Compile` writes over
+    /// `user.name`), or disabled with the file's own data (`None`).
+    fn packaged_fetch_rule(compiled_uid: Option<&str>) -> snitchwatch_proto::protocol::Rule {
+        use snitchwatch_proto::protocol::{Operator, Rule as DaemonRule};
+        let json: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../packaging/bluebuild/files/system/etc/opensnitchd/rules/000-snitchwatch-bridge-fetch.json"
+        ))
+        .unwrap();
+        let text = |v: &serde_json::Value, key: &str| v[key].as_str().unwrap().to_string();
+        let leaf = |v: &serde_json::Value| Operator {
+            r#type: text(v, "type"),
+            operand: text(v, "operand"),
+            data: match (compiled_uid, v["operand"].as_str()) {
+                (Some(uid), Some("user.name")) => uid.to_string(),
+                _ => text(v, "data"),
+            },
+            sensitive: v["sensitive"].as_bool().unwrap(),
+            list: Vec::new(),
+        };
+        DaemonRule {
+            name: text(&json, "name"),
+            description: text(&json, "description"),
+            enabled: compiled_uid.is_some(),
+            precedence: json["precedence"].as_bool().unwrap(),
+            action: text(&json, "action"),
+            duration: text(&json, "duration"),
+            operator: Some(Operator {
+                r#type: "list".into(),
+                operand: "list".into(),
+                list: json["operator"]["list"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(leaf)
+                    .collect(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// Fed through the bridge's own rules cache and wire shape: bound to a
+    /// program, so never flagged as applying to every app. Loaded (enabled),
+    /// it is read-only, since a toggle would send the uid back as a name,
+    /// but it stays deletable.
+    #[test]
+    fn the_packaged_fetch_rule_is_never_flagged_and_read_only_once_loaded() {
+        use super::super::row_store::RuleSource;
+        use snitchwatch_bridge::cache::rules::RulesCache;
+
+        for compiled_uid in [Some("987"), None] {
+            let mut cache = RulesCache::default();
+            cache.replace_all(vec![packaged_fetch_rule(compiled_uid)]);
+            let mut store = RulesStore::new();
+            store.apply(&ServerMessage::SetRules {
+                rules: cache.snapshot_wire().unwrap(),
+            });
+            let r = store.find_by_name("000-snitchwatch-bridge-fetch").unwrap();
+            assert!(!r.applies_to_all_apps());
+            assert_eq!(r.all_apps_hint(), None);
+            assert_eq!(store.legacy_host_only_count(), 0);
+            assert_eq!(r.source(), RuleSource::User);
+            assert_eq!(r.normalized_action(), "allow");
+            assert!(!r.precedence);
+            assert!(store.is_deletable(&r.name));
+            assert_eq!(r.is_read_only(), compiled_uid.is_some(), "{compiled_uid:?}");
+            assert_eq!(
+                store.rule_json_with_enabled(&r.name, false).is_none(),
+                compiled_uid.is_some(),
+                "no toggle is built for the loaded rule"
+            );
+            assert_eq!(
+                r.operator_summary(),
+                format!(
+                    "process.path = /usr/bin/snitchwatch-bridge-cli AND user.name = {} \
+                     AND dest.port = 443 AND protocol = ^tcp6?$",
+                    compiled_uid.unwrap_or("snitchwatch")
+                )
+            );
+        }
+    }
 }

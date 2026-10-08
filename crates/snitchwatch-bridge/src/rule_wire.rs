@@ -256,4 +256,94 @@ mod tests {
         });
         assert!(rule_from_wire(&wire(null_operands)).is_ok());
     }
+
+    /// The fetch rule the system image ships: listed, never reserved,
+    /// deletable. Once the daemon has compiled it, its `user.name` holds the
+    /// uid, so the GUI may not send it back (a toggle would break it).
+    #[test]
+    fn the_packaged_fetch_rule_is_listed_and_read_only_once_compiled() {
+        use test_helpers::{packaged_fetch_rule, PACKAGED_FETCH_RULE_NAME};
+
+        let on_disk = packaged_fetch_rule(None);
+        let wire = rule_to_wire(&on_disk);
+        assert_eq!(wire["name"], PACKAGED_FETCH_RULE_NAME);
+        assert!(wire["readOnlyReason"].is_null(), "{wire}");
+        assert_eq!(wire["deletable"], true);
+        assert_eq!(wire["precedence"], false);
+        assert_eq!(wire["operator"]["operands"].as_array().unwrap().len(), 4);
+        let back = rule_from_wire(&wire).unwrap();
+        assert_eq!(rule_to_wire(&back), wire, "round trip");
+
+        let compiled = packaged_fetch_rule(Some("987"));
+        let wire = rule_to_wire(&compiled);
+        assert_eq!(
+            wire["readOnlyReason"],
+            crate::rule_policy::SHAPE_READ_ONLY_REASON
+        );
+        assert_eq!(wire["deletable"], true);
+        assert!(rule_from_wire(&wire).is_err(), "never sent back");
+        assert!(!crate::rule_name::is_reserved_blocklist_name(
+            PACKAGED_FETCH_RULE_NAME
+        ));
+        assert!(
+            crate::daemon_commands::BlocklistCommand::delete(PACKAGED_FETCH_RULE_NAME).is_none()
+        );
+    }
+}
+
+#[cfg(test)]
+pub mod test_helpers {
+    use snitchwatch_proto::protocol::{Operator, Rule};
+
+    pub const PACKAGED_FETCH_RULE_NAME: &str = "000-snitchwatch-bridge-fetch";
+
+    /// `packaging/bluebuild/files/system/etc/opensnitchd/rules/` — the rule
+    /// Snitchwatch ships for the system bridge's blocklist downloads.
+    pub const PACKAGED_FETCH_RULE_JSON: &str = include_str!(
+        "../../../packaging/bluebuild/files/system/etc/opensnitchd/rules/000-snitchwatch-bridge-fetch.json"
+    );
+
+    /// The shipped rule as opensnitchd's `Serialize` reports it. With
+    /// `compiled_uid`, the `user.name` member holds that uid, as `Compile`
+    /// leaves it for an enabled rule; `None` is the file as written.
+    pub fn packaged_fetch_rule(compiled_uid: Option<&str>) -> Rule {
+        let json: serde_json::Value = serde_json::from_str(PACKAGED_FETCH_RULE_JSON).unwrap();
+        let text = |v: &serde_json::Value, key: &str| v[key].as_str().unwrap().to_string();
+        let leaf = |v: &serde_json::Value| {
+            let mut data = text(v, "data");
+            if let (Some(uid), "user.name") = (compiled_uid, v["operand"].as_str().unwrap()) {
+                data = uid.to_string();
+            }
+            Operator {
+                r#type: text(v, "type"),
+                operand: text(v, "operand"),
+                data,
+                sensitive: v["sensitive"].as_bool().unwrap(),
+                list: Vec::new(),
+            }
+        };
+        let operator = &json["operator"];
+        Rule {
+            created: 0,
+            name: text(&json, "name"),
+            description: text(&json, "description"),
+            enabled: json["enabled"].as_bool().unwrap(),
+            precedence: json["precedence"].as_bool().unwrap(),
+            nolog: json["nolog"].as_bool().unwrap(),
+            action: text(&json, "action"),
+            duration: text(&json, "duration"),
+            operator: Some(Operator {
+                r#type: text(operator, "type"),
+                operand: text(operator, "operand"),
+                data: String::new(),
+                sensitive: operator["sensitive"].as_bool().unwrap(),
+                list: operator["list"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(leaf)
+                    .collect(),
+            }),
+        }
+    }
 }

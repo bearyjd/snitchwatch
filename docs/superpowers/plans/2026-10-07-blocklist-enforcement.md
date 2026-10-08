@@ -439,6 +439,16 @@ Manual check in a disposable VM, in both modes:
     when the rule compiles (`vendor:daemon/rule/operator.go` `Compile`). So
     the sysusers uid needn't be hard-coded, but a rule loaded before the
     account exists fails to compile.
+  - **DECIDED (owner, 2026-10-08): ship a narrow allow rule.**
+    - `000-snitchwatch-bridge-fetch` allows only
+      `/usr/bin/snitchwatch-bridge-cli` running as `user.name=snitchwatch`
+      to reach TCP/TCP6 port 443.
+    - It has `precedence: false`, so a user deny or a blocklist that
+      matches the list's host still blocks the fetch.
+    - If the account is missing, the rule is skipped, never broadened.
+    - A GUI can't toggle the loaded rule, because the daemon reports its
+      `user.name` as the uid. It can still delete it.
+    - See `2026-10-08-packaged-bridge-fetch-rule.md`.
 - **"Rule installed" is not proof of a load.** Only daemon logs show the
   count. The VM check is the mitigation; surfacing the count needs a daemon
   change.

@@ -42,13 +42,58 @@ Both ship the same fail-**closed** daemon config
 ([`bluebuild/files/system/etc/opensnitchd/default-config.json`](bluebuild/files/system/etc/opensnitchd/default-config.json)):
 `DefaultAction: deny` and `Server.Address: 127.0.0.1:50051`.
 
+## The packaged fetch rule
+
+With `DefaultAction: deny` and no GUI attached, the daemon would deny the
+system bridge's own blocklist downloads. Snitchwatch therefore ships exactly
+one opensnitchd rule (owner decision, 2026-10-08):
+[`bluebuild/files/system/etc/opensnitchd/rules/000-snitchwatch-bridge-fetch.json`](bluebuild/files/system/etc/opensnitchd/rules/000-snitchwatch-bridge-fetch.json).
+
+- **What it allows.** It ANDs four conditions:
+  - `process.path` is exactly `/usr/bin/snitchwatch-bridge-cli`;
+  - `user.name` is `snitchwatch`;
+  - `dest.port` is `443`;
+  - `protocol` matches `^tcp6?$`.
+
+  Nothing else is allowed: no other port, no UDP/QUIC, and no desktop
+  user's bridge.
+- **Denies still win.** It is an `allow` with `precedence: false`. A user
+  deny or a subscribed blocklist that matches a list's host still blocks
+  that fetch, and the list's status shows the error.
+- **If the account is missing, the rule is skipped.** The daemon resolves
+  `user.name` when it loads the rule. Without the `snitchwatch` account it
+  logs `Error compiling list rule` and skips the rule; it never broadens
+  it.
+  - On today's bluebuild image, which runs the per-user bridge, the rule
+    is inert for this reason.
+  - With the system-bridge overlay, sysusers creates the account before
+    `opensnitch.service` starts.
+  - On a live host, restart `opensnitch.service` once after the account
+    exists.
+- **The Rules page shows it read-only.** It is listed like any daemon rule
+  but can't be toggled: the daemon reports `user.name` as the uid, and
+  sending that back would break the rule. It can still be deleted.
+- **Not covered:** DNS, and list URLs on other ports.
+- **Where it ships:**
+  - the bluebuild image (`files` module);
+  - the system-bridge overlay (`system/stage.sh` installs the same file
+    to `/etc/opensnitchd/rules/`, mode 0644).
+
+  The release tarball and the Flatpak don't carry it: the tarball ships
+  the per-user bridge, which the rule deliberately doesn't match.
+
+Details and the daemon-source reasoning:
+[`../docs/superpowers/plans/2026-10-08-packaged-bridge-fetch-rule.md`](../docs/superpowers/plans/2026-10-08-packaged-bridge-fetch-rule.md).
+
 ## Files
 
 ```
 packaging/
 ├── bluebuild/
 │   ├── recipe.yml                                  # batteries-included image recipe
-│   └── files/system/etc/opensnitchd/default-config.json  # fail-closed daemon config (canonical)
+│   └── files/system/etc/opensnitchd/
+│       ├── default-config.json                     # fail-closed daemon config (canonical)
+│       └── rules/000-snitchwatch-bridge-fetch.json # the one shipped allow rule (canonical)
 ├── flatpak/
 │   ├── org.snitchwatch.Snitchwatch.yml             # GUI-only Flatpak manifest (no --share=network)
 │   ├── org.snitchwatch.Snitchwatch.system.yml      # alternative system-bridge profile (same app-id)

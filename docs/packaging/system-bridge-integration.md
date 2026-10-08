@@ -94,8 +94,14 @@ packaging/system/stage.sh /path/to/image-root \
   /path/to/verified/snitchwatch-bridge-cli <verified-sha256>
 ```
 
-The staged overlay supplies sysusers, tmpfiles, one system service, and two
-socket units. Enable the two `.socket` units in the image/preset; do not
+The staged overlay supplies sysusers, tmpfiles, one system service, two
+socket units, and the one packaged opensnitchd rule.
+`/etc/opensnitchd/rules/000-snitchwatch-bridge-fetch.json` lets this
+account's bridge download blocklists over HTTPS (TCP 443) under
+`DefaultAction: deny`. Denies and blocklists still win; see
+[`../../packaging/README.md`](../../packaging/README.md#the-packaged-fetch-rule).
+After the first boot, confirm that `journalctl -u opensnitch.service` shows
+no `Error compiling list rule` for it. Enable the two `.socket` units in the image/preset; do not
 enable the service directly. For OpenSnitch 1.8.0, configure
 `Server.Address: unix:opensnitchd.sock` and give `opensnitch.service` this
 drop-in so the relative socket address resolves inside the protected runtime

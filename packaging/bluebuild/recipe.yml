@@ -54,6 +54,13 @@ modules:
   #    root, as the baked daemon runs, ebpf loads fine on 6.19. See issue
   #    #6's post-close correction comment.)
   #    See files/system/etc/opensnitchd/default-config.json.
+  #    The same module ships the one Snitchwatch rule,
+  #    files/system/etc/opensnitchd/rules/000-snitchwatch-bridge-fetch.json:
+  #    it lets the *system* bridge (account `snitchwatch`) download
+  #    blocklists over HTTPS. This image has no `snitchwatch` account yet, so
+  #    the daemon logs that it can't compile the rule, skips it, and nothing
+  #    is allowed by it. See ../../docs/superpowers/plans/
+  #    2026-10-08-packaged-bridge-fetch-rule.md.
   - type: files
     files:
       - source: system
