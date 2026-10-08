@@ -134,6 +134,25 @@ impl MockOpensnitchd {
         Ok(reply)
     }
 
+    /// A `Ping` carrying `Statistics`, as the real daemon sends when it has
+    /// new matched events (`rule_misses` and `uptime` feed the bridge's
+    /// prompt-slot count).
+    pub async fn ping_with_stats(
+        &mut self,
+        id: u64,
+        stats: snitchwatch_proto::protocol::Statistics,
+    ) -> Result<PingReply, MockError> {
+        let reply = self
+            .client
+            .ping(PingRequest {
+                id,
+                stats: Some(stats),
+            })
+            .await?
+            .into_inner();
+        Ok(reply)
+    }
+
     pub async fn subscribe(&mut self, name: &str) -> Result<ClientConfig, MockError> {
         let cfg = ClientConfig {
             id: 1,

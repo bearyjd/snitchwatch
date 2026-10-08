@@ -190,6 +190,61 @@ takes it again. Meanwhile every other new connection gets `DefaultAction`:
    - **When the count is `None`,** drop the "at least N" clause rather
      than show 0.
 
+#### A as implemented (2026-10-08): departures
+
+Branch `feat/prompt-slot-visibility`, which also folds in the honesty half of
+issue #78.
+- **`what` is not `display_summary`.** That function HTML-escapes, so a
+  PlainText label would show `&lt;` literally. The WS `holder.what` is
+  `prompt_slot::plain_summary`: control and bidi characters stripped, each
+  part truncated, nothing escaped. Clients show it in PlainText labels
+  only. Notifications keep their escaping and carry no connection data.
+- **Baseline rule.** The first reading after a hold, and any reading after
+  a reset, becomes the baseline. The count stays unknown until a later
+  reading.
+  - A reset is `uptime` dropping or the `rules.synced()` generation
+    changing.
+  - A count of 0 is shown like an unknown one: the count sentence is
+    dropped.
+- **The count is of times, not connections** (review of PR #86). The
+  daemon's `rule_misses` counts unanswered packets: a retry, or the waiting
+  connection's own SYN retransmit, counts again.
+  - The text says "the firewall applied its default action N times
+    meanwhile (retries count again)", never "at least N other connections".
+  - It is still a lower bound: counting starts at the first ping after the
+    hold.
+  - Overlapping holders count the same misses. Each release summary is true
+    of its own prompt; the summaries don't add up.
+- **"Oldest" is by hold order,** not row-id order (`ask-10` sorts before
+  `ask-9`).
+- **Gating on the bridge.** The bridge advertises a `promptSlot`
+  capability (the #74 handshake). The age-based `pendingExposureBanner`
+  stays, gated on its absence, so it never flashes before the snapshot on
+  a new bridge.
+- **`PromptSlotSummary { row_id, count }`.** It carries the ask id, so the
+  notifiers' cooldown is per prompt.
+- **Wording ("usually").** Tower's r8 saw requeued packets dropped under
+  nftables chain churn. The text says other new connections "usually get
+  the firewall's default action", never that every connection prompts.
+- **Issue #78 (honesty only).** While paused with a prompt holding the
+  slot, the banner and the tray tooltip add fixed text: "Filtering is
+  paused, but a connection is still waiting for your answer. Until you
+  answer it, the pause can't reach other new connections; they usually get
+  the firewall's default action instead."
+  - With several holders it reads "N connections are still waiting".
+  - This holds under either `DefaultAction`, which the bridge doesn't know.
+  - Nothing is auto-answered. #78's options 1, 2 and 4 are the owner's.
+- **UI shape.**
+  - The banner is its own component, `PromptSlotBanner.qml`: a fixed-text
+    InlineMessage and a PlainText label, per #51.
+  - Allow once and Deny use `InlineVerdicts`. They are enabled only while
+    the model holds the row as pending, and answer each holder once.
+  - They also wait until the holder has been shown for 750 ms. The timer
+    restarts on each holder change, so a double-click meant for one prompt
+    can't answer the next one.
+  - Review opens the Connections page, whose auto-select picks the row; it
+    doesn't open the inspector.
+
 ### B. Answer from the notification (UI, S; owner question S5 confirms)
 
 5. `notification_controller.rs` `dispatch` adds "Allow once" and "Deny"

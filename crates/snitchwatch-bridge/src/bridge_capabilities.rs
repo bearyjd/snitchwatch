@@ -13,9 +13,14 @@
 /// `docs/superpowers/plans/2026-10-08-inline-deny-until-restart.md`).
 pub const APP_BOUND_RULES: &str = "appBoundRules";
 
+/// The bridge sends `PromptSlot` messages: who holds the daemon's single
+/// prompt slot (`crate::prompt_slot`). Without it a client falls back to its
+/// own estimate from pending rows.
+pub const PROMPT_SLOT: &str = "promptSlot";
+
 /// What this bridge advertises to every authenticated client.
 pub fn advertised() -> Vec<String> {
-    vec![APP_BOUND_RULES.to_string()]
+    vec![APP_BOUND_RULES.to_string(), PROMPT_SLOT.to_string()]
 }
 
 #[cfg(test)]
@@ -49,11 +54,14 @@ mod tests {
     }
 
     #[test]
-    fn this_bridge_advertises_app_bound_rules() {
+    fn this_bridge_advertises_app_bound_rules_and_the_prompt_slot() {
         let ack: serde_json::Value = serde_json::from_str(&current_ack()).unwrap();
         assert_eq!(
             ack,
-            serde_json::json!({ "action": "authenticated", "capabilities": ["appBoundRules"] })
+            serde_json::json!({
+                "action": "authenticated",
+                "capabilities": ["appBoundRules", "promptSlot"],
+            })
         );
     }
 

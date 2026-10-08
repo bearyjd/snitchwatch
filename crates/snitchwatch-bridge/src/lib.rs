@@ -22,6 +22,7 @@ pub mod grpc_client;
 pub mod grpc_server;
 pub mod notice;
 pub mod profiles;
+pub mod prompt_slot;
 pub mod rule_name;
 pub mod rule_policy;
 pub mod rule_wire;

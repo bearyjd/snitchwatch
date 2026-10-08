@@ -12,6 +12,10 @@ path = "../bridge_protocol_test.rs"
 name = "verdict_not_remembered"
 path = "../verdict_not_remembered_test.rs"
 
+[[test]]
+name = "prompt_slot"
+path = "../prompt_slot_test.rs"
+
 [dev-dependencies]
 snitchwatch-bridge = { path = "../../crates/snitchwatch-bridge", default-features = false }
 snitchwatch-bridge-cli = { path = "../../crates/snitchwatch-bridge-cli", default-features = false }

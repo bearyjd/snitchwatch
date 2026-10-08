@@ -31,6 +31,8 @@ pub mod paths;
 pub mod pending_decision;
 pub mod profiles;
 pub mod profiles_model;
+pub mod prompt_slot_status;
+pub(crate) mod prompt_slot_text;
 pub mod rules;
 pub mod rules_model;
 pub mod scanner;
