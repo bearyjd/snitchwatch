@@ -18,8 +18,11 @@ can't list them.
 
 ## The contract (agreed with the bazzite-tower fork, 2026-10-08)
 
-The fork reports each connection that got the daemon's `DefaultAction` as
-an ordinary `Statistics.events[]` `Event`. Its `rule` is synthetic:
+The daemon side is **bazzite-tower PR #89** (branch
+`feat/snitchwatch-daemon-prompt-slot`, stacked on its #88; approved, not
+merged). The fork reports each connection that got the daemon's
+`DefaultAction` as an ordinary `Statistics.events[]` `Event`. Its `rule`
+is synthetic:
 
 | field | value |
 |---|---|
@@ -45,6 +48,10 @@ an ordinary `Statistics.events[]` `Event`. Its `rule` is synthetic:
 - **E2** (`DropWhileAsking`, a daemon config-file key, off by default)
   needs no bridge code. A busy drop touches no statistics: no event, no
   `rule_hits`, no `rule_misses`.
+- **Eviction differs.** On the fork, a miss that records no event no
+  longer evicts an older event from a full ring; on stock it still does.
+  The gap arithmetic below doesn't depend on either, and no test assumes
+  one.
 
 ## Decisions
 

@@ -16,15 +16,16 @@
 //! (`stats.go` `onConnection`; a `nolog` rule adds to neither, `main.go`
 //! `onPacket`). So between two pings, `missing = Δrule_hits − received` is
 //! every rule event that never arrived, however it was lost: dropped at the
-//! cap (a missed connection at the cap drops one too), emptied before a
-//! failed ping (`client.go` `ping`), appended between `Serialize`'s unlock
-//! and `emptyStats`, or sent while the bridge was away. The first ping of a
-//! bridge run only sets the baseline: the counter also covers the time
-//! before counting began.
+//! cap (on stock v1.8.0 a missed connection at the cap drops one too; on the
+//! fork a miss without an event doesn't, and nothing here depends on which),
+//! emptied before a failed ping (`client.go` `ping`), appended between
+//! `Serialize`'s unlock and `emptyStats`, or sent while the bridge was away.
+//! The first ping of a bridge run only sets the baseline: the counter also
+//! covers the time before counting began.
 //!
 //! `received` is every event of the ping except default-action ones. Stock
 //! v1.8.0 appends no event for a connection no rule matched. The
-//! bazzite-tower fork appends one with a marked synthetic rule
+//! bazzite-tower fork (its PR #89) appends one with a marked synthetic rule
 //! ([`is_default_action_rule`], E3, plan
 //! `2026-10-08-default-applied-events.md`), and it grows `rule_misses`, not
 //! `rule_hits`, so counting it would make every default-applied connection
