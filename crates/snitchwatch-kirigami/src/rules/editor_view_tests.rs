@@ -221,3 +221,14 @@ fn a_cached_rule_is_edited_in_its_wire_form() {
     );
     assert!(editable_in(&store, "899-missing").is_none());
 }
+
+/// The texts for a message that never reached the bridge, shared with "Make
+/// a rule…".
+#[test]
+fn a_message_that_was_not_queued_says_why() {
+    use crate::bridge_runtime::SendClientMessageError as E;
+    assert_eq!(not_sent_text(E::Full), QUEUE_FULL);
+    for error in [E::Disconnected, E::Stopped, E::StaleSession] {
+        assert_eq!(not_sent_text(error), NOT_CONNECTED, "{error:?}");
+    }
+}

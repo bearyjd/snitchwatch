@@ -201,7 +201,7 @@ Controls.ApplicationWindow {
                     // bridge runs here, so nothing can be sent.
                     const sheet = page.makeRuleSheet;
                     sheet.make("deny");
-                    probeWindow.check(sheet.result === "The rule couldn't be sent."
+                    probeWindow.check(sheet.result === "Snitchwatch isn't connected to its service, so nothing was sent."
                                       && !sheet.controller.created,
                                       "unsent: " + sheet.result);
                     // A request the bridge hasn't answered yet.

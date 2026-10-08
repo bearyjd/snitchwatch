@@ -111,6 +111,21 @@ pub(crate) fn add_rule_message(
     })
 }
 
+/// What the sheet says when the rule wasn't sent, or `None` when `send`
+/// queued it: [`NOT_SENT`] when no rule may be made (`message` is `None`),
+/// otherwise the rule editor's text for why it wasn't queued.
+pub(crate) fn send_problem(
+    message: Option<ClientMessage>,
+    send: impl FnOnce(ClientMessage) -> Result<(), crate::bridge_runtime::SendClientMessageError>,
+) -> Option<&'static str> {
+    let Some(message) = message else {
+        return Some(NOT_SENT);
+    };
+    send(message)
+        .err()
+        .map(crate::rules::editor_view::not_sent_text)
+}
+
 /// How a "Make a rule…" request ended, as the sheet says it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Finished {
@@ -578,6 +593,32 @@ mod tests {
         // A row id naming no session waits for the deadline only.
         wait.begin("make-2".into(), "probe-row".into(), now);
         assert!(wait.poll(now, NO_ANSWER_AFTER, |_| false).is_none());
+    }
+
+    #[test]
+    fn a_rule_that_was_not_sent_says_why() {
+        use crate::bridge_runtime::SendClientMessageError as E;
+        use crate::rules::editor_view::{NOT_CONNECTED, QUEUE_FULL};
+        let message = || {
+            add_rule_message(
+                &deferred_row(Some("/usr/bin/curl")),
+                "deny",
+                "this_host",
+                "forever",
+                0,
+                "make-1",
+            )
+        };
+        assert_eq!(send_problem(message(), |_| Ok(())), None);
+        assert_eq!(send_problem(message(), |_| Err(E::Full)), Some(QUEUE_FULL));
+        assert_eq!(
+            send_problem(message(), |_| Err(E::StaleSession)),
+            Some(NOT_CONNECTED)
+        );
+        assert_eq!(
+            send_problem(None, |_| panic!("nothing to send")),
+            Some(NOT_SENT)
+        );
     }
 
     #[test]

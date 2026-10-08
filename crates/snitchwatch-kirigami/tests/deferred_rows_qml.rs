@@ -257,7 +257,8 @@ Controls.ApplicationWindow {
                     probeWindow.check(page.makeRuleSheet.form.visible, "the rule form didn't open");
                     // No bridge runs here, so nothing can be sent.
                     page.makeRuleSheet.make("deny");
-                    probeWindow.check(page.makeRuleSheet.result === "The rule couldn't be sent.",
+                    probeWindow.check(page.makeRuleSheet.result
+                                      === "Snitchwatch isn't connected to its service, so nothing was sent.",
                                       "make result " + page.makeRuleSheet.result);
                     probeWindow.check(!page.makeRuleSheet.blockNote.visible,
                                       "the block note on a row with no block");

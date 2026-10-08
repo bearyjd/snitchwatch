@@ -193,11 +193,15 @@ ColumnLayout {
         if (requestId === "") {
             return;
         }
-        const sent = sheet.model !== null
-            && sheet.model.makeRule(sheet.rowId, choice, scopeBox.currentValue,
-                                    durationBox.currentValue, requestId) === true;
-        if (!sent) {
-            controller.notSent();
+        if (sheet.model === null) {
+            controller.notSent("");
+            return;
+        }
+        // Empty when sent; otherwise why not.
+        const problem = sheet.model.makeRule(sheet.rowId, choice, scopeBox.currentValue,
+                                             durationBox.currentValue, requestId);
+        if (problem !== "") {
+            controller.notSent(problem);
             return;
         }
         form.visible = false;

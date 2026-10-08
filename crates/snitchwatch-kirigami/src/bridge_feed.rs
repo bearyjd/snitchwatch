@@ -350,26 +350,31 @@ pub(crate) fn dispatch_to(
 }
 
 /// Send `msg`, which names no row itself (`AddRule` from "Make a rule…"),
-/// to the bridge session row `row_id` came from. False without a runtime,
-/// for a malformed id, or once that session is gone.
+/// to the bridge session row `row_id` came from. Why not, when it wasn't
+/// queued: a malformed id or a session that is gone, no runtime, a full
+/// queue.
 pub(crate) fn dispatch_for_row(
     row_id: &str,
     msg: snitchwatch_bridge::ws_messages::ClientMessage,
-) -> bool {
-    let Some(handles) = crate::bridge_runtime::handles() else {
-        tracing::warn!("BridgeFeed: bridge not running; dropping client message");
-        return false;
-    };
-    let Some((session, _)) = split_session_row_id(row_id) else {
-        return false;
-    };
-    match handles.try_send_for_session(session, msg) {
-        Ok(()) => true,
-        Err(error) => {
-            tracing::warn!(error = %error, "BridgeFeed: client mutation dropped");
-            false
-        }
+) -> Result<(), crate::bridge_runtime::SendClientMessageError> {
+    let result = dispatch_for_row_on(crate::bridge_runtime::handles().as_ref(), row_id, msg);
+    if let Err(error) = result {
+        tracing::warn!(error = %error, "BridgeFeed: client mutation dropped");
     }
+    result
+}
+
+/// [`dispatch_for_row`] on `handles` (`None`: the runtime isn't running).
+fn dispatch_for_row_on(
+    handles: Option<&crate::bridge_runtime::BridgeHandles>,
+    row_id: &str,
+    msg: snitchwatch_bridge::ws_messages::ClientMessage,
+) -> Result<(), crate::bridge_runtime::SendClientMessageError> {
+    use crate::bridge_runtime::SendClientMessageError;
+    let (session, _) = split_session_row_id(row_id).ok_or(SendClientMessageError::StaleSession)?;
+    handles
+        .ok_or(SendClientMessageError::Disconnected)?
+        .try_send_for_session(session, msg)
 }
 
 /// Whether row `row_id`'s bridge session is live and takes "Decide later".
@@ -462,6 +467,22 @@ mod tests {
         assert!(
             operator.contains("/usr/bin/curl") && operator.contains("example.com"),
             "{operator}"
+        );
+    }
+
+    #[test]
+    fn a_row_message_that_cannot_be_queued_says_why() {
+        use crate::bridge_runtime::SendClientMessageError as E;
+        use snitchwatch_bridge::ws_messages::ClientMessage;
+        // An id naming no session belongs to no live bridge.
+        assert_eq!(
+            dispatch_for_row_on(None, "7", ClientMessage::RequestSnapshot),
+            Err(E::StaleSession)
+        );
+        // No bridge runtime at all.
+        assert_eq!(
+            dispatch_for_row_on(None, "1:ask-7", ClientMessage::RequestSnapshot),
+            Err(E::Disconnected)
         );
     }
 

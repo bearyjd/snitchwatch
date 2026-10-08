@@ -16,15 +16,12 @@ use serde_json::Value;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
-use crate::bridge_runtime::SendClientMessageError;
 use crate::rules::editor::{self, RuleDraft};
 use crate::rules::editor_profile;
 use crate::rules::editor_view;
 use crate::rules::simulator::SimulationForm;
 use snitchwatch_bridge::ws_messages::{ClientMessage, ServerMessage};
 
-const NOT_CONNECTED: &str = "Snitchwatch isn't connected to its service, so nothing was sent.";
-const QUEUE_FULL: &str = "Snitchwatch is busy, so nothing was sent. Try again in a moment.";
 const SAVING: &str = "Saving…";
 /// A profile rule is saved, not yet installed: the Profiles page shows
 /// whether the firewall has it.
@@ -151,13 +148,10 @@ fn next_request_id() -> String {
 }
 
 fn send(message: ClientMessage) -> Result<(), &'static str> {
-    let handles = crate::bridge_runtime::handles().ok_or(NOT_CONNECTED)?;
-    handles.try_send(message).map_err(|error| match error {
-        SendClientMessageError::Full => QUEUE_FULL,
-        SendClientMessageError::Disconnected
-        | SendClientMessageError::Stopped
-        | SendClientMessageError::StaleSession => NOT_CONNECTED,
-    })
+    let handles = crate::bridge_runtime::handles().ok_or(editor_view::NOT_CONNECTED)?;
+    handles
+        .try_send(message)
+        .map_err(editor_view::not_sent_text)
 }
 
 fn draft_json(draft: &RuleDraft) -> QString {

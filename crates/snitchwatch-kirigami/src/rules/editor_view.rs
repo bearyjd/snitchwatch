@@ -20,6 +20,20 @@ const SAVED: &str = "Saved.";
 const NOT_SAVED: &str = "Not saved: ";
 const NOT_SENT: &str = "Not sent: ";
 const NO_DAEMON: &str = "The firewall service isn't connected, so nothing was sent.";
+/// A message that never reached the bridge (`not_sent_text`); "Make a
+/// rule…" says the same.
+pub const NOT_CONNECTED: &str = "Snitchwatch isn't connected to its service, so nothing was sent.";
+pub const QUEUE_FULL: &str = "Snitchwatch is busy, so nothing was sent. Try again in a moment.";
+
+/// Why a message wasn't queued for the bridge, as plain text.
+pub fn not_sent_text(error: crate::bridge_runtime::SendClientMessageError) -> &'static str {
+    use crate::bridge_runtime::SendClientMessageError as E;
+    match error {
+        E::Full => QUEUE_FULL,
+        E::Disconnected | E::Stopped | E::StaleSession => NOT_CONNECTED,
+    }
+}
+
 /// No answer: the change may or may not have been made.
 pub const UNKNOWN: &str = "No answer from the firewall in time. The change may have been \
      saved; check the Rules page.";

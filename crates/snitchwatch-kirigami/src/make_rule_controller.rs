@@ -58,10 +58,11 @@ pub mod qobject {
         #[qinvokable]
         fn begin(self: Pin<&mut MakeRuleController>, row_id: &QString) -> QString;
 
-        /// The request `begin` started wasn't sent.
+        /// The request `begin` started wasn't sent, because of `reason`
+        /// (`ConnectionsModel.makeRule`'s answer; empty: the generic text).
         #[qinvokable]
         #[cxx_name = "notSent"]
-        fn not_sent(self: Pin<&mut MakeRuleController>);
+        fn not_sent(self: Pin<&mut MakeRuleController>, reason: &QString);
 
         /// Give up waiting after a silence (called by a one-second QML timer).
         #[qinvokable]
@@ -130,11 +131,16 @@ impl qobject::MakeRuleController {
         QString::from(&request_id)
     }
 
-    fn not_sent(mut self: Pin<&mut Self>) {
+    fn not_sent(mut self: Pin<&mut Self>, reason: &QString) {
         self.as_mut().rust_mut().wait.abandon();
         self.as_mut().set_created(false);
         self.as_mut().set_busy(false);
-        self.set_status_text(QString::from(NOT_SENT));
+        let status = if reason.is_empty() {
+            QString::from(NOT_SENT)
+        } else {
+            reason.clone()
+        };
+        self.set_status_text(status);
     }
 
     fn poll(mut self: Pin<&mut Self>) {
