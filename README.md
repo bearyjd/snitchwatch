@@ -233,7 +233,10 @@ past 2,000,000 hosts in total (in subscription order) get no rule.
   `SNITCHWATCH_STATE_DIR`. With neither, they are kept in memory only and the
   page says so. Profiles and the active-profile choice persist the same way,
   in `profiles.sqlite3` (issue #46); profiles are not applied to the
-  firewall yet, and the Profiles page says so.
+  firewall yet, and the Profiles page says so. A manual choice can still be
+  replaced at startup: the bridge's first network reading after a restart
+  counts as a network change, so if a different profile matches the current
+  network, auto-switch activates it.
 - The bridge fetches only `https://` URLs, including every redirect, and
   never a loopback, link-local, carrier-grade NAT or other reserved address
   (LAN addresses are allowed for now). There is no `http://` or `file://`
