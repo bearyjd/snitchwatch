@@ -7,7 +7,7 @@
 //!     `activateProfile`/`deactivateProfile` are `qinvokable`s that emit the
 //!     bridge's typed `ClientMessage` (JSON) for the live feed to forward —
 //!     mirroring `BlocklistsModel::subscribe`/`unsubscribe` and
-//!     `RulesModel::toggleEnabled`'s "emit signal, no local mutation, wait
+//!     `RulesModel::setEnabled`'s "emit signal, no local mutation, wait
 //!     for the server round-trip" pattern. No bridge changes.
 //!
 //! Profile list updates are low-frequency whole-list replaces/upserts (same

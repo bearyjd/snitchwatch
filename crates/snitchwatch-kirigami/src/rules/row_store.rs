@@ -63,7 +63,7 @@ pub struct Rule {
     /// non-precedence rules, i.e. it can decide traffic another rule would
     /// otherwise match.
     ///
-    /// Carried here purely so it survives a round trip. `toggleEnabled` sends
+    /// Carried here purely so it survives a round trip. `setEnabled` sends
     /// the whole rule back as a `CHANGE_RULE`, and the daemon's handler does a
     /// wholesale `Replace` — so a field this struct drops is a field the next
     /// toggle silently clears on the daemon. For `precedence` that would
@@ -73,6 +73,17 @@ pub struct Rule {
     /// opensnitchd's `Rule.nolog` — suppress logging for matches of this rule.
     /// Same round-trip-ballast rationale as [`Self::precedence`].
     pub nolog: bool,
+    /// The bridge's display form of `name`, with bidi overrides and
+    /// zero-width characters removed (issue #48). Display only: `name` is the
+    /// rule's identity in every command, so this is never sent back.
+    #[serde(skip_serializing)]
+    pub display_name: Option<String>,
+    /// Set by the bridge when Snitchwatch can't edit this rule (a name the
+    /// bridge refuses to send back to the daemon); a plain-language reason
+    /// for the user. The row stays visible — the daemon still enforces it —
+    /// but no command is ever emitted for it. Never sent back.
+    #[serde(skip_serializing)]
+    pub read_only_reason: Option<String>,
 }
 
 /// Where a rule originated: authored directly by the user, or materialized
@@ -85,6 +96,16 @@ pub enum RuleSource {
 }
 
 impl Rule {
+    /// What to show for this rule's name; see [`Self::display_name`]. Falls
+    /// back to `name` only for a bridge that predates the field.
+    pub fn shown_name(&self) -> &str {
+        self.display_name.as_deref().unwrap_or(&self.name)
+    }
+
+    pub fn is_read_only(&self) -> bool {
+        self.read_only_reason.is_some()
+    }
+
     /// Classify this rule's source by its `name` prefix. Recognizes both the
     /// current `z00-blocklist:` band and the legacy `900-blocklist:` band (see
     /// [`LEGACY_BLOCKLIST_RULE_NAME_PREFIX`]) so migration-window rules still
@@ -237,13 +258,28 @@ impl RulesStore {
         true
     }
 
-    /// Build the full rule payload for toggling `name`'s `enabled` flag, with
-    /// every other field preserved — ready for the model wrapper to wrap in a
-    /// `ClientMessage::UpdateRule`. Returns `None` if `name` isn't known.
-    pub fn toggled_rule_json(&self, name: &str) -> Option<serde_json::Value> {
-        let rule = self.find_by_name(name)?;
-        let mut updated = rule.clone();
-        updated.enabled = !updated.enabled;
+    /// Whether a rule may be deleted from Snitchwatch: known and not
+    /// read-only.
+    pub fn is_deletable(&self, name: &str) -> bool {
+        self.find_by_name(name).is_some_and(|r| !r.is_read_only())
+    }
+
+    /// Build the full rule payload setting `name`'s `enabled` flag to
+    /// `enabled`, with every other field preserved — ready for the model
+    /// wrapper to wrap in a `ClientMessage::UpdateRule`. Returns `None` if
+    /// `name` isn't known.
+    ///
+    /// Takes the desired value rather than flipping the stored one: until
+    /// the bridge's next `SetRules` arrives, the store still holds the old
+    /// value, so a quick second click would otherwise send the same change
+    /// twice and leave the rule inverted from what the switch shows (#48).
+    /// Also `None` for a read-only rule: no command is built for it.
+    pub fn rule_json_with_enabled(&self, name: &str, enabled: bool) -> Option<serde_json::Value> {
+        let mut updated = self
+            .find_by_name(name)
+            .filter(|r| !r.is_read_only())?
+            .clone();
+        updated.enabled = enabled;
         serde_json::to_value(&updated).ok()
     }
 }
@@ -256,6 +292,8 @@ impl RulesStore {
 #[serde(rename_all = "camelCase")]
 struct FoundRule<'a> {
     name: &'a str,
+    display_name: &'a str,
+    read_only_reason: &'a str,
     enabled: bool,
     action: &'static str,
     duration: &'a str,
@@ -281,6 +319,8 @@ pub fn found_rule_json(store: &RulesStore, name: &str) -> Option<String> {
     };
     let found = FoundRule {
         name: &rule.name,
+        display_name: rule.shown_name(),
+        read_only_reason: rule.read_only_reason.as_deref().unwrap_or_default(),
         enabled: rule.enabled,
         action: rule.normalized_action(),
         duration: &rule.duration,
@@ -306,6 +346,8 @@ mod tests {
             operator: serde_json::json!({"operand": "dest.host", "data": "example.com"}),
             precedence: false,
             nolog: false,
+            display_name: None,
+            read_only_reason: None,
         }
     }
 
@@ -353,6 +395,27 @@ mod tests {
             rules: vec![serde_json::to_value(rule("999-new", true, "deny")).unwrap()],
         }));
         assert_eq!(names(&s), vec!["899-firefox", "999-new"]);
+    }
+
+    /// Issue #48: the bridge re-sends the daemon's full list after every
+    /// confirmed or refused command, so a later `SetRules` must replace
+    /// rules an earlier `UpdateRules` added (e.g. one the daemon refused).
+    #[test]
+    fn set_rules_after_update_rules_replaces_the_list() {
+        let mut s = RulesStore::new();
+        s.apply(&ServerMessage::SetRules {
+            rules: vec![serde_json::to_value(rule("899-firefox", true, "allow")).unwrap()],
+        });
+        s.apply(&ServerMessage::UpdateRules {
+            rules: vec![serde_json::to_value(rule("999-new", true, "deny")).unwrap()],
+        });
+
+        assert!(s.apply(&ServerMessage::SetRules {
+            rules: vec![serde_json::to_value(rule("899-firefox", false, "allow")).unwrap()],
+        }));
+
+        assert_eq!(names(&s), vec!["899-firefox"]);
+        assert!(!s.find_by_name("899-firefox").unwrap().enabled);
     }
 
     #[test]
@@ -468,15 +531,59 @@ mod tests {
     }
 
     #[test]
-    fn toggled_rule_json_flips_enabled_and_preserves_other_fields() {
+    fn rule_json_with_enabled_sets_enabled_and_preserves_other_fields() {
         let mut s = RulesStore::new();
         s.apply(&ServerMessage::SetRules {
             rules: vec![serde_json::to_value(rule("899-firefox", true, "allow")).unwrap()],
         });
-        let toggled = s.toggled_rule_json("899-firefox").expect("rule known");
+        let toggled = s
+            .rule_json_with_enabled("899-firefox", false)
+            .expect("rule known");
         assert_eq!(toggled["enabled"], false);
         assert_eq!(toggled["name"], "899-firefox");
         assert_eq!(toggled["action"], "allow");
+    }
+
+    /// #48: two clicks before the bridge's next `SetRules` must send "off"
+    /// then "on", not "off" twice (a flip of the stale stored value).
+    #[test]
+    fn a_quick_second_click_sends_the_value_the_switch_shows() {
+        let mut s = RulesStore::new();
+        s.apply(&ServerMessage::SetRules {
+            rules: vec![serde_json::to_value(rule("899-firefox", true, "allow")).unwrap()],
+        });
+        let first = s.rule_json_with_enabled("899-firefox", false).unwrap();
+        let second = s.rule_json_with_enabled("899-firefox", true).unwrap();
+        assert_eq!(first["enabled"], false);
+        assert_eq!(second["enabled"], true);
+    }
+
+    #[test]
+    fn display_name_is_shown_but_never_sent_back() {
+        let mut s = RulesStore::new();
+        s.apply(&ServerMessage::SetRules {
+            rules: vec![
+                serde_json::json!({
+                    "name": "evil\u{202e}txt.exe", "displayName": "eviltxt.exe",
+                    "enabled": true, "action": "allow", "duration": "always",
+                    "description": "", "operator": {}, "precedence": false, "nolog": false,
+                }),
+                serde_json::to_value(rule("old-bridge", true, "allow")).unwrap(),
+            ],
+        });
+        let name = s.rules()[0].name.clone();
+        assert_eq!(s.rules()[0].shown_name(), "eviltxt.exe");
+        assert_eq!(
+            s.rules()[1].shown_name(),
+            "old-bridge",
+            "no displayName: name"
+        );
+        let sent = s.rule_json_with_enabled(&name, false).unwrap();
+        assert_eq!(sent["name"], name.as_str(), "commands keep the exact name");
+        assert!(sent.get("displayName").is_none());
+        let found: serde_json::Value =
+            serde_json::from_str(&found_rule_json(&s, &name).unwrap()).unwrap();
+        assert_eq!(found["displayName"], "eviltxt.exe");
     }
 
     /// A toggle is sent to the daemon as a `CHANGE_RULE` carrying the whole
@@ -511,7 +618,7 @@ mod tests {
 
         // ...and the JSON sent back to the daemon must still carry them.
         let toggled = s
-            .toggled_rule_json("010-priority-allow")
+            .rule_json_with_enabled("010-priority-allow", false)
             .expect("rule known");
         assert_eq!(toggled["enabled"], false, "the toggle itself must apply");
         assert_eq!(
@@ -524,10 +631,40 @@ mod tests {
         );
     }
 
+    /// Option (b) of the #48 review: a rule Snitchwatch can't edit stays
+    /// listed with its reason, and no command is ever built for it.
     #[test]
-    fn toggled_rule_json_unknown_name_is_none() {
+    fn a_read_only_rule_is_listed_with_its_reason_but_never_commanded() {
+        let mut s = RulesStore::new();
+        let mut locked = serde_json::to_value(rule("stock\\ui", true, "deny")).unwrap();
+        locked["readOnlyReason"] = "Snitchwatch can't edit this rule.".into();
+        s.apply(&ServerMessage::SetRules {
+            rules: vec![
+                locked,
+                serde_json::to_value(rule("899-curl", true, "allow")).unwrap(),
+            ],
+        });
+
+        assert_eq!(names(&s), vec!["stock\\ui", "899-curl"]);
+        assert!(s.rules()[0].is_read_only());
+        assert!(s.rule_json_with_enabled("stock\\ui", false).is_none());
+        assert!(!s.is_deletable("stock\\ui"));
+        assert!(s.is_deletable("899-curl"));
+        assert!(!s.is_deletable("unknown"));
+        let found: serde_json::Value =
+            serde_json::from_str(&found_rule_json(&s, "stock\\ui").unwrap()).unwrap();
+        assert_eq!(found["readOnlyReason"], "Snitchwatch can't edit this rule.");
+        let editable: serde_json::Value =
+            serde_json::from_str(&found_rule_json(&s, "899-curl").unwrap()).unwrap();
+        assert_eq!(editable["readOnlyReason"], "");
+        let sent = serde_json::to_value(&s.rules()[0]).unwrap();
+        assert!(sent.get("readOnlyReason").is_none(), "never sent back");
+    }
+
+    #[test]
+    fn rule_json_with_enabled_unknown_name_is_none() {
         let s = RulesStore::new();
-        assert!(s.toggled_rule_json("nope").is_none());
+        assert!(s.rule_json_with_enabled("nope", false).is_none());
     }
 
     #[test]

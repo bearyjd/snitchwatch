@@ -3,7 +3,7 @@
 //! The pure fold logic lives in [`crate::rules::row_store`] and is
 //! unit-tested without Qt. This is the thin cxx-qt wrapper:
 //!   * exposes the flat rule list (roles below) to `RulesPage.qml`,
-//!   * `toggleEnabled(name)` / `deleteRule(name)` are `qinvokable`s that emit
+//!   * `setEnabled(name, enabled)` / `deleteRule(name)` are `qinvokable`s that emit
 //!     the bridge's typed `ClientMessage` (JSON) for the live feed to
 //!     forward — mirroring `BlocklistsModel::subscribe`/`unsubscribe`'s "emit
 //!     signal, no local mutation, wait for the server round-trip" pattern. No
@@ -30,6 +30,8 @@ const ROLE_OPERATOR_SUMMARY: i32 = 4;
 const ROLE_PRECEDENCE: i32 = 5;
 const ROLE_SOURCE: i32 = 6;
 const ROLE_BLOCKLIST_ID: i32 = 7;
+const ROLE_DISPLAY_NAME: i32 = 8;
+const ROLE_READ_ONLY_REASON: i32 = 9;
 
 #[cxx_qt::bridge]
 pub mod qobject {
@@ -87,11 +89,13 @@ pub mod qobject {
         #[cxx_name = "startBridgeFeed"]
         fn start_bridge_feed(self: Pin<&mut RulesModel>);
 
-        /// Toggle a rule's enabled flag (emits `UpdateRule` with the rule's
-        /// full payload, `enabled` flipped, every other field preserved).
+        /// Set a rule's enabled flag (emits `UpdateRule` with the rule's full
+        /// payload, `enabled` set to the given value, every other field
+        /// preserved). The desired value, not a flip: see
+        /// `RulesStore::rule_json_with_enabled`.
         #[qinvokable]
-        #[cxx_name = "toggleEnabled"]
-        fn toggle_enabled(self: Pin<&mut RulesModel>, name: &QString);
+        #[cxx_name = "setEnabled"]
+        fn set_enabled(self: Pin<&mut RulesModel>, name: &QString, enabled: bool);
 
         /// Delete a rule by name (emits `DeleteRule`).
         #[qinvokable]
@@ -162,6 +166,10 @@ impl qobject::RulesModel {
         };
         match role {
             ROLE_NAME => QVariant::from(&QString::from(&rule.name)),
+            ROLE_DISPLAY_NAME => QVariant::from(&QString::from(rule.shown_name())),
+            ROLE_READ_ONLY_REASON => QVariant::from(&QString::from(
+                rule.read_only_reason.as_deref().unwrap_or_default(),
+            )),
             ROLE_ENABLED => QVariant::from(&rule.enabled),
             ROLE_ACTION => QVariant::from(&QString::from(rule.normalized_action())),
             ROLE_DURATION => QVariant::from(&QString::from(&rule.duration)),
@@ -188,6 +196,8 @@ impl qobject::RulesModel {
     fn role_names(&self) -> QHash<QHashPair_i32_QByteArray> {
         let mut roles = QHash::<QHashPair_i32_QByteArray>::default();
         roles.insert(ROLE_NAME, QByteArray::from("name"));
+        roles.insert(ROLE_DISPLAY_NAME, QByteArray::from("displayName"));
+        roles.insert(ROLE_READ_ONLY_REASON, QByteArray::from("readOnlyReason"));
         roles.insert(ROLE_ENABLED, QByteArray::from("enabled"));
         // Named `ruleAction` (not `action`) because `Controls.ItemDelegate`
         // (an `AbstractButton` subclass) already declares a built-in `action`
@@ -209,21 +219,30 @@ impl qobject::RulesModel {
         }
     }
 
-    fn toggle_enabled(self: Pin<&mut Self>, name: &QString) {
+    fn set_enabled(self: Pin<&mut Self>, name: &QString, enabled: bool) {
         let name = name.to_string();
-        match self.store.toggled_rule_json(&name) {
+        match self.store.rule_json_with_enabled(&name, enabled) {
             Some(rule) => self.emit_client(ClientMessage::UpdateRule {
                 rule_id: name,
                 rule,
             }),
-            None => tracing::warn!(%name, "RulesModel: toggleEnabled for unknown rule, ignored"),
+            None => tracing::warn!(
+                name_len = name.len(),
+                "RulesModel: setEnabled for an unknown or read-only rule, ignored"
+            ),
         }
     }
 
     fn delete_rule(self: Pin<&mut Self>, name: &QString) {
-        self.emit_client(ClientMessage::DeleteRule {
-            rule_id: name.to_string(),
-        });
+        let name = name.to_string();
+        if !self.store.is_deletable(&name) {
+            tracing::warn!(
+                name_len = name.len(),
+                "RulesModel: deleteRule for an unknown or read-only rule, ignored"
+            );
+            return;
+        }
+        self.emit_client(ClientMessage::DeleteRule { rule_id: name });
     }
 
     fn select_rule_by_name(self: Pin<&mut Self>, name: &QString) -> QString {

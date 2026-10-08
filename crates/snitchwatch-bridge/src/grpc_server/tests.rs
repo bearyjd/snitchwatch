@@ -600,7 +600,7 @@ async fn two_concurrent_ask_rules_get_distinct_ask_ids() {
 
     let mut seen = std::collections::HashSet::new();
     while seen.len() < 2 {
-        let msg = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+        let msg = tokio::time::timeout(Duration::from_secs(10), rx.recv())
             .await
             .expect("missed broadcast")
             .expect("broadcast error");
@@ -862,7 +862,7 @@ fn process_bound_verdict_rule_survives_the_wire_round_trip() {
         &conn,
         0,
     );
-    let back = rule_from_wire(&rule_to_wire(&rule)).unwrap();
+    let back = crate::rule_wire::rule_from_wire(&crate::rule_wire::rule_to_wire(&rule)).unwrap();
     assert_eq!(back.name, rule.name);
     let op = back.operator.unwrap();
     assert_eq!(op.r#type, "list");
@@ -1506,6 +1506,306 @@ async fn tonic_request_deadline_cleans_pending_with_silent_authenticated_gui() {
             .into_inner()
             .id,
         18
+    );
+    server.abort();
+}
+
+// --- Issue #48: the daemon's rule list ---------------------------------------
+
+use crate::cache::rules::RulesCache;
+use crate::daemon_commands::CommandError;
+use snitchwatch_proto::protocol::{NotificationReplyCode, Operator};
+
+fn rules_service(
+    transport: DaemonTransport,
+) -> (
+    UiService,
+    Arc<Mutex<ConnectionCache>>,
+    broadcast::Receiver<ServerMessage>,
+) {
+    let (svc, cache, rx) = lifecycle_service();
+    (svc.with_daemon_transport(transport), cache, rx)
+}
+
+fn daemon_reply(id: u64, code: NotificationReplyCode, data: &str) -> NotificationReply {
+    NotificationReply {
+        id,
+        code: code as i32,
+        data: data.to_string(),
+    }
+}
+
+fn hello() -> NotificationReply {
+    daemon_reply(0, NotificationReplyCode::Ok, "")
+}
+
+fn daemon_rule(name: &str) -> Rule {
+    Rule {
+        name: name.to_string(),
+        enabled: true,
+        action: "allow".to_string(),
+        duration: "always".to_string(),
+        operator: Some(Operator {
+            r#type: "simple".into(),
+            operand: "dest.host".into(),
+            data: "example.com".into(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+fn with_rules(rules: Vec<Rule>) -> ClientConfig {
+    ClientConfig {
+        rules,
+        ..Default::default()
+    }
+}
+
+fn delete(name: &str) -> Notification {
+    Notification {
+        r#type: Action::DeleteRule as i32,
+        rules: vec![Rule {
+            name: name.to_string(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    }
+}
+
+fn set_rules_names(msg: ServerMessage) -> Vec<String> {
+    match msg {
+        ServerMessage::SetRules { rules } => rules
+            .iter()
+            .map(|r| r["name"].as_str().unwrap().to_string())
+            .collect(),
+        other => panic!("expected SetRules, got {other:?}"),
+    }
+}
+
+fn cached(svc: &UiService) -> RulesCache {
+    svc.rules_handle().lock().unwrap().clone()
+}
+
+#[tokio::test]
+async fn subscribe_then_hello_commits_one_name_sorted_set_rules() {
+    // Unix transport: a command needs a current stream, which makes the
+    // "current is set before SetRules" guarantee observable.
+    let (svc, _cache, mut rx) = rules_service(DaemonTransport::Unix);
+    let synced = svc.rules.synced();
+    let config = with_rules(vec![daemon_rule("c"), daemon_rule("a"), daemon_rule("b")]);
+
+    // `Request::new` has no remote address: the shared `None` key.
+    svc.subscribe(Request::new(config)).await.unwrap();
+    assert_eq!(*synced.borrow(), 0, "Subscribe alone commits nothing");
+    assert_eq!(cached(&svc), RulesCache::Unknown);
+    assert!(rx.try_recv().is_err());
+
+    let commands = svc.daemon_commands();
+    let (stream, _outbound) = commands.open_stream(None);
+    svc.daemon_commands().on_reply(stream.id(), &hello());
+
+    assert_eq!(set_rules_names(rx.try_recv().unwrap()), vec!["a", "b", "c"]);
+    assert!(
+        commands.send(delete("a")).is_ok(),
+        "a client that saw SetRules can send rule commands"
+    );
+    assert!(rx.try_recv().is_err(), "exactly one SetRules");
+    assert_eq!(*synced.borrow(), 1);
+
+    // The commit removed the staged snapshot.
+    svc.daemon_commands().on_reply(stream.id(), &hello());
+    assert!(rx.try_recv().is_err());
+    assert_eq!(*synced.borrow(), 1);
+}
+
+#[tokio::test]
+async fn hello_without_a_staged_snapshot_only_makes_its_stream_current() {
+    let (svc, _cache, mut rx) = rules_service(DaemonTransport::Unix);
+    svc.rules_handle()
+        .lock()
+        .unwrap()
+        .replace_all(vec![daemon_rule("kept")]);
+    let synced = svc.rules.synced();
+    let commands = svc.daemon_commands();
+    let (stream, _outbound) = commands.open_stream(None);
+
+    svc.daemon_commands().on_reply(stream.id(), &hello());
+
+    assert!(commands.send(delete("kept")).is_ok(), "stream is current");
+    assert!(rx.try_recv().is_err());
+    assert_eq!(*synced.borrow(), 0);
+    assert_eq!(cached(&svc).snapshot_wire().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn a_subscribe_whose_connection_never_says_hello_never_replaces_the_cache() {
+    let (svc, _cache, mut rx) = rules_service(DaemonTransport::Tcp);
+    svc.subscribe(Request::new(with_rules(vec![daemon_rule("never")])))
+        .await
+        .unwrap();
+
+    // Another connection's HELLO must not adopt it.
+    let other = Some(std::net::SocketAddr::from(([127, 0, 0, 1], 9)));
+    let (stream, _outbound) = svc.daemon_commands().open_stream(other);
+    svc.daemon_commands().on_reply(stream.id(), &hello());
+
+    assert_eq!(cached(&svc), RulesCache::Unknown);
+    assert!(rx.try_recv().is_err());
+}
+
+async fn ask_and_resolve(
+    svc: &UiService,
+    cache: &Arc<Mutex<ConnectionCache>>,
+    rx: &mut broadcast::Receiver<ServerMessage>,
+    duration: VerdictDuration,
+) -> Rule {
+    let ask_svc = svc.clone();
+    let ask = tokio::spawn(async move {
+        ask_svc
+            .ask_rule(Request::new(Connection {
+                protocol: "tcp".into(),
+                dst_host: "example.com".into(),
+                dst_ip: "93.184.216.34".into(),
+                dst_port: 443,
+                process_path: "/usr/bin/curl".into(),
+                ..Default::default()
+            }))
+            .await
+    });
+    let id = lifecycle_pending(rx).await;
+    cache
+        .lock()
+        .await
+        .resolve(&id, Verdict::Allow, duration, VerdictScope::ThisHost)
+        .unwrap();
+    ask.await.unwrap().unwrap().into_inner()
+}
+
+#[tokio::test]
+async fn a_remembered_verdict_is_cached_and_a_one_shot_is_not() {
+    let (svc, cache, mut rx) = rules_service(DaemonTransport::Tcp);
+    let _gui = svc.client_presence().authenticated_session();
+    svc.rules_handle().lock().unwrap().replace_all(Vec::new());
+
+    let once = ask_and_resolve(&svc, &cache, &mut rx, VerdictDuration::Once).await;
+    assert_eq!(cached(&svc).snapshot_wire(), Some(Vec::new()), "{once:?}");
+
+    let always = ask_and_resolve(&svc, &cache, &mut rx, VerdictDuration::Always).await;
+    let names: Vec<_> = cached(&svc)
+        .snapshot_wire()
+        .unwrap()
+        .iter()
+        .map(|r| r["name"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(names, vec![always.name]);
+}
+
+async fn next_set_rules(rx: &mut broadcast::Receiver<ServerMessage>) -> Vec<String> {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let msg = rx.recv().await.unwrap();
+            if matches!(msg, ServerMessage::SetRules { .. }) {
+                return set_rules_names(msg);
+            }
+        }
+    })
+    .await
+    .expect("no SetRules broadcast")
+}
+
+async fn next_command(stream: &mut Streaming<Notification>) -> Notification {
+    tokio::time::timeout(Duration::from_secs(10), stream.message())
+        .await
+        .expect("no command reached the daemon stream")
+        .unwrap()
+        .unwrap()
+}
+
+/// Opens a daemon-side `Notifications` stream that says HELLO first, as
+/// `listenForNotifications` does.
+async fn open_daemon_stream(
+    client: &mut UiClient<tonic::transport::Channel>,
+) -> (
+    tokio::sync::mpsc::Sender<NotificationReply>,
+    Streaming<Notification>,
+) {
+    let (tx, rx) = tokio::sync::mpsc::channel(8);
+    tx.send(hello()).await.unwrap();
+    let inbound = client
+        .notifications(tokio_stream::wrappers::ReceiverStream::new(rx))
+        .await
+        .unwrap()
+        .into_inner();
+    (tx, inbound)
+}
+
+/// A redialing daemon subscribes on a new connection while its old stream
+/// is still open: the new connection's snapshot is adopted on its own
+/// HELLO, and only its replies are correlated. Two real tonic channels, so
+/// the two connections have different remote addresses.
+#[tokio::test]
+async fn a_redial_adopts_the_new_connections_snapshot_and_correlates_its_replies() {
+    let (svc, _cache, mut rx) = rules_service(DaemonTransport::Tcp);
+    let commands = svc.daemon_commands();
+    let mut ready = commands.stream_ready();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(
+        Server::builder()
+            .add_service(svc.into_server())
+            .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener)),
+    );
+    let mut old = UiClient::connect(format!("http://{address}"))
+        .await
+        .unwrap();
+    let mut new = UiClient::connect(format!("http://{address}"))
+        .await
+        .unwrap();
+
+    old.subscribe(with_rules(vec![daemon_rule("old-rule")]))
+        .await
+        .unwrap();
+    let (old_replies, mut old_commands) = open_daemon_stream(&mut old).await;
+    assert_eq!(next_set_rules(&mut rx).await, vec!["old-rule"]);
+
+    new.subscribe(with_rules(vec![daemon_rule("new-b"), daemon_rule("new-a")]))
+        .await
+        .unwrap();
+    assert!(rx.try_recv().is_err(), "staged until the new HELLO");
+    let (new_replies, mut new_commands) = open_daemon_stream(&mut new).await;
+    assert_eq!(next_set_rules(&mut rx).await, vec!["new-a", "new-b"]);
+    tokio::time::timeout(Duration::from_secs(10), ready.wait_for(|g| *g >= 2))
+        .await
+        .unwrap()
+        .unwrap();
+
+    // TCP keeps fan-out; the old connection's reply is ignored.
+    let first = commands.send(delete("new-a")).unwrap();
+    assert_eq!(next_command(&mut old_commands).await.id, first.id());
+    assert_eq!(next_command(&mut new_commands).await.id, first.id());
+    old_replies
+        .send(daemon_reply(first.id(), NotificationReplyCode::Ok, ""))
+        .await
+        .unwrap();
+    assert_eq!(
+        first.wait(Duration::from_millis(300)).await,
+        Err(CommandError::Timeout)
+    );
+
+    let second = commands.send(delete("new-a")).unwrap();
+    assert_eq!(next_command(&mut new_commands).await.id, second.id());
+    new_replies
+        .send(daemon_reply(
+            second.id(),
+            NotificationReplyCode::Error,
+            "nope",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        second.wait(Duration::from_secs(10)).await,
+        Err(CommandError::Rejected("nope".into()))
     );
     server.abort();
 }

@@ -22,7 +22,11 @@ use snitchwatch_bridge::auth::{self, Token};
 use snitchwatch_bridge::blocklists::store::BlocklistStore;
 use snitchwatch_bridge::blocklists::BlocklistsManager;
 use snitchwatch_bridge::cache::connections::ConnectionCache;
+use snitchwatch_bridge::cache::rules::{
+    prune_expired_rules_every, publish_rules, settle_rule_command,
+};
 use snitchwatch_bridge::cache::traffic_tracker::TrafficTracker;
+use snitchwatch_bridge::daemon_commands::DaemonTransport;
 use snitchwatch_bridge::filter_pause::{FilterPause, PauseRequest};
 use snitchwatch_bridge::grpc_server::UiService;
 use snitchwatch_bridge::notice::{Notice, NoticeBus};
@@ -50,6 +54,13 @@ use tracing::{error, info, warn};
 /// `snitchwatch-kirigami::traffic::ring_store::DEFAULT_WINDOW_SECONDS` (the
 /// consumer side of the same underlying `TrafficBinner`).
 const TRAFFIC_WINDOW_SECONDS: usize = 300;
+
+/// How long a rule command waits for the daemon's reply before the GUI's
+/// optimistic change is rolled back (#48).
+const RULE_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How often expired temporary rules are pruned from the rules cache (#48).
+const RULE_EXPIRY_TICK: Duration = Duration::from_secs(30);
 
 /// The actual daemon endpoint. System mode never has a TCP address.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -186,6 +197,8 @@ pub struct RunningBridge {
     pub tray_rx: watch::Receiver<TrayState>,
     /// Receiver for desktop notifications published by the bridge.
     pub notice_rx: broadcast::Receiver<Notice>,
+    /// See [`RunningBridge::daemon_stream_ready`].
+    daemon_stream_ready: watch::Receiver<u64>,
     /// Authenticated GUI sessions. The WS server registers each client after
     /// its handshake; tests register one directly to exercise GUI-gated paths
     /// such as prompts and pausing. Test-only so no caller can hold a lease
@@ -207,6 +220,14 @@ pub struct RunningBridge {
 }
 
 impl RunningBridge {
+    /// Generation bumped each time a daemon `Notifications` stream says HELLO
+    /// and becomes the one rule commands are correlated with. Wait with a
+    /// level check, `wait_for(|g| *g >= 1)`: `changed()` hangs when the HELLO
+    /// was handled before the receiver was taken.
+    pub fn daemon_stream_ready(&self) -> watch::Receiver<u64> {
+        self.daemon_stream_ready.clone()
+    }
+
     /// Signal every background task to stop. Safe to call more than once.
     pub fn shutdown(mut self) {
         self.watchdog_handle.abort();
@@ -452,19 +473,26 @@ where
         notice_bus.clone(),
         filter_pause.clone(),
     )
-    .with_client_presence(client_presence.clone());
+    .with_client_presence(client_presence.clone())
+    .with_daemon_transport(match grpc_endpoint {
+        GrpcEndpoint::Tcp(_) => DaemonTransport::Tcp,
+        GrpcEndpoint::Unix(_) => DaemonTransport::Unix,
+    });
     // Grabbed before `.into_server()` consumes `ui_service_inner` — the
     // daemon-down watchdog below needs this to watch daemon liveness.
     let liveness = ui_service_inner.liveness_handle();
 
-    // Outbound rule commands (enable/disable/delete) for the connected daemon.
-    // Same "grab before into_server()" reason as `liveness` above.
-    let notifications_tx = ui_service_inner.notifications_handle();
-    // Echoed back by the daemon in its NotificationReply. Starts at 1: id 0 is
-    // the daemon's own HELLO reply
-    // (`vendor/opensnitch/daemon/ui/notifications.go:377`), so a 0 here would
-    // be indistinguishable from it.
-    let notification_id = Arc::new(std::sync::atomic::AtomicU64::new(1));
+    // Outbound rule commands (enable/disable/delete) for the connected daemon,
+    // and the bridge's copy of its rules (#48). Same "grab before
+    // into_server()" reason as `liveness` above.
+    let daemon_commands = ui_service_inner.daemon_commands();
+    let daemon_stream_ready = daemon_commands.stream_ready();
+    let rules = ui_service_inner.rules_handle();
+    tokio::spawn(prune_expired_rules_every(
+        RULE_EXPIRY_TICK,
+        Arc::downgrade(&rules),
+        broadcast_tx.clone(),
+    ));
 
     // Diagnostics: combines daemon-reachability (`liveness`), opensnitchd's
     // reported firewall status, and local kernel probes into the four-check
@@ -575,8 +603,8 @@ where
     let filter_pause_for_pump = filter_pause.clone();
     let presence_for_pump = client_presence.clone();
     let diagnostics_ctx_for_pump = diagnostics_ctx.clone();
-    let notifications_for_pump = notifications_tx.clone();
-    let notification_id_for_pump = notification_id.clone();
+    let commands_for_pump = daemon_commands;
+    let rules_for_pump = rules.clone();
     tokio::spawn(async move {
         while let Some(msg) = inbound_rx.recv().await {
             // Special-cased before is_profile_message/upstream::apply — this
@@ -634,9 +662,9 @@ where
                     // full state. Re-broadcast the snapshots the bridge itself
                     // owns: connection rows (clear + full insert, the same
                     // sequence a fresh view needs), blocklists, profiles,
-                    // diagnostics, tray and filter-pause state.
-                    // Rules are excluded — the bridge holds no rule cache (see
-                    // `ClientMessage::RequestSnapshot` docs).
+                    // the daemon's rules once a snapshot has been committed
+                    // (see `ClientMessage::RequestSnapshot` docs), diagnostics,
+                    // tray and filter-pause state.
                     let rows = cache_for_upstream.lock().await.rows().to_vec();
                     let _ = snapshot_tx.send(ServerMessage::ClearConnectionRows);
                     if !rows.is_empty() {
@@ -654,6 +682,7 @@ where
                         }
                         Err(e) => warn!(error = %e, "snapshot: profiles rebuild failed"),
                     }
+                    publish_rules(&rules_for_pump, &snapshot_tx);
                     let _ = snapshot_tx.send(ServerMessage::DiagnosticsReport {
                         checks: diagnostics_ctx_for_pump.report(),
                     });
@@ -696,31 +725,59 @@ where
                 }
                 Ok(effect) => {
                     // Rule enable/disable/delete: translate to a daemon
-                    // notification and push it down the outbound Notifications
-                    // stream. Anything that isn't a rule edit yields `None` and
-                    // falls through to the original log line.
-                    let id =
-                        notification_id_for_pump.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    match notification_for_effect(&effect, id) {
+                    // notification and send it down the outbound Notifications
+                    // stream(s); `DaemonCommands::send` assigns the id. The
+                    // rules cache follows the daemon's OK in reply order; a
+                    // spawned waiter re-broadcasts the unchanged list on any
+                    // other outcome, so the pump never blocks (#48). Anything
+                    // that isn't a rule edit yields `None` and falls through
+                    // to the original log line.
+                    match notification_for_effect(&effect, 0) {
                         Ok(Some(notification)) => {
                             let action = notification.r#type;
-                            match notifications_for_pump.send(notification) {
-                                Ok(receivers) => {
-                                    info!(id, action, receivers, "sent rule command to daemon")
+                            match commands_for_pump.send(notification) {
+                                Ok(pending) => {
+                                    info!(id = pending.id(), action, "sent rule command to daemon");
+                                    tokio::spawn(settle_rule_command(
+                                        pending,
+                                        rules_for_pump.clone(),
+                                        snapshot_tx.clone(),
+                                        RULE_COMMAND_TIMEOUT,
+                                    ));
                                 }
-                                // No daemon holding the stream open. Dropping is
+                                // No daemon stream took it. Dropping is
                                 // correct — the daemon reloads its own rules on
-                                // connect, so there is nothing to replay.
-                                Err(_) => {
-                                    warn!(id, action, "no daemon connected; rule command dropped")
+                                // connect, so there is nothing to replay. The
+                                // list is re-sent to undo the GUI's optimistic
+                                // change.
+                                Err(e) => {
+                                    warn!(action, error = %e, "rule command dropped");
+                                    publish_rules(&rules_for_pump, &snapshot_tx);
                                 }
                             }
                         }
                         Ok(None) => info!(?effect, "applied upstream effect"),
                         // A rule the daemon would reject silently (see
-                        // `rule_from_wire`). Never send it.
+                        // `rule_from_wire`). Never send it, and re-send the
+                        // list to undo the GUI's optimistic change. The rule
+                        // body and name are GUI/daemon-supplied text: log only
+                        // the request kind and the name's length.
                         Err(e) => {
-                            error!(error = %e, ?effect, "refusing to send malformed rule to daemon")
+                            let (kind, name_len) = match &effect {
+                                UpstreamEffect::AddRule { rule } => (
+                                    "add",
+                                    rule.get("name")
+                                        .and_then(|n| n.as_str())
+                                        .map_or(0, str::len),
+                                ),
+                                UpstreamEffect::UpdateRule { rule_id, .. } => {
+                                    ("update", rule_id.len())
+                                }
+                                UpstreamEffect::DeleteRule { rule_id } => ("delete", rule_id.len()),
+                                _ => ("other", 0),
+                            };
+                            error!(error = %e, kind, name_len, "refusing to send malformed rule to daemon");
+                            publish_rules(&rules_for_pump, &snapshot_tx);
                         }
                     }
                 }
@@ -780,6 +837,7 @@ where
         inbound_tx,
         tray_rx,
         notice_rx,
+        daemon_stream_ready,
         #[cfg(test)]
         client_presence,
         ws_shutdown_tx: Some(ws_shutdown_tx),
