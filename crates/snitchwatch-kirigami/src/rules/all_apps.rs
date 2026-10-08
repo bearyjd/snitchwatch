@@ -34,13 +34,13 @@ impl Rule {
 
     /// What deleting a flagged rule changes, as plain text with the
     /// destination sanitized for display; `None` when not flagged. A rule
-    /// Snitchwatch can't delete (the same `is_read_only` predicate
-    /// `RulesStore::is_deletable` and RulesPage's Delete button use) or a
+    /// Snitchwatch can't delete (`Rule::can_delete`, the bridge's `deletable`
+    /// flag that `RulesStore::is_deletable` and the row's Delete button use) or a
     /// disabled one is described as it is, never as "Deleting this ...".
     pub fn all_apps_hint(&self) -> Option<String> {
         let target = self.all_apps_target()?;
         let deny = self.normalized_action() != "allow";
-        Some(if self.is_read_only() {
+        Some(if !self.can_delete() {
             "This rule applies to every app. Snitchwatch can't delete it; its details say why."
                 .to_string()
         } else if !self.enabled && deny {
@@ -372,6 +372,21 @@ mod tests {
             locked.all_apps_hint().unwrap(),
             "This rule applies to every app. Snitchwatch can't delete it; its details say why."
         );
+        // #68: a rule refused only for its shape is read-only but deletable,
+        // so its Delete button shows and the hint says what deleting does.
+        let mut shape_refused = host("s", "deny", "github.com");
+        shape_refused.read_only_reason = Some("Snitchwatch can't edit this rule.".into());
+        shape_refused.deletable = Some(true);
+        assert!(shape_refused
+            .all_apps_hint()
+            .unwrap()
+            .starts_with("Deleting this unblocks github.com"));
+        let mut name_refused = host("n", "allow", "github.com");
+        name_refused.deletable = Some(false);
+        assert!(name_refused
+            .all_apps_hint()
+            .unwrap()
+            .contains("can't delete it"));
     }
 
     #[test]

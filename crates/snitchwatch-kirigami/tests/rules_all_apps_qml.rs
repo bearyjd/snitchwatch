@@ -208,6 +208,20 @@ Window {
                                   && typeof rulesModel.deleteAllAppsRules === "undefined",
                                   "RulesModel exposes a bulk delete");
 
+                // #68: read-only for its shape but deletable by the bridge's
+                // flag, so it gets its Delete button and the deleting hint.
+                const shapeRefused = probeWindow.rule("snitchwatch-deny-shape", "deny",
+                                                      probeWindow.host("example.org"),
+                                                      "Snitchwatch can't edit this rule.");
+                shapeRefused.deletable = true;
+                probeWindow.setRules([shapeRefused]);
+                const shapeHint = probeWindow.findChild(probeWindow.rowItem(0), "allAppsHint");
+                probeWindow.check(probeWindow.shown(0, "allAppsDelete") && shapeHint
+                                  && shapeHint.text.startsWith("Deleting this unblocks example.org"),
+                                  "deletable read-only rule: delete "
+                                  + probeWindow.shown(0, "allAppsDelete") + ", hint "
+                                  + (shapeHint ? shapeHint.text : "missing"));
+
                 probeWindow.setRules([probeWindow.rule(deny, "deny", probeWindow.host("github.com"))]);
                 const one = probeWindow.findChild(page.header, "allAppsCount");
                 probeWindow.check(one && one.text ===
