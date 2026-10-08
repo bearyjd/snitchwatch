@@ -134,9 +134,14 @@ impl RulesCache {
     ///   (`rule.Create` stamps `Created`), so an edited or re-enabled rule is
     ///   new as far as its age goes (the Rules page needs that to not call it
     ///   unused);
-    /// - a **timed** rule that is already cached keeps its cached `created`:
-    ///   the daemon's original expiry timer still fires on the original
-    ///   schedule.
+    /// - a **timed** rule that is already cached keeps its cached `created`.
+    ///   That is right while its duration is unchanged: the daemon's
+    ///   original expiry timer then still fires on the original schedule.
+    ///   When the duration changed, or an `always` rule became timed, the
+    ///   daemon expires it from the change instead (`loader.go`
+    ///   `scheduleTemporaryRule` starts a new timer, and an old one whose
+    ///   duration no longer matches does nothing), so the kept `created`
+    ///   puts the expiry too early until the next snapshot.
     ///
     /// A no-op while `Unknown`: one rule is not the full list.
     pub fn upsert(&mut self, rule: Rule) {
@@ -218,6 +223,8 @@ impl RulesCache {
     }
 }
 
+/// The time of day in Unix seconds: `i64::MAX` if it does not fit, 0 for a
+/// clock before 1970.
 fn now_secs() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -546,13 +553,9 @@ pub async fn prune_expired_rules_every(
         let Some(cache) = cache.upgrade() else {
             return;
         };
-        let now_secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
         let pruned = {
             let mut cache = lock(&cache);
-            let expired = cache.prune_expired(now_secs);
+            let expired = cache.prune_expired(now_secs());
             // Under the cache lock, like every hit-count change. A rule
             // re-made under the same name later is a new rule.
             hits.forget(expired.iter().map(String::as_str));

@@ -7,6 +7,11 @@ import QtQuick
 QtObject {
     id: root
 
+    // How long without hits makes a rule "unused", from the model's summary
+    // (hit_badge.rs `UNUSED_WINDOW_MS`); the page sets it.
+    property real unusedWindowMs: 0
+    readonly property int unusedDays: Math.round(root.unusedWindowMs / 86400000)
+
     function formatTime(ms) {
         return new Date(ms).toLocaleString(Qt.locale(), Locale.ShortFormat);
     }
@@ -24,7 +29,7 @@ QtObject {
             // and a long-past one says nothing is known since.
             if (info.lastGapMs > 0) {
                 text += " Hits may be missing before " + root.formatTime(info.lastGapMs) + ".";
-                if (Date.now() - info.lastGapMs >= 14 * 86400000) {
+                if (Date.now() - info.lastGapMs >= info.unusedWindowMs) {
                     text += " No gap noticed since.";
                 }
             } else {
@@ -47,7 +52,7 @@ QtObject {
         if (count === 0) {
             switch (badgeKind) {
             case "unused":
-                return "Unused: no hits counted in the last 14 days";
+                return "Unused: no hits counted in the last " + root.unusedDays + " days";
             case "since":
                 return "No hits since " + root.formatTime(badgeMs);
             case "sinceMissed":
@@ -73,7 +78,11 @@ QtObject {
             return "The rules changed after the analysis. Choose Analyze rules to run it again.";
         case "done": {
             const found = info.neverDecides + info.mayBeShadowed;
-            const caveat = " Snitchwatch checks only conditions it can compare exactly.";
+            // A regular-expression proof rests on Snitchwatch's own matcher, so
+            // it says "may" (shadow.rs `FindingKind::MayBeShadowed`).
+            const caveat = " Snitchwatch checks only conditions it can compare. A finding that "
+                + "rests on a regular expression says \"May\", because the firewall's own "
+                + "matching can differ in rare cases.";
             return found === 0
                 ? "No rules found that can never decide a connection." + caveat
                 : found + (found === 1 ? " rule" : " rules")

@@ -474,8 +474,10 @@ Kirigami.ScrollablePage {
                         elide: Text.ElideRight
                         Layout.fillWidth: true
                     }
-                    // A finding from "Analyze rules": another rule decides
-                    // these connections. The link opens that rule.
+                    // A finding from "Analyze rules": this rule never (or may
+                    // never) decides a connection, because the named rule
+                    // matches all of them and takes precedence. The link
+                    // opens that rule.
                     RowLayout {
                         visible: row.shadowText.length > 0
                         Layout.fillWidth: true
@@ -708,6 +710,7 @@ Kirigami.ScrollablePage {
     // `openEditor` for a connection.
     RulesInsightsText {
         id: insightsText
+        unusedWindowMs: page.hitsInfo ? page.hitsInfo.unusedWindowMs : 0
     }
 
     RuleEditorController {

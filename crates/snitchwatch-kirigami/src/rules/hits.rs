@@ -22,6 +22,7 @@ use serde::Serialize;
 use snitchwatch_bridge::cache::rule_hits::keepable_name;
 use snitchwatch_bridge::ws_messages::{ServerMessage, StorageStatus};
 
+use crate::rules::insights::hit_badge::UNUSED_WINDOW_MS;
 use crate::rules::row_store::Rule;
 
 /// What a rule row shows.
@@ -85,6 +86,9 @@ struct Info<'a> {
     last_gap_ms: i64,
     persistent: bool,
     storage_reason: &'a str,
+    /// How long a rule must go without hits to be called unused
+    /// ([`UNUSED_WINDOW_MS`]), so the page's wording takes it from here.
+    unused_window_ms: i64,
 }
 
 /// How the counts were made: what a "no hits" badge needs to know to be
@@ -182,6 +186,7 @@ impl RuleHitsView {
                 last_gap_ms: 0,
                 persistent: false,
                 storage_reason: "",
+                unused_window_ms: UNUSED_WINDOW_MS,
             },
             Some(r) => Info {
                 available: true,
@@ -191,6 +196,7 @@ impl RuleHitsView {
                 last_gap_ms: r.last_gap_unix_ms.unwrap_or(0),
                 persistent: r.storage.persistent,
                 storage_reason: r.storage.reason.as_deref().unwrap_or_default(),
+                unused_window_ms: UNUSED_WINDOW_MS,
             },
         };
         serde_json::to_string(&info).unwrap_or_default()

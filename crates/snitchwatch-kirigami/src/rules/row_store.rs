@@ -72,9 +72,10 @@ pub struct Rule {
     /// opensnitchd's `Rule.nolog` — suppress logging for matches of this rule.
     /// Same round-trip-ballast rationale as [`Self::precedence`].
     pub nolog: bool,
-    /// When the daemon created the rule, in Unix seconds; 0 when it doesn't
-    /// know (a hand-written rule without the field) or the bridge predates
-    /// the field. Display data only, never sent back.
+    /// When the daemon created the rule, in Unix seconds. The daemon never
+    /// reports 0: a rule file whose `created` it can't parse is given the
+    /// time it was loaded (`rule.go` `Serialize`). 0 here means the bridge
+    /// predates the field. Display data only, never sent back.
     #[serde(skip_serializing)]
     pub created: i64,
     /// The bridge's display form of `name`, with bidi overrides and

@@ -269,6 +269,10 @@ past 2,000,000 hosts in total (in subscription order) get no rule.
   profile's `850-profile:` rules and installs the new one's: that is not a
   gap (nothing else's count is affected), and a rule that comes back counts
   from zero and from the time it came back.
+  One limit: a rule with no counted hits that leaves the list and comes
+  back from outside Snitchwatch (a rule file restored, say) with its old
+  creation time leaves no gap, so after more than 14 days away it reads "Unused"
+  at once. Only a rule that had counted hits records a gap when it goes.
   A rule with no counted hits gets a badge: "Unused" only when the counts
   are saved and 14 days have passed since the latest of when counting began,
   when the rule was created and the bridge's last gap in the counting (a

@@ -66,6 +66,18 @@ fn upsert_and_remove_do_nothing_while_unknown() {
     assert!(cache.is_unknown());
 }
 
+/// A committed snapshot is the daemon's word on every rule's age, however old:
+/// only a confirmed change (`upsert_at`) restamps.
+#[test]
+fn a_committed_snapshot_keeps_the_daemons_created() {
+    let cache = synced(vec![
+        rule("a", "always", T - 90 * 86_400),
+        rule("b", "until restart", T - 5),
+    ]);
+    assert_eq!(get(&cache, "a").created, T - 90 * 86_400);
+    assert_eq!(get(&cache, "b").created, T - 5);
+}
+
 #[test]
 fn upsert_keeps_the_cached_created_only_when_the_incoming_one_is_zero() {
     let mut cache = synced(vec![rule("a", "5m", T)]);

@@ -252,7 +252,7 @@ Window {
         probeWindow.check(probeWindow.text(2, "shadowLabel") === "", "an unrelated rule flagged");
         const summary = probeWindow.header("analysisSummary");
         probeWindow.check(summary.startsWith("1 rule may never decide a connection")
-                          && summary.indexOf("compare exactly") > 0,
+                          && summary.indexOf("rests on a regular expression") > 0,
                           "summary: '" + summary + "'");
         probeWindow.check(probeWindow.plain("shadowLabel", "row")
                           && probeWindow.plain("analysisSummary", "header"),

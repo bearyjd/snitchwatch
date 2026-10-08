@@ -245,8 +245,10 @@ fn rules_page_labels_showing_rule_data_are_plain_text() {
             "page.inspectNotEditable",
             // P2.1: the editor's last result (bridge reasons).
             "ruleEditorController.statusText",
+            // P2.6: a finding names the covering rule, which is rule data.
+            "row.shadowText",
         ],
-        11,
+        12,
     );
 }
 
