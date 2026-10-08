@@ -287,12 +287,25 @@ impl UiService {
     /// generation no longer matches) — the newer block's own timer owns the
     /// eventual revert, so the tray never flickers back to a stale display
     /// mid-block.
-    fn publish_recent_block(&self, what: String) {
-        let generation = self.block_generation.fetch_add(1, Ordering::SeqCst) + 1;
-        self.tray_pub.set(TrayState::RecentBlock {
-            what,
-            ttl: RECENT_BLOCK_TTL,
-        });
+    ///
+    /// Not while the daemon is down (issue #58): the overlay would cover
+    /// `DaemonDown` for the whole TTL. The check and the publish happen under
+    /// the cache lock, which is also what the daemon watchdog holds when it
+    /// marks the daemon down and publishes, so neither can interleave.
+    async fn publish_recent_block(&self, what: String) {
+        let generation = {
+            let cache = self.cache.lock().await;
+            if cache.tray_state() == TrayState::DaemonDown {
+                return;
+            }
+            // Numbered in publish order, under the lock.
+            let generation = self.block_generation.fetch_add(1, Ordering::SeqCst) + 1;
+            self.tray_pub.set(TrayState::RecentBlock {
+                what,
+                ttl: RECENT_BLOCK_TTL,
+            });
+            generation
+        };
 
         let cache = self.cache.clone();
         let block_generation = self.block_generation.clone();
@@ -484,7 +497,7 @@ impl Ui for UiService {
         .map_err(|_| Status::unavailable("pending Ask cancelled before resolution"))?;
 
         if resolution.verdict == Verdict::Deny {
-            self.publish_recent_block(safe_what.clone());
+            self.publish_recent_block(safe_what.clone()).await;
 
             // FIX 2 (issue #14 security review): a narrowed Deny
             // under-blocks relative to what the pending-decision dialog

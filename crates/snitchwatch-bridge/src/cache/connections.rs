@@ -125,10 +125,11 @@ impl ConnectionCache {
     }
 
     /// Publish [`Self::tray_state`], regardless of what the tray is currently
-    /// showing. Used to recover the tray's display after a transient
-    /// override — the daemon-down watchdog and a `RecentBlock` timer both
-    /// need "what should the tray show right now" rather than assuming
-    /// `Idle`.
+    /// showing. Used where the tray must come back to what is true now rather
+    /// than to `Idle`: a `RecentBlock` timer's revert, and a pause starting,
+    /// ending or expiring (`announce_pause_state` in the bridge CLI). The
+    /// daemon watchdog does not use it; it publishes [`Self::tray_state`]
+    /// itself while it holds the cache lock.
     pub fn resync_tray_state(&self) {
         self.republish_pending_count();
     }
