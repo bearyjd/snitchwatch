@@ -17,6 +17,7 @@
 pub mod activation;
 mod busy;
 pub mod cli;
+mod profile_actions;
 pub mod profile_storage;
 mod replier;
 mod rule_commands;
@@ -231,6 +232,8 @@ pub struct RunningBridge {
     pause_clear_handle: tokio::task::JoinHandle<()>,
     /// The blocklist worker, its refresh loop and event pump (issue #45).
     blocklist_tasks: BlocklistTasks,
+    /// The profile enforcer and auto-switch tasks (issue #46).
+    profile_tasks: Vec<tokio::task::JoinHandle<()>>,
     /// Per-rule hit counts, saved once more at shutdown, and the ticker that
     /// broadcasts and saves them in between.
     rule_hits: RuleHitsHandle,
@@ -252,6 +255,9 @@ impl RunningBridge {
         self.pause_expiry_handle.abort();
         self.pause_clear_handle.abort();
         self.blocklist_tasks.abort();
+        for task in &self.profile_tasks {
+            task.abort();
+        }
         // The ticker first, so no save is started behind this one; `save_now`
         // waits for one already running.
         self.rule_hits_ticker.abort();
@@ -399,11 +405,13 @@ where
     });
     // Taken before the gRPC server starts, so no rules snapshot is missed.
     let rules_synced = ui_service_inner.rules_synced();
+    let profile_rules_synced = ui_service_inner.rules_synced();
 
     // --- BlocklistsManager: persisted and enforced only when `Persistent` ---
     // The profile store opens in the same state directory but tracks its
     // own storage status (issue #46 Part 1).
     let profiles_storage = options.storage.clone();
+    let profiles_mode = options.mode;
     let rule_hits = ui_service_inner.rule_hits_handle();
     rule_hits_storage::configure(&rule_hits, &options.storage);
     let rule_hits_ticker = rule_hits.spawn_ticker();
@@ -413,14 +421,25 @@ where
     };
     let blocklists_mgr = storage::build_blocklists_manager(options, daemon_rules)?;
 
-    // --- ProfilesManager: persisted when `Persistent`, never enforced yet ---
-    let profiles_mgr = profile_storage::build_profiles_manager(profiles_storage)?;
+    // --- ProfilesManager: persisted when `Persistent`, enforced only by the
+    // system bridge (issue #46 Part 2) ---
+    let profiles_mgr = profile_storage::build_profiles_manager(
+        profiles_storage,
+        profiles_mode,
+        storage::DaemonRules {
+            commands: ui_service_inner.daemon_commands(),
+            rules: ui_service_inner.rules_handle(),
+        },
+    )?;
+    let mut profile_tasks = profiles_mgr
+        .clone()
+        .spawn_enforcer(Some(profile_rules_synced));
 
     // Network-driven auto-activation. `connect_watcher` degrades to a no-op
     // watcher (manual-activation-only) if NetworkManager/D-Bus isn't
     // reachable — never fails `run`, never panics.
     let network_watcher = network_watcher::connect_watcher().await;
-    let _profile_auto_switch_handle = profiles_mgr.clone().spawn_auto_switch(network_watcher);
+    profile_tasks.push(profiles_mgr.clone().spawn_auto_switch(network_watcher));
 
     // --- WebSocket server ---------------------------------------------------
     // Generate a fresh handshake token and write it to a file alongside the
@@ -782,10 +801,7 @@ where
                 continue;
             }
             if is_profile_message(&msg) {
-                use snitchwatch_bridge::translator::upstream::handle_profile_action;
-                if let Err(e) = handle_profile_action(profiles_for_upstream.clone(), msg).await {
-                    error!(error = %e, "profile action failed");
-                }
+                profile_actions::handle(profiles_for_upstream.clone(), msg, &snapshot_tx).await;
                 continue;
             }
             let effect = {
@@ -984,6 +1000,7 @@ where
         pause_expiry_handle,
         pause_clear_handle,
         blocklist_tasks,
+        profile_tasks,
         rule_hits,
         rule_hits_ticker,
     })

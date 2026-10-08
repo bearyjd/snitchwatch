@@ -355,7 +355,8 @@ fn stamp_reply(
         | ClientMessage::DeleteRule { reply, .. }
         | ClientMessage::ExportRules { reply, .. }
         | ClientMessage::PreviewRulesImport { reply, .. }
-        | ClientMessage::ApplyRulesImport { reply, .. } => *reply = Some(reply_to.clone()),
+        | ClientMessage::ApplyRulesImport { reply, .. }
+        | ClientMessage::AddProfileRule { reply, .. } => *reply = Some(reply_to.clone()),
         _ => {}
     }
     message

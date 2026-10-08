@@ -45,6 +45,18 @@ pub const PACKAGED_FETCH_RULE_NAME: &str = "000-snitchwatch-bridge-fetch";
 /// away as, one of those.
 pub const CURATED_DEFAULT_RULE_NAME_PREFIX: &str = "snitchwatch-default-";
 
+/// Name prefix of the rules Snitchwatch installs for the active profile
+/// (`850-profile:<profile>:<rule>`, issue #46 Part 2). Reserved: a GUI
+/// can't add, change or delete a rule under it, so it can't replace a
+/// profile's deny with an allow. Those rules are managed on the Profiles
+/// page.
+pub const PROFILE_RULE_NAME_PREFIX: &str = "850-profile:";
+
+/// Whether `name` is under the profile prefix only the bridge may use.
+pub fn is_reserved_profile_name(name: &str) -> bool {
+    name.starts_with(PROFILE_RULE_NAME_PREFIX)
+}
+
 /// Whether `name` is under a blocklist prefix only the bridge may use.
 pub fn is_reserved_blocklist_name(name: &str) -> bool {
     name.starts_with(BLOCKLIST_RULE_NAME_PREFIX)
@@ -62,10 +74,11 @@ pub fn is_reserved_curated_name(name: &str) -> bool {
 }
 
 /// Whether `name` is under any prefix a GUI may not add, change or delete
-/// (blocklists, packaged rules, curated defaults). `DaemonCommands::send`
-/// refuses every command for such a name.
+/// (blocklists, profiles, packaged rules, curated defaults).
+/// `DaemonCommands::send` refuses every command for such a name.
 pub fn is_reserved_name(name: &str) -> bool {
     is_reserved_blocklist_name(name)
+        || is_reserved_profile_name(name)
         || is_reserved_packaged_name(name)
         || is_reserved_curated_name(name)
 }
@@ -237,6 +250,18 @@ mod tests {
             rule_name_for(Verdict::Allow, "github.com", 443, "/usr/bin/curl").as_str(),
             rule_name_for(Verdict::Deny, "example.com", 80, "").as_str(),
         ] {
+            assert!(!is_reserved_name(name), "{name}");
+        }
+    }
+
+    /// Issue #46 Part 2: profile rules are the bridge's own, like blocklist
+    /// rules.
+    #[test]
+    fn the_profile_prefix_is_reserved() {
+        assert!(is_reserved_profile_name("850-profile:home:0000-r1"));
+        assert!(is_reserved_name("850-profile:home:0000-r1"));
+        assert!(is_reserved_name(PROFILE_RULE_NAME_PREFIX));
+        for name in ["850-profile", "850-Profile:home", "851-profile:home"] {
             assert!(!is_reserved_name(name), "{name}");
         }
     }

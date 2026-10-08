@@ -2,12 +2,15 @@
 //!
 //! - [`row_store`]: pure, Qt-free store for the flat profile list — fully
 //!   unit-tested here.
+//! - [`rules_view`]: a profile's rules and their status as the page lists
+//!   them (issue #46 Part 2).
 //! - The cxx-qt `QAbstractListModel` wrapper that binds this to QML lives in
 //!   the top-level [`crate::profiles_model`] module (kept flat under `src/`
 //!   with the other `#[cxx_qt::bridge]` files, per the same cxx-qt-build
 //!   one-directory constraint noted in [`crate::connections`]).
 
 pub mod row_store;
+pub mod rules_view;
 
 /// Split a comma-separated network-matcher editor string into trimmed,
 /// non-empty glob patterns. Shared by `ProfilesModel`'s create/update
@@ -40,6 +43,10 @@ pub fn derive_profile_id(name: &str, existing_ids: &[String]) -> String {
     if slug.is_empty() {
         slug = "profile".to_string();
     }
+    // The bridge takes ids of at most 64 plain characters; leave room for a
+    // `-<n>` suffix.
+    slug.truncate(60);
+    let slug = slug.trim_end_matches('-').to_string();
     if !existing_ids.iter().any(|id| id == &slug) {
         return slug;
     }
@@ -56,6 +63,20 @@ pub fn derive_profile_id(name: &str, existing_ids: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The bridge takes profile ids of at most 64 plain characters
+    /// (PR #104 re-review), whatever the name's length.
+    #[test]
+    fn a_long_name_gives_an_id_the_bridge_takes() {
+        let long = "Home ".repeat(40);
+        let id = derive_profile_id(&long, &[]);
+        assert!(id.len() <= 64, "{id}");
+        let again = derive_profile_id(&long, std::slice::from_ref(&id));
+        assert!(again.len() <= 64 && again != id, "{again}");
+        assert!(snitchwatch_bridge::profiles::materializer::valid_rule_id(
+            &again
+        ));
+    }
 
     #[test]
     fn parse_matchers_trims_and_drops_empty_entries() {

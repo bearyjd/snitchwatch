@@ -82,11 +82,15 @@ pub fn notification_for_effect(
 /// Issue #45: blocklist rules are installed and removed by the bridge only.
 /// The rules Snitchwatch ships (`000-snitchwatch-…`) are never changed or
 /// deleted from a GUI, and neither are names under the curated-defaults
-/// prefix (`snitchwatch-default-…`). `DaemonCommands::send` refuses all
-/// three too. The error never echoes the name.
+/// prefix (`snitchwatch-default-…`), nor a profile's rules (`850-profile:…`,
+/// issue #46). `DaemonCommands::send` refuses all four too. The error never
+/// echoes the name.
 fn refuse_reserved_name(name: &str) -> Result<(), String> {
     if crate::rule_name::is_reserved_blocklist_name(name) {
         return Err("blocklist rules are managed on the Blocklists page".to_string());
+    }
+    if crate::rule_name::is_reserved_profile_name(name) {
+        return Err("profile rules are managed on the Profiles page".to_string());
     }
     if crate::rule_name::is_reserved_packaged_name(name) {
         return Err("rules built into Snitchwatch can't be changed or deleted".to_string());
@@ -158,6 +162,27 @@ mod tests {
         assert_eq!(ntf.rules[0].name, "899-firefox");
         // No operator needed, and requiring one would make delete impossible.
         assert!(ntf.rules[0].operator.is_none());
+    }
+
+    /// Issue #46 Part 2: profile rules are managed on the Profiles page.
+    #[test]
+    fn a_gui_can_never_add_update_or_delete_a_profile_rule() {
+        let name = "850-profile:home:r1";
+        for effect in [
+            UpstreamEffect::AddRule {
+                rule: wire_rule(name, true),
+            },
+            UpstreamEffect::UpdateRule {
+                rule_id: name.to_string(),
+                rule: wire_rule(name, false),
+            },
+            UpstreamEffect::DeleteRule {
+                rule_id: name.to_string(),
+            },
+        ] {
+            let error = notification_for_effect(&effect, 1).unwrap_err();
+            assert!(error.contains("Profiles page"), "{error}");
+        }
     }
 
     /// Issue #45 PR B: blocklist rules are managed on the Blocklists page. A
