@@ -18,8 +18,10 @@
 //! under the prefix only in exactly the shape [`CuratedEntry::rule`] builds,
 //! and only if it also passes the rule editor's policy checks.
 
+pub mod manager;
 pub mod reconcile;
 pub mod store;
+pub mod wire;
 
 use std::sync::OnceLock;
 

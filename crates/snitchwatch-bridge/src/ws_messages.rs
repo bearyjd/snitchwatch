@@ -148,6 +148,12 @@ pub enum ServerMessage {
     ProfileChanged {
         active_profile_id: Option<String>,
     },
+    /// The curated default rules for background services and where each
+    /// stands (prompt-slot plan Part D; `bridge_capabilities::CURATED_DEFAULTS`).
+    SetCuratedDefaults {
+        entries: Vec<crate::curated::wire::CuratedDefaultSummary>,
+        storage: StorageStatus,
+    },
     SetConnectionsStatus {
         status: ConnectionsStatus,
     },
@@ -510,6 +516,12 @@ pub enum ClientMessage {
     /// `bridge_capabilities::DECIDE_LATER`.
     DecideLater {
         row_id: String,
+    },
+    /// Turn the curated defaults `ids` on or off (prompt-slot plan Part D).
+    /// Unknown ids are ignored.
+    SetCuratedDefaults {
+        ids: Vec<String>,
+        on: bool,
     },
     /// Rule import/export (roadmap P2.7); handled by bridge-cli's
     /// `rules_import` task, never by `upstream::apply`. `request_id` is the

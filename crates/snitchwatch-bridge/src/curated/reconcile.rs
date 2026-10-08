@@ -18,7 +18,7 @@
 
 use std::collections::BTreeMap;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use snitchwatch_proto::protocol::{Operator, Rule};
 
 use super::store::{Choices, InstalledCopy};
@@ -35,9 +35,11 @@ pub enum CuratedAction {
 }
 
 /// Where an entry stands, for the GUI.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum EntryStatus {
+    /// The daemon's rule list isn't known yet: nothing is done.
+    Waiting,
     /// Not turned on, and not in the daemon.
     Off,
     /// Turned on; the rule is being installed.
@@ -54,6 +56,13 @@ pub enum EntryStatus {
     /// Installed once, then deleted outside Snitchwatch: not reinstalled
     /// until turned on again.
     DeletedOutside,
+    /// Turned on, but the install failed (see the entry's problem).
+    NotInstalled,
+    /// Turned off, but the delete failed (see the entry's problem).
+    NotRemoved,
+    /// A status from a newer bridge.
+    #[serde(other)]
+    Unknown,
 }
 
 /// What reconcile decided.

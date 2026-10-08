@@ -101,7 +101,9 @@ pub fn apply(
         | ClientMessage::ApplyRulesImport { .. }
         // Intercepted by the pump too: it needs the daemon's settings
         // (`deferred_answers::decide_later`).
-        | ClientMessage::DecideLater { .. } => Ok(UpstreamEffect::None),
+        | ClientMessage::DecideLater { .. }
+        // Routed to the curated defaults' worker before this point.
+        | ClientMessage::SetCuratedDefaults { .. } => Ok(UpstreamEffect::None),
     }
 }
 
