@@ -132,9 +132,13 @@ async fn a_refused_removal_keeps_its_status() {
         entry_state(&curated, FLATPAK).status == EntryStatus::NotRemoved
     })
     .await;
-    // Another pass (an unrelated choice) doesn't wipe it.
-    turn(&curated, B, false);
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    // Another pass (an unrelated choice, seen by its install) doesn't wipe
+    // it.
+    turn(&curated, B, true);
+    eventually("the unrelated pass", || {
+        entry_state(&curated, B).status == EntryStatus::Installed
+    })
+    .await;
     worker.abort();
     let state = entry_state(&curated, FLATPAK);
     assert_eq!(state.status, EntryStatus::NotRemoved);
@@ -142,7 +146,7 @@ async fn a_refused_removal_keeps_its_status() {
         state.problem.as_deref(),
         Some("The firewall service refused to remove the rule.")
     );
-    assert_eq!(harness.seen().len(), 1);
+    assert_eq!(harness.seen().len(), 2, "{:?}", harness.seen());
 }
 
 /// M3: a first-run copy turned off on the Rules page reads as off.
