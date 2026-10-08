@@ -13,6 +13,7 @@ use super::{compare, network, SimulationInput};
 
 // What a leaf lacked: shown to the user as "needs <this>".
 const PROCESS_PATH: &str = "process path";
+const PROTOCOL: &str = "protocol";
 const PARENT_PATHS: &str = "parent process paths";
 const COMMAND: &str = "process command line";
 const PID: &str = "process ID";
@@ -408,7 +409,7 @@ fn text_subject(operand: &str, input: &SimulationInput) -> Subject {
         "user.id" => known_or(input.uid, UID),
         "source.ip" => ip_subject(input.src_ip.as_deref(), SRC_IP),
         "source.port" => known_or(input.src_port, SRC_PORT),
-        "protocol" => Subject::Known(input.protocol.clone()),
+        "protocol" => known_or(input.protocol.as_ref(), PROTOCOL),
         "iface.in" => known_or(input.iface_in.as_ref(), IFACE_IN),
         "iface.out" => known_or(input.iface_out.as_ref(), IFACE_OUT),
         _ => match operand.strip_prefix("process.env.") {

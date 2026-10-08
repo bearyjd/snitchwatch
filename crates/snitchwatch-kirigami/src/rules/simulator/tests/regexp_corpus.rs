@@ -6,8 +6,10 @@
 //! answers it or reported as not simulated — never the other definite
 //! answer.** Each row is `(pattern, subject, Go's answer, whether the
 //! simulator models the pattern)`; the Go answers are worked out from Go's
-//! `regexp/syntax` grammar by hand, and patterns are matched sensitively so
-//! `Compile` doesn't lowercase them.
+//! `regexp/syntax` grammar by hand. Patterns are matched sensitively, so
+//! `Compile` doesn't lowercase them; only the second table in
+//! `case_folding_answers_like_go` turns that off, to cover the operator's
+//! non-sensitive mode.
 //!
 //! Every adversarial pattern from the review rounds is here, and so are the
 //! common forms that stay simulated.
@@ -22,9 +24,16 @@ enum Said {
     NotSimulated,
 }
 
-fn said(pattern: &str, subject: &str) -> Said {
+/// `sensitive` is the operator's flag: when false the daemon lowercases both
+/// the pattern source and the subject before matching.
+fn said_with(pattern: &str, subject: &str, sensitive: bool) -> Said {
     let input = base_with(|i| i.process_path = Some(subject.to_string()));
-    let result = run(op_sensitive("regexp", "process.path", pattern), &input);
+    let operator = if sensitive {
+        op_sensitive("regexp", "process.path", pattern)
+    } else {
+        op("regexp", "process.path", pattern)
+    };
+    let result = run(operator, &input);
     if !result.unsupported_operands.is_empty() {
         Said::NotSimulated
     } else if result.matched_rule.is_some() {
@@ -35,8 +44,12 @@ fn said(pattern: &str, subject: &str) -> Said {
 }
 
 fn check(corpus: &[(&str, &str, bool, bool)]) {
+    check_with(true, corpus);
+}
+
+fn check_with(sensitive: bool, corpus: &[(&str, &str, bool, bool)]) {
     for &(pattern, subject, go, modelled) in corpus {
-        let got = said(pattern, subject);
+        let got = said_with(pattern, subject, sensitive);
         // The invariant: never the other definite answer.
         match got {
             Said::Match => assert!(
@@ -112,9 +125,11 @@ fn syntax_outside_classes_answers_like_go() {
     ]);
 }
 
-/// The class forms the simulator models: ASCII letters and digits (and `_`)
-/// as literals, ranges between letters or digits, `\d \w \s` and their
-/// negations, and a whole POSIX class in item position, after an optional `^`.
+/// The class forms the simulator models, after an optional leading `^`: ASCII
+/// letters and digits as literals, ranges between two letters or digits, a
+/// single ASCII punctuation character other than `\ [ ] ^ -` (Snitchwatch's
+/// own wildcard rules are `[^.]*`), `\d \w \s` and their negations, and a
+/// whole POSIX class in item position.
 #[test]
 fn common_character_classes_stay_simulated() {
     check(&[
@@ -182,7 +197,8 @@ fn common_character_classes_stay_simulated() {
 
 /// Every adversarial class from the review rounds, and the common forms the
 /// allowlist gives up on: a `-` that isn't a range between two letters or
-/// digits, any punctuation but `_` (including escaped), `[` as a range end,
+/// digits, an escaped character other than `\d \w \s`, a `[` that isn't a whole
+/// POSIX class (including as a range end), a leading `]` or a mid-class `^`,
 /// `\p`/`\x` in a class, and non-ASCII.
 #[test]
 fn every_other_class_form_is_not_simulated() {
@@ -211,6 +227,7 @@ fn every_other_class_form_is_not_simulated() {
         ("^[\\w.-]+$", "a-b", true, false),
         ("^[a-z0-9.-]+$", "a-b.c", true, false),
         ("^[ \\t]$", " ", true, false),
+        ("^[ ]$", " ", true, false),
         ("^[a-]$", "-", true, false),
         ("^[-a]$", "-", true, false),
         ("^[]a]$", "]", true, false),
@@ -228,4 +245,42 @@ fn every_other_class_form_is_not_simulated() {
         ("^[a-z", "a", false, false),
         ("^[]$", "a", false, false),
     ]);
+}
+
+/// Case folding: the `(?i)` flag inside a pattern (Go folds with Unicode
+/// simple folding, class members included), and the operator's own
+/// non-sensitive mode, where the daemon lowercases the pattern text and the
+/// subject (`strings.ToLower`, one rune at a time) before matching.
+#[test]
+fn case_folding_answers_like_go() {
+    check(&[
+        // `(?i)`: k, K and the Kelvin sign are one orbit; so are s, S and ſ.
+        ("(?i)^k$", "\u{212A}", true, true),
+        ("(?i)^s$", "ſ", true, true),
+        ("(?i)^[a-c]$", "B", true, true),
+        ("(?i)^[[:upper:]]$", "k", true, true),
+        // A negated POSIX class is negated after folding, so no letter of
+        // either case is in it.
+        ("(?i)^[[:^upper:]]$", "K", false, true),
+        ("(?i)^[[:^upper:]]$", "k", false, true),
+        ("(?i)^[[:^upper:]]$", "1", true, true),
+    ]);
+    check_with(
+        false,
+        &[
+            // Both sides are lowercased: the Kelvin sign becomes `k`, but the
+            // long s is already lowercase and is not `s`.
+            ("k", "\u{212A}", true, true),
+            ("^s$", "ſ", false, true),
+            // The class bounds are lowercased with the rest of the pattern...
+            ("^[A-Z]$", "Q", true, true),
+            // ...so a range that was in order can arrive reversed (Go refuses
+            // to compile `[z-a]`; the simulator doesn't guess).
+            ("^[Z-a]$", "m", false, false),
+            // ...and `\D` becomes `\d`.
+            ("^\\D$", "5", true, true),
+            ("^\\D$", "x", false, true),
+            ("^[[:UPPER:]]$", "Q", false, true),
+        ],
+    );
 }

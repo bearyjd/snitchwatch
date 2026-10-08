@@ -1,9 +1,10 @@
 //! Integration smoke: the "not enforced" banners on `BlocklistsPage.qml` and
 //! `ProfilesPage.qml` (issues #45/#46) are live, visible and non-dismissable
-//! once the real pages are instantiated — on the Blocklists page, the warning
-//! that subscriptions are lost on restart until the bridge reports
-//! persistent storage, and the "not blocking" warning exactly while some list
-//! isn't "rule installed"; every page's inspector sheet draws its
+//! once the real pages are instantiated — on both pages, the warning that the
+//! data is lost on restart until the bridge reports persistent storage (the
+//! Profiles page then says profiles are saved, and always that they are not
+//! applied); on the Blocklists page, the "not blocking" warning exactly while
+//! some list isn't "rule installed"; every page's inspector sheet draws its
 //! title through `SizedOverlaySheet`'s PlainText header, whose hover tooltip is
 //! an explicit ToolTip with a PlainText content item (issue #51) — including for
 //! a long, markup-named title that actually elides; and the
@@ -151,26 +152,42 @@ Window {
         }
     }
 
-    function checkBanner(page, name) {
-        const banner = page.header;
-        if (!banner || banner.visible !== true) {
-            throw new Error(name + ": not-enforced banner is not visible");
+    // The Profiles header (issue #46): "not applied" always, "lost on
+    // restart" while storage isn't persistent, "saved" while it is. Returns
+    // the always-shown warning.
+    function checkProfilesBanners(page, expectPersistent) {
+        const found = {};
+        for (let i = 0; i < page.header.children.length; i++) {
+            const item = page.header.children[i];
+            found[item.objectName] = item;
         }
-        if (banner.type !== Kirigami.MessageType.Warning) {
-            throw new Error(name + ": banner is not a Warning");
+        const notApplied = found["notAppliedBanner"];
+        const memoryOnly = found["memoryOnlyStorageBanner"];
+        const saved = found["savedNote"];
+        if (!notApplied || !memoryOnly || !saved) {
+            throw new Error("ProfilesPage: banners not found - probe lookup drifted");
         }
-        if (banner.showCloseButton) {
-            throw new Error(name + ": banner is dismissable");
+        const name = "ProfilesPage (persistent=" + expectPersistent + ")";
+        if (notApplied.visible !== true || memoryOnly.visible !== !expectPersistent
+                || saved.visible !== expectPersistent) {
+            throw new Error(name + ": wrong banners visible");
         }
-        // Laid out for real: full page width and a non-zero height, not a
-        // zero-sized item that merely reports `visible`.
-        if (banner.width < page.width - 1 || banner.height <= 0) {
-            throw new Error(name + ": banner not laid out: " + banner.width + "x" + banner.height
-                            + " in a page " + page.width + " wide");
+        for (const banner of [notApplied, memoryOnly]) {
+            if (banner.type !== Kirigami.MessageType.Warning) {
+                throw new Error(name + ": banner is not a Warning");
+            }
+            if (banner.showCloseButton) {
+                throw new Error(name + ": banner is dismissable");
+            }
         }
-        if (banner.text.indexOf("not applied") < 0) {
-            throw new Error(name + ": banner text does not say it is not applied: " + banner.text);
+        if (notApplied.text.indexOf("not applied") < 0) {
+            throw new Error(name + ": banner text does not say it is not applied: "
+                            + notApplied.text);
         }
+        if (memoryOnly.text.indexOf("restart") < 0) {
+            throw new Error(name + ": memory-only warning lacks the restart sentence");
+        }
+        return notApplied;
     }
 
     // The Blocklists header holds two warnings (issue #45): "not blocking"
@@ -293,7 +310,26 @@ Window {
                 if (blocklistsPage.storageReason !== "blocklist store: <b>locked</b>") {
                     throw new Error("BlocklistsPage: storage reason not exposed");
                 }
-                checkBanner(profilesPage, "ProfilesPage");
+                // No SetProfiles yet: not persistent. Laid out for real: full
+                // page width and a non-zero height, not a zero-sized item
+                // that merely reports `visible`.
+                const notApplied = checkProfilesBanners(profilesPage, false);
+                if (notApplied.width < profilesPage.width - 1 || notApplied.height <= 0) {
+                    throw new Error("ProfilesPage: banner not laid out: " + notApplied.width
+                                    + "x" + notApplied.height);
+                }
+                profilesPage.model.applyServerMessageJson(JSON.stringify({
+                    action: "setProfiles", profiles: [], storage: { persistent: true }
+                }));
+                checkProfilesBanners(profilesPage, true);
+                profilesPage.model.applyServerMessageJson(JSON.stringify({
+                    action: "setProfiles", profiles: [],
+                    storage: { persistent: false, reason: "profile store: <b>locked</b>" }
+                }));
+                checkProfilesBanners(profilesPage, false);
+                if (profilesPage.storageReason !== "profile store: <b>locked</b>") {
+                    throw new Error("ProfilesPage: storage reason not exposed");
+                }
                 if (rulesPage.inspectName !== longRuleName) {
                     throw new Error("RulesPage inspector did not open on the markup-named rule");
                 }

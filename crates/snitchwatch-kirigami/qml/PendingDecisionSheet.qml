@@ -292,7 +292,7 @@ ColumnLayout {
         // reads the scope sent below.
         const duration = sheet.remembers ? durationBox.currentValue : "this_time";
         if (sheet.bridgeFeed !== null) {
-            // `bindableProcessPath`, not `remembers`: Rust checks the program
+            // `bindableProcessPath`, not `remembers`: Rust gates on this flag
             // again, and must not depend on this sheet's own gate.
             sheet.bridgeFeed.submitVerdict(sheet.rowId, action, scopeBox.currentValue, duration,
                                            sheet.bindableProcessPath);

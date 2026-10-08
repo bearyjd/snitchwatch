@@ -16,6 +16,7 @@
 
 pub mod activation;
 pub mod cli;
+pub mod profile_storage;
 pub mod storage;
 
 pub use storage::{
@@ -35,8 +36,6 @@ use snitchwatch_bridge::filter_pause::{FilterPause, PauseRequest};
 use snitchwatch_bridge::grpc_server::UiService;
 use snitchwatch_bridge::notice::{Notice, NoticeBus};
 use snitchwatch_bridge::profiles::network_watcher;
-use snitchwatch_bridge::profiles::store::ProfileStore;
-use snitchwatch_bridge::profiles::ProfilesManager;
 use snitchwatch_bridge::translator::downstream;
 use snitchwatch_bridge::translator::rule_notification::notification_for_effect;
 use snitchwatch_bridge::translator::upstream::{self, UpstreamEffect};
@@ -363,16 +362,17 @@ where
     let rules_synced = ui_service_inner.rules_synced();
 
     // --- BlocklistsManager: persisted and enforced only when `Persistent` ---
+    // The profile store opens in the same state directory but tracks its
+    // own storage status (issue #46 Part 1).
+    let profiles_storage = options.storage.clone();
     let daemon_rules = storage::DaemonRules {
         commands: ui_service_inner.daemon_commands(),
         rules: ui_service_inner.rules_handle(),
     };
     let blocklists_mgr = storage::build_blocklists_manager(options, daemon_rules)?;
 
-    // --- ProfilesManager (in-memory store; callers may swap in a persisted one) ---
-    let profiles_store =
-        Arc::new(ProfileStore::open_in_memory().context("failed to open in-memory profile store")?);
-    let profiles_mgr = Arc::new(ProfilesManager::new(profiles_store));
+    // --- ProfilesManager: persisted when `Persistent`, never enforced yet ---
+    let profiles_mgr = profile_storage::build_profiles_manager(profiles_storage)?;
 
     // Network-driven auto-activation. `connect_watcher` degrades to a no-op
     // watcher (manual-activation-only) if NetworkManager/D-Bus isn't
