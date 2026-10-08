@@ -68,6 +68,28 @@ async fn settle() {
     }
 }
 
+/// The state a bridge starts with (its storage status) is in every snapshot
+/// answer; broadcasting it too would only land between other messages.
+#[tokio::test(start_paused = true)]
+async fn the_ticker_does_not_broadcast_the_state_it_starts_with() {
+    let (hits, mut rx) = handle();
+    hits.set_storage(StorageStatus {
+        persistent: false,
+        reason: Some("no state directory".into()),
+        unreadable: false,
+    });
+    let _ticker = hits.spawn_ticker();
+    settle().await;
+    tokio::time::advance(BROADCAST_PERIOD * 2).await;
+    settle().await;
+    assert!(drain(&mut rx).is_empty(), "nothing changed since the start");
+
+    hits.record(&[ev("a")], 10, 1, &synced(&["a"]));
+    tokio::time::advance(BROADCAST_PERIOD).await;
+    settle().await;
+    assert_eq!(drain(&mut rx).len(), 1, "a change after the start is sent");
+}
+
 #[tokio::test(start_paused = true)]
 async fn fifty_pings_in_one_period_make_one_broadcast_with_all_of_them() {
     let (hits, mut rx) = handle();

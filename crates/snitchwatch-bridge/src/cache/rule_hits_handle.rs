@@ -261,7 +261,13 @@ impl RuleHitsHandle {
 
     /// Runs the broadcast and save schedule until the last handle is
     /// dropped. Abort the task, then call [`Self::save_now`], at shutdown.
+    /// The state it starts with is not broadcast: no client can have missed
+    /// it, and every snapshot answer carries it.
     pub fn spawn_ticker(&self) -> tokio::task::JoinHandle<()> {
+        {
+            let mut sent = lock(&self.inner.sent);
+            self.with_message(|stamp, _| *sent = stamp);
+        }
         let weak = Arc::downgrade(&self.inner);
         tokio::spawn(async move {
             let mut ticks = tokio::time::interval(BROADCAST_PERIOD);
