@@ -36,11 +36,12 @@ pub struct SimulationForm {
     pub dest_ip: String,
     pub iface_in: String,
     pub iface_out: String,
-    /// `"unknown"` (the default), `"off"`, `"on"` (the program's checksum is
-    /// in `md5`; blank means unknown) or `"on-none"` (checksums are on and
-    /// the program has none recorded).
+    /// `"unknown"` (the default), `"off"`, `"on"` (the program's checksums are
+    /// in `md5` and `sha1`; both blank means unknown) or `"on-none"`
+    /// (checksums are on and the program has none recorded).
     pub checksums: String,
     pub md5: String,
+    pub sha1: String,
 }
 
 impl SimulationForm {
@@ -93,15 +94,24 @@ impl SimulationForm {
     fn checksum_state(&self) -> (Option<bool>, Option<BTreeMap<String, String>>) {
         match self.checksums.as_str() {
             "off" => (Some(false), None),
-            "on" => (
-                Some(true),
-                // The daemon records lowercase hex and compares exactly.
-                text(&self.md5)
-                    .map(|md5| BTreeMap::from([("md5".to_string(), md5.to_lowercase())])),
-            ),
+            "on" => (Some(true), self.typed_checksums()),
             "on-none" => (Some(true), Some(BTreeMap::new())),
             _ => (None, None),
         }
+    }
+}
+
+impl SimulationForm {
+    /// The checksums typed in, lowercased (the daemon records lowercase hex
+    /// and compares exactly); none typed means unknown.
+    fn typed_checksums(&self) -> Option<BTreeMap<String, String>> {
+        let sums: BTreeMap<String, String> = [("md5", &self.md5), ("sha1", &self.sha1)]
+            .into_iter()
+            .filter_map(|(algorithm, raw)| {
+                text(raw).map(|sum| (algorithm.to_string(), sum.to_lowercase()))
+            })
+            .collect();
+        (!sums.is_empty()).then_some(sums)
     }
 }
 
@@ -153,7 +163,7 @@ mod tests {
         let input = form(serde_json::json!({
             "processPath": "  ", "parentPaths": "  \n \n", "command": "   ", "pid": " ", "uid": "\t",
             "env": "\n", "srcIp": " ", "srcPort": " ", "destIp": " ",
-            "ifaceIn": " ", "ifaceOut": " ", "md5": " "
+            "ifaceIn": " ", "ifaceOut": " ", "md5": " ", "sha1": " "
         }));
         assert_eq!(input, SimulationInput::default());
     }
@@ -259,6 +269,18 @@ mod tests {
         assert_eq!(input.checksums_enabled, Some(true));
         let sums = input.checksums.expect("checksums known");
         assert_eq!(sums.get("md5").map(String::as_str), Some("abc"));
+
+        // Both checksums typed, in any case.
+        let input = form(serde_json::json!({"checksums": "on", "md5": "AB", "sha1": " CD "}));
+        let sums = input.checksums.expect("checksums known");
+        assert_eq!(sums.get("md5").map(String::as_str), Some("ab"));
+        assert_eq!(sums.get("sha1").map(String::as_str), Some("cd"));
+
+        // Only the SHA1: the MD5 stays unknown.
+        let input = form(serde_json::json!({"checksums": "on", "sha1": "cd"}));
+        let sums = input.checksums.expect("checksums known");
+        assert_eq!(sums.len(), 1);
+        assert_eq!(sums.get("sha1").map(String::as_str), Some("cd"));
 
         // On, checksum left blank: unknown, not "none recorded".
         let input = form(serde_json::json!({"checksums": "on"}));

@@ -1,7 +1,7 @@
 //! Reading an RE2 pattern (Go's `regexp`, which opensnitchd compiles) with the
 //! `regex` crate where the two would silently disagree.
 //!
-//! The syntaxes are close enough that most patterns mean the same thing. Four
+//! The syntaxes are close enough that most patterns mean the same thing. Five
 //! differences change *answers* rather than failing to compile, so the pattern
 //! is rewritten before the crate sees it:
 //!
@@ -16,8 +16,12 @@
 //!   * **A backslash before punctuation is that character in RE2**, but the
 //!     crate reads `\<` and `\>` as word-boundary assertions; they become the
 //!     plain characters.
-//!   * **A `{` that isn't `{n}`, `{n,}` or `{n,m}` is text in RE2**; the crate
-//!     reads `{,2}` as `{0,2}`. It is escaped.
+//!   * **A `{` that isn't `{n}`, `{n,}` or `{n,m}` is text in RE2** (a bound
+//!     with a leading zero, `{01}`, isn't a number to Go either); the crate
+//!     reads `{,2}` as `{0,2}` and `{01}` as `{1}`. It is escaped. (`\p{..}`
+//!     and `\x{..}` keep their braces.)
+//!   * **`&&`, `--` and `~~` inside a class are plain characters or a range
+//!     end in RE2**, but set operators in the crate. They are escaped.
 //!
 //! Syntax only RE2 has (`\Q..\E`) is left alone and fails to compile; the
 //! caller then reports the condition as not simulated rather than as a miss.
@@ -29,7 +33,9 @@ pub(super) fn to_regex_crate(pattern: &str) -> String {
     let mut out = String::with_capacity(pattern.len() + 16);
     let mut chars = pattern.chars().peekable();
     let mut in_class = false;
+    let mut after_dash = false;
     while let Some(c) = chars.next() {
+        let dash_before = std::mem::take(&mut after_dash);
         match c {
             '\\' => escape(&mut chars, &mut out, in_class),
             '[' if in_class => bracket_in_class(&mut chars, &mut out),
@@ -37,10 +43,22 @@ pub(super) fn to_regex_crate(pattern: &str) -> String {
                 in_class = true;
                 open_class(&mut chars, &mut out);
             }
-            '{' if !in_class => brace(&mut chars, &mut out),
             ']' if in_class => {
                 in_class = false;
                 out.push(']');
+            }
+            '{' if !in_class => brace(&mut chars, &mut out),
+            // The crate reads `&&` and `~~` in a class as set operations.
+            '&' | '~' if in_class => {
+                out.push('\\');
+                out.push(c);
+            }
+            // ...and `--` as a difference; in Go the second dash is the
+            // literal end of a range (`[+--]`) or a literal after one.
+            '-' if in_class && dash_before => out.push_str(r"\-"),
+            '-' if in_class => {
+                after_dash = true;
+                out.push('-');
             }
             _ => out.push(c),
         }
@@ -66,6 +84,17 @@ fn escape(chars: &mut Peekable<Chars>, out: &mut String, in_class: bool) {
         // RE2: a backslash before punctuation is just that character; the
         // crate would read `\<` and `\>` as word-boundary assertions.
         '<' | '>' => out.push(esc),
+        // `\p{Greek}` and `\x{1F}` carry a braced name or number.
+        'p' | 'P' | 'x' if chars.peek() == Some(&'{') => {
+            out.push('\\');
+            out.push(esc);
+            for c in chars.by_ref() {
+                out.push(c);
+                if c == '}' {
+                    break;
+                }
+            }
+        }
         'b' if !in_class => out.push_str(r"(?-u:\b)"),
         'B' if !in_class => out.push_str(r"(?-u:\B)"),
         _ => {
@@ -103,8 +132,11 @@ fn is_repeat_body(body: &str) -> bool {
     let (min, max) = body
         .split_once(',')
         .map_or((body, None), |(min, max)| (min, Some(max)));
-    let digits = |text: &str| text.bytes().all(|b| b.is_ascii_digit());
-    !min.is_empty() && digits(min) && max.is_none_or(digits)
+    // Go's parseInt refuses a leading zero, so `{01}` is text.
+    let number = |text: &str| {
+        text.bytes().all(|b| b.is_ascii_digit()) && !(text.len() > 1 && text.starts_with('0'))
+    };
+    !min.is_empty() && number(min) && max.is_none_or(number)
 }
 
 /// After the `[` that opens a class: keep a `^`, and a leading `]` is a
@@ -121,22 +153,28 @@ fn open_class(chars: &mut Peekable<Chars>, out: &mut String) {
     }
 }
 
-/// A `[` inside a class: a POSIX class (`[:alpha:]`) is copied through its
-/// `:]`, anything else is a literal bracket.
+/// A `[` inside a class: a POSIX class (`[:alpha:]`, `[:^alpha:]`) is copied
+/// through its `:]`; anything else, including `[:` with no `:]` after it, is a
+/// literal bracket (Go's `parseNamedClass` finds no class and falls through).
 fn bracket_in_class(chars: &mut Peekable<Chars>, out: &mut String) {
-    if chars.peek() != Some(&':') {
-        out.push_str(r"\[");
-        return;
-    }
-    out.push('[');
-    while let Some(c) = chars.next() {
-        out.push(c);
-        if c == ':' && chars.peek() == Some(&']') {
-            out.push(']');
-            chars.next();
-            return;
+    let rest: String = chars.clone().collect();
+    match posix_class_len(&rest) {
+        Some(len) => {
+            out.push('[');
+            out.extend(chars.by_ref().take(len));
         }
+        None => out.push_str(r"\["),
     }
+}
+
+/// How many characters of `rest` (the text after the `[`) make up a POSIX
+/// class: `:name:]` with an optional `^` before the name.
+fn posix_class_len(rest: &str) -> Option<usize> {
+    let body = rest.strip_prefix(':')?;
+    let named = &body[..body.find(":]")?];
+    let name = named.strip_prefix('^').unwrap_or(named);
+    let valid = !name.is_empty() && name.chars().all(|c| c.is_ascii_alphabetic());
+    valid.then(|| 1 + named.chars().count() + 2)
 }
 
 #[cfg(test)]

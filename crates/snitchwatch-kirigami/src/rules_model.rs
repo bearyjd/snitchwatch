@@ -131,7 +131,9 @@ pub mod qobject {
         /// object (`rules::simulator::SimulationForm`); a blank advanced
         /// field means unknown. Pure, synchronous, in-memory evaluation over
         /// already-cached data — never touches the network or the Qt event
-        /// loop's async machinery, so it's safe to call directly from QML.
+        /// loop's async machinery. It runs on the calling (UI) thread and
+        /// compiles each regular expression it meets, which for a very large
+        /// pattern takes a fraction of a second.
         /// Returns a JSON-encoded `rules::simulator::SimulationResult`, or an
         /// empty string if `form_json` isn't a form.
         #[qinvokable]

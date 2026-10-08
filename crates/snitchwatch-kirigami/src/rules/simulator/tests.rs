@@ -10,7 +10,9 @@ use snitchwatch_bridge::ws_messages::ServerMessage;
 
 use super::*;
 
+mod hashes;
 mod operands;
+mod regexps;
 
 // ---- builders -------------------------------------------------------------
 

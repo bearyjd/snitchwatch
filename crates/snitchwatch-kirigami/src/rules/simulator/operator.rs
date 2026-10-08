@@ -23,7 +23,8 @@ const SRC_PORT: &str = "source port";
 const DEST_IP: &str = "destination IP";
 const IFACE_IN: &str = "inbound interface";
 const IFACE_OUT: &str = "outbound interface";
-const CHECKSUM: &str = "program checksum";
+const CHECKSUM_MD5: &str = "program's MD5 checksum";
+const CHECKSUM_SHA1: &str = "program's SHA1 checksum";
 const CHECKSUMS_ON: &str = "whether checksums are on";
 
 // Why an operand can't be simulated at all.
@@ -37,8 +38,10 @@ const UNKNOWN_NETWORK: &str = "not a CIDR or one of the default aliases (LAN, MU
 const NESTED_LIST: &str = "a list inside a list: opensnitchd compiles only one level of members \
      (and drops a nested list's members for rules sent over gRPC), so it fails or matches \
      everything instead of ANDing them";
-const REGEX_ENGINE: &str = "this regular expression compiled in opensnitchd (Go RE2) but not in \
-     the simulator's engine, whose syntax differs, so it can't be evaluated here";
+const REGEX_ENGINE: &str = "this regular expression compiled in opensnitchd (Go RE2), but its \
+     syntax differs from what the simulator's engine accepts, so it can't be evaluated here";
+const REGEX_TOO_LARGE: &str = "this regular expression is too large for the simulator to compile \
+     (opensnitchd accepted it), so it can't be evaluated here";
 const UNKNOWN_TYPE: &str = "a condition type opensnitchd 1.8.0 doesn't load";
 const LEGACY_SHAPE: &str = "a legacy rule shape the simulator doesn't read";
 const UNREADABLE: &str = "the condition's shape isn't recognised";
@@ -352,7 +355,10 @@ impl Matcher {
             }),
             Kind::Regexp => compare::Regexp::compile(&leaf.data, leaf.sensitive)
                 .map(Self::Regexp)
-                .ok_or(REGEX_ENGINE),
+                .map_err(|e| match e {
+                    compare::RegexpError::TooLarge => REGEX_TOO_LARGE,
+                    compare::RegexpError::Syntax => REGEX_ENGINE,
+                }),
             Kind::Network | Kind::Lists => Err(BAD_PAIRING),
         }
     }
@@ -466,11 +472,10 @@ fn hash_with_checksum_setting_unknown(leaf: &Leaf, input: &SimulationInput) -> O
         missing: CHECKSUMS_ON,
         invalid: false,
     }];
-    gaps.extend(
-        on.gaps
-            .into_iter()
-            .filter(|gap| matches!(gap, Gap::Unsupported { .. })),
-    );
+    if on.truth == Truth::Unknown {
+        // Also what the checksums-on answer is missing.
+        gaps.extend(on.gaps);
+    }
     Outcome {
         truth: Truth::Unknown,
         gaps,
@@ -480,10 +485,21 @@ fn hash_with_checksum_setting_unknown(leaf: &Leaf, input: &SimulationInput) -> O
 
 /// `ret` starts `true` and is overwritten only while iterating the process's
 /// checksums — **every** algorithm's value, whatever the operand's — so a
-/// process with none still matches.
+/// process with none still matches. A mismatch against the values given
+/// decides only if the value for the operand's own algorithm was among them;
+/// otherwise the one that wasn't given could still match. (v1.8.0 only ever
+/// computes the MD5 — `Loader.HasChecksums`, which would add the SHA1 for a
+/// `process.hash.sha1` rule, has no caller in the vendored tree — but a
+/// patched daemon may differ, so a SHA1 is asked for rather than assumed
+/// absent.)
 fn hash_with_checksums_on(leaf: &Leaf, input: &SimulationInput) -> Outcome {
+    let (algorithm, missing) = if leaf.operand == "process.hash.sha1" {
+        ("sha1", CHECKSUM_SHA1)
+    } else {
+        ("md5", CHECKSUM_MD5)
+    };
     let Some(checksums) = &input.checksums else {
-        return Outcome::unevaluated(&leaf.operand, CHECKSUM);
+        return Outcome::unevaluated(&leaf.operand, missing);
     };
     if checksums.is_empty() {
         return Outcome::yes_with(HASH_NONE_RECORDED);
@@ -496,7 +512,13 @@ fn hash_with_checksums_on(leaf: &Leaf, input: &SimulationInput) -> Outcome {
         // `hashCmp`'s fake match for an empty hash.
         return Outcome::yes_with(HASH_NONE_RECORDED);
     }
-    Outcome::from_bool(checksums.values().any(|sum| matcher.matches_hash(sum)))
+    if checksums.values().any(|sum| matcher.matches_hash(sum)) {
+        Outcome::definite(Truth::Yes)
+    } else if checksums.contains_key(algorithm) {
+        Outcome::definite(Truth::No)
+    } else {
+        Outcome::unevaluated(&leaf.operand, missing)
+    }
 }
 
 /// `dest.network` / `source.network`: `Match` passes a `net.IP`, which only

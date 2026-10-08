@@ -1,7 +1,9 @@
 // Rule-match simulator sheet (Little-Snitch-parity "Simulate" panel), opened
-// from RulesPage's header. Pure, synchronous evaluation over the already
-// cached rules (`RulesModel.simulate` -> `rules::simulator::simulate`): it
-// never touches the network, so it is safe to run on the UI thread.
+// from RulesPage's header. Synchronous evaluation over the already cached
+// rules (`RulesModel.simulate` -> `rules::simulator::simulate`): it never
+// touches the network, but it does run on the UI thread, and compiling every
+// regular expression it meets takes a moment (a pattern at the simulator's
+// size cap about a quarter of a second), so a click can pause briefly.
 //
 // Every result is a simulation, never a live daemon verdict (see the
 // `rules::simulator` module docs for what is and isn't reproduced). A blank
@@ -78,7 +80,8 @@ SizedOverlaySheet {
             ifaceIn: simIfaceIn.text,
             ifaceOut: simIfaceOut.text,
             checksums: simChecksums.modes[simChecksums.currentIndex],
-            md5: simMd5.text
+            md5: simMd5.text,
+            sha1: simSha1.text
         }));
         if (!json) return;
         const result = JSON.parse(json);
@@ -254,12 +257,19 @@ SizedOverlaySheet {
                     Kirigami.FormData.label: "Checksums"
                     // Parallel to `modes`, which is what the simulator reads.
                     readonly property var modes: ["unknown", "off", "on", "on-none"]
-                    model: ["Unknown", "Off", "On, program's MD5 below",
+                    model: ["Unknown", "Off", "On, program's checksums below",
                             "On, program has none recorded"]
                 }
                 Controls.TextField {
                     id: simMd5
                     Kirigami.FormData.label: "Program MD5"
+                    placeholderText: "Leave blank if unknown"
+                    enabled: simChecksums.currentIndex === 2
+                    Layout.fillWidth: true
+                }
+                Controls.TextField {
+                    id: simSha1
+                    Kirigami.FormData.label: "Program SHA1"
                     placeholderText: "Leave blank if unknown"
                     enabled: simChecksums.currentIndex === 2
                     Layout.fillWidth: true

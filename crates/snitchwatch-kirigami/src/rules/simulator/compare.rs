@@ -32,21 +32,41 @@ pub(super) struct Regexp {
 /// must not be misread as a miss for being big.
 const REGEX_SIZE_LIMIT: usize = 64 * 1024 * 1024;
 
+/// Why [`Regexp::compile`] failed.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum RegexpError {
+    /// The compiled program passes the size cap.
+    TooLarge,
+    /// The `regex` crate doesn't accept the syntax.
+    Syntax,
+}
+
 impl Regexp {
-    /// `None` when the `regex` crate can't compile the pattern. opensnitchd
-    /// compiled it (a rule that fails there is never loaded), so this is a
-    /// difference between the two engines, not a pattern that cannot match.
-    pub(super) fn compile(pattern: &str, sensitive: bool) -> Option<Self> {
+    /// An error is a difference between the two engines, not a pattern that
+    /// cannot match: opensnitchd compiled it (a rule that fails there is never
+    /// loaded).
+    pub(super) fn compile(pattern: &str, sensitive: bool) -> Result<Self, RegexpError> {
+        Self::compile_with_limit(pattern, sensitive, REGEX_SIZE_LIMIT)
+    }
+
+    fn compile_with_limit(
+        pattern: &str,
+        sensitive: bool,
+        size_limit: usize,
+    ) -> Result<Self, RegexpError> {
         let pattern = if sensitive {
             pattern.to_string()
         } else {
             go_to_lower(pattern)
         };
         let re = regex::RegexBuilder::new(&re2::to_regex_crate(&pattern))
-            .size_limit(REGEX_SIZE_LIMIT)
+            .size_limit(size_limit)
             .build()
-            .ok()?;
-        Some(Self { re, sensitive })
+            .map_err(|e| match e {
+                regex::Error::CompiledTooBig(_) => RegexpError::TooLarge,
+                _ => RegexpError::Syntax,
+            })?;
+        Ok(Self { re, sensitive })
     }
 
     pub(super) fn is_match(&self, subject: &str) -> bool {
@@ -134,6 +154,14 @@ mod tests {
         // `str::to_lowercase` would give ς for a word-final Σ.
         assert_eq!(go_to_lower("ΑΣ"), "ασ");
         assert_eq!(go_to_lower(r"^\D\S\W$"), r"^\d\s\w$");
+    }
+
+    #[test]
+    fn a_compile_failure_says_whether_the_pattern_was_too_big_or_unreadable() {
+        let too_big = Regexp::compile_with_limit(r"\pL{1,50}", true, 1024);
+        assert_eq!(too_big.err(), Some(RegexpError::TooLarge));
+        assert_eq!(Regexp::compile("(", true).err(), Some(RegexpError::Syntax));
+        assert!(Regexp::compile(r"\pL{1,50}", true).is_ok());
     }
 
     #[test]
