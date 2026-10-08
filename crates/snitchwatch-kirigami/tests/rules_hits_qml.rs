@@ -3,7 +3,7 @@
 //! - nothing is shown until the bridge has sent counts, and not before
 //!   counting has started;
 //! - a rule that doesn't log is "not counted", never "0", and a rule that was
-//!   counted without a hit says "No hits counted";
+//!   counted without a hit says "No hits since <time>" (Part 2 adds "Unused");
 //! - the header says since when the counts run and that they are approximate,
 //!   says so when hits may be missing and since when, and says when they
 //!   aren't saved across restarts (with the bridge's reason);
@@ -159,7 +159,9 @@ Window {
                                   "row b: '" + probeWindow.rowText(1) + "'");
                 probeWindow.check(probeWindow.rowText(2) === "Not counted: this rule doesn't log",
                                   "nolog row: '" + probeWindow.rowText(2) + "'");
-                probeWindow.check(probeWindow.rowText(3) === "No hits counted",
+                // A rule of unknown age is never "Unused"; counted from when
+                // counting began (rules_insights_qml.rs covers the badges).
+                probeWindow.check(probeWindow.rowText(3).startsWith("No hits since "),
                                   "zero row: '" + probeWindow.rowText(3) + "'");
                 const summary = probeWindow.headerLabel("hitsSummary");
                 probeWindow.check(summary.startsWith("Hits counted by Snitchwatch since ")

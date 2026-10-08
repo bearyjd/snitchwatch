@@ -9,6 +9,10 @@
 //!   connection against `row_store`'s cached rules the way opensnitchd
 //!   v1.8.0 does: every operand it matches on, its rule order, and its
 //!   comparison semantics. Inputs left blank are reported as not evaluated.
+//! - [`hits`]: the bridge's per-rule hit counts, as the Rules tab may show
+//!   them honestly (P2.6 Part 1).
+//! - [`insights`]: "unused" and "no hits" badges, and the on-demand analysis
+//!   of shadowed and redundant rules (P2.6 Part 2).
 //! - The cxx-qt `QAbstractListModel` wrapper that binds this to QML lives in
 //!   the top-level [`crate::rules_model`] module (kept flat under `src/`
 //!   with the other `#[cxx_qt::bridge]` files, per the same cxx-qt-build
@@ -16,5 +20,6 @@
 
 pub mod all_apps;
 pub mod hits;
+pub mod insights;
 pub mod row_store;
 pub mod simulator;

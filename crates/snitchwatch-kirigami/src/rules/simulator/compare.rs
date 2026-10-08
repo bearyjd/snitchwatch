@@ -5,7 +5,7 @@
 use super::re2;
 
 /// `Operator.simpleCmp`: `strings.EqualFold` unless `sensitive`, then `==`.
-pub(super) fn simple_cmp(subject: &str, data: &str, sensitive: bool) -> bool {
+pub(in crate::rules) fn simple_cmp(subject: &str, data: &str, sensitive: bool) -> bool {
     if sensitive {
         subject == data
     } else {
@@ -22,7 +22,7 @@ pub(super) fn hash_cmp(subject: &str, data: &str) -> bool {
 /// The compiled form of a `regexp` operator, as `Operator.Compile` and
 /// `reCmp` leave it: unless `sensitive`, the pattern source and the subject
 /// are both lowercased (so `\D` becomes `\d`), and the match is unanchored.
-pub(super) struct Regexp {
+pub(in crate::rules) struct Regexp {
     re: regex::Regex,
     sensitive: bool,
 }
@@ -34,7 +34,7 @@ const REGEX_SIZE_LIMIT: usize = 64 * 1024 * 1024;
 
 /// Why [`Regexp::compile`] failed.
 #[derive(Debug, PartialEq, Eq)]
-pub(super) enum RegexpError {
+pub(in crate::rules) enum RegexpError {
     /// The compiled program passes the size cap.
     TooLarge,
     /// The `regex` crate doesn't accept the syntax.
@@ -47,7 +47,7 @@ impl Regexp {
     /// An error is a difference between the two engines, not a pattern that
     /// cannot match: opensnitchd compiled it (a rule that fails there is never
     /// loaded).
-    pub(super) fn compile(pattern: &str, sensitive: bool) -> Result<Self, RegexpError> {
+    pub(in crate::rules) fn compile(pattern: &str, sensitive: bool) -> Result<Self, RegexpError> {
         Self::compile_with_limit(pattern, sensitive, REGEX_SIZE_LIMIT)
     }
 
@@ -72,7 +72,7 @@ impl Regexp {
         Ok(Self { re, sensitive })
     }
 
-    pub(super) fn is_match(&self, subject: &str) -> bool {
+    pub(in crate::rules) fn is_match(&self, subject: &str) -> bool {
         if self.sensitive {
             self.re.is_match(subject)
         } else {

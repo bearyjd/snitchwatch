@@ -72,6 +72,11 @@ pub struct Rule {
     /// opensnitchd's `Rule.nolog` — suppress logging for matches of this rule.
     /// Same round-trip-ballast rationale as [`Self::precedence`].
     pub nolog: bool,
+    /// When the daemon created the rule, in Unix seconds; 0 when it doesn't
+    /// know (a hand-written rule without the field) or the bridge predates
+    /// the field. Display data only, never sent back.
+    #[serde(skip_serializing)]
+    pub created: i64,
     /// The bridge's display form of `name`, with bidi overrides and
     /// zero-width characters removed (issue #48). Display only: `name` is the
     /// rule's identity in every command, so this is never sent back.
@@ -360,6 +365,7 @@ mod tests {
             operator: serde_json::json!({"operand": "dest.host", "data": "example.com"}),
             precedence: false,
             nolog: false,
+            created: 0,
             display_name: None,
             read_only_reason: None,
             deletable: None,

@@ -248,6 +248,13 @@ past 2,000,000 hosts in total (in subscription order) get no rule.
   that still exist in the daemon's first rule list after a restart keep
   theirs; without a state directory they are kept in memory and the page
   says so.
+  A rule with no counted hits gets a badge: "Unused" only when the counts
+  are saved, cover 14 days, have no gap in them and the rule is at least 14
+  days old; otherwise "No hits since <time>". "Analyze rules" marks rules that
+  can never decide a connection because another one covers them ("Redundant",
+  "Never applies", or "May be shadowed" when the proof rests on a regular
+  expression). It checks only conditions Snitchwatch can compare exactly, so
+  no mark is not a guarantee, and it never changes a rule.
 - The bridge fetches only `https://` URLs, including every redirect, and
   never a loopback, link-local, carrier-grade NAT or other reserved address
   (LAN addresses, RFC 1918 and ULA, are allowed: owner decision,

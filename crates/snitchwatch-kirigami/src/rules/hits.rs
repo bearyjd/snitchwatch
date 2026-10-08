@@ -78,6 +78,19 @@ struct Info<'a> {
     storage_reason: &'a str,
 }
 
+/// How the counts were made: what a "no hits" badge needs to know to be
+/// honest (`rules::insights::hit_badge`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Counting {
+    pub since_unix_ms: i64,
+    /// The counts are saved across restarts of the bridge.
+    pub persistent: bool,
+    /// Hits may be missing from the counts.
+    pub lossy: bool,
+    /// When the bridge last noticed a gap, if it said.
+    pub last_gap_unix_ms: Option<i64>,
+}
+
 #[derive(Debug, Default)]
 pub struct RuleHitsView {
     session: Option<u64>,
@@ -134,6 +147,17 @@ impl RuleHitsView {
             count,
             last_hit_unix_ms,
         }
+    }
+
+    /// How the counts were made, once counting has started.
+    pub fn counting(&self) -> Option<Counting> {
+        let received = self.received.as_ref()?;
+        Some(Counting {
+            since_unix_ms: received.since_unix_ms?,
+            persistent: received.storage.persistent,
+            lossy: received.lossy,
+            last_gap_unix_ms: received.last_gap_unix_ms,
+        })
     }
 
     pub fn info_json(&self) -> String {

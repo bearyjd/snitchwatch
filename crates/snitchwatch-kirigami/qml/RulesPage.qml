@@ -31,6 +31,16 @@
 // rather than 0, and the header says when the counts don't survive a
 // restart. Every label is PlainText.
 //
+// Rule insights (P2.6 Part 2): a zero-count rule gets a badge. "Unused" is
+// claimed only when the counts are saved across restarts, counting and the
+// rule's age cover 14 days, and no gap in the counting overlaps them (else it
+// is "No hits since <time>", or says hits may have been missed). "Analyze
+// rules" finds rules that can never decide a connection because another one
+// covers them: "Redundant", "Never applies", or only "May be shadowed" when the
+// proof leans on the regular-expression engine. It checks only conditions
+// Snitchwatch can compare exactly, so no finding is not a guarantee. Insights
+// describe; nothing here changes, disables or removes a rule.
+//
 // Names are shown via the `displayName` role (bidi overrides and zero-width
 // characters removed by the bridge); `name` stays the rule's identity.
 //
@@ -114,12 +124,53 @@ Kirigami.ScrollablePage {
             : "Hit counts are not saved across restarts.";
     }
 
-    function hitsRowText(counted, count, lastMs, note) {
+    function hitsRowText(counted, count, lastMs, note, badgeKind, badgeMs) {
         if (note.length > 0) return note;
         if (!counted) return "";
-        if (count === 0) return "No hits counted";
+        if (count === 0) {
+            switch (badgeKind) {
+            case "unused":
+                return "Unused: no hits counted in the last 14 days";
+            case "missed":
+                return "No hits counted in the last 14 days, but some may have been missed";
+            case "since":
+                return "No hits since " + page.formatTime(badgeMs);
+            case "sinceMissed":
+                return "No hits since " + page.formatTime(badgeMs)
+                    + "; some may have been missed";
+            default:
+                return "No hits counted";
+            }
+        }
         return count + (count === 1 ? " hit" : " hits")
             + (lastMs > 0 ? ", last " + page.formatTime(lastMs) : "");
+    }
+
+    // The on-demand analysis' state; null before the model has one.
+    readonly property var analysisInfo: !!page.model && page.model.analysisJson.length > 0
+        ? JSON.parse(page.model.analysisJson) : null
+
+    function analysisText(info) {
+        if (!info) return "";
+        switch (info.state) {
+        case "running":
+            return "Analyzing rules...";
+        case "tooMany":
+            return "Too many rules to analyze: " + info.enabled + " are enabled and the limit is "
+                + info.limit + ".";
+        case "stale":
+            return "The rules changed after the analysis. Analyze again.";
+        case "done": {
+            const found = info.redundant + info.neverApplies + info.mayBeShadowed;
+            const caveat = " Snitchwatch checks only conditions it can compare exactly.";
+            return found === 0
+                ? "No shadowed or redundant rules found." + caveat
+                : found + (found === 1 ? " rule" : " rules")
+                    + " may never decide a connection (marked below)." + caveat;
+        }
+        default:
+            return "";
+        }
     }
 
     // Rule-match diagnostics' "Show rule" jump target (called by main.qml
@@ -213,6 +264,14 @@ Kirigami.ScrollablePage {
             Layout.fillWidth: true
         }
         Controls.Button {
+            objectName: "analyzeButton"
+            text: "Analyze rules"
+            icon.name: "dialog-scripts"
+            enabled: !!page.model && !!page.analysisInfo ? page.analysisInfo.state !== "running"
+                                                          : !!page.model
+            onClicked: page.model.analyze()
+        }
+        Controls.Button {
             text: "Simulate"
             icon.name: "system-run"
             onClicked: simulateSheet.open()
@@ -225,6 +284,7 @@ Kirigami.ScrollablePage {
     header: ColumnLayout {
         visible: (!!page.model && page.model.legacyHostOnlyCount > 0)
             || hitsSummaryLabel.text.length > 0 || hitsStorageLabel.text.length > 0
+            || analysisLabel.text.length > 0
         spacing: 0
 
         Kirigami.InlineMessage {
@@ -270,6 +330,17 @@ Kirigami.ScrollablePage {
             font: Kirigami.Theme.smallFont
             color: Kirigami.Theme.neutralTextColor
             text: page.hitsStorageText(page.hitsInfo)
+        }
+        Controls.Label {
+            id: analysisLabel
+            objectName: "analysisSummary"
+            visible: text.length > 0
+            Layout.fillWidth: true
+            Layout.margins: Kirigami.Units.smallSpacing
+            textFormat: Text.PlainText
+            wrapMode: Text.Wrap
+            font: Kirigami.Theme.smallFont
+            text: page.analysisText(page.analysisInfo)
         }
     }
 
@@ -324,6 +395,11 @@ Kirigami.ScrollablePage {
             required property int hitCount
             required property real lastHitMs
             required property string hitsNote
+            required property string hitBadgeKind
+            required property real hitBadgeMs
+            required property string shadowKind
+            required property string shadowText
+            required property string shadowBy
 
             onClicked: {
                 list.currentIndex = row.index;
@@ -368,11 +444,35 @@ Kirigami.ScrollablePage {
                         visible: text.length > 0
                         textFormat: Text.PlainText
                         text: page.hitsRowText(row.hitsCounted, row.hitCount, row.lastHitMs,
-                                               row.hitsNote)
-                        opacity: 0.7
+                                               row.hitsNote, row.hitBadgeKind, row.hitBadgeMs)
+                        opacity: row.hitBadgeKind === "unused" ? 1.0 : 0.7
+                        color: row.hitBadgeKind === "unused" ? Kirigami.Theme.neutralTextColor
+                                                              : Kirigami.Theme.textColor
                         font: Kirigami.Theme.smallFont
                         elide: Text.ElideRight
                         Layout.fillWidth: true
+                    }
+                    // A finding from "Analyze rules": another rule decides
+                    // these connections. The link opens that rule.
+                    RowLayout {
+                        visible: row.shadowText.length > 0
+                        Layout.fillWidth: true
+                        Controls.Label {
+                            objectName: "shadowLabel"
+                            textFormat: Text.PlainText
+                            text: row.shadowText
+                            wrapMode: Text.Wrap
+                            font: Kirigami.Theme.smallFont
+                            color: Kirigami.Theme.neutralTextColor
+                            Layout.fillWidth: true
+                        }
+                        Controls.Button {
+                            objectName: "shadowShow"
+                            flat: true
+                            text: "Show rule"
+                            font: Kirigami.Theme.smallFont
+                            onClicked: page.openRuleByName(row.shadowBy)
+                        }
                     }
                     // Issue #44: what deleting this all-apps rule changes.
                     Controls.Label {

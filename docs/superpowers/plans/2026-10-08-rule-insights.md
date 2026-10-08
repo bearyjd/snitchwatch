@@ -275,6 +275,49 @@ the design above, this is what shipped):
      rules" button) on a worker thread, and cap it at 2 000 enabled rules
      with a "too many rules to analyze" message. #48 allows 10 000 rules.
 
+**Part 2 as built** (branch `feat/rule-insights-badges`, on Part 1):
+
+- **Files.** `rules/insights.rs` with `atoms.rs` (conditions as a
+  conjunction, and what implies what), `shadow.rs` (the analysis),
+  `hit_badge.rs`, `state.rs` (the analysis lifecycle) and `row.rs` (what a
+  row shows). The simulator's `operator`/`compare` helpers are shared, not
+  copied. The wire rule gains a display-only `created` (Unix seconds, 0 =
+  unknown), because "unused" needs the rule's age.
+- **Badges** (`hit_badge`, N2). An eligible rule (enabled, logs, `always` or
+  `until restart`, not read-only, not a blocklist, not `000-snitchwatch-`)
+  with a count of 0 is **Unused** only when the counts are saved across
+  restarts, counting and the rule's age (`created`; unknown age never counts)
+  cover 14 days, and no gap overlaps the window. The bridge reports only its
+  latest gap, so overlap is `last_gap >= now - 14 days` (a gap of unknown time
+  counts as inside). With a gap inside, the badge says "No hits counted in the
+  last 14 days, but some may have been missed". Otherwise (not saved, a shorter
+  period, a young rule) it is "No hits since <time>", plus "; some may have
+  been missed" when lossy. Known limit: when a rule was last *enabled* is
+  unknown, so a rule enabled recently reads as unused if it is old enough.
+- **Findings** (`shadow`, run by "Analyze rules" on a worker thread, at most
+  2 000 enabled rules). Same scan as the simulator and `FindFirstMatch`.
+  `B` is shadowed by `A` when `A` covers it and: `A` is a stop rule (deny,
+  reject, `precedence`) at any position and `B` is not; or both are stop
+  rules and `A` is earlier; or both are non-stop and `A` is later. `A` must be
+  enabled, **`always`** (a timed or `until restart` rule ends, and so does the
+  shadowing) and made only of modelled conditions. A proof from exact
+  comparisons is "Redundant: A already decides these connections the same way"
+  or "Never applies: A decides these connections instead"; a proof that uses
+  the simulator's regular-expression engine is only "May be shadowed by A"
+  (Go's RE2 differs for rare constructs). Not modelled, so never covering:
+  `lists.*`, `process.hash.*`, `user.name`, `iface.*`, `process.env.*`,
+  `process.parent.path`, aliases (they are whatever the daemon host's alias
+  file says; only an identical alias implies itself), IPv6 networks, nested
+  or empty lists. Two proof details found while writing it: an insensitive
+  literal is not covered by a regexp when it contains an `s` or a non-ASCII
+  letter (Go folds U+017F with `s` but `ToLower` leaves it); and an
+  insensitive literal never implies a sensitive condition.
+- **Staleness.** A result belongs to the rule list it was computed from; a
+  list change (or one during the run) drops the findings and says "The rules
+  changed after the analysis. Analyze again."
+- **Wording.** Every label is PlainText. Nothing says a rule was or will be
+  removed, disabled or changed.
+
 ### Part 3: the simulator for every operand (Kirigami, Qt-free)
 
 6. **`SimulationInput`** gains:
