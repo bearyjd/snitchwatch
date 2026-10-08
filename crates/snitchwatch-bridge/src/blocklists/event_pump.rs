@@ -52,9 +52,16 @@ async fn publish(
             subscription_id,
             offset,
             limit,
+            request_id,
         } => {
-            match downstream::build_blocklist_entries_page(mgr, &subscription_id, offset, limit)
-                .await
+            match downstream::build_blocklist_entries_page(
+                mgr,
+                &subscription_id,
+                offset,
+                limit,
+                request_id,
+            )
+            .await
             {
                 Ok(m) => {
                     let _ = tx.send(m);

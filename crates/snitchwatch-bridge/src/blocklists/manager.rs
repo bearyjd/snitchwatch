@@ -15,11 +15,13 @@ use crate::blocklists::fetcher::{
     validate_subscription_url, BlocklistFetch, FetchOutcome, HttpsFetcher, MAX_URL_LEN,
 };
 use crate::blocklists::leftover::LeftoverRules;
-use crate::blocklists::store::{BlocklistStore, FetchStatus, StoreError, Subscription};
+use crate::blocklists::store::{
+    BlocklistStore, EntriesPage, FetchStatus, StoreError, Subscription,
+};
 use crate::blocklists::{
-    derive_display_name, derive_id, BlocklistEvent, Enforcement, NoopRuleSink, NotInstalled,
-    RuleSink, AGGREGATE_MAX_HOSTS, FAILED_RETRY_SECS, MAX_SUBSCRIPTIONS, NOT_DOWNLOADED_REASON,
-    STORE_ERROR_REASON, UNREADABLE_STORE_REASON,
+    derive_display_name, derive_id, thousands, BlocklistEvent, Enforcement, NoopRuleSink,
+    NotInstalled, RuleSink, AGGREGATE_MAX_HOSTS, FAILED_RETRY_SECS, MAX_SUBSCRIPTIONS,
+    NOT_DOWNLOADED_REASON, STORED_MAX_HOSTS, STORE_ERROR_REASON, UNREADABLE_STORE_REASON,
 };
 use crate::ws_messages::{StorageStatus, BLOCKLIST_ENTRIES_PAGE_MAX};
 
@@ -60,6 +62,8 @@ pub struct BlocklistsManager {
     clock: Clock,
     /// [`AGGREGATE_MAX_HOSTS`], lowered in tests.
     aggregate_cap: u64,
+    /// [`STORED_MAX_HOSTS`], lowered in tests.
+    stored_cap: u64,
 }
 
 type Clock = Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>;
@@ -100,6 +104,7 @@ impl BlocklistsManager {
             refusals: Mutex::new(HashMap::new()),
             clock: Arc::new(Utc::now),
             aggregate_cap: AGGREGATE_MAX_HOSTS,
+            stored_cap: STORED_MAX_HOSTS,
         };
         let storage = manager.storage.clone();
         manager.with_storage_status(storage)
@@ -118,6 +123,13 @@ impl BlocklistsManager {
     #[cfg(test)]
     pub(crate) fn with_aggregate_cap(mut self, cap: u64) -> Self {
         self.aggregate_cap = cap;
+        self
+    }
+
+    /// A lower limit on the hosts saved in all lists. Tests only.
+    #[cfg(test)]
+    pub(crate) fn with_stored_cap(mut self, cap: u64) -> Self {
+        self.stored_cap = cap;
         self
     }
 
@@ -407,33 +419,30 @@ impl BlocklistsManager {
     }
 
     /// Ask the event pump for a page of `id`'s hosts (at most
-    /// [`BLOCKLIST_ENTRIES_PAGE_MAX`]).
-    pub fn request_entries(&self, id: &str, offset: u64, limit: u32) {
+    /// [`BLOCKLIST_ENTRIES_PAGE_MAX`]), to be sent with `request_id`.
+    pub fn request_entries(&self, id: &str, offset: u64, limit: u32, request_id: Option<String>) {
         let _ = self.bus.send(BlocklistEvent::EntriesRequested {
             subscription_id: id.to_string(),
             offset,
             limit,
+            request_id,
         });
     }
 
-    /// A page of `id`'s hosts and its total entry count. Never more than
-    /// [`BLOCKLIST_ENTRIES_PAGE_MAX`] hosts.
+    /// A page of `id`'s hosts, its total entry count and the download it came
+    /// from, read together. Never more than [`BLOCKLIST_ENTRIES_PAGE_MAX`]
+    /// hosts.
     pub async fn entries_page(
         &self,
         id: &str,
         offset: u64,
         limit: u32,
-    ) -> anyhow::Result<(Vec<String>, u64)> {
-        let total = self
-            .subscription(id)
-            .map(|s| u64::try_from(s.entry_count).unwrap_or(0))
-            .ok_or_else(|| anyhow::anyhow!("unknown subscription: {id}"))?;
+    ) -> anyhow::Result<EntriesPage> {
         let limit = limit.clamp(1, BLOCKLIST_ENTRIES_PAGE_MAX);
         let owned = id.to_string();
-        let hosts = self
-            .with_store(move |s| s.list_entries_page(&owned, offset, limit))
-            .await?;
-        Ok((hosts, total))
+        self.with_store(move |s| s.entries_page(&owned, offset, limit))
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("unknown subscription: {id}"))
     }
 
     /// Download `id` now and update the store, memory and GUIs. A failed
@@ -452,7 +461,17 @@ impl BlocklistsManager {
             Err(e) => error!(%id, error = %e, "couldn't record a download attempt"),
         }
         self.cache().insert(sub.id.clone(), sub.clone());
-        let outcome = self.fetcher.fetch(&sub.url).await;
+        let outcome = match self.fetcher.fetch(&sub.url).await {
+            FetchOutcome::Ok { hosts, .. } if self.over_stored_limit(&sub.id, hosts.len()) => {
+                FetchOutcome::Failed {
+                    reason: format!(
+                        "Saving this list would pass the limit of {} hosts across all lists",
+                        thousands(self.stored_cap)
+                    ),
+                }
+            }
+            outcome => outcome,
+        };
         let now = Utc::now();
         match outcome {
             FetchOutcome::Ok { hosts, .. } => Ok(self.store_download(sub, hosts, now).await),
@@ -485,6 +504,19 @@ impl BlocklistsManager {
                 Ok(FetchStatus::Failed { reason })
             }
         }
+    }
+
+    /// Whether saving `hosts` hosts for `id` would take the hosts saved in
+    /// all lists past [`STORED_MAX_HOSTS`]. `id`'s own old copy is replaced,
+    /// so only the other lists count.
+    fn over_stored_limit(&self, id: &str, hosts: usize) -> bool {
+        let others: u64 = self
+            .cache()
+            .values()
+            .filter(|s| s.id != id)
+            .map(|s| u64::try_from(s.entry_count).unwrap_or(0))
+            .sum();
+        others.saturating_add(hosts as u64) > self.stored_cap
     }
 
     async fn store_download(

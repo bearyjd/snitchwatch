@@ -109,6 +109,7 @@ async fn subscribe_blocklist_via_ws_yields_entries() {
         subscription_id: list_id.clone(),
         offset: 0,
         limit: None,
+        request_id: Some("gui-e2e".into()),
     };
     ws.send(Message::Text(serde_json::to_string(&request).unwrap()))
         .await
@@ -124,10 +125,17 @@ async fn subscribe_blocklist_via_ws_yields_entries() {
             entries,
             offset,
             total,
+            request_id,
+            last_updated_iso8601,
         }) = next_message(&mut ws).await
         {
             assert_eq!(subscription_id, list_id);
             assert_eq!(offset, 0);
+            assert_eq!(request_id.as_deref(), Some("gui-e2e"));
+            assert!(
+                last_updated_iso8601.is_some(),
+                "a downloaded list is versioned"
+            );
             assert_eq!(total, entries.len() as u64);
             assert!(entries.iter().any(|e| e.host == "doubleclick.net"));
             break;

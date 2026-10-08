@@ -299,6 +299,7 @@ async fn entry_requests_for_unknown_ids_are_dropped() {
         subscription_id: id.to_string(),
         offset: 0,
         limit: None,
+        request_id: None,
     };
     assert_eq!(
         worker.try_route(request("forged\nWARN fake log line")),
@@ -310,6 +311,41 @@ async fn entry_requests_for_unknown_ids_are_dropped() {
         events.try_recv(),
         Ok(BlocklistEvent::EntriesRequested { subscription_id, .. }) if subscription_id == "known"
     ));
+}
+
+/// Issue #67: the request id comes back on the page. It is GUI-chosen text
+/// that is echoed to every GUI, so a request with an oversize one is not
+/// served at all.
+#[tokio::test]
+async fn an_entry_request_keeps_its_id_and_an_oversize_id_is_dropped() {
+    use crate::ws_messages::MAX_REQUEST_ID_LEN;
+    let mgr = manager_with(
+        Arc::new(FixtureFetcher::default()),
+        &[subscription("known", FAST_URL)],
+    );
+    let (worker, _rx) = undrained(&mgr, 1);
+    let mut events = mgr.subscribe();
+    let request = |request_id: String| ClientMessage::RequestBlocklistEntries {
+        subscription_id: "known".to_string(),
+        offset: 0,
+        limit: None,
+        request_id: Some(request_id),
+    };
+    assert_eq!(worker.try_route(request("gui-1".into())), None);
+    assert!(matches!(
+        events.try_recv(),
+        Ok(BlocklistEvent::EntriesRequested { request_id: Some(id), .. }) if id == "gui-1"
+    ));
+    assert_eq!(
+        worker.try_route(request("x".repeat(MAX_REQUEST_ID_LEN + 1))),
+        None
+    );
+    assert!(events.try_recv().is_err(), "an oversize id was served");
+    assert_eq!(
+        worker.try_route(request("x".repeat(MAX_REQUEST_ID_LEN))),
+        None
+    );
+    assert!(events.try_recv().is_ok(), "an id at the limit is served");
 }
 
 /// Counts reconcile passes (each ends in `remove_orphans`).

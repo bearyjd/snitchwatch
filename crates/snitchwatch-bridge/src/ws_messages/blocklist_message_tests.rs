@@ -73,6 +73,8 @@ fn set_blocklist_entries_carries_strongly_typed_entries() {
     let msg = ServerMessage::SetBlocklistEntries {
         offset: 0,
         total: 2,
+        request_id: None,
+        last_updated_iso8601: None,
         subscription_id: "stevenblack".into(),
         entries: vec![
             BlocklistEntry {
@@ -87,6 +89,38 @@ fn set_blocklist_entries_carries_strongly_typed_entries() {
     assert_eq!(json["action"], "setBlocklistEntries");
     assert_eq!(json["subscriptionId"], "stevenblack");
     assert_eq!(json["entries"][0]["host"], "doubleclick.net");
+    // Additive fields stay off the wire when empty, so an older GUI sees
+    // exactly the page it always did.
+    assert!(json.get("requestId").is_none());
+    assert!(json.get("lastUpdatedIso8601").is_none());
+}
+
+/// Issue #67: a page names the request it answers and the download it was
+/// read from, and an older bridge's page (neither) still parses.
+#[test]
+fn an_entries_page_echoes_its_request_and_names_its_download() {
+    let msg = ServerMessage::SetBlocklistEntries {
+        subscription_id: "a".into(),
+        entries: vec![],
+        offset: 1000,
+        total: 2500,
+        request_id: Some("gui-1".into()),
+        last_updated_iso8601: Some("2026-10-08T12:00:00Z".into()),
+    };
+    let json = serde_json::to_value(&msg).unwrap();
+    assert_eq!(json["requestId"], "gui-1");
+    assert_eq!(json["lastUpdatedIso8601"], "2026-10-08T12:00:00Z");
+    assert_eq!(serde_json::from_value::<ServerMessage>(json).unwrap(), msg);
+
+    let older = r#"{"action":"setBlocklistEntries","subscriptionId":"a","entries":[]}"#;
+    match serde_json::from_str::<ServerMessage>(older).unwrap() {
+        ServerMessage::SetBlocklistEntries {
+            request_id,
+            last_updated_iso8601,
+            ..
+        } => assert_eq!((request_id, last_updated_iso8601), (None, None)),
+        other => panic!("expected SetBlocklistEntries, got {other:?}"),
+    }
 }
 
 /// Issue #45 (S2): the largest possible entries page (every host at the
@@ -101,6 +135,8 @@ fn the_largest_entries_page_fits_one_small_frame() {
             .collect(),
         offset: u64::MAX,
         total: u64::MAX,
+        request_id: Some("r".repeat(MAX_REQUEST_ID_LEN)),
+        last_updated_iso8601: Some("2026-10-08T12:00:00.123456789+00:00".into()),
     };
     let json = serde_json::to_string(&msg).unwrap();
     assert!(json.len() < 1024 * 1024, "{} bytes", json.len());
@@ -117,8 +153,17 @@ fn request_blocklist_entries_parses_with_defaults() {
             subscription_id: "a".into(),
             offset: 0,
             limit: None,
+            request_id: None,
         }
     );
+    let tagged: ClientMessage = serde_json::from_str(
+        r#"{"action":"requestBlocklistEntries","subscriptionId":"a","requestId":"gui-1"}"#,
+    )
+    .unwrap();
+    assert!(matches!(
+        tagged,
+        ClientMessage::RequestBlocklistEntries { request_id: Some(ref id), .. } if id == "gui-1"
+    ));
 }
 
 #[test]

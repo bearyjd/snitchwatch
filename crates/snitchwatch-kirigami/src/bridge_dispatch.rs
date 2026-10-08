@@ -375,6 +375,8 @@ mod tests {
             }],
             offset: 0,
             total: 1,
+            request_id: None,
+            last_updated_iso8601: None,
         };
         assert!(interests_blocklist_entries(&msg));
         assert!(!interests_blocklists(&msg));

@@ -18,9 +18,8 @@ use cxx_qt::CxxQtType;
 use cxx_qt::Threading;
 use cxx_qt_lib::{QByteArray, QHash, QHashPair_i32_QByteArray, QModelIndex, QString, QVariant};
 
-use crate::blocklists::row_store::{
-    enforcement_label, status_label, EntriesStore, SubscriptionsStore,
-};
+use crate::blocklists::entries_store::{client_request_id, EntriesStore};
+use crate::blocklists::row_store::{enforcement_label, status_label, SubscriptionsStore};
 use snitchwatch_bridge::ws_messages::{ClientMessage, ServerMessage};
 
 // Subscription roles.
@@ -179,6 +178,13 @@ pub mod qobject {
         #[qinvokable]
         #[cxx_name = "expectEntries"]
         fn expect_entries(self: Pin<&mut BlocklistEntriesModel>, id: &QString);
+
+        /// The list `id` was downloaded again between two pages (issue #67):
+        /// the entries shown were dropped rather than mixed. The page answers
+        /// with `BlocklistsModel.requestEntries(id, 0)`.
+        #[qsignal]
+        #[cxx_name = "restartRequested"]
+        fn restart_requested(self: Pin<&mut BlocklistEntriesModel>, id: QString);
     }
 
     unsafe extern "RustQt" {
@@ -293,6 +299,7 @@ impl qobject::BlocklistsModel {
             subscription_id: id.to_string(),
             offset: u64::try_from(offset).unwrap_or(0),
             limit: None,
+            request_id: Some(client_request_id().to_string()),
         });
     }
 
@@ -464,6 +471,7 @@ impl qobject::BlocklistEntriesModel {
             self.as_mut().begin_reset_model();
         }
         let changed = self.as_mut().rust_mut().store.apply(&msg);
+        let restart = self.as_mut().rust_mut().store.take_restart();
         unsafe {
             self.as_mut().end_reset_model();
         }
@@ -476,6 +484,9 @@ impl qobject::BlocklistEntriesModel {
             self.as_mut().set_total(total);
             self.as_mut().set_has_more(has_more);
             self.as_mut().set_subscription_id(sub);
+        }
+        if let Some(id) = restart {
+            self.as_mut().restart_requested(QString::from(&id));
         }
     }
 }

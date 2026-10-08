@@ -283,25 +283,54 @@ impl BlocklistStore {
         Ok(rows)
     }
 
-    /// At most `limit` of a subscription's hosts, in order, from `offset`.
-    pub fn list_entries_page(
+    /// At most `limit` of a subscription's hosts, in order, from `offset`,
+    /// with the list's entry count and download time as of the same moment
+    /// (one lock, so a refresh can't land between them). `None` if there is
+    /// no such subscription.
+    pub fn entries_page(
         &self,
         sub_id: &str,
         offset: u64,
         limit: u32,
-    ) -> Result<Vec<String>, StoreError> {
+    ) -> Result<Option<EntriesPage>, StoreError> {
         let conn = self.lock()?;
+        let Some((total, last_fetched_at)) = conn
+            .query_row(
+                "SELECT entry_count, last_fetched_at FROM subscriptions WHERE id = ?1",
+                params![sub_id],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?)),
+            )
+            .optional()?
+        else {
+            return Ok(None);
+        };
         let mut stmt = conn.prepare(
             "SELECT host FROM entries WHERE subscription_id = ?1 ORDER BY host LIMIT ?2 OFFSET ?3",
         )?;
         let offset = i64::try_from(offset).unwrap_or(i64::MAX);
-        let rows = stmt
+        let hosts = stmt
             .query_map(params![sub_id, limit, offset], |row| {
                 row.get::<_, String>(0)
             })?
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(rows)
+        Ok(Some(EntriesPage {
+            hosts,
+            total: u64::try_from(total).unwrap_or(0),
+            last_fetched_at,
+        }))
     }
+}
+
+/// A page of a subscription's hosts and what describes the list it was read
+/// from (see [`BlocklistStore::entries_page`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntriesPage {
+    pub hosts: Vec<String>,
+    /// The list's entry count.
+    pub total: u64,
+    /// When the list was last downloaded (RFC 3339): pages with different
+    /// values come from different contents.
+    pub last_fetched_at: Option<String>,
 }
 
 fn update_row(conn: &Connection, sub: &Subscription) -> rusqlite::Result<usize> {
@@ -579,14 +608,47 @@ mod tests {
         let mut updated = sub("p");
         updated.entry_count = 5;
         store.replace_entries_and_update(&updated, &hosts).unwrap();
-        assert_eq!(
-            store.list_entries_page("p", 0, 2).unwrap(),
-            vec!["h0.example", "h1.example"]
-        );
-        assert_eq!(
-            store.list_entries_page("p", 4, 2).unwrap(),
-            vec!["h4.example"]
-        );
-        assert!(store.list_entries_page("p", 9, 2).unwrap().is_empty());
+        let page = |offset, limit| store.entries_page("p", offset, limit).unwrap().unwrap();
+        assert_eq!(page(0, 2).hosts, vec!["h0.example", "h1.example"]);
+        assert_eq!(page(4, 2).hosts, vec!["h4.example"]);
+        assert!(page(9, 2).hosts.is_empty());
+        assert!(store.entries_page("missing", 0, 2).unwrap().is_none());
+    }
+
+    /// Issue #67: pages fetched across a refresh must not mix old and new
+    /// contents, so every page says which download it came from, read in
+    /// the same step as the hosts.
+    #[test]
+    fn a_page_says_which_download_it_came_from() {
+        let store = open_in_memory();
+        store.upsert_subscription(&sub("p")).unwrap();
+        let first = Utc::now();
+        let mut updated = sub("p");
+        updated.entry_count = 3;
+        updated.last_fetched_at = Some(first);
+        let hosts: Vec<String> = ["a", "b", "c"].map(String::from).to_vec();
+        store.replace_entries_and_update(&updated, &hosts).unwrap();
+        let page = store.entries_page("p", 0, 2).unwrap().unwrap();
+        assert_eq!(page.total, 3);
+        assert_eq!(page.last_fetched_at, Some(first.to_rfc3339()));
+
+        let second = first + chrono::Duration::seconds(5);
+        updated.entry_count = 1;
+        updated.last_fetched_at = Some(second);
+        store
+            .replace_entries_and_update(&updated, &["z".to_string()])
+            .unwrap();
+        let page = store.entries_page("p", 0, 2).unwrap().unwrap();
+        assert_eq!((page.total, page.hosts), (1, vec!["z".to_string()]));
+        assert_eq!(page.last_fetched_at, Some(second.to_rfc3339()));
+    }
+
+    #[test]
+    fn a_never_downloaded_list_has_an_empty_unversioned_page() {
+        let store = open_in_memory();
+        store.upsert_subscription(&sub("p")).unwrap();
+        let page = store.entries_page("p", 0, 10).unwrap().unwrap();
+        assert!(page.hosts.is_empty() && page.total == 0);
+        assert_eq!(page.last_fetched_at, None);
     }
 }

@@ -5,6 +5,12 @@
 
 use serde::{Deserialize, Serialize};
 
+mod blocklist_wire;
+pub use blocklist_wire::{
+    BlocklistEntry, BlocklistSummary, BLOCKLIST_ENTRIES_PAGE_MAX, ENFORCEMENT_NOT_ENFORCED,
+    ENFORCEMENT_PENDING, ENFORCEMENT_RULE_INSTALLED, MAX_REQUEST_ID_LEN,
+};
+
 use crate::notice::Notice;
 use crate::tray_state::TrayState;
 
@@ -126,7 +132,11 @@ pub enum ServerMessage {
     /// One page (at most [`BLOCKLIST_ENTRIES_PAGE_MAX`] hosts, starting at
     /// `offset`) of a subscription's `total` hosts, sent only in answer to
     /// `RequestBlocklistEntries` (issue #45: a whole list in one frame
-    /// overflowed GUI clients).
+    /// overflowed GUI clients). Sent to every connected GUI, so
+    /// `request_id` echoes the request it answers (issue #67): a GUI keeps
+    /// only its own pages. `last_updated_iso8601` is when the list was last
+    /// downloaded: pages of one list with different values come from
+    /// different contents, and a GUI starts over rather than mix them.
     SetBlocklistEntries {
         subscription_id: String,
         entries: Vec<BlocklistEntry>,
@@ -134,6 +144,10 @@ pub enum ServerMessage {
         offset: u64,
         #[serde(default)]
         total: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        last_updated_iso8601: Option<String>,
     },
     SetBlocklistEntryLocation {
         subscription_id: String,
@@ -391,13 +405,17 @@ pub enum ClientMessage {
     RemoveLeftoverBlocklistRules,
     /// Ask for a page of a subscription's hosts; answered with
     /// `SetBlocklistEntries`. `limit` is capped at
-    /// [`BLOCKLIST_ENTRIES_PAGE_MAX`].
+    /// [`BLOCKLIST_ENTRIES_PAGE_MAX`]. `request_id` (at most
+    /// [`MAX_REQUEST_ID_LEN`] bytes, else the request is ignored) comes back
+    /// on the page that answers it.
     RequestBlocklistEntries {
         subscription_id: String,
         #[serde(default)]
         offset: u64,
         #[serde(default)]
         limit: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
     },
     CreateProfile {
         id: String,
@@ -697,40 +715,6 @@ pub struct AboutInfo {
     pub ebpf_commit: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BlocklistSummary {
-    pub id: String,
-    pub display_name: String,
-    pub url: String,
-    pub entry_count: i64,
-    /// The download result (`pending` / `ok` / `failed`), not enforcement.
-    pub status: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub last_updated_iso8601: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub last_failure_reason: Option<String>,
-    /// One of the `ENFORCEMENT_*` values. Empty from an older bridge, which
-    /// enforced nothing.
-    #[serde(default)]
-    pub enforcement: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub enforcement_reason: Option<String>,
-}
-
-/// Most hosts in one `SetBlocklistEntries` page (~260 KiB of JSON at most).
-pub const BLOCKLIST_ENTRIES_PAGE_MAX: u32 = 1000;
-
-/// [`BlocklistSummary::enforcement`]: not downloaded or pushed yet.
-pub const ENFORCEMENT_PENDING: &str = "pending";
-/// [`BlocklistSummary::enforcement`]: the daemon accepted the list's rule,
-/// or already held it unchanged. The daemon may still have loaded 0
-/// entries, so GUIs say "Rule installed", never "Enforced".
-pub const ENFORCEMENT_RULE_INSTALLED: &str = "rule_installed";
-/// [`BlocklistSummary::enforcement`]: nothing blocks this list's hosts; see
-/// `enforcement_reason`.
-pub const ENFORCEMENT_NOT_ENFORCED: &str = "not_enforced";
-
 /// Where the bridge keeps blocklist subscriptions (`SetBlocklists`) or
 /// profiles (`SetProfiles`); each store reports its own.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -749,12 +733,6 @@ pub struct StorageStatus {
     /// unreadable profile store is reported as not persistent instead.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub unreadable: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BlocklistEntry {
-    pub host: String,
 }
 
 /// One rule override within a profile, as carried over the wire (mirrors

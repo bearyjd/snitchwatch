@@ -332,6 +332,18 @@ Kirigami.ScrollablePage {
         inspector.open();
     }
 
+    // The list was downloaded again between two pages (issue #67): the model
+    // dropped the hosts it held rather than mix old and new ones, so ask for
+    // the list from its start.
+    Connections {
+        target: page.entriesModel
+        function onRestartRequested(id) {
+            if (page.model && id === page.inspectId) {
+                page.model.requestEntries(id, 0);
+            }
+        }
+    }
+
     // Subscription detail + entries. Kept as an OverlaySheet, same as
     // ConnectionsPage's inspector, so it behaves identically at every width.
     SizedOverlaySheet {

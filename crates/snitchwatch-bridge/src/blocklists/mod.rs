@@ -50,6 +50,8 @@ pub enum BlocklistEvent {
         subscription_id: String,
         offset: u64,
         limit: u32,
+        /// Echoed on the page, so each GUI keeps only its own (issue #67).
+        request_id: Option<String>,
     },
 }
 
@@ -122,6 +124,14 @@ pub const MAX_SUBSCRIPTIONS: usize = 32;
 /// would let traffic through unfiltered while it restarts. Lists past the
 /// limit, in the order they were subscribed, get no files and no rule.
 pub const AGGREGATE_MAX_HOSTS: u64 = 2_000_000;
+/// Most hosts, summed over every subscription, the bridge saves on disk
+/// (issue #67): twice [`AGGREGATE_MAX_HOSTS`], so lists past that limit can
+/// still be browsed. Every saved host repeats its list's id (up to 81
+/// bytes), so without a bound 32 lists of `format::MAX_ENTRIES` took ~5 GB
+/// of the filesystem that also holds /var/home; this is well under 1 GB. A
+/// download that would pass it is refused and keeps the list's earlier
+/// hosts, like any failed download.
+pub const STORED_MAX_HOSTS: u64 = 4_000_000;
 
 /// How much a [`BlocklistsManager::reconcile_with`] pass does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -418,6 +428,9 @@ mod backoff_tests;
 
 #[cfg(test)]
 mod cap_tests;
+
+#[cfg(test)]
+mod entries_tests;
 
 #[cfg(test)]
 mod leftover_manager_tests;
