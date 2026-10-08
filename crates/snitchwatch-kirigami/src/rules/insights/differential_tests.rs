@@ -53,16 +53,23 @@ const HOST_PATTERNS: &[&str] = &[
 ];
 const PATH_PATTERNS: &[&str] = &["curl", "^/usr/"];
 
-fn atom(rng: &mut Rng) -> Value {
-    match rng.below(9) {
-        0 => simple("dest.host", rng.pick(HOSTS)),
-        1 => simple_sensitive("dest.host", rng.pick(HOSTS)),
-        2 => regexp("dest.host", rng.pick(HOST_PATTERNS)),
-        3 => regexp_sensitive("dest.host", rng.pick(HOST_PATTERNS)),
-        4 => simple("process.path", rng.pick(PATHS)),
-        5 => regexp("process.path", rng.pick(PATH_PATTERNS)),
-        6 => simple("dest.port", rng.pick(PORTS)),
-        7 => simple("protocol", rng.pick(PROTOCOLS)),
+/// One of five operands, with a condition on it from a small pool. Rules
+/// built from one group collide often enough to shadow each other.
+fn atom_in(rng: &mut Rng, group: usize) -> Value {
+    match group {
+        0 => match rng.below(4) {
+            0 => simple("dest.host", rng.pick(HOSTS)),
+            1 => simple_sensitive("dest.host", rng.pick(HOSTS)),
+            2 => regexp("dest.host", rng.pick(HOST_PATTERNS)),
+            _ => regexp_sensitive("dest.host", rng.pick(HOST_PATTERNS)),
+        },
+        1 => match rng.below(3) {
+            0 => simple("process.path", rng.pick(PATHS)),
+            1 => simple_sensitive("process.path", rng.pick(PATHS)),
+            _ => regexp("process.path", rng.pick(PATH_PATTERNS)),
+        },
+        2 => simple("dest.port", rng.pick(PORTS)),
+        3 => simple("protocol", rng.pick(PROTOCOLS)),
         _ => match rng.below(3) {
             0 => simple("dest.ip", rng.pick(IPS)),
             1 => super::testkit::network("dest.network", rng.pick(NETWORKS)),
@@ -71,25 +78,51 @@ fn atom(rng: &mut Rng) -> Value {
     }
 }
 
+fn operator_of(members: Vec<Value>) -> Value {
+    if members.len() == 1 {
+        members.into_iter().next().unwrap()
+    } else {
+        super::testkit::all_of(members)
+    }
+}
+
 fn random_rules(rng: &mut Rng) -> Vec<Rule> {
     let count = 2 + rng.below(4);
+    let focus = rng.below(5);
     (0..count)
         .map(|i| {
-            let members: Vec<Value> = (0..1 + rng.below(3)).map(|_| atom(rng)).collect();
-            let operator = if members.len() == 1 {
-                members.into_iter().next().unwrap()
-            } else {
-                super::testkit::all_of(members)
-            };
+            let members: Vec<Value> = (0..1 + rng.below(3))
+                .map(|_| {
+                    let group = if rng.below(2) == 0 {
+                        focus
+                    } else {
+                        rng.below(5)
+                    };
+                    atom_in(rng, group)
+                })
+                .collect();
             let name = format!("{:03}-r{i}", rng.below(1000));
             let action = if rng.below(2) == 0 { "allow" } else { "deny" };
-            let mut r = rule(&name, action, operator);
+            let mut r = rule(&name, action, operator_of(members));
             r.precedence = action == "allow" && rng.below(5) == 0;
             if rng.below(10) == 0 {
                 r.duration = "5m".into();
             }
             r.enabled = rng.below(20) != 0;
             r
+        })
+        .collect()
+}
+
+/// Two single-condition rules on the same operand: the cheapest way to meet
+/// every pairing of the comparison rules.
+fn random_pair(rng: &mut Rng) -> Vec<Rule> {
+    let group = rng.below(5);
+    (0..2)
+        .map(|i| {
+            let name = format!("{:03}-p{i}", rng.below(1000));
+            let action = if rng.below(2) == 0 { "allow" } else { "deny" };
+            rule(&name, action, atom_in(rng, group))
         })
         .collect()
 }
@@ -146,8 +179,12 @@ fn a_rule_the_analysis_calls_shadowed_never_decides_in_the_simulator() {
     let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
     let universe = connections();
     let mut by_kind = [0usize; 3];
-    for round in 0..120 {
-        let rules = random_rules(&mut rng);
+    for round in 0..600 {
+        let rules = if round % 3 == 0 {
+            random_rules(&mut rng)
+        } else {
+            random_pair(&mut rng)
+        };
         let Analysis::Done { findings } = analyze(&rules) else {
             panic!("small rule sets are analysed");
         };

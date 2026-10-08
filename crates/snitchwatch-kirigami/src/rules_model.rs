@@ -502,17 +502,18 @@ impl qobject::RulesModel {
                 self.as_mut().begin_reset_model();
             }
             let changed = self.as_mut().rust_mut().store.apply(&msg);
+            // Findings are about the list they were computed from: they go
+            // with it, inside the reset, so no view ever reads them against
+            // a list they weren't computed from.
+            if self.store.rules() != before.as_slice() {
+                self.as_mut().rust_mut().analysis.rules_changed();
+            }
             unsafe {
                 self.as_mut().end_reset_model();
             }
             changed
         };
-        // Findings are about the list they were computed from.
-        if self.store.rules() != before.as_slice() {
-            self.as_mut().rust_mut().analysis.rules_changed();
-            self.as_mut().refresh_findings();
-            self.as_mut().publish_analysis();
-        }
+        self.as_mut().publish_analysis();
         if changed {
             let n = self.store.len() as i32;
             self.as_mut().set_count(n);

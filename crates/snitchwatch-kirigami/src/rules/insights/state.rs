@@ -2,9 +2,10 @@
 //!
 //! The analysis (`shadow::analyze`) runs on a worker thread over a copy of the
 //! rule list. A rule list that changes while it runs, or after it finished,
-//! makes its result untrue, so a result is shown only for the **generation**
-//! of the list it was computed from. Anything older becomes `stale`, with the
-//! findings gone; the user asks again.
+//! makes its result untrue: the findings go and the state is `stale`, and the
+//! user asks again. A worker's result is taken only if it belongs to the run
+//! that is still wanted (`running`); one from a run the list outlived is
+//! dropped, even when the user has since started another.
 
 use std::collections::BTreeMap;
 
@@ -28,7 +29,10 @@ pub enum Phase {
 #[derive(Debug)]
 pub struct AnalysisState {
     phase: Phase,
+    /// Bumped by every rule list change.
     generation: u64,
+    /// The generation of the run still wanted, if one is.
+    running: Option<u64>,
     enabled: usize,
     findings: BTreeMap<String, Finding>,
 }
@@ -38,6 +42,7 @@ impl Default for AnalysisState {
         Self {
             phase: Phase::Idle,
             generation: 0,
+            running: None,
             enabled: 0,
             findings: BTreeMap::new(),
         }
@@ -59,6 +64,7 @@ impl AnalysisState {
     /// The rule list changed (or was replaced). Drops the findings.
     pub fn rules_changed(&mut self) {
         self.generation += 1;
+        self.running = None;
         self.findings.clear();
         if self.phase != Phase::Idle {
             self.phase = Phase::Stale;
@@ -72,17 +78,18 @@ impl AnalysisState {
             return None;
         }
         self.phase = Phase::Running;
+        self.running = Some(self.generation);
         self.findings.clear();
         Some(self.generation)
     }
 
-    /// A worker finished the analysis it began at `generation`.
+    /// A worker finished the analysis it began at `generation`. A result for
+    /// a run that is no longer wanted changes nothing.
     pub fn finish(&mut self, generation: u64, analysis: Analysis) {
-        if generation != self.generation || self.phase != Phase::Running {
-            self.findings.clear();
-            self.phase = Phase::Stale;
+        if self.running != Some(generation) {
             return;
         }
+        self.running = None;
         match analysis {
             Analysis::Done { findings } => {
                 self.findings = findings;

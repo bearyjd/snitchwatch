@@ -102,6 +102,24 @@ fn rules_are_ordered_by_name_whatever_order_they_arrive_in() {
     assert!(only(&rules, "a-allow").is_some());
 }
 
+/// Order matters between two allows (the later replaces the earlier), so the
+/// name order, not the arrival order, decides which one is redundant.
+#[test]
+fn which_allow_is_redundant_follows_the_name_order_not_the_arrival_order() {
+    let rules = [allow("200-second", x()), allow("100-first", x())];
+    assert_eq!(
+        only(&rules, "100-first"),
+        Some((FindingKind::Redundant, "200-second".into()))
+    );
+    assert_eq!(only(&rules, "200-second"), None);
+    let rules = [deny("200-second", x()), deny("100-first", x())];
+    assert_eq!(
+        only(&rules, "200-second"),
+        Some((FindingKind::Redundant, "100-first".into()))
+    );
+    assert_eq!(only(&rules, "100-first"), None);
+}
+
 #[test]
 fn a_wider_rule_shadows_a_narrower_one_but_not_the_other_way() {
     let wide = deny("100-wide", host("example.com"));

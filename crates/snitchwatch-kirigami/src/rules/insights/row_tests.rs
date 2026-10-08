@@ -82,3 +82,22 @@ fn without_counts_or_an_analysis_a_row_shows_nothing() {
     );
     assert_eq!(row, RowInsights::default());
 }
+
+#[test]
+fn each_kind_of_finding_has_its_own_row_kind() {
+    let x = || host("example.com");
+    let kind_of = |rules: &[crate::rules::row_store::Rule], name: &str| {
+        let state = analysed(rules);
+        let rule = rules.iter().find(|r| r.name == name).unwrap();
+        row_insights(rule, &RuleHitsView::default(), &state, NOW).shadow_kind
+    };
+    let same = [deny("100-a", x()), deny("200-b", x())];
+    assert_eq!(kind_of(&same, "200-b"), "redundant");
+    let differ = [deny("100-a", x()), allow("200-b", x())];
+    assert_eq!(kind_of(&differ, "200-b"), "neverApplies");
+    let engine = [
+        deny("100-a", regexp("dest.host", r"^.*\.example\.com$")),
+        allow("200-b", simple_sensitive("dest.host", "a.example.com")),
+    ];
+    assert_eq!(kind_of(&engine, "200-b"), "maybeShadowed");
+}

@@ -46,8 +46,9 @@ fn a_rule_list_that_changes_while_the_analysis_runs_makes_its_result_stale() {
     let mut state = AnalysisState::default();
     let generation = state.start().unwrap();
     state.rules_changed();
-    state.finish(generation, done(&[("a", FindingKind::NeverApplies)]));
     assert_eq!(state.phase(), Phase::Stale);
+    state.finish(generation, done(&[("a", FindingKind::NeverApplies)]));
+    assert_eq!(state.phase(), Phase::Stale, "the old result is dropped");
     assert!(state.finding("a").is_none());
     // And a new request analyses the new list.
     let next = state.start().unwrap();
@@ -55,6 +56,29 @@ fn a_rule_list_that_changes_while_the_analysis_runs_makes_its_result_stale() {
     state.finish(next, done(&[("b", FindingKind::NeverApplies)]));
     assert_eq!(state.phase(), Phase::Done);
     assert!(state.finding("b").is_some());
+}
+
+/// The first worker is still computing when the user asks again.
+#[test]
+fn a_result_from_an_older_run_never_lands_on_a_newer_one() {
+    let mut state = AnalysisState::default();
+    let old = state.start().unwrap();
+    state.rules_changed();
+    let new = state.start().unwrap();
+    assert_ne!(old, new);
+
+    state.finish(old, done(&[("old", FindingKind::Redundant)]));
+    assert_eq!(
+        state.phase(),
+        Phase::Running,
+        "still waiting for the new run"
+    );
+    assert!(state.finding("old").is_none());
+
+    state.finish(new, done(&[("new", FindingKind::Redundant)]));
+    assert_eq!(state.phase(), Phase::Done);
+    assert!(state.finding("new").is_some());
+    assert!(state.finding("old").is_none());
 }
 
 #[test]
@@ -110,9 +134,16 @@ fn the_summary_counts_each_kind() {
 }
 
 #[test]
-fn a_finish_nobody_is_waiting_for_is_stale() {
+fn a_finish_nobody_is_waiting_for_changes_nothing() {
     let mut state = AnalysisState::default();
     state.finish(0, done(&[("a", FindingKind::Redundant)]));
-    assert_eq!(state.phase(), Phase::Stale);
+    assert_eq!(state.phase(), Phase::Idle);
     assert!(state.finding("a").is_none());
+
+    // And not twice for the same run.
+    let generation = state.start().unwrap();
+    state.finish(generation, done(&[("a", FindingKind::Redundant)]));
+    state.finish(generation, done(&[("b", FindingKind::Redundant)]));
+    assert!(state.finding("a").is_some());
+    assert!(state.finding("b").is_none());
 }
