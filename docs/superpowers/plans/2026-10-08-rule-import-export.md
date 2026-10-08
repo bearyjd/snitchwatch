@@ -582,8 +582,9 @@ Decided while implementing, against the merged code (base `1c3615c`):
 - **Reserved names:** `snitchwatch-default-` is refused at the send point
   for every GUI command (its rules are listed read-only, "This name is
   reserved for Snitchwatch's own rules", and not deletable);
-  `000-snitchwatch-` (the packaged fetch rule's prefix, reserved at the
-  send point by its own PR) is refused on import and left out of exports.
+  `000-snitchwatch-` (the packaged rules' prefix, reserved at the send
+  point by #91) is refused on import and left out of exports, through
+  `rule_name::is_reserved_name`, which now covers all three prefixes.
 - **Version and `enabled`:** `version: 1.0` is version 1, as in JSON Schema;
   an imported rule must say `enabled` (the GUI's rule shape defaults it on,
   `rule_from_wire` off). A test ties the schema's enums, caps and reserved

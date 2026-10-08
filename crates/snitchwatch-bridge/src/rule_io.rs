@@ -267,10 +267,9 @@ pub fn check_rule_for_apply(rule: &Rule) -> Result<Rule, Vec<RuleProblem>> {
     Ok(reparsed)
 }
 
-/// Rules Snitchwatch installs itself: blocklists and curated defaults.
+/// Rules Snitchwatch owns: blocklists, packaged rules and curated defaults.
 fn is_bridge_owned(name: &str) -> bool {
     crate::rule_name::is_reserved_name(name)
-        || name.starts_with(crate::rule_policy::PACKAGED_RULE_NAME_PREFIX)
 }
 
 /// Parse a document from file text, refusing an oversized one before any

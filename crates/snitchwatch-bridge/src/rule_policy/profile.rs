@@ -35,10 +35,7 @@ pub const BLOCKLIST_NAME_REFUSED: &str = "names starting with z00-blocklist: or 
      belong to Snitchwatch's blocklist rules";
 pub const CURATED_NAME_REFUSED: &str =
     "names starting with snitchwatch-default- belong to Snitchwatch's own default rules";
-/// Rules Snitchwatch ships ready-made (the packaged fetch rule). The PR that
-/// adds them reserves the prefix in `rule_name.rs` for every GUI command;
-/// until it lands, import and export refuse it here.
-pub const PACKAGED_RULE_NAME_PREFIX: &str = "000-snitchwatch-";
+/// Rules Snitchwatch ships ready-made (`rule_name::PACKAGED_RULE_NAME_PREFIX`).
 pub const PACKAGED_NAME_REFUSED: &str =
     "names starting with 000-snitchwatch- belong to rules Snitchwatch ships";
 pub const ACTION_REFUSED: &str = "the action must be allow, deny or reject";
@@ -95,7 +92,7 @@ fn check_import(rule: &Rule, problems: &mut Vec<RuleProblem>) {
     {
         problem(problems, "name", CURATED_NAME_REFUSED);
     }
-    if rule.name.starts_with(PACKAGED_RULE_NAME_PREFIX) {
+    if crate::rule_name::is_reserved_packaged_name(&rule.name) {
         problem(problems, "name", PACKAGED_NAME_REFUSED);
     }
     if !matches!(rule.action.as_str(), "allow" | "deny" | "reject") {

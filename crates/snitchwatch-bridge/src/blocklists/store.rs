@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use chrono::{DateTime, Utc};
-use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension};
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,6 +59,15 @@ pub enum StoreError {
     NewerSchema(i64),
 }
 
+impl From<crate::sqlite_file::OpenError> for StoreError {
+    fn from(error: crate::sqlite_file::OpenError) -> Self {
+        match error {
+            crate::sqlite_file::OpenError::Sqlite(e) => Self::Sqlite(e),
+            other => Self::Io(other.into_io()),
+        }
+    }
+}
+
 pub struct BlocklistStore {
     conn: Mutex<Connection>,
 }
@@ -94,29 +103,12 @@ const SUBSCRIPTION_COLUMNS: &str = "id, url, display_name, format_hint, refresh_
      last_fetched_at, last_attempt_at, last_fetch_status, last_fetch_reason, entry_count";
 
 impl BlocklistStore {
-    /// Open (or create) the database at `path`, owner-only (0600). The path
-    /// is opened with `O_NOFOLLOW` and must be a regular file; the mode is
-    /// set through that handle. SQLite gives its journal files the
-    /// database's mode.
+    /// Open (or create) the database at `path`, owner-only (0600), through
+    /// [`crate::sqlite_file::open_owner_only`], which also refuses unsafe
+    /// SQLite sidecar files and a database that isn't a plain Snitchwatch
+    /// store.
     pub fn open(path: &Path) -> Result<Self, StoreError> {
-        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(path)?;
-        if !file.metadata()?.is_file() {
-            return Err(StoreError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("{} is not a regular file", path.display()),
-            )));
-        }
-        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-        drop(file);
-        let conn = open_connection(path)?;
+        let conn = crate::sqlite_file::open_owner_only(path)?;
         Self::initialize(conn)
     }
 
@@ -130,6 +122,7 @@ impl BlocklistStore {
         if version > SCHEMA_VERSION {
             return Err(StoreError::NewerSchema(version));
         }
+        crate::sqlite_file::require_known_schema(&conn, SCHEMA)?;
         conn.execute_batch("PRAGMA foreign_keys = ON;")?;
         conn.execute_batch(SCHEMA)?;
         conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
@@ -309,18 +302,6 @@ impl BlocklistStore {
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
     }
-}
-
-/// `Connection::open`'s flags without `URI`, plus `NOFOLLOW`: SQLite opens
-/// the path again after [`BlocklistStore::open`]'s checks.
-fn open_connection(path: &Path) -> rusqlite::Result<Connection> {
-    Connection::open_with_flags(
-        path,
-        OpenFlags::SQLITE_OPEN_READ_WRITE
-            | OpenFlags::SQLITE_OPEN_CREATE
-            | OpenFlags::SQLITE_OPEN_NO_MUTEX
-            | OpenFlags::SQLITE_OPEN_NOFOLLOW,
-    )
 }
 
 fn update_row(conn: &Connection, sub: &Subscription) -> rusqlite::Result<usize> {
@@ -543,8 +524,8 @@ mod tests {
         drop(Connection::open(&target).unwrap());
         let path = dir.path().join("blocklists.sqlite3");
         std::os::unix::fs::symlink(&target, &path).unwrap();
-        assert!(open_connection(&path).is_err());
-        assert!(open_connection(&target).is_ok());
+        assert!(crate::sqlite_file::open_connection(&path).is_err());
+        assert!(crate::sqlite_file::open_connection(&target).is_ok());
     }
 
     #[test]

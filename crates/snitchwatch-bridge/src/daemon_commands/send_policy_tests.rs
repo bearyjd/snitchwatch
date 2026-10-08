@@ -127,6 +127,30 @@ async fn a_blocklist_rule_name_is_refused_at_send_whatever_the_command() {
     assert!(rx.try_recv().is_err(), "nothing reached the daemon");
 }
 
+/// The rules Snitchwatch ships are never sent: an allow swapped for a deny,
+/// a temporary duration or a delete would all break list downloads.
+#[tokio::test]
+async fn a_packaged_rule_name_is_refused_at_send_whatever_the_command() {
+    let (commands, _rules) = fixture();
+    let (_stream, mut rx) = current_stream(&commands);
+    for name in [
+        crate::rule_name::PACKAGED_FETCH_RULE_NAME,
+        "000-snitchwatch-other",
+    ] {
+        assert_eq!(
+            commands.send(change(name, Some(host("x.example")))).err(),
+            Some(SendError::ReservedName),
+            "{name}"
+        );
+        assert_eq!(
+            commands.send(delete(name)).err(),
+            Some(SendError::ReservedName),
+            "{name}"
+        );
+    }
+    assert!(rx.try_recv().is_err(), "nothing reached the daemon");
+}
+
 #[tokio::test]
 async fn an_internal_blocklist_command_is_sent_and_its_ok_reaches_the_rules_cache() {
     let state = tempfile::tempdir().unwrap();
