@@ -458,3 +458,16 @@ fn live_and_restored_counts_together_stay_within_the_saved_limit() {
         );
     }
 }
+
+#[test]
+fn a_hit_time_too_far_ahead_is_taken_as_now() {
+    // One daemon event with a wild `unixnano` must not make every later
+    // save fail the file's own check.
+    let mut hits = RuleHits::default();
+    let far = (NOW + 2 * MAX_FUTURE_SKEW_MS) * 1_000_000;
+    let near = (NOW + MAX_FUTURE_SKEW_MS / 2) * 1_000_000;
+    rec(&mut hits, &[ev("a", far), ev("b", near)], &["a", "b"]);
+    let wire = hits.wire_hits();
+    assert_eq!(wire[0].last_hit_unix_ms, NOW, "far ahead");
+    assert_eq!(wire[1].last_hit_unix_ms, NOW + MAX_FUTURE_SKEW_MS / 2);
+}

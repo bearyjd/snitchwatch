@@ -62,6 +62,9 @@ pub const MAX_TRACKED_RULES: usize = MAX_SNAPSHOT_RULES;
 /// A longer rule name (or one with control characters) is not counted, and
 /// counts as a gap.
 pub const MAX_HIT_NAME_BYTES: usize = 256;
+/// How far past now a time may be: a hit time further ahead is taken as now,
+/// and the saved file refuses one (`rule_hits_file`).
+pub const MAX_FUTURE_SKEW_MS: i64 = 24 * 60 * 60 * 1000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 struct Stat {
@@ -127,6 +130,12 @@ impl RuleHits {
                 event.unixnano / 1_000_000
             } else {
                 now_ms
+            };
+            // Too far ahead for the saved file to accept: now.
+            let at = if at > now_ms.saturating_add(MAX_FUTURE_SKEW_MS) {
+                now_ms
+            } else {
+                at
             };
             self.count(&rule.name, at, now_ms, known(&rule.name));
         }

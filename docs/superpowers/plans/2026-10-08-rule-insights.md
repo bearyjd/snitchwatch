@@ -214,11 +214,16 @@ the design above, this is what shipped):
   the events in between are lost, so it records a gap. The counts stay,
   which is also what "counts survive a reconnect" and N1 require.
 - **Persistence.** One JSON file, `<state>/rule_hits.json` (not SQLite: it
-  needs no queries, and PR #90's `sqlite_file::open_owner_only` was not on
-  the base). Read `O_NOFOLLOW|O_NONBLOCK`; must be a regular file owned by
-  the bridge's user and not writable by others; at most 8 MiB, 10 000
-  entries; names at most 256 bytes. Written to a temp file
-  (`O_EXCL|O_NOFOLLOW`, 0600), synced, renamed. Restored counts wait for
+  needs no queries). Read `O_NOFOLLOW|O_NONBLOCK`; must be a regular file
+  owned by the bridge's user with no other hard link (#90's
+  `sqlite_file::file_problem`, reused) and not writable by others; at most
+  8 MiB, 10 000 entries; names at most 256 bytes; every time at least 0 and
+  at most a day past now (a hit time further ahead is recorded as now, so a
+  wild daemon timestamp can't make saves fail). Written to a temp file of
+  its own (named for the pid and a random number, so two bridges on one
+  state directory never delete each other's; `O_EXCL|O_NOFOLLOW`, 0600),
+  synced, renamed. A crash between the create and the rename can leave a
+  stray temp file behind. Restored counts wait for
   the first committed snapshot, which keeps only the names it has, and are
   saved unchanged meanwhile. A file that can't be read is left alone and the
   counts stay in memory. A save that fails turns `storage.persistent` off

@@ -223,6 +223,22 @@ fn counts_not_yet_checked_survive_a_save_before_the_daemon_connects() {
 }
 
 #[test]
+fn a_hit_time_from_the_far_future_still_saves() {
+    let dir = state_dir();
+    let path = dir.path().join("rule_hits.json");
+    let (hits, _rx) = handle();
+    hits.attach_file(path.clone());
+    let far = Event {
+        unixnano: (now_ms() + 10 * 86_400_000) * 1_000_000,
+        ..ev("a")
+    };
+    hits.record(&[far], 10, 1, &synced(&["a"]));
+    hits.save_now();
+    assert!(view(hits.message()).storage.persistent, "the save failed");
+    assert!(rule_hits_file::load(&path).unwrap().is_some());
+}
+
+#[test]
 fn only_changed_counts_are_saved() {
     let dir = state_dir();
     let path = dir.path().join("rule_hits.json");

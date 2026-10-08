@@ -11,11 +11,13 @@
 //!
 //! **Saving.** With a file attached ([`Self::attach_file`]) the ticker saves
 //! every [`SAVE_PERIOD`] when something changed, and the bridge saves once
-//! more on shutdown ([`Self::save_now`]). Saves are serialised by one lock, so
-//! they never share the temp file. A file that can't be read is left as it is
-//! and the counts stay in memory; a save that fails turns `storage.persistent`
-//! off with the reason, and a later success turns it back on. Without a file
-//! (no state directory) the counts are in memory only and the message says so.
+//! more on shutdown ([`Self::save_now`]). Saves are serialised by one lock,
+//! and each writes a temp file of its own (`rule_hits_file::save`), so not
+//! even another bridge on the same directory shares it. A file that can't be
+//! read is left as it is and the counts stay in memory; a save that fails
+//! turns `storage.persistent` off with the reason, and a later success turns
+//! it back on. Without a file (no state directory) the counts are in memory
+//! only and the message says so.
 //!
 //! **Lock order:** the rule cache, then the state, then the persistence
 //! details. `record` and `adopt_snapshot` are called with the cache locked
