@@ -174,6 +174,42 @@ fn connections() -> Vec<SimulationInput> {
     out
 }
 
+/// Counts the findings by kind, after checking that no rule called shadowed
+/// decides any connection of the universe in the simulator.
+fn check_findings(rules: &[Rule], universe: &[SimulationInput], by_kind: &mut [usize; 3]) {
+    let Analysis::Done { findings } = analyze(rules) else {
+        panic!("small rule sets are analysed");
+    };
+    if findings.is_empty() {
+        return;
+    }
+    let store = store(rules);
+    for (shadowed, finding) in &findings {
+        by_kind[match finding.kind {
+            FindingKind::Redundant => 0,
+            FindingKind::NeverApplies => 1,
+            FindingKind::MayBeShadowed => 2,
+        }] += 1;
+        for input in universe {
+            let result = simulate(&store, input);
+            assert_ne!(
+                result.matched_rule.as_deref(),
+                Some(shadowed.as_str()),
+                "{shadowed} is called shadowed by {} ({:?}) but decides {input:?}\n{}",
+                finding.by,
+                finding.kind,
+                json!(rules
+                    .iter()
+                    .map(|r| json!({
+                        "name": r.name, "action": r.action, "precedence": r.precedence,
+                        "enabled": r.enabled, "duration": r.duration, "operator": r.operator,
+                    }))
+                    .collect::<Vec<_>>()),
+            );
+        }
+    }
+}
+
 #[test]
 fn a_rule_the_analysis_calls_shadowed_never_decides_in_the_simulator() {
     let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
@@ -185,37 +221,46 @@ fn a_rule_the_analysis_calls_shadowed_never_decides_in_the_simulator() {
         } else {
             random_pair(&mut rng)
         };
-        let Analysis::Done { findings } = analyze(&rules) else {
-            panic!("small rule sets are analysed");
-        };
-        if findings.is_empty() {
-            continue;
-        }
-        let store = store(&rules);
-        for (shadowed, finding) in &findings {
-            by_kind[match finding.kind {
-                FindingKind::Redundant => 0,
-                FindingKind::NeverApplies => 1,
-                FindingKind::MayBeShadowed => 2,
-            }] += 1;
-            for input in &universe {
-                let result = simulate(&store, input);
-                assert_ne!(
-                    result.matched_rule.as_deref(),
-                    Some(shadowed.as_str()),
-                    "round {round}: {shadowed} is called shadowed by {} ({:?}) but decides {input:?}\n{}",
-                    finding.by,
-                    finding.kind,
-                    json!(rules.iter().map(|r| json!({
-                        "name": r.name, "action": r.action, "precedence": r.precedence,
-                        "enabled": r.enabled, "duration": r.duration, "operator": r.operator,
-                    })).collect::<Vec<_>>()),
-                );
-            }
-        }
+        check_findings(&rules, &universe, &mut by_kind);
     }
     // The test only means something if the generator finds things to check.
     assert!(by_kind[0] > 10, "redundant findings: {by_kind:?}");
     assert!(by_kind[1] > 10, "never-applies findings: {by_kind:?}");
     assert!(by_kind[2] > 0, "may-be-shadowed findings: {by_kind:?}");
+}
+
+/// The case random rules rarely reach, pinned against the simulator: Go folds
+/// U+017F (long s) with `s`, so the literal matches `ſub.example.com`; the
+/// insensitive pattern lowercases its subject and doesn't. The allow decides
+/// that connection, so it must not be called shadowed.
+#[test]
+fn the_long_s_case_is_what_the_simulator_says() {
+    let rules = [
+        rule(
+            "100-pattern",
+            "deny",
+            regexp("dest.host", r"^sub\.example\.com$"),
+        ),
+        rule(
+            "200-literal",
+            "allow",
+            simple("dest.host", "sub.example.com"),
+        ),
+    ];
+    let long_s = SimulationInput {
+        process_path: Some("/bin/sh".into()),
+        dest_host: Some("\u{17F}ub.example.com".into()),
+        dest_port: 443,
+        protocol: Some("tcp".into()),
+        dest_ip: Some("8.8.8.8".into()),
+        ..Default::default()
+    };
+    assert_eq!(
+        simulate(&store(&rules), &long_s).matched_rule.as_deref(),
+        Some("200-literal"),
+        "the ground truth the analysis has to respect"
+    );
+    let mut by_kind = [0; 3];
+    check_findings(&rules, &connections(), &mut by_kind);
+    assert_eq!(by_kind, [0, 0, 0], "nothing is proven here");
 }
