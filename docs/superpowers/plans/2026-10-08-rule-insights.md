@@ -181,19 +181,31 @@ the design above, this is what shipped):
 
 - **Files.** Pure state `cache/rule_hits.rs`; the shared handle, ticker and
   broadcast `cache/rule_hits_handle.rs`; the saved file
-  `cache/rule_hits_file.rs`; `daemon_config.rs` (reads `Stats.MaxEvents`
-  from `ClientConfig.config`, 150 when absent, as `stats.go` does; the
-  prompt-slot plan may extend it); bridge-cli `rule_hits_storage.rs`.
+  `cache/rule_hits_file.rs`; bridge-cli `rule_hits_storage.rs`. No
+  `daemon_config.rs`: gaps come from the daemon's own counter (below), so
+  nothing here reads `ClientConfig.config`, and the prompt-slot plan's step
+  10 creates that file.
   Hooks: `RulesSync::commit` and a confirmed `DELETE_RULE` in
   `apply_confirmed`; nothing on `withdraw`. The Kirigami side is
   `rules/hits.rs` plus three lines of `RulesModel` and `RulesPage.qml`.
 - **`lossy` is a gap record, and it is saved.** The wire message carries
   `lossy` and `lastGapUnixMs` (the two never disagree), because "never
-  clears for the session" is not enough once counts survive restarts. A gap
-  is noted when a batch is within one of the daemon's cap, when the daemon's
-  `uptime` drops, when the counts are restored from the file (the bridge was
-  down), when a bound is hit, and for a rule name that is over 256 bytes or
-  has control characters (not counted).
+  clears for the session" is not enough once counts survive restarts.
+- **Gaps come from the daemon's counter, not the batch size.** Within one
+  daemon run, `Statistics.rule_hits` grows by exactly one per event the
+  daemon appends (`onConnection`; `nolog` adds to neither), so between two
+  pings `missing = Δrule_hits − events.len()` counts every lost event: at
+  the cap, a batch emptied before a ping that failed (`client.go` `ping`
+  never resends), one appended between `Serialize`'s unlock and
+  `emptyStats`, and everything sent while the bridge was away. A gap is
+  noted when `missing > 0`; when the counter goes down, or `missing < 0`
+  (impossible within one run), or `uptime` drops (all three a daemon
+  restart); when the counts are restored from the file (the bridge was
+  down); when a bound is hit; and for a rule name that is over 256 bytes or
+  has control characters (not counted). The first ping of a bridge run only
+  sets the baseline, and nothing resets it on a reconnect. This replaced
+  the design's `≥ max_events - 1` heuristic, which missed failed pings and
+  read `MaxEvents` only at `Subscribe` though the daemon reloads it.
 - **A daemon restart zeroes nothing.** "Uptime drop" is a daemon restart:
   the events in between are lost, so it records a gap. The counts stay,
   which is also what "counts survive a reconnect" and N1 require.
@@ -397,7 +409,8 @@ Tower VM checks:
 ## Risks
 
 - **Counts are lossy.** Bursts, failed pings and bridge downtime all lose
-  hits; the `lossy` flag catches only the first. Wording stays
+  hits. As built, the daemon's `rule_hits` counter shows each of them as a
+  gap; a `nolog` rule is never counted at all. Wording stays
   "approximate".
 - **"Unused" without persistence is a session fact.** That is why N1/N2
   gate the badge.

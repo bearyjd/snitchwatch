@@ -364,9 +364,15 @@ impl RulesSync {
         self.hits.clone()
     }
 
-    /// Counts the events of a ping that carried statistics.
-    pub fn record_hits(&self, events: &[snitchwatch_proto::protocol::Event], uptime: u64) {
-        self.hits.record(events, uptime, &self.cache);
+    /// Counts the events of a ping that carried statistics, with its
+    /// `uptime` and `rule_hits`.
+    pub fn record_hits(
+        &self,
+        events: &[snitchwatch_proto::protocol::Event],
+        uptime: u64,
+        rule_hits: u64,
+    ) {
+        self.hits.record(events, uptime, rule_hits, &self.cache);
     }
 
     /// Generation bumped each time a daemon snapshot is committed.

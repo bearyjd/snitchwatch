@@ -22,7 +22,6 @@
 //! (or take it), so a commit and a ping can't interleave.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -30,7 +29,7 @@ use snitchwatch_proto::protocol::Event;
 use tokio::sync::broadcast;
 use tracing::{error, warn};
 
-use crate::cache::rule_hits::{RuleHits, DEFAULT_MAX_EVENTS};
+use crate::cache::rule_hits::RuleHits;
 use crate::cache::rule_hits_file;
 use crate::cache::rules::{RulesCache, SharedRulesCache};
 use crate::ws_messages::{ServerMessage, StorageStatus};
@@ -57,7 +56,6 @@ struct Inner {
     saving: Mutex<()>,
     /// `(state revision, persistence version)` of the last broadcast.
     sent: Mutex<(u64, u64)>,
-    max_events: AtomicUsize,
     broadcast: broadcast::Sender<ServerMessage>,
 }
 
@@ -99,23 +97,17 @@ impl RuleHitsHandle {
                 }),
                 saving: Mutex::new(()),
                 sent: Mutex::new((0, 0)),
-                max_events: AtomicUsize::new(DEFAULT_MAX_EVENTS),
                 broadcast,
             }),
         }
     }
 
-    /// The daemon's `Stats.MaxEvents` (from its `Subscribe` config).
-    pub fn set_max_events(&self, max_events: usize) {
-        self.inner.max_events.store(max_events, Ordering::Relaxed);
-    }
-
-    /// Counts the events of a ping that carried statistics. `rules` is the
-    /// bridge's copy of the daemon's list; it is locked first.
-    pub fn record(&self, events: &[Event], uptime: u64, rules: &SharedRulesCache) {
+    /// Counts the events of a ping that carried statistics, with its
+    /// `uptime` and `rule_hits`. `rules` is the bridge's copy of the daemon's
+    /// list; it is locked first.
+    pub fn record(&self, events: &[Event], uptime: u64, rule_hits: u64, rules: &SharedRulesCache) {
         let cache = lock(rules);
-        let max_events = self.inner.max_events.load(Ordering::Relaxed);
-        lock(&self.inner.state).record(events, uptime, max_events, now_ms(), |name| {
+        lock(&self.inner.state).record(events, uptime, rule_hits, now_ms(), |name| {
             cache.contains(name)
         });
     }

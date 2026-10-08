@@ -76,8 +76,8 @@ async fn fifty_pings_in_one_period_make_one_broadcast_with_all_of_them() {
     settle().await;
     assert!(drain(&mut rx).is_empty(), "nothing has changed yet");
 
-    for _ in 0..50 {
-        hits.record(&[ev("a")], 10, &rules);
+    for i in 1..=50 {
+        hits.record(&[ev("a")], 10, i, &rules);
         tokio::time::advance(Duration::from_millis(90)).await;
         settle().await;
     }
@@ -96,7 +96,7 @@ async fn fifty_pings_in_one_period_make_one_broadcast_with_all_of_them() {
     settle().await;
     assert!(drain(&mut rx).is_empty(), "an idle tick sends nothing");
 
-    hits.record(&[ev("a")], 11, &rules);
+    hits.record(&[ev("a")], 11, 51, &rules);
     tokio::time::advance(BROADCAST_PERIOD).await;
     settle().await;
     let sent = drain(&mut rx);
@@ -120,7 +120,7 @@ fn the_snapshot_answer_is_sent_even_before_the_first_ping() {
 fn counts_use_the_rule_cache_and_adopt_at_the_commit() {
     let (hits, _rx) = handle();
     let unknown: SharedRulesCache = Arc::default();
-    hits.record(&[ev("a"), ev("a")], 10, &unknown);
+    hits.record(&[ev("a"), ev("a")], 10, 2, &unknown);
     assert!(counts(&hits).is_empty(), "no snapshot yet");
 
     let mut cache = RulesCache::default();
@@ -130,16 +130,14 @@ fn counts_use_the_rule_cache_and_adopt_at_the_commit() {
 }
 
 #[test]
-fn the_daemons_max_events_sets_the_threshold_for_an_incomplete_batch() {
+fn the_daemons_rule_hits_counter_reveals_lost_events() {
     let (hits, _rx) = handle();
     let rules = synced(&["a"]);
-    let batch: Vec<Event> = (0..9).map(|_| ev("a")).collect();
-    hits.set_max_events(20);
-    hits.record(&batch, 10, &rules);
-    assert!(!view(hits.message()).lossy);
-    hits.set_max_events(10);
-    hits.record(&batch, 11, &rules);
-    assert!(view(hits.message()).lossy);
+    hits.record(&[ev("a")], 10, 1, &rules);
+    hits.record(&[ev("a"), ev("a")], 11, 3, &rules);
+    assert!(!view(hits.message()).lossy, "grew by exactly the events");
+    hits.record(&[ev("a")], 12, 9, &rules);
+    assert!(view(hits.message()).lossy, "five never arrived");
 }
 
 fn state_dir() -> tempfile::TempDir {
@@ -155,7 +153,7 @@ fn counts_survive_a_restart_through_the_file() {
     let (first, _rx) = handle();
     first.attach_file(path.clone());
     assert!(view(first.message()).storage.persistent);
-    first.record(&[ev("a"), ev("a"), ev("b")], 10, &rules);
+    first.record(&[ev("a"), ev("a"), ev("b")], 10, 3, &rules);
     let started = view(first.message()).since;
     assert!(started.is_some());
     first.save_now();
@@ -182,14 +180,14 @@ fn only_rules_in_the_first_snapshot_come_back_and_the_rest_are_pruned_for_good()
     let path = dir.path().join("rule_hits.json");
     let (first, _rx) = handle();
     first.attach_file(path.clone());
-    first.record(&[ev("a"), ev("gone")], 10, &synced(&["a", "gone"]));
+    first.record(&[ev("a"), ev("gone")], 10, 2, &synced(&["a", "gone"]));
     first.save_now();
 
     let (second, _rx) = handle();
     second.attach_file(path.clone());
     second.adopt_snapshot(&synced(&["a"]).lock().unwrap());
     assert_eq!(counts(&second), vec![("a".to_string(), 1)]);
-    second.record(&[ev("a")], 20, &synced(&["a"]));
+    second.record(&[ev("a")], 20, 3, &synced(&["a"]));
     second.save_now();
 
     let (third, _rx) = handle();
@@ -208,13 +206,13 @@ fn counts_not_yet_checked_survive_a_save_before_the_daemon_connects() {
     let path = dir.path().join("rule_hits.json");
     let (first, _rx) = handle();
     first.attach_file(path.clone());
-    first.record(&[ev("a")], 10, &synced(&["a"]));
+    first.record(&[ev("a")], 10, 1, &synced(&["a"]));
     first.save_now();
 
     // A bridge that runs a while with no daemon, saving as it goes.
     let (second, _rx) = handle();
     second.attach_file(path.clone());
-    second.record(&[], 1, &synced(&[]));
+    second.record(&[], 1, 0, &synced(&[]));
     second.save_now();
     second.save_now();
 
@@ -233,13 +231,13 @@ fn only_changed_counts_are_saved() {
     let rules = synced(&["a"]);
     hits.save_now();
     assert!(!path.exists(), "counting hasn't started");
-    hits.record(&[ev("a")], 10, &rules);
+    hits.record(&[ev("a")], 10, 1, &rules);
     hits.save_now();
     assert!(path.exists());
     std::fs::remove_file(&path).unwrap();
     hits.save_now();
     assert!(!path.exists(), "nothing changed, so nothing is written");
-    hits.record(&[ev("a")], 11, &rules);
+    hits.record(&[ev("a")], 11, 2, &rules);
     hits.save_now();
     assert!(path.exists());
 }
@@ -252,7 +250,7 @@ fn without_a_file_the_counts_stay_in_memory_and_clients_are_told() {
         reason: Some("state directory /x is not a directory".into()),
         unreadable: false,
     });
-    hits.record(&[ev("a")], 10, &synced(&["a"]));
+    hits.record(&[ev("a")], 10, 1, &synced(&["a"]));
     hits.save_now();
     let v = view(hits.message());
     assert_eq!(v.hits, vec![("a".to_string(), 1)]);
@@ -274,7 +272,7 @@ fn a_file_that_cannot_be_read_is_left_alone_and_the_counts_stay_in_memory() {
     assert!(!v.storage.persistent);
     assert!(v.storage.reason.unwrap().contains("rule hit counts file"));
 
-    hits.record(&[ev("a")], 10, &synced(&["a"]));
+    hits.record(&[ev("a")], 10, 1, &synced(&["a"]));
     hits.save_now();
     assert_eq!(std::fs::read(&path).unwrap(), b"{ not json");
     assert_eq!(counts(&hits), vec![("a".to_string(), 1)]);
@@ -289,7 +287,7 @@ fn a_failing_save_turns_persistence_off_with_the_reason_and_a_good_one_turns_it_
     let rules = synced(&["a"]);
     // A directory where the file belongs: the save is refused.
     std::fs::create_dir(&path).unwrap();
-    hits.record(&[ev("a")], 10, &rules);
+    hits.record(&[ev("a")], 10, 1, &rules);
     hits.save_now();
     let v = view(hits.message());
     assert!(!v.storage.persistent);
@@ -310,7 +308,7 @@ async fn the_ticker_saves_changed_counts_every_five_minutes() {
     let path = dir.path().join("rule_hits.json");
     let (hits, _rx) = handle();
     hits.attach_file(path.clone());
-    hits.record(&[ev("a")], 10, &synced(&["a"]));
+    hits.record(&[ev("a")], 10, 1, &synced(&["a"]));
     let _ticker = hits.spawn_ticker();
     settle().await;
 

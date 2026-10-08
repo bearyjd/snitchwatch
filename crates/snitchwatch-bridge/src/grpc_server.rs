@@ -402,7 +402,8 @@ impl Ui for UiService {
                 stats.uptime,
                 *self.rules.synced().borrow(),
             );
-            self.rules.record_hits(&stats.events, stats.uptime);
+            self.rules
+                .record_hits(&stats.events, stats.uptime, stats.rule_hits);
             let new_rows: Vec<_> = stats.events.iter().filter_map(event_to_row).collect();
             if !new_rows.is_empty() {
                 {
@@ -608,9 +609,6 @@ impl Ui for UiService {
         info!(client = %cfg.name, version = %cfg.version, "client subscribed");
         // Staged until this connection's stream says HELLO (see `cache::rules`).
         self.rules.stage(conn, cfg.rules.clone());
-        self.rules
-            .hits()
-            .set_max_events(crate::daemon_config::stats_max_events(&cfg.config));
         {
             let mut guard = self
                 .firewall_status

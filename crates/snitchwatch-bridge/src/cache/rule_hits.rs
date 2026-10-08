@@ -4,17 +4,29 @@
 //! opensnitchd reports only global `rule_hits` / `rule_misses`. Per-rule
 //! counts are derived from `Statistics.events` in its pings, and those are
 //! **incomplete by construction**: each ping carries at most
-//! `Stats.MaxEvents` matched connections (the oldest are dropped), nothing is
-//! reported while no bridge is connected, and a `nolog` rule produces no
-//! event at all. So every count here is a lower bound, and this state records
-//! *when it may have missed events* ([`RuleHits::last_gap_unix_ms`]) instead
-//! of pretending to be complete. A gap is noted when:
+//! `Stats.MaxEvents` matched connections (the oldest are dropped), a batch is
+//! emptied before the daemon knows its ping arrived and is never resent,
+//! nothing is reported while no bridge is connected, and a `nolog` rule
+//! produces no event at all. So every count here is a lower bound, and this
+//! state records *when it may have missed events*
+//! ([`RuleHits::last_gap_unix_ms`]) instead of pretending to be complete.
 //!
-//! - a ping's batch is within one of the daemon's cap (a missed connection at
-//!   the cap drops an event without adding one, so a batch that lost events
-//!   can end at `max_events - 1`);
-//! - the daemon's `uptime` drops (it restarted; the counts are **kept**, only
-//!   the events in between are unknown);
+//! **Finding the losses.** Within one daemon run, the global `rule_hits`
+//! counter grows by exactly one for each event the daemon appends
+//! (`stats.go` `onConnection`; a `nolog` rule adds to neither, `main.go`
+//! `onPacket`). So between two pings, `missing = Δrule_hits − events.len()`
+//! is every event that never arrived, however it was lost: dropped at the
+//! cap (a missed connection at the cap drops one too), emptied before a
+//! failed ping (`client.go` `ping`), appended between `Serialize`'s unlock
+//! and `emptyStats`, or sent while the bridge was away. The first ping of a
+//! bridge run only sets the baseline: the counter also covers the time
+//! before counting began. A gap is noted when:
+//!
+//! - `missing` is above 0 (events were lost);
+//! - the counter went down, or grew by less than the events (`missing`
+//!   below 0, impossible within one run), or the daemon's `uptime` dropped:
+//!   it restarted, and what happened in between is unknown. The counts are
+//!   **kept**;
 //! - the counts were restored from a file (the bridge was down meanwhile);
 //! - a bound below was hit, or a rule name was too long to keep.
 //!
@@ -40,8 +52,6 @@ use snitchwatch_proto::protocol::Event;
 use crate::cache::rules::MAX_SNAPSHOT_RULES;
 use crate::ws_messages::RuleHitWire;
 
-/// `Stats.MaxEvents` when the daemon's config doesn't say (`stats.go`).
-pub const DEFAULT_MAX_EVENTS: usize = 150;
 /// Most names waiting for a snapshot at once.
 pub const SIDE_MAP_MAX: usize = 1_000;
 /// Most rules counted (and saved) at once: the largest snapshot staged.
@@ -80,18 +90,21 @@ pub struct RuleHits {
     since_unix_ms: Option<i64>,
     last_gap_unix_ms: Option<i64>,
     last_uptime: Option<u64>,
+    /// The daemon's `rule_hits` at the last ping (see the module doc).
+    last_rule_hits: Option<u64>,
     revision: u64,
 }
 
 impl RuleHits {
-    /// Counts the events of one ping that carried statistics. `known` says
+    /// Counts the events of one ping that carried statistics, with the
+    /// daemon's `uptime` and `rule_hits` from the same message. `known` says
     /// whether the rule cache is synced and has that rule. Returns whether
     /// anything a client sees changed.
     pub fn record(
         &mut self,
         events: &[Event],
         uptime: u64,
-        max_events: usize,
+        rule_hits: u64,
         now_ms: i64,
         known: impl Fn(&str) -> bool,
     ) -> bool {
@@ -100,17 +113,7 @@ impl RuleHits {
             self.since_unix_ms = Some(now_ms);
             self.touch();
         }
-        if self.last_uptime.is_some_and(|previous| uptime < previous) {
-            self.note_gap(now_ms);
-        }
-        self.last_uptime = Some(uptime);
-        let max_events = if max_events == 0 {
-            DEFAULT_MAX_EVENTS
-        } else {
-            max_events
-        };
-        // The raw length: the daemon's cap counts events without a rule too.
-        if !events.is_empty() && events.len() + 1 >= max_events {
+        if self.missed_events(events.len(), uptime, rule_hits) {
             self.note_gap(now_ms);
         }
         for event in events {
@@ -125,6 +128,21 @@ impl RuleHits {
             self.count(&rule.name, at, now_ms, known(&rule.name));
         }
         self.revision != before
+    }
+
+    /// Whether a ping that brought `received` events (all of them, with a
+    /// rule or not) shows events that never arrived, or a daemon restart;
+    /// see the module doc. Moves the baselines to this ping.
+    fn missed_events(&mut self, received: usize, uptime: u64, rule_hits: u64) -> bool {
+        let restarted = self.last_uptime.is_some_and(|previous| uptime < previous);
+        let missed = self.last_rule_hits.is_some_and(|previous| {
+            rule_hits
+                .checked_sub(previous)
+                .is_none_or(|grown| grown != received as u64)
+        });
+        self.last_uptime = Some(uptime);
+        self.last_rule_hits = Some(rule_hits);
+        restarted || missed
     }
 
     fn count(&mut self, name: &str, at_ms: i64, now_ms: i64, known: bool) {

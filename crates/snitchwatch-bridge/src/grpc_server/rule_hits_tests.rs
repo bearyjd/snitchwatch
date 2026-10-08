@@ -46,12 +46,15 @@ fn event(rule_name: &str) -> Event {
     }
 }
 
-async fn ping(svc: &UiService, events: Vec<Event>, uptime: u64) {
+/// A ping with statistics. `rule_hits` is the daemon's global counter,
+/// which grows by one for every event it appends (`stats.go`).
+async fn ping(svc: &UiService, events: Vec<Event>, uptime: u64, rule_hits: u64) {
     svc.ping(Request::new(PingRequest {
         id: 1,
         stats: Some(Statistics {
             events,
             uptime,
+            rule_hits,
             ..Default::default()
         }),
     }))
@@ -131,6 +134,7 @@ async fn a_ping_counts_each_events_rule_once_the_list_is_synced() {
         &svc,
         vec![event("a"), event("b"), event("a"), event("a")],
         10,
+        4,
     )
     .await;
     assert_eq!(hits(&svc), vec![pair("a", 3), pair("b", 1)]);
@@ -147,7 +151,7 @@ async fn a_ping_counts_each_events_rule_once_the_list_is_synced() {
 #[tokio::test]
 async fn events_before_the_first_snapshot_are_adopted_when_it_names_them() {
     let (svc, _rx) = service();
-    ping(&svc, vec![event("a"), event("a"), event("gone")], 10).await;
+    ping(&svc, vec![event("a"), event("a"), event("gone")], 10, 3).await;
     assert!(hits(&svc).is_empty());
     let _stream = connect(&svc, &["a"]).await;
     assert_eq!(hits(&svc), vec![pair("a", 2)]);
@@ -170,7 +174,7 @@ async fn a_once_reply_name_is_never_counted() {
         &conn,
         1_800_000_000,
     );
-    ping(&svc, vec![event(&once.name), event("a")], 10).await;
+    ping(&svc, vec![event(&once.name), event("a")], 10, 2).await;
     assert_eq!(hits(&svc), vec![pair("a", 1)]);
     // And a later snapshot that doesn't have it can't bring it back.
     drop(_stream);
@@ -182,7 +186,7 @@ async fn a_once_reply_name_is_never_counted() {
 async fn counts_survive_a_daemon_reconnect_and_gap_hits_are_added_on_adoption() {
     let (svc, mut rx) = service();
     let stream = connect(&svc, &["a"]).await;
-    ping(&svc, vec![event("a"), event("a"), event("a")], 10).await;
+    ping(&svc, vec![event("a"), event("a"), event("a")], 10, 3).await;
 
     drop(stream);
     assert!(
@@ -192,16 +196,17 @@ async fn counts_survive_a_daemon_reconnect_and_gap_hits_are_added_on_adoption() 
     assert_eq!(hits(&svc), vec![pair("a", 3)], "withdrawing did not prune");
     while rx.try_recv().is_ok() {}
 
-    ping(&svc, vec![event("a"), event("a")], 11).await;
+    ping(&svc, vec![event("a"), event("a")], 11, 5).await;
     let _stream = connect(&svc, &["a"]).await;
     assert_eq!(hits(&svc), vec![pair("a", 5)]);
+    assert!(!lossy(&svc), "nothing was lost across the reconnect");
 }
 
 #[tokio::test]
 async fn a_new_snapshot_without_a_rule_drops_its_count() {
     let (svc, _rx) = service();
     let stream = connect(&svc, &["a", "b"]).await;
-    ping(&svc, vec![event("a"), event("b")], 10).await;
+    ping(&svc, vec![event("a"), event("b")], 10, 2).await;
     drop(stream);
     let _stream = connect(&svc, &["a"]).await;
     assert_eq!(hits(&svc), vec![pair("a", 1)]);
@@ -211,7 +216,7 @@ async fn a_new_snapshot_without_a_rule_drops_its_count() {
 async fn a_confirmed_delete_drops_the_count_and_a_rejected_one_does_not() {
     let (svc, _rx) = service();
     let stream = connect(&svc, &["a", "b"]).await;
-    ping(&svc, vec![event("a"), event("b")], 10).await;
+    ping(&svc, vec![event("a"), event("b")], 10, 2).await;
     let commands = svc.daemon_commands();
 
     let rejected = commands.send(delete("a")).unwrap();
@@ -241,7 +246,7 @@ async fn a_confirmed_delete_drops_the_count_and_a_rejected_one_does_not() {
 async fn a_confirmed_rule_change_keeps_the_count() {
     let (svc, _rx) = service();
     let stream = connect(&svc, &["a", "b"]).await;
-    ping(&svc, vec![event("a"), event("a")], 10).await;
+    ping(&svc, vec![event("a"), event("a")], 10, 2).await;
     let commands = svc.daemon_commands();
 
     let mut disabled = rule("a");
@@ -265,38 +270,45 @@ async fn a_confirmed_rule_change_keeps_the_count() {
 }
 
 #[tokio::test]
-async fn the_daemons_configured_event_cap_decides_what_looks_incomplete() {
-    let batch = |n: usize| (0..n).map(|_| event("a")).collect::<Vec<_>>();
-    // The default (150) when the daemon's config says nothing.
+async fn events_the_daemon_counted_but_never_sent_mark_the_counts_incomplete() {
+    let (svc, _rx) = service();
+    let stream = connect(&svc, &["a"]).await;
+    ping(&svc, vec![event("a")], 10, 1).await;
+    ping(&svc, vec![event("a"), event("a")], 11, 3).await;
+    assert!(!lossy(&svc), "the counter grew by exactly the events");
+
+    // The bridge is away for a while: the daemon's pings fail, and each
+    // failed batch is gone (`client.go` `ping` empties it first).
+    drop(stream);
+    let _stream = connect(&svc, &["a"]).await;
+    ping(&svc, vec![event("a")], 40, 9).await;
+    assert!(lossy(&svc), "five events never arrived");
+    assert_eq!(hits(&svc), vec![pair("a", 4)]);
+}
+
+#[tokio::test]
+async fn a_daemon_counter_that_goes_down_is_a_restart() {
+    // Restarted, then idle for longer than it had run: `uptime` grew.
     let (svc, _rx) = service();
     let _stream = connect(&svc, &["a"]).await;
-    ping(&svc, batch(100), 10).await;
+    ping(&svc, vec![event("a")], 10, 1).await;
+    ping(&svc, vec![event("a")], 11, 2).await;
     assert!(!lossy(&svc));
-    ping(&svc, batch(149), 11).await;
-    assert!(lossy(&svc), "149 of 150");
-
-    // A smaller cap from `Subscribe`'s config.
-    let (svc, _rx) = service();
-    svc.subscribe(Request::new(ClientConfig {
-        config: r#"{"Stats":{"MaxEvents":20}}"#.into(),
-        ..Default::default()
-    }))
-    .await
-    .unwrap();
-    ping(&svc, batch(18), 10).await;
-    assert!(!lossy(&svc));
-    ping(&svc, batch(19), 11).await;
-    assert!(lossy(&svc), "19 of 20");
+    ping(&svc, vec![event("a")], 5_000, 1).await;
+    assert!(lossy(&svc));
+    assert_eq!(hits(&svc), vec![pair("a", 3)], "nothing zeroed");
 }
 
 #[tokio::test]
 async fn a_daemon_restart_marks_the_counts_incomplete_and_keeps_them() {
     let (svc, _rx) = service();
     let _stream = connect(&svc, &["a"]).await;
-    ping(&svc, vec![event("a")], 500).await;
-    ping(&svc, vec![event("a")], 501).await;
+    ping(&svc, vec![event("a")], 500, 1).await;
+    ping(&svc, vec![event("a")], 501, 2).await;
     assert!(!lossy(&svc));
-    ping(&svc, vec![event("a")], 2).await;
+    // The new run's counter grew by exactly its events since the old
+    // one's last ping: only `uptime` says.
+    ping(&svc, vec![event("a"), event("a"), event("a")], 2, 5).await;
     assert!(lossy(&svc));
-    assert_eq!(hits(&svc), vec![pair("a", 3)]);
+    assert_eq!(hits(&svc), vec![pair("a", 5)]);
 }

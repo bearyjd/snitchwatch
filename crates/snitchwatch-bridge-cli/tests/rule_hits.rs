@@ -120,6 +120,8 @@ struct Daemon {
     _replies: mpsc::Sender<snitchwatch_proto::protocol::NotificationReply>,
     _inbound: mpsc::Receiver<snitchwatch_proto::protocol::Notification>,
     pings: u64,
+    /// `Statistics.rule_hits`: one more for every event sent (`stats.go`).
+    rule_hits: u64,
 }
 
 impl Daemon {
@@ -145,16 +147,19 @@ impl Daemon {
             _replies: replies,
             _inbound: inbound,
             pings: 0,
+            rule_hits: 0,
         }
     }
 
     async fn ping(&mut self, uptime: u64, events: Vec<Event>) {
         self.pings += 1;
+        self.rule_hits += events.len() as u64;
         self.mock
             .ping_with_stats(
                 self.pings,
                 Statistics {
                     uptime,
+                    rule_hits: self.rule_hits,
                     events,
                     ..Default::default()
                 },
