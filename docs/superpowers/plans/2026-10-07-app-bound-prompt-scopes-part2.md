@@ -107,9 +107,11 @@ and the summary/body `match`), `crates/snitchwatch-kirigami/src/notifier.rs`
 
 **Evaluation** (`vendor:daemon/rule/loader.go` `FindFirstMatch`): a matching
 deny returns immediately. A non-precedence allow is remembered while the
-scan continues. So a host-only **deny** currently overrides every app's
-process-only (`AnyHost`) allow for that host. Deleting the deny lets those
-apps through to the host; apps without an allow are prompted.
+scan continues. So a host-only **deny** currently overrides **every**
+non-precedence allow that covers that host. That includes process-only
+(`AnyHost`) allows, #50's app-bound `process.path` AND host allows, and
+domain-regexp allows. Deleting the deny unblocks the host for every app
+that has any such allow; apps without one are prompted.
 
 ## Design
 
@@ -187,8 +189,8 @@ apps through to the host; apps without an allow are prompted.
    - **Flagged allow rows**, hint: "Deleting this makes every app ask again
      before reaching <host>."
    - **Flagged deny rows**, which must say so explicitly: "Deleting this
-     unblocks <host> for every app that is allowed to reach any host; other
-     apps will be asked."
+     unblocks <host> for every app with an allow rule covering it,
+     including rules for just this host; other apps will be asked."
    - **Page header:** an informational `InlineMessage` with the count. No
      bulk action.
    - All new labels use `textFormat: Text.PlainText`, per the honest-ui PR.

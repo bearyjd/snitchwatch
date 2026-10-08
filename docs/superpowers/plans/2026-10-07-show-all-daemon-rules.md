@@ -34,7 +34,9 @@ makes, and a GUI that connects or reconnects receives the full list.
   is approximated in step 1.
 - A new `RemoveRules` ServerMessage. Deletes re-send the full `SetRules`.
 - Closing daemon impersonation in legacy (TCP loopback) mode. That is
-  issue #35. Step 4 only narrows it.
+  issue #35. Step 4 keeps today's command fan-out, so the real daemon
+  still gets every command. A local impostor can still spoof the Rules list
+  and reply status (see Risks).
 
 ## Findings (`main`)
 
@@ -113,31 +115,35 @@ makes, and a GUI that connects or reconnects receives the full list.
 2. **Ingest on `Subscribe`** (`grpc_server.rs` `subscribe`).
    - `UiService` creates the cache internally and exposes `rules_handle()`
      (the accessor pattern of `notifications_handle`).
-   - `subscribe()` does **not** write the cache directly. It stores
-     `cfg.rules` as the **pending snapshot for that connection** (latest
-     one wins per connection), keyed by connection identity:
-     - TCP (legacy mode): `request.remote_addr()`.
-     - Unix (system mode): only root peers get through `RootUnixIncoming`.
-       Tonic's `UdsConnectInfo` for an unnamed client socket probably has
-       no usable per-connection id (**verify**). If it doesn't, key every
-       root peer the same.
-   - **Commit on HELLO.** When a HELLO (step 4) makes that connection's
-     stream current, the pending snapshot from the same connection is
-     committed:
-     1. `replace_all(snapshot)`;
-     2. broadcast `SetRules`;
-     3. bump the `watch<u64>` "rules synced" generation.
+   - `subscribe()` does **not** write the cache. It stores `cfg.rules` in
+     a bounded **pending-snapshot set** keyed by
+     `ConnKey = Option<SocketAddr>` from `request.remote_addr()`:
+     - TCP (legacy mode): `Some(peer addr)`.
+     - `None`: Unix sockets (system mode, where tonic's `UdsConnectInfo`
+       has no `remote_addr`) and `Request::new` unit tests. `None` is
+       **one shared key**. In system mode every peer is root
+       (`RootUnixIncoming`), so sharing is fine.
+   - **Bounds.** A unary `Subscribe` has no connection-close hook, so
+     stale entries can't be dropped on close. Instead:
+     - each key keeps only its latest snapshot;
+     - the set holds at most 4 keys, evicting the oldest;
+     - an entry older than 30 s is ignored and removed at commit time.
+   - **Commit on HELLO** (step 4). When a HELLO on stream N (connection key
+     K) makes N current:
+     1. set `current_stream = N` and bump `stream_ready`;
+     2. **then**, if a fresh pending snapshot exists for K, remove it from
+        the set, `replace_all(snapshot)`, broadcast `SetRules`, and bump the
+        "rules synced" generation.
 
-     The generation therefore moves only at commit time, which is also
-     when #45's reconcile may run, since it waits for rules synced *and*
-     `stream_ready`.
-   - **Why commit on HELLO.** The daemon always calls `Subscribe` on a
-     new connection *before* that connection's stream sends HELLO
-     (`Client.Subscribe` → `listenForNotifications`). An old stream may
-     also stay open until the 10 s HTTP/2 keepalive notices it's dead. So
-     a redial's snapshot must be held, not dropped, until its own HELLO
-     arrives. `Subscribe` is one-shot, so a dropped snapshot would leave
-     the cache stale until the next reconnect.
+     A HELLO with no pending snapshot only makes its stream current and
+     leaves the cache untouched. Because `current_stream` is set before the
+     `SetRules` broadcast, a client that has seen `SetRules` can send rule
+     commands without hitting `NoDaemon`.
+   - **Why commit on HELLO.** The daemon always calls `Subscribe` on a new
+     connection *before* its stream sends HELLO (`Client.Subscribe` →
+     `listenForNotifications`). An old stream may also stay open until the
+     10 s HTTP/2 keepalive notices it's dead. So a redial's snapshot must
+     be held until its own HELLO arrives.
    - The echoed `ClientConfig` is unchanged.
 3. **Remembered verdicts** (`ask_rule`).
    - `upsert(rule.clone())` before the existing `UpdateRules` broadcast.
@@ -149,37 +155,50 @@ makes, and a GUI that connects or reconnects receives the full list.
    It replaces the raw `notifications_tx` and `notification_id` plumbing in
    `run_with_incoming`.
    - **Stream identity:** each `notifications()` call gets a stream id from
-     a counter. `DaemonCommands` keeps `current_stream: Option<StreamId>`.
-     A HELLO (id 0) on stream N makes N current and bumps a `stream_ready`
-     `watch<u64>`.
-   - **Outbound:** commands go **only to the current stream**. Each stream
-     filters the broadcast by stream id instead of fanning out to all
-     streams.
-   - **Replies:** a non-zero reply resolves its waiter only if it arrives
-     on the current stream. Replies from other streams are logged and
-     dropped. When the current stream ends, every outstanding waiter fails
+     a counter, and records its `ConnKey` (`request.remote_addr()`).
+     `DaemonCommands` keeps `current_stream: Option<StreamId>`. A HELLO
+     (id 0) on stream N makes N current (step 2).
+   - **Outbound, by transport** (`UiService::with_daemon_transport(…)`, set
+     by `run` and `run_system`):
+     - **TCP (legacy per-user mode):** commands keep **fanning out to every
+       open stream**, as today. The real daemon always receives them even
+       if another local process has opened a stream. No regression.
+     - **Root-only Unix socket (system mode):** commands go only to the
+       current stream. Every peer is root, so there is no impersonation to
+       defend against.
+   - **Replies (both modes):** a non-zero reply resolves its waiter only if
+     it arrives on the **current** stream. Other streams' replies are logged
+     and ignored. When the current stream ends, outstanding waiters fail
      with `StreamClosed` and `current_stream` is cleared.
-   - **Snapshot source:** only a snapshot from the connection whose
-     stream is current is ever committed to the cache (step 2, commit on
-     HELLO). Snapshots from other connections stay pending and are dropped
-     when their connection closes.
-     - This narrows impersonation in legacy TCP mode (a second local
-       "daemon" can't answer or redirect commands meant for the current
-       stream) but cannot close it. A spoofer whose HELLO is the most recent
-       still wins. The real fix is #35, which system mode's root-only Unix
-       socket already provides.
+   - **Snapshot source:** only the current stream's connection can commit a
+     snapshot (step 2).
+   - **What this does and doesn't buy in TCP mode.** A fake local "daemon"
+     can no longer stop the real daemon from receiving commands, because of
+     the fan-out. But a fake that subscribes and then sends a *later* HELLO
+     becomes current. That lets it:
+     - replace the Rules list shown to the user;
+     - answer replies, faking "rule installed" for #45/#46.
+
+     This is a residual risk until the TCP transport is retired (#35). See
+     Risks.
    - **Mock change (required):** `MockOpensnitchd::open_notifications`
-     must send `NotificationReply { id: 0, code: OK }` as its first message,
-     as the real daemon's `listenForNotifications` does. Without it, no mock
-     stream ever becomes current: commands stop reaching the mock, and
-     #45's `stream_ready` gate never opens.
-     - Existing protocol tests that open mock notifications and must keep
-       passing: `idle_daemon_with_open_notifications_stream_stays_reachable`,
-       `notifications_stream_close_triggers_down_transition_within_one_tick`,
-       and `rule_update_and_delete_reach_the_daemon_as_notifications`.
-     - Check whether any test asserts on the first reply the bridge sees.
+     must send `NotificationReply { id: 0, code: OK }` first, as the real
+     daemon's `listenForNotifications` does.
+   - **Readiness for tests.** HELLO is handled asynchronously, so a test that
+     sends `UpdateRule` right after `open_notifications()` returns could
+     race it and get `NoDaemon`. This affects
+     `rule_update_and_delete_reach_the_daemon_as_notifications`.
+     - Add a **`pub`** accessor, `RunningBridge::daemon_stream_ready() -> watch::Receiver<u64>`.
+       It must not be `#[cfg(test)]`: the `tests/` crate can't see those.
+     - Tests await a change on it before sending.
+     - Protocol tests that open mock notifications and must stay green:
+       - `idle_daemon_with_open_notifications_stream_stays_reachable`;
+       - `notifications_stream_close_triggers_down_transition_within_one_tick`;
+       - `rule_update_and_delete_reach_the_daemon_as_notifications`, which
+         must await readiness.
    - **API:**
-     - `send(Notification) -> Result<PendingReply, NoDaemon>`;
+     - `send(Notification) -> Result<PendingReply, NoDaemon>`, where
+       `NoDaemon` means there is no current stream;
      - `PendingReply::wait(timeout)` returns `Ok`, `Rejected(data)`,
        `Timeout` or `StreamClosed`.
    - #45 and #46 use this to report whether a rule is installed.
@@ -221,19 +240,30 @@ makes, and a GUI that connects or reconnects receives the full list.
   - ERROR surfaces the text in `data`;
   - a HELLO on stream 2 makes it current, and a later OK for a pending id
     arriving on stream 1 is ignored (that waiter times out);
-  - commands go only to the current stream;
+  - **TCP transport:** a command reaches both open streams (fan-out kept);
+  - **Unix transport:** a command reaches only the current stream;
   - stream close fails pending waiters;
   - `send` with no current stream returns `NoDaemon`.
 - **`subscribe` and commit on HELLO:**
   - with three rules, a `Subscribe` followed by a HELLO from the same
-    connection broadcasts one name-sorted `SetRules`, and "rules synced"
-    moves only at the HELLO;
-  - **redial with a stale stream:** connection 1 has subscribed, sent its
-    HELLO, and its stream stays open. Connection 2 subscribes with
-    different rules, then sends its HELLO. Connection 2's snapshot is
-    adopted, and commands now go to stream 2;
+    connection broadcasts one name-sorted `SetRules`; "rules synced" moves
+    only at the HELLO, and `current_stream` is already set when `SetRules`
+    is sent;
+  - after a commit, the snapshot has been removed from the pending set;
+  - a HELLO with no pending snapshot makes its stream current and leaves the
+    cache and the "rules synced" generation untouched;
+  - pending-set bounds: a fifth key evicts the oldest; a 31 s old snapshot
+    is not committed;
+  - `Request::new` (no `remote_addr`) uses the shared `None` key;
   - a `Subscribe` from a connection that never sends a HELLO never replaces
     the cache.
+- **Redial with a stale stream** (server-level test with **two real tonic
+  channels**, i.e. two `MockOpensnitchd::connect` instances, so
+  `remote_addr` differs):
+  1. channel 1 subscribes and opens notifications; its stream stays open;
+  2. channel 2 subscribes with different rules, then opens notifications;
+  3. channel 2's snapshot is adopted, and its replies are the ones
+     correlated.
 - **`ask_rule`:** a remembered verdict upserts. `Once` does not.
 
 **Protocol test** (`tests/bridge_protocol_test.rs`, modelled on
@@ -244,9 +274,10 @@ makes, and a GUI that connects or reconnects receives the full list.
    because the cache is still `Unknown`.
 3. The mock opens notifications. With this plan's mock change, that sends
    HELLO, so the client receives `SetRules` with both rules.
-4. `UpdateRule` (disable) with the mock replying OK gives `SetRules` with
+4. Await `RunningBridge::daemon_stream_ready()`.
+5. `UpdateRule` (disable) with the mock replying OK gives `SetRules` with
    the rule disabled.
-5. `DeleteRule` with an ERROR reply gives `SetRules` unchanged.
+6. `DeleteRule` with an ERROR reply gives `SetRules` unchanged.
 
 **Kirigami:** the `RulesStore` replacement test.
 
@@ -275,8 +306,23 @@ Manual VM check:
 - **Large rule sets.** A full `SetRules` is O(rules). Pre-#45 per-entry
   blocklist rules were never installed in production (no-op sink). #45's
   reconcile deletes any that a dev daemon holds.
-- **Stream-identity correlation** is new code in a security-relevant
-  path. Get a `security-reviewer` pass on it.
+- **Residual impersonation risk in legacy TCP mode** (until #35 retires
+  the TCP transport for the per-user bridge).
+  - Any local user can connect to `127.0.0.1:50051`, call `Subscribe` and
+    send a later HELLO. Their stream then becomes current, so they can:
+    - replace the Rules list the GUI shows;
+    - answer command replies, so #45/#46 report "rule installed" for a
+      rule the real daemon may have rejected.
+  - The real daemon still receives every command, because TCP mode keeps
+    the fan-out.
+  - Today that same user can already send fake `AskRule` prompts and fake
+    stats on that port (#35). This adds rule-list and status spoofing
+    to that existing exposure.
+  - System mode (root-only Unix socket) is not affected.
+  - **A `security-reviewer` pass on `DaemonCommands`, stream correlation
+    and the pending-snapshot set is required before merge.**
+  - *(Orchestrator decision, owner may revisit: no regression of TCP
+    fan-out.)*
 - **File-conflict hot spots:**
   - bridge-cli `run_with_incoming` (pump, snapshot), with #47 and #45;
   - `grpc_server.rs` (`subscribe`, `notifications`, `ask_rule`), with #47

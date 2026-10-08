@@ -138,11 +138,15 @@ the owner decision contradict it.
 
 **A2. A test-only fetch hook** usable from the `tests/` crates, which
 `#[cfg(test)]` doesn't reach.
-- `pub trait BlocklistFetch: Send + Sync { async fn fetch(&self, url) -> FetchOutcome }`.
-  The default implementation is the HTTPS fetcher.
+- `pub trait BlocklistFetch: Send + Sync { async fn fetch(&self, url: &str) -> FetchOutcome }`.
+  Declare it with **`#[async_trait]`**, so it is object-safe behind
+  `Arc<dyn …>`. That matches `RuleSink`/`ProfileRuleSink`, including their
+  `#[allow(clippy::double_must_use)]`. `async_trait` is already a
+  dependency.
+- The default implementation is the HTTPS fetcher.
 - Inject it with `BlocklistsManager::with_fetcher(Arc<dyn BlocklistFetch>)`,
-  and through bridge-cli with `run_with_options(config, RunOptions { state_dir, blocklist_fetcher })`.
-  `main.rs` never passes a fetcher.
+  and through bridge-cli with `RunOptions.blocklist_fetcher` (A5).
+  `main.rs` never sets a fetcher.
 - The fixture fetcher (file-backed, size-capped) lives **in the test
   files**, so production code has no file-reading fetch path at all.
 - Migrate `fetcher.rs` `parses_local_fixture_via_file_url` and
@@ -165,31 +169,61 @@ the owner decision contradict it.
 `<sanitized stem>-<8 hex of SHA-256(url)>`, in this PR because this PR
 starts persisting ids.
 
-**A5. State directory.** It is resolved only in `main.rs`/`run_system`.
-`run()` and the in-process shells never read it, so every test that calls
-`run()` stays in-memory and hermetic whatever the developer's environment.
-- `main.rs` resolves `$STATE_DIRECTORY` (systemd sets it for both units,
-  each declaring `StateDirectory=snitchwatch`), then a
-  `SNITCHWATCH_STATE_DIR` override. It canonicalizes the path, because
-  `/home` is a symlink to `/var/home` on Bazzite and the rule `data` must
-  be byte-stable. It then calls `run_with_options`.
-- `run_system` handles three cases:
-  - resolved path equals `/var/lib/snitchwatch`: use it;
-  - set but different: log an error and use in-memory stores;
-  - **unset**: in-memory stores, with `NotEnforced("no state directory")`.
+**A5. Storage mode, resolved once.**
+- New type: `enum Storage { Persistent(PathBuf), Ephemeral(EphemeralReason) }`,
+  where `EphemeralReason` is one of:
+  - `InProcess`: `run()` callers, meaning tests, the Tauri shell and any
+    in-process Kirigami runtime;
+  - `NotConfigured`: no `$STATE_DIRECTORY` and no `SNITCHWATCH_STATE_DIR`;
+  - `Unusable(String)`.
+- **Resolved once,** by `resolve_storage()`, called only from `main.rs`
+  and `run_system`:
+  1. `$STATE_DIRECTORY` (systemd sets it for both units, each declaring
+     `StateDirectory=snitchwatch`), then `SNITCHWATCH_STATE_DIR`.
+  2. `canonicalize`, because `/home` is a symlink to `/var/home` on Bazzite
+     and the rule `data` must be byte-stable.
+  3. `run_system` additionally requires the result to equal
+     `/var/lib/snitchwatch`.
+- **New options struct:**
+  `pub struct RunOptions { pub storage: Storage, pub blocklist_fetcher: Option<Arc<dyn BlocklistFetch>> }`.
+  - `run_with_incoming` gains `options: RunOptions`, next to
+    `system_token_path`.
+  - Its call sites: `run`, which passes `RunOptions::in_process()`,
+    meaning `Ephemeral(InProcess)` and the HTTPS fetcher; `run_system`; and
+    the bridge-cli test that calls it directly (the activated-Unix
+    `ask_rule` round trip in `lib.rs`'s test module).
+  - A new `pub async fn run_with_options(config, RunOptions)` serves
+    `main.rs` and the `tests/` crates.
+  - None of the 23 `BridgeConfig { … }` literals change.
+- **The Tauri shell** (and any in-process `run()` caller) **never
+  persists**. It is always `Ephemeral(InProcess)`.
+- **Failure policy (one rule, every path).** A storage problem never stops
+  the bridge, because it must stay up to answer prompts. Every problem
+  becomes `Ephemeral(Unusable(reason))`, is logged at `error!`, and is
+  **shown to the user** (A6). The cases:
 
-  None of these is a startup error: the bridge must stay up to answer
-  prompts.
-- `run_with_incoming` gains a `state_dir: Option<PathBuf>` parameter, next
-  to `system_token_path`. Its call sites are `run`, `run_system` and the
-  bridge-cli test that calls it directly (the activated-Unix
-  `ask_rule` round trip in `lib.rs`'s test module). They pass `None`,
-  except where a test wants persistence.
-- Tests that spawn the binary as a subprocess set `STATE_DIRECTORY` and
-  `SNITCHWATCH_STATE_DIR` to a tempdir with `Command::env`.
-- A source-guard test asserts that only `main.rs` and `run_system` call the
-  resolver.
-- None of the 23 `BridgeConfig { … }` literals change.
+  | Failure | Becomes |
+  |---|---|
+  | `canonicalize` fails | `Unusable("state directory <path>: <err>")` |
+  | system mode, path ≠ `/var/lib/snitchwatch` | `Unusable("unexpected state directory <path>")` |
+  | `BlocklistStore::open(<state>/blocklists.sqlite3)` fails | `Unusable("blocklist store: <err>")`, then fall back to `open_in_memory()` |
+
+  - Today's `?` on `open_in_memory()` stays fatal. That is not a
+    configuration problem, and it never happens in practice.
+  - The storage mode is **per store**: the blocklist store can be
+    `Persistent` while #46's profile store is not.
+- **Subprocess tests.** Tests that spawn the binary call **`env_clear()`**,
+  because otherwise they inherit `SNITCHWATCH_WS_SOCKET` and friends. They
+  then set only:
+  - `PATH`;
+  - a tempdir `XDG_RUNTIME_DIR`;
+  - `SNITCHWATCH_WS_SOCKET` inside it;
+  - `SNITCHWATCH_GRPC_BIND=127.0.0.1:0`;
+  - `STATE_DIRECTORY` or `SNITCHWATCH_STATE_DIR` as each test needs.
+
+  Never use `std::env::set_var` in-process.
+- **Source guard.** A test asserts that only `main.rs` and `run_system`
+  call `resolve_storage`.
 
 | | Per-user bridge | System bridge |
 |---|---|---|
@@ -204,8 +238,12 @@ daemon load 0 entries silently. This is the main reason the success state
 is only "rule installed" (A6).
 
 **A6. Persistence and honest status.**
-- `BlocklistStore::open(<state>/blocklists.sqlite3)` (mode 0600) when a
-  state dir exists; in-memory otherwise.
+- With `Persistent`, use `BlocklistStore::open(<state>/blocklists.sqlite3)`
+  (mode 0600). With `Ephemeral`, use in-memory.
+- `ServerMessage::SetBlocklists` gains
+  `#[serde(default)] storage: Option<StorageStatus>`, where
+  `StorageStatus { persistent: bool, reason: Option<String> }`. An older
+  bridge sends `None`, which the GUI treats as "not persistent".
 - `BlocklistsManager` keeps an in-memory map from id to `Enforcement`:
   - `Pending`;
   - `RuleInstalled { at }`: the daemon replied OK and the list file was
@@ -225,12 +263,17 @@ is only "rule installed" (A6).
   places.
 
 **A8. GUI.**
-- Subscriptions now survive restarts. Reword the honest-ui Blocklists
-  banner: still "not applied" (until PR B), but no longer "lost when …
-  restarts".
-- Relax that page's `contains("restart")` check in
-  `honest_ui_qml_guards.rs` `assert_preview_banner`. Keep "not applied"
-  and the no-"bridge"-word rule.
+- The honest-ui Blocklists banner text is **keyed on `storage`**:
+  - **`persistent: true`:** "…not applied to the firewall yet…" only. Drop
+    "lost when … restarts".
+  - **otherwise:** keep the "kept in memory only… lost when Snitchwatch's
+    background service restarts" sentence. For `Unusable`, append the
+    reason.
+  - Both variants keep "not applied" until PR B.
+- Update `honest_ui_qml_guards.rs` `assert_preview_banner` for this page:
+  - the not-persistent variant still contains "restart";
+  - both variants contain "not applied";
+  - the no-"bridge"-word rule stays.
 - Show the per-row enforcement state (`blocklists/row_store.rs`,
   `BlocklistsPage.qml`).
 
@@ -296,15 +339,26 @@ rules-synced and `stream_ready` signals, as a job on the A3 worker.
     immediately;
   - only one fetch is ever concurrent (the fake fetcher counts).
 - **`derive_id`:** two `…/hosts` URLs get distinct, stable ids.
-- **Persistence:** with `run_with_options(state_dir: tempdir, fixture fetcher)`,
+- **Persistence:** with `run_with_options(config, RunOptions { storage: Persistent(tempdir), blocklist_fetcher: Some(fixture) })`,
   subscribe, shut down and restart; the subscription is still there and the
   refresh loop schedules it.
+- **Storage resolution (every path):**
+  - unset → `NotConfigured`;
+  - a non-existent directory → `Unusable` from `canonicalize`;
+  - in system mode, `/tmp/x` → `Unusable("unexpected …")`;
+  - a store file that can't be opened (a directory at
+    `blocklists.sqlite3`) → `Unusable("blocklist store…")`, and the bridge
+    still starts with an in-memory store;
+  - valid → `Persistent`.
+  - `SetBlocklists.storage` reflects each case.
+  - The banner shows the restart sentence for every non-persistent case and
+    omits it for `Persistent`.
 - **Hermetic:**
   - a source-guard test asserts that `run()`/`run_with_incoming` never read
     `STATE_DIRECTORY`/`SNITCHWATCH_STATE_DIR`, and that only `main.rs` and
     `run_system` call the resolver;
-  - a subprocess test of the binary with a tempdir passed through
-    `Command::env` writes `blocklists.sqlite3` only there. The subprocess
+  - a subprocess test of the binary, run with `env_clear()` and a tempdir
+    passed through `Command::env`, writes `blocklists.sqlite3` only there. The subprocess
     must also get an isolated `XDG_RUNTIME_DIR` and
     `SNITCHWATCH_GRPC_BIND=127.0.0.1:0`; per CLAUDE.md, a bridge started
     without them replaces the running bridge's socket and token.

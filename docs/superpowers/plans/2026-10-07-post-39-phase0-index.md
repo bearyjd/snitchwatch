@@ -79,7 +79,7 @@ Several plans edit those QML files and its guard tests
 | `translator/downstream.rs` | | | | | | ✓ `build_set_blocklists`/`_status` | | ✓ `build_set_profiles` |
 | `blocklists/*` (`fetcher.rs`, `mod.rs`, `materializer.rs`) | | | | | | ✓ | ✓ | |
 | `profiles/*` | | | | | | | | ✓ |
-| `tests/bridge_protocol_test.rs`, `tests/mock_opensnitchd` (#48: `open_notifications` sends HELLO) | ✓ | ✓ | | ✓ | | | ✓ | |
+| `tests/bridge_protocol_test.rs`, `tests/mock_opensnitchd` (#48: `open_notifications` sends HELLO and tests await `daemon_stream_ready`; #47: the mock's `spawn_bridge_grpc` test helper calls `UiService::new`) | ✓ | ✓ | ✓ | ✓ | | | ✓ | |
 | QML: `ConnectionsPage` / `PendingDecisionSheet` | ✓ | | | ✓ | | | | |
 | QML: `RulesPage` | | | | | ✓ | | ✓ comment | |
 | QML: `BlocklistsPage` and guards | | | | | | ✓ wording | ✓ | |

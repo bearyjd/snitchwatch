@@ -64,55 +64,72 @@ approximate; go by the name.
 
 ### Part 1: persistence and honest banner (S, right after #45 PR A)
 
-1. In `run_with_incoming`, use `ProfileStore::open(<state>/profiles.sqlite3)`
-   (mode 0600) when #45's resolved state dir exists; in-memory otherwise.
-2. Reword the honest-ui Profiles banner. Profiles are now saved, but still
-   "not applied to the firewall".
-   - Relax that page's `contains("restart")` check in
-     `honest_ui_qml_guards.rs` `assert_preview_banner`.
-   - Keep "not applied", `visible: true`, non-dismissable, and no word
-     "bridge".
+1. **Store.** In `run_with_incoming`, with #45's `RunOptions.storage =
+   Persistent(dir)`, use `ProfileStore::open(<dir>/profiles.sqlite3)`
+   (mode 0600). Otherwise use in-memory.
+   - Apply #45's failure policy: an open failure becomes
+     `Ephemeral(Unusable("profile store: <err>"))`, logged and surfaced, and
+     the store falls back to in-memory.
+   - The profile store's mode is tracked separately from the blocklist
+     store's.
+2. **Same signal as #45.** `ServerMessage::SetProfiles` gains
+   `#[serde(default)] storage: Option<StorageStatus>` (#45's type), filled
+   in by `translator/downstream.rs` `build_set_profiles`.
+3. **Banner keyed on it.** Reword the honest-ui Profiles banner:
+   - **`persistent: true`:** "…not applied to the firewall yet…" only.
+   - **otherwise (or `None` from an older bridge):** keep the "kept in
+     memory only… lost when Snitchwatch's background service restarts"
+     sentence, plus the reason for `Unusable`.
+   - Update `honest_ui_qml_guards.rs` `assert_preview_banner` for this page
+     the same way as #45 does for Blocklists:
+     - the non-persistent variant still contains "restart";
+     - both contain "not applied";
+     - `visible: true`, non-dismissable, and no word "bridge".
 
 ### Part 2: enforcement (M, after #45 PR B and P2.1's editor)
 
-3. **`DaemonProfileSink`**, implementing `ProfileRuleSink` on #48's
+4. **`DaemonProfileSink`**, implementing `ProfileRuleSink` on #48's
    `DaemonCommands` with replace semantics:
    - CHANGE_RULE every desired rule;
    - DELETE_RULE every cached `850-profile:<id>:` rule that is not desired;
    - wait 5 s for the replies and return `Err(reason)` on `NoDaemon`,
      `Rejected`, `Timeout` or `StreamClosed`.
-4. **Materializer fixes.**
+5. **Materializer fixes.**
    - Add `sensitive` to the materializer's `Operator` and **force
      `sensitive: true` for `process.path`**, matching #50's
      `process_path_operator`.
    - Leave other operands `false`. `dest.host` lowercases, which is
      correct.
-5. **Validation**, in `handle_profile_action` or `ProfilesManager::add_rule`:
+6. **Validation**, in `handle_profile_action` or `ProfilesManager::add_rule`:
    - `operand` must be in the daemon's known operand list. Mirror
      `tests/mock_opensnitchd` `KNOWN_OPERANDS`, minus `list` and `lists.*`,
      because the type is fixed at `simple`;
    - `data` must be non-empty;
    - `action` must be `allow` or `deny`.
    Reject anything else.
-6. **Honest status.** Record an `Enforcement` for the active profile, using
+7. **Honest status.** Record an `Enforcement` for the active profile, using
    the same enum and "Rule installed" label as #45. `SetProfiles` gains
    `enforcement` and `enforcement_reason`, both `#[serde(default)]`. The
    Active chip reads "Active — not enforced: <reason>" on failure.
-7. **Reconcile.** Reuse #45's reconcile job: the daemon holds exactly the
+8. **Reconcile.** Reuse #45's reconcile job: the daemon holds exactly the
    active profile's rules, and any other `850-profile:` rule is deleted.
-8. **Rules page.** Add `RuleSource::Profile { profile_id }` for the
+9. **Rules page.** Add `RuleSource::Profile { profile_id }` for the
    `850-profile:` prefix (Kirigami `rules/row_store.rs` `Rule::source`).
-9. **Banner.** Remove it only when Part 2 *and* a profile-rule editor ship.
-10. Fix the doc comments listed under Findings.
+10. **Banner.** Remove it only when Part 2 *and* a profile-rule editor ship.
+11. Fix the doc comments listed under Findings.
 
 ## Tests to write first
 
 **Part 1:**
 - a file-backed `ProfileStore` reopened in a tempdir keeps profiles and the
   active flag;
-- bridge-cli `run_with_options(state_dir: tempdir)` → `CreateProfile` →
-  shutdown → restart in the same directory → `RequestSnapshot` →
-  `SetProfiles` still lists it;
+- bridge-cli `run_with_options(config, RunOptions { storage: Persistent(tempdir), .. })`
+  → `CreateProfile` → shutdown → restart in the same directory →
+  `RequestSnapshot` → `SetProfiles` still lists it, with
+  `storage.persistent == true`;
+- `run()` (in-process) → `SetProfiles.storage` is not persistent;
+- an unopenable `profiles.sqlite3` → `Unusable("profile store…")`, the
+  bridge still starts, and the banner keeps the restart sentence;
 - the QML guard is updated.
 
 **Part 2:**
