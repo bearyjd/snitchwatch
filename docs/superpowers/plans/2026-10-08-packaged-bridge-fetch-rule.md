@@ -199,7 +199,7 @@ it that way. So the GUI sees `user.name = <uid>`.
 After staging the overlay and booting, these show the rule loaded and
 compiled:
 
-- `journalctl -u opensnitch.service` shows no `Error compiling list rule`
+- `sudo grep 'Error compiling list rule' /var/log/opensnitchd.log` (the shipped config sets `LogFile: /var/log/opensnitchd.log`, so the journal won't show it) finds nothing
   for `000-snitchwatch-bridge-fetch`;
 - the Rules page lists the rule.
 

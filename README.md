@@ -224,7 +224,8 @@ past 2,000,000 hosts in total (in subscription order) get no rule.
   does. Refused or unanswered lists are retried on every refresh tick and
   daemon reconnect.
   "Rule installed" still isn't proof the daemon loaded the hosts: check
-  `journalctl -u opensnitchd | grep "domains loaded"`.
+  `sudo grep "domains loaded" /var/log/opensnitchd.log` (the shipped config
+  logs there, not to the journal).
 - These rules are read-only on the Rules page ("Managed on the Blocklists
   page"); no GUI can add, change or delete a rule named `z00-blocklist:…`.
 

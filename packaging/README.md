@@ -74,7 +74,15 @@ one opensnitchd rule (owner decision, 2026-10-08):
   reserved: no GUI action or rule import may change, rename or delete a
   rule under it. The Rules page lists it read-only as "Built into
   Snitchwatch: lets its background service download blocklists."
-- **Not covered:** DNS, and list URLs on other ports.
+- **Not covered:** list URLs on ports other than 443, and DNS. DNS is a
+  prerequisite, not a gap in this rule: with no GUI attached, a list
+  refresh only works once the system resolver's own upstream queries
+  (e.g. `systemd-resolved`) are allowed. OpenSnitch intercepts loopback
+  too (its "allow localhost connections" system rule is off by default),
+  so a query to `127.0.0.53:53` needs allowing as well.
+- **Unit name:** the Fedora RPM's unit is `opensnitch.service`; some
+  older Snitchwatch docs and `recipe.yml` still say `opensnitchd.service`
+  (issue #92).
 - **Where it ships:**
   - the bluebuild image (`files` module);
   - the system-bridge overlay (`system/stage.sh` installs the same file

@@ -100,8 +100,8 @@ socket units, and the one packaged opensnitchd rule.
 account's bridge download blocklists over HTTPS (TCP 443) under
 `DefaultAction: deny`. Denies and blocklists still win; see
 [`../../packaging/README.md`](../../packaging/README.md#the-packaged-fetch-rule).
-After the first boot, confirm that `journalctl -u opensnitch.service` shows
-no `Error compiling list rule` for it. Enable the two `.socket` units in the image/preset; do not
+After the first boot, confirm that
+`sudo grep 'Error compiling list rule' /var/log/opensnitchd.log` (the shipped config sets `LogFile: /var/log/opensnitchd.log`, so the journal won't show it) finds nothing for it. Enable the two `.socket` units in the image/preset; do not
 enable the service directly. For OpenSnitch 1.8.0, configure
 `Server.Address: unix:opensnitchd.sock` and give `opensnitch.service` this
 drop-in so the relative socket address resolves inside the protected runtime
