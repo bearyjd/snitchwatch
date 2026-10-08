@@ -43,13 +43,14 @@ async fn a_refused_install_is_sent_once_not_in_a_loop() {
     let curated = harness.curated();
     turn(&curated, FLATPAK, true);
     let worker = curated.spawn(harness.rules.synced());
-    eventually("the install's refusal", || {
-        entry_state(&curated, FLATPAK).status == EntryStatus::NotInstalled
-    })
-    .await;
+    eventually("the first install", || !harness.seen().is_empty()).await;
     tokio::time::sleep(SETTLE).await;
     worker.abort();
     assert_eq!(harness.seen().len(), 1, "{} sends", harness.seen().len());
+    assert_eq!(
+        entry_state(&curated, FLATPAK).status,
+        EntryStatus::NotInstalled
+    );
 }
 
 #[tokio::test]
@@ -58,13 +59,14 @@ async fn a_refused_delete_is_sent_once_not_in_a_loop() {
     let curated = harness.curated();
     turn(&curated, FLATPAK, false);
     let worker = curated.spawn(harness.rules.synced());
-    eventually("the delete's refusal", || {
-        entry_state(&curated, FLATPAK).status == EntryStatus::NotRemoved
-    })
-    .await;
+    eventually("the first delete", || !harness.seen().is_empty()).await;
     tokio::time::sleep(SETTLE).await;
     worker.abort();
     assert_eq!(harness.seen().len(), 1, "{} sends", harness.seen().len());
+    assert_eq!(
+        entry_state(&curated, FLATPAK).status,
+        EntryStatus::NotRemoved
+    );
 }
 
 /// A choice changed after a failure tries again, once.
