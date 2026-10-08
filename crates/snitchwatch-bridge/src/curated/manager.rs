@@ -337,6 +337,10 @@ impl CuratedDefaults {
             .passes
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.save_if_changed().await;
+        // The generation first: a HELLO between the two reads then pairs
+        // the new list with the old generation, and the pass stops at the
+        // first command (re-review 3, LOW-2).
+        let generation = self.generation();
         let daemon = {
             let cache = self.inner.rules.lock().unwrap_or_else(|e| e.into_inner());
             let left_out: BTreeSet<String> = cache.left_out().keys().cloned().collect();
@@ -352,7 +356,6 @@ impl CuratedDefaults {
             rules: &rules,
             left_out: &left_out,
         };
-        let generation = self.generation();
         let (actions, removals) = {
             let mut state = lock(&self.inner.state);
             state.problems.clear();
@@ -536,14 +539,21 @@ impl CuratedDefaults {
                 state.removal_failures.remove(id);
                 state.statuses.insert(id.to_string(), status);
             }
-            Err(problem) => fail(
-                &mut state,
-                true,
-                id,
-                EntryStatus::NotRemoved,
-                problem,
-                generation,
-            ),
+            Err(problem) => {
+                if !problem.sticky {
+                    // Busy: asked again at the next change of the pass's
+                    // inputs, as its text says (re-review 3).
+                    state.removals.insert(id.to_string());
+                }
+                fail(
+                    &mut state,
+                    true,
+                    id,
+                    EntryStatus::NotRemoved,
+                    problem,
+                    generation,
+                );
+            }
         }
     }
 

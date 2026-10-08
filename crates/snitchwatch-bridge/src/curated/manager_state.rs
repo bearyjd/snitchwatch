@@ -90,7 +90,7 @@ pub(super) fn send_problem(error: SendError) -> Problem {
     let (text, sticky) = match error {
         SendError::NotQueued => (
             "The firewall service is busy; Snitchwatch tries again when its rule list next \
-             changes.",
+             changes, or when you ask again.",
             false,
         ),
         SendError::NoDaemon => ("The firewall service isn't connected.", true),

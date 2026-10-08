@@ -239,9 +239,62 @@ async fn a_reconnect_mid_pass_redecides_the_removals_not_yet_sent() {
         if still_edited {
             eventually("the second delete", || harness.seen().len() == 2).await;
         } else {
-            tokio::time::sleep(Duration::from_millis(400)).await;
+            // The follow-up pass has seen the new list (the unedited copy
+            // reads "In the firewall") and taken the queued removal.
+            eventually("the follow-up pass", || {
+                entry_state(&curated, other).status == EntryStatus::InFirewall
+                    && lock(&curated.inner.state).removals.is_empty()
+            })
+            .await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
             assert_eq!(harness.seen().len(), 1, "{:?}", harness.seen());
         }
         worker.abort();
     }
+}
+
+/// Re-review 3, B3: a Remove that found the command queue full reads
+/// "busy" and is sent at the next change of the pass's inputs.
+#[tokio::test]
+async fn a_busy_removal_is_sent_once_the_queue_drains() {
+    let harness = Harness::new().connect(Daemon::Accept, vec![edited(FLATPAK)]);
+    let curated = harness.curated();
+    curated.reconcile().await;
+    // The daemon holds the first command; the rest fill the queue.
+    let gate = Arc::new(tokio::sync::Notify::new());
+    *harness.hold.lock().unwrap() = Some(gate.clone());
+    let filler = |i: usize| {
+        let mut rule = rule_of(B);
+        rule.name = format!("user-filler-{i}");
+        rule.description = String::new();
+        snitchwatch_proto::protocol::Notification {
+            r#type: Action::ChangeRule as i32,
+            rules: vec![rule],
+            ..Default::default()
+        }
+    };
+    harness.commands.send(filler(0)).unwrap();
+    eventually("the daemon to hold the first", || harness.seen().len() == 1).await;
+    let mut queued = 1;
+    while harness.commands.send(filler(queued)).is_ok() {
+        queued += 1;
+    }
+    remove(&curated, FLATPAK);
+    curated.reconcile().await;
+    let state = entry_state(&curated, FLATPAK);
+    assert_eq!(state.status, EntryStatus::NotRemoved);
+    assert!(state.problem.unwrap().contains("busy"));
+    // The queue drains (its OKs change the rule list): asked again.
+    gate.notify_one();
+    eventually("the queue to drain", || harness.seen().len() == queued).await;
+    curated.reconcile().await;
+    let deletes: Vec<_> = harness
+        .seen()
+        .into_iter()
+        .filter(|(kind, _)| *kind == Action::DeleteRule as i32)
+        .collect();
+    assert_eq!(
+        deletes,
+        [(Action::DeleteRule as i32, FLATPAK_RULE.to_string())]
+    );
 }
