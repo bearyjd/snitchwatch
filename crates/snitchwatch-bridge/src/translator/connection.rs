@@ -5,17 +5,27 @@
 //! as a stable correlation handle so the WS client can later send back a
 //! `setVerdict` referencing the same row.
 
-use crate::daemon_contract::is_default_action_rule;
+use crate::daemon_contract::{is_contract_default_action, is_default_action_rule};
 use crate::ws_messages::ConnectionRow;
 use snitchwatch_proto::protocol::{Connection, Event};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 pub const ASK_ROW_PREFIX: &str = "ask-";
 /// Id prefix for rows synthesized from a daemon-reported `Event` (see
 /// [`event_to_row`]) — connections the daemon already decided, by an
 /// existing rule or (with the bazzite-tower fork) by its default action, and
 /// reports via `Statistics.events` on a `Ping` call, as opposed to
-/// `ASK_ROW_PREFIX` rows the daemon is actively prompting for.
+/// `ASK_ROW_PREFIX` rows the daemon is actively prompting for. The full id is
+/// `event-<unixnano>-<seq>`; nothing parses it.
 pub const EVENT_ROW_PREFIX: &str = "event-";
+
+/// The `<seq>` of the next event row id. The daemon's time alone can repeat,
+/// and an id must name one row: "Make a rule…" finds its row by id when
+/// clicked (PR #108 security review, L2).
+static NEXT_EVENT_ROW: AtomicU64 = AtomicU64::new(1);
+
+/// Whether an off-contract default-action event was logged this run.
+static UNEXPECTED_DEFAULT_ACTION_LOGGED: AtomicBool = AtomicBool::new(false);
 
 pub fn ask_row_id(notification_id: u64) -> String {
     format!("{ASK_ROW_PREFIX}{notification_id}")
@@ -112,8 +122,16 @@ pub fn event_to_row(event: &Event) -> Option<ConnectionRow> {
     let rule = event.rule.as_ref()?;
     let by_default = is_default_action_rule(rule);
 
+    if by_default {
+        note_unexpected_default_action(&UNEXPECTED_DEFAULT_ACTION_LOGGED, &rule.action);
+    }
+
     let mut row = connection_to_row(conn, 0);
-    row.id = format!("{EVENT_ROW_PREFIX}{}", event.unixnano);
+    row.id = format!(
+        "{EVENT_ROW_PREFIX}{}-{}",
+        event.unixnano,
+        NEXT_EVENT_ROW.fetch_add(1, Ordering::Relaxed)
+    );
     row.action = Some(normalized_action(&rule.action).to_string());
     row.matched_rule = (!by_default).then(|| rule.name.clone());
     row.decided_by_default = by_default;
@@ -121,10 +139,28 @@ pub fn event_to_row(event: &Event) -> Option<ConnectionRow> {
     Some(row)
 }
 
+/// Logs, once per `logged` flag (once per bridge run in production), a
+/// default-action event whose action the contract doesn't name. The row
+/// still folds it like any event action ([`normalized_action`]). Returns
+/// whether it logged.
+fn note_unexpected_default_action(logged: &AtomicBool, action: &str) -> bool {
+    if is_contract_default_action(action) || logged.swap(true, Ordering::Relaxed) {
+        return false;
+    }
+    tracing::warn!(
+        action = %crate::translator::verdict::sanitize_for_display(action, 32),
+        shown_as = normalized_action(action),
+        "a default-action event carried an action outside the contract (allow, deny, \
+         reject); later ones are not logged"
+    );
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::daemon_contract::DEFAULT_ACTION_MARKER;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     fn sample_connection() -> Connection {
         Connection {
@@ -239,7 +275,11 @@ mod tests {
             unixnano: 1_700_000_000_123_456_789,
         };
         let row = event_to_row(&event).expect("both connection and rule present");
-        assert_eq!(row.id, "event-1700000000123456789");
+        assert!(
+            row.id.starts_with("event-1700000000123456789-"),
+            "{}",
+            row.id
+        );
         assert_eq!(row.process, "curl");
         assert_eq!(row.dst_host, "github.com");
         assert_eq!(row.action.as_deref(), Some("allow"));
@@ -317,7 +357,11 @@ mod tests {
             assert_eq!(row.matched_rule, None, "{applied}: no rule named \"\"");
             assert!(row.decided_by_default, "{applied}");
             assert!(!row.deferred);
-            assert_eq!(row.id, "event-1700000000123456789");
+            assert!(
+                row.id.starts_with("event-1700000000123456789-"),
+                "{}",
+                row.id
+            );
             assert_eq!(row.started_at_ms, 1_700_000_000_123);
         }
     }
@@ -353,6 +397,48 @@ mod tests {
         let event = event_with(sample_rule("899-firefox-allow-out.json", "allow"));
         assert!(!event_to_row(&event).unwrap().decided_by_default);
         assert!(!connection_to_row(&sample_connection(), 1).decided_by_default);
+    }
+
+    /// Pinned: an action outside the contract folds like any event action,
+    /// "deny" unless it is "allow" (PR #108 review).
+    #[test]
+    fn a_default_action_event_with_an_unexpected_action_folds_to_deny() {
+        for action in ["drop", "", "ACCEPT"] {
+            let row = event_to_row(&event_with(default_action_rule(action))).unwrap();
+            assert_eq!(row.action.as_deref(), Some("deny"), "{action:?}");
+            assert!(row.decided_by_default, "{action:?}");
+        }
+    }
+
+    #[test]
+    fn an_unexpected_default_action_is_logged_once() {
+        let logged = AtomicBool::new(false);
+        for action in ["allow", "deny", "reject"] {
+            assert!(!note_unexpected_default_action(&logged, action));
+        }
+        assert!(
+            !logged.load(Ordering::Relaxed),
+            "a contract action doesn't use up the warning"
+        );
+        assert!(note_unexpected_default_action(&logged, "drop"));
+        assert!(!note_unexpected_default_action(&logged, "other"));
+    }
+
+    /// L2 (PR #108 security review): two events with the same daemon time
+    /// are two rows, and "Make a rule…" finds a row by id.
+    #[test]
+    fn event_rows_have_distinct_ids_even_at_the_same_time() {
+        let event = event_with(sample_rule("899-firefox-allow-out.json", "allow"));
+        let first = event_to_row(&event).unwrap();
+        let second = event_to_row(&event).unwrap();
+        assert_ne!(first.id, second.id);
+        for row in [&first, &second] {
+            assert!(
+                row.id.starts_with("event-1700000000123456789-"),
+                "{}",
+                row.id
+            );
+        }
     }
 
     #[test]

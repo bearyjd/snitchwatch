@@ -148,7 +148,11 @@ async fn default_applied_events_reach_the_gui_as_default_decided_rows_without_a_
         assert!(row.get("deferred").is_none(), "{row}");
     }
     assert_eq!(rows[0]["dstHost"], "second.example.com");
-    assert_eq!(rows[0]["id"], format!("event-{}", 1_800_000_002 * S));
+    let id = rows[0]["id"].as_str().unwrap();
+    assert!(
+        id.starts_with(&format!("event-{}-", 1_800_000_002 * S)),
+        "{id}"
+    );
 
     ws.send(Message::Text(
         json!({ "action": "requestSnapshot" }).to_string(),
