@@ -181,28 +181,57 @@ the design above, this is what shipped):
 
 - **Files.** Pure state `cache/rule_hits.rs`; the shared handle, ticker and
   broadcast `cache/rule_hits_handle.rs`; the saved file
-  `cache/rule_hits_file.rs`; `daemon_config.rs` (reads `Stats.MaxEvents`
-  from `ClientConfig.config`, 150 when absent, as `stats.go` does; the
-  prompt-slot plan may extend it); bridge-cli `rule_hits_storage.rs`.
-  Hooks: `RulesSync::commit` and a confirmed `DELETE_RULE` in
-  `apply_confirmed`; nothing on `withdraw`. The Kirigami side is
+  `cache/rule_hits_file.rs`; bridge-cli `rule_hits_storage.rs`. No
+  `daemon_config.rs`: gaps come from the daemon's own counter (below), so
+  nothing here reads `ClientConfig.config`, and the prompt-slot plan's step
+  10 creates that file.
+  Hooks: `RulesSync::commit`, a confirmed `DELETE_RULE` in
+  `apply_confirmed`, and an expired temporary rule (the 30 s
+  `prune_expired_rules_every` tick, which now returns the pruned names, and
+  `RulesSync::upsert` when a remembered verdict replaces an expired rule
+  before that tick: prompt-rule names are deterministic, so a re-made rule
+  would otherwise inherit the old count); nothing on `withdraw`. The Kirigami side is
   `rules/hits.rs` plus three lines of `RulesModel` and `RulesPage.qml`.
 - **`lossy` is a gap record, and it is saved.** The wire message carries
   `lossy` and `lastGapUnixMs` (the two never disagree), because "never
-  clears for the session" is not enough once counts survive restarts. A gap
-  is noted when a batch is within one of the daemon's cap, when the daemon's
-  `uptime` drops, when the counts are restored from the file (the bridge was
-  down), when a bound is hit, and for a rule name that is over 256 bytes or
-  has control characters (not counted).
+  clears for the session" is not enough once counts survive restarts.
+- **Gaps come from the daemon's counter, not the batch size.** Within one
+  daemon run, `Statistics.rule_hits` grows by exactly one per event the
+  daemon appends (`onConnection`; `nolog` adds to neither), so between two
+  pings `missing = Δrule_hits − events.len()` counts every lost event: at
+  the cap, a batch emptied before a ping that failed (`client.go` `ping`
+  never resends), one appended between `Serialize`'s unlock and
+  `emptyStats`, and everything sent while the bridge was away. A gap is
+  noted when `missing > 0`; when the counter goes down, or `missing < 0`
+  (impossible within one run), or `uptime` drops (all three a daemon
+  restart); when the counts are restored from the file (the bridge was
+  down); when a bound is hit; and for a rule name that is over 256 bytes or
+  has control characters (not counted). The first ping of a bridge run only
+  sets the baseline, and nothing resets it on a reconnect. This replaced
+  the design's `≥ max_events - 1` heuristic, which missed failed pings and
+  read `MaxEvents` only at `Subscribe` though the daemon reloads it.
+- **An edit keeps the count (decided, not reset).** A confirmed
+  `CHANGE_RULE` for an existing name, including a new action or operator,
+  keeps that name's count and last hit; only a rename (a new name) starts at
+  zero. Resetting would need a per-rule "counted since": with only the
+  global `since`, a just-edited rule at 0 would look unused for the whole
+  window to Part 2's 14-day badge. Pinned by
+  `a_confirmed_rule_change_keeps_the_count`. Part 2 should word "Unused"
+  with that in mind, or add a per-rule start if it needs one.
 - **A daemon restart zeroes nothing.** "Uptime drop" is a daemon restart:
   the events in between are lost, so it records a gap. The counts stay,
   which is also what "counts survive a reconnect" and N1 require.
 - **Persistence.** One JSON file, `<state>/rule_hits.json` (not SQLite: it
-  needs no queries, and PR #90's `sqlite_file::open_owner_only` was not on
-  the base). Read `O_NOFOLLOW|O_NONBLOCK`; must be a regular file owned by
-  the bridge's user and not writable by others; at most 8 MiB, 10 000
-  entries; names at most 256 bytes. Written to a temp file
-  (`O_EXCL|O_NOFOLLOW`, 0600), synced, renamed. Restored counts wait for
+  needs no queries). Read `O_NOFOLLOW|O_NONBLOCK`; must be a regular file
+  owned by the bridge's user with no other hard link (#90's
+  `sqlite_file::file_problem`, reused) and not writable by others; at most
+  8 MiB, 10 000 entries; names at most 256 bytes; every time at least 0 and
+  at most a day past now (a hit time further ahead is recorded as now, so a
+  wild daemon timestamp can't make saves fail). Written to a temp file of
+  its own (named for the pid and a random number, so two bridges on one
+  state directory never delete each other's; `O_EXCL|O_NOFOLLOW`, 0600),
+  synced, renamed. A crash between the create and the rename can leave a
+  stray temp file behind. Restored counts wait for
   the first committed snapshot, which keeps only the names it has, and are
   saved unchanged meanwhile. A file that can't be read is left alone and the
   counts stay in memory. A save that fails turns `storage.persistent` off
@@ -440,7 +469,8 @@ Tower VM checks:
 ## Risks
 
 - **Counts are lossy.** Bursts, failed pings and bridge downtime all lose
-  hits; the `lossy` flag catches only the first. Wording stays
+  hits. As built, the daemon's `rule_hits` counter shows each of them as a
+  gap; a `nolog` rule is never counted at all. Wording stays
   "approximate".
 - **"Unused" without persistence is a session fact.** That is why N1/N2
   gate the badge.

@@ -73,6 +73,7 @@ pub fn connection_to_row(conn: &Connection, notification_id: u64) -> ConnectionR
         // matched rule yet. `ConnectionCache::resolve` fills this in once the
         // user's verdict becomes the governing rule.
         matched_rule: None,
+        auto_answer: None,
     }
 }
 

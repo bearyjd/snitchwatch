@@ -84,6 +84,7 @@ async fn rule_hits_cross_the_websocket_and_reach_the_rules_tab_view() {
         1,
         Statistics {
             uptime: 10,
+            rule_hits: 3,
             events: vec![
                 event("allow-curl", 1_700_000_000_000_000_000),
                 event("allow-curl", 1_700_000_005_000_000_000),

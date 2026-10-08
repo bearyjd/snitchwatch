@@ -256,6 +256,45 @@ pub enum ServerMessage {
         #[serde(default)]
         expires_at_unix_ms: Option<u64>,
     },
+    /// Rule import/export (roadmap P2.7, `crate::rule_io`). Additive, like
+    /// every extension above. Sent only to the requesting connection (an
+    /// in-process sender gets them on the broadcast); `request_id` echoes
+    /// the request's, and an apply's progress and result carry its
+    /// `preview_id`. The answer to `ExportRules`:
+    RulesExport {
+        request_id: String,
+        document: crate::rule_io::Document,
+        omitted: crate::rule_io::OmittedCounts,
+    },
+    RulesExportUnavailable {
+        request_id: String,
+        reason: String,
+    },
+    /// The answer to `PreviewRulesImport`: one item per rule in the file.
+    RulesImportPreview {
+        request_id: String,
+        preview_id: String,
+        items: Vec<crate::rule_io::ImportItem>,
+    },
+    /// A preview or an apply was refused as a whole (fixed text).
+    RulesImportRefused {
+        request_id: String,
+        reason: String,
+    },
+    /// One rule's outcome during `ApplyRulesImport`.
+    RulesImportProgress {
+        preview_id: String,
+        name: String,
+        outcome: crate::rule_io::ImportOutcome,
+    },
+    /// Sent once an apply ends, however it ends.
+    RulesImportResult {
+        preview_id: String,
+        applied: u32,
+        rejected: u32,
+        not_sent: u32,
+        no_answer: u32,
+    },
     /// How often each daemon rule decided a connection, as Snitchwatch
     /// counted from the `events` in the daemon's pings (P2.6 Part 1, see
     /// `crate::cache::rule_hits`). Sent at most every 5 seconds and only
@@ -410,6 +449,60 @@ pub enum ClientMessage {
         sender_uid: Option<u32>,
     },
     RecheckDiagnostics,
+    /// Rule import/export (roadmap P2.7); handled by bridge-cli's
+    /// `rules_import` task, never by `upstream::apply`. `request_id` is the
+    /// client's, echoed in the answer; `reply` is stamped by `ws_server`
+    /// with the sending connection and never comes from the wire.
+    ExportRules {
+        #[serde(default)]
+        request_id: String,
+        #[serde(skip)]
+        reply: Option<ReplyTo>,
+    },
+    /// Validate a rules document and preview it against the daemon's rules.
+    /// Bounded by the client message cap (`ws_server`).
+    PreviewRulesImport {
+        #[serde(default)]
+        request_id: String,
+        document: serde_json::Value,
+        #[serde(skip)]
+        reply: Option<ReplyTo>,
+    },
+    /// Apply the named rules of the pending preview (`CHANGE_RULE` only).
+    ApplyRulesImport {
+        #[serde(default)]
+        request_id: String,
+        preview_id: String,
+        include: Vec<String>,
+        #[serde(skip)]
+        reply: Option<ReplyTo>,
+    },
+}
+
+/// A channel back to one WebSocket connection, stamped on rule import and
+/// export requests by `ws_server` so their answers reach only the GUI that
+/// asked. Never serialized.
+#[derive(Clone)]
+pub struct ReplyTo(pub tokio::sync::mpsc::Sender<ServerMessage>);
+
+impl ReplyTo {
+    /// Deliver `message`, waiting for room; `false` when the connection is
+    /// gone.
+    pub async fn send(&self, message: ServerMessage) -> bool {
+        self.0.send(message).await.is_ok()
+    }
+}
+
+impl std::fmt::Debug for ReplyTo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ReplyTo")
+    }
+}
+
+impl PartialEq for ReplyTo {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.same_channel(&other.0)
+    }
 }
 
 /// Resolve [`ClientMessage::SetVerdict`]'s effective duration from the new
@@ -526,6 +619,25 @@ pub struct ConnectionRow {
     /// consumers (the web frontend) that don't know about it are unaffected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub matched_rule: Option<String>,
+    /// Set when the bridge answered this connection itself rather than a
+    /// person (issue #78). Additive and omitted when absent, like
+    /// `matched_rule`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_answer: Option<AutoAnswer>,
+}
+
+/// Why the bridge answered a connection without a person (issue #78).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum AutoAnswer {
+    /// Allowed once because filtering was paused: either the prompt was
+    /// already waiting when the pause took effect, or the connection arrived
+    /// during it (`pause_answers`).
+    FilterPaused,
+    /// A reason this build doesn't know, from a newer bridge. Keeps the row
+    /// readable instead of failing the whole message.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -657,6 +769,7 @@ mod tests {
                 bytes_received: 0,
                 started_at_ms: 1_700_000_000_000,
                 matched_rule: None,
+                auto_answer: None,
             }],
         };
 
@@ -789,6 +902,7 @@ mod tests {
             bytes_received: 0,
             started_at_ms: 1_700_000_000_000,
             matched_rule: Some("899-firefox-allow-out.json".to_string()),
+            auto_answer: None,
         };
         let json = serde_json::to_value(&row).unwrap();
         assert_eq!(json["matchedRule"], "899-firefox-allow-out.json");
@@ -1260,6 +1374,44 @@ mod filtering_pause_tests {
             !json.contains("sender"),
             "stamp leaked onto the wire: {json}"
         );
+    }
+
+    /// P2.6 Part 1: the largest `RuleHits` the bridge can send (every rule
+    /// it tracks, each name at the length limit and made of characters JSON
+    /// doubles, the widest numbers, a long storage reason) fits one frame of
+    /// a GUI client with tungstenite's default limit (the Kirigami shell's
+    /// `client_async` uses the default config).
+    #[test]
+    fn the_largest_rule_hits_fits_a_gui_clients_frame() {
+        use crate::cache::rule_hits::{MAX_HIT_NAME_BYTES, MAX_TRACKED_RULES};
+        let limit = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
+            .max_frame_size
+            .expect("tungstenite's default has a frame limit");
+        let hits = (0..MAX_TRACKED_RULES)
+            .map(|i| {
+                let stem = format!("{i:05}");
+                let fill = "\"\\".repeat((MAX_HIT_NAME_BYTES - stem.len()) / 2);
+                RuleHitWire {
+                    name: format!("{stem}{fill}"),
+                    count: u64::MAX,
+                    last_hit_unix_ms: i64::MIN,
+                }
+            })
+            .collect();
+        let msg = ServerMessage::RuleHits {
+            since_unix_ms: Some(i64::MIN),
+            lossy: true,
+            last_gap_unix_ms: Some(i64::MIN),
+            storage: StorageStatus {
+                persistent: false,
+                // Two paths at PATH_MAX and an OS error, all escaped.
+                reason: Some("\"".repeat(16 * 1024)),
+                unreadable: false,
+            },
+            hits,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.len() < limit, "{} bytes, limit {limit}", json.len());
     }
 
     #[test]

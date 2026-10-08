@@ -2,7 +2,6 @@ use super::*;
 use snitchwatch_proto::protocol::{Event, Rule};
 
 const NOW: i64 = 1_800_000_000_000;
-const MAX: usize = 150;
 
 fn ev(rule: &str, unixnano: i64) -> Event {
     Event {
@@ -22,10 +21,16 @@ fn ruleless() -> Event {
     }
 }
 
-/// Records `events` as a ping with uptime 100 where `names` are the rules
-/// the cache knows.
+/// Records `events` as a ping from a daemon that lost nothing: uptime 100,
+/// and its `rule_hits` counter grown by exactly the events it sends.
+fn ping(hits: &mut RuleHits, events: &[Event], known: impl Fn(&str) -> bool) -> bool {
+    let rule_hits = hits.last_rule_hits.unwrap_or(0) + events.len() as u64;
+    hits.record(events, 100, rule_hits, NOW, known)
+}
+
+/// [`ping`] where `names` are the rules the cache knows.
 fn rec(hits: &mut RuleHits, events: &[Event], names: &[&str]) -> bool {
-    hits.record(events, 100, MAX, NOW, |n| names.contains(&n))
+    ping(hits, events, |n| names.contains(&n))
 }
 
 fn counts(hits: &RuleHits) -> Vec<(String, u64)> {
@@ -141,55 +146,123 @@ fn a_rule_the_cache_learns_later_takes_its_waiting_counts_with_it() {
     assert_eq!(counts(&hits), vec![pair("a", 2)]);
 }
 
-fn batch(n: usize) -> Vec<Event> {
-    (0..n).map(|_| ev("a", 1)).collect()
+/// A ping at `now` from a daemon whose `rule_hits` counter reads
+/// `rule_hits`, every rule known.
+fn at(hits: &mut RuleHits, events: &[Event], rule_hits: u64, now: i64) {
+    hits.record(events, 100, rule_hits, now, |_| true);
 }
 
 #[test]
-fn a_batch_near_the_daemons_cap_marks_the_counts_incomplete() {
-    // `max_events - 1`: a missed connection at the cap drops an event first.
-    for (len, lossy) in [(MAX, true), (MAX - 1, true), (MAX - 2, false), (0, false)] {
-        let mut hits = RuleHits::default();
-        rec(&mut hits, &batch(len), &["a"]);
-        assert_eq!(hits.is_lossy(), lossy, "batch of {len}");
-    }
-}
-
-#[test]
-fn the_cap_is_the_daemons_own_and_counts_events_without_a_rule() {
+fn the_first_ping_only_sets_the_baseline() {
+    // The daemon's counter also covers the time before counting began.
     let mut hits = RuleHits::default();
-    hits.record(&batch(8), 100, 10, NOW, |_| true);
+    at(&mut hits, &[ev("a", 1)], 10_000, NOW);
     assert!(!hits.is_lossy());
-    hits.record(&batch(9), 100, 10, NOW, |_| true);
-    assert!(hits.is_lossy(), "9 of 10");
+    assert_eq!(counts(&hits), vec![pair("a", 1)]);
+}
 
+#[test]
+fn a_counter_that_grew_by_exactly_the_events_is_complete() {
     let mut hits = RuleHits::default();
-    let mut events = vec![ruleless(); 9];
-    events.push(ev("a", 1));
-    hits.record(&events, 100, 10, NOW, |_| true);
-    assert!(
-        hits.is_lossy(),
-        "the raw length counts, not the filtered one"
+    at(&mut hits, &[ev("a", 1)], 7, NOW);
+    at(&mut hits, &[ev("a", 2), ev("b", 3)], 9, NOW + 1_000);
+    at(&mut hits, &[], 9, NOW + 2_000);
+    assert!(!hits.is_lossy());
+}
+
+#[test]
+fn a_counter_that_grew_by_more_than_the_events_is_a_gap() {
+    // Dropped at the daemon's cap, or appended between `Serialize`'s unlock
+    // and `emptyStats`: counted by `RuleHits`, never sent.
+    let mut hits = RuleHits::default();
+    at(&mut hits, &[ev("a", 1)], 10, NOW);
+    at(&mut hits, &[ev("a", 2), ev("a", 3)], 13, NOW + 5);
+    assert_eq!(hits.last_gap_unix_ms(), Some(NOW + 5));
+    assert_eq!(counts(&hits), vec![pair("a", 3)], "what did arrive counts");
+}
+
+#[test]
+fn a_failed_ping_loses_its_batch_and_the_next_ping_shows_it() {
+    // `client.go` `ping`: `Serialize` empties the batch before the RPC, and
+    // a failed RPC is never resent.
+    let mut hits = RuleHits::default();
+    at(&mut hits, &[ev("a", 1), ev("a", 2), ev("a", 3)], 3, NOW);
+    // The daemon's next ping (events 4-6, counter 6) fails.
+    at(&mut hits, &[ev("a", 7)], 7, NOW + 2_000);
+    assert_eq!(hits.last_gap_unix_ms(), Some(NOW + 2_000));
+    assert_eq!(counts(&hits), vec![pair("a", 4)]);
+}
+
+#[test]
+fn the_raw_length_counts_not_the_events_with_a_rule() {
+    let mut hits = RuleHits::default();
+    at(&mut hits, &[ev("a", 1)], 1, NOW);
+    at(&mut hits, &[ruleless(), ev("a", 2)], 3, NOW + 1);
+    assert!(!hits.is_lossy());
+}
+
+#[test]
+fn the_baseline_moves_with_every_ping() {
+    let mut hits = RuleHits::default();
+    at(&mut hits, &[ev("a", 1)], 1, NOW - 1_000);
+    at(&mut hits, &[ev("a", 2)], 5, NOW);
+    assert_eq!(hits.last_gap_unix_ms(), Some(NOW));
+    at(&mut hits, &[ev("a", 3), ev("a", 4)], 7, NOW + 5_000);
+    assert_eq!(
+        hits.last_gap_unix_ms(),
+        Some(NOW),
+        "measured from the last ping, not the first"
     );
+}
+
+#[test]
+fn a_counter_that_went_down_is_a_restart_gap() {
+    // A restart that `uptime` misses: the daemon was idle (no ping) for
+    // longer than it had run before.
+    let mut hits = RuleHits::default();
+    hits.record(&[ev("a", 1)], 1_000, 100, NOW, |_| true);
+    hits.record(&[ev("a", 2), ev("a", 3)], 5_000, 3, NOW + 9, |_| true);
+    assert_eq!(hits.last_gap_unix_ms(), Some(NOW + 9));
+    hits.record(&[ev("a", 4)], 5_001, 4, NOW + 20, |_| true);
+    assert_eq!(
+        hits.last_gap_unix_ms(),
+        Some(NOW + 9),
+        "the new run is the baseline"
+    );
+    assert_eq!(counts(&hits), vec![pair("a", 4)], "nothing zeroed");
+}
+
+#[test]
+fn more_events_than_the_counter_grew_is_a_restart_gap() {
+    // Impossible within one daemon run (every event adds one), so the
+    // daemon restarted and its new counter passed the old one.
+    let mut hits = RuleHits::default();
+    hits.record(&[ev("a", 1)], 1_000, 100, NOW, |_| true);
+    let batch: Vec<Event> = (0..60).map(|i| ev("a", i + 2)).collect();
+    hits.record(&batch, 5_000, 150, NOW + 9, |_| true);
+    assert_eq!(hits.last_gap_unix_ms(), Some(NOW + 9));
 }
 
 #[test]
 fn incomplete_counts_stay_incomplete() {
     let mut hits = RuleHits::default();
-    rec(&mut hits, &batch(MAX), &["a"]);
+    at(&mut hits, &[ev("a", 1)], 1, NOW);
+    at(&mut hits, &[ev("a", 2)], 9, NOW);
     assert_eq!(hits.last_gap_unix_ms(), Some(NOW));
-    rec(&mut hits, &batch(1), &["a"]);
+    rec(&mut hits, &[ev("a", 3)], &["a"]);
     assert!(hits.is_lossy());
 }
 
 #[test]
 fn a_daemon_restart_is_a_gap_and_does_not_zero_the_counts() {
     let mut hits = RuleHits::default();
-    hits.record(&[ev("a", 1)], 500, MAX, NOW, |_| true);
-    hits.record(&[ev("a", 2)], 501, MAX, NOW, |_| true);
-    hits.record(&[ev("a", 3)], 501, MAX, NOW, |_| true);
+    hits.record(&[ev("a", 1)], 500, 1, NOW, |_| true);
+    hits.record(&[ev("a", 2)], 501, 2, NOW, |_| true);
+    hits.record(&[ev("a", 3)], 501, 3, NOW, |_| true);
     assert!(!hits.is_lossy(), "uptime grew or stood still");
-    hits.record(&[ev("a", 4)], 3, MAX, NOW + 7, |_| true);
+    // The new run's counter grew by exactly its events since the old
+    // one's last ping: only `uptime` says.
+    hits.record(&[ev("a", 4)], 3, 4, NOW + 7, |_| true);
     assert_eq!(hits.last_gap_unix_ms(), Some(NOW + 7), "uptime dropped");
     assert_eq!(counts(&hits), vec![pair("a", 4)]);
 }
@@ -198,9 +271,9 @@ fn a_daemon_restart_is_a_gap_and_does_not_zero_the_counts() {
 fn counting_starts_at_the_first_ping_with_statistics_and_stays_there() {
     let mut hits = RuleHits::default();
     assert_eq!(hits.since_unix_ms(), None);
-    hits.record(&[], 1, MAX, NOW, |_| true);
+    hits.record(&[], 1, 0, NOW, |_| true);
     assert_eq!(hits.since_unix_ms(), Some(NOW));
-    hits.record(&[ev("a", 1)], 2, MAX, NOW + 9_000, |_| true);
+    hits.record(&[ev("a", 1)], 2, 1, NOW + 9_000, |_| true);
     assert_eq!(hits.since_unix_ms(), Some(NOW));
 }
 
@@ -220,9 +293,8 @@ fn the_side_map_is_bounded_and_overflow_is_a_gap() {
     let mut hits = RuleHits::default();
     let names: Vec<String> = (0..=SIDE_MAP_MAX).map(|i| format!("n{i}")).collect();
     let events: Vec<Event> = names.iter().map(|n| ev(n, 1)).collect();
-    // One ping at a time: the cap would otherwise be the daemon's own.
     for chunk in events.chunks(50) {
-        hits.record(chunk, 100, 1_000_000, NOW, |_| false);
+        ping(&mut hits, chunk, |_| false);
     }
     assert!(
         hits.is_lossy(),
@@ -234,9 +306,9 @@ fn the_side_map_is_bounded_and_overflow_is_a_gap() {
     // A name already waiting still counts when the map is full.
     let mut hits = RuleHits::default();
     for chunk in events[..SIDE_MAP_MAX].chunks(50) {
-        hits.record(chunk, 100, 1_000_000, NOW, |_| false);
+        ping(&mut hits, chunk, |_| false);
     }
-    hits.record(&[ev("n0", 2)], 100, 1_000_000, NOW, |_| false);
+    ping(&mut hits, &[ev("n0", 2)], |_| false);
     assert!(!hits.is_lossy());
     hits.adopt_snapshot(NOW, |n| n == "n0");
     assert_eq!(counts(&hits), vec![pair("n0", 2)]);
@@ -250,7 +322,7 @@ fn the_main_map_is_bounded_and_overflow_is_a_gap() {
         .collect();
     for chunk in names.chunks(100) {
         let events: Vec<Event> = chunk.iter().map(|n| ev(n, 1)).collect();
-        hits.record(&events, 100, 1_000_000, NOW, |_| true);
+        ping(&mut hits, &events, |_| true);
     }
     assert_eq!(hits.wire_hits().len(), MAX_TRACKED_RULES);
     assert!(hits.is_lossy());
@@ -385,4 +457,17 @@ fn live_and_restored_counts_together_stay_within_the_saved_limit() {
             "{name}: the live counts go first"
         );
     }
+}
+
+#[test]
+fn a_hit_time_too_far_ahead_is_taken_as_now() {
+    // One daemon event with a wild `unixnano` must not make every later
+    // save fail the file's own check.
+    let mut hits = RuleHits::default();
+    let far = (NOW + 2 * MAX_FUTURE_SKEW_MS) * 1_000_000;
+    let near = (NOW + MAX_FUTURE_SKEW_MS / 2) * 1_000_000;
+    rec(&mut hits, &[ev("a", far), ev("b", near)], &["a", "b"]);
+    let wire = hits.wire_hits();
+    assert_eq!(wire[0].last_hit_unix_ms, NOW, "far ahead");
+    assert_eq!(wire[1].last_hit_unix_ms, NOW + MAX_FUTURE_SKEW_MS / 2);
 }

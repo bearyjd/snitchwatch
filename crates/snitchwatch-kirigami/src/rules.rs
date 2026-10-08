@@ -4,6 +4,9 @@
 //!   unit-tested here.
 //! - [`all_apps`]: flags pre-#50 Snitchwatch prompt rules that match every
 //!   program (issue #44, second half).
+//! - [`io`] and [`io_view`]: rule import/export (roadmap P2.7) without Qt:
+//!   the bounded file read, the owner-only export write, and the preview
+//!   rows and texts. `crate::rules_io_controller` binds them to QML.
 //! - [`simulator`]: pure, Qt-free rule-match simulator (Little-Snitch-parity
 //!   "rule-match diagnostics" simulate panel) — evaluates a candidate
 //!   connection against `row_store`'s cached rules the way opensnitchd
@@ -21,5 +24,13 @@
 pub mod all_apps;
 pub mod hits;
 pub mod insights;
+pub mod io;
+pub mod io_view;
 pub mod row_store;
 pub mod simulator;
+
+#[cfg(test)]
+mod io_tests;
+
+#[cfg(test)]
+mod io_view_tests;

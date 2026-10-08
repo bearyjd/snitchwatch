@@ -1,0 +1,14 @@
+{
+  "format": "snitchwatch.rules",
+  "version": 1,
+  "rules": [
+    { "name": "z00-blocklist:ads:domains", "enabled": true, "action": "allow", "duration": "always",
+      "operator": { "type": "simple", "operand": "dest.host", "data": "ads.example" } },
+    { "name": "900-blocklist:ads:domains", "enabled": true, "action": "allow", "duration": "always",
+      "operator": { "type": "simple", "operand": "dest.host", "data": "ads.example" } },
+    { "name": "snitchwatch-default-steam", "enabled": true, "action": "allow", "duration": "always",
+      "operator": { "type": "simple", "operand": "dest.host", "data": "steam.example" } },
+    { "name": "../default-config", "enabled": true, "action": "allow", "duration": "always",
+      "operator": { "type": "simple", "operand": "dest.host", "data": "x.example" } }
+  ]
+}

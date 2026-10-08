@@ -1,5 +1,4 @@
 use super::*;
-use crate::cache::rules::RulesCache;
 use crate::ws_messages::ServerMessage;
 use snitchwatch_proto::protocol::{Action, Operator, Rule};
 use tokio::sync::broadcast;
@@ -78,10 +77,12 @@ fn waiter_count(commands: &DaemonCommands) -> usize {
 }
 
 fn cached_names(rules: &RulesSync) -> Option<Vec<String>> {
-    match &*rules.cache().lock().unwrap() {
-        RulesCache::Unknown => None,
-        RulesCache::Synced(cached) => Some(cached.keys().cloned().collect()),
-    }
+    rules
+        .cache()
+        .lock()
+        .unwrap()
+        .rules()
+        .map(|cached| cached.keys().cloned().collect())
 }
 
 /// Names in the next `SetRules` broadcast, if there is one.

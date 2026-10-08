@@ -1,24 +1,27 @@
 //! The saved hit counts: one small JSON file in the bridge's state
 //! directory (owner question N1: counts survive a bridge restart).
 //!
-//! Chosen over a SQLite store because it is one file with no schema, and the
-//! hardened open/replace is short enough to audit: PR #90's shared
-//! `sqlite_file::open_owner_only` is not on this branch's base, and nothing
-//! here needs queries.
+//! Chosen over a SQLite store because it is one file with no schema and
+//! nothing here needs queries. The file checks are the stores' own
+//! ([`crate::sqlite_file::file_problem`], #90) plus the mode and size.
 //!
 //! **Reading** opens the file `O_NOFOLLOW | O_NONBLOCK` (a planted link or
 //! FIFO can neither redirect nor hang the bridge), then checks the opened
-//! file itself: a regular file, owned by the bridge's user, not writable by
-//! group or others, at most [`MAX_FILE_BYTES`]. The text must parse as the
-//! current version and pass [`validate`]. Anything else is an error, and the
-//! caller keeps the counts in memory and leaves the file alone.
+//! file itself: a regular file, owned by the bridge's user, with no other
+//! hard link, not writable by group or others, at most [`MAX_FILE_BYTES`].
+//! The text must parse as the current version and pass [`validate`].
+//! Anything else is an error, and the caller keeps the counts in memory and
+//! leaves the file alone.
 //!
-//! **Writing** removes any stale temp file (`remove_file` never follows a
-//! link), creates a new one `O_CREAT | O_EXCL | O_NOFOLLOW` with mode 0600,
+//! **Writing** creates a temp file of its own (named for the process and a
+//! random number, so two bridges on one state directory never share or
+//! delete each other's) `O_CREAT | O_EXCL | O_NOFOLLOW` with mode 0600,
 //! syncs it, renames it over the old file and syncs the directory, so a crash
-//! leaves the old file or the new one. The same [`validate`] that guards
-//! reading guards writing, and the entry and name limits bound the size
-//! (see [`MAX_FILE_BYTES`]): everything `save` writes, `load` accepts.
+//! leaves the old file or the new one (and, between the create and the
+//! rename, a stray temp file nothing reads). The same [`validate`] that
+//! guards reading guards writing, and the entry, name and time limits bound
+//! the size (see [`MAX_FILE_BYTES`]): everything `save` writes, `load`
+//! accepts.
 
 use std::collections::HashSet;
 use std::fs;
@@ -28,12 +31,13 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::cache::rule_hits::{keepable_name, Saved, MAX_TRACKED_RULES};
+use crate::cache::rule_hits::{keepable_name, Saved, MAX_FUTURE_SKEW_MS, MAX_TRACKED_RULES};
+use crate::sqlite_file::{file_problem, FileFacts};
 use crate::ws_messages::RuleHitWire;
 
 /// The largest file read or written. At the limits (10 000 entries, names of
 /// 256 bytes, every byte a quote or backslash that JSON doubles, maximal
-/// numbers) a file is about 6.3 MB.
+/// counts) a file is about 6 MB.
 pub const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
 const FILE_MODE: u32 = 0o600;
 const VERSION: u32 = 1;
@@ -53,6 +57,7 @@ struct FileFormat {
 struct Facts {
     is_file: bool,
     uid: u32,
+    links: u64,
     mode: u32,
     len: u64,
 }
@@ -76,6 +81,7 @@ pub fn load(path: &Path) -> io::Result<Option<Saved>> {
     let facts = Facts {
         is_file: meta.is_file(),
         uid: meta.uid(),
+        links: meta.nlink(),
         mode: meta.mode(),
         len: meta.len(),
     };
@@ -87,7 +93,7 @@ pub fn load(path: &Path) -> io::Result<Option<Saved>> {
     }
     let format: FileFormat = serde_json::from_slice(&bytes)
         .map_err(|e| invalid(format!("couldn't parse the file: {e}")))?;
-    validate(&format)?;
+    validate(&format, now_ms())?;
     Ok(Some(Saved {
         since_unix_ms: format.since_unix_ms,
         last_gap_unix_ms: format.last_gap_unix_ms,
@@ -103,7 +109,7 @@ pub fn save(path: &Path, saved: &Saved) -> io::Result<()> {
         last_gap_unix_ms: saved.last_gap_unix_ms,
         hits: saved.hits.clone(),
     };
-    validate(&format)?;
+    validate(&format, now_ms())?;
     let bytes = serde_json::to_vec(&format)?;
     if bytes.len() as u64 > MAX_FILE_BYTES {
         return Err(invalid("the counts are too large to save"));
@@ -114,10 +120,6 @@ pub fn save(path: &Path, saved: &Saved) -> io::Result<()> {
         _ => {}
     }
     let temp = temp_path(path);
-    match fs::remove_file(&temp) {
-        Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
-        _ => {}
-    }
     let mut file = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -147,17 +149,22 @@ pub fn save(path: &Path, saved: &Saved) -> io::Result<()> {
         .sync_all()
 }
 
+/// A temp file name no other save uses: this process's id and a random
+/// number.
 fn temp_path(path: &Path) -> PathBuf {
     let name = path.file_name().unwrap_or_default().to_string_lossy();
-    path.with_file_name(format!(".{name}.tmp"))
+    let unique = rand::random::<u64>();
+    path.with_file_name(format!(".{name}.{}.{unique:016x}.tmp", std::process::id()))
 }
 
 fn check_facts(facts: &Facts, euid: u32) -> io::Result<()> {
-    if !facts.is_file {
-        return Err(invalid("the file is not a regular file"));
-    }
-    if facts.uid != euid {
-        return Err(invalid("the file is not owned by this user"));
+    let file = FileFacts {
+        regular: facts.is_file,
+        uid: facts.uid,
+        links: facts.links,
+    };
+    if let Some(why) = file_problem(&file, euid) {
+        return Err(invalid(format!("the file {why}")));
     }
     if facts.mode & 0o022 != 0 {
         return Err(invalid("the file is writable by other users"));
@@ -168,12 +175,23 @@ fn check_facts(facts: &Facts, euid: u32) -> io::Result<()> {
     Ok(())
 }
 
-fn validate(format: &FileFormat) -> io::Result<()> {
+/// Whether a time is one this bridge could have recorded by `now_ms`.
+fn plausible_time(unix_ms: i64, now_ms: i64) -> bool {
+    (0..=now_ms.saturating_add(MAX_FUTURE_SKEW_MS)).contains(&unix_ms)
+}
+
+fn validate(format: &FileFormat, now_ms: i64) -> io::Result<()> {
     if format.version != VERSION {
         return Err(invalid(format!("unsupported version {}", format.version)));
     }
-    if format.since_unix_ms < 0 {
+    if !plausible_time(format.since_unix_ms, now_ms) {
         return Err(invalid("bad start time"));
+    }
+    if format
+        .last_gap_unix_ms
+        .is_some_and(|gap| !plausible_time(gap, now_ms))
+    {
+        return Err(invalid("bad time of the last gap"));
     }
     if format.hits.len() > MAX_TRACKED_RULES {
         return Err(invalid(format!(
@@ -189,6 +207,9 @@ fn validate(format: &FileFormat) -> io::Result<()> {
         if !seen.insert(hit.name.as_str()) {
             return Err(invalid(format!("lists the rule {:?} twice", hit.name)));
         }
+        if !plausible_time(hit.last_hit_unix_ms, now_ms) {
+            return Err(invalid(format!("bad last hit time for {:?}", hit.name)));
+        }
     }
     Ok(())
 }
@@ -197,6 +218,13 @@ fn effective_uid() -> u32 {
     // SAFETY: geteuid takes no arguments, touches no memory and always
     // succeeds.
     unsafe { libc::geteuid() }
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
+        .unwrap_or(0)
 }
 
 #[cfg(test)]

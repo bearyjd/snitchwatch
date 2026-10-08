@@ -1,0 +1,163 @@
+//! Profile layers on top of [`super::validate_operator`] for rules that come
+//! from outside the bridge as whole rules, not as edits of a daemon rule.
+//!
+//! [`validate_user_rule`] runs `validate_operator` first (pairing, list
+//! shape, `lists.*`, regexps, CIDRs, hash-only shapes) and, only for a shape
+//! it accepts, the profile's own checks. The `Import` profile (rule
+//! import, roadmap P2.7) treats every rule as untrusted file content.
+//!
+//! Every reason is fixed text: neither a reason nor a path ever echoes the
+//! rule's name, operand or data (the `rule_name.rs` pattern). Paths are built
+//! from field names and list indices only, e.g. `operator.list[1].data`.
+
+use serde::{Deserialize, Serialize};
+use snitchwatch_proto::protocol::{Operator, Rule};
+
+/// Which caller a rule comes from; each adds its own checks on top of
+/// `validate_operator`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PolicyProfile {
+    /// A rule read from an import file.
+    Import,
+}
+
+/// One reason a rule is refused. `reason` is always fixed text (or
+/// `validate_operator`'s, which is fixed text plus counts and indices).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuleProblem {
+    pub path: String,
+    pub reason: String,
+}
+
+pub const NO_CONDITIONS: &str = "the rule has no conditions";
+pub const BLOCKLIST_NAME_REFUSED: &str = "names starting with z00-blocklist: or 900-blocklist: \
+     belong to Snitchwatch's blocklist rules";
+pub const CURATED_NAME_REFUSED: &str =
+    "names starting with snitchwatch-default- belong to Snitchwatch's own default rules";
+/// Rules Snitchwatch ships ready-made (`rule_name::PACKAGED_RULE_NAME_PREFIX`).
+pub const PACKAGED_NAME_REFUSED: &str =
+    "names starting with 000-snitchwatch- belong to rules Snitchwatch ships";
+pub const ACTION_REFUSED: &str = "the action must be allow, deny or reject";
+pub const DURATION_REFUSED: &str = "only rules that last always or until the firewall restarts \
+     can be imported; once and timed rules can't";
+pub const TOO_LARGE: &str = "a field is over 16 KiB, or the conditions nest too deeply";
+pub const HASH_REFUSED: &str = "process hash conditions can't be imported: the firewall service \
+     treats them as matching every program while it doesn't compute checksums";
+pub const MATCHES_EVERYTHING: &str = "this rule matches every connection: none of its \
+     conditions narrows it (\"true\", a /0 network, or a pattern that matches everything); it \
+     can't be imported";
+pub const EMPTY_VALUE_REFUSED: &str =
+    "an empty value matches far more than it looks; only a host name may be empty";
+pub const PORT_REFUSED: &str = "a port must be a whole number from 0 to 65535";
+pub const ID_REFUSED: &str = "a process or user ID must be a whole number";
+
+/// Check a whole rule for `profile`. Returns every problem found.
+pub fn validate_user_rule(rule: &Rule, profile: PolicyProfile) -> Result<(), Vec<RuleProblem>> {
+    let mut problems = Vec::new();
+    match profile {
+        PolicyProfile::Import => check_import(rule, &mut problems),
+    }
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(problems)
+    }
+}
+
+fn problem(problems: &mut Vec<RuleProblem>, path: &str, reason: impl Into<String>) {
+    problems.push(RuleProblem {
+        path: path.to_string(),
+        reason: reason.into(),
+    });
+}
+
+fn check_import(rule: &Rule, problems: &mut Vec<RuleProblem>) {
+    match &rule.operator {
+        None => problem(problems, "operator", NO_CONDITIONS),
+        Some(op) => match super::validate_operator(op) {
+            Err(reason) => problem(problems, "operator", reason),
+            Ok(()) => check_import_operator(op, problems),
+        },
+    }
+    if let Err(reason) = crate::rule_name::validate_rule_name(&rule.name) {
+        problem(problems, "name", reason);
+    }
+    if crate::rule_name::is_reserved_blocklist_name(&rule.name) {
+        problem(problems, "name", BLOCKLIST_NAME_REFUSED);
+    }
+    if rule
+        .name
+        .starts_with(crate::rule_name::CURATED_DEFAULT_RULE_NAME_PREFIX)
+    {
+        problem(problems, "name", CURATED_NAME_REFUSED);
+    }
+    if crate::rule_name::is_reserved_packaged_name(&rule.name) {
+        problem(problems, "name", PACKAGED_NAME_REFUSED);
+    }
+    if !matches!(rule.action.as_str(), "allow" | "deny" | "reject") {
+        problem(problems, "action", ACTION_REFUSED);
+    }
+    if !matches!(rule.duration.as_str(), "always" | "until restart") {
+        problem(problems, "duration", DURATION_REFUSED);
+    }
+    if !crate::cache::rules::within_limits(rule) {
+        problem(problems, "rule", TOO_LARGE);
+    }
+}
+
+/// The import checks for an operator `validate_operator` accepted: a leaf,
+/// or one list of leaves.
+fn check_import_operator(op: &Operator, problems: &mut Vec<RuleProblem>) {
+    let leaves: Vec<(String, &Operator)> = if op.r#type == "list" {
+        op.list
+            .iter()
+            .enumerate()
+            .map(|(index, member)| (format!("operator.list[{index}]"), member))
+            .collect()
+    } else {
+        vec![("operator".to_string(), op)]
+    };
+    // Members are ANDed: a list narrows as soon as one member does.
+    if !leaves
+        .iter()
+        .any(|(_, leaf)| super::narrowing::narrows(leaf))
+    {
+        problem(problems, "operator", MATCHES_EVERYTHING);
+    }
+    for (path, leaf) in leaves {
+        check_import_leaf(&path, leaf, problems);
+    }
+}
+
+fn check_import_leaf(path: &str, leaf: &Operator, problems: &mut Vec<RuleProblem>) {
+    if leaf.operand.starts_with("process.hash.") {
+        problem(problems, &format!("{path}.operand"), HASH_REFUSED);
+    }
+    // Only `simple` compares the data as a value; a `regexp` is a pattern.
+    if leaf.r#type != "simple" {
+        return;
+    }
+    let data_path = format!("{path}.data");
+    // `simpleCmp` is `EqualFold`: an empty value matches every subject that
+    // lacks the field (an unset variable, say). Only an empty host name
+    // means something narrow (a connection with no host name).
+    if leaf.data.is_empty() && !matches!(leaf.operand.as_str(), "true" | "dest.host") {
+        problem(problems, &data_path, EMPTY_VALUE_REFUSED);
+        return;
+    }
+    match leaf.operand.as_str() {
+        "source.port" | "dest.port" if !is_decimal::<u16>(&leaf.data) => {
+            problem(problems, &data_path, PORT_REFUSED)
+        }
+        "process.id" | "user.id" if !is_decimal::<u32>(&leaf.data) => {
+            problem(problems, &data_path, ID_REFUSED)
+        }
+        _ => {}
+    }
+}
+
+/// Digits only (no sign, no `0x`), and within `T`'s range.
+fn is_decimal<T: std::str::FromStr>(data: &str) -> bool {
+    !data.is_empty() && data.bytes().all(|b| b.is_ascii_digit()) && data.parse::<T>().is_ok()
+}

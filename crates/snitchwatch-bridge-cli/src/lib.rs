@@ -18,6 +18,7 @@ pub mod activation;
 pub mod cli;
 pub mod profile_storage;
 pub mod rule_hits_storage;
+mod rules_import;
 pub mod storage;
 
 pub use storage::{
@@ -538,10 +539,17 @@ where
     let daemon_commands = ui_service_inner.daemon_commands();
     let daemon_stream_ready = daemon_commands.stream_ready();
     let rules = ui_service_inner.rules_handle();
+    // Rule import/export (roadmap P2.7): its own task; the pump only routes.
+    let rules_import = rules_import::RulesImport::spawn(
+        daemon_commands.clone(),
+        rules.clone(),
+        broadcast_tx.clone(),
+    );
     tokio::spawn(prune_expired_rules_every(
         RULE_EXPIRY_TICK,
         Arc::downgrade(&rules),
         broadcast_tx.clone(),
+        ui_service_inner.rule_hits_handle(),
     ));
 
     // Diagnostics: combines daemon-reachability (`liveness`), opensnitchd's
@@ -666,6 +674,9 @@ where
             let Some(msg) = blocklist_worker.try_route(msg) else {
                 continue;
             };
+            let Some(msg) = rules_import.try_route(msg) else {
+                continue;
+            };
             // Special-cased before is_profile_message/upstream::apply — this
             // changes the shared filter pause + tray state, not cache state
             // those own. See docs/superpowers/plans/2026-07-12-tray-filter-off.md.
@@ -686,6 +697,14 @@ where
                     sender_generation,
                     sender_uid,
                 );
+                // A pause also lets the prompts already waiting through,
+                // Allow once (issue #78). A no-op unless a pause applies.
+                snitchwatch_bridge::pause_answers::answer_waiting(
+                    &filter_pause_for_pump,
+                    &cache_for_upstream,
+                    &snapshot_tx,
+                )
+                .await;
                 // Always, even for an ignored or rejected request, so every
                 // GUI and the tray show the state that is actually in effect.
                 announce_pause_state(&filter_pause_for_pump, &cache_for_upstream, &snapshot_tx)
@@ -1496,6 +1515,7 @@ mod tests {
             bytes_received: 5678,
             started_at_ms: 0,
             matched_rule: None,
+            auto_answer: None,
         };
         bridge
             .broadcast_tx

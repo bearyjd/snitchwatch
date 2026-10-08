@@ -1,0 +1,16 @@
+{
+  "format": "snitchwatch.rules",
+  "version": 1,
+  "rules": [
+    { "name": "100-everything", "enabled": true, "action": "allow", "duration": "always",
+      "operator": { "type": "simple", "operand": "true", "data": "" } },
+    { "name": "101-hash", "enabled": true, "action": "allow", "duration": "always",
+      "operator": { "type": "list", "operands": [
+        { "type": "simple", "operand": "process.path", "data": "/usr/bin/curl" },
+        { "type": "simple", "operand": "process.hash.md5", "data": "d41d8cd98f00b204e9800998ecf8427e" } ] } },
+    { "name": "102-empty-list", "enabled": true, "action": "allow", "duration": "always",
+      "operator": { "type": "list", "operands": [] } },
+    { "name": "103-alias", "enabled": true, "action": "allow", "duration": "always",
+      "operator": { "type": "network", "operand": "dest.network", "data": "LAN" } }
+  ]
+}

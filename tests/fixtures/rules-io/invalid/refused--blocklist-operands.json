@@ -1,0 +1,12 @@
+{
+  "format": "snitchwatch.rules",
+  "version": 1,
+  "rules": [
+    { "name": "100-lists", "enabled": true, "action": "deny", "duration": "always",
+      "operator": { "type": "lists", "operand": "lists.domains", "data": "/etc/passwd-dir" } },
+    { "name": "101-nested-lists", "enabled": true, "action": "deny", "duration": "always",
+      "operator": { "type": "list", "operands": [
+        { "type": "simple", "operand": "process.path", "data": "/usr/bin/curl" },
+        { "type": "lists", "operand": "lists.nets", "data": "/var/lib/x" } ] } }
+  ]
+}

@@ -146,6 +146,7 @@ fn sysusers_and_stager_keep_enrollment_and_install_offline() {
         "usr/lib/systemd/system/snitchwatch-system-bridge.service",
         "usr/lib/tmpfiles.d/snitchwatch.conf",
         "usr/lib/sysusers.d/snitchwatch.conf",
+        "etc/opensnitchd/rules/$fetch_rule",
     ] {
         assert!(stage.contains(expected), "stage.sh missing {expected}");
     }
@@ -218,6 +219,18 @@ fn stager_accepts_a_canonical_nonroot_destination_and_only_stages_files() {
         .is_file());
     assert!(root.join("usr/lib/tmpfiles.d/snitchwatch.conf").is_file());
     assert!(root.join("usr/lib/sysusers.d/snitchwatch.conf").is_file());
+
+    // The packaged fetch rule: the bluebuild image's exact bytes, 0644.
+    let rule_path = "etc/opensnitchd/rules/000-snitchwatch-bridge-fetch.json";
+    let staged = root.join(rule_path);
+    assert_eq!(
+        std::fs::metadata(&staged).unwrap().permissions().mode() & 0o7777,
+        0o644
+    );
+    assert_eq!(
+        std::fs::read_to_string(&staged).unwrap(),
+        file(&format!("packaging/bluebuild/files/system/{rule_path}"))
+    );
 }
 
 #[test]

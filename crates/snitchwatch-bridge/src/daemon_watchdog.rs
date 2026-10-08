@@ -151,6 +151,7 @@ mod tests {
             bytes_received: 0,
             started_at_ms: 0,
             matched_rule: None,
+            auto_answer: None,
         };
         let _verdict_rx = cache.lock().await.insert_pending(row);
         rx.changed().await.unwrap();
@@ -234,6 +235,7 @@ mod tests {
             bytes_received: 0,
             started_at_ms: 0,
             matched_rule: None,
+            auto_answer: None,
         };
         let _verdict_rx = cache.lock().await.insert_pending(row);
         // The insert republished; mark that version seen before waiting.

@@ -117,7 +117,7 @@ the editor or import: list rules stay authored by #45's materializer only.
 | Module | Created by | Also used by |
 |---|---|---|
 | `crates/snitchwatch-bridge/src/rule_policy.rs` `validate_operator` (type↔operand pairing, `list` shape/nesting, `lists.*` refusal) | **the security PR** (`fix/rule-operator-validation`), applied in `rule_from_wire` | P2.7 (`validate_user_rule`, `Import` profile), P2.1 (`Editor` profile), prompt-slot D, #46 Part 2, Kirigami editor (via the `snitchwatch-bridge` dependency) |
-| `crates/snitchwatch-bridge/src/daemon_config.rs` (`DefaultAction`, `Stats.MaxEvents`, `Rules.EnableChecksums` from `ClientConfig.config`) | whichever of **prompt-slot C / P2.6 Part 1** lands first | the editor and simulator (hash warnings) |
+| `crates/snitchwatch-bridge/src/daemon_config.rs` (`DefaultAction`, `Stats.MaxEvents`, `Rules.EnableChecksums` from `ClientConfig.config`) | **prompt-slot C** (P2.6 Part 1 as built reads no config: its gaps come from the daemon's `rule_hits` counter, see `2026-10-08-rule-insights.md`) | the editor and simulator (hash warnings) |
 | `RulesCache` revision counter (bumped in every mutating `RulesCache` method, so `prune_expired_rules_every`'s direct prune counts too) | P2.7 | P2.1 (stale edit checks, optional) |
 | `bindable_process_path(&Connection)` and its `&str` form `is_bindable_process_path` (bridge), plus the `bindableProcessPath` role (Kirigami) | #44 Part A | inline Deny (`&str` form), prompt-slot C (P-c fallback), editor prefill |
 | `applies_to_all_apps` predicate | #44 Part B (Kirigami `rules/row_store.rs`) | P2.7 preview flag, P2.1 warning (generalised to "no `process.*` operand at any depth") |
@@ -143,7 +143,7 @@ Abbreviations:
 | `notice.rs`, tauri `notifier.rs`, kirigami `notifier.rs` / `notification_controller.rs` | ✓ `VerdictNotRemembered` | | ✓ `PromptSlotSummary`, actions | | | |
 | `grpc_server.rs` `ask_rule` | ✓ | | ✓ slot hold, timeout arm | | | |
 | `grpc_server.rs` `ping` | | | ✓ `rule_misses` | | ✓ `RuleHits::record` | |
-| `grpc_server.rs` `subscribe` | | | ✓ `daemon_config` | | ✓ `daemon_config` | |
+| `grpc_server.rs` `subscribe` | | | ✓ `daemon_config` | | | |
 | bridge-cli `lib.rs` `run_with_incoming` inbound pump, rule-effect arm | | | ✓ D reconcile | ✓ new arms, import task | | ✓ policy, `request_id`, rename |
 | bridge-cli `lib.rs` `SnapshotRequested` arm | | | ✓ `PromptSlot` | | ✓ `RuleHits` | |
 | `ws_messages.rs` | ✓ | | ✓ | ✓ | ✓ | ✓ |

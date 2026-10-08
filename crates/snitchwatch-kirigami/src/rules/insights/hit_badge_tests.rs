@@ -247,3 +247,13 @@ fn no_counts_from_the_bridge_means_no_badge() {
 fn the_window_is_fourteen_days() {
     assert_eq!(W, 14 * DAY);
 }
+
+/// The bridge can't count a rule whose name is too long or has control
+/// characters, so its zero says nothing: no badge at all.
+#[test]
+fn a_rule_the_bridge_cannot_count_is_never_unused() {
+    for name in ["x".repeat(300), "bad\u{1}name".to_string()] {
+        let rule = aged(&name, 20);
+        assert_eq!(badge(&rule, &Counts::healthy()), None, "{name:?}");
+    }
+}

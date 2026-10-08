@@ -4,6 +4,8 @@
 //!   counting has started;
 //! - a rule that doesn't log is "not counted", never "0", and a rule that was
 //!   counted without a hit says "No hits since <time>" (Part 2 adds "Unused");
+//! - so is a rule whose name the bridge can't count (over 256 bytes);
+//! - a count past a QML `int` is shown as it is, not capped;
 //! - the header says since when the counts run and that they are approximate,
 //!   says so when hits may be missing and since when, and says when they
 //!   aren't saved across restarts (with the bridge's reason);
@@ -128,11 +130,13 @@ Window {
                     probeWindow.rule("a"),
                     probeWindow.rule("b"),
                     probeWindow.rule("quiet", true),
-                    probeWindow.rule("once")
+                    probeWindow.rule("once"),
+                    probeWindow.rule("big"),
+                    probeWindow.rule("x".repeat(257))
                 ]);
 
                 // Nothing yet: no label on any row, no header.
-                for (let i = 0; i < 4; i++) {
+                for (let i = 0; i < 6; i++) {
                     probeWindow.check(probeWindow.rowText(i) === "",
                                       "row " + i + " shows '" + probeWindow.rowText(i)
                                       + "' before any counts");
@@ -151,7 +155,8 @@ Window {
                 probeWindow.hits(T, false, null, true, "", [
                     { name: "a", count: 3, lastHitUnixMs: T + 5000 },
                     { name: "quiet", count: 9, lastHitUnixMs: T + 6000 },
-                    { name: "b", count: 1, lastHitUnixMs: T + 7000 }
+                    { name: "b", count: 1, lastHitUnixMs: T + 7000 },
+                    { name: "big", count: 3000000000, lastHitUnixMs: T + 9000 }
                 ]);
                 const a = probeWindow.rowText(0);
                 probeWindow.check(a.startsWith("3 hits, last "), "row a: '" + a + "'");
@@ -163,6 +168,11 @@ Window {
                 // counting began (rules_insights_qml.rs covers the badges).
                 probeWindow.check(probeWindow.rowText(3).startsWith("No hits since "),
                                   "zero row: '" + probeWindow.rowText(3) + "'");
+                probeWindow.check(probeWindow.rowText(4).startsWith("3000000000 hits, last "),
+                                  "big row: '" + probeWindow.rowText(4) + "'");
+                probeWindow.check(probeWindow.rowText(5) ===
+                    "Not counted: this rule's name is too long or has control characters",
+                    "long-name row: '" + probeWindow.rowText(5) + "'");
                 const summary = probeWindow.headerLabel("hitsSummary");
                 probeWindow.check(summary.startsWith("Hits counted by Snitchwatch since ")
                                   && summary.endsWith("; approximate.")

@@ -1,16 +1,23 @@
 use super::*;
-use crate::cache::rule_hits::MAX_HIT_NAME_BYTES;
+use crate::cache::rule_hits::{MAX_FUTURE_SKEW_MS, MAX_HIT_NAME_BYTES};
 use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
+
+fn now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64
+}
 
 fn saved(n: usize) -> Saved {
     Saved {
-        since_unix_ms: 1_800_000_000_000,
-        last_gap_unix_ms: Some(1_800_000_100_000),
+        since_unix_ms: 1_700_000_000_000,
+        last_gap_unix_ms: Some(1_700_000_100_000),
         hits: (0..n)
             .map(|i| RuleHitWire {
                 name: format!("rule-{i}"),
                 count: i as u64 + 1,
-                last_hit_unix_ms: 1_800_000_050_000,
+                last_hit_unix_ms: 1_700_000_050_000,
             })
             .collect(),
     }
@@ -55,19 +62,59 @@ fn the_file_is_owner_only_and_leaves_no_temp_file_behind() {
 }
 
 #[test]
-fn a_stale_temp_file_from_a_crash_does_not_block_saving() {
+fn each_save_writes_its_own_temp_file_and_leaves_others_alone() {
     let dir = dir();
     let path = dir.path().join("rule_hits.json");
-    std::fs::write(temp_path(&path), b"half a write").unwrap();
-    save(&path, &saved(2)).unwrap();
-    assert_eq!(load(&path).unwrap(), Some(saved(2)));
-
-    // Even a planted link: it is removed, never followed.
+    assert_ne!(temp_path(&path), temp_path(&path), "unique per save");
+    // Another bridge's file (or a crash's leftover) under the old fixed
+    // name, and a planted link: neither is removed, followed or reused.
+    let leftover = dir.path().join(".rule_hits.json.tmp");
+    std::fs::write(&leftover, b"half a write").unwrap();
     let victim = dir.path().join("victim");
     std::fs::write(&victim, b"keep").unwrap();
-    symlink(&victim, temp_path(&path)).unwrap();
-    save(&path, &saved(1)).unwrap();
+    symlink(&victim, dir.path().join(".rule_hits.json.link.tmp")).unwrap();
+    save(&path, &saved(2)).unwrap();
+    assert_eq!(load(&path).unwrap(), Some(saved(2)));
+    assert_eq!(std::fs::read(&leftover).unwrap(), b"half a write");
     assert_eq!(std::fs::read(&victim).unwrap(), b"keep");
+}
+
+/// Two bridges on one state directory: neither deletes the other's temp
+/// file, so every save succeeds.
+#[test]
+fn concurrent_saves_to_one_file_all_succeed() {
+    let dir = dir();
+    let path = dir.path().join("rule_hits.json");
+    let savers: Vec<_> = (0..4)
+        .map(|n| {
+            let path = path.clone();
+            std::thread::spawn(move || {
+                for _ in 0..50 {
+                    save(&path, &saved(n + 1)).unwrap();
+                }
+            })
+        })
+        .collect();
+    for saver in savers {
+        saver.join().expect("a save failed");
+    }
+    assert!(load(&path).unwrap().is_some());
+    let names: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(names, vec![std::ffi::OsString::from("rule_hits.json")]);
+}
+
+#[test]
+fn a_file_with_another_hard_link_is_refused() {
+    // Through the other name, a write elsewhere would change what is read
+    // here (the same rule as `sqlite_file::file_problem`, #90).
+    let dir = dir();
+    let path = dir.path().join("rule_hits.json");
+    save(&path, &saved(1)).unwrap();
+    std::fs::hard_link(&path, dir.path().join("elsewhere")).unwrap();
+    assert!(invalid(load(&path)).contains("hard link"));
 }
 
 #[test]
@@ -116,10 +163,15 @@ fn a_file_of_another_user_or_a_special_file_fails_the_ownership_check() {
     let ok = Facts {
         is_file: true,
         uid: 7,
+        links: 1,
         mode: 0o600,
         len: 10,
     };
     assert!(check_facts(&ok, 7).is_ok());
+    assert!(
+        check_facts(&Facts { links: 2, ..ok }, 7).is_err(),
+        "another hard link"
+    );
     assert!(
         check_facts(&Facts { uid: 8, ..ok }, 7).is_err(),
         "someone else's"
@@ -174,6 +226,10 @@ fn what_cannot_be_trusted_is_refused() {
     };
     write(good);
     assert!(load(&path).unwrap().is_some());
+    // A clock a little ahead is fine.
+    let soon = now() + MAX_FUTURE_SKEW_MS / 2;
+    write(&good.replace("\"lastHitUnixMs\":2", &format!("\"lastHitUnixMs\":{soon}")));
+    assert!(load(&path).unwrap().is_some());
 
     let long = "x".repeat(MAX_HIT_NAME_BYTES + 1);
     let many: Vec<String> = (0..=MAX_TRACKED_RULES)
@@ -185,6 +241,38 @@ fn what_cannot_be_trusted_is_refused() {
         (good.replace("\"hits\"", "\"extra\":1,\"hits\""), "parse"),
         (
             good.replace("\"sinceUnixMs\":5", "\"sinceUnixMs\":-5"),
+            "start time",
+        ),
+        (
+            good.replace("\"lastHitUnixMs\":2", "\"lastHitUnixMs\":-1"),
+            "last hit",
+        ),
+        (
+            good.replace(
+                "\"lastHitUnixMs\":2",
+                &format!("\"lastHitUnixMs\":{}", now() + 2 * MAX_FUTURE_SKEW_MS),
+            ),
+            "last hit",
+        ),
+        (
+            good.replace("\"hits\"", "\"lastGapUnixMs\":-1,\"hits\""),
+            "gap",
+        ),
+        (
+            good.replace(
+                "\"hits\"",
+                &format!(
+                    "\"lastGapUnixMs\":{},\"hits\"",
+                    now() + 2 * MAX_FUTURE_SKEW_MS
+                ),
+            ),
+            "gap",
+        ),
+        (
+            good.replace(
+                "\"sinceUnixMs\":5",
+                &format!("\"sinceUnixMs\":{}", now() + 2 * MAX_FUTURE_SKEW_MS),
+            ),
             "start time",
         ),
         (good.replace("\"a\"", "\"\""), "name"),
@@ -227,13 +315,14 @@ fn the_largest_file_save_can_write_loads_back() {
             RuleHitWire {
                 name,
                 count: u64::MAX,
-                last_hit_unix_ms: i64::MAX,
+                // As many digits as any valid time has.
+                last_hit_unix_ms: now(),
             }
         })
         .collect();
     let biggest = Saved {
-        since_unix_ms: i64::MAX,
-        last_gap_unix_ms: Some(i64::MAX),
+        since_unix_ms: now(),
+        last_gap_unix_ms: Some(now()),
         hits,
     };
     save(&path, &biggest).unwrap();
@@ -250,5 +339,8 @@ fn a_save_that_would_not_load_back_is_an_error_not_a_silent_loss() {
     too_many.hits.truncate(1);
     too_many.hits[0].name = String::new();
     assert!(save(&path, &too_many).is_err());
+    too_many.hits[0].name = "a".into();
+    too_many.hits[0].last_hit_unix_ms = now() + 2 * MAX_FUTURE_SKEW_MS;
+    assert!(save(&path, &too_many).is_err(), "a time load would refuse");
     assert!(!path.exists());
 }

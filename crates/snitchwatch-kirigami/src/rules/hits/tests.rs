@@ -134,9 +134,36 @@ fn the_summary_carries_what_makes_the_counts_approximate() {
     assert_eq!(info["storageReason"], "state directory /x: gone");
 }
 
+/// The model's role is a `real`: a QML `int` would cap a count at
+/// 2 147 483 647 and show a wrong exact number above it.
 #[test]
-fn a_huge_count_is_clamped_for_the_model() {
-    assert_eq!(counted(u64::MAX, 1).count_for_model(), i32::MAX);
-    assert_eq!(counted(7, 1).count_for_model(), 7);
-    assert_eq!(RowHits::Unavailable.count_for_model(), 0);
+fn a_count_past_the_int_range_reaches_the_model_as_it_is() {
+    assert_eq!(counted(3_000_000_000, 1).count_for_model(), 3_000_000_000.0);
+    assert_eq!(counted(7, 1).count_for_model(), 7.0);
+    assert_eq!(RowHits::Unavailable.count_for_model(), 0.0);
+}
+
+/// The bridge never counts a name it can't keep (over 256 bytes, or with a
+/// control character), so "No hits counted" would be false there.
+#[test]
+fn a_rule_whose_name_the_bridge_cannot_count_is_not_counted() {
+    let mut view = RuleHitsView::default();
+    let long = "x".repeat(257);
+    view.apply(&hits_message(Some(1_000), &[]));
+    for name in [long.as_str(), "tab\there"] {
+        let shown = view.for_rule(&rule(name, false));
+        assert_eq!(shown, RowHits::NameNotCounted, "{name:?}");
+        assert_eq!(shown.count_for_model(), 0.0);
+    }
+    assert_eq!(
+        RowHits::NameNotCounted.note(),
+        "Not counted: this rule's name is too long or has control characters"
+    );
+    let fits = "x".repeat(256);
+    assert_eq!(view.for_rule(&rule(&fits, false)), counted(0, 0));
+    assert_eq!(
+        RuleHitsView::default().for_rule(&rule(&long, false)),
+        RowHits::Unavailable,
+        "nothing is claimed before counts arrive"
+    );
 }

@@ -27,9 +27,10 @@
 // connection, and the header says what those numbers are: Snitchwatch's own
 // tally of the daemon's per-ping events, since a time, approximate, and
 // possibly missing some. Nothing is shown until the bridge has sent counts
-// (an older bridge never does), a rule that doesn't log is "not counted"
-// rather than 0, and the header says when the counts don't survive a
-// restart. Every label is PlainText.
+// (an older bridge never does), a rule that doesn't log, or whose name the
+// bridge can't count, is "not counted" rather than 0, the count is a `real`
+// (a QML int stops at 2^31 - 1), and the header says when the counts don't
+// survive a restart. Every label is PlainText.
 //
 // Rule insights (P2.6 Part 2): a zero-count rule gets a badge. "Unused" is
 // claimed only when the counts are saved across restarts, counting and the
@@ -49,7 +50,15 @@
 // is flagged with what deleting it changes and its own Delete button — one
 // click, one rule. Deliberately no bulk delete: removing a deny can unblock
 // traffic, so every deletion stays a deliberate, per-row choice.
+//
+// Rule import/export (roadmap P2.7): "Export…" saves the firewall's user
+// rules through a file dialog; "Import…" reads a rules file and opens
+// `RulesImportSheet` with the bridge's dry-run preview. The GUI reads and
+// writes the files; the bridge checks every rule. Import never deletes.
+// The buttons stay enabled while the list is empty: the bridge says when
+// the firewall's rules haven't loaded (its answer shows below the title).
 import QtQuick
+import QtQuick.Dialogs
 import QtQuick.Layouts
 import QtQuick.Controls as Controls
 import org.kde.kirigami as Kirigami
@@ -83,6 +92,11 @@ Kirigami.ScrollablePage {
     property alias inspectorEnabledSwitch: inspectEnabledSwitch
     property alias inspectorDeleteButton: inspectDeleteButton
     property alias rulesList: list
+    property alias rulesIo: rulesIo
+    property alias importSheet: importSheet
+    readonly property bool showsAllAppsNotice: !!page.model && page.model.legacyHostOnlyCount > 0
+    // Not `ioStatus.visible`: a child of a hidden header always reads false.
+    readonly property bool showsIoStatus: rulesIo.statusText.length > 0 && !importSheet.visible
 
     function actionColor(action) {
         return action === "allow" ? Kirigami.Theme.positiveTextColor : Kirigami.Theme.negativeTextColor;
@@ -272,6 +286,20 @@ Kirigami.ScrollablePage {
             onClicked: page.model.analyze()
         }
         Controls.Button {
+            objectName: "exportRules"
+            text: "Export…"
+            icon.name: "document-export"
+            enabled: !rulesIo.busy
+            onClicked: rulesIo.requestExport()
+        }
+        Controls.Button {
+            objectName: "importRules"
+            text: "Import…"
+            icon.name: "document-import"
+            enabled: !rulesIo.busy && !rulesIo.applying
+            onClicked: importDialog.open()
+        }
+        Controls.Button {
             text: "Simulate"
             icon.name: "system-run"
             onClicked: simulateSheet.open()
@@ -280,16 +308,17 @@ Kirigami.ScrollablePage {
 
     // Issue #44: when some rules apply to every app. Fixed text; the
     // count sits in a PlainText label (InlineMessage can't render data).
-    // Below it, what the hit counts are (see the top of this file).
+    // Below it, what the hit counts are (see the top of this file), then the
+    // last import or export outcome.
     header: ColumnLayout {
-        visible: (!!page.model && page.model.legacyHostOnlyCount > 0)
+        visible: page.showsAllAppsNotice || page.showsIoStatus
             || hitsSummaryLabel.text.length > 0 || hitsStorageLabel.text.length > 0
             || analysisLabel.text.length > 0
         spacing: 0
 
         Kirigami.InlineMessage {
             Layout.fillWidth: true
-            visible: !!page.model && page.model.legacyHostOnlyCount > 0
+            visible: page.showsAllAppsNotice
             type: Kirigami.MessageType.Information
             text: "Some rules saved by earlier Snitchwatch versions apply to all apps, not only "
                 + "the app that asked. They are marked below, each with what deleting it changes."
@@ -298,7 +327,7 @@ Kirigami.ScrollablePage {
         // hand-written rules may apply to all apps too, so no "of N".
         Controls.Label {
             objectName: "allAppsCount"
-            visible: !!page.model && page.model.legacyHostOnlyCount > 0
+            visible: page.showsAllAppsNotice
             Layout.fillWidth: true
             Layout.margins: Kirigami.Units.smallSpacing
             textFormat: Text.PlainText
@@ -341,6 +370,17 @@ Kirigami.ScrollablePage {
             wrapMode: Text.Wrap
             font: Kirigami.Theme.smallFont
             text: page.analysisText(page.analysisInfo)
+        }
+        // The last export or import outcome (P2.7), plain text.
+        Controls.Label {
+            id: ioStatus
+            objectName: "rulesIoStatus"
+            visible: page.showsIoStatus
+            Layout.fillWidth: true
+            Layout.margins: Kirigami.Units.smallSpacing
+            textFormat: Text.PlainText
+            text: rulesIo.statusText
+            wrapMode: Text.Wrap
         }
     }
 
@@ -392,7 +432,7 @@ Kirigami.ScrollablePage {
             required property bool appliesToAllApps
             required property string allAppsHint
             required property bool hitsCounted
-            required property int hitCount
+            required property real hitCount
             required property real lastHitMs
             required property string hitsNote
             required property string hitBadgeKind
@@ -665,5 +705,39 @@ Kirigami.ScrollablePage {
     RuleSimulatorSheet {
         id: simulateSheet
         model: page.model
+    }
+
+    // Rule import/export (P2.7).
+    RulesIoController {
+        id: rulesIo
+        Component.onCompleted: startBridgeFeed()
+        onExportReady: exportDialog.open()
+    }
+    // Gives up on an answer that never comes (an older bridge).
+    Timer {
+        interval: 1000
+        repeat: true
+        running: rulesIo.busy
+        onTriggered: rulesIo.poll()
+    }
+    FileDialog {
+        id: exportDialog
+        title: "Export rules"
+        fileMode: FileDialog.SaveFile
+        defaultSuffix: "json"
+        nameFilters: ["Snitchwatch rules (*.json)"]
+        onAccepted: rulesIo.writeExport(selectedFile)
+        onRejected: rulesIo.exportCancelled()
+    }
+    FileDialog {
+        id: importDialog
+        title: "Import rules"
+        fileMode: FileDialog.OpenFile
+        nameFilters: ["Snitchwatch rules (*.json)"]
+        onAccepted: rulesIo.readImport(selectedFile)
+    }
+    RulesImportSheet {
+        id: importSheet
+        controller: rulesIo
     }
 }

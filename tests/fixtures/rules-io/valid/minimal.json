@@ -1,0 +1,13 @@
+{
+  "format": "snitchwatch.rules",
+  "version": 1,
+  "rules": [
+    {
+      "name": "100-deny-tracker",
+      "enabled": true,
+      "action": "deny",
+      "duration": "always",
+      "operator": { "type": "simple", "operand": "dest.host", "data": "tracker.example" }
+    }
+  ]
+}

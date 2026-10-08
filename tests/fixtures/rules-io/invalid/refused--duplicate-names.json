@@ -1,0 +1,10 @@
+{
+  "format": "snitchwatch.rules",
+  "version": 1,
+  "rules": [
+    { "name": "100-dup", "enabled": true, "action": "deny", "duration": "always",
+      "operator": { "type": "simple", "operand": "dest.host", "data": "a.example" } },
+    { "name": "100-dup", "enabled": true, "action": "allow", "duration": "always",
+      "operator": { "type": "simple", "operand": "dest.host", "data": "a.example" } }
+  ]
+}

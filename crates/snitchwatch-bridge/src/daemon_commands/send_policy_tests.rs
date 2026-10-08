@@ -6,7 +6,6 @@
 use super::*;
 use crate::blocklists::list_dir::{IdComponent, ListDir};
 use crate::blocklists::materializer::ListKind;
-use crate::cache::rules::RulesCache;
 use snitchwatch_proto::protocol::{Action, Operator, Rule};
 use std::path::Path;
 use tokio::sync::broadcast;
@@ -128,6 +127,30 @@ async fn a_blocklist_rule_name_is_refused_at_send_whatever_the_command() {
     assert!(rx.try_recv().is_err(), "nothing reached the daemon");
 }
 
+/// The rules Snitchwatch ships are never sent: an allow swapped for a deny,
+/// a temporary duration or a delete would all break list downloads.
+#[tokio::test]
+async fn a_packaged_rule_name_is_refused_at_send_whatever_the_command() {
+    let (commands, _rules) = fixture();
+    let (_stream, mut rx) = current_stream(&commands);
+    for name in [
+        crate::rule_name::PACKAGED_FETCH_RULE_NAME,
+        "000-snitchwatch-other",
+    ] {
+        assert_eq!(
+            commands.send(change(name, Some(host("x.example")))).err(),
+            Some(SendError::ReservedName),
+            "{name}"
+        );
+        assert_eq!(
+            commands.send(delete(name)).err(),
+            Some(SendError::ReservedName),
+            "{name}"
+        );
+    }
+    assert!(rx.try_recv().is_err(), "nothing reached the daemon");
+}
+
 #[tokio::test]
 async fn an_internal_blocklist_command_is_sent_and_its_ok_reaches_the_rules_cache() {
     let state = tempfile::tempdir().unwrap();
@@ -174,14 +197,32 @@ async fn an_internal_blocklist_command_is_sent_and_its_ok_reaches_the_rules_cach
         },
     );
     pending.wait(Duration::from_secs(5)).await.unwrap();
-    match &*rules.cache().lock().unwrap() {
-        RulesCache::Synced(cached) => {
+    match rules.cache().lock().unwrap().rules() {
+        Some(cached) => {
             assert!(cached.contains_key("z00-blocklist:ads-0123456789abcdef:domains"))
         }
-        RulesCache::Unknown => panic!("cache Unknown"),
+        None => panic!("cache Unknown"),
     }
 
     let delete = BlocklistCommand::delete("z00-blocklist:ads-0123456789abcdef:domains").unwrap();
     assert!(commands.send_blocklist(delete).is_ok());
     assert_eq!(rx.try_recv().unwrap().r#type, Action::DeleteRule as i32);
+}
+
+/// Curated default rules (`snitchwatch-default-`) are Snitchwatch's own:
+/// no GUI command and no import may add, change or delete one (P2.7 review).
+#[tokio::test]
+async fn a_curated_default_name_is_refused_at_send() {
+    let (commands, _rules) = fixture();
+    let (_stream, mut rx) = current_stream(&commands);
+    for notification in [
+        change("snitchwatch-default-steam", Some(host("steam.example"))),
+        delete("snitchwatch-default-steam"),
+    ] {
+        assert_eq!(
+            commands.send(notification).err(),
+            Some(SendError::ReservedName)
+        );
+    }
+    assert!(rx.try_recv().is_err(), "nothing reached the daemon");
 }
