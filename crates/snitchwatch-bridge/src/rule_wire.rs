@@ -257,34 +257,35 @@ mod tests {
         assert!(rule_from_wire(&wire(null_operands)).is_ok());
     }
 
-    /// The fetch rule the system image ships: listed, never reserved,
-    /// deletable. Once the daemon has compiled it, its `user.name` holds the
-    /// uid, so the GUI may not send it back (a toggle would break it).
+    /// The fetch rule the system image ships is listed in both forms the
+    /// daemon reports (on disk, and compiled with the uid in `user.name`),
+    /// read-only with fixed text, not deletable, and never sent back.
     #[test]
-    fn the_packaged_fetch_rule_is_listed_and_read_only_once_compiled() {
-        use test_helpers::{packaged_fetch_rule, PACKAGED_FETCH_RULE_NAME};
+    fn the_packaged_fetch_rule_is_listed_read_only_and_never_sent_back() {
+        use crate::rule_name::PACKAGED_FETCH_RULE_NAME;
+        use crate::translator::rule_notification::notification_for_effect;
+        use crate::translator::upstream::UpstreamEffect;
+        use test_helpers::packaged_fetch_rule;
 
-        let on_disk = packaged_fetch_rule(None);
-        let wire = rule_to_wire(&on_disk);
-        assert_eq!(wire["name"], PACKAGED_FETCH_RULE_NAME);
-        assert!(wire["readOnlyReason"].is_null(), "{wire}");
-        assert_eq!(wire["deletable"], true);
-        assert_eq!(wire["precedence"], false);
-        assert_eq!(wire["operator"]["operands"].as_array().unwrap().len(), 4);
-        let back = rule_from_wire(&wire).unwrap();
-        assert_eq!(rule_to_wire(&back), wire, "round trip");
-
-        let compiled = packaged_fetch_rule(Some("987"));
-        let wire = rule_to_wire(&compiled);
-        assert_eq!(
-            wire["readOnlyReason"],
-            crate::rule_policy::SHAPE_READ_ONLY_REASON
-        );
-        assert_eq!(wire["deletable"], true);
-        assert!(rule_from_wire(&wire).is_err(), "never sent back");
-        assert!(!crate::rule_name::is_reserved_blocklist_name(
-            PACKAGED_FETCH_RULE_NAME
-        ));
+        for uid in [None, Some("987")] {
+            let rule = packaged_fetch_rule(uid);
+            let wire = rule_to_wire(&rule);
+            assert_eq!(wire["name"], PACKAGED_FETCH_RULE_NAME);
+            assert_eq!(
+                wire["readOnlyReason"],
+                crate::rule_policy::PACKAGED_FETCH_RULE_REASON,
+                "{uid:?}"
+            );
+            assert_eq!(wire["deletable"], false, "{uid:?}");
+            assert_eq!(wire["precedence"], false);
+            assert_eq!(wire["operator"]["operands"].as_array().unwrap().len(), 4);
+            // A GUI echoing the row back (a toggle) is refused before the daemon.
+            let effect = UpstreamEffect::UpdateRule {
+                rule_id: PACKAGED_FETCH_RULE_NAME.to_string(),
+                rule: wire,
+            };
+            assert!(notification_for_effect(&effect, 1).is_err(), "{uid:?}");
+        }
         assert!(
             crate::daemon_commands::BlocklistCommand::delete(PACKAGED_FETCH_RULE_NAME).is_none()
         );
@@ -295,7 +296,7 @@ mod tests {
 pub mod test_helpers {
     use snitchwatch_proto::protocol::{Operator, Rule};
 
-    pub const PACKAGED_FETCH_RULE_NAME: &str = "000-snitchwatch-bridge-fetch";
+    pub use crate::rule_name::PACKAGED_FETCH_RULE_NAME;
 
     /// `packaging/bluebuild/files/system/etc/opensnitchd/rules/` — the rule
     /// Snitchwatch ships for the system bridge's blocklist downloads.

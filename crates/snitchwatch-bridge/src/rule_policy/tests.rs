@@ -526,6 +526,25 @@ fn a_user_name_holding_a_uid_is_refused_alone_and_in_a_list() {
     assert!(!refused(leaf("simple", "user.id", "987")));
 }
 
+/// The rules Snitchwatch ships are listed read-only with fixed text and
+/// can't be deleted, whatever their conditions.
+#[test]
+fn a_packaged_rule_is_read_only_with_fixed_text_and_not_deletable() {
+    use crate::rule_name::PACKAGED_FETCH_RULE_NAME;
+    for (name, reason) in [
+        (PACKAGED_FETCH_RULE_NAME, PACKAGED_FETCH_RULE_REASON),
+        ("000-snitchwatch-other", PACKAGED_RULE_REASON),
+    ] {
+        let rule = daemon_rule(name, Some(op("simple", "dest.host", "example.com")));
+        assert_eq!(read_only_reason(&rule), Some(reason), "{name}");
+        assert!(!deletable(&rule), "{name}");
+        let wire = rule_to_wire(&rule);
+        assert_eq!(wire["readOnlyReason"], reason);
+        assert_eq!(wire["deletable"], false);
+    }
+    assert!(!PACKAGED_RULE_REASON.contains("000-"), "fixed text only");
+}
+
 #[test]
 fn a_daemon_user_name_rule_reported_with_its_uid_is_read_only_but_deletable() {
     let rule = daemon_rule("000-x", Some(op("simple", "user.name", "987")));

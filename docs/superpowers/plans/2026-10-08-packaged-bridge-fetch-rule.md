@@ -50,11 +50,26 @@ daemon.
   `sort.Strings` order. With `precedence: false` this rule's place in that
   order changes nothing: a matching deny anywhere still wins, and a later
   matching allow is still an allow. The `000-` prefix lists it next to
-  upstream's own `000-allow-localhost` rules. It is outside every prefix
-  Snitchwatch reserves or manages (`z00-blocklist:`, `900-blocklist:`,
-  `snitchwatch-default-`, `850-profile:`), and it passes
+  upstream's own `000-allow-localhost` rules. It passes
   `rule_name::validate_rule_name`. The file name is `name + ".json"`, as
   the loader assumes when deleting (`deleteRule`, `deleteRuleFromDisk`).
+- **Reserved prefix `000-snitchwatch-`** (added after the #89 import/export
+  security review).
+  - `rule_name::PACKAGED_RULE_NAME_PREFIX` sits next to `z00-blocklist:`
+    and `900-blocklist:`. No GUI action or import may add, change, rename
+    or delete a rule under it.
+  - Otherwise an imported file could swap the allow for a deny, which stops
+    list downloads. It could also make the rule `until restart`, and the
+    daemon then deletes its file.
+  - The refusals:
+    - `rule_notification` refuses Add, Update, a rename in either direction,
+      and Delete.
+    - `DaemonCommands::send` refuses any command.
+    - The Rules page lists the rule read-only with fixed text, "Built into
+      Snitchwatch: lets its background service download blocklists.", and
+      `deletable: false`.
+  - The prefix lies outside the bands the bridge manages and purges
+    (`z00-`/`900-blocklist:`, `850-profile:`, `snitchwatch-default-`).
 - **Ports.** Only 443 is covered. A list URL with another port
   (`https://host:8443/…`) still needs a user allow.
 - **DNS is not covered.** `GuardedResolver` uses `getaddrinfo`
@@ -111,6 +126,8 @@ it that way. So the GUI sees `user.name = <uid>`.
   - This applies to every daemon `user.name` rule, including stock-UI ones:
     once enabled, the daemon reports all of them with a uid.
   - Nothing the bridge builds uses `user.name`.
+  - The packaged rule is refused earlier, by its reserved name. The guard
+    covers every other `user.name` rule.
 
 ## Shipping
 
@@ -131,8 +148,10 @@ it that way. So the GUI sees `user.name = <uid>`.
 ## Bridge and Rules page
 
 - **Blocklist reconcile and orphan purge.** These only ever select names
-  under the blocklist prefixes (`is_reserved_blocklist_name`). Every
-  `BlocklistCommand` delete also refuses any other name.
+  under the blocklist prefixes (`is_reserved_blocklist_name`, which
+  excludes the packaged prefix). They also require a rule the bridge made
+  (`made_by_bridge`). And every `BlocklistCommand` delete refuses any other
+  name.
 - **#44 "applies to every app".** This needs the interactive-verdict
   description and no `process.path` anywhere. The rule has neither, so it
   is never flagged.
@@ -142,7 +161,9 @@ it that way. So the GUI sees `user.name = <uid>`.
 - `tests/packaging_shape.rs` (run by `just package-check`, which also
   `json.load`s the file):
   - exact shape and file name;
-  - the name passes and isn't reserved;
+  - the name passes, sits under the packaged prefix, and isn't in a
+    blocklist band;
+  - it is read-only with fixed text and not deletable;
   - the operator passes `validate_operator` on disk and is refused once
     compiled;
   - a small evaluator that mirrors `operator.go` matches only the system
@@ -151,18 +172,24 @@ it that way. So the GUI sees `user.name = <uid>`.
 - Bridge unit tests:
   - `rule_wire`: the disk and compiled forms through
     `rule_to_wire`/`rule_from_wire`;
-  - `rule_policy`: the numeric `user.name` guard;
+  - `rule_policy`: the numeric `user.name` guard, and packaged rules being
+    read-only and not deletable;
+  - `rule_name`: what the prefix does and doesn't reserve;
+  - `rule_notification`: Add, Update, both renames and Delete are refused;
+  - `send_policy_tests`: `DaemonCommands::send` refuses change and delete;
   - `daemon_sink_tests`: the orphan purge leaves the rule alone.
 - Kirigami `rules/all_apps.rs`: the compiled rule goes through
-  `RulesCache` → `snapshot_wire` → `SetRules` → `RulesStore`. Not flagged,
-  user-sourced, read-only, deletable.
+  `RulesCache` → `snapshot_wire` → `SetRules` → `RulesStore`, in both
+  forms. It is not flagged, is user-sourced, is read-only with the fixed
+  text, is not deletable, and gets no toggle.
 - Stager test: the rule is staged at 0644 with the canonical bytes.
 - **Mutation check:**
   - drop each condition;
   - change `^tcp6?$` to `tcp`;
   - set `precedence` to true;
   - set the path's `sensitive` to false;
-  - remove the guard arm.
+  - remove the guard arm;
+  - remove each reserved-name refusal.
 
   Each mutation must fail a test.
 

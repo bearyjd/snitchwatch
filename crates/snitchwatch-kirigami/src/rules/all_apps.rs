@@ -446,13 +446,14 @@ mod tests {
     }
 
     /// Fed through the bridge's own rules cache and wire shape: bound to a
-    /// program, so never flagged as applying to every app. Loaded (enabled),
-    /// it is read-only, since a toggle would send the uid back as a name,
-    /// but it stays deletable.
+    /// program, so never flagged as applying to every app. Its name is
+    /// reserved for rules built into Snitchwatch, so it is read-only with
+    /// fixed text, can't be deleted, and no toggle is built for it.
     #[test]
-    fn the_packaged_fetch_rule_is_never_flagged_and_read_only_once_loaded() {
+    fn the_packaged_fetch_rule_is_never_flagged_and_built_in() {
         use super::super::row_store::RuleSource;
         use snitchwatch_bridge::cache::rules::RulesCache;
+        use snitchwatch_bridge::rule_policy::PACKAGED_FETCH_RULE_REASON;
 
         for compiled_uid in [Some("987"), None] {
             let mut cache = RulesCache::default();
@@ -468,13 +469,13 @@ mod tests {
             assert_eq!(r.source(), RuleSource::User);
             assert_eq!(r.normalized_action(), "allow");
             assert!(!r.precedence);
-            assert!(store.is_deletable(&r.name));
-            assert_eq!(r.is_read_only(), compiled_uid.is_some(), "{compiled_uid:?}");
             assert_eq!(
-                store.rule_json_with_enabled(&r.name, false).is_none(),
-                compiled_uid.is_some(),
-                "no toggle is built for the loaded rule"
+                r.read_only_reason.as_deref(),
+                Some(PACKAGED_FETCH_RULE_REASON)
             );
+            assert!(!r.can_delete(), "{compiled_uid:?}");
+            assert!(!store.is_deletable(&r.name), "{compiled_uid:?}");
+            assert!(store.rule_json_with_enabled(&r.name, false).is_none());
             assert_eq!(
                 r.operator_summary(),
                 format!(

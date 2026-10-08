@@ -70,9 +70,10 @@ one opensnitchd rule (owner decision, 2026-10-08):
     `opensnitch.service` starts.
   - On a live host, restart `opensnitch.service` once after the account
     exists.
-- **The Rules page shows it read-only.** It is listed like any daemon rule
-  but can't be toggled: the daemon reports `user.name` as the uid, and
-  sending that back would break the rule. It can still be deleted.
+- **Reserved and read-only.** The name prefix `000-snitchwatch-` is
+  reserved: no GUI action or rule import may change, rename or delete a
+  rule under it. The Rules page lists it read-only as "Built into
+  Snitchwatch: lets its background service download blocklists."
 - **Not covered:** DNS, and list URLs on other ports.
 - **Where it ships:**
   - the bluebuild image (`files` module);

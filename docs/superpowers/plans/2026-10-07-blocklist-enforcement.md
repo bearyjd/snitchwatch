@@ -446,8 +446,8 @@ Manual check in a disposable VM, in both modes:
     - It has `precedence: false`, so a user deny or a blocklist that
       matches the list's host still blocks the fetch.
     - If the account is missing, the rule is skipped, never broadened.
-    - A GUI can't toggle the loaded rule, because the daemon reports its
-      `user.name` as the uid. It can still delete it.
+    - Its `000-snitchwatch-` prefix is reserved: no GUI action or import
+      may change or delete it, and the Rules page lists it read-only.
     - See `2026-10-08-packaged-bridge-fetch-rule.md`.
 - **"Rule installed" is not proof of a load.** Only daemon logs show the
   count. The VM check is the mitigation; surfacing the count needs a daemon

@@ -63,6 +63,17 @@ pub const SHAPE_READ_ONLY_REASON: &str = "Snitchwatch can't change this rule bec
 pub const BLOCKLIST_MANAGED_REASON: &str =
     "Managed on the Blocklists page. Subscribe to or remove the list there.";
 
+/// Why a GUI may not change or delete the packaged fetch rule
+/// ([`crate::rule_name::PACKAGED_FETCH_RULE_NAME`]).
+pub const PACKAGED_FETCH_RULE_REASON: &str =
+    "Built into Snitchwatch: lets its background service download blocklists.";
+
+/// Why a GUI may not change or delete any other rule under the packaged
+/// prefix ([`crate::rule_name::is_reserved_packaged_name`]).
+pub const PACKAGED_RULE_REASON: &str =
+    "Uses a name reserved for rules built into Snitchwatch, so Snitchwatch doesn't change or \
+     delete it.";
+
 /// Operands whose value the daemon passes as a `net.IP`; only the `network`
 /// type can compare one.
 const NETWORK_OPERANDS: &[&str] = &["dest.network", "source.network"];
@@ -130,6 +141,12 @@ pub fn read_only_reason(rule: &Rule) -> Option<&'static str> {
     if crate::rule_name::is_reserved_blocklist_name(&rule.name) {
         return Some(BLOCKLIST_MANAGED_REASON);
     }
+    if rule.name == crate::rule_name::PACKAGED_FETCH_RULE_NAME {
+        return Some(PACKAGED_FETCH_RULE_REASON);
+    }
+    if crate::rule_name::is_reserved_packaged_name(&rule.name) {
+        return Some(PACKAGED_RULE_REASON);
+    }
     if crate::rule_name::validate_rule_name(&rule.name).is_err() {
         return Some(crate::rule_wire::READ_ONLY_REASON);
     }
@@ -143,10 +160,10 @@ pub fn read_only_reason(rule: &Rule) -> Option<&'static str> {
 /// name (`Loader.Delete` never reads the operator), so this is the name
 /// check `notification_for_effect` applies to a `DeleteRule`: a rule
 /// read-only only for its conditions stays deletable. A blocklist rule is
-/// removed from the Blocklists page instead.
+/// removed from the Blocklists page instead, and a packaged rule not at all.
 pub fn deletable(rule: &Rule) -> bool {
     crate::rule_name::validate_rule_name(&rule.name).is_ok()
-        && !crate::rule_name::is_reserved_blocklist_name(&rule.name)
+        && !crate::rule_name::is_reserved_name(&rule.name)
 }
 
 fn validate_list(op: &Operator) -> Result<(), String> {

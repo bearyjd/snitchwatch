@@ -505,17 +505,29 @@ fn packaged_fetch_rule_passes_the_bridges_rule_checks() {
     let rule = fetch_rule();
     let name = rule["name"].as_str().unwrap();
     rule_name::validate_rule_name(name).unwrap();
-    // Reserved for, or managed by, the bridge itself.
+    // Reserved, so no GUI action or import can replace, re-duration or
+    // delete it, and in no band the bridge manages (and purges) itself.
+    assert_eq!(name, rule_name::PACKAGED_FETCH_RULE_NAME);
+    assert!(rule_name::is_reserved_packaged_name(name));
     assert!(!rule_name::is_reserved_blocklist_name(name));
     let profile_band = snitchwatch_bridge::profiles::materializer::PROFILE_BAND_PREFIX;
     for prefix in ["snitchwatch-default-", profile_band] {
         assert!(!name.starts_with(prefix), "{name} is under {prefix}");
     }
-    rule_policy::validate_operator(&fetch_rule_operator(None)).unwrap();
-    assert!(
-        rule_policy::validate_operator(&fetch_rule_operator(Some("978"))).is_err(),
-        "the GUI must not send the daemon's compiled form back"
+    let daemon_rule = snitchwatch_proto::protocol::Rule {
+        name: name.to_string(),
+        operator: Some(fetch_rule_operator(Some("978"))),
+        ..Default::default()
+    };
+    assert_eq!(
+        rule_policy::read_only_reason(&daemon_rule),
+        Some(rule_policy::PACKAGED_FETCH_RULE_REASON)
     );
+    assert!(!rule_policy::deletable(&daemon_rule));
+    // The conditions themselves are ones the daemon evaluates as written;
+    // its compiled form (the uid in user.name) could never be sent back.
+    rule_policy::validate_operator(&fetch_rule_operator(None)).unwrap();
+    assert!(rule_policy::validate_operator(&fetch_rule_operator(Some("978"))).is_err());
 }
 
 /// The one license every Snitchwatch-owned declaration must agree on (plan
