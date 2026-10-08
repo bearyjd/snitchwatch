@@ -1,0 +1,174 @@
+//! Making text from outside safe to show: in a desktop notification body
+//! (rendered as a markup subset), a log line or a plain-text label.
+//! Moved out of `translator::verdict`, which re-exports the two public
+//! functions under their old paths.
+
+/// Sanitize an attacker-controlled string before it's shown in a desktop
+/// notification body or sent to the WS client as protocol text — issue #14
+/// security review round 2, MEDIUM-1. See `translator::verdict::ScopeDegradation`'s doc
+/// comment for why this exists. Strips control characters (including the
+/// ANSI `ESC` byte, newlines, carriage returns — bridge-cli logs apply
+/// terminal escape sequences), HTML-entity-escapes the markup
+/// metacharacters `<`/`>`/`&` (so a literal `<b>` in a hostname displays as
+/// the text `<b>` rather than being interpreted as bold by a freedesktop
+/// notification daemon), and caps the result to `max_len` **characters**
+/// (not bytes — truncating mid-codepoint would corrupt multi-byte UTF-8).
+pub fn sanitize_for_display(input: &str, max_len: usize) -> String {
+    let mut out = String::new();
+    let mut count = 0usize;
+    for c in input.chars() {
+        if count >= max_len {
+            out.push('…');
+            break;
+        }
+        if c.is_control() || is_display_hazard(c) {
+            continue;
+        }
+        match c {
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '&' => out.push_str("&amp;"),
+            other => out.push(other),
+        }
+        count += 1;
+    }
+    out
+}
+
+/// Plain-text form of attacker-influenced text for a `Text.PlainText` label:
+/// drops control characters and [`is_display_hazard`] ones, escapes nothing.
+pub fn strip_display_hazards(input: &str) -> String {
+    input
+        .chars()
+        .filter(|&c| !c.is_control() && !is_display_hazard(c))
+        .collect()
+}
+
+/// Unicode characters `char::is_control()` (category Cc only) doesn't
+/// catch, but that still let attacker-controlled text visually lie about
+/// itself once rendered in a notification body or log — issue #14 security
+/// review round 2, LOW. Bidi format controls (category Cf) can reorder or
+/// hide surrounding text: e.g. a hostname containing U+202E
+/// RIGHT-TO-LEFT OVERRIDE can make the *displayed* text read as a
+/// different, more trustworthy-looking domain than the bytes actually are.
+/// The zero-width/invisible-joiner controls (also Cf) can hide characters
+/// entirely or defeat naive substring-based review. The line/paragraph
+/// separators (category Zl/Zp) can inject a visual line break a
+/// control-char-only strip wouldn't catch, splitting a notification body
+/// across lines the caller didn't intend.
+///
+/// Since the PR #100 review it is every format character (general category
+/// Cf: soft hyphen, Arabic letter mark, tag characters, and the rest) plus
+/// those two separators. The Cf ranges are generated from Python's
+/// `unicodedata` (Unicode 16.0.0).
+fn is_display_hazard(c: char) -> bool {
+    matches!(c,
+        '\u{2028}' // LINE SEPARATOR (Zl)
+        | '\u{2029}' // PARAGRAPH SEPARATOR (Zp)
+        // General category Cf, Unicode 16.0.0:
+        | '\u{00AD}'
+        | '\u{0600}'..='\u{0605}'
+        | '\u{061C}'
+        | '\u{06DD}'
+        | '\u{070F}'
+        | '\u{0890}'..='\u{0891}'
+        | '\u{08E2}'
+        | '\u{180E}'
+        | '\u{200B}'..='\u{200F}' // zero-width space/ZWNJ/ZWJ, LRM, RLM
+        | '\u{202A}'..='\u{202E}' // LRE, RLE, PDF, LRO, RLO
+        | '\u{2060}'..='\u{2064}' // word joiner, invisible operators
+        | '\u{2066}'..='\u{206F}' // LRI, RLI, FSI, PDI, deprecated format
+        | '\u{FEFF}' // BOM / zero-width no-break space
+        | '\u{FFF9}'..='\u{FFFB}'
+        | '\u{110BD}'
+        | '\u{110CD}'
+        | '\u{13430}'..='\u{1343F}'
+        | '\u{1BCA0}'..='\u{1BCA3}'
+        | '\u{1D173}'..='\u{1D17A}'
+        | '\u{E0001}'
+        | '\u{E0020}'..='\u{E007F}' // tag characters
+    )
+}
+
+/// Like [`sanitize_for_display`], but a long `input` keeps its END: at most
+/// `max_len` characters, with a leading "…". For a program path or a host,
+/// where the end (the file name, the registered domain) is what identifies
+/// it, and a right-truncated `login.microsoft.com.<padding>.evil.tld` would
+/// hide the real domain (PR #100 review). Escapes after truncating, so an
+/// entity is never cut in half.
+pub fn sanitize_tail_for_display(input: &str, max_len: usize) -> String {
+    let kept: Vec<char> = input
+        .chars()
+        .filter(|&c| !c.is_control() && !is_display_hazard(c))
+        .collect();
+    let tail = if kept.len() > max_len {
+        &kept[kept.len() - max_len..]
+    } else {
+        &kept[..]
+    };
+    let mut out = String::new();
+    if tail.len() < kept.len() {
+        out.push('…');
+    }
+    for &c in tail {
+        match c {
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '&' => out.push_str("&amp;"),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_format_character_is_a_hazard() {
+        for c in [
+            '\u{00AD}',
+            '\u{061C}',
+            '\u{200B}',
+            '\u{2060}',
+            '\u{FEFF}',
+            '\u{E0001}',
+            '\u{E0020}',
+            '\u{E0041}',
+            '\u{E007F}',
+            '\u{2069}',
+            '\u{206F}',
+            '\u{1D173}',
+            '\u{2028}',
+            '\u{2029}',
+        ] {
+            assert!(is_display_hazard(c), "U+{:04X}", c as u32);
+            let shown = sanitize_for_display(&format!("a{c}b"), 64);
+            assert_eq!(shown, "ab", "U+{:04X}", c as u32);
+            assert_eq!(strip_display_hazards(&format!("a{c}b")), "ab");
+        }
+        for c in ['a', 'é', '中', '-', '.', ' ', '\u{2070}', '\u{FFFC}'] {
+            assert!(!is_display_hazard(c), "U+{:04X}", c as u32);
+        }
+    }
+
+    #[test]
+    fn a_long_host_or_path_keeps_its_end() {
+        let host = format!("login.microsoft.com.{}.evil.tld", "a".repeat(200));
+        let shown = sanitize_tail_for_display(&host, 64);
+        assert!(
+            shown.starts_with('…') && shown.ends_with(".evil.tld"),
+            "{shown}"
+        );
+        assert_eq!(shown.chars().count(), 65);
+        assert_eq!(
+            sanitize_tail_for_display("/tmp/x/firefox", 64),
+            "/tmp/x/firefox"
+        );
+        // Hazards go before counting; escaping comes after cutting.
+        assert_eq!(sanitize_tail_for_display("a\u{202e}b", 64), "ab");
+        assert_eq!(sanitize_tail_for_display("x&y<z>", 3), "…&lt;z&gt;");
+        assert_eq!(sanitize_tail_for_display("&&&&&", 2), "…&amp;&amp;");
+    }
+}

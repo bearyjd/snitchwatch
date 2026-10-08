@@ -327,8 +327,23 @@ Branch `feat/prompt-slot-notification-actions`, after Part C.
     the inline Deny's tooltip does.
 - **No "Decide later" on the notification.** Item 8 lists it, but the owner's
   S5 is "Allow once and Deny only". It can be added if S5 is widened.
-- **Not done:** the notification isn't withdrawn when its row is answered
-  elsewhere. Acting on it is harmless.
+- **PR #100 security review fixes.**
+  - **Only the notification server can click.** notify-rust's
+    `wait_for_action` accepted `ActionInvoked` from any sender on the bus.
+    `notification_signals` sends `Notify` itself, on the connection that
+    listens. Its match rule names the server's unique name, path and
+    interface. `classify` checks the sender, the id and that the key is one
+    of ours. A change of owner voids the notice. Every other notice now
+    carries no actions.
+  - **Body.** It shows the full program path. A long path or host keeps its
+    end behind a leading "…".
+  - **Format characters.** The display sanitizer strips every format
+    character (Unicode category Cf).
+  - **Lost race.** The bridge drops a verdict for a row that stopped
+    waiting without saying so. The answer then watches for the row's
+    update, and says "This prompt was already answered" when the row was
+    settled another way.
+  - **Withdrawn.** The notification is closed once its row stops waiting.
 
 ### C. Bridge auto-answer and "Decide later" (BR + UI, M; S1/S2 decided: P-a after 30 s, "Decide later" = P-c)
 

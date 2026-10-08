@@ -16,28 +16,45 @@
 //! (`BridgeHandles::pending_row`). Otherwise nothing is sent and the user is
 //! told so.
 
+use snitchwatch_bridge::translator::display::sanitize_tail_for_display;
 use snitchwatch_bridge::translator::process_binding::{is_bindable_process_path, RuleRefusal};
-use snitchwatch_bridge::translator::verdict::sanitize_for_display;
+use snitchwatch_bridge::ws_messages::{ConnectionRow, ServerMessage};
+use tokio::sync::broadcast;
 
-use crate::bridge_runtime::{BridgeHandles, PendingRow};
+use crate::bridge_runtime::{BridgeHandles, PendingRow, ReceivedServerMessage};
+use crate::connections::outcome::is_pending;
 use crate::inline_deny::InlineDeny;
 use crate::pending_decision::build_verdict_message;
 
 /// D-Bus action ids for the pending notification's answers.
 pub(crate) const ALLOW_ONCE_ACTION: &str = "allow-once";
 pub(crate) const DENY_ACTION: &str = "deny";
+pub(crate) const REVIEW_ACTION: &str = "review";
+
+/// How much of a program path or host a notification shows. Longer ones
+/// keep their end, behind a leading "…".
+const BODY_PATH_CHARS: usize = 120;
+const BODY_HOST_CHARS: usize = 100;
 
 /// The pending notification's body. The program and host come from outside
 /// and freedesktop notification servers render a markup subset in bodies,
-/// so both are escaped (and stripped of control and bidi characters) by the
-/// bridge's display sanitizer. When Deny would be remembered (`deny`, from
-/// `InlineDeny::decide`), the body says for how long, as the inline Deny's
-/// tooltip does; a once-only Deny explains itself after the click.
+/// so both are escaped (and stripped of control and format characters) by
+/// the bridge's display sanitizer.
+///
+/// It shows the program's full path, not just its file name: a
+/// `/tmp/x/firefox` must not read as "firefox". A long path or host keeps
+/// its end, so `login.microsoft.com.<padding>.evil.tld` still shows the
+/// real domain (PR #100 review).
+///
+/// When Deny would be remembered (`deny`, from `InlineDeny::decide`), the
+/// body says for how long, as the inline Deny's tooltip does; a once-only
+/// Deny explains itself after the click.
 pub(crate) fn pending_body(row: &PendingRow, deny: InlineDeny) -> String {
+    let program = row.process_path.as_deref().unwrap_or(&row.process);
     let asking = format!(
         "{} wants to connect to {}",
-        sanitize_for_display(&row.process, 64),
-        sanitize_for_display(&row.dst_host, 128)
+        sanitize_tail_for_display(program, BODY_PATH_CHARS),
+        sanitize_tail_for_display(&row.dst_host, BODY_HOST_CHARS)
     );
     match deny {
         InlineDeny::UntilRestart => format!("{asking}\n{DENY_UNTIL_RESTART}"),
@@ -75,6 +92,9 @@ pub(crate) enum ActionOutcome {
     DeniedOnce(InlineDeny),
     /// The row isn't waiting in this session any more; nothing was sent.
     NoLongerWaiting,
+    /// It was answered another way first (in the window, by a pause, by the
+    /// timeout), so the bridge didn't use this answer.
+    AlreadyAnswered,
     /// The answer couldn't be queued: the bridge connection is gone.
     NotSent,
 }
@@ -86,6 +106,8 @@ pub(crate) const NO_LONGER_WAITING: &str =
     "That connection is no longer waiting for an answer, so nothing was sent.";
 pub(crate) const NOT_SENT: &str =
     "The connection to the background service was lost, so the answer wasn't sent.";
+pub(crate) const ALREADY_ANSWERED: &str =
+    "This prompt was already answered, so your answer wasn't used.";
 
 impl ActionOutcome {
     /// The fixed text of a follow-up notification, when one is needed.
@@ -97,6 +119,7 @@ impl ActionOutcome {
             }
             Self::DeniedOnce(InlineDeny::BridgeTooOld) => Some(BRIDGE_TOO_OLD),
             Self::NoLongerWaiting => Some(NO_LONGER_WAITING),
+            Self::AlreadyAnswered => Some(ALREADY_ANSWERED),
             Self::NotSent => Some(NOT_SENT),
         }
     }
@@ -158,6 +181,92 @@ pub(crate) fn act(
     }
 }
 
+/// How long [`act_and_confirm`] listens for the bridge's row update.
+pub(crate) const CONFIRM_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// [`act`], then a check of what the bridge did with it. The bridge answers
+/// a verdict for a row that stopped waiting by doing nothing, so this
+/// watches for the row's update instead. It subscribes before `act` looks,
+/// so no update is missed:
+/// - the row decided as we answered: the outcome stands;
+/// - decided another way (another answer, a pause, the timeout): the
+///   prompt was already answered;
+/// - withdrawn: it isn't waiting any more;
+/// - nothing within [`CONFIRM_WAIT`]: the outcome stands, as nothing more
+///   is known.
+pub(crate) async fn act_and_confirm(
+    handles: &BridgeHandles,
+    connection_id: u64,
+    wire_id: &str,
+    action: NoticeAction,
+) -> ActionOutcome {
+    let mut updates = handles.subscribe();
+    let outcome = act(handles, connection_id, wire_id, action);
+    if !matches!(outcome, ActionOutcome::Sent | ActionOutcome::DeniedOnce(_)) {
+        return outcome;
+    }
+    let ours = match action {
+        NoticeAction::AllowOnce => "allow",
+        NoticeAction::Deny => "deny",
+    };
+    let settled = tokio::time::timeout(
+        CONFIRM_WAIT,
+        row_settled(&mut updates, connection_id, wire_id),
+    )
+    .await;
+    match settled {
+        Ok(Some(Some(row)))
+            if row.action.as_deref() == Some(ours)
+                && !row.deferred
+                && row.auto_answer.is_none() =>
+        {
+            outcome
+        }
+        Ok(Some(Some(_))) => ActionOutcome::AlreadyAnswered,
+        Ok(Some(None)) => ActionOutcome::NoLongerWaiting,
+        Ok(None) | Err(_) => outcome,
+    }
+}
+
+/// The next settling of row `wire_id` in session `connection_id`:
+/// `Some(Some(row))` when it is decided or put off, `Some(None)` when it is
+/// withdrawn, `None` when the feed ends.
+async fn row_settled(
+    updates: &mut broadcast::Receiver<ReceivedServerMessage>,
+    connection_id: u64,
+    wire_id: &str,
+) -> Option<Option<ConnectionRow>> {
+    loop {
+        let received = match updates.recv().await {
+            Ok(received) => received,
+            Err(broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(broadcast::error::RecvError::Closed) => return None,
+        };
+        if received.connection_id != connection_id {
+            continue;
+        }
+        match received.message {
+            ServerMessage::InsertConnectionRows { rows }
+            | ServerMessage::UpdateConnectionRows { rows } => {
+                if let Some(row) = rows
+                    .into_iter()
+                    .find(|row| row.id == wire_id && !is_pending(row))
+                {
+                    return Some(Some(row));
+                }
+            }
+            ServerMessage::RemoveConnectionRows { ids }
+            | ServerMessage::MoveConnetionRows { ids }
+                if ids.iter().any(|id| id == wire_id) =>
+            {
+                return Some(None);
+            }
+            ServerMessage::ClearConnectionRows => return Some(None),
+            _ => {}
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -174,7 +283,7 @@ mod tests {
     fn the_body_never_carries_markup_from_the_program_or_host() {
         assert_eq!(
             pending_body(&row("curl", "example.com"), InlineDeny::ProgramUnknown),
-            "curl wants to connect to example.com"
+            "/usr/bin/curl wants to connect to example.com"
         );
         let body = pending_body(
             &row(
@@ -190,14 +299,48 @@ mod tests {
     }
 
     #[test]
+    fn the_body_shows_the_whole_program_path_and_the_end_of_a_long_host() {
+        let spoof = PendingRow {
+            process: "firefox".into(),
+            process_path: Some("/tmp/x/firefox".into()),
+            dst_host: format!("login.microsoft.com.{}.evil.tld", "a".repeat(300)),
+        };
+        let body = pending_body(&spoof, InlineDeny::ProgramUnknown);
+        assert!(
+            body.starts_with("/tmp/x/firefox wants to connect to …"),
+            "{body}"
+        );
+        assert!(body.ends_with(".evil.tld"), "{body}");
+        let long_path = PendingRow {
+            process_path: Some(format!("/home/u/{}/firefox", "d/".repeat(200))),
+            ..spoof.clone()
+        };
+        let body = pending_body(&long_path, InlineDeny::ProgramUnknown);
+        assert!(
+            body.starts_with('…') && body.contains("/firefox wants to connect to"),
+            "{body}"
+        );
+        // With no path, the program name stands in.
+        let nameless = PendingRow {
+            process_path: None,
+            dst_host: "example.com".into(),
+            ..spoof
+        };
+        assert_eq!(
+            pending_body(&nameless, InlineDeny::ProgramUnknown),
+            "firefox wants to connect to example.com"
+        );
+    }
+
+    #[test]
     fn the_body_says_how_long_a_remembered_deny_lasts() {
         let body = |deny| pending_body(&row("curl", "example.com"), deny);
         assert_eq!(
             body(InlineDeny::UntilRestart),
-            format!("curl wants to connect to example.com\n{DENY_UNTIL_RESTART}")
+            format!("/usr/bin/curl wants to connect to example.com\n{DENY_UNTIL_RESTART}")
         );
         for once in [InlineDeny::ProgramUnknown, InlineDeny::BridgeTooOld] {
-            assert_eq!(body(once), "curl wants to connect to example.com");
+            assert_eq!(body(once), "/usr/bin/curl wants to connect to example.com");
         }
         let inline = include_str!("../qml/InlineVerdicts.qml");
         assert!(
@@ -240,6 +383,10 @@ mod tests {
             Some(NO_LONGER_WAITING)
         );
         assert_eq!(ActionOutcome::NotSent.explanation(), Some(NOT_SENT));
+        assert_eq!(
+            ActionOutcome::AlreadyAnswered.explanation(),
+            Some(ALREADY_ANSWERED)
+        );
     }
 
     #[test]

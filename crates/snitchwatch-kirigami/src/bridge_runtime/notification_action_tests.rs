@@ -282,3 +282,87 @@ async fn a_pending_notice_is_announced_only_while_its_row_waits_in_its_session()
     disconnect_and_discard(&connection, &mut inbound_rx);
     assert!(still_waiting(&handles, session, &notice(2)).is_none());
 }
+
+/// What `act_and_confirm` reports for each way the bridge can settle the
+/// row after an "Allow once" was sent.
+#[tokio::test]
+async fn the_bridges_update_tells_a_won_race_from_a_lost_one() {
+    use crate::notification_actions::act_and_confirm;
+    use snitchwatch_bridge::ws_messages::AutoAnswer;
+
+    let (handles, connection, mut inbound_rx) = handles_and_queue();
+    let session = mark_connected(&connection, true);
+    let decided = |action: &str| ConnectionRow {
+        action: Some(action.into()),
+        ..row("ask-1", Some("/usr/bin/curl"))
+    };
+    let update = |row: ConnectionRow| ServerMessage::UpdateConnectionRows { rows: vec![row] };
+    let cases = [
+        (update(decided("allow")), ActionOutcome::Sent),
+        (update(decided("deny")), ActionOutcome::AlreadyAnswered),
+        (
+            update(ConnectionRow {
+                auto_answer: Some(AutoAnswer::FilterPaused),
+                ..decided("allow")
+            }),
+            ActionOutcome::AlreadyAnswered,
+        ),
+        (
+            update(ConnectionRow {
+                deferred: true,
+                ..row("ask-1", Some("/usr/bin/curl"))
+            }),
+            ActionOutcome::AlreadyAnswered,
+        ),
+        (
+            ServerMessage::RemoveConnectionRows {
+                ids: vec!["ask-1".into()],
+            },
+            ActionOutcome::NoLongerWaiting,
+        ),
+    ];
+    for (settling, expected) in cases {
+        insert(
+            &connection,
+            session,
+            vec![row("ask-1", Some("/usr/bin/curl"))],
+        );
+        let asking = handles.clone();
+        let answer = tokio::spawn(async move {
+            act_and_confirm(&asking, session, "ask-1", NoticeAction::AllowOnce).await
+        });
+        // Sent: so it is already listening for the update.
+        inbound_rx.recv().await.expect("the answer was sent");
+        handles
+            .broadcast_tx
+            .send(ReceivedServerMessage {
+                connection_id: session,
+                message: settling.clone(),
+            })
+            .unwrap();
+        assert_eq!(answer.await.unwrap(), expected, "{settling:?}");
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn no_word_from_the_bridge_keeps_the_outcome() {
+    use crate::notification_actions::act_and_confirm;
+
+    let (handles, connection, mut inbound_rx) = handles_and_queue();
+    let session = mark_connected(&connection, true);
+    insert(
+        &connection,
+        session,
+        vec![row("ask-1", Some("/usr/bin/curl"))],
+    );
+    assert_eq!(
+        act_and_confirm(&handles, session, "ask-1", NoticeAction::Deny).await,
+        ActionOutcome::Sent
+    );
+    assert!(inbound_rx.try_recv().is_ok(), "the answer was sent");
+    // A stale row is still refused at once.
+    assert_eq!(
+        act_and_confirm(&handles, session, "ask-9", NoticeAction::Deny).await,
+        ActionOutcome::NoLongerWaiting
+    );
+}
