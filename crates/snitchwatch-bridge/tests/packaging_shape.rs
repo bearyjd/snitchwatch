@@ -195,13 +195,34 @@ fn bluebuild_recipe_installs_and_enables_opensnitchd() {
         "- opensnitch",
         "type: files",
         "type: systemd",
-        "- opensnitchd.service",
+        // The RPM installs the unit as `opensnitch.service` and ships no
+        // `opensnitchd.service` alias (`vendor:utils/packaging/daemon/rpm/
+        // opensnitch.spec`, issue #92).
+        "- opensnitch.service",
     ] {
         assert!(
             body.contains(needle),
             "bluebuild recipe missing `{needle}`\nbody:\n{body}"
         );
     }
+    assert!(
+        !body.contains("opensnitchd.service"),
+        "the RPM has no opensnitchd.service unit (issue #92)"
+    );
+}
+
+/// Issue #92: the layering guide's commands name the RPM's real unit.
+#[test]
+fn the_layering_guide_names_the_rpms_unit() {
+    let body = read("docs/packaging/rpm-ostree-layering.md");
+    assert!(
+        body.contains("systemctl enable --now opensnitch.service"),
+        "{body}"
+    );
+    assert!(
+        !body.contains("opensnitchd.service"),
+        "the RPM has no opensnitchd.service unit (issue #92)"
+    );
 }
 
 // --- The packaged fetch rule ---------------------------------------------
