@@ -232,7 +232,18 @@ past 2,000,000 hosts in total (in subscription order) get no rule.
 - Subscriptions persist in `blocklists.sqlite3` (mode 0600) under the state
   directory: `$STATE_DIRECTORY` (set by both systemd units), else
   `SNITCHWATCH_STATE_DIR`. With neither, they are kept in memory only and the
-  page says so. Profiles and the active-profile choice persist the same way,
+  page says so. So they are if the directory isn't the bridge user's own,
+  if a database or SQLite's `-journal`/`-wal`/`-shm` file beside it is a
+  FIFO, a symlink, a hard link or someone else's file, or if the database
+  holds anything the store doesn't create itself (a view, a trigger, a
+  virtual table, an extra index or table, or a table defined differently).
+  A per-user directory that is yours but writable by group or others
+  (a umask of 002 makes it 0775) has that write access removed at startup,
+  with a warning in the log, and the bridge carries on. Only that directory
+  is checked, not the ones above it: whoever can write to its parent can
+  swap it, so point `SNITCHWATCH_STATE_DIR` only at a directory whose parents
+  only you and root can write to (anything under your home directory, as
+  usual). Profiles and the active-profile choice persist the same way,
   in `profiles.sqlite3` (issue #46); profiles are not applied to the
   firewall yet, and the Profiles page says so. A manual choice can still be
   replaced at startup: the bridge's first network reading after a restart
