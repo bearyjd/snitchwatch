@@ -537,6 +537,51 @@ mod tests {
         );
     }
 
+    /// The bridge's own policy problems, in the editor's plain words.
+    #[test]
+    fn a_policy_refusal_lists_its_problems() {
+        let refused = outcome_status(&RuleCommandOutcome::Refused {
+            problems: vec![
+                snitchwatch_bridge::rule_policy::RuleProblem {
+                    path: "name".into(),
+                    reason: "a rule with this name exists".into(),
+                },
+                snitchwatch_bridge::rule_policy::RuleProblem {
+                    path: "operator.list[1].data".into(),
+                    reason: "not a port".into(),
+                },
+            ],
+        });
+        assert!(!refused.created);
+        assert!(
+            refused.status.starts_with("The rule wasn't sent: "),
+            "{}",
+            refused.status
+        );
+        assert!(
+            refused.status.contains("not a port (condition 2's value)"),
+            "{}",
+            refused.status
+        );
+        assert!(
+            refused.status.contains("a rule with this name exists"),
+            "{}",
+            refused.status
+        );
+    }
+
+    #[test]
+    fn ok_with_a_note_is_created_and_keeps_the_note() {
+        let done = outcome_status(&RuleCommandOutcome::OkWithNote {
+            note: "The old file couldn't be removed.".into(),
+        });
+        assert!(done.created);
+        assert_eq!(
+            done.status,
+            "The rule was created. The old file couldn't be removed."
+        );
+    }
+
     #[test]
     fn no_result_in_time_is_not_created() {
         let now = Instant::now();
