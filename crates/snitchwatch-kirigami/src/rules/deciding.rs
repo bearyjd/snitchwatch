@@ -6,7 +6,9 @@
 //! only when nothing blocks. "First match wins" is true only of the rules
 //! that stop the check.
 
-use super::row_store::Rule;
+use snitchwatch_bridge::translator::verdict::strip_display_hazards;
+
+use super::row_store::{Rule, UNRECOGNISED_ACTION};
 use super::simulator::{daemon_action, stops_scan};
 
 pub const OFF: &str = "Turned off: it decides nothing.";
@@ -22,6 +24,29 @@ pub const ALLOWS: &str = "Allows only if no deny, reject, blocklist or decide-fi
 /// decides (`acceptOrDeny`).
 pub const UNRECOGNISED: &str = "Its action isn't one the firewall recognises: a match doesn't \
      stop the check, and if no later rule matches, the connection is blocked.";
+
+/// Longest unrecognised action shown, in characters.
+const MAX_ACTION_CHARS: usize = 32;
+
+impl Rule {
+    /// The rule's action as the Rules page shows it: `allow` or `deny`
+    /// (`reject` included), or for any other the action as written, as plain
+    /// text, with what the daemon does with it (PR #106 review N4).
+    pub fn action_label(&self) -> String {
+        let normalized = self.normalized_action();
+        if normalized != UNRECOGNISED_ACTION {
+            return normalized.to_string();
+        }
+        let plain = strip_display_hazards(&self.action);
+        let shown: String = plain.chars().take(MAX_ACTION_CHARS).collect();
+        let cut = if plain.chars().count() > MAX_ACTION_CHARS {
+            "…"
+        } else {
+            ""
+        };
+        format!("\"{shown}{cut}\" (unrecognised: blocks)")
+    }
+}
 
 /// The simulator's own reading of a rule (`stops_scan`, `daemon_action`),
 /// so the inspector and Simulate never disagree.
@@ -63,6 +88,35 @@ mod tests {
         assert_eq!(how_it_decides(&rule("deny", true, true)), DECIDES_FIRST);
         assert_eq!(how_it_decides(&rule("allow", false, false)), OFF);
         assert!(!ALLOWS.contains("first match wins"));
+    }
+
+    /// The Rules page shows an unrecognised action as written, as plain
+    /// text and capped, with what the daemon does (N4).
+    #[test]
+    fn an_unrecognised_action_is_shown_as_written_with_a_note() {
+        assert_eq!(rule("allow", false, true).action_label(), "allow");
+        assert_eq!(rule("reject", false, true).action_label(), "deny");
+        assert_eq!(
+            rule("Allow", false, true).normalized_action(),
+            UNRECOGNISED_ACTION
+        );
+        assert_eq!(
+            rule("Allow", false, true).action_label(),
+            "\"Allow\" (unrecognised: blocks)"
+        );
+        assert_eq!(
+            rule("<b>d\u{202e}rop", false, true).action_label(),
+            "\"<b>drop\" (unrecognised: blocks)"
+        );
+        let long = rule(&"x".repeat(40), false, true).action_label();
+        assert!(
+            long.starts_with(&format!("\"{}…\"", "x".repeat(32))),
+            "{long}"
+        );
+        assert_eq!(
+            rule("", false, true).action_label(),
+            "\"\" (unrecognised: blocks)"
+        );
     }
 
     /// The daemon compares actions exactly: "Allow" or "drop" neither stops

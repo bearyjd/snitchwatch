@@ -112,14 +112,15 @@ Kirigami.ScrollablePage {
     // The rule editor's last result once its sheet closed (P2.1).
     readonly property bool showsEditorStatus: ruleEditorController.statusText.length > 0
                                               && !ruleEditor.visible
-    // What the list leaves out (issue #61).
+    // What the list leaves out (#61); no "No rules yet" while that shows.
     readonly property bool showsNotShown: !!page.model && page.model.notShownText.length > 0
-    // "No rules yet", but not while the header says rules aren't listed.
     readonly property bool showsEmptyPlaceholder: (!page.model || page.model.count === 0)
                                                   && !page.showsNotShown
 
+    // `allow`, `deny`, or an unrecognised action (a neutral colour, N4).
     function actionColor(action) {
-        return action === "allow" ? Kirigami.Theme.positiveTextColor : Kirigami.Theme.negativeTextColor;
+        if (action === "allow") return Kirigami.Theme.positiveTextColor;
+        return action === "deny" ? Kirigami.Theme.negativeTextColor : Kirigami.Theme.neutralTextColor;
     }
 
     // The model's JSON summary of the hit counts; null until the bridge has
@@ -368,7 +369,6 @@ Kirigami.ScrollablePage {
             text: rulesIo.statusText
             wrapMode: Text.Wrap
         }
-        // Rules the list leaves out (issue #61), plain text.
         Controls.Label {
             objectName: "rulesNotShown"
             visible: page.showsNotShown
@@ -402,7 +402,6 @@ Kirigami.ScrollablePage {
             listed: !!page.model && page.model.listed
         }
 
-        // Headings from Rust, "(continued)" when a source comes back.
         section.property: "sectionLabel"
         section.criteria: ViewSection.FullString
         section.delegate: Kirigami.ListSectionHeader {
@@ -443,7 +442,6 @@ Kirigami.ScrollablePage {
             required property string hitsNote
             required property string howItDecides
             required property string sourceLabel
-            required property string sectionLabel
             required property string hitBadgeKind
             required property real hitBadgeMs
             required property string shadowKind
@@ -533,8 +531,8 @@ Kirigami.ScrollablePage {
                         text: row.allAppsHint
                         wrapMode: Text.Wrap
                         font: Kirigami.Theme.smallFont
-                        color: row.ruleAction === "allow" ? Kirigami.Theme.neutralTextColor
-                                                          : Kirigami.Theme.negativeTextColor
+                        color: row.ruleAction === "deny" ? Kirigami.Theme.negativeTextColor
+                                                         : Kirigami.Theme.neutralTextColor
                         Layout.fillWidth: true
                     }
                 }
@@ -645,8 +643,6 @@ Kirigami.ScrollablePage {
                     text: page.inspectOperatorSummary
                     wrapMode: Text.Wrap
                 }
-                // Issue #102: only deny, reject and decide-first rules stop
-                // the daemon's check; an allow decides only if none matches.
                 Controls.Label {
                     objectName: "inspectHowItDecides"
                     Kirigami.FormData.label: "Order"

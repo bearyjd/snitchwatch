@@ -66,6 +66,7 @@ fn all_apps_rows_are_flagged_explained_and_deleted_one_at_a_time() {
     let qml = r#"
 import QtQuick
 import QtQuick.Window
+import org.kde.kirigami as Kirigami
 import com.snitchwatch.shell
 
 Window {
@@ -109,6 +110,22 @@ Window {
             }
         }
         return item.contentItem ? probeWindow.findChild(item.contentItem, name) : null;
+    }
+    function findText(item, text) {
+        if (!item) {
+            return null;
+        }
+        if (item.text === text) {
+            return item;
+        }
+        const kids = item.children || [];
+        for (let i = 0; i < kids.length; i++) {
+            const found = probeWindow.findText(kids[i], text);
+            if (found) {
+                return found;
+            }
+        }
+        return item.contentItem ? probeWindow.findText(item.contentItem, text) : null;
     }
     function rowItem(index) {
         page.rulesList.forceLayout();
@@ -250,6 +267,22 @@ Window {
                 probeWindow.check(rulesModel.legacyHostOnlyCount === 0 && !page.header.visible,
                                   "notice stays without flagged rules");
 
+                // N4: an action the daemon doesn't recognise is shown as
+                // written, with a note, in a neutral colour (row and inspector).
+                probeWindow.setRules([probeWindow.rule("100-odd", "drop",
+                                                       probeWindow.host("x.example"))]);
+                const odd = "\"drop\" (unrecognised: blocks)";
+                const oddLabel = probeWindow.findText(probeWindow.rowItem(0), odd);
+                probeWindow.check(oddLabel !== null && oddLabel.textFormat === Text.PlainText
+                                  && Qt.colorEqual(oddLabel.color, page.actionColor(odd))
+                                  && Qt.colorEqual(page.actionColor(odd),
+                                                   Kirigami.Theme.neutralTextColor),
+                                  "unrecognised action label");
+                probeWindow.check(page.openRuleByName("100-odd") && page.inspectAction === odd,
+                                  "inspector action: " + page.inspectAction);
+                page.inspectorSheet.close();
+                probeWindow.setRules([]);
+
                 // Issue #61: what the list leaves out is said under the title.
                 rulesModel.applyServerMessageJson(JSON.stringify({
                     action: "rulesNotShown", tooLarge: 2, listed: true }));
@@ -281,6 +314,11 @@ Window {
                 probeWindow.check(placeholder.visible
                                   && placeholder.text === "Waiting for the firewall service's rules",
                                   "waiting placeholder: " + placeholder.text);
+                // A withdrawal's empty list, before its RulesNotShown: no flash (N8).
+                rulesModel.applyServerMessageJson(JSON.stringify({
+                    action: "setRules", rules: [] }));
+                probeWindow.check(placeholder.text === "Waiting for the firewall service's rules",
+                                  "no 'No rules yet' flash: " + placeholder.text);
 
                 if (probeWindow.failures.length > 0) {
                     throw new Error("all-apps probe: " + probeWindow.failures.join("; "));

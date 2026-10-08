@@ -234,6 +234,9 @@ pub struct RulesModelRust {
     hits_info_json: QString,
     not_shown_text: QString,
     listed: bool,
+    /// Whether a `RulesNotShown` arrived: from then on only it says whether
+    /// there is a list (PR #106 review N8).
+    says_listed: bool,
     analysis: AnalysisState,
     analysis_json: QString,
 }
@@ -272,7 +275,7 @@ impl qobject::RulesModel {
             ROLE_HOW_IT_DECIDES => {
                 QVariant::from(&QString::from(crate::rules::deciding::how_it_decides(rule)))
             }
-            ROLE_ACTION => QVariant::from(&QString::from(rule.normalized_action())),
+            ROLE_ACTION => QVariant::from(&QString::from(&rule.action_label())),
             ROLE_DURATION => QVariant::from(&QString::from(&rule.duration)),
             ROLE_OPERATOR_SUMMARY => QVariant::from(&QString::from(&rule.operator_summary())),
             ROLE_PRECEDENCE => QVariant::from(&(row as i32)),
@@ -545,13 +548,15 @@ impl qobject::RulesModel {
         if let Some(text) = crate::rules::not_shown::not_shown_text(&msg) {
             self.as_mut().set_not_shown_text(QString::from(&text));
             if let ServerMessage::RulesNotShown { listed, .. } = msg {
+                self.as_mut().rust_mut().says_listed = true;
                 self.as_mut().set_listed(listed);
             }
             return;
         }
-        if matches!(msg, ServerMessage::SetRules { .. }) {
-            // An older bridge sends a list only once it has one; a newer
-            // one follows with `RulesNotShown`, which says.
+        if matches!(msg, ServerMessage::SetRules { .. }) && !self.says_listed {
+            // An older bridge sends a list only once it has one. A newer one
+            // follows every list with `RulesNotShown`, which says; so a
+            // withdrawal's empty list never shows "No rules yet" (N8).
             self.as_mut().set_listed(true);
         }
         let changed = {

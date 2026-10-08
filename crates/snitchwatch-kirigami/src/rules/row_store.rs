@@ -41,6 +41,9 @@ const BLOCKLIST_RULE_NAME_PREFIX: &str = "z00-blocklist:";
 /// migration note in `snitchwatch_bridge::blocklists::materializer`.
 const LEGACY_BLOCKLIST_RULE_NAME_PREFIX: &str = "900-blocklist:";
 
+/// [`Rule::normalized_action`] for an action the daemon doesn't recognise.
+pub const UNRECOGNISED_ACTION: &str = "unrecognised";
+
 fn default_enabled() -> bool {
     true
 }
@@ -181,14 +184,16 @@ impl Rule {
         matches!(self.source(), RuleSource::Blocklist { .. })
     }
 
-    /// Normalized to exactly `"allow"` or `"deny"` (opensnitchd's `reject`
-    /// action, if ever encountered, is folded into `"deny"` for display —
-    /// same normalization `web/js/rules.js`'s `normalizedRuleAction` does).
+    /// What the daemon does with a match, compared exactly as it compares
+    /// (the simulator's `daemon_action`, PR #106 review N4): `"allow"` for
+    /// exactly `allow`, `"deny"` for exactly `deny` or `reject`, and
+    /// [`UNRECOGNISED_ACTION`] for anything else, which the daemon blocks
+    /// without ending its check (see `rules::deciding`).
     pub fn normalized_action(&self) -> &'static str {
-        if self.action.eq_ignore_ascii_case("allow") {
-            "allow"
+        if matches!(self.action.as_str(), "allow" | "deny" | "reject") {
+            super::simulator::daemon_action(self)
         } else {
-            "deny"
+            UNRECOGNISED_ACTION
         }
     }
 
@@ -365,7 +370,8 @@ struct FoundRule<'a> {
     deletable: bool,
     toggleable: bool,
     enabled: bool,
-    action: &'static str,
+    /// As shown: `allow`, `deny`, or an unrecognised one with a note.
+    action: String,
     duration: &'a str,
     operator_summary: String,
     /// The rule's position in evaluation order (0-based), i.e. its index in
@@ -396,7 +402,7 @@ pub fn found_rule_json(store: &RulesStore, name: &str) -> Option<String> {
         deletable: rule.can_delete(),
         toggleable: rule.can_toggle(),
         enabled: rule.enabled,
-        action: rule.normalized_action(),
+        action: rule.action_label(),
         duration: &rule.duration,
         operator_summary: rule.operator_summary(),
         precedence: idx,
