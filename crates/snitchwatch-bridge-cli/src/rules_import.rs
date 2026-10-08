@@ -133,7 +133,8 @@ impl RulesImport {
             } else {
                 ServerMessage::RulesImportRefused { request_id, reason }
             };
-            tokio::spawn(async move { replier.send(answer).await });
+            // Never a task per dropped request: answer only if there is room.
+            replier.send_now(answer);
         }
         None
     }
@@ -361,8 +362,8 @@ impl ImportTask {
             // The whole guard moves in (not just its `Copy` totals field).
             let mut run = run;
             apply::run(&applier, rules, &mut run.totals).await;
-            // `run` drops here, or on a panic or cancellation above: it
-            // publishes the rules, frees the import and sends the result.
+            // On a panic or cancellation above, dropping `run` does this.
+            run.finish().await;
         });
     }
 }
