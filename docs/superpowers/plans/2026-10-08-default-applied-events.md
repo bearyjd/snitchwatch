@@ -52,14 +52,26 @@ is synthetic:
   longer evicts an older event from a full ring; on stock it still does.
   The gap arithmetic below doesn't depend on either, and no test assumes
   one.
+- **The marker can be spoofed** (PR #108 security review, L1):
+  - by root, with a stock rule file named `""` that carries the
+    description;
+  - by a local process on the legacy TCP transport (#35).
+  - It grants nothing those actors couldn't already do: such an event only
+    shows a decided row and stays out of the hit-count arithmetic. Tower
+    has been asked to confirm that its rule loader refuses empty names.
+- **Off-contract actions.** A marked event whose action isn't `allow`,
+  `deny` or `reject` logs a warning the first time in a bridge run, and its
+  row folds the action like any event's (`deny` unless `allow`); a test
+  pins that.
 
 ## Decisions
 
 ### One predicate
 
-`translator::connection::is_default_action_rule(&Rule)` and the const
-`DEFAULT_ACTION_MARKER`. `event_to_row`, `RuleHits::record` and the tests
-all use it, so the marker is defined once.
+`daemon_contract::is_default_action_rule(&Rule)` and the const
+`DEFAULT_ACTION_MARKER`, in a small module of their own. `event_to_row`,
+`RuleHits::record` and the tests all use it, so the marker is defined
+once.
 
 ### Wire representation
 
@@ -71,7 +83,9 @@ all use it, so the marker is defined once.
     `decidedByDefault`), set to `true`. It follows `deferred`:
     `#[serde(default, skip_serializing_if = "std::ops::Not::not")]`, so it
     is absent on every other row and in old payloads.
-- The row id stays `event-<unixnano>`.
+- The row id is `event-<unixnano>-<seq>`, `<seq>` from a bridge counter
+  (PR #108 security review, L2). The daemon's time alone can repeat, and
+  "Make a rule…" finds its row by id when clicked. Nothing parses the id.
 - **Why a flag and not `matched_rule: None` alone.** Old rows and some
   decision paths already have `None`. A GUI must never infer "the default
   decided this" from a missing name.
@@ -156,11 +170,17 @@ all use it, so the marker is defined once.
   the list's verdict label (flat and grouped) and the inspector's Verdict
   line, with no QML change:
   - "Denied (the firewall's default action)";
-  - "Allowed (the firewall's default action)". **No "usually"**
-    (orchestrator decision, 2026-10-08): the daemon reports the action it
-    applied. "Usually allowed" stays where the bridge only predicts the
-    default from the daemon config (deferred rows, the prompt-slot texts;
-    tower's r8: requeued packets can drop under nftables chain churn).
+  - "Usually allowed (the firewall's default action)". Tower's r8 saw
+    requeued packets dropped under nftables chain churn whatever the
+    verdict. A marked event after an Ask timeout is exactly that requeue,
+    and the bridge can't tell it from the slot-busy case. (Briefly
+    "Allowed", then reversed after review: the r8 requeue caveat.)
+- **The flag always means "decided, no rule"** (PR #108 review):
+  - `is_pending` is false and `Verdict::of` is Other for a flagged row even
+    without an action;
+  - the `matchedRule` role (`matched_rule_name`) is empty for it whatever
+    `matched_rule` says, so "Show rule" and the 5-minute note can't read a
+    stray name.
 - **`matched_rule_display`** checks the flag first:
   - "No rule: the firewall's default action (deny)" / "(allow)";
   - it never blanks, and never infers this from `matched_rule == None`.
@@ -177,6 +197,39 @@ all use it, so the marker is defined once.
   - The 5-minute-block note needs a `matchedRule`, so it never shows here.
   - Rule-matched and plain decided rows still get no "Make a rule…", and
     neither do pending rows.
+- **"Make a rule…" says only what the bridge answered** (PR #108 security
+  review, M1; it predates E3, which widens who reaches it).
+  - The `AddRule` carries a request id. `MakeRuleController`
+    (`make_rule::MakeRuleWait`) waits for its `RuleCommandResult`, as the
+    rule editor does.
+  - "The rule was created." shows only on Ok. A refusal shows its reason
+    (the TCP transport, a name clash, the rule policy, a daemon error), and
+    no answer within `NO_ANSWER_AFTER` says the outcome is unknown. All
+    plain text.
+  - One request at a time; the status shows only on the row it is about.
+    Deferred rows share the path.
+- **The two-rows hint.** A put-off row without a rule on record
+  (`outcome::may_be_listed_again`) gets one fixed plain-text line in its
+  inspector: "The firewall may also list this connection, and its retries,
+  separately as decided by its default action." It doesn't show on a
+  "Decide later" 5-minute block, which a rule decided.
+
+## Known limitations
+
+- **Two rows for one connection** (see above): not folded in v1.
+- **Cache eviction.** The bridge's connection cache is bounded and evicts
+  the oldest decided rows first, deferred ones included. A burst or flood
+  of default-applied connections, which any unprivileged process can cause
+  (PR #108 security review, L3), can push other rows, deferred ones
+  included, out before the user acts on them. Coalescing marked events is
+  a follow-up.
+- **The daemon's own cap.** A marked event dropped at the daemon's
+  `MaxEvents` cap never reaches the bridge, so that connection isn't
+  listed. For the hit counts that is correct: it decides no rule's count.
+- **Pings of only marked events.** The daemon pings only when
+  `Serialize()` has new events. r12 should confirm on tower's VM that
+  pings carrying only marked events reach the bridge; the fork must set
+  `newEvents` when it appends one.
 
 ## Overlap with PR #101 (`feat/rule-insights-badges`, in flight)
 
@@ -212,15 +265,26 @@ all use it, so the marker is defined once.
      `received`;
    - an unmarked `""` event that grew `rule_hits` is no gap.
 4. **Kirigami unit** (`connections/outcome.rs`, `connections/row_store.rs`,
-   `make_rule.rs`): the labels above; the flag wins over `matched_rule`;
+   `make_rule.rs`, `bridge_feed.rs`): the labels above; the flag wins over
+   `matched_rule` (`is_pending`, `Verdict::of`, `matched_rule_name`);
    `offers_make_rule` and `add_rule_message` accept a default-decided row
-   with the same refusals, and refuse a rule-matched one.
+   with the same refusals, and refuse a rule-matched one; a fork event's
+   row (`1:event-…`) names its session and gets the program-bound
+   `AddRule`; `MakeRuleWait`'s Ok, refused and no-reply paths;
+   `may_be_listed_again`.
 5. **Kirigami QML probe** (`tests/default_action_rows_qml.rs`): a real
    `ConnectionsPage` + `ConnectionsModel` with default-decided rows:
    - the list label, flat and grouped;
    - the inspector's Verdict and Matched rule;
-   - no "Show rule"; "Make a rule…" shown for default-decided rows, with no
-     block note, and hidden on a rule-matched and an unmarked `""` row.
+   - no "Show rule", even with a stray `matchedRule`; "Make a rule…" shown
+     for default-decided rows, with no block note, and hidden on a
+     rule-matched and an unmarked `""` row;
+   - the sheet's result: unsent, sending, refused, created, and nothing on
+     another row;
+   - no two-rows hint here; `deferred_rows_qml.rs` checks it on a put-off
+     row and not on a 5-minute block.
+   - Guards (`honest_ui_qml_guards.rs`): the hint is one fixed PlainText
+     line, and `MakeRuleSheet.qml` never says created or sent itself.
 6. **`mock_opensnitchd`**: `default_action_event(...)` builds the contract
    `Event`; a unit test pins its shape.
 7. **Integration** (`tests/default_applied_events_test.rs`, the
@@ -235,8 +299,11 @@ Each flipped alone, a test must fail, then reverted:
 - the description half;
 - the gap exclusion (back to `events.len()`);
 - `outcome_text` and `matched_rule_display` ignoring the flag;
-- `offers_make_rule` ignoring `decided_by_default`;
-- the default-decided allow label saying "Usually allowed" again.
+- `offers_make_rule` ignoring `decided_by_default`, and the
+  `makeRuleOffered` role bypassing it;
+- the default-decided allow label losing "Usually";
+- `is_pending`, `Verdict::of` and the `matchedRule` role ignoring the flag;
+- "Make a rule…" showing success whatever the outcome.
 
 ## Gates
 
@@ -254,5 +321,6 @@ QT_QUICK_CONTROLS_STYLE=Basic`); `cargo test` for default members.
   config was unreadable).
 - **"Make a rule…" on a default-decided row: yes,** through the deferred
   row's path and checks (see Kirigami).
-- **Wording: "Allowed (the firewall's default action)"** for a
-  default-decided allow, without "usually" (see Kirigami).
+- **Wording: "Usually allowed (the firewall's default action)"** for a
+  default-decided allow. First decided as "Allowed"; **reversed after
+  review: r8 requeue caveat** (see Kirigami).
