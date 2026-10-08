@@ -218,6 +218,8 @@ Controls.ApplicationWindow {
                                       && !sheet.controller.created,
                                       "refused: " + sheet.result);
                     const okId = sheet.controller.begin(page.inspectId);
+                    probeWindow.check(sheet.controller.busy && !sheet.busyElsewhereNote.visible,
+                                      "busy-elsewhere note for this row's own request");
                     sheet.controller.applyServerMessageJson(JSON.stringify({
                         action: "ruleCommandResult", requestId: okId, outcome: { status: "ok" }
                     }));
@@ -228,6 +230,10 @@ Controls.ApplicationWindow {
                     // naming no session, so only the deadline can end it.)
                     sheet.controller.begin("probe-row");
                     probeWindow.check(sheet.result === "", "another row's status: " + sheet.result);
+                    probeWindow.check(sheet.busyElsewhereNote.visible
+                                      && sheet.busyElsewhereNote.text
+                                         === "Another rule is still being sent. Try again in a moment.",
+                                      "no busy-elsewhere note while another row's rule waits");
                     sheet.controller.applyServerMessageJson(JSON.stringify({
                         action: "ruleCommandResult", requestId: "unrelated", outcome: { status: "ok" }
                     }));
@@ -241,6 +247,8 @@ Controls.ApplicationWindow {
                     // 150 ms later: past the 50 ms deadline, poll gives up.
                     const controller = page.makeRuleSheet.controller;
                     controller.poll();
+                    probeWindow.check(!page.makeRuleSheet.busyElsewhereNote.visible,
+                                      "busy-elsewhere note after the wait ended");
                     probeWindow.check(!controller.busy && !controller.created
                                       && controller.statusText === "No answer from the firewall "
                                          + "in time. The rule may have been created; check the "

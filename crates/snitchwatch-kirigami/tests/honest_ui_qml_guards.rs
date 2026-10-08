@@ -393,6 +393,27 @@ fn make_rule_sheet_says_only_what_the_bridge_answered() {
         .expect("the result label");
     assert!(has_line(&label, "textFormat: Text.PlainText"), "{label}");
     assert!(has_line(&label, "text: sheet.result"), "{label}");
+
+    // While another row's request waits, Allow and Deny are disabled; one
+    // fixed line says why.
+    let busy = blocks(&code, "Controls.Label {")
+        .into_iter()
+        .find(|block| has_line(block, "objectName: \"makeRuleBusyElsewhere\""))
+        .expect("the busy-elsewhere label");
+    assert!(
+        has_line(
+            &busy,
+            "visible: controller.busy && controller.rowId !== sheet.rowId"
+        ),
+        "{busy}"
+    );
+    assert!(has_line(&busy, "textFormat: Text.PlainText"), "{busy}");
+    let binding = text_binding(&busy).expect("the label has a text");
+    assert!(is_fixed_text(&binding), "{binding}");
+    assert!(
+        binding.contains("Another rule is still being sent. Try again in a moment."),
+        "{binding}"
+    );
 }
 
 /// E3 (PR #108 review): a put-off row's inspector says the firewall may list

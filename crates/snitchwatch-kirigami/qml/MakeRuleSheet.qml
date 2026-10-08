@@ -39,6 +39,7 @@ ColumnLayout {
     property alias blockNote: blockNoteLabel
     property alias controller: controller
     property alias alsoListedNote: alsoListedNote
+    property alias busyElsewhereNote: busyElsewhereNote
 
     onRowIdChanged: form.visible = false
 
@@ -152,6 +153,17 @@ ColumnLayout {
         opacity: 0.7
         textFormat: Text.PlainText
         text: "This program's 5-minute block stays until it ends. Until then it wins over an Allow rule."
+    }
+
+    Controls.Label {
+        id: busyElsewhereNote
+        objectName: "makeRuleBusyElsewhere"
+        Layout.fillWidth: true
+        visible: controller.busy && controller.rowId !== sheet.rowId
+        wrapMode: Text.Wrap
+        opacity: 0.7
+        textFormat: Text.PlainText
+        text: "Another rule is still being sent. Try again in a moment."
     }
 
     Controls.Label {
