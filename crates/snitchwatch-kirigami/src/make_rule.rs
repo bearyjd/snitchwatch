@@ -122,9 +122,7 @@ pub(crate) fn send_problem(
     let Some(message) = message else {
         return Some(NOT_SENT);
     };
-    send(message)
-        .err()
-        .map(crate::rules::editor_view::not_sent_text)
+    send(message).err().map(crate::rule_commands::not_sent_text)
 }
 
 /// "Make a rule…"'s wording of a result: [`CREATED`] only for Ok.
@@ -160,7 +158,8 @@ pub(crate) struct MakeRuleWait(Pending<RowTag>);
 
 impl MakeRuleWait {
     pub(crate) fn begin(&mut self, request_id: String, row_id: String, now: Instant) {
-        let session = crate::bridge_feed::split_session_row_id(&row_id).map(|(session, _)| session);
+        let session =
+            crate::rule_commands::split_session_row_id(&row_id).map(|(session, _)| session);
         self.0
             .sent_with(request_id, RowTag { row_id, session }, now);
     }
@@ -621,7 +620,7 @@ mod tests {
     #[test]
     fn a_rule_that_was_not_sent_says_why() {
         use crate::bridge_runtime::SendClientMessageError as E;
-        use crate::rules::editor_view::{NOT_CONNECTED, QUEUE_FULL};
+        use crate::rule_commands::{NOT_CONNECTED, QUEUE_FULL};
         let message = || {
             add_rule_message(
                 &deferred_row(Some("/usr/bin/curl")),

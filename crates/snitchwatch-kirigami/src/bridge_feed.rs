@@ -26,6 +26,7 @@ use cxx_qt::Threading;
 use cxx_qt_lib::QString;
 
 use crate::bridge_runtime::{LinkState, LinkStatus};
+use crate::rule_commands::split_session_row_id;
 use snitchwatch_bridge::ws_messages::ServerMessage;
 
 #[cxx_qt::bridge]
@@ -401,13 +402,6 @@ pub(crate) fn app_bound_rules_for_row(
     }
 }
 
-/// Local-only row identity. Never transmitted to the service.
-pub(crate) fn split_session_row_id(id: &str) -> Option<(u64, &str)> {
-    let (session, wire_id) = id.split_once(':')?;
-    let session = session.parse::<u64>().ok().filter(|id| *id != 0)?;
-    (!wire_id.is_empty()).then_some((session, wire_id))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -484,15 +478,6 @@ mod tests {
             dispatch_for_row_on(None, "1:ask-7", ClientMessage::RequestSnapshot),
             Err(E::Disconnected)
         );
-    }
-
-    #[test]
-    fn local_row_identity_retains_origin_even_when_wire_ids_are_reused() {
-        assert_eq!(split_session_row_id("1:7"), Some((1, "7")));
-        assert_eq!(split_session_row_id("2:7"), Some((2, "7")));
-        for id in ["7", "0:7", "invalid:7", "2:"] {
-            assert_eq!(split_session_row_id(id), None);
-        }
     }
 
     #[test]

@@ -11,7 +11,7 @@ use snitchwatch_bridge::ws_messages::{ClientMessage, ServerMessage};
 
 use crate::bridge_dispatch::run_feed;
 use crate::bridge_runtime::SendClientMessageError;
-use crate::rules::editor_view::interests_rule_editor;
+use crate::rule_commands::interests_rule_results;
 
 /// Feed the bridge's `RuleCommandResult`s to `on_message`, on the Qt thread
 /// of the object `qt_thread` belongs to, and only from the live bridge
@@ -40,7 +40,7 @@ where
             snapshots.try_send(ClientMessage::RequestSnapshot)
         }),
         label,
-        interests_rule_editor,
+        interests_rule_results,
         move |connection_id, message, _json| {
             let session_handles = session_handles.clone();
             let message = message.clone();
@@ -112,7 +112,7 @@ mod tests {
                     Ok(())
                 }),
                 "test-results",
-                interests_rule_editor,
+                interests_rule_results,
                 |_, _, _| {},
             ));
             tokio::time::sleep(std::time::Duration::from_millis(250)).await;

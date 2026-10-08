@@ -15,7 +15,6 @@ use cxx_qt_lib::QString;
 use std::time::{Duration, Instant};
 
 use crate::make_rule::{Finished, MakeRuleWait, NOT_SENT, NO_ANSWER_AFTER, SENDING};
-use crate::rules::editor_view;
 use snitchwatch_bridge::ws_messages::ServerMessage;
 
 #[cxx_qt::bridge]
@@ -113,7 +112,7 @@ impl qobject::MakeRuleController {
         if self.busy {
             return QString::from("");
         }
-        let request_id = editor_view::next_request_id("make");
+        let request_id = crate::rule_commands::next_request_id("make");
         self.as_mut()
             .rust_mut()
             .wait

@@ -138,10 +138,10 @@ pub struct RuleEditorControllerRust {
 }
 
 fn send(message: ClientMessage) -> Result<(), &'static str> {
-    let handles = crate::bridge_runtime::handles().ok_or(editor_view::NOT_CONNECTED)?;
+    let handles = crate::bridge_runtime::handles().ok_or(crate::rule_commands::NOT_CONNECTED)?;
     handles
         .try_send(message)
-        .map_err(editor_view::not_sent_text)
+        .map_err(crate::rule_commands::not_sent_text)
 }
 
 fn draft_json(draft: &RuleDraft) -> QString {
@@ -266,7 +266,7 @@ impl qobject::RuleEditorController {
             self.set_status(reason);
             return false;
         }
-        let request_id = editor_view::next_request_id("edit");
+        let request_id = crate::rule_commands::next_request_id("edit");
         let editing = self.editing_name.to_string();
         let profile = self.profile_id.to_string();
         let message = if profile.is_empty() {

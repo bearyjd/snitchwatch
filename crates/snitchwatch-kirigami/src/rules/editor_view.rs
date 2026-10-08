@@ -6,7 +6,6 @@
 use serde::Serialize;
 use serde_json::Value;
 use snitchwatch_bridge::ws_messages::{ClientMessage, RuleCommandOutcome, ServerMessage};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use super::editor::{plain_problems, EditorCheck, RuleDraft};
@@ -21,20 +20,6 @@ const SAVED: &str = "Saved.";
 const NOT_SAVED: &str = "Not saved: ";
 const NOT_SENT: &str = "Not sent: ";
 const NO_DAEMON: &str = "The firewall service isn't connected, so nothing was sent.";
-/// A message that never reached the bridge (`not_sent_text`); "Make a
-/// rule…" says the same.
-pub const NOT_CONNECTED: &str = "Snitchwatch isn't connected to its service, so nothing was sent.";
-pub const QUEUE_FULL: &str = "Snitchwatch is busy, so nothing was sent. Try again in a moment.";
-
-/// Why a message wasn't queued for the bridge, as plain text.
-pub fn not_sent_text(error: crate::bridge_runtime::SendClientMessageError) -> &'static str {
-    use crate::bridge_runtime::SendClientMessageError as E;
-    match error {
-        E::Full => QUEUE_FULL,
-        E::Disconnected | E::Stopped | E::StaleSession => NOT_CONNECTED,
-    }
-}
-
 /// No answer: the change may or may not have been made.
 pub const UNKNOWN: &str = "No answer from the firewall in time. The change may have been \
      saved; check the Rules page.";
@@ -262,21 +247,4 @@ impl Pending {
         self.expired_with(now, NO_ANSWER_AFTER, |_| false, &EDITOR_WORDING)
             .map(|(_, done)| done)
     }
-}
-
-/// The live feed's filter for the editor and "Make a rule…": results only.
-pub fn interests_rule_editor(message: &ServerMessage) -> bool {
-    matches!(message, ServerMessage::RuleCommandResult { .. })
-}
-
-/// A new request id, `<prefix>-<pid>-<n>`, unique in this process (the
-/// editor's are `edit-…`, "Make a rule…"'s `make-…`). Valid for the bridge
-/// for a short ASCII `prefix`.
-pub fn next_request_id(prefix: &str) -> String {
-    static NEXT: AtomicU64 = AtomicU64::new(1);
-    format!(
-        "{prefix}-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    )
 }

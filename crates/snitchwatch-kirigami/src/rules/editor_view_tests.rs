@@ -160,8 +160,9 @@ fn only_the_awaited_result_finishes_the_wait() {
         None
     );
 
-    assert!(interests_rule_editor(&result("x", RuleCommandOutcome::Ok)));
-    assert!(!interests_rule_editor(&ServerMessage::SetRules {
+    use crate::rule_commands::interests_rule_results;
+    assert!(interests_rule_results(&result("x", RuleCommandOutcome::Ok)));
+    assert!(!interests_rule_results(&ServerMessage::SetRules {
         rules: vec![]
     }));
 }
@@ -220,33 +221,6 @@ fn a_cached_rule_is_edited_in_its_wire_form() {
         locked.not_editable
     );
     assert!(editable_in(&store, "899-missing").is_none());
-}
-
-/// The texts for a message that never reached the bridge, shared with "Make
-/// a rule…".
-#[test]
-fn a_message_that_was_not_queued_says_why() {
-    use crate::bridge_runtime::SendClientMessageError as E;
-    assert_eq!(not_sent_text(E::Full), QUEUE_FULL);
-    for error in [E::Disconnected, E::Stopped, E::StaleSession] {
-        assert_eq!(not_sent_text(error), NOT_CONNECTED, "{error:?}");
-    }
-}
-
-#[test]
-fn request_ids_are_valid_distinct_and_prefixed() {
-    let (edit, make) = (next_request_id("edit"), next_request_id("make"));
-    assert!(
-        edit.starts_with("edit-") && make.starts_with("make-"),
-        "{edit} {make}"
-    );
-    assert_ne!(edit, next_request_id("edit"));
-    for id in [&edit, &make] {
-        assert!(
-            snitchwatch_bridge::ws_messages::valid_request_id(id),
-            "{id}"
-        );
-    }
 }
 
 /// The wait "Make a rule…" shares: a tag rides along, the wording is the
