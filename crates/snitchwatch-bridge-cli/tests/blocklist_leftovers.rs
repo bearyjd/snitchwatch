@@ -13,7 +13,7 @@ use snitchwatch_bridge::ws_messages::{ClientMessage, ServerMessage};
 use snitchwatch_bridge_cli::{
     run_with_options, BridgeConfig, BridgeMode, EphemeralReason, RunOptions, RunningBridge, Storage,
 };
-use snitchwatch_proto::protocol::{Action, ClientConfig, Notification, Operator, Rule};
+use snitchwatch_proto::protocol::{ClientConfig, Notification, Operator, Rule};
 use tokio::sync::{broadcast, mpsc};
 
 const WAIT: Duration = Duration::from_secs(10);
@@ -116,12 +116,6 @@ async fn next_count(rx: &mut broadcast::Receiver<ServerMessage>) -> u32 {
     })
     .await
     .expect("no SetBlocklistLeftovers")
-}
-
-async fn count_until(rx: &mut broadcast::Receiver<ServerMessage>, want: u32) {
-    tokio::time::timeout(WAIT, async { while next_count(rx).await != want {} })
-        .await
-        .unwrap_or_else(|_| panic!("the count never became {want}"));
 }
 
 fn snapshot() -> Vec<Rule> {
