@@ -201,7 +201,9 @@ pub async fn handle_profile_action(
             mgr.deactivate().await?;
             Ok(ProfileActionOutcome::Deactivated)
         }
-        ClientMessage::AddProfileRule { profile_id, rule } => {
+        ClientMessage::AddProfileRule {
+            profile_id, rule, ..
+        } => {
             mgr.add_rule(
                 &profile_id,
                 ProfileRule {
@@ -209,6 +211,7 @@ pub async fn handle_profile_action(
                     action: rule.action,
                     operand: rule.operand,
                     data: rule.data,
+                    operator: rule.operator,
                 },
             )
             .await?;
@@ -303,7 +306,10 @@ mod profile_action_tests {
                     action: "deny".into(),
                     operand: "dest.host".into(),
                     data: "ads.example".into(),
+                    ..Default::default()
                 },
+                request_id: None,
+                reply: None,
             },
         )
         .await

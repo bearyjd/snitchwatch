@@ -1,42 +1,63 @@
 //! Bridge-owned switchable firewall profiles ("At Home" / "Public Wi-Fi" /
-//! "Office"), with automatic activation based on the connected network.
+//! "Office"), with automatic activation based on the connected network, and
+//! enforcement of the active profile's rules (issue #46 Part 2).
 //!
-//! ## Auto vs. manual activation semantics
+//! ## Auto vs. manual activation (issue #82)
 //!
-//! - [`ProfilesManager::activate`] (driven by `ClientMessage::ActivateProfile`,
-//!   i.e. a user clicking "Activate" in the UI) is always **manual**: it sets
-//!   an internal "pinned" flag and materializes the chosen profile
-//!   immediately, regardless of what the network matcher would pick.
-//! - The auto-switch loop (spawned by [`ProfilesManager::spawn_auto_switch`])
-//!   only acts when the *network identity itself changes* (a new
-//!   [`crate::profiles::network_watcher::NetworkWatcher`] observation
-//!   different from the last one it saw). On every such change it clears the
-//!   pin and re-evaluates matchers against the new network from scratch.
-//! - In other words: **a manual pick sticks until you actually change
-//!   networks**, at which point auto-switching resumes and evaluates the
-//!   *new* network's matchers fresh — a manual choice never permanently
-//!   disables auto-switching, and it is never silently overridden while you
-//!   stay on the same network.
-//! - If no profile's matchers match the new network, the loop leaves
-//!   whatever's currently active as-is (it does not deactivate to "none").
+//! - [`ProfilesManager::activate`] / [`ProfilesManager::deactivate`] (the
+//!   Profiles page) are **manual**: the choice is saved together with the
+//!   newest network the bridge has seen ([`store::ManualChoice`]).
+//! - Auto-switching ([`ProfilesManager::spawn_auto_switch`]) acts on a
+//!   network only once it has stayed the same for a few seconds
+//!   ([`tasks::NETWORK_SETTLE`]), and only when it differs from the
+//!   last network it acted on.
+//! - **A manual choice holds while the observed network is the one it was
+//!   made on**, including the first reading after a restart. A different
+//!   network clears it, and auto-switching evaluates that network's
+//!   matchers from scratch.
+//! - If no profile's matchers match a network, the active profile is left
+//!   as it is (it does not deactivate to "none").
+//!
+//! ## Enforcement
+//!
+//! Profile actions only change the store and ask for an enforcement pass;
+//! the pass itself runs on one task ([`ProfilesManager::spawn_enforcer`]),
+//! never on the bridge's message pump, and also after every committed
+//! daemon rules snapshot. See [`enforcer`] for what a pass does. Each rule
+//! of the active profile has a status: pending, "Rule installed" (only
+//! after a correlated `OK`, or found in place), or not enforced with the
+//! reason. A rule the `ProfileRule` policy refuses is never installed.
 
+pub mod enforcer;
 pub mod matcher;
 pub mod materializer;
 pub mod network_watcher;
 pub mod store;
+pub mod tasks;
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex as StdMutex, MutexGuard};
 
-use async_trait::async_trait;
-use tokio::sync::{broadcast, Mutex};
-use tokio::task::JoinHandle;
-use tracing::{info, warn};
+use tokio::sync::{broadcast, Mutex, Notify};
+use tracing::{error, info};
 
-use crate::profiles::materializer::{materialize_profile, MaterializedRule};
-use crate::profiles::network_watcher::NetworkWatcher;
-use crate::profiles::store::{Profile, ProfileRule, ProfileStore, StoreError};
+pub use crate::profiles::enforcer::{DaemonProfileSink, NoopProfileRuleSink, ProfileRuleSink};
+
+use crate::blocklists::Enforcement;
+use crate::profiles::materializer::{materialize_profile, materialize_rule, valid_rule_id};
+use crate::profiles::store::{ManualChoice, Profile, ProfileRule, ProfileStore, StoreError};
+use crate::rule_policy::RuleProblem;
 use crate::ws_messages::StorageStatus;
+
+/// Most rules one profile holds.
+pub const MAX_RULES_PER_PROFILE: usize = 64;
+
+/// Why nothing is installed when no sink was wired in (in-process bridges
+/// and tests).
+pub const NO_SINK_REASON: &str = "Profiles aren't applied to the firewall by this Snitchwatch";
+
+const RULE_ID_REFUSED: &str = "a profile rule's id must be 1 to 64 letters, digits, - or _";
+const TOO_MANY_RULES: &str = "a profile holds at most 64 rules";
 
 /// Events emitted whenever profile state changes. The translator subscribes
 /// and rebroadcasts as `SetProfiles` / `ProfileChanged` over the WS.
@@ -46,45 +67,22 @@ pub enum ProfileEvent {
     ActiveProfileChanged { profile_id: Option<String> },
 }
 
-/// Sink that receives materialized rules whenever a profile is activated
-/// (`rules` non-empty) or deactivated (`rules` empty, to clear its band).
-/// Mirrors [`crate::blocklists::RuleSink`]; kept as a separate trait since
-/// profile activation additionally needs to *clear* the previously active
-/// profile's band, and giving it its own name keeps that call site
-/// unambiguous about which band is being replaced.
-// clippy 1.99's `double_must_use` fires on async_trait's generated
-// `#[must_use]` methods (they return an already-must_use boxed future).
-#[allow(clippy::double_must_use)]
-#[async_trait]
-pub trait ProfileRuleSink: Send + Sync + 'static {
-    async fn replace_profile_rules(
-        &self,
-        profile_id: &str,
-        rules: Vec<MaterializedRule>,
-    ) -> anyhow::Result<()>;
-}
-
-/// No-op sink: the bridge's production sink until issue #46 Part 2, so
-/// activating a profile installs no daemon rule (the Profiles page says so).
-pub struct NoopProfileRuleSink;
-
-#[async_trait]
-impl ProfileRuleSink for NoopProfileRuleSink {
-    async fn replace_profile_rules(
-        &self,
-        _profile_id: &str,
-        _rules: Vec<MaterializedRule>,
-    ) -> anyhow::Result<()> {
-        Ok(())
-    }
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum ProfilesError {
     #[error("store error: {0}")]
     Store(#[from] StoreError),
     #[error("unknown profile: {0}")]
     UnknownProfile(String),
+    /// A profile rule the bridge won't keep; each reason is plain text.
+    #[error("profile rule refused")]
+    Refused(Vec<RuleProblem>),
+}
+
+/// The active profile's rule statuses, by rule id.
+#[derive(Debug, Default, Clone, PartialEq)]
+struct Statuses {
+    profile_id: Option<String>,
+    rules: HashMap<String, Enforcement>,
 }
 
 pub struct ProfilesManager {
@@ -92,13 +90,25 @@ pub struct ProfilesManager {
     bus: broadcast::Sender<ProfileEvent>,
     rule_sink: Arc<dyn ProfileRuleSink>,
     storage: StorageStatus,
-    /// `true` once a manual `activate()` call has pinned the active profile
-    /// against auto-switching, until the network identity next changes. See
-    /// module docs.
-    manual_pin: AtomicBool,
-    /// Last network identity the auto-switch loop observed, so it can detect
-    /// "the network actually changed" vs. a repeated poll of the same value.
-    last_seen_network: Mutex<Option<String>>,
+    /// Serializes manual choices and network observations, so an
+    /// auto-switch can't land between a click and its saved choice.
+    switch_lock: Mutex<()>,
+    /// The last settled network auto-switching acted on; `None` until the
+    /// first one since the bridge started.
+    last_settled: StdMutex<Option<Option<String>>>,
+    /// The newest network seen, settled or not: what a manual choice is
+    /// saved with.
+    latest_network: StdMutex<Option<String>>,
+    statuses: StdMutex<Statuses>,
+    enforce_requested: Notify,
+    /// One enforcement pass at a time.
+    pass_lock: Mutex<()>,
+}
+
+fn lock<T>(mutex: &StdMutex<T>) -> MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 impl ProfilesManager {
@@ -107,14 +117,18 @@ impl ProfilesManager {
         Self {
             store,
             bus,
-            rule_sink: Arc::new(NoopProfileRuleSink),
+            rule_sink: Arc::new(NoopProfileRuleSink::new(NO_SINK_REASON)),
             storage: StorageStatus {
                 unreadable: false,
                 persistent: false,
                 reason: None,
             },
-            manual_pin: AtomicBool::new(false),
-            last_seen_network: Mutex::new(None),
+            switch_lock: Mutex::new(()),
+            last_settled: StdMutex::new(None),
+            latest_network: StdMutex::new(None),
+            statuses: StdMutex::default(),
+            enforce_requested: Notify::new(),
+            pass_lock: Mutex::new(()),
         }
     }
 
@@ -134,12 +148,42 @@ impl ProfilesManager {
         &self.storage
     }
 
+    /// Why profiles install nothing at all, if they don't.
+    pub fn not_applied_reason(&self) -> Option<String> {
+        self.rule_sink.not_applied_reason().map(str::to_string)
+    }
+
+    /// The status of `profile_id`'s rule `rule_id`; `None` unless that
+    /// profile is the active one.
+    pub fn rule_status(&self, profile_id: &str, rule_id: &str) -> Option<Enforcement> {
+        let statuses = lock(&self.statuses);
+        if statuses.profile_id.as_deref() != Some(profile_id) {
+            return None;
+        }
+        Some(
+            statuses
+                .rules
+                .get(rule_id)
+                .cloned()
+                .unwrap_or(Enforcement::Pending),
+        )
+    }
+
     pub fn subscribe(&self) -> broadcast::Receiver<ProfileEvent> {
         self.bus.subscribe()
     }
 
     pub fn store(&self) -> &Arc<ProfileStore> {
         &self.store
+    }
+
+    fn changed(&self) {
+        let _ = self.bus.send(ProfileEvent::ProfilesChanged);
+    }
+
+    /// Ask the enforcer for a pass; requests made before it runs coalesce.
+    pub fn request_enforcement(&self) {
+        self.enforce_requested.notify_one();
     }
 
     pub async fn create_profile(
@@ -155,7 +199,7 @@ impl ProfilesManager {
             rules: vec![],
             active: false,
         })?;
-        let _ = self.bus.send(ProfileEvent::ProfilesChanged);
+        self.changed();
         Ok(())
     }
 
@@ -165,472 +209,270 @@ impl ProfilesManager {
         name: &str,
         network_matchers: Vec<String>,
     ) -> Result<(), ProfilesError> {
-        let mut existing = self
-            .store
-            .get_profile(id)?
-            .ok_or_else(|| ProfilesError::UnknownProfile(id.to_string()))?;
+        let mut existing = self.profile(id)?;
         existing.name = name.to_string();
         existing.network_matchers = network_matchers;
         self.store.upsert_profile(&existing)?;
-        let _ = self.bus.send(ProfileEvent::ProfilesChanged);
+        self.changed();
         Ok(())
     }
 
-    pub async fn delete_profile(&self, id: &str) -> Result<(), ProfilesError> {
-        let was_active = self
-            .store
+    fn profile(&self, id: &str) -> Result<Profile, ProfilesError> {
+        self.store
             .get_profile(id)?
-            .map(|p| p.active)
-            .unwrap_or(false);
+            .ok_or_else(|| ProfilesError::UnknownProfile(id.to_string()))
+    }
+
+    pub async fn delete_profile(&self, id: &str) -> Result<(), ProfilesError> {
+        let _switch = self.switch_lock.lock().await;
+        let was_active = self.store.get_profile(id)?.is_some_and(|p| p.active);
         self.store.delete_profile(id)?;
+        let chosen = self.store.manual_choice()?;
+        if chosen.is_some_and(|c| c.profile_id.as_deref() == Some(id)) {
+            self.store.clear_manual_choice()?;
+        }
         if was_active {
-            if let Err(e) = self.rule_sink.replace_profile_rules(id, vec![]).await {
-                warn!(%id, error = %e, "profiles: failed to clear rules for deleted active profile");
-            }
+            self.reset_statuses(None);
+            self.request_enforcement();
             let _ = self
                 .bus
                 .send(ProfileEvent::ActiveProfileChanged { profile_id: None });
         }
-        let _ = self.bus.send(ProfileEvent::ProfilesChanged);
+        self.changed();
         Ok(())
     }
 
+    /// Add or replace a rule of `profile_id`. Refused, and nothing stored,
+    /// when its id isn't plain, the profile is full, or the bridge wouldn't
+    /// install it (the `ProfileRule` policy, through
+    /// [`materializer::materialize_rule`]).
     pub async fn add_rule(&self, profile_id: &str, rule: ProfileRule) -> Result<(), ProfilesError> {
-        let mut profile = self
-            .store
-            .get_profile(profile_id)?
-            .ok_or_else(|| ProfilesError::UnknownProfile(profile_id.to_string()))?;
-        profile.rules.retain(|r| r.id != rule.id);
-        profile.rules.push(rule);
-        let is_active = profile.active;
-        self.store.upsert_profile(&profile)?;
-        if is_active {
-            self.rematerialize(&profile).await;
+        let mut profile = self.profile(profile_id)?;
+        if !valid_rule_id(&rule.id) {
+            return Err(refused("id", RULE_ID_REFUSED));
         }
-        let _ = self.bus.send(ProfileEvent::ProfilesChanged);
+        profile.rules.retain(|r| r.id != rule.id);
+        if profile.rules.len() >= MAX_RULES_PER_PROFILE {
+            return Err(refused("rule", TOO_MANY_RULES));
+        }
+        let seq = profile.rules.len();
+        materialize_rule(profile_id, &rule, seq).map_err(ProfilesError::Refused)?;
+        let rule_id = rule.id.clone();
+        profile.rules.push(rule);
+        self.store.upsert_profile(&profile)?;
+        if profile.active {
+            lock(&self.statuses)
+                .rules
+                .insert(rule_id, Enforcement::Pending);
+            self.request_enforcement();
+        }
+        self.changed();
         Ok(())
     }
 
     pub async fn remove_rule(&self, profile_id: &str, rule_id: &str) -> Result<(), ProfilesError> {
-        let mut profile = self
-            .store
-            .get_profile(profile_id)?
-            .ok_or_else(|| ProfilesError::UnknownProfile(profile_id.to_string()))?;
+        let mut profile = self.profile(profile_id)?;
         profile.rules.retain(|r| r.id != rule_id);
-        let is_active = profile.active;
         self.store.upsert_profile(&profile)?;
-        if is_active {
-            self.rematerialize(&profile).await;
+        if profile.active {
+            lock(&self.statuses).rules.remove(rule_id);
+            self.request_enforcement();
         }
-        let _ = self.bus.send(ProfileEvent::ProfilesChanged);
+        self.changed();
         Ok(())
     }
 
-    /// Manually activate `id`. Pins auto-switching off until the network
-    /// identity next changes (see module docs).
+    /// Manually activate `id`; the choice is saved with the newest network
+    /// seen (issue #82, see module docs).
     pub async fn activate(&self, id: &str) -> Result<(), ProfilesError> {
-        self.manual_pin.store(true, Ordering::SeqCst);
-        self.activate_inner(id).await
+        let _switch = self.switch_lock.lock().await;
+        self.activate_inner(id)?;
+        self.save_manual_choice(Some(id))
     }
 
-    /// Deactivate whatever's active (clears its band, no profile becomes
-    /// active). Also counts as a manual action for pinning purposes.
+    /// Deactivate whatever's active, as a manual choice of no profile.
     pub async fn deactivate(&self) -> Result<(), ProfilesError> {
-        self.manual_pin.store(true, Ordering::SeqCst);
-        self.deactivate_inner().await
+        let _switch = self.switch_lock.lock().await;
+        self.deactivate_inner()?;
+        self.save_manual_choice(None)
     }
 
-    async fn activate_inner(&self, id: &str) -> Result<(), ProfilesError> {
-        let profile = self
-            .store
-            .get_profile(id)?
-            .ok_or_else(|| ProfilesError::UnknownProfile(id.to_string()))?;
-        let previous = self.store.get_active()?;
+    fn save_manual_choice(&self, profile_id: Option<&str>) -> Result<(), ProfilesError> {
+        let network = lock(&self.latest_network).clone();
+        self.store.set_manual_choice(&ManualChoice {
+            profile_id: profile_id.map(str::to_string),
+            network,
+        })?;
+        Ok(())
+    }
+
+    fn activate_inner(&self, id: &str) -> Result<(), ProfilesError> {
+        let profile = self.profile(id)?;
         self.store.set_active(Some(id))?;
-
-        if let Some(prev) = previous {
-            if prev.id != id {
-                if let Err(e) = self.rule_sink.replace_profile_rules(&prev.id, vec![]).await {
-                    warn!(id = %prev.id, error = %e, "profiles: failed to clear previously active profile's rules");
-                }
-            }
-        }
-
-        let materialized = materialize_profile(&profile.id, &profile.rules);
-        if let Err(e) = self
-            .rule_sink
-            .replace_profile_rules(&profile.id, materialized)
-            .await
-        {
-            warn!(id = %profile.id, error = %e, "profiles: rule sink push failed; profile marked active but not enforced");
-        }
-
+        self.reset_statuses(Some(&profile));
+        self.request_enforcement();
         info!(id = %profile.id, "profile activated");
         let _ = self.bus.send(ProfileEvent::ActiveProfileChanged {
             profile_id: Some(profile.id),
         });
+        self.changed();
         Ok(())
     }
 
-    async fn deactivate_inner(&self) -> Result<(), ProfilesError> {
-        if let Some(prev) = self.store.get_active()? {
+    fn deactivate_inner(&self) -> Result<(), ProfilesError> {
+        if self.store.get_active()?.is_some() {
             self.store.set_active(None)?;
-            if let Err(e) = self.rule_sink.replace_profile_rules(&prev.id, vec![]).await {
-                warn!(id = %prev.id, error = %e, "profiles: failed to clear deactivated profile's rules");
-            }
+            self.reset_statuses(None);
+            self.request_enforcement();
             let _ = self
                 .bus
                 .send(ProfileEvent::ActiveProfileChanged { profile_id: None });
+            self.changed();
         }
         Ok(())
     }
 
-    async fn rematerialize(&self, profile: &Profile) {
-        let materialized = materialize_profile(&profile.id, &profile.rules);
-        if let Err(e) = self
-            .rule_sink
-            .replace_profile_rules(&profile.id, materialized)
-            .await
-        {
-            warn!(id = %profile.id, error = %e, "profiles: rule sink push failed while rematerializing active profile");
-        }
+    /// Every rule of a newly active profile starts pending, so the page
+    /// never shows a status from an earlier activation.
+    fn reset_statuses(&self, active: Option<&Profile>) {
+        let rules = active
+            .map(|p| {
+                p.rules
+                    .iter()
+                    .map(|r| (r.id.clone(), Enforcement::Pending))
+                    .collect()
+            })
+            .unwrap_or_default();
+        *lock(&self.statuses) = Statuses {
+            profile_id: active.map(|p| p.id.clone()),
+            rules,
+        };
     }
 
-    /// One tick of auto-switch evaluation: called by the watcher loop with
-    /// the newly observed network identity. Only actually re-activates
-    /// anything when `network` differs from the last-seen value (clearing
-    /// the manual pin in that case) — see module docs for the full
-    /// semantics. Exposed standalone (rather than only inside
-    /// `spawn_auto_switch`) so it's directly unit-testable without a real
-    /// `NetworkWatcher`.
-    pub async fn on_network_observed(&self, network: Option<String>) -> Result<(), ProfilesError> {
-        let mut last_seen = self.last_seen_network.lock().await;
-        if *last_seen == network {
-            return Ok(());
+    /// One enforcement pass: install the active profile's rules that pass
+    /// the policy, delete the bridge's others, and record each rule's
+    /// status. Announces a change of status.
+    pub async fn enforce(&self) {
+        let _pass = self.pass_lock.lock().await;
+        let active = match self.store.get_active() {
+            Ok(active) => active,
+            Err(e) => {
+                error!(error = %e, "profiles: couldn't read the active profile; nothing applied");
+                return;
+            }
+        };
+        let materialized = active
+            .as_ref()
+            .map(|p| materialize_profile(&p.id, &p.rules))
+            .unwrap_or_default();
+        let wanted: Vec<_> = materialized
+            .iter()
+            .filter_map(|(_, rule)| rule.as_ref().ok().cloned())
+            .collect();
+        let mut outcomes = self.rule_sink.apply(&wanted).await.into_iter();
+        let rules = materialized
+            .into_iter()
+            .map(|(id, rule)| {
+                let status = match rule {
+                    Ok(_) => outcomes.next().unwrap_or(Enforcement::Pending),
+                    Err(problems) => Enforcement::NotEnforced {
+                        reason: refusal_text(&problems),
+                    },
+                };
+                (id, status)
+            })
+            .collect();
+        self.record_statuses(active.map(|p| p.id), rules);
+    }
+
+    /// Store a pass's statuses, keeping an unchanged "Rule installed" time.
+    fn record_statuses(&self, profile_id: Option<String>, rules: HashMap<String, Enforcement>) {
+        let mut statuses = lock(&self.statuses);
+        if statuses.profile_id != profile_id {
+            // Another profile became active during the pass; its own pass
+            // follows.
+            return;
         }
-        *last_seen = network.clone();
-        drop(last_seen);
+        let mut changed = false;
+        for (id, status) in rules {
+            let kept = matches!(
+                (statuses.rules.get(&id), &status),
+                (
+                    Some(Enforcement::RuleInstalled { .. }),
+                    Enforcement::RuleInstalled { .. }
+                )
+            );
+            if !kept && statuses.rules.get(&id) != Some(&status) {
+                statuses.rules.insert(id, status);
+                changed = true;
+            }
+        }
+        drop(statuses);
+        if changed {
+            self.changed();
+        }
+    }
+}
 
-        // A genuinely new network resets the pin: auto-switching gets a
-        // fresh chance to evaluate this network's matchers.
-        self.manual_pin.store(false, Ordering::SeqCst);
+impl ProfilesManager {
+    /// The newest network seen, settled or not (what a manual choice is
+    /// saved with).
+    pub fn note_network(&self, network: Option<String>) {
+        *lock(&self.latest_network) = network;
+    }
 
+    /// Act on a network that stayed the same for the settle time (the
+    /// auto-switch task calls this; tests call it directly). Nothing happens
+    /// for the network last acted on, nor while a manual choice made on
+    /// this network holds (issue #82, also right after a restart). Another
+    /// network clears the choice, and the first profile whose matchers
+    /// match it is activated; none matching leaves the active one.
+    pub async fn on_network_observed(&self, network: Option<String>) -> Result<(), ProfilesError> {
+        let _switch = self.switch_lock.lock().await;
+        {
+            let mut last = lock(&self.last_settled);
+            if last.as_ref() == Some(&network) {
+                return Ok(());
+            }
+            *last = Some(network.clone());
+        }
+        if let Some(choice) = self.store.manual_choice()? {
+            if choice.network == network {
+                return Ok(());
+            }
+            self.store.clear_manual_choice()?;
+        }
         let profiles = self.store.list_profiles()?;
         let candidates: Vec<(&str, &[String])> = profiles
             .iter()
             .map(|p| (p.id.as_str(), p.network_matchers.as_slice()))
             .collect();
-        let Some(matched_id) = matcher::find_matching_profile(candidates, network.as_deref())
-        else {
-            // No profile matches this network — leave the current active
-            // profile (if any) untouched rather than deactivating.
+        let Some(matched) = matcher::find_matching_profile(candidates, network.as_deref()) else {
             return Ok(());
         };
-
-        let already_active = self
-            .store
-            .get_active()?
-            .map(|p| p.id == matched_id)
-            .unwrap_or(false);
-        if already_active {
+        let already = self.store.get_active()?.is_some_and(|p| p.id == matched);
+        if already {
             return Ok(());
         }
-        self.activate_inner(&matched_id).await
+        self.activate_inner(&matched)
     }
+}
 
-    /// Spawn the background loop that drives [`Self::on_network_observed`]
-    /// from a live [`NetworkWatcher`]. Returns immediately; the loop runs
-    /// until every `NetworkWatcher` subscription is dropped or the manager
-    /// itself is dropped.
-    pub fn spawn_auto_switch(self: Arc<Self>, watcher: Arc<dyn NetworkWatcher>) -> JoinHandle<()> {
-        tokio::spawn(async move {
-            let mut rx = watcher.subscribe();
-            // Evaluate the watcher's current value once up front, in case it
-            // already had a value before we subscribed (e.g. NetworkManager
-            // was already connected to Wi-Fi when the bridge started).
-            let initial = watcher.current_connection_id().await;
-            if let Err(e) = self.on_network_observed(initial).await {
-                warn!(error = %e, "profiles: initial auto-switch evaluation failed");
-            }
-            loop {
-                if rx.changed().await.is_err() {
-                    break;
-                }
-                let network = rx.borrow().clone();
-                if let Err(e) = self.on_network_observed(network).await {
-                    warn!(error = %e, "profiles: auto-switch evaluation failed");
-                }
-            }
-        })
-    }
+fn refused(path: &str, reason: &str) -> ProfilesError {
+    ProfilesError::Refused(vec![RuleProblem {
+        path: path.into(),
+        reason: reason.into(),
+    }])
+}
+
+/// The policy's reasons as one plain sentence list.
+fn refusal_text(problems: &[RuleProblem]) -> String {
+    let reasons: Vec<&str> = problems.iter().map(|p| p.reason.as_str()).collect();
+    format!("Not installed: {}", reasons.join("; "))
 }
 
 #[cfg(test)]
-pub mod test_helpers {
-    use super::*;
-    use tokio::sync::watch;
-
-    /// Test double implementing [`NetworkWatcher`] with a controllable
-    /// `watch::Sender`, so `ProfilesManager` behavior can be exercised
-    /// without any real D-Bus/NetworkManager dependency.
-    pub struct FakeNetworkWatcher {
-        tx: watch::Sender<Option<String>>,
-    }
-
-    impl FakeNetworkWatcher {
-        pub fn new(initial: Option<&str>) -> (Arc<Self>, watch::Sender<Option<String>>) {
-            let (tx, _rx) = watch::channel(initial.map(str::to_string));
-            let watcher = Arc::new(Self { tx: tx.clone() });
-            (watcher, tx)
-        }
-    }
-
-    #[async_trait]
-    impl NetworkWatcher for FakeNetworkWatcher {
-        async fn current_connection_id(&self) -> Option<String> {
-            self.tx.borrow().clone()
-        }
-
-        fn subscribe(&self) -> watch::Receiver<Option<String>> {
-            self.tx.subscribe()
-        }
-    }
-
-    #[derive(Default)]
-    pub struct CapturingRuleSink {
-        pub calls: std::sync::Mutex<Vec<(String, Vec<MaterializedRule>)>>,
-    }
-
-    #[async_trait]
-    impl ProfileRuleSink for CapturingRuleSink {
-        async fn replace_profile_rules(
-            &self,
-            profile_id: &str,
-            rules: Vec<MaterializedRule>,
-        ) -> anyhow::Result<()> {
-            self.calls
-                .lock()
-                .unwrap()
-                .push((profile_id.to_string(), rules));
-            Ok(())
-        }
-    }
-}
+pub mod test_helpers;
 
 #[cfg(test)]
-mod tests {
-    use super::test_helpers::{CapturingRuleSink, FakeNetworkWatcher};
-    use super::*;
-
-    fn manager() -> ProfilesManager {
-        let store = Arc::new(ProfileStore::open_in_memory().unwrap());
-        ProfilesManager::new(store)
-    }
-
-    #[tokio::test]
-    async fn create_profile_emits_profiles_changed_event() {
-        let mgr = manager();
-        let mut rx = mgr.subscribe();
-        mgr.create_profile("home", "At Home", vec!["Home*".into()])
-            .await
-            .unwrap();
-        let evt = rx.recv().await.unwrap();
-        assert!(matches!(evt, ProfileEvent::ProfilesChanged));
-        assert_eq!(mgr.store().list_profiles().unwrap().len(), 1);
-    }
-
-    #[tokio::test]
-    async fn activate_materializes_rules_and_emits_active_changed() {
-        let store = Arc::new(ProfileStore::open_in_memory().unwrap());
-        let sink = Arc::new(CapturingRuleSink::default());
-        let mgr = ProfilesManager::new(store).with_rule_sink(sink.clone());
-        mgr.create_profile("home", "At Home", vec![]).await.unwrap();
-        mgr.add_rule(
-            "home",
-            ProfileRule {
-                id: "r1".into(),
-                action: "allow".into(),
-                operand: "dest.host".into(),
-                data: "nas.local".into(),
-            },
-        )
-        .await
-        .unwrap();
-
-        let mut rx = mgr.subscribe();
-        mgr.activate("home").await.unwrap();
-        let evt = rx.recv().await.unwrap();
-        assert!(matches!(
-            evt,
-            ProfileEvent::ActiveProfileChanged {
-                profile_id: Some(ref id)
-            } if id == "home"
-        ));
-
-        let calls = sink.calls.lock().unwrap();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].0, "home");
-        assert_eq!(calls[0].1.len(), 1);
-        assert!(mgr.store().get_active().unwrap().unwrap().active);
-    }
-
-    #[tokio::test]
-    async fn activating_a_new_profile_clears_the_previous_ones_band() {
-        let store = Arc::new(ProfileStore::open_in_memory().unwrap());
-        let sink = Arc::new(CapturingRuleSink::default());
-        let mgr = ProfilesManager::new(store).with_rule_sink(sink.clone());
-        mgr.create_profile("home", "Home", vec![]).await.unwrap();
-        mgr.create_profile("office", "Office", vec![])
-            .await
-            .unwrap();
-
-        mgr.activate("home").await.unwrap();
-        mgr.activate("office").await.unwrap();
-
-        let calls = sink.calls.lock().unwrap();
-        // home activated (empty rules), office activated (empty rules), and
-        // home cleared (empty rules) when office took over — 3 calls total,
-        // the middle assertions below check the *targets* seen.
-        let targets: Vec<&str> = calls.iter().map(|(id, _)| id.as_str()).collect();
-        assert!(targets.contains(&"home"));
-        assert!(targets.contains(&"office"));
-        assert_eq!(mgr.store().get_active().unwrap().unwrap().id, "office");
-        assert!(!mgr.store().get_profile("home").unwrap().unwrap().active);
-    }
-
-    #[tokio::test]
-    async fn deactivate_clears_active_profile() {
-        let mgr = manager();
-        mgr.create_profile("home", "Home", vec![]).await.unwrap();
-        mgr.activate("home").await.unwrap();
-        mgr.deactivate().await.unwrap();
-        assert!(mgr.store().get_active().unwrap().is_none());
-    }
-
-    #[tokio::test]
-    async fn delete_active_profile_clears_its_band_and_deactivates() {
-        let store = Arc::new(ProfileStore::open_in_memory().unwrap());
-        let sink = Arc::new(CapturingRuleSink::default());
-        let mgr = ProfilesManager::new(store).with_rule_sink(sink.clone());
-        mgr.create_profile("home", "Home", vec![]).await.unwrap();
-        mgr.activate("home").await.unwrap();
-        mgr.delete_profile("home").await.unwrap();
-        assert!(mgr.store().get_profile("home").unwrap().is_none());
-        let calls = sink.calls.lock().unwrap();
-        assert!(calls
-            .iter()
-            .any(|(id, rules)| id == "home" && rules.is_empty()));
-    }
-
-    #[tokio::test]
-    async fn auto_switch_activates_matching_profile_on_network_change() {
-        let mgr = manager();
-        mgr.create_profile("home", "Home", vec!["Home*".into()])
-            .await
-            .unwrap();
-        mgr.create_profile("office", "Office", vec!["Office*".into()])
-            .await
-            .unwrap();
-
-        mgr.on_network_observed(Some("Home-5G".into()))
-            .await
-            .unwrap();
-        assert_eq!(mgr.store().get_active().unwrap().unwrap().id, "home");
-
-        mgr.on_network_observed(Some("Office-Guest".into()))
-            .await
-            .unwrap();
-        assert_eq!(mgr.store().get_active().unwrap().unwrap().id, "office");
-    }
-
-    #[tokio::test]
-    async fn manual_activation_is_not_overridden_until_network_changes() {
-        let mgr = manager();
-        mgr.create_profile("home", "Home", vec!["Home*".into()])
-            .await
-            .unwrap();
-        mgr.create_profile("office", "Office", vec!["Office*".into()])
-            .await
-            .unwrap();
-
-        // Auto-activate "home" for the current network.
-        mgr.on_network_observed(Some("Home-5G".into()))
-            .await
-            .unwrap();
-        assert_eq!(mgr.store().get_active().unwrap().unwrap().id, "home");
-
-        // User manually overrides to "office" while still on the Home network.
-        mgr.activate("office").await.unwrap();
-        assert_eq!(mgr.store().get_active().unwrap().unwrap().id, "office");
-
-        // A repeated observation of the SAME network must not re-run
-        // auto-switch logic and stomp the manual pick.
-        mgr.on_network_observed(Some("Home-5G".into()))
-            .await
-            .unwrap();
-        assert_eq!(mgr.store().get_active().unwrap().unwrap().id, "office");
-
-        // Only once the network actually changes does auto-switch resume.
-        mgr.on_network_observed(Some("Office-Guest".into()))
-            .await
-            .unwrap();
-        assert_eq!(mgr.store().get_active().unwrap().unwrap().id, "office");
-    }
-
-    #[tokio::test]
-    async fn network_with_no_matching_profile_leaves_active_profile_untouched() {
-        let mgr = manager();
-        mgr.create_profile("home", "Home", vec!["Home*".into()])
-            .await
-            .unwrap();
-        mgr.on_network_observed(Some("Home-5G".into()))
-            .await
-            .unwrap();
-        assert_eq!(mgr.store().get_active().unwrap().unwrap().id, "home");
-
-        mgr.on_network_observed(Some("Coffee-Shop-WiFi".into()))
-            .await
-            .unwrap();
-        // No profile matches "Coffee-Shop-WiFi" — "home" should remain active.
-        assert_eq!(mgr.store().get_active().unwrap().unwrap().id, "home");
-    }
-
-    #[tokio::test]
-    async fn spawn_auto_switch_reacts_to_fake_watcher() {
-        let mgr = Arc::new(manager());
-        mgr.create_profile("home", "Home", vec!["Home*".into()])
-            .await
-            .unwrap();
-        let (watcher, tx) = FakeNetworkWatcher::new(None);
-
-        let handle = mgr.clone().spawn_auto_switch(watcher);
-        // `spawn_auto_switch`'s task subscribes asynchronously; give it a
-        // chance to do so before publishing, retrying the send rather than
-        // asserting a fixed delay (a `watch::Sender::send` errors only when
-        // zero receivers currently exist, which is true for a brief moment
-        // right after `spawn` returns).
-        let mut sent = false;
-        for _ in 0..50 {
-            if tx.send(Some("Home-Wifi".into())).is_ok() {
-                sent = true;
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        assert!(sent, "auto-switch task never subscribed to the watcher");
-
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
-        loop {
-            if mgr.store().get_active().unwrap().is_some() {
-                break;
-            }
-            if tokio::time::Instant::now() >= deadline {
-                handle.abort();
-                panic!("auto-switch never activated matching profile");
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-        assert_eq!(mgr.store().get_active().unwrap().unwrap().id, "home");
-        handle.abort();
-    }
-}
+mod tests;

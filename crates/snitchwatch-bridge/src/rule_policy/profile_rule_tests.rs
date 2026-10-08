@@ -105,7 +105,7 @@ fn a_profile_rule_lasts_always_and_never_decides_first_or_hides() {
 fn a_profile_rule_names_a_host_and_matches_a_path_case_exactly() {
     refused_for(
         &rule(list(vec![curl(), leaf("simple", "dest.host", "", false)])),
-        PROFILE_EMPTY_HOST_REFUSED,
+        EDITOR_EMPTY_HOST_REFUSED,
     );
     refused_for(
         &rule(leaf("simple", "process.path", "/usr/bin/curl", false)),

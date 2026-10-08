@@ -71,12 +71,14 @@ pub const PROFILE_NAME_REFUSED: &str =
 pub const PROFILE_PREFIX_REQUIRED: &str = "a profile rule's name must start with 850-profile:";
 pub const PROFILE_DURATION_REFUSED: &str =
     "a profile rule lasts while its profile is active, so it can't have a time of its own";
-pub const PROFILE_PRECEDENCE_REFUSED: &str = "a profile rule can't decide before other rules:      blocking rules and blocklists win over a profile";
+pub const PROFILE_PRECEDENCE_REFUSED: &str = "a profile rule can't decide before other rules: \
+     blocking rules and blocklists win over a profile";
 pub const PROFILE_NOLOG_REFUSED: &str = "a profile rule can't hide its connections";
-pub const PROFILE_EMPTY_HOST_REFUSED: &str = "an empty host name matches every connection to a      bare address; a profile rule must name a host";
 pub const PROFILE_CASE_REFUSED: &str =
     "an exact program path in a profile rule must match upper and lower case exactly";
-pub const PROFILE_USER_NAME_REFUSED: &str = "a profile rule can't match a user by name: the      firewall stores it as a number, so Snitchwatch couldn't tell the rule is in place; use the      user ID";
+pub const PROFILE_USER_NAME_REFUSED: &str = "a profile rule can't match a user by name: the \
+     firewall stores it as a number, so Snitchwatch couldn't tell the rule is in place; use the \
+     user ID";
 
 /// Check a whole rule for `profile`. Returns every problem found.
 pub fn validate_user_rule(rule: &Rule, profile: PolicyProfile) -> Result<(), Vec<RuleProblem>> {
@@ -189,17 +191,12 @@ fn check_profile_fields(rule: &Rule, problems: &mut Vec<RuleProblem>) {
     }
 }
 
-/// Part 1's findings for profile rules: an empty host matches every
-/// bare-address connection, a case-folded exact path is #50's bug, and a
+/// Part 1's findings for profile rules (the editor's checks already refuse
+/// an empty host): a case-folded exact path is #50's bug, and a
 /// `user.name` comes back from the daemon as a number.
 fn check_profile_leaf(path: &str, leaf: &Operator, problems: &mut Vec<RuleProblem>) {
     let simple = leaf.r#type == "simple";
     match leaf.operand.as_str() {
-        "dest.host" if simple && leaf.data.is_empty() => problem(
-            problems,
-            &format!("{path}.data"),
-            PROFILE_EMPTY_HOST_REFUSED,
-        ),
         "process.path" if simple && !leaf.sensitive => {
             problem(problems, &format!("{path}.data"), PROFILE_CASE_REFUSED)
         }

@@ -7,9 +7,10 @@
 //! The profile store's storage is tracked apart from the blocklist store's:
 //! either can fall back to memory while the other persists, and each GUI
 //! page is told about its own. Any bridge with a `Persistent` state
-//! directory saves profiles, the per-user one too: profiles install no
-//! firewall rule (the sink is `NoopProfileRuleSink` until Part 2), so unlike
-//! blocklists there is nothing to gate on [`BridgeMode`](crate::BridgeMode).
+//! directory saves profiles, the per-user one too. Only the system bridge
+//! with a saved store applies the active profile's rules to the firewall
+//! (issue #46 Part 2, like the blocklists); any other installs nothing and
+//! says why on the Profiles page.
 //!
 //! A store that can't be opened, or opens but can't be read, falls back to
 //! memory as `Unusable("profile store: …")`, logged at `error!` and shown on
@@ -26,20 +27,46 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use snitchwatch_bridge::profiles::store::{ProfileStore, StoreError};
-use snitchwatch_bridge::profiles::ProfilesManager;
+use snitchwatch_bridge::profiles::{
+    DaemonProfileSink, NoopProfileRuleSink, ProfileRuleSink, ProfilesManager,
+};
 use tracing::{error, info};
 
-use crate::storage::{EphemeralReason, Storage};
+use crate::storage::{BridgeMode, DaemonRules, EphemeralReason, Storage};
+
+/// Why a per-user bridge applies no profile rules.
+pub const PER_USER_REASON: &str = "Profiles are applied to the firewall only by the \
+     system-wide Snitchwatch service; in this per-user setup another program could pose as the \
+     firewall service.";
+/// Why a bridge that can't save profiles applies none.
+pub const NOT_SAVED_REASON: &str =
+    "Profiles are applied to the firewall only while Snitchwatch can save them.";
 
 /// The profile database's file name inside the state directory.
 pub const PROFILE_DB_FILE: &str = "profiles.sqlite3";
 
 /// The bridge's profile manager: persisted in `<state>/profiles.sqlite3`
-/// when its store opened `Persistent` (in memory otherwise), with the
-/// default no-op rule sink.
-pub(crate) fn build_profiles_manager(storage: Storage) -> Result<Arc<ProfilesManager>> {
+/// when its store opened `Persistent` (in memory otherwise), and applying
+/// the active profile's rules through `daemon` only for the system bridge
+/// with a saved store.
+pub(crate) fn build_profiles_manager(
+    storage: Storage,
+    mode: BridgeMode,
+    daemon: DaemonRules,
+) -> Result<Arc<ProfilesManager>> {
     let (store, storage) = open_profile_store(storage)?;
-    let manager = ProfilesManager::new(store).with_storage_status(storage.status());
+    let sink: Arc<dyn ProfileRuleSink> = match (&storage, mode) {
+        (Storage::Persistent(_), BridgeMode::System) => {
+            Arc::new(DaemonProfileSink::new(daemon.commands, daemon.rules))
+        }
+        (Storage::Persistent(_), BridgeMode::User) => {
+            Arc::new(NoopProfileRuleSink::new(PER_USER_REASON))
+        }
+        (Storage::Ephemeral(_), _) => Arc::new(NoopProfileRuleSink::new(NOT_SAVED_REASON)),
+    };
+    let manager = ProfilesManager::new(store)
+        .with_storage_status(storage.status())
+        .with_rule_sink(sink);
     Ok(Arc::new(manager))
 }
 
@@ -302,16 +329,49 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 
+    fn daemon() -> DaemonRules {
+        use snitchwatch_bridge::cache::rules::RulesSync;
+        use snitchwatch_bridge::daemon_commands::{DaemonCommands, DaemonTransport};
+        let rules = RulesSync::new(tokio::sync::broadcast::channel(4).0);
+        DaemonRules {
+            commands: DaemonCommands::new(DaemonTransport::Unix, rules.clone()),
+            rules: rules.cache(),
+        }
+    }
+
+    fn build(storage: Storage, mode: BridgeMode) -> Arc<ProfilesManager> {
+        build_profiles_manager(storage, mode, daemon()).unwrap()
+    }
+
+    /// Issue #46 Part 2: only the system bridge with a saved store applies
+    /// profile rules; any other says why.
+    #[test]
+    fn only_the_system_bridge_with_a_saved_store_applies_profiles() {
+        let (_dir, state) = state();
+        let system = build(Storage::Persistent(state.clone()), BridgeMode::System);
+        assert_eq!(system.not_applied_reason(), None);
+        let user = build(Storage::Persistent(state), BridgeMode::User);
+        assert_eq!(user.not_applied_reason().as_deref(), Some(PER_USER_REASON));
+        let memory = build(
+            Storage::Ephemeral(EphemeralReason::InProcess),
+            BridgeMode::System,
+        );
+        assert_eq!(
+            memory.not_applied_reason().as_deref(),
+            Some(NOT_SAVED_REASON)
+        );
+    }
+
     #[test]
     fn the_manager_reports_the_resolved_storage() {
         let (_dir, state) = state();
-        let persistent = build_profiles_manager(Storage::Persistent(state.clone())).unwrap();
+        let persistent = build(Storage::Persistent(state.clone()), BridgeMode::User);
         assert!(persistent.storage_status().persistent);
         assert_eq!(persistent.storage_status().reason, None);
 
         std::fs::remove_file(state.join(PROFILE_DB_FILE)).unwrap();
         std::fs::create_dir(state.join(PROFILE_DB_FILE)).unwrap();
-        let fallback = build_profiles_manager(Storage::Persistent(state)).unwrap();
+        let fallback = build(Storage::Persistent(state), BridgeMode::User);
         assert!(!fallback.storage_status().persistent);
         assert!(fallback
             .storage_status()
@@ -319,8 +379,10 @@ mod tests {
             .as_deref()
             .is_some_and(|r| r.starts_with("profile store: ")));
 
-        let in_process =
-            build_profiles_manager(Storage::Ephemeral(EphemeralReason::InProcess)).unwrap();
+        let in_process = build(
+            Storage::Ephemeral(EphemeralReason::InProcess),
+            BridgeMode::User,
+        );
         assert!(!in_process.storage_status().persistent);
         assert_eq!(in_process.storage_status().reason, None);
     }

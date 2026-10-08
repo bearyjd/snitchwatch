@@ -63,7 +63,9 @@ async fn snapshot(
         loop {
             match rx.recv().await.expect("broadcast closed") {
                 ServerMessage::SetBlocklists { storage, .. } => blocklist_storage = Some(storage),
-                ServerMessage::SetProfiles { profiles, storage } => {
+                ServerMessage::SetProfiles {
+                    profiles, storage, ..
+                } => {
                     if let Some(blocklists) = blocklist_storage.take() {
                         return (profiles, storage, blocklists);
                     }

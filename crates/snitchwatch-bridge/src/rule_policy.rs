@@ -54,6 +54,16 @@ pub use narrowing::binds_to_programs;
 
 pub use profile::{enable_problems, validate_user_rule, PolicyProfile, RuleProblem};
 
+/// The fixed texts of [`validate_user_rule`]'s problems, for callers that
+/// show or test them.
+pub mod reasons {
+    pub use super::profile::{
+        ACTION_REFUSED, EDITOR_EMPTY_HOST_REFUSED, MATCHES_EVERYTHING, PROFILE_CASE_REFUSED,
+        PROFILE_DURATION_REFUSED, PROFILE_NAME_REFUSED, PROFILE_NOLOG_REFUSED,
+        PROFILE_PRECEDENCE_REFUSED, PROFILE_PREFIX_REQUIRED, PROFILE_USER_NAME_REFUSED,
+    };
+}
+
 /// Parse a rule from the wire shape and check it for `profile`: the one
 /// path the bridge and the GUIs use for a rule written or imported whole.
 /// A wire error is reported as a problem at `rule`.
