@@ -33,12 +33,14 @@ acknowledgement. Internal broadcast subscribers do not establish GUI presence.
 An Ask without an authenticated session returns gRPC `Unavailable` before
 creating a pending row, so OpenSnitch applies its own configured default
 action. This holds while filtering is paused too: a pause only auto-allows
-while at least one GUI is authenticated. The bridge clears it when the last
-authenticated session ends and ignores a pause request that arrives with no
-GUI attached, so a pause doesn't carry over to the next GUI. One race remains:
-a pause still queued from a GUI that just left can apply if another GUI
-authenticates first (stamping each pause with its sender's session
-generation would close it). The bridge does not duplicate policy or translate reject into deny.
+while at least one GUI is authenticated. A pause always lasts 5 minutes, 30
+minutes or 1 hour and then ends on its own. The bridge also clears it when
+the last authenticated session ends, and it ignores a pause request whose
+sender's session generation has ended: each request is stamped with the
+generation its WebSocket session authenticated under, so a pause still queued
+from a GUI that just left doesn't apply even if another GUI authenticates
+first. The bridge logs the uid of each session that changes the pause. The
+bridge does not duplicate policy or translate reject into deny.
 
 When the last client disconnects, existing pending requests are canceled even
 if a new client immediately reconnects. RPC cancellation removes its pending

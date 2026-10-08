@@ -9,6 +9,7 @@ use crate::client_presence::ClientPresence;
 use crate::daemon_alerts::DaemonAlertStore;
 use crate::daemon_liveness::StreamGuard;
 use crate::diagnostics::DiagnosticsCtx;
+use crate::filter_pause::FilterPause;
 use crate::notice::NoticeBus;
 use crate::translator::connection::{connection_to_row, event_to_row};
 use crate::translator::verdict::verdict_to_rule;
@@ -20,7 +21,7 @@ use snitchwatch_proto::protocol::{
     PingReply, PingRequest, Rule,
 };
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::Duration;
 use tokio::sync::{broadcast, Mutex};
@@ -202,14 +203,14 @@ pub struct UiService {
     /// counter still matches the value it captured at spawn time, so an
     /// older block's timer never stomps a newer block's still-live display.
     block_generation: Arc<AtomicU64>,
-    /// True while the user has paused interactive filtering (tray
-    /// "Pause filtering"). Unlike `liveness`/`block_generation`, this must
-    /// be *writable* from outside `UiService` (the inbound `ClientMessage`
-    /// pump toggles it) as well as readable from inside `ask_rule` — the
-    /// same shape `tray_pub`/`cache` already have — so it's a genuine
-    /// constructor parameter, not internal-only state. See
+    /// The user's timed filtering pause (tray "Pause filtering", issue #47).
+    /// Unlike `liveness`/`block_generation`, this must be *writable* from
+    /// outside `UiService` (the inbound `ClientMessage` pump sets it through
+    /// `client_presence::apply_pause_request`) as well as readable from
+    /// inside `ask_rule` — the same shape `tray_pub`/`cache` already have —
+    /// so it's a genuine constructor parameter, not internal-only state. See
     /// `docs/superpowers/plans/2026-07-12-tray-filter-off.md`.
-    filtering_paused: Arc<AtomicBool>,
+    filter_pause: Arc<FilterPause>,
     client_presence: ClientPresence,
     /// Set on every `subscribe()` call from opensnitchd's `is_firewall_running`
     /// field on its `ClientConfig`; read by a later diagnostics report
@@ -282,7 +283,7 @@ impl UiService {
         broadcast: broadcast::Sender<ServerMessage>,
         tray_pub: Arc<TrayStatePublisher>,
         notice_bus: Arc<NoticeBus>,
-        filtering_paused: Arc<AtomicBool>,
+        filter_pause: Arc<FilterPause>,
     ) -> Self {
         Self {
             cache,
@@ -292,7 +293,7 @@ impl UiService {
             notice_bus,
             liveness: DaemonLiveness::new(),
             block_generation: Arc::new(AtomicU64::new(0)),
-            filtering_paused,
+            filter_pause,
             client_presence: ClientPresence::default(),
             firewall_status: Arc::new(StdMutex::new(None)),
             alert_store: Arc::new(DaemonAlertStore::new()),
@@ -475,8 +476,10 @@ impl Ui for UiService {
         // the bridge's own decision policy changes, so a genuine bridge
         // outage (this process crashing, not merely being paused) still
         // hits the daemon's fail-closed default. See
-        // docs/superpowers/plans/2026-07-12-tray-filter-off.md.
-        if self.filtering_paused.load(Ordering::Relaxed) {
+        // docs/superpowers/plans/2026-07-12-tray-filter-off.md. The deadline
+        // is checked here, so an expired pause stops auto-allowing even
+        // before the expiry task clears it (issue #47).
+        if self.filter_pause.is_active_now() {
             let row = connection_to_row(&conn, ask_id);
             let mut decided_row = row.clone();
             decided_row.action = Some("allow".to_string());

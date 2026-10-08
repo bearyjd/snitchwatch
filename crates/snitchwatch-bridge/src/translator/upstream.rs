@@ -78,8 +78,8 @@ pub fn apply(
         ClientMessage::RequestSnapshot => Ok(UpstreamEffect::SnapshotRequested),
         // SetFilteringPaused is intercepted earlier in the pump loop
         // (snitchwatch-bridge-cli::run, mirroring how profile messages are
-        // special-cased before reaching here) since it toggles a shared
-        // flag + tray state, not cache state this function owns.
+        // special-cased before reaching here) since it changes the shared
+        // filter pause + tray state, not cache state this function owns.
         ClientMessage::GlobalSettings { .. }
         | ClientMessage::SubscribeBlocklist { .. }
         | ClientMessage::UnsubscribeBlocklist { .. }

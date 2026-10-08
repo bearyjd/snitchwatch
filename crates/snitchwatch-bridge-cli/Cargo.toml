@@ -38,3 +38,5 @@ futures-util = { workspace = true }
 tokio-tungstenite = { workspace = true }
 hyper-util = { version = "0.1", features = ["tokio"] }
 tower = { version = "0.4", features = ["util"] }
+# `tokio::time::pause`/`advance` for the timed-pause expiry tests (issue #47).
+tokio = { workspace = true, features = ["test-util"] }

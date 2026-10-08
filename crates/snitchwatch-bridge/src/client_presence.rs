@@ -1,6 +1,6 @@
 //! Authenticated external clients, independent of internal broadcast receivers.
+use crate::filter_pause::{FilterPause, PauseRequest, PauseState};
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::watch;
 
@@ -38,6 +38,26 @@ impl ClientPresence {
         self.losses.subscribe()
     }
 
+    /// The current GUI-session generation. It only advances when the last
+    /// authenticated session ends, so a session that reads it while holding
+    /// its [`SessionLease`] gets a value that stays current until every GUI
+    /// has left. `ws_server` stamps it on each pause request.
+    pub fn current_generation(&self) -> u64 {
+        self.state.lock().unwrap().loss_generation
+    }
+
+    /// Run `f` under the presence lock only while a GUI is authenticated and
+    /// `generation` is still current: the check [`Admission::while_current`]
+    /// makes, against a given generation.
+    pub(crate) fn while_generation_current<T>(
+        &self,
+        generation: u64,
+        f: impl FnOnce() -> T,
+    ) -> Option<T> {
+        let state = self.state.lock().unwrap();
+        (state.clients > 0 && state.loss_generation == generation).then(f)
+    }
+
     pub fn admit(&self) -> Option<Admission> {
         let state = self.state.lock().unwrap();
         (state.clients > 0).then(|| Admission {
@@ -54,20 +74,22 @@ impl ClientPresence {
 /// `snitchwatch-ui` member) while the tray may already show Idle.
 /// `losses` comes from [`ClientPresence::session_losses`]. `on_cleared` runs
 /// after each loss that actually cleared a pause; the bridge uses it to
-/// resync the tray. Ends when every `ClientPresence` is dropped.
+/// resync the tray and broadcast the new pause state. No
+/// `FilterPauseExpired` notice: no GUI is left to show it. Ends when every
+/// `ClientPresence` is dropped.
 ///
 /// A pause request still queued when its GUI left is handled by
 /// [`apply_pause_request`], which every pause must go through.
 pub async fn clear_pause_on_last_session_loss<F, Fut>(
     mut losses: watch::Receiver<u64>,
-    paused: Arc<AtomicBool>,
+    pause: Arc<FilterPause>,
     on_cleared: F,
 ) where
     F: Fn() -> Fut,
     Fut: Future<Output = ()>,
 {
     while losses.changed().await.is_ok() {
-        if paused.swap(false, Ordering::SeqCst) {
+        if pause.resume() {
             tracing::info!("last authenticated GUI session ended; filtering pause cleared");
             on_cleared().await;
         }
@@ -75,34 +97,46 @@ pub async fn clear_pause_on_last_session_loss<F, Fut>(
 }
 
 /// Apply a GUI's pause/resume request and return the pause state that took
-/// effect. A pause only takes effect while a GUI is authenticated: a request
-/// still queued when its sender disconnected arrives after
-/// [`clear_pause_on_last_session_loss`] already ran, so it would otherwise
-/// re-arm the pause with no GUI attached (issue #47). The flag is set under
-/// the presence lock (`while_current`), so it is never `true` with zero
-/// sessions: a racing last-session loss either prevents the set or follows
-/// it and is cleared by the cleanup task.
+/// effect. Every pause goes through here; nothing else calls
+/// [`FilterPause::pause`].
 ///
-/// Remaining gap: if another GUI authenticates before a departed GUI's
-/// queued pause is applied, the new GUI inherits that pause. Stamping each
-/// pause with its sender's admission generation would close it.
+/// A pause takes effect only while its sender's GUI session generation is
+/// still current. `sender_generation` is the stamp `ws_server` puts on each
+/// request from an authenticated WebSocket session. A request that was still
+/// queued when every GUI left is ignored, even if another GUI has
+/// authenticated since (issue #47). An unstamped request (`None`) comes from
+/// an in-process sender with no WebSocket session; it applies only while a
+/// GUI is authenticated.
+///
+/// The pause is set under the presence lock, so it is never active with zero
+/// sessions: a racing last-session loss either prevents the set or follows
+/// it and is cleared by [`clear_pause_on_last_session_loss`].
 pub fn apply_pause_request(
     presence: &ClientPresence,
-    paused: &AtomicBool,
-    requested: bool,
-) -> bool {
-    if !requested {
-        paused.store(false, Ordering::SeqCst);
-        return false;
+    pause: &FilterPause,
+    request: PauseRequest,
+    sender_generation: Option<u64>,
+) -> PauseState {
+    let PauseRequest::Pause(duration) = request else {
+        pause.resume();
+        return pause.state();
+    };
+    let set = || pause.pause(duration);
+    let outcome = match sender_generation {
+        Some(generation) => presence.while_generation_current(generation, set),
+        None => presence
+            .admit()
+            .and_then(|admission| admission.while_current(set)),
+    };
+    match outcome {
+        None => tracing::info!(
+            ?sender_generation,
+            "pause request ignored: its GUI session is gone"
+        ),
+        Some(Err(rejected)) => tracing::warn!(%rejected, "pause request rejected"),
+        Some(Ok(_)) => {}
     }
-    let applied = presence
-        .admit()
-        .and_then(|admission| admission.while_current(|| paused.store(true, Ordering::SeqCst)))
-        .is_some();
-    if !applied {
-        tracing::info!("pause request ignored: no authenticated GUI session");
-    }
-    applied
+    pause.state()
 }
 
 pub struct SessionLease(ClientPresence);
@@ -128,8 +162,7 @@ pub struct Admission {
 impl Admission {
     /// Serialize admission/verdict resolution against the last-client loss.
     pub(crate) fn while_current<T>(&self, f: impl FnOnce() -> T) -> Option<T> {
-        let state = self.presence.state.lock().unwrap();
-        (state.clients > 0 && state.loss_generation == self.generation).then(f)
+        self.presence.while_generation_current(self.generation, f)
     }
 
     pub async fn lost(&mut self) {
@@ -166,16 +199,20 @@ mod tests {
         assert!(presence.admit().unwrap().while_current(|| ()).is_some());
     }
 
-    #[tokio::test]
-    async fn last_session_loss_clears_a_filtering_pause() {
-        let presence = ClientPresence::default();
-        let paused = Arc::new(std::sync::atomic::AtomicBool::new(true));
-        let (cleared_tx, mut cleared_rx) = tokio::sync::mpsc::unbounded_channel();
-        let first = presence.authenticated_session();
-        let second = presence.authenticated_session();
+    const THIRTY_MINUTES: std::time::Duration = std::time::Duration::from_secs(1800);
+
+    fn pause_for_thirty_minutes() -> PauseRequest {
+        PauseRequest::Pause(THIRTY_MINUTES)
+    }
+
+    fn spawn_clear_task(
+        presence: &ClientPresence,
+        pause: &Arc<FilterPause>,
+    ) -> tokio::sync::mpsc::UnboundedReceiver<()> {
+        let (cleared_tx, cleared_rx) = tokio::sync::mpsc::unbounded_channel();
         tokio::spawn(clear_pause_on_last_session_loss(
             presence.session_losses(),
-            paused.clone(),
+            pause.clone(),
             move || {
                 let cleared_tx = cleared_tx.clone();
                 async move {
@@ -183,12 +220,23 @@ mod tests {
                 }
             },
         ));
+        cleared_rx
+    }
+
+    #[tokio::test]
+    async fn last_session_loss_clears_a_filtering_pause() {
+        let presence = ClientPresence::default();
+        let pause = Arc::new(FilterPause::new());
+        let first = presence.authenticated_session();
+        let second = presence.authenticated_session();
+        pause.pause(THIRTY_MINUTES).unwrap();
+        let mut cleared_rx = spawn_clear_task(&presence, &pause);
         tokio::task::yield_now().await;
 
         drop(first);
         tokio::task::yield_now().await;
         assert!(
-            paused.load(std::sync::atomic::Ordering::SeqCst),
+            pause.is_active_now(),
             "another GUI is still authenticated: its pause stands"
         );
 
@@ -197,7 +245,7 @@ mod tests {
             .await
             .expect("pause was not cleared after the last session ended")
             .unwrap();
-        assert!(!paused.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(!pause.is_active_now());
     }
 
     #[test]
@@ -206,33 +254,73 @@ mod tests {
         // effect with no GUI attached; the cleanup task already ran and would
         // never clear it (issue #47).
         let presence = ClientPresence::default();
-        let paused = std::sync::atomic::AtomicBool::new(false);
-        assert!(!apply_pause_request(&presence, &paused, true));
-        assert!(!paused.load(std::sync::atomic::Ordering::SeqCst));
+        let pause = FilterPause::new();
+        assert!(!apply_pause_request(&presence, &pause, pause_for_thirty_minutes(), None).paused);
+        assert!(!pause.is_active_now());
 
         let _gui = presence.authenticated_session();
-        assert!(apply_pause_request(&presence, &paused, true));
-        assert!(paused.load(std::sync::atomic::Ordering::SeqCst));
-        assert!(!apply_pause_request(&presence, &paused, false));
-        assert!(!paused.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(apply_pause_request(&presence, &pause, pause_for_thirty_minutes(), None).paused);
+        assert!(pause.is_active_now());
+        assert!(!apply_pause_request(&presence, &pause, PauseRequest::Resume, None).paused);
+        assert!(!pause.is_active_now());
+    }
+
+    #[test]
+    fn a_stamped_pause_from_a_session_whose_generation_ended_is_ignored() {
+        // Issue #47's remaining race: GUI A's pause is still queued when A
+        // leaves, and GUI B authenticates before the pump applies it.
+        let presence = ClientPresence::default();
+        let pause = FilterPause::new();
+        let gui_a = presence.authenticated_session();
+        let stamp_a = presence.current_generation();
+        drop(gui_a);
+        let _gui_b = presence.authenticated_session();
+
+        let state =
+            apply_pause_request(&presence, &pause, pause_for_thirty_minutes(), Some(stamp_a));
+        assert!(!state.paused, "B must not inherit A's queued pause");
+        assert!(!pause.is_active_now());
+
+        // B's own stamped request, and an unstamped in-process request, apply.
+        let stamp_b = presence.current_generation();
+        assert!(
+            apply_pause_request(&presence, &pause, pause_for_thirty_minutes(), Some(stamp_b))
+                .paused
+        );
+        pause.resume();
+        assert!(apply_pause_request(&presence, &pause, pause_for_thirty_minutes(), None).paused);
+    }
+
+    #[test]
+    fn a_stamped_pause_applies_while_any_gui_of_its_generation_remains() {
+        let presence = ClientPresence::default();
+        let pause = FilterPause::new();
+        let _gui_a = presence.authenticated_session();
+        let gui_b = presence.authenticated_session();
+        let stamp_b = presence.current_generation();
+        drop(gui_b);
+        assert!(
+            apply_pause_request(&presence, &pause, pause_for_thirty_minutes(), Some(stamp_b))
+                .paused
+        );
+    }
+
+    #[test]
+    fn a_rejected_duration_changes_nothing() {
+        let presence = ClientPresence::default();
+        let pause = FilterPause::new();
+        let _gui = presence.authenticated_session();
+        let request = PauseRequest::Pause(std::time::Duration::from_secs(7200));
+        assert!(!apply_pause_request(&presence, &pause, request, None).paused);
+        assert!(!pause.is_active_now());
     }
 
     #[tokio::test]
     async fn last_session_loss_without_a_pause_does_not_report_a_clear() {
         let presence = ClientPresence::default();
-        let paused = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let (cleared_tx, mut cleared_rx) = tokio::sync::mpsc::unbounded_channel();
+        let pause = Arc::new(FilterPause::new());
         let session = presence.authenticated_session();
-        tokio::spawn(clear_pause_on_last_session_loss(
-            presence.session_losses(),
-            paused.clone(),
-            move || {
-                let cleared_tx = cleared_tx.clone();
-                async move {
-                    let _ = cleared_tx.send(());
-                }
-            },
-        ));
+        let mut cleared_rx = spawn_clear_task(&presence, &pause);
         tokio::task::yield_now().await;
         drop(session);
         assert!(

@@ -31,7 +31,7 @@ use axum::{
     extract::State,
     response::IntoResponse,
     routing::get,
-    Router,
+    Extension, Router,
 };
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -63,6 +63,12 @@ struct AppState {
     handles: WsHandles,
     token: Token,
 }
+
+/// The connecting peer's uid from `SO_PEERCRED`, captured at accept so the
+/// bridge can log which session paused filtering (issue #47). `None` if the
+/// kernel could not report it.
+#[derive(Clone, Copy, Debug)]
+struct PeerUid(Option<u32>);
 
 pub struct WsServer {
     socket_path: PathBuf,
@@ -152,12 +158,16 @@ impl WsServer {
 
         loop {
             let (stream, _peer_addr) = listener.accept().await?;
+            let peer_uid = PeerUid(stream.peer_cred().ok().map(|cred| cred.uid()));
             let tower_service = app.clone();
             tokio::spawn(async move {
                 let io = hyper_util::rt::TokioIo::new(stream);
-                let hyper_service = hyper::service::service_fn(move |request| {
-                    tower::Service::call(&mut tower_service.clone(), request)
-                });
+                let hyper_service = hyper::service::service_fn(
+                    move |mut request: hyper::Request<hyper::body::Incoming>| {
+                        request.extensions_mut().insert(peer_uid);
+                        tower::Service::call(&mut tower_service.clone(), request)
+                    },
+                );
                 if let Err(err) = hyper_util::server::conn::auto::Builder::new(
                     hyper_util::rt::TokioExecutor::new(),
                 )
@@ -171,8 +181,13 @@ impl WsServer {
     }
 }
 
-async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_socket(socket, state.handles, state.token))
+async fn ws_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+    peer: Option<Extension<PeerUid>>,
+) -> impl IntoResponse {
+    let peer_uid = peer.and_then(|Extension(PeerUid(uid))| uid);
+    ws.on_upgrade(move |socket| handle_socket(socket, state.handles, state.token, peer_uid))
 }
 
 /// Wait for the handshake token as the first WS frame. Returns `true` if the
@@ -201,7 +216,7 @@ where
     }
 }
 
-async fn handle_socket(socket: WebSocket, handles: WsHandles, token: Token) {
+async fn handle_socket(socket: WebSocket, handles: WsHandles, token: Token, peer_uid: Option<u32>) {
     use futures_util::{SinkExt, StreamExt};
     let (mut sender, mut receiver) = socket.split();
 
@@ -228,19 +243,26 @@ async fn handle_socket(socket: WebSocket, handles: WsHandles, token: Token) {
         return;
     }
 
-    pump_authenticated(sender, receiver, handles).await;
+    pump_authenticated(sender, receiver, handles, peer_uid).await;
 }
 
 /// Kept as sibling futures: failure of either direction releases the lease
 /// and drops the other future, even when its peer never sends another frame.
-async fn pump_authenticated<S, R>(mut sender: S, mut receiver: R, handles: WsHandles)
-where
+async fn pump_authenticated<S, R>(
+    mut sender: S,
+    mut receiver: R,
+    handles: WsHandles,
+    peer_uid: Option<u32>,
+) where
     S: futures_util::Sink<Message> + Unpin,
     R: futures_util::Stream<Item = Result<Message, axum::Error>> + Unpin,
 {
     use futures_util::{SinkExt, StreamExt};
     let mut broadcast_rx = handles.broadcast.subscribe();
     let _session = handles.presence.authenticated_session();
+    // Stable while `_session` is held: the generation only advances when the
+    // last authenticated session ends.
+    let generation = handles.presence.current_generation();
     let outbound = async move {
         while let Ok(msg) = broadcast_rx.recv().await {
             let json = match serde_json::to_string(&msg) {
@@ -260,6 +282,7 @@ where
             match msg {
                 Message::Text(text) => match serde_json::from_str::<ClientMessage>(&text) {
                     Ok(parsed) => {
+                        let parsed = stamp_sender(parsed, generation, peer_uid);
                         if handles.inbound.send(parsed).await.is_err() {
                             break;
                         }
@@ -276,6 +299,34 @@ where
         _ = inbound => {},
     }
     debug!("WS client connection ended");
+}
+
+/// Stamp a pause request with its sender's GUI-session generation, so
+/// `client_presence::apply_pause_request` ignores it once every GUI of that
+/// generation has left (issue #47), and log who asked. Overwrites whatever
+/// the message carried; the field is never deserialized from the wire anyway.
+fn stamp_sender(message: ClientMessage, generation: u64, peer_uid: Option<u32>) -> ClientMessage {
+    match message {
+        ClientMessage::SetFilteringPaused {
+            paused,
+            duration_secs,
+            ..
+        } => {
+            info!(
+                uid = ?peer_uid,
+                session_generation = generation,
+                paused,
+                ?duration_secs,
+                "GUI session requested a filtering pause change"
+            );
+            ClientMessage::SetFilteringPaused {
+                paused,
+                duration_secs,
+                sender_generation: Some(generation),
+            }
+        }
+        other => other,
+    }
 }
 
 /// Boot a minimal WS server for integration tests. Returns the Unix socket
@@ -522,7 +573,12 @@ mod tests {
             },
         ));
         let never_receives = futures_util::stream::pending::<Result<Message, axum::Error>>();
-        let pump = tokio::spawn(pump_authenticated(failing_sink, never_receives, handles));
+        let pump = tokio::spawn(pump_authenticated(
+            failing_sink,
+            never_receives,
+            handles,
+            None,
+        ));
         tokio::time::timeout(std::time::Duration::from_secs(1), async {
             while presence.admit().is_none() {
                 tokio::task::yield_now().await;
@@ -538,6 +594,54 @@ mod tests {
             .unwrap();
         admission.lost().await;
         assert!(presence.admit().is_none());
+    }
+
+    #[tokio::test]
+    async fn pause_requests_carry_the_sender_session_generation() {
+        // Issue #47: the stamp is what lets `apply_pause_request` ignore a
+        // pause queued by a GUI whose generation has ended. A client-supplied
+        // value must never survive.
+        let dir = tempfile::tempdir().unwrap();
+        let (inbound_tx, mut inbound_rx) = mpsc::channel(16);
+        let handles = WsHandles {
+            inbound: inbound_tx,
+            ..default_handles()
+        };
+        let presence = handles.presence.clone();
+        // Move past generation 0, so a default value can't pass by accident.
+        drop(presence.authenticated_session());
+        let token = Token::generate();
+        let path = socket_path(&dir);
+        let server = WsServer::new(path.clone(), token.clone(), handles);
+        let listener = server.bind().await.unwrap();
+        let server = tokio::spawn(server.serve(listener));
+
+        let mut gui = connect(&path).await;
+        gui.send(TMessage::Text(token.as_str().into()))
+            .await
+            .unwrap();
+        let _ack = gui.next().await.unwrap().unwrap();
+        gui.send(TMessage::Text(
+            r#"{"action":"setFilteringPaused","paused":true,"durationSecs":1800,"senderGeneration":999}"#
+                .into(),
+        ))
+        .await
+        .unwrap();
+
+        let received = tokio::time::timeout(std::time::Duration::from_secs(2), inbound_rx.recv())
+            .await
+            .expect("pause request was not forwarded")
+            .unwrap();
+        assert_eq!(presence.current_generation(), 1);
+        assert_eq!(
+            received,
+            ClientMessage::SetFilteringPaused {
+                paused: true,
+                duration_secs: Some(1800),
+                sender_generation: Some(1),
+            }
+        );
+        server.abort();
     }
 
     #[tokio::test]
