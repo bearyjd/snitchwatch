@@ -84,8 +84,9 @@ Kirigami.ScrollablePage {
         type: Kirigami.MessageType.Warning
         visible: true
         text: "Preview: blocklist subscriptions are shown here but are not applied to the "
-            + "firewall yet, so they do not block anything. They are also kept in memory only "
-            + "and are lost when the bridge restarts."
+            + "firewall yet, so they do not block anything. They are also kept in memory only, "
+            + "so they are lost when Snitchwatch's background service restarts (for example "
+            + "on logout or reboot)."
     }
 
     Kirigami.PlaceholderMessage {
@@ -94,7 +95,7 @@ Kirigami.ScrollablePage {
         visible: !page.model || page.model.count === 0
         icon.name: "edit-delete"
         text: "No blocklist subscriptions yet"
-        explanation: "Subscribe to a blocklist URL above to start filtering hosts."
+        explanation: "Subscribe to a blocklist URL above to preview its host list."
     }
 
     ListView {

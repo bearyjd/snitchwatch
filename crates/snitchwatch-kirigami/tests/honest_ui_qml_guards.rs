@@ -139,7 +139,12 @@ fn assert_preview_banner(page_name: &str, source: &str) {
     assert!(
         banner.contains("not applied") && banner.contains("restart"),
         "{page_name}'s banner must say the data is not applied to the firewall and is lost on \
-         bridge restart"
+         restart"
+    );
+    assert!(
+        !banner.contains("bridge"),
+        "{page_name}'s banner uses internal jargon (\"bridge\"); say \"Snitchwatch's \
+         background service\" instead"
     );
 }
 
@@ -154,6 +159,17 @@ fn blocklists_page_warns_it_is_not_enforced() {
 #[test]
 fn profiles_page_warns_it_is_not_enforced() {
     assert_preview_banner("ProfilesPage.qml", PROFILES_PAGE);
+}
+
+/// The empty-state copy sits right under the banner, so it must not promise
+/// what the banner disclaims.
+#[test]
+fn blocklists_empty_state_does_not_promise_filtering() {
+    assert!(
+        !code_lines(BLOCKLISTS_PAGE).contains("start filtering"),
+        "BlocklistsPage.qml's empty-state text promises filtering while the page's banner says \
+         subscriptions are not applied to the firewall"
+    );
 }
 
 /// Issue #51: `Controls.Label` defaults to `Text.AutoText`, which renders

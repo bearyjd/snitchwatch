@@ -72,8 +72,9 @@ Kirigami.ScrollablePage {
         type: Kirigami.MessageType.Warning
         visible: true
         text: "Preview: profiles are shown here but are not applied to the firewall yet, so "
-            + "activating one does not change any rules. Profiles are also kept in memory only "
-            + "and are lost when the bridge restarts."
+            + "activating one does not change any rules. Profiles are also kept in memory only, "
+            + "so they are lost when Snitchwatch's background service restarts (for example "
+            + "on logout or reboot)."
     }
 
     Kirigami.PlaceholderMessage {
