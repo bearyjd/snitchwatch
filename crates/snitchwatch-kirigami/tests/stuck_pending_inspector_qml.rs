@@ -12,16 +12,23 @@
 //! `QGuiApplication` can exist per process. It drives a real
 //! `ConnectionsPage` and a real `ConnectionsModel` with the same messages the
 //! bridge feed delivers, and reads the page's own inspector state afterwards:
-//!   * a row removed while the inspector is open on it (the model is flat and
-//!     unfiltered, so this reaches the incremental `rowsRemoved` path rather
-//!     than a full reset);
-//!   * `ClearConnectionRows`, which every snapshot answer starts with;
-//!   * a session change: the old session's row is cleared and the new
-//!     session reuses the same wire id, so only the qualified id differs;
-//!   * the bridge feed's connection status flipping;
-//!   * controls: an unrelated removal, a status flip with the row still
-//!     pending, and re-opening the inspector all leave a live pending row
-//!     decidable.
+//!   * the default grouped view first, where with no bridge runtime every
+//!     message lands behind a full model reset (`modelReset`);
+//!   * then the flat, unfiltered view, where a removal is an incremental
+//!     `rowsRemoved`, an insert is `rowsInserted` and an update is only
+//!     `dataChanged`;
+//!   * in both: a row removed, `ClearConnectionRows`, and a same-session
+//!     snapshot, which clears and then re-inserts the very same still-pending
+//!     row and must put the prompt back;
+//!   * a session change: the old session's row is cleared and the new session
+//!     reuses the same wire id, so only the qualified id differs, and the old
+//!     prompt must stay withdrawn;
+//!   * a row decided elsewhere, which flat mode reports only as `dataChanged`;
+//!   * a lost bridge connection, in the order the app sees it: `ok` goes false
+//!     while the model still holds the old session's pending row, and nothing
+//!     short of that session's rows being replaced brings the prompt back;
+//!   * controls: an unrelated removal or update, and re-opening the
+//!     inspector, leave a live pending row decidable.
 //!
 //! Failures are collected and thrown together, so a red run names every
 //! scenario that broke. The throw is reported by Qt against the probe's URL,
@@ -103,10 +110,12 @@ Window {
         });
     }
     function stillOffered() {
-        return page.inspectPending === true && page.inspectNoLongerPending !== true;
+        return page.inspectPending === true && page.inspectNoLongerPending !== true
+            && page.inspectVerdictText === "pending";
     }
     function withdrawn() {
-        return page.inspectPending === false && page.inspectNoLongerPending === true;
+        return page.inspectPending === false && page.inspectNoLongerPending === true
+            && page.inspectVerdictText === "no longer pending";
     }
 
     Timer {
@@ -115,12 +124,32 @@ Window {
         repeat: false
         onTriggered: {
             try {
-                // Flat + unfiltered: removals go through apply_remove and its
-                // rowsRemoved signal instead of a full model reset.
+                // --- Grouped mode (the default view) -------------------------
+                // No bridge runtime here, so each message resets the model.
+                probeWindow.insertPending("g1");
+                probeWindow.openOn("g1");
+                probeWindow.check(probeWindow.stillOffered(),
+                                  "grouped: not offered right after opening on a pending row");
+                probeWindow.send({ action: "clearConnectionRows" });
+                probeWindow.check(probeWindow.withdrawn(),
+                                  "grouped: still pending after ClearConnectionRows");
+                // A same-session snapshot re-inserts the row that is still pending.
+                probeWindow.insertPending("g1");
+                probeWindow.check(probeWindow.stillOffered(),
+                                  "grouped: a snapshot re-inserting the same pending row "
+                                  + "did not restore the prompt");
+                probeWindow.send({ action: "removeConnectionRows", ids: ["g1"] });
+                probeWindow.check(probeWindow.withdrawn(),
+                                  "grouped: still pending after its own row was removed");
+                probeWindow.send({ action: "clearConnectionRows" });
+
+                // --- Flat, unfiltered view -----------------------------------
+                // Removals go through apply_remove and rowsRemoved, inserts
+                // through rowsInserted, updates through dataChanged.
                 connModel.setGroupedMode(false);
 
-                // 1. Removing an unrelated row leaves the open prompt alone;
-                //    removing its own row withdraws it.
+                // Removing an unrelated row leaves the open prompt alone;
+                // removing its own row withdraws it.
                 probeWindow.insertPending("r1");
                 probeWindow.insertPending("r2");
                 probeWindow.openOn("r1");
@@ -133,45 +162,75 @@ Window {
                 probeWindow.check(probeWindow.withdrawn(),
                                   "remove: still pending after its own row was removed");
 
-                // 2. Re-opening on a live pending row clears the notice.
+                // Re-opening on a live pending row clears the notice.
                 probeWindow.insertPending("r3");
                 probeWindow.openOn("r3");
                 probeWindow.check(probeWindow.stillOffered(),
                                   "reopen: notice from the previous row was not reset");
 
-                // 3. Clearing the model (the start of every snapshot).
+                // Clearing the model, then a same-session snapshot putting the
+                // same still-pending row back (rowsInserted in flat mode).
                 probeWindow.send({ action: "clearConnectionRows" });
                 probeWindow.check(probeWindow.withdrawn(),
                                   "clear: still pending after ClearConnectionRows");
+                probeWindow.insertPending("r3");
+                probeWindow.check(probeWindow.stillOffered(),
+                                  "snapshot: re-inserting the same pending row did not "
+                                  + "restore the prompt");
+                probeWindow.send({ action: "clearConnectionRows" });
 
-                // 4. Session change: the old session's row is cleared, then the
-                //    new session reuses wire id 7. The held id is "1:7"; "2:7"
-                //    is a different row and must not revive it.
+                // Session change: the old session's row is cleared, then the new
+                // session reuses wire id 7. The held id is "1:7"; "2:7" is a
+                // different row and must not revive it.
                 probeWindow.insertPending("1:7");
                 probeWindow.openOn("1:7");
                 probeWindow.check(probeWindow.stillOffered(),
                                   "session: not offered right after opening on 1:7");
                 probeWindow.send({ action: "clearConnectionRows" });
                 probeWindow.insertPending("2:7");
-                probeWindow.check(probeWindow.withdrawn(),
+                probeWindow.check(probeWindow.withdrawn() && page.inspectId === "1:7",
                                   "session: prompt for 1:7 survived, or was revived by 2:7");
                 probeWindow.send({ action: "clearConnectionRows" });
 
-                // 5. The bridge feed's connection status flipping. A still-
-                //    pending row stays offered; a row the model never held
-                //    (as after a reconnect swapped the model underneath) does not.
-                probeWindow.insertPending("k1");
-                probeWindow.openOn("k1");
-                feedStub.ok = false;
-                feedStub.ok = true;
+                // Decided elsewhere: flat mode reports an update as dataChanged
+                // only. Another row being decided leaves the prompt alone.
+                probeWindow.insertPending("d1");
+                probeWindow.insertPending("d2");
+                probeWindow.openOn("d1");
+                probeWindow.send({ action: "updateConnectionRows",
+                                   rows: [probeWindow.row("d2", "allow")] });
                 probeWindow.check(probeWindow.stillOffered(),
-                                  "status: a status flip withdrew a still-pending row");
-                probeWindow.openOn("ghost");
+                                  "decided: an unrelated update withdrew the prompt");
+                probeWindow.send({ action: "updateConnectionRows",
+                                   rows: [probeWindow.row("d1", "allow")] });
+                probeWindow.check(probeWindow.withdrawn(),
+                                  "decided: still pending after the row was decided elsewhere");
+                probeWindow.send({ action: "clearConnectionRows" });
+
+                // Lost connection, in the order the app sees it. `ok` goes false
+                // while the model still holds the old session's pending row, so
+                // the row check alone would keep offering a verdict that
+                // can only fail with "disconnected".
+                probeWindow.insertPending("1:7");
+                probeWindow.openOn("1:7");
                 probeWindow.check(probeWindow.stillOffered(),
-                                  "status: not offered right after opening on ghost");
+                                  "disconnect: not offered right after opening on 1:7");
                 feedStub.ok = false;
                 probeWindow.check(probeWindow.withdrawn(),
-                                  "status: a row the model no longer holds survived a status flip");
+                                  "disconnect: still offered while the connection is down");
+                probeWindow.insertPending("1:8");
+                probeWindow.check(probeWindow.withdrawn(),
+                                  "disconnect: restored by an unrelated model event while down");
+                // The connection coming back is not enough on its own: the new
+                // session's snapshot replaces the old session's rows, and its
+                // ids differ.
+                feedStub.ok = true;
+                probeWindow.check(probeWindow.withdrawn(),
+                                  "reconnect: a status flip alone restored the prompt");
+                probeWindow.send({ action: "clearConnectionRows" });
+                probeWindow.insertPending("2:7");
+                probeWindow.check(probeWindow.withdrawn() && page.inspectId === "1:7",
+                                  "reconnect: the old prompt was revived by the new session");
 
                 if (probeWindow.failures.length > 0) {
                     throw new Error(probeWindow.failures.join("; "));
