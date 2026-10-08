@@ -35,6 +35,7 @@ const BOTH_MAY_EXIST: &str = "The renamed rule was saved, but Snitchwatch couldn
      old one was removed: both may exist. Check the Rules page.";
 pub(super) const OLD_DECIDES: &str = "Until then, where both match, the old rule decides.";
 pub(super) const NEW_DECIDES: &str = "Until then, where both match, the renamed rule decides.";
+pub(super) const BOTH_OFF: &str = "Both are turned off, so neither decides.";
 pub(super) const BOTH_ALLOW: &str =
     "Both allow, so the connections both match are allowed either way.";
 
@@ -53,7 +54,8 @@ pub(super) fn deciding(old: &Rule, new: &Rule) -> &'static str {
     match (old.enabled, new.enabled) {
         (true, false) => return OLD_DECIDES,
         (false, true) => return NEW_DECIDES,
-        _ => {}
+        (false, false) => return BOTH_OFF,
+        (true, true) => {}
     }
     match (blocks(old), blocks(new)) {
         (true, true) if old.name < new.name => OLD_DECIDES,

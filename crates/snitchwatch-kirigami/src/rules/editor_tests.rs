@@ -292,7 +292,17 @@ fn a_program_path_pattern_says_what_it_matches() {
         anchored.iter().all(|w| !w.contains("^ at the start")),
         "{anchored:?}"
     );
-    for loose in ["/usr/bin/curl", "^/usr/bin/curl", "/usr/bin/curl$"] {
+    let grouped = warns("^(/usr/bin/curl|/usr/bin/wget)$");
+    assert!(
+        grouped.iter().all(|w| !w.contains("^ at the start")),
+        "{grouped:?}"
+    );
+    for loose in [
+        "/usr/bin/curl",
+        "^/usr/bin/curl",
+        "/usr/bin/curl$",
+        "^/usr/bin/curl|wget$",
+    ] {
         let warnings = warns(loose);
         assert!(
             warnings.iter().any(|w| w.contains("^ at the start")),

@@ -142,7 +142,7 @@ async fn an_unanswered_delete_is_not_undone() {
 #[test]
 fn which_rule_decides_while_both_exist() {
     let rule = |name: &str, action: &str| bound(name, action);
-    use super::rename::{deciding, BOTH_ALLOW, NEW_DECIDES, OLD_DECIDES};
+    use super::rename::{deciding, BOTH_ALLOW, BOTH_OFF, NEW_DECIDES, OLD_DECIDES};
     assert_eq!(
         deciding(&rule("100-a", "deny"), &rule("200-b", "allow")),
         OLD_DECIDES
@@ -169,6 +169,11 @@ fn which_rule_decides_while_both_exist() {
         ..rule("100-a", "deny")
     };
     assert_eq!(deciding(&off, &rule("200-b", "allow")), NEW_DECIDES);
+    let off_too = snitchwatch_proto::protocol::Rule {
+        enabled: false,
+        ..rule("200-b", "deny")
+    };
+    assert_eq!(deciding(&off, &off_too), BOTH_OFF);
 }
 
 #[tokio::test]

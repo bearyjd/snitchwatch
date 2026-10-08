@@ -62,8 +62,11 @@ async fn a_refused_always_to_timed_edit_saves_the_rule_again() {
     assert_eq!(model.lock().unwrap().memory["100-x"].action, "deny");
 }
 
+/// With live reload (the daemon's default), the removed file makes the
+/// daemon drop the old rule from memory too; if the restore fails, the rule
+/// may be gone, so it leaves the list and the result says so.
 #[tokio::test]
-async fn a_restore_that_fails_says_the_rule_lasts_until_a_restart() {
+async fn a_restore_that_fails_says_the_rule_may_have_stopped_applying() {
     let old = bound("100-x", "deny");
     let mut daemon = daemon(vec![old.clone()]);
     let model = model(std::slice::from_ref(&old));
@@ -75,7 +78,37 @@ async fn a_restore_that_fails_says_the_rule_lasts_until_a_restart() {
     let mut rx = daemon.broadcast.subscribe();
     commands.try_route(update("100-x", broken_timed_edit(&old), Some("e1")));
     let reason = reason(result(&mut rx).await);
-    assert!(reason.contains("until the firewall restarts"), "{reason}");
+    assert!(reason.contains("may have stopped applying"), "{reason}");
+    assert!(applying(&model).is_empty(), "the daemon dropped it");
+    let cached = daemon.cache.lock().unwrap().rules().unwrap().clone();
+    assert!(!cached.contains_key("100-x"), "the list mustn't claim it");
+}
+
+/// An unanswered always-to-timed edit may have removed the file (and so
+/// the rule): it leaves the list, and nothing is resent blind.
+#[tokio::test]
+async fn an_unanswered_always_to_timed_edit_leaves_the_list() {
+    let old = bound("100-x", "deny");
+    let mut daemon = daemon(vec![old.clone()]);
+    let model = model(std::slice::from_ref(&old));
+    model
+        .lock()
+        .unwrap()
+        .silent
+        .insert((Action::ChangeRule as i32, "100-x".into()));
+    let seen = run_model(&mut daemon, model.clone());
+    let commands = commands(&daemon);
+    let mut rx = daemon.broadcast.subscribe();
+    commands.try_route(update("100-x", broken_timed_edit(&old), Some("e1")));
+    match result(&mut rx).await {
+        RuleCommandOutcome::Unsure { reason } => {
+            assert!(reason.contains("may have stopped applying"), "{reason}")
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(seen.lock().unwrap().len(), 1, "no blind resend");
+    let cached = daemon.cache.lock().unwrap().rules().unwrap().clone();
+    assert!(!cached.contains_key("100-x"));
 }
 
 /// An edit that keeps `always` loses no file, so nothing is resent.
