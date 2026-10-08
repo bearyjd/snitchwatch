@@ -27,6 +27,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use snitchwatch_bridge::profiles::store::{ProfileStore, StoreError};
 use snitchwatch_bridge::profiles::ProfilesManager;
+use snitchwatch_bridge::ws_messages::ClientMessage;
 use tracing::{error, info};
 
 use crate::storage::{EphemeralReason, Storage};
@@ -97,6 +98,22 @@ fn open_readable(path: &Path) -> std::result::Result<ProfileStore, OpenFailure> 
     let store = ProfileStore::open(path).map_err(OpenFailure::Open)?;
     store.list_profiles().map_err(OpenFailure::Unreadable)?;
     Ok(store)
+}
+
+/// True for every `ClientMessage` variant `ProfilesManager` owns handling of.
+/// Kept as a free function (rather than inlined into the pump's `match`) so
+/// it reads as one clear routing decision at the call site.
+pub(crate) fn is_profile_message(msg: &ClientMessage) -> bool {
+    matches!(
+        msg,
+        ClientMessage::CreateProfile { .. }
+            | ClientMessage::UpdateProfile { .. }
+            | ClientMessage::DeleteProfile { .. }
+            | ClientMessage::ActivateProfile { .. }
+            | ClientMessage::DeactivateProfile
+            | ClientMessage::AddProfileRule { .. }
+            | ClientMessage::RemoveProfileRule { .. }
+    )
 }
 
 #[cfg(test)]

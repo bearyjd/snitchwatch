@@ -2,7 +2,10 @@
 use anyhow::{bail, Context, Result};
 use std::collections::HashMap;
 use std::os::fd::{FromRawFd, RawFd};
-use tokio::net::UnixListener;
+use std::pin::Pin;
+use std::task::{Context as TaskContext, Poll};
+use tokio::net::{UnixListener, UnixStream};
+use tracing::warn;
 
 pub const GRPC_SOCKET_PATH: &str = "/run/snitchwatch/opensnitchd.sock";
 pub const GUI_SOCKET_PATH: &str = "/run/snitchwatch/bridge.sock";
@@ -131,6 +134,33 @@ fn duplicate_unix_listener(fd: RawFd) -> Result<UnixListener> {
     let listener = unsafe { std::os::unix::net::UnixListener::from_raw_fd(owned) };
     listener.set_nonblocking(true)?;
     UnixListener::from_std(listener).context("cannot adopt activated Unix listener")
+}
+
+/// Check kernel credentials before tonic sees a daemon connection. Rejected
+/// clients are dropped and accepting continues, including after lookup errors.
+pub(crate) struct RootUnixIncoming(pub(crate) UnixListener);
+
+impl tokio_stream::Stream for RootUnixIncoming {
+    type Item = std::io::Result<UnixStream>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Option<Self::Item>> {
+        // Bound each poll so a flood of rejected clients cannot starve shutdown.
+        for _ in 0..32 {
+            match self.0.poll_accept(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(error)) => return Poll::Ready(Some(Err(error))),
+                Poll::Ready(Ok((stream, _))) => match stream.peer_cred() {
+                    Ok(cred) if cred.uid() == 0 => return Poll::Ready(Some(Ok(stream))),
+                    Ok(cred) => warn!(uid = cred.uid(), "rejected non-root daemon peer"),
+                    Err(error) => {
+                        warn!(%error, "rejected daemon peer with unavailable credentials")
+                    }
+                },
+            }
+        }
+        cx.waker().wake_by_ref();
+        Poll::Pending
+    }
 }
 
 #[cfg(test)]
