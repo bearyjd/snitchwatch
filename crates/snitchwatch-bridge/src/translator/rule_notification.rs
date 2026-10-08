@@ -53,6 +53,8 @@ pub fn notification_for_effect(
             if rule_id.is_empty() {
                 return Err("DeleteRule with an empty rule id".to_string());
             }
+            // The daemon deletes `rulesDir + "/" + name + ".json"` as root.
+            crate::rule_name::validate_rule_name(rule_id)?;
             (
                 Action::DeleteRule,
                 vec![Rule {
@@ -136,6 +138,33 @@ mod tests {
     }
 
     #[test]
+    fn a_rule_name_that_leaves_the_rules_directory_never_reaches_the_daemon() {
+        // Root opensnitchd writes `Join(rulesDir, name + ".json")` and deletes
+        // `rulesDir + "/" + name + ".json"` without validating `name`.
+        for name in ["../default-config", "../../../../etc/cron.d/x"] {
+            let update = UpstreamEffect::UpdateRule {
+                rule_id: name.to_string(),
+                rule: wire_rule(name, true),
+            };
+            assert!(
+                notification_for_effect(&update, 3).is_err(),
+                "update {name}"
+            );
+            let add = UpstreamEffect::AddRule {
+                rule: wire_rule(name, true),
+            };
+            assert!(notification_for_effect(&add, 4).is_err(), "add {name}");
+            let delete = UpstreamEffect::DeleteRule {
+                rule_id: name.to_string(),
+            };
+            assert!(
+                notification_for_effect(&delete, 5).is_err(),
+                "delete {name}"
+            );
+        }
+    }
+
+    #[test]
     fn a_rule_the_daemon_would_reject_is_an_error_not_a_notification() {
         // `operator: null` is the issue #14 failure mode: the daemon's
         // `rule.Deserialize` rejects it and silently applies its default
@@ -194,6 +223,44 @@ mod tests {
         assert!(notification_for_effect(&UpstreamEffect::None, 6)
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn only_rule_edits_are_ever_forwarded_never_change_config() {
+        // CHANGE_CONFIG lets the sender repoint Rules.Path, log/firewall
+        // config paths, the server address and TLS paths — after which even
+        // valid rule names make root write anywhere. Nothing a GUI sends may
+        // ever become one (or anything but a rule edit).
+        let effects = [
+            UpstreamEffect::None,
+            UpstreamEffect::VerdictApplied {
+                row_id: "r".to_string(),
+                verdict: crate::cache::connections::Verdict::Allow,
+                remember: true,
+            },
+            UpstreamEffect::AddRule {
+                rule: wire_rule("r", true),
+            },
+            UpstreamEffect::DeleteRule {
+                rule_id: "r".to_string(),
+            },
+            UpstreamEffect::UpdateRule {
+                rule_id: "r".to_string(),
+                rule: wire_rule("r", true),
+            },
+            UpstreamEffect::SnapshotRequested,
+        ];
+        for effect in effects {
+            if let Some(ntf) = notification_for_effect(&effect, 1).unwrap() {
+                assert!(
+                    ntf.r#type == Action::ChangeRule as i32
+                        || ntf.r#type == Action::DeleteRule as i32,
+                    "{effect:?} produced action {}",
+                    ntf.r#type
+                );
+                assert_ne!(ntf.r#type, Action::ChangeConfig as i32);
+            }
+        }
     }
 
     #[test]
