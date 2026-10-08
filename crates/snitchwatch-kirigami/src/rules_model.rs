@@ -243,6 +243,8 @@ impl qobject::RulesModel {
             Some(rule) => self.emit_client(ClientMessage::UpdateRule {
                 rule_id: name,
                 rule,
+                request_id: None,
+                reply: None,
             }),
             None => tracing::warn!(
                 name_len = name.len(),
@@ -260,7 +262,11 @@ impl qobject::RulesModel {
             );
             return;
         }
-        self.emit_client(ClientMessage::DeleteRule { rule_id: name });
+        self.emit_client(ClientMessage::DeleteRule {
+            rule_id: name,
+            request_id: None,
+            reply: None,
+        });
     }
 
     fn select_rule_by_name(self: Pin<&mut Self>, name: &QString) -> QString {

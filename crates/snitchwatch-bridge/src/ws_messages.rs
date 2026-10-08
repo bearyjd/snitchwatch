@@ -295,6 +295,42 @@ pub enum ServerMessage {
         not_sent: u32,
         no_answer: u32,
     },
+    /// The outcome of an `AddRule`/`UpdateRule`/`DeleteRule` that carried a
+    /// `request_id` (rule editor, P2.1), sent to the asking connection only.
+    RuleCommandResult {
+        request_id: String,
+        outcome: RuleCommandOutcome,
+    },
+}
+
+/// What happened to a rule command (P2.1). Every reason is plain text.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(
+    tag = "status",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum RuleCommandOutcome {
+    /// The daemon answered OK (both steps, for a rename).
+    Ok,
+    /// The daemon answered ERROR, or a rename was undone; why.
+    Rejected { reason: String },
+    /// The bridge didn't send it: the rule policy's problems.
+    Refused {
+        problems: Vec<crate::rule_policy::RuleProblem>,
+    },
+    /// No answer in time: it may or may not have been applied.
+    Timeout,
+    /// No firewall service connected; nothing was sent.
+    NoDaemon,
+    /// A rename whose outcome isn't known (see the reason).
+    Unsure { reason: String },
+}
+
+/// Whether a client's request id is usable: 1 to 64 ASCII letters, digits
+/// or `-`. Anything else is treated as absent.
+pub fn valid_request_id(id: &str) -> bool {
+    (1..=64).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
 
 /// Client → server messages. These come from the UI's `sendAction(type, payload)`
@@ -325,15 +361,31 @@ pub enum ClientMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         remember: Option<bool>,
     },
+    /// `request_id` (P2.1, optional; see [`valid_request_id`]) asks for a
+    /// [`ServerMessage::RuleCommandResult`]; `reply` is stamped by
+    /// `ws_server` and never comes from the wire.
     AddRule {
         rule: serde_json::Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+        #[serde(skip)]
+        reply: Option<ReplyTo>,
     },
+    /// A `rule_id` other than `rule.name` renames (P2.1, E1).
     UpdateRule {
         rule_id: String,
         rule: serde_json::Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+        #[serde(skip)]
+        reply: Option<ReplyTo>,
     },
     DeleteRule {
         rule_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+        #[serde(skip)]
+        reply: Option<ReplyTo>,
     },
     GlobalSettings {
         settings: serde_json::Value,

@@ -17,8 +17,12 @@
 pub mod activation;
 pub mod cli;
 pub mod profile_storage;
+mod replier;
+mod rule_commands;
 mod rules_import;
 pub mod storage;
+#[cfg(test)]
+mod test_daemon;
 
 pub use storage::{
     resolve_storage, BridgeMode, EphemeralReason, RunOptions, Storage, PER_USER_REASON,
@@ -532,6 +536,12 @@ where
         rules.clone(),
         broadcast_tx.clone(),
     );
+    // Rule commands (P2.1 editor checks and results); the pump only routes.
+    let rule_commands = rule_commands::RuleCommands::new(
+        daemon_commands.clone(),
+        rules.clone(),
+        broadcast_tx.clone(),
+    );
     tokio::spawn(prune_expired_rules_every(
         RULE_EXPIRY_TICK,
         Arc::downgrade(&rules),
@@ -660,6 +670,9 @@ where
                 continue;
             };
             let Some(msg) = rules_import.try_route(msg) else {
+                continue;
+            };
+            let Some(msg) = rule_commands.try_route(msg) else {
                 continue;
             };
             // Special-cased before is_profile_message/upstream::apply — this

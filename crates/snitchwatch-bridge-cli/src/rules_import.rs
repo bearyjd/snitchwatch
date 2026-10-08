@@ -36,7 +36,8 @@ use tracing::{error, info, warn};
 mod apply;
 mod run_guard;
 
-pub(crate) use run_guard::{ApplyRun, Replier};
+use crate::replier::Replier;
+pub(crate) use run_guard::ApplyRun;
 
 pub(crate) const UNKNOWN_PREVIEW: &str =
     "This import preview is no longer available. Preview the file again.";
@@ -122,7 +123,7 @@ impl RulesImport {
             _ => return Some(msg),
         };
         let (request_id, replier) = (
-            request_id.clone(),
+            usable(request_id.clone()),
             Replier::new(reply.clone(), self.broadcast.clone()),
         );
         if self.tx.try_send(msg).is_err() {
@@ -162,6 +163,16 @@ fn lock(cache: &SharedRulesCache) -> MutexGuard<'_, RulesCache> {
     cache.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// A client's request id if it is usable (`valid_request_id`), else empty:
+/// an answer never echoes anything else.
+fn usable(request_id: String) -> String {
+    if snitchwatch_bridge::ws_messages::valid_request_id(&request_id) {
+        request_id
+    } else {
+        String::new()
+    }
+}
+
 fn now_unix_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -174,13 +185,14 @@ impl ImportTask {
         while let Some(msg) = rx.recv().await {
             match msg {
                 ClientMessage::ExportRules { request_id, reply } => {
-                    self.export(self.replier(reply), request_id).await
+                    self.export(self.replier(reply), usable(request_id)).await
                 }
                 ClientMessage::PreviewRulesImport {
                     request_id,
                     document,
                     reply,
                 } => {
+                    let request_id = usable(request_id);
                     self.preview(self.replier(reply), request_id, document)
                         .await
                 }
@@ -193,7 +205,7 @@ impl ImportTask {
                     let replier = self.replier(reply);
                     if let Err(reason) = self.apply(replier.clone(), &preview_id, include) {
                         let answer = ServerMessage::RulesImportRefused {
-                            request_id,
+                            request_id: usable(request_id),
                             reason: reason.to_string(),
                         };
                         replier.send(answer).await;

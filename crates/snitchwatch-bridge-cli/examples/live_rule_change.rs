@@ -82,11 +82,17 @@ async fn main() -> anyhow::Result<()> {
             ClientMessage::UpdateRule {
                 rule_id: rule_name,
                 rule,
+                request_id: None,
+                reply: None,
             }
         }
         None => {
             tracing::warn!(%rule_name, "sending DELETE_RULE — this destroys the rule");
-            ClientMessage::DeleteRule { rule_id: rule_name }
+            ClientMessage::DeleteRule {
+                rule_id: rule_name,
+                request_id: None,
+                reply: None,
+            }
         }
     };
     bridge.inbound_tx.send(message).await?;

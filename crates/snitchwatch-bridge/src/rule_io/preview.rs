@@ -297,6 +297,25 @@ fn empty_item() -> ImportItem {
     }
 }
 
+/// Whether `new` differs from `old` in nothing but `enabled` (a pure
+/// toggle, P2.1): the list operand's spelling and `created` don't count.
+pub fn only_enabled_differs(old: &Rule, new: &Rule) -> bool {
+    changed_fields(old, new)
+        .iter()
+        .all(|field| *field == "enabled")
+}
+
+/// The plain-word cautions for writing `new` over `old` (`None`: a new
+/// rule), as the import preview shows them; the rule editor shows the same.
+pub fn edit_cautions(old: Option<&Rule>, new: &Rule) -> Vec<String> {
+    let all_apps = !new
+        .operator
+        .as_ref()
+        .is_some_and(crate::rule_policy::binds_to_programs);
+    let same_conditions = old.is_none_or(|old| !changed_fields(old, new).contains(&"conditions"));
+    caution::cautions(old, new, all_apps, same_conditions)
+}
+
 /// Whether two optional rules have the same content (see [`changed_fields`]):
 /// how an apply checks a rule is still what the preview compared against.
 pub fn same_rule(a: Option<&Rule>, b: Option<&Rule>) -> bool {

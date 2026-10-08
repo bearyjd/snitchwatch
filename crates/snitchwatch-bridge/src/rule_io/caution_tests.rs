@@ -346,3 +346,47 @@ fn an_allow_for_a_launcher_with_no_destination_starts_unticked() {
         "a destination narrows it"
     );
 }
+
+// --- Shared with the rule editor (P2.1) -----------------------------------
+
+#[test]
+fn edit_cautions_compare_with_the_rule_being_replaced() {
+    let deny = bound("deny");
+    let mut allow = bound("allow");
+    allow.name = "011-renamed".into();
+    let cautions = edit_cautions(Some(&deny), &allow);
+    assert!(
+        cautions.iter().any(|c| c.contains("into an allow")),
+        "{cautions:?}"
+    );
+    assert!(edit_cautions(Some(&deny), &deny).is_empty());
+    let mut host_allow = bound("allow");
+    host_allow.operator = Some(leaf("dest.host", "example.com"));
+    assert!(edit_cautions(None, &host_allow)
+        .iter()
+        .any(|c| c.contains("every app")));
+}
+
+#[test]
+fn only_an_enabled_change_is_a_toggle() {
+    let cached = bound("deny");
+    let mut toggled = cached.clone();
+    toggled.enabled = false;
+    toggled.created = 0;
+    // As a GUI sends it back: a list's operand empty.
+    toggled.operator.as_mut().unwrap().operand.clear();
+    assert!(only_enabled_differs(&cached, &toggled));
+    assert!(only_enabled_differs(&cached, &cached));
+    for change in [
+        |r: &mut Rule| r.duration = "until restart".into(),
+        |r: &mut Rule| r.action = "allow".into(),
+        |r: &mut Rule| r.precedence = true,
+        |r: &mut Rule| r.nolog = true,
+        |r: &mut Rule| r.description = "note".into(),
+        |r: &mut Rule| r.operator.as_mut().unwrap().list[1].data = "other".into(),
+    ] {
+        let mut changed = toggled.clone();
+        change(&mut changed);
+        assert!(!only_enabled_differs(&cached, &changed), "{changed:?}");
+    }
+}

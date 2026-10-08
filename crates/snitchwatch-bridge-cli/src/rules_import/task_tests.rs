@@ -481,3 +481,20 @@ async fn an_apply_result_waits_for_room_on_a_full_queue() {
         Some(ServerMessage::RulesImportResult { .. })
     ));
 }
+
+/// Import uses the same request-id rule as rule commands: an unusable id
+/// is answered without echoing it.
+#[tokio::test]
+async fn an_unusable_request_id_is_not_echoed() {
+    let daemon = daemon(Vec::new());
+    let import = task(&daemon, Duration::from_secs(600));
+    let mut rx = daemon.broadcast.subscribe();
+    import.try_route(ClientMessage::ExportRules {
+        request_id: "a/<b>".into(),
+        reply: None,
+    });
+    match next_import_message(&mut rx).await {
+        ServerMessage::RulesExport { request_id, .. } => assert_eq!(request_id, ""),
+        other => panic!("{other:?}"),
+    }
+}

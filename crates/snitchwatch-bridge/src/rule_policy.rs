@@ -54,6 +54,23 @@ pub use narrowing::binds_to_programs;
 
 pub use profile::{validate_user_rule, PolicyProfile, RuleProblem};
 
+/// Parse a rule from the wire shape and check it for `profile`: the one
+/// path the bridge and the GUIs use for a rule written or imported whole.
+/// A wire error is reported as a problem at `rule`.
+pub fn check_wire_rule(
+    value: &serde_json::Value,
+    profile: PolicyProfile,
+) -> Result<Rule, Vec<RuleProblem>> {
+    let rule = crate::rule_wire::rule_from_wire(value).map_err(|reason| {
+        vec![RuleProblem {
+            path: "rule".into(),
+            reason,
+        }]
+    })?;
+    validate_user_rule(&rule, profile)?;
+    Ok(rule)
+}
+
 /// Why a GUI may not change a daemon rule whose operator fails
 /// [`validate_operator`] (a `lists` blocklist rule, a network alias such as
 /// `LAN`, or a shape the daemon can't evaluate). The rule is still listed,
@@ -347,3 +364,6 @@ mod profile_tests;
 
 #[cfg(test)]
 mod schema_tests;
+
+#[cfg(test)]
+mod editor_tests;

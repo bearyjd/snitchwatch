@@ -12,10 +12,10 @@
 //! rules in a row get no answer.
 
 use super::Replier;
+use crate::replier::display_reason;
 use snitchwatch_bridge::cache::rules::SharedRulesCache;
 use snitchwatch_bridge::daemon_commands::{CommandError, DaemonCommands, SendError};
 use snitchwatch_bridge::rule_io::{check_rule_for_apply, same_rule, ImportOutcome};
-use snitchwatch_bridge::translator::verdict::strip_display_hazards;
 use snitchwatch_bridge::ws_messages::ServerMessage;
 use snitchwatch_proto::protocol::{Action, Notification, Rule};
 use std::collections::HashMap;
@@ -31,8 +31,6 @@ pub(crate) const MAX_UNANSWERED_IN_A_ROW: u32 = 20;
 /// Retries of a command no stream could queue, each after one reply (or
 /// `retry_delay` when none is pending).
 const SEND_RETRIES: u32 = 3;
-/// Longest daemon error text shown.
-const MAX_REASON_CHARS: usize = 200;
 
 const BUSY: &str = "The firewall service was busy, so this rule wasn't sent.";
 const NO_DAEMON: &str = "The firewall service isn't connected, so this rule wasn't sent.";
@@ -142,17 +140,6 @@ struct Run<'a> {
     /// Set once nothing more may be sent; every later rule gets this reason.
     stop: Option<&'static str>,
     unanswered: u32,
-}
-
-/// Daemon text for a plain-text label: no hidden characters, not too long.
-fn display_reason(text: &str) -> String {
-    let shown = strip_display_hazards(text);
-    if shown.chars().count() <= MAX_REASON_CHARS {
-        return shown;
-    }
-    let mut short: String = shown.chars().take(MAX_REASON_CHARS).collect();
-    short.push('…');
-    short
 }
 
 impl Run<'_> {

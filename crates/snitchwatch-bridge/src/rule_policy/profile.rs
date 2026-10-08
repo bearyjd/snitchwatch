@@ -19,6 +19,8 @@ use snitchwatch_proto::protocol::{Operator, Rule};
 pub enum PolicyProfile {
     /// A rule read from an import file.
     Import,
+    /// A rule written or changed in the rule editor (roadmap P2.1).
+    Editor,
 }
 
 /// One reason a rule is refused. `reason` is always fixed text (or
@@ -49,6 +51,11 @@ pub const MATCHES_EVERYTHING: &str = "this rule matches every connection: none o
      can't be imported";
 pub const EMPTY_VALUE_REFUSED: &str =
     "an empty value matches far more than it looks; only a host name may be empty";
+pub const EDITOR_DURATION_REFUSED: &str = "the duration must be always, until the firewall \
+     restarts, or a time from 10s to 365 days written like 30s, 5m or 1h30m";
+pub const RELATIVE_PATH_REFUSED: &str = "an exact program path must be the program's full path, \
+     starting with /; use a pattern to match more than one program";
+pub const PROTOCOL_REFUSED: &str = "a protocol is a short lowercase name such as tcp or udp";
 pub const PORT_REFUSED: &str = "a port must be a whole number from 0 to 65535";
 pub const ID_REFUSED: &str = "a process or user ID must be a whole number";
 
@@ -56,7 +63,7 @@ pub const ID_REFUSED: &str = "a process or user ID must be a whole number";
 pub fn validate_user_rule(rule: &Rule, profile: PolicyProfile) -> Result<(), Vec<RuleProblem>> {
     let mut problems = Vec::new();
     match profile {
-        PolicyProfile::Import => check_import(rule, &mut problems),
+        PolicyProfile::Import | PolicyProfile::Editor => check_rule(rule, profile, &mut problems),
     }
     if problems.is_empty() {
         Ok(())
@@ -72,12 +79,14 @@ fn problem(problems: &mut Vec<RuleProblem>, path: &str, reason: impl Into<String
     });
 }
 
-fn check_import(rule: &Rule, problems: &mut Vec<RuleProblem>) {
+/// The checks every profile shares; they differ only in which durations
+/// they take and in the editor's extra checks on what is typed by hand.
+fn check_rule(rule: &Rule, profile: PolicyProfile, problems: &mut Vec<RuleProblem>) {
     match &rule.operator {
         None => problem(problems, "operator", NO_CONDITIONS),
         Some(op) => match super::validate_operator(op) {
             Err(reason) => problem(problems, "operator", reason),
-            Ok(()) => check_import_operator(op, problems),
+            Ok(()) => check_import_operator(op, profile, problems),
         },
     }
     if let Err(reason) = crate::rule_name::validate_rule_name(&rule.name) {
@@ -98,8 +107,14 @@ fn check_import(rule: &Rule, problems: &mut Vec<RuleProblem>) {
     if !matches!(rule.action.as_str(), "allow" | "deny" | "reject") {
         problem(problems, "action", ACTION_REFUSED);
     }
-    if !matches!(rule.duration.as_str(), "always" | "until restart") {
-        problem(problems, "duration", DURATION_REFUSED);
+    match profile {
+        PolicyProfile::Import if !matches!(rule.duration.as_str(), "always" | "until restart") => {
+            problem(problems, "duration", DURATION_REFUSED)
+        }
+        PolicyProfile::Editor if !editor_duration(&rule.duration) => {
+            problem(problems, "duration", EDITOR_DURATION_REFUSED)
+        }
+        _ => {}
     }
     if !crate::cache::rules::within_limits(rule) {
         problem(problems, "rule", TOO_LARGE);
@@ -108,7 +123,7 @@ fn check_import(rule: &Rule, problems: &mut Vec<RuleProblem>) {
 
 /// The import checks for an operator `validate_operator` accepted: a leaf,
 /// or one list of leaves.
-fn check_import_operator(op: &Operator, problems: &mut Vec<RuleProblem>) {
+fn check_import_operator(op: &Operator, profile: PolicyProfile, problems: &mut Vec<RuleProblem>) {
     let leaves: Vec<(String, &Operator)> = if op.r#type == "list" {
         op.list
             .iter()
@@ -127,6 +142,48 @@ fn check_import_operator(op: &Operator, problems: &mut Vec<RuleProblem>) {
     }
     for (path, leaf) in leaves {
         check_import_leaf(&path, leaf, problems);
+        if profile == PolicyProfile::Editor {
+            check_editor_leaf(&path, leaf, problems);
+        }
+    }
+}
+
+/// Shortest and longest timed rule the editor writes: the daemon parses
+/// the duration only after storing the rule (`replaceUserRule`), so one it
+/// can't parse would never expire.
+const MIN_TIMED_SECS: i64 = 10;
+const MAX_TIMED_SECS: i64 = 365 * 24 * 3600;
+
+fn editor_duration(duration: &str) -> bool {
+    matches!(duration, "always" | "until restart")
+        || crate::cache::rules::parse_duration_secs(duration)
+            .is_some_and(|secs| (MIN_TIMED_SECS..=MAX_TIMED_SECS).contains(&secs))
+}
+
+/// What the editor adds for values typed by hand (owner decision E2): an
+/// exact program path is a real program's full path (#44's rule for
+/// remembered verdicts), and a protocol is a short lowercase token.
+fn check_editor_leaf(path: &str, leaf: &Operator, problems: &mut Vec<RuleProblem>) {
+    if leaf.r#type != "simple" || leaf.data.is_empty() {
+        return;
+    }
+    let data_path = format!("{path}.data");
+    match leaf.operand.as_str() {
+        "process.path"
+            if !crate::translator::process_binding::is_bindable_process_path(&leaf.data) =>
+        {
+            problem(problems, &data_path, RELATIVE_PATH_REFUSED)
+        }
+        "protocol"
+            if !(leaf.data.len() <= 16
+                && leaf
+                    .data
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())) =>
+        {
+            problem(problems, &data_path, PROTOCOL_REFUSED)
+        }
+        _ => {}
     }
 }
 

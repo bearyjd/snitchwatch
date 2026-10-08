@@ -33,8 +33,8 @@ mod caution;
 mod limits;
 mod preview;
 pub use preview::{
-    check_rules, classify, preview, same_rule, CheckedRule, ImportItem, ImportKind, ImportPreview,
-    PreviousRule, DUPLICATE_NAME, HIDDEN_NAME,
+    check_rules, classify, edit_cautions, only_enabled_differs, preview, same_rule, CheckedRule,
+    ImportItem, ImportKind, ImportPreview, PreviousRule, DUPLICATE_NAME, HIDDEN_NAME,
 };
 
 pub const FORMAT: &str = "snitchwatch.rules";

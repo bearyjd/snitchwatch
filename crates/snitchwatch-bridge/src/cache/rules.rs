@@ -106,7 +106,9 @@ impl RulesCache {
         &self.left_out
     }
 
-    pub(crate) fn set_left_out(&mut self, left_out: BTreeMap<String, usize>) {
+    /// Set when a snapshot is committed; public so other crates' tests can
+    /// stand in for an oversized daemon rule.
+    pub fn set_left_out(&mut self, left_out: BTreeMap<String, usize>) {
         self.left_out = left_out;
     }
 
@@ -196,7 +198,7 @@ fn expires_at(rule: &Rule) -> Option<i64> {
         .checked_add(parse_duration_secs(&rule.duration)?)
 }
 
-fn parse_duration_secs(duration: &str) -> Option<i64> {
+pub(crate) fn parse_duration_secs(duration: &str) -> Option<i64> {
     let mut total: i64 = 0;
     let mut digits = String::new();
     for c in duration.chars() {

@@ -342,11 +342,39 @@ async fn forward_outbound<S>(
 /// Answers queued for one connection before its sender waits.
 const REPLY_QUEUE: usize = 32;
 
-/// Give a rule import/export request a channel back to its own connection.
-/// Overwrites whatever it carried; the field is never deserialized anyway.
+/// Give a rule import/export request or a rule command a channel back to
+/// its own connection. Overwrites whatever it carried; the field is never
+/// deserialized anyway.
 fn stamp_reply(message: ClientMessage, reply_to: &crate::ws_messages::ReplyTo) -> ClientMessage {
     let reply = Some(reply_to.clone());
     match message {
+        ClientMessage::AddRule {
+            rule, request_id, ..
+        } => ClientMessage::AddRule {
+            rule,
+            request_id,
+            reply,
+        },
+        ClientMessage::UpdateRule {
+            rule_id,
+            rule,
+            request_id,
+            ..
+        } => ClientMessage::UpdateRule {
+            rule_id,
+            rule,
+            request_id,
+            reply,
+        },
+        ClientMessage::DeleteRule {
+            rule_id,
+            request_id,
+            ..
+        } => ClientMessage::DeleteRule {
+            rule_id,
+            request_id,
+            reply,
+        },
         ClientMessage::ExportRules { request_id, .. } => {
             ClientMessage::ExportRules { request_id, reply }
         }
