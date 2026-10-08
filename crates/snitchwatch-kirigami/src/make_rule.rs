@@ -70,6 +70,8 @@ pub(crate) fn add_rule_message(
     };
     Some(ClientMessage::AddRule {
         rule: rule_to_wire(&rule),
+        request_id: None,
+        reply: None,
     })
 }
 
@@ -102,7 +104,7 @@ mod tests {
 
     fn wire_rule(msg: ClientMessage) -> serde_json::Value {
         match msg {
-            ClientMessage::AddRule { rule } => rule,
+            ClientMessage::AddRule { rule, .. } => rule,
             other => panic!("expected AddRule, got {other:?}"),
         }
     }
@@ -121,7 +123,7 @@ mod tests {
         );
         assert!(text.contains("example.com"), "{text}");
         // What the bridge's pump does with a GUI's AddRule.
-        let ClientMessage::AddRule { rule } = msg else {
+        let ClientMessage::AddRule { rule, .. } = msg else {
             unreachable!()
         };
         let notification = notification_for_effect(&UpstreamEffect::AddRule { rule }, 1)
@@ -164,7 +166,7 @@ mod tests {
                     "{scope}: {text}"
                 );
                 assert!(!text.contains("dest.host"), "{scope}: {text}");
-                let ClientMessage::AddRule { rule } = msg else {
+                let ClientMessage::AddRule { rule, .. } = msg else {
                     unreachable!()
                 };
                 notification_for_effect(&UpstreamEffect::AddRule { rule }, 1).unwrap();
@@ -200,7 +202,7 @@ mod tests {
                 for choice in ["allow", "deny"] {
                     let msg = add_rule_message(&row, choice, scope, duration, 0)
                         .unwrap_or_else(|| panic!("{choice} {scope} {duration}"));
-                    let ClientMessage::AddRule { rule } = msg else {
+                    let ClientMessage::AddRule { rule, .. } = msg else {
                         unreachable!()
                     };
                     notification_for_effect(&UpstreamEffect::AddRule { rule }, 1).unwrap();

@@ -15,11 +15,16 @@
 //!    mutates the cache (resolving pending rows by firing the oneshot).
 
 pub mod activation;
+mod busy;
 pub mod cli;
 pub mod profile_storage;
+mod replier;
+mod rule_commands;
 pub mod rule_hits_storage;
 mod rules_import;
 pub mod storage;
+#[cfg(test)]
+mod test_daemon;
 
 pub use storage::{
     resolve_storage, BridgeMode, EphemeralReason, RunOptions, Storage, PER_USER_REASON,
@@ -562,11 +567,22 @@ where
     let daemon_commands = ui_service_inner.daemon_commands();
     let daemon_stream_ready = daemon_commands.stream_ready();
     let rules = ui_service_inner.rules_handle();
+    // Names a rule command or an import is changing; neither may race the
+    // other on one name (P2.1).
+    let busy_names = busy::BusyNames::default();
     // Rule import/export (roadmap P2.7): its own task; the pump only routes.
     let rules_import = rules_import::RulesImport::spawn(
         daemon_commands.clone(),
         rules.clone(),
         broadcast_tx.clone(),
+        busy_names.clone(),
+    );
+    // Rule commands (P2.1 editor checks and results); the pump only routes.
+    let rule_commands = rule_commands::RuleCommands::new(
+        daemon_commands.clone(),
+        rules.clone(),
+        broadcast_tx.clone(),
+        busy_names.clone(),
     );
     tokio::spawn(prune_expired_rules_every(
         RULE_EXPIRY_TICK,
@@ -699,6 +715,9 @@ where
                 continue;
             };
             let Some(msg) = rules_import.try_route(msg) else {
+                continue;
+            };
+            let Some(msg) = rule_commands.try_route(msg) else {
                 continue;
             };
             // Special-cased before is_profile_message/upstream::apply — this

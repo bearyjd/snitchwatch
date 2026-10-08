@@ -7,6 +7,10 @@
 //! - [`io`] and [`io_view`]: rule import/export (roadmap P2.7) without Qt:
 //!   the bounded file read, the owner-only export write, and the preview
 //!   rows and texts. `crate::rules_io_controller` binds them to QML.
+//! - [`editor`] and [`editor_view`]: the rule editor (roadmap P2.1) without
+//!   Qt: the condition builder, the wire shape, the bridge's own checks, and
+//!   what is sent and said.
+//!   `crate::rule_editor_controller` binds it to QML.
 //! - [`simulator`]: pure, Qt-free rule-match simulator (Little-Snitch-parity
 //!   "rule-match diagnostics" simulate panel) — evaluates a candidate
 //!   connection against `row_store`'s cached rules the way opensnitchd
@@ -18,11 +22,19 @@
 //!   one-directory constraint noted in [`crate::connections`]).
 
 pub mod all_apps;
+pub mod editor;
+pub mod editor_view;
 pub mod hits;
 pub mod io;
 pub mod io_view;
 pub mod row_store;
 pub mod simulator;
+
+#[cfg(test)]
+mod editor_tests;
+
+#[cfg(test)]
+mod editor_view_tests;
 
 #[cfg(test)]
 mod io_tests;

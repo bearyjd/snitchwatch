@@ -52,7 +52,24 @@ mod regexp;
 
 pub use narrowing::binds_to_programs;
 
-pub use profile::{validate_user_rule, PolicyProfile, RuleProblem};
+pub use profile::{enable_problems, validate_user_rule, PolicyProfile, RuleProblem};
+
+/// Parse a rule from the wire shape and check it for `profile`: the one
+/// path the bridge and the GUIs use for a rule written or imported whole.
+/// A wire error is reported as a problem at `rule`.
+pub fn check_wire_rule(
+    value: &serde_json::Value,
+    profile: PolicyProfile,
+) -> Result<Rule, Vec<RuleProblem>> {
+    let rule = crate::rule_wire::rule_from_wire(value).map_err(|reason| {
+        vec![RuleProblem {
+            path: "rule".into(),
+            reason,
+        }]
+    })?;
+    validate_user_rule(&rule, profile)?;
+    Ok(rule)
+}
 
 /// Why a GUI may not change a daemon rule whose operator fails
 /// [`validate_operator`] (a `lists` blocklist rule, a network alias such as
@@ -317,9 +334,17 @@ fn is_env_var_name(name: &str) -> bool {
 /// and only fails once it is enabled.
 fn validate_cidr(data: &str) -> Result<(), String> {
     const NOT_A_CIDR: &str = "network operator data is not a CIDR such as 10.0.0.0/8";
+    // Go's `IPNet.Contains` reads a network on an IPv4-mapped address as
+    // IPv4 with the mask's last 32 bits: `::ffff:0:0/96` matches every IPv4
+    // address. Only the IPv4 form says what it means.
+    const MAPPED: &str = "network operator data is an IPv4 network written as IPv6 \
+         (::ffff:…); write it as IPv4, such as 10.0.0.0/8";
     let (addr, prefix) = data.split_once('/').ok_or(NOT_A_CIDR)?;
     let max_prefix = match addr.parse::<std::net::IpAddr>() {
         Ok(std::net::IpAddr::V4(_)) => 32,
+        Ok(std::net::IpAddr::V6(v6)) if v6.to_ipv4_mapped().is_some() => {
+            return Err(MAPPED.to_string())
+        }
         Ok(std::net::IpAddr::V6(_)) => 128,
         Err(_) => return Err(NOT_A_CIDR.to_string()),
     };
@@ -339,3 +364,6 @@ mod profile_tests;
 
 #[cfg(test)]
 mod schema_tests;
+
+#[cfg(test)]
+mod editor_tests;

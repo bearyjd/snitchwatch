@@ -46,6 +46,7 @@ fn task(daemon: &Daemon, preview_ttl: Duration) -> RulesImport {
             reply_timeout: Duration::from_secs(5),
             retry_delay: Duration::from_millis(10),
             preview_ttl,
+            busy: crate::busy::BusyNames::default(),
         },
     )
 }
@@ -300,7 +301,7 @@ async fn answers_go_only_to_the_requesting_connection() {
     let (tx, mut mine) = mpsc::channel(8);
     import.try_route(ClientMessage::ExportRules {
         request_id: "mine".into(),
-        reply: Some(ReplyTo(tx)),
+        reply: Some(ReplyTo::new(tx)),
     });
     let answer = tokio::time::timeout(Duration::from_secs(5), mine.recv())
         .await
@@ -378,6 +379,8 @@ async fn an_apply_that_ends_early_still_frees_the_task_and_reports() {
     guard.totals.applied = 3;
     drop(guard);
     assert!(!running.load(std::sync::atomic::Ordering::SeqCst));
+    // The result goes out from a task of its own, off the dropping stack.
+    tokio::time::sleep(Duration::from_millis(50)).await;
     let mut saw_rules = false;
     let mut saw_result = false;
     while let Ok(message) = rx.try_recv() {
@@ -404,7 +407,7 @@ async fn an_apply_that_ends_early_still_frees_the_task_and_reports() {
 async fn a_gui_that_stops_reading_is_given_up_on_after_one_wait() {
     let (tx, _never_read) = mpsc::channel(1);
     let (broadcast, _) = broadcast::channel(4);
-    let replier = Replier::new(Some(ReplyTo(tx)), broadcast);
+    let replier = Replier::new(Some(ReplyTo::new(tx)), broadcast);
     let started = tokio::time::Instant::now();
     for i in 0..50 {
         replier
@@ -419,4 +422,81 @@ async fn a_gui_that_stops_reading_is_given_up_on_after_one_wait() {
         "{:?}",
         started.elapsed()
     );
+}
+
+/// Re-review: the give-up is per connection, not per request, so a GUI
+/// flooding requests and reading none costs one wait in all.
+#[tokio::test(start_paused = true)]
+async fn a_stalled_connection_is_given_up_on_once_across_requests() {
+    let (tx, _never_read) = mpsc::channel(1);
+    let connection = ReplyTo::new(tx);
+    let (broadcast, _) = broadcast::channel(4);
+    let started = tokio::time::Instant::now();
+    for i in 0..10 {
+        let replier = Replier::new(Some(connection.clone()), broadcast.clone());
+        for j in 0..5 {
+            replier
+                .send(ServerMessage::RulesImportRefused {
+                    request_id: format!("r{i}-{j}"),
+                    reason: String::new(),
+                })
+                .await;
+        }
+    }
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+/// Re-review: an apply's result waits (briefly) for room on its
+/// connection's queue rather than being dropped when the queue is full.
+#[tokio::test]
+async fn an_apply_result_waits_for_room_on_a_full_queue() {
+    let daemon = daemon(Vec::new());
+    let (tx, mut rx) = mpsc::channel(1);
+    let connection = ReplyTo::new(tx);
+    assert!(
+        connection
+            .send(ServerMessage::RulesImportRefused {
+                request_id: "filler".into(),
+                reason: String::new(),
+            })
+            .await
+    );
+    let run = ApplyRun::new(
+        Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        daemon.commands.hold_rule_publishes(),
+        Replier::new(Some(connection), daemon.broadcast.clone()),
+        "p".into(),
+    );
+    let finished = tokio::spawn(run.finish());
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(matches!(
+        rx.recv().await,
+        Some(ServerMessage::RulesImportRefused { .. })
+    ));
+    finished.await.unwrap();
+    assert!(matches!(
+        rx.recv().await,
+        Some(ServerMessage::RulesImportResult { .. })
+    ));
+}
+
+/// Import uses the same request-id rule as rule commands: an unusable id
+/// is answered without echoing it.
+#[tokio::test]
+async fn an_unusable_request_id_is_not_echoed() {
+    let daemon = daemon(Vec::new());
+    let import = task(&daemon, Duration::from_secs(600));
+    let mut rx = daemon.broadcast.subscribe();
+    import.try_route(ClientMessage::ExportRules {
+        request_id: "a/<b>".into(),
+        reply: None,
+    });
+    match next_import_message(&mut rx).await {
+        ServerMessage::RulesExport { request_id, .. } => assert_eq!(request_id, ""),
+        other => panic!("{other:?}"),
+    }
 }

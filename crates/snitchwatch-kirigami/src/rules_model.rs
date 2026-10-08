@@ -154,6 +154,13 @@ pub mod qobject {
         #[qinvokable]
         #[cxx_name = "simulate"]
         fn simulate(self: &RulesModel, form_json: &QString) -> QString;
+
+        /// A rule for the rule editor (P2.1): `rules::editor_view::Editable`
+        /// as JSON (its wire form, and why Edit isn't available, empty when
+        /// it is), or empty for an unknown name.
+        #[qinvokable]
+        #[cxx_name = "editableRuleJson"]
+        fn editable_rule_json(self: &RulesModel, name: &QString) -> QString;
     }
 
     unsafe extern "RustQt" {
@@ -295,6 +302,8 @@ impl qobject::RulesModel {
             Some(rule) => self.emit_client(ClientMessage::UpdateRule {
                 rule_id: name,
                 rule,
+                request_id: None,
+                reply: None,
             }),
             None => tracing::warn!(
                 name_len = name.len(),
@@ -312,7 +321,11 @@ impl qobject::RulesModel {
             );
             return;
         }
-        self.emit_client(ClientMessage::DeleteRule { rule_id: name });
+        self.emit_client(ClientMessage::DeleteRule {
+            rule_id: name,
+            request_id: None,
+            reply: None,
+        });
     }
 
     fn select_rule_by_name(self: Pin<&mut Self>, name: &QString) -> QString {
@@ -339,6 +352,13 @@ impl qobject::RulesModel {
                 QString::from("")
             }
         }
+    }
+
+    fn editable_rule_json(&self, name: &QString) -> QString {
+        crate::rules::editor_view::editable_in(&self.store, &name.to_string())
+            .and_then(|editable| serde_json::to_string(&editable).ok())
+            .map(|json| QString::from(&json))
+            .unwrap_or_default()
     }
 
     fn start_bridge_feed(self: Pin<&mut Self>) {

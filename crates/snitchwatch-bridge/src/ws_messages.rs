@@ -295,6 +295,12 @@ pub enum ServerMessage {
         not_sent: u32,
         no_answer: u32,
     },
+    /// The outcome of an `AddRule`/`UpdateRule`/`DeleteRule` that carried a
+    /// `request_id` (rule editor, P2.1), sent to the asking connection only.
+    RuleCommandResult {
+        request_id: String,
+        outcome: RuleCommandOutcome,
+    },
     /// How often each daemon rule decided a connection, as Snitchwatch
     /// counted from the `events` in the daemon's pings (P2.6 Part 1, see
     /// `crate::cache::rule_hits`). Sent at most every 5 seconds and only
@@ -316,6 +322,39 @@ pub enum ServerMessage {
         storage: StorageStatus,
         hits: Vec<RuleHitWire>,
     },
+}
+
+/// What happened to a rule command (P2.1). Every reason is plain text.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(
+    tag = "status",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum RuleCommandOutcome {
+    /// The daemon answered OK (both steps, for a rename).
+    Ok,
+    /// Done, with something the user should know (a renamed rule's old
+    /// file the daemon couldn't remove).
+    OkWithNote { note: String },
+    /// The daemon answered ERROR, or a rename was undone; why.
+    Rejected { reason: String },
+    /// The bridge didn't send it: the rule policy's problems.
+    Refused {
+        problems: Vec<crate::rule_policy::RuleProblem>,
+    },
+    /// No answer in time: it may or may not have been applied.
+    Timeout,
+    /// No firewall service connected; nothing was sent.
+    NoDaemon,
+    /// A rename whose outcome isn't known (see the reason).
+    Unsure { reason: String },
+}
+
+/// Whether a client's request id is usable: 1 to 64 ASCII letters, digits
+/// or `-`. Anything else is treated as absent.
+pub fn valid_request_id(id: &str) -> bool {
+    (1..=64).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
 
 /// One rule's count in [`ServerMessage::RuleHits`], and in the saved hit
@@ -358,15 +397,31 @@ pub enum ClientMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         remember: Option<bool>,
     },
+    /// `request_id` (P2.1, optional; see [`valid_request_id`]) asks for a
+    /// [`ServerMessage::RuleCommandResult`]; `reply` is stamped by
+    /// `ws_server` and never comes from the wire.
     AddRule {
         rule: serde_json::Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+        #[serde(skip)]
+        reply: Option<ReplyTo>,
     },
+    /// A `rule_id` other than `rule.name` renames (P2.1, E1).
     UpdateRule {
         rule_id: String,
         rule: serde_json::Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+        #[serde(skip)]
+        reply: Option<ReplyTo>,
     },
     DeleteRule {
         rule_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+        #[serde(skip)]
+        reply: Option<ReplyTo>,
     },
     GlobalSettings {
         settings: serde_json::Value,
@@ -488,15 +543,42 @@ pub enum ClientMessage {
 
 /// A channel back to one WebSocket connection, stamped on rule import and
 /// export requests by `ws_server` so their answers reach only the GUI that
-/// asked. Never serialized.
+/// asked. Never serialized. Clones share the connection's "stopped reading"
+/// mark, so a GUI that stops reading is waited on once, not per request.
 #[derive(Clone)]
-pub struct ReplyTo(pub tokio::sync::mpsc::Sender<ServerMessage>);
+pub struct ReplyTo {
+    tx: tokio::sync::mpsc::Sender<ServerMessage>,
+    stalled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
 
 impl ReplyTo {
+    /// One connection's channel (call once per connection, then clone).
+    pub fn new(tx: tokio::sync::mpsc::Sender<ServerMessage>) -> Self {
+        Self {
+            tx,
+            stalled: std::sync::Arc::default(),
+        }
+    }
+
     /// Deliver `message`, waiting for room; `false` when the connection is
     /// gone.
     pub async fn send(&self, message: ServerMessage) -> bool {
-        self.0.send(message).await.is_ok()
+        self.tx.send(message).await.is_ok()
+    }
+
+    /// Deliver `message` only if there is room now.
+    pub fn try_send(&self, message: ServerMessage) -> bool {
+        self.tx.try_send(message).is_ok()
+    }
+
+    /// Whether the connection was found not reading its answers.
+    pub fn stalled(&self) -> bool {
+        self.stalled.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub fn mark_stalled(&self) {
+        self.stalled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -508,7 +590,7 @@ impl std::fmt::Debug for ReplyTo {
 
 impl PartialEq for ReplyTo {
     fn eq(&self, other: &Self) -> bool {
-        self.0.same_channel(&other.0)
+        self.tx.same_channel(&other.tx)
     }
 }
 

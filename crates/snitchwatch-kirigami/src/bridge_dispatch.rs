@@ -518,7 +518,11 @@ mod tests {
             other => panic!("expected SubscribeBlocklist, got {other:?}"),
         }
         match decode_client(r#"{"action":"deleteRule","ruleId":"block-ads"}"#).unwrap() {
-            ClientMessage::DeleteRule { rule_id } => assert_eq!(rule_id, "block-ads"),
+            ClientMessage::DeleteRule {
+                rule_id,
+                request_id: None,
+                reply: None,
+            } => assert_eq!(rule_id, "block-ads"),
             other => panic!("expected DeleteRule, got {other:?}"),
         }
     }

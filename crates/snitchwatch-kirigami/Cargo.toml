@@ -35,6 +35,7 @@ harness = false
 
 [dependencies]
 snitchwatch-bridge = { path = "../snitchwatch-bridge", default-features = false }
+# The rule editor reads checked rules' conditions (`protocol::Operator`), and
 # "Make a rule…" builds a daemon `Connection` for the bridge's rule builder.
 snitchwatch-proto = { path = "../snitchwatch-proto" }
 cxx = "=1.0.194"

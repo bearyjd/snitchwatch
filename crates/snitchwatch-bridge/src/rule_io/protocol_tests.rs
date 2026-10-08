@@ -117,3 +117,78 @@ fn server_messages_round_trip_and_echo_their_ids() {
     .unwrap();
     assert_eq!(progress, json!({ "status": "notSent", "reason": "busy" }));
 }
+
+// --- Rule commands with results (P2.1) -------------------------------------
+
+#[test]
+fn rule_commands_carry_an_optional_request_id() {
+    let add: ClientMessage = serde_json::from_value(json!({
+        "action": "addRule", "requestId": "e1", "rule": { "name": "a" },
+    }))
+    .unwrap();
+    assert!(matches!(add, ClientMessage::AddRule { request_id: Some(ref id), .. } if id == "e1"));
+    // An older GUI's toggle has none, and serializes as before.
+    let toggle = ClientMessage::UpdateRule {
+        rule_id: "a".into(),
+        rule: json!({ "name": "a" }),
+        request_id: None,
+        reply: None,
+    };
+    let text = serde_json::to_string(&toggle).unwrap();
+    assert_eq!(
+        text,
+        r#"{"action":"updateRule","ruleId":"a","rule":{"name":"a"}}"#
+    );
+    let delete: ClientMessage =
+        serde_json::from_value(json!({ "action": "deleteRule", "ruleId": "a" })).unwrap();
+    assert!(matches!(
+        delete,
+        ClientMessage::DeleteRule {
+            request_id: None,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn rule_command_results_round_trip() {
+    use crate::ws_messages::RuleCommandOutcome;
+    for outcome in [
+        RuleCommandOutcome::Ok,
+        RuleCommandOutcome::Rejected {
+            reason: "bad regexp".into(),
+        },
+        RuleCommandOutcome::Refused {
+            problems: vec![crate::rule_policy::RuleProblem {
+                path: "duration".into(),
+                reason: "x".into(),
+            }],
+        },
+        RuleCommandOutcome::Timeout,
+        RuleCommandOutcome::NoDaemon,
+        RuleCommandOutcome::Unsure {
+            reason: "both may exist".into(),
+        },
+    ] {
+        let message = ServerMessage::RuleCommandResult {
+            request_id: "e1".into(),
+            outcome,
+        };
+        let text = serde_json::to_string(&message).unwrap();
+        assert_eq!(
+            serde_json::from_str::<ServerMessage>(&text).unwrap(),
+            message,
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn request_ids_are_short_plain_tokens() {
+    use crate::ws_messages::valid_request_id;
+    assert!(valid_request_id("123-4"));
+    assert!(valid_request_id(&"a".repeat(64)));
+    for bad in ["", "a/b", "a b", "ünï", &"a".repeat(65)] {
+        assert!(!valid_request_id(bad), "{bad:?}");
+    }
+}
