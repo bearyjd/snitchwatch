@@ -200,9 +200,13 @@ async fn a_prompt_answered_again_after_the_rule_was_turned_off_never_raises_the_
     bridge.shutdown();
 }
 
-/// The variant: "For 5 minutes" over the disabled rule.
+/// The variant: "For 5 minutes" over the disabled rule. This is a pause
+/// check only: the timed rule stays listed, so the check is held back
+/// whatever the allowance says. The pin for the allowance after its expiry
+/// is the unit test `a_timed_answer_over_a_disabled_rule_leaves_the_daemon_one_more_after_expiry`
+/// (the prune can't be driven end to end: it needs five minutes).
 #[tokio::test]
-async fn a_five_minute_answer_over_a_disabled_rule_never_raises_the_hint() {
+async fn a_five_minute_answer_over_a_disabled_rule_is_held_back_while_it_is_listed() {
     let (_sockets, bridge) = start().await;
     let _gui = gui_session(&bridge).await;
     let mut rx = bridge.broadcast_tx.subscribe();

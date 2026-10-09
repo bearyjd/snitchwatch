@@ -195,12 +195,28 @@ upwards, never downwards; a missed hint is the cheaper error.
 3. **A temporary rule pruned early.** The bridge prunes by the wall clock
    (`now_secs`); the daemon's `time.AfterFunc` runs on the monotonic clock
    (`CLOCK_MONOTONIC` on Linux), which does not count suspend. Each `Expiry`
-   keeps `ends`, the daemon timer's monotonic end (`Instant` when it was
-   made, plus the wall time left). `prune_expired_at(now_secs, clock)` notes
+   keeps `ends`, the daemon timer's monotonic end: the `Instant` when it was
+   made plus the **whole** duration. For a change the bridge made that is
+   exact. For a snapshot rule it is an upper bound: its `created` stamp is
+   old when the daemon loaded it from a temporary-rule file at start (the
+   timer starts at load, `loadRule`) or the list was adopted after the host
+   slept, so the wall-clock expiry can be long past while the daemon's timer
+   has its whole duration to run. The rule rests on Rust's `Instant` and Go's
+   runtime timers reading the same clock, `CLOCK_MONOTONIC` and not
+   `CLOCK_BOOTTIME`; if either counted suspend time, the tolerance would
+   silently stop working. `prune_expired_at(now_secs, clock)` notes
    `ends + 5 s` as an allowance when `ends` is still ahead of `clock`, i.e.
    when the two clocks disagree; in the normal case it notes nothing.
 
+`note_prompt_answer` counts a name that is listed, left out of the list for
+its size, or an add the daemon refused and may have stored: the daemon has
+the name in each case, and saves the answer as `<name>-2`.
+
 All three clear with `replace_all` (an adopted snapshot) and `set_unknown`.
+**The prompt-answer count is never reduced until the next snapshot**, even if
+the extra rule later expires or is deleted from outside: it can hide an
+outside change of that size for as long as the daemon stays connected (days,
+bounded by the number of answers). That is the cheaper error.
 Not covered, on purpose: a command that never got an answer (after its 30 s
 late-reply grace) is a real divergence the hint may report.
 

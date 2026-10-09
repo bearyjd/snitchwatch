@@ -150,6 +150,11 @@ impl LoaderModel {
     /// so the daemon then holds one rule more than a list that replaced the
     /// name. Returns the name it stored the rule under, and `Err` as
     /// `change` does (a rule that doesn't compile is not stored).
+    ///
+    /// Not modelled: Go's `Add` ignores that compile error (`addUserRule`
+    /// drops `replaceUserRule`'s result) and still `Save`s an `always`
+    /// rule's file, a rule that isn't in memory; here the answer is `Err`
+    /// and no file is written. `NumRules()` is the same either way.
     pub fn add_prompt_answer(&mut self, mut rule: Rule) -> Result<Option<String>, String> {
         if rule.duration == "once" {
             return Ok(None);
