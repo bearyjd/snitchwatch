@@ -201,10 +201,11 @@ impl RunningBridge {
         for task in &self.profile_tasks {
             task.abort();
         }
-        // The ticker first, so no save is started behind this one; `save_now`
-        // waits for one already running.
+        // Aborting the ticker doesn't cancel a save it already handed to
+        // `spawn_blocking`: `save_at_stop` waits for one running, and makes
+        // one that runs later a no-op.
         self.rule_hits_ticker.abort();
-        self.rule_hits.save_now();
+        self.rule_hits.save_at_stop();
         if let Some(tx) = self.ws_shutdown_tx.take() {
             let _ = tx.send(());
         }
@@ -796,3 +797,6 @@ mod pause_tests;
 
 #[cfg(test)]
 mod leftover_unix_tests;
+
+#[cfg(test)]
+mod rule_hits_restart_tests;
