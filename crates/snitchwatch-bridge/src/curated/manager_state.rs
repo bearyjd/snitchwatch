@@ -141,8 +141,8 @@ pub(super) struct Problem {
     /// The daemon answered `ERROR`. For a delete that means the rule
     /// already left its memory (`RulesCache::apply_refused`).
     pub(super) daemon_refused: bool,
-    /// No answer within the timeout, on a stream still open: the daemon
-    /// may still apply the command (#120 item 13).
+    /// No answer within the timeout (not a closed stream): the daemon may
+    /// still apply the command (#120 item 13).
     pub(super) unanswered: bool,
 }
 
