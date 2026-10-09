@@ -207,6 +207,41 @@ async fn a_refused_delete_says_its_file_is_left_and_is_retried_when_listed_again
     assert_eq!(entry_state(&curated, FLATPAK).status, EntryStatus::Off);
 }
 
+/// Tower r12, at once: turned on again before any other pass ran, the entry
+/// is installed again, not taken for one deleted outside Snitchwatch (its
+/// install record went with the refused delete).
+#[tokio::test]
+async fn turned_on_right_after_a_refused_delete_it_is_installed_again() {
+    let harness = Harness::new().connect(Daemon::RefuseDeletes, Vec::new());
+    let curated = harness.curated();
+    turn(&curated, FLATPAK, true);
+    curated.reconcile().await;
+    assert_eq!(
+        entry_state(&curated, FLATPAK).status,
+        EntryStatus::Installed
+    );
+    turn(&curated, FLATPAK, false);
+    curated.reconcile().await;
+    assert_eq!(
+        entry_state(&curated, FLATPAK).status,
+        EntryStatus::OffFileLeft
+    );
+    turn(&curated, FLATPAK, true);
+    curated.reconcile().await;
+    assert_eq!(
+        harness.seen(),
+        vec![
+            (Action::ChangeRule as i32, FLATPAK_RULE.to_string()),
+            (Action::DeleteRule as i32, FLATPAK_RULE.to_string()),
+            (Action::ChangeRule as i32, FLATPAK_RULE.to_string()),
+        ]
+    );
+    assert_eq!(
+        entry_state(&curated, FLATPAK).status,
+        EntryStatus::Installed
+    );
+}
+
 async fn wait_for(status: EntryStatus, rx: &mut broadcast::Receiver<ServerMessage>) {
     let shows = |m: &ServerMessage| match m {
         ServerMessage::SetCuratedDefaults { entries, .. } => entries
