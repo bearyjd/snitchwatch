@@ -250,6 +250,7 @@ pub(super) fn summary(
         allows: entry.allows(),
         why: entry.why.clone(),
         on,
+        broad: entry.broad(),
         status,
         problem: state.problems.get(&entry.id).map(|p| p.to_string()),
     }

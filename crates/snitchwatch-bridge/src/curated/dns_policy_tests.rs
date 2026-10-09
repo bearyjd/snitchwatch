@@ -182,3 +182,14 @@ fn the_reserved_name_keeps_users_from_adding_widening_or_deleting_it() {
     unpinned.operator.as_mut().unwrap().list.remove(1);
     assert!(!rule_policy::toggleable(&unpinned));
 }
+
+/// The entry's `broad` flag is what the GUIs read ("Turn all on" skips it):
+/// the any-address entry alone. The summary the bridge sends carries it
+/// (checked end to end in `bridge-cli/tests/curated_dns.rs`).
+#[test]
+fn only_the_any_address_entry_is_broad() {
+    assert!(dns().broad());
+    for entry in entries().iter().filter(|entry| entry.id != ID) {
+        assert!(!entry.broad(), "{}", entry.id);
+    }
+}

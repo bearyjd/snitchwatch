@@ -66,9 +66,11 @@ Controls.ApplicationWindow {
         return null;
     }
 
-    function entry(id, on, status) {
-        return { id: id, program: "/usr/bin/" + id, allows: probeWindow.markup,
-                 why: "Why " + id, on: on, status: status };
+    function entry(id, on, status, broad) {
+        const e = { id: id, program: "/usr/bin/" + id, allows: probeWindow.markup,
+                    why: "Why " + id, on: on, status: status };
+        if (broad) e.broad = true;
+        return e;
     }
 
     function send(entries, unavailable) {
@@ -113,9 +115,11 @@ Controls.ApplicationWindow {
                        && explanation.indexOf("except the DNS rule, which lets the system "
                            + "resolver reach any address on port 53.") >= 0,
                        "explanation hides the any-address DNS rule: " + explanation);
-                expect(explanation.indexOf("Turn all on turns on every rule below, including "
-                           + "that one, so read each one first.") >= 0,
+                expect(explanation.indexOf('The "Turn all on" button skips the DNS rule, which '
+                           + 'you turn on by itself; "Turn all off" turns it off too.') >= 0,
                        "explanation doesn't say what Turn all on does: " + explanation);
+                expect(explanation.indexOf("turns on every rule") < 0,
+                       "explanation still says Turn all on turns on every rule: " + explanation);
                 expect(explanation.indexOf("one place") < 0,
                        "explanation calls any address one place: " + explanation);
                 // An older bridge: nothing offered, and the page says so.
@@ -183,6 +187,24 @@ Controls.ApplicationWindow {
                        && probeWindow.sent[2].action === "removeCuratedDefault"
                        && probeWindow.sent[2].id === "nm",
                        "Remove: " + JSON.stringify(probeWindow.sent));
+
+                // A broad entry (any address, S6) is never turned on or adopted by
+                // "Turn all on", and "Turn all off" includes it.
+                send([entry("flatpak", false, "off"), entry("dns", false, "off", true),
+                      entry("dns2", true, "inFirewall", true),
+                      entry("chronyc", true, "installed")]);
+                const asked = probeWindow.sent.length;
+                find(header, "allOnButton").clicked();
+                expect(probeWindow.sent.length === asked + 1
+                       && JSON.stringify(probeWindow.sent[asked].ids) === '["flatpak"]'
+                       && probeWindow.sent[asked].on === true,
+                       "Turn all on and a broad entry: " + JSON.stringify(probeWindow.sent));
+                find(header, "allOffButton").clicked();
+                expect(probeWindow.sent.length === asked + 2
+                       && JSON.stringify(probeWindow.sent[asked + 1].ids) === '["dns2","chronyc"]'
+                       && probeWindow.sent[asked + 1].on === false,
+                       "Turn all off and a broad entry: " + JSON.stringify(probeWindow.sent));
+                probeWindow.sent.length = asked;
 
                 // A bridge that never adds them: nothing can be turned on.
                 send([entry("flatpak", false, "unavailable")], "Needs the system service.");

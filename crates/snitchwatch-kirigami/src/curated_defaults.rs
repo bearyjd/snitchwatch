@@ -117,12 +117,14 @@ impl CuratedStore {
 
     /// "Turn all on/off": only the entries not already that way, so an
     /// entry already on isn't asked again. "Turn all on" also keeps a rule
-    /// already in the firewall that the user hadn't chosen yet.
+    /// already in the firewall that the user hadn't chosen yet, but never
+    /// touches a broad entry (any address, S6): that one is turned on, or
+    /// kept, by itself. "Turn all off" includes it, the safe direction.
     pub fn request_all(&self, on: bool) -> Option<ClientMessage> {
         let ids: Vec<String> = self
             .entries
             .iter()
-            .filter(|e| e.on != on || (on && e.status == EntryStatus::InFirewall))
+            .filter(|e| asks_for(e, on))
             .map(|e| e.id.clone())
             .collect();
         (self.usable() && !ids.is_empty()).then_some(ClientMessage::SetCuratedDefaults { ids, on })
@@ -135,6 +137,14 @@ impl CuratedStore {
             .any(|e| e.id == id && self.can_remove(e))
             .then(|| ClientMessage::RemoveCuratedDefault { id: id.to_string() })
     }
+}
+
+/// Whether "Turn all on/off" asks for `entry`.
+fn asks_for(entry: &CuratedDefaultSummary, on: bool) -> bool {
+    if on && entry.broad {
+        return false;
+    }
+    entry.on != on || (on && entry.status == EntryStatus::InFirewall)
 }
 
 /// Where an entry stands, in one fixed sentence, as of the firewall
@@ -183,8 +193,34 @@ mod tests {
             allows: "/usr/bin/flatpak may connect to dl.flathub.org on TCP port 443.".into(),
             why: "Flatpak downloads app updates.".into(),
             on,
+            broad: false,
             status,
             problem: None,
+        }
+    }
+
+    fn broad_entry(id: &str, on: bool, status: EntryStatus) -> CuratedDefaultSummary {
+        CuratedDefaultSummary {
+            broad: true,
+            ..entry(id, on, status)
+        }
+    }
+
+    fn message_with_broad() -> ServerMessage {
+        ServerMessage::SetCuratedDefaults {
+            entries: vec![
+                entry("flatpak-flathub", false, EntryStatus::Off),
+                broad_entry("dns-off", false, EntryStatus::Off),
+                broad_entry("dns-adopt", true, EntryStatus::InFirewall),
+                broad_entry("dns-on", true, EntryStatus::Installed),
+                entry("chronyc-local", true, EntryStatus::Installed),
+            ],
+            storage: StorageStatus {
+                persistent: true,
+                reason: None,
+                unreadable: false,
+            },
+            unavailable: None,
         }
     }
 
@@ -245,6 +281,64 @@ mod tests {
                     "undecided".into()
                 ],
                 on: false
+            })
+        );
+    }
+
+    /// S6: "Turn all on" never turns on or adopts a broad (any address)
+    /// entry, in either branch, and "Turn all off" does include it.
+    #[test]
+    fn turn_all_on_never_asks_for_a_broad_entry() {
+        let mut store = CuratedStore::default();
+        store.apply(1, &message_with_broad());
+        // A broad entry that is off, and one already in the firewall that
+        // would be adopted: neither is asked for.
+        assert_eq!(
+            store.request_all(true),
+            Some(ClientMessage::SetCuratedDefaults {
+                ids: vec!["flatpak-flathub".into()],
+                on: true
+            })
+        );
+        // Turn all off: the safe direction, broad entries included.
+        assert_eq!(
+            store.request_all(false),
+            Some(ClientMessage::SetCuratedDefaults {
+                ids: vec!["dns-adopt".into(), "dns-on".into(), "chronyc-local".into()],
+                on: false
+            })
+        );
+        // Only broad entries left to turn on: nothing to ask.
+        let mut only_broad = CuratedStore::default();
+        only_broad.apply(
+            1,
+            &ServerMessage::SetCuratedDefaults {
+                entries: vec![
+                    broad_entry("dns-off", false, EntryStatus::Off),
+                    broad_entry("dns-adopt", true, EntryStatus::InFirewall),
+                ],
+                storage: StorageStatus {
+                    persistent: true,
+                    reason: None,
+                    unreadable: false,
+                },
+                unavailable: None,
+            },
+        );
+        assert!(only_broad.request_all(true).is_none());
+        // By itself, it still can be turned on and kept.
+        assert_eq!(
+            only_broad.request("dns-off", true),
+            Some(ClientMessage::SetCuratedDefaults {
+                ids: vec!["dns-off".into()],
+                on: true
+            })
+        );
+        assert_eq!(
+            only_broad.keeping("dns-adopt"),
+            Some(ClientMessage::SetCuratedDefaults {
+                ids: vec!["dns-adopt".into()],
+                on: true
             })
         );
     }
