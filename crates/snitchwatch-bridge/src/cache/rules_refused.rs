@@ -36,6 +36,11 @@ enum RefusedEffect {
     Unknown,
 }
 
+/// Stock only: an `ERROR` reply to `DELETE_RULE` means the rule already
+/// left the daemon's memory. That is true for stock opensnitchd v1.8.0
+/// `Loader.Delete` (memory first, then the file); a daemon that refuses
+/// before touching memory (e.g. the proposed tower PR #93) would break
+/// this, and the cache would drop a rule that still applies.
 fn refused_effect(sent: &Notification) -> RefusedEffect {
     if sent.r#type == Action::DeleteRule as i32 {
         return RefusedEffect::Removed;

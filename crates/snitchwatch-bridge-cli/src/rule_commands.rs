@@ -319,6 +319,12 @@ fn wait_outcome(waited: Result<(), CommandError>) -> RuleCommandOutcome {
 
 /// A refused delete's result: the rule stopped applying anyway, its file
 /// left behind.
+///
+/// Stock only: an `ERROR` reply to `DELETE_RULE` means the rule already
+/// left the daemon's memory. That is true for stock opensnitchd v1.8.0
+/// `Loader.Delete` (memory first, then the file); a daemon that refuses
+/// before touching memory (e.g. the proposed tower PR #93) would break
+/// this, and "Deleted." would be false.
 fn refused_delete_outcome(reason: &str) -> RuleCommandOutcome {
     RuleCommandOutcome::OkWithNote {
         note: format!("{DELETED_FILE_LEFT} ({reason})"),

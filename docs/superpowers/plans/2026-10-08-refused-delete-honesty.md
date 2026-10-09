@@ -83,7 +83,7 @@ The bazzite-tower fork (its PRs #89 and #91) changes none of this.
 | `CHANGE_RULE`, disabled + `always` | Compile is skipped for a disabled rule, so only `Save` can fail. The rule as sent is in memory, and its file wasn't written | Upsert it, restamped, as on `OK`. The marker is **not** cleared |
 | `CHANGE_RULE`, disabled + temporary | Can't happen on stock: no compile, no save, no timer | Unchanged |
 | `CHANGE_RULE`, enabled + temporary | A compile error (the timer error can't happen with editor-checked durations) | Unchanged. `rule_commands/edit.rs` already restores an `always` rule that lost its file first |
-| `CHANGE_RULE`, enabled + `always` | **Undeterminable**; see "Open question" | Unchanged |
+| `CHANGE_RULE`, enabled + `always` | **Undeterminable**; see "Refused enabled `always` changes" | Unchanged |
 
 - **The "file may remain" marker** is a bounded set of names in
   `RulesCache`: at most `MAX_FILES_LEFT` (256). Past that, new names aren't
@@ -121,10 +121,35 @@ The bazzite-tower fork (its PRs #89 and #91) changes none of this.
   back unchanged, Snitchwatch removes it then."
   - Older GUIs read it as `Unknown` (`serde(other)`).
 - **The no-hot-loop property (#105) holds.** After the refusal the rule is
-  absent, so no delete is planned. A restart that reloads the file lists it
-  again, which clears the marker; then exactly one delete goes out. If that
-  is refused again, the rule is absent again, and nothing more is sent
-  until the next restart.
+  absent, so no delete is planned (except the one follow-up delete of a
+  refused install, below). A restart that reloads the file lists it again,
+  which clears the marker; then exactly one delete goes out. If that is
+  refused again, the rule is absent again, and nothing more is sent until
+  the next restart.
+- **Refused install, then off (review M1, fail-open).** Stock
+  `replaceUserRule` takes a rule into memory before `Save` can fail. So an
+  install refused for an immutable file, or a read-only or full rules
+  directory, can apply although the daemon answered `ERROR` and the list
+  lacks it. Before the fix, turning the entry off then planned nothing
+  (absent and off: `Off`, or `OffFileLeft` with the marker), and the allow
+  applied until the daemon restarted.
+  - The manager records a refused install's name (`maybe_applied`, in
+    memory only, passed to `plan` in `DaemonRules`). An entry turned off
+    with that record gets exactly one `DELETE_RULE` by name (status
+    `Removing`), before the `OffFileLeft`/`Off` returns; `still_wanted`
+    lets it through while the list still lacks the name.
+  - The record is dropped once a delete of the name, or an install, is
+    answered. On stock, that delete is a harmless `OK` for a name not in
+    memory, or a refusal that leaves it out of memory; neither repeats.
+    A busy (not queued) delete keeps the record and is tried again at the
+    next change of the pass's inputs; a timeout keeps it and is held back
+    by the sticky failure until a new choice or a reconnect.
+  - An install failure is no longer recorded when the entry is no longer
+    on at reply time. Failures are keyed by entry, so the install's sticky
+    failure would otherwise filter out that delete.
+  - Not persisted: after a bridge restart the daemon's `Subscribe` snapshot
+    is its memory, so an applied rule is listed and the normal delete path
+    handles it.
 - **Refused edited-copy removal** (`remove`): the copy is gone from memory,
   as after success. So the choices record `user_removed` there too.
   Otherwise the next pass would install the canonical rule over a copy the
@@ -140,8 +165,9 @@ The bazzite-tower fork (its PRs #89 and #91) changes none of this.
   but couldn't remove its saved file, so the rule may come back when the
   firewall restarts. If it does, delete it again on the Rules page.
   (reason)".
-- `republish` runs for anything but `Ok`, so the list goes out without the
-  row.
+- The cache's own publish (`apply_refused`) sends the list without the
+  row. The refused delete's result doesn't republish it (it used to go out
+  twice); other `OkWithNote` results (rename, edit) still do.
 - Kirigami's Rules page sends deletes without a `request_id`, so it never
   sees that result. It sees the `leftOnDisk` sentence instead, persistent
   while the marker stands. The editor shows `OkWithNote` text as is
@@ -226,8 +252,16 @@ A `LoaderModel` (memory, files, stuck files), modelled on bridge-cli's
 - **Profiles:** a refused purge isn't resent on the next pass.
 - **Kirigami:** `not_shown_text` with `left_on_disk`; `status_text` for
   `OffFileLeft`.
+- **Review M1** (refused install, then off): a `plan` unit test; worker
+  tests (off deletes once, forced passes send nothing more, on again
+  installs once; off while the refused install is on its way still
+  deletes); end to end on the mock loader model (on again while the file
+  is stuck, then off; a `Save` failure with no marker). Mutation-checked:
+  no branch, record never set, record never dropped, record dropped only on
+  `OK`, branch after the marker check, `still_wanted` dropping the delete,
+  and no in-flight guard are each killed.
 
-## Open question (for the owner)
+## Refused enabled `always` changes (review M1)
 
 **`CHANGE_RULE`, enabled + `always`, answered `ERROR`.** On stock v1.8.0 it
 is one of two cases:
@@ -238,24 +272,43 @@ is one of two cases:
   holds the old version, no file, or a truncated file that won't load.
 
 Only the daemon's error text tells these apart ("(2) error compiling …" vs
-"Error while saving rule …"), and this change doesn't trust that text. The
-cache keeps its current copy. That is what the daemon holds after its next
-start in both cases (unless a write truncated the file), and it is today's
-behaviour.
+"Error while saving rule …"), and this change doesn't trust that text.
 
-The residual risk: in the `Save` case an `allow` can apply while the GUI
-shows the old state. One example is turning a recommended rule back on
-while its file is still immutable. It shows "Not installed", though the
-rule applies until the daemon restarts.
+**Fixed:** the fail-open both reviews found. A recommended rule turned back
+on while its file is still stuck, then off again, read "Turned off" and
+sent nothing, while the allow kept applying until the daemon restarted.
+The same happened after a `Save` failure with no marker (`ENOSPC`). Turning
+such an entry off now sends one delete by name (section 2, "Refused
+install, then off").
 
-The fork's pre-`Replace` refusal of `lists` rules has the same shape and
-changes nothing, so no marker is set for this case. A marker would put a
-permanent spurious note on every refused blocklist.
-
-A follow-up could show a per-row "unconfirmed" state. That needs a wire
-field and a Kirigami row role; it is out of scope here.
+**What remains:**
+- The cache still keeps its current copy for an enabled + `always`
+  refusal. That is what the daemon holds after its next start in both
+  cases (unless a write truncated the file). Until then, in the `Save`
+  case an `allow` can apply while the GUI shows the old state: a refused
+  recommended install reads "Not installed" while it applies, until the
+  entry is turned off.
+- A Rules-page turn-on of a recommended rule (`send_curated_toggle`)
+  refused while its file is stuck has the same shape and isn't covered by
+  the curated record: the row reads as off while the rule applies. The
+  rule stays listed, so turning the entry off on the Recommended page
+  still deletes it.
+- The fork's pre-`Replace` refusal of `lists` rules has the same shape and
+  changes nothing, so no marker is set for this case. A marker would put a
+  permanent spurious note on every refused blocklist.
+- A per-row "unconfirmed" state stays a follow-up. It needs a wire field
+  and a Kirigami row role.
 
 ## Known residue (not changed here)
+
+- **Stock-only assumption.** An `ERROR` reply to `DELETE_RULE` is taken to
+  mean the rule already left the daemon's memory. That is true for stock
+  opensnitchd v1.8.0 `Loader.Delete` (memory first, then the file). A
+  daemon that refuses before touching memory (e.g. the proposed tower PR
+  #93) would break it: the cache would drop a rule that still applies, and
+  the Rules page would say "Deleted." Pinned in comments at
+  `refused_effect` (`cache/rules_refused.rs`) and `refused_delete_outcome`
+  (`bridge-cli/src/rule_commands.rs`).
 
 - An editor change of a disabled `always` rule that the daemon refuses
   (`Save` failed) now shows in the list as the daemon holds it, the new
