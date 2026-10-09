@@ -84,9 +84,8 @@ fn until_the_first_ping_a_restore_shows_a_provisional_gap_that_is_never_saved() 
         "the next run can still judge"
     );
     assert_eq!(
-        out.stopped_unix_ms,
-        Some(LAST_PING + 1_000),
-        "still the previous run's"
+        out.stopped_unix_ms, None,
+        "a clean stop is consumed when read: only the shutdown save writes one"
     );
 }
 
@@ -358,12 +357,10 @@ fn a_run_with_no_ping_keeps_the_previous_runs_stop_status() {
     let mut next = restored(out);
     next.record(&a_events(3), 40, 3, FIRST, |_| true);
     gap_at_first_ping(&next);
-    // The previous run stopped cleanly: that stands too, in every save.
+    // The previous run stopped cleanly: its shutdown save says so again (a
+    // periodic save never does: the stop was consumed when it was read).
     let hits = restored(usual(true));
-    assert_eq!(
-        hits.to_saved().unwrap().stopped_unix_ms,
-        Some(LAST_PING + 1_000)
-    );
+    assert_eq!(hits.to_saved().unwrap().stopped_unix_ms, None);
     let out = hits.to_saved_at_stop(NOW + 5_000).unwrap();
     assert_eq!(out.stopped_unix_ms, Some(LAST_PING + 1_000));
     let mut next = restored(out);
@@ -390,5 +387,160 @@ fn once_judged_the_shutdown_save_is_this_runs_clean_stop() {
     assert_eq!(
         fresh.to_saved_at_stop(NOW + 1).unwrap().stopped_unix_ms,
         Some(NOW + 1)
+    );
+}
+
+// Review of PR #123.
+
+#[test]
+fn exactly_at_the_slack_the_start_time_is_still_the_same_run() {
+    // Row 4's bound is inclusive, both ways.
+    for uptime in [UPTIME_UP - 5, UPTIME_UP + 5] {
+        let mut hits = restored(usual(true));
+        hits.record(&a_events(2), uptime, HITS_THEN + 2, FIRST, |_| true);
+        no_new_gap(&hits);
+    }
+}
+
+#[test]
+fn a_start_exactly_the_slack_before_the_last_ping_is_a_restart() {
+    // Row 3's bound is inclusive, and wins over row 4: the old daemon pinged
+    // 10 s after its start, the start estimate now is 5 s before that ping
+    // (5 s from the old start too). As the same run, `H - H₀ = R` would pass.
+    let mut hits = restored(left_by(baseline(LAST_PING, 10, HITS_THEN), true));
+    let uptime = ((FIRST - (LAST_PING - 5_000)) / 1_000) as u64;
+    hits.record(&a_events(2), uptime, HITS_THEN + 2, FIRST, |_| true);
+    gap_at_first_ping(&hits);
+}
+
+#[test]
+fn hits_waiting_for_the_first_snapshot_are_saved_with_the_baseline() {
+    // The stock daemon pings before its HELLO is committed, so that batch
+    // waits in the side map: saved, the next run's first snapshot sorts it.
+    let mut hits = RuleHits::default();
+    hits.trust_daemon_counters(true);
+    hits.record(
+        &[ev("a", 1), ev("a", 2), ev("once-1", 3)],
+        50,
+        7,
+        NOW,
+        |_| false,
+    );
+    let out = hits.to_saved_at_stop(NOW + 1_000).unwrap();
+    let mut got: Vec<_> = out
+        .hits
+        .iter()
+        .map(|h| (h.name.as_str(), h.count))
+        .collect();
+    got.sort();
+    assert_eq!(got, vec![("a", 2), ("once-1", 1)]);
+    assert_eq!(out.daemon, Some(baseline(NOW, 50, 7)));
+    let mut next = RuleHits::default();
+    next.trust_daemon_counters(true);
+    next.restore(out, NOW + 2_000);
+    next.adopt_snapshot(NOW + 3_000, |n| n == "a");
+    next.record(&[ev("a", 4)], 52, 8, NOW + 4_000, |n| n == "a");
+    assert_eq!(counts(&next), vec![pair("a", 3)], "once-1 filtered out");
+    assert!(!next.is_lossy(), "gap at {:?}", next.last_gap_unix_ms());
+}
+
+#[test]
+fn a_run_whose_list_never_syncs_still_saves_what_it_counted() {
+    // A snapshot over the rule limit leaves the cache unknown for the run.
+    let mut hits = restored(usual(true));
+    hits.record(&a_events(2), UPTIME_UP, HITS_THEN + 2, FIRST, |_| false);
+    hits.record(
+        &[ev("b", 1)],
+        UPTIME_UP + 1,
+        HITS_THEN + 3,
+        FIRST + 1_000,
+        |_| false,
+    );
+    no_new_gap(&hits);
+    let out = hits.to_saved().unwrap();
+    let mut got: Vec<_> = out
+        .hits
+        .iter()
+        .map(|h| (h.name.as_str(), h.count))
+        .collect();
+    got.sort();
+    assert_eq!(
+        got,
+        vec![("a", 6), ("b", 1)],
+        "restored and waiting, merged"
+    );
+    assert_eq!(
+        out.daemon,
+        Some(baseline(FIRST + 1_000, UPTIME_UP + 1, HITS_THEN + 3))
+    );
+}
+
+#[test]
+fn a_waiting_hit_on_a_counted_rule_is_saved_with_its_count() {
+    // After a daemon reconnect (cache unknown) a counted rule takes new hits
+    // on the side until the next snapshot.
+    let mut hits = RuleHits::default();
+    hits.trust_daemon_counters(true);
+    hits.record(&[ev("a", 1)], 50, 1, NOW, |_| true);
+    hits.record(&[ev("a", 2)], 51, 2, NOW + 1_000, |_| false);
+    let out = hits.to_saved().unwrap();
+    assert_eq!(out.hits.len(), 1);
+    assert_eq!((out.hits[0].count, out.hits[0].last_hit_unix_ms), (2, 0));
+    assert_eq!(out.daemon, Some(baseline(NOW + 1_000, 51, 2)));
+}
+
+#[test]
+fn counts_cut_off_at_the_entry_limit_save_no_baseline() {
+    // Not every event counted since the baseline is in the file then.
+    let many: Vec<(String, u64)> = (0..MAX_TRACKED_RULES)
+        .map(|i| (format!("r{i:05}"), 1))
+        .collect();
+    let refs: Vec<(&str, u64)> = many.iter().map(|(n, c)| (n.as_str(), *c)).collect();
+    let mut hits = restored(Saved {
+        hits: saved(&refs).hits,
+        ..usual(true)
+    });
+    assert!(
+        hits.to_saved().unwrap().daemon.is_some(),
+        "exactly at the limit"
+    );
+    hits.record(&[ev("waiting", 1)], UPTIME_UP, HITS_THEN + 1, FIRST, |_| {
+        false
+    });
+    let out = hits.to_saved().unwrap();
+    assert_eq!(out.hits.len(), MAX_TRACKED_RULES);
+    assert_eq!(out.daemon, None);
+}
+
+#[test]
+fn over_tcp_the_shutdown_save_marks_no_clean_stop() {
+    // An untrusting bridge writes the version 1 shape.
+    let mut hits = RuleHits::default();
+    hits.record(&a_events(1), 50, 7, NOW, |_| true);
+    let out = hits.to_saved_at_stop(NOW + 1).unwrap();
+    assert_eq!((out.daemon, out.stopped_unix_ms), (None, None));
+}
+
+#[test]
+fn a_restore_that_cannot_be_trusted_after_all_is_a_gap_now() {
+    // The restored clean stop couldn't be consumed (`RuleHitsHandle`).
+    let mut hits = restored(usual(true));
+    hits.distrust_restart(NOW + 1_000);
+    assert_eq!(hits.last_gap_unix_ms(), Some(NOW + 1_000));
+    assert_eq!(hits.to_saved().unwrap().last_gap_unix_ms, Some(NOW + 1_000));
+    assert_eq!(
+        hits.to_saved().unwrap().daemon,
+        None,
+        "nothing to judge from"
+    );
+    hits.record(&a_events(2), UPTIME_UP, HITS_THEN + 2, FIRST, |_| true);
+    assert_eq!(
+        hits.last_gap_unix_ms(),
+        Some(NOW + 1_000),
+        "only a baseline now"
+    );
+    assert_eq!(
+        hits.to_saved().unwrap().daemon,
+        Some(baseline(FIRST, UPTIME_UP, HITS_THEN + 2))
     );
 }

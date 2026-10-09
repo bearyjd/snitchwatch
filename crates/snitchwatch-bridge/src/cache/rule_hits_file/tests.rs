@@ -412,11 +412,21 @@ fn the_daemon_baseline_and_a_clean_stop_are_saved_as_version_2() {
     };
     save(&path, &none).unwrap();
     let text = std::fs::read_to_string(&path).unwrap();
-    assert!(
-        !text.contains("daemon") && !text.contains("stopped"),
-        "{text}"
+    // Nothing to judge a restart from: the exact version 1 shape, which a
+    // bridge from before N3 still reads (a rollback).
+    assert_eq!(
+        text,
+        r#"{"version":1,"sinceUnixMs":1700000000000,"lastGapUnixMs":1700000100000,"hits":[{"name":"rule-0","count":1,"lastHitUnixMs":1700000050000}]}"#
     );
     assert_eq!(load(&path).unwrap(), Some(none));
+    let only_stop = Saved {
+        daemon: None,
+        ..saved(1)
+    };
+    save(&path, &only_stop).unwrap();
+    assert!(std::fs::read_to_string(&path)
+        .unwrap()
+        .starts_with("{\"version\":2,"));
 }
 
 /// A file an older bridge wrote still loads, with nothing to judge a

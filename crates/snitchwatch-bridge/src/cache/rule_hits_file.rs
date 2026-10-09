@@ -17,7 +17,11 @@
 //! `2026-10-09-n3-unused-window-from-daemon-counters.md`) adds the daemon's
 //! counters at the last ping counted (`daemon`) and, from the shutdown save
 //! only, `stoppedUnixMs`: what the next run judges a restart from
-//! ([`crate::cache::rule_hits`]). Version 1 files still load, with neither.
+//! ([`crate::cache::rule_hits`]). Version 1 files still load, with neither,
+//! and a file with neither is written as version 1, byte for byte the shape
+//! a bridge from before N3 reads: so is every file of a bridge that doesn't
+//! trust the daemon's counters (TCP, the shipped per-user setup), and a
+//! rollback of it keeps its counts.
 //! Fields this bridge doesn't know are ignored, so a later additive field
 //! doesn't make an older bridge distrust the whole file; a higher version is
 //! refused.
@@ -50,7 +54,7 @@ use crate::ws_messages::RuleHitWire;
 /// 256 bytes, every byte a quote or backslash that JSON doubles, maximal
 /// counts) a file is about 6 MB.
 pub const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
-/// The version written.
+/// The version written when there is a restart to judge.
 const VERSION: u32 = 2;
 /// The oldest version read.
 const OLDEST_VERSION: u32 = 1;
@@ -88,8 +92,13 @@ pub fn load(path: &Path) -> io::Result<Option<Saved>> {
 
 /// Replaces the file with `saved`, atomically.
 pub fn save(path: &Path, saved: &Saved) -> io::Result<()> {
+    let version = if saved.daemon.is_none() && saved.stopped_unix_ms.is_none() {
+        OLDEST_VERSION
+    } else {
+        VERSION
+    };
     let format = FileFormat {
-        version: VERSION,
+        version,
         since_unix_ms: saved.since_unix_ms,
         last_gap_unix_ms: saved.last_gap_unix_ms,
         hits: saved.hits.clone(),

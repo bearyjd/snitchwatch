@@ -11,12 +11,13 @@
 //!
 //! **Saving.** With a file attached ([`Self::attach_file`]) the ticker saves
 //! every [`SAVE_PERIOD`] when something changed, and the bridge saves once
-//! more on shutdown ([`Self::save_at_stop`], always written and marked as a
-//! clean stop, which the next run needs to judge a daemon restart; N3).
-//! Saves are serialised by one lock, and each writes a temp file of its own
+//! more on shutdown ([`Self::save_at_stop`], always written, marked as a
+//! clean stop, which the next run needs to judge a daemon restart (N3), and
+//! the last: later saves are no-ops). A clean stop read at
+//! [`Self::attach_file`] is written out of the file at once. Saves are
+//! serialised by one lock, and each writes a temp file of its own
 //! (`rule_hits_file::save`), so not even another bridge on the same directory
-//! shares it. A file that can't be
-//! read is left as it is and the counts stay in memory; a save that fails
+//! shares it. A file that can't be read is left as it is and the counts stay in memory; a save that fails
 //! turns `storage.persistent` off with the reason, and a later success turns
 //! it back on. Without a file (no state directory) the counts are in memory
 //! only and the message says so.
@@ -52,6 +53,19 @@ struct Persistence {
     saved_revision: Option<u64>,
     /// Bumped whenever `status` changes, so the ticker re-sends.
     version: u64,
+    /// The shutdown save ran: any later save is a no-op.
+    stopped: bool,
+}
+
+/// Which save.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SaveKind {
+    /// The ticker's: written only when something changed.
+    Periodic,
+    /// At restore, taking a clean stop out of the file: always written.
+    Consume,
+    /// At shutdown: always written, marked as a clean stop, and the last.
+    Stop,
 }
 
 struct Inner {
@@ -99,6 +113,7 @@ impl RuleHitsHandle {
                     status: memory_only(None),
                     saved_revision: None,
                     version: 0,
+                    stopped: false,
                 }),
                 saving: Mutex::new(()),
                 sent: Mutex::new((0, 0)),
@@ -111,10 +126,11 @@ impl RuleHitsHandle {
     /// `uptime` and `rule_hits`. `rules` is the bridge's copy of the daemon's
     /// list; it is locked first.
     pub fn record(&self, events: &[Event], uptime: u64, rule_hits: u64, rules: &SharedRulesCache) {
+        // Before waiting on any lock: the judgement compares it with the
+        // daemon's uptime.
+        let now = now_ms();
         let cache = lock(rules);
-        lock(&self.inner.state).record(events, uptime, rule_hits, now_ms(), |name| {
-            cache.contains(name)
-        });
+        lock(&self.inner.state).record(events, uptime, rule_hits, now, |name| cache.contains(name));
     }
 
     /// A snapshot was committed: call with the cache locked, after it holds
@@ -141,11 +157,20 @@ impl RuleHitsHandle {
     /// Keeps the counts in `path`: restores what an earlier run saved there
     /// (the counts wait for the first snapshot). A file that can't be read
     /// is left alone and the counts stay in memory, with the reason shown.
+    ///
+    /// A clean stop in the file vouches for the run that wrote it, and this
+    /// run is about to count hits the file doesn't hold, so it is taken out
+    /// of the file at once (kept in memory for the judgement and for a
+    /// shutdown before the first ping). Were this run to die before its
+    /// first save, the next would otherwise read it as this run's. If it
+    /// can't be taken out, the restart is a gap.
     pub fn attach_file(&self, path: PathBuf) {
         let loaded = rule_hits_file::load(&path);
+        let mut consume = false;
         let status = match loaded {
             Ok(saved) => {
                 if let Some(saved) = saved {
+                    consume = saved.stopped_unix_ms.is_some();
                     lock(&self.inner.state).restore(saved, now_ms());
                 }
                 None
@@ -156,18 +181,23 @@ impl RuleHitsHandle {
                 Some(reason)
             }
         };
-        let mut persistence = lock(&self.inner.persistence);
-        persistence.version += 1;
-        match status {
-            None => {
-                persistence.file = Some(path);
-                persistence.status = StorageStatus {
-                    persistent: true,
-                    reason: None,
-                    unreadable: false,
-                };
+        {
+            let mut persistence = lock(&self.inner.persistence);
+            persistence.version += 1;
+            match status {
+                None => {
+                    persistence.file = Some(path);
+                    persistence.status = StorageStatus {
+                        persistent: true,
+                        reason: None,
+                        unreadable: false,
+                    };
+                }
+                Some(reason) => persistence.status = memory_only(Some(reason)),
             }
-            Some(reason) => persistence.status = memory_only(Some(reason)),
+        }
+        if consume && !self.save(SaveKind::Consume) {
+            lock(&self.inner.state).distrust_restart(now_ms());
         }
     }
 
@@ -181,22 +211,30 @@ impl RuleHitsHandle {
     /// Saves the counts if they changed since the last save. Safe to call
     /// from any thread.
     pub fn save_now(&self) {
-        self.save(false);
+        self.save(SaveKind::Periodic);
     }
 
     /// The save at shutdown: written even when nothing changed, and marked as
     /// a clean stop (`stoppedUnixMs`; `RuleHits::to_saved_at_stop` says when
-    /// not). Any later save writes again, unmarked.
+    /// not). The last one: a save after it (one the ticker had already handed
+    /// to `spawn_blocking`) writes nothing.
     pub fn save_at_stop(&self) {
-        self.save(true);
+        self.save(SaveKind::Stop);
     }
 
-    fn save(&self, at_stop: bool) {
+    /// Whether no write failed.
+    fn save(&self, kind: SaveKind) -> bool {
         let _saving = lock(&self.inner.saving);
         let (path, saved_revision, was_persistent) = {
-            let persistence = lock(&self.inner.persistence);
+            let mut persistence = lock(&self.inner.persistence);
+            if persistence.stopped {
+                return true;
+            }
+            if kind == SaveKind::Stop {
+                persistence.stopped = true;
+            }
             let Some(path) = persistence.file.clone() else {
-                return;
+                return true;
             };
             (
                 path,
@@ -206,23 +244,23 @@ impl RuleHitsHandle {
         };
         let (saved, revision) = {
             let state = lock(&self.inner.state);
-            let saved = if at_stop {
+            let saved = if kind == SaveKind::Stop {
                 state.to_saved_at_stop(now_ms())
             } else {
                 state.to_saved()
             };
             (saved, state.revision())
         };
-        let Some(saved) = saved else { return };
-        if !at_stop && saved_revision == Some(revision) && was_persistent {
-            return;
+        let Some(saved) = saved else { return true };
+        if kind == SaveKind::Periodic && saved_revision == Some(revision) && was_persistent {
+            return true;
         }
         // Not under any other lock: a pinged `record` must not wait on disk.
         let result = rule_hits_file::save(&path, &saved);
         let mut persistence = lock(&self.inner.persistence);
         match result {
             Ok(()) => {
-                persistence.saved_revision = (!at_stop).then_some(revision);
+                persistence.saved_revision = Some(revision);
                 if !persistence.status.persistent {
                     persistence.status = StorageStatus {
                         persistent: true,
@@ -231,6 +269,7 @@ impl RuleHitsHandle {
                     };
                     persistence.version += 1;
                 }
+                true
             }
             Err(e) => {
                 let reason = format!(
@@ -243,6 +282,7 @@ impl RuleHitsHandle {
                     persistence.status = status;
                     persistence.version += 1;
                 }
+                false
             }
         }
     }

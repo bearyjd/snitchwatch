@@ -437,13 +437,24 @@ fn counts_not_yet_adopted_are_still_saved() {
 }
 
 #[test]
-fn saving_leaves_out_the_side_map_and_nothing_counted_yet() {
+fn saving_keeps_waiting_counts_for_the_next_snapshot_and_nothing_counted_yet() {
+    // Waiting counts aren't confirmed yet, but they are counted: the next
+    // run's first snapshot sorts them (N3 review: a saved baseline must
+    // account for every event counted since it).
     let mut hits = RuleHits::default();
     hits.restore(saved(&[("a", 4)]), NOW);
     rec(&mut hits, &[ev("a", 5), ev("once-1", 6)], &[]);
     let out = hits.to_saved().unwrap();
-    assert_eq!(out.hits.len(), 1, "waiting counts are not confirmed yet");
-    assert_eq!(out.hits[0].count, 4);
+    let got: Vec<_> = out
+        .hits
+        .iter()
+        .map(|h| (h.name.as_str(), h.count))
+        .collect();
+    assert_eq!(got, vec![("a", 5), ("once-1", 1)]);
+    let mut next = RuleHits::default();
+    next.restore(out, NOW + 1);
+    next.adopt_snapshot(NOW + 2, |n| n == "a");
+    assert_eq!(counts(&next), vec![pair("a", 5)]);
 
     let mut live = RuleHits::default();
     rec(&mut live, &[ev("a", 1)], &["a"]);

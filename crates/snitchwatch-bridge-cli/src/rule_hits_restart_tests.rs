@@ -79,6 +79,11 @@ fn config(dir: &Path, n: u32) -> BridgeConfig {
 /// Bridge number `n` on `state`, with the daemon subscribed (rule `a`) and
 /// its stream ready.
 async fn start(transport: Transport, dir: &Path, state: &Path, n: u32) -> Run {
+    start_with(transport, dir, state, n, true).await
+}
+
+/// [`start`], with the daemon's HELLO (its rule list committed) or without.
+async fn start_with(transport: Transport, dir: &Path, state: &Path, n: u32, hello: bool) -> Run {
     let options = RunOptions {
         storage: Storage::Persistent(state.to_path_buf()),
         blocklist_fetcher: None,
@@ -122,6 +127,14 @@ async fn start(transport: Transport, dir: &Path, state: &Path, n: u32) -> Run {
         }
     };
     let rx = bridge.broadcast_tx.subscribe();
+    if !hello {
+        return Run {
+            bridge,
+            rx,
+            daemon,
+            _commands: tokio::sync::mpsc::channel(1).1,
+        };
+    }
     daemon
         .subscribe_with_config(ClientConfig {
             name: "mock".into(),
@@ -277,5 +290,27 @@ async fn a_bridge_restart_over_tcp_is_a_gap() {
         "anyone local could have sent that ping"
     );
     assert_eq!(a, Some(3));
+    run.bridge.shutdown();
+}
+
+/// Review of PR #123: the stock daemon pings in the same pass as its
+/// `Subscribe`, so a batch can arrive before the rule list is committed and
+/// wait on the side. A stop then must not lose it while the saved baseline
+/// says it was counted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hits_pinged_before_the_first_hello_survive_a_restart_on_the_unix_socket() {
+    let (dir, state) = dirs();
+    let daemon = DaemonRun::started_secs_ago(100);
+    let run = start_with(Transport::Unix, dir.path(), &state, 1, false).await;
+    let mut mock = run.daemon;
+    mock.ping_with_stats(1, daemon.stats(7, 2)).await.unwrap();
+    run.bridge.shutdown();
+
+    let mut run = start(Transport::Unix, dir.path(), &state, 2).await;
+    run.daemon
+        .ping_with_stats(2, daemon.stats(8, 1))
+        .await
+        .unwrap();
+    assert_eq!(rule_hits(&mut run).await, (false, None, Some(3)));
     run.bridge.shutdown();
 }

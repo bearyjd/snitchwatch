@@ -68,6 +68,8 @@
 //! the first committed snapshot says which of them still exist. Until then
 //! they are kept out of the wire message but included in what is saved, so
 //! a bridge that runs for hours without a daemon doesn't lose its history.
+//! Side-map counts are saved too, for the same snapshot to sort: the saved
+//! daemon baseline must account for every event counted since it.
 //!
 //! **Across a bridge restart** (N3, issue #117; plan
 //! `2026-10-09-n3-unused-window-from-daemon-counters.md`, whose table this
@@ -91,9 +93,12 @@
 //! A daemon that stayed up but looks restarted only meets the stricter test,
 //! which its old hits fail. Until that first ping the wire shows a
 //! provisional gap at the restore (never saved), so nothing reads "Unused"
-//! early, and saves keep the restored baseline with its run's stop status,
-//! even the shutdown save: a run that counted nothing can't vouch for a crash
-//! before it ([`RuleHits::to_saved_at_stop`]). All of this is only on the
+//! early, and saves keep the restored baseline. A clean stop vouches for one
+//! restart only: it is taken out of the file as soon as it is read
+//! (`RuleHitsHandle::attach_file`; if that fails, a gap) and only the
+//! shutdown save writes one, which, before this run's first ping, is the
+//! restored one or none (a run that counted nothing can't vouch for a crash
+//! before it, [`RuleHits::to_saved_at_stop`]). All of this is only on the
 //! root-only Unix socket ([`RuleHits::trust_daemon_counters`]): over TCP any
 //! local process can send that first ping, so a restore there is a gap at
 //! once, as is a file with no baseline (version 1).
@@ -363,21 +368,38 @@ impl RuleHits {
         self.touch();
     }
 
-    /// What to save, or `None` while counting hasn't started. The main map
-    /// plus the counts restored but not yet checked against a snapshot, up
-    /// to [`MAX_TRACKED_RULES`] (the main map first).
+    /// What a periodic save writes, or `None` while counting hasn't started:
+    /// every count held, so that the baseline saved with them accounts for
+    /// every event counted since it. That is the main map, plus the counts
+    /// waiting for a snapshot (`side`; the next run's first snapshot sorts
+    /// them, as it does the restored ones) and those restored but not yet
+    /// checked against one, up to [`MAX_TRACKED_RULES`] (the main map
+    /// first). When that limit cuts counts off, no baseline is saved. Never a
+    /// clean stop: only [`Self::to_saved_at_stop`] writes one, and a restored
+    /// one is consumed when read (`RuleHitsHandle::attach_file`).
     pub fn to_saved(&self) -> Option<Saved> {
         let since_unix_ms = self.since_unix_ms?;
-        let restored = self
-            .restored
-            .iter()
-            .filter(|(name, _)| !self.main.contains_key(*name));
-        let hits = self
-            .main
-            .iter()
-            .chain(restored)
+        let mut waiting: BTreeMap<&str, Stat> = BTreeMap::new();
+        for (name, stat) in self.side.iter().chain(&self.restored) {
+            if !self.main.contains_key(name) {
+                waiting.entry(name.as_str()).or_default().merge(*stat);
+            }
+        }
+        let complete = self.main.len() + waiting.len() <= MAX_TRACKED_RULES;
+        let counted = self.main.iter().map(|(name, stat)| {
+            let mut stat = *stat;
+            for more in [self.side.get(name), self.restored.get(name)]
+                .into_iter()
+                .flatten()
+            {
+                stat.merge(*more);
+            }
+            (name.as_str(), stat)
+        });
+        let hits = counted
+            .chain(waiting)
             .take(MAX_TRACKED_RULES)
-            .map(|(name, stat)| wire(name, stat))
+            .map(|(name, stat)| wire(name, &stat))
             .collect();
         let daemon = match self.pending {
             // No ping yet: the next run judges from the same one.
@@ -388,22 +410,35 @@ impl RuleHits {
             since_unix_ms,
             last_gap_unix_ms: self.last_gap_unix_ms,
             hits,
-            daemon: daemon.filter(|_| self.trust_daemon_counters),
-            // Its stop status goes with the baseline.
-            stopped_unix_ms: self.pending.and_then(|pending| pending.stopped_unix_ms),
+            daemon: daemon.filter(|_| self.trust_daemon_counters && complete),
+            stopped_unix_ms: None,
         })
     }
 
     /// What the shutdown save writes: [`Self::to_saved`], marked as a clean
-    /// stop at `now_ms`. Not while a restore still waits for its first ping:
-    /// this run counted nothing, so the saved baseline and its stop status
-    /// are still the run's before it (a crash then stays a crash).
+    /// stop at `now_ms` when the daemon's counters are trusted. While a
+    /// restore still waits for its first ping, this run counted nothing: the
+    /// baseline and its stop status are still the run's before it (a crash
+    /// then stays a crash).
     pub fn to_saved_at_stop(&self, now_ms: i64) -> Option<Saved> {
         let mut saved = self.to_saved()?;
-        if self.pending.is_none() {
-            saved.stopped_unix_ms = Some(now_ms);
+        if self.trust_daemon_counters {
+            saved.stopped_unix_ms = match self.pending {
+                Some(pending) => pending.stopped_unix_ms,
+                None => Some(now_ms),
+            };
         }
         Some(saved)
+    }
+
+    /// The restore can't be judged after all (its clean stop couldn't be
+    /// consumed): a gap now, and the first ping only sets a baseline.
+    pub fn distrust_restart(&mut self, now_ms: i64) {
+        if self.pending.take().is_some() {
+            self.provisional_gap_unix_ms = None;
+            self.touch();
+        }
+        self.note_gap(now_ms);
     }
 
     /// The counts clients see, in name order.
