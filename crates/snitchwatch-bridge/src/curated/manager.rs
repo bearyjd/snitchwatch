@@ -29,7 +29,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use tokio::sync::{broadcast, watch, Notify};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use super::canonical::is_unedited;
 use super::entries;
@@ -550,7 +550,15 @@ impl CuratedDefaults {
             // Turned off while its install was on its way: the failure is
             // for a choice that is gone, and must not hold back the delete
             // the next pass plans (M1). That pass sets the status.
-            Err(_) if matches!(done, Done::Install(_)) && !state.choices.enabled.contains(&id) => {}
+            Err(problem)
+                if matches!(done, Done::Install(_)) && !state.choices.enabled.contains(&id) =>
+            {
+                debug!(
+                    entry = %id,
+                    problem = problem.text,
+                    "an install failed after its entry was turned off; the failure isn't kept"
+                );
+            }
             Err(problem) => {
                 let status = match done {
                     Done::Install(_) => EntryStatus::NotInstalled,
