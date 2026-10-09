@@ -92,8 +92,11 @@ DNS needs udp/53 and tcp/53 (truncated answers, large answers, DNSSEC). Options:
     edit cannot add a second any-address entry, or widen this one, without a
     reviewed code change. The existing "no destination is never offered"
     test becomes "no destination is offered for one program only".
-  - A host or loopback entry may also use `tcp+udp`; nothing else about their
-    shape changes.
+  - `tcp+udp` is accepted **only** in that destination-less branch. A host or
+    loopback entry must stay `tcp` or `udp`: no entry needs the wider pattern
+    there, and refusing it keeps the widening to the one reviewed exception.
+    Data load also refuses `anyAddress` together with a host or loopback, on
+    any other program, and on any other port.
 - Nothing in `manager*.rs`, `reconcile.rs`, `store.rs`, `wire.rs`, the
   daemon-command path or the wire protocol changes: they are id-driven and
   read `entry.rule()`/`allows()`. (The sibling worktree `wt-fu120` edits
@@ -105,12 +108,13 @@ DNS needs udp/53 and tcp/53 (truncated answers, large answers, DNSSEC). Options:
 - Program: `/usr/lib/systemd/systemd-resolved`.
 - **Allows** (generated from the entry, so it cannot drift from the rule):
   `/usr/lib/systemd/systemd-resolved may connect to any address on TCP and UDP port 53, over IPv4 and IPv6.`
-- **Why** (data file, plain text, 364 of 400 characters):
+- **Why** (data file, plain text, 396 of 400 characters):
   "With the firewall set to deny by default, no name can be looked up until
   the system's DNS resolver may reach its DNS server. That server differs on
   every network, so this lets that one program reach any address on port 53.
-  It does not make lookups private: whoever runs the server sees them. The
-  other recommended rules need names looked up, so they need this one."
+  It does not make lookups private: whoever runs the server sees them.
+  NetworkManager's check, Flathub updates and blocklist downloads need names
+  looked up, so they need this."
 - **Evidence** (data file): "bazzite-tower r10: /usr/lib/systemd/systemd-resolved
   to the network's DNS server port 53 over udp (not selected in v1: S6). TCP
   port 53 (truncated and large answers) is the standard fallback but was not
@@ -120,8 +124,8 @@ DNS needs udp/53 and tcp/53 (truncated answers, large answers, DNSSEC). Options:
   any address) and says exactly what it allows. Snitchwatch adds none unless
   you turn it on; Turn all on turns on every rule below, so read each one
   first." plus the existing sentences about rules added earlier and the
-  firewall service's last rule list. The old "one program reach one place"
-  is no longer true for DNS.
+  firewall service's last rule list. The old "one place" is no longer true
+  for DNS.
 - Statuses, the Keep/Remove flow and the "edited by you" text are unchanged
   and apply to this entry like any other.
 
@@ -180,8 +184,10 @@ What it does **not** say it does, and does not do:
   inert, never broader. r13 verifies the path on the image.
 - **Looks like a duplicate of a user's own DNS rule.** Different name, so
   both coexist; no dedupe.
-- **tcp/53 is not in the r10 capture.** It is the standard fallback, but the
-  evidence is udp only. Stated in the entry's `evidence`.
+- **Evidence gap: tcp/53 is not in the r10 capture.** DNS needs both
+  transports (truncated and large answers, DNSSEC), so the rule has both; the
+  evidence is udp only, stated in the entry's `evidence`, and r13 confirms tcp
+  (below).
 - **A stale GUI.** An older GUI lists the entry from the bridge's own texts
   (`allows`, `why`) and shows them unchanged; its fixed explanation is the old
   one, and says "one place". Accepted: bridge and GUI ship together.
@@ -214,7 +220,9 @@ semantics (`simple` equality, sensitive or `EqualFold`; `regexp` lowercased
   copy) is refused by `validate_user_rule`; `deletable` is false.
 - Wire/GUI strings: the summary carries the `allows` and `why` above.
 
-bridge-cli (`tests/curated_dns.rs`, a mock daemon): turn the entry on → one
+bridge-cli (`tests/curated_defaults.rs`: `turn` and `entry_until` gain id
+parameters, the flatpak ones stay as thin wrappers; the mock loader's
+`validate_rule_shape` must accept the three-leaf rule): turn the entry on → one
 `CHANGE_RULE` of exactly the DNS rule → "installed"; an edited copy is left
 alone; a copy deleted outside is not reinstalled after a restart; the entry is
 off before any choice.
@@ -259,11 +267,8 @@ Kirigami clippy; `cargo test -j 4 --no-fail-fast`; the Kirigami headless suite
 
 ## Open questions for the owner
 
-1. **Is TCP/53 wanted?** The capture shows udp only. Dropping TCP leaves
-   truncated/DNSSEC answers failing; keeping it widens a default-allow to a
-   second transport that was not observed.
-2. **Should "Turn all on" include it?** Today it does (all entries). The page
+1. **Should "Turn all on" include it?** Today it does (all entries). The page
    says so. Excluding any-address entries from the bulk action would be a
    small Kirigami+bridge change.
-3. Stub queries from apps (`127.0.0.53`) and DoT/mDNS are not covered, by
+2. Stub queries from apps (`127.0.0.53`) and DoT/mDNS are not covered, by
    design; a second opt-in entry is possible if r13 shows apps use the stub.
