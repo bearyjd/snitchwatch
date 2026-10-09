@@ -50,7 +50,7 @@ nothing from the daemon, and closes no stream.
 | A removed file drops its rule only when the rule is `always` and the **file name** is the rule's name | `deleteRule` |
 | `Delete` removes from memory first, then the file | `Delete` (`delete(l.rules, …)` before `deleteRuleFromDisk`) |
 | **No ping is sent when there are no new events** | `stats.go` `Serialize` returns `nil` without new events; `vendor:daemon/ui/client.go` `ping` returns before the RPC |
-| Pings are 1 s apart at most | `client.go` `poller` (`time.Sleep(1 * time.Second)`) |
+| Pings are at least about 1 s apart | `client.go` `poller` (`time.Sleep(1 * time.Second)` between iterations) |
 | `rules` is a plain proto3 `uint64`: 0 and "not reported" look the same | `vendor:proto/ui.proto` `Statistics.rules` |
 
 So the number can only be compared **on pings that carry statistics**, i.e.
@@ -76,7 +76,8 @@ The comparison is `reported` (from the ping) against `expected`
 | `once` verdict | no | not cached | no | agrees |
 | File that fails to parse or compile | no | not in the snapshot | no | agrees |
 | Staged `Subscribe` snapshot, not adopted yet | yes | not in the cache | evaluation **pauses** while a fresh unadopted snapshot waits (30 s bound) | the next adoption is a new baseline |
-| Enabled temporary rule | yes, until its timer fires | cache entry with an approximate expiry (30 s prune tick, `\d+[smh]` only) | evaluation **pauses** while any exists | the bridge's expiry and the daemon's timer disagree by seconds, and for durations the bridge cannot parse (`1.5h`) for good |
+| Temporary rule (duration not `always`, `until restart` or `once`), **enabled or not** | yes, until its timer fires | cache entry; an approximate expiry only if it was enabled and parses (30 s prune tick, `\d+[smh]`) | evaluation **pauses** while any is cached | the daemon's timer outlives a later disable (`scheduleTemporaryRule` ignores `enabled`), and a snapshot gives a disabled rule no expiry; the bridge's expiry and the daemon's timer also disagree by seconds, and for durations the bridge cannot parse (`1.5h`) for good |
+| Temporary rule among those left out by the size limits | yes | `left_out` stores no duration | evaluation **pauses** (the snapshot notes that one was temporary) | otherwise its timer would leave a permanent −1 |
 | Prompt answer stored as `<name>-2` | yes, one more | `<name>` replaced | counted: a real +1 | a true disagreement, the known divergence in `cache/rules.rs`; the hint is honest |
 | File added with a new rule name | yes (+1) | unknown | disagrees | **detected** |
 | File removed (`always`, file name = rule name) | no (-1) | unknown | disagrees | **detected** |
@@ -106,9 +107,14 @@ and the flag are always seen together). New file
   `(reported, expected)` pair.
 - `raised`: whether the hint is on. Only this goes on the wire.
 
-`RulesSync::observe_daemon_rules(reported, uptime)` is called by the ping
-handler (`grpc_server.rs`) for a ping that has `stats`. It takes the cache
-lock, asks the watch, and **only when `raised` flips** broadcasts
+`RulesSync::observe_daemon_rules(reported, uptime, commands_in_flight)` is
+called by the ping handler (`grpc_server.rs`) for a ping that has `stats`, as
+its own statement: not inside the `new_rows` block, which holds the rules
+cache lock (a std mutex, not reentrant), and not inside `record_hits`.
+`DaemonCommands::in_flight()` and the staged-snapshot check each take and
+release their own lock **before** the cache lock is taken, so no new lock
+nesting exists (`DaemonCommands::on_reply` already nests its lock outside the
+cache's). It takes the cache lock, asks the watch, and **only when `raised` flips** broadcasts
 `cache.not_shown()` (a `RulesNotShown`, never a `SetRules`), still under the
 lock like every list publisher.
 
@@ -121,8 +127,14 @@ Per reading, in order:
 4. A reading of 0 while the list is not empty: stop, `run = 0`. The field
    cannot say "not reported", so 0 is not evidence. (A daemon that really
    lost every rule file goes unflagged; a missed hint is the cheaper error.)
-5. A fresh unadopted staged snapshot, or any enabled temporary rule or running
-   expiry timer: stop, `run = 0`. A hint already on stays on.
+5. Any of these: stop, `run = 0`. A hint already on stays on.
+   - a fresh unadopted staged snapshot;
+   - any cached rule with a temporary duration, enabled or not, or a left-out
+     rule that was temporary;
+   - a rule command still waiting for the daemon's reply
+     (`DaemonCommands::in_flight`). The quiet readings cover the time after
+     a reply; this covers the gap between the daemon applying a command and
+     its `OK` arriving, however slow, and a reconcile or import burst.
 6. Compare: `key == (reported, expected)` makes `run += 1`, otherwise
    `key = …` and `run = 1`.
 7. Off and disagreeing for `PINGS_TO_RAISE` readings in a row: **on**. On and
@@ -200,8 +212,10 @@ label, visible when the text is non-empty. The text is a constant in
 - `left_out` counts toward `expected`; a `files_left` marker does not;
 - a zero reading is ignored while the list is not empty, and agrees with an
   empty list;
-- an enabled temporary rule, a running expiry timer, and a fresh unadopted
-  staged snapshot each pause the watch (and leave a raised hint raised);
+- each pause leaves a raised hint raised and never raises one: a temporary
+  rule (enabled; **disabled**, from a snapshot with no expiry, followed by a
+  daemon count one lower), a temporary left-out rule, a fresh unadopted
+  staged snapshot, and a command in flight;
 - clearing needs three agreeing readings; disagree/agree flapping never
   flips it; the broadcast fires **once per flip**, never per ping, and is a
   `RulesNotShown` with no `SetRules`;
@@ -230,8 +244,9 @@ and the fixed text after a mismatch `RulesNotShown`, hidden again when the
 next one has none, and a `SetRules` alone does not hide it.
 
 **Mutation checks** (reported): `PINGS_TO_RAISE` 3 to 1; drop the quiet
-ping count; compare without `left_out`; drop the temporary-rule pause; drop
-the zero-reading guard; clear on one agreeing ping; broadcast on every
+ping count; compare without `left_out`; drop the temporary-rule pause; make
+it ignore disabled temporary rules; drop the in-flight pause; drop the
+staged-snapshot pause; drop the zero-reading guard; clear on one agreeing ping; broadcast on every
 ping; leave the flag out of `not_shown()`; `replace_all` not clearing it;
 Kirigami `Text.PlainText` removed.
 
@@ -260,10 +275,20 @@ Kirigami `Text.PlainText` removed.
   `cargo clippy -p snitchwatch-kirigami --all-targets -- -D warnings`
 - `cargo test -j 4 --no-fail-fast` and the Kirigami headless suite
 - `just package-check`
-- Tower r13: with the patched daemon running and the bridge connected, drop a
-  valid rule file into `/etc/opensnitchd/rules/` (the watcher loads it); with
-  some traffic, the hint appears after about three pings and the new rule is
-  **not** listed. Remove the file: the hint clears after three pings.
-  Restart `opensnitchd`: the list gains the rule and the hint is gone. An
-  in-place edit of an existing file must **not** show the hint. Rule changes
-  made from the GUI, and a "for 5 minutes" answer, must never show it.
+- Tower r13. The daemon's watcher handles only `Write` and `Remove` events of
+  `*.json` files, and pings carry statistics only while there is traffic.
+  1. With the patched daemon running, the bridge connected and **no
+     temporary rule** present, add a valid rule file with `cp` or `cat >`
+     (not `mv`, and not an editor that saves by rename: those raise no
+     `Write`, the daemon never loads the file, and the gate would fail for
+     the wrong reason). Generate some traffic. The hint appears after about
+     three pings, and the new rule is **not** listed.
+  2. `rm` that file (an `always` rule whose file name is its rule name; a
+     differently named file leaves the rule in memory). The hint clears
+     after three pings with traffic.
+  3. Add the file again, then restart `opensnitchd`: the list gains the rule
+     and the hint is gone.
+  4. An in-place edit of an existing file (same rule name) must **not** show
+     the hint.
+  5. Rule changes made from the GUI, and a "for 5 minutes" answer, must never
+     show it; while that temporary rule lasts, step 1 shows nothing either.
