@@ -140,10 +140,10 @@ async fn rules_until(
                             .collect(),
                     );
                 }
-                Ok(ServerMessage::RulesNotShown { left_on_disk, .. }) => {
-                    if names.as_ref().is_some_and(|n| done(n, left_on_disk)) {
-                        return;
-                    }
+                Ok(ServerMessage::RulesNotShown { left_on_disk, .. })
+                    if names.as_ref().is_some_and(|n| done(n, left_on_disk)) =>
+                {
+                    return;
                 }
                 _ => {}
             }
