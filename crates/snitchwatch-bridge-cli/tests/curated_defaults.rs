@@ -540,3 +540,102 @@ async fn a_file_left_behind_is_deleted_once_when_the_daemon_loads_it_again() {
     nothing_sent(&mut seen).await;
     s.bridge.shutdown();
 }
+
+/// Turn the entry on with the model's daemon, as an install the daemon
+/// refused: stock `replaceUserRule` takes the rule into memory before
+/// `Save` fails, so the allow applies though the answer is `ERROR`.
+async fn refused_install_that_applies(
+    s: &mut Setup,
+    seen: &mut mpsc::Receiver<Notification>,
+    model: &SharedLoader,
+) {
+    send(&s.bridge, turn(true)).await;
+    assert_eq!(next_command(seen).await.r#type, Action::ChangeRule as i32);
+    entry_until(&mut s.rx, "not installed", |e, _| {
+        e.status == EntryStatus::NotInstalled
+    })
+    .await;
+    assert!(
+        model.lock().unwrap().memory.contains_key(FLATPAK_RULE),
+        "the refused install applies"
+    );
+}
+
+/// PR #119 review M1: on again while the file is still immutable, the
+/// refused install applies anyway. Off again deletes it, once (the marker
+/// from the first refusal doesn't stop it); more offs send nothing; on
+/// again, once the file can be written, installs once.
+#[tokio::test]
+async fn off_after_an_install_refused_on_a_stuck_file_deletes_what_it_applied() {
+    let mut s = start(BridgeMode::System).await;
+    let model = LoaderModel::default().shared();
+    let (_daemon, mut seen) = connect_model(&s.bridge, 1, &model).await;
+    send(&s.bridge, turn(true)).await;
+    next_command(&mut seen).await;
+    entry_until(&mut s.rx, "installed", |e, _| {
+        e.status == EntryStatus::Installed
+    })
+    .await;
+    model.lock().unwrap().stuck.insert(FLATPAK_RULE.into());
+    send(&s.bridge, turn(false)).await;
+    next_command(&mut seen).await;
+    entry_until(&mut s.rx, "off, file left", |e, _| {
+        e.status == EntryStatus::OffFileLeft
+    })
+    .await;
+    refused_install_that_applies(&mut s, &mut seen, &model).await;
+
+    send(&s.bridge, turn(false)).await;
+    let delete = next_command(&mut seen).await;
+    assert_eq!(delete.r#type, Action::DeleteRule as i32);
+    assert_eq!(delete.rules[0].name, FLATPAK_RULE);
+    entry_until(&mut s.rx, "off, file left", |e, _| {
+        e.status == EntryStatus::OffFileLeft
+    })
+    .await;
+    assert!(!model.lock().unwrap().memory.contains_key(FLATPAK_RULE));
+    for _ in 0..2 {
+        send(&s.bridge, turn(false)).await;
+        nothing_sent(&mut seen).await;
+    }
+
+    model.lock().unwrap().stuck.clear();
+    send(&s.bridge, turn(true)).await;
+    assert_eq!(
+        next_command(&mut seen).await.r#type,
+        Action::ChangeRule as i32
+    );
+    entry_until(&mut s.rx, "installed again", |e, _| {
+        e.status == EntryStatus::Installed && e.on
+    })
+    .await;
+    nothing_sent(&mut seen).await;
+    s.bridge.shutdown();
+}
+
+/// M1 with no marker: the rules directory can't take the file (read-only
+/// or full), so the very first install is refused after memory took it.
+/// Off deletes it, once.
+#[tokio::test]
+async fn off_after_an_install_refused_on_save_deletes_what_it_applied() {
+    let mut s = start(BridgeMode::System).await;
+    let model = LoaderModel::default().shared();
+    model.lock().unwrap().stuck.insert(FLATPAK_RULE.into());
+    let (_daemon, mut seen) = connect_model(&s.bridge, 1, &model).await;
+    refused_install_that_applies(&mut s, &mut seen, &model).await;
+
+    send(&s.bridge, turn(false)).await;
+    assert_eq!(
+        next_command(&mut seen).await.r#type,
+        Action::DeleteRule as i32
+    );
+    // No file to remove is an `ERROR` too: the harmless over-warning.
+    entry_until(&mut s.rx, "off, file left", |e, _| {
+        e.status == EntryStatus::OffFileLeft
+    })
+    .await;
+    assert!(model.lock().unwrap().memory.is_empty());
+    send(&s.bridge, turn(false)).await;
+    nothing_sent(&mut seen).await;
+    s.bridge.shutdown();
+}

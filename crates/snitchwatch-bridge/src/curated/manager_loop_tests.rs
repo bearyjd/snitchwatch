@@ -218,3 +218,61 @@ async fn broadcasts_that_change_nothing_run_no_pass() {
     let after = passes(&curated);
     assert_eq!(after, before, "{} passes for nothing", after - before);
 }
+
+fn sent(action: Action) -> (i32, String) {
+    (action as i32, FLATPAK_RULE.to_string())
+}
+
+/// Wait for a pass that starts after now.
+async fn another_pass(curated: &CuratedDefaults, ask: impl FnOnce()) {
+    let before = passes(curated);
+    ask();
+    eventually("another pass", || passes(curated) > before).await;
+}
+
+/// PR #119 review M1: stock `replaceUserRule` takes a rule into memory
+/// before `Save` fails, so a refused install may apply though the list
+/// lacks it. Off deletes it, once: more passes send nothing more (no hot
+/// loop), and on again installs once.
+#[tokio::test]
+async fn off_after_a_refused_install_deletes_it_once() {
+    let harness = Harness::new().connect(Daemon::Refuse, Vec::new());
+    let curated = harness.curated();
+    turn(&curated, FLATPAK, true);
+    let worker = curated.spawn(harness.rules.synced());
+    eventually("the refused install", || {
+        entry_state(&curated, FLATPAK).status == EntryStatus::NotInstalled
+    })
+    .await;
+    turn(&curated, FLATPAK, false);
+    eventually("the delete", || harness.seen().len() >= 2).await;
+    eventually("off, file left", || {
+        entry_state(&curated, FLATPAK).status == EntryStatus::OffFileLeft
+    })
+    .await;
+    for _ in 0..3 {
+        another_pass(&curated, || turn(&curated, FLATPAK, false)).await;
+    }
+    tokio::time::sleep(SETTLE).await;
+    assert_eq!(
+        harness.seen(),
+        vec![sent(Action::ChangeRule), sent(Action::DeleteRule)]
+    );
+
+    *harness.policy.lock().unwrap() = Daemon::Accept;
+    turn(&curated, FLATPAK, true);
+    eventually("installed", || {
+        entry_state(&curated, FLATPAK).status == EntryStatus::Installed
+    })
+    .await;
+    tokio::time::sleep(SETTLE).await;
+    worker.abort();
+    assert_eq!(
+        harness.seen(),
+        vec![
+            sent(Action::ChangeRule),
+            sent(Action::DeleteRule),
+            sent(Action::ChangeRule)
+        ]
+    );
+}
