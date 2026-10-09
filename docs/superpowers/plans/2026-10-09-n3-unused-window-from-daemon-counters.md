@@ -61,8 +61,28 @@ baseline the next run measures from.
 | `daemon` (optional) | `{ pingUnixMs, uptime, ruleHits }`: the daemon's counters at the last ping counted **and saved with these counts** (taken under the same lock as the counts, so they always agree). |
 | `stoppedUnixMs` (optional) | Written only by the save at shutdown: the counts include every event this run received. A periodic save writes none. |
 
-- `version` is written as `2`; `1` and `2` are read. A version-1 file has
-  no `daemon`, so its first restart is "cannot tell" (a gap), once.
+- `version` is written as `2` when either field is present; `1` and `2` are
+  read. A file with neither (every file of a bridge that doesn't trust the
+  counters, i.e. TCP; review of PR #123) is written as the **exact version 1
+  shape**, so a rollback of the shipped per-user setup still reads it. A
+  version-1 file has no `daemon`, so its first restart is "cannot tell" (a
+  gap), once.
+- **Every count held is saved** (review M3): the main map, the counts
+  restored but not yet checked against a snapshot, and the side map (hits
+  that arrived while the rule list wasn't committed: the stock daemon pings
+  in the same pass as its `Subscribe`, so the first batch after a restart
+  usually lands there; a list over the rule limit keeps it there for the
+  run). The next run's first snapshot sorts them. So the saved baseline
+  accounts for every event counted since it. When the entry limit cuts
+  counts off, no baseline is saved (the next restart is a gap).
+- **A clean stop vouches for one restart only** (review H1). When a file
+  with `stoppedUnixMs` is read, it is rewritten at once without it (the
+  value is kept in memory for the judgement and for a shutdown before the
+  first ping). If that rewrite fails, the restart is a gap. Otherwise a run
+  that judged its first ping, counted hits and then lost power before its
+  first periodic save would leave the previous run's clean stop in the file.
+- The shutdown save is the **last** save: one the ticker had already handed
+  to `spawn_blocking` (aborting the ticker doesn't cancel it) is a no-op.
 - **Unknown fields are ignored** (`deny_unknown_fields` is dropped), so a
   later additive field doesn't make an older bridge distrust the whole file.
   A higher version is still refused (the file is left alone and the counts
@@ -74,10 +94,11 @@ baseline the next run measures from.
   nothing changed since the last periodic save, which would leave no
   `stoppedUnixMs`).
 - While a restart is still being judged (below), saves keep the restored
-  `daemon` baseline and its `stoppedUnixMs` (or its absence), the shutdown
-  save included, so a run that sees no ping hands both to the next run
-  unchanged. Otherwise a crash, then a run with no ping that stops cleanly,
-  then a reboot would read as a clean stop and hide the crash's losses.
+  `daemon` baseline; the shutdown save writes back the restored
+  `stoppedUnixMs` (or its absence), so a run that sees no ping hands both to
+  the next run unchanged. Otherwise a crash, then a run with no ping that
+  stops cleanly, then a reboot would read as a clean stop and hide the
+  crash's losses.
 
 ### Who is trusted: the transport
 
@@ -156,6 +177,21 @@ gaps, unchanged.
 - **`MaxEvents`.** More than `MaxEvents` (250 shipped) rule hits while no
   bridge is connected are a gap (correctly: they are lost).
 - **TCP** gets nothing from this change (above).
+- **Rollback, then roll forward** (review M2; documented, not handled). A
+  pre-N3 bridge (after `rpm-ostree rollback`) refuses a version 2 file and
+  never writes it: it keeps its counts in memory and the file keeps the
+  pre-rollback baseline and clean stop. Rolled forward days later, a daemon
+  restart whose first ping holds every hit of its run reads "no gap", and
+  every hit of the rollback period is invisible. The same holds for an N3
+  run whose file was unreadable until fixed. Options for later: honour row 5
+  only when the new daemon started within N minutes of `stoppedUnixMs`
+  (gives up "machine off overnight"), or record a boot id.
+- **Open question: "stayed up" fooled.** Row 4 trusts a matching start
+  time. A baseline recorded late (a ping processed long after the daemon
+  serialised it) or a backward wall-clock step between runs could make a
+  restarted daemon's start estimate land within 5 s of the old one, but it
+  also needs both counters to have grown and `Δrule_hits` to equal the
+  events received: a coincidence, not ruled out.
 
 ## Tests (written first)
 
@@ -205,6 +241,9 @@ the PR.
 `cargo test -j 4 --no-fail-fast`; `just package-check`.
 
 ## Tower r13 gate (system bridge, Unix)
+
+0. **After every bridge start**, the file has no `stoppedUnixMs` (consumed
+   when read; it comes back only with the shutdown save).
 
 **Check the transport first.** Every item below assumes the system bridge
 (`snitchwatch-system-bridge`, opensnitchd dialing its Unix socket). On a
@@ -259,14 +298,24 @@ unchanged** from today.
   `cache/rule_hits_handle/tests.rs`; whole bridges (Unix and TCP, two runs on
   one state directory, the mock keeping its counters) in bridge-cli
   `rule_hits_restart_tests.rs`.
-- Mutation checks (by hand, 35 mutants: every guard of the judgement, the
-  slack both ways, the provisional gap, trust at restore and save, the
-  pending stop status in both saves, the version range, both new time
-  checks, unknown fields, the stop save's write/mark/revision, the
-  transport wiring and the shutdown call): all killed.
-- Review finding fixed before merge: the shutdown save of a run that saw no
-  ping used to mark the file clean next to the previous (crashed) run's
-  baseline (`a_crash_stays_a_crash_through_a_run_that_saw_no_ping`).
+- Mutation checks, by hand. Round 1 (35 mutants: the judgement's guards,
+  the slack moved to 3 s and 60 s, the provisional gap, trust, the stop
+  status, the file checks, the wiring) were all killed, but they did **not**
+  include the boundaries: `>=` → `>` in row 3 and `<=` → `<` in row 4 would
+  have survived. Round 2 (review of PR #123; run in a private copy of the
+  worktree, 52 mutants: round 1's still-valid ones, both boundaries, the
+  consumed stop, a failed consume, saves after the stop save, the side map
+  and the entry limit, the version 1 shape, TCP marking no stop): all
+  killed. Not mutation-tested: `record` taking its time before the locks
+  (no deterministic test for lock delay).
+- Review findings fixed before merge: the shutdown save of a run that saw
+  no ping used to mark the file clean next to the previous (crashed) run's
+  baseline (`a_crash_stays_a_crash_through_a_run_that_saw_no_ping`); and,
+  from the PR #123 review, H1 (a clean stop consumed when read,
+  `a_clean_stop_is_consumed_when_read`), M3 (side-map counts saved,
+  `hits_pinged_before_the_first_hello_survive_a_restart_on_the_unix_socket`),
+  the version 1 shape over TCP, the stop save as the last save, and the
+  time taken before the locks in `RuleHitsHandle::record`.
 - **Rollback:** a pre-N3 bridge (e.g. after `rpm-ostree rollback`) refuses
   a version 2 file as an unsupported version; it leaves the file alone and
   keeps counts in memory until rolled forward.
