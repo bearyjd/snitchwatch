@@ -272,3 +272,44 @@ Kirigami clippy; `cargo test -j 4 --no-fail-fast`; the Kirigami headless suite
    small Kirigami+bridge change.
 2. Stub queries from apps (`127.0.0.53`) and DoT/mDNS are not covered, by
    design; a second opt-in entry is possible if r13 shows apps use the stub.
+
+## As implemented (2026-10-09)
+
+Branch `feat/curated-dns-resolved`, local commits only.
+
+- **Shape.** As planned: `anyAddress` entry field, `Protocol::TcpAndUdp`
+  (serde names are explicit, `tcp`, `udp`, `tcp+udp`), appended entry
+  `dns-resolved`, rule name `snitchwatch-default-dns-resolved`.
+  `check_leaves` takes a destination-less rule only for
+  `/usr/lib/systemd/systemd-resolved`, port `53`, protocol
+  `^(tcp|udp)6?$`; `tcp+udp` is refused for host and this-computer entries.
+  Data load refuses `anyAddress` with a host or loopback, for another
+  program, port or transport, and the old "no destination at all" case.
+- **Spec-change test edits** (not regressions): `curated/tests.rs` pins the
+  entry ids and the `allows` strings of the data file, so both gain the
+  fourth entry; its "no destination" comment now says "for the DNS resolver
+  only".
+- **Tests.** `curated/dns_tests.rs` (14 tests; a mirror of the daemon's
+  `Operator.Match` in test code evaluates the rule `entries()` builds, with
+  the real `regex` crate), two end-to-end tests in
+  `bridge-cli/tests/curated_defaults.rs` (`turn_entry` and `entry_until_id`
+  take an id; `turn` and `entry_until` stay as the flatpak wrappers), and
+  a fixed-text assertion on the page explanation in
+  `kirigami/tests/recommended_rules_qml.rs`.
+- **Mutation checks.** 26 bridge mutants (protocol pattern anchors and
+  members, program sensitivity, port, the destination-less allowlist's
+  program/port/transport, the host branch accepting `tcp+udp`, destination
+  counting, `allows()` text, the data file's port/protocol/path/order/why,
+  reconcile on-by-default, reinstall of a user delete, overwrite of an edit,
+  `toggleable`): all killed. One survived the first run (several
+  destinations with `anyAddress` and `loopback` on a loopback program, where
+  `allows()` would say "any address" for a loopback-only rule) and got a
+  test case. Seven of them were rerun against the end-to-end file: all
+  killed. Two mutants of the Kirigami explanation: both killed.
+- **A mistake in the DNS entry disables every entry.** `entries()` returns
+  nothing for an invalid data file (existing behaviour: fail safe), so a
+  DNS-entry typo shows as every end-to-end test failing, as the port mutant
+  did.
+- Not updated here, for merge time: `HANDOFF.md` ("Owner decisions pending:
+  #117") and the S6 row of the capture table in
+  `2026-10-08-prompt-slot-ux.md`.
