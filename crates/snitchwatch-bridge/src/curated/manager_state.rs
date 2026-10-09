@@ -26,11 +26,13 @@ pub(super) struct State {
     pub(super) removal_failures: BTreeMap<String, Failure>,
     /// Entries the user confirmed removing (edited copies, M2).
     pub(super) removals: BTreeSet<String>,
-    /// Rule names whose install the daemon refused: stock `replaceUserRule`
-    /// takes a rule into memory before `Save` can fail, so it may apply
-    /// though the list lacks it. Forgotten once a delete of the name, or an
-    /// install, is answered (PR #119 review M1).
-    pub(super) maybe_applied: BTreeSet<String>,
+    /// Rule names whose install the daemon refused or didn't answer: stock
+    /// `replaceUserRule` takes a rule into memory before `Save` can fail,
+    /// so it may apply though the list lacks it (PR #119 review M1), and an
+    /// unanswered install may still be taken (#120 item 13). Forgotten once
+    /// a delete of the name, or an install, is answered, and at a
+    /// reconnect.
+    pub(super) maybe_applied: BTreeMap<String, MaybeApplied>,
     /// Bumped by every GUI request taken (a choice, even an unchanged one,
     /// or a removal): each gets a pass (re-review 2, HIGH).
     pub(super) requests: u64,
@@ -52,7 +54,7 @@ impl State {
             failures: BTreeMap::new(),
             removal_failures: BTreeMap::new(),
             removals: BTreeSet::new(),
-            maybe_applied: BTreeSet::new(),
+            maybe_applied: BTreeMap::new(),
             requests: 0,
             file: None,
             storage: StorageStatus {
@@ -64,6 +66,59 @@ impl State {
             version: 0,
             saved: 0,
         }
+    }
+}
+
+/// A rule that may apply though the list lacks it ([`State::maybe_applied`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct MaybeApplied {
+    /// The daemon stream's generation it was recorded on. A reconnect's
+    /// snapshot is the daemon's memory, so it is forgotten then (#120
+    /// item 14).
+    pub(super) generation: u64,
+    /// Whether the rule may have a file, which a refused delete would leave
+    /// behind: an unanswered install may have written it, and a refused one
+    /// wrote none, so only a file a refused delete left before it counts
+    /// (#120 item 15).
+    pub(super) file_possible: bool,
+}
+
+/// Keep `name`'s [`State::maybe_applied`] record up to date with a
+/// command's `outcome`; returns the record an answered command dropped.
+/// - A refused or unanswered install records it; `marked` says whether the
+///   cache noted a file left behind under the name. A record is never made
+///   less cautious on the same stream.
+/// - An install or delete answered `OK`, or a refused delete, drops it: the
+///   name is out of the daemon's memory or listed. A delete that wasn't
+///   answered or sent keeps it.
+pub(super) fn track_maybe_applied(
+    state: &mut State,
+    name: &str,
+    install: bool,
+    outcome: &Result<(), Problem>,
+    marked: bool,
+    generation: u64,
+) -> Option<MaybeApplied> {
+    let (refused, unanswered) = match outcome {
+        Ok(()) => (false, false),
+        Err(problem) => (problem.daemon_refused, problem.unanswered),
+    };
+    if install && (refused || unanswered) {
+        // Each pass keeps only its own stream's records.
+        let earlier = state
+            .maybe_applied
+            .get(name)
+            .is_some_and(|record| record.file_possible);
+        let record = MaybeApplied {
+            generation,
+            file_possible: unanswered || marked || earlier,
+        };
+        state.maybe_applied.insert(name.to_string(), record);
+        None
+    } else if outcome.is_ok() || refused {
+        state.maybe_applied.remove(name)
+    } else {
+        None
     }
 }
 
@@ -86,6 +141,9 @@ pub(super) struct Problem {
     /// The daemon answered `ERROR`. For a delete that means the rule
     /// already left its memory (`RulesCache::apply_refused`).
     pub(super) daemon_refused: bool,
+    /// No answer within the timeout (not a closed stream): the daemon may
+    /// still apply the command (#120 item 13).
+    pub(super) unanswered: bool,
 }
 
 /// What a refusal refused.
@@ -109,11 +167,13 @@ pub(super) fn send_problem(error: SendError) -> Problem {
         text,
         sticky,
         daemon_refused: false,
+        unanswered: false,
     }
 }
 
 pub(super) fn command_problem(error: CommandError, refusal: Refusal) -> Problem {
     let daemon_refused = matches!(error, CommandError::Rejected(_));
+    let unanswered = error == CommandError::Timeout;
     let text = match (error, refusal) {
         (CommandError::Rejected(_), Refusal::Add) => "The firewall service refused the rule.",
         (CommandError::Rejected(_), Refusal::Remove) => {
@@ -126,6 +186,7 @@ pub(super) fn command_problem(error: CommandError, refusal: Refusal) -> Problem 
         text,
         sticky: true,
         daemon_refused,
+        unanswered,
     }
 }
 

@@ -29,7 +29,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use tokio::sync::{broadcast, watch, Notify};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use super::canonical::is_unedited;
 use super::entries;
@@ -44,7 +44,7 @@ use crate::ws_messages::{ClientMessage, ServerMessage, StorageStatus};
 mod state;
 use state::{
     command_problem, fail, keep, save_in_order, send_problem, show_removal_failures, still_edited,
-    summary, without_failed, Problem, Refusal, SaveJob, State,
+    summary, track_maybe_applied, without_failed, Problem, Refusal, SaveJob, State,
 };
 
 /// How long a curated rule command waits for the daemon's reply.
@@ -356,7 +356,14 @@ impl CuratedDefaults {
             self.announce_changed();
             return;
         };
-        let maybe_applied = lock(&self.inner.state).maybe_applied.clone();
+        let maybe_applied: BTreeSet<String> = {
+            let mut state = lock(&self.inner.state);
+            // A reconnect's snapshot is the daemon's memory (#120 item 14).
+            state
+                .maybe_applied
+                .retain(|_, record| record.generation == generation);
+            state.maybe_applied.keys().cloned().collect()
+        };
         let daemon = DaemonRules {
             rules: &rules,
             left_out: &left_out,
@@ -440,7 +447,7 @@ impl CuratedDefaults {
                 let wanted =
                     !state.choices.enabled.contains(id) || !entries().iter().any(|e| &e.id == id);
                 let recorded = state.choices.installed.get(id).cloned();
-                let maybe_applied = state.maybe_applied.contains(name);
+                let maybe_applied = state.maybe_applied.contains_key(name);
                 drop(state);
                 wanted
                     && (self.still_unedited(id, name, recorded.as_ref())
@@ -499,19 +506,16 @@ impl CuratedDefaults {
                 (id, name, outcome, Done::Delete)
             }
         };
+        let marked = self.file_left(&name);
         let mut state = lock(&self.inner.state);
         // Stock `replaceUserRule` takes a rule into memory before `Save` can
         // fail: a refused install may apply unlisted until a delete of its
-        // name is answered (PR #119 review M1).
-        let refused = outcome
-            .as_ref()
-            .err()
-            .is_some_and(|problem| problem.daemon_refused);
-        if refused && matches!(done, Done::Install(_)) {
-            state.maybe_applied.insert(name);
-        } else if outcome.is_ok() || refused {
-            state.maybe_applied.remove(&name);
-        }
+        // name is answered (PR #119 review M1). So may an unanswered one,
+        // which the daemon can still take (#120 item 13); not one cut off by
+        // a closed stream, whose reconnect lists what the daemon holds.
+        let install = matches!(done, Done::Install(_));
+        let dropped = track_maybe_applied(&mut state, &name, install, &outcome, marked, generation);
+        let mut no_file = false;
         match outcome {
             Ok(()) => {
                 let (choices, status) = match done {
@@ -526,18 +530,35 @@ impl CuratedDefaults {
             }
             // The daemon dropped the rule before failing on its file: it is
             // off, and nothing is sent again until the daemon lists it again
-            // (the cache no longer does).
+            // (the cache no longer does). A rule whose install was refused
+            // (so wrote no file), with no file left before it, had none to
+            // remove: nothing can come back (#120 item 15).
             Err(problem) if problem.daemon_refused && matches!(done, Done::Delete) => {
-                warn!(entry = %id, "the firewall service couldn't remove a recommended rule's file");
+                no_file = dropped.is_some_and(|record| !record.file_possible);
+                let status = if no_file {
+                    info!(entry = %id, "deleted a recommended rule whose install saved no file");
+                    EntryStatus::Off
+                } else {
+                    warn!(entry = %id, "the firewall service couldn't remove a recommended rule's file");
+                    EntryStatus::OffFileLeft
+                };
                 let choices = state.choices.removed(&id);
                 keep(&mut state, choices);
                 state.failures.remove(&id);
-                state.statuses.insert(id, EntryStatus::OffFileLeft);
+                state.statuses.insert(id, status);
             }
             // Turned off while its install was on its way: the failure is
             // for a choice that is gone, and must not hold back the delete
             // the next pass plans (M1). That pass sets the status.
-            Err(_) if matches!(done, Done::Install(_)) && !state.choices.enabled.contains(&id) => {}
+            Err(problem)
+                if matches!(done, Done::Install(_)) && !state.choices.enabled.contains(&id) =>
+            {
+                debug!(
+                    entry = %id,
+                    problem = problem.text,
+                    "an install failed after its entry was turned off; the failure isn't kept"
+                );
+            }
             Err(problem) => {
                 let status = match done {
                     Done::Install(_) => EntryStatus::NotInstalled,
@@ -546,6 +567,19 @@ impl CuratedDefaults {
                 fail(&mut state, false, &id, status, problem, generation);
             }
         }
+        drop(state);
+        if no_file {
+            // The refusal marked a file left; the publish of this pass's
+            // rule-list hold carries the count without it.
+            let mut cache = self.inner.rules.lock().unwrap_or_else(|e| e.into_inner());
+            cache.forget_file_left(&name);
+        }
+    }
+
+    /// Whether the cache notes a file left behind under `name`.
+    fn file_left(&self, name: &str) -> bool {
+        let cache = self.inner.rules.lock().unwrap_or_else(|e| e.into_inner());
+        cache.files_left().contains(name)
     }
 
     /// Remove an edited (or unreadable) copy the user confirmed removing,
@@ -565,6 +599,9 @@ impl CuratedDefaults {
         };
         let outcome = self.send(command, Refusal::Remove).await;
         let mut state = lock(&self.inner.state);
+        // Answered, the name is out of the daemon's memory: no delete by name
+        // is owed for it any more (#120 item 17). The copy had a file.
+        track_maybe_applied(&mut state, &name, false, &outcome, false, generation);
         match outcome {
             // A refusal: the daemon dropped the copy before failing on its
             // file, so it is removed as asked, its file left behind.
@@ -696,3 +733,7 @@ mod loop_tests;
 #[cfg(test)]
 #[path = "manager_gate_tests.rs"]
 mod gate_tests;
+
+#[cfg(test)]
+#[path = "manager_unanswered_tests.rs"]
+mod unanswered_tests;
