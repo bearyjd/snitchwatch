@@ -594,6 +594,15 @@ async fn off_after_an_install_refused_on_a_stuck_file_deletes_what_it_applied() 
     })
     .await;
     assert!(!model.lock().unwrap().memory.contains_key(FLATPAK_RULE));
+    // The stuck file is still there: the warning stands once settled.
+    let settled = settled_entry(&mut s, &mut seen).await;
+    assert_eq!(settled.status, EntryStatus::OffFileLeft);
+    send(&s.bridge, ClientMessage::RequestSnapshot).await;
+    rules_until(&mut s.rx, "unlisted, file noted", |names, left| {
+        !names.iter().any(|n| n == FLATPAK_RULE) && left == 1
+    })
+    .await;
+    assert!(model.lock().unwrap().files.contains_key(FLATPAK_RULE));
     for _ in 0..2 {
         send(&s.bridge, turn(false)).await;
         nothing_sent(&mut seen).await;
@@ -615,7 +624,9 @@ async fn off_after_an_install_refused_on_a_stuck_file_deletes_what_it_applied() 
 
 /// M1 with no marker: the rules directory can't take the file (read-only
 /// or full), so the very first install is refused after memory took it.
-/// Off deletes it, once.
+/// Off deletes it, once. That install wrote no file and none was left
+/// before it, so the delete's `ERROR` (no file to remove) leaves no "may
+/// come back" warning (#120 item 15).
 #[tokio::test]
 async fn off_after_an_install_refused_on_save_deletes_what_it_applied() {
     let mut s = start(BridgeMode::System).await;
@@ -629,12 +640,19 @@ async fn off_after_an_install_refused_on_save_deletes_what_it_applied() {
         next_command(&mut seen).await.r#type,
         Action::DeleteRule as i32
     );
-    // No file to remove is an `ERROR` too: the harmless over-warning.
-    entry_until(&mut s.rx, "off, file left", |e, _| {
-        e.status == EntryStatus::OffFileLeft
+    let off = settled_entry(&mut s, &mut seen).await;
+    assert_eq!(off.status, EntryStatus::Off);
+    assert!(!off.on);
+    send(&s.bridge, ClientMessage::RequestSnapshot).await;
+    rules_until(&mut s.rx, "unlisted, no file noted", |names, left| {
+        !names.iter().any(|n| n == FLATPAK_RULE) && left == 0
     })
     .await;
-    assert!(model.lock().unwrap().memory.is_empty());
+    {
+        let model = model.lock().unwrap();
+        assert!(model.memory.is_empty());
+        assert!(model.files.is_empty(), "no file was ever written");
+    }
     send(&s.bridge, turn(false)).await;
     nothing_sent(&mut seen).await;
     s.bridge.shutdown();

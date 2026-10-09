@@ -19,6 +19,9 @@ pub(super) enum Daemon {
     Accept,
     Refuse,
     RefuseDeletes,
+    /// Never answers a `CHANGE_RULE` (its waiter times out); accepts the
+    /// rest.
+    SilentInstalls,
 }
 
 pub(super) struct Harness {
@@ -88,6 +91,10 @@ impl Harness {
                     Daemon::Accept => true,
                     Daemon::Refuse => false,
                     Daemon::RefuseDeletes => command.r#type != Action::DeleteRule as i32,
+                    Daemon::SilentInstalls if command.r#type == Action::ChangeRule as i32 => {
+                        continue
+                    }
+                    Daemon::SilentInstalls => true,
                 };
                 commands.on_reply(stream_id, &reply(command.id, ok));
             }
@@ -101,6 +108,12 @@ impl Harness {
         self.rules.stage(None, snapshot);
         let (_, stream_id) = self.stream.as_ref().unwrap();
         self.commands.on_reply(*stream_id, &reply(0, true));
+    }
+
+    /// The daemon answers command `id` now (a late reply, say).
+    pub(super) fn answer(&self, id: u64, ok: bool) {
+        let (_, stream_id) = self.stream.as_ref().unwrap();
+        self.commands.on_reply(*stream_id, &reply(id, ok));
     }
 
     pub(super) fn curated(&self) -> CuratedDefaults {
