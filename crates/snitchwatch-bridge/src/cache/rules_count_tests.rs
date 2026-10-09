@@ -152,6 +152,23 @@ fn readings_right_after_the_bridges_own_change_are_ignored() {
     assert!(read_times(&mut cache, 3, 20).iter().all(|flip| !flip));
 }
 
+/// The quiet readings are exactly [`QUIET_PINGS`]: a disagreement that stays
+/// after them is real and is counted from the first reading after them.
+#[test]
+fn only_the_quiet_readings_after_an_own_change_are_ignored() {
+    let mut cache = synced(2);
+    settle(&mut cache);
+    cache.upsert(rule("new", "always", true));
+    // The daemon never learns of it (say): 2 against a list of 3.
+    let flips = read_times(
+        &mut cache,
+        2,
+        usize::from(QUIET_PINGS) + usize::from(PINGS_TO_RAISE) - 1,
+    );
+    assert!(flips.iter().all(|flip| !flip), "{flips:?}");
+    assert!(read(&mut cache, 2), "the next one completes the run");
+}
+
 #[test]
 fn a_run_that_a_change_interrupts_starts_over() {
     let mut cache = synced(2);

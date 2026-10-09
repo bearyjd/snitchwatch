@@ -102,6 +102,12 @@ Window {
                 probeWindow.check(!hint.visible && hint.text === "" && !page.header.visible,
                                   "no mismatch, no hint: " + hint.text);
 
+                // Something else to show in the header must not show the hint.
+                probeWindow.notShown({ tooLarge: 1 });
+                probeWindow.check(page.header.visible && other.visible && !hint.visible,
+                                  "the header alone does not show the hint");
+                probeWindow.notShown({});
+
                 // The bridge says the counts differ.
                 probeWindow.notShown({ countMismatch: true });
                 const text = rulesModel.countHintText;
