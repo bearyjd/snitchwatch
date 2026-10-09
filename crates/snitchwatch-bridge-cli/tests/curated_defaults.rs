@@ -153,6 +153,18 @@ async fn rules_until(
     .unwrap_or_else(|_| panic!("timed out: {what}"));
 }
 
+/// Once the bridge has settled, the flatpak entry as a fresh snapshot shows
+/// it: not a passing status announced on the way.
+async fn settled_entry(
+    s: &mut Setup,
+    seen: &mut mpsc::Receiver<Notification>,
+) -> CuratedDefaultSummary {
+    nothing_sent(seen).await;
+    while s.rx.try_recv().is_ok() {}
+    send(&s.bridge, ClientMessage::RequestSnapshot).await;
+    entry_until(&mut s.rx, "a snapshot's entry", |_, _| true).await
+}
+
 async fn send(bridge: &RunningBridge, msg: ClientMessage) {
     bridge.inbound_tx.send(msg).await.unwrap();
 }
@@ -429,10 +441,12 @@ async fn a_refused_delete_is_reported_honestly_and_turning_on_installs_again() {
         next_command(&mut seen).await.r#type,
         Action::DeleteRule as i32
     );
-    let off = entry_until(&mut s.rx, "off, file left", |e, _| {
+    entry_until(&mut s.rx, "off, file left", |e, _| {
         e.status == EntryStatus::OffFileLeft
     })
     .await;
+    let off = settled_entry(&mut s, &mut seen).await;
+    assert_eq!(off.status, EntryStatus::OffFileLeft);
     assert!(!off.on);
     send(&s.bridge, ClientMessage::RequestSnapshot).await;
     rules_until(&mut s.rx, "unlisted, file noted", |names, left| {
@@ -508,6 +522,8 @@ async fn a_file_left_behind_is_deleted_once_when_the_daemon_loads_it_again() {
         e.status == EntryStatus::OffFileLeft
     })
     .await;
+    let settled = settled_entry(&mut s, &mut seen).await;
+    assert_eq!(settled.status, EntryStatus::OffFileLeft);
     nothing_sent(&mut seen).await;
     drop((daemon, seen));
 

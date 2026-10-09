@@ -2,7 +2,8 @@
 
 **Date:** 2026-10-08
 **Found by:** bazzite-tower's r12 VM run (reproduced twice).
-**Baseline:** `main` @ `9f5e2d6` (branch `fix/refused-delete-honesty`).
+**Baseline:** `main` @ `12c900c` (`9f5e2d6` plus a docs-only HANDOFF
+commit; branch `fix/refused-delete-honesty`).
 **Size:** M. Bridge (rules cache, `daemon_commands`, curated defaults,
 blocklist sink), bridge-cli (rule commands), `mock_opensnitchd` (a loader
 model), Kirigami (two plain-text strings). One additive wire field, one new
