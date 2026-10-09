@@ -44,7 +44,7 @@ use crate::ws_messages::{ClientMessage, ServerMessage, StorageStatus};
 mod state;
 use state::{
     command_problem, fail, keep, save_in_order, send_problem, show_removal_failures, still_edited,
-    summary, without_failed, Problem, Refusal, SaveJob, State,
+    summary, without_failed, MaybeApplied, Problem, Refusal, SaveJob, State,
 };
 
 /// How long a curated rule command waits for the daemon's reply.
@@ -356,7 +356,14 @@ impl CuratedDefaults {
             self.announce_changed();
             return;
         };
-        let maybe_applied = lock(&self.inner.state).maybe_applied.clone();
+        let maybe_applied: BTreeSet<String> = {
+            let mut state = lock(&self.inner.state);
+            // A reconnect's snapshot is the daemon's memory (#120 item 14).
+            state
+                .maybe_applied
+                .retain(|_, record| record.generation == generation);
+            state.maybe_applied.keys().cloned().collect()
+        };
         let daemon = DaemonRules {
             rules: &rules,
             left_out: &left_out,
@@ -440,7 +447,7 @@ impl CuratedDefaults {
                 let wanted =
                     !state.choices.enabled.contains(id) || !entries().iter().any(|e| &e.id == id);
                 let recorded = state.choices.installed.get(id).cloned();
-                let maybe_applied = state.maybe_applied.contains(name);
+                let maybe_applied = state.maybe_applied.contains_key(name);
                 drop(state);
                 wanted
                     && (self.still_unedited(id, name, recorded.as_ref())
@@ -514,7 +521,9 @@ impl CuratedDefaults {
             .err()
             .is_some_and(|problem| problem.unanswered);
         if (refused || unanswered) && matches!(done, Done::Install(_)) {
-            state.maybe_applied.insert(name);
+            state
+                .maybe_applied
+                .insert(name, MaybeApplied { generation });
         } else if outcome.is_ok() || refused {
             state.maybe_applied.remove(&name);
         }

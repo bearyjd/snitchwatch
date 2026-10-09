@@ -30,8 +30,9 @@ pub(super) struct State {
     /// `replaceUserRule` takes a rule into memory before `Save` can fail,
     /// so it may apply though the list lacks it (PR #119 review M1), and an
     /// unanswered install may still be taken (#120 item 13). Forgotten once
-    /// a delete of the name, or an install, is answered.
-    pub(super) maybe_applied: BTreeSet<String>,
+    /// a delete of the name, or an install, is answered, and at a
+    /// reconnect.
+    pub(super) maybe_applied: BTreeMap<String, MaybeApplied>,
     /// Bumped by every GUI request taken (a choice, even an unchanged one,
     /// or a removal): each gets a pass (re-review 2, HIGH).
     pub(super) requests: u64,
@@ -53,7 +54,7 @@ impl State {
             failures: BTreeMap::new(),
             removal_failures: BTreeMap::new(),
             removals: BTreeSet::new(),
-            maybe_applied: BTreeSet::new(),
+            maybe_applied: BTreeMap::new(),
             requests: 0,
             file: None,
             storage: StorageStatus {
@@ -66,6 +67,15 @@ impl State {
             saved: 0,
         }
     }
+}
+
+/// A rule that may apply though the list lacks it ([`State::maybe_applied`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct MaybeApplied {
+    /// The daemon stream's generation it was recorded on. A reconnect's
+    /// snapshot is the daemon's memory, so it is forgotten then (#120
+    /// item 14).
+    pub(super) generation: u64,
 }
 
 /// A failed command for an entry, and when it failed.

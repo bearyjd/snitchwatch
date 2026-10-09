@@ -100,3 +100,21 @@ async fn an_install_cut_off_by_a_closed_stream_records_nothing() {
     pass.await.unwrap();
     assert!(lock(&curated.inner.state).maybe_applied.is_empty());
 }
+
+/// #14: a reconnect's snapshot is the daemon's memory. A refused install
+/// recorded on the old stream is forgotten: off sends nothing for a rule
+/// the new list lacks.
+#[tokio::test]
+async fn a_reconnect_forgets_a_refused_install() {
+    let harness = Harness::new().connect(Daemon::Refuse, Vec::new());
+    let curated = harness.curated();
+    turn(&curated, FLATPAK, true);
+    curated.reconcile().await;
+    assert_eq!(status(&curated), EntryStatus::NotInstalled);
+
+    harness.resync(Vec::new());
+    turn(&curated, FLATPAK, false);
+    curated.reconcile().await;
+    assert_eq!(harness.seen(), vec![sent(Action::ChangeRule)]);
+    assert_eq!(status(&curated), EntryStatus::Off);
+}
