@@ -62,7 +62,9 @@ wrong.
 The comparison is `reported` (from the ping) against `expected`
 (from the bridge's `RulesCache`):
 
-`expected = rules.len() + left_out.len()`
+`expected = rules.len() + left_out.len()`, and the daemon may hold up to
+`allowance` more (see "Allowance"): a count in `expected ..= expected +
+allowance` agrees.
 
 | Daemon-side thing | In `NumRules()`? | Bridge side | Counted in `expected` | Notes |
 |---|---|---|---|---|
@@ -78,7 +80,9 @@ The comparison is `reported` (from the ping) against `expected`
 | Staged `Subscribe` snapshot, not adopted yet | yes | not in the cache | evaluation **pauses** while a fresh unadopted snapshot waits (30 s bound) | the next adoption is a new baseline |
 | Temporary rule (duration not `always`, `until restart` or `once`), **enabled or not** | yes, until its timer fires | cache entry; an approximate expiry only if it was enabled and parses (30 s prune tick, `\d+[smh]`) | evaluation **pauses** while any is cached | the daemon's timer outlives a later disable (`scheduleTemporaryRule` ignores `enabled`), and a snapshot gives a disabled rule no expiry; the bridge's expiry and the daemon's timer also disagree by seconds, and for durations the bridge cannot parse (`1.5h`) for good |
 | Temporary rule among those left out by the size limits | yes | `left_out` stores no duration | evaluation **pauses** (the snapshot notes that one was temporary) | otherwise its timer would leave a permanent −1 |
-| Prompt answer stored as `<name>-2` | yes, one more | `<name>` replaced | counted: a real +1 | a true disagreement, the known divergence in `cache/rules.rs`; the hint is honest |
+| Prompt answer under a listed name, stored as `<name>-N` | yes, one more | `<name>` replaced | **allowance +1** per answer | `setUniqueName`; typical after the user turned a remembered rule off and the program asked again. Persists until the next snapshot |
+| Add the daemon refused after storing it (`Save` failed, or `scheduleTemporaryRule` failed on a duration Go can't parse) | yes | not listed (`RefusedEffect::Unknown`) | **allowance +1** per name | `Replace` stores before `Save`; cleared when the name is listed or by a snapshot |
+| Temporary rule the bridge pruned before the daemon's timer fired | yes, until that timer | removed at the wall-clock expiry | **allowance +1** until the timer's monotonic end | Go's timers run on the monotonic clock, which stops while the host is suspended; the wall clock does not |
 | File added with a new rule name | yes (+1) | unknown | disagrees | **detected** |
 | File removed (`always`, file name = rule name) | no (-1) | unknown | disagrees | **detected** |
 | File edited in place, or a moved-in file | unchanged | unknown | agrees | **not detected** (a `mv` into the directory raises no `Write` event, so the daemon ignores it too) |
@@ -93,7 +97,7 @@ and the flag are always seen together). New file
 
 ### The watch
 
-`RulesCache` gets a `CountWatch`:
+`RulesCache` gets a `CountWatch` and a `MayHold` (the allowance):
 
 - `seen_revision`: the cache `revision` at the last reading. **Every** change
   of the list bumps it (a confirmed or refused rule command, a remembered
@@ -104,7 +108,7 @@ and the flag are always seen together). New file
 - `quiet`: pings still to ignore. Set to `QUIET_PINGS` when the revision
   changed or the daemon's `uptime` went backwards (a restarted daemon).
 - `run` and `key`: how many pings in a row repeated the same
-  `(reported, expected)` pair.
+  `(reported, expected, allowance)` triple.
 - `raised`: whether the hint is on. Only this goes on the wire.
 
 `RulesSync::observe_daemon_rules(reported, uptime, commands_in_flight)` is
@@ -127,16 +131,21 @@ Per reading, in order:
 4. A reading of 0 while the list is not empty: stop, `run = 0`. The field
    cannot say "not reported", so 0 is not evidence. (A daemon that really
    lost every rule file goes unflagged; a missed hint is the cheaper error.)
-5. Any of these: stop, `run = 0`. A hint already on stays on.
-   - a fresh unadopted staged snapshot;
-   - any cached rule with a temporary duration, enabled or not, or a left-out
-     rule that was temporary;
-   - a rule command still waiting for the daemon's reply
-     (`DaemonCommands::in_flight`). The quiet readings cover the time after
-     a reply; this covers the gap between the daemon applying a command and
-     its `OK` arriving, however slow, and a reconcile or import burst.
-6. Compare: `key == (reported, expected)` makes `run += 1`, otherwise
-   `key = …` and `run = 1`.
+5. Pauses: stop and `run = 0`; a hint already on stays on.
+   - **Both ways** (nothing counts): a fresh unadopted staged snapshot, and a
+     rule command still waiting for the daemon's reply
+     (`DaemonCommands::in_flight`, which includes commands that timed out
+     within the 30 s late-reply grace). The quiet readings cover the time
+     after a reply; this covers the gap between the daemon applying a command
+     and its `OK` arriving, however slow, and a reconcile or import burst.
+   - **Never raise** (agreeing readings still clear a hint that is on): any
+     cached rule with a temporary duration, enabled or not, or a left-out rule
+     that was temporary. A rule whose expiry the bridge can't know (a
+     duration it can't parse, or a disabled rule whose duration changed) must
+     not keep a hint up for good.
+6. Compare: `reported` agrees when it is in `expected ..= expected +
+   allowance` (at the reading's monotonic time). `key == (reported, expected,
+   allowance)` makes `run += 1`, otherwise `key = …` and `run = 1`.
 7. Off and disagreeing for `PINGS_TO_RAISE` readings in a row: **on**. On and
    agreeing for `PINGS_TO_CLEAR` readings in a row: **off**. Nothing else
    flips it.
@@ -157,6 +166,43 @@ Properties that follow:
 - The hint is never a reaction: there is no re-send, no snapshot request and
   no command anywhere in this path. A snapshot is adopted only when the daemon
   reconnects, and adoption resets the watch.
+
+### Allowance
+
+Independent review of PR #124 found ordinary in-app sequences that leave the
+daemon one rule ahead of the list for good, and so raised a hint that only a
+reconnect cleared. The allowance (`MayHold`) is the number of rules the daemon
+**may** hold that the list does not show. It only widens the agreeing range
+upwards, never downwards; a missed hint is the cheaper error.
+
+1. **A prompt answered under a listed name.** The daemon stores a prompt
+   answer through `Loader.Add` (`main.go`, after `Ask`) → `addUserRule` →
+   `setUniqueName` (`loader.go`): `<name>-2` (then `-3`, ...) when `<name>` is
+   in memory. A rule the user turned off stays in memory, and only enabled
+   rules match, so the same program asks again; the answer gets the same name
+   (`rule_name_for`), the bridge replaces `<name>`, and the daemon holds one
+   more. "For 5 minutes" is the same, with the bridge pruning `<name>` at the
+   expiry while the daemon keeps the disabled original. `RulesSync::upsert`
+   (the `ask_rule` path) calls `note_prompt_answer(name)`: `renamed += 1` if
+   `name` is listed. It persists until the next snapshot.
+2. **A refused add.** `Replace` → `replaceUserRule` stores the rule in memory
+   before `Save` can fail, and `scheduleTemporaryRule` fails on a duration
+   `time.ParseDuration` can't read after the rule is stored; both answer
+   `ERROR`. `RefusedEffect::Unknown` leaves the cache as it was, so
+   `apply_refused` notes each name of the command that isn't listed
+   (`refused`, a set of at most 256). A listed name (an update) adds nothing.
+   A later confirmed `CHANGE_RULE` that lists the name drops the entry.
+3. **A temporary rule pruned early.** The bridge prunes by the wall clock
+   (`now_secs`); the daemon's `time.AfterFunc` runs on the monotonic clock
+   (`CLOCK_MONOTONIC` on Linux), which does not count suspend. Each `Expiry`
+   keeps `ends`, the daemon timer's monotonic end (`Instant` when it was
+   made, plus the wall time left). `prune_expired_at(now_secs, clock)` notes
+   `ends + 5 s` as an allowance when `ends` is still ahead of `clock`, i.e.
+   when the two clocks disagree; in the normal case it notes nothing.
+
+All three clear with `replace_all` (an adopted snapshot) and `set_unknown`.
+Not covered, on purpose: a command that never got an answer (after its 30 s
+late-reply grace) is a real divergence the hint may report.
 
 ### Resets
 
@@ -202,7 +248,9 @@ label, visible when the text is non-empty. The text is a constant in
 
 ## Tests (TDD, each written to fail first)
 
-**`rules_count_tests.rs`** (pure watch plus cache):
+**`rules_count_tests.rs`** (27 tests, pure watch plus cache) and
+**`rules_count_allowance_tests.rs`** (17: the allowance, clearing while paused,
+and the watch driven through adopt and re-adopt on the Unix socket):
 
 - equal counts never raise; two disagreeing readings do not raise, three do;
   a moving count never raises;
@@ -236,6 +284,24 @@ mock daemon with `LoaderModel` answering commands, as in
 - a GUI-made rule change: the daemon applies it, the stale reading before the
   reply and the fresh ones after never raise it;
 - a daemon reconnect with the new count: adopted, hint cleared, no new one.
+
+**Allowance e2e** (`rules_count_hint_unseen.rs`; the shared helpers are in
+`tests/count_hint_support/`). `LoaderModel::add_prompt_answer` models
+`Loader.Add` (`setUniqueName`, `Save`) and `LoaderModel::change` now stores a
+rule before `scheduleTemporaryRule` refuses a duration Go can't parse.
+- the user answers `Always`, turns the rule off from the Rules page, the same
+  program asks again, the user answers `Always`: the daemon holds `<name>-2`,
+  the list shows `<name>` once, and 40 pings never raise the hint; one more
+  unseen file on top of it still does (the allowance is one rule, not a
+  blanket); the same with "For 5 minutes";
+- a recommended-rule install the daemon refuses after storing it (stuck file;
+  over TCP the bridge sends no `AddRule`, #35, and the install is the same
+  `CHANGE_RULE`): no hint; after the retry succeeds the allowance for it is
+  gone and a file the bridge never heard of is said again.
+- Not end to end: the suspend sequence (needs a host whose wall and
+  monotonic clocks diverge; it is tested on the cache and on `RulesSync` with
+  injected clocks), and an add with a duration Go can't parse (the bridge
+  sends no `AddRule` over TCP; the cache and the loader model are tested).
 
 **Kirigami**: `not_shown` unit tests (text, wording facts: no daemon text,
 mentions restart); a QML probe (`rules_count_hint_qml.rs`, same pattern as
@@ -286,6 +352,28 @@ of 1, and an always-visible label inside an already visible header) and got
 tests that pin them; all 38 are killed.
 
 ## Limitations (also for the tower gate)
+
+- **The allowance is a blind spot, by design.** After one of the three cases
+  above, a file added outside Snitchwatch is not said until it is one more
+  than the allowance, or until the next snapshot (a daemon reconnect).
+- **A second adoption on the Unix socket replaces the list** with the staged
+  snapshot and drops what was confirmed in between (`RulesSync::readopt`,
+  PR #106 N1). The daemon's count then really differs from the list's, and the
+  hint says so after the quiet readings, though its wording guesses the wrong
+  cause. The watch resets at each adoption (a unit test drives adopt and
+  re-adopt).
+- **A forged `Ping` on the legacy TCP port (#35)** can raise or clear the
+  hint. It can already send fake statistics and prompts there; the hint
+  triggers no re-send, snapshot request or command.
+- **Open question, not fixed here:** `PendingReply::drop` removes the waiter
+  without moving the command to `late`, so `in_flight()` reads 0 and a later
+  `OK` is ignored. No live path drops a handle before `wait()` (every sender
+  awaits it), but with the hint such a command would be a permanent
+  disagreement.
+- Go's timers use the runtime's monotonic clock, `CLOCK_MONOTONIC` on Linux,
+  which stops while the host is suspended; the allowance for a pruned
+  temporary rule relies on that (reasoned from Go's design, not read from the
+  runtime source in this repository).
 
 - **In-place edits are not detected.** An edited file that keeps its rule
   name replaces the rule and leaves the count alone. So does any change that

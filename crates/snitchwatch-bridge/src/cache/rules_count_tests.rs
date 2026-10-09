@@ -41,6 +41,7 @@ fn read_at(cache: &mut RulesCache, reported: u64, uptime: u64) -> bool {
         reported,
         uptime,
         settling: false,
+        now: Instant::now(),
     })
 }
 
@@ -357,6 +358,7 @@ fn a_reading_taken_while_settling_is_not_evidence() {
             reported: 3,
             uptime: 100,
             settling: true,
+            now: Instant::now(),
         });
         assert!(!flip);
     }
@@ -374,6 +376,7 @@ fn a_pause_interrupts_a_run() {
         reported: 3,
         uptime: 100,
         settling: true,
+        now: Instant::now(),
     });
     assert!(!paused);
     assert_eq!(read_times(&mut cache, 3, 2), vec![false, false]);
@@ -381,17 +384,15 @@ fn a_pause_interrupts_a_run() {
 }
 
 #[test]
-fn a_hint_already_shown_stays_while_the_check_is_paused() {
+fn a_hint_already_shown_stays_while_the_check_is_paused_and_the_disagreement_holds() {
     let mut cache = synced(2);
     raised(&mut cache, 3);
     // A timed rule is made: the list changes (quiet), then the check pauses.
     cache.upsert(rule("timed", "5m", true));
     settle(&mut cache);
-    assert!(read_times(&mut cache, 3, 30).iter().all(|flip| !flip));
-    assert!(
-        cache.count_mismatch(),
-        "agreement while paused clears nothing"
-    );
+    // Still more than the list: nothing changes, and nothing new is raised.
+    assert!(read_times(&mut cache, 4, 30).iter().all(|flip| !flip));
+    assert!(cache.count_mismatch());
     // It ends: three agreeing readings clear it.
     cache.remove("timed");
     settle(&mut cache);

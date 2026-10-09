@@ -89,6 +89,9 @@ pub struct RulesCache {
     /// A rule left out for the size limits was temporary, so its daemon
     /// timer may drop it unseen (`rules_count.rs`).
     left_out_temporary: bool,
+    /// Rules the daemon may hold that the list does not show
+    /// (`rules_count.rs`). Cleared with every list.
+    may_hold: count::MayHold,
 }
 
 /// The daemon timer that will remove a temporary rule (PR #106 review M2),
@@ -104,6 +107,10 @@ pub struct RulesCache {
 struct Expiry {
     duration: String,
     at: i64,
+    /// When the daemon's timer fires on its own clock, the monotonic one
+    /// (Go's runtime timers; `CLOCK_MONOTONIC` stops while the host is
+    /// suspended, the wall clock `at` does not). See `rules_count.rs`.
+    ends: Instant,
 }
 
 /// A `Subscribe` snapshot within the limits, and what it left out; or, for
@@ -174,10 +181,16 @@ impl RulesCache {
     /// change, when the timer started); a disabled one is given none, since
     /// whether one still runs isn't known.
     pub fn replace_all(&mut self, rules: Vec<Rule>) {
+        let (now, clock) = (now_secs(), Instant::now());
         self.expiries = rules
             .iter()
             .filter(|rule| rule.enabled && rule.created > 0)
-            .filter_map(|rule| Some((rule.name.clone(), timer_from(rule, rule.created)?)))
+            .filter_map(|rule| {
+                Some((
+                    rule.name.clone(),
+                    timer_from(rule, rule.created, now, clock)?,
+                ))
+            })
             .collect();
         for rule in &rules {
             // Listed again: the daemon loaded its file.
@@ -187,6 +200,7 @@ impl RulesCache {
         self.over_limit_total = None;
         self.count_watch = count::CountWatch::default();
         self.left_out_temporary = false;
+        self.may_hold.clear();
         self.revision += 1;
     }
 
@@ -216,6 +230,7 @@ impl RulesCache {
         self.expiries.clear();
         self.count_watch = count::CountWatch::default();
         self.left_out_temporary = false;
+        self.may_hold.clear();
         if self.rules.take().is_some() {
             self.revision += 1;
         }
@@ -245,11 +260,16 @@ impl RulesCache {
             .expiries
             .remove(&rule.name)
             .filter(|kept| kept.duration == rule.duration && kept.at > now_secs);
-        let timer = running.or_else(|| rule.enabled.then(|| timer_from(&rule, now_secs)).flatten());
+        let timer = running.or_else(|| {
+            rule.enabled
+                .then(|| timer_from(&rule, now_secs, now_secs, Instant::now()))
+                .flatten()
+        });
         if let Some(timer) = timer {
             self.expiries.insert(rule.name.clone(), timer);
         }
         self.left_out.remove(&rule.name);
+        self.may_hold.forget(&rule.name);
         rules.insert(rule.name.clone(), rule);
         self.revision += 1;
     }
@@ -291,6 +311,14 @@ impl RulesCache {
     /// Drop temporary rules whose daemon timer ([`Expiry`]) has fired.
     /// Returns the names removed, in name order.
     pub fn prune_expired(&mut self, now_secs: i64) -> Vec<String> {
+        self.prune_expired_at(now_secs, Instant::now())
+    }
+
+    /// [`prune_expired`](Self::prune_expired) at a given wall time and
+    /// monotonic reading. A rule pruned while its daemon timer, which runs on
+    /// the monotonic clock, has not fired yet (the host was suspended) may
+    /// still be in the daemon: see `rules_count.rs` `MayHold`.
+    pub fn prune_expired_at(&mut self, now_secs: i64, clock: Instant) -> Vec<String> {
         let Some(rules) = &mut self.rules else {
             return Vec::new();
         };
@@ -302,7 +330,9 @@ impl RulesCache {
             .collect();
         for name in &expired {
             rules.remove(name);
-            self.expiries.remove(name);
+            if let Some(expiry) = self.expiries.remove(name) {
+                self.may_hold.note_pruned(expiry.ends, clock);
+            }
         }
         self.revision += u64::from(!expired.is_empty());
         expired
@@ -350,13 +380,16 @@ fn now_secs() -> i64 {
 /// The timer the daemon starts for `rule` at `start`, if it is temporary
 /// (`loader.go` `isTemporary`: not `once`, `until restart` or `always`).
 /// Approximate: a duration that isn't a `\d+[smh]` sequence has none.
-fn timer_from(rule: &Rule, start: i64) -> Option<Expiry> {
+fn timer_from(rule: &Rule, start: i64, now_secs: i64, clock: Instant) -> Option<Expiry> {
     if !count::is_temporary(&rule.duration) {
         return None;
     }
+    let at = start.checked_add(parse_duration_secs(&rule.duration)?)?;
+    let remaining = Duration::from_secs(u64::try_from(at.saturating_sub(now_secs)).unwrap_or(0));
     Some(Expiry {
         duration: rule.duration.clone(),
-        at: start.checked_add(parse_duration_secs(&rule.duration)?)?,
+        at,
+        ends: clock.checked_add(remaining).unwrap_or(clock),
     })
 }
 
@@ -630,6 +663,7 @@ impl RulesSync {
             self.hits.forget([rule.name.as_str()]);
         }
         let name = rule.name.clone();
+        cache.note_prompt_answer(&name);
         cache.upsert(rule);
         let rules = cache
             .rules()
