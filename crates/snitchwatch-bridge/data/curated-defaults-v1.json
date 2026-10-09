@@ -27,6 +27,15 @@
       "protocol": "tcp",
       "why": "Flatpak downloads app updates and app information from Flathub.",
       "evidence": "bazzite-tower r10: after flatpak update --appstream, /usr/bin/flatpak to dl.flathub.org port 443 over tcp6 (held, so the update timed out)"
+    },
+    {
+      "id": "dns-resolved",
+      "path": "/usr/lib/systemd/systemd-resolved",
+      "anyAddress": true,
+      "port": 53,
+      "protocol": "tcp+udp",
+      "why": "With the firewall set to deny by default, no name can be looked up until the system's DNS resolver may reach its DNS server. That server differs on every network, so this lets that one program reach any address on port 53. It does not make lookups private: whoever runs the server sees them. NetworkManager's check, Flathub updates and blocklist downloads need names looked up, so they need this.",
+      "evidence": "bazzite-tower r10: /usr/lib/systemd/systemd-resolved to the network's DNS server port 53 over udp (left out of v1: owner question S6, decided opt-in). TCP port 53 (truncated and large answers) is the standard fallback but was not captured; r13 checks both."
     }
   ]
 }

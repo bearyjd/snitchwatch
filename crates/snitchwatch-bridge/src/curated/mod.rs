@@ -5,9 +5,12 @@
 //! The list is data, `data/curated-defaults-v1.json`, reviewed and built
 //! into the bridge. Each entry lets one program, named by its exact
 //! absolute path under `/usr`, reach the narrowest destination the
-//! bazzite-tower capture supports: one host or this computer only (never
-//! any address), one port, one protocol over both IP versions. Each says
-//! in plain text why it is there.
+//! bazzite-tower capture supports: one host or this computer only, one
+//! port, one protocol over both IP versions. The one exception is the
+//! system resolver's DNS (owner decision S6): its upstream server changes
+//! with every network, so it is offered for any address, port 53, TCP and
+//! UDP, and no other program can be. Each entry says in plain text why it
+//! is there.
 //!
 //! Nothing is on by default. The user turns entries on (`store`), and
 //! `reconcile` installs them under the reserved `snitchwatch-default-`
@@ -41,13 +44,24 @@ pub const DESCRIPTION: &str = "snitchwatch curated default v1";
 /// `dest.ip` for an entry limited to this computer: IPv4 or IPv6 loopback.
 const LOOPBACK_PATTERN: &str = r"^(127\.0\.0\.1|::1)$";
 
+/// The one program that may be offered for any address (owner decision S6,
+/// issue #117), and the one port and transport it gets there: the system
+/// resolver's DNS, whose upstream server differs on every network.
+const DNS_PROGRAM: &str = "/usr/lib/systemd/systemd-resolved";
+const DNS_PORT: u16 = 53;
+
 /// The transport an entry allows, over IPv4 and IPv6 (the daemon names the
-/// IPv6 forms `tcp6`/`udp6`).
+/// IPv6 forms `tcp6`/`udp6`). `TcpAndUdp` is the DNS entry's alone
+/// ([`check_leaves`]): one anchored regexp for both, as the daemon's
+/// `protocol` operand is compared to one value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
 pub enum Protocol {
+    #[serde(rename = "tcp")]
     Tcp,
+    #[serde(rename = "udp")]
     Udp,
+    #[serde(rename = "tcp+udp")]
+    TcpAndUdp,
 }
 
 impl Protocol {
@@ -55,6 +69,7 @@ impl Protocol {
         match self {
             Self::Tcp => "^tcp6?$",
             Self::Udp => "^udp6?$",
+            Self::TcpAndUdp => "^(tcp|udp)6?$",
         }
     }
 
@@ -62,6 +77,7 @@ impl Protocol {
         match self {
             Self::Tcp => "TCP",
             Self::Udp => "UDP",
+            Self::TcpAndUdp => "TCP and UDP",
         }
     }
 }
@@ -73,12 +89,17 @@ pub struct CuratedEntry {
     pub id: String,
     /// The program's exact absolute path, under `/usr`.
     pub path: String,
-    /// The one host it may reach. Exactly one of `host` and `loopback`.
+    /// The one host it may reach. Exactly one of `host`, `loopback` and
+    /// `anyAddress`.
     #[serde(default)]
     pub host: Option<String>,
     /// Only this computer (127.0.0.1 and ::1).
     #[serde(default)]
     pub loopback: bool,
+    /// Any address: no destination condition. Only the system resolver's
+    /// DNS ([`DNS_PROGRAM`], port 53, TCP and UDP) passes [`check_leaves`].
+    #[serde(default, rename = "anyAddress")]
+    pub any_address: bool,
     pub port: u16,
     pub protocol: Protocol,
     /// Why it is offered, in plain text.
@@ -161,6 +182,7 @@ impl CuratedEntry {
         if self.loopback {
             leaves.push(leaf("regexp", "dest.ip", LOOPBACK_PATTERN, false));
         }
+        // `any_address` adds no destination condition: that is what it means.
         leaves.push(leaf("simple", "dest.port", &self.port.to_string(), false));
         leaves.push(leaf("regexp", "protocol", self.protocol.pattern(), false));
         Rule {
@@ -184,9 +206,10 @@ impl CuratedEntry {
 
     /// Exactly what the rule allows, in plain text.
     pub fn allows(&self) -> String {
-        let to = match &self.host {
-            Some(host) => host.clone(),
-            None => "this computer only (127.0.0.1 and ::1)".to_string(),
+        let to = match (&self.host, self.any_address) {
+            (Some(host), _) => host.clone(),
+            (None, true) => "any address".to_string(),
+            (None, false) => "this computer only (127.0.0.1 and ::1)".to_string(),
         };
         format!(
             "{} may connect to {to} on {} port {}, over IPv4 and IPv6.",
@@ -206,8 +229,13 @@ impl CuratedEntry {
         if self.host.as_deref().is_some_and(|host| !valid_host(host)) {
             return Err("an entry's host isn't one plain host name".into());
         }
-        if self.host.is_some() == self.loopback {
-            return Err("an entry names neither or both of a host and this computer".into());
+        let destinations = usize::from(self.host.is_some())
+            + usize::from(self.loopback)
+            + usize::from(self.any_address);
+        if destinations != 1 {
+            return Err(
+                "an entry names none or several of a host, this computer and any address".into(),
+            );
         }
         if self.port == 0 {
             return Err("an entry has no port".into());
@@ -302,41 +330,62 @@ pub fn check_curated_rule(rule: &Rule) -> Result<(), String> {
 
 fn check_leaves(leaves: &[Operator]) -> Result<(), String> {
     let mut rest = leaves.iter().peekable();
-    match rest.next() {
+    let program = match rest.next() {
         Some(op)
             if op.r#type == "simple"
                 && op.operand == "process.path"
                 && op.sensitive
-                && usr_program(&op.data) => {}
+                && usr_program(&op.data) =>
+        {
+            op.data.as_str()
+        }
         _ => return Err("the first condition isn't an exact /usr program path".into()),
-    }
-    match rest.next() {
-        Some(op)
-            if op.operand == "dest.host"
-                && op.r#type == "simple"
-                && !op.sensitive
-                && valid_host(&op.data) => {}
-        Some(op)
-            if op.operand == "dest.ip" && op.r#type == "regexp" && op.data == LOOPBACK_PATTERN => {}
-        _ => return Err("the destination isn't one plain host name or this computer".into()),
+    };
+    // No destination condition means any address, for the DNS resolver only.
+    let any_address = rest.peek().is_some_and(|op| op.operand == "dest.port");
+    if any_address {
+        if program != DNS_PROGRAM {
+            return Err("only the system resolver's DNS may reach any address".into());
+        }
+    } else {
+        match rest.next() {
+            Some(op)
+                if op.operand == "dest.host"
+                    && op.r#type == "simple"
+                    && !op.sensitive
+                    && valid_host(&op.data) => {}
+            Some(op)
+                if op.operand == "dest.ip"
+                    && op.r#type == "regexp"
+                    && op.data == LOOPBACK_PATTERN => {}
+            _ => return Err("the destination isn't one plain host name or this computer".into()),
+        }
     }
     match rest.next() {
         Some(op)
             if op.r#type == "simple"
                 && op.operand == "dest.port"
                 && op.data.bytes().all(|b| b.is_ascii_digit())
-                && op.data.parse::<u16>().is_ok_and(|port| port != 0)
+                && op
+                    .data
+                    .parse::<u16>()
+                    .is_ok_and(|port| port != 0 && (!any_address || port == DNS_PORT))
                 && !op.data.starts_with('0') => {}
         _ => return Err("the port condition isn't one port".into()),
     }
+    let protocols: &[Protocol] = if any_address {
+        &[Protocol::TcpAndUdp]
+    } else {
+        &[Protocol::Tcp, Protocol::Udp]
+    };
     match rest.next() {
         Some(op)
             if op.r#type == "regexp"
                 && op.operand == "protocol"
-                && [Protocol::Tcp, Protocol::Udp]
+                && protocols
                     .iter()
                     .any(|protocol| op.data == protocol.pattern()) => {}
-        _ => return Err("the protocol condition isn't TCP or UDP".into()),
+        _ => return Err("the protocol condition isn't the one this entry may have".into()),
     }
     if rest.next().is_some() || leaves.iter().any(|op| !op.list.is_empty()) {
         return Err("a curated default has other conditions".into());
@@ -344,5 +393,7 @@ fn check_leaves(leaves: &[Operator]) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(test)]
+mod dns_tests;
 #[cfg(test)]
 mod tests;
