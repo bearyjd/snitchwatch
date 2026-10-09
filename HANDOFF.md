@@ -1,15 +1,144 @@
-# Linux App Firewall + Bazzite Security Scanner — Handoff (updated 2026-10-08, evening)
+# Linux App Firewall + Bazzite Security Scanner — Handoff (updated 2026-10-09)
 
 > **Read this first if you're picking this repo up cold.** Everything below
 > the "Current status" section is the *original* handoff from 2026-07-04,
 > kept for history/decision rationale — it is accurate as a record of what
-> was decided and why, but stale as a status report. Trust this section for
-> "what's true today."
+> was decided and why, but stale as a status report. Trust the "2026-10-09
+> (current)" section for "what's true today."
 
-## 2026-10-08 evening (current)
+## 2026-10-09 (current)
 
-`main` is at `9f5e2d6`. The overnight section below describes `90a032b`;
-everything here merged after it. No merged work is blocked on the owner.
+`main` is at `49e957d`, CI green. The 2026-10-08 evening section below
+describes `9f5e2d6`; the five PRs here merged after it, all on 2026-10-09 UTC.
+Nothing merged is blocked on the owner; next work waits on tower's r12 and r13
+gates. Earlier work is in the 2026-10-08 sections below.
+
+**Merged since `9f5e2d6`** (squash shas; plans are in
+`docs/superpowers/plans/`):
+- #119 `ac446e2`: a refused rule delete leaves the rules cache honest (tower
+  r12's #105 finding). Stock v1.8.0 `Loader.Delete` removes the rule from
+  memory first, then its file, so an `ERROR` to `DELETE_RULE` means the rule
+  already stopped applying and only the file may remain. The cache drops it
+  and keeps a per-name "file may remain" marker (bridge run only):
+  `RulesNotShown.leftOnDisk`, `OffFileLeft`. Plan:
+  `2026-10-08-refused-delete-honesty.md`.
+- #122 `ddb6b96`: #120 items 13-17. An install unanswered after 15 s sets
+  `maybe_applied` (turning the entry off then sends one delete); a reconnect
+  clears it; a refused delete after an install that never wrote a file reads
+  `Off`, not `OffFileLeft`. Plan: `2026-10-09-curated-followups-120.md`.
+- #123 `f978282`: N3. On the Unix-socket system bridge, a restart's hit-count
+  gap is judged from the daemon's counters at the first ping, so a restart
+  that lost no hits is no longer a gap; TCP bridges always record one.
+  `rule_hits.json` is version 2 (`daemon` baseline; `stoppedUnixMs` after a
+  clean shutdown, consumed when read). No wire change. Plan:
+  `2026-10-09-n3-unused-window-from-daemon-counters.md`.
+- #124 `fa14795`: #65 option (c). When `DaemonStatistics.rules` disagrees with
+  the list for 3 pings with statistics in a row (an allowance range covers
+  `<name>-2` answers, refused adds, early-pruned temporary rules), the Rules
+  page shows a fixed hint to restart the firewall service. Files added or
+  removed show; in-place edits do not. **#65 stays open**: the full fix needs a
+  daemon "rules reloaded" push (tower). Wire field `countMismatch`. Plan:
+  `2026-10-09-rules-count-hint-65.md`.
+- #121 `49e957d`: S6. Opt-in recommended entry for `systemd-resolved` DNS:
+  `/usr/lib/systemd/systemd-resolved`, any address, port 53, tcp and udp,
+  pinned to `user.id` 193 (not `user.name`: the daemon rewrites a name to the
+  uid when it saves). Off by default; `broad: true` in the summary; "Turn all
+  on" skips it ("Turn all off" includes it). A wrong uid fails closed. Plan:
+  `2026-10-09-curated-dns-resolved.md`.
+
+**Decisions (#117).** S6 (a), N3's recommendation and #65 (c) were taken (the
+plan headers say so; #117 is open, unedited, no comments). "Orchestrator
+calls" and `InterceptUnknown`: no change recorded.
+
+**Tower (`bazzite-tower`; PR numbers here are tower's).**
+- **r12 VM gate passed.** Image `sha256:48528857…` from tower `21adea3`
+  (Snitchwatch `9f5e2d6` + the daemon patch with #89 and #91). Result: "PASS
+  with one product finding … and one timing observation". Evidence (tower
+  checkout): `output/snitchwatch-fresh-vm-r12.F20JIs/R12-VM-ACCEPTANCE-RESULT.json`.
+  - Finding: the #105 cleanup after a refused `DELETE_RULE` (`chattr +i` only);
+    #119 is the bridge-side fix.
+  - Timing: #112's notice posted ~4.8 s after the window raise (recipe: ~1 s).
+    Notification "Allow once"/"Deny" answered; r11's failure may have been a
+    test artefact (a popup under a resting pointer gets no `ActionInvoked`);
+    unconfirmed.
+- Tower #92 (re-pin to `9f5e2d6`) and docs #94 merged. #78-#91 were stacked
+  PRs closed unmerged; their commits landed through #92 (#77 merged alone).
+- Tower #93 (daemon keeps the in-memory rule when its file delete fails):
+  closed unmerged 2026-10-09 by the tower session, after the owner deferred
+  the call with a drop recommendation; branch now 404. Stock `Loader.Delete`
+  semantics stay, and #119 depends on them (#120 item 8).
+- **r12 publication is unsettled.** Tower main `5871311` (#94, #95) built green
+  (run 37873323964); ghcr has it as `latest`, `20261009`, `5871311` since
+  2026-10-09T02:17Z, digest `sha256:46b25390…`, not the gated `48528857…`. Its
+  tree differs from `21adea3` only in `.github/workflows/build.yml` and the
+  tower research doc. Ask the tower session if this counts as r12 shipped.
+
+**r13: one batched VM gate** on `main` `49e957d`, deferred by the owner until
+r12 ships (stated by the orchestrating session; not in the repo). Details: PRs
+and plans.
+- #119: `chattr +i` a recommended rule's file, turn the entry off: one
+  `DELETE_RULE` per refused turn-off, the "1 deleted rule may come back when
+  the firewall service restarts" sentence once, turn-on reinstalls.
+- #122: an install with no answer (timed out), then turn off: one delete.
+- #123 (Unix-socket system bridge only; check the transport first, TCP always
+  gaps): bridge-only restart with under 250 hits keeps `lastGapUnixMs`; over
+  250 hits while service and socket are stopped gives a gap; reboot with under
+  250 hits before the first ping gives none; `stoppedUnixMs` removed plus an
+  `opensnitchd` restart gives a gap; the file has no `stoppedUnixMs` after any
+  bridge start; "Unused" returns after the first ping.
+- #124: a soak with no rule file touched shows no hint. With no temporary
+  rule, `cp` (not `mv`) a rule file in and make traffic: hint after ~3 pings,
+  rule not listed; `rm` it: clears; restart `opensnitchd`: the list gains the
+  rule. In-place edits, GUI changes and "for 5 minutes" answers never show it.
+  One real suspend with a 5-minute rule (clock assumption, #120 item 31).
+- #121 (plan items 1-8): `readlink -f /proc/$(pidof systemd-resolved)/exe`
+  equals the rule path; resolved's udp and tcp events carry uid 193 (else the
+  rule matches nothing); deny default, only this entry: `resolvectl query
+  example.org` works, a tcp/tcp6 hit shows (needs a large answer); an ordinary
+  user's `LD_PRELOAD` run at the exact path is not matched; `dig @8.8.8.8` and
+  DoT (853) stay denied; off removes it; it survives a daemon restart; the
+  blocklist fetch works only with it on; "Turn all on" leaves it off. First
+  remove any path-only DNS rule from the earlier head `1f26540` (#120 item 40).
+
+**Open follow-ups.** None starts without owner triage.
+- #120 (items 1-42, from the reviews of #119, #122, #123, #124, #121).
+  Highlights:
+  - 37: before the first Flatpak GUI release, the bridge must ignore a `broad`
+    id in an `on: true` request with more than one id (an older GUI's "Turn
+    all on" would enable the any-address rule). No GUI has shipped yet.
+  - 36, 41: the three older curated entries (NetworkManager, chronyc,
+    flatpak) pin the program path only; pinning senders is a separate call.
+  - 27, M2: N3 limits (rollback-then-roll-forward, or a run on unwritable
+    storage, can leave a stale clean stop that hides losses).
+  - 29-34: count-hint limits (the `renamed` allowance, the clock assumption).
+  - 35, 39: an unbounded `yield_now` wait (`curated/manager_unanswered_tests.rs`
+    ~98) spins forever if `entries()` is empty: a broken data file hangs CI.
+- #109, #110, #113-#116 (evening section): no commit subject on main names them.
+  #65 stays open; #35 and #17 are unchanged; Renovate PR #33 has no reviews.
+
+**Process notes.**
+- Run mutation checks in a private copy: an in-place run left a stale build in
+  a shared target dir (12 tests failed in a reviewer's first run, #120).
+  `cargo clean -p snitchwatch-bridge` after restoring.
+- Build only from the `/var/home/user/...` spelling (`/home/...` panics
+  cxx-qt-build). QML segfaults after an interface change: `cargo clean -p
+  snitchwatch-kirigami` first.
+- Stated by the orchestrating session, not checked in the repo: pin squash
+  merges with `gh pr merge --squash --match-head-commit <sha>`; merge, never
+  rebase, pushed branches; re-run CI on the merge ref when main moved.
+- Disk at 2026-10-09 ~04:45 UTC: 1.9 TB free of 7.3 TB. Main's `target/` is 209
+  GB; `-wt-n3`, `-wt-s6`, `-wt-65`, `-wt-fu120` had 28 to 92 GB each. Remove a
+  merged worktree's `target/` when done.
+
+**Next steps, in order:** (1) settle with the tower session whether `5871311`
+is r12 shipped; (2) one batched r13 gate on `49e957d`; (3) triage #120 with
+the owner; (4) update this file after r13.
+
+## Previously (2026-10-08, evening)
+
+`main` was at `9f5e2d6` when this was written. The overnight section below
+describes `90a032b`; everything here merged after it. For what is true now,
+use the 2026-10-09 section above.
 
 **Merged since `90a032b`, in order:**
 - #86: who holds the daemon's prompt slot.
@@ -44,30 +173,25 @@ everything here merged after it. No merged work is blocked on the owner.
 - #111: Make-a-rule follow-ups.
 - #106: Rules page follow-ups (#102, #64, #61).
 
-**Closed today (among others):** #46, #73, #78, #82, #92, #97, #102, #64, #61.
+**Closed on 2026-10-08 (among others):** #46, #73, #78, #82, #92, #97, #102,
+#64, #61.
 
 **Tower (`bazzite-tower`, a separate repo and session).** PR numbers in this
-block are tower's, not this repo's.
+block are tower's, not this repo's. Its state is now in the 2026-10-09 section
+above; what follows is the 2026-10-08 view.
 - VM runs r10 and r11 passed. r11's one finding: #100's notification buttons
   didn't answer. #112 fixed that.
 - Issue A (no notice posted after the window raise) is root-caused and fixed.
-  Issue B (the click) is hardened and instrumented, but its root cause is
-  unconfirmed, pending r12.
-- The r12 head is Snitchwatch `9f5e2d6` plus tower PRs #89 (E2
-  drop-while-busy, E3 events) and #91 (loadRule ValidName).
-- Merging tower PRs #86-#91 is the owner's call. Nothing in this repo depends
-  on them being merged.
+  Issue B (the click) was hardened and instrumented. r12 did not settle its
+  root cause (2026-10-09 section).
+- The r12 head was Snitchwatch `9f5e2d6` plus tower PRs #89 (E2
+  drop-while-busy, E3 events) and #91 (loadRule ValidName). Those landed in
+  tower through #92.
 
-**S6 is decided and built (PR #121):** option (a), an opt-in recommended
-entry for `systemd-resolved` DNS, any address, port 53, TCP and UDP. The
-review narrowed it: it is pinned to the resolver's account (`user.id` 193)
-and never turned on by "Turn all on" (`broad` flag). Plan:
-`docs/superpowers/plans/2026-10-09-curated-dns-resolved.md`; tower r13
-verifies the path, the uid and tcp.
-
-**Owner decisions still pending: #117.** N3 (the "Unused" window across
-restarts), #65 (rule-file reloads), `InterceptUnknown`, and orchestrator
-calls to revisit. Nothing merged is blocked on them.
+**S6, N3 and #65 are built and merged** (#121, #123, #124): see the
+2026-10-09 section. Still open from #117: `InterceptUnknown` and the
+orchestrator calls to revisit (no change recorded). Nothing merged is blocked
+on them.
 
 **Follow-up issues, not started:**
 - #109 (blocklists), #110 (flaky tests under load), #113 (recommended rules),
@@ -94,7 +218,7 @@ Kirigami QML tests can segfault on stale AOT build artifacts. Run
 ## 2026-10-08 overnight + owner decisions
 
 Earlier on 2026-10-08, `main` was at `90a032b`. This section is history; the
-"2026-10-08 evening (current)" section above is the current status. The
+"2026-10-09 (current)" section at the top is the current status. The
 "Previously (2026-10-07)" section below predates everything here (it still
 calls #39 a draft; #39 merged as `670f42c`).
 
