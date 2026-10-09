@@ -19,13 +19,14 @@ fn the_data_file_parses_and_offers_the_reviewed_entries() {
         [
             "networkmanager-connectivity-check",
             "chronyc-local",
-            "flatpak-flathub"
+            "flatpak-flathub",
+            "dns-resolved"
         ]
     );
 }
 
 #[test]
-fn every_entry_builds_a_narrow_allow_under_the_reserved_prefix() {
+fn every_entry_builds_a_non_precedence_allow_under_the_reserved_prefix() {
     for entry in entries() {
         let rule = entry.rule();
         assert!(
@@ -65,6 +66,7 @@ fn each_entry_says_exactly_what_it_allows() {
             "/usr/bin/NetworkManager may connect to fedoraproject.org on TCP port 80, over IPv4 and IPv6.",
             "/usr/bin/chronyc may connect to this computer only (127.0.0.1 and ::1) on UDP port 323, over IPv4 and IPv6.",
             "/usr/bin/flatpak may connect to dl.flathub.org on TCP port 443, over IPv4 and IPv6.",
+            "/usr/lib/systemd/systemd-resolved may connect to any address on TCP and UDP port 53, over IPv4 and IPv6, but only while it runs as user ID 193 (the systemd-resolve account).",
         ]
     );
 }
@@ -106,7 +108,8 @@ fn the_allowlist_takes_only_the_exact_curated_shape() {
         op.data = r"\.flathub\.org$".into();
     })
     .is_err());
-    // A destination: one host or this computer, never any address.
+    // A destination: one host or this computer. Any address is the DNS
+    // resolver's alone (see `dns_tests`), so a flatpak rule without one fails.
     assert!(changed(&|rule| {
         rule.operator.as_mut().unwrap().list.remove(1);
     })
@@ -143,7 +146,8 @@ fn a_bad_entry_is_refused() {
         entry("/home/u/bin/flatpak", host),
         entry("/opt/x/flatpak", host),
         entry("/usr/bin/./flatpak", host),
-        // No destination: any address is never offered in v1 (S3).
+        // No destination: any address is offered for the DNS resolver only
+        // (S6; see `dns_tests`).
         entry("/usr/bin/flatpak", ""),
         entry("/usr/bin/flatpak", r#", "host": "*.flathub.org""#),
         entry("/usr/bin/flatpak", r#", "host": "10.0.2.3""#),

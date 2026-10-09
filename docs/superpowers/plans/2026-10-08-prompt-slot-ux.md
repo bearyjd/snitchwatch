@@ -682,7 +682,7 @@ Branch `feat/prompt-slot-curated-defaults`.
   | `/usr/bin/NetworkManager` → `fedoraproject.org`:80, tcp/tcp6 | included | the connectivity check |
   | `/usr/bin/chronyc` → `127.0.0.1`/`::1`:323, udp/udp6 | included, this computer only | talks to chronyd |
   | `/usr/bin/flatpak` → `dl.flathub.org`:443, tcp6 | included | Flathub updates (held in r10, so the update timed out) |
-  | `/usr/lib/systemd/systemd-resolved` → the network's DNS server:53, udp | **excluded, owner question S6** | the server differs per network, so only an any-address allow fits; S3 says host-constrained |
+  | `/usr/lib/systemd/systemd-resolved` → the network's DNS server:53, udp | **excluded from v1; S6 decided (a): an opt-in entry, added later** | the server differs per network, so only an any-address allow fits; S3 says host-constrained. See `2026-10-09-curated-dns-resolved.md` |
   | chronyd → NTP servers:123 | pending | chronyd was stopped in the fixture |
   | rpm-ostree, skopeo | pending r11 | r10 has only skopeo to a local image reference (`127.0.0.1`/`::1`:443) |
   | fwupd | pending r11 | not in r10 |
@@ -909,4 +909,7 @@ Tower VM checks:
   - (b) ship it in packaging instead, like the fetch rule;
   - (c) leave DNS to the user.
 
-  **OPEN.**
+  **DECIDED (owner, issue #117): (a).** An opt-in entry on the Recommended
+  rules page. Built as `dns-resolved`, narrowed by review: also pinned to
+  the resolver's account by user ID, and never turned on by "Turn all on"
+  (`docs/superpowers/plans/2026-10-09-curated-dns-resolved.md`).

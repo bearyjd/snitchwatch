@@ -1,6 +1,8 @@
 // Recommended background-service rules (prompt-slot plan Part D; owner
 // decision S3: opt-in, programs under /usr only, each limited to one host
-// or this computer).
+// or this computer; S6: the one exception is the system resolver's DNS,
+// any address on port 53, which "Turn all on" skips: the bridge marks it
+// `broad`, and it is turned on by itself).
 //
 // Each row says exactly what its rule allows, in the bridge's words from
 // its reviewed list, and why it is offered. Nothing is on unless the user
@@ -40,8 +42,11 @@ Kirigami.ScrollablePage {
             type: Kirigami.MessageType.Information
             visible: true
             text: "Background services on this computer that need the network. Each rule lets "
-                + "one program reach one place, and says exactly what it allows. Snitchwatch "
-                + "adds none unless you turn it on; a rule already in the firewall (added "
+                + "one program reach one host, or this computer, on one port, and says exactly "
+                + "what it allows, except the DNS rule, which lets the system resolver reach "
+                + "any address on port 53. Snitchwatch adds none unless you turn it on. The "
+                + "\"Turn all on\" button skips the DNS rule, which you turn on by itself; "
+                + "\"Turn all off\" turns it off too. A rule already in the firewall (added "
                 + "earlier) stays as it is until you keep it or turn it off. What each says is "
                 + "as of the firewall service's last rule list."
         }
