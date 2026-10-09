@@ -83,7 +83,11 @@ fn until_the_first_ping_a_restore_shows_a_provisional_gap_that_is_never_saved() 
         Some(baseline(LAST_PING, UPTIME_THEN, HITS_THEN)),
         "the next run can still judge"
     );
-    assert_eq!(out.stopped_unix_ms, None, "only the shutdown save says so");
+    assert_eq!(
+        out.stopped_unix_ms,
+        Some(LAST_PING + 1_000),
+        "still the previous run's"
+    );
 }
 
 #[test]
@@ -340,4 +344,51 @@ fn a_run_with_no_ping_hands_the_old_baseline_on() {
     let mut next = restored(out);
     next.record(&a_events(2), UPTIME_UP, HITS_THEN + 2, FIRST, |_| true);
     no_new_gap(&next);
+}
+
+#[test]
+fn a_run_with_no_ping_keeps_the_previous_runs_stop_status() {
+    // Row 9: a run that counted nothing can't vouch for the run before it.
+    // The previous run crashed: its last events may be lost, and a clean stop
+    // now must not hide that from a run after a reboot.
+    let hits = restored(usual(false));
+    assert_eq!(hits.to_saved().unwrap().stopped_unix_ms, None);
+    let out = hits.to_saved_at_stop(NOW + 5_000).unwrap();
+    assert_eq!(out.stopped_unix_ms, None, "the crash stands");
+    let mut next = restored(out);
+    next.record(&a_events(3), 40, 3, FIRST, |_| true);
+    gap_at_first_ping(&next);
+    // The previous run stopped cleanly: that stands too, in every save.
+    let hits = restored(usual(true));
+    assert_eq!(
+        hits.to_saved().unwrap().stopped_unix_ms,
+        Some(LAST_PING + 1_000)
+    );
+    let out = hits.to_saved_at_stop(NOW + 5_000).unwrap();
+    assert_eq!(out.stopped_unix_ms, Some(LAST_PING + 1_000));
+    let mut next = restored(out);
+    next.record(&a_events(3), 40, 3, FIRST, |_| true);
+    no_new_gap(&next);
+}
+
+#[test]
+fn once_judged_the_shutdown_save_is_this_runs_clean_stop() {
+    let mut hits = restored(usual(false));
+    hits.record(&a_events(2), UPTIME_UP, HITS_THEN + 2, FIRST, |_| true);
+    assert_eq!(hits.to_saved().unwrap().stopped_unix_ms, None);
+    assert_eq!(
+        hits.to_saved_at_stop(FIRST + 5_000)
+            .unwrap()
+            .stopped_unix_ms,
+        Some(FIRST + 5_000)
+    );
+    // A run that restored nothing.
+    let mut fresh = RuleHits::default();
+    fresh.trust_daemon_counters(true);
+    assert_eq!(fresh.to_saved_at_stop(NOW), None, "counting hasn't started");
+    fresh.record(&a_events(1), 50, 7, NOW, |_| true);
+    assert_eq!(
+        fresh.to_saved_at_stop(NOW + 1).unwrap().stopped_unix_ms,
+        Some(NOW + 1)
+    );
 }

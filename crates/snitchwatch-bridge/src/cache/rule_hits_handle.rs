@@ -185,7 +185,8 @@ impl RuleHitsHandle {
     }
 
     /// The save at shutdown: written even when nothing changed, and marked as
-    /// a clean stop (`stoppedUnixMs`). Any later save writes again, unmarked.
+    /// a clean stop (`stoppedUnixMs`; `RuleHits::to_saved_at_stop` says when
+    /// not). Any later save writes again, unmarked.
     pub fn save_at_stop(&self) {
         self.save(true);
     }
@@ -205,14 +206,16 @@ impl RuleHitsHandle {
         };
         let (saved, revision) = {
             let state = lock(&self.inner.state);
-            (state.to_saved(), state.revision())
+            let saved = if at_stop {
+                state.to_saved_at_stop(now_ms())
+            } else {
+                state.to_saved()
+            };
+            (saved, state.revision())
         };
-        let Some(mut saved) = saved else { return };
+        let Some(saved) = saved else { return };
         if !at_stop && saved_revision == Some(revision) && was_persistent {
             return;
-        }
-        if at_stop {
-            saved.stopped_unix_ms = Some(now_ms());
         }
         // Not under any other lock: a pinged `record` must not wait on disk.
         let result = rule_hits_file::save(&path, &saved);

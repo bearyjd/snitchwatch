@@ -74,8 +74,10 @@ baseline the next run measures from.
   nothing changed since the last periodic save, which would leave no
   `stoppedUnixMs`).
 - While a restart is still being judged (below), saves keep the restored
-  `daemon` baseline, so a run that sees no ping hands the same baseline to
-  the next run.
+  `daemon` baseline and its `stoppedUnixMs` (or its absence), the shutdown
+  save included, so a run that sees no ping hands both to the next run
+  unchanged. Otherwise a crash, then a run with no ping that stops cleanly,
+  then a reboot would read as a clean stop and hide the crash's losses.
 
 ### Who is trusted: the transport
 
@@ -114,7 +116,7 @@ time `now`, and the saved baseline (`pingUnixMs` P, `uptime` U₀,
 | 6 | Restarted, no clean stop (crash, kill, a failed final save) | – | **gap**: events the old bridge received after its last periodic save are gone, and the new daemon's counter can't show them |
 | 7 | Neither the same start nor a restart (suspend while the daemon kept running: its uptime lags the wall clock; a clock step between runs) | – | **gap** ("cannot tell") |
 | 8 | `H − H₀ < R` (row 4) or `H < R` (row 5): impossible within one daemon run | the usual in-run check | **gap** |
-| 9 | No ping during this whole run (daemon idle, down, or never connected) | – | stays pending: the wire keeps the provisional gap; the file keeps the old baseline and this run's `stoppedUnixMs`, and the next run judges |
+| 9 | No ping during this whole run (daemon idle, down, or never connected) | – | stays pending: the wire keeps the provisional gap; every save, the shutdown save included, keeps the old baseline **and the old run's stop status** (a run that counted nothing can't vouch for a crash before it), and the next run judges |
 | 10 | First ping is only E3 default-applied events | R = 0 | row 4: no gap iff `H = H₀`; row 5: no gap iff `H = 0` |
 | 11 | TCP | – | **gap** at restore, as today |
 
@@ -204,6 +206,12 @@ the PR.
 
 ## Tower r13 gate (system bridge, Unix)
 
+**Check the transport first.** Every item below assumes the system bridge
+(`snitchwatch-system-bridge`, opensnitchd dialing its Unix socket). On a
+per-user bridge over TCP (the shipped `default-config.json`'s
+`127.0.0.1:50051`) the expected result of every restart is **a gap,
+unchanged** from today.
+
 1. **Bridge-only restart.** Note `lastGapUnixMs` in
    `/var/lib/snitchwatch/rule_hits.json` (mode 0600, owner `snitchwatch`,
    `"version":2`). `systemctl restart snitchwatch-system-bridge`; make a few
@@ -242,18 +250,26 @@ the PR.
   cannot tell`, `clean_stop`, `missed`); trust is set by
   `UiService::with_daemon_transport` through
   `RuleHitsHandle::set_daemon_transport`; `RunningBridge::shutdown` calls
-  `RuleHitsHandle::save_at_stop`, after which any later save writes again,
-  unmarked.
+  `RuleHitsHandle::save_at_stop` (`RuleHits::to_saved_at_stop`: marked only
+  when no restore is pending), after which any later save writes again,
+  unmarked. The e2e bridges write their token next to their WS socket in
+  the test's tempdir, not under `$XDG_RUNTIME_DIR`.
 - Tests: the table's rows in `cache/rule_hits/restart_tests.rs`; file format
   in `cache/rule_hits_file/tests.rs`; handle in
   `cache/rule_hits_handle/tests.rs`; whole bridges (Unix and TCP, two runs on
   one state directory, the mock keeping its counters) in bridge-cli
   `rule_hits_restart_tests.rs`.
-- Mutation checks (by hand, 33 mutants: every guard of the judgement, the
+- Mutation checks (by hand, 35 mutants: every guard of the judgement, the
   slack both ways, the provisional gap, trust at restore and save, the
-  version range, both new time checks, unknown fields, the stop save's
-  write/mark/revision, the transport wiring and the shutdown call): all
-  killed.
+  pending stop status in both saves, the version range, both new time
+  checks, unknown fields, the stop save's write/mark/revision, the
+  transport wiring and the shutdown call): all killed.
+- Review finding fixed before merge: the shutdown save of a run that saw no
+  ping used to mark the file clean next to the previous (crashed) run's
+  baseline (`a_crash_stays_a_crash_through_a_run_that_saw_no_ping`).
+- **Rollback:** a pre-N3 bridge (e.g. after `rpm-ostree rollback`) refuses
+  a version 2 file as an unsupported version; it leaves the file alone and
+  keeps counts in memory until rolled forward.
 - Not changed: Kirigami. Its `hit_badge.rs` module doc still says a bridge
   restart is a gap; on the Unix socket that is now only when hits may have
   been lost (a doc follow-up, no behaviour change).

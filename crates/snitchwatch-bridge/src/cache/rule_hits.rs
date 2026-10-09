@@ -91,7 +91,9 @@
 //! A daemon that stayed up but looks restarted only meets the stricter test,
 //! which its old hits fail. Until that first ping the wire shows a
 //! provisional gap at the restore (never saved), so nothing reads "Unused"
-//! early, and saves keep the restored baseline. All of this is only on the
+//! early, and saves keep the restored baseline with its run's stop status,
+//! even the shutdown save: a run that counted nothing can't vouch for a crash
+//! before it ([`RuleHits::to_saved_at_stop`]). All of this is only on the
 //! root-only Unix socket ([`RuleHits::trust_daemon_counters`]): over TCP any
 //! local process can send that first ping, so a restore there is a gap at
 //! once, as is a file with no baseline (version 1).
@@ -155,11 +157,12 @@ pub struct Saved {
     pub stopped_unix_ms: Option<i64>,
 }
 
-/// A restored baseline waiting for the first ping.
+/// A restored baseline waiting for the first ping, with the stop status of
+/// the run that counted it.
 #[derive(Debug, Clone, Copy)]
 struct Pending {
     daemon: DaemonBaseline,
-    stopped_cleanly: bool,
+    stopped_unix_ms: Option<i64>,
 }
 
 /// The counts. Pure: times and the rule cache's membership are passed in.
@@ -351,7 +354,7 @@ impl RuleHits {
             Some(daemon) => {
                 self.pending = Some(Pending {
                     daemon,
-                    stopped_cleanly: saved.stopped_unix_ms.is_some(),
+                    stopped_unix_ms: saved.stopped_unix_ms,
                 });
                 self.provisional_gap_unix_ms = Some(now_ms);
             }
@@ -386,8 +389,21 @@ impl RuleHits {
             last_gap_unix_ms: self.last_gap_unix_ms,
             hits,
             daemon: daemon.filter(|_| self.trust_daemon_counters),
-            stopped_unix_ms: None,
+            // Its stop status goes with the baseline.
+            stopped_unix_ms: self.pending.and_then(|pending| pending.stopped_unix_ms),
         })
+    }
+
+    /// What the shutdown save writes: [`Self::to_saved`], marked as a clean
+    /// stop at `now_ms`. Not while a restore still waits for its first ping:
+    /// this run counted nothing, so the saved baseline and its stop status
+    /// are still the run's before it (a crash then stays a crash).
+    pub fn to_saved_at_stop(&self, now_ms: i64) -> Option<Saved> {
+        let mut saved = self.to_saved()?;
+        if self.pending.is_none() {
+            saved.stopped_unix_ms = Some(now_ms);
+        }
+        Some(saved)
     }
 
     /// The counts clients see, in name order.
@@ -461,11 +477,9 @@ fn restart_missed_hits(
     let restarted = rule_hits < then.rule_hits
         || uptime < then.uptime
         || started_now >= then.ping_unix_ms.saturating_sub(SAME_START_SLACK_MS);
+    let clean_stop = pending.stopped_unix_ms.is_some();
     let (daemon, missed) = if restarted {
-        (
-            "restarted",
-            !pending.stopped_cleanly || rule_hits != received,
-        )
+        ("restarted", !clean_stop || rule_hits != received)
     } else if started_now.abs_diff(started_then) <= SAME_START_SLACK_MS.unsigned_abs() {
         ("stayed up", rule_hits - then.rule_hits != received)
     } else {
@@ -473,9 +487,7 @@ fn restart_missed_hits(
     };
     info!(
         daemon,
-        clean_stop = pending.stopped_cleanly,
-        missed,
-        "rule hit counts: a bridge restart judged from the daemon's counters"
+        clean_stop, missed, "rule hit counts: a bridge restart judged from the daemon's counters"
     );
     missed
 }

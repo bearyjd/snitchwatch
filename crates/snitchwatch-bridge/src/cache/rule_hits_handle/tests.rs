@@ -474,3 +474,26 @@ fn a_bridge_restart_over_tcp_is_always_a_gap() {
     second.record(&[ev("a"), ev("a")], 101, 9, &rules);
     assert!(view(second.message()).lossy);
 }
+
+#[test]
+fn a_crash_stays_a_crash_through_a_run_that_saw_no_ping() {
+    let dir = state_dir();
+    let path = dir.path().join("rule_hits.json");
+    let rules = synced(&["a"]);
+    // Run one crashes after a periodic save.
+    let (first, _rx) = unix_handle();
+    first.attach_file(path.clone());
+    first.record(&[ev("a")], 100, 7, &rules);
+    first.save_now();
+    // Run two: the daemon is idle, no ping; then a clean stop.
+    let (second, _rx) = unix_handle();
+    second.attach_file(path.clone());
+    second.save_at_stop();
+    assert_eq!(stopped_in(&path), None, "it vouches for nothing before it");
+    // Run three, after a reboot: every hit of the new daemon run arrived,
+    // but what run one received after its last save is gone.
+    let (third, _rx) = unix_handle();
+    third.attach_file(path);
+    third.record(&[ev("a")], 2, 1, &rules);
+    assert!(view(third.message()).lossy);
+}
