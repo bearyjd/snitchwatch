@@ -219,6 +219,22 @@ fn the_same_refused_add_twice_allows_one_and_a_later_ok_allows_none() {
     assert_eq!(flips.last(), Some(&true), "{flips:?}");
 }
 
+/// The daemon deleted what a refused add had put in (the curated defaults
+/// do this when switched off): its copy is gone, and so is the allowance.
+#[test]
+fn a_confirmed_delete_of_a_refused_add_forgets_it() {
+    let mut cache = synced(vec![rule("a", "always", true)]);
+    cache.apply_refused(&change(rule("c", "always", true)));
+    cache.apply_confirmed(&Notification {
+        r#type: Action::DeleteRule as i32,
+        rules: vec![rule("c", "always", true)],
+        ..Default::default()
+    });
+    settle(&mut cache, 1);
+    let flips = many(&mut cache, 2, 3);
+    assert_eq!(flips.last(), Some(&true), "{flips:?}");
+}
+
 #[test]
 fn only_so_many_refused_names_are_remembered() {
     let mut cache = synced(Vec::new());

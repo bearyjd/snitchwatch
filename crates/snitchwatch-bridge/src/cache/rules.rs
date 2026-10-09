@@ -283,6 +283,7 @@ impl RulesCache {
     pub fn remove(&mut self, name: &str) {
         let removed = self.rules.as_mut().and_then(|rules| rules.remove(name));
         self.expiries.remove(name);
+        self.may_hold.forget(name);
         let was_left_out = self.rules.is_some() && self.left_out.remove(name).is_some();
         if removed.is_some() || was_left_out {
             self.revision += 1;
