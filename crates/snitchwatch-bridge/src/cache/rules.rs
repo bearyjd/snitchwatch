@@ -83,6 +83,12 @@ pub struct RulesCache {
     /// Names whose `DELETE_RULE` the daemon refused: see
     /// [`Self::files_left`] (`rules_refused.rs`). Kept across lists.
     files_left: BTreeSet<String>,
+    /// The debounce behind the Rules page's "different number of rules"
+    /// hint (`rules_count.rs`). Not part of the list: no revision bump.
+    count_watch: count::CountWatch,
+    /// A rule left out for the size limits was temporary, so its daemon
+    /// timer may drop it unseen (`rules_count.rs`).
+    left_out_temporary: bool,
 }
 
 /// The daemon timer that will remove a temporary rule (PR #106 review M2),
@@ -112,6 +118,8 @@ pub(crate) struct Snapshot {
     /// rules were kept. Staged and adopted like a list, so the count shown
     /// belongs to the connection that sent it (PR #106 review L1).
     pub(crate) over_limit: Option<usize>,
+    /// A rule left out was temporary (`rules_count.rs`).
+    pub(crate) left_out_temporary: bool,
 }
 
 impl From<Vec<Rule>> for Snapshot {
@@ -177,6 +185,8 @@ impl RulesCache {
         }
         self.rules = Some(rules.into_iter().map(|r| (r.name.clone(), r)).collect());
         self.over_limit_total = None;
+        self.count_watch = count::CountWatch::default();
+        self.left_out_temporary = false;
         self.revision += 1;
     }
 
@@ -196,6 +206,7 @@ impl RulesCache {
                 .map(|total| u32::try_from(total).unwrap_or(u32::MAX)),
             listed: !self.is_unknown(),
             left_on_disk: u32::try_from(self.files_left.len()).unwrap_or(u32::MAX),
+            count_mismatch: self.count_mismatch(),
         }
     }
 
@@ -203,6 +214,8 @@ impl RulesCache {
     pub fn set_unknown(&mut self) {
         self.left_out.clear();
         self.expiries.clear();
+        self.count_watch = count::CountWatch::default();
+        self.left_out_temporary = false;
         if self.rules.take().is_some() {
             self.revision += 1;
         }
@@ -338,7 +351,7 @@ fn now_secs() -> i64 {
 /// (`loader.go` `isTemporary`: not `once`, `until restart` or `always`).
 /// Approximate: a duration that isn't a `\d+[smh]` sequence has none.
 fn timer_from(rule: &Rule, start: i64) -> Option<Expiry> {
-    if matches!(rule.duration.as_str(), "once" | "until restart" | "always") {
+    if !count::is_temporary(&rule.duration) {
         return None;
     }
     Some(Expiry {
@@ -410,6 +423,14 @@ impl PendingSnapshots {
         while self.entries.len() > PENDING_SNAPSHOT_CAP {
             self.entries.pop_front();
         }
+    }
+
+    /// Whether a fresh snapshot waits for its stream's HELLO.
+    pub(crate) fn awaiting_adoption(&self, now: Instant) -> bool {
+        self.entries.iter().any(|staged| {
+            staged.adopted_by.is_empty()
+                && now.saturating_duration_since(staged.at) <= PENDING_SNAPSHOT_TTL
+        })
     }
 
     /// `key`'s fresh snapshot if `stream` has adopted it already: what a
@@ -502,6 +523,7 @@ fn bounded_snapshot(rules: Vec<Rule>) -> Snapshot {
             snapshot.rules.push(rule);
             continue;
         }
+        snapshot.left_out_temporary |= count::is_temporary(&rule.duration);
         let key = if rule.name.len() <= crate::rule_name::MAX_RULE_NAME_BYTES {
             rule.name.clone()
         } else {
@@ -722,6 +744,7 @@ impl RulesSync {
             let mut cache = lock(&self.cache);
             cache.replace_all(snapshot.rules);
             cache.set_left_out(snapshot.left_out);
+            cache.note_left_out_temporary(snapshot.left_out_temporary);
             self.hits.adopt_snapshot(&cache);
         }
         self.publish();
@@ -846,6 +869,8 @@ pub async fn prune_expired_rules_every(
     }
 }
 
+#[path = "rules_count.rs"]
+mod count;
 #[path = "rules_refused.rs"]
 mod refused;
 pub use refused::MAX_FILES_LEFT;

@@ -82,6 +82,7 @@ mod tests {
             over_limit_total,
             listed: over_limit_total.is_none(),
             left_on_disk: 0,
+            count_mismatch: false,
         }
     }
 
@@ -92,6 +93,7 @@ mod tests {
             over_limit_total: None,
             listed: true,
             left_on_disk,
+            count_mismatch: false,
         };
         let one = not_shown_text(&left(1)).unwrap();
         assert!(
@@ -108,6 +110,7 @@ mod tests {
             over_limit_total: None,
             listed: true,
             left_on_disk: 1,
+            count_mismatch: false,
         })
         .unwrap();
         assert!(

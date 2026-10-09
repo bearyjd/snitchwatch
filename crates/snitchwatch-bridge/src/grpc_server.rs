@@ -284,6 +284,10 @@ impl Ui for UiService {
             );
             self.rules
                 .record_hits(&stats.events, stats.uptime, stats.rule_hits);
+            // Its own statement: neither this nor `record_hits` may run under
+            // the rules cache lock the next block takes.
+            self.rules
+                .observe_daemon_rules(stats.rules, stats.uptime, self.commands.in_flight());
             let new_rows: Vec<_> = {
                 let rules = self.rules_handle();
                 let rules = rules.lock().unwrap_or_else(|e| e.into_inner());
