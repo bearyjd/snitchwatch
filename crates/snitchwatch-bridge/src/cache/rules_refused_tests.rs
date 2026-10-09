@@ -205,6 +205,7 @@ fn the_count_is_omitted_from_the_wire_when_zero() {
             over_limit_total: None,
             listed: true,
             left_on_disk,
+            count_mismatch: false,
         })
         .unwrap()
     };

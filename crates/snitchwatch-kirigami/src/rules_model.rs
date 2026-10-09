@@ -100,6 +100,9 @@ pub mod qobject {
         /// What the list leaves out, as plain text (issue #61); "" when
         /// nothing is.
         #[qproperty(QString, not_shown_text, cxx_name = "notShownText")]
+        /// The hint that the firewall service reports a different number of
+        /// rules than the list holds (issue #65); "" when it doesn't.
+        #[qproperty(QString, count_hint_text, cxx_name = "countHintText")]
         /// Whether the bridge has the firewall service's rule list: false
         /// until one arrives, and while the bridge has none (PR #106
         /// review), so an empty list isn't called "No rules yet".
@@ -233,6 +236,7 @@ pub struct RulesModelRust {
     hits: RuleHitsView,
     hits_info_json: QString,
     not_shown_text: QString,
+    count_hint_text: QString,
     listed: bool,
     /// Whether a `RulesNotShown` arrived: from then on only it says whether
     /// there is a list (PR #106 review N8).
@@ -547,6 +551,9 @@ impl qobject::RulesModel {
         }
         if let Some(text) = crate::rules::not_shown::not_shown_text(&msg) {
             self.as_mut().set_not_shown_text(QString::from(&text));
+            if let Some(hint) = crate::rules::not_shown::count_hint_text(&msg) {
+                self.as_mut().set_count_hint_text(QString::from(hint));
+            }
             if let ServerMessage::RulesNotShown { listed, .. } = msg {
                 self.as_mut().rust_mut().says_listed = true;
                 self.as_mut().set_listed(listed);

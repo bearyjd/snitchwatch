@@ -163,6 +163,28 @@ impl MockOpensnitchd {
         Ok(reply)
     }
 
+    /// A `Ping` as the real daemon builds one when it has new events
+    /// (`vendor/opensnitch/daemon/statistics/stats.go` `Serialize`): `rules`
+    /// is its loader's `NumRules()`, every rule in memory, enabled or not
+    /// ([`loader::LoaderModel::num_rules`]), and `uptime` is in seconds.
+    pub async fn ping_reporting_rules(
+        &mut self,
+        id: u64,
+        rules: u64,
+        uptime: u64,
+    ) -> Result<PingReply, MockError> {
+        self.ping_with_stats(
+            id,
+            snitchwatch_proto::protocol::Statistics {
+                rules,
+                uptime,
+                daemon_version: "mock-1.8.0".to_string(),
+                ..Default::default()
+            },
+        )
+        .await
+    }
+
     pub async fn subscribe(&mut self, name: &str) -> Result<ClientConfig, MockError> {
         let cfg = ClientConfig {
             id: 1,

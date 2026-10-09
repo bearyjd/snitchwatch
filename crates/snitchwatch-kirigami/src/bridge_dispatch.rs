@@ -331,6 +331,7 @@ mod tests {
             over_limit_total: None,
             listed: true,
             left_on_disk: 0,
+            count_mismatch: false,
         };
         assert!(interests_rules(&not_shown));
         assert!(!interests_connections(&not_shown));

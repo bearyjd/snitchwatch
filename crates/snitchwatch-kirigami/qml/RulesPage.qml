@@ -114,8 +114,10 @@ Kirigami.ScrollablePage {
                                               && !ruleEditor.visible
     // What the list leaves out (#61); no "No rules yet" while that shows.
     readonly property bool showsNotShown: !!page.model && page.model.notShownText.length > 0
+    // Issue #65: the firewall service's rule count differs from the list's.
+    readonly property bool showsCountHint: !!page.model && page.model.countHintText.length > 0
     readonly property bool showsEmptyPlaceholder: (!page.model || page.model.count === 0)
-                                                  && !page.showsNotShown
+                                                  && !page.showsNotShown && !page.showsCountHint
 
     // `allow`, `deny`, or an unrecognised action (a neutral colour, N4).
     function actionColor(action) {
@@ -295,7 +297,7 @@ Kirigami.ScrollablePage {
     // last import or export outcome.
     header: ColumnLayout {
         visible: page.showsAllAppsNotice || page.showsIoStatus || page.showsEditorStatus
-                 || page.showsNotShown
+                 || page.showsNotShown || page.showsCountHint
             || hitsSummaryLabel.text.length > 0 || hitsStorageLabel.text.length > 0
             || analysisLabel.text.length > 0
         spacing: 0
@@ -377,6 +379,18 @@ Kirigami.ScrollablePage {
             textFormat: Text.PlainText
             wrapMode: Text.Wrap
             text: page.model ? page.model.notShownText : ""
+        }
+        // Issue #65: fixed text, advice only (the list is not re-sent).
+        Controls.Label {
+            objectName: "rulesCountHint"
+            visible: page.showsCountHint
+            Layout.fillWidth: true
+            Layout.margins: Kirigami.Units.smallSpacing
+            textFormat: Text.PlainText
+            wrapMode: Text.Wrap
+            font: Kirigami.Theme.smallFont
+            color: Kirigami.Theme.neutralTextColor
+            text: page.model ? page.model.countHintText : ""
         }
         // The rule editor's last result (P2.1), plain text.
         Controls.Label {

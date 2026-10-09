@@ -59,6 +59,34 @@ pub fn not_shown_text(message: &ServerMessage) -> Option<String> {
     Some(parts.join(" "))
 }
 
+/// The Rules page's hint when the firewall service keeps reporting a
+/// different number of rules than the list holds (issue #65). One fixed
+/// text: nothing the service says is rendered. The count can't say why, and
+/// an edit of a rule file in place leaves it alone, so the sentence is a
+/// possibility and a remedy, never a claim about the cause.
+pub const COUNT_MISMATCH_HINT: &str = "The firewall service reports a different number of rules \
+     than this list shows, so rule files may have been changed outside Snitchwatch. Restarting \
+     the firewall service refreshes the list.";
+
+/// The page's hint for a `RulesNotShown`: [`COUNT_MISMATCH_HINT`] while the
+/// bridge says the counts differ and it has a list to differ from, and an
+/// empty string otherwise; `None` for any other message.
+pub fn count_hint_text(message: &ServerMessage) -> Option<&'static str> {
+    let ServerMessage::RulesNotShown {
+        listed,
+        count_mismatch,
+        ..
+    } = message
+    else {
+        return None;
+    };
+    Some(if *listed && *count_mismatch {
+        COUNT_MISMATCH_HINT
+    } else {
+        ""
+    })
+}
+
 /// `n` with thousands separators (12,000).
 fn grouped(n: u64) -> String {
     let digits = n.to_string();
@@ -82,6 +110,7 @@ mod tests {
             over_limit_total,
             listed: over_limit_total.is_none(),
             left_on_disk: 0,
+            count_mismatch: false,
         }
     }
 
@@ -92,6 +121,7 @@ mod tests {
             over_limit_total: None,
             listed: true,
             left_on_disk,
+            count_mismatch: false,
         };
         let one = not_shown_text(&left(1)).unwrap();
         assert!(
@@ -108,12 +138,53 @@ mod tests {
             over_limit_total: None,
             listed: true,
             left_on_disk: 1,
+            count_mismatch: false,
         })
         .unwrap();
         assert!(
             both.starts_with("2 rules aren't listed") && both.ends_with("saved file."),
             "{both}"
         );
+    }
+
+    fn mismatch(listed: bool, count_mismatch: bool) -> ServerMessage {
+        ServerMessage::RulesNotShown {
+            too_large: 0,
+            over_limit_total: None,
+            listed,
+            left_on_disk: 0,
+            count_mismatch,
+        }
+    }
+
+    #[test]
+    fn the_count_hint_is_one_fixed_sentence_pair_shown_only_for_a_listed_mismatch() {
+        assert_eq!(
+            count_hint_text(&mismatch(true, true)),
+            Some(COUNT_MISMATCH_HINT)
+        );
+        assert_eq!(count_hint_text(&mismatch(true, false)), Some(""));
+        // With no list from the firewall service there is nothing to differ from.
+        assert_eq!(count_hint_text(&mismatch(false, true)), Some(""));
+        assert_eq!(count_hint_text(&ServerMessage::ClearConnectionRows), None);
+    }
+
+    #[test]
+    fn the_count_hint_is_honest_actionable_and_plain() {
+        let hint = COUNT_MISMATCH_HINT;
+        assert!(hint.contains("different number of rules"), "{hint}");
+        assert!(hint.contains("changed outside Snitchwatch"), "{hint}");
+        assert!(
+            hint.contains("may have been"),
+            "it is a possibility: {hint}"
+        );
+        assert!(
+            hint.contains("Restarting the firewall service refreshes the list"),
+            "{hint}"
+        );
+        assert!(!hint.contains(['<', '>', '&', '\n']), "plain text: {hint}");
+        // The mismatch says nothing else is left out.
+        assert_eq!(not_shown_text(&mismatch(true, true)).as_deref(), Some(""));
     }
 
     #[test]

@@ -188,9 +188,11 @@ impl UiService {
     }
 
     /// TCP (the default) fans commands out to every open daemon stream; the
-    /// root-only Unix socket uses the current one. Call before taking handles.
+    /// root-only Unix socket uses the current one, and its counters judge a
+    /// bridge restart's hit-count gap (N3). Call before taking handles.
     pub fn with_daemon_transport(mut self, transport: DaemonTransport) -> Self {
         self.commands = DaemonCommands::new(transport, self.rules.clone());
+        self.rules.hits().set_daemon_transport(transport);
         self
     }
 
@@ -284,6 +286,10 @@ impl Ui for UiService {
             );
             self.rules
                 .record_hits(&stats.events, stats.uptime, stats.rule_hits);
+            // Its own statement: neither this nor `record_hits` may run under
+            // the rules cache lock the next block takes.
+            self.rules
+                .observe_daemon_rules(stats.rules, stats.uptime, self.commands.in_flight());
             let new_rows: Vec<_> = {
                 let rules = self.rules_handle();
                 let rules = rules.lock().unwrap_or_else(|e| e.into_inner());
