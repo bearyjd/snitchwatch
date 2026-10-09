@@ -204,7 +204,7 @@ impl RunningBridge {
         // The ticker first, so no save is started behind this one; `save_now`
         // waits for one already running.
         self.rule_hits_ticker.abort();
-        self.rule_hits.save_now();
+        self.rule_hits.save_at_stop();
         if let Some(tx) = self.ws_shutdown_tx.take() {
             let _ = tx.send(());
         }
@@ -796,3 +796,6 @@ mod pause_tests;
 
 #[cfg(test)]
 mod leftover_unix_tests;
+
+#[cfg(test)]
+mod rule_hits_restart_tests;

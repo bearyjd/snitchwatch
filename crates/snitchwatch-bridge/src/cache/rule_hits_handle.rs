@@ -11,7 +11,8 @@
 //!
 //! **Saving.** With a file attached ([`Self::attach_file`]) the ticker saves
 //! every [`SAVE_PERIOD`] when something changed, and the bridge saves once
-//! more on shutdown ([`Self::save_now`]). Saves are serialised by one lock,
+//! more on shutdown ([`Self::save_at_stop`], always written and marked as a
+//! clean stop, which the next run needs to judge a daemon restart; N3). Saves are serialised by one lock,
 //! and each writes a temp file of its own (`rule_hits_file::save`), so not
 //! even another bridge on the same directory shares it. A file that can't be
 //! read is left as it is and the counts stay in memory; a save that fails
@@ -34,6 +35,7 @@ use tracing::{error, warn};
 use crate::cache::rule_hits::RuleHits;
 use crate::cache::rule_hits_file;
 use crate::cache::rules::{RulesCache, SharedRulesCache};
+use crate::daemon_commands::DaemonTransport;
 use crate::ws_messages::{ServerMessage, StorageStatus};
 
 /// The least time between two `RuleHits` broadcasts.
@@ -168,9 +170,26 @@ impl RuleHitsHandle {
         }
     }
 
+    /// How the daemon reaches the bridge: a restart is judged from its
+    /// counters only on the root-only Unix socket (`cache::rule_hits`, N3).
+    /// Call before [`Self::attach_file`].
+    pub fn set_daemon_transport(&self, transport: DaemonTransport) {
+        lock(&self.inner.state).trust_daemon_counters(transport == DaemonTransport::Unix);
+    }
+
     /// Saves the counts if they changed since the last save. Safe to call
-    /// from any thread, and again at shutdown.
+    /// from any thread.
     pub fn save_now(&self) {
+        self.save(false);
+    }
+
+    /// The save at shutdown: written even when nothing changed, and marked as
+    /// a clean stop (`stoppedUnixMs`). Any later save writes again, unmarked.
+    pub fn save_at_stop(&self) {
+        self.save(true);
+    }
+
+    fn save(&self, at_stop: bool) {
         let _saving = lock(&self.inner.saving);
         let (path, saved_revision, was_persistent) = {
             let persistence = lock(&self.inner.persistence);
@@ -187,16 +206,19 @@ impl RuleHitsHandle {
             let state = lock(&self.inner.state);
             (state.to_saved(), state.revision())
         };
-        let Some(saved) = saved else { return };
-        if saved_revision == Some(revision) && was_persistent {
+        let Some(mut saved) = saved else { return };
+        if !at_stop && saved_revision == Some(revision) && was_persistent {
             return;
+        }
+        if at_stop {
+            saved.stopped_unix_ms = Some(now_ms());
         }
         // Not under any other lock: a pinged `record` must not wait on disk.
         let result = rule_hits_file::save(&path, &saved);
         let mut persistence = lock(&self.inner.persistence);
         match result {
             Ok(()) => {
-                persistence.saved_revision = Some(revision);
+                persistence.saved_revision = (!at_stop).then_some(revision);
                 if !persistence.status.persistent {
                     persistence.status = StorageStatus {
                         persistent: true,

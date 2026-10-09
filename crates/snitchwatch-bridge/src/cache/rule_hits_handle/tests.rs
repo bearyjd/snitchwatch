@@ -372,3 +372,105 @@ async fn the_ticker_saves_changed_counts_every_five_minutes() {
     }
     assert!(path.exists(), "saved at five minutes");
 }
+
+// N3 (plan `2026-10-09-n3-unused-window-from-daemon-counters.md`): the
+// shutdown save, and a bridge restart judged from the daemon's counters.
+
+fn unix_handle() -> (RuleHitsHandle, broadcast::Receiver<ServerMessage>) {
+    let (hits, rx) = handle();
+    hits.set_daemon_transport(DaemonTransport::Unix);
+    (hits, rx)
+}
+
+fn stopped_in(path: &std::path::Path) -> Option<i64> {
+    rule_hits_file::load(path)
+        .unwrap()
+        .expect("a saved file")
+        .stopped_unix_ms
+}
+
+#[test]
+fn the_shutdown_save_always_writes_and_says_the_run_stopped_cleanly() {
+    let dir = state_dir();
+    let path = dir.path().join("rule_hits.json");
+    let (hits, _rx) = unix_handle();
+    hits.attach_file(path.clone());
+    hits.record(&[ev("a")], 10, 1, &synced(&["a"]));
+    hits.save_now();
+    assert_eq!(stopped_in(&path), None, "a periodic save");
+    let before = now_ms();
+    hits.save_at_stop();
+    let stopped = stopped_in(&path).expect("written although nothing changed");
+    assert!((before..=now_ms()).contains(&stopped));
+    // Were the bridge to go on, its next save no longer claims a clean stop,
+    // changed or not.
+    hits.save_now();
+    assert_eq!(stopped_in(&path), None);
+}
+
+#[test]
+fn the_shutdown_save_needs_a_file_and_started_counts() {
+    let dir = state_dir();
+    let path = dir.path().join("rule_hits.json");
+    let (hits, _rx) = unix_handle();
+    hits.save_at_stop();
+    hits.attach_file(path.clone());
+    hits.save_at_stop();
+    assert!(!path.exists(), "counting hasn't started");
+}
+
+/// Run one: a ping with the daemon's counters, then a clean stop or only a
+/// periodic save. Run two restores from the same file.
+fn second_run(clean: bool, transport: DaemonTransport) -> (RuleHitsHandle, SharedRulesCache) {
+    let dir = state_dir();
+    let path = dir.path().join("rule_hits.json");
+    let rules = synced(&["a"]);
+    let (first, _rx) = unix_handle();
+    first.attach_file(path.clone());
+    first.record(&[ev("a")], 100, 7, &rules);
+    assert!(!view(first.message()).lossy, "the first run has no gap");
+    if clean {
+        first.save_at_stop();
+    } else {
+        first.save_now();
+    }
+    let (second, _rx) = handle();
+    second.set_daemon_transport(transport);
+    second.attach_file(path);
+    second.adopt_snapshot(&rules.lock().unwrap());
+    (second, rules)
+}
+
+#[test]
+fn a_bridge_restart_with_the_daemon_up_is_no_gap_on_the_unix_socket() {
+    let (second, rules) = second_run(true, DaemonTransport::Unix);
+    assert!(
+        view(second.message()).lossy,
+        "provisional, until the first ping"
+    );
+    // Two hits while the bridge was down, delivered with its first ping.
+    second.record(&[ev("a"), ev("a")], 101, 9, &rules);
+    let v = view(second.message());
+    assert!(!v.lossy);
+    assert_eq!(v.hits, vec![("a".to_string(), 3)]);
+}
+
+#[test]
+fn a_bridge_restart_with_a_restarted_daemon_needs_the_clean_stop() {
+    let (second, rules) = second_run(true, DaemonTransport::Unix);
+    second.record(&[ev("a")], 2, 1, &rules);
+    assert!(
+        !view(second.message()).lossy,
+        "every hit of the new run arrived"
+    );
+    let (second, rules) = second_run(false, DaemonTransport::Unix);
+    second.record(&[ev("a")], 2, 1, &rules);
+    assert!(view(second.message()).lossy, "no clean stop: cannot tell");
+}
+
+#[test]
+fn a_bridge_restart_over_tcp_is_always_a_gap() {
+    let (second, rules) = second_run(true, DaemonTransport::Tcp);
+    second.record(&[ev("a"), ev("a")], 101, 9, &rules);
+    assert!(view(second.message()).lossy);
+}
