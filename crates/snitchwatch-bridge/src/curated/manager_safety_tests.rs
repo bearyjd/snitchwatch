@@ -181,31 +181,65 @@ async fn removal_isnt_for_an_unedited_copy() {
     assert!(harness.seen().is_empty(), "{:?}", harness.seen());
 }
 
-/// M5: a refused delete says so, isn't sent again on the same daemon
-/// stream, and is tried again once the daemon reconnects.
+/// M5, tower r12: a refused delete took the rule out of the daemon's
+/// memory, its file left behind. It says so, isn't sent again, and is tried
+/// again once the daemon lists the rule again (its file loaded at a start).
 #[tokio::test]
-async fn a_refused_delete_is_reported_and_retried() {
+async fn a_refused_delete_says_its_file_is_left_and_is_retried_when_listed_again() {
     let harness = Harness::new().connect(Daemon::RefuseDeletes, vec![flatpak_rule()]);
     let curated = harness.curated();
     turn(&curated, FLATPAK, false);
     curated.reconcile().await;
     let state = entry_state(&curated, FLATPAK);
-    assert_eq!(state.status, EntryStatus::NotRemoved);
-    assert_eq!(
-        state.problem.as_deref(),
-        Some("The firewall service refused to remove the rule.")
-    );
+    assert_eq!(state.status, EntryStatus::OffFileLeft);
+    assert_eq!(state.problem, None);
+    assert!(!state.on);
     curated.reconcile().await;
     assert_eq!(harness.seen().len(), 1, "sent again: {:?}", harness.seen());
     assert_eq!(
         entry_state(&curated, FLATPAK).status,
-        EntryStatus::NotRemoved
+        EntryStatus::OffFileLeft
     );
     *harness.policy.lock().unwrap() = Daemon::Accept;
     harness.resync(vec![flatpak_rule()]);
     curated.reconcile().await;
     assert_eq!(harness.seen().len(), 2, "retried: {:?}", harness.seen());
     assert_eq!(entry_state(&curated, FLATPAK).status, EntryStatus::Off);
+}
+
+/// Tower r12, at once: turned on again before any other pass ran, the entry
+/// is installed again, not taken for one deleted outside Snitchwatch (its
+/// install record went with the refused delete).
+#[tokio::test]
+async fn turned_on_right_after_a_refused_delete_it_is_installed_again() {
+    let harness = Harness::new().connect(Daemon::RefuseDeletes, Vec::new());
+    let curated = harness.curated();
+    turn(&curated, FLATPAK, true);
+    curated.reconcile().await;
+    assert_eq!(
+        entry_state(&curated, FLATPAK).status,
+        EntryStatus::Installed
+    );
+    turn(&curated, FLATPAK, false);
+    curated.reconcile().await;
+    assert_eq!(
+        entry_state(&curated, FLATPAK).status,
+        EntryStatus::OffFileLeft
+    );
+    turn(&curated, FLATPAK, true);
+    curated.reconcile().await;
+    assert_eq!(
+        harness.seen(),
+        vec![
+            (Action::ChangeRule as i32, FLATPAK_RULE.to_string()),
+            (Action::DeleteRule as i32, FLATPAK_RULE.to_string()),
+            (Action::ChangeRule as i32, FLATPAK_RULE.to_string()),
+        ]
+    );
+    assert_eq!(
+        entry_state(&curated, FLATPAK).status,
+        EntryStatus::Installed
+    );
 }
 
 async fn wait_for(status: EntryStatus, rx: &mut broadcast::Receiver<ServerMessage>) {

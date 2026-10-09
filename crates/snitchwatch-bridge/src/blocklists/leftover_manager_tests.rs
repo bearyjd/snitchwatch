@@ -252,20 +252,17 @@ async fn no_leftovers_have_no_cause() {
     );
 }
 
-/// A removal the daemon partly refuses says so under the button.
+/// Tower r12: a refused delete comes after the daemon stopped using the
+/// rule, so nothing is left to remove here; the Rules page says the files
+/// may bring them back (`RulesNotShown::left_on_disk`).
 #[tokio::test]
-async fn a_refused_removal_is_reported_to_the_gui() {
+async fn a_refused_removal_leaves_no_leftovers_and_notes_the_files() {
     let h = holding_two();
     h.set_daemon(Daemon::RefuseDelete("busy"));
     let mgr = without_a_state_directory(&h);
     mgr.remove_leftover_rules().await;
-    let (cause, reason, count) = cause_and_reason(&mgr);
-    assert_eq!((cause.as_deref(), count), (Some("no_state_dir"), 2));
-    let reason = reason.expect("the refusal is reported");
-    assert!(
-        reason.contains("refused") && reason.contains("2"),
-        "{reason}"
-    );
+    assert_eq!(cause_and_reason(&mgr), (None, None, 0));
+    assert_eq!(h.rules.cache().lock().unwrap().files_left().len(), 2);
 }
 
 #[tokio::test]
@@ -286,7 +283,7 @@ async fn a_removal_that_could_not_reach_the_daemon_says_why() {
 #[tokio::test]
 async fn the_note_of_a_failed_removal_goes_with_the_leftovers() {
     let h = holding_two();
-    h.set_daemon(Daemon::RefuseDelete("busy"));
+    h.set_daemon(Daemon::Silent);
     let mgr = without_a_state_directory(&h);
     mgr.remove_leftover_rules().await;
     assert!(mgr.leftover_outcome().is_some());
@@ -310,7 +307,7 @@ fn two_rules(h: &Harness) -> Vec<snitchwatch_proto::protocol::Rule> {
 #[tokio::test]
 async fn a_failed_removals_note_does_not_outlive_its_leftovers() {
     let h = holding_two();
-    h.set_daemon(Daemon::RefuseDelete("busy"));
+    h.set_daemon(Daemon::Silent);
     let mgr = without_a_state_directory(&h);
     mgr.remove_leftover_rules().await;
     assert!(mgr.leftover_outcome().is_some());
@@ -347,14 +344,26 @@ async fn a_removal_that_stopped_part_way_says_how_far_it_got() {
     );
 }
 
+/// A refused delete counts as removed (the daemon stopped using the rule),
+/// and its file is mentioned.
 #[tokio::test]
 async fn a_partly_refused_removal_counts_what_went() {
-    let h = holding_two();
-    h.set_daemon(Daemon::RefuseDelete("busy"));
+    let h = Harness::new();
+    let snapshot = vec![
+        super::daemon_sink::tests::legacy_rule("900-blocklist:old:0001-x.example"),
+        h.bridge_rule(ADS, ListKind::Domains),
+        h.bridge_rule(ADS, ListKind::Ips),
+    ];
+    let h = h.connect(Daemon::RefuseThenSilent(1), snapshot);
     let mgr = without_a_state_directory(&h);
     mgr.remove_leftover_rules().await;
+    assert_eq!(mgr.leftover_count(), Some(2));
     assert_eq!(
         mgr.leftover_outcome().as_deref(),
-        Some("Removed 0 of 2 rules; the firewall service refused to delete 2, which stay.")
+        Some(
+            "Removed 1 of 3 rules, then it stopped: The firewall service didn't answer. The \
+             rest stay. The firewall service couldn't remove the saved file of 1, so it may \
+             come back when the service restarts."
+        )
     );
 }

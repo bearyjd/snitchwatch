@@ -362,6 +362,11 @@ pub enum ServerMessage {
         /// waiting for one rather than "no rules" (PR #106 review).
         #[serde(default)]
         listed: bool,
+        /// Deleted rules the daemon stopped using but couldn't remove the
+        /// saved file of: each may come back when it restarts (tower r12,
+        /// `RulesCache::files_left`). Omitted when 0.
+        #[serde(default, skip_serializing_if = "is_zero")]
+        left_on_disk: u32,
     },
     /// The outcome of an `AddRule`/`UpdateRule`/`DeleteRule` that carried a
     /// `request_id` (rule editor, P2.1), sent to the asking connection only.
@@ -417,6 +422,10 @@ pub enum RuleCommandOutcome {
     NoDaemon,
     /// A rename whose outcome isn't known (see the reason).
     Unsure { reason: String },
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 /// Whether a client's request id is usable: 1 to 64 ASCII letters, digits

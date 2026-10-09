@@ -212,34 +212,42 @@ async fn a_new_snapshot_without_a_rule_drops_its_count() {
     assert_eq!(hits(&svc), vec![pair("a", 1)]);
 }
 
+/// A delete drops the count whether the daemon confirmed it or refused it: a
+/// refusal comes after the rule left its memory (tower r12). A refused
+/// change the bridge can't place keeps it.
 #[tokio::test]
-async fn a_confirmed_delete_drops_the_count_and_a_rejected_one_does_not() {
+async fn a_delete_drops_the_count_confirmed_or_refused_and_a_refused_change_does_not() {
     let (svc, _rx) = service();
     let stream = connect(&svc, &["a", "b"]).await;
     ping(&svc, vec![event("a"), event("b")], 10, 2).await;
     let commands = svc.daemon_commands();
+    let answer = |id: u64, code: NotificationReplyCode| {
+        commands.on_reply(
+            stream.stream.id(),
+            &NotificationReply {
+                id,
+                code: code as i32,
+                data: "no".into(),
+            },
+        );
+    };
 
-    let rejected = commands.send(delete("a")).unwrap();
-    commands.on_reply(
-        stream.stream.id(),
-        &NotificationReply {
-            id: rejected.id(),
-            code: NotificationReplyCode::Error as i32,
-            data: "no".into(),
-        },
-    );
+    let change = Notification {
+        r#type: Action::ChangeRule as i32,
+        rules: vec![rule("a")],
+        ..Default::default()
+    };
+    let refused_change = commands.send(change).unwrap();
+    answer(refused_change.id(), NotificationReplyCode::Error);
     assert_eq!(hits(&svc), vec![pair("a", 1), pair("b", 1)]);
 
-    let confirmed = commands.send(delete("a")).unwrap();
-    commands.on_reply(
-        stream.stream.id(),
-        &NotificationReply {
-            id: confirmed.id(),
-            code: NotificationReplyCode::Ok as i32,
-            data: String::new(),
-        },
-    );
+    let refused_delete = commands.send(delete("a")).unwrap();
+    answer(refused_delete.id(), NotificationReplyCode::Error);
     assert_eq!(hits(&svc), vec![pair("b", 1)]);
+
+    let confirmed = commands.send(delete("b")).unwrap();
+    answer(confirmed.id(), NotificationReplyCode::Ok);
+    assert_eq!(hits(&svc), Vec::new());
 }
 
 #[tokio::test]

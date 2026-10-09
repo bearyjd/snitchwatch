@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use mock_opensnitchd::lists::{spawn_responder, ListsPolicy};
+use mock_opensnitchd::loader::{spawn_loader_responder, LoaderModel, SharedLoader};
 use mock_opensnitchd::round_trip::as_daemon_reports;
 use mock_opensnitchd::MockOpensnitchd;
 use snitchwatch_bridge::curated::reconcile::EntryStatus;
@@ -88,6 +89,80 @@ async fn connect_daemon(
         .expect("no HELLO")
         .unwrap();
     (daemon, seen)
+}
+
+/// A daemon (re)starting from `model`, answering as its loader would.
+async fn connect_model(
+    bridge: &RunningBridge,
+    generation: u64,
+    model: &SharedLoader,
+) -> (MockOpensnitchd, mpsc::Receiver<Notification>) {
+    let mut daemon = MockOpensnitchd::connect(bridge.grpc_endpoint.tcp_addr().unwrap())
+        .await
+        .unwrap();
+    let rules = model.lock().unwrap().snapshot();
+    daemon
+        .subscribe_with_config(ClientConfig {
+            id: 1,
+            name: "mock".into(),
+            version: "mock-1.8.0".into(),
+            rules,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let (replies, inbound) = daemon.open_notifications().await.unwrap();
+    let seen = spawn_loader_responder(model.clone(), replies, inbound);
+    let mut ready = bridge.daemon_stream_ready();
+    tokio::time::timeout(WAIT, ready.wait_for(|g| *g >= generation))
+        .await
+        .expect("no HELLO")
+        .unwrap();
+    (daemon, seen)
+}
+
+/// Watch the rule list until `done` holds for the names in a `SetRules`
+/// and the `leftOnDisk` count of the `RulesNotShown` after it.
+async fn rules_until(
+    rx: &mut broadcast::Receiver<ServerMessage>,
+    what: &str,
+    done: impl Fn(&[String], u32) -> bool,
+) {
+    tokio::time::timeout(WAIT, async {
+        let mut names: Option<Vec<String>> = None;
+        loop {
+            match rx.recv().await {
+                Ok(ServerMessage::SetRules { rules }) => {
+                    names = Some(
+                        rules
+                            .iter()
+                            .map(|r| r["name"].as_str().unwrap().to_string())
+                            .collect(),
+                    );
+                }
+                Ok(ServerMessage::RulesNotShown { left_on_disk, .. })
+                    if names.as_ref().is_some_and(|n| done(n, left_on_disk)) =>
+                {
+                    return;
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("timed out: {what}"));
+}
+
+/// Once the bridge has settled, the flatpak entry as a fresh snapshot shows
+/// it: not a passing status announced on the way.
+async fn settled_entry(
+    s: &mut Setup,
+    seen: &mut mpsc::Receiver<Notification>,
+) -> CuratedDefaultSummary {
+    nothing_sent(seen).await;
+    while s.rx.try_recv().is_ok() {}
+    send(&s.bridge, ClientMessage::RequestSnapshot).await;
+    entry_until(&mut s.rx, "a snapshot's entry", |_, _| true).await
 }
 
 async fn send(bridge: &RunningBridge, msg: ClientMessage) {
@@ -337,4 +412,230 @@ async fn unreadable_choices_leave_the_firewall_as_it_is() {
         "not json"
     );
     bridge.shutdown();
+}
+
+/// Tower r12: the daemon refuses to delete a rule whose file is immutable,
+/// after dropping it from memory. The entry and the rule list say so, and
+/// turning the entry on again installs it again (a `CHANGE_RULE` that
+/// rewrites the file), so the next turn-off removes the file for real.
+#[tokio::test]
+async fn a_refused_delete_is_reported_honestly_and_turning_on_installs_again() {
+    let mut s = start(BridgeMode::System).await;
+    let model = LoaderModel::default().shared();
+    let (_daemon, mut seen) = connect_model(&s.bridge, 1, &model).await;
+    send(&s.bridge, turn(true)).await;
+    assert_eq!(
+        next_command(&mut seen).await.r#type,
+        Action::ChangeRule as i32
+    );
+    entry_until(&mut s.rx, "installed", |e, _| {
+        e.status == EntryStatus::Installed
+    })
+    .await;
+
+    // `chattr +i` on its file, then off: the daemon drops it from memory
+    // and fails on the file.
+    model.lock().unwrap().stuck.insert(FLATPAK_RULE.into());
+    send(&s.bridge, turn(false)).await;
+    assert_eq!(
+        next_command(&mut seen).await.r#type,
+        Action::DeleteRule as i32
+    );
+    entry_until(&mut s.rx, "off, file left", |e, _| {
+        e.status == EntryStatus::OffFileLeft
+    })
+    .await;
+    let off = settled_entry(&mut s, &mut seen).await;
+    assert_eq!(off.status, EntryStatus::OffFileLeft);
+    assert!(!off.on);
+    send(&s.bridge, ClientMessage::RequestSnapshot).await;
+    rules_until(&mut s.rx, "unlisted, file noted", |names, left| {
+        !names.iter().any(|n| n == FLATPAK_RULE) && left == 1
+    })
+    .await;
+    {
+        let model = model.lock().unwrap();
+        assert!(!model.memory.contains_key(FLATPAK_RULE));
+        assert!(model.files.contains_key(FLATPAK_RULE));
+    }
+    nothing_sent(&mut seen).await;
+
+    // The attribute cleared, on again: installed again, file rewritten.
+    model.lock().unwrap().stuck.clear();
+    send(&s.bridge, turn(true)).await;
+    let install = next_command(&mut seen).await;
+    assert_eq!(install.r#type, Action::ChangeRule as i32);
+    assert_eq!(install.rules[0].name, FLATPAK_RULE);
+    entry_until(&mut s.rx, "installed again", |e, _| {
+        e.status == EntryStatus::Installed && e.on
+    })
+    .await;
+    assert!(model.lock().unwrap().memory.contains_key(FLATPAK_RULE));
+
+    // Off again: this delete removes the file.
+    send(&s.bridge, turn(false)).await;
+    assert_eq!(
+        next_command(&mut seen).await.r#type,
+        Action::DeleteRule as i32
+    );
+    entry_until(&mut s.rx, "off", |e, _| e.status == EntryStatus::Off).await;
+    {
+        let model = model.lock().unwrap();
+        assert!(model.memory.is_empty(), "{:?}", model.memory.keys());
+        assert!(model.files.is_empty(), "{:?}", model.files.keys());
+    }
+    nothing_sent(&mut seen).await;
+    s.bridge.shutdown();
+}
+
+/// The heal: a daemon restart loads the file again, the rule is listed
+/// again, and one delete goes out. While the file is still immutable that
+/// delete is refused again, and nothing more is sent (#105: no hot loop).
+#[tokio::test]
+async fn a_file_left_behind_is_deleted_once_when_the_daemon_loads_it_again() {
+    let mut s = start(BridgeMode::System).await;
+    let model = LoaderModel::default().shared();
+    let (daemon, mut seen) = connect_model(&s.bridge, 1, &model).await;
+    send(&s.bridge, turn(true)).await;
+    next_command(&mut seen).await;
+    entry_until(&mut s.rx, "installed", |e, _| {
+        e.status == EntryStatus::Installed
+    })
+    .await;
+    model.lock().unwrap().stuck.insert(FLATPAK_RULE.into());
+    send(&s.bridge, turn(false)).await;
+    next_command(&mut seen).await;
+    entry_until(&mut s.rx, "off, file left", |e, _| {
+        e.status == EntryStatus::OffFileLeft
+    })
+    .await;
+    drop((daemon, seen));
+
+    // Restarted, file still immutable: one delete, refused, then quiet.
+    model.lock().unwrap().restart();
+    let (daemon, mut seen) = connect_model(&s.bridge, 2, &model).await;
+    assert_eq!(
+        next_command(&mut seen).await.r#type,
+        Action::DeleteRule as i32
+    );
+    entry_until(&mut s.rx, "off, file left again", |e, _| {
+        e.status == EntryStatus::OffFileLeft
+    })
+    .await;
+    let settled = settled_entry(&mut s, &mut seen).await;
+    assert_eq!(settled.status, EntryStatus::OffFileLeft);
+    nothing_sent(&mut seen).await;
+    drop((daemon, seen));
+
+    // Restarted with the attribute cleared: one delete removes the file.
+    model.lock().unwrap().stuck.clear();
+    model.lock().unwrap().restart();
+    let (_daemon, mut seen) = connect_model(&s.bridge, 3, &model).await;
+    assert_eq!(
+        next_command(&mut seen).await.r#type,
+        Action::DeleteRule as i32
+    );
+    entry_until(&mut s.rx, "off", |e, _| e.status == EntryStatus::Off).await;
+    assert!(model.lock().unwrap().files.is_empty());
+    nothing_sent(&mut seen).await;
+    s.bridge.shutdown();
+}
+
+/// Turn the entry on with the model's daemon, as an install the daemon
+/// refused: stock `replaceUserRule` takes the rule into memory before
+/// `Save` fails, so the allow applies though the answer is `ERROR`.
+async fn refused_install_that_applies(
+    s: &mut Setup,
+    seen: &mut mpsc::Receiver<Notification>,
+    model: &SharedLoader,
+) {
+    send(&s.bridge, turn(true)).await;
+    assert_eq!(next_command(seen).await.r#type, Action::ChangeRule as i32);
+    entry_until(&mut s.rx, "not installed", |e, _| {
+        e.status == EntryStatus::NotInstalled
+    })
+    .await;
+    assert!(
+        model.lock().unwrap().memory.contains_key(FLATPAK_RULE),
+        "the refused install applies"
+    );
+}
+
+/// PR #119 review M1: on again while the file is still immutable, the
+/// refused install applies anyway. Off again deletes it, once (the marker
+/// from the first refusal doesn't stop it); more offs send nothing; on
+/// again, once the file can be written, installs once.
+#[tokio::test]
+async fn off_after_an_install_refused_on_a_stuck_file_deletes_what_it_applied() {
+    let mut s = start(BridgeMode::System).await;
+    let model = LoaderModel::default().shared();
+    let (_daemon, mut seen) = connect_model(&s.bridge, 1, &model).await;
+    send(&s.bridge, turn(true)).await;
+    next_command(&mut seen).await;
+    entry_until(&mut s.rx, "installed", |e, _| {
+        e.status == EntryStatus::Installed
+    })
+    .await;
+    model.lock().unwrap().stuck.insert(FLATPAK_RULE.into());
+    send(&s.bridge, turn(false)).await;
+    next_command(&mut seen).await;
+    entry_until(&mut s.rx, "off, file left", |e, _| {
+        e.status == EntryStatus::OffFileLeft
+    })
+    .await;
+    refused_install_that_applies(&mut s, &mut seen, &model).await;
+
+    send(&s.bridge, turn(false)).await;
+    let delete = next_command(&mut seen).await;
+    assert_eq!(delete.r#type, Action::DeleteRule as i32);
+    assert_eq!(delete.rules[0].name, FLATPAK_RULE);
+    entry_until(&mut s.rx, "off, file left", |e, _| {
+        e.status == EntryStatus::OffFileLeft
+    })
+    .await;
+    assert!(!model.lock().unwrap().memory.contains_key(FLATPAK_RULE));
+    for _ in 0..2 {
+        send(&s.bridge, turn(false)).await;
+        nothing_sent(&mut seen).await;
+    }
+
+    model.lock().unwrap().stuck.clear();
+    send(&s.bridge, turn(true)).await;
+    assert_eq!(
+        next_command(&mut seen).await.r#type,
+        Action::ChangeRule as i32
+    );
+    entry_until(&mut s.rx, "installed again", |e, _| {
+        e.status == EntryStatus::Installed && e.on
+    })
+    .await;
+    nothing_sent(&mut seen).await;
+    s.bridge.shutdown();
+}
+
+/// M1 with no marker: the rules directory can't take the file (read-only
+/// or full), so the very first install is refused after memory took it.
+/// Off deletes it, once.
+#[tokio::test]
+async fn off_after_an_install_refused_on_save_deletes_what_it_applied() {
+    let mut s = start(BridgeMode::System).await;
+    let model = LoaderModel::default().shared();
+    model.lock().unwrap().stuck.insert(FLATPAK_RULE.into());
+    let (_daemon, mut seen) = connect_model(&s.bridge, 1, &model).await;
+    refused_install_that_applies(&mut s, &mut seen, &model).await;
+
+    send(&s.bridge, turn(false)).await;
+    assert_eq!(
+        next_command(&mut seen).await.r#type,
+        Action::DeleteRule as i32
+    );
+    // No file to remove is an `ERROR` too: the harmless over-warning.
+    entry_until(&mut s.rx, "off, file left", |e, _| {
+        e.status == EntryStatus::OffFileLeft
+    })
+    .await;
+    assert!(model.lock().unwrap().memory.is_empty());
+    send(&s.bridge, turn(false)).await;
+    nothing_sent(&mut seen).await;
+    s.bridge.shutdown();
 }

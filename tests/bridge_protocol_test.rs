@@ -1234,7 +1234,9 @@ async fn daemon_rules_reach_the_gui_and_follow_confirmed_commands() {
         ]
     );
 
-    // 6. A delete the daemon refuses leaves the list as it was.
+    // 6. A delete the daemon refuses: opensnitchd dropped the rule from
+    //    memory before failing on its file (tower r12), so it leaves the
+    //    list.
     bridge
         .inbound_tx
         .send(ClientMessage::DeleteRule {
@@ -1253,17 +1255,13 @@ async fn daemon_rules_reach_the_gui_and_follow_confirmed_commands() {
         .send(NotificationReply {
             id: delete.id,
             code: NotificationReplyCode::Error as i32,
-            data: "rule not found".into(),
+            data: "remove b-curl.json: operation not permitted".into(),
         })
         .await
         .unwrap();
     assert_eq!(
         names_and_enabled(&next_set_rules(&mut ws).await),
-        vec![
-            ("a-firefox".into(), false),
-            ("b-curl".into(), true),
-            (r"c-stock\ui".into(), true)
-        ]
+        vec![("a-firefox".into(), false), (r"c-stock\ui".into(), true)]
     );
 
     // 7. A malformed toggle is never sent, and the list is re-sent so the
@@ -1280,11 +1278,7 @@ async fn daemon_rules_reach_the_gui_and_follow_confirmed_commands() {
         .unwrap();
     assert_eq!(
         names_and_enabled(&next_set_rules(&mut ws).await),
-        vec![
-            ("a-firefox".into(), false),
-            ("b-curl".into(), true),
-            (r"c-stock\ui".into(), true)
-        ]
+        vec![("a-firefox".into(), false), (r"c-stock\ui".into(), true)]
     );
     assert!(
         notifications.try_recv().is_err(),
@@ -1302,7 +1296,7 @@ async fn daemon_rules_reach_the_gui_and_follow_confirmed_commands() {
         })
         .await
         .unwrap();
-    assert_eq!(next_set_rules(&mut ws).await.len(), 3);
+    assert_eq!(next_set_rules(&mut ws).await.len(), 2);
     assert!(
         notifications.try_recv().is_err(),
         "a command for a read-only rule reached the daemon"

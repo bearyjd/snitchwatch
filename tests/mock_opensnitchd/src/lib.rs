@@ -8,6 +8,7 @@
 //! `notifications`, `post_alert`.
 
 pub mod lists;
+pub mod loader;
 pub mod round_trip;
 
 use snitchwatch_proto::protocol::ui_client::UiClient;

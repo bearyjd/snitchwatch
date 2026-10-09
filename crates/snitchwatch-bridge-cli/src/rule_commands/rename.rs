@@ -6,8 +6,9 @@
 //! file, and removing the file is the only thing that can fail
 //! (`loader.go`). So an ERROR on the old rule's delete means it has already
 //! stopped applying: the rename stands, nothing is undone (undoing would
-//! leave neither rule), the old rule leaves the bridge's list, and the
-//! result says its file may bring it back when the firewall restarts.
+//! leave neither rule), the old rule leaves the bridge's list (as every
+//! refused delete does, `RulesCache::apply_refused`), and the result says
+//! its file may bring it back when the firewall restarts.
 //!
 //! What a failure leaves:
 //! - the new rule refused or never sent: only the old one, unchanged;
@@ -18,7 +19,6 @@
 
 use super::steps::{delete, step, Step};
 use crate::replier::display_reason;
-use snitchwatch_bridge::cache::rules::SharedRulesCache;
 use snitchwatch_bridge::daemon_commands::{CommandError, DaemonCommands};
 use snitchwatch_bridge::ws_messages::RuleCommandOutcome;
 use snitchwatch_proto::protocol::{Notification, Rule};
@@ -68,7 +68,6 @@ pub(super) fn deciding(old: &Rule, new: &Rule) -> &'static str {
 
 pub(super) async fn run(
     commands: &DaemonCommands,
-    rules: &SharedRulesCache,
     timeout: Duration,
     change: Notification,
     old: &Rule,
@@ -88,16 +87,10 @@ pub(super) async fn run(
     }
     match step(commands, delete(&old.name), timeout).await {
         Step::Ok => RuleCommandOutcome::Ok,
-        Step::Rejected(text) => {
-            // The daemon dropped the old rule before failing on its file.
-            rules
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .remove(&old.name);
-            RuleCommandOutcome::OkWithNote {
-                note: format!("{OLD_FILE_LEFT} ({})", display_reason(&text)),
-            }
-        }
+        // The daemon dropped the old rule before failing on its file.
+        Step::Rejected(text) => RuleCommandOutcome::OkWithNote {
+            note: format!("{OLD_FILE_LEFT} ({})", display_reason(&text)),
+        },
         Step::NotSent(_) => unsure(BOTH_EXIST, old, &new),
         Step::Unanswered => unsure(BOTH_MAY_EXIST, old, &new),
     }

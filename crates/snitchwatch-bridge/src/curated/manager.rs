@@ -344,17 +344,24 @@ impl CuratedDefaults {
         let daemon = {
             let cache = self.inner.rules.lock().unwrap_or_else(|e| e.into_inner());
             let left_out: BTreeSet<String> = cache.left_out().keys().cloned().collect();
-            cache.rules().cloned().map(|rules| (rules, left_out))
+            let files_left = cache.files_left().clone();
+            cache
+                .rules()
+                .cloned()
+                .map(|rules| (rules, left_out, files_left))
         };
-        let Some((rules, left_out)) = daemon else {
+        let Some((rules, left_out, files_left)) = daemon else {
             // A removal asked for under the old list doesn't carry over.
             lock(&self.inner.state).removals.clear();
             self.announce_changed();
             return;
         };
+        let maybe_applied = lock(&self.inner.state).maybe_applied.clone();
         let daemon = DaemonRules {
             rules: &rules,
             left_out: &left_out,
+            files_left: &files_left,
+            maybe_applied: &maybe_applied,
         };
         let (actions, removals) = {
             let mut state = lock(&self.inner.state);
@@ -414,7 +421,9 @@ impl CuratedDefaults {
 
     /// Whether the user still wants `action` (a choice may change while
     /// earlier commands of the pass wait for the daemon), and, for an
-    /// install, whether the daemon still lacks the rule.
+    /// install, whether the daemon still lacks the rule; for a delete,
+    /// whether its copy is still unedited, or, after a refused install,
+    /// still unlisted.
     fn still_wanted(&self, action: &CuratedAction) -> bool {
         let state = lock(&self.inner.state);
         if state.inert.is_some() {
@@ -431,8 +440,11 @@ impl CuratedDefaults {
                 let wanted =
                     !state.choices.enabled.contains(id) || !entries().iter().any(|e| &e.id == id);
                 let recorded = state.choices.installed.get(id).cloned();
+                let maybe_applied = state.maybe_applied.contains(name);
                 drop(state);
-                wanted && self.still_unedited(id, name, recorded.as_ref())
+                wanted
+                    && (self.still_unedited(id, name, recorded.as_ref())
+                        || (maybe_applied && self.still_missing(name)))
             }
         }
     }
@@ -462,18 +474,19 @@ impl CuratedDefaults {
     }
 
     async fn apply(&self, action: CuratedAction, generation: u64) {
-        let (id, outcome, done) = match action {
+        let (id, name, outcome, done) = match action {
             CuratedAction::Install(id) => {
                 let Some(entry) = entries().iter().find(|entry| entry.id == id) else {
                     return;
                 };
+                let name = entry.rule_name();
                 let outcome = self
                     .send(CuratedCommand::install(entry), Refusal::Add)
                     .await;
                 if outcome.is_ok() {
                     info!(entry = %id, "installed a recommended rule");
                 }
-                (id, outcome, Done::Install(Box::new(entry.rule())))
+                (id, name, outcome, Done::Install(Box::new(entry.rule())))
             }
             CuratedAction::Delete { id, name } => {
                 let Some(command) = CuratedCommand::delete(&name) else {
@@ -483,10 +496,22 @@ impl CuratedDefaults {
                 if outcome.is_ok() {
                     info!(entry = %id, "deleted a recommended rule");
                 }
-                (id, outcome, Done::Delete)
+                (id, name, outcome, Done::Delete)
             }
         };
         let mut state = lock(&self.inner.state);
+        // Stock `replaceUserRule` takes a rule into memory before `Save` can
+        // fail: a refused install may apply unlisted until a delete of its
+        // name is answered (PR #119 review M1).
+        let refused = outcome
+            .as_ref()
+            .err()
+            .is_some_and(|problem| problem.daemon_refused);
+        if refused && matches!(done, Done::Install(_)) {
+            state.maybe_applied.insert(name);
+        } else if outcome.is_ok() || refused {
+            state.maybe_applied.remove(&name);
+        }
         match outcome {
             Ok(()) => {
                 let (choices, status) = match done {
@@ -499,6 +524,20 @@ impl CuratedDefaults {
                 state.failures.remove(&id);
                 state.statuses.insert(id, status);
             }
+            // The daemon dropped the rule before failing on its file: it is
+            // off, and nothing is sent again until the daemon lists it again
+            // (the cache no longer does).
+            Err(problem) if problem.daemon_refused && matches!(done, Done::Delete) => {
+                warn!(entry = %id, "the firewall service couldn't remove a recommended rule's file");
+                let choices = state.choices.removed(&id);
+                keep(&mut state, choices);
+                state.failures.remove(&id);
+                state.statuses.insert(id, EntryStatus::OffFileLeft);
+            }
+            // Turned off while its install was on its way: the failure is
+            // for a choice that is gone, and must not hold back the delete
+            // the next pass plans (M1). That pass sets the status.
+            Err(_) if matches!(done, Done::Install(_)) && !state.choices.enabled.contains(&id) => {}
             Err(problem) => {
                 let status = match done {
                     Done::Install(_) => EntryStatus::NotInstalled,
@@ -527,6 +566,20 @@ impl CuratedDefaults {
         let outcome = self.send(command, Refusal::Remove).await;
         let mut state = lock(&self.inner.state);
         match outcome {
+            // A refusal: the daemon dropped the copy before failing on its
+            // file, so it is removed as asked, its file left behind.
+            Err(problem) if problem.daemon_refused => {
+                warn!(entry = %id, "removed an edited recommended rule; its file stays");
+                let choices = state.choices.user_removed(id);
+                let status = if choices.enabled.contains(id) {
+                    EntryStatus::DeletedOutside
+                } else {
+                    EntryStatus::OffFileLeft
+                };
+                keep(&mut state, choices);
+                state.removal_failures.remove(id);
+                state.statuses.insert(id.to_string(), status);
+            }
             Ok(()) => {
                 info!(entry = %id, "removed an edited recommended rule at the user's request");
                 let choices = state.choices.user_removed(id);

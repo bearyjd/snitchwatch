@@ -28,22 +28,31 @@ use crate::ws_messages::{
 };
 
 /// What to tell the page about a removal that did not remove everything, or
-/// `None` if it did.
+/// `None` if it did. A refused delete counts as removed: the daemon stopped
+/// using the rule before it failed to remove the file (tower r12).
 fn removal_note(done: &RemovedLeftovers) -> Option<String> {
-    let of = format!("Removed {} of {} rules", done.removed, done.total);
+    let taken = done.removed + done.refused;
+    let of = format!("Removed {taken} of {} rules", done.total);
+    let files = match done.refused {
+        0 => String::new(),
+        1 => " The firewall service couldn't remove the saved file of 1, so it may come back \
+              when the service restarts."
+            .to_string(),
+        n => format!(
+            " The firewall service couldn't remove the saved files of {n}, so they may come \
+             back when the service restarts."
+        ),
+    };
     match &done.stopped {
-        Some(stopped) if done.removed == 0 && done.refused == 0 => Some(format!(
+        Some(stopped) if taken == 0 => Some(format!(
             "The rules were not removed: {}.",
             stopped.reason.trim_end_matches('.')
         )),
         Some(stopped) => Some(format!(
-            "{of}, then it stopped: {}. The rest stay.",
+            "{of}, then it stopped: {}. The rest stay.{files}",
             stopped.reason.trim_end_matches('.')
         )),
-        None if done.refused > 0 => Some(format!(
-            "{of}; the firewall service refused to delete {}, which stay.",
-            done.refused
-        )),
+        None if done.refused > 0 => Some(format!("{of}.{files}")),
         None => None,
     }
 }

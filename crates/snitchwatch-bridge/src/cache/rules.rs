@@ -31,7 +31,7 @@ use crate::daemon_commands::{BecameCurrent, CommandError, ConnKey, PendingReply,
 use crate::rule_wire::rule_to_wire;
 use crate::ws_messages::ServerMessage;
 use snitchwatch_proto::protocol::{Action, Notification, Rule};
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, MutexGuard, Weak};
 use std::time::{Duration, Instant};
@@ -80,6 +80,9 @@ pub struct RulesCache {
     /// Account names for `user.name` uids, sent with the rules for display
     /// (`accounts`, PR #106 review M4). Kept across lists.
     accounts: KnownAccounts,
+    /// Names whose `DELETE_RULE` the daemon refused: see
+    /// [`Self::files_left`] (`rules_refused.rs`). Kept across lists.
+    files_left: BTreeSet<String>,
 }
 
 /// The daemon timer that will remove a temporary rule (PR #106 review M2),
@@ -152,6 +155,9 @@ impl RulesCache {
     /// Set when a snapshot is committed; public so other crates' tests can
     /// stand in for an oversized daemon rule.
     pub fn set_left_out(&mut self, left_out: BTreeMap<String, usize>) {
+        for name in left_out.keys() {
+            self.forget_file_left(name);
+        }
         self.left_out = left_out;
     }
 
@@ -165,6 +171,10 @@ impl RulesCache {
             .filter(|rule| rule.enabled && rule.created > 0)
             .filter_map(|rule| Some((rule.name.clone(), timer_from(rule, rule.created)?)))
             .collect();
+        for rule in &rules {
+            // Listed again: the daemon loaded its file.
+            self.files_left.remove(&rule.name);
+        }
         self.rules = Some(rules.into_iter().map(|r| (r.name.clone(), r)).collect());
         self.over_limit_total = None;
         self.revision += 1;
@@ -185,6 +195,7 @@ impl RulesCache {
                 .filter(|_| self.is_unknown())
                 .map(|total| u32::try_from(total).unwrap_or(u32::MAX)),
             listed: !self.is_unknown(),
+            left_on_disk: u32::try_from(self.files_left.len()).unwrap_or(u32::MAX),
         }
     }
 
@@ -285,7 +296,8 @@ impl RulesCache {
     }
 
     /// Apply a command the daemon answered `OK`: `CHANGE_RULE` upserts its
-    /// rules, `DELETE_RULE` removes them by name.
+    /// rules (an `always` one's file was written: [`Self::files_left`]
+    /// forgets it), `DELETE_RULE` removes them by name.
     pub fn apply_confirmed(&mut self, sent: &Notification) {
         self.apply_confirmed_at(sent, now_secs());
     }
@@ -294,6 +306,9 @@ impl RulesCache {
     pub fn apply_confirmed_at(&mut self, sent: &Notification, now_secs: i64) {
         if sent.r#type == Action::ChangeRule as i32 {
             for rule in &sent.rules {
+                if rule.duration == "always" {
+                    self.forget_file_left(&rule.name);
+                }
                 // The daemon makes the rule anew and stamps it, whatever
                 // stamp it carried (`Deserialize`, `rule.Create`; N5).
                 let restamped = Rule {
@@ -745,6 +760,12 @@ impl RulesSync {
                     .forget(sent.rules.iter().map(|rule| rule.name.as_str()));
             }
         }
+        self.publish_after_command();
+    }
+
+    /// Publish a daemon-answered command's change: at once, or once the
+    /// last [`PublishHold`] drops.
+    fn publish_after_command(&self) {
         if self.holds.load(Ordering::SeqCst) == 0 {
             self.publish();
         } else {
@@ -825,6 +846,10 @@ pub async fn prune_expired_rules_every(
     }
 }
 
+#[path = "rules_refused.rs"]
+mod refused;
+pub use refused::MAX_FILES_LEFT;
+
 #[cfg(test)]
 #[path = "rules_tests.rs"]
 mod tests;
@@ -832,3 +857,7 @@ mod tests;
 #[cfg(test)]
 #[path = "rules_revision_tests.rs"]
 mod revision_tests;
+
+#[cfg(test)]
+#[path = "rules_refused_tests.rs"]
+mod refused_tests;

@@ -37,7 +37,9 @@ use crate::rule_name::is_reserved_blocklist_name;
 pub struct RemovedLeftovers {
     /// Rules the daemon confirmed deleting.
     pub removed: usize,
-    /// Rules the daemon refused to delete (logged; they stay listed).
+    /// Rules the daemon refused to delete (logged). It stopped using them
+    /// before it failed to remove their saved files, so they leave the list,
+    /// and may come back when it restarts (tower r12).
     pub refused: usize,
     /// Rules there were to delete when the pass began.
     pub total: usize,
