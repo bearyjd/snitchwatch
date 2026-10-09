@@ -136,6 +136,13 @@ impl LoaderModel {
             .collect();
     }
 
+    /// `Statistics.rules` in a `Ping`: `Loader.NumRules()`, which is
+    /// `len(l.rules)`: every rule in memory, disabled and temporary ones
+    /// too, and none that left it (a refused delete's file does not count).
+    pub fn num_rules(&self) -> u64 {
+        self.memory.len() as u64
+    }
+
     /// `Subscribe`'s `ClientConfig.rules`: everything in memory.
     pub fn snapshot(&self) -> Vec<Rule> {
         self.memory.values().cloned().collect()
@@ -238,6 +245,20 @@ mod tests {
         assert!(model.memory.contains_key("a"), "it loads again");
         assert_eq!(model.apply(&delete("a")), Ok(()));
         assert!(model.files.is_empty() && model.memory.is_empty());
+    }
+
+    #[test]
+    fn num_rules_counts_every_rule_in_memory_as_the_daemon_does() {
+        let mut model = LoaderModel::with_rules(&[
+            rule("on", true, "always"),
+            rule("off", false, "always"),
+            rule("timed", true, "5m"),
+        ]);
+        assert_eq!(model.num_rules(), 3, "disabled and temporary count");
+        model.stuck.insert("on".into());
+        assert!(model.apply(&delete("on")).is_err());
+        assert_eq!(model.num_rules(), 2, "a refused delete left memory first");
+        assert_eq!(model.snapshot().len() as u64, model.num_rules());
     }
 
     #[test]
