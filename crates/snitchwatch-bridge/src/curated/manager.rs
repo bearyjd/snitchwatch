@@ -591,6 +591,9 @@ impl CuratedDefaults {
         };
         let outcome = self.send(command, Refusal::Remove).await;
         let mut state = lock(&self.inner.state);
+        // Answered, the name is out of the daemon's memory: no delete by name
+        // is owed for it any more (#120 item 17). The copy had a file.
+        track_maybe_applied(&mut state, &name, false, &outcome, false, generation);
         match outcome {
             // A refusal: the daemon dropped the copy before failing on its
             // file, so it is removed as asked, its file left behind.

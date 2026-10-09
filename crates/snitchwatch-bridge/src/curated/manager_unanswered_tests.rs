@@ -5,9 +5,10 @@
 //! The time is paused, so the 15 s command timeout passes at once, and each
 //! pass is run directly (no pass gate), so the commands sent are exact.
 
+use super::state::MaybeApplied;
 use super::tests::*;
 use super::*;
-use snitchwatch_proto::protocol::Action;
+use snitchwatch_proto::protocol::{Action, Rule};
 
 fn sent(action: Action) -> (i32, String) {
     (action as i32, FLATPAK_RULE.to_string())
@@ -177,4 +178,40 @@ async fn a_refused_install_after_an_unanswered_one_keeps_the_file_warning() {
     );
     assert_eq!(status(&curated), EntryStatus::OffFileLeft);
     assert!(file_left(&harness));
+}
+
+fn edited_flatpak() -> Rule {
+    let mut rule = flatpak_rule();
+    rule.operator.as_mut().unwrap().list[2].data = "8443".into();
+    rule
+}
+
+/// #17: an edited copy's removal, once answered (`OK` or refused), took the
+/// name out of the daemon's memory. A record of it that may apply (as from
+/// a refused install on this stream) is dropped with it, so the passes
+/// after it send no second delete.
+#[tokio::test]
+async fn an_answered_removal_forgets_what_may_apply() {
+    for (daemon, after) in [
+        (Daemon::Accept, EntryStatus::Off),
+        (Daemon::RefuseDeletes, EntryStatus::OffFileLeft),
+    ] {
+        let harness = Harness::new().connect(daemon, vec![edited_flatpak()]);
+        let curated = harness.curated();
+        turn(&curated, FLATPAK, false);
+        let record = MaybeApplied {
+            generation: curated.generation(),
+            file_possible: false,
+        };
+        lock(&curated.inner.state)
+            .maybe_applied
+            .insert(FLATPAK_RULE.into(), record);
+        curated.try_route(ClientMessage::RemoveCuratedDefault { id: FLATPAK.into() });
+        curated.reconcile().await;
+        let removed = vec![sent(Action::DeleteRule)];
+        assert_eq!(harness.seen(), removed);
+        forced_passes(&curated, false).await;
+        assert_eq!(harness.seen(), removed);
+        assert_eq!(status(&curated), after);
+    }
 }
