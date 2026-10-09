@@ -4,6 +4,7 @@
 
 use super::{lock, RulesCache, RulesSync};
 use std::time::Instant;
+use tracing::info;
 
 /// Readings ignored after the bridge changed its own list or the daemon
 /// restarted: a ping built before the change is at most one reading old.
@@ -146,6 +147,13 @@ impl RulesSync {
         };
         let mut cache = lock(&self.cache);
         if cache.observe_rule_count(reading) {
+            info!(
+                reported,
+                expected = cache.expected_count(),
+                shown = cache.count_mismatch(),
+                revision = cache.revision(),
+                "the rules-count hint changed"
+            );
             let _ = self.broadcast.send(cache.not_shown());
         }
     }

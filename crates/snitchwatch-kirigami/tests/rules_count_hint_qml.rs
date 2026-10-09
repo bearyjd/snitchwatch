@@ -141,6 +141,22 @@ Window {
                 probeWindow.check(!hint.visible && hint.text === "" && !page.header.visible,
                                   "cleared by the next message");
 
+                // An empty list with a mismatch (a file the bridge never heard of):
+                // "No rules yet" would contradict the hint.
+                const placeholder = probeWindow.findChild(page, "rulesEmptyPlaceholder");
+                probeWindow.setRules([]);
+                probeWindow.notShown({ countMismatch: true });
+                probeWindow.check(hint.visible && placeholder && !placeholder.visible,
+                                  "no 'No rules yet' beside the hint: "
+                                  + (placeholder ? placeholder.visible + " " + placeholder.text
+                                                 : "missing"));
+                probeWindow.notShown({});
+                probeWindow.check(placeholder.visible && placeholder.text === "No rules yet",
+                                  "the placeholder returns with the hint gone: "
+                                  + placeholder.text);
+                probeWindow.setRules(["100-a"]);
+                probeWindow.notShown({ countMismatch: true });
+
                 // With no list there is nothing to differ from, whatever a frame says.
                 probeWindow.notShown({ listed: false, countMismatch: true });
                 probeWindow.check(!hint.visible && rulesModel.countHintText === "",

@@ -117,7 +117,7 @@ Kirigami.ScrollablePage {
     // Issue #65: the firewall service's rule count differs from the list's.
     readonly property bool showsCountHint: !!page.model && page.model.countHintText.length > 0
     readonly property bool showsEmptyPlaceholder: (!page.model || page.model.count === 0)
-                                                  && !page.showsNotShown
+                                                  && !page.showsNotShown && !page.showsCountHint
 
     // `allow`, `deny`, or an unrecognised action (a neutral colour, N4).
     function actionColor(action) {
