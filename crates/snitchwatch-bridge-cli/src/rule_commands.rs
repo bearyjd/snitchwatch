@@ -21,6 +21,11 @@
 //!   new name, then `DELETE_RULE` the old one;
 //! - on the legacy TCP transport only toggles and deletes go through (#35).
 //!
+//! A delete the daemon refuses already took the rule out of its memory
+//! (opensnitchd removes the file last, and only that can fail; tower r12):
+//! the bridge's list drops it (`RulesCache::apply_refused`), and the result
+//! is `OkWithNote`, saying the file may bring it back at the next restart.
+//!
 //! A command with a valid `request_id` gets one `RuleCommandResult`, sent
 //! to the asking connection only. Without one it behaves as #48: no
 //! result, and any failure re-sends the rule list to undo a GUI's
@@ -35,7 +40,7 @@ use snitchwatch_bridge::rule_policy::RuleProblem;
 use snitchwatch_bridge::ws_messages::{
     valid_request_id, ClientMessage, ReplyTo, RuleCommandOutcome, ServerMessage,
 };
-use snitchwatch_proto::protocol::Notification;
+use snitchwatch_proto::protocol::{Action, Notification};
 use std::time::Duration;
 use tokio::sync::broadcast;
 use tracing::warn;
@@ -51,6 +56,11 @@ pub(crate) use gates::{BUSY, CURATED_INERT_REFUSED, NAME_TAKEN, TCP_REFUSED};
 
 /// How long each daemon answer is awaited (#48's pump uses 5 s).
 const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// A refused delete's note (rename's `OLD_FILE_LEFT` says the same).
+const DELETED_FILE_LEFT: &str = "Deleted. The firewall stopped using this rule, but couldn't \
+     remove its saved file, so the rule may come back when the firewall restarts. If it does, \
+     delete it again on the Rules page.";
 
 /// The pump's handle for rule commands.
 pub(crate) struct RuleCommands {
@@ -238,9 +248,7 @@ impl RuleCommands {
                 Task::Edit(change, old) => {
                     edit::run(&commands, &rules, timeout, change, &old).await
                 }
-                Task::Rename(change, old) => {
-                    rename::run(&commands, &rules, timeout, change, &old).await
-                }
+                Task::Rename(change, old) => rename::run(&commands, timeout, change, &old).await,
             };
             drop(guard);
             answer.finish(outcome).await;
@@ -248,10 +256,16 @@ impl RuleCommands {
     }
 
     fn send(&self, notification: Notification, answer: Answer) {
+        let delete = notification.r#type == Action::DeleteRule as i32;
         let sent = self.commands.send(notification);
         let timeout = self.reply_timeout;
         tokio::spawn(async move {
             let outcome = sent_outcome(sent, timeout).await;
+            let outcome = if delete {
+                deleted_outcome(outcome)
+            } else {
+                outcome
+            };
             answer.finish(outcome).await;
         });
     }
@@ -296,6 +310,17 @@ fn wait_outcome(waited: Result<(), CommandError>) -> RuleCommandOutcome {
     }
 }
 
+/// A delete's result: one the daemon refused stopped applying anyway, its
+/// file left behind.
+fn deleted_outcome(outcome: RuleCommandOutcome) -> RuleCommandOutcome {
+    match outcome {
+        RuleCommandOutcome::Rejected { reason } => RuleCommandOutcome::OkWithNote {
+            note: format!("{DELETED_FILE_LEFT} ({reason})"),
+        },
+        other => other,
+    }
+}
+
 /// Why `DaemonCommands::send` sent nothing, as a result.
 fn send_error_outcome(error: SendError) -> RuleCommandOutcome {
     match error {
@@ -327,3 +352,6 @@ mod toggle_tests;
 
 #[cfg(test)]
 mod curated_toggle_tests;
+
+#[cfg(test)]
+mod delete_tests;
