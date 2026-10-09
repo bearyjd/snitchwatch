@@ -502,12 +502,18 @@ impl CuratedDefaults {
         let mut state = lock(&self.inner.state);
         // Stock `replaceUserRule` takes a rule into memory before `Save` can
         // fail: a refused install may apply unlisted until a delete of its
-        // name is answered (PR #119 review M1).
+        // name is answered (PR #119 review M1). So may an unanswered one,
+        // which the daemon can still take (#120 item 13); not one cut off by
+        // a closed stream, whose reconnect lists what the daemon holds.
         let refused = outcome
             .as_ref()
             .err()
             .is_some_and(|problem| problem.daemon_refused);
-        if refused && matches!(done, Done::Install(_)) {
+        let unanswered = outcome
+            .as_ref()
+            .err()
+            .is_some_and(|problem| problem.unanswered);
+        if (refused || unanswered) && matches!(done, Done::Install(_)) {
             state.maybe_applied.insert(name);
         } else if outcome.is_ok() || refused {
             state.maybe_applied.remove(&name);
@@ -696,3 +702,7 @@ mod loop_tests;
 #[cfg(test)]
 #[path = "manager_gate_tests.rs"]
 mod gate_tests;
+
+#[cfg(test)]
+#[path = "manager_unanswered_tests.rs"]
+mod unanswered_tests;

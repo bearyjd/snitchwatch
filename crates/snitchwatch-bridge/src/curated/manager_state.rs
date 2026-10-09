@@ -26,10 +26,11 @@ pub(super) struct State {
     pub(super) removal_failures: BTreeMap<String, Failure>,
     /// Entries the user confirmed removing (edited copies, M2).
     pub(super) removals: BTreeSet<String>,
-    /// Rule names whose install the daemon refused: stock `replaceUserRule`
-    /// takes a rule into memory before `Save` can fail, so it may apply
-    /// though the list lacks it. Forgotten once a delete of the name, or an
-    /// install, is answered (PR #119 review M1).
+    /// Rule names whose install the daemon refused or didn't answer: stock
+    /// `replaceUserRule` takes a rule into memory before `Save` can fail,
+    /// so it may apply though the list lacks it (PR #119 review M1), and an
+    /// unanswered install may still be taken (#120 item 13). Forgotten once
+    /// a delete of the name, or an install, is answered.
     pub(super) maybe_applied: BTreeSet<String>,
     /// Bumped by every GUI request taken (a choice, even an unchanged one,
     /// or a removal): each gets a pass (re-review 2, HIGH).
@@ -86,6 +87,9 @@ pub(super) struct Problem {
     /// The daemon answered `ERROR`. For a delete that means the rule
     /// already left its memory (`RulesCache::apply_refused`).
     pub(super) daemon_refused: bool,
+    /// No answer within the timeout, on a stream still open: the daemon
+    /// may still apply the command (#120 item 13).
+    pub(super) unanswered: bool,
 }
 
 /// What a refusal refused.
@@ -109,11 +113,13 @@ pub(super) fn send_problem(error: SendError) -> Problem {
         text,
         sticky,
         daemon_refused: false,
+        unanswered: false,
     }
 }
 
 pub(super) fn command_problem(error: CommandError, refusal: Refusal) -> Problem {
     let daemon_refused = matches!(error, CommandError::Rejected(_));
+    let unanswered = error == CommandError::Timeout;
     let text = match (error, refusal) {
         (CommandError::Rejected(_), Refusal::Add) => "The firewall service refused the rule.",
         (CommandError::Rejected(_), Refusal::Remove) => {
@@ -126,6 +132,7 @@ pub(super) fn command_problem(error: CommandError, refusal: Refusal) -> Problem 
         text,
         sticky: true,
         daemon_refused,
+        unanswered,
     }
 }
 
