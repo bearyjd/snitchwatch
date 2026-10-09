@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use snitchwatch_proto::protocol::Rule;
 
 use super::canonical::{canonical, is_unedited};
-use super::dns_tests::{dns, ID, NAME, PATH};
+use super::dns_tests::{dns, ID, NAME};
 use super::reconcile::{plan, CuratedAction, DaemonRules, EntryStatus};
 use super::store::Choices;
 use super::*;
