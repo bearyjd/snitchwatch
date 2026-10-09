@@ -269,6 +269,22 @@ Kirigami `Text.PlainText` removed.
 - No role id was added to `RulesModel` (the hint is page state, a
   `countHintText` property beside `notShownText`).
 
+## Mutation checks (as run)
+
+38 one-line mutants, each applied alone and run against the new tests:
+thresholds (raise 1 and 2, clear 1 and 2, quiet 0 and 1), `expected` without
+`left_out` and with `files_left`, each pause dropped (temporary rules, disabled
+temporary rules, left-out temporary rules, in-flight commands, staged
+snapshot, zero reading, the ping handler's in-flight argument and its whole
+call), no restart detection, runs that survive a pause or a changed count, a
+broadcast per ping, a flag missing from `not_shown`, resets missing from
+`replace_all` and `set_unknown`, the staged-snapshot and late-reply bounds, the
+wire field always serialized, and in Kirigami a non-plain label, a header that
+ignores the hint, an always-visible label, the `listed` guard, the model never
+setting the text and a hint with no remedy. Two survived the first run (a quiet
+of 1, and an always-visible label inside an already visible header) and got
+tests that pin them; all 38 are killed.
+
 ## Limitations (also for the tower gate)
 
 - **In-place edits are not detected.** An edited file that keeps its rule
