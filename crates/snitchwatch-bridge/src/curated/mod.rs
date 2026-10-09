@@ -53,8 +53,8 @@ const LOOPBACK_PATTERN: &str = r"^(127\.0\.0\.1|::1)$";
 /// daemon's `Compile` rewrites a `user.name` leaf's data to the uid and
 /// saves the rule that way, so after a restart the file's number would be
 /// looked up as a name and the rule would fail to load. Fedora's
-/// `sysusers.d` fixes `systemd-resolve` at 193; a rule pinned to the wrong
-/// ID matches nothing (fail closed).
+/// `sysusers.d/systemd-resolve.conf` fixes `systemd-resolve` at 193; a rule
+/// pinned to the wrong ID matches nothing (fail closed).
 const DNS_PROGRAM: &str = "/usr/lib/systemd/systemd-resolved";
 const DNS_PORT: u16 = 53;
 const DNS_USER_ID: &str = "193";

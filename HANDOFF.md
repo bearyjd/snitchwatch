@@ -58,10 +58,16 @@ block are tower's, not this repo's.
 - Merging tower PRs #86-#91 is the owner's call. Nothing in this repo depends
   on them being merged.
 
-**Owner decisions pending: #117.** S6 (DNS rule for systemd-resolved), N3
-(the "Unused" window across restarts), #65 (rule-file reloads),
-`InterceptUnknown`, and orchestrator calls to revisit. Nothing merged is
-blocked on them.
+**S6 is decided and built (PR #121):** option (a), an opt-in recommended
+entry for `systemd-resolved` DNS, any address, port 53, TCP and UDP. The
+review narrowed it: it is pinned to the resolver's account (`user.id` 193)
+and never turned on by "Turn all on" (`broad` flag). Plan:
+`docs/superpowers/plans/2026-10-09-curated-dns-resolved.md`; tower r13
+verifies the path, the uid and tcp.
+
+**Owner decisions still pending: #117.** N3 (the "Unused" window across
+restarts), #65 (rule-file reloads), `InterceptUnknown`, and orchestrator
+calls to revisit. Nothing merged is blocked on them.
 
 **Follow-up issues, not started:**
 - #109 (blocklists), #110 (flaky tests under load), #113 (recommended rules),
