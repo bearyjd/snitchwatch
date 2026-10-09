@@ -156,12 +156,19 @@ fn a_refused_change_the_bridge_cannot_place_leaves_the_cache_as_it_was() {
         rule("a", true, "5m"),
         rule("a", false, "5m"),
         rule("new", true, "always"),
+        // `Deserialize` refuses a rule without an operator before anything
+        // changes, disabled and `always` or not.
+        Rule {
+            operator: None,
+            ..rule("a", false, "always")
+        },
     ] {
         let mut cache = synced(vec![rule("a", false, "always")]);
         let before = cache.revision();
         cache.apply_refused_at(&change(sent.clone()), T);
         assert_eq!(listed(&cache), vec!["a"], "{sent:?}");
         assert!(!cache.rules().unwrap()["a"].enabled, "{sent:?}");
+        assert!(cache.rules().unwrap()["a"].operator.is_some(), "{sent:?}");
         assert_eq!(cache.revision(), before, "{sent:?}");
         assert!(cache.files_left().is_empty());
     }
