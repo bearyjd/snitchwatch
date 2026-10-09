@@ -2,8 +2,9 @@
 //! reconnect forgets what may apply, and a refused delete of a rule that
 //! never had a file reads plain `Off`.
 //!
-//! The time is paused, so the 15 s command timeout passes at once, and each
-//! pass is run directly (no pass gate), so the commands sent are exact.
+//! Each pass is run directly (no pass gate), so the commands sent are
+//! exact; where an install goes unanswered, the time is paused, so the
+//! 15 s command timeout passes at once.
 
 use super::state::MaybeApplied;
 use super::tests::*;
