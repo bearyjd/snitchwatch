@@ -24,6 +24,8 @@ use tokio::sync::{broadcast, mpsc};
 const WAIT: Duration = Duration::from_secs(10);
 const FLATPAK: &str = "flatpak-flathub";
 const FLATPAK_RULE: &str = "snitchwatch-default-flatpak-flathub";
+const DNS: &str = "dns-resolved";
+const DNS_RULE: &str = "snitchwatch-default-dns-resolved";
 
 struct Setup {
     _sockets: tempfile::TempDir,
@@ -170,8 +172,12 @@ async fn send(bridge: &RunningBridge, msg: ClientMessage) {
 }
 
 fn turn(on: bool) -> ClientMessage {
+    turn_entry(FLATPAK, on)
+}
+
+fn turn_entry(id: &str, on: bool) -> ClientMessage {
     ClientMessage::SetCuratedDefaults {
-        ids: vec![FLATPAK.into()],
+        ids: vec![id.into()],
         on,
     }
 }
@@ -179,6 +185,16 @@ fn turn(on: bool) -> ClientMessage {
 /// Watch `SetCuratedDefaults` until the flatpak entry satisfies `done`.
 async fn entry_until(
     rx: &mut broadcast::Receiver<ServerMessage>,
+    what: &str,
+    done: impl Fn(&CuratedDefaultSummary, &Option<String>) -> bool,
+) -> CuratedDefaultSummary {
+    entry_until_id(rx, FLATPAK, what, done).await
+}
+
+/// Watch `SetCuratedDefaults` until the entry `id` satisfies `done`.
+async fn entry_until_id(
+    rx: &mut broadcast::Receiver<ServerMessage>,
+    id: &str,
     what: &str,
     done: impl Fn(&CuratedDefaultSummary, &Option<String>) -> bool,
 ) -> CuratedDefaultSummary {
@@ -190,7 +206,7 @@ async fn entry_until(
                 ..
             }) = rx.recv().await
             {
-                let entry = entries.into_iter().find(|e| e.id == FLATPAK).unwrap();
+                let entry = entries.into_iter().find(|e| e.id == id).unwrap();
                 if done(&entry, &unavailable) {
                     return entry;
                 }
@@ -637,5 +653,155 @@ async fn off_after_an_install_refused_on_save_deletes_what_it_applied() {
     assert!(model.lock().unwrap().memory.is_empty());
     send(&s.bridge, turn(false)).await;
     nothing_sent(&mut seen).await;
+    s.bridge.shutdown();
+}
+
+/// Owner decision S6: the DNS entry is off until chosen, installs exactly the
+/// resolver's rule (the mock daemon compiles it like opensnitchd, and the
+/// install counts only after its `OK`), and no other entry comes with it.
+#[tokio::test]
+async fn the_dns_entry_is_off_until_chosen_and_installs_exactly_the_resolver_rule() {
+    let mut s = start(BridgeMode::System).await;
+    let (_daemon, mut seen) = connect_daemon(&s.bridge, 1, Vec::new()).await;
+    nothing_sent(&mut seen).await;
+
+    // Listed with the bridge's own words, off, before any choice.
+    send(&s.bridge, ClientMessage::RequestSnapshot).await;
+    let listed = entry_until_id(&mut s.rx, DNS, "listed", |_, _| true).await;
+    assert!(!listed.on);
+    assert_eq!(listed.status, EntryStatus::Off);
+    assert_eq!(listed.program, "/usr/lib/systemd/systemd-resolved");
+    assert_eq!(
+        listed.allows,
+        "/usr/lib/systemd/systemd-resolved may connect to any address on TCP and UDP port 53, \
+         over IPv4 and IPv6."
+    );
+    assert!(listed.why.contains("does not make lookups private"));
+    nothing_sent(&mut seen).await;
+
+    // Turning it on sends one CHANGE_RULE, of exactly that rule.
+    send(&s.bridge, turn_entry(DNS, true)).await;
+    let change = next_command(&mut seen).await;
+    assert_eq!(change.r#type, Action::ChangeRule as i32);
+    assert_eq!(change.rules.len(), 1);
+    let rule = &change.rules[0];
+    assert_eq!(rule.name, DNS_RULE);
+    assert_eq!(
+        (
+            rule.action.as_str(),
+            rule.duration.as_str(),
+            rule.precedence
+        ),
+        ("allow", "always", false)
+    );
+    let leaves: Vec<(&str, &str, &str, bool)> = rule
+        .operator
+        .as_ref()
+        .unwrap()
+        .list
+        .iter()
+        .map(|op| {
+            (
+                op.r#type.as_str(),
+                op.operand.as_str(),
+                op.data.as_str(),
+                op.sensitive,
+            )
+        })
+        .collect();
+    assert_eq!(
+        leaves,
+        [
+            (
+                "simple",
+                "process.path",
+                "/usr/lib/systemd/systemd-resolved",
+                true
+            ),
+            ("simple", "dest.port", "53", false),
+            ("regexp", "protocol", "^(tcp|udp)6?$", false),
+        ]
+    );
+    let installed = entry_until_id(&mut s.rx, DNS, "installed", |e, _| {
+        e.status == EntryStatus::Installed
+    })
+    .await;
+    assert!(installed.on);
+    // The other entries stay off, and nothing else is sent.
+    send(&s.bridge, ClientMessage::RequestSnapshot).await;
+    let flatpak = entry_until_id(&mut s.rx, FLATPAK, "flatpak", |_, _| true).await;
+    assert_eq!((flatpak.on, flatpak.status), (false, EntryStatus::Off));
+    nothing_sent(&mut seen).await;
+
+    // Opt out: one DELETE_RULE of our own rule.
+    send(&s.bridge, turn_entry(DNS, false)).await;
+    let delete = next_command(&mut seen).await;
+    assert_eq!(delete.r#type, Action::DeleteRule as i32);
+    assert_eq!(delete.rules[0].name, DNS_RULE);
+    nothing_sent(&mut seen).await;
+    s.bridge.shutdown();
+}
+
+/// The user's side of the DNS entry, as for every entry: a copy deleted
+/// outside Snitchwatch stays deleted across a restart, and an edited copy
+/// (its port widened to 5353 here) is left alone, even on opt-out.
+#[tokio::test]
+async fn a_deleted_or_edited_dns_rule_is_left_as_the_user_made_it() {
+    let mut s = start(BridgeMode::System).await;
+    let (daemon, mut seen) = connect_daemon(&s.bridge, 1, Vec::new()).await;
+    send(&s.bridge, turn_entry(DNS, true)).await;
+    let installed = next_command(&mut seen).await.rules[0].clone();
+    entry_until_id(&mut s.rx, DNS, "installed", |e, _| {
+        e.status == EntryStatus::Installed
+    })
+    .await;
+    drop((daemon, seen));
+
+    // The daemon reports our copy back in its own shape: nothing to do.
+    let (daemon, mut seen) =
+        connect_daemon(&s.bridge, 2, vec![as_daemon_reports(&installed)]).await;
+    nothing_sent(&mut seen).await;
+    while s.rx.try_recv().is_ok() {}
+    send(&s.bridge, ClientMessage::RequestSnapshot).await;
+    entry_until_id(&mut s.rx, DNS, "still installed", |e, _| {
+        e.status == EntryStatus::Installed
+    })
+    .await;
+    drop((daemon, seen));
+
+    // Edited outside Snitchwatch: left alone, never overwritten or deleted.
+    let mut edited = as_daemon_reports(&installed);
+    edited.operator.as_mut().unwrap().list[1].data = "5353".into();
+    let (daemon, mut seen) = connect_daemon(&s.bridge, 3, vec![edited]).await;
+    entry_until_id(&mut s.rx, DNS, "edited by you", |e, _| {
+        e.status == EntryStatus::EditedByYou
+    })
+    .await;
+    send(&s.bridge, turn_entry(DNS, false)).await;
+    entry_until_id(&mut s.rx, DNS, "off, edit kept", |e, _| {
+        !e.on && e.status == EntryStatus::EditedByYou
+    })
+    .await;
+    nothing_sent(&mut seen).await;
+    drop((daemon, seen));
+
+    // Deleted outside (turn it on again, then the daemon comes back
+    // without it): never reinstalled.
+    send(&s.bridge, turn_entry(DNS, true)).await;
+    entry_until_id(&mut s.rx, DNS, "on, edit kept", |e, _| {
+        e.on && e.status == EntryStatus::EditedByYou
+    })
+    .await;
+    let (_daemon, mut seen) = connect_daemon(&s.bridge, 4, Vec::new()).await;
+    entry_until_id(&mut s.rx, DNS, "deleted outside", |e, _| {
+        e.status == EntryStatus::DeletedOutside
+    })
+    .await;
+    nothing_sent(&mut seen).await;
+    let saved = std::fs::read_to_string(s.state.join("curated-defaults.json")).unwrap();
+    assert!(
+        saved.contains(r#""deletedByUser":["dns-resolved"]"#),
+        "{saved}"
+    );
     s.bridge.shutdown();
 }
