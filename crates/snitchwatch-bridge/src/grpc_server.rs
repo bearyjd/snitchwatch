@@ -188,9 +188,11 @@ impl UiService {
     }
 
     /// TCP (the default) fans commands out to every open daemon stream; the
-    /// root-only Unix socket uses the current one. Call before taking handles.
+    /// root-only Unix socket uses the current one, and its counters judge a
+    /// bridge restart's hit-count gap (N3). Call before taking handles.
     pub fn with_daemon_transport(mut self, transport: DaemonTransport) -> Self {
         self.commands = DaemonCommands::new(transport, self.rules.clone());
+        self.rules.hits().set_daemon_transport(transport);
         self
     }
 
