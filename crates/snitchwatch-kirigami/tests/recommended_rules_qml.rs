@@ -109,12 +109,15 @@ Controls.ApplicationWindow {
                 // The fixed explanation is honest about the one any-address rule
                 // (S6) and about what "Turn all on" turns on.
                 const explanation = find(header, "explanation").text;
-                expect(explanation.indexOf("one host, this computer, or, for DNS, any address") >= 0,
+                expect(explanation.indexOf("reach one host, or this computer, on one port") >= 0
+                       && explanation.indexOf("except the DNS rule, which lets the system "
+                           + "resolver reach any address on port 53.") >= 0,
                        "explanation hides the any-address DNS rule: " + explanation);
-                expect(explanation.indexOf("Turn all on turns on every rule below, so read each one first.") >= 0,
+                expect(explanation.indexOf("Turn all on turns on every rule below, including "
+                           + "that one, so read each one first.") >= 0,
                        "explanation doesn't say what Turn all on does: " + explanation);
-                expect(explanation.indexOf("reach one place, and") < 0,
-                       "explanation still says one place without the DNS exception");
+                expect(explanation.indexOf("one place") < 0,
+                       "explanation calls any address one place: " + explanation);
                 // An older bridge: nothing offered, and the page says so.
                 expect(find(header, "notOfferedBanner").visible, "no not-offered banner");
                 expect(!find(header, "allOnButton").visible, "Turn all on before any list");

@@ -41,12 +41,13 @@ Kirigami.ScrollablePage {
             type: Kirigami.MessageType.Information
             visible: true
             text: "Background services on this computer that need the network. Each rule lets "
-                + "one program reach one place on one port (one host, this computer, or, for "
-                + "DNS, any address) and says exactly what it allows. Snitchwatch adds none "
-                + "unless you turn it on; Turn all on turns on every rule below, so read each "
-                + "one first. A rule already in the firewall (added earlier) stays as it is "
-                + "until you keep it or turn it off. What each says is as of the firewall "
-                + "service's last rule list."
+                + "one program reach one host, or this computer, on one port, and says exactly "
+                + "what it allows, except the DNS rule, which lets the system resolver reach "
+                + "any address on port 53. Snitchwatch adds none unless you turn it on; Turn "
+                + "all on turns on every rule below, including that one, so read each one "
+                + "first. A rule already in the firewall (added earlier) stays as it is until "
+                + "you keep it or turn it off. What each says is as of the firewall service's "
+                + "last rule list."
         }
         Kirigami.InlineMessage {
             objectName: "notOfferedBanner"

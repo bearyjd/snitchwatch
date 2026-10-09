@@ -120,12 +120,13 @@ DNS needs udp/53 and tcp/53 (truncated answers, large answers, DNSSEC). Options:
   port 53 (truncated and large answers) is the standard fallback but was not
   captured; r13 checks both."
 - **Kirigami explanation** (fixed text on the page): "Each rule lets one
-  program reach one place on one port (one host, this computer, or, for DNS,
-  any address) and says exactly what it allows. Snitchwatch adds none unless
-  you turn it on; Turn all on turns on every rule below, so read each one
+  program reach one host, or this computer, on one port, and says exactly
+  what it allows, except the DNS rule, which lets the system resolver reach
+  any address on port 53. Snitchwatch adds none unless you turn it on; Turn
+  all on turns on every rule below, including that one, so read each one
   first." plus the existing sentences about rules added earlier and the
   firewall service's last rule list. The old "one place" is no longer true
-  for DNS.
+  for DNS, and the page no longer says it.
 - Statuses, the Keep/Remove flow and the "edited by you" text are unchanged
   and apply to this entry like any other.
 
@@ -252,10 +253,14 @@ Kirigami clippy; `cargo test -j 4 --no-fail-fast`; the Kirigami headless suite
    resolved reports that `process.path` (not `/lib/...` or a deleted-binary
    suffix).
 2. **The rule actually matches resolved's queries**: with a deny default and
-   only this entry on, `resolvectl query example.org` succeeds; the daemon
-   logs/stat show the rule hit (`snitchwatch-default-dns-resolved`) for udp
-   and, forcing TCP (`resolvectl --protocol=dns` against a server answering
-   truncated), for tcp. Check both address families (`udp6`/`tcp6`).
+   only this entry on, `resolvectl query example.org` succeeds and the daemon
+   shows a hit on `snitchwatch-default-dns-resolved` for udp. **TCP needs
+   resolved itself to fall back**, so query a name whose answer does not fit
+   a UDP reply (a large TXT record, or DNSSEC answers) or use an upstream
+   that sets the truncation flag, and confirm a `tcp` or `tcp6` hit on the
+   same rule. (`resolvectl --protocol=` chooses DNS versus LLMNR/mDNS, not
+   the transport, and `dig +tcp` is attributed to `dig`, not resolved, so
+   neither tests this rule.) Check both address families (`udp6`/`tcp6`).
 3. **Does not cover what it should not**: a `dig @8.8.8.8` from a shell is
    still prompted/denied (process is `dig`); DoT (853) still denied.
 4. **Entry turned off** removes the rule and lookups fail again; the
@@ -305,7 +310,12 @@ Branch `feat/curated-dns-resolved`, local commits only.
   destinations with `anyAddress` and `loopback` on a loopback program, where
   `allows()` would say "any address" for a loopback-only rule) and got a
   test case. Seven of them were rerun against the end-to-end file: all
-  killed. Two mutants of the Kirigami explanation: both killed.
+  killed. Three mutants of the Kirigami explanation (back to "one place", the DNS exception dropped, "including that one" dropped): all killed.
+- **What the end-to-end "installed" proves.** The mock daemon's
+  responder (`lists.rs` `respond`) runs `validate_rule_shape` on every
+  `CHANGE_RULE` and answers `ERROR` for a shape it would not compile, so an
+  "installed" DNS entry means that mock accepted the three-condition rule.
+  It is a mock of `Compile`, not the real daemon; r13 is the real check.
 - **A mistake in the DNS entry disables every entry.** `entries()` returns
   nothing for an invalid data file (existing behaviour: fail safe), so a
   DNS-entry typo shows as every end-to-end test failing, as the port mutant
