@@ -34,8 +34,8 @@
       "anyAddress": true,
       "port": 53,
       "protocol": "tcp+udp",
-      "why": "With the firewall set to deny by default, no name can be looked up until the system's DNS resolver may reach its DNS server. That server differs on every network, so this lets that one program reach any address on port 53. It does not make lookups private: whoever runs the server sees them. NetworkManager's check, Flathub updates and blocklist downloads need names looked up, so they need this.",
-      "evidence": "bazzite-tower r10: /usr/lib/systemd/systemd-resolved to the network's DNS server port 53 over udp (left out of v1: owner question S6, decided opt-in). TCP port 53 (truncated and large answers) is the standard fallback but was not captured; r13 checks both."
+      "why": "A deny default blocks every lookup until the system resolver may reach its DNS server. That server differs on every network, so this lets it reach any address on port 53. Lookups are not private: whoever runs the server sees them, and any program can send data out inside lookups, since every app's lookups use this rule. Flathub updates, blocklist downloads and NetworkManager's check need it.",
+      "evidence": "bazzite-tower r10: /usr/lib/systemd/systemd-resolved to the network's DNS server port 53 over udp (left out of v1: owner question S6, decided opt-in). TCP port 53 (truncated and large answers) was not captured, nor was the sender's user ID 193 (Fedora's systemd-resolve account); r13 checks both."
     }
   ]
 }

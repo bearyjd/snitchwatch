@@ -9,8 +9,10 @@
 //! port, one protocol over both IP versions. The one exception is the
 //! system resolver's DNS (owner decision S6): its upstream server changes
 //! with every network, so it is offered for any address, port 53, TCP and
-//! UDP, and no other program can be. Each entry says in plain text why it
-//! is there.
+//! UDP, and no other program can be. A path alone doesn't name a sender
+//! (any user can run that binary with `LD_PRELOAD`), so that entry is also
+//! pinned to the resolver's own account by user ID. Each entry says in plain
+//! text why it is there.
 //!
 //! Nothing is on by default. The user turns entries on (`store`), and
 //! `reconcile` installs them under the reserved `snitchwatch-default-`
@@ -45,20 +47,26 @@ pub const DESCRIPTION: &str = "snitchwatch curated default v1";
 const LOOPBACK_PATTERN: &str = r"^(127\.0\.0\.1|::1)$";
 
 /// The one program that may be offered for any address (owner decision S6,
-/// issue #117), and the one port and transport it gets there: the system
-/// resolver's DNS, whose upstream server differs on every network.
+/// issue #117), and the one port, transport and sender it gets there: the
+/// system resolver's DNS, whose upstream server differs on every network,
+/// run by its own account. The pin is the user ID, not `user.name`: the
+/// daemon's `Compile` rewrites a `user.name` leaf's data to the uid and
+/// saves the rule that way, so after a restart the file's number would be
+/// looked up as a name and the rule would fail to load. Fedora's
+/// `sysusers.d` fixes `systemd-resolve` at 193; a rule pinned to the wrong
+/// ID matches nothing (fail closed).
 const DNS_PROGRAM: &str = "/usr/lib/systemd/systemd-resolved";
 const DNS_PORT: u16 = 53;
+const DNS_USER_ID: &str = "193";
 
 /// The transport an entry allows, over IPv4 and IPv6 (the daemon names the
 /// IPv6 forms `tcp6`/`udp6`). `TcpAndUdp` is the DNS entry's alone
 /// ([`check_leaves`]): one anchored regexp for both, as the daemon's
 /// `protocol` operand is compared to one value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Protocol {
-    #[serde(rename = "tcp")]
     Tcp,
-    #[serde(rename = "udp")]
     Udp,
     #[serde(rename = "tcp+udp")]
     TcpAndUdp,
@@ -97,7 +105,8 @@ pub struct CuratedEntry {
     #[serde(default)]
     pub loopback: bool,
     /// Any address: no destination condition. Only the system resolver's
-    /// DNS ([`DNS_PROGRAM`], port 53, TCP and UDP) passes [`check_leaves`].
+    /// DNS ([`DNS_PROGRAM`], run by [`DNS_USER_ID`], port 53, TCP and UDP)
+    /// passes [`check_leaves`].
     #[serde(default, rename = "anyAddress")]
     pub any_address: bool,
     pub port: u16,
@@ -182,7 +191,11 @@ impl CuratedEntry {
         if self.loopback {
             leaves.push(leaf("regexp", "dest.ip", LOOPBACK_PATTERN, false));
         }
-        // `any_address` adds no destination condition: that is what it means.
+        // `any_address` adds no destination condition: that is what it
+        // means. It pins the sender instead.
+        if self.any_address {
+            leaves.push(leaf("simple", "user.id", DNS_USER_ID, false));
+        }
         leaves.push(leaf("simple", "dest.port", &self.port.to_string(), false));
         leaves.push(leaf("regexp", "protocol", self.protocol.pattern(), false));
         Rule {
@@ -211,12 +224,25 @@ impl CuratedEntry {
             (None, true) => "any address".to_string(),
             (None, false) => "this computer only (127.0.0.1 and ::1)".to_string(),
         };
+        let sender = if self.any_address {
+            format!(
+                ", but only while it runs as user ID {DNS_USER_ID} (the systemd-resolve account)"
+            )
+        } else {
+            String::new()
+        };
         format!(
-            "{} may connect to {to} on {} port {}, over IPv4 and IPv6.",
+            "{} may connect to {to} on {} port {}, over IPv4 and IPv6{sender}.",
             self.path,
             self.protocol.label(),
             self.port
         )
+    }
+
+    /// Whether the entry allows more than one named place: its GUI never
+    /// turns it on in bulk ("Turn all on"), only by itself.
+    pub fn broad(&self) -> bool {
+        self.any_address
     }
 
     fn check(&self) -> Result<(), String> {
@@ -300,7 +326,11 @@ fn plain_text(text: &str) -> bool {
 /// only if it is an `always`, non-precedence `allow` with our description,
 /// whose conditions are exactly: an exact `/usr` program path (case
 /// sensitive); one plain host or this computer; one port; one transport.
-/// It must also pass the rule editor's policy checks.
+/// The one exception is the system resolver's DNS (owner decision S6): no
+/// destination, but its account's user ID pinned right after the path, port
+/// 53, TCP and UDP. A rule with no destination is refused for any other
+/// program, and without that exact pin. It must also pass the rule editor's
+/// policy checks.
 pub fn check_curated_rule(rule: &Rule) -> Result<(), String> {
     let id = rule
         .name
@@ -328,40 +358,80 @@ pub fn check_curated_rule(rule: &Rule) -> Result<(), String> {
         .map_err(|_| "the rule fails the rule editor's checks".to_string())
 }
 
+type Leaves<'a> = std::iter::Peekable<std::slice::Iter<'a, Operator>>;
+
 fn check_leaves(leaves: &[Operator]) -> Result<(), String> {
     let mut rest = leaves.iter().peekable();
-    let program = match rest.next() {
+    let program = check_program(rest.next())?;
+    let any_address = check_destination(&mut rest, program)?;
+    check_port(rest.next(), any_address)?;
+    check_protocol(rest.next(), any_address)?;
+    if rest.next().is_some() || leaves.iter().any(|op| !op.list.is_empty()) {
+        return Err("a curated default has other conditions".into());
+    }
+    Ok(())
+}
+
+fn check_program(leaf: Option<&Operator>) -> Result<&str, String> {
+    match leaf {
         Some(op)
             if op.r#type == "simple"
                 && op.operand == "process.path"
                 && op.sensitive
                 && usr_program(&op.data) =>
         {
-            op.data.as_str()
+            Ok(op.data.as_str())
         }
-        _ => return Err("the first condition isn't an exact /usr program path".into()),
-    };
-    // No destination condition means any address, for the DNS resolver only.
-    let any_address = rest.peek().is_some_and(|op| op.operand == "dest.port");
-    if any_address {
-        if program != DNS_PROGRAM {
-            return Err("only the system resolver's DNS may reach any address".into());
-        }
-    } else {
-        match rest.next() {
+        _ => Err("the first condition isn't an exact /usr program path".into()),
+    }
+}
+
+/// The destination: one plain host or this computer, or no destination
+/// condition at all, which is any address. Returns whether it is any
+/// address; that is the system resolver's alone, and it must name its
+/// account, so a rule without the pin is refused.
+fn check_destination(rest: &mut Leaves<'_>, program: &str) -> Result<bool, String> {
+    let named = rest
+        .peek()
+        .is_some_and(|op| matches!(op.operand.as_str(), "dest.host" | "dest.ip"));
+    if named {
+        return match rest.next() {
             Some(op)
                 if op.operand == "dest.host"
                     && op.r#type == "simple"
                     && !op.sensitive
-                    && valid_host(&op.data) => {}
+                    && valid_host(&op.data) =>
+            {
+                Ok(false)
+            }
             Some(op)
                 if op.operand == "dest.ip"
                     && op.r#type == "regexp"
-                    && op.data == LOOPBACK_PATTERN => {}
-            _ => return Err("the destination isn't one plain host name or this computer".into()),
-        }
+                    && op.data == LOOPBACK_PATTERN =>
+            {
+                Ok(false)
+            }
+            _ => Err("the destination isn't one plain host name or this computer".into()),
+        };
+    }
+    if program != DNS_PROGRAM {
+        return Err("only the system resolver's DNS may reach any address".into());
     }
     match rest.next() {
+        Some(op)
+            if op.r#type == "simple"
+                && op.operand == "user.id"
+                && !op.sensitive
+                && op.data == DNS_USER_ID =>
+        {
+            Ok(true)
+        }
+        _ => Err("any address needs the system resolver's account pinned by user ID".into()),
+    }
+}
+
+fn check_port(leaf: Option<&Operator>, any_address: bool) -> Result<(), String> {
+    match leaf {
         Some(op)
             if op.r#type == "simple"
                 && op.operand == "dest.port"
@@ -370,29 +440,35 @@ fn check_leaves(leaves: &[Operator]) -> Result<(), String> {
                     .data
                     .parse::<u16>()
                     .is_ok_and(|port| port != 0 && (!any_address || port == DNS_PORT))
-                && !op.data.starts_with('0') => {}
-        _ => return Err("the port condition isn't one port".into()),
+                && !op.data.starts_with('0') =>
+        {
+            Ok(())
+        }
+        _ => Err("the port condition isn't one port".into()),
     }
-    let protocols: &[Protocol] = if any_address {
+}
+
+/// TCP or UDP for a named place; both, for the resolver's any-address rule.
+fn check_protocol(leaf: Option<&Operator>, any_address: bool) -> Result<(), String> {
+    let allowed: &[Protocol] = if any_address {
         &[Protocol::TcpAndUdp]
     } else {
         &[Protocol::Tcp, Protocol::Udp]
     };
-    match rest.next() {
+    match leaf {
         Some(op)
             if op.r#type == "regexp"
                 && op.operand == "protocol"
-                && protocols
-                    .iter()
-                    .any(|protocol| op.data == protocol.pattern()) => {}
-        _ => return Err("the protocol condition isn't the one this entry may have".into()),
+                && allowed.iter().any(|protocol| op.data == protocol.pattern()) =>
+        {
+            Ok(())
+        }
+        _ => Err("the protocol condition isn't the one this entry may have".into()),
     }
-    if rest.next().is_some() || leaves.iter().any(|op| !op.list.is_empty()) {
-        return Err("a curated default has other conditions".into());
-    }
-    Ok(())
 }
 
+#[cfg(test)]
+mod dns_policy_tests;
 #[cfg(test)]
 mod dns_tests;
 #[cfg(test)]
