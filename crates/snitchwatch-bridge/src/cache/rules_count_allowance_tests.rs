@@ -102,6 +102,33 @@ fn a_prompt_answer_under_a_listed_name_lets_the_daemon_hold_one_more() {
     assert_eq!(flips.last(), Some(&true), "{flips:?}");
 }
 
+/// The daemon holds the left-out rule (a name the list doesn't show) or the
+/// refused add it stored anyway, and the answer is saved as `<name>-2`:
+/// the list then shows `<name>` once, and the daemon has two.
+#[test]
+fn a_prompt_answer_under_a_left_out_name_allows_one_more() {
+    let mut cache = synced(vec![rule("other", "always", true)]);
+    cache.set_left_out([("big".to_string(), 20_000)].into());
+    cache.note_prompt_answer("big");
+    cache.upsert(rule("big", "always", true));
+    settle(&mut cache, 3);
+    assert!(none_flipped(&many(&mut cache, 3, 40)), "other, big, big-2");
+    let flips = many(&mut cache, 4, 3);
+    assert_eq!(flips.last(), Some(&true), "{flips:?}");
+}
+
+#[test]
+fn a_prompt_answer_under_the_name_of_a_refused_add_allows_one_more() {
+    let mut cache = synced(vec![rule("other", "always", true)]);
+    cache.apply_refused(&change(rule("c", "always", true)));
+    cache.note_prompt_answer("c");
+    cache.upsert(rule("c", "always", true));
+    settle(&mut cache, 3);
+    assert!(none_flipped(&many(&mut cache, 3, 40)), "other, c, c-2");
+    let flips = many(&mut cache, 4, 3);
+    assert_eq!(flips.last(), Some(&true), "{flips:?}");
+}
+
 #[test]
 fn a_prompt_answer_under_a_new_name_allows_nothing() {
     let mut cache = synced(vec![rule("other", "always", true)]);
@@ -180,6 +207,27 @@ fn a_refused_add_may_have_been_applied() {
     assert!(none_flipped(&many(&mut cache, 3, 40)));
     assert!(none_flipped(&many(&mut cache, 2, 40)), "or it was not");
     let flips = many(&mut cache, 4, 3);
+    assert_eq!(flips.last(), Some(&true), "{flips:?}");
+}
+
+/// The allowance is room for rules the list doesn't show, never for fewer
+/// than it shows: a daemon that holds less is still said.
+#[test]
+fn the_allowance_only_goes_upward() {
+    let mut cache = synced(vec![rule("a", "always", true), rule("b", "always", true)]);
+    cache.apply_refused(&change(rule("c", "always", true)));
+    settle(&mut cache, 2);
+    let flips = many(&mut cache, 1, 3);
+    assert_eq!(flips.last(), Some(&true), "{flips:?}");
+
+    let mut cache = synced(vec![
+        rule("seen", "always", false),
+        rule("b", "always", true),
+    ]);
+    cache.note_prompt_answer("seen");
+    cache.upsert(rule("seen", "always", true));
+    settle(&mut cache, 2);
+    let flips = many(&mut cache, 1, 3);
     assert_eq!(flips.last(), Some(&true), "{flips:?}");
 }
 
@@ -322,6 +370,61 @@ fn the_ping_path_tolerates_a_rule_pruned_before_the_daemons_timer_fires() {
     }
     assert!(!lock(&sync.cache).count_mismatch());
     assert!(hint_messages(&mut rx).iter().all(|shown| !shown));
+}
+
+/// A snapshot's temporary rule has a stamp from before the snapshot: a file
+/// loaded at daemon start (the daemon's timer starts at load, `loadRule`) or
+/// a list adopted after the host slept. Its wall-clock expiry may be long
+/// past while the daemon's timer has its whole duration to run.
+#[test]
+fn a_snapshots_temporary_rule_with_an_old_stamp_may_still_have_its_whole_duration_in_the_daemon() {
+    let created = now_secs() - 3_000;
+    let mut cache = synced(vec![
+        rule("other", "always", true),
+        Rule {
+            created,
+            ..rule("timed", "5m", true)
+        },
+    ]);
+    let started = Instant::now();
+    assert_eq!(cache.prune_expired_at(now_secs(), started), vec!["timed"]);
+    settle(&mut cache, 1);
+    let during = started + Duration::from_secs(120);
+    for _ in 0..40 {
+        assert!(
+            !read_at(&mut cache, 2, during),
+            "the daemon's timer still runs"
+        );
+    }
+    assert!(!cache.count_mismatch());
+    // Past its whole duration (and a little more) the extra rule isn't explained.
+    let later = started + Duration::from_secs(300 + 60);
+    let flips: Vec<bool> = (0..3).map(|_| read_at(&mut cache, 2, later)).collect();
+    assert_eq!(flips.last(), Some(&true), "{flips:?}");
+}
+
+/// The end of a timer near the limit of the clock must not panic inside the
+/// cache lock.
+#[test]
+fn a_pruned_rule_ending_at_the_edge_of_the_clock_does_not_panic() {
+    let now = Instant::now();
+    let (mut lo, mut hi) = (0_u64, u64::MAX / 2);
+    while lo < hi {
+        let mid = lo + (hi - lo).div_ceil(2);
+        if now.checked_add(Duration::from_secs(mid)).is_some() {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    let far = now + Duration::from_secs(lo);
+    assert!(
+        far.checked_add(Duration::from_secs(5)).is_none(),
+        "at the edge"
+    );
+    let mut hold = MayHold::default();
+    hold.note_pruned(far, now);
+    assert_eq!(hold.allowance(now), 1);
 }
 
 // --- the allowance ends with the list ------------------------------------

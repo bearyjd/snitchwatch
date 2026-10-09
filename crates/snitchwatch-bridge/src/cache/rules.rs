@@ -110,6 +110,12 @@ struct Expiry {
     /// When the daemon's timer fires on its own clock, the monotonic one
     /// (Go's runtime timers; `CLOCK_MONOTONIC` stops while the host is
     /// suspended, the wall clock `at` does not). See `rules_count.rs`.
+    ///
+    /// **An assumption this rests on:** Rust's `Instant` on Linux reads
+    /// `CLOCK_MONOTONIC`, not `CLOCK_BOOTTIME`, and Go's runtime timers
+    /// (`nanotime`) read the same clock, so the two stop together while the
+    /// host is suspended. If either ever counted suspend time, the tolerance
+    /// for a rule pruned early would silently stop working.
     ends: Instant,
 }
 
@@ -181,16 +187,11 @@ impl RulesCache {
     /// change, when the timer started); a disabled one is given none, since
     /// whether one still runs isn't known.
     pub fn replace_all(&mut self, rules: Vec<Rule>) {
-        let (now, clock) = (now_secs(), Instant::now());
+        let clock = Instant::now();
         self.expiries = rules
             .iter()
             .filter(|rule| rule.enabled && rule.created > 0)
-            .filter_map(|rule| {
-                Some((
-                    rule.name.clone(),
-                    timer_from(rule, rule.created, now, clock)?,
-                ))
-            })
+            .filter_map(|rule| Some((rule.name.clone(), timer_from(rule, rule.created, clock)?)))
             .collect();
         for rule in &rules {
             // Listed again: the daemon loaded its file.
@@ -262,7 +263,7 @@ impl RulesCache {
             .filter(|kept| kept.duration == rule.duration && kept.at > now_secs);
         let timer = running.or_else(|| {
             rule.enabled
-                .then(|| timer_from(&rule, now_secs, now_secs, Instant::now()))
+                .then(|| timer_from(&rule, now_secs, Instant::now()))
                 .flatten()
         });
         if let Some(timer) = timer {
@@ -381,16 +382,26 @@ fn now_secs() -> i64 {
 /// The timer the daemon starts for `rule` at `start`, if it is temporary
 /// (`loader.go` `isTemporary`: not `once`, `until restart` or `always`).
 /// Approximate: a duration that isn't a `\d+[smh]` sequence has none.
-fn timer_from(rule: &Rule, start: i64, now_secs: i64, clock: Instant) -> Option<Expiry> {
+///
+/// `ends` is `clock` plus the **whole** duration, whatever `start` is. For a
+/// change the bridge made, `start` is now, so that is when the daemon's timer
+/// fires. For a rule in a snapshot, `start` is its `created` stamp, which
+/// the daemon's timer need not have started at: a rule loaded from a
+/// temporary-rule file starts its timer at load (`loadRule`) with the file's
+/// old stamp, and a list adopted after the host slept has run its timers on
+/// the monotonic clock. The whole duration is an upper bound that hides at
+/// most one duration.
+fn timer_from(rule: &Rule, start: i64, clock: Instant) -> Option<Expiry> {
     if !count::is_temporary(&rule.duration) {
         return None;
     }
-    let at = start.checked_add(parse_duration_secs(&rule.duration)?)?;
-    let remaining = Duration::from_secs(u64::try_from(at.saturating_sub(now_secs)).unwrap_or(0));
+    let secs = parse_duration_secs(&rule.duration)?;
+    let at = start.checked_add(secs)?;
+    let whole = Duration::from_secs(u64::try_from(secs).unwrap_or(0));
     Some(Expiry {
         duration: rule.duration.clone(),
         at,
-        ends: clock.checked_add(remaining).unwrap_or(clock),
+        ends: clock.checked_add(whole).unwrap_or(clock),
     })
 }
 

@@ -40,7 +40,8 @@ const PRUNED_SLACK: Duration = Duration::from_secs(5);
 ///   the daemon's timer (`time.AfterFunc`) runs on the monotonic clock,
 ///   which stops while the host is suspended. Until that timer would have
 ///   fired (its [`Expiry`](super::Expiry)`::ends`, plus a little) the daemon
-///   may still hold the rule.
+///   may still hold the rule. `ends` rests on a clock assumption pinned at
+///   `Expiry::ends`.
 #[derive(Debug, Clone, Default)]
 pub(super) struct MayHold {
     renamed: u32,
@@ -61,7 +62,9 @@ impl MayHold {
     pub(super) fn note_pruned(&mut self, ends: Instant, clock: Instant) {
         self.pruned_until.retain(|until| *until > clock);
         if ends > clock {
-            self.pruned_until.push(ends + PRUNED_SLACK);
+            // At the edge of the clock there is no later instant to name.
+            self.pruned_until
+                .push(ends.checked_add(PRUNED_SLACK).unwrap_or(ends));
         }
     }
 
@@ -134,7 +137,12 @@ impl RulesCache {
     /// A prompt answer for `name` is about to be stored in the list: if the
     /// name is listed, the daemon stores it under another (see [`MayHold`]).
     pub(crate) fn note_prompt_answer(&mut self, name: &str) {
-        if self.contains(name) {
+        // The name is in the daemon if it is listed, left out of the list for
+        // its size, or an add the daemon refused and may have stored.
+        if self.contains(name)
+            || self.left_out.contains_key(name)
+            || self.may_hold.refused.contains(name)
+        {
             self.may_hold.renamed = self.may_hold.renamed.saturating_add(1);
         }
     }
