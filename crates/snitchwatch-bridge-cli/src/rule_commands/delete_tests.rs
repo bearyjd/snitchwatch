@@ -122,3 +122,35 @@ async fn a_second_delete_of_a_name_not_in_memory_keeps_the_note() {
     assert_eq!(files(&model), vec!["100-a"]);
     assert!(daemon.cache.lock().unwrap().files_left().contains("100-a"));
 }
+
+/// The cache's own publish (`RulesSync::apply_refused`) already carries
+/// the row's removal: the GUI's optimistic removal stands, and the list
+/// goes out once, not again for the result.
+#[tokio::test]
+async fn a_refused_delete_publishes_the_list_once() {
+    for request_id in [Some("d1"), None] {
+        let rules = [bound("100-a", "deny")];
+        let mut daemon = daemon(rules.to_vec());
+        let model = model(&rules);
+        model.lock().unwrap().stuck_files.insert("100-a".into());
+        run_model(&mut daemon, model.clone());
+        let commands = commands(&daemon);
+        let mut rx = daemon.broadcast.subscribe();
+        let mut lists = daemon.broadcast.subscribe();
+
+        commands.try_route(delete("100-a", request_id));
+        list_until_left_on_disk(&mut rx, 1).await;
+        if request_id.is_some() {
+            // Sent after any list of its own.
+            result(&mut rx).await;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let mut published = 0;
+        while let Ok(message) = lists.try_recv() {
+            if matches!(message, ServerMessage::SetRules { .. }) {
+                published += 1;
+            }
+        }
+        assert_eq!(published, 1, "request id {request_id:?}");
+    }
+}

@@ -105,6 +105,11 @@ impl Answer {
     /// connection.
     async fn finish(&self, outcome: RuleCommandOutcome) {
         self.republish(&outcome);
+        self.reply(outcome).await;
+    }
+
+    /// [`Self::finish`] for an outcome the rule list already shows.
+    async fn reply(&self, outcome: RuleCommandOutcome) {
         if let Some(message) = self.result(outcome) {
             self.replier.send_final(message).await;
         }
@@ -260,13 +265,15 @@ impl RuleCommands {
         let sent = self.commands.send(notification);
         let timeout = self.reply_timeout;
         tokio::spawn(async move {
-            let outcome = sent_outcome(sent, timeout).await;
-            let outcome = if delete {
-                deleted_outcome(outcome)
-            } else {
-                outcome
-            };
-            answer.finish(outcome).await;
+            match sent_outcome(sent, timeout).await {
+                // The cache already dropped the row and published the list
+                // (`RulesSync::apply_refused`): the GUI's optimistic removal
+                // stands, so the list isn't sent again.
+                RuleCommandOutcome::Rejected { reason } if delete => {
+                    answer.reply(refused_delete_outcome(&reason)).await;
+                }
+                outcome => answer.finish(outcome).await,
+            }
         });
     }
 
@@ -310,14 +317,11 @@ fn wait_outcome(waited: Result<(), CommandError>) -> RuleCommandOutcome {
     }
 }
 
-/// A delete's result: one the daemon refused stopped applying anyway, its
-/// file left behind.
-fn deleted_outcome(outcome: RuleCommandOutcome) -> RuleCommandOutcome {
-    match outcome {
-        RuleCommandOutcome::Rejected { reason } => RuleCommandOutcome::OkWithNote {
-            note: format!("{DELETED_FILE_LEFT} ({reason})"),
-        },
-        other => other,
+/// A refused delete's result: the rule stopped applying anyway, its file
+/// left behind.
+fn refused_delete_outcome(reason: &str) -> RuleCommandOutcome {
+    RuleCommandOutcome::OkWithNote {
+        note: format!("{DELETED_FILE_LEFT} ({reason})"),
     }
 }
 
