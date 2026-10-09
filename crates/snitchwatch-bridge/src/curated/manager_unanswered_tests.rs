@@ -118,3 +118,63 @@ async fn a_reconnect_forgets_a_refused_install() {
     assert_eq!(harness.seen(), vec![sent(Action::ChangeRule)]);
     assert_eq!(status(&curated), EntryStatus::Off);
 }
+
+fn file_left(harness: &Harness) -> bool {
+    harness
+        .rules
+        .cache()
+        .lock()
+        .unwrap()
+        .files_left()
+        .contains(FLATPAK_RULE)
+}
+
+/// Off, the delete refused, and the passes that follow it.
+async fn off_refused(harness: &Harness, curated: &CuratedDefaults) {
+    *harness.policy.lock().unwrap() = Daemon::Refuse;
+    turn(curated, FLATPAK, false);
+    curated.reconcile().await;
+    for _ in 0..2 {
+        curated.reconcile().await;
+    }
+}
+
+/// #15: an unanswered install may have written its file, so the refused
+/// delete after it keeps the "may come back" warning.
+#[tokio::test(start_paused = true)]
+async fn a_refused_delete_after_an_unanswered_install_keeps_the_file_warning() {
+    let harness = Harness::new().connect(Daemon::SilentInstalls, Vec::new());
+    let curated = harness.curated();
+    unanswered_install(&harness, &curated).await;
+    off_refused(&harness, &curated).await;
+    assert_eq!(
+        harness.seen(),
+        vec![sent(Action::ChangeRule), sent(Action::DeleteRule)]
+    );
+    assert_eq!(status(&curated), EntryStatus::OffFileLeft);
+    assert!(file_left(&harness));
+}
+
+/// #15: a refused install doesn't take back what an earlier unanswered one
+/// may have written.
+#[tokio::test(start_paused = true)]
+async fn a_refused_install_after_an_unanswered_one_keeps_the_file_warning() {
+    let harness = Harness::new().connect(Daemon::SilentInstalls, Vec::new());
+    let curated = harness.curated();
+    unanswered_install(&harness, &curated).await;
+    *harness.policy.lock().unwrap() = Daemon::Refuse;
+    turn(&curated, FLATPAK, true);
+    curated.reconcile().await;
+    assert_eq!(status(&curated), EntryStatus::NotInstalled);
+    off_refused(&harness, &curated).await;
+    assert_eq!(
+        harness.seen(),
+        vec![
+            sent(Action::ChangeRule),
+            sent(Action::ChangeRule),
+            sent(Action::DeleteRule)
+        ]
+    );
+    assert_eq!(status(&curated), EntryStatus::OffFileLeft);
+    assert!(file_left(&harness));
+}

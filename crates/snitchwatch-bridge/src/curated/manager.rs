@@ -44,7 +44,7 @@ use crate::ws_messages::{ClientMessage, ServerMessage, StorageStatus};
 mod state;
 use state::{
     command_problem, fail, keep, save_in_order, send_problem, show_removal_failures, still_edited,
-    summary, without_failed, MaybeApplied, Problem, Refusal, SaveJob, State,
+    summary, track_maybe_applied, without_failed, Problem, Refusal, SaveJob, State,
 };
 
 /// How long a curated rule command waits for the daemon's reply.
@@ -506,27 +506,16 @@ impl CuratedDefaults {
                 (id, name, outcome, Done::Delete)
             }
         };
+        let marked = self.file_left(&name);
         let mut state = lock(&self.inner.state);
         // Stock `replaceUserRule` takes a rule into memory before `Save` can
         // fail: a refused install may apply unlisted until a delete of its
         // name is answered (PR #119 review M1). So may an unanswered one,
         // which the daemon can still take (#120 item 13); not one cut off by
         // a closed stream, whose reconnect lists what the daemon holds.
-        let refused = outcome
-            .as_ref()
-            .err()
-            .is_some_and(|problem| problem.daemon_refused);
-        let unanswered = outcome
-            .as_ref()
-            .err()
-            .is_some_and(|problem| problem.unanswered);
-        if (refused || unanswered) && matches!(done, Done::Install(_)) {
-            state
-                .maybe_applied
-                .insert(name, MaybeApplied { generation });
-        } else if outcome.is_ok() || refused {
-            state.maybe_applied.remove(&name);
-        }
+        let install = matches!(done, Done::Install(_));
+        let dropped = track_maybe_applied(&mut state, &name, install, &outcome, marked, generation);
+        let mut no_file = false;
         match outcome {
             Ok(()) => {
                 let (choices, status) = match done {
@@ -541,13 +530,22 @@ impl CuratedDefaults {
             }
             // The daemon dropped the rule before failing on its file: it is
             // off, and nothing is sent again until the daemon lists it again
-            // (the cache no longer does).
+            // (the cache no longer does). A rule whose install was refused
+            // (so wrote no file), with no file left before it, had none to
+            // remove: nothing can come back (#120 item 15).
             Err(problem) if problem.daemon_refused && matches!(done, Done::Delete) => {
-                warn!(entry = %id, "the firewall service couldn't remove a recommended rule's file");
+                no_file = dropped.is_some_and(|record| !record.file_possible);
+                let status = if no_file {
+                    info!(entry = %id, "deleted a recommended rule whose install saved no file");
+                    EntryStatus::Off
+                } else {
+                    warn!(entry = %id, "the firewall service couldn't remove a recommended rule's file");
+                    EntryStatus::OffFileLeft
+                };
                 let choices = state.choices.removed(&id);
                 keep(&mut state, choices);
                 state.failures.remove(&id);
-                state.statuses.insert(id, EntryStatus::OffFileLeft);
+                state.statuses.insert(id, status);
             }
             // Turned off while its install was on its way: the failure is
             // for a choice that is gone, and must not hold back the delete
@@ -561,6 +559,19 @@ impl CuratedDefaults {
                 fail(&mut state, false, &id, status, problem, generation);
             }
         }
+        drop(state);
+        if no_file {
+            // The refusal marked a file left; the publish of this pass's
+            // rule-list hold carries the count without it.
+            let mut cache = self.inner.rules.lock().unwrap_or_else(|e| e.into_inner());
+            cache.forget_file_left(&name);
+        }
+    }
+
+    /// Whether the cache notes a file left behind under `name`.
+    fn file_left(&self, name: &str) -> bool {
+        let cache = self.inner.rules.lock().unwrap_or_else(|e| e.into_inner());
+        cache.files_left().contains(name)
     }
 
     /// Remove an edited (or unreadable) copy the user confirmed removing,

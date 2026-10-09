@@ -76,6 +76,50 @@ pub(super) struct MaybeApplied {
     /// snapshot is the daemon's memory, so it is forgotten then (#120
     /// item 14).
     pub(super) generation: u64,
+    /// Whether the rule may have a file, which a refused delete would leave
+    /// behind: an unanswered install may have written it, and a refused one
+    /// wrote none, so only a file a refused delete left before it counts
+    /// (#120 item 15).
+    pub(super) file_possible: bool,
+}
+
+/// Keep `name`'s [`State::maybe_applied`] record up to date with a
+/// command's `outcome`; returns the record an answered command dropped.
+/// - A refused or unanswered install records it; `marked` says whether the
+///   cache noted a file left behind under the name. A record is never made
+///   less cautious on the same stream.
+/// - An install or delete answered `OK`, or a refused delete, drops it: the
+///   name is out of the daemon's memory or listed. A delete that wasn't
+///   answered or sent keeps it.
+pub(super) fn track_maybe_applied(
+    state: &mut State,
+    name: &str,
+    install: bool,
+    outcome: &Result<(), Problem>,
+    marked: bool,
+    generation: u64,
+) -> Option<MaybeApplied> {
+    let (refused, unanswered) = match outcome {
+        Ok(()) => (false, false),
+        Err(problem) => (problem.daemon_refused, problem.unanswered),
+    };
+    if install && (refused || unanswered) {
+        // Each pass keeps only its own stream's records.
+        let earlier = state
+            .maybe_applied
+            .get(name)
+            .is_some_and(|record| record.file_possible);
+        let record = MaybeApplied {
+            generation,
+            file_possible: unanswered || marked || earlier,
+        };
+        state.maybe_applied.insert(name.to_string(), record);
+        None
+    } else if outcome.is_ok() || refused {
+        state.maybe_applied.remove(name)
+    } else {
+        None
+    }
 }
 
 /// A failed command for an entry, and when it failed.
