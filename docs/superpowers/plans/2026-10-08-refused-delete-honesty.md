@@ -157,7 +157,17 @@ The bazzite-tower fork (its PRs #89 and #91) changes none of this.
   is unchanged.
 - `remove_other_kinds`' text "Snitchwatch will try again" now means: when
   the rule comes back at a restart (it's no longer listed). The text is
-  reworded to say that.
+  reworded to say that, and so is the unsubscribe's refusal text. Both now
+  say the rule stopped applying but its saved file may bring it back.
+- **Leftover blocklist rules** (#73, the Blocklists page's "Remove"): a
+  refused delete takes the rule off the leftover list too.
+  - `removal_note` counts it as removed and adds a sentence about its file.
+  - The note shows only while leftovers remain. A pass where every delete
+    was refused leaves none, so the Rules page's `leftOnDisk` sentence is
+    what tells the user.
+  - The tests that used refusals to produce a lingering note now use a
+    silent daemon. A new `RefuseThenSilent` harness answer covers the mixed
+    note.
 - **Profile enforcer:** a refused purge is logged, as before. The rule
   leaves the cache, so the next pass doesn't resend. A restart that reloads
   the file brings it back and it is purged then.
@@ -177,7 +187,11 @@ A `LoaderModel` (memory, files, stuck files), modelled on bridge-cli's
 - `restart()` reloads memory from the files in the daemon's reported shape
   (`round_trip::as_daemon_reports`), and serves that as the next
   `Subscribe` snapshot.
-- `spawn_loader_responder` answers a stream from it.
+- `spawn_loader_responder` answers a stream from it. Dropping its receiver
+  stands for the daemon process exiting: the next command is neither
+  applied nor answered, and the stream closes. On TCP the bridge fans a
+  command out to every open stream, so a lingering old stream would
+  otherwise apply it to the shared model a second time.
 
 ## Tests (TDD: each written RED first)
 
@@ -239,6 +253,15 @@ permanent spurious note on every refused blocklist.
 
 A follow-up could show a per-row "unconfirmed" state. That needs a wire
 field and a Kirigami row role; it is out of scope here.
+
+## Known residue (not changed here)
+
+- An editor change of a disabled `always` rule that the daemon refuses
+  (`Save` failed) now shows in the list as the daemon holds it, the new
+  version. The editor's result still reads "Not saved: <daemon text>",
+  which is literally true: it applies until the daemon's next start.
+- `rules.rs` was already over the 800-line guide (834 lines) and grows by
+  about 30 lines. The new logic lives in `rules_refused.rs`.
 
 ## Not changed
 
