@@ -152,21 +152,17 @@ fn readings_right_after_the_bridges_own_change_are_ignored() {
     assert!(read_times(&mut cache, 3, 20).iter().all(|flip| !flip));
 }
 
-/// The quiet readings are exactly [`QUIET_PINGS`]: a disagreement that stays
-/// after them is real and is counted from the first reading after them.
+/// The plan's numbers, literally: two readings are ignored after an own
+/// change, and three more repeats of a disagreement raise the hint.
 #[test]
-fn only_the_quiet_readings_after_an_own_change_are_ignored() {
+fn two_readings_are_ignored_after_an_own_change_and_three_more_raise() {
     let mut cache = synced(2);
     settle(&mut cache);
     cache.upsert(rule("new", "always", true));
     // The daemon never learns of it (say): 2 against a list of 3.
-    let flips = read_times(
-        &mut cache,
-        2,
-        usize::from(QUIET_PINGS) + usize::from(PINGS_TO_RAISE) - 1,
-    );
-    assert!(flips.iter().all(|flip| !flip), "{flips:?}");
-    assert!(read(&mut cache, 2), "the next one completes the run");
+    let flips = read_times(&mut cache, 2, 4);
+    assert_eq!(flips, vec![false; 4], "2 ignored, then 2 of 3");
+    assert!(read(&mut cache, 2), "the fifth completes the run");
 }
 
 #[test]
