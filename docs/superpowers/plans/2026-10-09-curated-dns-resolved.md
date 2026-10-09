@@ -5,8 +5,8 @@
 Recommended rules page ('DNS only, any address')". The review below narrows
 the rule (it names its sender) and the bulk action (it is never turned on in
 bulk); the destination stays "any address".
-**Baseline:** `origin/main` @ `ac446e2`, then merged with `ddb6b96` (#122);
-branch `feat/curated-dns-resolved`.
+**Baseline:** `origin/main` @ `ac446e2`, then merged with `ddb6b96` (#122) and
+`fa14795` (#124); branch `feat/curated-dns-resolved`.
 **Size:** S–M. One data entry, one new `Protocol` value, one new destination
 kind with a hard allowlist including a sender pin, one additive wire flag
 (`broad`), one fixed Kirigami sentence and a store rule. No new capability.
@@ -135,10 +135,11 @@ DNS needs udp/53 and tcp/53 (truncated answers, large answers, DNSSEC). Options:
   `broad` entry in either branch (the `e.on != on` branch and the adopt of a
   rule already in the firewall); "Turn all off" does include it (the safe
   direction). A single row's switch and Keep still work.
-- `bridge-cli/tests/curated_defaults.rs` is **untouched** (PR #122 edited its
-  helpers); the DNS tests live in `tests/curated_dns.rs` with their own small
-  copy of the few helpers they need. Sharing one helper module is a later
-  cleanup once nobody else is editing the file.
+- `bridge-cli/tests`: the helpers both files need (`start`, `connect_daemon`,
+  `send`, `entry_until_id`, `next_command`, `nothing_sent`) moved into
+  `tests/curated_support/mod.rs`, the convention `count_hint_support` already
+  uses. `curated_defaults.rs` keeps its flatpak wrappers and its own scenarios
+  (659 to 561 lines); the DNS tests are in `tests/curated_dns.rs`.
 
 ## Wording (what the user reads)
 
@@ -317,10 +318,14 @@ Kirigami clippy; `cargo test -j 4 --no-fail-fast`; the Kirigami headless suite;
    (`resolvectl --protocol=` chooses DNS versus LLMNR/mDNS, not the transport,
    and `dig +tcp` is attributed to `dig`, so neither tests this rule.) Check
    both address families (`udp6`/`tcp6`).
-4. **The sender pin works**: as an ordinary user,
-   `LD_PRELOAD=/usr/lib64/libfoo.so /usr/lib/systemd/systemd-resolved ...` (or
-   a copy that sends one UDP packet to port 53) is **not** allowed by this
-   rule; the daemon prompts for it.
+4. **The sender pin works**: as an ordinary user (not root, not
+   `systemd-resolve`), run `/usr/lib/systemd/systemd-resolved` **at its exact
+   path** with an `LD_PRELOAD` shim whose constructor sends one UDP packet to
+   port 53 (a copy at another path fails the path match and tests nothing).
+   Confirm the daemon's event shows `process.path` exactly
+   `/usr/lib/systemd/systemd-resolved` with **the user's uid**, and that the
+   connection is prompted or denied, not matched by
+   `snitchwatch-default-dns-resolved`.
 5. **Does not cover what it should not**: a `dig @8.8.8.8` from a shell is
    still prompted/denied (process is `dig`); DoT (853) still denied.
 6. **Entry turned off** removes the rule and lookups fail again; after a
@@ -348,8 +353,9 @@ Branch `feat/curated-dns-resolved`, local commits only, merged with
 - **First round** (`95a7532`..`6c173f3`, `1f26540`): the entry, the allowlist, the
   tests, the Kirigami sentence. The first design pinned the path only, and
   "Turn all on" included the entry.
-- **Fix round after review** (H1 in `874494d`; M1 and the sibling test file in
-  `2e692b9`): the pin, the `broad` flag, the store rule and the cleanups.
+- **Fix round after review** (H1 in `874494d`, which alone leaves the old
+  bridge-cli DNS tests red until M1 in `2e692b9`; the sibling test file and
+  the shared `curated_support` module after the merge of #122): the pin, the `broad` flag, the store rule and the cleanups.
   Code-review items done: the file over 800 lines (the DNS tests moved to
   `curated_dns.rs`, leaving `curated_defaults.rs` identical to main), the
   `check_curated_rule` doc and the tests.rs comment and test name, `check_leaves` split,

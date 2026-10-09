@@ -2,97 +2,31 @@
 //! bridge with a persistent state directory, driven over its inbound channel
 //! like a GUI, and the mock daemon, which checks every rule the way
 //! opensnitchd compiles it (`validate_rule_shape`). The other entries'
-//! scenarios are in `curated_defaults.rs`; its helpers are repeated here in
-//! the few lines these tests need, so that file stays as it is.
+//! scenarios are in `curated_defaults.rs`; both use `curated_support`.
 
-use std::path::PathBuf;
-use std::time::Duration;
-
-use mock_opensnitchd::lists::{spawn_responder, ListsPolicy};
 use mock_opensnitchd::round_trip::as_daemon_reports;
-use mock_opensnitchd::MockOpensnitchd;
 use snitchwatch_bridge::curated::reconcile::EntryStatus;
 use snitchwatch_bridge::curated::wire::CuratedDefaultSummary;
 use snitchwatch_bridge::ws_messages::{ClientMessage, ServerMessage};
-use snitchwatch_bridge_cli::{
-    run_with_options, BridgeConfig, BridgeMode, RunOptions, RunningBridge, Storage,
-};
-use snitchwatch_proto::protocol::{Action, ClientConfig, Notification};
-use tokio::sync::{broadcast, mpsc};
+use snitchwatch_bridge_cli::BridgeMode;
+use snitchwatch_proto::protocol::Action;
+use tokio::sync::broadcast;
 
-const WAIT: Duration = Duration::from_secs(10);
+mod curated_support;
+use curated_support::{connect_daemon, entry_until_id, next_command, nothing_sent, send, start};
+
 const DNS: &str = "dns-resolved";
 const DNS_RULE: &str = "snitchwatch-default-dns-resolved";
 const FLATPAK: &str = "flatpak-flathub";
 
-struct Setup {
-    _sockets: tempfile::TempDir,
-    _state_dir: tempfile::TempDir,
-    state: PathBuf,
-    bridge: RunningBridge,
-    rx: broadcast::Receiver<ServerMessage>,
-}
-
-async fn start() -> Setup {
-    let sockets = tempfile::tempdir().unwrap();
-    let state_dir = tempfile::tempdir().unwrap();
-    let state = state_dir.path().canonicalize().unwrap();
-    let bridge = run_with_options(
-        BridgeConfig {
-            grpc_bind: "127.0.0.1:0".parse().unwrap(),
-            ws_socket_path: sockets.path().join("bridge.sock"),
-            cache_capacity: 64,
-        },
-        RunOptions {
-            storage: Storage::Persistent(state.clone()),
-            blocklist_fetcher: None,
-            mode: BridgeMode::System,
-        },
-    )
-    .await
-    .unwrap();
-    let rx = bridge.broadcast_tx.subscribe();
-    Setup {
-        _sockets: sockets,
-        _state_dir: state_dir,
-        state,
-        bridge,
-        rx,
-    }
-}
-
-/// A daemon (re)starting with `rules` as its snapshot; returns once its
-/// HELLO is the bridge's `generation`th.
-async fn connect_daemon(
-    bridge: &RunningBridge,
-    generation: u64,
-    rules: Vec<snitchwatch_proto::protocol::Rule>,
-) -> (MockOpensnitchd, mpsc::Receiver<Notification>) {
-    let mut daemon = MockOpensnitchd::connect(bridge.grpc_endpoint.tcp_addr().unwrap())
-        .await
-        .unwrap();
-    daemon
-        .subscribe_with_config(ClientConfig {
-            id: 1,
-            name: "mock".into(),
-            version: "mock-1.8.0".into(),
-            rules,
-            ..Default::default()
-        })
-        .await
-        .unwrap();
-    let (replies, inbound) = daemon.open_notifications().await.unwrap();
-    let seen = spawn_responder(ListsPolicy::Accept, replies, inbound);
-    let mut ready = bridge.daemon_stream_ready();
-    tokio::time::timeout(WAIT, ready.wait_for(|g| *g >= generation))
-        .await
-        .expect("no HELLO")
-        .unwrap();
-    (daemon, seen)
-}
-
-async fn send(bridge: &RunningBridge, msg: ClientMessage) {
-    bridge.inbound_tx.send(msg).await.unwrap();
+/// Watch `SetCuratedDefaults` until the entry `id` satisfies `done`.
+async fn entry_until(
+    rx: &mut broadcast::Receiver<ServerMessage>,
+    id: &str,
+    what: &str,
+    done: impl Fn(&CuratedDefaultSummary) -> bool,
+) -> CuratedDefaultSummary {
+    entry_until_id(rx, id, what, |entry, _| done(entry)).await
 }
 
 fn turn(id: &str, on: bool) -> ClientMessage {
@@ -102,46 +36,13 @@ fn turn(id: &str, on: bool) -> ClientMessage {
     }
 }
 
-/// Watch `SetCuratedDefaults` until the entry `id` satisfies `done`.
-async fn entry_until(
-    rx: &mut broadcast::Receiver<ServerMessage>,
-    id: &str,
-    what: &str,
-    done: impl Fn(&CuratedDefaultSummary) -> bool,
-) -> CuratedDefaultSummary {
-    tokio::time::timeout(WAIT, async {
-        loop {
-            if let Ok(ServerMessage::SetCuratedDefaults { entries, .. }) = rx.recv().await {
-                let entry = entries.into_iter().find(|e| e.id == id).unwrap();
-                if done(&entry) {
-                    return entry;
-                }
-            }
-        }
-    })
-    .await
-    .unwrap_or_else(|_| panic!("timed out: {what}"))
-}
-
-async fn next_command(seen: &mut mpsc::Receiver<Notification>) -> Notification {
-    tokio::time::timeout(WAIT, seen.recv())
-        .await
-        .expect("no command reached the daemon")
-        .unwrap()
-}
-
-async fn nothing_sent(seen: &mut mpsc::Receiver<Notification>) {
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    assert!(seen.try_recv().is_err(), "a command reached the daemon");
-}
-
 /// The DNS entry is off until chosen, installs exactly the resolver's rule
 /// (the mock daemon compiles it like opensnitchd, and the install counts only
 /// after its `OK`), pinned to the resolver's account, and no other entry
 /// comes with it. Only it is marked broad on the wire.
 #[tokio::test]
 async fn the_dns_entry_is_off_until_chosen_and_installs_exactly_the_resolver_rule() {
-    let mut s = start().await;
+    let mut s = start(BridgeMode::System).await;
     let (_daemon, mut seen) = connect_daemon(&s.bridge, 1, Vec::new()).await;
     nothing_sent(&mut seen).await;
 
@@ -236,7 +137,7 @@ async fn the_dns_entry_is_off_until_chosen_and_installs_exactly_the_resolver_rul
 /// deleted outside Snitchwatch stays deleted across a restart.
 #[tokio::test]
 async fn a_deleted_or_edited_dns_rule_is_left_as_the_user_made_it() {
-    let mut s = start().await;
+    let mut s = start(BridgeMode::System).await;
     let (daemon, mut seen) = connect_daemon(&s.bridge, 1, Vec::new()).await;
     send(&s.bridge, turn(DNS, true)).await;
     let installed = next_command(&mut seen).await.rules[0].clone();
@@ -296,7 +197,7 @@ async fn a_deleted_or_edited_dns_rule_is_left_as_the_user_made_it() {
 /// page flags it and offers Remove), and is neither overwritten nor deleted.
 #[tokio::test]
 async fn a_dns_copy_without_its_sender_pin_is_an_edit_left_alone() {
-    let mut s = start().await;
+    let mut s = start(BridgeMode::System).await;
     let (daemon, mut seen) = connect_daemon(&s.bridge, 1, Vec::new()).await;
     send(&s.bridge, turn(DNS, true)).await;
     let installed = next_command(&mut seen).await.rules[0].clone();

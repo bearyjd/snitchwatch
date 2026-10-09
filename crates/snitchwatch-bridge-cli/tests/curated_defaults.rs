@@ -3,10 +3,6 @@
 //! inbound channel like a GUI, and the mock daemon, which checks every rule
 //! the way opensnitchd compiles it.
 
-use std::path::PathBuf;
-use std::time::Duration;
-
-use mock_opensnitchd::lists::{spawn_responder, ListsPolicy};
 use mock_opensnitchd::loader::{spawn_loader_responder, LoaderModel, SharedLoader};
 use mock_opensnitchd::round_trip::as_daemon_reports;
 use mock_opensnitchd::MockOpensnitchd;
@@ -21,75 +17,13 @@ use snitchwatch_bridge_cli::{
 use snitchwatch_proto::protocol::{Action, ClientConfig, Notification};
 use tokio::sync::{broadcast, mpsc};
 
-const WAIT: Duration = Duration::from_secs(10);
+mod curated_support;
+use curated_support::{
+    connect_daemon, entry_until_id, next_command, nothing_sent, send, start, Setup, WAIT,
+};
+
 const FLATPAK: &str = "flatpak-flathub";
 const FLATPAK_RULE: &str = "snitchwatch-default-flatpak-flathub";
-
-struct Setup {
-    _sockets: tempfile::TempDir,
-    _state_dir: tempfile::TempDir,
-    state: PathBuf,
-    bridge: RunningBridge,
-    rx: broadcast::Receiver<ServerMessage>,
-}
-
-async fn start(mode: BridgeMode) -> Setup {
-    let sockets = tempfile::tempdir().unwrap();
-    let state_dir = tempfile::tempdir().unwrap();
-    let state = state_dir.path().canonicalize().unwrap();
-    let bridge = run_with_options(
-        BridgeConfig {
-            grpc_bind: "127.0.0.1:0".parse().unwrap(),
-            ws_socket_path: sockets.path().join("bridge.sock"),
-            cache_capacity: 64,
-        },
-        RunOptions {
-            storage: Storage::Persistent(state.clone()),
-            blocklist_fetcher: None,
-            mode,
-        },
-    )
-    .await
-    .unwrap();
-    let rx = bridge.broadcast_tx.subscribe();
-    Setup {
-        _sockets: sockets,
-        _state_dir: state_dir,
-        state,
-        bridge,
-        rx,
-    }
-}
-
-/// A daemon (re)starting with `rules` as its snapshot; returns once its
-/// HELLO is the bridge's `generation`th.
-async fn connect_daemon(
-    bridge: &RunningBridge,
-    generation: u64,
-    rules: Vec<snitchwatch_proto::protocol::Rule>,
-) -> (MockOpensnitchd, mpsc::Receiver<Notification>) {
-    let mut daemon = MockOpensnitchd::connect(bridge.grpc_endpoint.tcp_addr().unwrap())
-        .await
-        .unwrap();
-    daemon
-        .subscribe_with_config(ClientConfig {
-            id: 1,
-            name: "mock".into(),
-            version: "mock-1.8.0".into(),
-            rules,
-            ..Default::default()
-        })
-        .await
-        .unwrap();
-    let (replies, inbound) = daemon.open_notifications().await.unwrap();
-    let seen = spawn_responder(ListsPolicy::Accept, replies, inbound);
-    let mut ready = bridge.daemon_stream_ready();
-    tokio::time::timeout(WAIT, ready.wait_for(|g| *g >= generation))
-        .await
-        .expect("no HELLO")
-        .unwrap();
-    (daemon, seen)
-}
 
 /// A daemon (re)starting from `model`, answering as its loader would.
 async fn connect_model(
@@ -165,10 +99,6 @@ async fn settled_entry(
     entry_until(&mut s.rx, "a snapshot's entry", |_, _| true).await
 }
 
-async fn send(bridge: &RunningBridge, msg: ClientMessage) {
-    bridge.inbound_tx.send(msg).await.unwrap();
-}
-
 fn turn(on: bool) -> ClientMessage {
     ClientMessage::SetCuratedDefaults {
         ids: vec![FLATPAK.into()],
@@ -182,35 +112,7 @@ async fn entry_until(
     what: &str,
     done: impl Fn(&CuratedDefaultSummary, &Option<String>) -> bool,
 ) -> CuratedDefaultSummary {
-    tokio::time::timeout(WAIT, async {
-        loop {
-            if let Ok(ServerMessage::SetCuratedDefaults {
-                entries,
-                unavailable,
-                ..
-            }) = rx.recv().await
-            {
-                let entry = entries.into_iter().find(|e| e.id == FLATPAK).unwrap();
-                if done(&entry, &unavailable) {
-                    return entry;
-                }
-            }
-        }
-    })
-    .await
-    .unwrap_or_else(|_| panic!("timed out: {what}"))
-}
-
-async fn next_command(seen: &mut mpsc::Receiver<Notification>) -> Notification {
-    tokio::time::timeout(WAIT, seen.recv())
-        .await
-        .expect("no command reached the daemon")
-        .unwrap()
-}
-
-async fn nothing_sent(seen: &mut mpsc::Receiver<Notification>) {
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    assert!(seen.try_recv().is_err(), "a command reached the daemon");
+    entry_until_id(rx, FLATPAK, what, done).await
 }
 
 #[tokio::test]
