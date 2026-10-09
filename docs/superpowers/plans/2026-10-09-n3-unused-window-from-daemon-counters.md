@@ -323,7 +323,11 @@ unchanged** from today.
   consumed stop, a failed consume, saves after the stop save, the side map
   and the entry limit, the version 1 shape, TCP marking no stop): all
   killed. Not mutation-tested: `record` taking its time before the locks
-  (no deterministic test for lock delay).
+  (no deterministic test for lock delay). Round 3 (re-review, private
+  copy, 9 mutants on the file removal and the TCP rewrite): 7 killed (one
+  after adding `an_untrusting_bridge_that_cannot_rewrite_keeps_the_file`);
+  2 equivalent survivors: a trusting bridge also rewriting a file with a
+  baseline at attach writes the same content.
 - Review findings fixed before merge: the shutdown save of a run that saw
   no ping used to mark the file clean next to the previous (crashed) run's
   baseline (`a_crash_stays_a_crash_through_a_run_that_saw_no_ping`); and,

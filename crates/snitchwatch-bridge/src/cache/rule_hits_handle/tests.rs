@@ -670,3 +670,22 @@ fn an_untrusting_bridge_rewrites_a_version_2_file_as_version_1_at_once() {
     assert_eq!(old.version, 1);
     assert!(view(tcp.message()).storage.persistent);
 }
+
+#[test]
+fn an_untrusting_bridge_that_cannot_rewrite_keeps_the_file() {
+    // Only a clean stop that can't be consumed costs the file; over TCP a
+    // failed rewrite to version 1 waits for the next good save.
+    let dir = state_dir();
+    let short = dir.path().join("rule_hits.json");
+    let long = dir.path().join(format!("{}.json", "h".repeat(240)));
+    let (unix, _rx) = unix_handle();
+    unix.attach_file(short.clone());
+    unix.record(&[ev("a")], 100, 7, &synced(&["a"]));
+    unix.save_now();
+    std::fs::rename(&short, &long).unwrap();
+    let (tcp, _rx) = handle();
+    tcp.attach_file(long.clone());
+    assert!(long.exists(), "the counts are not thrown away");
+    tcp.adopt_snapshot(&synced(&["a"]).lock().unwrap());
+    assert_eq!(counts(&tcp), vec![("a".to_string(), 1)]);
+}
