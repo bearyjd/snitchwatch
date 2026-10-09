@@ -1,5 +1,5 @@
 use super::*;
-use crate::cache::rule_hits::{MAX_FUTURE_SKEW_MS, MAX_HIT_NAME_BYTES};
+use crate::cache::rule_hits::{DaemonBaseline, MAX_FUTURE_SKEW_MS, MAX_HIT_NAME_BYTES};
 use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
 
 fn now() -> i64 {
@@ -20,6 +20,12 @@ fn saved(n: usize) -> Saved {
                 last_hit_unix_ms: 1_700_000_050_000,
             })
             .collect(),
+        daemon: Some(DaemonBaseline {
+            ping_unix_ms: 1_700_000_060_000,
+            uptime: 3_600,
+            rule_hits: 42,
+        }),
+        stopped_unix_ms: Some(1_700_000_070_000),
     }
 }
 
@@ -237,8 +243,43 @@ fn what_cannot_be_trusted_is_refused() {
         .collect();
     let bad = [
         ("not json".to_string(), "parse"),
-        (good.replace("\"version\":1", "\"version\":2"), "version"),
-        (good.replace("\"hits\"", "\"extra\":1,\"hits\""), "parse"),
+        (good.replace("\"version\":1", "\"version\":3"), "version"),
+        (good.replace("\"version\":1", "\"version\":0"), "version"),
+        (
+            good.replace(
+                "\"hits\"",
+                "\"daemon\":{\"pingUnixMs\":-1,\"uptime\":1,\"ruleHits\":1},\"hits\"",
+            ),
+            "daemon ping",
+        ),
+        (
+            good.replace(
+                "\"hits\"",
+                &format!(
+                    "\"daemon\":{{\"pingUnixMs\":{},\"uptime\":1,\"ruleHits\":1}},\"hits\"",
+                    now() + 2 * MAX_FUTURE_SKEW_MS
+                ),
+            ),
+            "daemon ping",
+        ),
+        (
+            good.replace("\"hits\"", "\"daemon\":{\"uptime\":1},\"hits\""),
+            "parse",
+        ),
+        (
+            good.replace("\"hits\"", "\"stoppedUnixMs\":-1,\"hits\""),
+            "stop time",
+        ),
+        (
+            good.replace(
+                "\"hits\"",
+                &format!(
+                    "\"stoppedUnixMs\":{},\"hits\"",
+                    now() + 2 * MAX_FUTURE_SKEW_MS
+                ),
+            ),
+            "stop time",
+        ),
         (
             good.replace("\"sinceUnixMs\":5", "\"sinceUnixMs\":-5"),
             "start time",
@@ -324,6 +365,12 @@ fn the_largest_file_save_can_write_loads_back() {
         since_unix_ms: now(),
         last_gap_unix_ms: Some(now()),
         hits,
+        daemon: Some(DaemonBaseline {
+            ping_unix_ms: now(),
+            uptime: u64::MAX,
+            rule_hits: u64::MAX,
+        }),
+        stopped_unix_ms: Some(now()),
     };
     save(&path, &biggest).unwrap();
     assert!(std::fs::metadata(&path).unwrap().len() <= MAX_FILE_BYTES);
@@ -343,4 +390,75 @@ fn a_save_that_would_not_load_back_is_an_error_not_a_silent_loss() {
     too_many.hits[0].last_hit_unix_ms = now() + 2 * MAX_FUTURE_SKEW_MS;
     assert!(save(&path, &too_many).is_err(), "a time load would refuse");
     assert!(!path.exists());
+}
+
+/// N3: what the next run judges a restart from, written as version 2.
+#[test]
+fn the_daemon_baseline_and_a_clean_stop_are_saved_as_version_2() {
+    let dir = dir();
+    let path = dir.path().join("rule_hits.json");
+    save(&path, &saved(1)).unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains("\"version\":2"), "{text}");
+    assert!(
+        text.contains("\"daemon\":{\"pingUnixMs\":1700000060000,\"uptime\":3600,\"ruleHits\":42}"),
+        "{text}"
+    );
+    assert!(text.contains("\"stoppedUnixMs\":1700000070000"), "{text}");
+    let none = Saved {
+        daemon: None,
+        stopped_unix_ms: None,
+        ..saved(1)
+    };
+    save(&path, &none).unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        !text.contains("daemon") && !text.contains("stopped"),
+        "{text}"
+    );
+    assert_eq!(load(&path).unwrap(), Some(none));
+}
+
+/// A file an older bridge wrote still loads, with nothing to judge a
+/// restart from.
+#[test]
+fn a_version_1_file_loads_without_a_baseline() {
+    let dir = dir();
+    let path = dir.path().join("rule_hits.json");
+    std::fs::write(
+        &path,
+        r#"{"version":1,"sinceUnixMs":5,"lastGapUnixMs":6,"hits":[{"name":"a","count":1,"lastHitUnixMs":2}]}"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let loaded = load(&path).unwrap().expect("a version 1 file loads");
+    assert_eq!(loaded.since_unix_ms, 5);
+    assert_eq!(loaded.last_gap_unix_ms, Some(6));
+    assert_eq!(loaded.hits.len(), 1);
+    assert_eq!(loaded.daemon, None);
+    assert_eq!(loaded.stopped_unix_ms, None);
+}
+
+/// A field this bridge doesn't know (a later additive change) is ignored,
+/// not a reason to distrust the whole file.
+#[test]
+fn an_unknown_field_is_ignored() {
+    let dir = dir();
+    let path = dir.path().join("rule_hits.json");
+    std::fs::write(
+        &path,
+        r#"{"version":2,"sinceUnixMs":5,"later":{"x":[1]},"hits":[{"name":"a","count":1,"lastHitUnixMs":2,"more":true}],"daemon":{"pingUnixMs":7,"uptime":1,"ruleHits":3,"bootId":"x"}}"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let loaded = load(&path).unwrap().expect("unknown fields are ignored");
+    assert_eq!(
+        loaded.daemon,
+        Some(DaemonBaseline {
+            ping_unix_ms: 7,
+            uptime: 1,
+            rule_hits: 3,
+        })
+    );
+    assert_eq!(loaded.hits[0].name, "a");
 }
