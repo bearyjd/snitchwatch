@@ -323,6 +323,11 @@ fn a_new_snapshot_and_a_withdrawal_forget_the_allowance() {
     let mut cache = synced(vec![rule("seen", "always", false)]);
     cache.note_prompt_answer("seen");
     cache.set_unknown();
+    assert_eq!(
+        cache.may_hold.allowance(Instant::now()),
+        0,
+        "withdrawn at once"
+    );
     cache.replace_all(vec![rule("seen", "always", false)]);
     settle(&mut cache, 1);
     let flips = many(&mut cache, 2, 3);
