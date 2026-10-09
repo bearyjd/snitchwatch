@@ -591,3 +591,82 @@ fn an_untrusting_bridge_writes_the_version_1_shape() {
         );
     }
 }
+
+// Re-review of PR #123.
+
+/// Where the badge's trusted period starts: the later of counting start and
+/// the last gap.
+fn trusted_from(handle: &RuleHitsHandle) -> i64 {
+    match handle.message() {
+        ServerMessage::RuleHits {
+            since_unix_ms,
+            last_gap_unix_ms,
+            ..
+        } => since_unix_ms.unwrap().max(last_gap_unix_ms.unwrap_or(0)),
+        other => panic!("expected RuleHits, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_clean_stop_that_cannot_be_rewritten_is_removed_with_the_file() {
+    // Run two can read the file but write nothing for its whole run (a full
+    // disk: no temp file fits, but an unlink still works; here a name so
+    // long that no temp name fits next to it). It counts hits that are never
+    // saved. Run three, storage fixed and the daemon restarted, must not
+    // judge from run one's clean stop.
+    let dir = state_dir();
+    let short = dir.path().join("rule_hits.json");
+    let long = dir.path().join(format!("{}.json", "h".repeat(240)));
+    let rules = synced(&["a", "b"]);
+    let (first, _rx) = unix_handle();
+    first.attach_file(short.clone());
+    first.record(&[ev("a")], 100, 7, &rules);
+    first.save_at_stop();
+    std::fs::rename(&short, &long).unwrap();
+
+    let started = now_ms();
+    let (second, _rx) = unix_handle();
+    second.attach_file(long.clone());
+    second.record(&[ev("b"), ev("b")], 1, 2, &rules);
+    second.save_now();
+    second.save_at_stop();
+    assert!(view(second.message()).lossy);
+    drop(second);
+
+    if long.exists() {
+        std::fs::rename(&long, &short).unwrap();
+    }
+    let (third, _rx) = unix_handle();
+    third.attach_file(short);
+    third.record(&[ev("a")], 2, 1, &rules);
+    assert!(
+        trusted_from(&third) >= started,
+        "run two's hits may be missing: no trusted period from before it"
+    );
+}
+
+#[test]
+fn an_untrusting_bridge_rewrites_a_version_2_file_as_version_1_at_once() {
+    // A rollback to a bridge from before N3 reads only the version 1 shape.
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    #[allow(dead_code)]
+    struct OldReader {
+        version: u32,
+        since_unix_ms: i64,
+        last_gap_unix_ms: Option<i64>,
+        hits: Vec<crate::ws_messages::RuleHitWire>,
+    }
+    let dir = state_dir();
+    let path = dir.path().join("rule_hits.json");
+    let (unix, _rx) = unix_handle();
+    unix.attach_file(path.clone());
+    unix.record(&[ev("a")], 100, 7, &synced(&["a"]));
+    unix.save_now();
+    assert!(text_of(&path).contains("\"daemon\""), "a version 2 file");
+    let (tcp, _rx) = handle();
+    tcp.attach_file(path.clone());
+    let old: OldReader = serde_json::from_str(&text_of(&path)).expect("the old reader");
+    assert_eq!(old.version, 1);
+    assert!(view(tcp.message()).storage.persistent);
+}

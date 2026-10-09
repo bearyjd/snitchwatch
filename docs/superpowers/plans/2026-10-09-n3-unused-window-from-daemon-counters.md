@@ -78,7 +78,11 @@ baseline the next run measures from.
 - **A clean stop vouches for one restart only** (review H1). When a file
   with `stoppedUnixMs` is read, it is rewritten at once without it (the
   value is kept in memory for the judgement and for a shutdown before the
-  first ping). If that rewrite fails, the restart is a gap. Otherwise a run
+  first ping). If that rewrite fails, the restart is a gap and the file is
+  removed (re-review: otherwise storage unwritable for the whole run would
+  leave the clean stop for the next run after all; with no file the next
+  run starts counting afresh). A bridge that doesn't trust the counters
+  also rewrites a file with a baseline at once, as the version 1 shape. Otherwise a run
   that judged its first ping, counted hits and then lost power before its
   first periodic save would leave the previous run's clean stop in the file.
 - The shutdown save is the **last** save: one the ticker had already handed
@@ -163,8 +167,9 @@ gaps, unchanged.
   recorded and, in row 5, not noticed. With pings only on hits, "after the
   last ping" means the daemon's last batch (under ~1 s of hits) plus
   whatever it decided after the bridge stopped. On a reboot both stop
-  within seconds. Pings the bridge receives between its shutdown save and
-  the gRPC server's stop fall in the same window.
+  within seconds. Pings that arrive after the shutdown save (the gRPC
+  server is told to stop after it) are counted in memory and dropped, never
+  saved: if the daemon then restarts, they fall in the same window.
 - **A bridge stopped long before the daemon restarts.** If the bridge is
   stopped while the daemon keeps running, and the daemon then restarts
   before the next bridge starts, every hit in between is lost unnoticed. For
@@ -186,6 +191,17 @@ gaps, unchanged.
   run whose file was unreadable until fixed. Options for later: honour row 5
   only when the new daemon started within N minutes of `stoppedUnixMs`
   (gives up "machine off overnight"), or record a boot id.
+- **Storage that can't be written to at all for a whole run** (re-review;
+  documented, not handled). When the clean stop can't be rewritten out of
+  the file, the file is removed; an unlink works on a full disk, but not on
+  a read-only file system (EROFS after a file-system error) or an
+  unwritable directory. Then only the gap in memory remains (and a warning
+  is logged): the run's hits are never saved, and if storage recovers after
+  a reboot that also restarted the daemon, the next run reads the old
+  clean stop and can judge "no gap", so a rule hit only in that run can
+  read "Unused". Same options as for the rollback.
+- **Two bridges on one state directory** (Unix) at once: no lock. Socket
+  activation starts one system bridge, so this is unreachable in practice.
 - **Open question: "stayed up" fooled.** Row 4 trusts a matching start
   time. A baseline recorded late (a ping processed long after the daemon
   serialised it) or a backward wall-clock step between runs could make a

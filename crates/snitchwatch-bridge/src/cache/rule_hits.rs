@@ -456,6 +456,11 @@ impl RuleHits {
         self.trust_daemon_counters = trusted;
     }
 
+    /// See [`Self::trust_daemon_counters`].
+    pub fn daemon_counters_trusted(&self) -> bool {
+        self.trust_daemon_counters
+    }
+
     pub fn since_unix_ms(&self) -> Option<i64> {
         self.since_unix_ms
     }

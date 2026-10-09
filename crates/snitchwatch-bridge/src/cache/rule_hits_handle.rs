@@ -17,9 +17,9 @@
 //! [`Self::attach_file`] is written out of the file at once. Saves are
 //! serialised by one lock, and each writes a temp file of its own
 //! (`rule_hits_file::save`), so not even another bridge on the same directory
-//! shares it. A file that can't be read is left as it is and the counts stay in memory; a save that fails
-//! turns `storage.persistent` off with the reason, and a later success turns
-//! it back on. Without a file (no state directory) the counts are in memory
+//! shares it. A file that can't be read is left as it is and the counts stay
+//! in memory; a save that fails turns `storage.persistent` off with the
+//! reason, and a later success turns it back on. Without a file (no state directory) the counts are in memory
 //! only and the message says so.
 //!
 //! **Lock order:** the rule cache, then the state, then the persistence
@@ -163,15 +163,22 @@ impl RuleHitsHandle {
     /// of the file at once (kept in memory for the judgement and for a
     /// shutdown before the first ping). Were this run to die before its
     /// first save, the next would otherwise read it as this run's. If it
-    /// can't be taken out, the restart is a gap.
+    /// can't be taken out, the restart is a gap, and the file is removed:
+    /// were storage to stay unwritable for the whole run, the next run would
+    /// otherwise read the clean stop after all (an unlink still works on a
+    /// full disk; on a read-only one it can't, and only the gap in memory
+    /// remains). A bridge that doesn't trust the counters rewrites a file
+    /// with a baseline too, as the version 1 shape a rollback can read.
     pub fn attach_file(&self, path: PathBuf) {
         let loaded = rule_hits_file::load(&path);
-        let mut consume = false;
+        let (mut consume, mut downgrade) = (false, false);
         let status = match loaded {
             Ok(saved) => {
                 if let Some(saved) = saved {
+                    let mut state = lock(&self.inner.state);
                     consume = saved.stopped_unix_ms.is_some();
-                    lock(&self.inner.state).restore(saved, now_ms());
+                    downgrade = saved.daemon.is_some() && !state.daemon_counters_trusted();
+                    state.restore(saved, now_ms());
                 }
                 None
             }
@@ -186,7 +193,7 @@ impl RuleHitsHandle {
             persistence.version += 1;
             match status {
                 None => {
-                    persistence.file = Some(path);
+                    persistence.file = Some(path.clone());
                     persistence.status = StorageStatus {
                         persistent: true,
                         reason: None,
@@ -196,8 +203,15 @@ impl RuleHitsHandle {
                 Some(reason) => persistence.status = memory_only(Some(reason)),
             }
         }
-        if consume && !self.save(SaveKind::Consume) {
+        if (consume || downgrade) && !self.save(SaveKind::Consume) && consume {
             lock(&self.inner.state).distrust_restart(now_ms());
+            if let Err(e) = std::fs::remove_file(&path) {
+                warn!(
+                    error = %e,
+                    "couldn't remove the rule hit counts file after failing to rewrite it; \
+                     a later bridge run may miss that this run's hits are not saved"
+                );
+            }
         }
     }
 
@@ -326,7 +340,7 @@ impl RuleHitsHandle {
     }
 
     /// Runs the broadcast and save schedule until the last handle is
-    /// dropped. Abort the task, then call [`Self::save_now`], at shutdown.
+    /// dropped. Abort the task, then call [`Self::save_at_stop`], at shutdown.
     /// The state it starts with is not broadcast: no client can have missed
     /// it, and every snapshot answer carries it.
     pub fn spawn_ticker(&self) -> tokio::task::JoinHandle<()> {
