@@ -234,3 +234,26 @@ the PR.
   shipped `default-config.json` dials `127.0.0.1:50051`, so until #35 every
   per-user setup keeps the old behaviour (a gap per bridge start).
   **Recommendation: no**, until #35: a forged first ping could hide a gap.
+
+## As built
+
+- As designed above. The judgement is `restart_missed_hits` in
+  `cache/rule_hits.rs` (logged at `info!`: `daemon = stayed up | restarted |
+  cannot tell`, `clean_stop`, `missed`); trust is set by
+  `UiService::with_daemon_transport` through
+  `RuleHitsHandle::set_daemon_transport`; `RunningBridge::shutdown` calls
+  `RuleHitsHandle::save_at_stop`, after which any later save writes again,
+  unmarked.
+- Tests: the table's rows in `cache/rule_hits/restart_tests.rs`; file format
+  in `cache/rule_hits_file/tests.rs`; handle in
+  `cache/rule_hits_handle/tests.rs`; whole bridges (Unix and TCP, two runs on
+  one state directory, the mock keeping its counters) in bridge-cli
+  `rule_hits_restart_tests.rs`.
+- Mutation checks (by hand, 33 mutants: every guard of the judgement, the
+  slack both ways, the provisional gap, trust at restore and save, the
+  version range, both new time checks, unknown fields, the stop save's
+  write/mark/revision, the transport wiring and the shutdown call): all
+  killed.
+- Not changed: Kirigami. Its `hit_badge.rs` module doc still says a bridge
+  restart is a gap; on the Unix socket that is now only when hits may have
+  been lost (a doc follow-up, no behaviour change).
