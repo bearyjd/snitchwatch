@@ -62,13 +62,17 @@ impl RulesCache {
     /// Deleted rules the daemon stopped using but couldn't remove the file
     /// of. A name leaves when a snapshot lists it again (the file loaded) or
     /// a confirmed `always` change rewrites its file; not on a confirmed
-    /// delete, which for a name not in memory touches no file.
+    /// delete, which for a name not in memory touches no file. The curated
+    /// defaults also drop a rule that never had a file
+    /// ([`Self::forget_file_left`]).
     pub fn files_left(&self) -> &BTreeSet<String> {
         &self.files_left
     }
 
-    /// Forget `name`'s marker; bumps the revision if it had one.
-    pub(super) fn forget_file_left(&mut self, name: &str) {
+    /// Forget `name`'s marker; bumps the revision if it had one. Also for
+    /// a caller that knows the rule had no file: the curated defaults, for
+    /// a rule whose install was refused (#120 item 15).
+    pub(crate) fn forget_file_left(&mut self, name: &str) {
         if self.files_left.remove(name) {
             self.revision += 1;
         }

@@ -230,10 +230,25 @@ async fn another_pass(curated: &CuratedDefaults, ask: impl FnOnce()) {
     eventually("another pass", || passes(curated) > before).await;
 }
 
+/// Whether a `SetCuratedDefaults` in `rx` showed the entry as `status`.
+fn announced(rx: &mut broadcast::Receiver<ServerMessage>, status: EntryStatus) -> bool {
+    let mut shown = false;
+    while let Ok(message) = rx.try_recv() {
+        if let ServerMessage::SetCuratedDefaults { entries, .. } = message {
+            shown |= entries
+                .iter()
+                .any(|e| e.id == FLATPAK && e.status == status);
+        }
+    }
+    shown
+}
+
 /// PR #119 review M1: stock `replaceUserRule` takes a rule into memory
 /// before `Save` fails, so a refused install may apply though the list
 /// lacks it. Off deletes it, once: more passes send nothing more (no hot
-/// loop), and on again installs once.
+/// loop), and on again installs once. That install wrote no file and none
+/// was left before it, so the refused delete leaves none: the entry reads
+/// plain `Off`, never "may come back" (#120 item 15).
 #[tokio::test]
 async fn off_after_a_refused_install_deletes_it_once() {
     let harness = Harness::new().connect(Daemon::Refuse, Vec::new());
@@ -244,12 +259,19 @@ async fn off_after_a_refused_install_deletes_it_once() {
         entry_state(&curated, FLATPAK).status == EntryStatus::NotInstalled
     })
     .await;
+    let mut rx = harness.broadcast.subscribe();
     turn(&curated, FLATPAK, false);
     eventually("the delete", || harness.seen().len() >= 2).await;
-    eventually("off, file left", || {
-        entry_state(&curated, FLATPAK).status == EntryStatus::OffFileLeft
-    })
-    .await;
+    tokio::time::sleep(SETTLE).await;
+    assert_eq!(entry_state(&curated, FLATPAK).status, EntryStatus::Off);
+    assert!(!announced(&mut rx, EntryStatus::OffFileLeft));
+    assert!(harness
+        .rules
+        .cache()
+        .lock()
+        .unwrap()
+        .files_left()
+        .is_empty());
     for _ in 0..3 {
         another_pass(&curated, || turn(&curated, FLATPAK, false)).await;
     }
