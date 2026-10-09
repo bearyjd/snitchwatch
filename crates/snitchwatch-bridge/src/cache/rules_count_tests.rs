@@ -351,6 +351,22 @@ fn a_reading_taken_while_settling_is_not_evidence() {
     assert_eq!(read_times(&mut cache, 3, 2), vec![false, false]);
 }
 
+/// A disagreement has to hold with nothing in between: a pause is a gap.
+#[test]
+fn a_pause_interrupts_a_run() {
+    let mut cache = synced(2);
+    settle(&mut cache);
+    assert_eq!(read_times(&mut cache, 3, 2), vec![false, false]);
+    let paused = cache.observe_rule_count(Reading {
+        reported: 3,
+        uptime: 100,
+        settling: true,
+    });
+    assert!(!paused);
+    assert_eq!(read_times(&mut cache, 3, 2), vec![false, false]);
+    assert!(read(&mut cache, 3));
+}
+
 #[test]
 fn a_hint_already_shown_stays_while_the_check_is_paused() {
     let mut cache = synced(2);

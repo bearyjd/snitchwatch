@@ -250,6 +250,25 @@ staged-snapshot pause; drop the zero-reading guard; clear on one agreeing ping; 
 ping; leave the flag out of `not_shown()`; `replace_all` not clearing it;
 Kirigami `Text.PlainText` removed.
 
+## As built (differences from the plan above)
+
+- `DaemonCommands::in_flight()` counts waiting commands **and** commands that
+  timed out within `LATE_REPLY_GRACE` (30 s): their late `OK` is still
+  applied to the cache, so the daemon may have changed what the bridge does
+  not know yet.
+- The bridge-cli end-to-end tests use `DeleteRule` as the "GUI-made change":
+  the per-user setup refuses `AddRule`, and a delete moves the daemon's count
+  just the same. The mock gained `LoaderModel::num_rules()` and
+  `MockOpensnitchd::ping_reporting_rules()`.
+- Kirigami shows the hint only for a `RulesNotShown` that is `listed`
+  (`count_hint_text`), whatever else a frame says.
+- No snapshot storm: a feed asks for a snapshot only after it subscribes or
+  lags (`bridge_dispatch::run_feed`). The hint adds at most one small
+  `RulesNotShown` per flip, never per ping, and nothing in this path sends a
+  command or a list.
+- No role id was added to `RulesModel` (the hint is page state, a
+  `countHintText` property beside `notShownText`).
+
 ## Limitations (also for the tower gate)
 
 - **In-place edits are not detected.** An edited file that keeps its rule
