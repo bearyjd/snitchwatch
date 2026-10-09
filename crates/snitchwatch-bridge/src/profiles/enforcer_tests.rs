@@ -238,6 +238,24 @@ async fn deactivating_deletes_every_rule_the_bridge_made() {
     assert_eq!(deleted, vec![a.name, b.name]);
 }
 
+/// Tower r12: a refused delete comes after the daemon dropped the rule from
+/// memory, so the rule leaves the list and the next pass doesn't send the
+/// delete again (its file may bring it back at the daemon's next start,
+/// and that pass deletes it then).
+#[tokio::test]
+async fn a_refused_purge_is_not_sent_again() {
+    let stray = wanted("old", "x", "x.example");
+    let h = Harness::new().connect(
+        Daemon::Refuse("operation not permitted"),
+        vec![stray.clone()],
+    );
+    let sink = h.sink();
+    assert!(sink.apply(&[]).await.is_empty());
+    assert!(sink.apply(&[]).await.is_empty());
+    assert_eq!(h.seen(), vec![(DELETE, stray.name.clone())]);
+    assert!(!h.rules.cache().lock().unwrap().contains(&stray.name));
+}
+
 #[tokio::test]
 async fn the_noop_sink_says_why_nothing_is_installed() {
     let sink = NoopProfileRuleSink::new("per-user mode");

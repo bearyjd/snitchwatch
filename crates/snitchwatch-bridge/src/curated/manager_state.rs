@@ -77,6 +77,9 @@ pub(super) struct Failure {
 pub(super) struct Problem {
     pub(super) text: &'static str,
     pub(super) sticky: bool,
+    /// The daemon answered `ERROR`. For a delete that means the rule
+    /// already left its memory (`RulesCache::apply_refused`).
+    pub(super) daemon_refused: bool,
 }
 
 /// What a refusal refused.
@@ -96,10 +99,15 @@ pub(super) fn send_problem(error: SendError) -> Problem {
         SendError::NoDaemon => ("The firewall service isn't connected.", true),
         _ => ("Snitchwatch refused to send this rule.", true),
     };
-    Problem { text, sticky }
+    Problem {
+        text,
+        sticky,
+        daemon_refused: false,
+    }
 }
 
 pub(super) fn command_problem(error: CommandError, refusal: Refusal) -> Problem {
+    let daemon_refused = matches!(error, CommandError::Rejected(_));
     let text = match (error, refusal) {
         (CommandError::Rejected(_), Refusal::Add) => "The firewall service refused the rule.",
         (CommandError::Rejected(_), Refusal::Remove) => {
@@ -108,7 +116,11 @@ pub(super) fn command_problem(error: CommandError, refusal: Refusal) -> Problem 
         (CommandError::Timeout, _) => "The firewall service didn't answer.",
         (CommandError::StreamClosed, _) => "The firewall service disconnected.",
     };
-    Problem { text, sticky: true }
+    Problem {
+        text,
+        sticky: true,
+        daemon_refused,
+    }
 }
 
 /// Take `choices`, if they changed; the worker saves them.

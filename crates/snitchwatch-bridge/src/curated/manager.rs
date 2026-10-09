@@ -344,9 +344,13 @@ impl CuratedDefaults {
         let daemon = {
             let cache = self.inner.rules.lock().unwrap_or_else(|e| e.into_inner());
             let left_out: BTreeSet<String> = cache.left_out().keys().cloned().collect();
-            cache.rules().cloned().map(|rules| (rules, left_out))
+            let files_left = cache.files_left().clone();
+            cache
+                .rules()
+                .cloned()
+                .map(|rules| (rules, left_out, files_left))
         };
-        let Some((rules, left_out)) = daemon else {
+        let Some((rules, left_out, files_left)) = daemon else {
             // A removal asked for under the old list doesn't carry over.
             lock(&self.inner.state).removals.clear();
             self.announce_changed();
@@ -355,6 +359,7 @@ impl CuratedDefaults {
         let daemon = DaemonRules {
             rules: &rules,
             left_out: &left_out,
+            files_left: &files_left,
         };
         let (actions, removals) = {
             let mut state = lock(&self.inner.state);
@@ -499,6 +504,15 @@ impl CuratedDefaults {
                 state.failures.remove(&id);
                 state.statuses.insert(id, status);
             }
+            // The daemon dropped the rule before failing on its file: it is
+            // off, and nothing is sent again (the cache no longer lists it).
+            Err(problem) if problem.daemon_refused && matches!(done, Done::Delete) => {
+                warn!(entry = %id, "the firewall service couldn't remove a recommended rule's file");
+                let choices = state.choices.removed(&id);
+                keep(&mut state, choices);
+                state.failures.remove(&id);
+                state.statuses.insert(id, EntryStatus::OffFileLeft);
+            }
             Err(problem) => {
                 let status = match done {
                     Done::Install(_) => EntryStatus::NotInstalled,
@@ -527,6 +541,20 @@ impl CuratedDefaults {
         let outcome = self.send(command, Refusal::Remove).await;
         let mut state = lock(&self.inner.state);
         match outcome {
+            // A refusal: the daemon dropped the copy before failing on its
+            // file, so it is removed as asked, its file left behind.
+            Err(problem) if problem.daemon_refused => {
+                warn!(entry = %id, "removed an edited recommended rule; its file stays");
+                let choices = state.choices.user_removed(id);
+                let status = if choices.enabled.contains(id) {
+                    EntryStatus::DeletedOutside
+                } else {
+                    EntryStatus::OffFileLeft
+                };
+                keep(&mut state, choices);
+                state.removal_failures.remove(id);
+                state.statuses.insert(id.to_string(), status);
+            }
             Ok(()) => {
                 info!(entry = %id, "removed an edited recommended rule at the user's request");
                 let choices = state.choices.user_removed(id);

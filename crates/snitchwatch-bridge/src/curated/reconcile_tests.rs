@@ -23,6 +23,7 @@ fn plan(entries: &[CuratedEntry], rules: &BTreeMap<String, Rule>, choices: &Choi
         DaemonRules {
             rules,
             left_out: NONE_LEFT_OUT,
+            files_left: NONE_LEFT_OUT,
         },
         choices,
     )
@@ -203,6 +204,7 @@ fn a_rule_too_large_to_read_is_left_alone() {
     let side = DaemonRules {
         rules: &BTreeMap::new(),
         left_out: &left_out,
+        files_left: NONE_LEFT_OUT,
     };
     for choices in [on.clone(), on.disable("flatpak-flathub")] {
         let plan = super::plan(entries(), side, &choices);
@@ -226,6 +228,7 @@ fn an_inert_bridge_reports_what_the_daemon_has() {
         DaemonRules {
             rules: &rules,
             left_out: NONE_LEFT_OUT,
+            files_left: NONE_LEFT_OUT,
         },
     );
     assert_eq!(statuses["flatpak-flathub"], EntryStatus::InFirewall);
@@ -300,7 +303,36 @@ fn an_undecided_copy_turned_off_reads_as_off() {
         DaemonRules {
             rules: &rules,
             left_out: NONE_LEFT_OUT,
+            files_left: NONE_LEFT_OUT,
         },
     );
     assert_eq!(inert["flatpak-flathub"], EntryStatus::InFirewallButOff);
+}
+
+/// Tower r12: a delete the daemon refused took the rule out of its memory,
+/// its file left behind. Off reads so, and nothing is planned (no hot
+/// loop); on again installs it, which rewrites the file.
+#[test]
+fn a_rule_whose_delete_was_refused_reads_off_with_its_file_left_and_on_installs() {
+    let name = flatpak().rule_name();
+    let files_left = BTreeSet::from([name]);
+    let installed = Choices::default()
+        .enable("flatpak-flathub")
+        .installed("flatpak-flathub", &flatpak().rule());
+    let side = DaemonRules {
+        rules: &BTreeMap::new(),
+        left_out: NONE_LEFT_OUT,
+        files_left: &files_left,
+    };
+    let off = super::plan(entries(), side, &installed.disable("flatpak-flathub"));
+    assert!(off.actions.is_empty(), "{:?}", off.actions);
+    assert_eq!(status(&off, "flatpak-flathub"), EntryStatus::OffFileLeft);
+    assert!(!off.choices.was_installed("flatpak-flathub"));
+
+    let on = super::plan(entries(), side, &off.choices.enable("flatpak-flathub"));
+    assert_eq!(
+        on.actions,
+        vec![CuratedAction::Install("flatpak-flathub".into())]
+    );
+    assert_eq!(status(&on, "flatpak-flathub"), EntryStatus::Installing);
 }

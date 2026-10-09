@@ -13,7 +13,10 @@
 //!   unedited copy already in the firewall reads "In the firewall" until
 //!   the user turns it on (adopt) or off (delete).
 //! - An entry the user turned off is deleted, but only an **unedited** copy
-//!   ([`is_unedited`]). A copy someone edited is left alone and flagged,
+//!   ([`is_unedited`]). A delete the daemon refused already took the rule
+//!   out of its memory (`RulesCache::apply_refused`): the entry reads
+//!   [`EntryStatus::OffFileLeft`] and nothing is sent until the file loads
+//!   again and lists the rule, at the next daemon start. A copy someone edited is left alone and flagged,
 //!   even on opt-out; so is a copy too large for the bridge's list (left
 //!   out of the snapshot, security review L4).
 //! - A rule under the prefix that is no longer in the data file is deleted
@@ -77,17 +80,23 @@ pub enum EntryStatus {
     NotInstalled,
     /// Turned off, but the delete failed (see the entry's problem).
     NotRemoved,
+    /// Turned off: the firewall service stopped using the rule but couldn't
+    /// remove its saved file, which may bring it back when the service
+    /// restarts (tower r12, `RulesCache::files_left`).
+    OffFileLeft,
     /// A status from a newer bridge.
     #[serde(other)]
     Unknown,
 }
 
-/// The daemon's side of a plan: its rules, and the names it has that were
-/// too large to keep (`RulesCache::left_out`).
+/// The daemon's side of a plan: its rules, the names it has that were too
+/// large to keep (`RulesCache::left_out`), and the names whose delete it
+/// refused, whose files may remain (`RulesCache::files_left`).
 #[derive(Debug, Clone, Copy)]
 pub struct DaemonRules<'a> {
     pub rules: &'a BTreeMap<String, Rule>,
     pub left_out: &'a BTreeSet<String>,
+    pub files_left: &'a BTreeSet<String>,
 }
 
 /// What reconcile decided.
@@ -159,6 +168,9 @@ fn plan_entry(
         let was_installed = choices.was_installed(&entry.id);
         next.installed.remove(&entry.id);
         next.installed_ids.remove(&entry.id);
+        if !enabled && daemon.files_left.contains(&name) {
+            return EntryStatus::OffFileLeft;
+        }
         if !enabled {
             return EntryStatus::Off;
         }

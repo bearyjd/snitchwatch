@@ -88,7 +88,10 @@ async fn a_refused_delete_is_counted_and_the_rest_are_still_tried() {
     let h = h.connect(Daemon::Refuse("no"), snapshot);
     let outcome = leftover(&h).remove_all().await.unwrap();
     assert_eq!((outcome.removed, outcome.refused), (0, 2));
-    assert_eq!(leftover(&h).names().map(|n| n.len()), Some(2));
+    // Tower r12: the daemon stopped using both before failing on their
+    // files, so they leave the list and their files are noted.
+    assert_eq!(leftover(&h).names(), Some(Vec::new()));
+    assert_eq!(h.rules.cache().lock().unwrap().files_left().len(), 2);
 }
 
 #[tokio::test]

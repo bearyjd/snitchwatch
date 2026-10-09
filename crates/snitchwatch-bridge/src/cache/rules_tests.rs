@@ -538,6 +538,7 @@ fn what_the_list_leaves_out_is_published_with_it() {
                 too_large,
                 over_limit_total,
                 listed,
+                ..
             } => Some((too_large, over_limit_total, listed)),
             _ => None,
         })

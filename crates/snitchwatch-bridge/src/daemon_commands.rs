@@ -13,7 +13,9 @@
 //! A non-zero reply counts only when it arrives on the stream that is
 //! current at reply time (and, on the Unix transport, the stream the command
 //! went to); other replies are logged and ignored. An `OK` for a rule
-//! command updates the rules cache right here, in reply order.
+//! command updates the rules cache right here, in reply order, and so does
+//! an `ERROR` that left the daemon changed: a refused `DELETE_RULE` already
+//! dropped the rule from its memory (`RulesCache::apply_refused`).
 //!
 //! **Rules list.** A HELLO commits its connection's staged `Subscribe`
 //! snapshot while this module's lock is held, so the committing stream is
@@ -86,8 +88,9 @@ pub type StreamId = u64;
 /// so this only absorbs a burst such as a batch delete.
 const STREAM_QUEUE_CAPACITY: usize = 64;
 
-/// How long after its waiter timed out a command's `OK` is still applied to
-/// the rules cache (with a warning) instead of being ignored.
+/// How long after its waiter timed out a command's answer (`OK`, or an
+/// `ERROR` that left the daemon changed) is still applied to the rules
+/// cache (with a warning) instead of being ignored.
 const LATE_REPLY_GRACE: Duration = Duration::from_secs(30);
 
 /// How the daemon reaches this bridge; see the module doc.
@@ -425,6 +428,8 @@ impl DaemonCommands {
             let waiter = inner.waiters.remove(&reply.id).expect("checked above");
             if ok {
                 self.rules.apply_confirmed(&waiter.command);
+            } else {
+                self.rules.apply_refused(&waiter.command);
             }
             let outcome = if ok {
                 Ok(())
@@ -441,6 +446,12 @@ impl DaemonCommands {
                     "applying a daemon OK that arrived after its timeout"
                 );
                 self.rules.apply_confirmed(&late.command);
+            } else if in_time && right_stream {
+                warn!(
+                    id = reply.id,
+                    "applying a daemon ERROR that arrived after its timeout"
+                );
+                self.rules.apply_refused(&late.command);
             } else {
                 warn!(id = reply.id, ok, "ignoring a late daemon reply");
             }
@@ -676,3 +687,7 @@ mod tests;
 #[cfg(test)]
 #[path = "daemon_commands/send_policy_tests.rs"]
 mod send_policy_tests;
+
+#[cfg(test)]
+#[path = "daemon_commands/refusal_tests.rs"]
+mod refusal_tests;

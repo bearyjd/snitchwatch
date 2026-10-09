@@ -117,7 +117,10 @@ async fn a_reconnect_mid_pass_doesnt_delete_a_copy_edited_meanwhile() {
     );
 }
 
-/// M2: a refused removal keeps its status and text.
+/// M2, tower r12: a refused removal keeps its status. The daemon dropped
+/// the copy before failing on its file, so it is removed as asked; the
+/// status says its file is left, and keeps saying so through an unrelated
+/// pass.
 #[tokio::test]
 async fn a_refused_removal_keeps_its_status() {
     let harness = Harness::new().connect(Daemon::RefuseDeletes, vec![edited(FLATPAK)]);
@@ -128,8 +131,8 @@ async fn a_refused_removal_keeps_its_status() {
     })
     .await;
     remove(&curated, FLATPAK);
-    eventually("Not removed", || {
-        entry_state(&curated, FLATPAK).status == EntryStatus::NotRemoved
+    eventually("off, file left", || {
+        entry_state(&curated, FLATPAK).status == EntryStatus::OffFileLeft
     })
     .await;
     // Another pass (an unrelated choice, seen by its install) doesn't wipe
@@ -141,12 +144,38 @@ async fn a_refused_removal_keeps_its_status() {
     .await;
     worker.abort();
     let state = entry_state(&curated, FLATPAK);
-    assert_eq!(state.status, EntryStatus::NotRemoved);
-    assert_eq!(
-        state.problem.as_deref(),
-        Some("The firewall service refused to remove the rule.")
-    );
+    assert_eq!(state.status, EntryStatus::OffFileLeft);
+    assert_eq!(state.problem, None);
     assert_eq!(harness.seen().len(), 2, "{:?}", harness.seen());
+}
+
+/// Tower r12: a refused removal of an edited copy, with the entry on, is a
+/// removal the user asked for like any other: the canonical rule isn't
+/// installed in its place (as after a removal the daemon confirmed).
+#[tokio::test]
+async fn a_refused_removal_of_an_edited_copy_is_not_replaced_by_an_install() {
+    let harness = Harness::new().connect(Daemon::RefuseDeletes, vec![edited(FLATPAK)]);
+    let curated = harness.curated();
+    turn(&curated, FLATPAK, true);
+    let worker = curated.spawn(harness.rules.synced());
+    eventually("the first pass", || {
+        entry_state(&curated, FLATPAK).status == EntryStatus::EditedByYou
+    })
+    .await;
+    remove(&curated, FLATPAK);
+    eventually("deleted outside", || {
+        entry_state(&curated, FLATPAK).status == EntryStatus::DeletedOutside
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    worker.abort();
+    assert_eq!(
+        harness.seen(),
+        vec![(
+            Action::DeleteRule as i32,
+            "snitchwatch-default-flatpak-flathub".to_string()
+        )]
+    );
 }
 
 /// M3: a first-run copy turned off on the Rules page reads as off.

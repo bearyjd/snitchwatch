@@ -162,6 +162,11 @@ pub fn status_text(status: EntryStatus) -> &'static str {
         }
         EntryStatus::NotInstalled => "Not installed.",
         EntryStatus::NotRemoved => "Not removed.",
+        EntryStatus::OffFileLeft => {
+            "Turned off, but the firewall service couldn't remove the rule's saved file, so it may \
+             come back when the service restarts. If it comes back unchanged, Snitchwatch removes \
+             it then."
+        }
         EntryStatus::Unknown => "Status unknown to this version of Snitchwatch.",
     }
 }
@@ -316,11 +321,14 @@ mod tests {
             EntryStatus::DeletedOutside,
             EntryStatus::NotInstalled,
             EntryStatus::NotRemoved,
+            EntryStatus::OffFileLeft,
             EntryStatus::Unknown,
         ];
         let texts: std::collections::BTreeSet<&str> = all.iter().map(|s| status_text(*s)).collect();
         assert_eq!(texts.len(), all.len());
         assert!(status_text(EntryStatus::EditedByYou).contains("still applies"));
         assert!(!status_text(EntryStatus::DeletedOutside).contains("You deleted"));
+        let left = status_text(EntryStatus::OffFileLeft);
+        assert!(left.starts_with("Turned off") && left.contains("may come back"));
     }
 }

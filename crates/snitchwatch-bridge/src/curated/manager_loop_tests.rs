@@ -65,7 +65,7 @@ async fn a_refused_delete_is_sent_once_not_in_a_loop() {
     assert_eq!(harness.seen().len(), 1, "{} sends", harness.seen().len());
     assert_eq!(
         entry_state(&curated, FLATPAK).status,
-        EntryStatus::NotRemoved
+        EntryStatus::OffFileLeft
     );
 }
 

@@ -3,7 +3,8 @@
 //! per-rule size limits are left out one by one; a daemon list over
 //! [`MAX_SNAPSHOT_RULES`] isn't read at all. Either way the rules stay in
 //! the firewall service: a disabled one still doesn't apply, so the text
-//! doesn't say they apply.
+//! doesn't say they apply. Deleted rules whose saved files the service
+//! couldn't remove are no longer listed, but may come back (tower r12).
 
 use snitchwatch_bridge::cache::rules::MAX_SNAPSHOT_RULES;
 use snitchwatch_bridge::ws_messages::ServerMessage;
@@ -14,6 +15,7 @@ pub fn not_shown_text(message: &ServerMessage) -> Option<String> {
     let ServerMessage::RulesNotShown {
         too_large,
         over_limit_total,
+        left_on_disk,
         ..
     } = message
     else {
@@ -38,6 +40,19 @@ pub fn not_shown_text(message: &ServerMessage) -> Option<String> {
         n => parts.push(format!(
             "{} rules aren't listed: each is larger than Snitchwatch reads. They are still in \
              the firewall service.",
+            grouped(u64::from(*n)),
+        )),
+    }
+    match left_on_disk {
+        0 => {}
+        1 => parts.push(
+            "1 deleted rule may come back when the firewall service restarts: the service \
+             stopped using it, but couldn't remove its saved file."
+                .into(),
+        ),
+        n => parts.push(format!(
+            "{} deleted rules may come back when the firewall service restarts: the service \
+             stopped using them, but couldn't remove their saved files.",
             grouped(u64::from(*n)),
         )),
     }
@@ -66,7 +81,39 @@ mod tests {
             too_large,
             over_limit_total,
             listed: over_limit_total.is_none(),
+            left_on_disk: 0,
         }
+    }
+
+    #[test]
+    fn deleted_rules_that_may_come_back_are_said_plainly() {
+        let left = |left_on_disk| ServerMessage::RulesNotShown {
+            too_large: 0,
+            over_limit_total: None,
+            listed: true,
+            left_on_disk,
+        };
+        let one = not_shown_text(&left(1)).unwrap();
+        assert!(
+            one.starts_with("1 deleted rule may come back") && one.contains("its saved file"),
+            "{one}"
+        );
+        let many = not_shown_text(&left(1_200)).unwrap();
+        assert!(
+            many.starts_with("1,200 deleted rules may come back") && many.contains("their"),
+            "{many}"
+        );
+        let both = not_shown_text(&ServerMessage::RulesNotShown {
+            too_large: 2,
+            over_limit_total: None,
+            listed: true,
+            left_on_disk: 1,
+        })
+        .unwrap();
+        assert!(
+            both.starts_with("2 rules aren't listed") && both.ends_with("saved file."),
+            "{both}"
+        );
     }
 
     #[test]

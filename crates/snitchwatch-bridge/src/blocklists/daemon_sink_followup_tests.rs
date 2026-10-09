@@ -288,9 +288,10 @@ fn deletes(h: &Harness, after: usize) -> usize {
         .count()
 }
 
-/// A delete the daemon refuses leaves a rule that would go on blocking a list
-/// the user dropped: without its files it reads nothing, so they go at once
-/// and the unsubscribe says the rule is still there.
+/// A delete the daemon refuses leaves a rule file that would block a list the
+/// user dropped again at the daemon's next start: without its files it reads
+/// nothing, so they go at once, and the unsubscribe says the rule may come
+/// back.
 #[tokio::test]
 async fn a_refused_delete_at_unsubscribe_takes_the_files_at_once() {
     let h = Harness::new().connect(Daemon::Accept, Vec::new());
@@ -300,7 +301,11 @@ async fn a_refused_delete_at_unsubscribe_takes_the_files_at_once() {
         .unwrap();
     h.set_daemon(Daemon::RefuseDelete("busy"));
     let err = sink.release_blocklist_rules(ADS).await.unwrap_err();
-    assert!(err.reason.contains("refused to delete"), "{}", err.reason);
+    assert!(
+        err.reason.contains("couldn't remove their saved files"),
+        "{}",
+        err.reason
+    );
     assert!(!h.dir.list_dir(&IdComponent::from_id(ADS)).exists());
 }
 
@@ -412,4 +417,25 @@ async fn a_refused_stale_kind_cleanup_is_not_a_refused_install() {
         !h.dir.has_list(&list, ListKind::Ips),
         "the stale file went, so the stale rule matches nothing"
     );
+}
+
+/// Tower r12: a refused delete comes after the daemon dropped the rule from
+/// memory, so it no longer counts as confirmed. With the daemon's list
+/// unknown, writing that kind again doesn't claim its rule in place.
+#[tokio::test]
+async fn a_refused_delete_no_longer_counts_as_confirmed() {
+    let h = Harness::new().connect(Daemon::Accept, Vec::new());
+    let sink = h.sink();
+    let both = || hosts(&["ads.example", "203.0.113.7"]);
+    sink.replace_blocklist_rules(ADS, both()).await.unwrap();
+    h.set_daemon(Daemon::RefuseDelete("busy"));
+    let err = sink
+        .replace_blocklist_rules(ADS, hosts(&["ads.example"]))
+        .await
+        .unwrap_err();
+    assert!(err.cleanup_pending, "{err:?}");
+    assert!(!h.rules.cache().lock().unwrap().contains(&ips_rule()));
+    h.rules.withdraw();
+    let err = sink.replace_blocklist_rules(ADS, both()).await.unwrap_err();
+    assert!(err.daemon_unavailable, "{err:?}");
 }

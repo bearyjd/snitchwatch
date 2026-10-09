@@ -226,7 +226,8 @@ impl DaemonRuleSink {
 
     /// Delete `names`, stopping at the first the daemon can't be reached
     /// for. A refused delete is logged and skipped; the names it was refused
-    /// for come back.
+    /// for come back. The daemon dropped such a rule from memory before it
+    /// failed on the file (tower r12), so it is no longer confirmed either.
     async fn delete(
         &self,
         names: impl IntoIterator<Item = String>,
@@ -243,6 +244,7 @@ impl DaemonRuleSink {
                 Err(e) if e.daemon_unavailable => return Err(e),
                 Err(e) => {
                     warn!(reason = %e.reason, "daemon refused to delete a blocklist rule");
+                    self.confirmed().remove(&name);
                     refused.push(name);
                 }
             }
@@ -335,8 +337,9 @@ impl DaemonRuleSink {
             return Ok(());
         }
         Err(NotInstalled::cleanup_pending(format!(
-            "The firewall service refused to delete {} old rule(s) for hosts the list no longer \
-             has; they match nothing now, and Snitchwatch will try again",
+            "The firewall service stopped using {} old rule(s) for hosts the list no longer has, \
+             but couldn't remove their saved files; they match nothing now, and Snitchwatch \
+             removes them if they come back when the service restarts",
             refused.len()
         )))
     }
@@ -413,15 +416,18 @@ impl RuleSink for DaemonRuleSink {
         let failure = match deleted {
             Ok(refused) if refused.is_empty() => return self.keep_files_for_now(list).await,
             Ok(refused) => NotInstalled::new(format!(
-                "The firewall service refused to delete {} rule(s) of the list",
+                "The firewall service stopped using {} rule(s) of the list, but couldn't remove \
+                 their saved files; they may come back when the service restarts, and \
+                 Snitchwatch removes them then",
                 refused.len()
             )),
             Err(unreachable) => unreachable,
         };
-        // A rule the daemon couldn't be told to delete, or refused to, must
-        // not go on blocking a list the user dropped: without its files it
-        // reads nothing, and the next reconcile deletes it. The daemon isn't
-        // asked a second time.
+        // A rule the daemon couldn't be told to delete, or whose file it
+        // couldn't remove (which may load again at its next start), must not
+        // go on blocking a list the user dropped: without its files it reads
+        // nothing, and the next reconcile deletes it. The daemon isn't asked
+        // a second time.
         self.remove_blocklist_files(list_id).await.and(Err(failure))
     }
 

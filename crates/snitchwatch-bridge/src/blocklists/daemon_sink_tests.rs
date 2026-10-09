@@ -23,6 +23,8 @@ pub(in crate::blocklists) enum Daemon {
     RefuseDelete(&'static str),
     /// Answers `OK` to this many commands, then stops answering.
     AcceptThenSilent(usize),
+    /// Refuses this many commands, then stops answering.
+    RefuseThenSilent(usize),
     Silent,
 }
 
@@ -115,6 +117,11 @@ impl Harness {
                         commands.on_reply(stream_id, &reply(command.id, Ok(())))
                     }
                     Daemon::AcceptThenSilent(_) => false,
+                    Daemon::RefuseThenSilent(n) if answered < n => {
+                        answered += 1;
+                        commands.on_reply(stream_id, &reply(command.id, Err("busy")))
+                    }
+                    Daemon::RefuseThenSilent(_) => false,
                     Daemon::Silent => false,
                 };
             }
