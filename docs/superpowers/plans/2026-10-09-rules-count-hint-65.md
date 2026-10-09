@@ -351,6 +351,23 @@ setting the text and a hint with no remedy. Two survived the first run (a quiet
 of 1, and an always-visible label inside an already visible header) and got
 tests that pin them; all 38 are killed.
 
+### Mutation checks, review fix round (private copy, never in place)
+
+Run in a copy of the tree under the scratchpad, with the worktree's target
+directory. 23 new mutants for the allowance and the pauses: each allowance
+dropped, applied to a new name, to a listed refused name, never forgotten
+(snapshot, withdrawal, upsert, confirmed delete), capped off by one; the
+pruned-rule allowance never noted, always noted, never ending, on the wrong
+clock or with `ends` = now; a range that accepts a count below the list or
+has no allowance; timers pausing both ways or allowing a raise; a pause that
+keeps the run; the ask path not noting the collision. The three end-to-end
+claims were each checked against the end-to-end tests too (the prompt
+allowance, the refused install, the forgetting). One survived (the
+withdrawal's own clear is redundant with `replace_all`'s) and got a direct
+assertion. The 31 mutants of the first round that still apply were re-run
+against the new code: all killed. The mock's `add_prompt_answer` and
+duration handling have unit tests of their own.
+
 ## Limitations (also for the tower gate)
 
 - **The allowance is a blind spot, by design.** After one of the three cases
