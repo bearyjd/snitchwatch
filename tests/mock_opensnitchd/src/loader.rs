@@ -20,6 +20,10 @@
 //!      rule already in memory and the old file left as it was.
 //! - [`LoaderModel::restart`]: memory is what the files load as, in the
 //!   daemon's reported shape ([`as_daemon_reports`]).
+//! - [`LoaderModel::add_prompt_answer`] (`Loader.Add`): a name already in
+//!   memory is stored as `<name>-2`, `-3`, ... (`setUniqueName`).
+//! - An enabled temporary rule whose duration Go can't parse is stored,
+//!   then refused (`scheduleTemporaryRule`).
 //!
 //! Not modelled: live reload (the watcher's reaction to a removed file),
 //! temporary rules' timers, and multi-rule commands (the bridge sends one
@@ -34,7 +38,7 @@ use snitchwatch_proto::protocol::{
 use tokio::sync::mpsc;
 
 use crate::round_trip::as_daemon_reports;
-use crate::validate_rule_shape;
+use crate::{validate_duration, validate_rule_shape};
 
 /// What a stuck file's removal or write answers.
 pub const NOT_PERMITTED: &str = "operation not permitted";
@@ -111,9 +115,21 @@ impl LoaderModel {
             self.files.remove(&rule.name);
         }
         if rule.enabled {
-            validate_rule_shape(&rule).map_err(|e| format!("(2) error compiling rule: {e}"))?;
+            // `Compile` (before the rule is stored); the duration is read
+            // later, by `scheduleTemporaryRule`.
+            let mut compiled = rule.clone();
+            compiled.duration = "always".into();
+            validate_rule_shape(&compiled).map_err(|e| format!("(2) error compiling rule: {e}"))?;
         }
         self.memory.insert(rule.name.clone(), rule.clone());
+        // `scheduleTemporaryRule` (`time.ParseDuration`) fails after the
+        // rule is stored: `ERROR`, and the rule is in memory all the same.
+        if rule.enabled
+            && !matches!(rule.duration.as_str(), "once" | "until restart" | "always")
+            && validate_duration(&rule.duration).is_err()
+        {
+            return Err(format!("time: invalid duration \"{}\"", rule.duration));
+        }
         if rule.duration != "always" {
             return Ok(());
         }
@@ -127,6 +143,32 @@ impl LoaderModel {
         Ok(())
     }
 
+    /// The daemon stores a prompt answer: `Loader.Add` (`main.go` after
+    /// `Ask`) → `addUserRule` → `setUniqueName` → `replaceUserRule`, then
+    /// `Save` for an `always` rule. A `once` answer is not stored. A name
+    /// already in memory, a disabled rule's included, gets `-2`, `-3`, ...
+    /// so the daemon then holds one rule more than a list that replaced the
+    /// name. Returns the name it stored the rule under, and `Err` as
+    /// `change` does (a rule that doesn't compile is not stored).
+    ///
+    /// Not modelled: Go's `Add` ignores that compile error (`addUserRule`
+    /// drops `replaceUserRule`'s result) and still `Save`s an `always`
+    /// rule's file, a rule that isn't in memory; here the answer is `Err`
+    /// and no file is written. `NumRules()` is the same either way.
+    pub fn add_prompt_answer(&mut self, mut rule: Rule) -> Result<Option<String>, String> {
+        if rule.duration == "once" {
+            return Ok(None);
+        }
+        let base = rule.name.clone();
+        let mut n = 1;
+        while self.memory.contains_key(&rule.name) {
+            n += 1;
+            rule.name = format!("{base}-{n}");
+        }
+        let stored = rule.name.clone();
+        self.change(rule).map(|()| Some(stored))
+    }
+
     /// The daemon restarts: memory is what its files load as.
     pub fn restart(&mut self) {
         self.memory = self
@@ -134,6 +176,13 @@ impl LoaderModel {
             .iter()
             .map(|(name, rule)| (name.clone(), as_daemon_reports(rule)))
             .collect();
+    }
+
+    /// `Statistics.rules` in a `Ping`: `Loader.NumRules()`, which is
+    /// `len(l.rules)`: every rule in memory, disabled and temporary ones
+    /// too, and none that left it (a refused delete's file does not count).
+    pub fn num_rules(&self) -> u64 {
+        self.memory.len() as u64
     }
 
     /// `Subscribe`'s `ClientConfig.rules`: everything in memory.
@@ -238,6 +287,65 @@ mod tests {
         assert!(model.memory.contains_key("a"), "it loads again");
         assert_eq!(model.apply(&delete("a")), Ok(()));
         assert!(model.files.is_empty() && model.memory.is_empty());
+    }
+
+    #[test]
+    fn num_rules_counts_every_rule_in_memory_as_the_daemon_does() {
+        let mut model = LoaderModel::with_rules(&[
+            rule("on", true, "always"),
+            rule("off", false, "always"),
+            rule("timed", true, "5m"),
+        ]);
+        assert_eq!(model.num_rules(), 3, "disabled and temporary count");
+        model.stuck.insert("on".into());
+        assert!(model.apply(&delete("on")).is_err());
+        assert_eq!(model.num_rules(), 2, "a refused delete left memory first");
+        assert_eq!(model.snapshot().len() as u64, model.num_rules());
+    }
+
+    #[test]
+    fn a_duration_go_cannot_parse_is_refused_after_the_rule_is_stored() {
+        let mut model = LoaderModel::default();
+        let refused = model
+            .apply(&change(rule("t", true, "5 minutes")))
+            .unwrap_err();
+        assert!(refused.contains("invalid duration"), "{refused}");
+        assert!(model.memory.contains_key("t"), "stored before the error");
+        assert_eq!(model.num_rules(), 1);
+        // A disabled rule is never scheduled.
+        assert_eq!(model.apply(&change(rule("d", false, "5 minutes"))), Ok(()));
+        // The duration Go reads and the bridge doesn't.
+        assert_eq!(model.apply(&change(rule("ok", true, "1.5h"))), Ok(()));
+    }
+
+    #[test]
+    fn a_prompt_answer_under_a_name_in_memory_is_stored_under_a_new_one() {
+        let mut model = LoaderModel::with_rules(&[rule("seen", false, "always")]);
+        assert_eq!(
+            model.add_prompt_answer(rule("seen", true, "always")),
+            Ok(Some("seen-2".to_string()))
+        );
+        assert_eq!(
+            model.add_prompt_answer(rule("seen", true, "5m")),
+            Ok(Some("seen-3".to_string()))
+        );
+        assert_eq!(model.num_rules(), 3, "the disabled original stays");
+        assert!(!model.memory["seen"].enabled);
+        assert!(
+            model.files.contains_key("seen-2"),
+            "an always rule is saved"
+        );
+        assert!(!model.files.contains_key("seen-3"), "a timed one is not");
+        // Under a new name it is stored as it is, and a `once` is not stored.
+        assert_eq!(
+            model.add_prompt_answer(rule("fresh", true, "always")),
+            Ok(Some("fresh".to_string()))
+        );
+        assert_eq!(
+            model.add_prompt_answer(rule("fresh", true, "once")),
+            Ok(None)
+        );
+        assert_eq!(model.num_rules(), 4);
     }
 
     #[test]

@@ -377,6 +377,22 @@ impl DaemonCommands {
         self.rules.hold_publishes()
     }
 
+    /// Commands the daemon may yet answer in a way that changes the rules
+    /// cache: those still waiting, and those that timed out within
+    /// [`LATE_REPLY_GRACE`], whose `OK` is still applied. The rules-count
+    /// hint reads nothing from the daemon while any exist. Takes only this
+    /// lock, which the caller must not hold the rules cache lock across
+    /// (`on_reply` nests the other way).
+    pub fn in_flight(&self) -> usize {
+        let inner = lock(&self.inner);
+        let late = inner
+            .late
+            .values()
+            .filter(|late| late.timed_out_at.elapsed() <= LATE_REPLY_GRACE)
+            .count();
+        inner.waiters.len() + late
+    }
+
     /// Register a newly opened `Notifications` stream. The receiver yields
     /// the commands addressed to it and ends when the stream is closed.
     pub fn open_stream(&self, conn: ConnKey) -> (StreamRegistration, mpsc::Receiver<Notification>) {
@@ -691,3 +707,7 @@ mod send_policy_tests;
 #[cfg(test)]
 #[path = "daemon_commands/refusal_tests.rs"]
 mod refusal_tests;
+
+#[cfg(test)]
+#[path = "daemon_commands/in_flight_tests.rs"]
+mod in_flight_tests;

@@ -83,6 +83,15 @@ pub struct RulesCache {
     /// Names whose `DELETE_RULE` the daemon refused: see
     /// [`Self::files_left`] (`rules_refused.rs`). Kept across lists.
     files_left: BTreeSet<String>,
+    /// The debounce behind the Rules page's "different number of rules"
+    /// hint (`rules_count.rs`). Not part of the list: no revision bump.
+    count_watch: count::CountWatch,
+    /// A rule left out for the size limits was temporary, so its daemon
+    /// timer may drop it unseen (`rules_count.rs`).
+    left_out_temporary: bool,
+    /// Rules the daemon may hold that the list does not show
+    /// (`rules_count.rs`). Cleared with every list.
+    may_hold: count::MayHold,
 }
 
 /// The daemon timer that will remove a temporary rule (PR #106 review M2),
@@ -98,6 +107,16 @@ pub struct RulesCache {
 struct Expiry {
     duration: String,
     at: i64,
+    /// When the daemon's timer fires on its own clock, the monotonic one
+    /// (Go's runtime timers; `CLOCK_MONOTONIC` stops while the host is
+    /// suspended, the wall clock `at` does not). See `rules_count.rs`.
+    ///
+    /// **An assumption this rests on:** Rust's `Instant` on Linux reads
+    /// `CLOCK_MONOTONIC`, not `CLOCK_BOOTTIME`, and Go's runtime timers
+    /// (`nanotime`) read the same clock, so the two stop together while the
+    /// host is suspended. If either ever counted suspend time, the tolerance
+    /// for a rule pruned early would silently stop working.
+    ends: Instant,
 }
 
 /// A `Subscribe` snapshot within the limits, and what it left out; or, for
@@ -112,6 +131,8 @@ pub(crate) struct Snapshot {
     /// rules were kept. Staged and adopted like a list, so the count shown
     /// belongs to the connection that sent it (PR #106 review L1).
     pub(crate) over_limit: Option<usize>,
+    /// A rule left out was temporary (`rules_count.rs`).
+    pub(crate) left_out_temporary: bool,
 }
 
 impl From<Vec<Rule>> for Snapshot {
@@ -166,10 +187,11 @@ impl RulesCache {
     /// change, when the timer started); a disabled one is given none, since
     /// whether one still runs isn't known.
     pub fn replace_all(&mut self, rules: Vec<Rule>) {
+        let clock = Instant::now();
         self.expiries = rules
             .iter()
             .filter(|rule| rule.enabled && rule.created > 0)
-            .filter_map(|rule| Some((rule.name.clone(), timer_from(rule, rule.created)?)))
+            .filter_map(|rule| Some((rule.name.clone(), timer_from(rule, rule.created, clock)?)))
             .collect();
         for rule in &rules {
             // Listed again: the daemon loaded its file.
@@ -177,6 +199,9 @@ impl RulesCache {
         }
         self.rules = Some(rules.into_iter().map(|r| (r.name.clone(), r)).collect());
         self.over_limit_total = None;
+        self.count_watch = count::CountWatch::default();
+        self.left_out_temporary = false;
+        self.may_hold.clear();
         self.revision += 1;
     }
 
@@ -196,6 +221,7 @@ impl RulesCache {
                 .map(|total| u32::try_from(total).unwrap_or(u32::MAX)),
             listed: !self.is_unknown(),
             left_on_disk: u32::try_from(self.files_left.len()).unwrap_or(u32::MAX),
+            count_mismatch: self.count_mismatch(),
         }
     }
 
@@ -203,6 +229,9 @@ impl RulesCache {
     pub fn set_unknown(&mut self) {
         self.left_out.clear();
         self.expiries.clear();
+        self.count_watch = count::CountWatch::default();
+        self.left_out_temporary = false;
+        self.may_hold.clear();
         if self.rules.take().is_some() {
             self.revision += 1;
         }
@@ -232,11 +261,16 @@ impl RulesCache {
             .expiries
             .remove(&rule.name)
             .filter(|kept| kept.duration == rule.duration && kept.at > now_secs);
-        let timer = running.or_else(|| rule.enabled.then(|| timer_from(&rule, now_secs)).flatten());
+        let timer = running.or_else(|| {
+            rule.enabled
+                .then(|| timer_from(&rule, now_secs, Instant::now()))
+                .flatten()
+        });
         if let Some(timer) = timer {
             self.expiries.insert(rule.name.clone(), timer);
         }
         self.left_out.remove(&rule.name);
+        self.may_hold.forget(&rule.name);
         rules.insert(rule.name.clone(), rule);
         self.revision += 1;
     }
@@ -250,6 +284,7 @@ impl RulesCache {
     pub fn remove(&mut self, name: &str) {
         let removed = self.rules.as_mut().and_then(|rules| rules.remove(name));
         self.expiries.remove(name);
+        self.may_hold.forget(name);
         let was_left_out = self.rules.is_some() && self.left_out.remove(name).is_some();
         if removed.is_some() || was_left_out {
             self.revision += 1;
@@ -278,6 +313,14 @@ impl RulesCache {
     /// Drop temporary rules whose daemon timer ([`Expiry`]) has fired.
     /// Returns the names removed, in name order.
     pub fn prune_expired(&mut self, now_secs: i64) -> Vec<String> {
+        self.prune_expired_at(now_secs, Instant::now())
+    }
+
+    /// [`prune_expired`](Self::prune_expired) at a given wall time and
+    /// monotonic reading. A rule pruned while its daemon timer, which runs on
+    /// the monotonic clock, has not fired yet (the host was suspended) may
+    /// still be in the daemon: see `rules_count.rs` `MayHold`.
+    pub fn prune_expired_at(&mut self, now_secs: i64, clock: Instant) -> Vec<String> {
         let Some(rules) = &mut self.rules else {
             return Vec::new();
         };
@@ -289,7 +332,9 @@ impl RulesCache {
             .collect();
         for name in &expired {
             rules.remove(name);
-            self.expiries.remove(name);
+            if let Some(expiry) = self.expiries.remove(name) {
+                self.may_hold.note_pruned(expiry.ends, clock);
+            }
         }
         self.revision += u64::from(!expired.is_empty());
         expired
@@ -337,13 +382,26 @@ fn now_secs() -> i64 {
 /// The timer the daemon starts for `rule` at `start`, if it is temporary
 /// (`loader.go` `isTemporary`: not `once`, `until restart` or `always`).
 /// Approximate: a duration that isn't a `\d+[smh]` sequence has none.
-fn timer_from(rule: &Rule, start: i64) -> Option<Expiry> {
-    if matches!(rule.duration.as_str(), "once" | "until restart" | "always") {
+///
+/// `ends` is `clock` plus the **whole** duration, whatever `start` is. For a
+/// change the bridge made, `start` is now, so that is when the daemon's timer
+/// fires. For a rule in a snapshot, `start` is its `created` stamp, which
+/// the daemon's timer need not have started at: a rule loaded from a
+/// temporary-rule file starts its timer at load (`loadRule`) with the file's
+/// old stamp, and a list adopted after the host slept has run its timers on
+/// the monotonic clock. The whole duration is an upper bound that hides at
+/// most one duration.
+fn timer_from(rule: &Rule, start: i64, clock: Instant) -> Option<Expiry> {
+    if !count::is_temporary(&rule.duration) {
         return None;
     }
+    let secs = parse_duration_secs(&rule.duration)?;
+    let at = start.checked_add(secs)?;
+    let whole = Duration::from_secs(u64::try_from(secs).unwrap_or(0));
     Some(Expiry {
         duration: rule.duration.clone(),
-        at: start.checked_add(parse_duration_secs(&rule.duration)?)?,
+        at,
+        ends: clock.checked_add(whole).unwrap_or(clock),
     })
 }
 
@@ -410,6 +468,14 @@ impl PendingSnapshots {
         while self.entries.len() > PENDING_SNAPSHOT_CAP {
             self.entries.pop_front();
         }
+    }
+
+    /// Whether a fresh snapshot waits for its stream's HELLO.
+    pub(crate) fn awaiting_adoption(&self, now: Instant) -> bool {
+        self.entries.iter().any(|staged| {
+            staged.adopted_by.is_empty()
+                && now.saturating_duration_since(staged.at) <= PENDING_SNAPSHOT_TTL
+        })
     }
 
     /// `key`'s fresh snapshot if `stream` has adopted it already: what a
@@ -502,6 +568,7 @@ fn bounded_snapshot(rules: Vec<Rule>) -> Snapshot {
             snapshot.rules.push(rule);
             continue;
         }
+        snapshot.left_out_temporary |= count::is_temporary(&rule.duration);
         let key = if rule.name.len() <= crate::rule_name::MAX_RULE_NAME_BYTES {
             rule.name.clone()
         } else {
@@ -608,6 +675,7 @@ impl RulesSync {
             self.hits.forget([rule.name.as_str()]);
         }
         let name = rule.name.clone();
+        cache.note_prompt_answer(&name);
         cache.upsert(rule);
         let rules = cache
             .rules()
@@ -722,6 +790,7 @@ impl RulesSync {
             let mut cache = lock(&self.cache);
             cache.replace_all(snapshot.rules);
             cache.set_left_out(snapshot.left_out);
+            cache.note_left_out_temporary(snapshot.left_out_temporary);
             self.hits.adopt_snapshot(&cache);
         }
         self.publish();
@@ -846,6 +915,8 @@ pub async fn prune_expired_rules_every(
     }
 }
 
+#[path = "rules_count.rs"]
+mod count;
 #[path = "rules_refused.rs"]
 mod refused;
 pub use refused::MAX_FILES_LEFT;

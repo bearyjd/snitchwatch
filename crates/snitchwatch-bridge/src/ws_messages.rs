@@ -367,6 +367,13 @@ pub enum ServerMessage {
         /// `RulesCache::files_left`). Omitted when 0.
         #[serde(default, skip_serializing_if = "is_zero")]
         left_on_disk: u32,
+        /// The daemon has kept reporting a different number of rules than
+        /// the list holds, for several pings in a row (issue #65, option c;
+        /// `RulesCache::count_mismatch`). Advice only: the list is not
+        /// re-sent. Omitted when false; an older GUI ignores it, and an
+        /// older bridge never sends it.
+        #[serde(default, skip_serializing_if = "is_false")]
+        count_mismatch: bool,
     },
     /// The outcome of an `AddRule`/`UpdateRule`/`DeleteRule` that carried a
     /// `request_id` (rule editor, P2.1), sent to the asking connection only.
@@ -426,6 +433,10 @@ pub enum RuleCommandOutcome {
 
 fn is_zero(n: &u32) -> bool {
     *n == 0
+}
+
+fn is_false(flag: &bool) -> bool {
+    !*flag
 }
 
 /// Whether a client's request id is usable: 1 to 64 ASCII letters, digits

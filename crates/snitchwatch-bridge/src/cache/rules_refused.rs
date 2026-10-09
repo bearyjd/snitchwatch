@@ -115,7 +115,12 @@ impl RulesCache {
                     self.upsert_at(restamped, now_secs);
                 }
             }
-            RefusedEffect::Unknown => {}
+            RefusedEffect::Unknown => {
+                // An add the daemon may have stored before it failed.
+                for rule in &sent.rules {
+                    self.note_maybe_applied(&rule.name);
+                }
+            }
         }
         self.revision != before
     }
