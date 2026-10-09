@@ -19,11 +19,14 @@
 //! - A delete the daemon refused already took the rule out of its memory
 //!   (`RulesCache::apply_refused`): the entry reads
 //!   [`EntryStatus::OffFileLeft`], and no delete is planned for it until
-//!   the file loads again and lists the rule, at the next daemon start.
-//! - An install the daemon refused may apply anyway, unlisted: stock
-//!   `replaceUserRule` takes the rule into memory before `Save` can fail
+//!   the file loads again and lists the rule, at the next daemon start. A
+//!   rule whose refused install wrote no file reads plain `Off` instead:
+//!   it had no file to leave (the manager, #120 item 15).
+//! - An install the daemon refused or didn't answer may apply anyway,
+//!   unlisted: stock `replaceUserRule` takes the rule into memory before
+//!   `Save` can fail, and an unanswered one may still be taken
 //!   ([`DaemonRules::maybe_applied`]). Turned off, such an entry is deleted
-//!   by name, listed or not (PR #119 review M1).
+//!   by name, listed or not (PR #119 review M1, #120 item 13).
 //! - A rule under the prefix that is no longer in the data file is deleted
 //!   only if it is a copy Snitchwatch recorded installing, unedited.
 //! - Nothing outside the prefix is ever touched.
@@ -47,7 +50,10 @@ use crate::rule_name::CURATED_DEFAULT_RULE_NAME_PREFIX;
 pub enum CuratedAction {
     /// Install the entry with this id.
     Install(String),
-    /// Delete the rule `name`, an unedited copy Snitchwatch installed.
+    /// Delete the rule `name`: an unedited copy Snitchwatch installed or
+    /// adopted (for an entry no longer offered, only one it recorded
+    /// installing), or, for an entry turned off, a rule that may apply
+    /// though the daemon doesn't list it ([`DaemonRules::maybe_applied`]).
     Delete { id: String, name: String },
 }
 
@@ -102,10 +108,13 @@ pub struct DaemonRules<'a> {
     pub rules: &'a BTreeMap<String, Rule>,
     pub left_out: &'a BTreeSet<String>,
     pub files_left: &'a BTreeSet<String>,
-    /// Names whose install the daemon refused, which may apply though it
-    /// doesn't list them: stock `replaceUserRule` takes a rule into memory
-    /// before `Save` can fail. Kept by the manager until a delete of the
-    /// name is answered.
+    /// Names whose install the daemon refused or didn't answer, which may
+    /// apply though it doesn't list them: stock `replaceUserRule` takes a
+    /// rule into memory before `Save` can fail, and an unanswered install
+    /// may still be taken. Kept by the manager until a delete or an install
+    /// of the name is answered (`OK`, or a refused delete), and only on the
+    /// daemon stream it was recorded on: a reconnect's list is the daemon's
+    /// memory.
     pub maybe_applied: &'a BTreeSet<String>,
 }
 
