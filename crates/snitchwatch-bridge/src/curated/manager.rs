@@ -534,6 +534,10 @@ impl CuratedDefaults {
                 state.failures.remove(&id);
                 state.statuses.insert(id, EntryStatus::OffFileLeft);
             }
+            // Turned off while its install was on its way: the failure is
+            // for a choice that is gone, and must not hold back the delete
+            // the next pass plans (M1). That pass sets the status.
+            Err(_) if matches!(done, Done::Install(_)) && !state.choices.enabled.contains(&id) => {}
             Err(problem) => {
                 let status = match done {
                     Done::Install(_) => EntryStatus::NotInstalled,

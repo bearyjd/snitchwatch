@@ -276,3 +276,25 @@ async fn off_after_a_refused_install_deletes_it_once() {
         ]
     );
 }
+
+/// M1, turned off while the install is on its way: the install's failure,
+/// for a choice the user already changed, doesn't hold back the delete.
+#[tokio::test]
+async fn off_while_a_refused_install_is_pending_still_deletes_it() {
+    let harness = Harness::new().connect(Daemon::Refuse, Vec::new());
+    let curated = harness.curated();
+    turn(&curated, FLATPAK, true);
+    let gate = Arc::new(tokio::sync::Notify::new());
+    *harness.hold.lock().unwrap() = Some(gate.clone());
+    let worker = curated.spawn(harness.rules.synced());
+    wait_until(|| !harness.seen().is_empty()).await;
+    turn(&curated, FLATPAK, false);
+    gate.notify_one();
+    eventually("the delete", || harness.seen().len() >= 2).await;
+    tokio::time::sleep(SETTLE).await;
+    worker.abort();
+    assert_eq!(
+        harness.seen(),
+        vec![sent(Action::ChangeRule), sent(Action::DeleteRule)]
+    );
+}
