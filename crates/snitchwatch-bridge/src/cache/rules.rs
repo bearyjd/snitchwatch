@@ -83,6 +83,9 @@ pub struct RulesCache {
     /// Names whose `DELETE_RULE` the daemon refused: see
     /// [`Self::files_left`] (`rules_refused.rs`). Kept across lists.
     files_left: BTreeSet<String>,
+    /// Cache revision of each latest refused delete. A retained Subscribe
+    /// predating that event cannot prove the file was loaded again.
+    files_left_revisions: BTreeMap<String, u64>,
     /// The debounce behind the Rules page's "different number of rules"
     /// hint (`rules_count.rs`). Not part of the list: no revision bump.
     count_watch: count::CountWatch,
@@ -123,6 +126,8 @@ struct Expiry {
 /// one over [`MAX_SNAPSHOT_RULES`], only how many rules it had.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct Snapshot {
+    /// Cache revision when Subscribe was received, before later refusals.
+    observed_revision: u64,
     pub(crate) rules: Vec<Rule>,
     /// Name (or, for a name no import could use, a NUL-prefixed index) to
     /// encoded size.
@@ -176,8 +181,16 @@ impl RulesCache {
     /// Set when a snapshot is committed; public so other crates' tests can
     /// stand in for an oversized daemon rule.
     pub fn set_left_out(&mut self, left_out: BTreeMap<String, usize>) {
+        self.set_left_out_at_revision(left_out, self.revision);
+    }
+
+    fn set_left_out_at_revision(
+        &mut self,
+        left_out: BTreeMap<String, usize>,
+        observed_revision: u64,
+    ) {
         for name in left_out.keys() {
-            self.forget_file_left(name);
+            self.forget_file_left_in_snapshot(name, observed_revision);
         }
         self.left_out = left_out;
     }
@@ -187,6 +200,10 @@ impl RulesCache {
     /// change, when the timer started); a disabled one is given none, since
     /// whether one still runs isn't known.
     pub fn replace_all(&mut self, rules: Vec<Rule>) {
+        self.replace_all_at_revision(rules, self.revision);
+    }
+
+    fn replace_all_at_revision(&mut self, rules: Vec<Rule>, observed_revision: u64) {
         let clock = Instant::now();
         self.expiries = rules
             .iter()
@@ -194,8 +211,8 @@ impl RulesCache {
             .filter_map(|rule| Some((rule.name.clone(), timer_from(rule, rule.created, clock)?)))
             .collect();
         for rule in &rules {
-            // Listed again: the daemon loaded its file.
-            self.files_left.remove(&rule.name);
+            // Only a list observed after the refusal proves the file loaded.
+            self.forget_file_left_in_snapshot(&rule.name, observed_revision);
         }
         self.rules = Some(rules.into_iter().map(|r| (r.name.clone(), r)).collect());
         self.over_limit_total = None;
@@ -727,7 +744,19 @@ impl RulesSync {
     /// oversized snapshot is held as its count, replacing the key's earlier
     /// one like any other.
     pub fn stage(&self, key: ConnKey, rules: Vec<Rule>) {
-        let snapshot = bounded_snapshot(rules);
+        self.stage_at_revision(key, rules, self.snapshot_revision());
+    }
+
+    /// Capture before any await while handling a received Subscribe.
+    pub(crate) fn snapshot_revision(&self) -> u64 {
+        lock(&self.cache).revision()
+    }
+
+    /// Stage with the immutable receipt cutoff, even if account lookup or
+    /// other work let newer refusals arrive before staging.
+    pub(crate) fn stage_at_revision(&self, key: ConnKey, rules: Vec<Rule>, observed_revision: u64) {
+        let mut snapshot = bounded_snapshot(rules);
+        snapshot.observed_revision = observed_revision;
         lock(&self.pending).stage(key, snapshot, Instant::now());
     }
 
@@ -788,8 +817,8 @@ impl RulesSync {
         );
         {
             let mut cache = lock(&self.cache);
-            cache.replace_all(snapshot.rules);
-            cache.set_left_out(snapshot.left_out);
+            cache.replace_all_at_revision(snapshot.rules, snapshot.observed_revision);
+            cache.set_left_out_at_revision(snapshot.left_out, snapshot.observed_revision);
             cache.note_left_out_temporary(snapshot.left_out_temporary);
             self.hits.adopt_snapshot(&cache);
         }

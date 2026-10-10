@@ -493,6 +493,9 @@ impl Ui for UiService {
         &self,
         request: Request<ClientConfig>,
     ) -> Result<Response<ClientConfig>, Status> {
+        // The received list predates any refusal arriving during account
+        // lookup. Preserve that order instead of capturing it after the await.
+        let observed_revision = self.rules.snapshot_revision();
         self.liveness.touch();
         let conn = request.remote_addr();
         let cfg = request.into_inner();
@@ -504,7 +507,8 @@ impl Ui for UiService {
             self.rules.learn_account_names(lookup, &cfg.rules).await;
         }
         // Staged until this connection's stream says HELLO (see `cache::rules`).
-        self.rules.stage(conn, cfg.rules.clone());
+        self.rules
+            .stage_at_revision(conn, cfg.rules.clone(), observed_revision);
         {
             let mut guard = self
                 .firewall_status
