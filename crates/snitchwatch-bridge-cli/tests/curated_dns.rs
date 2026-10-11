@@ -13,7 +13,9 @@ use snitchwatch_proto::protocol::Action;
 use tokio::sync::broadcast;
 
 mod curated_support;
-use curated_support::{connect_daemon, entry_until_id, next_command, nothing_sent, send, start};
+use curated_support::{
+    connect_daemon, consent_dns, entry_until_id, next_command, nothing_sent, send, start,
+};
 
 const DNS: &str = "dns-resolved";
 const DNS_RULE: &str = "snitchwatch-default-dns-resolved";
@@ -31,6 +33,8 @@ async fn entry_until(
 
 fn turn(id: &str, on: bool) -> ClientMessage {
     ClientMessage::SetCuratedDefaults {
+        request_id: None,
+        reply: None,
         ids: vec![id.into()],
         on,
     }
@@ -69,7 +73,7 @@ async fn the_dns_entry_is_off_until_chosen_and_installs_exactly_the_resolver_rul
     assert!(!flatpak.broad);
 
     // Turning it on sends one CHANGE_RULE, of exactly that rule.
-    send(&s.bridge, turn(DNS, true)).await;
+    consent_dns(&s.bridge, "enable").await;
     let change = next_command(&mut seen).await;
     assert_eq!(change.r#type, Action::ChangeRule as i32);
     assert_eq!(change.rules.len(), 1);
@@ -139,7 +143,7 @@ async fn the_dns_entry_is_off_until_chosen_and_installs_exactly_the_resolver_rul
 async fn a_deleted_or_edited_dns_rule_is_left_as_the_user_made_it() {
     let mut s = start(BridgeMode::System).await;
     let (daemon, mut seen) = connect_daemon(&s.bridge, 1, Vec::new()).await;
-    send(&s.bridge, turn(DNS, true)).await;
+    consent_dns(&s.bridge, "enable").await;
     let installed = next_command(&mut seen).await.rules[0].clone();
     entry_until(&mut s.rx, DNS, "installed", |e| {
         e.status == EntryStatus::Installed
@@ -167,17 +171,13 @@ async fn a_deleted_or_edited_dns_rule_is_left_as_the_user_made_it() {
         e.status == EntryStatus::EditedByYou
     })
     .await;
-    send(&s.bridge, turn(DNS, false)).await;
-    entry_until(&mut s.rx, DNS, "off, edit kept", |e| {
-        !e.on && e.status == EntryStatus::EditedByYou
-    })
-    .await;
+    // The enabled edited copy remains untouched. A legacy singleton on
+    // cannot elevate/retry even though the earlier choice was saved.
+    send(&s.bridge, turn(DNS, true)).await;
     nothing_sent(&mut seen).await;
     drop((daemon, seen));
 
-    // Deleted outside (turn it on again, then the daemon comes back
-    // without it): never reinstalled.
-    send(&s.bridge, turn(DNS, true)).await;
+    // Deleted outside: the saved modern choice does not recreate it.
     let (_daemon, mut seen) = connect_daemon(&s.bridge, 4, Vec::new()).await;
     entry_until(&mut s.rx, DNS, "deleted outside", |e| {
         e.status == EntryStatus::DeletedOutside
@@ -199,7 +199,7 @@ async fn a_deleted_or_edited_dns_rule_is_left_as_the_user_made_it() {
 async fn a_dns_copy_without_its_sender_pin_is_an_edit_left_alone() {
     let mut s = start(BridgeMode::System).await;
     let (daemon, mut seen) = connect_daemon(&s.bridge, 1, Vec::new()).await;
-    send(&s.bridge, turn(DNS, true)).await;
+    consent_dns(&s.bridge, "enable").await;
     let installed = next_command(&mut seen).await.rules[0].clone();
     entry_until(&mut s.rx, DNS, "installed", |e| {
         e.status == EntryStatus::Installed

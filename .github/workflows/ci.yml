@@ -2,8 +2,11 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, r13-candidate]
   pull_request:
+
+permissions:
+  contents: read
 
 # check/test jobs: default-members only (snitchwatch-proto, -spike, -bridge,
 # -bridge-cli, -tauri, scanner-core, scanner-cli, scanner-privileged,
@@ -32,9 +35,11 @@ jobs:
       # 2026-07-12, caught by this job's first real run) — the submodule
       # isn't merely "reference only" the way vendor/opensnitch's other
       # files (default-config.json, source for docs) are.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           submodules: true
+          persist-credentials: false
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -71,9 +76,11 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           submodules: true
+          persist-credentials: false
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -99,9 +106,11 @@ jobs:
   package-check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           submodules: true
+          persist-credentials: false
 
       # clippy: package-check lints the release tarball's feature set
       # (--no-default-features, plan decision I), which no other job builds.
@@ -170,9 +179,11 @@ jobs:
             qt6-qttools-devel \
             kf6-kirigami-devel
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           submodules: true
+          persist-credentials: false
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -215,3 +226,15 @@ jobs:
           QT_QUICK_CONTROLS_STYLE: Basic
           QT_FORCE_STDERR_LOGGING: "1"
         run: qmltestrunner-qt6 -input crates/snitchwatch-kirigami/tests/qml
+
+  candidate-contract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          submodules: true
+          persist-credentials: false
+      - run: python3 -m pip install PyYAML==6.0.3
+      - run: python3 packaging/flatpak/test-candidate-publication.py

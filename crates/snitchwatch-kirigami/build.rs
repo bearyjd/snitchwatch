@@ -30,6 +30,7 @@ fn main() {
             "qml/RuleEditorSheet.qml",
             "qml/ProfilesPage.qml",
             "qml/RecommendedRulesPage.qml",
+            "qml/DnsConsentDialog.qml",
             "qml/TrafficPage.qml",
             "qml/OnboardingPage.qml",
             "qml/DiagnosticsPage.qml",

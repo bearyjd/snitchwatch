@@ -597,3 +597,203 @@ async fn import_requests_carry_a_reply_channel_to_their_connection() {
     );
     pump.abort();
 }
+
+#[tokio::test]
+async fn modern_context_dies_on_both_pump_directions_and_task_cancellation() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    for mode in ["inbound", "outbound", "cancellation"] {
+        let (inbound_tx, mut inbound_rx) = mpsc::channel(8);
+        let handles = WsHandles {
+            inbound: inbound_tx,
+            ..default_handles()
+        };
+        let broadcasts = handles.broadcast.clone();
+        let (frame_tx, frame_rx) = mpsc::channel::<Result<Message, axum::Error>>(8);
+        let failed = Arc::new(AtomicBool::new(false));
+        let failed_sink = failed.clone();
+        let sink = futures_util::sink::unfold((), move |(), _: Message| {
+            let failed = failed_sink.clone();
+            async move {
+                if failed.load(Ordering::SeqCst) {
+                    Err(())
+                } else {
+                    Ok(())
+                }
+            }
+        });
+        let task = tokio::spawn(pump_authenticated(
+            Box::pin(sink),
+            tokio_stream::wrappers::ReceiverStream::new(frame_rx),
+            handles,
+            Some(1000),
+        ));
+        frame_tx.send(Ok(Message::Text(r#"{"action":"prepareCuratedBroadOptIn","requestId":"prepare-1","id":"dns-resolved","purpose":"enable"}"#.into()))).await.unwrap();
+        let ClientMessage::PrepareCuratedBroadOptIn {
+            context: Some(context),
+            reply: Some(_),
+            ..
+        } = inbound_rx.recv().await.unwrap()
+        else {
+            panic!("missing server stamp")
+        };
+        assert!(context.admit().is_ok());
+        match mode {
+            "inbound" => drop(frame_tx),
+            "outbound" => {
+                failed.store(true, Ordering::SeqCst);
+                broadcasts.send(ServerMessage::ClearConnectionRows).unwrap();
+            }
+            _ => task.abort(),
+        }
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(1), task)
+            .await
+            .unwrap();
+        assert!(
+            matches!(
+                context.admit(),
+                Err(crate::curated::intent::IntentError::StaleIntent)
+            ),
+            "{mode}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn malformed_modern_result_is_private_and_invalidates_only_sender_ticket() {
+    use crate::ws_messages::CuratedIntentPurpose;
+    let dir = tempfile::tempdir().unwrap();
+    let token = Token::generate();
+    let (path, _broadcasts, mut inbound, server) =
+        spawn_server_with_inbound(&dir, token.clone()).await;
+    let mut first = connect(&path).await;
+    let mut other = connect(&path).await;
+    let mut contexts = Vec::new();
+    for client in [&mut first, &mut other] {
+        client
+            .send(TMessage::Text(token.as_str().into()))
+            .await
+            .unwrap();
+        let ack = client.next().await.unwrap().unwrap();
+        assert!(ack.into_text().unwrap().contains("curatedBroadOptInV1"));
+        client.send(TMessage::Text(r#"{"action":"prepareCuratedBroadOptIn","requestId":"p1","id":"dns-resolved","purpose":"enable"}"#.into())).await.unwrap();
+        let ClientMessage::PrepareCuratedBroadOptIn {
+            context: Some(context),
+            ..
+        } = inbound.recv().await.unwrap()
+        else {
+            panic!()
+        };
+        contexts.push(context);
+    }
+    let first_context = &contexts[0];
+    let other_context = &contexts[1];
+    let policy = "a".repeat(64);
+    let first_ticket = first_context
+        .admit()
+        .unwrap()
+        .prepare(
+            "p1",
+            "dns-resolved",
+            CuratedIntentPurpose::Enable,
+            &policy,
+            0,
+        )
+        .unwrap();
+    let other_ticket = other_context
+        .admit()
+        .unwrap()
+        .prepare(
+            "p1",
+            "dns-resolved",
+            CuratedIntentPurpose::Enable,
+            &policy,
+            0,
+        )
+        .unwrap();
+    first.send(TMessage::Text(r#"{"action":"prepareCuratedBroadOptIn","requestId":"bad-1","id":"dns-resolved","purpose":"enable","purpose":"enable"}"#.into())).await.unwrap();
+    let reply = tokio::time::timeout(std::time::Duration::from_secs(1), first.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap()
+        .into_text()
+        .unwrap();
+    let result: ServerMessage = serde_json::from_str(&reply).unwrap();
+    assert!(
+        matches!(result,ServerMessage::CuratedDefaultsRequestResult { request_id:Some(id),.. } if id=="bad-1")
+    );
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), other.next())
+            .await
+            .is_err()
+    );
+    assert!(inbound.try_recv().is_err());
+    assert!(first_context
+        .admit()
+        .unwrap()
+        .consume(
+            "p1",
+            &first_ticket,
+            "dns-resolved",
+            CuratedIntentPurpose::Enable,
+            &policy,
+            0,
+            crate::curated::intent::CONSENT_VERSION
+        )
+        .is_err());
+    assert!(other_context
+        .admit()
+        .unwrap()
+        .consume(
+            "p1",
+            &other_ticket,
+            "dns-resolved",
+            CuratedIntentPurpose::Enable,
+            &policy,
+            0,
+            crate::curated::intent::CONSENT_VERSION
+        )
+        .is_ok());
+    server.abort();
+}
+
+#[tokio::test]
+async fn curated_tickets_cannot_be_forwarded_from_broadcast() {
+    let (broadcasts, broadcast_rx) = broadcast::channel(8);
+    let (_reply_tx, reply_rx) = mpsc::channel(8);
+    let (sent_tx, mut sent_rx) = mpsc::channel::<Message>(8);
+    let sink = futures_util::sink::unfold(sent_tx, |sent_tx, message| async move {
+        sent_tx.send(message).await.map_err(|_| ())?;
+        Ok::<_, ()>(sent_tx)
+    });
+    let task = tokio::spawn(forward_outbound(Box::pin(sink), broadcast_rx, reply_rx));
+    broadcasts
+        .send(ServerMessage::CuratedBroadOptInPrepared {
+            request_id: "req".into(),
+            id: "dns-resolved".into(),
+            purpose: crate::ws_messages::CuratedIntentPurpose::Enable,
+            ticket: "a".repeat(64),
+        })
+        .unwrap();
+    broadcasts
+        .send(ServerMessage::CuratedDefaultsRequestResult {
+            request_id: Some("req".into()),
+            results: vec![],
+        })
+        .unwrap();
+    broadcasts.send(ServerMessage::ClearConnectionRows).unwrap();
+    let Message::Text(sent) =
+        tokio::time::timeout(std::time::Duration::from_secs(1), sent_rx.recv())
+            .await
+            .unwrap()
+            .unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(
+        serde_json::from_str::<ServerMessage>(&sent).unwrap(),
+        ServerMessage::ClearConnectionRows
+    );
+    assert!(sent_rx.try_recv().is_err());
+    task.abort();
+}

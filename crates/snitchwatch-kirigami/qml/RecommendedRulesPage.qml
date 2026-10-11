@@ -33,6 +33,11 @@ Kirigami.ScrollablePage {
     readonly property bool usable: page.received && page.unavailableReason.length === 0
     property alias entriesList: list
 
+    property alias dnsConsentDialog: dnsConsent
+    DnsConsentDialog { id: dnsConsent; consentModel: page.model }
+    onVisibleChanged: if (!visible && model) model.cancelBroadConsent()
+    Component.onDestruction: if (model) model.cancelBroadConsent()
+
     header: ColumnLayout {
         spacing: 0
 
@@ -75,6 +80,22 @@ Kirigami.ScrollablePage {
             wrapMode: Text.Wrap
             text: page.unavailableReason
         }
+        Controls.Label {
+            objectName: "dnsUnsupported"
+            Layout.fillWidth: true
+            textFormat: Text.PlainText
+            wrapMode: Text.Wrap
+            visible: page.model && !page.model.broadSupported
+            text: "This service cannot accept reviewed DNS consent. Connect to an updated service to turn on or keep the DNS rule. Turning it off is still available."
+        }
+        Controls.Label {
+            objectName: "dnsChoiceResult"
+            Layout.fillWidth: true
+            textFormat: Text.PlainText
+            wrapMode: Text.Wrap
+            visible: page.model && page.model.consentResult.length > 0
+            text: page.model ? page.model.consentResult : ""
+        }
         RowLayout {
             Layout.margins: Kirigami.Units.smallSpacing
             spacing: Kirigami.Units.largeSpacing
@@ -106,6 +127,7 @@ Kirigami.ScrollablePage {
             required property string program
             required property string allows
             required property string why
+            required property bool isBroad
             required property bool isOn
             required property string statusText
             required property string problem
@@ -119,7 +141,7 @@ Kirigami.ScrollablePage {
 
                 Controls.Switch {
                     objectName: "entrySwitch"
-                    enabled: page.usable
+                    enabled: page.usable && (!row.isBroad || row.isOn || page.model.broadSupported)
                     checked: row.isOn
                     Layout.alignment: Qt.AlignTop
                     onToggled: {
@@ -174,8 +196,16 @@ Kirigami.ScrollablePage {
                     Controls.Button {
                         objectName: "keepButton"
                         visible: row.canKeep
+                        enabled: !row.isBroad || page.model.broadSupported
                         text: "Keep"
                         onClicked: page.model.keepEntry(row.entryId)
+                    }
+                    Controls.Button {
+                        objectName: "reviewDnsButton"
+                        visible: row.isBroad && !row.canKeep && !row.canRemove
+                        enabled: page.usable && page.model.broadSupported
+                        text: "Review DNS choice…"
+                        onClicked: page.model.setEntry(row.entryId, true)
                     }
                     Controls.Button {
                         objectName: "removeButton"

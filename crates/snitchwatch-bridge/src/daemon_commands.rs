@@ -540,16 +540,63 @@ impl DaemonCommands {
     /// [`dispatch`](Self::dispatch) with the streams to send to chosen.
     fn dispatch_via(
         &self,
+        notification: Notification,
+        delivery: Delivery,
+    ) -> Result<PendingReply, SendError> {
+        self.dispatch_via_checked(notification, delivery, None)
+    }
+
+    fn dispatch_via_checked(
+        &self,
         mut notification: Notification,
         delivery: Delivery,
+        curated: Option<(u64, Option<bool>)>,
     ) -> Result<PendingReply, SendError> {
         check_sendable(&notification)?;
         let mut inner = lock(&self.inner);
-        let targets = targets(&inner, delivery)?;
+        let mut targets = targets(&inner, delivery)?;
         // The committed stream may own only an over-limit count, no list: a
         // leftover delete needs the list it was decided from (PR #106 N3).
         if matches!(delivery, Delivery::CommittedStream) && !self.rules.has_list() {
             return Err(SendError::NoDaemon);
+        }
+        // HELLO, daemon replies and this admission share inner -> cache
+        // lock order. Keep both through queue_on, preventing a new stream
+        // or edited snapshot from receiving a previously planned install.
+        let cache = self.rules.cache();
+        let guarded_cache = curated.map(|_| cache.lock().unwrap_or_else(|e| e.into_inner()));
+        if let Some((generation, reenable)) = curated {
+            if *self.ready.borrow() != generation || inner.current != inner.committed_by {
+                return Err(SendError::NoDaemon);
+            }
+            // Existing in-process test/development TCP transport remains
+            // usable, but guarded broad work goes only to the one stream
+            // whose current snapshot authorized it, never every TCP peer.
+            targets = inner.committed_by.into_iter().collect();
+            if targets.is_empty() {
+                return Err(SendError::NoDaemon);
+            }
+            let cache = guarded_cache.as_ref().expect("guarded curated cache");
+            let [rule] = notification.rules.as_slice() else {
+                return Err(SendError::RefusedOperator);
+            };
+            let rules = cache.rules().ok_or(SendError::NoDaemon)?;
+            if cache.left_out().contains_key(&rule.name) || cache.files_left().contains(&rule.name)
+            {
+                return Err(SendError::ReservedName);
+            }
+            let current = rules.get(&rule.name);
+            let valid = match reenable {
+                Some(enabled) => current.is_some_and(|current| {
+                    (!enabled || !current.enabled)
+                        && crate::curated::canonical::canonical(current)
+                            == crate::curated::canonical::canonical(rule)
+                }),
+                None => current.is_none(),
+            };
+            if !valid {
+                return Err(SendError::ReservedName);
+            }
         }
         let id = inner.next_id;
         inner.next_id += 1;
@@ -558,9 +605,13 @@ impl DaemonCommands {
             return Err(SendError::NotQueued);
         }
         let (tx, rx) = oneshot::channel();
-        let stream = match inner.transport {
-            DaemonTransport::Tcp => None,
-            DaemonTransport::Unix => inner.current,
+        let stream = if curated.is_some() {
+            inner.committed_by
+        } else {
+            match inner.transport {
+                DaemonTransport::Tcp => None,
+                DaemonTransport::Unix => inner.current,
+            }
         };
         inner.waiters.insert(
             id,

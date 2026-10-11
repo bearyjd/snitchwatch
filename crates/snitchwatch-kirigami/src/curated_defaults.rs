@@ -98,20 +98,29 @@ impl CuratedStore {
     pub fn keeping(&self, id: &str) -> Option<ClientMessage> {
         self.entries
             .iter()
-            .any(|e| e.id == id && self.can_keep(e))
+            .any(|e| e.id == id && !e.broad && e.id != "dns-resolved" && self.can_keep(e))
             .then(|| ClientMessage::SetCuratedDefaults {
                 ids: vec![id.to_string()],
                 on: true,
+
+                request_id: None,
+                reply: None,
             })
     }
 
     /// The request turning `id` on or off; `None` while the bridge hasn't
     /// offered them or changes none, or for an id it didn't list.
     pub fn request(&self, id: &str, on: bool) -> Option<ClientMessage> {
-        let known = self.entries.iter().any(|e| e.id == id);
+        let known = self
+            .entries
+            .iter()
+            .any(|e| e.id == id && (!on || (!e.broad && e.id != "dns-resolved")));
         (self.usable() && known).then(|| ClientMessage::SetCuratedDefaults {
             ids: vec![id.to_string()],
             on,
+
+            request_id: None,
+            reply: None,
         })
     }
 
@@ -127,7 +136,12 @@ impl CuratedStore {
             .filter(|e| asks_for(e, on))
             .map(|e| e.id.clone())
             .collect();
-        (self.usable() && !ids.is_empty()).then_some(ClientMessage::SetCuratedDefaults { ids, on })
+        (self.usable() && !ids.is_empty()).then_some(ClientMessage::SetCuratedDefaults {
+            ids,
+            on,
+            request_id: None,
+            reply: None,
+        })
     }
 
     /// The request removing `id`'s edited rule, once the user confirmed.
@@ -141,7 +155,7 @@ impl CuratedStore {
 
 /// Whether "Turn all on/off" asks for `entry`.
 fn asks_for(entry: &CuratedDefaultSummary, on: bool) -> bool {
-    if on && entry.broad {
+    if on && (entry.broad || entry.id == "dns-resolved") {
         return false;
     }
     entry.on != on || (on && entry.status == EntryStatus::InFirewall)
@@ -176,6 +190,9 @@ pub fn status_text(status: EntryStatus) -> &'static str {
             "Turned off, but the firewall service couldn't remove the rule's saved file, so it may \
              come back when the service restarts. If it comes back unchanged, Snitchwatch removes \
              it then."
+        }
+        EntryStatus::AwaitingConsent => {
+            "Awaiting your reviewed DNS consent; no activation requested."
         }
         EntryStatus::Unknown => "Status unknown to this version of Snitchwatch.",
     }
@@ -254,7 +271,10 @@ mod tests {
             store.request("flatpak-flathub", true),
             Some(ClientMessage::SetCuratedDefaults {
                 ids: vec!["flatpak-flathub".into()],
-                on: true
+                on: true,
+
+                request_id: None,
+                reply: None,
             })
         );
         assert!(store.request("unknown", true).is_none());
@@ -269,7 +289,10 @@ mod tests {
             store.request_all(true),
             Some(ClientMessage::SetCuratedDefaults {
                 ids: vec!["flatpak-flathub".into(), "undecided".into()],
-                on: true
+                on: true,
+
+                request_id: None,
+                reply: None,
             })
         );
         assert_eq!(
@@ -280,7 +303,10 @@ mod tests {
                     "networkmanager".into(),
                     "undecided".into()
                 ],
-                on: false
+                on: false,
+
+                request_id: None,
+                reply: None,
             })
         );
     }
@@ -297,7 +323,10 @@ mod tests {
             store.request_all(true),
             Some(ClientMessage::SetCuratedDefaults {
                 ids: vec!["flatpak-flathub".into()],
-                on: true
+                on: true,
+
+                request_id: None,
+                reply: None,
             })
         );
         // Turn all off: the safe direction, broad entries included.
@@ -305,7 +334,10 @@ mod tests {
             store.request_all(false),
             Some(ClientMessage::SetCuratedDefaults {
                 ids: vec!["dns-adopt".into(), "dns-on".into(), "chronyc-local".into()],
-                on: false
+                on: false,
+
+                request_id: None,
+                reply: None,
             })
         );
         // Only broad entries left to turn on: nothing to ask.
@@ -326,21 +358,9 @@ mod tests {
             },
         );
         assert!(only_broad.request_all(true).is_none());
-        // By itself, it still can be turned on and kept.
-        assert_eq!(
-            only_broad.request("dns-off", true),
-            Some(ClientMessage::SetCuratedDefaults {
-                ids: vec!["dns-off".into()],
-                on: true
-            })
-        );
-        assert_eq!(
-            only_broad.keeping("dns-adopt"),
-            Some(ClientMessage::SetCuratedDefaults {
-                ids: vec!["dns-adopt".into()],
-                on: true
-            })
-        );
+        // Broad entries never use legacy singleton On or Keep.
+        assert!(only_broad.request("dns-off", true).is_none());
+        assert!(only_broad.keeping("dns-adopt").is_none());
     }
 
     /// Re-review 2, LOW 5: Keep is offered for an undecided rule already in
@@ -353,7 +373,10 @@ mod tests {
             store.keeping("undecided"),
             Some(ClientMessage::SetCuratedDefaults {
                 ids: vec!["undecided".into()],
-                on: true
+                on: true,
+
+                request_id: None,
+                reply: None,
             })
         );
         assert!(store.keeping("chronyc-local").is_none());

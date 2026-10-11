@@ -117,3 +117,12 @@ before starting the app, so journald files the app's stderr (and
 ```bash
 journalctl --user -u 'app-flatpak-org.snitchwatch.Snitchwatch-*' --since -10min
 ```
+
+## Candidate publication CI
+
+The clean system-profile candidate builder and fixed prerelease publisher are
+specified in [r13 candidate GUI CI](../../docs/packaging/r13-candidate-gui-ci.md).
+Primary-reviewed immutable SHA authorization and green native/QML CI precede
+the guarded candidate-branch push. The release packet binds bundle bytes and
+all source/runtime/toolchain identities; independent runtime acceptance still
+precedes any stable reuse of those bytes.

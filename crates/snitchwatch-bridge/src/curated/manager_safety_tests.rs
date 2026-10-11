@@ -112,6 +112,8 @@ async fn turn_all_on_doesnt_reinstall_a_removed_rule() {
         EntryStatus::DeletedOutside
     );
     curated.try_route(ClientMessage::SetCuratedDefaults {
+        request_id: None,
+        reply: None,
         ids: all_ids(),
         on: true,
     });

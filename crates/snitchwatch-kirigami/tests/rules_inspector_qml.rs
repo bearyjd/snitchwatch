@@ -43,15 +43,19 @@ fn inspector_switch_follows_the_bridges_rule_list() {
     let qml = r#"
 import QtQuick
 import QtQuick.Window
+import QtQuick.Controls as Controls
 import com.snitchwatch.shell
 
-Window {
+Controls.ApplicationWindow {
     id: probeWindow
     visible: true
     width: 800
     height: 600
 
     property var sent: []
+    property var dnsSent: []
+    CuratedDefaultsModel { id: dnsConsentModel }
+    Connections { target: dnsConsentModel; function onCuratedChangeRequested(json) { probeWindow.dnsSent.push(JSON.parse(json)); } }
 
     function setRules(rules) {
         rulesModel.applyServerMessageJson(JSON.stringify({ action: "setRules", rules: rules }));
@@ -79,6 +83,7 @@ Window {
         id: page
         anchors.fill: parent
         model: RulesModel { id: rulesModel }
+        curatedModel: dnsConsentModel
     }
 
     Connections {
@@ -215,6 +220,63 @@ Window {
                 rows.currentIndex = 1;
                 page.openInspector(rows.currentItem);
                 expect(!sw.enabled, "row path: stale switch on a read-only rule");
+                // Canonical managed DNS has a dedicated reviewed reenable path.
+                const dns = probeWindow.curl(false);
+                dns.name = "snitchwatch-default-dns-resolved";
+                dns.displayName = dns.name;
+                dns.toggleable = true;
+                dns.readOnlyReason = "A recommended background-service rule";
+                probeWindow.setRules([dns]);
+                expect(page.openRuleByName(dns.name), "managed DNS missing");
+                const dnsBefore = probeWindow.sent.length;
+                rulesModel.setEnabled(dns.name, true);
+                expect(probeWindow.sent.length === dnsBefore, "generic DNS enable bypassed consent");
+                dnsConsentModel.applyServerMessageJson(JSON.stringify({action:"authenticated", capabilities:["curatedBroadOptInV1"]}));
+                dnsConsentModel.applyServerMessageJson(JSON.stringify({action:"setCuratedDefaults", storage:{persistent:true}, entries:[
+                    {id:"dns-resolved",program:"/usr/lib/systemd/systemd-resolved",allows:"DNS",why:"Resolver",on:true,broad:true,status:"installedButOff"}
+                ]}));
+                page.setInspectEnabled(true);
+                expect(probeWindow.dnsSent.length === 1 && probeWindow.dnsSent[0].purpose === "reenable", "Rules enable did not prepare reviewed reenable");
+                expect(!page.inspectEnabled && !sw.checked && !sw.enabled, "DNS falsely enabled before daemon response");
+                const intent = probeWindow.dnsSent[0];
+                dnsConsentModel.applyServerMessageJson(JSON.stringify({action:"curatedBroadOptInPrepared", requestId:intent.requestId,
+                    id:"dns-resolved", purpose:"reenable", ticket:"a".repeat(64)}));
+                expect(dnsConsentModel.consentReady, "valid reenable ticket did not become ready");
+                dnsConsentModel.confirmBroadConsent();
+                expect(probeWindow.dnsSent.length === 2 && probeWindow.dnsSent[1].action === "enableCuratedBroadDefault",
+                       "reviewed reenable was not submitted");
+                // The daemon can publish its enabled snapshot before the
+                // private acceptance result. Off must invalidate that result.
+                dns.enabled = true;
+                probeWindow.setRules([dns]);
+                page.setInspectEnabled(false);
+                expect(probeWindow.sent.length === dnsBefore + 1 && probeWindow.sent[dnsBefore].rule.enabled === false,
+                       "Rules-page DNS off was blocked");
+                dnsConsentModel.applyServerMessageJson(JSON.stringify({action:"curatedDefaultsRequestResult", requestId:intent.requestId,
+                    results:[{id:"dns-resolved",outcome:"choiceAccepted",choiceAccepted:true,persisted:true,reason:"saved"}]}));
+                expect(!dnsConsentModel.consentOpen && dnsConsentModel.consentResult === "",
+                       "late accepted result survived Rules-page DNS Off");
+                // Off also cancels an outstanding preparation without
+                // changing the generic disable command.
+                dnsConsentModel.reenableDns();
+                const pending = probeWindow.dnsSent[probeWindow.dnsSent.length - 1];
+                page.setInspectEnabled(false);
+                expect(probeWindow.dnsSent[probeWindow.dnsSent.length - 1].action === "cancelCuratedBroadOptIn"
+                       && !dnsConsentModel.consentOpen, "Rules-page Off did not cancel pending consent");
+                dnsConsentModel.applyServerMessageJson(JSON.stringify({action:"curatedBroadOptInPrepared", requestId:pending.requestId,
+                    id:"dns-resolved", purpose:"reenable", ticket:"b".repeat(64)}));
+                expect(!dnsConsentModel.consentReady, "cancelled ticket became ready after Rules-page Off");
+                dnsConsentModel.reenableDns();
+                const saved = probeWindow.dnsSent[probeWindow.dnsSent.length - 1];
+                dnsConsentModel.applyServerMessageJson(JSON.stringify({action:"curatedBroadOptInPrepared", requestId:saved.requestId,
+                    id:"dns-resolved", purpose:"reenable", ticket:"c".repeat(64)}));
+                dnsConsentModel.confirmBroadConsent();
+                dnsConsentModel.applyServerMessageJson(JSON.stringify({action:"curatedDefaultsRequestResult", requestId:saved.requestId,
+                    results:[{id:"dns-resolved",outcome:"choiceAccepted",choiceAccepted:true,persisted:true,reason:"saved"}]}));
+                expect(dnsConsentModel.consentResult.indexOf("DNS choice saved") === 0,
+                       "saved acceptance did not establish result fixture");
+                page.setInspectEnabled(false);
+                expect(dnsConsentModel.consentResult === "", "Rules-page Off kept an already displayed saved result");
             } finally {
                 Qt.quit();
             }

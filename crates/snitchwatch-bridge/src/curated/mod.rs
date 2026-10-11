@@ -24,6 +24,7 @@
 //! and only if it also passes the rule editor's policy checks.
 
 pub mod canonical;
+pub mod intent;
 pub mod manager;
 pub mod reconcile;
 pub mod store;

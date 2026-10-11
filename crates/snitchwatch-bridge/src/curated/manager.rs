@@ -23,7 +23,7 @@
 //!   saved all leave the firewall as it is: no command is sent, no choice
 //!   is taken, and the GUI is told why.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
@@ -40,6 +40,8 @@ use crate::daemon_commands::{CuratedCommand, DaemonCommands};
 use crate::rule_name::CURATED_DEFAULT_RULE_NAME_PREFIX;
 use crate::ws_messages::{ClientMessage, ServerMessage, StorageStatus};
 
+#[path = "manager_intent.rs"]
+mod intent;
 #[path = "manager_state.rs"]
 mod state;
 use state::{
@@ -165,49 +167,15 @@ impl CuratedDefaults {
         lock(&self.inner.state).inert.is_some()
     }
 
-    /// A GUI's request, if it is one for the curated defaults: taken in
-    /// memory and reconciled on the worker. Never waits, never writes.
+    /// Route curated requests before generic rule translation.
     pub fn try_route(&self, msg: ClientMessage) -> Option<ClientMessage> {
-        match msg {
-            ClientMessage::SetCuratedDefaults { ids, on } => self.choose(&ids, on),
-            ClientMessage::RemoveCuratedDefault { id } => self.ask_removal(&id),
-            other => return Some(other),
-        }
-        None
-    }
-
-    fn choose(&self, ids: &[String], on: bool) {
-        let taken = {
-            let mut state = lock(&self.inner.state);
-            if state.inert.is_some() {
-                false
-            } else {
-                state.requests += 1;
-                let mut choices = state.choices.clone();
-                for entry in entries().iter().filter(|entry| ids.contains(&entry.id)) {
-                    choices = if on {
-                        choices.enable(&entry.id)
-                    } else {
-                        choices.disable(&entry.id)
-                    };
-                    // A new choice: a command that failed may be tried again.
-                    state.failures.remove(&entry.id);
-                }
-                keep(&mut state, choices);
-                true
-            }
-        };
-        if taken {
-            self.inner.wake.notify_one();
-        } else {
-            // Undo the GUI's optimistic switch.
-            self.announce();
-        }
+        self.route_intent(msg)
     }
 
     fn ask_removal(&self, id: &str) {
         let mut state = lock(&self.inner.state);
         if state.inert.is_none() && entries().iter().any(|entry| entry.id == id) {
+            self.revoke_locked(&mut state, id);
             state.removals.insert(id.to_string());
             state.removal_failures.remove(id);
             state.requests += 1;
@@ -337,6 +305,7 @@ impl CuratedDefaults {
             .passes
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.save_if_changed().await;
+        self.flush_request_results();
         // The generation first: a HELLO between the two reads then pairs
         // the new list with the old generation, and the pass stops at the
         // first command (re-review 3, LOW-2).
@@ -370,26 +339,36 @@ impl CuratedDefaults {
             files_left: &files_left,
             maybe_applied: &maybe_applied,
         };
-        let (actions, removals) = {
+        let (actions, removals, reenables) = {
             let mut state = lock(&self.inner.state);
             state.problems.clear();
             if state.inert.is_some() {
                 state.statuses = inert_statuses(entries(), daemon);
                 state.removals.clear();
                 state.removal_failures.clear();
-                (Vec::new(), BTreeSet::new())
+                state.reenables.clear();
+                (Vec::new(), BTreeSet::new(), BTreeMap::new())
             } else {
                 let planned = plan(entries(), daemon, &state.choices);
                 state.statuses = planned.statuses;
                 keep(&mut state, planned.choices);
                 let actions = without_failed(&mut state, planned.actions, generation);
                 show_removal_failures(&mut state, daemon, generation);
-                (actions, std::mem::take(&mut state.removals))
+                let revision = state.broad_revision;
+                let actions = actions
+                    .into_iter()
+                    .map(|action| (action, revision))
+                    .collect::<Vec<_>>();
+                (
+                    actions,
+                    std::mem::take(&mut state.removals),
+                    std::mem::take(&mut state.reenables),
+                )
             }
         };
         self.save_if_changed().await;
         self.announce_changed();
-        if actions.is_empty() && removals.is_empty() {
+        if actions.is_empty() && removals.is_empty() && reenables.is_empty() {
             return;
         }
         // One rule-list broadcast for the pass (if any command changed it).
@@ -413,14 +392,19 @@ impl CuratedDefaults {
             self.save_if_changed().await;
             self.announce_changed();
         }
-        for action in actions {
+        for (action, revision) in actions {
             if self.generation() != generation {
                 break;
             }
             if !self.still_wanted(&action) {
                 continue;
             }
-            self.apply(action, generation).await;
+            self.apply(action, generation, revision).await;
+            self.save_if_changed().await;
+            self.announce_changed();
+        }
+        for (id, revision) in reenables {
+            self.reenable(&id, generation, revision).await;
             self.save_if_changed().await;
             self.announce_changed();
         }
@@ -480,16 +464,44 @@ impl CuratedDefaults {
             && !cache.left_out().contains_key(name)
     }
 
-    async fn apply(&self, action: CuratedAction, generation: u64) {
+    async fn apply(&self, action: CuratedAction, generation: u64, revision: u64) {
         let (id, name, outcome, done) = match action {
             CuratedAction::Install(id) => {
                 let Some(entry) = entries().iter().find(|entry| entry.id == id) else {
                     return;
                 };
                 let name = entry.rule_name();
-                let outcome = self
-                    .send(CuratedCommand::install(entry), Refusal::Add)
-                    .await;
+                // The state guard stays held through queue admission: an off
+                // cannot revoke authority between this check and the send.
+                let sent = {
+                    let state = lock(&self.inner.state);
+                    if state.inert.is_some()
+                        || self.generation() != generation
+                        || !state.choices.enabled.contains(&id)
+                        || state.choices.deleted_by_user.contains(&id)
+                        || (entry.broad()
+                            && (state.broad_revision != revision
+                                || !state.choices.has_broad_authority(&id)
+                                || state.saved < state.version
+                                || !state.storage.persistent))
+                        || !self.still_missing(&name)
+                    {
+                        return;
+                    }
+                    let command = if entry.broad() {
+                        CuratedCommand::authorized_install(entry)
+                    } else {
+                        CuratedCommand::install(entry)
+                    };
+                    if entry.broad() {
+                        self.inner
+                            .commands
+                            .send_curated_guarded(command, generation, false)
+                    } else {
+                        self.inner.commands.send_curated(command)
+                    }
+                };
+                let outcome = Self::wait_sent(sent, Refusal::Add).await;
                 if outcome.is_ok() {
                     info!(entry = %id, "installed a recommended rule");
                 }
@@ -633,6 +645,7 @@ impl CuratedDefaults {
                 if !problem.sticky {
                     // Busy: asked again at the next change of the pass's
                     // inputs, as its text says (re-review 3).
+                    self.revoke_locked(&mut state, id);
                     state.removals.insert(id.to_string());
                 }
                 fail(
@@ -648,7 +661,14 @@ impl CuratedDefaults {
     }
 
     async fn send(&self, command: CuratedCommand, refusal: Refusal) -> Result<(), Problem> {
-        match self.inner.commands.send_curated(command) {
+        Self::wait_sent(self.inner.commands.send_curated(command), refusal).await
+    }
+
+    async fn wait_sent(
+        sent: Result<crate::daemon_commands::PendingReply, crate::daemon_commands::SendError>,
+        refusal: Refusal,
+    ) -> Result<(), Problem> {
+        match sent {
             Ok(reply) => reply
                 .wait(COMMAND_TIMEOUT)
                 .await
@@ -737,3 +757,7 @@ mod gate_tests;
 #[cfg(test)]
 #[path = "manager_unanswered_tests.rs"]
 mod unanswered_tests;
+
+#[cfg(test)]
+#[path = "manager_intent_tests.rs"]
+mod intent_tests;

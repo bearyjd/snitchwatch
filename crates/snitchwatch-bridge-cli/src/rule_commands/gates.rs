@@ -3,7 +3,7 @@
 
 use crate::busy::BusyNames;
 use snitchwatch_bridge::cache::rules::{RulesCache, SharedRulesCache};
-use snitchwatch_bridge::curated::{requested_toggle, toggleable};
+use snitchwatch_bridge::curated::{entry_for_rule_name, requested_toggle, toggleable};
 use snitchwatch_bridge::daemon_commands::{DaemonCommands, DaemonTransport};
 use snitchwatch_bridge::rule_io::only_enabled_differs;
 use snitchwatch_bridge::rule_name::is_reserved_curated_name;
@@ -175,6 +175,12 @@ fn plan_curated_toggle(
         .ok_or_else(|| refusal("rule", reason))?;
     if busy.contains(rule_id) {
         return Err(refusal("name", BUSY));
+    }
+    if enabled && entry_for_rule_name(rule_id).is_some_and(|entry| entry.broad()) {
+        return Err(refusal(
+            "rule",
+            "This recommended DNS rule needs explicit confirmation on the Recommended page.",
+        ));
     }
     if enabled && !old.enabled {
         may_turn_on(old)?;

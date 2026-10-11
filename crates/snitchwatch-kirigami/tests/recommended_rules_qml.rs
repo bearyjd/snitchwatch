@@ -206,6 +206,58 @@ Controls.ApplicationWindow {
                        "Turn all off and a broad entry: " + JSON.stringify(probeWindow.sent));
                 probeWindow.sent.length = asked;
 
+                // Old bridge refuses singleton broad On and Keep; Off remains.
+                send([entry("dns-resolved", false, "off", true)]);
+                const beforeDns = probeWindow.sent.length;
+                curated.setEntry("dns-resolved", true);
+                expect(probeWindow.sent.length === beforeDns && !curated.consentOpen,
+                       "old bridge received DNS enable");
+                curated.applyServerMessageJson(JSON.stringify({action:"authenticated", capabilities:["curatedBroadOptInV1"]}));
+                curated.setEntry("dns-resolved", true);
+                expect(curated.consentOpen && !curated.consentReady, "no waiting DNS confirmation");
+                const prepare = probeWindow.sent[beforeDns];
+                expect(prepare.action === "prepareCuratedBroadOptIn" && prepare.purpose === "enable", "wrong prepare");
+                const dialog = page.dnsConsentDialog;
+                const confirmDns = find(dialog.contentItem, "dnsConsentConfirm");
+                const cancelDns = find(dialog.contentItem, "dnsConsentCancel");
+                expect(dialog.visible && !confirmDns.enabled, "confirmation visible before preparation");
+                const disclosure = find(dialog.contentItem, "dnsConsentDisclosure").text;
+                expect(find(dialog.contentItem, "dnsConsentDisclosure").textFormat === Text.PlainText, "DNS disclosure is markup");
+                for (const word of ["/usr/lib/systemd/systemd-resolved", "UID 193", "TCP/UDP", "53", "IPv4/IPv6", "any destination", "data inside DNS lookups"])
+                    expect(disclosure.indexOf(word) >= 0, "missing disclosure " + word);
+                curated.confirmBroadConsent();
+                expect(probeWindow.sent.length === beforeDns + 1, "confirmed before a ticket");
+                curated.setEntry("dns-resolved", true);
+                const intent = probeWindow.sent[probeWindow.sent.length - 1];
+                curated.applyServerMessageJson(JSON.stringify({action:"curatedBroadOptInPrepared", requestId:intent.requestId,
+                    id:"dns-resolved", purpose:"enable", ticket:"a".repeat(64)}));
+                expect(curated.consentReady && confirmDns.enabled, "valid private ticket not accepted");
+                confirmDns.clicked();
+                const enable = probeWindow.sent[probeWindow.sent.length - 1];
+                expect(enable.action === "enableCuratedBroadDefault" && enable.consent === "resolver-any-address-v1", "no reviewed enable");
+                const afterConfirm = probeWindow.sent.length;
+                curated.confirmBroadConsent();
+                expect(probeWindow.sent.length === afterConfirm, "confirmation replayed");
+                curated.applyServerMessageJson(JSON.stringify({action:"curatedDefaultsRequestResult", requestId:intent.requestId,
+                    results:[{id:"dns-resolved", outcome:"choiceAccepted", choiceAccepted:true, persisted:false, reason:"session only"}]}));
+                expect(curated.consentResult.indexOf("not saved") >= 0 && curated.consentResult.indexOf("Installation status follows") >= 0,
+                       "result claimed persistent installation");
+                // Keep-disabled has its own disclosure and cannot become enable.
+                send([entry("dns-resolved", true, "inFirewallButOff", true)]);
+                curated.keepEntry("dns-resolved");
+                const keepIntent = probeWindow.sent[probeWindow.sent.length - 1];
+                expect(keepIntent.purpose === "keep", "disabled Keep became enable");
+                cancelDns.clicked();
+                expect(probeWindow.sent[probeWindow.sent.length - 1].action === "cancelCuratedBroadOptIn", "cancel did not cancel ticket");
+                curated.reenableDns();
+                expect(probeWindow.sent[probeWindow.sent.length - 1].purpose === "reenable", "no dedicated reenable intent");
+                curated.resetBridgeSession();
+                expect(!curated.consentOpen && !curated.broadSupported, "session loss retained consent");
+                const beforeReplay = probeWindow.sent.length;
+                curated.confirmBroadConsent();
+                expect(probeWindow.sent.length === beforeReplay, "disconnect replayed confirmation");
+                probeWindow.sent.length = beforeDns;
+
                 // A bridge that never adds them: nothing can be turned on.
                 send([entry("flatpak", false, "unavailable")], "Needs the system service.");
                 expect(find(header, "unavailableBanner").visible, "no unavailable banner");

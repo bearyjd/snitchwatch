@@ -42,6 +42,103 @@ fn nothing_is_on_by_default() {
     assert_eq!(plan.choices, Choices::default());
 }
 
+fn dns() -> &'static CuratedEntry {
+    entries()
+        .iter()
+        .find(|entry| entry.id == "dns-resolved")
+        .unwrap()
+}
+
+#[test]
+fn broad_install_needs_valid_reviewed_authority_and_preserves_legacy_choices() {
+    let legacy = Choices::default().enable(&dns().id);
+    let refused = plan(entries(), &BTreeMap::new(), &legacy);
+    assert!(refused.actions.is_empty());
+    assert_eq!(status(&refused, &dns().id), EntryStatus::AwaitingConsent);
+    assert_eq!(refused.choices, legacy);
+    let modern = legacy.grant_broad(&dns().id, true);
+    let accepted = plan(entries(), &BTreeMap::new(), &modern);
+    assert_eq!(accepted.actions, [CuratedAction::Install(dns().id.clone())]);
+    let mut changed = dns().clone();
+    changed.port = 5353;
+    let mismatched = plan(&[changed], &BTreeMap::new(), &modern);
+    assert!(mismatched.actions.is_empty());
+    assert_eq!(status(&mismatched, &dns().id), EntryStatus::AwaitingConsent);
+    assert_eq!(mismatched.choices, modern);
+}
+
+#[test]
+fn legacy_or_adoption_only_preserves_enabled_and_disabled_rule_bytes() {
+    for enabled in [true, false] {
+        let mut rule = dns().rule();
+        rule.enabled = enabled;
+        rule.created = 761;
+        let rules = daemon(&[rule]);
+        let before = rules.clone();
+        for choices in [
+            Choices::default().enable(&dns().id),
+            Choices::default()
+                .enable(&dns().id)
+                .grant_broad(&dns().id, false),
+        ] {
+            let adopted = plan(entries(), &rules, &choices);
+            assert!(adopted.actions.is_empty());
+            assert_eq!(
+                status(&adopted, &dns().id),
+                if enabled {
+                    EntryStatus::Installed
+                } else {
+                    EntryStatus::InstalledButOff
+                }
+            );
+            assert_eq!(rules, before);
+            assert!(!adopted.choices.has_broad_authority(&dns().id));
+        }
+    }
+    let choices = Choices::default()
+        .enable(&dns().id)
+        .grant_broad(&dns().id, false);
+    let missing = plan(entries(), &BTreeMap::new(), &choices);
+    assert!(missing.actions.is_empty());
+    assert_eq!(status(&missing, &dns().id), EntryStatus::AwaitingConsent);
+}
+
+#[test]
+fn external_broad_deletion_revokes_grant_and_never_recreates_it() {
+    let choices = Choices::default()
+        .enable(&dns().id)
+        .grant_broad(&dns().id, true)
+        .installed(&dns().id, &dns().rule());
+    let gone = plan(entries(), &BTreeMap::new(), &choices);
+    assert!(gone.actions.is_empty());
+    assert_eq!(status(&gone, &dns().id), EntryStatus::DeletedOutside);
+    assert!(gone.choices.deleted_by_user.contains(&dns().id));
+    assert!(gone.choices.broad_grants.is_empty());
+    let restarted = plan(entries(), &BTreeMap::new(), &gone.choices);
+    assert!(restarted.actions.is_empty());
+}
+
+#[test]
+fn legacy_path_only_dns_stays_edited_and_missing_legacy_dns_stays_inert() {
+    let choices = Choices::default().enable(&dns().id);
+    let mut path_only = dns().rule();
+    path_only.operator = path_only
+        .operator
+        .unwrap()
+        .list
+        .into_iter()
+        .find(|op| op.operand == "process.path");
+    let rules = daemon(&[path_only]);
+    let before = rules.clone();
+    let edited = plan(entries(), &rules, &choices);
+    assert_eq!(status(&edited, &dns().id), EntryStatus::EditedByYou);
+    assert!(edited.actions.is_empty());
+    assert_eq!(rules, before);
+    let absent = plan(entries(), &BTreeMap::new(), &choices);
+    assert!(absent.actions.is_empty());
+    assert_eq!(status(&absent, &dns().id), EntryStatus::AwaitingConsent);
+}
+
 #[test]
 fn an_entry_turned_on_is_installed_and_then_reported_installed() {
     let on = Choices::default().enable("flatpak-flathub");

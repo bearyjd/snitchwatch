@@ -124,6 +124,11 @@ Kirigami.ApplicationWindow {
         id: curatedDefaultsModel
     }
 
+    Connections {
+        target: bridgeFeed
+        function onOkChanged() { if (!bridgeFeed.ok) curatedDefaultsModel.resetBridgeSession(); }
+    }
+
     // First-run onboarding wizard (Task 12). Owns daemon-detection state; the
     // onboarding page itself is pushed/popped below based on `state`.
     WizardController {
@@ -481,6 +486,7 @@ Kirigami.ApplicationWindow {
         id: rulesPageComponent
         RulesPage {
             model: rulesModel
+            curatedModel: curatedDefaultsModel
         }
     }
     Component {

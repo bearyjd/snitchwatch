@@ -101,6 +101,7 @@ async fn settled_entry(
 
 fn turn(on: bool) -> ClientMessage {
     ClientMessage::SetCuratedDefaults {
+            request_id: None, reply: None,
         ids: vec![FLATPAK.into()],
         on,
     }

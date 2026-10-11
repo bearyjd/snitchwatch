@@ -15,14 +15,15 @@
 //!   in the list, a curated rule), is dropped with a warning (lenient: a
 //!   copy from an older list then reads as edited, so it is left alone).
 //!
-//! Version 1 (the wire JSON of each copy) is still read; version 2 is
-//! written.
+//! Versions 1 (wire copies) and 2 are still read without broad authority;
+//! version 3 additionally records reviewed policy consent, never tickets.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use snitchwatch_proto::protocol::Rule;
 
 use super::canonical::{canonical, CanonicalRule};
@@ -48,9 +49,154 @@ pub struct Choices {
     /// Entries whose rule was removed outside the Recommended page, or by
     /// its Remove button.
     pub deleted_by_user: BTreeSet<String>,
+    /// Deliberate modern consent. An enabled legacy id alone grants nothing.
+    #[serde(deserialize_with = "read_broad_grants")]
+    pub broad_grants: BTreeMap<String, BroadGrant>,
+}
+
+pub const BROAD_CONSENT: &str = "resolver-any-address-v1";
+const GRANT_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum BroadAuthority {
+    Enable,
+    AdoptionOnly,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BroadGrant {
+    pub version: u32,
+    pub id: String,
+    pub consent: String,
+    pub policy_sha256: String,
+    pub authority: BroadAuthority,
+}
+
+/// Ordered struct fields and ordered operator leaves define a stable JSON
+/// encoding; canonical excludes only transient enabled/created values.
+pub fn broad_policy_fingerprint(entry: &super::CuratedEntry) -> String {
+    let bytes = serde_json::to_vec(&canonical(&entry.rule()))
+        .expect("canonical policy contains only JSON-serializable fields");
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+impl BroadGrant {
+    fn matches(&self, entry: &super::CuratedEntry) -> bool {
+        entry.any_address
+            && self.version == GRANT_VERSION
+            && self.id == entry.id
+            && self.consent == BROAD_CONSENT
+            && self.policy_sha256 == broad_policy_fingerprint(entry)
+    }
+}
+
+/// Malformed provenance drops authority, not otherwise readable choices.
+/// Strict grant decoding rejects unknown/duplicate fields and wrong types.
+fn read_broad_grants<'de, D>(deserializer: D) -> Result<BTreeMap<String, BroadGrant>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Grant {
+        Valid(BroadGrant),
+        Invalid(serde::de::IgnoredAny),
+    }
+    struct UniqueGrants(BTreeMap<String, Grant>);
+    impl<'de> Deserialize<'de> for UniqueGrants {
+        fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            struct Visitor;
+            impl<'de> serde::de::Visitor<'de> for Visitor {
+                type Value = UniqueGrants;
+                fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                    f.write_str("a map with unique broad grant ids")
+                }
+                fn visit_map<A: serde::de::MapAccess<'de>>(
+                    self,
+                    mut map: A,
+                ) -> Result<Self::Value, A::Error> {
+                    let mut grants = BTreeMap::new();
+                    while let Some((id, grant)) = map.next_entry::<String, Grant>()? {
+                        if grants.insert(id, grant).is_some() {
+                            return Err(serde::de::Error::custom("duplicate broad grant id"));
+                        }
+                    }
+                    Ok(UniqueGrants(grants))
+                }
+            }
+            deserializer.deserialize_map(Visitor)
+        }
+    }
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Grants {
+        Map(UniqueGrants),
+        Invalid(serde::de::IgnoredAny),
+    }
+    Ok(match Grants::deserialize(deserializer)? {
+        Grants::Map(UniqueGrants(grants)) => grants
+            .into_iter()
+            .filter_map(|(id, grant)| match grant {
+                Grant::Valid(grant) => Some((id, grant)),
+                Grant::Invalid(_) => None,
+            })
+            .collect(),
+        Grants::Invalid(_) => BTreeMap::new(),
+    })
 }
 
 impl Choices {
+    /// Revocation alone preserves the rule's user's enabled/disabled choice:
+    /// a Rules-page toggle off leaves its curated adoption record intact.
+    pub fn revoke_broad(&self, id: &str) -> Self {
+        let mut next = self.clone();
+        next.broad_grants.remove(id);
+        next
+    }
+    /// Admission must already have validated a live modern intent. This
+    /// records its reviewed scope and deliberately does not change choices.
+    pub fn grant_broad(&self, id: &str, activation: bool) -> Self {
+        let mut next = self.clone();
+        if let Some(entry) = super::entries()
+            .iter()
+            .find(|entry| entry.id == id && entry.any_address)
+        {
+            next.broad_grants.insert(
+                id.into(),
+                BroadGrant {
+                    version: GRANT_VERSION,
+                    id: id.into(),
+                    consent: BROAD_CONSENT.into(),
+                    policy_sha256: broad_policy_fingerprint(entry),
+                    authority: if activation {
+                        BroadAuthority::Enable
+                    } else {
+                        BroadAuthority::AdoptionOnly
+                    },
+                },
+            );
+        }
+        next
+    }
+
+    pub fn has_broad_authority(&self, id: &str) -> bool {
+        super::entries()
+            .iter()
+            .find(|entry| entry.id == id)
+            .is_some_and(|entry| self.has_broad_authority_for(entry))
+    }
+
+    pub fn has_broad_authority_for(&self, entry: &super::CuratedEntry) -> bool {
+        self.enabled.contains(&entry.id)
+            && !self.disabled.contains(&entry.id)
+            && !self.deleted_by_user.contains(&entry.id)
+            && self.broad_grants.get(&entry.id).is_some_and(|grant| {
+                grant.authority == BroadAuthority::Enable && grant.matches(entry)
+            })
+    }
+
     /// The user turned `id` on. Only a change from off forgets a removal:
     /// "Turn all on" over an entry already on reinstalls nothing (M1).
     pub fn enable(&self, id: &str) -> Self {
@@ -66,6 +212,7 @@ impl Choices {
         let mut next = self.clone();
         next.enabled.remove(id);
         next.disabled.insert(id.to_string());
+        next.broad_grants.remove(id);
         next
     }
 
@@ -95,6 +242,7 @@ impl Choices {
     pub fn user_removed(&self, id: &str) -> Self {
         let mut next = self.removed(id);
         next.deleted_by_user.insert(id.to_string());
+        next.broad_grants.remove(id);
         next
     }
 }
@@ -104,7 +252,7 @@ pub const FILE_NAME: &str = "curated-defaults.json";
 /// Far more than the choices for a few hundred entries.
 const MAX_FILE_BYTES: u64 = 512 * 1024;
 const MAX_IDS: usize = 256;
-const VERSION: u32 = 2;
+const VERSION: u32 = 3;
 
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -153,10 +301,14 @@ pub fn load(path: &Path) -> io::Result<Option<Choices>> {
     let Versioned { version } = serde_json::from_slice(&bytes).map_err(parse_error)?;
     let choices = match version {
         1 => from_v1(serde_json::from_slice::<FileFormatV1>(&bytes).map_err(parse_error)?),
-        VERSION => {
-            serde_json::from_slice::<FileFormat>(&bytes)
+        2 | VERSION => {
+            let mut choices = serde_json::from_slice::<FileFormat>(&bytes)
                 .map_err(parse_error)?
-                .choices
+                .choices;
+            if version == 2 {
+                choices.broad_grants.clear();
+            }
+            choices
         }
         other => return Err(invalid(format!("unsupported version {other}"))),
     };
@@ -164,8 +316,9 @@ pub fn load(path: &Path) -> io::Result<Option<Choices>> {
         + choices.disabled.len()
         + choices.deleted_by_user.len()
         + choices.installed.len()
-        + choices.installed_ids.len();
-    if count > 5 * MAX_IDS {
+        + choices.installed_ids.len()
+        + choices.broad_grants.len();
+    if count > 6 * MAX_IDS {
         return Err(invalid("the file lists too many entries"));
     }
     Ok(Some(lenient(choices)))
@@ -215,6 +368,16 @@ fn cleaned(choices: Choices) -> Choices {
         disabled: choices.disabled.into_iter().filter(valid).collect(),
         deleted_by_user: choices.deleted_by_user.into_iter().filter(valid).collect(),
         installed_ids,
+        broad_grants: choices
+            .broad_grants
+            .into_iter()
+            .filter(|(id, grant)| {
+                super::entries()
+                    .iter()
+                    .find(|entry| entry.id == *id)
+                    .is_some_and(|entry| grant.matches(entry))
+            })
+            .collect(),
         installed: choices
             .installed
             .into_iter()
@@ -240,6 +403,12 @@ fn valid_copy(id: &str, copy: &CanonicalRule) -> bool {
 /// Replace the file with `choices`, atomically. Refuses what `load` would
 /// drop: the bridge only writes what it made.
 pub fn save(path: &Path, choices: &Choices) -> io::Result<()> {
+    // Retain owner-only/no-link checks at the durable authority boundary.
+    // Atomic replacement must not silently repair a planted linked store.
+    if path.exists() {
+        crate::state_file::read(path, MAX_FILE_BYTES)?;
+    }
+
     if cleaned(choices.clone()) != *choices {
         return Err(invalid("the choices hold an invalid id or copy"));
     }

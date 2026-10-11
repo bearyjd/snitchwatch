@@ -352,6 +352,12 @@ impl RulesStore {
     /// is built for it.
     pub fn rule_json_with_enabled(&self, name: &str, enabled: bool) -> Option<serde_json::Value> {
         let mut updated = self.find_by_name(name).filter(|r| r.can_toggle())?.clone();
+        if enabled
+            && updated.name == "snitchwatch-default-dns-resolved"
+            && updated.source() == RuleSource::Recommended
+        {
+            return None;
+        }
         updated.enabled = enabled;
         serde_json::to_value(&updated).ok()
     }
@@ -421,3 +427,25 @@ mod toggle_tests;
 #[cfg(test)]
 #[path = "row_store_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod broad_toggle_tests {
+    use super::*;
+    #[test]
+    fn managed_dns_generic_activation_refuses_but_off_and_narrow_work() {
+        let mut store = RulesStore::new();
+        store.apply(&ServerMessage::SetRules { rules: vec![
+            serde_json::json!({"name":"snitchwatch-default-dns-resolved", "enabled":false, "toggleable":true}),
+            serde_json::json!({"name":"snitchwatch-default-flatpak-flathub", "enabled":false, "toggleable":true})
+        ]});
+        assert!(store
+            .rule_json_with_enabled("snitchwatch-default-dns-resolved", true)
+            .is_none());
+        assert!(store
+            .rule_json_with_enabled("snitchwatch-default-dns-resolved", false)
+            .is_some());
+        assert!(store
+            .rule_json_with_enabled("snitchwatch-default-flatpak-flathub", true)
+            .is_some());
+    }
+}

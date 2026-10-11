@@ -151,3 +151,26 @@ async fn an_inert_bridge_refuses_toggling_a_recommended_rule() {
     assert_eq!(refused(&result(&mut rx).await), [CURATED_INERT_REFUSED]);
     nothing_sent(&mut daemon).await;
 }
+
+#[tokio::test]
+async fn generic_dns_reenable_refuses_but_off_and_narrow_toggles_remain_available() {
+    let entry = entries()
+        .iter()
+        .find(|entry| entry.id == "dns-resolved")
+        .unwrap();
+    let mut rule = entry.rule();
+    rule.enabled = false;
+    let mut daemon = daemon(vec![rule.clone()]);
+    let seen = respond(&mut daemon, |_| Some((true, String::new()))).0;
+    let commands = commands(&daemon);
+    let mut rx = daemon.broadcast.subscribe();
+    commands.try_route(update(&rule.name, switched(&rule, true), Some("dns-on")));
+    assert!(matches!(
+        result(&mut rx).await,
+        RuleCommandOutcome::Refused { .. }
+    ));
+    assert!(seen.lock().unwrap().is_empty());
+    commands.try_route(update(&rule.name, switched(&rule, false), Some("dns-off")));
+    assert_eq!(result(&mut rx).await, RuleCommandOutcome::Ok);
+    assert_eq!(seen.lock().unwrap().len(), 1);
+}

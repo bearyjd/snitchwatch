@@ -108,7 +108,11 @@ pub fn interests_traffic(msg: &ServerMessage) -> bool {
 pub fn interests_curated_defaults(msg: &ServerMessage) -> bool {
     matches!(
         msg,
-        ServerMessage::SetCuratedDefaults { .. } | ServerMessage::ClearConnectionRows
+        ServerMessage::SetCuratedDefaults { .. }
+            | ServerMessage::ClearConnectionRows
+            | ServerMessage::Authenticated { .. }
+            | ServerMessage::CuratedBroadOptInPrepared { .. }
+            | ServerMessage::CuratedDefaultsRequestResult { .. }
     )
 }
 

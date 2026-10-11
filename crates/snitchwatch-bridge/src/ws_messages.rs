@@ -6,11 +6,17 @@
 use serde::{Deserialize, Serialize};
 
 mod blocklist_wire;
+mod curated_wire;
 mod verdict_wire;
+pub use crate::curated::intent::IntentContext;
 pub use blocklist_wire::{
     BlocklistEntry, BlocklistSummary, BLOCKLIST_ENTRIES_PAGE_MAX, ENFORCEMENT_NOT_ENFORCED,
     ENFORCEMENT_PENDING, ENFORCEMENT_RULE_INSTALLED, LEFTOVER_CAUSE_NO_STATE_DIR,
     LEFTOVER_CAUSE_STORE_UNREADABLE,
+};
+pub use curated_wire::{
+    decode_client_message, CuratedIntentPurpose, CuratedRequestOutcome, CuratedRequestResult,
+    IntentDecodeError,
 };
 
 pub use verdict_wire::{
@@ -51,7 +57,7 @@ pub struct DiagnosticCheck {
 
 /// Server → client message envelope. Each variant matches one of the 22
 /// `handleServerCommand` cases in the LS UI's `app.js`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
 #[serde(
     tag = "action",
     rename_all = "camelCase",
@@ -202,6 +208,17 @@ pub enum ServerMessage {
         /// saved settings); `None` when it does.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         unavailable: Option<String>,
+    },
+    CuratedBroadOptInPrepared {
+        request_id: String,
+        id: String,
+        purpose: CuratedIntentPurpose,
+        ticket: String,
+    },
+    CuratedDefaultsRequestResult {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+        results: Vec<CuratedRequestResult>,
     },
     SetConnectionsStatus {
         status: ConnectionsStatus,
@@ -459,13 +476,21 @@ pub struct RuleHitWire {
 
 /// Client → server messages. These come from the UI's `sendAction(type, payload)`
 /// calls. The `action` discriminator is the type name.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(
-    tag = "action",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum ClientMessage {
+macro_rules! client_message {
+    ($($variants:tt)*) => {
+        #[derive(Clone, Serialize, PartialEq)]
+        #[serde(tag = "action", rename_all = "camelCase", rename_all_fields = "camelCase")]
+        pub enum ClientMessage { $($variants)* }
+
+        // One source of variant definitions preserves legacy serde behavior,
+        // while the public decoder validates modern raw fields first.
+        #[derive(Deserialize)]
+        #[allow(dead_code)]
+        #[serde(remote = "ClientMessage", tag = "action", rename_all = "camelCase", rename_all_fields = "camelCase")]
+        enum ClientMessageSerde { $($variants)* }
+    };
+}
+client_message! {
     SetVerdict {
         row_id: String,
         /// "allow" or "deny" — named `verdict` to avoid colliding with the
@@ -621,6 +646,49 @@ pub enum ClientMessage {
     SetCuratedDefaults {
         ids: Vec<String>,
         on: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+        #[serde(skip)]
+        reply: Option<ReplyTo>,
+    },
+    PrepareCuratedBroadOptIn {
+        request_id: String,
+        id: String,
+        purpose: CuratedIntentPurpose,
+        #[serde(skip)]
+        context: Option<IntentContext>,
+        #[serde(skip)]
+        reply: Option<ReplyTo>,
+    },
+    EnableCuratedBroadDefault {
+        request_id: String,
+        id: String,
+        purpose: CuratedIntentPurpose,
+        ticket: String,
+        consent: String,
+        #[serde(skip)]
+        context: Option<IntentContext>,
+        #[serde(skip)]
+        reply: Option<ReplyTo>,
+    },
+    KeepCuratedBroadDefault {
+        request_id: String,
+        id: String,
+        purpose: CuratedIntentPurpose,
+        ticket: String,
+        consent: String,
+        #[serde(skip)]
+        context: Option<IntentContext>,
+        #[serde(skip)]
+        reply: Option<ReplyTo>,
+    },
+    CancelCuratedBroadOptIn {
+        request_id: String,
+        id: String,
+        #[serde(skip)]
+        context: Option<IntentContext>,
+        #[serde(skip)]
+        reply: Option<ReplyTo>,
     },
     /// Remove an entry's rule that was edited outside Snitchwatch, after the
     /// user confirmed (prompt-slot D, code review M2). Only that entry's own
@@ -656,6 +724,43 @@ pub enum ClientMessage {
         #[serde(skip)]
         reply: Option<ReplyTo>,
     },
+}
+
+impl<'de> Deserialize<'de> for ClientMessage {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let fields = curated_wire::RawFields::deserialize(deserializer)?;
+        curated_wire::decode_fields(fields)
+            .map_err(|_| serde::de::Error::custom("invalid client message"))
+    }
+}
+
+impl std::fmt::Debug for ClientMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        redacted_message_debug(self, "ClientMessage", f)
+    }
+}
+
+impl std::fmt::Debug for ServerMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        redacted_message_debug(self, "ServerMessage", f)
+    }
+}
+
+fn redacted_message_debug<T: Serialize>(
+    message: &T,
+    name: &str,
+    f: &mut std::fmt::Formatter<'_>,
+) -> std::fmt::Result {
+    let mut value = serde_json::to_value(message).map_err(|_| std::fmt::Error)?;
+    if let Some(object) = value.as_object_mut() {
+        if object.contains_key("ticket") {
+            object.insert(
+                "ticket".into(),
+                serde_json::Value::String("<redacted>".into()),
+            );
+        }
+    }
+    f.debug_tuple(name).field(&value).finish()
 }
 
 /// A channel back to one WebSocket connection, stamped on rule import and

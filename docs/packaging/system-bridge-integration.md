@@ -159,3 +159,6 @@ must not be able to create or replace either socket path. Do not add
 This is an overlay until a bridge release packages these files and the daemon
 configuration migration together. The published user-service release remains
 unchanged for existing installations.
+
+Broad recommended DNS uses the authenticated ticket and durable consent protocol
+documented in [curated broad opt-in](../bridge/curated-broad-opt-in.md).

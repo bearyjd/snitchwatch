@@ -18,6 +18,7 @@ pub mod coexistence;
 pub mod connections;
 pub mod connections_model;
 pub mod crash_log;
+pub mod curated_broad_consent;
 pub mod curated_defaults;
 pub mod curated_defaults_model;
 pub mod daemon_health_model;

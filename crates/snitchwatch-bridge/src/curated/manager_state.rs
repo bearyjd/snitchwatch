@@ -16,6 +16,10 @@ use crate::ws_messages::StorageStatus;
 
 pub(super) struct State {
     pub(super) choices: Choices,
+    pub(super) broad_revision: u64,
+    pub(super) consent_problems: BTreeMap<String, &'static str>,
+    pub(super) reenables: BTreeMap<String, u64>,
+    pub(super) request_results: Vec<super::intent::PendingResult>,
     pub(super) statuses: BTreeMap<String, EntryStatus>,
     pub(super) problems: BTreeMap<String, &'static str>,
     /// Planned commands that failed, by entry id: not sent again until the
@@ -49,6 +53,10 @@ impl State {
     pub(super) fn new() -> Self {
         Self {
             choices: Choices::default(),
+            broad_revision: 0,
+            consent_problems: BTreeMap::new(),
+            reenables: BTreeMap::new(),
+            request_results: Vec::new(),
             statuses: BTreeMap::new(),
             problems: BTreeMap::new(),
             failures: BTreeMap::new(),
@@ -305,6 +313,13 @@ pub(super) fn summary(
     // An undecided entry whose rule is in the firewall and enabled reads as
     // on: it is active. One turned off on the Rules page reads as off.
     let on = state.choices.enabled.contains(&entry.id) || status == EntryStatus::InFirewall;
+    let awaiting = status == EntryStatus::AwaitingConsent;
+    // Older strict enum decoders know NotInstalled, but not AwaitingConsent.
+    let status = if awaiting {
+        EntryStatus::NotInstalled
+    } else {
+        status
+    };
     CuratedDefaultSummary {
         id: entry.id.clone(),
         program: entry.path.clone(),
@@ -313,7 +328,15 @@ pub(super) fn summary(
         on,
         broad: entry.broad(),
         status,
-        problem: state.problems.get(&entry.id).map(|p| p.to_string()),
+        problem: if awaiting {
+            Some("awaitingConsent: Confirm this broad DNS rule on the Recommended page before installation.".into())
+        } else {
+            state
+                .consent_problems
+                .get(&entry.id)
+                .or_else(|| state.problems.get(&entry.id))
+                .map(|p| p.to_string())
+        },
     }
 }
 
