@@ -32,9 +32,6 @@ jobs:
       packet_sha256: ${{ steps.build.outputs.packet_sha256 }}
     env:
       REVIEWED_SHA: ${{ vars.R13_CANDIDATE_REVIEWED_SHA }}
-      XDG_DATA_HOME: ${{ runner.temp }}/candidate-flatpak-data
-      XDG_CONFIG_HOME: ${{ runner.temp }}/candidate-flatpak-config
-      XDG_CACHE_HOME: ${{ runner.temp }}/candidate-flatpak-cache
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -50,6 +47,10 @@ jobs:
           echo "$RUNNER_TEMP/generator-env/bin" >> "$GITHUB_PATH"
       - name: Build system GUI from clean exact source
         id: build
+        env:
+          XDG_DATA_HOME: ${{ runner.temp }}/candidate-flatpak-data
+          XDG_CONFIG_HOME: ${{ runner.temp }}/candidate-flatpak-config
+          XDG_CACHE_HOME: ${{ runner.temp }}/candidate-flatpak-cache
         run: python3 packaging/flatpak/build-candidate.py --output "$RUNNER_TEMP/candidate-output"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

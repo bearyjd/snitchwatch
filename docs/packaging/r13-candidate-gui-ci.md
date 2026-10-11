@@ -24,6 +24,11 @@ and [manual-run guide](https://docs.github.com/en/actions/how-tos/manage-workflo
 `ci.yml` keeps its native/QML gates, explicitly checks out each PR head SHA with
 submodules and no persisted credentials, and also tests candidate pushes.
 
+The build step sets its job-local XDG paths in step-level `env`, where
+`runner.temp` is available. Job-level `env` cannot use the runner context;
+validate workflow expressions with actionlint as well as YAML parsing.
+See [GitHub context availability](https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#context-availability).
+
 The read-only builder exports tracked source and the exact pinned submodule
 into a fresh directory, rejects developer Cargo configuration and cached
 binaries, verifies the pinned Cargo generator before execution and verifies

@@ -257,6 +257,16 @@ class Publication(unittest.TestCase):
             with self.subTest(attack=attack):
                 self.refused(self.exercise(file_attack=attack))
 
+    def test_runner_paths_are_evaluated_on_the_build_step(self):
+        build = self.workflow['jobs']['build']
+        self.assertNotIn('runner.', json.dumps(build['env']))
+        step = next(step for step in build['steps'] if step.get('id') == 'build')
+        self.assertEqual(step['env'], {
+            'XDG_DATA_HOME': '${{ runner.temp }}/candidate-flatpak-data',
+            'XDG_CONFIG_HOME': '${{ runner.temp }}/candidate-flatpak-config',
+            'XDG_CACHE_HOME': '${{ runner.temp }}/candidate-flatpak-cache',
+        })
+
     def test_credential_boundary_and_pr_head(self):
         workflow = self.workflow
         self.assertEqual(workflow['permissions'], {'contents': 'read'})
