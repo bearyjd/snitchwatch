@@ -22,6 +22,7 @@ use snitchwatch_kirigami::bridge_bindings as _;
 mod common;
 use common::{capture_stderr, init_headless_qt_env};
 
+const DONE_MARKER: &str = "PROMPT_SLOT_BANNER_PROBE_DONE";
 const PROBE_URL: &str = "qrc:/prompt_slot_banner_probe.qml";
 const SHELL_QML_PREFIX: &str = "qrc:/qt/qml/com/snitchwatch/shell/qml/";
 
@@ -145,86 +146,113 @@ Controls.ApplicationWindow {
         probeWindow.check(got === JSON.stringify(expected), what + ": sent " + got);
     }
 
-    // Each phase runs after the banner had time to arm (300 ms > 200 ms).
+    // Follow the banner's actual arming event, rather than guessing when
+    // its timer will have fired. Defer the next phase past the signal handler.
+    Connections {
+        target: banner
+        function onArmedChanged() {
+            if (banner.armed && !probeWindow.finished) {
+                Qt.callLater(probeWindow.advance);
+            }
+        }
+    }
+    property bool finished: false
+    Component.onCompleted: Qt.callLater(probeWindow.advance)
+
     Timer {
-        interval: 300
+        id: watchdog
+        interval: 5000
         running: true
-        repeat: true
+        repeat: false
         onTriggered: {
-            probeWindow.phase++;
-            let done = false;
+            probeWindow.finished = true;
             try {
-                if (probeWindow.phase === 1) {
-                    connModel.applyServerMessageJson(JSON.stringify({
-                        action: "insertConnectionRows",
-                        rows: [
-                            probeWindow.row("1:abs", "/usr/bin/curl"),
-                            probeWindow.row("1:abs2", "/usr/bin/wget"),
-                            probeWindow.row("1:kern", "Kernel connection")
-                        ]
-                    }));
-                    statusStub.held = true;
-                    probeWindow.check(banner.shown && banner.visible, "not shown");
-                    probeWindow.check(banner.label.text === probeWindow.markup
-                                      && banner.label.textFormat === Text.PlainText,
-                                      "label " + banner.label.text);
-                    probeWindow.expectSent(() => banner.answer("allow"), [],
-                                           "a holder answered before it was shown long enough");
-                } else if (probeWindow.phase === 2) {
-                    probeWindow.expectSent(() => banner.answer("allow"),
-                                           ["1:abs allow this_host/this_time bindable=true"],
-                                           "Allow once");
-                    probeWindow.expectSent(() => banner.answer("deny"), [],
-                                           "a second answer for the same holder");
-                    // The next holder takes its place; a quick second click.
-                    statusStub.rowId = "1:abs2";
-                    probeWindow.expectSent(() => banner.answer("deny"), [],
-                                           "a double-click answered the next holder");
-                } else if (probeWindow.phase === 3) {
-                    probeWindow.expectSent(() => banner.answer("deny"),
-                                           ["1:abs2 deny this_host/until_quit bindable=true"],
-                                           "Deny");
-                    statusStub.rowId = "1:kern";
-                } else if (probeWindow.phase === 4) {
-                    probeWindow.expectSent(() => banner.answer("deny"),
-                                           ["1:kern deny this_host/this_time bindable=false"],
-                                           "Deny for an unidentified program");
-                    probeWindow.check(probeWindow.explanations.length === 1
-                                      && probeWindow.explanations[0].indexOf("couldn't identify") >= 0,
-                                      "explanations " + JSON.stringify(probeWindow.explanations));
-                    statusStub.rowId = "1:gone";
-                } else {
-                    probeWindow.check(!banner.actionable, "actionable for a row the model lacks");
-                    probeWindow.expectSent(() => banner.answer("allow"), [],
-                                           "answered a row the model lacks");
-                    statusStub.rowId = "1:abs";
-                    statusStub.supported = false;
-                    probeWindow.check(!banner.shown, "shown for an older bridge");
-                    statusStub.supported = true;
-                    statusStub.held = false;
-                    probeWindow.check(!banner.shown, "shown with a free slot");
-                    statusStub.held = true;
-                    feedStub.ok = false;
-                    probeWindow.check(!banner.shown, "shown while disconnected");
-                    feedStub.ok = true;
-                    probeWindow.check(banner.shown, "not shown again");
-                    probeWindow.check(!banner.actionable, "answerable as soon as it reappeared");
-                    done = true;
-                }
-            } catch (e) {
-                probeWindow.failures.push("phase " + probeWindow.phase + " threw: " + e);
+                throw new Error("prompt slot banner probe timed out in phase " + probeWindow.phase);
+            } finally {
+                Qt.quit();
+            }
+        }
+    }
+
+    function advance() {
+        if (probeWindow.finished) {
+            return;
+        }
+        probeWindow.phase++;
+        let done = false;
+        try {
+            if (probeWindow.phase === 1) {
+                connModel.applyServerMessageJson(JSON.stringify({
+                    action: "insertConnectionRows",
+                    rows: [
+                        probeWindow.row("1:abs", "/usr/bin/curl"),
+                        probeWindow.row("1:abs2", "/usr/bin/wget"),
+                        probeWindow.row("1:kern", "Kernel connection")
+                    ]
+                }));
+                statusStub.held = true;
+                probeWindow.check(banner.shown && banner.visible, "not shown");
+                probeWindow.check(banner.label.text === probeWindow.markup
+                                  && banner.label.textFormat === Text.PlainText,
+                                  "label " + banner.label.text);
+                probeWindow.expectSent(() => banner.answer("allow"), [],
+                                       "a holder answered before it was shown long enough");
+            } else if (probeWindow.phase === 2) {
+                probeWindow.expectSent(() => banner.answer("allow"),
+                                       ["1:abs allow this_host/this_time bindable=true"],
+                                       "Allow once");
+                probeWindow.expectSent(() => banner.answer("deny"), [],
+                                       "a second answer for the same holder");
+                // The next holder takes its place; a quick second click.
+                statusStub.rowId = "1:abs2";
+                probeWindow.expectSent(() => banner.answer("deny"), [],
+                                       "a double-click answered the next holder");
+            } else if (probeWindow.phase === 3) {
+                probeWindow.expectSent(() => banner.answer("deny"),
+                                       ["1:abs2 deny this_host/until_quit bindable=true"],
+                                       "Deny");
+                statusStub.rowId = "1:kern";
+            } else if (probeWindow.phase === 4) {
+                probeWindow.expectSent(() => banner.answer("deny"),
+                                       ["1:kern deny this_host/this_time bindable=false"],
+                                       "Deny for an unidentified program");
+                probeWindow.check(probeWindow.explanations.length === 1
+                                  && probeWindow.explanations[0].indexOf("couldn't identify") >= 0,
+                                  "explanations " + JSON.stringify(probeWindow.explanations));
+                statusStub.rowId = "1:gone";
+            } else {
+                probeWindow.check(!banner.actionable, "actionable for a row the model lacks");
+                probeWindow.expectSent(() => banner.answer("allow"), [],
+                                       "answered a row the model lacks");
+                statusStub.rowId = "1:abs";
+                statusStub.supported = false;
+                probeWindow.check(!banner.shown, "shown for an older bridge");
+                statusStub.supported = true;
+                statusStub.held = false;
+                probeWindow.check(!banner.shown, "shown with a free slot");
+                statusStub.held = true;
+                feedStub.ok = false;
+                probeWindow.check(!banner.shown, "shown while disconnected");
+                feedStub.ok = true;
+                probeWindow.check(banner.shown, "not shown again");
+                probeWindow.check(!banner.actionable, "answerable as soon as it reappeared");
                 done = true;
             }
-            if (done || probeWindow.failures.length > 0) {
-                stop();
-                try {
-                    if (probeWindow.failures.length > 0) {
-                        throw new Error("prompt slot banner probe: "
-                                        + probeWindow.failures.join("; "));
-                    }
-                } finally {
-                    Qt.quit();
+        } catch (e) {
+            probeWindow.failures.push("phase " + probeWindow.phase + " threw: " + e);
+            done = true;
+        }
+        if (done || probeWindow.failures.length > 0) {
+            probeWindow.finished = true;
+            watchdog.stop();
+            try {
+                if (probeWindow.failures.length > 0) {
+                    throw new Error("prompt slot banner probe: "
+                                    + probeWindow.failures.join("; "));
                 }
+                console.warn("PROMPT_SLOT_BANNER_PROBE_DONE");
+            } finally {
+                Qt.quit();
             }
         }
     }
@@ -257,11 +285,16 @@ Controls.ApplicationWindow {
     );
     let bad_lines: Vec<&str> = captured
         .lines()
+        .filter(|line| !line.contains(DONE_MARKER))
         .filter(|line| line.contains(PROBE_URL) || line.contains(SHELL_QML_PREFIX))
         .collect();
     assert!(
         bad_lines.is_empty(),
         "prompt slot banner probe reported errors:\n{}",
         bad_lines.join("\n")
+    );
+    assert!(
+        captured.contains(DONE_MARKER),
+        "the prompt slot banner probe never finished; stderr:\n{captured}"
     );
 }

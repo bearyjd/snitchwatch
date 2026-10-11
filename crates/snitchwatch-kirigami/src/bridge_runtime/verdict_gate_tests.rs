@@ -28,9 +28,9 @@ fn verdict(
 
 /// The duration of the next queued verdict.
 async fn queued_duration(inbound_rx: &mut mpsc::Receiver<QueuedClientMessage>) -> VerdictDuration {
-    match inbound_rx
-        .recv()
+    match tokio::time::timeout(std::time::Duration::from_secs(5), inbound_rx.recv())
         .await
+        .expect("a verdict must be queued within five seconds")
         .expect("a verdict was queued")
         .message
     {
@@ -170,6 +170,35 @@ fn logged_while(f: impl FnOnce()) -> String {
 
 #[tokio::test]
 async fn a_downgrade_is_logged_with_its_row_and_scope_and_a_kept_verdict_is_not() {
+    // A thread-local subscriber still shares tracing's callsite interest cache
+    // with parallel tests dispatching the same verdict. Keep this capture in a
+    // private process, without changing the application's global subscriber.
+    const CHILD: &str = "SNITCHWATCH_VERDICT_LOG_TEST_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let name = concat!(
+            module_path!(),
+            "::a_downgrade_is_logged_with_its_row_and_scope_and_a_kept_verdict_is_not"
+        );
+        // libtest names omit the crate prefix in module_path!().
+        let name = name.split_once("::").unwrap().1;
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", name, "--nocapture", "--test-threads=1"])
+            .env(CHILD, "1")
+            .output()
+            .expect("run the isolated verdict log test");
+        assert!(
+            output.status.success(),
+            "isolated verdict log test failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+            "the isolated verdict log test must actually run"
+        );
+        return;
+    }
+
     let (handles, connection, mut inbound_rx) = handles_and_queue();
     mark_connected(&connection, false);
 
