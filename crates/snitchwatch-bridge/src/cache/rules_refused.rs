@@ -60,7 +60,8 @@ fn refused_effect(sent: &Notification) -> RefusedEffect {
 
 impl RulesCache {
     /// Deleted rules the daemon stopped using but couldn't remove the file
-    /// of. A name leaves when a snapshot lists it again (the file loaded) or
+    /// of. A name leaves when a snapshot received after the refusal lists it
+    /// again (the file loaded), or
     /// a confirmed `always` change rewrites its file; not on a confirmed
     /// delete, which for a name not in memory touches no file. The curated
     /// defaults also drop a rule that never had a file
@@ -74,20 +75,30 @@ impl RulesCache {
     /// a rule whose install was refused (#120 item 15).
     pub(crate) fn forget_file_left(&mut self, name: &str) {
         if self.files_left.remove(name) {
+            self.files_left_revisions.remove(name);
             self.revision += 1;
         }
     }
 
-    fn mark_file_left(&mut self, name: &str) {
-        if self.files_left.contains(name) {
-            return;
+    pub(super) fn forget_file_left_in_snapshot(&mut self, name: &str, observed_revision: u64) {
+        if self
+            .files_left_revisions
+            .get(name)
+            .is_some_and(|revision| *revision <= observed_revision)
+        {
+            self.forget_file_left(name);
         }
-        if self.files_left.len() >= MAX_FILES_LEFT {
+    }
+
+    fn mark_file_left(&mut self, name: &str) {
+        if !self.files_left.contains(name) && self.files_left.len() >= MAX_FILES_LEFT {
             warn!("too many rule files the daemon couldn't remove; not noting another");
             return;
         }
-        self.files_left.insert(name.to_string());
         self.revision += 1;
+        self.files_left.insert(name.to_string());
+        self.files_left_revisions
+            .insert(name.to_string(), self.revision);
     }
 
     /// Apply a command the daemon answered `ERROR`, now.

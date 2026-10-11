@@ -2183,3 +2183,94 @@ async fn a_redial_adopts_the_new_connections_snapshot_and_correlates_its_replies
     );
     server.abort();
 }
+
+/// Subscribe received these rules before account lookup blocked. A refusal
+/// during that await is newer than the received list, even if staging is later.
+#[tokio::test(start_paused = true)]
+async fn a_subscribe_blocked_in_account_lookup_keeps_later_refusal_markers() {
+    use crate::cache::rules::MAX_RULE_FIELD_BYTES;
+
+    let (entered, entry) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    let released = StdMutex::new(released);
+    let lookup: crate::accounts::AccountLookup = Arc::new(move |uid| {
+        assert_eq!(uid, 958);
+        entered.send(()).unwrap();
+        released
+            .lock()
+            .unwrap()
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the test must release account lookup");
+        Some("snitchwatch".to_string())
+    });
+    let (svc, _cache, mut rx) = rules_service(DaemonTransport::Unix);
+    let svc = svc.with_account_lookup(lookup);
+    let with_user = |name: &str| Rule {
+        operator: Some(Operator {
+            r#type: "simple".into(),
+            operand: "user.name".into(),
+            data: "958".into(),
+            ..Default::default()
+        }),
+        ..daemon_rule(name)
+    };
+    let listed = with_user("listed");
+    let mut oversized = with_user("oversized");
+    oversized.description = "x".repeat(MAX_RULE_FIELD_BYTES + 1);
+    let config = with_rules(vec![listed, oversized]);
+    let subscribed = svc.subscribe(Request::new(config.clone()));
+    tokio::pin!(subscribed);
+    assert!(futures_util::poll!(&mut subscribed).is_pending());
+    // The paused clock prevents the production lookup timeout from racing
+    // this bounded handshake with the blocking worker.
+    entry
+        .recv_timeout(Duration::from_secs(5))
+        .expect("Subscribe must have entered account lookup");
+    svc.rules.apply_refused(&delete("listed"));
+    svc.rules.apply_refused(&delete("oversized"));
+    release.send(()).unwrap();
+    tokio::time::resume();
+    tokio::time::timeout(Duration::from_secs(5), &mut subscribed)
+        .await
+        .expect("Subscribe must finish after lookup is released")
+        .unwrap();
+
+    let commands = svc.daemon_commands();
+    let (stream, _outbound) = commands.open_stream(None);
+    commands.on_reply(stream.id(), &hello());
+    let cache = cached(&svc);
+    assert!(cache.contains("listed"), "the received list was adopted");
+    assert!(cache.left_out().contains_key("oversized"));
+    assert_eq!(
+        cache.snapshot_wire().unwrap()[0]["userNames"],
+        serde_json::json!({ "958": "snitchwatch" }),
+        "the lookup completed before adoption"
+    );
+    for name in ["listed", "oversized"] {
+        assert!(
+            cache.files_left().contains(name),
+            "a snapshot received before blocked lookup cannot clear a later refusal: {name}"
+        );
+    }
+    assert!(
+        std::iter::from_fn(|| rx.try_recv().ok()).any(|message| matches!(
+            message,
+            ServerMessage::RulesNotShown {
+                left_on_disk: 2,
+                ..
+            }
+        ))
+    );
+
+    // A genuinely newer Subscribe still proves both files were loaded.
+    svc.subscribe(Request::new(config)).await.unwrap();
+    let (newer, _newer_outbound) = commands.open_stream(None);
+    commands.on_reply(newer.id(), &hello());
+    let fresh = cached(&svc);
+    for name in ["listed", "oversized"] {
+        assert!(
+            !fresh.files_left().contains(name),
+            "a snapshot received after the refusal must clear its listed marker: {name}"
+        );
+    }
+}

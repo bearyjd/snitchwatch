@@ -256,3 +256,135 @@ async fn a_refused_delete_is_published_after_the_hold_like_a_confirmed_one() {
     drop(hold);
     assert_eq!(set_rules(&mut rx), None);
 }
+
+fn staged_unix(
+    rules: Vec<Rule>,
+) -> (
+    RulesSync,
+    crate::daemon_commands::DaemonCommands,
+    snitchwatch_proto::protocol::NotificationReply,
+) {
+    use crate::daemon_commands::{DaemonCommands, DaemonTransport};
+    use snitchwatch_proto::protocol::{NotificationReply, NotificationReplyCode};
+
+    let (tx, _) = broadcast::channel(64);
+    let sync = RulesSync::new(tx);
+    let commands = DaemonCommands::new(DaemonTransport::Unix, sync.clone());
+    sync.stage(None, rules);
+    let hello = NotificationReply {
+        code: NotificationReplyCode::Ok as i32,
+        ..Default::default()
+    };
+    (sync, commands, hello)
+}
+
+/// A Unix fallback reuses the retained Subscribe, not a new daemon list.
+#[test]
+fn a_retained_snapshot_keeps_a_later_refused_delete_marker() {
+    // The name is evidence of a loaded file even when its rule was too large
+    // to show, but only if the snapshot was observed after the refusal.
+    for left_out in [false, true] {
+        let mut a = rule("a", true, "always");
+        if left_out {
+            a.description = "x".repeat(MAX_RULE_FIELD_BYTES + 1);
+        }
+        let (sync, commands, hello) = staged_unix(vec![a]);
+        let (older, _older_rx) = commands.open_stream(None);
+        commands.on_reply(older.id(), &hello);
+        let (newer, _newer_rx) = commands.open_stream(None);
+        commands.on_reply(newer.id(), &hello);
+        sync.apply_refused(&delete("a"));
+        assert!(marked(&lock(&sync.cache), "a"));
+
+        drop(newer); // readopt the same snapshot for the fallback stream.
+        let cache = lock(&sync.cache);
+        assert!(!cache.is_unknown(), "the fallback adopted its list");
+        assert!(
+            marked(&cache, "a"),
+            "a retained snapshot predating the refusal cannot prove the file reloaded (left_out={left_out})"
+        );
+        assert!(matches!(
+            cache.not_shown(),
+            ServerMessage::RulesNotShown {
+                left_on_disk: 1,
+                ..
+            }
+        ));
+        drop(cache);
+        drop(older);
+    }
+}
+
+#[test]
+fn a_delayed_first_adoption_keeps_a_later_refusal_marker() {
+    let (sync, commands, hello) = staged_unix(vec![rule("a", true, "always")]);
+    sync.apply_refused(&delete("a"));
+    let (stream, _rx) = commands.open_stream(None);
+    commands.on_reply(stream.id(), &hello);
+    assert!(marked(&lock(&sync.cache), "a"));
+}
+
+#[test]
+fn a_new_snapshot_only_clears_markers_for_names_it_lists() {
+    for left_out in [false, true] {
+        let (sync, commands, hello) = staged_unix(Vec::new());
+        sync.apply_refused(&delete("a"));
+        sync.apply_refused(&delete("b"));
+        let mut a = rule("a", true, "always");
+        if left_out {
+            a.description = "x".repeat(MAX_RULE_FIELD_BYTES + 1);
+        }
+        sync.stage(None, vec![a]);
+        let (stream, _rx) = commands.open_stream(None);
+        commands.on_reply(stream.id(), &hello);
+        let cache = lock(&sync.cache);
+        assert!(
+            !marked(&cache, "a"),
+            "a new list proves a loaded (left_out={left_out})"
+        );
+        assert!(
+            marked(&cache, "b"),
+            "an absent name proves nothing about its file"
+        );
+        drop(cache);
+        drop(stream);
+    }
+}
+
+#[test]
+fn a_repeated_refusal_is_newer_than_the_snapshot_between_refusals() {
+    let (sync, commands, hello) = staged_unix(Vec::new());
+    sync.apply_refused(&delete("a"));
+    sync.stage(None, vec![rule("a", true, "always")]);
+    sync.apply_refused(&delete("a"));
+    let (stream, _rx) = commands.open_stream(None);
+    commands.on_reply(stream.id(), &hello);
+    assert!(marked(&lock(&sync.cache), "a"));
+}
+
+#[test]
+fn confirmed_file_operations_after_readoption_keep_their_marker_semantics() {
+    let (sync, commands, hello) = staged_unix(vec![rule("a", true, "always")]);
+    let (older, _older_rx) = commands.open_stream(None);
+    commands.on_reply(older.id(), &hello);
+    let (newer, _newer_rx) = commands.open_stream(None);
+    commands.on_reply(newer.id(), &hello);
+    sync.apply_refused(&delete("a"));
+    drop(newer);
+    assert!(marked(&lock(&sync.cache), "a"));
+
+    // The retained list may show a again, but stock Delete's OK for a name
+    // already gone from daemon memory still cannot prove its file was removed.
+    sync.apply_confirmed(&delete("a"));
+    assert!(marked(&lock(&sync.cache), "a"));
+    sync.apply_confirmed(&change(rule("a", true, "5m")));
+    assert!(
+        marked(&lock(&sync.cache), "a"),
+        "a temporary change writes no file"
+    );
+    sync.apply_confirmed(&change(rule("a", true, "always")));
+    assert!(
+        !marked(&lock(&sync.cache), "a"),
+        "a confirmed always change rewrites the file"
+    );
+}
