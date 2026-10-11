@@ -13,6 +13,24 @@ Controls.Dialog {
     width: Math.min(parent ? parent.width - 32 : 520, 520)
     modal: true
     title: "Allow the system resolver to send DNS?"
+    header: Kirigami.Heading {
+        id: titleHeading
+        level: 2
+        verticalAlignment: Text.AlignVCenter
+        elide: Text.ElideRight
+        textFormat: Text.PlainText
+        text: dialog.title
+        Controls.ToolTip {
+            visible: titleHeading.truncated && titleHover.hovered
+            contentItem: Controls.Label {
+                textFormat: Text.PlainText
+                wrapMode: Text.Wrap
+                color: palette.toolTipText
+                text: dialog.title
+            }
+        }
+        HoverHandler { id: titleHover }
+    }
     closePolicy: Controls.Popup.CloseOnEscape
     visible: consentModel ? consentModel.consentOpen : false
     onClosed: if (consentModel && consentModel.consentOpen) consentModel.cancelBroadConsent()
