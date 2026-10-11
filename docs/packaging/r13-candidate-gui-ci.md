@@ -53,9 +53,14 @@ still-running jobs hold publication. The publisher never checks out source,
 restores caches, unpacks a Flatpak or executes candidate code. The write token
 is repository-wide; fixed reviewed publisher code enforces the target boundary.
 
-The publisher attests the validated bundle and packet as data. It creates only
-`r13-candidate`, at the reviewed commit, as a draft prerelease. It verifies
-server-reported uploaded asset SHA256/size/name and rechecks the tag before
+The publisher attests the validated bundle and packet as data. It explicitly
+creates the lightweight `refs/tags/r13-candidate` at the reviewed commit before
+creating a draft prerelease: GitHub draft releases do not create their tag.
+An existing tag must already point directly to that exact commit. Only a 404
+from the tag lookup permits creation; lookup errors and creation conflicts
+hold publication without updating or deleting any ref. See
+[GitHub's create-reference API](https://docs.github.com/en/rest/git/refs#create-a-reference).
+It verifies server-reported uploaded asset SHA256/size/name and rechecks the tag before
 making that prerelease public. The release never becomes latest; an existing
 release or mismatched tag is refused. Failure after creation leaves a draft
 and HOLD, never overwrites or deletes assets. A rerun of only the publisher
@@ -80,5 +85,8 @@ They execute the exact publisher scripts with mocked GitHub APIs and assert
 refusal before release writes for wrong targets, source/workflow/ref/run/
 attempt/profile identities, altered packet/assets/provenance/generator inputs,
 stale CI, moved refs, existing releases, extra files, symlinks, hardlinks,
-empty and oversized files. Partial uploads and moved tags remain drafts.
+empty and oversized files. The draft mock leaves tags unchanged, reproducing
+GitHub behavior; absent tags must be created before the draft, exact existing
+tags are preserved, and lookup/creation errors hold publication. Partial uploads
+and moved tags remain drafts.
 These tests establish local boundary behavior, not remote CI or acceptance.

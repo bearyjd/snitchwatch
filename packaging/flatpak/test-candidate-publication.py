@@ -39,14 +39,21 @@ const github = {rest: {
       return {data: {type: 'file', encoding: 'base64', size: bytes.length, content: bytes.toString('base64')}};
     },
     getReleaseByTag: async () => spec.releaseExists ? {data: {id: 1}} : missing(),
-    createRelease: async args => {calls.push(['create', args]); spec.tag = {type: 'commit', sha: args.target_commitish}; return {data: {id: 7, html_url: 'candidate-url'}};},
+    createRelease: async args => {calls.push(['create', args]); return {data: {id: 7, html_url: 'candidate-url'}};},
     uploadReleaseAsset: async args => {calls.push(['upload', {name: args.name}]); if (spec.moveTagDuringUpload) spec.tag.sha = 'f'.repeat(40); return {data: {name: args.name, size: args.data.length, digest: spec.badUpload ? 'wrong' : 'sha256:' + require('crypto').createHash('sha256').update(args.data).digest('hex')}};},
     updateRelease: async args => {calls.push(['update', args]); return {data: {}};}
   },
   git: {
     getCommit: async () => ({data: {tree: {sha: spec.tree}}}),
+    createRef: async args => {
+      if (spec.createRefError) {const error = new Error('create ref failed'); error.status = spec.createRefError; throw error;}
+      if (spec.tag) throw new Error('existing ref cannot be overwritten');
+      calls.push(['tag', args]); spec.tag = spec.createdTag || {type: 'commit', sha: args.sha};
+      return {data: {ref: args.ref, object: spec.tag}};
+    },
     getRef: async args => {
       if (args.ref.startsWith('heads/')) return {data: {object: {sha: spec.branch}}};
+      if (spec.getRefError) {const error = new Error('get ref failed'); error.status = spec.getRefError; throw error;}
       return spec.tag ? {data: {object: spec.tag}} : missing();
     }
   },
@@ -58,6 +65,8 @@ const github = {rest: {
 (async () => {
   try {
     await new Function('github','context','core','require',`return (async () => {${spec.validate}})();`)(github, context, core, require);
+    if (spec.tagAfterValidation) spec.tag = spec.tagAfterValidation;
+    if (spec.getRefErrorAfterValidation) spec.getRefError = spec.getRefErrorAfterValidation;
     if (spec.afterValidation) {
       fs.appendFileSync(process.env.RUNNER_TEMP + '/candidate-data/' + spec.afterValidation, 'tamper');
     }
@@ -170,14 +179,52 @@ class Publication(unittest.TestCase):
     def test_fixed_prerelease_success(self):
         result = self.exercise()
         self.assertTrue(result['ok'], result)
-        create = result['calls'][0][1]
+        create = next(call[1] for call in result['calls'] if call[0] == 'create')
         self.assertEqual(create['tag_name'], 'r13-candidate')
         self.assertEqual(create['target_commitish'], SHA)
         self.assertTrue(create['draft'])
         self.assertTrue(create['prerelease'])
         self.assertEqual(create['make_latest'], 'false')
         self.assertEqual(result['calls'][-1][1]['draft'], False)
-        self.assertEqual(len(result['calls']), 11)
+        self.assertEqual(len(result['calls']), 12)
+
+    def test_missing_tag_created_before_draft(self):
+        result = self.exercise()
+        self.assertTrue(result['ok'], result)
+        self.assertEqual(result['calls'][0], ['tag', {
+            'owner': 'bearyjd', 'repo': 'snitchwatch',
+            'ref': 'refs/tags/r13-candidate', 'sha': SHA}])
+        self.assertEqual(result['calls'][1][0], 'create')
+        self.assertEqual([call[0] for call in result['calls']].count('tag'), 1)
+
+    def test_exact_existing_tag_is_preserved(self):
+        result = self.exercise(lambda a, e, p, s: s.update(
+            {'tag': {'type': 'commit', 'sha': SHA}}))
+        self.assertTrue(result['ok'], result)
+        self.assertNotIn('tag', [call[0] for call in result['calls']])
+        self.assertEqual(result['calls'][0][0], 'create')
+
+    def test_tag_api_failure_is_not_missing_or_overwritten(self):
+        for key, status in [('getRefError', 403), ('getRefError', 500),
+                            ('createRefError', 403), ('createRefError', 404), ('createRefError', 409),
+                            ('createRefError', 422), ('createRefError', 500)]:
+            with self.subTest(key=key, status=status):
+                self.refused(self.exercise(lambda a, e, p, s: s.update({key: status})))
+
+    def test_tag_changed_or_lookup_failed_after_validation(self):
+        for change in [{'tagAfterValidation': {'type': 'commit', 'sha': 'f' * 40}},
+                       {'tagAfterValidation': {'type': 'tag', 'sha': SHA}},
+                       {'getRefErrorAfterValidation': 403}, {'getRefErrorAfterValidation': 500}]:
+            with self.subTest(change=change):
+                self.refused(self.exercise(lambda a, e, p, s: s.update(change)))
+
+    def test_bad_created_tag_holds_before_draft(self):
+        for tag in [{'type': 'commit', 'sha': 'f' * 40},
+                    {'type': 'tag', 'sha': SHA}]:
+            with self.subTest(tag=tag):
+                result = self.exercise(lambda a, e, p, s: s.update({'createdTag': tag}))
+                self.assertFalse(result['ok'], result)
+                self.assertEqual([call[0] for call in result['calls']], ['tag'])
 
     def test_packet_identity_substitutions(self):
         for key, wrong in {'schema': 2, 'repository': 'attacker/snitchwatch', 'target': 'v13',
@@ -248,8 +295,8 @@ class Publication(unittest.TestCase):
             with self.subTest(change=change):
                 result = self.exercise(lambda a, e, p, s: s.update(change))
                 self.assertFalse(result['ok'], result)
-                self.assertEqual(result['calls'][0][0], 'create')
-                self.assertTrue(result['calls'][0][1]['draft'])
+                create = next(call[1] for call in result['calls'] if call[0] == 'create')
+                self.assertTrue(create['draft'])
                 self.assertNotIn('update', [call[0] for call in result['calls']])
 
     def test_bounded_regular_files_only(self):
