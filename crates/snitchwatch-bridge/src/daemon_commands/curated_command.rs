@@ -31,6 +31,7 @@ use crate::rule_name::{validate_rule_name, CURATED_DEFAULT_RULE_NAME_PREFIX};
 #[derive(Debug, Clone)]
 pub struct CuratedCommand {
     notification: Notification,
+    broad_authorized: bool,
 }
 
 impl CuratedCommand {
@@ -54,8 +55,21 @@ impl CuratedCommand {
         }))
     }
 
+    pub(crate) fn authorized_install(entry: &CuratedEntry) -> Self {
+        let mut command = Self::install(entry);
+        command.broad_authorized = true;
+        command
+    }
+
+    pub(crate) fn authorized_toggle(current: &Rule) -> Option<Self> {
+        let mut command = Self::toggle(current, true)?;
+        command.broad_authorized = true;
+        Some(command)
+    }
+
     fn change(rule: Rule) -> Self {
         Self {
+            broad_authorized: false,
             notification: Notification {
                 r#type: Action::ChangeRule as i32,
                 rules: vec![rule],
@@ -70,6 +84,7 @@ impl CuratedCommand {
             return None;
         }
         Some(Self {
+            broad_authorized: false,
             notification: Notification {
                 r#type: Action::DeleteRule as i32,
                 rules: vec![Rule {
@@ -107,6 +122,12 @@ impl CuratedCommand {
         if !exact {
             return Err(SendError::RefusedOperator);
         }
+        if rule.enabled
+            && entry_for_rule_name(&rule.name).is_some_and(|entry| entry.broad())
+            && !self.broad_authorized
+        {
+            return Err(SendError::ReservedName);
+        }
         check_curated_rule(rule).map_err(|_| SendError::RefusedOperator)
     }
 }
@@ -123,7 +144,27 @@ impl DaemonCommands {
     /// prefix may take to the daemon.
     pub fn send_curated(&self, command: CuratedCommand) -> Result<PendingReply, SendError> {
         command.check()?;
+        if command.rule().is_some_and(|rule| {
+            rule.enabled && entry_for_rule_name(&rule.name).is_some_and(|entry| entry.broad())
+        }) {
+            return Err(SendError::ReservedName);
+        }
         self.dispatch(command.notification)
+    }
+
+    /// Final broad admission; caller holds its current choice/revision guard.
+    pub(crate) fn send_curated_guarded(
+        &self,
+        command: CuratedCommand,
+        generation: u64,
+        reenable: bool,
+    ) -> Result<PendingReply, SendError> {
+        command.check()?;
+        self.dispatch_via_checked(
+            command.notification,
+            super::Delivery::Usual,
+            Some((generation, if reenable { Some(true) } else { None })),
+        )
     }
 
     /// A GUI's pure toggle of the curated rule `name` (plan item 13): the
@@ -144,7 +185,20 @@ impl DaemonCommands {
                 .and_then(|rules| rules.get(name))
                 .and_then(|current| CuratedCommand::toggle(current, enabled))
         };
-        self.send_curated(command.ok_or(SendError::ReservedName)?)
+        let command = command.ok_or(SendError::ReservedName)?;
+        if entry_for_rule_name(name).is_some_and(|entry| entry.broad()) {
+            if enabled {
+                return Err(SendError::ReservedName);
+            }
+            command.check()?;
+            let generation = *self.ready.borrow();
+            return self.dispatch_via_checked(
+                command.notification,
+                super::Delivery::Usual,
+                Some((generation, Some(false))),
+            );
+        }
+        self.send_curated(command)
     }
 }
 
@@ -164,7 +218,15 @@ mod tests {
     #[test]
     fn what_the_constructors_build_passes_the_send_check() {
         for entry in entries() {
-            assert_eq!(CuratedCommand::install(entry).check(), Ok(()));
+            assert_eq!(
+                CuratedCommand::install(entry).check(),
+                if entry.broad() {
+                    Err(SendError::ReservedName)
+                } else {
+                    Ok(())
+                }
+            );
+            assert_eq!(CuratedCommand::authorized_install(entry).check(), Ok(()));
             let delete = CuratedCommand::delete(&entry.rule_name()).unwrap();
             assert_eq!(delete.check(), Ok(()));
         }
@@ -283,6 +345,140 @@ mod tests {
             );
         }
         assert!(rx.try_recv().is_err(), "nothing else sent");
+    }
+
+    #[tokio::test]
+    async fn generic_curated_send_refuses_even_authorized_broad_constructors() {
+        let dns = entries()
+            .iter()
+            .find(|entry| entry.id == "dns-resolved")
+            .unwrap();
+        let mut disabled = dns.rule();
+        disabled.enabled = false;
+        let (commands, mut rx, _stream) = connected(vec![disabled.clone()]);
+        assert_eq!(
+            commands
+                .send_curated(CuratedCommand::authorized_install(dns))
+                .err(),
+            Some(SendError::ReservedName)
+        );
+        assert_eq!(
+            commands
+                .send_curated(CuratedCommand::authorized_toggle(&disabled).unwrap())
+                .err(),
+            Some(SendError::ReservedName)
+        );
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn guarded_broad_dispatch_refuses_changed_generation_snapshot_and_deletion_markers() {
+        let dns = entries()
+            .iter()
+            .find(|entry| entry.id == "dns-resolved")
+            .unwrap();
+        let (commands, mut rx, stream) = connected(vec![]);
+        let generation = *commands.stream_ready().borrow();
+        let command = CuratedCommand::authorized_install(dns);
+        // A new HELLO selected a new generation after the manager precheck.
+        commands.rules.stage(None, vec![]);
+        commands.on_reply(
+            stream.id(),
+            &snitchwatch_proto::protocol::NotificationReply {
+                id: 0,
+                code: snitchwatch_proto::protocol::NotificationReplyCode::Ok as i32,
+                data: String::new(),
+            },
+        );
+        assert_eq!(
+            commands
+                .send_curated_guarded(command, generation, false)
+                .err(),
+            Some(SendError::NoDaemon)
+        );
+        assert!(rx.try_recv().is_err());
+        let generation = *commands.stream_ready().borrow();
+        let mut edited = dns.rule();
+        edited.operator.as_mut().unwrap().list[2].data = "5353".into();
+        // A late daemon-confirmed edit between precheck and final admission.
+        commands.rules.apply_confirmed(&Notification {
+            r#type: Action::ChangeRule as i32,
+            rules: vec![edited],
+            ..Default::default()
+        });
+        assert_eq!(
+            commands
+                .send_curated_guarded(CuratedCommand::authorized_install(dns), generation, false)
+                .err(),
+            Some(SendError::ReservedName)
+        );
+        let mut disabled = dns.rule();
+        disabled.enabled = false;
+        assert_eq!(
+            commands
+                .send_curated_guarded(
+                    CuratedCommand::authorized_toggle(&disabled).unwrap(),
+                    generation,
+                    true
+                )
+                .err(),
+            Some(SendError::ReservedName)
+        );
+        assert!(rx.try_recv().is_err());
+        // A refused delete removes memory but records a file that may return.
+        commands.rules.apply_refused(&Notification {
+            r#type: Action::DeleteRule as i32,
+            rules: vec![dns.rule()],
+            ..Default::default()
+        });
+        assert_eq!(
+            commands
+                .send_curated_guarded(CuratedCommand::authorized_install(dns), generation, false)
+                .err(),
+            Some(SendError::ReservedName)
+        );
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn guarded_tcp_reply_cannot_be_forged_by_a_new_current_peer() {
+        let dns = entries()
+            .iter()
+            .find(|entry| entry.id == "dns-resolved")
+            .unwrap();
+        let sync = crate::cache::rules::RulesSync::new(tokio::sync::broadcast::channel(8).0);
+        let commands = DaemonCommands::new(DaemonTransport::Tcp, sync.clone());
+        let hello = snitchwatch_proto::protocol::NotificationReply {
+            id: 0,
+            code: snitchwatch_proto::protocol::NotificationReplyCode::Ok as i32,
+            data: String::new(),
+        };
+        sync.stage(None, vec![]);
+        let (first, mut first_rx) = commands.open_stream(None);
+        commands.on_reply(first.id(), &hello);
+        let generation = *commands.stream_ready().borrow();
+        let _pending = commands
+            .send_curated_guarded(CuratedCommand::authorized_install(dns), generation, false)
+            .unwrap();
+        let queued = first_rx.try_recv().unwrap();
+        sync.stage(None, vec![]);
+        let (other, mut other_rx) = commands.open_stream(None);
+        commands.on_reply(other.id(), &hello);
+        assert!(other_rx.try_recv().is_err());
+        commands.on_reply(
+            other.id(),
+            &snitchwatch_proto::protocol::NotificationReply {
+                id: queued.id,
+                ..hello
+            },
+        );
+        assert!(sync.cache().lock().unwrap().rules().unwrap().is_empty());
+        assert!(commands
+            .inner
+            .lock()
+            .unwrap()
+            .waiters
+            .contains_key(&queued.id));
     }
 
     /// The profile enforcer and the curated reconcile each send only under

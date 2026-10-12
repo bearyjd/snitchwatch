@@ -101,6 +101,7 @@ struct ConnectionState {
     pause_answers_waiting: bool,
     /// The same for `bridge_capabilities::DECIDE_LATER`.
     decide_later: bool,
+    curated_broad_opt_in: bool,
     /// This session's waiting prompts, for desktop notifications.
     pending_rows: pending_rows::PendingRows,
 }
@@ -135,6 +136,11 @@ impl BridgeHandles {
     /// before a queued model mutation.
     pub fn is_current_session(&self, connection_id: u64) -> bool {
         is_current_connection(&self.connection, connection_id)
+    }
+
+    pub fn advertises_curated_broad_opt_in(&self, connection_id: u64) -> bool {
+        let state = self.connection.lock().unwrap_or_else(|p| p.into_inner());
+        state.connected && state.connection_id == connection_id && state.curated_broad_opt_in
     }
 
     /// True only while `connection_id` is the live session and its bridge
@@ -222,6 +228,13 @@ impl BridgeHandles {
         if expected_session.is_some_and(|id| id != connection.connection_id) {
             return Err(SendClientMessageError::StaleSession);
         }
+        // Reviewed DNS intent must retain its originating session through queue
+        // admission. Generic JSON forwarding must never assign it a new session.
+        if is_broad_intent(&message)
+            && (expected_session.is_none() || !connection.curated_broad_opt_in)
+        {
+            return Err(SendClientMessageError::StaleSession);
+        }
         self.inbound_tx
             .try_send(QueuedClientMessage {
                 connection_id: connection.connection_id,
@@ -232,6 +245,16 @@ impl BridgeHandles {
                 mpsc::error::TrySendError::Closed(_) => SendClientMessageError::Stopped,
             })
     }
+}
+
+fn is_broad_intent(message: &ClientMessage) -> bool {
+    matches!(
+        message,
+        ClientMessage::PrepareCuratedBroadOptIn { .. }
+            | ClientMessage::EnableCuratedBroadDefault { .. }
+            | ClientMessage::KeepCuratedBroadDefault { .. }
+            | ClientMessage::CancelCuratedBroadOptIn { .. }
+    )
 }
 
 struct ClientRuntime {
@@ -481,6 +504,16 @@ async fn connect_and_relay(
     if advertised(snitchwatch_bridge::bridge_capabilities::DECIDE_LATER) {
         mark_decide_later(connection, connection_id);
     }
+    {
+        let mut state = connection.lock().unwrap_or_else(|p| p.into_inner());
+        state.curated_broad_opt_in = advertised(crate::curated_broad_consent::CAPABILITY);
+    }
+    let _ = broadcast_tx.send(ReceivedServerMessage {
+        connection_id,
+        message: ServerMessage::Authenticated {
+            capabilities: capabilities.clone(),
+        },
+    });
     clear_unreported_leftovers(&capabilities, connection_id, broadcast_tx);
     set_status(status, LinkState::Connected, "Connected to bridge service");
     tracing::info!(socket = %socket_path.display(), "connected to bridge service");
@@ -578,6 +611,7 @@ fn mark_connected_with(
     state.prompt_slot = prompt_slot;
     state.pause_answers_waiting = pause_answers_waiting;
     state.decide_later = false;
+    state.curated_broad_opt_in = false;
     state.pending_rows.clear();
     state.connection_id
 }
@@ -627,6 +661,7 @@ fn disconnect_and_discard(
         state.prompt_slot = false;
         state.pause_answers_waiting = false;
         state.decide_later = false;
+        state.curated_broad_opt_in = false;
         state.pending_rows.clear();
     }
     while inbound_rx.try_recv().is_ok() {}
@@ -797,3 +832,45 @@ use leftover_capability::clear_unreported_leftovers;
 #[cfg(test)]
 #[path = "bridge_runtime/leftover_capability_tests.rs"]
 mod leftover_capability_tests;
+
+#[cfg(test)]
+mod curated_consent_tests {
+    use super::*;
+    fn prepare() -> ClientMessage {
+        serde_json::from_value(serde_json::json!({"action":"prepareCuratedBroadOptIn","requestId":"dns-1-1","id":"dns-resolved","purpose":"enable"})).unwrap()
+    }
+    #[tokio::test]
+    async fn modern_queue_requires_current_capable_origin_and_never_replays() {
+        let (broadcast_tx, _) = broadcast::channel(8);
+        let (inbound_tx, mut rx) = mpsc::channel(1);
+        let connection = Arc::new(Mutex::new(ConnectionState::default()));
+        let handles = BridgeHandles {
+            broadcast_tx,
+            inbound_tx,
+            runtime: Handle::current(),
+            connection: connection.clone(),
+        };
+        let session = mark_connected(&connection, false);
+        assert!(handles.try_send_for_session(session, prepare()).is_err());
+        connection.lock().unwrap().curated_broad_opt_in = true;
+        assert!(
+            handles.try_send(prepare()).is_err(),
+            "generic send assigned modern intent a session"
+        );
+        assert_eq!(handles.try_send_for_session(session, prepare()), Ok(()));
+        assert_eq!(
+            handles.try_send_for_session(session, prepare()),
+            Err(SendClientMessageError::Full)
+        );
+        disconnect_and_discard(&connection, &mut rx);
+        assert!(rx.try_recv().is_err(), "queued consent survived disconnect");
+        let next = mark_connected(&connection, false);
+        connection.lock().unwrap().curated_broad_opt_in = true;
+        assert!(!handles.advertises_curated_broad_opt_in(session));
+        assert!(handles.advertises_curated_broad_opt_in(next));
+        assert_eq!(
+            handles.try_send_for_session(session, prepare()),
+            Err(SendClientMessageError::StaleSession)
+        );
+    }
+}

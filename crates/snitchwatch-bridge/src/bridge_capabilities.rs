@@ -39,6 +39,9 @@ pub const DECIDE_LATER: &str = "decideLater";
 /// (`ServerMessage::SetCuratedDefaults`, `ClientMessage::SetCuratedDefaults`;
 /// prompt-slot plan Part D).
 pub const CURATED_DEFAULTS: &str = "curatedDefaults";
+/// Ticketed deliberate consent for the curated any-destination resolver rule.
+/// Feature negotiation only; never authorization.
+pub const CURATED_BROAD_OPT_IN_V1: &str = "curatedBroadOptInV1";
 
 /// The bridge sends `SetBlocklistLeftovers` (issue #73). A bridge without it
 /// never says "none left", so a client must not keep a count an earlier
@@ -54,6 +57,7 @@ pub fn advertised() -> Vec<String> {
         RULE_HITS.to_string(),
         DECIDE_LATER.to_string(),
         CURATED_DEFAULTS.to_string(),
+        CURATED_BROAD_OPT_IN_V1.to_string(),
         BLOCKLIST_LEFTOVERS.to_string(),
     ]
 }
@@ -102,6 +106,7 @@ mod tests {
                     "ruleHits",
                     "decideLater",
                     "curatedDefaults",
+                    "curatedBroadOptInV1",
                     "blocklistLeftovers"
                 ],
             })

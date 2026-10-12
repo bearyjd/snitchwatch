@@ -104,6 +104,10 @@ pub fn apply(
         // (`deferred_answers::decide_later`).
         | ClientMessage::DecideLater { .. }
         // Routed to the curated defaults' worker before this point.
+        | ClientMessage::PrepareCuratedBroadOptIn { .. }
+        | ClientMessage::EnableCuratedBroadDefault { .. }
+        | ClientMessage::KeepCuratedBroadDefault { .. }
+        | ClientMessage::CancelCuratedBroadOptIn { .. }
         | ClientMessage::SetCuratedDefaults { .. }
         | ClientMessage::RemoveCuratedDefault { .. } => Ok(UpstreamEffect::None),
     }

@@ -280,7 +280,10 @@ impl RuleCommands {
     /// A recommended rule turned on or off. The daemon's `OK` updates the
     /// rule list, whose broadcast also refreshes the Recommended page.
     fn toggle_curated(&self, name: &str, enabled: bool, answer: Answer) {
-        let sent = self.commands.send_curated_toggle(name, enabled);
+        let sent = match &self.curated {
+            Some(curated) => curated.send_managed_toggle(name, enabled),
+            None => self.commands.send_curated_toggle(name, enabled),
+        };
         let timeout = self.reply_timeout;
         tokio::spawn(async move {
             let outcome = sent_outcome(sent, timeout).await;

@@ -10,6 +10,7 @@ use cxx_qt::CxxQtType;
 use cxx_qt::Threading;
 use cxx_qt_lib::{QByteArray, QHash, QHashPair_i32_QByteArray, QModelIndex, QString, QVariant};
 
+use crate::curated_broad_consent::{BroadConsent, DISCLOSURE, DNS_ID};
 use crate::curated_defaults::{status_text, CuratedStore};
 use snitchwatch_bridge::ws_messages::{ClientMessage, ServerMessage};
 
@@ -22,6 +23,7 @@ const ROLE_STATUS: i32 = 5;
 const ROLE_PROBLEM: i32 = 6;
 const ROLE_CAN_REMOVE: i32 = 7;
 const ROLE_CAN_KEEP: i32 = 8;
+const ROLE_BROAD: i32 = 9;
 
 #[cxx_qt::bridge]
 pub mod qobject {
@@ -48,6 +50,11 @@ pub mod qobject {
         #[qobject]
         #[qml_element]
         #[base = QAbstractListModel]
+        #[qproperty(bool, broad_supported, cxx_name = "broadSupported")]
+        #[qproperty(bool, consent_open, cxx_name = "consentOpen")]
+        #[qproperty(bool, consent_ready, cxx_name = "consentReady")]
+        #[qproperty(QString, consent_disclosure, cxx_name = "consentDisclosure")]
+        #[qproperty(QString, consent_result, cxx_name = "consentResult")]
         #[qproperty(i32, count)]
         #[qproperty(bool, received)]
         #[qproperty(QString, unavailable_reason, cxx_name = "unavailableReason")]
@@ -80,6 +87,23 @@ pub mod qobject {
         #[qinvokable]
         #[cxx_name = "startBridgeFeed"]
         fn start_bridge_feed(self: Pin<&mut CuratedDefaultsModel>);
+
+        #[qinvokable]
+        #[cxx_name = "confirmBroadConsent"]
+        fn confirm_broad_consent(self: Pin<&mut CuratedDefaultsModel>);
+        #[qinvokable]
+        #[cxx_name = "cancelBroadConsent"]
+        fn cancel_broad_consent(self: Pin<&mut CuratedDefaultsModel>);
+        /// Clear local DNS choice correlation when another page requests Off.
+        #[qinvokable]
+        #[cxx_name = "revokeBroadConsent"]
+        fn revoke_broad_consent(self: Pin<&mut CuratedDefaultsModel>);
+        #[qinvokable]
+        #[cxx_name = "reenableDns"]
+        fn reenable_dns(self: Pin<&mut CuratedDefaultsModel>);
+        #[qinvokable]
+        #[cxx_name = "resetBridgeSession"]
+        fn reset_bridge_session(self: Pin<&mut CuratedDefaultsModel>);
 
         /// Ask to turn one entry on or off.
         #[qinvokable]
@@ -121,6 +145,12 @@ pub mod qobject {
 #[derive(Default)]
 pub struct CuratedDefaultsModelRust {
     store: CuratedStore,
+    consent: BroadConsent,
+    broad_supported: bool,
+    consent_open: bool,
+    consent_ready: bool,
+    consent_disclosure: QString,
+    consent_result: QString,
     count: i32,
     received: bool,
     unavailable_reason: QString,
@@ -145,6 +175,7 @@ impl qobject::CuratedDefaultsModel {
             ROLE_STATUS => text(status_text(entry.status)),
             ROLE_PROBLEM => text(entry.problem.as_deref().unwrap_or_default()),
             ROLE_CAN_REMOVE => QVariant::from(&self.store.can_remove(entry)),
+            ROLE_BROAD => QVariant::from(&(entry.broad || entry.id == DNS_ID)),
             ROLE_CAN_KEEP => QVariant::from(&self.store.can_keep(entry)),
             _ => QVariant::default(),
         }
@@ -152,6 +183,7 @@ impl qobject::CuratedDefaultsModel {
 
     fn role_names(&self) -> QHash<QHashPair_i32_QByteArray> {
         let mut roles = QHash::<QHashPair_i32_QByteArray>::default();
+        roles.insert(ROLE_BROAD, QByteArray::from("isBroad"));
         roles.insert(ROLE_ID, QByteArray::from("entryId"));
         roles.insert(ROLE_PROGRAM, QByteArray::from("program"));
         roles.insert(ROLE_ALLOWS, QByteArray::from("allows"));
@@ -178,6 +210,32 @@ impl qobject::CuratedDefaultsModel {
             tracing::warn!("CuratedDefaultsModel: bad ServerMessage JSON");
             return;
         };
+        if let ServerMessage::Authenticated { capabilities } = &msg {
+            self.as_mut().rust_mut().consent.authenticate(
+                connection_id,
+                capabilities
+                    .iter()
+                    .any(|c| c == crate::curated_broad_consent::CAPABILITY),
+            );
+        }
+        if let Ok(value) = serde_json::to_value(&msg) {
+            match value["action"].as_str() {
+                Some("curatedBroadOptInPrepared") => {
+                    self.as_mut()
+                        .rust_mut()
+                        .consent
+                        .prepared(connection_id, &value);
+                }
+                Some("curatedDefaultsRequestResult") => {
+                    self.as_mut()
+                        .rust_mut()
+                        .consent
+                        .receive_result(connection_id, &value);
+                }
+                _ => {}
+            }
+        }
+        self.as_mut().sync_consent();
         let mut next = self.store.clone();
         if !next.apply(connection_id, &msg) {
             return;
@@ -212,30 +270,177 @@ impl qobject::CuratedDefaultsModel {
                     if !session_handles.is_current_session(connection_id) {
                         return;
                     }
+                    let capable = session_handles.advertises_curated_broad_opt_in(connection_id);
+                    let mut qobject = qobject;
+                    qobject
+                        .as_mut()
+                        .rust_mut()
+                        .consent
+                        .authenticate(connection_id, capable);
                     qobject.apply_session_message(connection_id, &QString::from(&json));
                 });
             },
         );
     }
 
-    fn set_entry(self: Pin<&mut Self>, id: &QString, on: bool) {
+    fn set_entry(mut self: Pin<&mut Self>, id: &QString, on: bool) {
+        if id.to_string() == DNS_ID && on {
+            self.begin_broad("enable");
+            return;
+        }
+        if id.to_string() == DNS_ID && !on {
+            self.as_mut().cancel_broad_consent();
+            self.as_mut().rust_mut().consent.revoke_local();
+            self.as_mut().sync_consent();
+        }
         let request = self.store.request(&id.to_string(), on);
         self.emit_client(request);
     }
 
-    fn set_all(self: Pin<&mut Self>, on: bool) {
+    fn set_all(mut self: Pin<&mut Self>, on: bool) {
+        if !on {
+            self.as_mut().cancel_broad_consent();
+            self.as_mut().rust_mut().consent.revoke_local();
+            self.as_mut().sync_consent();
+        }
         let request = self.store.request_all(on);
         self.emit_client(request);
     }
 
-    fn remove_entry(self: Pin<&mut Self>, id: &QString) {
+    fn remove_entry(mut self: Pin<&mut Self>, id: &QString) {
+        if id.to_string() == DNS_ID {
+            self.as_mut().cancel_broad_consent();
+            self.as_mut().rust_mut().consent.revoke_local();
+            self.as_mut().sync_consent();
+        }
         let request = self.store.removal(&id.to_string());
         self.emit_client(request);
     }
 
     fn keep_entry(self: Pin<&mut Self>, id: &QString) {
+        if id.to_string() == DNS_ID {
+            self.begin_broad("keep");
+            return;
+        }
         let request = self.store.keeping(&id.to_string());
         self.emit_client(request);
+    }
+
+    fn sync_consent(mut self: Pin<&mut Self>) {
+        let consent = self.consent.clone();
+        self.as_mut().set_broad_supported(consent.supported());
+        self.as_mut().set_consent_open(consent.open());
+        self.as_mut().set_consent_ready(consent.ready());
+        self.as_mut()
+            .set_consent_disclosure(QString::from(DISCLOSURE));
+        self.as_mut()
+            .set_consent_result(QString::from(consent.result()));
+    }
+
+    fn begin_broad(mut self: Pin<&mut Self>, purpose: &str) {
+        use snitchwatch_bridge::curated::reconcile::EntryStatus;
+        let entry = (0..self.store.len())
+            .filter_map(|i| self.store.row(i))
+            .find(|e| e.id == DNS_ID);
+        let purpose = if purpose == "enable"
+            && entry.is_some_and(|e| {
+                matches!(
+                    e.status,
+                    EntryStatus::InstalledButOff | EntryStatus::InFirewallButOff
+                )
+            }) {
+            "reenable"
+        } else {
+            purpose
+        };
+        let allowed = entry.is_some_and(|e| {
+            self.store.unavailable_reason().is_empty()
+                && match purpose {
+                    "keep" => self.store.can_keep(e),
+                    "reenable" => matches!(
+                        e.status,
+                        EntryStatus::InstalledButOff | EntryStatus::InFirewallButOff
+                    ),
+                    "enable" => matches!(
+                        e.status,
+                        EntryStatus::Off
+                            | EntryStatus::NotInstalled
+                            | EntryStatus::Installed
+                            | EntryStatus::AwaitingConsent
+                    ),
+                    _ => false,
+                }
+        });
+        if !allowed {
+            return;
+        }
+        self.as_mut().cancel_broad_consent();
+        let session = self.store.session();
+        if let Some(handles) = crate::bridge_runtime::handles() {
+            if !handles.advertises_curated_broad_opt_in(session) {
+                self.as_mut().reset_bridge_session();
+                return;
+            }
+        }
+        let request = self.as_mut().rust_mut().consent.begin(purpose);
+        if let Some(request) = request {
+            self.as_mut().send_broad(session, request);
+        }
+        self.sync_consent();
+    }
+
+    fn send_broad(mut self: Pin<&mut Self>, session: u64, value: serde_json::Value) {
+        let result = serde_json::from_value::<ClientMessage>(value);
+        let Ok(message) = result else {
+            self.as_mut()
+                .rust_mut()
+                .consent
+                .failed("This bridge version cannot accept reviewed DNS consent.");
+            return;
+        };
+        if let Some(handles) = crate::bridge_runtime::handles() {
+            if handles.try_send_for_session(session, message).is_err() {
+                self.as_mut()
+                    .rust_mut()
+                    .consent
+                    .failed("DNS request was not queued. Open a fresh confirmation to try again.");
+            }
+        } else {
+            // Offline QML probes observe the exact JSON; the production runtime
+            // always sends reviewed intent directly with its original session.
+            self.emit_client(Some(message));
+        }
+    }
+
+    fn confirm_broad_consent(mut self: Pin<&mut Self>) {
+        let request = self.as_mut().rust_mut().consent.confirm();
+        if let Some((session, request)) = request {
+            self.as_mut().send_broad(session, request);
+        }
+        self.sync_consent();
+    }
+
+    fn cancel_broad_consent(mut self: Pin<&mut Self>) {
+        let request = self.as_mut().rust_mut().consent.cancel();
+        if let Some((session, request)) = request {
+            self.as_mut().send_broad(session, request);
+        }
+        self.sync_consent();
+    }
+
+    fn revoke_broad_consent(mut self: Pin<&mut Self>) {
+        self.as_mut().cancel_broad_consent();
+        self.as_mut().rust_mut().consent.revoke_local();
+        self.sync_consent();
+    }
+
+    fn reenable_dns(self: Pin<&mut Self>) {
+        self.begin_broad("reenable");
+    }
+
+    fn reset_bridge_session(mut self: Pin<&mut Self>) {
+        self.as_mut().rust_mut().consent.disconnect();
+        self.sync_consent();
     }
 
     fn emit_client(mut self: Pin<&mut Self>, msg: Option<ClientMessage>) {

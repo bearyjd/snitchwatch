@@ -72,6 +72,11 @@ Kirigami.ScrollablePage {
 
     // Injected by the caller (main.qml) so the model's lifetime is owned there.
     property RulesModel model
+    property CuratedDefaultsModel curatedModel
+    readonly property bool inspectManagedDns: inspectName === "snitchwatch-default-dns-resolved" && inspectSource === "recommended"
+    DnsConsentDialog { consentModel: page.curatedModel }
+    onVisibleChanged: if (!visible && curatedModel) curatedModel.cancelBroadConsent()
+    Component.onDestruction: if (curatedModel) curatedModel.cancelBroadConsent()
 
     // Snapshot of the rule currently shown in the detail sheet.
     property string inspectName: ""
@@ -229,6 +234,13 @@ Kirigami.ScrollablePage {
     // `inspectEnabled`, which the next model reset corrects.
     function setInspectEnabled(enabled) {
         if (!page.model) return;
+        if (page.inspectManagedDns && enabled) {
+            if (page.curatedModel) page.curatedModel.reenableDns();
+            inspectEnabledSwitch.checked = Qt.binding(function () { return page.inspectEnabled; });
+            return;
+        }
+        if (page.inspectManagedDns && !enabled && page.curatedModel)
+            page.curatedModel.revokeBroadConsent();
         page.model.setEnabled(page.inspectName, enabled);
         page.inspectEnabled = enabled;
         inspectEnabledSwitch.checked = Qt.binding(function () { return page.inspectEnabled; });
@@ -671,9 +683,23 @@ Kirigami.ScrollablePage {
                 Controls.Switch {
                     id: inspectEnabledSwitch
                     Kirigami.FormData.label: "Enabled"
-                    enabled: page.inspectToggleable
+                    enabled: page.inspectToggleable && (!page.inspectManagedDns || page.inspectEnabled)
                     checked: page.inspectEnabled
                     onToggled: page.setInspectEnabled(checked)
+                }
+                Controls.Button {
+                    objectName: "reenableDnsButton"
+                    visible: page.inspectManagedDns && !page.inspectEnabled && page.inspectToggleable
+                    enabled: page.curatedModel && page.curatedModel.broadSupported
+                    text: "Re-enable DNS…"
+                    onClicked: page.curatedModel.reenableDns()
+                }
+                Controls.Label {
+                    textFormat: Text.PlainText
+                    wrapMode: Text.Wrap
+                    Layout.fillWidth: true
+                    visible: page.inspectManagedDns && page.curatedModel && page.curatedModel.consentResult.length > 0
+                    text: page.curatedModel ? page.curatedModel.consentResult : ""
                 }
                 Controls.Label {
                     Kirigami.FormData.label: "Read-only"

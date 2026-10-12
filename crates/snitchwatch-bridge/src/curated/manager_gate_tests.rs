@@ -87,6 +87,8 @@ async fn a_reconnect_mid_pass_doesnt_delete_a_copy_edited_meanwhile() {
     let gate = Arc::new(tokio::sync::Notify::new());
     *harness.hold.lock().unwrap() = Some(gate.clone());
     curated.try_route(ClientMessage::SetCuratedDefaults {
+        request_id: None,
+        reply: None,
         ids: vec![FLATPAK.into(), B.into()],
         on: false,
     });

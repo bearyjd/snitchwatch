@@ -68,7 +68,7 @@ fn a_file_that_fails_a_check_is_refused() {
     let path = dir.path().join(FILE_NAME);
     for bad in [
         "not json",
-        r#"{"version": 3, "choices": {}}"#,
+        r#"{"version": 4, "choices": {}}"#,
         r#"{"version": 2, "choices": {"surprise": true}}"#,
         r#"{"version": 2, "choices": {}, "extra": 1}"#,
         r#"{"choices": {}}"#,
@@ -173,4 +173,268 @@ fn a_version_1_file_is_read() {
             .enable("flatpak-flathub")
             .installed("flatpak-flathub", &flatpak_rule())
     );
+}
+
+const DNS: &str = "dns-resolved";
+
+fn granted() -> Choices {
+    Choices::default().enable(DNS).grant_broad(DNS, true)
+}
+
+fn missing_plan(choices: &Choices) -> crate::curated::reconcile::Plan {
+    let none = BTreeSet::new();
+    crate::curated::reconcile::plan(
+        entries(),
+        crate::curated::reconcile::DaemonRules {
+            rules: &BTreeMap::new(),
+            left_out: &none,
+            files_left: &none,
+            maybe_applied: &none,
+        },
+        choices,
+    )
+}
+
+#[test]
+fn broad_authority_is_durable_and_off_or_removal_revokes_it() {
+    let dir = dir();
+    let path = dir.path().join(FILE_NAME);
+    let choices = granted();
+    save(&path, &choices).unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&std::fs::read(&path).unwrap()).unwrap()
+            ["version"],
+        3
+    );
+    let restarted = load(&path).unwrap().unwrap();
+    assert_eq!(restarted, choices);
+    assert!(restarted.has_broad_authority(DNS));
+    assert_eq!(
+        missing_plan(&restarted).actions,
+        [crate::curated::reconcile::CuratedAction::Install(
+            DNS.into()
+        )]
+    );
+    for revoked in [
+        restarted.disable(DNS),
+        restarted.user_removed(DNS),
+        restarted.revoke_broad(DNS),
+    ] {
+        assert!(!revoked.has_broad_authority(DNS));
+        assert!(revoked.broad_grants.is_empty());
+        save(&path, &revoked).unwrap();
+        assert!(missing_plan(&load(&path).unwrap().unwrap())
+            .actions
+            .is_empty());
+        assert!(!load(&path)
+            .unwrap()
+            .unwrap()
+            .enable(DNS)
+            .has_broad_authority(DNS));
+    }
+    let only_revoke = choices.revoke_broad(DNS);
+    assert_eq!(only_revoke.enabled, choices.enabled);
+    assert_eq!(only_revoke.disabled, choices.disabled);
+}
+
+#[test]
+fn legacy_enabled_choices_and_files_are_preserved_without_authority() {
+    let dir = dir();
+    let path = dir.path().join(FILE_NAME);
+    for version in [1, 2] {
+        let bytes =
+            serde_json::json!({"version": version, "choices": {"enabled": [DNS]}}).to_string();
+        write(&path, &bytes, 0o600);
+        let loaded = load(&path).unwrap().unwrap();
+        assert_eq!(loaded.enabled, BTreeSet::from([DNS.into()]));
+        assert!(!loaded.has_broad_authority(DNS));
+        let refused = missing_plan(&loaded);
+        assert!(refused.actions.is_empty());
+        assert_eq!(
+            refused.statuses[DNS],
+            crate::curated::reconcile::EntryStatus::AwaitingConsent
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), bytes);
+    }
+    // A v2 file cannot claim modern consent by injecting v3 metadata.
+    let file = serde_json::json!({"version": 2, "choices": granted()});
+    write(&path, &file.to_string(), 0o600);
+    assert!(!load(&path).unwrap().unwrap().has_broad_authority(DNS));
+}
+
+#[test]
+fn invalid_or_mismatched_grants_leave_choices_without_authority() {
+    let dir = dir();
+    let path = dir.path().join(FILE_NAME);
+    let mut bad_grants = vec![
+        serde_json::json!(null),
+        serde_json::json!([]),
+        serde_json::json!({}),
+        serde_json::json!(true),
+    ];
+    let grant = serde_json::to_value(&granted().broad_grants[DNS]).unwrap();
+    for field in ["version", "id", "consent", "policySha256", "authority"] {
+        let mut missing = grant.clone();
+        missing.as_object_mut().unwrap().remove(field);
+        bad_grants.push(serde_json::json!({DNS: missing}));
+    }
+    for (field, bad) in [
+        ("version", serde_json::json!(2)),
+        ("id", serde_json::json!("flatpak-flathub")),
+        ("consent", serde_json::json!("future-consent")),
+        ("policySha256", serde_json::json!("0".repeat(64))),
+        ("authority", serde_json::json!("admin")),
+        ("unexpected", serde_json::json!(true)),
+    ] {
+        let mut altered = grant.clone();
+        altered[field] = bad;
+        bad_grants.push(serde_json::json!({DNS: altered}));
+    }
+    for metadata in bad_grants {
+        let file = serde_json::json!({"version": 3, "choices": {"enabled": [DNS], "broadGrants": metadata}});
+        write(&path, &file.to_string(), 0o600);
+        let loaded = load(&path).unwrap().unwrap();
+        assert!(loaded.enabled.contains(DNS));
+        assert!(!loaded.has_broad_authority(DNS));
+        assert!(loaded.broad_grants.is_empty());
+        assert!(missing_plan(&loaded).actions.is_empty());
+    }
+    // A valid field beside a duplicate cannot launder a malformed record.
+    let valid = grant.to_string();
+    let duplicate_field = valid.replacen("{", "{\"version\":99,", 1);
+    for grants in [
+        format!("{{\"{DNS}\":{duplicate_field}}}"),
+        format!("{{\"{DNS}\":{valid},\"{DNS}\":{valid}}}"),
+    ] {
+        write(&path, &format!("{{\"version\":3,\"choices\":{{\"enabled\":[\"{DNS}\"],\"broadGrants\":{grants}}}}}"), 0o600);
+        let loaded = load(&path).unwrap().unwrap();
+        assert!(loaded.enabled.contains(DNS));
+        assert!(!loaded.has_broad_authority(DNS));
+    }
+}
+
+#[test]
+fn adoption_only_and_choice_enable_cannot_elevate_to_activation() {
+    let dir = dir();
+    let path = dir.path().join(FILE_NAME);
+    let adopted = Choices::default().enable(DNS).grant_broad(DNS, false);
+    save(&path, &adopted).unwrap();
+    let loaded = load(&path).unwrap().unwrap().enable(DNS);
+    assert_eq!(
+        loaded.broad_grants[DNS].authority,
+        BroadAuthority::AdoptionOnly
+    );
+    assert!(!loaded.has_broad_authority(DNS));
+    assert!(missing_plan(&loaded).actions.is_empty());
+    assert!(!Choices::default().enable(DNS).has_broad_authority(DNS));
+    assert!(Choices::default()
+        .grant_broad("flatpak-flathub", true)
+        .broad_grants
+        .is_empty());
+}
+
+#[test]
+fn fingerprint_binds_every_canonical_policy_field_and_ignores_transients() {
+    let entry = entries().iter().find(|entry| entry.id == DNS).unwrap();
+    let fingerprint = broad_policy_fingerprint(entry);
+    let mut transient = entry.rule();
+    transient.enabled = false;
+    transient.created = 123;
+    assert_eq!(
+        fingerprint,
+        format!(
+            "{:x}",
+            Sha256::digest(serde_json::to_vec(&canonical(&transient)).unwrap())
+        )
+    );
+    let mut mutations: Vec<Rule> = Vec::new();
+    for operand in ["process.path", "user.id", "dest.port", "protocol"] {
+        let mut rule = entry.rule();
+        rule.operator
+            .as_mut()
+            .unwrap()
+            .list
+            .iter_mut()
+            .find(|leaf| leaf.operand == operand)
+            .unwrap()
+            .data
+            .push('x');
+        mutations.push(rule);
+    }
+    let mut destination = entry.rule();
+    destination
+        .operator
+        .as_mut()
+        .unwrap()
+        .list
+        .push(snitchwatch_proto::protocol::Operator {
+            r#type: "simple".into(),
+            operand: "dest.ip".into(),
+            data: "127.0.0.1".into(),
+            sensitive: true,
+            list: vec![],
+        });
+    mutations.push(destination);
+    for field in [
+        "name",
+        "action",
+        "duration",
+        "description",
+        "precedence",
+        "nolog",
+    ] {
+        let mut rule = entry.rule();
+        match field {
+            "name" => rule.name.push('x'),
+            "action" => rule.action = "deny".into(),
+            "duration" => rule.duration = "once".into(),
+            "description" => rule.description.push('x'),
+            "precedence" => rule.precedence = true,
+            "nolog" => rule.nolog = !rule.nolog,
+            _ => unreachable!(),
+        }
+        mutations.push(rule);
+    }
+    for rule in mutations {
+        assert_ne!(
+            fingerprint,
+            format!(
+                "{:x}",
+                Sha256::digest(serde_json::to_vec(&canonical(&rule)).unwrap())
+            )
+        );
+    }
+}
+
+#[test]
+fn broad_grants_retain_atomic_owner_only_and_no_link_guards() {
+    let dir = dir();
+    let path = dir.path().join(FILE_NAME);
+    save(&path, &granted()).unwrap();
+    let original_choices = std::fs::read(&path).unwrap();
+    let mut invalid_grant = granted();
+    invalid_grant
+        .broad_grants
+        .get_mut(DNS)
+        .unwrap()
+        .policy_sha256 = "0".repeat(64);
+    assert!(save(&path, &invalid_grant).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), original_choices);
+    assert_eq!(
+        std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(&path).unwrap().permissions())
+            & 0o777,
+        0o600
+    );
+    let target = dir.path().join("target.json");
+    save(&target, &granted()).unwrap();
+    let original = std::fs::read(&target).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    std::os::unix::fs::symlink(&target, &path).unwrap();
+    assert!(save(&path, &granted().disable(DNS)).is_err());
+    assert_eq!(std::fs::read(&target).unwrap(), original);
+    assert!(load(&path).is_err());
+    std::fs::remove_file(&path).unwrap();
+    std::fs::hard_link(&target, &path).unwrap();
+    assert!(save(&path, &granted()).is_err());
+    assert!(load(&path).is_err());
 }

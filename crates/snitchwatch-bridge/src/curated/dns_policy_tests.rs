@@ -52,7 +52,7 @@ fn it_is_off_by_default_and_turned_on_installs_exactly_its_rule() {
     assert_eq!(nothing.statuses[ID], EntryStatus::Off);
     assert_eq!(nothing.choices, Choices::default());
 
-    let on = Choices::default().enable(ID);
+    let on = Choices::default().enable(ID).grant_broad(ID, true);
     let first = reconcile(&BTreeMap::new(), &on);
     assert_eq!(first.actions, [CuratedAction::Install(ID.into())]);
     assert_eq!(first.statuses[ID], EntryStatus::Installing);

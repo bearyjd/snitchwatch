@@ -270,31 +270,61 @@ async fn pump_authenticated<S, R>(
     // Answers meant for this connection only (rule import/export, P2.7).
     let (reply_tx, reply_rx) = mpsc::channel::<ServerMessage>(REPLY_QUEUE);
     let reply_to = crate::ws_messages::ReplyTo::new(reply_tx);
+    let intent = crate::curated::intent::IntentContext::websocket();
+    let outbound_guard = intent.drop_guard();
+    let inbound_guard = intent.drop_guard();
     let _session = handles.presence.authenticated_session();
     // Stable while `_session` is held: the generation only advances when the
     // last authenticated session ends.
     let generation = handles.presence.current_generation();
-    let outbound = forward_outbound(sender, broadcast_rx, reply_rx);
+    let outbound = async {
+        let _guard = outbound_guard;
+        forward_outbound(sender, broadcast_rx, reply_rx).await;
+    };
     let inbound = async {
+        let _guard = inbound_guard;
         while let Some(Ok(msg)) = receiver.next().await {
             match msg {
                 // `ws_handler` sets the same bound on the transport; this
                 // holds for any stream (rule import, P2.7).
                 Message::Text(text) if text.len() > MAX_CLIENT_MESSAGE_BYTES => {
+                    if let Ok(mut admission) = intent.admit() {
+                        admission.invalidate();
+                    }
                     warn!(
                         bytes = text.len(),
                         "dropping an oversized client message unparsed"
                     )
                 }
-                Message::Text(text) => match serde_json::from_str::<ClientMessage>(&text) {
+                Message::Text(text) => match crate::ws_messages::decode_client_message(&text) {
                     Ok(parsed) => {
                         let parsed = stamp_sender(parsed, generation, peer_uid);
                         let parsed = stamp_reply(parsed, &reply_to);
+                        let parsed = stamp_intent(parsed, &intent);
                         if handles.inbound.send(parsed).await.is_err() {
                             break;
                         }
                     }
-                    Err(error) => error!(%error, "failed to parse ClientMessage"),
+                    Err(error) => {
+                        if let Ok(mut admission) = intent.admit() {
+                            admission.invalidate();
+                        }
+                        // Never log submitted fields or decoder errors: a
+                        // malformed ticket may otherwise appear in diagnostics.
+                        warn!("client message rejected by protocol validation");
+                        if let Some(request_id) = error.request_id {
+                            let _ = reply_to.try_send(ServerMessage::CuratedDefaultsRequestResult {
+                                request_id: Some(request_id),
+                                results: vec![crate::ws_messages::CuratedRequestResult {
+                                    id: "dns-resolved".to_owned(),
+                                    outcome: crate::ws_messages::CuratedRequestOutcome::InvalidIntent,
+                                    reason: "Invalid curated opt-in request".to_owned(),
+                                    choice_accepted: Some(false),
+                                    persisted: Some(false),
+                                }],
+                            });
+                        }
+                    }
                 },
                 Message::Close(_) => break,
                 _ => {}
@@ -321,6 +351,11 @@ async fn forward_outbound<S>(
     loop {
         let msg = tokio::select! {
             received = broadcast_rx.recv() => match received {
+                Ok(ServerMessage::CuratedBroadOptInPrepared { .. }
+                    | ServerMessage::CuratedDefaultsRequestResult { .. }) => {
+                    warn!("private curated response rejected from broadcast channel");
+                    continue;
+                }
                 Ok(msg) => msg,
                 Err(_) => break,
             },
@@ -358,6 +393,25 @@ fn stamp_reply(
         | ClientMessage::ApplyRulesImport { reply, .. }
         | ClientMessage::AddProfileRule { reply, .. }
         | ClientMessage::RequestBlocklistEntries { reply, .. } => *reply = Some(reply_to.clone()),
+        ClientMessage::SetCuratedDefaults { reply, .. }
+        | ClientMessage::PrepareCuratedBroadOptIn { reply, .. }
+        | ClientMessage::EnableCuratedBroadDefault { reply, .. }
+        | ClientMessage::KeepCuratedBroadDefault { reply, .. }
+        | ClientMessage::CancelCuratedBroadOptIn { reply, .. } => *reply = Some(reply_to.clone()),
+        _ => {}
+    }
+    message
+}
+
+fn stamp_intent(
+    mut message: ClientMessage,
+    intent: &crate::curated::intent::IntentContext,
+) -> ClientMessage {
+    match &mut message {
+        ClientMessage::PrepareCuratedBroadOptIn { context, .. }
+        | ClientMessage::EnableCuratedBroadDefault { context, .. }
+        | ClientMessage::KeepCuratedBroadDefault { context, .. }
+        | ClientMessage::CancelCuratedBroadOptIn { context, .. } => *context = Some(intent.clone()),
         _ => {}
     }
     message

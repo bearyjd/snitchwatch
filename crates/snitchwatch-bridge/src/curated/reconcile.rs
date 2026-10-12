@@ -75,6 +75,8 @@ pub enum EntryStatus {
     Off,
     /// Turned on; the rule is being installed.
     Installing,
+    /// A saved choice exists, but no reviewed broad activation authority.
+    AwaitingConsent,
     /// Installed and active.
     Installed,
     /// Installed, but turned off in the rule list.
@@ -205,7 +207,11 @@ fn plan_entry(
         }
         if choices.deleted_by_user.contains(&entry.id) || was_installed {
             next.deleted_by_user.insert(entry.id.clone());
+            next.broad_grants.remove(&entry.id);
             return EntryStatus::DeletedOutside;
+        }
+        if entry.any_address && !choices.has_broad_authority_for(entry) {
+            return EntryStatus::AwaitingConsent;
         }
         actions.push(CuratedAction::Install(entry.id.clone()));
         return EntryStatus::Installing;

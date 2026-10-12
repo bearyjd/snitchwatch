@@ -1,0 +1,255 @@
+name: r13 System GUI Candidate
+
+on:
+  # Primary sets this repository variable to the independently reviewed SHA
+  # only after exact-head native/QML CI passes, then pushes that exact head.
+  # No default-branch publication prerequisite or user-chosen destination.
+  push:
+    branches: [r13-candidate]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: r13-gui-candidate-publication
+  cancel-in-progress: false
+
+jobs:
+  register:
+    if: github.event_name == 'push' && vars.R13_CANDIDATE_REVIEWED_SHA != github.sha
+    runs-on: ubuntu-24.04
+    permissions: {}
+    steps:
+      - run: echo 'Candidate workflow held until primary records reviewed SHA and exact-head CI.'
+
+  build:
+    if: github.event_name == 'push' && github.repository == 'bearyjd/snitchwatch' && github.ref == 'refs/heads/r13-candidate' && vars.R13_CANDIDATE_REVIEWED_SHA == github.sha
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    outputs:
+      packet_sha256: ${{ steps.build.outputs.packet_sha256 }}
+    env:
+      REVIEWED_SHA: ${{ vars.R13_CANDIDATE_REVIEWED_SHA }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          submodules: recursive
+          persist-credentials: false
+      - name: Install build preparation tools (disposable runner)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y flatpak flatpak-builder ostree binutils python3-venv
+          python3 -m venv "$RUNNER_TEMP/generator-env"
+          "$RUNNER_TEMP/generator-env/bin/pip" install aiohttp==3.13.3 tomlkit==0.14.0
+          echo "$RUNNER_TEMP/generator-env/bin" >> "$GITHUB_PATH"
+      - name: Build system GUI from clean exact source
+        id: build
+        env:
+          XDG_DATA_HOME: ${{ runner.temp }}/candidate-flatpak-data
+          XDG_CONFIG_HOME: ${{ runner.temp }}/candidate-flatpak-config
+          XDG_CACHE_HOME: ${{ runner.temp }}/candidate-flatpak-cache
+        run: python3 packaging/flatpak/build-candidate.py --output "$RUNNER_TEMP/candidate-output"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: r13-system-gui-candidate
+          path: ${{ runner.temp }}/candidate-output/*
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    if: github.event_name == 'push' && github.repository == 'bearyjd/snitchwatch' && github.ref == 'refs/heads/r13-candidate' && vars.R13_CANDIDATE_REVIEWED_SHA == github.sha
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      actions: read
+      id-token: write
+      attestations: write
+    env:
+      REVIEWED_SHA: ${{ vars.R13_CANDIDATE_REVIEWED_SHA }}
+      PACKET_SHA256: ${{ needs.build.outputs.packet_sha256 }}
+    steps:
+      # Same-run immutable artifact only. No checkout, shell or candidate code.
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: r13-system-gui-candidate
+          path: ${{ runner.temp }}/candidate-data
+      - name: Validate fixed candidate target and exact packet
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const crypto = require('crypto');
+            const fail = message => { throw new Error(message); };
+            const canonical = value => JSON.stringify(value, (_, item) => {
+              if (item && typeof item === 'object' && !Array.isArray(item))
+                return Object.fromEntries(Object.keys(item).sort().map(key => [key, item[key]]));
+              return item;
+            });
+            const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
+            const { owner, repo } = context.repo;
+            const sha = process.env.GITHUB_SHA;
+            const workflow = '.github/workflows/candidate-gui.yml';
+            const workflowRef = `bearyjd/snitchwatch/${workflow}@refs/heads/r13-candidate`;
+            if (owner !== 'bearyjd' || repo !== 'snitchwatch' || context.eventName !== 'push' ||
+                context.ref !== 'refs/heads/r13-candidate' || !/^[0-9a-f]{40}$/.test(sha) ||
+                process.env.REVIEWED_SHA !== sha || process.env.GITHUB_WORKFLOW_SHA !== sha ||
+                process.env.GITHUB_WORKFLOW_REF !== workflowRef) fail('reviewed workflow/source/ref mismatch');
+            const base = path.join(process.env.RUNNER_TEMP, 'candidate-data');
+            const limits = {
+              'snitchwatch-system-r13-candidate.flatpak': 512 * 1024 * 1024,
+              'build.log': 64 * 1024 * 1024,
+              'system-manifest.yml': 1024 * 1024,
+              'metadata.ini': 1024 * 1024,
+              'resolved-manifest.json': 16 * 1024 * 1024,
+              'generated-cargo-sources.json': 16 * 1024 * 1024,
+              'generator-provenance.json': 1024 * 1024,
+              'provenance.json': 1024 * 1024,
+              'candidate-packet.json': 1024 * 1024
+            };
+            const names = Object.keys(limits).sort();
+            if (fs.lstatSync(base).isSymbolicLink() || fs.readdirSync(base).sort().join('\n') !== names.join('\n'))
+              fail('unexpected artifact paths');
+            const bytes = {};
+            for (const name of names) {
+              const file = path.join(base, name);
+              const stat = fs.lstatSync(file);
+              if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || stat.size < 1 || stat.size > limits[name])
+                fail('invalid or oversized artifact');
+              bytes[name] = fs.readFileSync(file);
+            }
+            const packetHash = hash(bytes['candidate-packet.json']);
+            if (!/^[0-9a-f]{64}$/.test(process.env.PACKET_SHA256) || packetHash !== process.env.PACKET_SHA256)
+              fail('packet hash mismatch');
+            const packet = JSON.parse(bytes['candidate-packet.json']);
+            if (bytes['candidate-packet.json'].toString() !== canonical(packet) + '\n') fail('noncanonical packet');
+            const expected = {schema: 1, repository: 'bearyjd/snitchwatch', target: 'r13-candidate',
+              ref: 'refs/heads/r13-candidate', source_commit: sha, workflow_sha: sha, workflow_ref: workflowRef,
+              run_id: process.env.GITHUB_RUN_ID, run_attempt: process.env.GITHUB_RUN_ATTEMPT, profile: 'system'};
+            if (Object.keys(packet).sort().join() !== [...Object.keys(expected), 'assets'].sort().join())
+              fail('unexpected packet fields');
+            for (const [key, value] of Object.entries(expected)) if (packet[key] !== value) fail(`packet ${key} mismatch`);
+            const assetNames = names.filter(name => name !== 'candidate-packet.json');
+            if (!packet.assets || Object.keys(packet.assets).sort().join() !== assetNames.join()) fail('asset allowlist mismatch');
+            for (const name of assetNames) {
+              const asset = packet.assets[name];
+              if (Object.keys(asset).sort().join() !== 'sha256,size' || !/^[0-9a-f]{64}$/.test(asset.sha256) ||
+                  asset.sha256 !== hash(bytes[name]) || asset.size !== bytes[name].length) fail('asset hash/size mismatch');
+            }
+            const evidence = JSON.parse(bytes['provenance.json']);
+            for (const key of ['schema', 'source_commit', 'workflow_sha', 'workflow_ref', 'run_id', 'run_attempt', 'profile'])
+              if (evidence[key] !== expected[key]) fail(`provenance ${key} mismatch`);
+            if (evidence.workflow !== workflow || evidence.binary_path !== '/app/bin/snitchwatch-kirigami' ||
+                !/^[0-9a-f]{40}$/.test(evidence.source_tree) || !/^[0-9a-f]{40}$/.test(evidence.submodule_commit) ||
+                !/^[0-9a-f]{64}$/.test(evidence.binary_sha256) || !/^[0-9a-f]{64}$/.test(evidence.flatpak_commit) ||
+                evidence.manifest_sha256 !== hash(bytes['system-manifest.yml']) ||
+                evidence.permissions_sha256 !== hash(bytes['metadata.ini'])) fail('provenance artifact identity mismatch');
+            const runtimeRefs = ['runtime/org.kde.Platform/x86_64/6.11', 'runtime/org.kde.Sdk/x86_64/6.11',
+              'runtime/org.freedesktop.Sdk.Extension.rust-stable/x86_64/25.08'].sort();
+            if (!evidence.flatpak_inputs || Object.keys(evidence.flatpak_inputs).sort().join() !== runtimeRefs.join() ||
+                Object.values(evidence.flatpak_inputs).some(commit => !/^[0-9a-f]{64}$/.test(commit))) fail('Flatpak input identities');
+            const generation = JSON.parse(bytes['generator-provenance.json']);
+            if (generation.cargo_lock_sha256 !== evidence.cargo_lock_sha256 ||
+                generation.generated_sources_sha256 !== hash(bytes['generated-cargo-sources.json']) ||
+                canonical(generation.generator) !== canonical(evidence.generator)) fail('generator provenance mismatch');
+            const sourceFile = async file => {
+              const response = await github.rest.repos.getContent({owner, repo, path: file, ref: sha});
+              if (response.data.type !== 'file' || response.data.encoding !== 'base64' || response.data.size > 1024 * 1024)
+                fail('unexpected source identity response');
+              return Buffer.from(response.data.content, 'base64');
+            };
+            if (hash(await sourceFile(workflow)) !== evidence.workflow_sha256 ||
+                hash(await sourceFile('Cargo.lock')) !== evidence.cargo_lock_sha256 ||
+                hash(await sourceFile('packaging/flatpak/org.snitchwatch.Snitchwatch.system.yml')) !== evidence.manifest_sha256 ||
+                canonical(JSON.parse(await sourceFile('packaging/flatpak/cargo-generator-pin.json'))) !== canonical(evidence.generator))
+              fail('source file identity mismatch');
+            const commit = await github.rest.git.getCommit({owner, repo, commit_sha: sha});
+            const submodule = await github.rest.repos.getContent({owner, repo, path: 'vendor/opensnitch', ref: sha});
+            if (commit.data.tree.sha !== evidence.source_tree || submodule.data.sha !== evidence.submodule_commit)
+              fail('source tree/submodule mismatch');
+            const branch = await github.rest.git.getRef({owner, repo, ref: 'heads/r13-candidate'});
+            if (branch.data.object.sha !== sha) fail('candidate branch moved');
+            const runs = await github.rest.actions.listWorkflowRuns({owner, repo, workflow_id: 'ci.yml',
+              head_sha: sha, per_page: 100});
+            const ci = runs.data.workflow_runs.find(run => run.head_sha === sha && ['push', 'pull_request'].includes(run.event));
+            if (!ci || ci.status !== 'completed' || ci.conclusion !== 'success' || ci.repository.full_name !== 'bearyjd/snitchwatch')
+              fail('exact-head native CI missing or failed');
+            const jobs = await github.rest.actions.listJobsForWorkflowRun({owner, repo, run_id: ci.id, filter: 'latest', per_page: 100});
+            for (const name of ['check', 'test', 'package-check', 'kirigami', 'candidate-contract']) {
+              const matches = jobs.data.jobs.filter(job => job.name === name && job.head_sha === sha && job.run_attempt === ci.run_attempt);
+              if (matches.length !== 1 || matches[0].conclusion !== 'success') fail(`missing green CI job ${name}`);
+            }
+            try {
+              await github.rest.repos.getReleaseByTag({owner, repo, tag: 'r13-candidate'});
+              fail('candidate release already exists; no replacement allowed');
+            } catch (error) { if (error.status !== 404) throw error; }
+            try {
+              const tag = await github.rest.git.getRef({owner, repo, ref: 'tags/r13-candidate'});
+              if (tag.data.object.type !== 'commit' || tag.data.object.sha !== sha) fail('candidate tag mismatch');
+            } catch (error) { if (error.status !== 404) throw error; }
+            core.exportVariable('VERIFIED_PACKET_SHA256', packetHash);
+            core.exportVariable('VERIFIED_CI_RUN_ID', String(ci.id));
+            core.info(`Validated candidate packet ${packetHash}; exact-head CI ${ci.id}. Runtime acceptance remains pending.`);
+      - name: Attest validated bundle and identity packet as data
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            ${{ runner.temp }}/candidate-data/snitchwatch-system-r13-candidate.flatpak
+            ${{ runner.temp }}/candidate-data/candidate-packet.json
+      - name: Publish fixed prerelease data
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const crypto = require('crypto');
+            const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
+            const {owner, repo} = context.repo;
+            const sha = process.env.GITHUB_SHA;
+            if (owner !== 'bearyjd' || repo !== 'snitchwatch' || context.eventName !== 'push' ||
+                context.ref !== 'refs/heads/r13-candidate' || sha !== process.env.REVIEWED_SHA ||
+                !/^[0-9a-f]{40}$/.test(sha) || !/^[0-9a-f]{64}$/.test(process.env.VERIFIED_PACKET_SHA256))
+              throw new Error('publication context mismatch');
+            const base = path.join(process.env.RUNNER_TEMP, 'candidate-data');
+            const raw = fs.readFileSync(path.join(base, 'candidate-packet.json'));
+            if (hash(raw) !== process.env.VERIFIED_PACKET_SHA256) throw new Error('packet changed after validation');
+            const packet = JSON.parse(raw);
+            const files = Object.entries(packet.assets).map(([name, identity]) => {
+              const data = fs.readFileSync(path.join(base, name));
+              if (hash(data) !== identity.sha256 || data.length !== identity.size) throw new Error('asset changed after validation');
+              return {name, data};
+            });
+            files.push({name: 'candidate-packet.json', data: raw});
+            const branch = await github.rest.git.getRef({owner, repo, ref: 'heads/r13-candidate'});
+            if (branch.data.object.sha !== sha) throw new Error('candidate branch moved');
+            let tag;
+            try {
+              tag = await github.rest.git.getRef({owner, repo, ref: 'tags/r13-candidate'});
+            } catch (error) { if (error.status !== 404) throw error; }
+            // Draft releases do not create their tag. Create only a missing fixed ref;
+            // conflicts fail closed, without moving or overwriting an existing tag.
+            if (!tag) tag = await github.rest.git.createRef({owner, repo, ref: 'refs/tags/r13-candidate', sha});
+            if (tag.data.object.type !== 'commit' || tag.data.object.sha !== sha)
+              throw new Error('candidate tag moved');
+            // All destinations are literals. Create draft, attach data, make prerelease public last.
+            // A failure leaves a draft and HOLD; there is no overwrite/retry shortcut.
+            const release = await github.rest.repos.createRelease({owner, repo, tag_name: 'r13-candidate',
+              target_commitish: sha, name: 'r13 system GUI candidate', prerelease: true, draft: true,
+              make_latest: 'false', body: `Candidate only. Runtime acceptance pending.\nSource: ${sha}\nPacket SHA256: ${process.env.VERIFIED_PACKET_SHA256}\nCI run: ${process.env.VERIFIED_CI_RUN_ID}\nPreserve these bundle bytes for any accepted promotion.`});
+            for (const {name, data} of files) {
+              const uploaded = await github.rest.repos.uploadReleaseAsset({owner, repo, release_id: release.data.id,
+                name, data, headers: {'content-type': 'application/octet-stream', 'content-length': data.length}});
+              if (uploaded.data.name !== name || uploaded.data.size !== data.length ||
+                  uploaded.data.digest !== `sha256:${hash(data)}`) throw new Error('uploaded asset identity mismatch; draft remains HOLD');
+            }
+            const finalTag = await github.rest.git.getRef({owner, repo, ref: 'tags/r13-candidate'});
+            if (finalTag.data.object.type !== 'commit' || finalTag.data.object.sha !== sha)
+              throw new Error('candidate tag changed during upload; draft remains HOLD');
+            await github.rest.repos.updateRelease({owner, repo, release_id: release.data.id,
+              draft: false, prerelease: true, make_latest: 'false'});
+            core.info(`Candidate prerelease ${release.data.html_url}; packet ${process.env.VERIFIED_PACKET_SHA256}. Stable remains HOLD.`);

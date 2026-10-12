@@ -44,6 +44,10 @@ const ALL_QML: &[(&str, &str)] = &[
         "DiagnosticsPage.qml",
         include_str!("../qml/DiagnosticsPage.qml"),
     ),
+    (
+        "DnsConsentDialog.qml",
+        include_str!("../qml/DnsConsentDialog.qml"),
+    ),
     ("GeoPage.qml", include_str!("../qml/GeoPage.qml")),
     (
         "InlineVerdicts.qml",

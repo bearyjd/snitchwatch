@@ -126,3 +126,60 @@ pub async fn nothing_sent(seen: &mut mpsc::Receiver<Notification>) {
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(seen.try_recv().is_err(), "a command reached the daemon");
 }
+
+/// Deliberate opt-in traverses the authenticated socket and its private ticket.
+pub async fn consent_dns(bridge: &RunningBridge, purpose: &str) {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+    let transport = tokio::net::UnixStream::connect(&bridge.ws_socket_path)
+        .await
+        .unwrap();
+    let (mut gui, _) = tokio_tungstenite::client_async("ws://localhost/stream", transport)
+        .await
+        .unwrap();
+    gui.send(Message::Text(bridge.ws_token.as_str().into()))
+        .await
+        .unwrap();
+    let ack = gui.next().await.unwrap().unwrap();
+    assert!(ack.to_string().contains("authenticated"));
+    let prepare = serde_json::json!({"action":"prepareCuratedBroadOptIn","requestId":"dns-test","id":"dns-resolved","purpose":purpose});
+    gui.send(Message::Text(prepare.to_string())).await.unwrap();
+    let ticket = tokio::time::timeout(WAIT, async {
+        loop {
+            let frame = gui.next().await.unwrap().unwrap();
+            if let Message::Text(text) = frame {
+                let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+                if value["action"] == "curatedBroadOptInPrepared" {
+                    break value["ticket"].as_str().unwrap().to_owned();
+                }
+            }
+        }
+    })
+    .await
+    .unwrap();
+    let action = if purpose == "keep" {
+        "keepCuratedBroadDefault"
+    } else {
+        "enableCuratedBroadDefault"
+    };
+    let enable = serde_json::json!({"action":action,"requestId":"dns-test","id":"dns-resolved","purpose":purpose,
+        "ticket":ticket,"consent":"resolver-any-address-v1"});
+    gui.send(Message::Text(enable.to_string())).await.unwrap();
+    tokio::time::timeout(WAIT, async {
+        loop {
+            let frame = gui.next().await.unwrap().unwrap();
+            if let Message::Text(text) = frame {
+                let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+                if value["action"] == "curatedDefaultsRequestResult"
+                    && value["requestId"] == "dns-test"
+                {
+                    assert_eq!(value["results"][0]["outcome"], "choiceAccepted", "{value}");
+                    assert_eq!(value["results"][0]["persisted"], true, "{value}");
+                    break;
+                }
+            }
+        }
+    })
+    .await
+    .unwrap();
+}

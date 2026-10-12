@@ -335,3 +335,87 @@ fn verdict_duration_wire_tokens_are_snake_case() {
         "until_restart"
     );
 }
+
+#[test]
+fn modern_intents_reject_duplicate_unknown_and_spoofed_context_fields() {
+    let good = r#"{"action":"prepareCuratedBroadOptIn","requestId":"safe-1","id":"dns-resolved","purpose":"enable"}"#;
+    let ClientMessage::PrepareCuratedBroadOptIn { context, reply, .. } =
+        decode_client_message(good).unwrap()
+    else {
+        panic!()
+    };
+    assert!(context.is_none() && reply.is_none());
+    for extra in [
+        r#", "id":"dns-resolved""#,
+        r#", "purpose":"keep""#,
+        r#", "action":"setCuratedDefaults""#,
+        r#", "context":{"alive":true}"#,
+        r#", "reply":null"#,
+        r#", "ids":["dns-resolved"]"#,
+        r#", "policy":{}"#,
+    ] {
+        let malformed = format!("{}{}{}", &good[..good.len() - 1], extra, "}");
+        let failure = decode_client_message(&malformed).unwrap_err();
+        assert_eq!(failure.request_id.as_deref(), Some("safe-1"));
+        assert!(serde_json::from_str::<ClientMessage>(&malformed).is_err());
+    }
+    let duplicate_request = good.replace(
+        "\"requestId\":\"safe-1\"",
+        "\"requestId\":\"safe-1\",\"requestId\":\"safe-1\"",
+    );
+    assert_eq!(
+        decode_client_message(&duplicate_request)
+            .unwrap_err()
+            .request_id,
+        None
+    );
+}
+
+#[test]
+fn modern_intent_bounds_shape_purpose_and_safe_correlation() {
+    let ticket = "a".repeat(64);
+    let good = serde_json::json!({"action":"enableCuratedBroadDefault","requestId":"safe-1","id":"dns-resolved","purpose":"reenable","ticket":ticket,"consent":"resolver-any-address-v1"});
+    let message = decode_client_message(&good.to_string()).unwrap();
+    assert!(!format!("{message:?}").contains(&ticket));
+    for (field, wrong) in [
+        ("requestId", serde_json::json!("x".repeat(65))),
+        ("requestId", serde_json::json!("not_safe")),
+        ("requestId", serde_json::json!(1)),
+        ("id", serde_json::json!(["dns-resolved"])),
+        ("id", serde_json::json!("unknown")),
+        ("purpose", serde_json::json!("keep")),
+        ("ticket", serde_json::json!("A".repeat(64))),
+        ("ticket", serde_json::json!("a".repeat(63))),
+        ("consent", serde_json::json!("wrong")),
+    ] {
+        let mut value = good.clone();
+        value[field] = wrong;
+        assert!(decode_client_message(&value.to_string()).is_err());
+        assert!(serde_json::from_value::<ClientMessage>(value).is_err());
+    }
+    for missing in ["requestId", "id", "purpose", "ticket", "consent"] {
+        let mut value = good.clone();
+        value.as_object_mut().unwrap().remove(missing);
+        assert!(decode_client_message(&value.to_string()).is_err());
+    }
+    assert!(decode_client_message(&format!("{}{}", " ".repeat(4096), good)).is_err());
+    let prepared = ServerMessage::CuratedBroadOptInPrepared {
+        request_id: "safe-1".into(),
+        id: "dns-resolved".into(),
+        purpose: CuratedIntentPurpose::Enable,
+        ticket: ticket.clone(),
+    };
+    assert!(!format!("{prepared:?}").contains(&ticket));
+    assert_eq!(serde_json::to_value(prepared).unwrap()["ticket"], ticket);
+}
+
+#[test]
+fn legacy_curated_json_stays_compatible_and_defaults_private_reply_absent() {
+    let ClientMessage::SetCuratedDefaults { ids, on, request_id, reply } = decode_client_message(r#"{"action":"setCuratedDefaults","ids":["dns-resolved"],"on":true,"ignoredOldExtension":1}"#).unwrap() else { panic!() };
+    assert_eq!(ids, vec!["dns-resolved"]);
+    assert!(on && request_id.is_none() && reply.is_none());
+    assert!(decode_client_message(
+        r#"{"action":"setCuratedDefaults","ids":[],"on":true,"on":false}"#
+    )
+    .is_err());
+}

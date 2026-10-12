@@ -138,6 +138,8 @@ impl Harness {
 
 pub(super) fn turn(curated: &CuratedDefaults, id: &str, on: bool) {
     let routed = curated.try_route(ClientMessage::SetCuratedDefaults {
+        request_id: None,
+        reply: None,
         ids: vec![id.into()],
         on,
     });
