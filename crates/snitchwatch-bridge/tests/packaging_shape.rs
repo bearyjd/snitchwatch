@@ -75,6 +75,55 @@ fn flatpak_manifest_grants_socket_filesystem_but_not_network() {
     );
 }
 
+/// App icons need read-only views of host .desktop files and icon themes.
+/// Every such grant must be `:ro`, and the broad `host-os`/`host`/`home`
+/// grants must stay out: system-package apps get the generic icon instead.
+#[test]
+fn flatpak_icon_grants_are_read_only_and_narrow() {
+    for path in [
+        "packaging/flatpak/org.snitchwatch.Snitchwatch.yml",
+        "packaging/flatpak/org.snitchwatch.Snitchwatch.system.yml",
+    ] {
+        let body = read(path);
+        let finish_args = body
+            .split("finish-args:")
+            .nth(1)
+            .and_then(|rest| rest.split("\nmodules:").next())
+            .expect("manifest must have a finish-args block before modules");
+        let args: Vec<&str> = finish_args
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("- "))
+            .map(str::trim)
+            .collect();
+        for needed in [
+            "--filesystem=/var/lib/flatpak/exports/share:ro",
+            "--filesystem=xdg-data/flatpak/exports/share:ro",
+            "--filesystem=xdg-data/applications:ro",
+            "--filesystem=xdg-data/icons:ro",
+        ] {
+            assert!(
+                args.contains(&needed),
+                "{path}: finish-args missing `{needed}`"
+            );
+        }
+        for arg in &args {
+            if let Some(target) = arg.strip_prefix("--filesystem=") {
+                let broad = matches!(
+                    target.split(':').next(),
+                    Some("host" | "host-os" | "host-etc" | "home" | "/" | "/usr" | "/var")
+                );
+                assert!(!broad, "{path}: `{arg}` is too broad for app-icon lookup");
+            }
+        }
+        for arg in args
+            .iter()
+            .filter(|a| a.contains("applications") || a.contains("icons"))
+        {
+            assert!(arg.ends_with(":ro"), "{path}: `{arg}` must be read-only");
+        }
+    }
+}
+
 #[test]
 fn bridge_user_unit_pins_stable_grpc_bind_and_is_a_user_service() {
     let body = read("packaging/systemd/snitchwatch-bridge.service");

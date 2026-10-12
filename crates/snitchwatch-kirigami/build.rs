@@ -6,60 +6,65 @@
 //!
 //! Rust `#[cxx_qt::bridge]` modules that back QML types are added via
 //! `.file(...)` so their generated code is compiled and statically registered.
-use cxx_qt_build::{CxxQtBuilder, QmlModule};
+use cxx_qt_build::{CxxQtBuilder, QmlFile, QmlModule};
 
 fn main() {
-    let builder =
-        CxxQtBuilder::new_qml_module(QmlModule::new("com.snitchwatch.shell").qml_files([
-            "qml/main.qml",
-            "qml/TrayMenu.qml",
-            "qml/SizedOverlaySheet.qml",
-            "qml/ConnectionsPage.qml",
-            "qml/InlineVerdicts.qml",
-            "qml/PromptSlotBanner.qml",
-            "qml/PendingDecisionSheet.qml",
-            "qml/DecideLaterButton.qml",
-            "qml/MakeRuleSheet.qml",
-            "qml/MakeRuleOutcomes.qml",
-            "qml/BlocklistsPage.qml",
-            "qml/RulesPage.qml",
-            "qml/RulesInsightsText.qml",
-            "qml/RulesEmptyPlaceholder.qml",
-            "qml/RuleSimulatorSheet.qml",
-            "qml/RulesImportSheet.qml",
-            "qml/RuleEditorSheet.qml",
-            "qml/ProfilesPage.qml",
-            "qml/RecommendedRulesPage.qml",
-            "qml/DnsConsentDialog.qml",
-            "qml/TrafficPage.qml",
-            "qml/OnboardingPage.qml",
-            "qml/DiagnosticsPage.qml",
-            "qml/GeoPage.qml",
-            "qml/ScannerPage.qml",
-            "qml/DaemonHealthPage.qml",
-        ]))
-        .qt_module("Widgets")
-        .file("src/application.rs")
-        .file("src/bridge_bindings.rs")
-        .file("src/bridge_feed.rs")
-        .file("src/connections_model.rs")
-        .file("src/insight_model.rs")
-        .file("src/blocklists_model.rs")
-        .file("src/rules_model.rs")
-        .file("src/rules_io_controller.rs")
-        .file("src/rule_editor_controller.rs")
-        .file("src/make_rule_controller.rs")
-        .file("src/profiles_model.rs")
-        .file("src/curated_defaults_model.rs")
-        .file("src/traffic_model.rs")
-        .file("src/wizard_controller.rs")
-        .file("src/settings_controller.rs")
-        .file("src/notification_controller.rs")
-        .file("src/tray_controller.rs")
-        .file("src/prompt_slot_status.rs")
-        .file("src/geo_model.rs")
-        .file("src/scanner_controller.rs")
-        .file("src/daemon_health_model.rs");
+    let builder = CxxQtBuilder::new_qml_module(
+        QmlModule::new("com.snitchwatch.shell")
+            // `Theme.qml` is a `pragma Singleton`; it needs the qmldir
+            // `singleton` flag, so it is declared as a `QmlFile`.
+            .qml_file(QmlFile::from("qml/Theme.qml").singleton(true))
+            .qml_files([
+                "qml/main.qml",
+                "qml/TrayMenu.qml",
+                "qml/SizedOverlaySheet.qml",
+                "qml/ConnectionsPage.qml",
+                "qml/InlineVerdicts.qml",
+                "qml/PromptSlotBanner.qml",
+                "qml/PendingDecisionSheet.qml",
+                "qml/DecideLaterButton.qml",
+                "qml/MakeRuleSheet.qml",
+                "qml/MakeRuleOutcomes.qml",
+                "qml/BlocklistsPage.qml",
+                "qml/RulesPage.qml",
+                "qml/RulesInsightsText.qml",
+                "qml/RulesEmptyPlaceholder.qml",
+                "qml/RuleSimulatorSheet.qml",
+                "qml/RulesImportSheet.qml",
+                "qml/RuleEditorSheet.qml",
+                "qml/ProfilesPage.qml",
+                "qml/RecommendedRulesPage.qml",
+                "qml/DnsConsentDialog.qml",
+                "qml/TrafficPage.qml",
+                "qml/OnboardingPage.qml",
+                "qml/DiagnosticsPage.qml",
+                "qml/GeoPage.qml",
+                "qml/ScannerPage.qml",
+                "qml/DaemonHealthPage.qml",
+            ]),
+    )
+    .qt_module("Widgets")
+    .file("src/application.rs")
+    .file("src/bridge_bindings.rs")
+    .file("src/bridge_feed.rs")
+    .file("src/connections_model.rs")
+    .file("src/insight_model.rs")
+    .file("src/blocklists_model.rs")
+    .file("src/rules_model.rs")
+    .file("src/rules_io_controller.rs")
+    .file("src/rule_editor_controller.rs")
+    .file("src/make_rule_controller.rs")
+    .file("src/profiles_model.rs")
+    .file("src/curated_defaults_model.rs")
+    .file("src/traffic_model.rs")
+    .file("src/wizard_controller.rs")
+    .file("src/settings_controller.rs")
+    .file("src/notification_controller.rs")
+    .file("src/tray_controller.rs")
+    .file("src/prompt_slot_status.rs")
+    .file("src/geo_model.rs")
+    .file("src/scanner_controller.rs")
+    .file("src/daemon_health_model.rs");
     // SAFETY: only add the crate-owned header directory; preserve builder flags.
     unsafe {
         builder.cc_builder(|cc| {

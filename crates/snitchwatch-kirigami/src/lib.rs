@@ -6,6 +6,7 @@
 //! Phase 3a spike proved cxx-qt issue #770 does not bite this repo — see
 //! `crates/kirigami-spike/tests/link_770.rs`).
 
+pub mod app_icons;
 pub mod application;
 pub mod autostart;
 pub mod blocklists;
@@ -22,6 +23,7 @@ pub mod curated_broad_consent;
 pub mod curated_defaults;
 pub mod curated_defaults_model;
 pub mod daemon_health_model;
+pub mod demo;
 pub mod geo;
 pub mod geo_model;
 pub(crate) mod inline_deny;

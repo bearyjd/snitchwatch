@@ -79,6 +79,16 @@ const ROLE_ANSWER_DEADLINE_MS: i32 = 23;
 /// "Make a rule…" is offered (`make_rule::offers_make_rule`): the prompt was
 /// put off, or the firewall's default action decided the row (E3).
 const ROLE_MAKE_RULE_OFFERED: i32 = 24;
+/// Executable path of the process, empty when the daemon did not report one.
+const ROLE_PROCESS_PATH: i32 = 25;
+/// `"outgoing"` / `"incoming"` as the bridge reports it; empty on headers.
+const ROLE_DIRECTION: i32 = 26;
+/// When the connection started, in Unix ms (a `real`: ms overflow a QML
+/// `int`); -1 on headers.
+const ROLE_STARTED_AT_MS: i32 = 27;
+/// Icon name (or path) for the process, from installed `.desktop` files;
+/// the generic executable icon when none matches, empty on headers.
+const ROLE_APP_ICON: i32 = 28;
 
 #[cxx_qt::bridge]
 pub mod qobject {
@@ -202,6 +212,12 @@ pub mod qobject {
         #[qinvokable]
         #[cxx_name = "setGroupedMode"]
         fn set_grouped_mode(self: Pin<&mut ConnectionsModel>, grouped: bool);
+
+        /// Fill the model with fake rows. A no-op unless the process was
+        /// started with `SNITCHWATCH_DEMO=1` (`crate::demo`).
+        #[qinvokable]
+        #[cxx_name = "loadDemoRows"]
+        fn load_demo_rows(self: Pin<&mut ConnectionsModel>);
 
         /// Toggle a top-level process group's expand/collapse state.
         #[qinvokable]
@@ -587,6 +603,10 @@ impl qobject::ConnectionsModel {
             ROLE_OUTCOME_TEXT => QVariant::from(&QString::from(outcome_text(row))),
             ROLE_ANSWER_DEADLINE_MS => QVariant::from(&answer_deadline_ms(row)),
             ROLE_MAKE_RULE_OFFERED => QVariant::from(&crate::make_rule::offers_make_rule(row)),
+            ROLE_PROCESS_PATH => QVariant::from(&QString::from(process_path_text(row))),
+            ROLE_DIRECTION => QVariant::from(&QString::from(&row.direction)),
+            ROLE_STARTED_AT_MS => QVariant::from(&started_at_ms(row)),
+            ROLE_APP_ICON => QVariant::from(&QString::from(&app_icon_for_row(row))),
             _ => QVariant::default(),
         }
     }
@@ -627,7 +647,23 @@ impl qobject::ConnectionsModel {
             QByteArray::from("answerDeadlineMs"),
         );
         roles.insert(ROLE_MAKE_RULE_OFFERED, QByteArray::from("makeRuleOffered"));
+        roles.insert(ROLE_PROCESS_PATH, QByteArray::from("processPath"));
+        roles.insert(ROLE_DIRECTION, QByteArray::from("direction"));
+        roles.insert(ROLE_STARTED_AT_MS, QByteArray::from("startedAtMs"));
+        roles.insert(ROLE_APP_ICON, QByteArray::from("appIcon"));
         roles
+    }
+
+    fn load_demo_rows(self: Pin<&mut Self>) {
+        if !crate::demo::enabled() {
+            return;
+        }
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as i64);
+        self.apply_server_message(ServerMessage::InsertConnectionRows {
+            rows: crate::demo::demo_rows(now_ms),
+        });
     }
 
     fn apply_server_message_json(self: Pin<&mut Self>, json: &QString) {
@@ -1267,6 +1303,21 @@ fn answer_deadline_ms(row: &ConnectionRow) -> f64 {
 /// Read one role of a grouped-projection [`VisibleEntry`] into the QVariant
 /// shape `data()` returns. `store` resolves leaf `Row` entries' full
 /// `ConnectionRow` content (the tree only tracks ids).
+/// The row's executable path, empty when the daemon reported none.
+fn process_path_text(row: &ConnectionRow) -> &str {
+    row.process_path.as_deref().unwrap_or("")
+}
+
+/// `startedAtMs` as a `real` (epoch ms overflow a QML `int`).
+fn started_at_ms(row: &ConnectionRow) -> f64 {
+    row.started_at_ms as f64
+}
+
+/// Icon for the row's process; the generic icon when the path is unknown.
+fn app_icon_for_row(row: &ConnectionRow) -> String {
+    crate::app_icons::icon_for_path(process_path_text(row))
+}
+
 fn grouped_entry_data(entry: &VisibleEntry, role: i32, store: &RowStore) -> QVariant {
     match entry {
         VisibleEntry::ProcessHeader {
@@ -1296,7 +1347,10 @@ fn grouped_entry_data(entry: &VisibleEntry, role: i32, store: &RowStore) -> QVar
                 QVariant::from(&QString::from(""))
             }
             ROLE_ANSWERED_WHILE_PAUSED | ROLE_MAKE_RULE_OFFERED => QVariant::from(&false),
-            ROLE_ANSWER_DEADLINE_MS => QVariant::from(&-1.0f64),
+            ROLE_ANSWER_DEADLINE_MS | ROLE_STARTED_AT_MS => QVariant::from(&-1.0f64),
+            ROLE_PROCESS_PATH | ROLE_DIRECTION | ROLE_APP_ICON => {
+                QVariant::from(&QString::from(""))
+            }
             _ => QVariant::default(),
         },
         VisibleEntry::DomainHeader {
@@ -1327,7 +1381,10 @@ fn grouped_entry_data(entry: &VisibleEntry, role: i32, store: &RowStore) -> QVar
                 QVariant::from(&QString::from(""))
             }
             ROLE_ANSWERED_WHILE_PAUSED | ROLE_MAKE_RULE_OFFERED => QVariant::from(&false),
-            ROLE_ANSWER_DEADLINE_MS => QVariant::from(&-1.0f64),
+            ROLE_ANSWER_DEADLINE_MS | ROLE_STARTED_AT_MS => QVariant::from(&-1.0f64),
+            ROLE_PROCESS_PATH | ROLE_DIRECTION | ROLE_APP_ICON => {
+                QVariant::from(&QString::from(""))
+            }
             _ => QVariant::default(),
         },
         VisibleEntry::Row { id, .. } => {
@@ -1364,6 +1421,10 @@ fn grouped_entry_data(entry: &VisibleEntry, role: i32, store: &RowStore) -> QVar
                 ROLE_OUTCOME_TEXT => QVariant::from(&QString::from(outcome_text(row))),
                 ROLE_ANSWER_DEADLINE_MS => QVariant::from(&answer_deadline_ms(row)),
                 ROLE_MAKE_RULE_OFFERED => QVariant::from(&crate::make_rule::offers_make_rule(row)),
+                ROLE_PROCESS_PATH => QVariant::from(&QString::from(process_path_text(row))),
+                ROLE_DIRECTION => QVariant::from(&QString::from(&row.direction)),
+                ROLE_STARTED_AT_MS => QVariant::from(&started_at_ms(row)),
+                ROLE_APP_ICON => QVariant::from(&QString::from(&app_icon_for_row(row))),
                 _ => QVariant::default(),
             }
         }
@@ -1490,5 +1551,37 @@ mod tests {
     fn collect_new_pending_ids_empty_for_non_insert_batches() {
         assert!(collect_new_pending_ids(&[ServerMessage::ClearConnectionRows]).is_empty());
         assert!(collect_new_pending_ids(&[]).is_empty());
+    }
+
+    #[test]
+    fn new_row_helpers_read_the_bridge_row() {
+        let mut r = row("a", None);
+        assert_eq!(process_path_text(&r), "");
+        r.process_path = Some("/usr/bin/curl".into());
+        r.started_at_ms = 1_760_000_000_123;
+        assert_eq!(process_path_text(&r), "/usr/bin/curl");
+        assert_eq!(started_at_ms(&r), 1_760_000_000_123.0);
+    }
+
+    #[test]
+    fn app_icon_is_generic_without_a_process_path() {
+        assert_eq!(
+            app_icon_for_row(&row("a", None)),
+            crate::app_icons::FALLBACK_ICON
+        );
+    }
+
+    #[test]
+    fn new_roles_have_distinct_ids_and_names() {
+        let ids = [
+            ROLE_PROCESS_PATH,
+            ROLE_DIRECTION,
+            ROLE_STARTED_AT_MS,
+            ROLE_APP_ICON,
+        ];
+        for (i, a) in ids.iter().enumerate() {
+            assert!(*a > ROLE_MAKE_RULE_OFFERED);
+            assert!(!ids[i + 1..].contains(a));
+        }
     }
 }

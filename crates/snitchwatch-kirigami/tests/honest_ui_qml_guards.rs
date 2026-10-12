@@ -85,6 +85,7 @@ const ALL_QML: &[(&str, &str)] = &[
     ("ScannerPage.qml", include_str!("../qml/ScannerPage.qml")),
     ("SizedOverlaySheet.qml", SIZED_SHEET),
     ("TrafficPage.qml", include_str!("../qml/TrafficPage.qml")),
+    ("Theme.qml", include_str!("../qml/Theme.qml")),
     ("TrayMenu.qml", include_str!("../qml/TrayMenu.qml")),
 ];
 

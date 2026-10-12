@@ -133,17 +133,6 @@ Kirigami.ScrollablePage {
     // Simulate sheet, which this page has no reference to.
     signal simulateConnectionRequested(string prefillJson)
 
-    // Verdict token -> accent colour. Kept in QML since it's pure presentation.
-    function verdictColor(verdict) {
-        switch (verdict) {
-        case "pending": return Kirigami.Theme.neutralTextColor;
-        case "allowed": return Kirigami.Theme.positiveTextColor;
-        case "denied": return Kirigami.Theme.negativeTextColor;
-        case "blocklisted": return Kirigami.Theme.negativeTextColor;
-        default: return Kirigami.Theme.disabledTextColor;
-        }
-    }
-
     function verdictGlyph(verdict, pending) {
         if (pending) return "◐";
         switch (verdict) {
@@ -319,6 +308,8 @@ Kirigami.ScrollablePage {
             required property string outcomeText
             required property real answerDeadlineMs
             required property bool makeRuleOffered
+            // Icon name/path from the process's .desktop file (empty on headers).
+            required property string appIcon
 
             // Issue #18 double-submit guard: the inline/batch buttons stay
             // visible until the round trip flips `pending` to false, so a
@@ -420,7 +411,16 @@ Kirigami.ScrollablePage {
                     visible: !row.isGroupHeader
                     textFormat: Text.PlainText
                     text: page.verdictGlyph(row.verdict, row.pending)
-                    color: page.verdictColor(row.verdict)
+                    color: Theme.verdictColor(row.verdict)
+                    Layout.alignment: Qt.AlignVCenter
+                }
+
+                Kirigami.Icon {
+                    visible: !row.isGroupHeader
+                    source: row.appIcon
+                    fallback: "application-x-executable"
+                    Layout.preferredWidth: Theme.iconRow
+                    Layout.preferredHeight: Theme.iconRow
                     Layout.alignment: Qt.AlignVCenter
                 }
 
@@ -453,7 +453,7 @@ Kirigami.ScrollablePage {
                         : row.outcomeText !== "" ? row.outcomeText
                         : row.answeredWhilePaused ? "Allowed once (filtering was paused)"
                         : row.verdict
-                    color: page.verdictColor(row.verdict)
+                    color: Theme.verdictColor(row.verdict)
                     Layout.alignment: Qt.AlignVCenter
                 }
 
@@ -711,7 +711,7 @@ Kirigami.ScrollablePage {
                     text: page.inspectVerdictText
                     color: page.inspectNoLongerPending
                         ? Kirigami.Theme.disabledTextColor
-                        : page.verdictColor(page.inspectVerdict)
+                        : Theme.verdictColor(page.inspectVerdict)
                 }
                 Controls.Label {
                     Kirigami.FormData.label: "Matched rule"
