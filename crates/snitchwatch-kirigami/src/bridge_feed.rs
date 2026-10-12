@@ -164,7 +164,15 @@ fn published(link: Option<LinkStatus>) -> (bool, String, &'static str) {
 
 impl qobject::BridgeFeed {
     fn refresh(mut self: Pin<&mut Self>) {
-        let (ok, detail, state) = published(crate::bridge_runtime::link_status());
+        let (ok, detail, state) = if crate::demo::enabled() {
+            (
+                true,
+                "Demo mode: no bridge".to_string(),
+                LinkState::Connected.token(),
+            )
+        } else {
+            published(crate::bridge_runtime::link_status())
+        };
         self.as_mut().set_ok(ok);
         self.as_mut().set_status_text(QString::from(&detail));
         self.as_mut().set_link_state(QString::from(state));

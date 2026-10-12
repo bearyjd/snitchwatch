@@ -15,7 +15,7 @@
 use snitchwatch_kirigami::bridge_bindings as _;
 
 use cxx_qt_lib::{QQmlApplicationEngine, QString, QUrl};
-use snitchwatch_kirigami::{application, bridge_runtime, logging};
+use snitchwatch_kirigami::{application, bridge_runtime, demo, logging};
 
 fn main() {
     // Without this, every `tracing::info!`/`tracing::error!` call in this
@@ -42,9 +42,14 @@ fn main() {
     // the UI via the `BridgeFeed` status property (bound to a Kirigami
     // InlineMessage in main.qml). Never panic here — a failed bridge must
     // degrade to a visible status, not a dead window.
-    match bridge_runtime::ensure_started() {
-        (true, msg) => tracing::info!(status = %msg, "bridge client started"),
-        (false, msg) => tracing::error!(status = %msg, "bridge client unavailable"),
+    if demo::enabled() {
+        // Demo mode never starts or contacts a bridge.
+        tracing::info!("SNITCHWATCH_DEMO=1: demo mode, bridge client not started");
+    } else {
+        match bridge_runtime::ensure_started() {
+            (true, msg) => tracing::info!(status = %msg, "bridge client started"),
+            (false, msg) => tracing::error!(status = %msg, "bridge client unavailable"),
+        }
     }
 
     let mut app = application::new();

@@ -225,6 +225,90 @@ Kirigami.ApplicationWindow {
         notificationController.startBridgeFeed();
         trayController.startBridgeFeed();
         promptSlotStatus.startBridgeFeed();
+        // SNITCHWATCH_DEMO=1 only (the model ignores the call otherwise).
+        if (appInfo.demoMode) {
+            connectionsModel.loadDemoRows();
+        }
+    }
+
+    // Review screenshots: SNITCHWATCH_DEMO=1 + SNITCHWATCH_SCREENSHOT_DIR=<dir>
+    // (`appInfo.screenshotDir` is empty unless both are set). Walks a few
+    // pages, grabs the window to <dir>/<name>.png after each has rendered,
+    // then quits. Never active in a normal session.
+    QtObject {
+        id: screenshots
+        property int step: 0
+        property int pending: 0
+        readonly property var shots: [
+            { name: "main" },
+            { name: "connections-expanded", expand: 0 },
+            { name: "connections-flat", flat: true },
+            { name: "rules", page: "rules" },
+            { name: "blocklists", page: "blocklists" }
+        ]
+        function capture(name) {
+            screenshots.pending++;
+            root.pageStack.grabToImage(function (result) {
+                const ok = result.saveToFile(appInfo.screenshotDir + "/" + name + ".png");
+                console.log("screenshot " + name + (ok ? " saved" : " FAILED"));
+                screenshots.pending--;
+            });
+        }
+        // Expand every collapsed group header at `depth` (0 = process,
+        // 1 = domain; expanding a process already opens its domains). Keys
+        // are collected first: each toggle reshapes the list.
+        function expandDepth(depth) {
+            const m = root.connectionsModelRef;
+            const list = root.pageStack.currentItem.connectionList;
+            list.forceLayout();
+            const todo = [];
+            for (let i = 0; i < list.count; i++) {
+                const d = list.itemAtIndex(i);
+                if (d && d.isGroupHeader && d.depth === depth && !d.expanded) {
+                    todo.push({ key: d.groupKey, parent: d.groupParentKey });
+                }
+            }
+            for (const t of todo) {
+                if (depth === 0) {
+                    m.toggleProcessGroup(t.key);
+                } else {
+                    m.toggleDomainGroup(t.parent, t.key);
+                }
+            }
+        }
+    }
+    Timer {
+        interval: 700
+        running: appInfo.screenshotDir !== ""
+        repeat: true
+        onTriggered: {
+            if (screenshots.pending > 0) {
+                return;
+            }
+            if (!root.visible) {
+                root.show();
+                return;
+            }
+            if (screenshots.step >= screenshots.shots.length) {
+                stop();
+                Qt.quit();
+                return;
+            }
+            const shot = screenshots.shots[screenshots.step++];
+            if (shot.page === "rules") {
+                root.pageStack.replace(rulesPageComponent);
+            } else if (shot.page === "blocklists") {
+                root.pageStack.replace(blocklistsPageComponent);
+            }
+            if (shot.expand !== undefined) {
+                screenshots.expandDepth(shot.expand);
+            }
+            if (shot.flat) {
+                root.connectionsModelRef.setGroupedMode(false);
+            }
+            // Give the page a frame to lay out before grabbing it.
+            Qt.callLater(function () { screenshots.capture(shot.name); });
+        }
     }
 
     // Inbound routing (Task 13): model request signals carry a JSON-encoded

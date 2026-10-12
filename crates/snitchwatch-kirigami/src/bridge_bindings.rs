@@ -21,6 +21,10 @@ pub mod qobject {
         #[qml_element]
         #[qproperty(QString, app_name, cxx_name = "appName")]
         #[qproperty(QString, version)]
+        /// `SNITCHWATCH_DEMO=1`: fake rows, no bridge (see `crate::demo`).
+        #[qproperty(bool, demo_mode, cxx_name = "demoMode")]
+        /// Screenshot output directory; empty unless demo mode is on.
+        #[qproperty(QString, screenshot_dir, cxx_name = "screenshotDir")]
         type AppInfo = super::AppInfoRust;
     }
 }
@@ -29,6 +33,8 @@ pub mod qobject {
 pub struct AppInfoRust {
     app_name: cxx_qt_lib::QString,
     version: cxx_qt_lib::QString,
+    demo_mode: bool,
+    screenshot_dir: cxx_qt_lib::QString,
 }
 
 impl Default for AppInfoRust {
@@ -36,6 +42,12 @@ impl Default for AppInfoRust {
         Self {
             app_name: cxx_qt_lib::QString::from("Snitchwatch"),
             version: cxx_qt_lib::QString::from(env!("CARGO_PKG_VERSION")),
+            demo_mode: crate::demo::enabled(),
+            screenshot_dir: cxx_qt_lib::QString::from(
+                crate::demo::screenshot_dir()
+                    .map(|d| d.display().to_string())
+                    .unwrap_or_default(),
+            ),
         }
     }
 }

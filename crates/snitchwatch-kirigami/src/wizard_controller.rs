@@ -98,6 +98,10 @@ impl Default for WizardControllerRust {
 
 impl qobject::WizardController {
     fn probe(mut self: Pin<&mut Self>) {
+        // Demo mode has no bridge by design; keep onboarding out of the way.
+        if crate::demo::enabled() {
+            return;
+        }
         self.as_mut().set_busy(true);
         let connected =
             crate::bridge_runtime::handles().is_some_and(|handles| handles.is_connected());

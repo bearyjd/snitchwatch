@@ -196,6 +196,16 @@ why `kirigami-spike`/`snitchwatch-kirigami` are excluded from the workspace
 just kirigami-dev
 ```
 
+To review the look without a bridge or daemon, `SNITCHWATCH_DEMO=1` fills the
+Connections list with fake rows (the bridge is never started), and
+`just kirigami-screenshots [dir]` renders it offscreen and writes PNGs of the
+main pages to `dir` (default `target/screenshots`). Screenshots are captured
+with the Basic Qt Quick style; the Flatpak uses the platform style, so
+colours and metrics differ slightly. App icons in the connection list come
+from the host's `.desktop` files; the Flatpak gets read-only grants for the
+Flatpak exports and the user's data dirs only, so apps installed from system
+packages show a generic icon there.
+
 Everything else — autostart, crash log, privacy/RDAP opt-in, `opensnitch-ui`
 coexistence — works the same way as documented above for the Tauri shell,
 just reached from this shell's own **Settings & Diagnostics** page instead.
