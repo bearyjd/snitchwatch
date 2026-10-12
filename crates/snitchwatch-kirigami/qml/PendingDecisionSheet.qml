@@ -155,9 +155,9 @@ ColumnLayout {
     // Granular rule scopes (Parity 2): how long the resulting rule should
     // live. Maps onto the bridge's `VerdictDuration` — see
     // `pending_decision.rs`'s doc comment for the full duration-mapping
-    // table. The `until_quit` token is daemon "until restart", so it is
-    // labelled "Until firewall restarts": opensnitchd has no notion of an app
-    // quitting.
+    // table. The list is `Durations.all`, shared with the alert; "Until
+    // Restart" is daemon "until restart" (opensnitchd has no notion of an app
+    // quitting). It opens on the Settings default where that is offered.
     RowLayout {
         Layout.fillWidth: true
         Controls.Label {
@@ -169,18 +169,11 @@ ColumnLayout {
             Layout.fillWidth: true
             textRole: "label"
             valueRole: "token"
-            // Back-reference: `model[0]`'s token ("this_time") is what
-            // `ConnectionsPage.qml`'s inline Allow sends, and `until_quit` is
-            // what its inline Deny sends for a program it can bind a rule to,
-            // on a bridge that advertised app-bound rules (`inline_deny.rs`).
-            model: sheet.remembers
-                ? [
-                    { label: "This time", token: "this_time" },
-                    { label: "For 5 minutes", token: "for_5_minutes" },
-                    { label: "Until firewall restarts", token: "until_quit" },
-                    { label: "Forever", token: "forever" }
-                ]
-                : [{ label: "This time", token: "this_time" }]
+            // `Durations.all[0]` ("this_time") is the only choice where a
+            // rule can't be bound (`inline_deny.rs` decides the same for the
+            // inline buttons).
+            model: sheet.remembers ? Durations.all : [Durations.all[0]]
+            currentIndex: sheet.remembers ? Math.max(0, Durations.indexOf(Durations.defaultToken)) : 0
         }
     }
 

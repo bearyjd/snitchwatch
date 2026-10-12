@@ -222,6 +222,7 @@ Kirigami.ApplicationWindow {
         curatedDefaultsModel.startBridgeFeed();
         geoModel.startBridgeFeed();
         wizardController.probe();
+        settingsController.refreshPreferences();
         notificationController.startBridgeFeed();
         trayController.startBridgeFeed();
         promptSlotStatus.startBridgeFeed();
@@ -231,83 +232,49 @@ Kirigami.ApplicationWindow {
         }
     }
 
-    // Review screenshots: SNITCHWATCH_DEMO=1 + SNITCHWATCH_SCREENSHOT_DIR=<dir>
-    // (`appInfo.screenshotDir` is empty unless both are set). Walks a few
-    // pages, grabs the window to <dir>/<name>.png after each has rendered,
-    // then quits. Never active in a normal session.
-    QtObject {
-        id: screenshots
-        property int step: 0
-        property int pending: 0
-        readonly property var shots: [
-            { name: "main" },
-            { name: "connections-expanded", expand: 0 },
-            { name: "connections-flat", flat: true },
-            { name: "rules", page: "rules" },
-            { name: "blocklists", page: "blocklists" }
-        ]
-        function capture(name) {
-            screenshots.pending++;
-            root.pageStack.grabToImage(function (result) {
-                const ok = result.saveToFile(appInfo.screenshotDir + "/" + name + ".png");
-                console.log("screenshot " + name + (ok ? " saved" : " FAILED"));
-                screenshots.pending--;
-            });
-        }
-        // Expand every collapsed group header at `depth` (0 = process,
-        // 1 = domain; expanding a process already opens its domains). Keys
-        // are collected first: each toggle reshapes the list.
-        function expandDepth(depth) {
-            const m = root.connectionsModelRef;
-            const list = root.pageStack.currentItem.connectionList;
-            list.forceLayout();
-            const todo = [];
-            for (let i = 0; i < list.count; i++) {
-                const d = list.itemAtIndex(i);
-                if (d && d.isGroupHeader && d.depth === depth && !d.expanded) {
-                    todo.push({ key: d.groupKey, parent: d.groupParentKey });
-                }
+    // Review screenshots (demo mode only); see ScreenshotRunner.qml.
+    ScreenshotRunner {
+        window: root
+        dir: appInfo.screenshotDir
+        alertWindow: alertHost.alert
+        pages: ({ rules: rulesPageComponent, blocklists: blocklistsPageComponent })
+    }
+
+    // The standalone alert and the silent-mode/duration wiring (LS redesign
+    // phase 1); see AlertHost.qml.
+    AlertHost {
+        id: alertHost
+        settings: settingsController
+        bridgeFeed: bridgeFeed
+        model: connectionsModel
+        window: root
+        onNotice: text => root.showPassiveNotification(text, "long")
+    }
+
+    // First-run step asking how new connections are treated when nobody is
+    // asked. Shown once, while nothing has been chosen yet.
+    property bool silentStepShown: false
+    Component {
+        id: silentModePageComponent
+        SilentModePage {
+            settings: settingsController
+            onDone: {
+                root.silentStepShown = false;
+                root.pageStack.pop();
             }
-            for (const t of todo) {
-                if (depth === 0) {
-                    m.toggleProcessGroup(t.key);
-                } else {
-                    m.toggleDomainGroup(t.parent, t.key);
-                }
+            onReviewRecommendedRules: {
+                root.silentStepShown = false;
+                root.pageStack.replace(recommendedRulesPageComponent);
             }
         }
     }
-    Timer {
-        interval: 700
-        running: appInfo.screenshotDir !== ""
-        repeat: true
-        onTriggered: {
-            if (screenshots.pending > 0) {
-                return;
+    Connections {
+        target: settingsController
+        function onPreferencesLoadedChanged() {
+            if (settingsController.silentMode === "" && !appInfo.demoMode && !root.silentStepShown) {
+                root.silentStepShown = true;
+                root.pageStack.push(silentModePageComponent);
             }
-            if (!root.visible) {
-                root.show();
-                return;
-            }
-            if (screenshots.step >= screenshots.shots.length) {
-                stop();
-                Qt.quit();
-                return;
-            }
-            const shot = screenshots.shots[screenshots.step++];
-            if (shot.page === "rules") {
-                root.pageStack.replace(rulesPageComponent);
-            } else if (shot.page === "blocklists") {
-                root.pageStack.replace(blocklistsPageComponent);
-            }
-            if (shot.expand !== undefined) {
-                screenshots.expandDepth(shot.expand);
-            }
-            if (shot.flat) {
-                root.connectionsModelRef.setGroupedMode(false);
-            }
-            // Give the page a frame to lay out before grabbing it.
-            Qt.callLater(function () { screenshots.capture(shot.name); });
         }
     }
 
@@ -706,6 +673,9 @@ Kirigami.ApplicationWindow {
     // `on_window_event`/`CloseRequested` handler: closing the window hides it
     // instead of quitting, since the tray icon is the only way back in
     // otherwise. `Qt.quit()` above (tray menu) is the actual exit path.
+    // A hidden window is nobody looking: AlertHost reports it to Rust, which
+    // then answers new prompts at arrival (allow once, or the silent mode's
+    // choice) instead of letting each wait out the bridge's 30 s.
     onClosing: function (close) {
         close.accepted = false;
         root.hide();

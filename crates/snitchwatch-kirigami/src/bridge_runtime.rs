@@ -825,6 +825,10 @@ mod pause_answers_tests;
 #[path = "bridge_runtime/notification_action_tests.rs"]
 mod notification_action_tests;
 
+#[cfg(test)]
+#[path = "bridge_runtime/silent_answer_tests.rs"]
+mod silent_answer_tests;
+
 #[path = "bridge_runtime/leftover_capability.rs"]
 mod leftover_capability;
 use leftover_capability::clear_unreported_leftovers;

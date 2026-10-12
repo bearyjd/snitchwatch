@@ -14,6 +14,8 @@ fn main() {
             // `Theme.qml` is a `pragma Singleton`; it needs the qmldir
             // `singleton` flag, so it is declared as a `QmlFile`.
             .qml_file(QmlFile::from("qml/Theme.qml").singleton(true))
+            .qml_file(QmlFile::from("qml/Durations.qml").singleton(true))
+            .qml_file(QmlFile::from("qml/SilentModes.qml").singleton(true))
             .qml_files([
                 "qml/main.qml",
                 "qml/TrayMenu.qml",
@@ -37,6 +39,12 @@ fn main() {
                 "qml/DnsConsentDialog.qml",
                 "qml/TrafficPage.qml",
                 "qml/OnboardingPage.qml",
+                "qml/SilentModeChoice.qml",
+                "qml/SilentModePage.qml",
+                "qml/AlertHost.qml",
+                "qml/ScreenshotRunner.qml",
+                "qml/SegmentedChoice.qml",
+                "qml/AlertWindow.qml",
                 "qml/DiagnosticsPage.qml",
                 "qml/GeoPage.qml",
                 "qml/ScannerPage.qml",

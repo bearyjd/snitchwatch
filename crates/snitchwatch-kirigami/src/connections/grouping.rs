@@ -1083,6 +1083,7 @@ mod tests {
                     &id,
                     crate::pending_decision::VerdictChoice::Deny,
                     true,
+                    "forever",
                 );
                 let msg =
                     crate::pending_decision::build_verdict_message(&id, "deny", "this_host", token)

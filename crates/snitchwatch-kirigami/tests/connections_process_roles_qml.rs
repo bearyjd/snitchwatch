@@ -1,5 +1,5 @@
 //! `ConnectionsModel`'s process-identity roles reach QML: `processPath`,
-//! `direction`, `startedAtMs` and `appIcon`, in the flat view and on the
+//! `direction`, `startedAtMs`, `appIcon` and `needsRule`, in the flat view and on the
 //! grouped view's leaf rows (headers report empty / -1). A Repeater delegate
 //! reads each role; failures are thrown against the probe's URL, which the
 //! stderr capture turns into an assertion. Also covers demo mode being inert
@@ -52,9 +52,11 @@ Window {
             required property string direction
             required property real startedAtMs
             required property string appIcon
+            required property bool needsRule
             Component.onCompleted: probe.seen.push({
                 id: rowId, header: isGroupHeader, path: processPath,
-                direction: direction, started: startedAtMs, icon: appIcon })
+                direction: direction, started: startedAtMs, icon: appIcon,
+                needsRule: needsRule })
         }
     }
 
@@ -92,6 +94,8 @@ Window {
                         probe.expect(a.direction === "incoming", "direction: " + a.direction);
                         probe.expect(a.started === 1760000000123, "startedAtMs: " + a.started);
                         probe.expect(a.icon === "application-x-executable", "unmatched path gets the generic icon: " + a.icon);
+                        probe.expect(a.needsRule === false && b.needsRule === false,
+                                     "rows nobody answered silently need no rule");
                         probe.expect(b.path === "", "missing path is empty: '" + b.path + "'");
                         probe.expect(b.icon === "application-x-executable", "no path gets the generic icon: " + b.icon);
                     }

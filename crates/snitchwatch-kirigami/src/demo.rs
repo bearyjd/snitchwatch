@@ -412,7 +412,8 @@ pub fn demo_rows(now_ms: i64) -> Vec<ConnectionRow> {
             started_at_ms: now_ms - sp.age_secs * 1000,
             matched_rule: sp.rule.map(str::to_string),
             auto_answer: None,
-            answer_deadline_ms: None,
+            // A pending row shows the bridge's 30 s countdown, as a live one.
+            answer_deadline_ms: sp.action.is_none().then_some(now_ms + 30_000),
             deferred: false,
             decided_by_default: false,
         })
@@ -472,6 +473,14 @@ mod tests {
             .as_deref()
             .is_some_and(|p| p.contains("/flatpak/app/"))));
         assert!(rows.iter().all(|r| r.started_at_ms < 1_760_000_000_000));
+        for r in &rows {
+            assert_eq!(
+                r.answer_deadline_ms.is_some(),
+                r.action.is_none(),
+                "{}: only pending rows carry a deadline",
+                r.id
+            );
+        }
     }
 
     #[test]

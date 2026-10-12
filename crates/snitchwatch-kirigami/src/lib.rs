@@ -6,6 +6,7 @@
 //! Phase 3a spike proved cxx-qt issue #770 does not bite this repo — see
 //! `crates/kirigami-spike/tests/link_770.rs`).
 
+pub(crate) mod alert_row;
 pub mod app_icons;
 pub mod application;
 pub mod autostart;
@@ -54,6 +55,7 @@ pub mod scanner;
 pub mod scanner_controller;
 pub mod settings;
 pub mod settings_controller;
+pub(crate) mod silent_mode;
 pub mod traffic;
 pub mod traffic_model;
 pub mod tray;

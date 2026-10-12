@@ -83,7 +83,7 @@ kirigami-build:
     cargo build -p snitchwatch-kirigami --release
 
 # Render the Kirigami shell in demo mode (fake rows, no bridge) offscreen and
-# write review screenshots (main.png, connections-*.png, rules.png, ...) to
+# write review screenshots (main.png, alert.png, connections-*.png, rules.png, ...) to
 # `dir`. SNITCHWATCH_SCREENSHOT_DIR is only honoured with SNITCHWATCH_DEMO=1.
 # The Basic style is used because it completes headless; the Flatpak uses the
 # platform style, so colours and metrics differ slightly.

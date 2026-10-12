@@ -177,3 +177,130 @@ fn the_prompt_raise_is_logged_through_the_controller() {
         "the log and the raise are no longer in the same branch"
     );
 }
+
+const DURATIONS_QML: &str = include_str!("../qml/Durations.qml");
+const SILENT_MODES_QML: &str = include_str!("../qml/SilentModes.qml");
+const ALERT_HOST_QML: &str = include_str!("../qml/AlertHost.qml");
+const ALERT_WINDOW_QML: &str = include_str!("../qml/AlertWindow.qml");
+const SHEET_QML: &str = include_str!("../qml/PendingDecisionSheet.qml");
+const MAKE_RULE_QML: &str = include_str!("../qml/MakeRuleSheet.qml");
+const INLINE_QML: &str = include_str!("../qml/InlineVerdicts.qml");
+
+/// The `token: "..."` values of a QML list, in order.
+fn tokens(source: &str) -> Vec<String> {
+    code_lines(source)
+        .split("token: \"")
+        .skip(1)
+        .filter_map(|rest| rest.split('"').next())
+        .map(str::to_string)
+        .collect()
+}
+
+/// LS redesign phase 1, owner decision 1: Once / 5 minutes / Until Restart /
+/// Forever, defined once (`Durations.qml`) and used by every surface. The QML
+/// list, the Rust vocabulary and the settings default must agree.
+#[test]
+fn the_duration_list_is_defined_once_and_matches_rust() {
+    assert_eq!(
+        tokens(DURATIONS_QML),
+        snitchwatch_kirigami::settings::DURATION_TOKENS
+            .iter()
+            .map(|t| t.to_string())
+            .collect::<Vec<_>>()
+    );
+    for label in ["Once", "5 minutes", "Until Restart", "Forever"] {
+        assert!(
+            DURATIONS_QML.contains(&format!("label: \"{label}\"")),
+            "Durations.qml lost the {label:?} label"
+        );
+    }
+    assert!(
+        DURATIONS_QML.contains(&format!(
+            "property string defaultToken: \"{}\"",
+            snitchwatch_kirigami::settings::DEFAULT_DURATION
+        )),
+        "the QML default and settings::DEFAULT_DURATION drifted"
+    );
+    for (name, source) in [
+        ("PendingDecisionSheet.qml", SHEET_QML),
+        ("AlertWindow.qml", ALERT_WINDOW_QML),
+        ("MakeRuleSheet.qml", MAKE_RULE_QML),
+    ] {
+        let code = code_lines(source);
+        assert!(
+            code.contains("Durations."),
+            "{name} has its own duration list"
+        );
+        for stale in [
+            "until_quit",
+            "Until firewall restarts",
+            "For 5 minutes",
+            "\"This time\"",
+        ] {
+            assert!(!code.contains(stale), "{name} still offers {stale:?}");
+        }
+    }
+}
+
+/// The silent modes are defined once and match `settings::SilentMode`.
+#[test]
+fn the_silent_mode_list_matches_rust() {
+    use snitchwatch_kirigami::settings::SilentMode;
+    assert_eq!(
+        tokens(SILENT_MODES_QML),
+        [SilentMode::Off, SilentMode::Allow, SilentMode::Deny].map(|m| m.token().to_string())
+    );
+    assert!(SILENT_MODES_QML.contains("readonly property string recommended: \"allow\""));
+    // The honest limit of silent mode is stated wherever it is chosen.
+    assert!(SILENT_MODES_QML.contains("When Snitchwatch is not running at all"));
+    assert!(SILENT_MODES_QML.contains("the firewall's own default action applies"));
+}
+
+/// Closing the window still only hides it to the tray (`main.qml`), but a
+/// hidden window now means nobody is looking: `AlertHost` reports its
+/// visibility to Rust, which then answers new prompts at arrival, and shows
+/// the alert only while the window is shown and silent mode is off.
+#[test]
+fn a_hidden_window_means_silent_behaviour() {
+    let main = code_lines(MAIN_QML);
+    let closing = main
+        .split("onClosing")
+        .nth(1)
+        .and_then(|rest| rest.split("globalDrawer").next())
+        .expect("main.qml has no onClosing");
+    assert!(
+        closing.contains("close.accepted = false") && closing.contains("root.hide()"),
+        "closing the window must still only hide it: {closing}"
+    );
+    let host = code_lines(ALERT_HOST_QML);
+    assert!(
+        host.contains("setSilentState(host.mode, host.windowShown)")
+            && host.contains("host.window !== null && host.window.visible"),
+        "AlertHost no longer reports the window's visibility to Rust"
+    );
+    assert!(
+        host.contains("active: (host.mode === \"\" || host.mode === \"off\") && host.windowShown"),
+        "the alert must show only while silent mode is off and the window is shown"
+    );
+    assert!(main.contains("AlertHost {"), "main.qml lost the AlertHost");
+    assert!(
+        include_str!("../src/bridge_feed.rs").contains("#[cxx_name = \"setSilentState\"]"),
+        "BridgeFeed no longer exposes setSilentState"
+    );
+}
+
+/// Inline Allow follows the Settings duration instead of hard-coding
+/// `this_time` (the bug: the daemon stores only `always` rules).
+#[test]
+fn inline_allow_sends_the_settings_duration() {
+    let code = code_lines(INLINE_QML);
+    assert!(
+        code.contains("inlineDurationFor(rowId, choice, appBound, Durations.defaultToken)"),
+        "InlineVerdicts no longer passes the Settings duration"
+    );
+    assert!(
+        include_str!("../src/notification_actions.rs")
+            .contains("allow_token(kind, allow_duration)"),
+        "notification Allow no longer follows the Settings duration"
+    );
+}

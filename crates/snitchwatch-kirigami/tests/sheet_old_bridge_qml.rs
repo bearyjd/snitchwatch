@@ -182,6 +182,10 @@ Controls.ApplicationWindow {
                 scopes.currentIndex = 2;
                 probeWindow.check(durations.count === 4 && sheet.showOldBridgeNote === false,
                                   "any_host offers " + durations.count);
+                // The sheet opens on the Settings default (Forever); the
+                // one-time-Deny hint belongs to "Once".
+                probeWindow.check(durations.currentValue === "forever", "opens on the default");
+                durations.currentIndex = 0;
                 probeWindow.check(sheet.showDenyOnceHint === true, "any_host: no Deny hint");
                 durations.currentIndex = 3;
                 probeWindow.expectSubmit("abs any_host/forever", "any_host");

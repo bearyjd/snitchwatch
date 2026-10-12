@@ -298,8 +298,7 @@ Kirigami.ScrollablePage {
             // they aren't a single decided connection.
             required property string matchedRule
             required property string matchedRuleDisplay
-            // The bridge allowed this row once because filtering was paused
-            // (issue #78). Always false on headers.
+            // Allowed once because filtering was paused (issue #78); false on headers.
             required property bool answeredWhilePaused
             // Prompt-slot plan Part C: a put-off or default-decided row's
             // label (empty otherwise), when the bridge answers a pending one
@@ -308,9 +307,10 @@ Kirigami.ScrollablePage {
             required property string outcomeText
             required property real answerDeadlineMs
             required property bool makeRuleOffered
-            // Icon name/path from the process's .desktop file (empty on headers).
+            // Icon from the process's .desktop file (empty on headers); answered
+            // silently once-only, so it needs a rule (`silent_mode.rs`).
             required property string appIcon
-
+            required property bool needsRule
             // Issue #18 double-submit guard: the inline/batch buttons stay
             // visible until the round trip flips `pending` to false, so a
             // second click before that arrives would otherwise send a
@@ -411,7 +411,7 @@ Kirigami.ScrollablePage {
                     visible: !row.isGroupHeader
                     textFormat: Text.PlainText
                     text: page.verdictGlyph(row.verdict, row.pending)
-                    color: Theme.verdictColor(row.verdict)
+                    color: row.needsRule ? Theme.needsRule : Theme.verdictColor(row.verdict)
                     Layout.alignment: Qt.AlignVCenter
                 }
 
@@ -452,8 +452,9 @@ Kirigami.ScrollablePage {
                     text: row.pending ? "pending"
                         : row.outcomeText !== "" ? row.outcomeText
                         : row.answeredWhilePaused ? "Allowed once (filtering was paused)"
+                        : row.needsRule ? row.verdict + " once, needs a rule"
                         : row.verdict
-                    color: Theme.verdictColor(row.verdict)
+                    color: row.needsRule ? Theme.needsRule : Theme.verdictColor(row.verdict)
                     Layout.alignment: Qt.AlignVCenter
                 }
 
@@ -547,10 +548,9 @@ Kirigami.ScrollablePage {
 
                 // Issue #18: inline Allow/Deny on pending leaf rows, so a
                 // decision no longer requires opening the inspector sheet.
-                // Allow submits the sheet's defaults; Deny remembers until the
-                // firewall restarts where it can (see InlineVerdicts.qml).
-                // Disabled after one
-                // click (see `row.submitted`'s doc comment) until the round
+                // Allow submits the Settings duration; Deny remembers until the
+                // firewall restarts where it can (see InlineVerdicts.qml). Disabled
+                // after one click (see `row.submitted`'s doc comment) until the round
                 // trip flips `pending` and resets the guard.
                 RowLayout {
                     visible: !row.isGroupHeader && row.pending

@@ -19,7 +19,8 @@
 //! mutations behind its own `QAbstractListModel` begin/end signals on the Qt
 //! thread. This object never touches the models directly. The one outbound
 //! event it relays is model-free: `verdictNotRemembered` (issue #44), which
-//! `ConnectionsPage.qml` turns into a passive notification.
+//! `ConnectionsPage.qml` turns into a passive notification. The same task
+//! answers new prompts silently when `crate::silent_mode` says so.
 
 use core::pin::Pin;
 use cxx_qt::Threading;
@@ -113,6 +114,15 @@ pub mod qobject {
         #[cxx_name = "decideLater"]
         fn decide_later(self: Pin<&mut BridgeFeed>, row_id: &QString) -> bool;
 
+        /// Tell the feed what decides silent answers (`crate::silent_mode`):
+        /// `mode` is `SettingsController.silentMode` (`off`, `allow`, `deny`;
+        /// anything else counts as `off`) and `window_visible` whether the
+        /// main window is shown. A hidden window answers new prompts like
+        /// silent mode does. Called from `main.qml` whenever either changes.
+        #[qinvokable]
+        #[cxx_name = "setSilentState"]
+        fn set_silent_state(self: &BridgeFeed, mode: &QString, window_visible: bool);
+
         /// Issue #44: the bridge answered a remembered verdict for this
         /// connection only, because it couldn't identify the program's file.
         /// `row_id` is session-qualified like `ConnectionsModel`'s ids.
@@ -179,10 +189,12 @@ impl qobject::BridgeFeed {
     }
 
     fn app_bound_rules_for(&self, row_id: &QString) -> bool {
-        app_bound_rules_for_row(
-            crate::bridge_runtime::handles().as_ref(),
-            &row_id.to_string(),
-        )
+        // Demo mode has no bridge; show the capable-bridge UI in review shots.
+        crate::demo::enabled()
+            || app_bound_rules_for_row(
+                crate::bridge_runtime::handles().as_ref(),
+                &row_id.to_string(),
+            )
     }
 
     fn decide_later_for(&self, row_id: &QString) -> bool {
@@ -235,6 +247,11 @@ impl qobject::BridgeFeed {
         }
     }
 
+    fn set_silent_state(&self, mode: &QString, window_visible: bool) {
+        let mode = crate::settings::SilentMode::from_token(&mode.to_string()).unwrap_or_default();
+        crate::silent_mode::set_state(mode, window_visible);
+    }
+
     fn start_bridge_feed(self: Pin<&mut Self>) {
         let Some(handles) = crate::bridge_runtime::handles() else {
             tracing::warn!("BridgeFeed: bridge not running; verdict notices disabled");
@@ -246,6 +263,7 @@ impl qobject::BridgeFeed {
         let runtime = handles.runtime().clone();
         runtime.spawn(async move {
             use tokio::sync::broadcast::error::RecvError;
+            let mut answered = crate::silent_mode::Answered::default();
             loop {
                 let received = match rx.recv().await {
                     Ok(received) => received,
@@ -253,6 +271,14 @@ impl qobject::BridgeFeed {
                     Err(RecvError::Closed) => break,
                 };
                 let connection_id = received.connection_id;
+                // New prompts are answered at arrival when silent mode (or a
+                // hidden window) says so, before anything is shown.
+                crate::silent_mode::answer_new_rows(
+                    &handles,
+                    connection_id,
+                    &received.message,
+                    &mut answered,
+                );
                 let Some(row_id) = verdict_not_remembered_row(connection_id, &received.message)
                 else {
                     continue;

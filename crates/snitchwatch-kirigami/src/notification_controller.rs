@@ -208,6 +208,17 @@ fn relay(
         });
         return;
     };
+    // Silent mode (or a hidden window) answers this prompt at arrival, so
+    // it never goes through the grace period or gets a notice. Skipped only
+    // for this GUI's own session, the one `silent_mode` answers.
+    if handles.is_current_session(connection_id) && crate::silent_mode::current_choice().is_some() {
+        tracing::info!(
+            session = connection_id,
+            row_id,
+            "no pending notice: silent mode answers it"
+        );
+        return;
+    }
     tokio::spawn(async move {
         let look = || {
             let (tx, rx) = tokio::sync::oneshot::channel();

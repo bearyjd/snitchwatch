@@ -30,6 +30,26 @@ const SIZED_SHEET: &str = include_str!("../qml/SizedOverlaySheet.qml");
 /// Every QML file the shell ships, for the guards that must hold everywhere
 /// (checked against the directory by `all_qml_files_are_covered`).
 const ALL_QML: &[(&str, &str)] = &[
+    ("AlertHost.qml", include_str!("../qml/AlertHost.qml")),
+    ("AlertWindow.qml", include_str!("../qml/AlertWindow.qml")),
+    ("Durations.qml", include_str!("../qml/Durations.qml")),
+    (
+        "ScreenshotRunner.qml",
+        include_str!("../qml/ScreenshotRunner.qml"),
+    ),
+    (
+        "SegmentedChoice.qml",
+        include_str!("../qml/SegmentedChoice.qml"),
+    ),
+    (
+        "SilentModeChoice.qml",
+        include_str!("../qml/SilentModeChoice.qml"),
+    ),
+    (
+        "SilentModePage.qml",
+        include_str!("../qml/SilentModePage.qml"),
+    ),
+    ("SilentModes.qml", include_str!("../qml/SilentModes.qml")),
     ("BlocklistsPage.qml", BLOCKLISTS_PAGE),
     ("ConnectionsPage.qml", CONNECTIONS_PAGE),
     (

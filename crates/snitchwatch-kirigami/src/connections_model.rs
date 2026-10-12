@@ -89,6 +89,9 @@ const ROLE_STARTED_AT_MS: i32 = 27;
 /// Icon name (or path) for the process, from installed `.desktop` files;
 /// the generic executable icon when none matches, empty on headers.
 const ROLE_APP_ICON: i32 = 28;
+/// Whether Snitchwatch answered the row silently (once-only) and it still
+/// has no rule (`crate::silent_mode`); false on headers.
+const ROLE_NEEDS_RULE: i32 = 29;
 
 #[cxx_qt::bridge]
 pub mod qobject {
@@ -292,7 +295,9 @@ pub mod qobject {
         /// `app_bound_rules` is `BridgeFeed.appBoundRulesFor(id)`.
         ///
         /// The duration token `choice` (`"allow"`/`"deny"`) sends for row
-        /// `id`: `"until_quit"` or `"this_time"` (also for an unknown choice).
+        /// `id`: a Deny sends `"until_restart"` or `"this_time"`; an Allow sends
+        /// `allow_duration` (the Settings default) where a rule can be bound,
+        /// else `"this_time"` (also for an unknown choice).
         #[qinvokable]
         #[cxx_name = "inlineDurationFor"]
         fn inline_duration_for(
@@ -300,6 +305,7 @@ pub mod qobject {
             id: &QString,
             choice: &QString,
             app_bound_rules: bool,
+            allow_duration: &QString,
         ) -> QString;
 
         /// What a Deny does for row `id`: `"until_restart"`,
@@ -308,6 +314,13 @@ pub mod qobject {
         #[cxx_name = "inlineDenyFor"]
         fn inline_deny_for(self: &ConnectionsModel, id: &QString, app_bound_rules: bool)
             -> QString;
+
+        /// The oldest row still pending, as the JSON `crate::alert_row`
+        /// builds for the standalone alert (`"{}"` when none waits).
+        /// Read-only, like `isPendingRow`.
+        #[qinvokable]
+        #[cxx_name = "alertRowJson"]
+        fn alert_row_json(self: &ConnectionsModel) -> QString;
 
         /// The first row still pending under process group `key` (what its
         /// "Deny all" tooltip describes), or `""`.
@@ -607,6 +620,7 @@ impl qobject::ConnectionsModel {
             ROLE_DIRECTION => QVariant::from(&QString::from(&row.direction)),
             ROLE_STARTED_AT_MS => QVariant::from(&started_at_ms(row)),
             ROLE_APP_ICON => QVariant::from(&QString::from(&app_icon_for_row(row))),
+            ROLE_NEEDS_RULE => QVariant::from(&needs_rule_for_row(row)),
             _ => QVariant::default(),
         }
     }
@@ -651,6 +665,7 @@ impl qobject::ConnectionsModel {
         roles.insert(ROLE_DIRECTION, QByteArray::from("direction"));
         roles.insert(ROLE_STARTED_AT_MS, QByteArray::from("startedAtMs"));
         roles.insert(ROLE_APP_ICON, QByteArray::from("appIcon"));
+        roles.insert(ROLE_NEEDS_RULE, QByteArray::from("needsRule"));
         roles
     }
 
@@ -1099,16 +1114,23 @@ impl qobject::ConnectionsModel {
         id: &QString,
         choice: &QString,
         app_bound_rules: bool,
+        allow_duration: &QString,
     ) -> QString {
+        let allow_duration = allow_duration.to_string();
         let token = VerdictChoice::from_token(&choice.to_string()).map_or("this_time", |choice| {
             inline_deny::duration_token_for_row(
                 &self.store,
                 &id.to_string(),
                 choice,
                 app_bound_rules,
+                &allow_duration,
             )
         });
         QString::from(token)
+    }
+
+    fn alert_row_json(&self) -> QString {
+        QString::from(&crate::alert_row::oldest_pending_json(&self.store))
     }
 
     fn inline_deny_for(&self, id: &QString, app_bound_rules: bool) -> QString {
@@ -1318,6 +1340,11 @@ fn app_icon_for_row(row: &ConnectionRow) -> String {
     crate::app_icons::icon_for_path(process_path_text(row))
 }
 
+/// Whether the GUI answered `row` silently and it is no longer waiting.
+fn needs_rule_for_row(row: &ConnectionRow) -> bool {
+    !is_pending(row) && crate::silent_mode::needs_rule(&row.id)
+}
+
 fn grouped_entry_data(entry: &VisibleEntry, role: i32, store: &RowStore) -> QVariant {
     match entry {
         VisibleEntry::ProcessHeader {
@@ -1380,7 +1407,9 @@ fn grouped_entry_data(entry: &VisibleEntry, role: i32, store: &RowStore) -> QVar
             ROLE_MATCHED_RULE | ROLE_MATCHED_RULE_DISPLAY | ROLE_OUTCOME_TEXT => {
                 QVariant::from(&QString::from(""))
             }
-            ROLE_ANSWERED_WHILE_PAUSED | ROLE_MAKE_RULE_OFFERED => QVariant::from(&false),
+            ROLE_ANSWERED_WHILE_PAUSED | ROLE_MAKE_RULE_OFFERED | ROLE_NEEDS_RULE => {
+                QVariant::from(&false)
+            }
             ROLE_ANSWER_DEADLINE_MS | ROLE_STARTED_AT_MS => QVariant::from(&-1.0f64),
             ROLE_PROCESS_PATH | ROLE_DIRECTION | ROLE_APP_ICON => {
                 QVariant::from(&QString::from(""))
@@ -1425,6 +1454,7 @@ fn grouped_entry_data(entry: &VisibleEntry, role: i32, store: &RowStore) -> QVar
                 ROLE_DIRECTION => QVariant::from(&QString::from(&row.direction)),
                 ROLE_STARTED_AT_MS => QVariant::from(&started_at_ms(row)),
                 ROLE_APP_ICON => QVariant::from(&QString::from(&app_icon_for_row(row))),
+                ROLE_NEEDS_RULE => QVariant::from(&needs_rule_for_row(row)),
                 _ => QVariant::default(),
             }
         }
@@ -1572,12 +1602,24 @@ mod tests {
     }
 
     #[test]
+    fn a_silently_answered_row_needs_a_rule_once_it_is_decided() {
+        let mut answered = row("7:silent-answered", None);
+        assert!(!needs_rule_for_row(&answered), "unmarked");
+        crate::silent_mode::mark_needs_rule("7:silent-answered");
+        assert!(!needs_rule_for_row(&answered), "still waiting");
+        answered.action = Some("allow".into());
+        assert!(needs_rule_for_row(&answered));
+        assert!(!needs_rule_for_row(&row("7:other", Some("allow"))));
+    }
+
+    #[test]
     fn new_roles_have_distinct_ids_and_names() {
         let ids = [
             ROLE_PROCESS_PATH,
             ROLE_DIRECTION,
             ROLE_STARTED_AT_MS,
             ROLE_APP_ICON,
+            ROLE_NEEDS_RULE,
         ];
         for (i, a) in ids.iter().enumerate() {
             assert!(*a > ROLE_MAKE_RULE_OFFERED);

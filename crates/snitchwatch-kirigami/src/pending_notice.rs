@@ -1,6 +1,6 @@
 //! A waiting prompt's desktop notification, from showing it to acting on
-//! the answer (prompt-slot plan Part B; owner decision S5: Allow once and
-//! Deny only).
+//! the answer (prompt-slot plan Part B; Allow follows the Settings duration
+//! since the LS redesign, Deny is remembered until the firewall restarts).
 //!
 //! Runs on the bridge runtime. The notification is sent and heard through
 //! `crate::notification_signals`, so only the notification server's click
@@ -22,7 +22,7 @@ use crate::notification_signals::{Notice, WaitEnd};
 const SUMMARY: &str = "Snitchwatch — pending decision";
 /// Action keys and their labels, as the notification shows them.
 const ACTIONS: [(&str, &str); 3] = [
-    (ALLOW_ONCE_ACTION, "Allow once"),
+    (ALLOW_ONCE_ACTION, "Allow"),
     (DENY_ACTION, "Deny"),
     (REVIEW_ACTION, "Review"),
 ];
@@ -123,11 +123,14 @@ async fn on_action(target: &PendingTarget, key: &str, on_review: impl FnOnce()) 
     let Some(action) = NoticeAction::from_id(key) else {
         return;
     };
+    let allow_duration =
+        crate::settings::read_settings(&crate::paths::settings_path()).duration_token();
     let outcome = act_and_confirm(
         &target.handles,
         target.connection_id,
         &target.wire_id,
         action,
+        allow_duration,
     )
     .await;
     tracing::info!(

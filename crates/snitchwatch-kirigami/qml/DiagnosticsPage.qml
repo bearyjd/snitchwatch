@@ -25,6 +25,7 @@ Kirigami.ScrollablePage {
             page.controller.refreshAutostart();
             page.controller.refreshCrashLog();
             page.controller.refreshRdapEnabled();
+            page.controller.refreshPreferences();
             page.controller.refreshCoexistence();
         }
     }
@@ -65,6 +66,53 @@ Kirigami.ScrollablePage {
                 opacity: 0.7
                 wrapMode: Text.Wrap
                 text: "Off by default: when enabled, a pending connection's remote IP is sent to rdap.org to look up its registration info. Reverse DNS lookups always use the system resolver and are unaffected by this setting."
+            }
+        }
+
+        Kirigami.Separator {
+            Layout.fillWidth: true
+        }
+
+        // LS redesign phase 1: what an Allow remembers and what happens to a
+        // new connection when nobody is asked. Options come from the shared
+        // `Durations` / `SilentModes` lists.
+        Kirigami.FormLayout {
+            Layout.fillWidth: true
+
+            Controls.ComboBox {
+                objectName: "defaultDurationBox"
+                Kirigami.FormData.label: "Allow remembers for"
+                textRole: "label"
+                valueRole: "token"
+                model: Durations.all
+                currentIndex: page.controller
+                    ? Math.max(0, Durations.indexOf(page.controller.defaultDuration)) : 0
+                enabled: page.controller && !page.controller.busy
+                onActivated: page.controller.chooseDefaultDuration(currentValue)
+            }
+            Controls.Label {
+                Kirigami.FormData.label: ""
+                opacity: 0.7
+                wrapMode: Text.Wrap
+                text: "Used by the alert, the Allow buttons and notifications. The firewall stores only \"Forever\" rules; a program Snitchwatch cannot identify is always answered once."
+            }
+            Controls.ComboBox {
+                objectName: "silentModeBox"
+                Kirigami.FormData.label: "New connections"
+                textRole: "label"
+                valueRole: "token"
+                model: SilentModes.all
+                currentIndex: page.controller
+                    ? Math.max(0, SilentModes.indexOf(page.controller.silentMode)) : 0
+                enabled: page.controller && !page.controller.busy
+                onActivated: page.controller.chooseSilentMode(currentValue)
+            }
+            Controls.Label {
+                Kirigami.FormData.label: ""
+                objectName: "silentModeNote"
+                opacity: 0.7
+                wrapMode: Text.Wrap
+                text: "While the main window is hidden, new connections are answered without asking: allowed once, or denied once if you chose Deny. " + SilentModes.notRunningNote
             }
         }
 
