@@ -44,7 +44,7 @@ def main():
     root = Path(__file__).resolve().parents[2]
     sha = run("git", "rev-parse", "HEAD", cwd=root)
     if (os.environ["GITHUB_REPOSITORY"] != "bearyjd/snitchwatch"
-            or os.environ["GITHUB_REF"] != "refs/heads/r13-candidate"
+            or os.environ["GITHUB_REF"] != "refs/heads/r14-candidate"
             or sha != os.environ["GITHUB_SHA"]
             or sha != os.environ["REVIEWED_SHA"]
             or os.environ["GITHUB_WORKFLOW_SHA"] != sha):
@@ -152,7 +152,7 @@ def main():
         (output / "provenance.json").write_text(canonical(evidence))
         assets = {path.name: {"sha256": digest(path), "size": path.stat().st_size}
                   for path in sorted(output.iterdir())}
-        packet = {"schema": 1, "repository": "bearyjd/snitchwatch", "target": "r13-candidate",
+        packet = {"schema": 1, "repository": "bearyjd/snitchwatch", "target": "r14-candidate",
                   "ref": os.environ["GITHUB_REF"], "source_commit": sha,
                   "workflow_sha": os.environ["GITHUB_WORKFLOW_SHA"],
                   "workflow_ref": os.environ["GITHUB_WORKFLOW_REF"],
