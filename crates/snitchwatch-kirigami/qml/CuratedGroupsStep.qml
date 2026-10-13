@@ -52,7 +52,8 @@ ColumnLayout {
         wrapMode: Text.Wrap
         textFormat: Text.PlainText
         text: "Optional. Each switch adds a few rules for background programs. Each rule "
-            + "lets one program reach the place listed under Details, and nothing else. "
+            + "lets one program reach the place listed under Details, and nothing else "
+            + "(except Name resolution, which can reach any DNS server and asks you first). "
             + "Everything is off until you turn it on, and you can change it later under "
             + "Recommended background-service rules."
     }
