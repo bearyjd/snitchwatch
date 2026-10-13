@@ -26,7 +26,7 @@ use cxx_qt_lib::{
 
 use crate::connections::filter::ConnectionFilter;
 use crate::connections::grouping::{GroupTree, VisibleEntry};
-use crate::connections::level_rules::{Level, LevelFinished, LevelRules, NodeRef, RuleState};
+use crate::connections::level_rules::{LevelFinished, LevelRules};
 use crate::connections::outcome::{is_pending, outcome_text};
 use crate::connections::projection_diff;
 use crate::connections::row_store::{
@@ -35,7 +35,9 @@ use crate::connections::row_store::{
 use crate::inline_deny::{self, InlineDeny};
 use crate::pending_decision::VerdictChoice;
 use snitchwatch_bridge::translator::process_binding::is_bindable_process_path;
-use snitchwatch_bridge::ws_messages::{AutoAnswer, ClientMessage, ConnectionRow, ServerMessage};
+use snitchwatch_bridge::ws_messages::{AutoAnswer, ConnectionRow, ServerMessage};
+
+mod level_rule_actions;
 
 // Role ids exposed to the QML delegate. Flat-mode leaf rows use 0-6; the
 // grouping layer (Little-Snitch-parity Process->Domain view) adds 7+. None
@@ -874,27 +876,7 @@ impl qobject::ConnectionsModel {
     }
 
     fn level_rule_role(&self, row: i32, role: i32) -> QVariant {
-        let entry = self
-            .grouped
-            .then(|| self.grouped_projection.get(row as usize))
-            .flatten();
-        let projection = entry
-            .and_then(entry_node)
-            .map(|node| self.level_rules.project(node));
-        let text = match (projection, role) {
-            (Some(p), ROLE_LEVEL_RULE_STATE) => p.state.token().to_owned(),
-            (Some(p), _)
-                if matches!(
-                    p.state,
-                    RuleState::Allow | RuleState::Deny | RuleState::Pending
-                ) =>
-            {
-                p.names.first().cloned().unwrap_or_default()
-            }
-            (None, ROLE_LEVEL_RULE_STATE) => RuleState::None.token().to_owned(),
-            _ => String::new(),
-        };
-        QVariant::from(&QString::from(&text))
+        level_rule_actions::role(self, row, role)
     }
 
     fn apply_message_for_session(
@@ -1347,109 +1329,27 @@ impl qobject::ConnectionsModel {
     }
 
     fn create_level_rule(
-        mut self: Pin<&mut Self>,
+        self: Pin<&mut Self>,
         level: i32,
         process_key: &QString,
         key: &QString,
         choice: &QString,
         confirmed: bool,
     ) -> QString {
-        use crate::make_rule::{add_level_rule_message, LevelRuleRefusal};
-        let (process_key, key, choice) =
-            (process_key.to_string(), key.to_string(), choice.to_string());
-        let Some(level) = Level::from_i32(level) else {
-            return QString::from(LevelRuleRefusal::UnknownLevel.reason());
-        };
-        let node = NodeRef {
-            program: &process_key,
-            level,
-            key: &key,
-        };
-        if self.level_rules.project(node).state == RuleState::Pending {
-            return QString::from(ALREADY_WORKING);
-        }
-        let request_id = crate::rule_commands::next_request_id("level");
-        let settings = crate::settings::read_settings(&crate::paths::settings_path());
-        let request = match add_level_rule_message(
-            node,
-            &choice,
-            &settings,
-            confirmed,
-            now_ms(),
-            &request_id,
-        ) {
-            Ok(request) => request,
-            Err(refusal) => return QString::from(refusal.reason()),
-        };
-        let operator = request.operator;
-        let problem =
-            crate::make_rule::send_problem(Some(request.message), send_to_current_session);
-        if let Some(problem) = problem {
-            return QString::from(problem);
-        }
-        self.as_mut()
-            .rust_mut()
-            .level_rules
-            .begin_create(&request_id, node, operator);
-        self.notify_level_rules_changed();
-        QString::from("")
+        level_rule_actions::create(self, level, process_key, key, choice, confirmed)
     }
 
     fn delete_level_rule(
-        mut self: Pin<&mut Self>,
+        self: Pin<&mut Self>,
         level: i32,
         process_key: &QString,
         key: &QString,
     ) -> QString {
-        let (process_key, key) = (process_key.to_string(), key.to_string());
-        let Some(level) = Level::from_i32(level) else {
-            return QString::from(crate::make_rule::LevelRuleRefusal::UnknownLevel.reason());
-        };
-        let node = NodeRef {
-            program: &process_key,
-            level,
-            key: &key,
-        };
-        let projection = self.level_rules.project(node);
-        let name = match (projection.state, projection.names.first()) {
-            (RuleState::Pending, _) => return QString::from(ALREADY_WORKING),
-            (RuleState::Allow | RuleState::Deny, Some(name)) => name.clone(),
-            (RuleState::Allow | RuleState::Deny, None) => {
-                return QString::from(
-                    "Snitchwatch can't delete this rule. Manage it on the Rules page.",
-                )
-            }
-            _ => {
-                return QString::from("There is no single rule here to delete. See the Rules page.")
-            }
-        };
-        let request_id = crate::rule_commands::next_request_id("level");
-        let message = ClientMessage::DeleteRule {
-            rule_id: name.clone(),
-            request_id: Some(request_id.clone()),
-            reply: None,
-        };
-        let problem = crate::make_rule::send_problem(Some(message), send_to_current_session);
-        if let Some(problem) = problem {
-            return QString::from(problem);
-        }
-        self.as_mut()
-            .rust_mut()
-            .level_rules
-            .begin_delete(&request_id, node, &name);
-        self.notify_level_rules_changed();
-        QString::from("")
+        level_rule_actions::delete(self, level, process_key, key)
     }
 
-    fn poll_level_rules(mut self: Pin<&mut Self>) {
-        let ended = self
-            .as_mut()
-            .rust_mut()
-            .level_rules
-            .expire(std::time::Instant::now(), crate::make_rule::NO_ANSWER_AFTER);
-        for finished in ended {
-            self.as_mut().report_level_finished(finished);
-        }
+    fn poll_level_rules(self: Pin<&mut Self>) {
+        level_rule_actions::poll(self);
     }
 
     fn inline_duration_for(
@@ -1687,45 +1587,6 @@ fn answered_while_paused(row: &ConnectionRow) -> bool {
 
 fn answer_deadline_ms(row: &ConnectionRow) -> f64 {
     row.answer_deadline_ms.map_or(-1.0, |ms| ms as f64)
-}
-
-/// Why a rule button's command was not sent: one is already in flight.
-const ALREADY_WORKING: &str = "Still waiting for the firewall to answer the last change here.";
-
-/// A header entry as the node its rule button is about; connections have none.
-fn entry_node(entry: &VisibleEntry) -> Option<NodeRef<'_>> {
-    match entry {
-        VisibleEntry::ProcessHeader { key, .. } => Some(NodeRef {
-            program: key,
-            level: Level::Program,
-            key: "",
-        }),
-        VisibleEntry::DomainHeader {
-            process_key, key, ..
-        } => Some(NodeRef {
-            program: process_key,
-            level: Level::Domain,
-            key,
-        }),
-        VisibleEntry::HostHeader {
-            process_key, key, ..
-        } => Some(NodeRef {
-            program: process_key,
-            level: Level::Host,
-            key,
-        }),
-        VisibleEntry::Row { .. } => None,
-    }
-}
-
-/// Queue `message` for the live bridge session, whichever it is (a header
-/// has no row, so no row session).
-fn send_to_current_session(
-    message: ClientMessage,
-) -> Result<(), crate::bridge_runtime::SendClientMessageError> {
-    crate::bridge_runtime::handles()
-        .ok_or(crate::bridge_runtime::SendClientMessageError::Disconnected)?
-        .try_send(message)
 }
 
 /// Read one role of a grouped-projection [`VisibleEntry`] into the QVariant

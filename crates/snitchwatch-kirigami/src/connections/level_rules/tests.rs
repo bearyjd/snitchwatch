@@ -491,3 +491,52 @@ fn silence_or_a_lost_session_ends_a_pending_command_as_unknown() {
     level_rules.abandon("make-3");
     assert_eq!(level_rules.project(host).state, RuleState::None);
 }
+
+#[test]
+fn a_domain_with_a_host_under_a_delegated_suffix_is_too_broad() {
+    let levels = LevelRules::default();
+    let domain = node(Level::Domain, "amazonaws.com");
+    // `s3.amazonaws.com` is a public suffix: `bucket.s3.amazonaws.com` is
+    // its own registrable root, and `*.amazonaws.com` would cover it.
+    let hosts = ["bucket.s3.amazonaws.com", "ec2.amazonaws.com"];
+    let p = levels.project_in(domain, hosts);
+    assert!(p.too_broad);
+    assert_eq!(p.state, RuleState::None);
+    // The same domain without such a host is fine.
+    assert!(!levels.project_in(domain, ["ec2.amazonaws.com"]).too_broad);
+}
+
+#[test]
+fn an_ordinary_subdomain_does_not_make_a_domain_too_broad() {
+    let levels = LevelRules::default();
+    let domain = node(Level::Domain, "github.com");
+    let p = levels.project_in(domain, ["api.github.com", "GitHub.com", "x.y.github.com"]);
+    assert!(!p.too_broad);
+    // Other levels and bare IPs never take the check.
+    let host = node(Level::Host, "bucket.s3.amazonaws.com");
+    assert!(
+        !levels
+            .project_in(host, ["bucket.s3.amazonaws.com"])
+            .too_broad
+    );
+    let ip = node(Level::Domain, "93.184.216.34");
+    assert!(!levels.project_in(ip, ["93.184.216.34"]).too_broad);
+}
+
+#[test]
+fn a_delegated_domain_still_shows_a_rule_that_already_exists() {
+    let rule = bridge_rule(
+        "wild",
+        Verdict::Allow,
+        VerdictScope::AnyHostOnDomain,
+        "x.amazonaws.com",
+        "",
+        PROG,
+    );
+    let p = with_rules(&[rule]).project_in(
+        node(Level::Domain, "amazonaws.com"),
+        ["bucket.s3.amazonaws.com"],
+    );
+    assert!(p.too_broad);
+    assert_eq!((p.state, p.matching), (RuleState::Allow, 1));
+}

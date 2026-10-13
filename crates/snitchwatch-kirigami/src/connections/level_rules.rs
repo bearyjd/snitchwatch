@@ -13,7 +13,9 @@
 //! not the bridge's. The bridge wildcards a host's leftmost label, so the
 //! expected rule is built for the made-up host `x.<key>`. If that degrades
 //! and the key has a dot (`co.uk`, `github.io`), no rule can cover the
-//! domain ([`Target::too_broad`]) and nothing is created for it.
+//! domain ([`Target::too_broad`]) and nothing is created for it. The same
+//! goes for a domain with a host under a delegated public suffix
+//! ([`crosses_delegated_suffix`]).
 //!
 //! What counts as "a rule at this level": enabled, allow/deny, a user rule
 //! (not a blocklist, profile or recommended one), whose operator equals the
@@ -275,7 +277,28 @@ pub struct Projection {
     /// Names of the deletable allow/deny rules at the node's level, in the
     /// firewall's order.
     pub names: Vec<String>,
+    /// How many enabled user allow/deny rules sit exactly at the node's
+    /// level, deletable or not.
+    pub matching: usize,
     pub effective: Level,
+    /// No rule can be made for the node: a public suffix, or a domain whose
+    /// wildcard would cross into a delegated suffix (see
+    /// [`crosses_delegated_suffix`]).
+    pub too_broad: bool,
+}
+
+/// Whether a wildcard over the domain `key` would reach past it: some host
+/// under it has a different registrable root in the Public Suffix List than
+/// `key` (`bucket.s3.amazonaws.com` is its own root, as `s3.amazonaws.com`
+/// is a public suffix, so `*.amazonaws.com` would cover every bucket). The
+/// bridge's prompt flow falls back to the exact host there. Bare IPs are
+/// not hosts; a host that doesn't parse counts as crossing.
+pub fn crosses_delegated_suffix<'a>(key: &str, hosts: impl IntoIterator<Item = &'a str>) -> bool {
+    let key = key.to_ascii_lowercase();
+    hosts.into_iter().filter(|h| !is_ip(h)).any(|host| {
+        let host = host.to_ascii_lowercase();
+        addr::parse_dns_name(&host).ok().and_then(|n| n.root()) != Some(key.as_str())
+    })
 }
 
 /// What a command in flight is.
@@ -444,13 +467,31 @@ impl LevelRules {
         self.store.is_deletable(name)
     }
 
-    /// The state of `node` and the names of its deletable rules.
+    /// [`Self::project_in`] for a node with no known hosts under it.
+    #[cfg(test)]
     pub fn project(&self, node: NodeRef<'_>) -> Projection {
+        self.project_in(node, [])
+    }
+
+    /// The state of `node` and the names of its deletable rules. `hosts` are
+    /// the hosts currently under a domain node (ignored for other levels).
+    pub fn project_in<'a>(
+        &self,
+        node: NodeRef<'_>,
+        hosts: impl IntoIterator<Item = &'a str>,
+    ) -> Projection {
         let target = self.target(node);
+        let delegated = node.level == Level::Domain
+            && target.operator.is_some()
+            && target.effective == Level::Domain
+            && crosses_delegated_suffix(node.key, hosts);
+        let too_broad = target.too_broad || delegated;
         let none = |state| Projection {
             state,
             names: Vec::new(),
+            matching: 0,
             effective: target.effective,
+            too_broad,
         };
         let Some(expected) = target.operator.as_ref() else {
             return none(RuleState::None);
@@ -492,7 +533,9 @@ impl LevelRules {
         Projection {
             state,
             names,
+            matching: exact.len(),
             effective: target.effective,
+            too_broad,
         }
     }
 }

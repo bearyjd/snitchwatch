@@ -4638,6 +4638,7 @@ dependencies = [
 name = "snitchwatch-kirigami"
 version = "0.1.0"
 dependencies = [
+ "addr",
  "anyhow",
  "async-trait",
  "cxx",
