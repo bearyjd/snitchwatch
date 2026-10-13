@@ -66,6 +66,9 @@ enum SaveKind {
     Consume,
     /// At shutdown: always written, marked as a clean stop, and the last.
     Stop,
+    /// A ping counted after [`Self::Stop`]: written (as a clean stop again)
+    /// only when something changed.
+    AfterStop,
 }
 
 struct Inner {
@@ -131,6 +134,14 @@ impl RuleHitsHandle {
         let now = now_ms();
         let cache = lock(rules);
         lock(&self.inner.state).record(events, uptime, rule_hits, now, |name| cache.contains(name));
+        drop(cache);
+        // After the state changed, so a stop save that read the state before
+        // it is seen to have set `stopped`. The gRPC server stops after the
+        // shutdown save: what it counts then is saved too (the file's clean
+        // stop vouches for everything the run counted).
+        if lock(&self.inner.persistence).stopped {
+            self.save(SaveKind::AfterStop);
+        }
     }
 
     /// A snapshot was committed: call with the cache locked, after it holds
@@ -176,7 +187,10 @@ impl RuleHitsHandle {
             Ok(saved) => {
                 if let Some(saved) = saved {
                     let mut state = lock(&self.inner.state);
-                    consume = saved.stopped_unix_ms.is_some();
+                    // A bridge that doesn't trust the counters never trusts
+                    // the stop, so it has none to consume (and keeps the
+                    // file if the rewrite fails).
+                    consume = saved.stopped_unix_ms.is_some() && state.daemon_counters_trusted();
                     downgrade = saved.daemon.is_some() && !state.daemon_counters_trusted();
                     state.restore(saved, now_ms());
                 }
@@ -230,8 +244,10 @@ impl RuleHitsHandle {
 
     /// The save at shutdown: written even when nothing changed, and marked as
     /// a clean stop (`stoppedUnixMs`; `RuleHits::to_saved_at_stop` says when
-    /// not). The last one: a save after it (one the ticker had already handed
-    /// to `spawn_blocking`) writes nothing.
+    /// not). The last periodic one: a save after it (one the ticker had
+    /// already handed to `spawn_blocking`) writes nothing. A `record` after
+    /// it (the gRPC server stops later) writes the counts again, as a clean
+    /// stop again.
     pub fn save_at_stop(&self) {
         self.save(SaveKind::Stop);
     }
@@ -241,7 +257,7 @@ impl RuleHitsHandle {
         let _saving = lock(&self.inner.saving);
         let (path, saved_revision, was_persistent) = {
             let mut persistence = lock(&self.inner.persistence);
-            if persistence.stopped {
+            if persistence.stopped != (kind == SaveKind::AfterStop) {
                 return true;
             }
             if kind == SaveKind::Stop {
@@ -258,7 +274,7 @@ impl RuleHitsHandle {
         };
         let (saved, revision) = {
             let state = lock(&self.inner.state);
-            let saved = if kind == SaveKind::Stop {
+            let saved = if matches!(kind, SaveKind::Stop | SaveKind::AfterStop) {
                 state.to_saved_at_stop(now_ms())
             } else {
                 state.to_saved()
@@ -266,7 +282,8 @@ impl RuleHitsHandle {
             (saved, state.revision())
         };
         let Some(saved) = saved else { return true };
-        if kind == SaveKind::Periodic && saved_revision == Some(revision) && was_persistent {
+        let only_if_changed = matches!(kind, SaveKind::Periodic | SaveKind::AfterStop);
+        if only_if_changed && saved_revision == Some(revision) && was_persistent {
             return true;
         }
         // Not under any other lock: a pinged `record` must not wait on disk.
