@@ -46,6 +46,10 @@ pub async fn start(mode: BridgeMode) -> Setup {
     )
     .await
     .unwrap();
+    // Never the host's accounts: systemd-resolve is 193 here.
+    bridge.set_curated_uid_lookup(std::sync::Arc::new(|name| {
+        (name == "systemd-resolve").then_some(193)
+    }));
     let rx = bridge.broadcast_tx.subscribe();
     Setup {
         _sockets: sockets,

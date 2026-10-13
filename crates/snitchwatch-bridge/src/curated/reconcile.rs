@@ -72,7 +72,9 @@ pub enum EntryStatus {
     /// The daemon's rule list isn't known yet: nothing is done.
     Waiting,
     /// This bridge changes no recommended rules (see the message's
-    /// `unavailable`), and the daemon has no rule under this name.
+    /// `unavailable`), and the daemon has no rule under this name; or this
+    /// entry isn't offered on this computer (see its problem: the DNS
+    /// entry's account, #120 item 38).
     Unavailable,
     /// The daemon has this entry's rule, unedited (added earlier) and
     /// enabled, and this bridge changes none, or the user hasn't chosen yet.

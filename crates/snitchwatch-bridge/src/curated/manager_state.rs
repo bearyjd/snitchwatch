@@ -43,6 +43,8 @@ pub(super) struct State {
     /// Entries turned off because the daemon refused their install (#130),
     /// with why: shown until the entry is turned on again.
     pub(super) install_refusals: BTreeMap<String, &'static str>,
+    /// Entries the last pass withheld (`manager_resolver.rs`).
+    pub(super) withheld: BTreeSet<String>,
     /// Bumped by every GUI request taken (a choice, even an unchanged one,
     /// or a removal): each gets a pass (re-review 2, HIGH).
     pub(super) requests: u64,
@@ -70,6 +72,7 @@ impl State {
             removals: BTreeSet::new(),
             maybe_applied: BTreeMap::new(),
             install_refusals: BTreeMap::new(),
+            withheld: BTreeSet::new(),
             requests: 0,
             file: None,
             storage: StorageStatus {

@@ -237,7 +237,11 @@ impl CuratedDefaults {
             if !valid_request_id(&request_id) || id != "dns-resolved" {
                 return Err(IntentError::InvalidIntent);
             }
-            if state.inert.is_some() || state.file.is_none() || !state.storage.persistent {
+            if state.inert.is_some()
+                || state.file.is_none()
+                || !state.storage.persistent
+                || state.withheld.contains(&id)
+            {
                 return Err(IntentError::Unavailable);
             }
             let entry = entries()
@@ -315,6 +319,7 @@ impl CuratedDefaults {
             if state.inert.is_some()
                 || state.file.is_none()
                 || !state.storage.persistent
+                || state.withheld.contains(&id)
                 || (reply.is_some() && state.request_results.len() >= 256)
             {
                 return Err(IntentError::Unavailable);

@@ -123,6 +123,8 @@ impl Harness {
             self.broadcast.clone(),
         );
         curated.attach_file(self.file.clone());
+        // Never the host's accounts: systemd-resolve is 193 here.
+        curated.set_uid_lookup(Arc::new(|name| (name == "systemd-resolve").then_some(193)));
         curated
     }
 

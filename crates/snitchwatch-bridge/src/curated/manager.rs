@@ -42,8 +42,12 @@ use crate::ws_messages::{ClientMessage, ServerMessage, StorageStatus};
 
 #[path = "manager_intent.rs"]
 mod intent;
+#[path = "manager_resolver.rs"]
+mod resolver;
 #[path = "manager_state.rs"]
 mod state;
+use resolver::withhold;
+pub use resolver::DNS_ACCOUNT_REASON;
 use state::{
     command_problem, deleted, fail, keep, no_file_marks, rule_name, save_in_order, send_problem,
     show_removal_failures, still_edited, summary, track_maybe_applied, without_failed, Problem,
@@ -87,6 +91,8 @@ struct Inner {
     /// One save at a time; holds the last version written, so an older
     /// snapshot never replaces a newer one (code review LOW-1).
     saver: Mutex<u64>,
+    /// Finds the system resolver's account (#120 item 38).
+    uid_lookup: Mutex<crate::accounts::UidLookup>,
     /// Passes run, for the tests of the pass gate.
     #[cfg(test)]
     passes: std::sync::atomic::AtomicU64,
@@ -124,6 +130,7 @@ impl CuratedDefaults {
                 wake: Notify::new(),
                 last: Mutex::new(None),
                 saver: Mutex::new(0),
+                uid_lookup: Mutex::new(crate::accounts::system_uid_lookup()),
                 #[cfg(test)]
                 passes: Default::default(),
             }),
@@ -332,6 +339,7 @@ impl CuratedDefaults {
             self.announce_changed();
             return;
         };
+        let withheld = self.withheld().await;
         let (maybe_applied, no_files) = {
             let mut state = lock(&self.inner.state);
             let no_files = no_file_marks(&state, &files_left);
@@ -374,6 +382,7 @@ impl CuratedDefaults {
                 state.install_refusals.retain(|id, _| !enabled.contains(id));
                 let actions = without_failed(&mut state, planned.actions, generation);
                 show_removal_failures(&mut state, daemon, generation);
+                let actions = withhold(&mut state, actions, &withheld);
                 let revision = state.broad_revision;
                 let actions = actions
                     .into_iter()
@@ -793,3 +802,7 @@ mod refused_install_tests;
 #[cfg(test)]
 #[path = "manager_file_left_tests.rs"]
 mod file_left_tests;
+
+#[cfg(test)]
+#[path = "manager_resolver_tests.rs"]
+mod resolver_tests;
