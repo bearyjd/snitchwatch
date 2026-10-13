@@ -206,7 +206,12 @@ upwards, never downwards; a missed hint is the cheaper error.
    `CLOCK_BOOTTIME`; if either counted suspend time, the tolerance would
    silently stop working. `prune_expired_at(now_secs, clock)` notes
    `ends + 5 s` as an allowance when `ends` is still ahead of `clock`, i.e.
-   when the two clocks disagree; in the normal case it notes nothing.
+   when the two clocks disagree. For a change the bridge made that happens
+   only after a suspend. For a snapshot rule it is the usual case: its
+   `created` stamp is older than the timer's start, so after the prune it
+   keeps a tolerance of up to min(age at adoption, duration) + 5 s, and a
+   real +1 mismatch can go unreported for that long (a missed hint, bounded
+   by the duration: the cheaper error; #120 item 30).
 
 `note_prompt_answer` counts a name that is listed, left out of the list for
 its size, or an add the daemon refused and may have stored: the daemon has
