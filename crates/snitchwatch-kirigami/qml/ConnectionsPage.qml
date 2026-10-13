@@ -296,9 +296,7 @@ Kirigami.Page {
         const anyPending = ids.some(id => page.model.isPendingRow(id));
         const index = anyPending ? page.model.oldestPendingRowIndex(page.dismissedId)
             : (ids.length > 0 ? page.model.visibleRowIndex(ids[ids.length - 1]) : -1);
-        if (index >= 0) {
-            page.selectAuto(index);
-        }
+        if (index >= 0) page.selectAuto(index);
     }
 
     // The pushed detail page left the stack (Back): the selection ends with it.
@@ -368,9 +366,7 @@ Kirigami.Page {
 
     function selectOldestPending(exceptId) {
         const index = page.model ? page.model.oldestPendingRowIndex(exceptId) : -1;
-        if (index >= 0) {
-            page.selectAuto(index);
-        }
+        if (index >= 0) page.selectAuto(index);
     }
 
     // The list's current row changed (click, auto-select, or the model moving
