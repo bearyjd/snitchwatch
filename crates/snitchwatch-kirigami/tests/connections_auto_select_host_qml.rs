@@ -1,5 +1,7 @@
-//! A new pending row under an open domain opens its host and is auto-selected,
-//! with ranged signals. Shares the ranged-toggle probe harness: failures are
+//! A new pending row under an open domain opens its host and is auto-selected.
+//! The ranged signals for the host-open are guarded by the debug assert in
+//! `apply_grouped_projection`, not observed here (the insert itself resets the
+//! model in this harness). Shares the ranged-toggle probe harness: failures are
 //! thrown against the probe's URL, which the stderr capture turns into an
 //! assertion. Run headless with `QT_QPA_PLATFORM=offscreen`.
 use std::sync::atomic::{AtomicBool, Ordering};
