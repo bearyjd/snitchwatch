@@ -1442,14 +1442,19 @@ impl qobject::ConnectionsModel {
 
     fn oldest_pending_row_index(&self, except_id: &QString) -> i32 {
         let except = except_id.to_string();
-        let pending = |id: &str| id != except && self.store.is_pending(id) == Some(true);
         let index = if self.grouped {
-            self.grouped_projection
-                .iter()
-                .position(|e| matches!(e, VisibleEntry::Row { id, .. } if pending(id)))
+            oldest_pending_position(
+                self.grouped_projection.iter().map(|e| match e {
+                    VisibleEntry::Row { id, .. } => self.store.row_by_id(id),
+                    _ => None,
+                }),
+                &except,
+            )
         } else {
-            (0..self.store.visible_len())
-                .position(|i| self.store.visible_row(i).is_some_and(|r| pending(&r.id)))
+            oldest_pending_position(
+                (0..self.store.visible_len()).map(|i| self.store.visible_row(i)),
+                &except,
+            )
         };
         index.map_or(-1, |i| i as i32)
     }
@@ -1787,6 +1792,20 @@ fn process_path_text(row: &ConnectionRow) -> &str {
     row.process_path.as_deref().unwrap_or("")
 }
 
+/// Position of the pending row with the smallest `started_at_ms` (the one
+/// waiting longest), skipping `except`; ties go to the topmost. `None` entries
+/// (group headers) are never candidates.
+fn oldest_pending_position<'a>(
+    rows: impl Iterator<Item = Option<&'a ConnectionRow>>,
+    except: &str,
+) -> Option<usize> {
+    rows.enumerate()
+        .filter_map(|(i, r)| r.map(|r| (i, r)))
+        .filter(|(_, r)| r.id != except && is_pending(r))
+        .min_by_key(|(_, r)| r.started_at_ms)
+        .map(|(i, _)| i)
+}
+
 /// `startedAtMs` as a `real` (epoch ms overflow a QML `int`).
 fn started_at_ms(row: &ConnectionRow) -> f64 {
     row.started_at_ms as f64
@@ -2036,6 +2055,25 @@ mod tests {
             deferred: false,
             decided_by_default: false,
         }
+    }
+
+    #[test]
+    fn oldest_pending_position_picks_smallest_start_topmost_on_ties() {
+        let mut a = row("a", None);
+        a.started_at_ms = 5;
+        let mut b = row("b", None);
+        b.started_at_ms = 2;
+        let mut c = row("c", None);
+        c.started_at_ms = 2;
+        let mut d = row("d", Some("allow"));
+        d.started_at_ms = 1;
+        let list = [None, Some(&a), Some(&b), Some(&c), Some(&d)];
+        assert_eq!(oldest_pending_position(list.iter().copied(), ""), Some(2));
+        assert_eq!(oldest_pending_position(list.iter().copied(), "b"), Some(3));
+        assert_eq!(
+            oldest_pending_position([None, Some(&d)].into_iter(), ""),
+            None
+        );
     }
 
     #[test]

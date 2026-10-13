@@ -282,13 +282,19 @@ Kirigami.Page {
 
     // Row ids auto-select asked for since the last `runAuto`.
     property var autoIds: []
+    // The pending row the user last closed: auto-select skips it until it is
+    // decided or removed, so a dismissed prompt does not come back.
+    property string dismissedId: ""
     // A pending arrival selects the OLDEST pending row (the one waiting
     // longest); any other id (the grouped re-anchor) selects that row itself.
     function runAuto() {
         const ids = page.autoIds;
         page.autoIds = [];
+        if (page.dismissedId !== "" && !page.model.isPendingRow(page.dismissedId)) {
+            page.dismissedId = "";
+        }
         const anyPending = ids.some(id => page.model.isPendingRow(id));
-        const index = anyPending ? page.model.oldestPendingRowIndex("")
+        const index = anyPending ? page.model.oldestPendingRowIndex(page.dismissedId)
             : (ids.length > 0 ? page.model.visibleRowIndex(ids[ids.length - 1]) : -1);
         if (index >= 0) {
             page.selectAuto(index);
@@ -352,6 +358,7 @@ Kirigami.Page {
     // Close / finished action: clear the selection.
     function dismissInspector() {
         const closed = inspect.rowId;
+        page.dismissedId = closed;
         inspect.clear();
         page.closeDetailPage();
         listPane.view.currentIndex = -1;

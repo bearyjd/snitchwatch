@@ -300,14 +300,14 @@ Window {
         },
         function () {
             probe.expect(!page.inspecting, "dismiss left a selection: " + page.inspectId);
-            // p9 is gone, so the new arrival is the oldest pending row.
-            model.applyServerMessageJson(JSON.stringify({ action: "removeConnectionRows", ids: ["p9"] }));
+            // p9 was dismissed and is still pending (and older): the new
+            // arrival is shown, not p9.
             model.applyServerMessageJson(JSON.stringify({ action: "insertConnectionRows", rows: [
-                probe.row("p10", "p10.example.com", null, null)] }));
+                Object.assign(probe.row("p10", "p10.example.com", null, null), { startedAtMs: 2 })] }));
         },
         function () {
             probe.expect(page.inspecting && page.inspectId === "p10",
-                         "idle: a newly arrived pending row was not shown: '" + page.inspectId + "'");
+                         "idle: a newly arrived pending row was not shown (dismissed p9 must not return): '" + page.inspectId + "'");
         }
     ]
 

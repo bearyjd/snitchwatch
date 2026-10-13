@@ -47,10 +47,10 @@ Window {
     }
 
     function expect(ok, what) { if (!ok) probe.failures.push(what); }
-    function row(id, action) {
-        return { id: id, process: "curl", processPath: "/usr/bin/curl", dstHost: "x.example.com",
+    function row(id, action, process, startedAtMs) {
+        return { id: id, process: process, processPath: "/usr/bin/" + process, dstHost: "x.example.com",
                  dstIp: "203.0.113.7", dstPort: 443, protocol: "tcp", direction: "outgoing",
-                 action: action, bytesSent: 0, bytesReceived: 0, startedAtMs: 1, matchedRule: null };
+                 action: action, bytesSent: 0, bytesReceived: 0, startedAtMs: startedAtMs, matchedRule: null };
     }
     // Open every collapsed header at `depth` (0 program, 1 domain, 2 host).
     function expandDepth(depth) {
@@ -73,7 +73,8 @@ Window {
     readonly property var steps: [
         function () {
             model.applyServerMessageJson(JSON.stringify({ action: "insertConnectionRows",
-                rows: [probe.row("old", "allow")] }));
+                rows: [probe.row("old", "allow", "curl", 1),
+                       probe.row("oldw", "allow", "wget", 1)] }));
         },
         function () { probe.expandDepth(0); },
         function () { probe.expandDepth(1); },
@@ -86,12 +87,15 @@ Window {
                 const d = list.itemAtIndex(i);
                 if (d && !d.isGroupHeader) leaves++;
             }
-            probe.expect(leaves === 1 && !page.inspecting, "setup: leaves " + leaves);
-            // Two arrivals in the same tick: pA first, then pB (listed above it).
+            probe.expect(leaves === 2 && !page.inspecting, "setup: leaves " + leaves);
+            // Two arrivals in the same tick: pA first, in the lower wget group,
+            // then pB (newer) in the curl group above it. pB's row pushes pA's
+            // down, so the index recorded for pA is stale by the time the page
+            // runs; the oldest pending row is still pA.
             model.applyServerMessageJson(JSON.stringify({ action: "insertConnectionRows",
-                rows: [probe.row("pA", null)] }));
+                rows: [probe.row("pA", null, "wget", 1)] }));
             model.applyServerMessageJson(JSON.stringify({ action: "insertConnectionRows",
-                rows: [probe.row("pB", null)] }));
+                rows: [probe.row("pB", null, "curl", 2)] }));
         },
         function () {
             probe.expect(page.inspecting && page.inspectId === "pA",
