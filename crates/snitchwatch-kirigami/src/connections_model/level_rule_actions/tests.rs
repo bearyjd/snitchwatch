@@ -128,6 +128,7 @@ fn projection(state: RuleState, names: &[&str], matching: usize) -> Projection {
         matching,
         effective: Level::Host,
         too_broad: false,
+        reason: None,
     }
 }
 
@@ -168,9 +169,80 @@ fn a_delete_with_nothing_or_something_in_flight_is_refused() {
 }
 
 #[test]
+fn a_node_with_no_rule_is_unavailable_when_the_duration_is_once_only() {
+    let none = projection(RuleState::None, &[], 0);
+    assert_eq!(
+        shown_state(&none, || false),
+        (
+            RuleState::Unavailable,
+            Some(LevelRuleRefusal::NotRemembered)
+        )
+    );
+    assert_eq!(shown_state(&none, || true), (RuleState::None, None));
+}
+
+#[test]
+fn an_existing_rule_stays_removable_whatever_the_duration() {
+    for state in [RuleState::Allow, RuleState::Deny, RuleState::Partial] {
+        let p = projection(state, &["r"], 1);
+        // The duration is not even asked for.
+        assert_eq!(shown_state(&p, || unreachable!()), (state, None));
+    }
+}
+
+#[test]
+fn an_unavailable_projection_keeps_its_own_reason() {
+    let mut p = projection(RuleState::Unavailable, &[], 0);
+    p.reason = Some(LevelRuleRefusal::TooBroad);
+    assert_eq!(
+        shown_state(&p, || false),
+        (RuleState::Unavailable, Some(LevelRuleRefusal::TooBroad))
+    );
+}
+
+#[test]
 fn a_flat_model_refuses_every_node_whatever_the_cached_projection_holds() {
     let entries = shown();
     let n = node(PROG, Level::Domain, "github.com");
     assert_eq!(known_node(true, &entries, n), Ok(()));
     assert_eq!(known_node(false, &entries, n), Err(NOT_IN_LIST));
+}
+
+#[test]
+fn the_duration_is_read_once_however_often_it_is_asked() {
+    let reads = Cell::new(0);
+    let cache = DurationCache::default();
+    let read = || {
+        reads.set(reads.get() + 1);
+        "this_time"
+    };
+    for _ in 0..1000 {
+        assert_eq!(cache.get(read), "this_time");
+    }
+    assert_eq!(reads.get(), 1);
+}
+
+#[test]
+fn a_refresh_reads_again_and_says_whether_the_duration_changed() {
+    let cache = DurationCache::default();
+    assert_eq!(cache.get(|| "forever"), "forever");
+    assert!(!cache.refresh(|| "forever"), "same token is no change");
+    assert!(cache.refresh(|| "this_time"), "a new token is a change");
+    // The new token is what is held, with no further read.
+    assert_eq!(cache.get(|| panic!("read after a refresh")), "this_time");
+}
+
+#[test]
+fn a_refresh_before_any_read_counts_as_a_change() {
+    assert!(DurationCache::default().refresh(|| "forever"));
+}
+
+#[test]
+fn a_shown_duration_must_still_be_the_current_one() {
+    assert_eq!(duration_matches("forever", "forever"), Ok(()));
+    assert_eq!(duration_matches("", "this_time"), Ok(()), "none was shown");
+    assert_eq!(
+        duration_matches("for_5_minutes", "forever"),
+        Err(DURATION_CHANGED)
+    );
 }

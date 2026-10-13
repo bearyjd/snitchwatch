@@ -53,7 +53,7 @@ Window {
         bridgeFeed: feedStub
         model: ConnectionsModel { id: model }
     }
-    TestCase { id: tc; name: "rowclick"; when: false }
+    TestCase { id: tc; name: "filterlayout"; when: false }
 
     function expect(ok, what) { if (!ok) probe.failures.push(what); }
     function row(id, host) {
@@ -170,7 +170,7 @@ Window {
         .collect();
     assert!(
         bad_lines.is_empty(),
-        "clicking a leaf row did not open the inspector:\n{}",
+        "the filter bar overlaps the list:\n{}",
         bad_lines.join("\n")
     );
     assert!(

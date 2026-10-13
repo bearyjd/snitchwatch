@@ -60,6 +60,8 @@ Kirigami.ScrollablePage {
     // Exposed for the headless probe (tests/inline_verdict_qml.rs).
     property alias inlineVerdicts: verdictHelper
 
+    property alias levelRules: ruleActions
+
     // Issue #18: a row's inline Allow/Deny. Also the entry point
     // `tests/inline_verdict_qml.rs` drives, to exercise the click -> submit ->
     // verdict-message path without synthesizing a real mouse click.
@@ -214,11 +216,21 @@ Kirigami.ScrollablePage {
         title: page.title
     }
 
-    // The wrapping filter switches and summary sit above the list, in the
-    // page content, where their height is laid out rather than overflowed.
-    header: ConnectionsFilterBar {
-        id: filterBar
-        model: page.model
+    // Above the list, in the page content where their height is laid out
+    // rather than overflowed: the wrapping filter switches and summary, then
+    // the header rule buttons' commands, confirm and outcome bar.
+    header: ColumnLayout {
+        spacing: 0
+        ConnectionsFilterBar {
+            id: filterBar
+            Layout.fillWidth: true
+            model: page.model
+        }
+        LevelRuleActions {
+            id: ruleActions
+            Layout.fillWidth: true
+            model: page.model
+        }
     }
 
     Kirigami.PlaceholderMessage {

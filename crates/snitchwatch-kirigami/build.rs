@@ -25,6 +25,8 @@ fn main() {
                 "qml/ConnectionsHeader.qml",
                 "qml/ConnectionsFilterBar.qml",
                 "qml/ConnectionInspector.qml",
+                "qml/RuleButton.qml",
+                "qml/LevelRuleActions.qml",
                 "qml/InlineVerdicts.qml",
                 "qml/PromptSlotBanner.qml",
                 "qml/PendingDecisionSheet.qml",

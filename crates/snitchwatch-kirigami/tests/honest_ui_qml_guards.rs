@@ -36,6 +36,10 @@ const CONNECTIONS_PAGE: &str = concat!(
     include_str!("../qml/ConnectionsFilterBar.qml"),
     "\n",
     include_str!("../qml/ConnectionInspector.qml"),
+    "\n",
+    include_str!("../qml/RuleButton.qml"),
+    "\n",
+    include_str!("../qml/LevelRuleActions.qml"),
 );
 const MAIN_QML: &str = include_str!("../qml/main.qml");
 const SIZED_SHEET: &str = include_str!("../qml/SizedOverlaySheet.qml");
@@ -87,6 +91,11 @@ const ALL_QML: &[(&str, &str)] = &[
     (
         "DecideLaterButton.qml",
         include_str!("../qml/DecideLaterButton.qml"),
+    ),
+    ("RuleButton.qml", include_str!("../qml/RuleButton.qml")),
+    (
+        "LevelRuleActions.qml",
+        include_str!("../qml/LevelRuleActions.qml"),
     ),
     (
         "DaemonHealthPage.qml",
@@ -909,4 +918,56 @@ fn per_connection_traffic_readouts_stay_hidden() {
         !main.contains("trafficModelRef"),
         "main.qml threads the zero-fed TrafficModel into ConnectionsPage again (issue #49)"
     );
+}
+
+/// The rule button's message bar and confirm dialog show the model's refusal
+/// reason and the bridge's status (data): both must be plain text.
+#[test]
+fn level_rule_actions_labels_showing_bridge_text_are_plain_text() {
+    assert_data_labels_plain_text(
+        "LevelRuleActions.qml",
+        include_str!("../qml/LevelRuleActions.qml"),
+        &[
+            "actions.message",
+            "actions.confirmText",
+            "actions.asked.program",
+        ],
+        3,
+    );
+    assert_data_labels_plain_text(
+        "RuleButton.qml",
+        include_str!("../qml/RuleButton.qml"),
+        &["root.tipText", "root.glyph", "root.stateLabel"],
+        3,
+    );
+}
+
+/// Colour is never the only cue (Phase 2 risks): every rule button state has
+/// its own glyph and label, none shared, and the label is drawn next to the
+/// glyph. The live state table is checked in `rule_button_qml.rs`.
+#[test]
+fn rule_button_states_each_have_a_distinct_glyph_and_label() {
+    let code = code_lines(include_str!("../qml/RuleButton.qml"));
+    let mut glyphs = Vec::new();
+    let mut labels = Vec::new();
+    for state in ["allow", "deny", "partial", "none", "pending", "unavailable"] {
+        let line = code
+            .lines()
+            .find(|l| l.trim_start().starts_with(&format!("{state}: {{")))
+            .unwrap_or_else(|| panic!("no table row for {state}"));
+        let field = |name: &str| {
+            let rest = line.split(&format!("{name}: \"")).nth(1);
+            rest.and_then(|r| r.split('"').next()).map(str::to_owned)
+        };
+        glyphs.push(field("glyph").unwrap_or_else(|| panic!("{state}: no glyph")));
+        labels.push(field("label").unwrap_or_else(|| panic!("{state}: no label")));
+    }
+    for set in [&glyphs, &labels] {
+        let mut unique = set.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), set.len(), "duplicate in {set:?}");
+        assert!(set.iter().all(|t| !t.is_empty()), "empty text in {set:?}");
+    }
+    assert!(code.contains("text: root.glyph") && code.contains("text: root.stateLabel"));
 }

@@ -26,7 +26,12 @@ Item {
         { name: "blocklists", page: "blocklists" },
         { name: "onboarding-groups", page: "curatedGroups" },
         { name: "onboarding-groups-details", page: "curatedGroups", expandGroups: true },
-        { name: "recommended-rules", page: "recommendedRules" }
+        { name: "recommended-rules", page: "recommendedRules" },
+        // The connections page again, narrowed to one program: the rule
+        // button's "Can't add rule" state (no program file known), then the
+        // confirm dialog of a program-wide rule.
+        { name: "connections-unavailable", page: "connections", filter: "dhclient" },
+        { name: "connections-confirm", confirm: true }
     ]
 
     function capture(name, item) {
@@ -91,6 +96,18 @@ Item {
                 Qt.callLater(function () { runner.capture(shot.name, runner.alertWindow.contentItem); });
                 return;
             }
+            if (shot.confirm) {
+                // The dialog opens on one tick and is grabbed on the next, once
+                // it has been laid out. It is a popup, so grab its own content.
+                const actions = runner.window.pageStack.currentItem.levelRules;
+                if (!actions.confirmDialog.opened) {
+                    actions.create(0, "/usr/bin/curl", "", "curl", "allow");
+                    return;
+                }
+                runner.step++;
+                runner.capture(shot.name, actions.confirmDialog.contentItem);
+                return;
+            }
             runner.step++;
             if (shot.page) {
                 runner.window.pageStack.replace(runner.pages[shot.page]);
@@ -103,6 +120,10 @@ Item {
                         groups.itemAt(i).expanded = true;
                     }
                 });
+            }
+            if (shot.filter !== undefined) {
+                runner.window.connectionsModelRef.setGroupedMode(true);
+                runner.window.connectionsModelRef.setFilterQuery(shot.filter);
             }
             if (shot.expand !== undefined) {
                 runner.expandDepth(shot.expand);

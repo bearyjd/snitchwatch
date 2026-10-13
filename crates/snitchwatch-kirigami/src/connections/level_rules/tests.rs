@@ -169,9 +169,31 @@ fn a_program_without_a_path_cannot_be_bound() {
                     key: "example.com"
                 })
                 .state,
-            RuleState::None
+            RuleState::Unavailable
+        );
+        let p = with_rules(&[]).project(NodeRef {
+            program,
+            level: Level::Host,
+            key: "example.com",
+        });
+        assert_eq!(
+            p.reason,
+            Some(LevelRuleRefusal::UnknownProgram),
+            "{program:?}"
         );
     }
+}
+
+#[test]
+fn a_public_suffix_domain_is_unavailable_with_its_reason() {
+    for key in ["co.uk", "github.io"] {
+        let p = with_rules(&[]).project(node(Level::Domain, key));
+        assert_eq!(p.state, RuleState::Unavailable, "{key}");
+        assert_eq!(p.reason, Some(LevelRuleRefusal::TooBroad), "{key}");
+    }
+    // An ordinary node is not unavailable.
+    let p = with_rules(&[]).project(node(Level::Domain, "example.com"));
+    assert_eq!((p.state, p.reason), (RuleState::None, None));
 }
 
 #[test]
@@ -501,7 +523,9 @@ fn a_domain_with_a_host_under_a_delegated_suffix_is_too_broad() {
     let hosts = ["bucket.s3.amazonaws.com", "ec2.amazonaws.com"];
     let p = levels.project_in(domain, hosts);
     assert!(p.too_broad);
-    assert_eq!(p.state, RuleState::None);
+    assert_eq!(p.state, RuleState::Unavailable);
+    assert_eq!(p.reason, Some(LevelRuleRefusal::TooBroad));
+    assert_eq!(p.state.token(), "unavailable");
 }
 
 #[test]
@@ -625,4 +649,5 @@ fn a_delegated_domain_still_shows_a_rule_that_already_exists() {
     );
     assert!(p.too_broad);
     assert_eq!((p.state, p.matching), (RuleState::Allow, 1));
+    assert_eq!(p.reason, None);
 }

@@ -140,6 +140,12 @@ Kirigami.ApplicationWindow {
     SettingsController {
         id: settingsController
     }
+    // The rule buttons' states depend on the default duration; the model
+    // re-reads it (once) when Settings publish a change.
+    Connections {
+        target: settingsController
+        function onDefaultDurationChanged() { connectionsModel.refreshLevelRuleDuration(); }
+    }
 
     // Desktop notification dispatch (Task 17). `windowActive` is a live
     // binding so the 5-second-grace-period check in Rust always sees this
@@ -242,6 +248,7 @@ Kirigami.ApplicationWindow {
         dir: appInfo.screenshotDir
         alertWindow: alertHost.alert
         pages: ({
+            connections: connectionsPageComponent,
             rules: rulesPageComponent,
             blocklists: blocklistsPageComponent,
             curatedGroups: curatedGroupsPageComponent,
