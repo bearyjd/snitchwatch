@@ -499,7 +499,7 @@ pub use sync::{
 mod count;
 #[path = "rules_refused.rs"]
 mod refused;
-pub use refused::MAX_FILES_LEFT;
+pub use refused::{applied_but_not_saved, MAX_FILES_LEFT};
 
 #[cfg(test)]
 #[path = "rules_tests.rs"]

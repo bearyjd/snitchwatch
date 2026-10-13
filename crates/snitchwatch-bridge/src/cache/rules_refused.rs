@@ -58,6 +58,13 @@ fn refused_effect(sent: &Notification) -> RefusedEffect {
     RefusedEffect::Unknown
 }
 
+/// Whether a refused `sent` still applies as sent, its file not written: a
+/// `CHANGE_RULE` of disabled `always` rules (only `Save` can have failed).
+/// The file holds the old version, which loads again at the next start.
+pub fn applied_but_not_saved(sent: &Notification) -> bool {
+    refused_effect(sent) == RefusedEffect::AppliedNotSaved
+}
+
 impl RulesCache {
     /// Deleted rules the daemon stopped using but couldn't remove the file
     /// of. A name leaves when a snapshot received after the refusal lists it
