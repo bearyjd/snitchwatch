@@ -30,6 +30,19 @@ pub fn interests_connections(msg: &ServerMessage) -> bool {
     )
 }
 
+/// True when `msg` drives `ConnectionsModel`: the connection list, plus the
+/// rule list and rule command results its tree's rule buttons show
+/// (`connections::level_rules`).
+pub fn interests_monitor(msg: &ServerMessage) -> bool {
+    interests_connections(msg)
+        || matches!(
+            msg,
+            ServerMessage::SetRules { .. }
+                | ServerMessage::UpdateRules { .. }
+                | ServerMessage::RuleCommandResult { .. }
+        )
+}
+
 /// True when `msg` mutates the connection list — the same variants
 /// `interests_connections` cares about, but drives `GeoModel`'s per-country
 /// aggregate instead. Kept as its own named predicate (rather than reusing
