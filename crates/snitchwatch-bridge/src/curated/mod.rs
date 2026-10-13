@@ -60,6 +60,13 @@ const DNS_PROGRAM: &str = "/usr/lib/systemd/systemd-resolved";
 const DNS_PORT: u16 = 53;
 const DNS_USER_ID: &str = "193";
 
+/// The multicast DNS group (RFC 6762): `dest.ip` for the one entry that may
+/// reach it, Avahi's announcements and lookups. Fixed addresses, not a
+/// server or a peer. It gets only this program, UDP, and this port.
+const MDNS_PATTERN: &str = r"^(224\.0\.0\.251|ff02::fb)$";
+const MDNS_PROGRAM: &str = "/usr/bin/avahi-daemon";
+const MDNS_PORT: u16 = 5353;
+
 /// The transport an entry allows, over IPv4 and IPv6 (the daemon names the
 /// IPv6 forms `tcp6`/`udp6`). `TcpAndUdp` is the DNS entry's alone
 /// ([`check_leaves`]): one anchored regexp for both, as the daemon's
@@ -96,6 +103,9 @@ impl Protocol {
 #[serde(deny_unknown_fields)]
 pub struct CuratedEntry {
     pub id: String,
+    /// The id of the [`CuratedGroup`] it is offered in. Regrouping never
+    /// changes `id`: the installed rule is named after it.
+    pub group: String,
     /// The program's exact absolute path, under `/usr`.
     pub path: String,
     /// The one host it may reach. Exactly one of `host`, `loopback` and
@@ -110,6 +120,10 @@ pub struct CuratedEntry {
     /// passes [`check_leaves`].
     #[serde(default, rename = "anyAddress")]
     pub any_address: bool,
+    /// Only the multicast DNS group (224.0.0.251 and ff02::fb). Only
+    /// [`MDNS_PROGRAM`], UDP [`MDNS_PORT`], passes [`check_leaves`].
+    #[serde(default, rename = "multicastDns")]
+    pub multicast_dns: bool,
     pub port: u16,
     pub protocol: Protocol,
     /// Why it is offered, in plain text.
@@ -118,11 +132,28 @@ pub struct CuratedEntry {
     pub evidence: String,
 }
 
+/// One group of entries, offered together: a trust boundary the user can
+/// turn on in one step. The bridge's own text, from the reviewed data file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CuratedGroup {
+    pub id: String,
+    pub title: String,
+    pub description: String,
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DataFile {
     version: u32,
+    groups: Vec<CuratedGroup>,
     entries: Vec<CuratedEntry>,
+}
+
+/// The groups the entries are offered in, in display order.
+pub fn groups() -> &'static [CuratedGroup] {
+    static GROUPS: OnceLock<Vec<CuratedGroup>> = OnceLock::new();
+    GROUPS.get_or_init(|| parse_file(DATA).map(|f| f.groups).unwrap_or_default())
 }
 
 /// The entries offered. An invalid data file is a build mistake the tests
@@ -161,6 +192,10 @@ pub fn entry_for_rule_name(name: &str) -> Option<&'static CuratedEntry> {
 }
 
 fn parse(raw: &str) -> Result<Vec<CuratedEntry>, String> {
+    parse_file(raw).map(|file| file.entries)
+}
+
+fn parse_file(raw: &str) -> Result<DataFile, String> {
     let file: DataFile =
         serde_json::from_str(raw).map_err(|_| "the data file isn't valid".to_string())?;
     if file.version != 1 {
@@ -175,7 +210,38 @@ fn parse(raw: &str) -> Result<Vec<CuratedEntry>, String> {
             return Err("two entries share an id".into());
         }
     }
-    Ok(file.entries)
+    check_groups(&file)?;
+    Ok(file)
+}
+
+/// Every group is well formed, unique and used; every entry is in one; and a
+/// broad entry is alone in its group, so turning a group on in one step can
+/// never carry a broad rule with it.
+fn check_groups(file: &DataFile) -> Result<(), String> {
+    for (index, group) in file.groups.iter().enumerate() {
+        if !valid_id(&group.id) || !plain_text(&group.title) || !plain_text(&group.description) {
+            return Err("a group isn't an id with a plain title and description".into());
+        }
+        if file.groups[..index]
+            .iter()
+            .any(|other| other.id == group.id)
+        {
+            return Err("two groups share an id".into());
+        }
+        if !file.entries.iter().any(|entry| entry.group == group.id) {
+            return Err("a group has no entries".into());
+        }
+    }
+    for entry in &file.entries {
+        let members = file.entries.iter().filter(|e| e.group == entry.group);
+        if !file.groups.iter().any(|group| group.id == entry.group) {
+            return Err("an entry is in a group nobody declared".into());
+        }
+        if entry.broad() && members.count() != 1 {
+            return Err("a broad entry shares its group".into());
+        }
+    }
+    Ok(())
 }
 
 impl CuratedEntry {
@@ -191,6 +257,9 @@ impl CuratedEntry {
         }
         if self.loopback {
             leaves.push(leaf("regexp", "dest.ip", LOOPBACK_PATTERN, false));
+        }
+        if self.multicast_dns {
+            leaves.push(leaf("regexp", "dest.ip", MDNS_PATTERN, false));
         }
         // `any_address` adds no destination condition: that is what it
         // means. It pins the sender instead.
@@ -220,10 +289,11 @@ impl CuratedEntry {
 
     /// Exactly what the rule allows, in plain text.
     pub fn allows(&self) -> String {
-        let to = match (&self.host, self.any_address) {
-            (Some(host), _) => host.clone(),
-            (None, true) => "any address".to_string(),
-            (None, false) => "this computer only (127.0.0.1 and ::1)".to_string(),
+        let to = match (&self.host, self.any_address, self.multicast_dns) {
+            (Some(host), _, _) => host.clone(),
+            (None, true, _) => "any address".to_string(),
+            (None, false, true) => "the multicast DNS group (224.0.0.251 and ff02::fb)".to_string(),
+            (None, false, false) => "this computer only (127.0.0.1 and ::1)".to_string(),
         };
         let sender = if self.any_address {
             format!(
@@ -258,11 +328,16 @@ impl CuratedEntry {
         }
         let destinations = usize::from(self.host.is_some())
             + usize::from(self.loopback)
-            + usize::from(self.any_address);
+            + usize::from(self.any_address)
+            + usize::from(self.multicast_dns);
         if destinations != 1 {
             return Err(
-                "an entry names none or several of a host, this computer and any address".into(),
+                "an entry names none or several of a host, this computer, multicast DNS and any address"
+                    .into(),
             );
+        }
+        if !valid_id(&self.group) {
+            return Err("an entry's group isn't lowercase letters, digits and dashes".into());
         }
         if self.port == 0 {
             return Err("an entry has no port".into());
@@ -364,9 +439,9 @@ type Leaves<'a> = std::iter::Peekable<std::slice::Iter<'a, Operator>>;
 fn check_leaves(leaves: &[Operator]) -> Result<(), String> {
     let mut rest = leaves.iter().peekable();
     let program = check_program(rest.next())?;
-    let any_address = check_destination(&mut rest, program)?;
-    check_port(rest.next(), any_address)?;
-    check_protocol(rest.next(), any_address)?;
+    let destination = check_destination(&mut rest, program)?;
+    check_port(rest.next(), destination)?;
+    check_protocol(rest.next(), destination)?;
     if rest.next().is_some() || leaves.iter().any(|op| !op.list.is_empty()) {
         return Err("a curated default has other conditions".into());
     }
@@ -387,11 +462,22 @@ fn check_program(leaf: Option<&Operator>) -> Result<&str, String> {
     }
 }
 
-/// The destination: one plain host or this computer, or no destination
-/// condition at all, which is any address. Returns whether it is any
-/// address; that is the system resolver's alone, and it must name its
-/// account, so a rule without the pin is refused.
-fn check_destination(rest: &mut Leaves<'_>, program: &str) -> Result<bool, String> {
+/// What a rule's destination condition is.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Destination {
+    /// One plain host, or this computer.
+    Named,
+    /// The multicast DNS group: Avahi's alone.
+    Mdns,
+    /// No condition: the system resolver's alone.
+    AnyAddress,
+}
+
+/// The destination: one plain host, this computer or the multicast DNS
+/// group, or no destination condition at all, which is any address. Any
+/// address is the system resolver's alone, and it must name its account, so
+/// a rule without the pin is refused; the multicast group is Avahi's alone.
+fn check_destination(rest: &mut Leaves<'_>, program: &str) -> Result<Destination, String> {
     let named = rest
         .peek()
         .is_some_and(|op| matches!(op.operand.as_str(), "dest.host" | "dest.ip"));
@@ -403,14 +489,22 @@ fn check_destination(rest: &mut Leaves<'_>, program: &str) -> Result<bool, Strin
                     && !op.sensitive
                     && valid_host(&op.data) =>
             {
-                Ok(false)
+                Ok(Destination::Named)
             }
             Some(op)
                 if op.operand == "dest.ip"
                     && op.r#type == "regexp"
                     && op.data == LOOPBACK_PATTERN =>
             {
-                Ok(false)
+                Ok(Destination::Named)
+            }
+            Some(op)
+                if op.operand == "dest.ip"
+                    && op.r#type == "regexp"
+                    && op.data == MDNS_PATTERN
+                    && program == MDNS_PROGRAM =>
+            {
+                Ok(Destination::Mdns)
             }
             _ => Err("the destination isn't one plain host name or this computer".into()),
         };
@@ -425,22 +519,26 @@ fn check_destination(rest: &mut Leaves<'_>, program: &str) -> Result<bool, Strin
                 && !op.sensitive
                 && op.data == DNS_USER_ID =>
         {
-            Ok(true)
+            Ok(Destination::AnyAddress)
         }
         _ => Err("any address needs the system resolver's account pinned by user ID".into()),
     }
 }
 
-fn check_port(leaf: Option<&Operator>, any_address: bool) -> Result<(), String> {
+fn check_port(leaf: Option<&Operator>, destination: Destination) -> Result<(), String> {
     match leaf {
         Some(op)
             if op.r#type == "simple"
                 && op.operand == "dest.port"
                 && op.data.bytes().all(|b| b.is_ascii_digit())
-                && op
-                    .data
-                    .parse::<u16>()
-                    .is_ok_and(|port| port != 0 && (!any_address || port == DNS_PORT))
+                && op.data.parse::<u16>().is_ok_and(|port| {
+                    port != 0
+                        && match destination {
+                            Destination::Named => true,
+                            Destination::Mdns => port == MDNS_PORT,
+                            Destination::AnyAddress => port == DNS_PORT,
+                        }
+                })
                 && !op.data.starts_with('0') =>
         {
             Ok(())
@@ -449,12 +547,13 @@ fn check_port(leaf: Option<&Operator>, any_address: bool) -> Result<(), String> 
     }
 }
 
-/// TCP or UDP for a named place; both, for the resolver's any-address rule.
-fn check_protocol(leaf: Option<&Operator>, any_address: bool) -> Result<(), String> {
-    let allowed: &[Protocol] = if any_address {
-        &[Protocol::TcpAndUdp]
-    } else {
-        &[Protocol::Tcp, Protocol::Udp]
+/// TCP or UDP for a named place; UDP for multicast DNS; both, for the
+/// resolver's any-address rule.
+fn check_protocol(leaf: Option<&Operator>, destination: Destination) -> Result<(), String> {
+    let allowed: &[Protocol] = match destination {
+        Destination::Named => &[Protocol::Tcp, Protocol::Udp],
+        Destination::Mdns => &[Protocol::Udp],
+        Destination::AnyAddress => &[Protocol::TcpAndUdp],
     };
     match leaf {
         Some(op)

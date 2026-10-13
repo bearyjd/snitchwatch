@@ -19,10 +19,137 @@ fn the_data_file_parses_and_offers_the_reviewed_entries() {
         [
             "networkmanager-connectivity-check",
             "chronyc-local",
+            "chronyd-ntp",
+            "avahi-mdns",
             "flatpak-flathub",
+            "tailscale-control",
+            "tailscale-logs",
             "dns-resolved"
         ]
     );
+}
+
+/// The ids installed rules are named after never change when entries are
+/// regrouped: a changed id would orphan an installed rule.
+#[test]
+fn the_original_ids_keep_their_rule_names() {
+    for id in [
+        "networkmanager-connectivity-check",
+        "chronyc-local",
+        "flatpak-flathub",
+        "dns-resolved",
+    ] {
+        let name = format!("snitchwatch-default-{id}");
+        assert!(entry_for_rule_name(&name).is_some(), "{id}");
+    }
+}
+
+#[test]
+fn every_entry_is_in_a_declared_group_and_every_group_is_used() {
+    let declared: Vec<&str> = groups().iter().map(|g| g.id.as_str()).collect();
+    assert_eq!(
+        declared,
+        [
+            "system-services",
+            "app-updates",
+            "tailscale",
+            "name-resolution"
+        ]
+    );
+    for entry in entries() {
+        assert!(declared.contains(&entry.group.as_str()), "{}", entry.id);
+    }
+    for group in groups() {
+        assert!(
+            entries().iter().any(|e| e.group == group.id),
+            "{}",
+            group.id
+        );
+        assert!(plain_text(&group.title) && plain_text(&group.description));
+    }
+    let group_of = |id: &str| {
+        entries()
+            .iter()
+            .find(|e| e.id == id)
+            .map(|e| e.group.as_str())
+    };
+    assert_eq!(group_of("avahi-mdns"), Some("system-services"));
+    assert_eq!(group_of("chronyd-ntp"), Some("system-services"));
+    assert_eq!(group_of("tailscale-control"), Some("tailscale"));
+    assert_eq!(group_of("dns-resolved"), Some("name-resolution"));
+}
+
+/// A GUI turns a whole group on in one step, so a broad entry is never
+/// grouped with others: it stays a deliberate, ticketed choice of its own.
+#[test]
+fn a_broad_entry_is_alone_in_its_group() {
+    for entry in entries().iter().filter(|e| e.broad()) {
+        let members = entries().iter().filter(|e| e.group == entry.group).count();
+        assert_eq!(members, 1, "{}", entry.id);
+    }
+}
+
+#[test]
+fn every_entry_binds_an_absolute_program_and_names_a_destination() {
+    for entry in entries() {
+        let op = entry.rule().operator.unwrap();
+        assert_eq!(op.list[0].operand, "process.path");
+        assert!(op.list[0].data.starts_with('/'), "{}", entry.id);
+        let has_destination = op
+            .list
+            .iter()
+            .any(|l| matches!(l.operand.as_str(), "dest.host" | "dest.ip"));
+        // Without a destination the rule is the pinned DNS resolver's.
+        if !has_destination {
+            assert!(entry.broad() && entry.id == "dns-resolved", "{}", entry.id);
+            assert!(op.list.iter().any(|l| l.operand == "user.id"));
+        }
+    }
+}
+
+#[test]
+fn mdns_is_limited_to_the_multicast_group_on_udp_5353() {
+    let avahi = entries().iter().find(|e| e.id == "avahi-mdns").unwrap();
+    assert!(!avahi.broad());
+    let mut rule = avahi.rule();
+    assert!(check_curated_rule(&rule).is_ok());
+    let leaves = &mut rule.operator.as_mut().unwrap().list;
+    assert_eq!(leaves[1].data, r"^(224\.0\.0\.251|ff02::fb)$");
+    // Not another port, transport, or program.
+    leaves[2].data = "53".into();
+    assert!(check_curated_rule(&rule).is_err());
+    let mut rule = avahi.rule();
+    rule.operator.as_mut().unwrap().list[3].data = Protocol::Tcp.pattern().into();
+    assert!(check_curated_rule(&rule).is_err());
+    let mut rule = avahi.rule();
+    rule.operator.as_mut().unwrap().list[0].data = "/usr/bin/flatpak".into();
+    assert!(check_curated_rule(&rule).is_err());
+    // A widened pattern is refused.
+    let mut rule = avahi.rule();
+    rule.operator.as_mut().unwrap().list[1].data = r"^224\.0\.0\..*$".into();
+    assert!(check_curated_rule(&rule).is_err());
+}
+
+#[test]
+fn the_new_services_are_as_narrow_as_the_protocol_allows() {
+    let allows = |id: &str| entries().iter().find(|e| e.id == id).unwrap().allows();
+    assert_eq!(
+        allows("avahi-mdns"),
+        "/usr/bin/avahi-daemon may connect to the multicast DNS group (224.0.0.251 and ff02::fb) on UDP port 5353, over IPv4 and IPv6."
+    );
+    assert_eq!(
+        allows("chronyd-ntp"),
+        "/usr/bin/chronyd may connect to 2.fedora.pool.ntp.org on UDP port 123, over IPv4 and IPv6."
+    );
+    assert_eq!(
+        allows("tailscale-control"),
+        "/usr/bin/tailscaled may connect to controlplane.tailscale.com on TCP port 443, over IPv4 and IPv6."
+    );
+    // No Tailscale entry can reach any address.
+    assert!(entries()
+        .iter()
+        .filter(|e| e.group == "tailscale")
+        .all(|e| e.host.is_some() && !e.broad()));
 }
 
 #[test]
@@ -65,7 +192,11 @@ fn each_entry_says_exactly_what_it_allows() {
         [
             "/usr/bin/NetworkManager may connect to fedoraproject.org on TCP port 80, over IPv4 and IPv6.",
             "/usr/bin/chronyc may connect to this computer only (127.0.0.1 and ::1) on UDP port 323, over IPv4 and IPv6.",
+            "/usr/bin/chronyd may connect to 2.fedora.pool.ntp.org on UDP port 123, over IPv4 and IPv6.",
+            "/usr/bin/avahi-daemon may connect to the multicast DNS group (224.0.0.251 and ff02::fb) on UDP port 5353, over IPv4 and IPv6.",
             "/usr/bin/flatpak may connect to dl.flathub.org on TCP port 443, over IPv4 and IPv6.",
+            "/usr/bin/tailscaled may connect to controlplane.tailscale.com on TCP port 443, over IPv4 and IPv6.",
+            "/usr/bin/tailscaled may connect to log.tailscale.com on TCP port 443, over IPv4 and IPv6.",
             "/usr/lib/systemd/systemd-resolved may connect to any address on TCP and UDP port 53, over IPv4 and IPv6, but only while it runs as user ID 193 (the systemd-resolve account).",
         ]
     );
@@ -133,10 +264,14 @@ fn the_allowlist_takes_only_the_exact_curated_shape() {
 
 #[test]
 fn a_bad_entry_is_refused() {
-    let file = |entry: &str| format!(r#"{{"version": 1, "entries": [{entry}]}}"#);
+    let file = |entry: &str| {
+        format!(
+            r#"{{"version": 1, "groups": [{{"id": "g", "title": "t", "description": "d"}}], "entries": [{entry}]}}"#
+        )
+    };
     let entry = |path: &str, rest: &str| {
         format!(
-            r#"{{"id": "x", "path": "{path}", "port": 443, "protocol": "tcp", "why": "w", "evidence": "e"{rest}}}"#
+            r#"{{"id": "x", "group": "g", "path": "{path}", "port": 443, "protocol": "tcp", "why": "w", "evidence": "e"{rest}}}"#
         )
     };
     let host = r#", "host": "a.org""#;
@@ -157,6 +292,15 @@ fn a_bad_entry_is_refused() {
             r#", "host": "a.org", "pathRegexp": ".*""#,
         ),
         entry("/usr/bin/flatpak", host).replace(r#""why": "w""#, r#""why": "<b>x</b>""#),
+        // A group nobody declared, and no group at all.
+        entry("/usr/bin/flatpak", host).replace(r#""group": "g""#, r#""group": "nope""#),
+        entry("/usr/bin/flatpak", host).replace(r#""group": "g", "#, ""),
+        // The multicast destination is avahi's alone, on udp 5353.
+        entry("/usr/bin/flatpak", r#", "multicastDns": true"#),
+        entry(
+            "/usr/bin/flatpak",
+            r#", "host": "a.org", "multicastDns": true"#,
+        ),
     ] {
         assert!(parse(&file(&bad)).is_err(), "{bad}");
     }
@@ -166,7 +310,18 @@ fn a_bad_entry_is_refused() {
         entry("/usr/bin/b", host)
     );
     assert!(parse(&file(&twice)).is_err(), "duplicate ids");
-    assert!(parse(r#"{"version": 2, "entries": []}"#).is_err());
+    assert!(parse(r#"{"version": 2, "groups": [], "entries": []}"#).is_err());
+    // A group nobody uses, and two groups with one id.
+    let unused = format!(
+        r#"{{"version": 1, "groups": [{{"id": "g", "title": "t", "description": "d"}}, {{"id": "h", "title": "t", "description": "d"}}], "entries": [{}]}}"#,
+        entry("/usr/bin/flatpak", host)
+    );
+    assert!(parse(&unused).is_err(), "unused group");
+    let twin = file(&entry("/usr/bin/flatpak", host)).replace(
+        r#"[{"id": "g", "title": "t", "description": "d"}]"#,
+        r#"[{"id": "g", "title": "t", "description": "d"}, {"id": "g", "title": "t", "description": "d"}]"#,
+    );
+    assert!(parse(&twin).is_err(), "duplicate group id");
 }
 
 #[test]

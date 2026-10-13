@@ -203,6 +203,11 @@ pub enum ServerMessage {
     /// stands (prompt-slot plan Part D; `bridge_capabilities::CURATED_DEFAULTS`).
     SetCuratedDefaults {
         entries: Vec<crate::curated::wire::CuratedDefaultSummary>,
+        /// The groups the entries are offered in, in display order
+        /// (`bridge_capabilities::CURATED_GROUPS_V1`). Left out by a bridge
+        /// without groups.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        groups: Vec<crate::curated::CuratedGroup>,
         storage: StorageStatus,
         /// Why this bridge never installs them (the per-user bridge, or no
         /// saved settings); `None` when it does.

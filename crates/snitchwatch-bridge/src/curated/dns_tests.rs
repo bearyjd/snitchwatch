@@ -468,10 +468,14 @@ fn a_host_entry_cannot_borrow_the_dns_accounts_pin() {
 
 #[test]
 fn only_the_resolver_can_be_offered_with_no_destination() {
-    let file = |entry: &str| format!(r#"{{"version": 1, "entries": [{entry}]}}"#);
+    let file = |entry: &str| {
+        format!(
+            r#"{{"version": 1, "groups": [{{"id": "g", "title": "t", "description": "d"}}], "entries": [{entry}]}}"#
+        )
+    };
     let entry = |path: &str, port: u16, protocol: &str, rest: &str| {
         format!(
-            r#"{{"id": "x", "path": "{path}", "port": {port}, "protocol": "{protocol}", "why": "w", "evidence": "e"{rest}}}"#
+            r#"{{"id": "x", "group": "g", "path": "{path}", "port": {port}, "protocol": "{protocol}", "why": "w", "evidence": "e"{rest}}}"#
         )
     };
     let any = r#", "anyAddress": true"#;

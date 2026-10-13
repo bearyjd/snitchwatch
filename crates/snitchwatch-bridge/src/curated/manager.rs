@@ -32,9 +32,9 @@ use tokio::sync::{broadcast, watch, Notify};
 use tracing::{debug, error, info, warn};
 
 use super::canonical::is_unedited;
-use super::entries;
 use super::reconcile::{inert_statuses, plan, CuratedAction, DaemonRules, EntryStatus};
 use super::store;
+use super::{entries, groups};
 use crate::cache::rules::SharedRulesCache;
 use crate::daemon_commands::{CuratedCommand, DaemonCommands};
 use crate::rule_name::CURATED_DEFAULT_RULE_NAME_PREFIX;
@@ -198,6 +198,7 @@ impl CuratedDefaults {
                 .iter()
                 .map(|entry| summary(entry, &state, rules_known))
                 .collect(),
+            groups: groups().to_vec(),
             storage: state.storage.clone(),
             unavailable: state.inert.clone(),
         }

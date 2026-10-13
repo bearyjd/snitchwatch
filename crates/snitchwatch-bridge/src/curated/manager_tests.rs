@@ -169,6 +169,7 @@ async fn nothing_is_sent_until_the_user_turns_an_entry_on() {
         entries,
         storage,
         unavailable,
+        ..
     } = curated.message()
     else {
         unreachable!()

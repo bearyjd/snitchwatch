@@ -10,6 +10,10 @@ use super::reconcile::EntryStatus;
 #[serde(rename_all = "camelCase")]
 pub struct CuratedDefaultSummary {
     pub id: String,
+    /// The id of the group ([`super::CuratedGroup`]) it is offered in; empty
+    /// from an older bridge, which had no groups.
+    #[serde(default)]
+    pub group: String,
     /// The program's exact path.
     pub program: String,
     /// Exactly what the rule allows, in plain text.
@@ -37,6 +41,7 @@ mod tests {
     fn summary(broad: bool) -> CuratedDefaultSummary {
         CuratedDefaultSummary {
             id: "x".into(),
+            group: "g".into(),
             program: "/usr/bin/x".into(),
             allows: "a".into(),
             why: "w".into(),
@@ -57,6 +62,27 @@ mod tests {
         assert!(plain.get("broad").is_none(), "{plain}");
         assert_eq!(
             serde_json::from_value::<CuratedDefaultSummary>(plain).unwrap(),
+            summary(false)
+        );
+    }
+
+    /// An older bridge's summary has no `group`: it reads as ungrouped.
+    #[test]
+    fn a_summary_without_a_group_parses_as_ungrouped_and_a_group_round_trips() {
+        let old = serde_json::json!({
+            "id": "flatpak-flathub", "program": "/usr/bin/flatpak", "allows": "a",
+            "why": "w", "on": true, "status": "installed"
+        });
+        assert_eq!(
+            serde_json::from_value::<CuratedDefaultSummary>(old)
+                .unwrap()
+                .group,
+            ""
+        );
+        let wire = serde_json::to_value(summary(false)).unwrap();
+        assert_eq!(wire["group"], "g");
+        assert_eq!(
+            serde_json::from_value::<CuratedDefaultSummary>(wire).unwrap(),
             summary(false)
         );
     }
