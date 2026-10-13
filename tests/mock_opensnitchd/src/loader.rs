@@ -135,8 +135,9 @@ impl LoaderModel {
             .memory
             .get(&rule.name)
             .is_some_and(|old| old.duration == "always" && rule.duration != "always");
-        let file_removed =
-            loses_file && !self.stuck.contains(&rule.name) && self.files.remove(&rule.name).is_some();
+        let file_removed = loses_file
+            && !self.stuck.contains(&rule.name)
+            && self.files.remove(&rule.name).is_some();
         if rule.enabled {
             // `Compile` (before the rule is stored); the duration is read
             // later, by `scheduleTemporaryRule`.

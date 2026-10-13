@@ -141,10 +141,14 @@ pub(crate) use mock_opensnitchd::loader::{LoaderModel, SharedLoader as SharedMod
 /// Answer `daemon`'s commands from `model`, as opensnitchd would.
 pub(crate) fn run_model(daemon: &mut Daemon, model: SharedModel) -> Seen {
     respond_to(daemon, move |n| {
-        model.lock().unwrap().answer(n).map(|outcome| match outcome {
-            Ok(()) => (true, String::new()),
-            Err(text) => (false, text),
-        })
+        model
+            .lock()
+            .unwrap()
+            .answer(n)
+            .map(|outcome| match outcome {
+                Ok(()) => (true, String::new()),
+                Err(text) => (false, text),
+            })
     })
     .0
 }

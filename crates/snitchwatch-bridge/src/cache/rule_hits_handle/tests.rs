@@ -425,7 +425,10 @@ fn a_ping_after_the_shutdown_save_is_saved_with_the_clean_stop() {
     let stopped = stopped_in(&path).expect("a clean stop");
     hits.record(&[ev("a")], 11, 2, &synced(&["a"]));
     let late = std::fs::read_to_string(&path).unwrap();
-    assert!(late.contains("\"count\":2"), "the late hit is saved: {late}");
+    assert!(
+        late.contains("\"count\":2"),
+        "the late hit is saved: {late}"
+    );
     assert!(stopped_in(&path) >= Some(stopped), "still a clean stop");
     // Nothing counted, nothing written.
     let before = text_of(&path);
