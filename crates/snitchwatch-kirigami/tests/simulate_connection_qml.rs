@@ -353,6 +353,9 @@ fn connections_files_stay_within_their_line_budgets() {
             "ConnectionInspector.qml",
             include_str!("../qml/ConnectionInspector.qml"),
         ),
+        ("MapBand.qml", include_str!("../qml/MapBand.qml")),
+        ("MapView.qml", include_str!("../qml/MapView.qml")),
+        ("MapMarker.qml", include_str!("../qml/MapMarker.qml")),
     ] {
         let lines = source.lines().count();
         assert!(

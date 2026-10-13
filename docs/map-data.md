@@ -69,3 +69,14 @@ header's `no_marker` line and here, and never entered by hand.
 The resolver returns whatever ISO code the operator's `.mmdb` holds, so there is no code table in
 `src/geo/`; the test checks all 249 assigned ISO 3166-1 alpha-2 codes plus XK. Pseudo-codes such as `AP`,
 `EU` or `A1` have no marker.
+
+## How the map band uses it (phase 2, step 9)
+
+`GeoModel.landPath()` returns every outline as one SVG path (`geo::map_markers::land_path`), drawn by
+`MapView.qml` with a single `ShapePath`; the file is never read from QML. The view crops the grid to rows
+60..1500 (about 84N to 60S) so Antarctica does not take a third of the band, and clamps a marker that falls
+outside (Antarctica) to the edge. `GeoModel.clustersJson(scale, radius)` joins the per-country counts with
+the centroids, merges markers that share a grid bucket of `radius` pixels at `scale` pixels per grid unit,
+and returns the clusters (summed counts, member codes, dominant verdict, spoken summary). A country with no
+centroid or no ISO code (local network, unknown) gets no marker; the Geography page still lists it. In
+demo mode (`SNITCHWATCH_DEMO=1`) a fixed fake lookup (`demo::DemoGeo`) stands in for the GeoIP database.

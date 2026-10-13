@@ -404,6 +404,46 @@ const SPECS: [Spec; 26] = [
     ),
 ];
 
+/// Demo-only country lookup for the fake rows' addresses (most are
+/// documentation ranges with no real country), so the map shows a spread of
+/// countries. Installed by `geo::shared_geo` only when [`enabled`].
+pub struct DemoGeo;
+
+impl DemoGeo {
+    const COUNTRIES: [(&'static str, &'static str, &'static str); 19] = [
+        ("151.101.65.91", "US", "United States"),
+        ("140.82.121.4", "US", "United States"),
+        ("2a00:1450:4001:82b::2003", "IE", "Ireland"),
+        ("142.250.80.34", "US", "United States"),
+        ("203.0.113.50", "CN", "China"),
+        ("198.51.100.23", "JP", "Japan"),
+        ("185.125.190.97", "GB", "United Kingdom"),
+        ("9.9.9.9", "CH", "Switzerland"),
+        ("2620:fe::fe", "CH", "Switzerland"),
+        ("139.162.10.9", "DE", "Germany"),
+        ("192.200.0.100", "CA", "Canada"),
+        ("2a05:d014:386:202::1", "FR", "France"),
+        ("35.186.224.53", "SE", "Sweden"),
+        ("2a03:b0c0:3:d0::1", "NL", "Netherlands"),
+        ("93.184.216.34", "AU", "Australia"),
+        ("34.160.111.145", "BR", "Brazil"),
+        ("198.51.100.77", "IN", "India"),
+        ("203.0.113.9", "RU", "Russia"),
+        ("192.0.2.123", "ZA", "South Africa"),
+    ];
+}
+
+impl crate::geo::resolver::CountryLookup for DemoGeo {
+    fn lookup(&self, addr: std::net::IpAddr) -> Option<crate::geo::resolver::CountryInfo> {
+        let ip = addr.to_string();
+        let (_, code, name) = Self::COUNTRIES.iter().find(|(known, _, _)| *known == ip)?;
+        Some(crate::geo::resolver::CountryInfo {
+            code: code.to_string(),
+            name: name.to_string(),
+        })
+    }
+}
+
 /// ~26 realistic fake rows: allowed, denied, pending and blocklisted;
 /// several programs (one a Flatpak app), IPv4 and IPv6, both directions.
 pub fn demo_rows(now_ms: i64) -> Vec<ConnectionRow> {
@@ -517,6 +557,23 @@ pub fn curated_group_messages() -> Vec<String> {
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    #[test]
+    fn demo_geo_places_the_public_demo_rows_on_the_map() {
+        use crate::geo::resolver::{Bucket, SharedResolver};
+        let resolver = SharedResolver::new(Some(std::sync::Arc::new(DemoGeo)));
+        let mut codes = HashSet::new();
+        for row in demo_rows(0) {
+            if let Bucket::Country(code) = resolver.resolve(&row.dst_ip).bucket {
+                assert!(crate::geo::world_map::lookup(&code).is_some(), "{code}");
+                codes.insert(code);
+            }
+        }
+        assert!(
+            codes.len() >= 10,
+            "demo map should show many countries: {codes:?}"
+        );
+    }
 
     #[test]
     fn only_exactly_one_enables_demo() {

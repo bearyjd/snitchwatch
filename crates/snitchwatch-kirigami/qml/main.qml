@@ -63,6 +63,8 @@ Kirigami.ApplicationWindow {
         id: connectionsModel
     }
     property var connectionsModelRef: connectionsModel
+    // For page components, whose own `geoModel` property would shadow the id.
+    property var geoModelRef: geoModel
 
     // "Make a rule…" requests (PR #111 review, OQ1). Owned here, not by the
     // Connections page: the drawer's pageStack.replace destroys that page, and
@@ -238,6 +240,7 @@ Kirigami.ApplicationWindow {
         // SNITCHWATCH_DEMO=1 only (the model ignores the call otherwise).
         if (appInfo.demoMode) {
             connectionsModel.loadDemoRows();
+            geoModel.loadDemoRows();
             curatedDefaultsModel.loadDemoGroups();
         }
     }
@@ -533,6 +536,7 @@ Kirigami.ApplicationWindow {
         id: connectionsPageComponent
         ConnectionsPage {
             model: root.connectionsModelRef
+            geoModel: root.geoModelRef
             bridgeFeed: root.bridgeFeedRef
             makeRuleController: root.makeRuleControllerRef
 

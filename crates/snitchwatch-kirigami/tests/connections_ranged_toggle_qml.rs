@@ -45,6 +45,9 @@ Window {
     property var inserted: []
     property var removed: []
     property int changed: 0
+    // This probe clicks a row 5 deep in the list; the featured map band would
+    // push it below the 600 px window. Collapse state is session-only.
+    Component.onCompleted: MapBandState.collapsed = true
 
     ConnectionsModel { id: model }
     QtObject {

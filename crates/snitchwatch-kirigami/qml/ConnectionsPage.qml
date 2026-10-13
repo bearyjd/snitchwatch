@@ -44,6 +44,11 @@ Kirigami.ScrollablePage {
     // Injected by the caller (main.qml) so the model's lifetime is owned there.
     property ConnectionsModel model
 
+    // Injected by main.qml for the map band; null in isolated tests, where
+    // the band shows its empty state.
+    property var geoModel: null
+    property alias mapBand: mapBand
+
     // Live-wiring hub (Task 13), injected by main.qml. Threaded down to the
     // embedded PendingDecisionSheet so a submitted verdict reaches the bridge's
     // inbound pump. Null in isolated component tests (the sheet no-ops then).
@@ -221,6 +226,15 @@ Kirigami.ScrollablePage {
     // the header rule buttons' commands, confirm and outcome bar.
     header: ColumnLayout {
         spacing: 0
+        // The featured map (visible by default, collapsible, resizable); it
+        // gives up height before the list does. See MapBand.qml.
+        MapBand {
+            id: mapBand
+            Layout.fillWidth: true
+            geoModel: page.geoModel
+            connectionsModel: page.model
+            availableHeight: page.height
+        }
         ConnectionsFilterBar {
             id: filterBar
             Layout.fillWidth: true
