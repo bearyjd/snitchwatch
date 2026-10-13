@@ -37,6 +37,10 @@ const CONNECTIONS_PAGE: &str = concat!(
     "\n",
     include_str!("../qml/ConnectionsTopBar.qml"),
     "\n",
+    include_str!("../qml/InspectorState.qml"),
+    "\n",
+    include_str!("../qml/HoverTip.qml"),
+    "\n",
     include_str!("../qml/InspectorPanel.qml"),
     "\n",
     include_str!("../qml/ConnectionDetailPage.qml"),
@@ -94,6 +98,12 @@ const ALL_QML: &[(&str, &str)] = &[
         "ConnectionsTopBar.qml",
         include_str!("../qml/ConnectionsTopBar.qml"),
     ),
+    (
+        "InspectorState.qml",
+        include_str!("../qml/InspectorState.qml"),
+    ),
+    ("HoverTip.qml", include_str!("../qml/HoverTip.qml")),
+    ("StackNav.qml", include_str!("../qml/StackNav.qml")),
     (
         "InspectorPanel.qml",
         include_str!("../qml/InspectorPanel.qml"),
@@ -913,6 +923,47 @@ fn inspector_panel_title_is_plain_text() {
         heading.contains("textFormat: Text.PlainText") && heading.contains("page.inspectProcess"),
         "InspectorPanel.qml's heading must render the process name as PlainText:\n{heading}"
     );
+}
+
+/// `HoverTip` is the inspector panel's tooltip for elided data (process and
+/// host names). Like every tooltip it must draw PlainText, never the style's
+/// AutoText label.
+#[test]
+fn hover_tip_draws_plain_text() {
+    let code = code_lines(include_str!("../qml/HoverTip.qml"));
+    assert!(
+        code.contains("textFormat: Text.PlainText") && code.contains("contentItem: Controls.Label"),
+        "HoverTip.qml must draw its text through a PlainText contentItem"
+    );
+}
+
+/// Navigation must go through `StackNav.replaceMain`: a pushed detail page
+/// sits on top of the page being left, and a bare `pageStack.replace` swaps
+/// that one instead.
+#[test]
+fn main_navigates_through_the_stack_router() {
+    let drawer = MAIN_QML
+        .split("globalDrawer:")
+        .nth(1)
+        .expect("main.qml lost its drawer");
+    assert!(
+        !code_lines(drawer).contains("pageStack.replace("),
+        "a drawer action replaces the page stack's top page directly; use nav.replaceMain"
+    );
+    for routed in [
+        "onShowRuleRequested",
+        "onSimulateConnectionRequested",
+        "function openRuleEditor",
+    ] {
+        let at = MAIN_QML
+            .find(routed)
+            .unwrap_or_else(|| panic!("main.qml lost {routed}"));
+        let body = &MAIN_QML[at..at + 260];
+        assert!(
+            body.contains("nav.replaceMain("),
+            "{routed} must navigate through nav.replaceMain:\n{body}"
+        );
+    }
 }
 
 /// Issue #49: the bridge hardcodes per-connection bytes to 0 and opensnitchd

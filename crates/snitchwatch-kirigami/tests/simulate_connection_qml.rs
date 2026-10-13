@@ -354,6 +354,11 @@ fn connections_files_stay_within_their_line_budgets() {
             include_str!("../qml/ConnectionsTopBar.qml"),
         ),
         (
+            "InspectorState.qml",
+            include_str!("../qml/InspectorState.qml"),
+        ),
+        ("HoverTip.qml", include_str!("../qml/HoverTip.qml")),
+        (
             "InspectorPanel.qml",
             include_str!("../qml/InspectorPanel.qml"),
         ),

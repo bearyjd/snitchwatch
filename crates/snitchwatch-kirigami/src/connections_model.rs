@@ -413,13 +413,14 @@ pub mod qobject {
         #[cxx_name = "isPendingRow"]
         fn is_pending_row(self: &ConnectionsModel, id: &QString) -> bool;
 
-        /// Whether the connection `id` is a row of the list as it is drawn now
-        /// (after the filter and, in grouped mode, group expansion). The side
-        /// panel clears its selection when this goes false. Read-only and
-        /// never flushing, like `isPendingRow`.
+        /// Where the connection `id` sits in the list as it is drawn now (after
+        /// the filter and, in grouped mode, group expansion), or -1 if it is not
+        /// a row of it. The side panel clears its selection on -1 and re-points
+        /// the list's current index after a reset. Read-only and never
+        /// flushing, like `isPendingRow`.
         #[qinvokable]
-        #[cxx_name = "isRowVisible"]
-        fn is_row_visible(self: &ConnectionsModel, id: &QString) -> bool;
+        #[cxx_name = "visibleRowIndex"]
+        fn visible_row_index(self: &ConnectionsModel, id: &QString) -> i32;
 
         /// Inline buttons (`crate::inline_deny`; all read-only, never
         /// flushing, like `isPendingRow`, since bindings call them).
@@ -1409,15 +1410,16 @@ impl qobject::ConnectionsModel {
         self.store.is_pending(&id.to_string()).unwrap_or(false)
     }
 
-    fn is_row_visible(&self, id: &QString) -> bool {
+    fn visible_row_index(&self, id: &QString) -> i32 {
         let id = id.to_string();
-        if self.grouped {
-            return self
-                .grouped_projection
+        let index = if self.grouped {
+            self.grouped_projection
                 .iter()
-                .any(|e| matches!(e, VisibleEntry::Row { id: row_id, .. } if *row_id == id));
-        }
-        self.store.visible_index_of(&id).is_some()
+                .position(|e| matches!(e, VisibleEntry::Row { id: row_id, .. } if *row_id == id))
+        } else {
+            self.store.visible_index_of(&id)
+        };
+        index.map_or(-1, |i| i as i32)
     }
 
     fn make_rule(

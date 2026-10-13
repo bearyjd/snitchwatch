@@ -81,68 +81,52 @@ Kirigami.Page {
     readonly property var hostStack: Controls.ApplicationWindow.window
         ? (Controls.ApplicationWindow.window.pageStack || null) : null
     readonly property bool compact: page.hostStack !== null && page.width < page.compactWidth
-    // A connection is selected; the panel shows its snapshot.
-    property bool inspecting: false
     // The pushed ConnectionDetailPage while one is open (compact mode).
     property var detailPage: null
     // The panel currently on screen: the pushed page's, else the column's.
     readonly property var activePanel: page.detailPage ? page.detailPage.panel : sideLoader.item
     onCompactChanged: {
-        if (!page.compact) {
+        if (page.compact) {
+            page.pushDetailPage();
+        } else {
             page.closeDetailPage();
         }
     }
 
-    // Snapshot of the row shown in the panel.
-    property string inspectId: ""
-    property string inspectProcess: ""
-    property string inspectHost: ""
-    property int inspectPort: 0
-    property string inspectProtocol: ""
-    property string inspectVerdict: ""
-    property bool inspectPending: false
-    // Issue #49: set when the row the inspector was opened on as pending has
-    // since gone away (see `recheckInspectedRow`). Shown as a notice in place of
-    // the decision sheet.
-    property bool inspectNoLongerPending: false
-    // What the inspector's Verdict row says. `inspectVerdict` is the copy taken
-    // when it opened, so for a withdrawn prompt it would still read "pending".
-    readonly property string inspectVerdictText: page.inspectNoLongerPending
-        ? "no longer pending"
-        : (page.inspectPending ? "pending"
-           : page.inspectOutcomeText !== "" ? page.inspectOutcomeText : page.inspectVerdict)
-    // Prompt-slot plan Part C, copied from the row: when the bridge answers it
-    // (-1: never), a put-off row's label, whether "Make a rule…" is offered (put
-    // off, or decided by the default action, E3), whether it takes "Decide later".
-    property real inspectDeadlineMs: -1
-    property string inspectOutcomeText: ""
-    property bool inspectMakeRuleOffered: false
-    property bool inspectDecideLater: false
-    // Parity 2 (pending-decision insight panel) — pulled from
-    // `ConnectionsModel.rowDetailsJson` alongside the rest of the inspector
-    // snapshot. Per-connection byte counters are deliberately not surfaced:
-    // the bridge reports them as a hardcoded 0 (issue #49).
-    property string inspectIp: ""
-    // Issue #44: whether an answer for this row's program can be remembered
-    // (`rowDetailsJson`'s `bindableProcessPath`); false until known.
-    property bool inspectBindableProcessPath: false
-    // E3: `rowDetailsJson`'s `alsoListedByDefault` (the two-rows hint).
-    property bool inspectAlsoListedByDefault: false
-    // Whether the inspected row's bridge advertised app-bound rules
-    // (`InlineVerdicts.rowAppBoundRules`); false until known.
-    property bool inspectAppBoundRules: false
+    // The selection's snapshot (InspectorState.qml), as `inspect*` for the
+    // panel and the headless probes.
+    InspectorState {
+        id: inspect
+        model: page.model
+        bridgeFeed: page.bridgeFeed
+        verdicts: verdictHelper
+    }
+    property alias inspecting: inspect.inspecting
+    property alias inspectId: inspect.rowId
+    property alias inspectProcess: inspect.process
+    property alias inspectHost: inspect.host
+    property alias inspectPort: inspect.port
+    property alias inspectProtocol: inspect.protocol
+    property alias inspectVerdict: inspect.verdict
+    property alias inspectPending: inspect.pending
+    property alias inspectNoLongerPending: inspect.noLongerPending
+    property alias inspectVerdictText: inspect.verdictText
+    property alias inspectDeadlineMs: inspect.deadlineMs
+    property alias inspectOutcomeText: inspect.outcomeText
+    property alias inspectMakeRuleOffered: inspect.makeRuleOffered
+    property alias inspectDecideLater: inspect.decideLater
+    property alias inspectIp: inspect.ip
+    property alias inspectBindableProcessPath: inspect.bindableProcessPath
+    property alias inspectAlsoListedByDefault: inspect.alsoListedByDefault
+    property alias inspectAppBoundRules: inspect.appBoundRules
+    property alias inspectMatchedRule: inspect.matchedRule
+    property alias inspectMatchedRuleDisplay: inspect.matchedRuleDisplay
     // For the headless probes and main.qml (the panel on screen).
     readonly property var decisionSheet: page.activePanel ? page.activePanel.decisionSheet : null
     readonly property var makeRuleSheet: page.activePanel ? page.activePanel.makeRuleSheet : null
     // The window's MakeRuleController (main.qml), for the Make a rule sheet.
     property var makeRuleController: null
     property alias connectionList: listPane.view
-    // Raw matched-rule name (empty when unknown/not applicable — drives the
-    // "Show rule" button's visibility) and its friendly display string (never
-    // blank — see `connections::row_store::matched_rule_display`).
-    property string inspectMatchedRule: ""
-    property string inspectMatchedRuleDisplay: ""
-
     // Rule-match diagnostics (Little-Snitch-parity "which rule decided this
     // connection" — jump to the Rules tab). Emitted by the inspector's "Show
     // rule" button; main.qml routes it to a RulesPage navigation + highlight,
@@ -167,11 +151,13 @@ Kirigami.Page {
     }
 
     // React to the Rust auto-select policy: move the selection, but never open
-    // the inspector — surfacing a pending row must not grab the user's focus.
+    // the inspector, and never while one is showing (a panel or a half-filled
+    // make-rule form must not change under the user's hands).
     Connections {
         target: page.model
         function onAutoSelectRequested(row) {
-            listPane.view.currentIndex = row;
+            // The row was just inserted: select it once the list has it.
+            Qt.callLater(page.selectAuto, row);
         }
         // Issue #49: the bridge removes a pending row when opensnitchd's ask
         // times out, a snapshot starts with ClearConnectionRows and then
@@ -181,20 +167,23 @@ Kirigami.Page {
         // grouped filter changes. Every other mutation (clear, rows arriving
         // in grouped mode, flat filters) brackets a full reset.
         function onRowsRemoved() {
-            page.recheckInspectedRow();
+            inspect.recheck();
             page.clearIfRowGone();
         }
         function onRowsInserted() {
-            page.recheckInspectedRow();
+            inspect.recheck();
             page.clearIfRowGone();
         }
         function onDataChanged() {
-            page.recheckInspectedRow();
+            inspect.recheck();
             page.clearIfRowGone();
         }
         function onModelReset() {
-            page.recheckInspectedRow();
+            inspect.recheck();
             page.clearIfRowGone();
+            // The reset drops the list's current index; once it has settled,
+            // point it back at the selected row, wherever that now is.
+            Qt.callLater(page.reanchor);
         }
     }
 
@@ -209,7 +198,7 @@ Kirigami.Page {
         ignoreUnknownSignals: true
         function onOkChanged() {
             if (page.bridgeFeed.ok === false) {
-                page.recheckInspectedRow();
+                inspect.recheck();
             }
         }
         function onVerdictNotRemembered(rowId) {
@@ -273,38 +262,34 @@ Kirigami.Page {
         }
     }
 
-    // Issue #49: the panel works from a copy of the row taken when it opened.
-    // If the bridge withdraws that prompt afterwards (ask timed out, rows
-    // cleared, service restarted), Allow/Deny would act on a row that no longer
-    // exists. A snapshot clears the model and re-inserts the still-pending rows,
-    // so a withdrawn prompt comes back if the very same id is pending again; row
-    // ids carry the bridge session, so a reused wire id cannot revive it. The
-    // panel itself stays open.
-    function inspectedRowDecidable() {
-        // A closed feed can't carry a verdict, whatever the model still holds
-        // from the lost session.
-        if (page.bridgeFeed && page.bridgeFeed.ok === false) {
-            return false;
-        }
-        return !!page.model && page.model.isPendingRow(page.inspectId);
-    }
-
-    function recheckInspectedRow() {
-        const decidable = page.inspectedRowDecidable();
-        if (page.inspectPending && !decidable) {
-            page.inspectPending = false;
-            page.inspectNoLongerPending = true;
-        } else if (page.inspectNoLongerPending && decidable) {
-            page.inspectPending = true;
-            page.inspectNoLongerPending = false;
-        }
-    }
-
     // Row click: select; when compact, push the detail page.
     function openInspector(row) {
-        page.snapshotRow(row);
-        if (page.compact && !page.detailPage) {
+        inspect.snapshot(row);
+        page.pushDetailPage();
+    }
+
+    function pushDetailPage() {
+        if (page.compact && page.inspecting && !page.detailPage) {
             page.detailPage = page.hostStack.push(detailPageComponent, { page: pageRoot });
+        }
+    }
+
+    function selectAuto(row) {
+        const view = listPane.view;
+        if (page.inspecting) {
+            return;
+        }
+        view.forceLayout();
+        view.currentIndex = row;
+        const item = view.itemAtIndex(row);
+        page.model.setCurrentRowId(item ? item.rowId : "");
+        page.followSelection(item);
+    }
+
+    function reanchor() {
+        const index = page.inspecting ? page.model.visibleRowIndex(page.inspectId) : -1;
+        if (index >= 0 && listPane.view.currentIndex !== index) {
+            listPane.view.currentIndex = index;
         }
     }
 
@@ -323,7 +308,7 @@ Kirigami.Page {
 
     // Close / finished action: clear the selection.
     function dismissInspector() {
-        page.inspecting = false;
+        inspect.clear();
         page.closeDetailPage();
         listPane.view.currentIndex = -1;
     }
@@ -334,10 +319,10 @@ Kirigami.Page {
         if (!item || item.isGroupHeader || item.rowId === page.inspectId) {
             return;
         }
-        if (page.inspecting && !page.model.isRowVisible(page.inspectId)) {
+        if (page.inspecting && page.model.visibleRowIndex(page.inspectId) < 0) {
             page.dismissInspector();
         } else if (!page.compact) {
-            page.snapshotRow(item);
+            inspect.snapshot(item);
         }
     }
 
@@ -346,54 +331,11 @@ Kirigami.Page {
     // withdrawn keeps its "no longer waiting" notice instead (issue #49).
     function clearIfRowGone() {
         if (!page.inspecting || page.inspectNoLongerPending
-                || page.model.isRowVisible(page.inspectId)) {
+                || page.model.visibleRowIndex(page.inspectId) >= 0) {
             return;
         }
         if (!page.inspectPending || page.model.isPendingRow(page.inspectId)) {
             page.dismissInspector();
-        }
-    }
-
-    function snapshotRow(row) {
-        page.inspecting = true;
-        page.inspectNoLongerPending = false;
-        page.inspectId = row.rowId;
-        page.inspectProcess = row.process;
-        page.inspectHost = row.host;
-        page.inspectPort = row.port;
-        page.inspectProtocol = row.protocol;
-        page.inspectVerdict = row.verdict;
-        page.inspectPending = row.pending;
-        page.inspectMatchedRule = row.matchedRule;
-        page.inspectMatchedRuleDisplay = row.matchedRuleDisplay;
-        page.inspectDeadlineMs = row.answerDeadlineMs > 0 ? row.answerDeadlineMs : -1;
-        page.inspectOutcomeText = row.outcomeText || "";
-        page.inspectMakeRuleOffered = row.makeRuleOffered === true;
-        page.applyRowDetails(row.rowId);
-        page.inspectAppBoundRules = verdictHelper.rowAppBoundRules(row.rowId);
-        page.inspectDecideLater = verdictHelper.rowDecideLater(row.rowId);
-        // The row may be a stale pending one, and with the connection already
-        // down no `ok` change follows to catch it.
-        page.recheckInspectedRow();
-    }
-
-    // Parity 2: pull the destination IP for the insight panel. Best-effort —
-    // malformed/missing JSON degrades to a blank value rather than throwing,
-    // since this is a decorative side-channel, never a blocker.
-    function applyRowDetails(id) {
-        page.inspectIp = "";
-        page.inspectBindableProcessPath = false;
-        page.inspectAlsoListedByDefault = false;
-        if (!page.model) {
-            return;
-        }
-        try {
-            const details = JSON.parse(page.model.rowDetailsJson(id));
-            page.inspectIp = details.dstIp || "";
-            page.inspectBindableProcessPath = details.bindableProcessPath === true;
-            page.inspectAlsoListedByDefault = details.alsoListedByDefault === true;
-        } catch (e) {
-            // Leave the defaults above.
         }
     }
 }

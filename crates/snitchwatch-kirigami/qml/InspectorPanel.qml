@@ -36,12 +36,19 @@ ColumnLayout {
             textFormat: Text.PlainText
             text: page.inspectProcess
             elide: Text.ElideMiddle
+            HoverTip {
+                text: page.inspectProcess
+                onlyWhen: titleLabel.truncated
+            }
         }
         Controls.ToolButton {
             objectName: "inspectorCloseButton"
             icon.name: "window-close"
             display: Controls.AbstractButton.IconOnly
             text: "Close details"
+            HoverTip {
+                text: "Close details"
+            }
             onClicked: page.dismissInspector()
         }
     }
@@ -70,6 +77,10 @@ ColumnLayout {
                 text: page.inspectHost
                 Layout.fillWidth: true
                 elide: Text.ElideMiddle
+                HoverTip {
+                    text: page.inspectHost
+                    onlyWhen: parent.truncated
+                }
             }
             Controls.Label {
                 Kirigami.FormData.label: "Destination IP"
@@ -113,9 +124,12 @@ ColumnLayout {
             visible: page.inspectMatchedRule.length > 0
             text: "Show rule"
             icon.name: "view-list-details"
+            // Leave the detail page first: the router replaces the topmost page,
+            // which would otherwise be this one.
             onClicked: {
-                page.showRuleRequested(page.inspectMatchedRule);
+                const rule = page.inspectMatchedRule;
                 page.dismissInspector();
+                page.showRuleRequested(rule);
             }
         }
 
@@ -125,8 +139,9 @@ ColumnLayout {
             text: "Simulate this connection"
             icon.name: "system-run"
             onClicked: {
-                page.simulateConnectionRequested(page.model.simulationPrefillJson(page.inspectId));
+                const prefill = page.model.simulationPrefillJson(page.inspectId);
                 page.dismissInspector();
+                page.simulateConnectionRequested(prefill);
             }
         }
 

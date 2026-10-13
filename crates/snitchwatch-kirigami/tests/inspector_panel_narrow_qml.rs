@@ -141,6 +141,28 @@ Kirigami.ApplicationWindow {
             probe.expect(probe.pageStack.depth === 1, "widening did not pop: " + probe.pageStack.depth);
             probe.expect(probe.page.activePanel !== null, "no side column after widening");
             probe.expect(probe.page.inspecting, "selection lost on widening");
+            probe.width = 600;
+        },
+        function () {
+            // Narrowing with a selection shows it on a pushed page.
+            probe.expect(probe.page.compact, "600px window not compact again");
+            probe.expect(probe.pageStack.depth === 2 && probe.page.detailPage !== null,
+                         "narrowing did not push the selection: " + probe.pageStack.depth);
+            probe.page.dismissInspector();
+        },
+        function () {
+            // Keyboard: Down selects without pushing (compact waits for a click),
+            // Enter opens the page.
+            probe.expect(probe.pageStack.depth === 1, "dismiss did not pop");
+            const list = probe.page.connectionList;
+            list.forceActiveFocus();
+            tc.keyClick(Qt.Key_Down);
+            probe.expect(probe.pageStack.depth === 1, "an arrow key pushed a page");
+            tc.keyClick(Qt.Key_Return);
+        },
+        function () {
+            probe.expect(probe.pageStack.depth === 2, "Enter did not open the detail page: "
+                         + probe.pageStack.depth);
         }
     ]
 

@@ -10,7 +10,12 @@
 //!     in the sheet, and finishing an action clears the selection;
 //!   * the close button clears the selection;
 //!   * the selection is cleared when the selected row is hidden by a filter
-//!     or removed (age-out).
+//!     or removed (age-out);
+//!   * auto-select never replaces a panel that is showing a row;
+//!   * the arrow keys move the selection and the panel follows;
+//!   * after a model reset the list's current index is re-anchored to the
+//!     selected row;
+//!   * the decision sheet's insight values wrap inside the column.
 //!
 //! One probe, steps run one per timer tick so the list can lay out between
 //! them. Failures are collected and thrown together. Headless:
@@ -94,6 +99,15 @@ Window {
         if (item.text === text && typeof item.clicked === "function") return item;
         for (let i = 0; i < item.children.length; i++) {
             const hit = probe.findText(item.children[i], text);
+            if (hit) return hit;
+        }
+        return null;
+    }
+    function findText2(item, text) {
+        if (!item) return null;
+        if (item.text === text) return item;
+        for (let i = 0; i < item.children.length; i++) {
+            const hit = probe.findText2(item.children[i], text);
             if (hit) return hit;
         }
         return null;
@@ -203,6 +217,66 @@ Window {
             probe.select("a");
             model.applyServerMessageJson(JSON.stringify({ action: "removeConnectionRows", ids: ["p"] }));
             probe.expect(page.inspecting && page.inspectId === "a", "unrelated removal cleared the panel");
+            // Auto-select must not replace a panel the user is looking at.
+            model.applyServerMessageJson(JSON.stringify({ action: "insertConnectionRows", rows: [
+                probe.row("p2", "p2.example.com", null, null)] }));
+        },
+        function () {
+            probe.expect(page.inspecting && page.inspectId === "a",
+                         "auto-select replaced the panel: " + page.inspectId);
+            probe.expect(probe.panelHost() === "a.example.com", "panel host changed: " + probe.panelHost());
+            // Idle (nothing selected), a new pending row IS shown.
+            page.dismissInspector();
+            probe.expect(page.inspectId === "", "dismiss kept the id: " + page.inspectId);
+            model.applyServerMessageJson(JSON.stringify({ action: "insertConnectionRows", rows: [
+                probe.row("p3", "p3.example.com", null, null)] }));
+        },
+        function () {
+            probe.expect(page.inspecting && page.inspectId === "p3",
+                         "idle auto-select did not show the new pending row: " + page.inspectId);
+            // The decision sheet's insight form wraps inside the 22-unit column.
+            const note = probe.findText2(page, "Online research disabled — enable in Settings");
+            probe.expect(note !== null, "no Registration info note");
+            if (note) {
+                const right = note.mapToItem(page.activePanel, note.width, 0).x;
+                probe.expect(note.wrapMode === Text.Wrap, "Registration info does not wrap");
+                probe.expect(right <= page.activePanel.width + 1,
+                             "Registration info overflows the panel: " + right + " > " + page.activePanel.width);
+                probe.expect(!note.truncated, "Registration info is clipped");
+            }
+        },
+        function () {
+            // Keyboard: the list takes focus and the arrows move the selection,
+            // which the panel follows.
+            page.dismissInspector();
+            const list = page.connectionList;
+            probe.expect(list.activeFocusOnTab && list.keyNavigationEnabled, "list lost keyboard navigation");
+            probe.select("a");
+            list.forceActiveFocus();
+            const before = list.currentIndex;
+            tc.keyClick(Qt.Key_Down);
+            probe.expect(list.currentIndex === before + 1, "Down did not move: " + before + " -> " + list.currentIndex);
+            const d = list.itemAtIndex(list.currentIndex);
+            probe.expect(d && page.inspectId === d.rowId, "panel did not follow the arrow key: " + page.inspectId);
+        },
+        function () {
+            // After a reset the list's index is re-anchored to the selected row.
+            probe.select("p2");
+            probe.expect(page.inspectId === "p2", "p2 not selected");
+            model.setFilterQuery("p2.example");
+        },
+        function () {
+            const at = model.visibleRowIndex("p2");
+            probe.expect(page.inspectId === "p2" && at === 0, "p2 lost or misplaced by the filter: " + at);
+            probe.expect(page.connectionList.currentIndex === at,
+                         "currentIndex not re-anchored: " + page.connectionList.currentIndex + " vs " + at);
+            model.setFilterQuery("");
+        },
+        function () {
+            const at = model.visibleRowIndex("p2");
+            probe.expect(at > 0 && page.connectionList.currentIndex === at,
+                         "currentIndex not re-anchored after the filter cleared: "
+                         + page.connectionList.currentIndex + " vs " + at);
         }
     ]
 

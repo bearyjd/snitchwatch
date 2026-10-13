@@ -12,6 +12,15 @@ Item {
     // The owning ConnectionsPage.
     property var page
     property alias view: list
+    Kirigami.Theme.colorSet: Kirigami.Theme.View
+    Kirigami.Theme.inherit: false
+
+    function openCurrent() {
+        const item = list.currentItem;
+        if (item && !item.isGroupHeader) {
+            pane.page.openInspector(item);
+        }
+    }
 
     Kirigami.PlaceholderMessage {
         anchors.centerIn: parent
@@ -34,6 +43,14 @@ Item {
         currentIndex: -1
         reuseItems: true
         Controls.ScrollBar.vertical: Controls.ScrollBar {}
+
+        // Keyboard: Tab focuses the list, arrows move the selection (the wide
+        // panel follows it), Enter opens it (the pushed page, when compact).
+        focus: true
+        activeFocusOnTab: true
+        keyNavigationEnabled: true
+        Keys.onReturnPressed: pane.openCurrent()
+        Keys.onEnterPressed: pane.openCurrent()
 
         // Keep the Rust model's notion of the current selection in sync so its
         // auto-select policy knows whether the user is investigating a row.
