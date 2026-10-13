@@ -74,7 +74,21 @@ Item {
     property alias chooseMenu: chooseMenu
     property alias removeMenu: removeMenu
 
-    implicitWidth: button.implicitWidth
+    // Sized to its widest steady label ("Can't add rule"), the same for every
+    // state so a column of buttons lines up. "Waiting for the firewall" is
+    // longer and elides; its tooltip and Accessible.name say it in full.
+    TextMetrics {
+        id: widest
+        font: Kirigami.Theme.smallFont
+        text: "Can't add rule"
+    }
+    TextMetrics {
+        id: glyphMetrics
+        font.bold: true
+        text: "◷"
+    }
+    implicitWidth: button.leftPadding + button.rightPadding + glyphMetrics.width
+        + Kirigami.Units.smallSpacing + Math.ceil(widest.width)
     implicitHeight: button.implicitHeight
 
     function openMenu(menu) {

@@ -88,7 +88,7 @@ const fn s(
 const OUT: &str = "outgoing";
 const IN: &str = "incoming";
 
-const SPECS: [Spec; 25] = [
+const SPECS: [Spec; 26] = [
     s(
         "firefox",
         FIREFOX,
@@ -389,9 +389,22 @@ const SPECS: [Spec; 25] = [
         Some("deny-ssh-unknown"),
         520,
     ),
+    // No program file known: its rule button shows "Can't add rule".
+    s(
+        "dhclient",
+        "",
+        "ntp.example.org",
+        "192.0.2.123",
+        123,
+        "udp",
+        OUT,
+        Some("allow"),
+        None,
+        3,
+    ),
 ];
 
-/// ~25 realistic fake rows: allowed, denied, pending and blocklisted;
+/// ~26 realistic fake rows: allowed, denied, pending and blocklisted;
 /// several programs (one a Flatpak app), IPv4 and IPv6, both directions.
 pub fn demo_rows(now_ms: i64) -> Vec<ConnectionRow> {
     SPECS
@@ -527,7 +540,7 @@ mod tests {
     #[test]
     fn rows_cover_the_requested_mix() {
         let rows = demo_rows(1_760_000_000_000);
-        assert_eq!(rows.len(), 25);
+        assert_eq!(rows.len(), 26);
         let ids: HashSet<_> = rows.iter().map(|r| r.id.as_str()).collect();
         assert_eq!(ids.len(), rows.len(), "row ids must be unique");
         let actions: HashSet<_> = rows.iter().map(|r| r.action.as_deref()).collect();

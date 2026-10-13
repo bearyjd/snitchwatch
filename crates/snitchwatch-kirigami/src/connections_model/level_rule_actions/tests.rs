@@ -207,3 +207,42 @@ fn a_flat_model_refuses_every_node_whatever_the_cached_projection_holds() {
     assert_eq!(known_node(true, &entries, n), Ok(()));
     assert_eq!(known_node(false, &entries, n), Err(NOT_IN_LIST));
 }
+
+#[test]
+fn the_duration_is_read_once_however_often_it_is_asked() {
+    let reads = Cell::new(0);
+    let cache = DurationCache::default();
+    let read = || {
+        reads.set(reads.get() + 1);
+        "this_time"
+    };
+    for _ in 0..1000 {
+        assert_eq!(cache.get(read), "this_time");
+    }
+    assert_eq!(reads.get(), 1);
+}
+
+#[test]
+fn a_refresh_reads_again_and_says_whether_the_duration_changed() {
+    let cache = DurationCache::default();
+    assert_eq!(cache.get(|| "forever"), "forever");
+    assert!(!cache.refresh(|| "forever"), "same token is no change");
+    assert!(cache.refresh(|| "this_time"), "a new token is a change");
+    // The new token is what is held, with no further read.
+    assert_eq!(cache.get(|| panic!("read after a refresh")), "this_time");
+}
+
+#[test]
+fn a_refresh_before_any_read_counts_as_a_change() {
+    assert!(DurationCache::default().refresh(|| "forever"));
+}
+
+#[test]
+fn a_shown_duration_must_still_be_the_current_one() {
+    assert_eq!(duration_matches("forever", "forever"), Ok(()));
+    assert_eq!(duration_matches("", "this_time"), Ok(()), "none was shown");
+    assert_eq!(
+        duration_matches("for_5_minutes", "forever"),
+        Err(DURATION_CHANGED)
+    );
+}

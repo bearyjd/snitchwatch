@@ -337,6 +337,7 @@ pub mod qobject {
             key: &QString,
             choice: &QString,
             confirmed: bool,
+            shown_duration: &QString,
         ) -> QString;
 
         /// Delete the one rule the node's `levelRuleState` (`allow` or
@@ -356,6 +357,12 @@ pub mod qobject {
         #[qinvokable]
         #[cxx_name = "levelRuleDuration"]
         fn level_rule_duration(self: &ConnectionsModel) -> QString;
+
+        /// Settings changed: read the default duration again and repaint the
+        /// rule buttons if it differs.
+        #[qinvokable]
+        #[cxx_name = "refreshLevelRuleDuration"]
+        fn refresh_level_rule_duration(self: Pin<&mut ConnectionsModel>);
 
         /// Give up on rule button commands with no answer in time (called by
         /// a QML timer); `levelRuleFinished` says the outcome is unknown.
@@ -628,6 +635,8 @@ pub struct ConnectionsModelRust {
     /// The firewall's rules and the rule button commands in flight, behind
     /// the `levelRuleState` and `levelRuleName` roles.
     level_rules: LevelRules,
+    /// The Settings default duration the rule roles are computed with.
+    duration: level_rule_actions::DurationCache,
 }
 
 impl Default for ConnectionsModelRust {
@@ -646,6 +655,7 @@ impl Default for ConnectionsModelRust {
             pending_grouped_msgs: Vec::new(),
             grouped_flush_scheduled: false,
             level_rules: LevelRules::default(),
+            duration: level_rule_actions::DurationCache::default(),
         }
     }
 }
@@ -1350,8 +1360,17 @@ impl qobject::ConnectionsModel {
         key: &QString,
         choice: &QString,
         confirmed: bool,
+        shown_duration: &QString,
     ) -> QString {
-        level_rule_actions::create(self, level, process_key, key, choice, confirmed)
+        level_rule_actions::create(
+            self,
+            level,
+            process_key,
+            key,
+            choice,
+            confirmed,
+            shown_duration,
+        )
     }
 
     fn delete_level_rule(
@@ -1368,7 +1387,13 @@ impl qobject::ConnectionsModel {
     }
 
     fn level_rule_duration(&self) -> QString {
-        QString::from(level_rule_actions::default_duration())
+        QString::from(level_rule_actions::default_duration(self))
+    }
+
+    fn refresh_level_rule_duration(self: Pin<&mut Self>) {
+        if level_rule_actions::refresh_default_duration(&self) {
+            self.notify_level_rules_changed();
+        }
     }
 
     fn inline_duration_for(

@@ -48,6 +48,7 @@ Window {
     property int ticks: 0
     property int settle: 0
     property var pooled: null
+    property bool geometryChecked: false
 
     // Records every call; answers like a model that queued the command.
     QtObject {
@@ -56,8 +57,8 @@ Window {
         property int polls: 0
         property string answer: ""
         signal levelRuleFinished(int level, string processKey, string key, int ending, string status)
-        function createLevelRule(level, p, k, choice, confirmed) {
-            calls.push(["create", level, p, k, choice, confirmed].join("|"));
+        function createLevelRule(level, p, k, choice, confirmed, shown) {
+            calls.push(["create", level, p, k, choice, confirmed, shown].join("|"));
             return answer;
         }
         function deleteLevelRule(level, p, k) {
@@ -138,16 +139,28 @@ Window {
                                  && actions.confirmProgramLabel.textFormat === Text.PlainText
                                  && actions.confirmBodyLabel.textFormat === Text.PlainText,
                                  "dialog program file: " + actions.confirmProgramLabel.text);
-                    // Cancelling sends nothing and forgets the request.
-                    actions.confirmDialog.close();
+                    // Cancelling sends nothing and forgets the request (below,
+                    // once the open dialog has been laid out and measured).
                 } else if (probe.phase === 1) {
+                    if (!probe.geometryChecked) {
+                        probe.geometryChecked = true;
+                        // Laid out, not stacked: both labels have a width and the
+                        // program file sits below the text, not on top of it.
+                        const body = actions.confirmBodyLabel, file = actions.confirmProgramLabel;
+                        probe.expect(body.width > 0 && file.width > 0, "dialog labels have no width: " + body.width + "," + file.width);
+                        probe.expect(file.mapToItem(null, 0, 0).y >= body.mapToItem(null, 0, 0).y + body.height,
+                                     "dialog labels overlap: body " + body.mapToItem(null, 0, 0).y + "+" + body.height
+                                     + " file " + file.mapToItem(null, 0, 0).y);
+                        actions.confirmDialog.close();
+                        return;
+                    }
                     probe.expect(!actions.confirmDialog.opened, "confirm still open after cancel");
                     probe.expect(stub.calls.length === 0, "sent after cancel: " + stub.calls.join(","));
                     probe.expect(!actions.pollTimer.running, "timer running after cancel");
                     // Accepting sends once, confirmed.
                     actions.create(0, "/usr/bin/p", "", "p", "allow");
                     actions.confirmDialog.customFooterActions[0].trigger();
-                    probe.expect(stub.calls.join(",") === "create|0|/usr/bin/p||allow|true", "accepted call: " + stub.calls.join(","));
+                    probe.expect(stub.calls.join(",") === "create|0|/usr/bin/p||allow|true|for_5_minutes", "accepted call: " + stub.calls.join(","));
                     probe.expect(actions.pollTimer.running, "timer off with a command waiting");
                 } else if (probe.phase === 2) {
                     probe.expect(stub.polls >= 1, "poll never called while waiting: " + stub.polls);
@@ -160,7 +173,7 @@ Window {
                     stub.calls = [];
                     actions.create(1, "/usr/bin/p", "example.com", "example.com", "deny");
                     probe.expect(!actions.confirmDialog.opened, "domain level opened a confirm");
-                    probe.expect(stub.calls.join(",") === "create|1|/usr/bin/p|example.com|deny|false", "domain call: " + stub.calls.join(","));
+                    probe.expect(stub.calls.join(",") === "create|1|/usr/bin/p|example.com|deny|false|", "domain call: " + stub.calls.join(","));
                     probe.expect(actions.pollTimer.running, "timer off for a domain command");
                     // Two in flight: the timer runs until both end.
                     actions.remove(2, "/usr/bin/p", "a.example.com", "a.example.com");
@@ -212,7 +225,7 @@ Window {
                     probe.expect(stub.calls.length === 0, "keyboard accept sent without the dialog: " + stub.calls.join(","));
                     probe.expect(actions.confirmDialog.visible, "keyboard accept did not ask first");
                     actions.confirmDialog.customFooterActions[0].trigger();
-                    probe.expect(stub.calls.join(",") === "create|0|/usr/bin/k||allow|true", "dialog accept call: " + stub.calls.join(","));
+                    probe.expect(stub.calls.join(",") === "create|0|/usr/bin/k||allow|true|for_5_minutes", "dialog accept call: " + stub.calls.join(","));
                     stub.levelRuleFinished(0, "/usr/bin/k", "", 1, "ok");
                 } else if (probe.phase === 5) {
                     realModel.setPendingOnly(false);
@@ -234,7 +247,7 @@ Window {
                     probe.expect(page.levelRules.message.indexOf("connected") >= 0, "reason: " + page.levelRules.message);
                     // A real model refuses a program-wide rule that isn't
                     // confirmed, before anything else.
-                    const need = realModel.createLevelRule(0, dom.ruleProgram, "", "allow", false);
+                    const need = realModel.createLevelRule(0, dom.ruleProgram, "", "allow", false, "");
                     probe.expect(need === "A rule for every connection of a program needs confirming.", "unconfirmed program rule: " + need);
                     // Open the domain row's menu, then let the list pool it.
                     probe.pooled = dom;

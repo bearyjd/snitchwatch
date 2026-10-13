@@ -387,7 +387,7 @@ Item {
             program: row.ruleProgram
             nodeKey: row.ruleKey
             nodeLabel: row.groupLabel
-            Layout.preferredWidth: Kirigami.Units.gridUnit * 9
+            Layout.preferredWidth: implicitWidth
             Layout.alignment: Qt.AlignVCenter
             onCreateRequested: (level, program, key, label, choice) => row.page.levelRules.create(
                 level, program, key, label, choice)

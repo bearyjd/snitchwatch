@@ -29,6 +29,12 @@ fn level_rule_state_is_unavailable_when_the_default_duration_is_once() {
     )
     .expect("settings file");
     std::env::set_var("XDG_CONFIG_HOME", config.path());
+    // The probe rewrites that file (Settings changing under the model).
+    std::env::set_var("QML_XHR_ALLOW_FILE_WRITE", "1");
+    let settings_url = format!(
+        "file://{}/snitchwatch/settings.json",
+        config.path().display()
+    );
 
     let mut app = QGuiApplication::new();
     let mut engine = QQmlApplicationEngine::new();
@@ -52,6 +58,23 @@ Window {
     readonly property int reasonRole: 34
 
     ConnectionsModel { id: model }
+    // Repaints of the rule roles (a Settings change must cause exactly these).
+    property int repaints: 0
+    property var lastRoles: []
+    Connections {
+        target: model
+        function onDataChanged(top, bottom, roles) { probe.repaints++; probe.lastRoles = roles; }
+    }
+    // Rewrites the Settings file; the write finishes before the next tick.
+    function writeSettings(body) {
+        const x = new XMLHttpRequest();
+        x.open("PUT", "__SETTINGS_URL__");
+        x.onreadystatechange = function () {
+            if (x.readyState === XMLHttpRequest.DONE) probe.wrote = x.status + ":" + x.responseText;
+        };
+        x.send(body);
+    }
+    property string wrote: ""
 
     function row(id, process, path, host) {
         return { id: id, process: process, processPath: path, dstHost: host,
@@ -112,10 +135,10 @@ Window {
                         probe.expect(f !== null && f.reason.indexOf("default duration") >= 0, "reason: " + (f ? f.reason : "?"));
                     }
                     // Creating one is refused with the same reason.
-                    const why = model.createLevelRule(1, "/usr/bin/curl", "example.com", "allow", true);
+                    const why = model.createLevelRule(1, "/usr/bin/curl", "example.com", "allow", true, "");
                     probe.expect(why.indexOf("default duration") >= 0, "create: " + why);
                     // A program-wide rule still needs confirming first.
-                    probe.expect(model.createLevelRule(0, "/usr/bin/curl", "", "allow", false).indexOf("needs confirming") >= 0,
+                    probe.expect(model.createLevelRule(0, "/usr/bin/curl", "", "allow", false, "").indexOf("needs confirming") >= 0,
                                  "unconfirmed program rule");
                     // An existing rule at the level still shows, so it can be removed.
                     model.applyServerMessageJson(JSON.stringify({ action: "setRules", rules: [
@@ -125,6 +148,37 @@ Window {
                               { type: "simple", operand: "dest.host", data: "www.example.com", sensitive: false } ] } } ] }));
                     const h = probe.find(2, "www.example.com");
                     probe.expect(h !== null && h.state === "allow" && h.reason === "", "existing rule: " + JSON.stringify(h));
+                    // A duration the user was shown that is no longer Settings'
+                    // is refused, before anything is sent.
+                    const stale = model.createLevelRule(1, "/usr/bin/curl", "example.com", "allow", true, "forever");
+                    probe.expect(stale.indexOf("changed") >= 0, "stale duration: " + stale);
+                    // Settings change under the model (checked next tick, once
+                    // the write has landed).
+                    probe.writeSettings('{"default_duration":"forever"}');
+                } else if (probe.phase === 4) {
+                    // The file alone changes nothing: states come from the cached
+                    // token, not a read per data() call. The model's refresh
+                    // applies it, and repaints only the rule roles.
+                    const before = probe.find(0, "/usr/bin/wget");
+                    probe.expect(before !== null && before.state === "unavailable", "cached token: " + JSON.stringify(before) + " wrote " + probe.wrote);
+                    probe.expect(model.levelRuleDuration() === "this_time", "duration re-read per call: " + model.levelRuleDuration());
+                    const n = probe.repaints;
+                    model.refreshLevelRuleDuration();
+                    const after = probe.find(0, "/usr/bin/wget");
+                    probe.expect(after !== null && after.state === "none", "after refresh: " + JSON.stringify(after));
+                    probe.expect(model.levelRuleDuration() === "forever", "duration after refresh: " + model.levelRuleDuration());
+                    probe.expect(probe.repaints === n + 1, "repaints: " + (probe.repaints - n));
+                    probe.expect(probe.lastRoles.length === 3 && probe.lastRoles.indexOf(probe.stateRole) >= 0,
+                                 "repainted roles: " + JSON.stringify(probe.lastRoles));
+                    // An unchanged duration repaints nothing.
+                    model.refreshLevelRuleDuration();
+                    probe.expect(probe.repaints === n + 1, "repainted without a change");
+                    // And back to once-only.
+                    probe.writeSettings('{"default_duration":"this_time"}');
+                } else if (probe.phase === 5) {
+                    model.refreshLevelRuleDuration();
+                    const back = probe.find(0, "/usr/bin/wget");
+                    probe.expect(back !== null && back.state === "unavailable", "after switching back: " + JSON.stringify(back));
                     done = true;
                 }
                 probe.phase++;
@@ -148,6 +202,8 @@ Window {
 }
 "#;
 
+    let qml = qml.replace("__SETTINGS_URL__", &settings_url);
+
     let guard = engine.as_mut().map(|engine| {
         let root_ok = root_ok.clone();
         engine.on_object_created(move |_engine, obj, _url| {
@@ -158,7 +214,7 @@ Window {
 
     let captured = capture_stderr(|| {
         if let Some(engine) = engine.as_mut() {
-            engine.load_data(&QByteArray::from(qml), &QUrl::from(PROBE_URL));
+            engine.load_data(&QByteArray::from(qml.as_str()), &QUrl::from(PROBE_URL));
         }
         if let Some(app) = app.as_mut() {
             app.exec();

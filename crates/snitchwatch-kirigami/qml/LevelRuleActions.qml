@@ -93,12 +93,15 @@ ColumnLayout {
     function create(level, program, key, label, choice) {
         if (level === 0) {
             // The duration is the model's, as `createLevelRule` will take it.
+            // `durationToken` goes back with the confirm: the model refuses it
+            // if Settings changed what was shown.
+            const token = actions.model.levelRuleDuration();
             actions.asked = { level: level, program: program, key: key, label: label, choice: choice,
-                              duration: Durations.labelFor(actions.model.levelRuleDuration()) };
+                              duration: Durations.labelFor(token), durationToken: token };
             confirmDialog.open();
             return;
         }
-        actions.send(level, program, key, label, choice, false);
+        actions.send(level, program, key, label, choice, false, "");
     }
 
     function remove(level, program, key, label) {
@@ -106,8 +109,9 @@ ColumnLayout {
         actions.sent(level, program, key, label, why);
     }
 
-    function send(level, program, key, label, choice, confirmed) {
-        const why = actions.model.createLevelRule(level, program, key, choice, confirmed);
+    // `shownDuration`: the duration token the user was shown ("" if none was).
+    function send(level, program, key, label, choice, confirmed, shownDuration) {
+        const why = actions.model.createLevelRule(level, program, key, choice, confirmed, shownDuration);
         actions.sent(level, program, key, label, why);
     }
 
@@ -124,7 +128,7 @@ ColumnLayout {
         const a = actions.asked;
         actions.asked = null;
         if (a !== null) {
-            actions.send(a.level, a.program, a.key, a.label, a.choice, true);
+            actions.send(a.level, a.program, a.key, a.label, a.choice, true, a.durationToken);
         }
     }
 
@@ -167,22 +171,30 @@ ColumnLayout {
             }
         ]
         onClosed: actions.asked = null
+        preferredWidth: Kirigami.Units.gridUnit * 24
 
-        Controls.Label {
-            id: confirmBody
-            objectName: "confirmBody"
-            Layout.fillWidth: true
-            textFormat: Text.PlainText
-            wrapMode: Text.Wrap
-            text: actions.confirmText
-        }
-        Controls.Label {
-            id: confirmProgram
-            objectName: "confirmProgram"
-            Layout.fillWidth: true
-            textFormat: Text.PlainText
-            wrapMode: Text.WrapAnywhere
-            text: actions.asked === null ? "" : "Program file: " + actions.asked.program
+        // The dialog's content has no layout of its own, and a wrapping label
+        // gets no width from it: one column, as wide as the dialog allows.
+        ColumnLayout {
+            id: confirmColumn
+            objectName: "confirmColumn"
+            spacing: Kirigami.Units.largeSpacing
+            Controls.Label {
+                id: confirmBody
+                objectName: "confirmBody"
+                Layout.fillWidth: true
+                textFormat: Text.PlainText
+                wrapMode: Text.Wrap
+                text: actions.confirmText
+            }
+            Controls.Label {
+                id: confirmProgram
+                objectName: "confirmProgram"
+                Layout.fillWidth: true
+                textFormat: Text.PlainText
+                wrapMode: Text.WrapAnywhere
+                text: actions.asked === null ? "" : "Program file: " + actions.asked.program
+            }
         }
     }
 
