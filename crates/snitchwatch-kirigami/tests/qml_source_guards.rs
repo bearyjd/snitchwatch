@@ -14,7 +14,18 @@
 //! That leaves a gap exactly where a regression already happened once, so it
 //! gets a cheap guard rather than no guard.
 
-const CONNECTIONS_PAGE: &str = include_str!("../qml/ConnectionsPage.qml");
+/// The Connections page and the components split out of it (monitor-tree step
+/// 1): guards that used to scan the single page file scan the union, so moving
+/// code between these files never silently drops a check.
+const CONNECTIONS_PAGE: &str = concat!(
+    include_str!("../qml/ConnectionsPage.qml"),
+    "\n",
+    include_str!("../qml/ConnectionRow.qml"),
+    "\n",
+    include_str!("../qml/ConnectionsHeader.qml"),
+    "\n",
+    include_str!("../qml/ConnectionInspector.qml"),
+);
 const MAIN_QML: &str = include_str!("../qml/main.qml");
 
 /// Drop whole-line `//` comments so a guard can't trip over prose that merely
@@ -312,4 +323,26 @@ fn inline_allow_sends_the_settings_duration() {
             .contains("allow_token(kind, allow_duration)"),
         "notification Allow no longer follows the Settings duration"
     );
+}
+
+/// `ListView.*` attached properties exist only on the delegate root. Inside a
+/// child item (the row's `MouseArea`) an unqualified `ListView.view` is null, so
+/// the click handler throws and the inspector never opens. Everything but the
+/// root's own `width:` binding must go through the root id (`row.ListView.`).
+#[test]
+fn connection_row_reaches_listview_only_through_the_delegate_root() {
+    let code = code_lines(include_str!("../qml/ConnectionRow.qml"));
+    assert!(
+        code.contains("row.ListView.view.currentIndex = row.index"),
+        "the row click no longer selects its row through the delegate root"
+    );
+    for line in code.lines() {
+        let rest = line.replace("row.ListView.", "");
+        if rest.contains("ListView.") {
+            assert!(
+                line.trim_start().starts_with("width: ListView.view ?"),
+                "unqualified ListView attached property outside the delegate root: {line}"
+            );
+        }
+    }
 }

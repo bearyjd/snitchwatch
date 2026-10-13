@@ -6,7 +6,7 @@
 //! `RowStore` visible-row projection. It mirrors the same insert/update/
 //! remove/move/clear deltas the row store applies (see
 //! `ConnectionsModel::apply_server_message`, which feeds both) and maintains
-//! a two-level tree — process, then registrable domain — with running
+//! a three-level tree — process, registrable domain, then host — with running
 //! aggregate counts, incrementally:
 //!
 //!   * [`GroupTree::upsert_row`] / [`remove_row`](GroupTree::remove_row) /
@@ -23,9 +23,9 @@
 //!     the same "recompute the view from maintained state" shape the
 //!     `cxx-qt` model wrapper already uses elsewhere (e.g. `refresh_counts`
 //!     scans `store.rows()` after every mutation). The `ConnectionsModel`
-//!     wrapper brackets a call to this with a Qt model reset, matching the
-//!     precedent it already sets for the filtered-flat path ("a filter is an
-//!     explicit user investigation mode... a reset is acceptable here").
+//!     wrapper brackets a call to this with a Qt model reset when rows
+//!     arrive, but swaps in the result with ranged row signals for an
+//!     expand/collapse or a filter change (see [`super::projection_diff`]).
 //!
 //! Design decision — pending work is signalled, never forced open (issue
 //! #20): a group with pending descendants stays in whatever expand/collapse
@@ -36,6 +36,12 @@
 //! and made manual collapse impossible. The active filter still forces the
 //! path to a match open — a filter is an explicit user investigation mode,
 //! and a hidden match would read as "no results".
+//!
+//! Design decision — the host level is data first, display later: the tree
+//! always tracks hosts, but [`GroupTree::build_projection`] keeps the
+//! two-level program > domain > connection projection the shell renders today,
+//! and [`GroupTree::build_host_projection`] adds the host rows between domain
+//! and connection for the monitor-tree UI that follows.
 //!
 //! Design decision — domain grouping heuristic: exact Public Suffix List
 //! handling is explicitly not required. [`registrable_domain`] uses a
@@ -115,8 +121,23 @@ fn domain_key(row: &ConnectionRow) -> String {
     }
 }
 
+/// The host-group key for `row`: its lowercased hostname, or the destination
+/// IP for bare-IP / empty hosts (so such a host row equals its domain row).
+fn host_key(row: &ConnectionRow) -> String {
+    let host = row.dst_host.trim();
+    if host.is_empty() || is_ip(host) {
+        row.dst_ip.clone()
+    } else {
+        host.to_lowercase()
+    }
+}
+
 fn composite_key(process_key: &str, domain_key: &str) -> String {
     format!("{process_key}\u{1}{domain_key}")
+}
+
+fn host_composite_key(process_key: &str, domain_key: &str, host_key: &str) -> String {
+    format!("{process_key}\u{1}{domain_key}\u{1}{host_key}")
 }
 
 /// Running aggregate counts for a group (process or domain level).
@@ -161,11 +182,20 @@ impl GroupCounts {
 }
 
 #[derive(Debug, Default)]
+struct HostGroup {
+    /// Row ids in display order, same ordering rule as [`DomainGroup::row_order`].
+    row_order: Vec<String>,
+    counts: GroupCounts,
+}
+
+#[derive(Debug, Default)]
 struct DomainGroup {
     label: String,
     /// Row ids in display order (front = most recently active, mirroring
     /// `RowStore::move_rows_to_front`'s move-to-front semantics).
     row_order: Vec<String>,
+    host_order: Vec<String>,
+    hosts: HashMap<String, HostGroup>,
     counts: GroupCounts,
 }
 
@@ -184,6 +214,7 @@ struct ProcessGroup {
 struct RowMeta {
     process_key: String,
     domain_key: String,
+    host_key: String,
     verdict: Verdict,
     bytes_sent: u64,
     bytes_received: u64,
@@ -205,10 +236,22 @@ pub enum VisibleEntry {
         expanded: bool,
         counts: GroupCounts,
     },
+    /// A host under a domain; only emitted by
+    /// [`GroupTree::build_host_projection`].
+    HostHeader {
+        process_key: String,
+        domain_key: String,
+        key: String,
+        label: String,
+        expanded: bool,
+        counts: GroupCounts,
+    },
     Row {
         id: String,
         process_key: String,
         domain_key: String,
+        /// `Some` when the row sits under a host header (host projection).
+        host_key: Option<String>,
     },
 }
 
@@ -220,6 +263,7 @@ pub struct GroupTree {
     id_meta: HashMap<String, RowMeta>,
     expanded_processes: HashSet<String>,
     expanded_domains: HashSet<String>,
+    expanded_hosts: HashSet<String>,
 }
 
 impl GroupTree {
@@ -235,23 +279,26 @@ impl GroupTree {
         let verdict = Verdict::of(row);
         let pkey = process_key(row);
         let dkey = domain_key(row);
+        let hkey = host_key(row);
         let bytes_sent = row.bytes_sent;
         let bytes_received = row.bytes_received;
 
         match self.id_meta.get(&row.id).cloned() {
-            Some(old) if old.process_key == pkey && old.domain_key == dkey => {
-                self.with_counts(&pkey, &dkey, |c| {
+            Some(old)
+                if old.process_key == pkey && old.domain_key == dkey && old.host_key == hkey =>
+            {
+                self.with_counts(&pkey, &dkey, &hkey, |c| {
                     c.sub(old.verdict, old.bytes_sent, old.bytes_received);
                     c.add(verdict, bytes_sent, bytes_received);
                 });
                 self.relabel(&pkey, &dkey, row);
             }
             Some(old) => {
-                self.remove_from_group(&old.process_key, &old.domain_key, &row.id);
-                self.insert_into_group(&pkey, &dkey, row);
+                self.remove_from_group(&old.process_key, &old.domain_key, &old.host_key, &row.id);
+                self.insert_into_group(&pkey, &dkey, &hkey, row);
             }
             None => {
-                self.insert_into_group(&pkey, &dkey, row);
+                self.insert_into_group(&pkey, &dkey, &hkey, row);
             }
         }
 
@@ -260,6 +307,7 @@ impl GroupTree {
             RowMeta {
                 process_key: pkey,
                 domain_key: dkey,
+                host_key: hkey,
                 verdict,
                 bytes_sent,
                 bytes_received,
@@ -279,7 +327,7 @@ impl GroupTree {
         let Some(meta) = self.id_meta.get(id).cloned() else {
             return;
         };
-        self.remove_from_group(&meta.process_key, &meta.domain_key, id);
+        self.remove_from_group(&meta.process_key, &meta.domain_key, &meta.host_key, id);
         self.id_meta.remove(id);
     }
 
@@ -299,6 +347,16 @@ impl GroupTree {
                     if let Some(pos) = dg.row_order.iter().position(|r| r == id) {
                         let row = dg.row_order.remove(pos);
                         dg.row_order.insert(0, row);
+                    }
+                    if let Some(hg) = dg.hosts.get_mut(&meta.host_key) {
+                        if let Some(pos) = hg.row_order.iter().position(|r| r == id) {
+                            let row = hg.row_order.remove(pos);
+                            hg.row_order.insert(0, row);
+                        }
+                    }
+                    if let Some(pos) = dg.host_order.iter().position(|h| h == &meta.host_key) {
+                        let h = dg.host_order.remove(pos);
+                        dg.host_order.insert(0, h);
                     }
                 }
                 if let Some(pos) = pg.domain_order.iter().position(|d| d == &meta.domain_key) {
@@ -324,6 +382,7 @@ impl GroupTree {
         self.id_meta.clear();
         self.expanded_processes.clear();
         self.expanded_domains.clear();
+        self.expanded_hosts.clear();
     }
 
     pub fn toggle_process(&mut self, key: &str) {
@@ -353,6 +412,28 @@ impl GroupTree {
             self.expanded_domains.insert(composite);
         } else {
             self.expanded_domains.remove(&composite);
+        }
+    }
+
+    pub fn toggle_host(&mut self, process_key: &str, domain_key: &str, host_key: &str) {
+        let composite = host_composite_key(process_key, domain_key, host_key);
+        if !self.expanded_hosts.remove(&composite) {
+            self.expanded_hosts.insert(composite);
+        }
+    }
+
+    pub fn set_host_expanded(
+        &mut self,
+        process_key: &str,
+        domain_key: &str,
+        host_key: &str,
+        expanded: bool,
+    ) {
+        let composite = host_composite_key(process_key, domain_key, host_key);
+        if expanded {
+            self.expanded_hosts.insert(composite);
+        } else {
+            self.expanded_hosts.remove(&composite);
         }
     }
 
@@ -402,6 +483,27 @@ impl GroupTree {
         &self,
         rows_by_id: &HashMap<&str, &ConnectionRow>,
         filter: &ConnectionFilter,
+    ) -> Vec<VisibleEntry> {
+        self.project(rows_by_id, filter, false)
+    }
+
+    /// Like [`build_projection`](Self::build_projection) but with the host
+    /// level: program > domain > host > connection. Under an expanded domain
+    /// each host is a header (rows only appear under an expanded host, or
+    /// when the filter forces the path open).
+    pub fn build_host_projection(
+        &self,
+        rows_by_id: &HashMap<&str, &ConnectionRow>,
+        filter: &ConnectionFilter,
+    ) -> Vec<VisibleEntry> {
+        self.project(rows_by_id, filter, true)
+    }
+
+    fn project(
+        &self,
+        rows_by_id: &HashMap<&str, &ConnectionRow>,
+        filter: &ConnectionFilter,
+        with_hosts: bool,
     ) -> Vec<VisibleEntry> {
         let filter_active = filter.is_active();
         let mut out = Vec::new();
@@ -458,11 +560,16 @@ impl GroupTree {
                 if !domain_expanded {
                     continue;
                 }
+                if with_hosts {
+                    self.push_hosts(&mut out, pkey, dkey, dg, &visible_ids, filter_active);
+                    continue;
+                }
                 for id in visible_ids {
                     out.push(VisibleEntry::Row {
                         id: id.clone(),
                         process_key: pkey.clone(),
                         domain_key: dkey.clone(),
+                        host_key: None,
                     });
                 }
             }
@@ -473,7 +580,58 @@ impl GroupTree {
 
     // --- internal helpers ---------------------------------------------
 
-    fn insert_into_group(&mut self, pkey: &str, dkey: &str, row: &ConnectionRow) {
+    /// Host headers (and their rows) for one expanded domain. `visible_ids`
+    /// is the domain's filter-surviving row set; a host with none of them is
+    /// hidden while the filter is active.
+    fn push_hosts(
+        &self,
+        out: &mut Vec<VisibleEntry>,
+        pkey: &str,
+        dkey: &str,
+        dg: &DomainGroup,
+        visible_ids: &[&String],
+        filter_active: bool,
+    ) {
+        let visible: HashSet<&str> = visible_ids.iter().map(|id| id.as_str()).collect();
+        for hkey in &dg.host_order {
+            let Some(hg) = dg.hosts.get(hkey) else {
+                continue;
+            };
+            let host_ids: Vec<&String> = hg
+                .row_order
+                .iter()
+                .filter(|id| visible.contains(id.as_str()))
+                .collect();
+            if filter_active && host_ids.is_empty() {
+                continue;
+            }
+            let expanded = filter_active
+                || self
+                    .expanded_hosts
+                    .contains(&host_composite_key(pkey, dkey, hkey));
+            out.push(VisibleEntry::HostHeader {
+                process_key: pkey.to_string(),
+                domain_key: dkey.to_string(),
+                key: hkey.clone(),
+                label: hkey.clone(),
+                expanded,
+                counts: hg.counts,
+            });
+            if !expanded {
+                continue;
+            }
+            for id in host_ids {
+                out.push(VisibleEntry::Row {
+                    id: id.clone(),
+                    process_key: pkey.to_string(),
+                    domain_key: dkey.to_string(),
+                    host_key: Some(hkey.clone()),
+                });
+            }
+        }
+    }
+
+    fn insert_into_group(&mut self, pkey: &str, dkey: &str, hkey: &str, row: &ConnectionRow) {
         let verdict = Verdict::of(row);
         if !self.processes.contains_key(pkey) {
             self.process_order.push(pkey.to_string());
@@ -500,9 +658,16 @@ impl GroupTree {
         let dg = pg.domains.get_mut(dkey).expect("just inserted");
         dg.row_order.push(row.id.clone());
         dg.counts.add(verdict, row.bytes_sent, row.bytes_received);
+        if !dg.hosts.contains_key(hkey) {
+            dg.host_order.push(hkey.to_string());
+            dg.hosts.insert(hkey.to_string(), HostGroup::default());
+        }
+        let hg = dg.hosts.get_mut(hkey).expect("just inserted");
+        hg.row_order.push(row.id.clone());
+        hg.counts.add(verdict, row.bytes_sent, row.bytes_received);
     }
 
-    fn remove_from_group(&mut self, pkey: &str, dkey: &str, id: &str) {
+    fn remove_from_group(&mut self, pkey: &str, dkey: &str, hkey: &str, id: &str) {
         let Some(pg) = self.processes.get_mut(pkey) else {
             return;
         };
@@ -516,6 +681,23 @@ impl GroupTree {
                     pg.counts
                         .sub(meta.verdict, meta.bytes_sent, meta.bytes_received);
                 }
+            }
+            let mut host_now_empty = false;
+            if let Some(hg) = dg.hosts.get_mut(hkey) {
+                if let Some(pos) = hg.row_order.iter().position(|r| r == id) {
+                    hg.row_order.remove(pos);
+                    if let Some(meta) = self.id_meta.get(id) {
+                        hg.counts
+                            .sub(meta.verdict, meta.bytes_sent, meta.bytes_received);
+                    }
+                }
+                host_now_empty = hg.row_order.is_empty();
+            }
+            if host_now_empty {
+                dg.hosts.remove(hkey);
+                dg.host_order.retain(|h| h != hkey);
+                self.expanded_hosts
+                    .remove(&host_composite_key(pkey, dkey, hkey));
             }
             domain_now_empty = dg.row_order.is_empty();
         }
@@ -531,11 +713,14 @@ impl GroupTree {
         }
     }
 
-    fn with_counts(&mut self, pkey: &str, dkey: &str, f: impl Fn(&mut GroupCounts)) {
+    fn with_counts(&mut self, pkey: &str, dkey: &str, hkey: &str, f: impl Fn(&mut GroupCounts)) {
         if let Some(pg) = self.processes.get_mut(pkey) {
             f(&mut pg.counts);
             if let Some(dg) = pg.domains.get_mut(dkey) {
                 f(&mut dg.counts);
+                if let Some(hg) = dg.hosts.get_mut(hkey) {
+                    f(&mut hg.counts);
+                }
             }
         }
     }
@@ -1110,5 +1295,209 @@ mod tests {
         let rows = vec![row("a", "firefox", "github.com", "1.1.1.1", None)];
         let tree = build(&rows); // never expanded
         assert_eq!(tree.pending_row_ids("firefox"), vec!["a".to_string()]);
+    }
+
+    // --- host level --------------------------------------------------------
+
+    fn host_rows() -> Vec<ConnectionRow> {
+        vec![
+            row("a", "firefox", "www.github.com", "1.1.1.1", Some("allow")),
+            row("b", "firefox", "api.github.com", "1.1.1.2", None),
+            row("c", "firefox", "www.github.com", "1.1.1.1", Some("deny")),
+            row("d", "firefox", "slack.com", "2.2.2.2", Some("allow")),
+        ]
+    }
+
+    fn open_all(tree: &mut GroupTree) {
+        tree.set_process_expanded("firefox", true);
+        tree.set_domain_expanded("firefox", "github.com", true);
+        tree.set_host_expanded("firefox", "github.com", "www.github.com", true);
+        tree.set_host_expanded("firefox", "github.com", "api.github.com", true);
+    }
+
+    fn shape(proj: &[VisibleEntry]) -> Vec<String> {
+        proj.iter()
+            .map(|e| match e {
+                VisibleEntry::ProcessHeader { key, .. } => format!("P:{key}"),
+                VisibleEntry::DomainHeader { key, .. } => format!("D:{key}"),
+                VisibleEntry::HostHeader { key, .. } => format!("H:{key}"),
+                VisibleEntry::Row { id, host_key, .. } => {
+                    format!("R:{id}:{}", host_key.is_some())
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn host_projection_nests_hosts_between_domain_and_connection() {
+        let rows = host_rows();
+        let mut tree = build(&rows);
+        open_all(&mut tree);
+        let proj = tree.build_host_projection(&rows_map(&rows), &ConnectionFilter::default());
+        assert_eq!(
+            shape(&proj),
+            vec![
+                "P:firefox",
+                "D:github.com",
+                "H:www.github.com",
+                "R:a:true",
+                "R:c:true",
+                "H:api.github.com",
+                "R:b:true",
+                "D:slack.com",
+            ]
+        );
+        match &proj[2] {
+            VisibleEntry::HostHeader {
+                counts, expanded, ..
+            } => {
+                assert_eq!((counts.total, counts.allowed, counts.denied), (2, 1, 1));
+                assert!(expanded);
+            }
+            other => panic!("expected host header, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_plain_projection_never_shows_hosts() {
+        let rows = host_rows();
+        let mut tree = build(&rows);
+        open_all(&mut tree);
+        let proj = tree.build_projection(&rows_map(&rows), &ConnectionFilter::default());
+        assert!(proj
+            .iter()
+            .all(|e| !matches!(e, VisibleEntry::HostHeader { .. })));
+        assert!(proj
+            .iter()
+            .any(|e| matches!(e, VisibleEntry::Row { host_key: None, .. })));
+    }
+
+    #[test]
+    fn a_collapsed_host_hides_its_rows_and_keeps_its_counts() {
+        let rows = host_rows();
+        let mut tree = build(&rows);
+        open_all(&mut tree);
+        tree.toggle_host("firefox", "github.com", "www.github.com");
+        let proj = tree.build_host_projection(&rows_map(&rows), &ConnectionFilter::default());
+        let s = shape(&proj);
+        assert!(s.contains(&"H:www.github.com".to_string()));
+        assert!(!s.contains(&"R:a:true".to_string()));
+        assert!(s.contains(&"R:b:true".to_string()));
+    }
+
+    #[test]
+    fn pending_host_rows_are_signalled_not_forced_open() {
+        let rows = host_rows();
+        let mut tree = build(&rows);
+        tree.set_process_expanded("firefox", true);
+        tree.set_domain_expanded("firefox", "github.com", true);
+        let proj = tree.build_host_projection(&rows_map(&rows), &ConnectionFilter::default());
+        // api.github.com holds the pending row b but stays collapsed.
+        let api = proj
+            .iter()
+            .find(|e| matches!(e, VisibleEntry::HostHeader { key, .. } if key == "api.github.com"));
+        match api {
+            Some(VisibleEntry::HostHeader {
+                expanded, counts, ..
+            }) => {
+                assert!(!expanded);
+                assert_eq!(counts.pending, 1);
+            }
+            other => panic!("expected api.github.com host header, got {other:?}"),
+        }
+        assert!(!shape(&proj).iter().any(|s| s.starts_with("R:")));
+    }
+
+    #[test]
+    fn an_active_filter_forces_the_host_path_open_and_hides_other_hosts() {
+        let rows = host_rows();
+        let tree = build(&rows);
+        let filter = ConnectionFilter::new("api.github", false);
+        let proj = tree.build_host_projection(&rows_map(&rows), &filter);
+        assert_eq!(
+            shape(&proj),
+            vec!["P:firefox", "D:github.com", "H:api.github.com", "R:b:true"]
+        );
+    }
+
+    #[test]
+    fn hosts_are_pruned_and_counted_down_as_rows_leave() {
+        let rows = host_rows();
+        let mut tree = build(&rows);
+        open_all(&mut tree);
+        tree.remove_row("b");
+        tree.remove_row("a");
+        let remaining: Vec<ConnectionRow> = rows
+            .iter()
+            .filter(|r| r.id != "a" && r.id != "b")
+            .cloned()
+            .collect();
+        let proj = tree.build_host_projection(&rows_map(&remaining), &ConnectionFilter::default());
+        let s = shape(&proj);
+        assert!(!s.contains(&"H:api.github.com".to_string()), "{s:?}");
+        match proj
+            .iter()
+            .find(|e| matches!(e, VisibleEntry::HostHeader { key, .. } if key == "www.github.com"))
+        {
+            Some(VisibleEntry::HostHeader { counts, .. }) => assert_eq!(counts.total, 1),
+            other => panic!("expected www.github.com, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_update_that_changes_verdict_moves_the_host_counts() {
+        let rows = host_rows();
+        let mut tree = build(&rows);
+        open_all(&mut tree);
+        let mut decided = rows.clone();
+        decided[1].action = Some("allow".to_string());
+        tree.upsert_row(&decided[1]);
+        let proj = tree.build_host_projection(&rows_map(&decided), &ConnectionFilter::default());
+        match proj
+            .iter()
+            .find(|e| matches!(e, VisibleEntry::HostHeader { key, .. } if key == "api.github.com"))
+        {
+            Some(VisibleEntry::HostHeader { counts, .. }) => {
+                assert_eq!((counts.pending, counts.allowed), (0, 1));
+            }
+            other => panic!("expected api.github.com, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_update_to_another_host_moves_the_row_between_hosts() {
+        let rows = host_rows();
+        let mut tree = build(&rows);
+        open_all(&mut tree);
+        let mut moved = rows.clone();
+        moved[1].dst_host = "www.github.com".to_string();
+        tree.upsert_row(&moved[1]);
+        let proj = tree.build_host_projection(&rows_map(&moved), &ConnectionFilter::default());
+        let s = shape(&proj);
+        assert!(!s.contains(&"H:api.github.com".to_string()), "{s:?}");
+    }
+
+    #[test]
+    fn bare_ip_hosts_are_keyed_by_the_ip() {
+        let rows = vec![row("a", "curl", "", "10.0.0.5", Some("allow"))];
+        let mut tree = build(&rows);
+        tree.set_process_expanded("curl", true);
+        tree.set_domain_expanded("curl", "10.0.0.5", true);
+        let proj = tree.build_host_projection(&rows_map(&rows), &ConnectionFilter::default());
+        assert_eq!(shape(&proj), vec!["P:curl", "D:10.0.0.5", "H:10.0.0.5"]);
+    }
+
+    #[test]
+    fn move_to_front_reorders_hosts_within_a_domain() {
+        let rows = host_rows();
+        let mut tree = build(&rows);
+        open_all(&mut tree);
+        tree.move_to_front(&["b".to_string()]);
+        let proj = tree.build_host_projection(&rows_map(&rows), &ConnectionFilter::default());
+        let hosts: Vec<String> = shape(&proj)
+            .into_iter()
+            .filter(|s| s.starts_with("H:"))
+            .collect();
+        assert_eq!(hosts, vec!["H:api.github.com", "H:www.github.com"]);
     }
 }

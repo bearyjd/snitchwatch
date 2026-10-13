@@ -27,6 +27,7 @@ use cxx_qt_lib::{
 use crate::connections::filter::ConnectionFilter;
 use crate::connections::grouping::{GroupTree, VisibleEntry};
 use crate::connections::outcome::{is_pending, outcome_text};
+use crate::connections::projection_diff;
 use crate::connections::row_store::{
     matched_rule_display, matched_rule_name, ModelOp, RowStore, Verdict,
 };
@@ -931,17 +932,67 @@ impl qobject::ConnectionsModel {
     /// group tree, store rows, and active filter. Cheap relative to a tree
     /// rebuild — see `connections::grouping` module docs.
     fn rebuild_grouped_projection(mut self: Pin<&mut Self>) {
-        let filter = self.store.filter().clone();
-        let projection = {
-            let rows_by_id: HashMap<&str, &ConnectionRow> = self
-                .store
-                .rows()
-                .iter()
-                .map(|r| (r.id.as_str(), r))
-                .collect();
-            self.grouping.build_projection(&rows_by_id, &filter)
-        };
+        let projection = self.compute_grouped_projection();
         self.as_mut().rust_mut().grouped_projection = projection;
+    }
+
+    fn compute_grouped_projection(&self) -> Vec<VisibleEntry> {
+        let filter = self.store.filter().clone();
+        let rows_by_id: HashMap<&str, &ConnectionRow> = self
+            .store
+            .rows()
+            .iter()
+            .map(|r| (r.id.as_str(), r))
+            .collect();
+        self.grouping.build_projection(&rows_by_id, &filter)
+    }
+
+    /// Swap the grouped projection for `new` with ranged signals (one remove
+    /// range, one insert range, `dataChanged` for headers whose expand flag or
+    /// counts changed) instead of a model reset, so the view keeps its scroll
+    /// position, selection and delegates. See `connections::projection_diff`.
+    fn apply_grouped_projection(mut self: Pin<&mut Self>, new: Vec<VisibleEntry>) {
+        let diff = projection_diff::diff(&self.grouped_projection, &new);
+        let no_parent = QModelIndex::default();
+        if !diff.removed.is_empty() {
+            unsafe {
+                self.as_mut().begin_remove_rows(
+                    &no_parent,
+                    diff.removed.start as i32,
+                    (diff.removed.end - 1) as i32,
+                );
+            }
+            self.as_mut()
+                .rust_mut()
+                .grouped_projection
+                .drain(diff.removed.clone());
+            unsafe {
+                self.as_mut().end_remove_rows();
+            }
+        }
+        if !diff.inserted.is_empty() {
+            unsafe {
+                self.as_mut().begin_insert_rows(
+                    &no_parent,
+                    diff.inserted.start as i32,
+                    (diff.inserted.end - 1) as i32,
+                );
+            }
+            self.as_mut().rust_mut().grouped_projection.splice(
+                diff.inserted.start..diff.inserted.start,
+                new[diff.inserted.clone()].iter().cloned(),
+            );
+            unsafe {
+                self.as_mut().end_insert_rows();
+            }
+        }
+        for &idx in &diff.changed {
+            self.as_mut().rust_mut().grouped_projection[idx] = new[idx].clone();
+            let index = self.index(idx as i32, 0, &no_parent);
+            self.as_mut()
+                .data_changed(&index, &index, &QList::<i32>::default());
+        }
+        debug_assert_eq!(self.grouped_projection, new, "ranged update desynced");
     }
 
     /// Replace the active filter, bracketed by a model reset (the whole visible
@@ -952,15 +1003,18 @@ impl qobject::ConnectionsModel {
         // Anything still in the grouped debounce buffer must land first so the
         // filter is computed over current data.
         self.as_mut().flush_grouped_messages();
-        unsafe {
-            self.as_mut().begin_reset_model();
-        }
-        self.as_mut().rust_mut().store.set_filter(filter);
         if self.grouped {
-            self.as_mut().rebuild_grouped_projection();
-        }
-        unsafe {
-            self.as_mut().end_reset_model();
+            self.as_mut().rust_mut().store.set_filter(filter);
+            let projection = self.compute_grouped_projection();
+            self.as_mut().apply_grouped_projection(projection);
+        } else {
+            unsafe {
+                self.as_mut().begin_reset_model();
+            }
+            self.as_mut().rust_mut().store.set_filter(filter);
+            unsafe {
+                self.as_mut().end_reset_model();
+            }
         }
         self.refresh_counts();
     }
@@ -994,17 +1048,13 @@ impl qobject::ConnectionsModel {
             return;
         }
         self.as_mut().flush_grouped_messages();
-        unsafe {
-            self.as_mut().begin_reset_model();
-        }
         self.as_mut()
             .rust_mut()
             .grouping
             .toggle_process(&key.to_string());
-        self.as_mut().rebuild_grouped_projection();
-        unsafe {
-            self.as_mut().end_reset_model();
-        }
+        let projection = self.compute_grouped_projection();
+        self.as_mut().apply_grouped_projection(projection);
+        self.refresh_counts();
     }
 
     /// Toggle a domain subgroup's expand/collapse state within its parent
@@ -1015,17 +1065,13 @@ impl qobject::ConnectionsModel {
             return;
         }
         self.as_mut().flush_grouped_messages();
-        unsafe {
-            self.as_mut().begin_reset_model();
-        }
         self.as_mut()
             .rust_mut()
             .grouping
             .toggle_domain(&process_key.to_string(), &domain_key.to_string());
-        self.as_mut().rebuild_grouped_projection();
-        unsafe {
-            self.as_mut().end_reset_model();
-        }
+        let projection = self.compute_grouped_projection();
+        self.as_mut().apply_grouped_projection(projection);
+        self.refresh_counts();
     }
 
     /// Parity 2: destination IP (plus byte counters, currently always 0 from
@@ -1434,7 +1480,33 @@ fn grouped_entry_data(entry: &VisibleEntry, role: i32, store: &RowStore) -> QVar
             }
             _ => QVariant::default(),
         },
-        VisibleEntry::Row { id, .. } => {
+        VisibleEntry::HostHeader {
+            process_key,
+            domain_key,
+            key,
+            label,
+            expanded,
+            counts,
+        } => match role {
+            ROLE_ID => QVariant::from(&QString::from(&format!(
+                "host:{process_key}|{domain_key}|{key}"
+            ))),
+            ROLE_DEPTH => QVariant::from(&2i32),
+            ROLE_GROUP_PARENT_KEY => QVariant::from(&QString::from(domain_key)),
+            // Everything else reads as a domain header with the host's data.
+            _ => grouped_entry_data(
+                &VisibleEntry::DomainHeader {
+                    process_key: process_key.clone(),
+                    key: key.clone(),
+                    label: label.clone(),
+                    expanded: *expanded,
+                    counts: *counts,
+                },
+                role,
+                store,
+            ),
+        },
+        VisibleEntry::Row { id, host_key, .. } => {
             let Some(row) = store.row_by_id(id) else {
                 return QVariant::default();
             };
@@ -1449,7 +1521,7 @@ fn grouped_entry_data(entry: &VisibleEntry, role: i32, store: &RowStore) -> QVar
                     QVariant::from(&QString::from(v.as_token()))
                 }
                 ROLE_PENDING => QVariant::from(&is_pending(row)),
-                ROLE_DEPTH => QVariant::from(&2i32),
+                ROLE_DEPTH => QVariant::from(&if host_key.is_some() { 3i32 } else { 2i32 }),
                 ROLE_IS_GROUP_HEADER => QVariant::from(&false),
                 ROLE_EXPANDED => QVariant::from(&false),
                 ROLE_GROUP_KEY | ROLE_GROUP_PARENT_KEY | ROLE_GROUP_LABEL => {
