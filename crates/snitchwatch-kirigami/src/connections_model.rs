@@ -103,11 +103,14 @@ const ROLE_GROUP_LEVEL: i32 = 30;
 /// needs besides the domain and host keys); empty elsewhere.
 const ROLE_GROUP_PROCESS_KEY: i32 = 31;
 /// What a tree header's rule button shows (`connections::level_rules::RuleState::token`):
-/// `none`, `allow`, `deny`, `partial` or `pending`; `none` on connection rows.
+/// `none`, `allow`, `deny`, `partial`, `pending` or `unavailable`; `none` on
+/// connection rows.
 const ROLE_LEVEL_RULE_STATE: i32 = 32;
 /// The name of the rule a delete would remove, only while the state is
 /// `allow`, `deny` or `pending`; empty otherwise.
 const ROLE_LEVEL_RULE_NAME: i32 = 33;
+/// Why the state is `unavailable` (fixed plain text); empty otherwise.
+const ROLE_LEVEL_RULE_REASON: i32 = 34;
 
 #[cxx_qt::bridge]
 pub mod qobject {
@@ -346,6 +349,13 @@ pub mod qobject {
             process_key: &QString,
             key: &QString,
         ) -> QString;
+
+        /// The Settings default duration token (`this_time`, `for_5_minutes`,
+        /// `until_restart`, `forever`) a rule button's rule would take now:
+        /// the one `createLevelRule` sends.
+        #[qinvokable]
+        #[cxx_name = "levelRuleDuration"]
+        fn level_rule_duration(self: &ConnectionsModel) -> QString;
 
         /// Give up on rule button commands with no answer in time (called by
         /// a QML timer); `levelRuleFinished` says the outcome is unknown.
@@ -658,7 +668,10 @@ impl qobject::ConnectionsModel {
                     .unwrap_or_default(),
             ));
         }
-        if role == ROLE_LEVEL_RULE_STATE || role == ROLE_LEVEL_RULE_NAME {
+        if matches!(
+            role,
+            ROLE_LEVEL_RULE_STATE | ROLE_LEVEL_RULE_NAME | ROLE_LEVEL_RULE_REASON
+        ) {
             return self.level_rule_role(index.row(), role);
         }
         if self.grouped {
@@ -754,6 +767,7 @@ impl qobject::ConnectionsModel {
         roles.insert(ROLE_GROUP_PROCESS_KEY, QByteArray::from("groupProcessKey"));
         roles.insert(ROLE_LEVEL_RULE_STATE, QByteArray::from("levelRuleState"));
         roles.insert(ROLE_LEVEL_RULE_NAME, QByteArray::from("levelRuleName"));
+        roles.insert(ROLE_LEVEL_RULE_REASON, QByteArray::from("levelRuleReason"));
         roles
     }
 
@@ -861,6 +875,7 @@ impl qobject::ConnectionsModel {
         let mut roles = QList::<i32>::default();
         roles.append(ROLE_LEVEL_RULE_STATE);
         roles.append(ROLE_LEVEL_RULE_NAME);
+        roles.append(ROLE_LEVEL_RULE_REASON);
         self.data_changed(&top, &bottom, &roles);
     }
 
@@ -1350,6 +1365,10 @@ impl qobject::ConnectionsModel {
 
     fn poll_level_rules(self: Pin<&mut Self>) {
         level_rule_actions::poll(self);
+    }
+
+    fn level_rule_duration(&self) -> QString {
+        QString::from(level_rule_actions::default_duration())
     }
 
     fn inline_duration_for(

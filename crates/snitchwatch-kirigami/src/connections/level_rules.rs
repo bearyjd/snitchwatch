@@ -37,7 +37,7 @@ use snitchwatch_bridge::translator::verdict::once_rule;
 use snitchwatch_bridge::ws_messages::{RuleCommandOutcome, ServerMessage, VerdictScope};
 use snitchwatch_proto::protocol::Connection;
 
-use crate::make_rule::{ending_of, Ending};
+use crate::make_rule::{ending_of, Ending, LevelRuleRefusal};
 use crate::rules::editor_view::{finished_with, Finished, Wording};
 use crate::rules::row_store::{Rule, RuleSource, RulesStore};
 
@@ -115,11 +115,15 @@ pub enum RuleState {
     Partial,
     /// A create or delete command for this node is in flight.
     Pending,
+    /// No rule exists here and none can be made (`Projection::reason` says
+    /// why). Only ever a node with no rule: an existing one shows its own
+    /// state so it can be removed.
+    Unavailable,
 }
 
 impl RuleState {
     /// The `levelRuleState` role's string: `none`, `allow`, `deny`,
-    /// `partial` or `pending`.
+    /// `partial`, `pending` or `unavailable`.
     pub fn token(self) -> &'static str {
         match self {
             Self::None => "none",
@@ -127,6 +131,7 @@ impl RuleState {
             Self::Deny => "deny",
             Self::Partial => "partial",
             Self::Pending => "pending",
+            Self::Unavailable => "unavailable",
         }
     }
 }
@@ -285,6 +290,10 @@ pub struct Projection {
     /// wildcard would cross into a delegated suffix (see
     /// [`crosses_delegated_suffix`]).
     pub too_broad: bool,
+    /// Why the state is `Unavailable` (the program can't be bound, or the
+    /// node is too broad); `None` otherwise. The Settings duration is
+    /// checked by the model, which knows the Settings.
+    pub(crate) reason: Option<LevelRuleRefusal>,
 }
 
 /// Whether a wildcard over the domain `key` would reach past it: some host
@@ -486,15 +495,20 @@ impl LevelRules {
             && target.effective == Level::Domain
             && crosses_delegated_suffix(node.key, hosts);
         let too_broad = target.too_broad || delegated;
-        let none = |state| Projection {
-            state,
-            names: Vec::new(),
-            matching: 0,
-            effective: target.effective,
-            too_broad,
-        };
         let Some(expected) = target.operator.as_ref() else {
-            return none(RuleState::None);
+            let reason = if target.bindable {
+                LevelRuleRefusal::TooBroad
+            } else {
+                LevelRuleRefusal::UnknownProgram
+            };
+            return Projection {
+                state: RuleState::Unavailable,
+                names: Vec::new(),
+                matching: 0,
+                effective: target.effective,
+                too_broad,
+                reason: Some(reason),
+            };
         };
         let key = node.to_key();
         let mut exact: Vec<&Rule> = Vec::new();
@@ -528,6 +542,7 @@ impl LevelRules {
             (true, false) => RuleState::Allow,
             (false, true) => RuleState::Deny,
             (false, false) if narrower => RuleState::Partial,
+            (false, false) if too_broad => RuleState::Unavailable,
             (false, false) => RuleState::None,
         };
         Projection {
@@ -536,6 +551,7 @@ impl LevelRules {
             matching: exact.len(),
             effective: target.effective,
             too_broad,
+            reason: (state == RuleState::Unavailable).then_some(LevelRuleRefusal::TooBroad),
         }
     }
 }

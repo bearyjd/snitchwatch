@@ -1,12 +1,16 @@
 // The rule button on a tree header row (Phase 2 step 4): shows whether a
 // rule covers this program, domain or host, and offers to make or remove one.
 //
-// It holds no state of its own and sends nothing. `ruleState` is the
-// `levelRuleState` role (`none`, `allow`, `deny`, `partial`, `pending`); a
-// click only emits `createRequested(choice)` or `removeRequested()` for the
-// owner (LevelRuleActions.qml) to carry out and report on. Colour is never the
-// only cue: every state has its own glyph and a text label, and the tooltip and
-// Accessible.name spell out the state and the level.
+// It sends nothing. `ruleState` is the `levelRuleState` role (`none`, `allow`,
+// `deny`, `partial`, `pending`, `unavailable`; `ruleReason` is the last one's
+// why). A click opens a menu; picking from it only emits `createRequested` or
+// `removeRequested` for the owner (LevelRuleActions.qml) to carry out and
+// report on. Both carry a copy of the node (level, program, key, label) taken
+// when the menu opened: the list reuses its delegates, so what the row shows
+// later can be another node, and the pick must act on the one that was
+// clicked. Colour is never the only cue: every state has its own glyph and a
+// text label, and the tooltip and Accessible.name spell out the state and the
+// level.
 import QtQuick
 import QtQuick.Layouts
 import QtQuick.Controls as Controls
@@ -20,11 +24,21 @@ Item {
     property string ruleState: "none"
     // `levelRuleName` role: the rule's name (data), allow/deny/pending only.
     property string ruleName: ""
+    // `levelRuleReason` role: why `unavailable` (fixed text).
+    property string ruleReason: ""
     // `groupLevel` of the header: 0 program, 1 domain, 2 host.
     property int level: 0
+    // The node this button is on: the program path, the domain or host key
+    // ("" for a program) and the label to name it by.
+    property string program: ""
+    property string nodeKey: ""
+    property string nodeLabel: ""
 
-    signal createRequested(string choice)
-    signal removeRequested
+    signal createRequested(int level, string program, string key, string label, string choice)
+    signal removeRequested(int level, string program, string key, string label)
+
+    // The node as it was when the open menu was opened, or null.
+    property var node: null
 
     readonly property string levelName: root.level === 0 ? "program"
         : root.level === 1 ? "domain" : "host"
@@ -41,7 +55,11 @@ Item {
         none: { color: Theme.needsRule, glyph: "+", label: "Needs rule", enabled: true,
                 tip: "No rule for this " + root.levelName + " yet. Click to allow or deny." },
         pending: { color: Theme.pending, glyph: "◷", label: "Waiting for the firewall",
-                   enabled: false, tip: "Waiting for the firewall" }
+                   enabled: false, tip: "Waiting for the firewall" },
+        unavailable: { color: Kirigami.Theme.disabledTextColor, glyph: "⊘", label: "Can't add rule",
+                       enabled: false,
+                       tip: "A rule can't be added for this " + root.levelName
+                            + (root.ruleReason !== "" ? ": " + root.ruleReason : ".") }
     })
     readonly property var entry: root.table[root.ruleState] !== undefined
         ? root.table[root.ruleState] : root.table.none
@@ -59,6 +77,25 @@ Item {
     implicitWidth: button.implicitWidth
     implicitHeight: button.implicitHeight
 
+    function openMenu(menu) {
+        root.node = { level: root.level, program: root.program, key: root.nodeKey, label: root.nodeLabel };
+        menu.popup(button, 0, button.height);
+    }
+
+    // For a row that is being reused: nothing may be picked afterwards.
+    function closeMenus() {
+        chooseMenu.close();
+        removeMenu.close();
+        root.node = null;
+    }
+
+    function pick(choice) {
+        const n = root.node;
+        if (n !== null) {
+            root.createRequested(n.level, n.program, n.key, n.label, choice);
+        }
+    }
+
     Controls.Button {
         id: button
         objectName: "ruleButton"
@@ -67,7 +104,7 @@ Item {
         enabled: root.actionable
         Accessible.name: "Rule at " + root.levelName + " level: " + root.stateLabel
         Accessible.description: root.tipText
-        onClicked: (root.ruleState === "none" ? chooseMenu : removeMenu).popup(button, 0, button.height)
+        onClicked: root.openMenu(root.ruleState === "none" ? chooseMenu : removeMenu)
 
         contentItem: RowLayout {
             spacing: Kirigami.Units.smallSpacing
@@ -80,6 +117,8 @@ Item {
             }
             Controls.Label {
                 objectName: "ruleLabel"
+                Layout.fillWidth: true
+                elide: Text.ElideRight
                 textFormat: Text.PlainText
                 text: root.stateLabel
                 color: root.stateColor
@@ -93,12 +132,12 @@ Item {
         Controls.MenuItem {
             text: "Allow"
             icon.name: "dialog-ok-apply"
-            onTriggered: root.createRequested("allow")
+            onTriggered: root.pick("allow")
         }
         Controls.MenuItem {
             text: "Deny"
             icon.name: "edit-delete-remove"
-            onTriggered: root.createRequested("deny")
+            onTriggered: root.pick("deny")
         }
     }
     Controls.Menu {
@@ -106,7 +145,12 @@ Item {
         Controls.MenuItem {
             text: "Remove rule"
             icon.name: "edit-delete"
-            onTriggered: root.removeRequested()
+            onTriggered: {
+                const n = root.node;
+                if (n !== null) {
+                    root.removeRequested(n.level, n.program, n.key, n.label);
+                }
+            }
         }
     }
 

@@ -1,7 +1,11 @@
 //! `RuleButton.qml` on its own: each `levelRuleState` gives its colour, glyph,
 //! label and enabled state; the label and glyph are drawn (colour is never
 //! the only cue); a click opens Allow/Deny for `none` and "Remove rule" for
-//! `allow`/`deny`, and does nothing for `partial` and `pending`. Run headless
+//! `allow`/`deny`, and does nothing for `partial`, `pending` and `unavailable`
+//! (which carries its reason in the tooltip and accessible description). A pick
+//! carries the node copied when the menu opened, whatever the row shows by
+//! then, and nothing can be picked once the menus are closed for a reused
+//! delegate. Run headless
 //! with `QT_QPA_PLATFORM=offscreen`.
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -30,6 +34,7 @@ fn rule_button_states_and_clicks() {
 import QtQuick
 import QtQuick.Window
 import QtTest
+import org.kde.kirigami as Kirigami
 import com.snitchwatch.shell
 
 Window {
@@ -46,8 +51,13 @@ Window {
         x: 20
         y: 20
         level: 1
-        onCreateRequested: choice => probe.requests.push("create:" + choice)
-        onRemoveRequested: probe.requests.push("remove")
+        program: "/usr/bin/a"
+        nodeKey: "a.com"
+        nodeLabel: "a.com"
+        onCreateRequested: (level, program, key, label, choice) =>
+            probe.requests.push("create:" + [level, program, key, label, choice].join("|"))
+        onRemoveRequested: (level, program, key, label) =>
+            probe.requests.push("remove:" + [level, program, key, label].join("|"))
     }
     TestCase { id: tc; name: "rulebutton"; when: false }
 
@@ -58,7 +68,8 @@ Window {
         deny: [Theme.deny, "\u2715", "Denied", true],
         partial: [Theme.partial, "\u25D0", "Partial", false],
         none: [Theme.needsRule, "+", "Needs rule", true],
-        pending: [Theme.pending, "\u25F7", "Waiting for the firewall", false]
+        pending: [Theme.pending, "\u25F7", "Waiting for the firewall", false],
+        unavailable: [Kirigami.Theme.disabledTextColor, "\u2298", "Can't add rule", false]
     })
 
     function checkTable() {
@@ -83,6 +94,11 @@ Window {
             seenGlyphs.push(btn.glyph);
             seenLabels.push(btn.stateLabel);
         }
+        btn.ruleReason = "Too broad.";
+        btn.ruleState = "unavailable";
+        probe.expect(btn.tipText.indexOf("Too broad.") >= 0, "unavailable tooltip carries the reason: " + btn.tipText);
+        probe.expect(btn.button.Accessible.description.indexOf("Too broad.") >= 0, "accessible description carries the reason");
+        probe.expect(btn.button.Accessible.name.indexOf("Can't add rule") >= 0, "accessible name");
         btn.ruleState = "bogus";
         probe.expect(btn.stateLabel === "Needs rule", "unknown state falls back to none");
         btn.level = 0;
@@ -106,23 +122,46 @@ Window {
                 } else if (probe.phase === 2) {
                     probe.expect(btn.chooseMenu.visible, "none: choose menu did not open");
                     probe.expect(!btn.removeMenu.visible, "none: remove menu opened");
+                    // The row is reused for another node while the menu is open.
+                    btn.program = "/usr/bin/b";
+                    btn.nodeKey = "b.com";
+                    btn.nodeLabel = "b.com";
+                    btn.level = 2;
                     btn.chooseMenu.itemAt(1).triggered();
                     btn.chooseMenu.close();
+                    btn.program = "/usr/bin/a";
+                    btn.nodeKey = "a.com";
+                    btn.nodeLabel = "a.com";
+                    btn.level = 1;
                 } else if (probe.phase === 3) {
                     btn.ruleState = "deny";
                     tc.mouseClick(btn.button);
                 } else if (probe.phase === 4) {
                     probe.expect(btn.removeMenu.visible, "deny: remove menu did not open");
                     probe.expect(btn.removeMenu.itemAt(0).text === "Remove rule", "remove item text");
+                    btn.nodeKey = "c.com";
+                    btn.nodeLabel = "c.com";
                     btn.removeMenu.itemAt(0).triggered();
                     btn.removeMenu.close();
+                    btn.nodeKey = "a.com";
+                    btn.nodeLabel = "a.com";
                 } else if (probe.phase === 5) {
-                    for (const s of ["partial", "pending"]) {
+                    // Pooled with a menu open: it closes, and a late pick sends nothing.
+                    btn.ruleState = "none";
+                    tc.mouseClick(btn.button);
+                } else if (probe.phase === 6) {
+                    probe.expect(btn.chooseMenu.visible, "menu did not open before pooling");
+                    btn.closeMenus();
+                    probe.expect(!btn.chooseMenu.visible, "menu still open after closeMenus");
+                    btn.chooseMenu.itemAt(0).triggered();
+                    btn.ruleState = "partial";
+                    for (const s of ["partial", "pending", "unavailable"]) {
                         btn.ruleState = s;
                         tc.mouseClick(btn.button);
                         probe.expect(!btn.chooseMenu.visible && !btn.removeMenu.visible, s + ": a menu opened");
                     }
-                    probe.expect(probe.requests.join(",") === "create:deny,remove", "requests: " + probe.requests.join(","));
+                    probe.expect(probe.requests.join(",") === "create:1|/usr/bin/a|a.com|a.com|deny,remove:1|/usr/bin/a|a.com|a.com",
+                                 "requests (the node as it was when the menu opened): " + probe.requests.join(","));
                     done = true;
                 }
                 probe.phase++;

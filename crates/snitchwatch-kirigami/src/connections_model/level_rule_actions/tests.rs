@@ -128,6 +128,7 @@ fn projection(state: RuleState, names: &[&str], matching: usize) -> Projection {
         matching,
         effective: Level::Host,
         too_broad: false,
+        reason: None,
     }
 }
 
@@ -165,4 +166,36 @@ fn a_delete_with_nothing_or_something_in_flight_is_refused() {
     let reason = delete_name(&projection(RuleState::Allow, &[], 1)).unwrap_err();
     assert!(reason.contains("Rules page"), "{reason}");
     assert!(delete_name(&projection(RuleState::None, &[], 0)).is_err());
+}
+
+#[test]
+fn a_node_with_no_rule_is_unavailable_when_the_duration_is_once_only() {
+    let none = projection(RuleState::None, &[], 0);
+    assert_eq!(
+        shown_state(&none, || false),
+        (
+            RuleState::Unavailable,
+            Some(LevelRuleRefusal::NotRemembered)
+        )
+    );
+    assert_eq!(shown_state(&none, || true), (RuleState::None, None));
+}
+
+#[test]
+fn an_existing_rule_stays_removable_whatever_the_duration() {
+    for state in [RuleState::Allow, RuleState::Deny, RuleState::Partial] {
+        let p = projection(state, &["r"], 1);
+        // The duration is not even asked for.
+        assert_eq!(shown_state(&p, || unreachable!()), (state, None));
+    }
+}
+
+#[test]
+fn an_unavailable_projection_keeps_its_own_reason() {
+    let mut p = projection(RuleState::Unavailable, &[], 0);
+    p.reason = Some(LevelRuleRefusal::TooBroad);
+    assert_eq!(
+        shown_state(&p, || false),
+        (RuleState::Unavailable, Some(LevelRuleRefusal::TooBroad))
+    );
 }

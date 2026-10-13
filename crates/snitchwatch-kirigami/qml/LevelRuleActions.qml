@@ -7,6 +7,10 @@
 // RuleCommandResult), never an assumption that a send worked; a refusal shows
 // the model's human-readable reason. All of that text is data, so it sits in a
 // PlainText label. `header` is the bar the page puts above its list.
+//
+// Every message starts with the label of the node it is about, and each node
+// keeps its own: a new command, or another node's answer, never clears or
+// replaces a different node's message (the last few are kept, oldest dropped).
 import QtQuick
 import QtQuick.Layouts
 import QtQuick.Controls as Controls
@@ -24,18 +28,26 @@ ColumnLayout {
     readonly property int endingFailed: 0
     readonly property int endingDone: 1
 
-    // Commands sent and not yet ended, by "level|program|key".
+    // Commands sent and not yet ended, by "level|program|key" -> the node's
+    // label (an answer is attributed to the node it was sent for).
     property var inFlight: ({})
     property int inFlightCount: 0
-    // Last message, shown in the bar until dismissed.
+    // Messages by node id, oldest first, and all of them as the bar shows
+    // them (one per line) until dismissed.
+    property var notes: ({})
     property string message: ""
+    readonly property int maxNotes: 5
     // The program-wide rule waiting for the dialog's answer, or null.
     property var asked: null
 
     // Exposed for the headless probes.
     property alias pollTimer: pollTimer
     property alias confirmDialog: confirmDialog
-    readonly property string confirmText: confirmDialog.subtitle
+    property alias confirmBodyLabel: confirmBody
+    property alias confirmProgramLabel: confirmProgram
+    readonly property string confirmText: actions.asked === null ? ""
+        : (actions.asked.choice === "deny" ? "Deny" : "Allow") + " any host for " + actions.asked.label
+          + ". The rule lasts: " + actions.asked.duration + "."
 
     visible: actions.message !== ""
     spacing: Kirigami.Units.smallSpacing
@@ -44,10 +56,11 @@ ColumnLayout {
         return level + "|" + program + "|" + key;
     }
 
-    function track(id, on) {
+    // `label` is the node's label to track it under, or null to stop.
+    function track(id, label) {
         const next = Object.assign({}, actions.inFlight);
-        if (on) {
-            next[id] = true;
+        if (label !== null) {
+            next[id] = label;
         } else {
             delete next[id];
         }
@@ -55,34 +68,55 @@ ColumnLayout {
         actions.inFlightCount = Object.keys(next).length;
     }
 
+    // Sets node `id`'s message to "label: text" ("" removes it).
+    function note(id, label, text) {
+        const next = Object.assign({}, actions.notes);
+        delete next[id];
+        if (text !== "") {
+            next[id] = label + ": " + text;
+        }
+        const ids = Object.keys(next);
+        while (ids.length > actions.maxNotes) {
+            delete next[ids.shift()];
+        }
+        actions.notes = next;
+        actions.message = ids.map(i => next[i]).join("\n");
+    }
+
+    function dismiss() {
+        actions.notes = ({});
+        actions.message = "";
+    }
+
     // A button's choice. A program-wide rule (level 0) waits for the dialog;
     // domain and host rules go straight out.
     function create(level, program, key, label, choice) {
         if (level === 0) {
-            actions.asked = { level: level, program: program, key: key, label: label, choice: choice };
+            // The duration is the model's, as `createLevelRule` will take it.
+            actions.asked = { level: level, program: program, key: key, label: label, choice: choice,
+                              duration: Durations.labelFor(actions.model.levelRuleDuration()) };
             confirmDialog.open();
             return;
         }
-        actions.send(level, program, key, choice, false);
+        actions.send(level, program, key, label, choice, false);
     }
 
-    function remove(level, program, key) {
+    function remove(level, program, key, label) {
         const why = actions.model.deleteLevelRule(level, program, key);
-        actions.sent(level, program, key, why);
+        actions.sent(level, program, key, label, why);
     }
 
-    function send(level, program, key, choice, confirmed) {
+    function send(level, program, key, label, choice, confirmed) {
         const why = actions.model.createLevelRule(level, program, key, choice, confirmed);
-        actions.sent(level, program, key, why);
+        actions.sent(level, program, key, label, why);
     }
 
-    function sent(level, program, key, why) {
-        if (why !== "") {
-            actions.message = why;
-            return;
+    function sent(level, program, key, label, why) {
+        const id = actions.nodeId(level, program, key);
+        actions.note(id, label, why);
+        if (why === "") {
+            actions.track(id, label);
         }
-        actions.message = "";
-        actions.track(actions.nodeId(level, program, key), true);
     }
 
     // Only the dialog's accept gets here.
@@ -90,7 +124,7 @@ ColumnLayout {
         const a = actions.asked;
         actions.asked = null;
         if (a !== null) {
-            actions.send(a.level, a.program, a.key, a.choice, true);
+            actions.send(a.level, a.program, a.key, a.label, a.choice, true);
         }
     }
 
@@ -98,8 +132,11 @@ ColumnLayout {
         target: actions.model
         ignoreUnknownSignals: true
         function onLevelRuleFinished(level, program, key, ending, status) {
-            actions.track(actions.nodeId(level, program, key), false);
-            actions.message = status;
+            const id = actions.nodeId(level, program, key);
+            const label = actions.inFlight[id] !== undefined ? actions.inFlight[id]
+                : (key !== "" ? key : program);
+            actions.track(id, null);
+            actions.note(id, label, status);
         }
     }
 
@@ -116,9 +153,8 @@ ColumnLayout {
         id: confirmDialog
         title: actions.asked !== null && actions.asked.choice === "deny"
             ? "Deny every connection of this program?" : "Allow every connection of this program?"
-        subtitle: actions.asked === null ? "" : (actions.asked.choice === "deny" ? "Deny" : "Allow")
-            + " any host for " + actions.asked.label + ". The rule lasts: "
-            + Durations.labelFor(Durations.defaultToken) + "."
+        // The name is the process's; the file is what the rule binds to. Both
+        // are data, so plain text (the dialog's own subtitle is not used).
         standardButtons: Kirigami.Dialog.Cancel
         customFooterActions: [
             Kirigami.Action {
@@ -131,6 +167,23 @@ ColumnLayout {
             }
         ]
         onClosed: actions.asked = null
+
+        Controls.Label {
+            id: confirmBody
+            objectName: "confirmBody"
+            Layout.fillWidth: true
+            textFormat: Text.PlainText
+            wrapMode: Text.Wrap
+            text: actions.confirmText
+        }
+        Controls.Label {
+            id: confirmProgram
+            objectName: "confirmProgram"
+            Layout.fillWidth: true
+            textFormat: Text.PlainText
+            wrapMode: Text.WrapAnywhere
+            text: actions.asked === null ? "" : "Program file: " + actions.asked.program
+        }
     }
 
     RowLayout {
@@ -146,7 +199,7 @@ ColumnLayout {
         Controls.Button {
             flat: true
             text: "Dismiss"
-            onClicked: actions.message = ""
+            onClicked: actions.dismiss()
         }
     }
 }

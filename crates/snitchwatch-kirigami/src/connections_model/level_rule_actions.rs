@@ -13,7 +13,7 @@ use cxx_qt::CxxQtType;
 use cxx_qt_lib::{QString, QVariant};
 use snitchwatch_bridge::ws_messages::ClientMessage;
 
-use super::{qobject::ConnectionsModel, ROLE_LEVEL_RULE_STATE};
+use super::{qobject::ConnectionsModel, ROLE_LEVEL_RULE_REASON, ROLE_LEVEL_RULE_STATE};
 use crate::connections::grouping::VisibleEntry;
 use crate::connections::level_rules::{Level, NodeRef, Projection, RuleState};
 use crate::make_rule::LevelRuleRefusal;
@@ -106,25 +106,57 @@ fn send_to_current_session(
         .try_send(message)
 }
 
-/// The `levelRuleState` / `levelRuleName` role of the grouped row `row`.
+/// What a node's button shows: its projection, except that a node with no
+/// rule is `Unavailable` when the Settings default duration can't make one.
+/// `remembers` is asked only for such a node.
+fn shown_state(
+    projection: &Projection,
+    remembers: impl FnOnce() -> bool,
+) -> (RuleState, Option<LevelRuleRefusal>) {
+    if projection.state == RuleState::None && !remembers() {
+        return (
+            RuleState::Unavailable,
+            Some(LevelRuleRefusal::NotRemembered),
+        );
+    }
+    (projection.state, projection.reason)
+}
+
+/// Whether the Settings default duration makes a rule that lasts.
+fn default_duration_remembers() -> bool {
+    let settings = crate::settings::read_settings(&crate::paths::settings_path());
+    crate::pending_decision::parse_duration(settings.duration_token()).remembers()
+}
+
+/// The Settings default duration token, as a rule made now would take it.
+pub(super) fn default_duration() -> &'static str {
+    crate::settings::read_settings(&crate::paths::settings_path()).duration_token()
+}
+
+/// The `levelRuleState` / `levelRuleName` / `levelRuleReason` role of the
+/// grouped row `row`.
 pub(super) fn role(model: &ConnectionsModel, row: i32, role: i32) -> QVariant {
     let entry = model
         .grouped
         .then(|| model.grouped_projection.get(row as usize))
         .flatten();
     let projection = entry.and_then(entry_node).map(|node| project(model, node));
-    let text = match (projection, role) {
-        (Some(p), ROLE_LEVEL_RULE_STATE) => p.state.token().to_owned(),
-        (Some(p), _)
-            if matches!(
-                p.state,
-                RuleState::Allow | RuleState::Deny | RuleState::Pending
-            ) =>
-        {
-            p.names.first().cloned().unwrap_or_default()
-        }
-        (None, ROLE_LEVEL_RULE_STATE) => RuleState::None.token().to_owned(),
-        _ => String::new(),
+    let (state, reason) = match &projection {
+        Some(p) => shown_state(p, default_duration_remembers),
+        None => (RuleState::None, None),
+    };
+    let text = match role {
+        ROLE_LEVEL_RULE_STATE => state.token().to_owned(),
+        ROLE_LEVEL_RULE_REASON => reason.map(|r| r.reason().to_owned()).unwrap_or_default(),
+        _ => projection
+            .filter(|p| {
+                matches!(
+                    p.state,
+                    RuleState::Allow | RuleState::Deny | RuleState::Pending
+                )
+            })
+            .and_then(|p| p.names.first().cloned())
+            .unwrap_or_default(),
     };
     QVariant::from(&QString::from(&text))
 }

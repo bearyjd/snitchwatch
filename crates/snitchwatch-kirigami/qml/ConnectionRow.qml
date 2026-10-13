@@ -52,6 +52,7 @@ Item {
     // Rule button roles (headers only; "none" and "" elsewhere).
     required property string levelRuleState
     required property string levelRuleName
+    required property string levelRuleReason
 
     // Rule-match diagnostics roles. Header rows report empty strings
     // for both (see `ConnectionsModel::grouped_entry_data`) since
@@ -96,6 +97,12 @@ Item {
     readonly property string ruleProgram: row.groupLevel === 0 ? row.groupKey
         : row.groupLevel === 1 ? row.groupParentKey : row.groupProcessKey
     readonly property string ruleKey: row.groupLevel === 0 ? "" : row.groupKey
+    Connections {
+        target: row.ListView
+        function onPooled() {
+            headerRuleButton.closeMenus();
+        }
+    }
     // Exposed for the headless probes.
     property alias ruleButton: headerRuleButton
     property alias denyButton: rowDenyButton
@@ -159,6 +166,7 @@ Item {
         id: content
         anchors.fill: parent
         anchors.margins: Kirigami.Units.smallSpacing
+        anchors.rightMargin: Kirigami.Units.largeSpacing
         z: 1
         spacing: Kirigami.Units.largeSpacing
 
@@ -241,19 +249,6 @@ Item {
             text: row.groupTotal + " connection" + (row.groupTotal === 1 ? "" : "s")
             color: Kirigami.Theme.disabledTextColor
             Layout.alignment: Qt.AlignVCenter
-        }
-
-        RuleButton {
-            id: headerRuleButton
-            objectName: "headerRuleButton"
-            visible: row.isGroupHeader
-            ruleState: row.levelRuleState
-            ruleName: row.levelRuleName
-            level: row.groupLevel
-            Layout.alignment: Qt.AlignVCenter
-            onCreateRequested: choice => page.levelRules.create(
-                row.groupLevel, row.ruleProgram, row.ruleKey, row.groupLabel, choice)
-            onRemoveRequested: page.levelRules.remove(row.groupLevel, row.ruleProgram, row.ruleKey)
         }
 
         Rectangle {
@@ -375,6 +370,29 @@ Item {
                 enabled: !row.submitted
                 onClicked: row.decideOnce("later", false)
             }
+        }
+
+        // Last on the row, at a fixed width, so the rule-state column lines
+        // up; the badge and Allow all / Deny all sit to its left. Its picks
+        // carry the node as copied when its menu opened (this delegate is
+        // reused for other rows), and the menus close when it is pooled.
+        RuleButton {
+            id: headerRuleButton
+            objectName: "headerRuleButton"
+            visible: row.isGroupHeader
+            ruleState: row.levelRuleState
+            ruleName: row.levelRuleName
+            ruleReason: row.levelRuleReason
+            level: row.groupLevel
+            program: row.ruleProgram
+            nodeKey: row.ruleKey
+            nodeLabel: row.groupLabel
+            Layout.preferredWidth: Kirigami.Units.gridUnit * 9
+            Layout.alignment: Qt.AlignVCenter
+            onCreateRequested: (level, program, key, label, choice) => row.page.levelRules.create(
+                level, program, key, label, choice)
+            onRemoveRequested: (level, program, key, label) => row.page.levelRules.remove(
+                level, program, key, label)
         }
     }
 }

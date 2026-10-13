@@ -3,7 +3,11 @@
 //! host rules need no confirm; the outcome shown is the model's
 //! `levelRuleFinished`, a refusal's reason is shown, and the 1 s poll timer
 //! runs only while a command waits. The last phase drives the real page and
-//! model, which refuse (no firewall connected). Run headless with
+//! model, which refuse (no firewall connected). Messages start with the label
+//! of their node and one node's never clears another's; the dialog names the
+//! program file and the duration the model will use; a keyboard accept on the
+//! menu sends nothing before the dialog's accept; the menus of a pooled row
+//! close. Run headless with
 //! `QT_QPA_PLATFORM=offscreen`.
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -42,6 +46,8 @@ Window {
     property var failures: []
     property int phase: 0
     property int ticks: 0
+    property int settle: 0
+    property var pooled: null
 
     // Records every call; answers like a model that queued the command.
     QtObject {
@@ -59,8 +65,20 @@ Window {
             return answer;
         }
         function pollLevelRules() { polls++; }
+        // Not the QML default ("forever"): the dialog must ask the model.
+        function levelRuleDuration() { return "for_5_minutes"; }
     }
     LevelRuleActions { id: actions; model: stub; width: 600 }
+    // A real button wired like the row wires it.
+    RuleButton {
+        id: keyBtn
+        x: 650
+        z: 100
+        level: 0
+        program: "/usr/bin/k"
+        nodeLabel: "k"
+        onCreateRequested: (level, program, key, label, choice) => actions.create(level, program, key, label, choice)
+    }
 
     // The real page and model: refusals come from the Rust side.
     ConnectionsPage {
@@ -97,6 +115,10 @@ Window {
             if (probe.phase === 2 && ++probe.ticks < 14) {
                 return;
             }
+            // Let the closing confirm dialog finish before clicking the page.
+            if (probe.phase === 6 && ++probe.settle < 6) {
+                return;
+            }
             try {
                 if (probe.phase === 0) {
                     // Nothing pending: the poll timer is off.
@@ -108,8 +130,14 @@ Window {
                     probe.expect(stub.calls.length === 0, "sent before accept: " + stub.calls.join(","));
                     const text = actions.confirmText;
                     probe.expect(text.indexOf("any host") >= 0 && text.indexOf("for p.") >= 0
-                                 && text.indexOf(Durations.labelFor(Durations.defaultToken)) >= 0
+                                 && text.indexOf("The rule lasts: 5 minutes.") >= 0
+                                 && text.indexOf(Durations.labelFor(Durations.defaultToken)) < 0
                                  && text.indexOf("Deny") >= 0, "confirm text: " + text);
+                    // It names the program file as plain text, not just the process.
+                    probe.expect(actions.confirmProgramLabel.text.indexOf("/usr/bin/p") >= 0
+                                 && actions.confirmProgramLabel.textFormat === Text.PlainText
+                                 && actions.confirmBodyLabel.textFormat === Text.PlainText,
+                                 "dialog program file: " + actions.confirmProgramLabel.text);
                     // Cancelling sends nothing and forgets the request.
                     actions.confirmDialog.close();
                 } else if (probe.phase === 1) {
@@ -125,7 +153,7 @@ Window {
                     probe.expect(stub.polls >= 1, "poll never called while waiting: " + stub.polls);
                     // The outcome comes from the signal.
                     stub.levelRuleFinished(0, "/usr/bin/p", "", 1, "The rule was created.");
-                    probe.expect(actions.message === "The rule was created.", "message: " + actions.message);
+                    probe.expect(actions.message === "p: The rule was created.", "message: " + actions.message);
                     probe.expect(!actions.pollTimer.running, "timer still running after the answer");
                     probe.expect(actions.visible, "message bar hidden");
                     // Domain level: straight out, no confirm, confirmed=false.
@@ -135,7 +163,7 @@ Window {
                     probe.expect(stub.calls.join(",") === "create|1|/usr/bin/p|example.com|deny|false", "domain call: " + stub.calls.join(","));
                     probe.expect(actions.pollTimer.running, "timer off for a domain command");
                     // Two in flight: the timer runs until both end.
-                    actions.remove(2, "/usr/bin/p", "a.example.com");
+                    actions.remove(2, "/usr/bin/p", "a.example.com", "a.example.com");
                     stub.levelRuleFinished(1, "/usr/bin/p", "example.com", 0, "The rule wasn't created: nope");
                     probe.expect(actions.pollTimer.running, "timer off with one still waiting");
                     stub.levelRuleFinished(2, "/usr/bin/p", "a.example.com", 2, "No answer");
@@ -143,10 +171,32 @@ Window {
                     // A refusal shows its reason and starts no wait.
                     stub.answer = "A rule can't be made for this row.";
                     actions.create(1, "/usr/bin/p", "x.com", "x.com", "allow");
-                    probe.expect(actions.message === stub.answer, "refusal not shown: " + actions.message);
+                    probe.expect(actions.message.indexOf("x.com: " + stub.answer) >= 0, "refusal not shown: " + actions.message);
                     probe.expect(!actions.pollTimer.running, "timer on after a refusal");
                     // The bar's text is the one on screen.
                     probe.expect(actions.children.length > 0, "no bar");
+                    // Two commands at once: each answer keeps its own label,
+                    // and a new send clears neither.
+                    stub.answer = "";
+                    actions.dismiss();
+                    actions.create(1, "/usr/bin/p", "one.com", "one.com", "allow");
+                    actions.create(2, "/usr/bin/p", "b.two.com", "b.two.com", "deny");
+                    probe.expect(actions.message === "", "a send cleared the bar: " + actions.message);
+                    stub.levelRuleFinished(2, "/usr/bin/p", "b.two.com", 1, "The rule was created.");
+                    probe.expect(actions.message === "b.two.com: The rule was created.", "first answer: " + actions.message);
+                    actions.create(1, "/usr/bin/p", "three.com", "three.com", "allow");
+                    probe.expect(actions.message === "b.two.com: The rule was created.", "a send cleared another row's message: " + actions.message);
+                    stub.levelRuleFinished(1, "/usr/bin/p", "one.com", 0, "The rule wasn't created: nope");
+                    probe.expect(actions.message === "b.two.com: The rule was created.\none.com: The rule wasn't created: nope",
+                                 "two messages: " + actions.message);
+                    stub.levelRuleFinished(1, "/usr/bin/p", "three.com", 2, "No answer");
+                    actions.dismiss();
+                    probe.expect(actions.message === "" && !actions.visible, "dismiss left a message");
+                    // A keyboard accept on the menu item is only a request: a
+                    // program-wide rule still waits for the dialog's accept.
+                    stub.calls = [];
+                    keyBtn.ruleState = "none";
+                    tc.mouseClick(keyBtn.button);
                     // Real page: expand to a domain header and ask for a rule
                     // with no firewall connected.
                     realModel.setGroupedMode(true);
@@ -155,15 +205,25 @@ Window {
                         rows: [probe.row("a", "x.example.com")]
                     }));
                 } else if (probe.phase === 3) {
-                    realModel.setPendingOnly(false);
+                    probe.expect(keyBtn.chooseMenu.visible, "keyboard button: menu did not open");
+                    keyBtn.chooseMenu.currentIndex = 0;
+                    tc.keyClick(Qt.Key_Return);
                 } else if (probe.phase === 4) {
+                    probe.expect(stub.calls.length === 0, "keyboard accept sent without the dialog: " + stub.calls.join(","));
+                    probe.expect(actions.confirmDialog.visible, "keyboard accept did not ask first");
+                    actions.confirmDialog.customFooterActions[0].trigger();
+                    probe.expect(stub.calls.join(",") === "create|0|/usr/bin/k||allow|true", "dialog accept call: " + stub.calls.join(","));
+                    stub.levelRuleFinished(0, "/usr/bin/k", "", 1, "ok");
+                } else if (probe.phase === 5) {
+                    realModel.setPendingOnly(false);
+                } else if (probe.phase === 6) {
                     const list = probe.findList(page);
                     tc.mouseClick(list.itemAtIndex(0), 2, 2);
-                } else if (probe.phase === 5) {
+                } else if (probe.phase === 7) {
                     const list = probe.findList(page);
                     const dom = list.itemAtIndex(1);
                     if (dom === null || dom.groupLevel !== 1) {
-                        probe.failures.push("list count " + list.count + " model count " + realModel.count);
+                        probe.failures.push("list count " + list.count + " model count " + realModel.count + " idx0=" + (list.itemAtIndex(0) ? list.itemAtIndex(0).groupKey : "null") + " cur=" + list.currentIndex);
                     }
                     probe.expect(dom !== null && dom.groupLevel === 1, "no domain header");
                     probe.expect(dom.ruleButton.visible && dom.ruleButton.ruleState === "none", "domain state: " + dom.ruleButton.ruleState);
@@ -172,6 +232,20 @@ Window {
                     probe.expect(page.levelRules.message !== "", "no reason shown for a refusal");
                     probe.expect(!page.levelRules.pollTimer.running, "timer on after the model refused");
                     probe.expect(page.levelRules.message.indexOf("connected") >= 0, "reason: " + page.levelRules.message);
+                    // A real model refuses a program-wide rule that isn't
+                    // confirmed, before anything else.
+                    const need = realModel.createLevelRule(0, dom.ruleProgram, "", "allow", false);
+                    probe.expect(need === "A rule for every connection of a program needs confirming.", "unconfirmed program rule: " + need);
+                    // Open the domain row's menu, then let the list pool it.
+                    probe.pooled = dom;
+                    tc.mouseClick(dom.ruleButton.button);
+                } else if (probe.phase === 8) {
+                    probe.expect(probe.pooled.ruleButton.chooseMenu.visible, "row menu did not open");
+                    tc.mouseClick(probe.findList(page).itemAtIndex(0), 2, 2);
+                } else if (probe.phase === 9) {
+                    probe.expect(probe.findList(page).count === 1, "group did not collapse: " + probe.findList(page).count);
+                    probe.expect(!probe.pooled.ruleButton.chooseMenu.visible && probe.pooled.ruleButton.node === null,
+                                 "a pooled row kept its menu open");
                     done = true;
                 }
                 probe.phase++;

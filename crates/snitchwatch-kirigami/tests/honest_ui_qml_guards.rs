@@ -921,8 +921,12 @@ fn level_rule_actions_labels_showing_bridge_text_are_plain_text() {
     assert_data_labels_plain_text(
         "LevelRuleActions.qml",
         include_str!("../qml/LevelRuleActions.qml"),
-        &["actions.message"],
-        1,
+        &[
+            "actions.message",
+            "actions.confirmText",
+            "actions.asked.program",
+        ],
+        3,
     );
     assert_data_labels_plain_text(
         "RuleButton.qml",
@@ -940,7 +944,7 @@ fn rule_button_states_each_have_a_distinct_glyph_and_label() {
     let code = code_lines(include_str!("../qml/RuleButton.qml"));
     let mut glyphs = Vec::new();
     let mut labels = Vec::new();
-    for state in ["allow", "deny", "partial", "none", "pending"] {
+    for state in ["allow", "deny", "partial", "none", "pending", "unavailable"] {
         let line = code
             .lines()
             .find(|l| l.trim_start().starts_with(&format!("{state}: {{")))
