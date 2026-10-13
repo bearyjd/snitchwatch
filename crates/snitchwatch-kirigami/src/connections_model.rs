@@ -93,6 +93,12 @@ const ROLE_APP_ICON: i32 = 28;
 /// Whether Snitchwatch answered the row silently (once-only) and it still
 /// has no rule (`crate::silent_mode`); false on headers.
 const ROLE_NEEDS_RULE: i32 = 29;
+/// The tree tier: 0 program, 1 domain, 2 host, 3 connection (every row in
+/// flat mode is a connection).
+const ROLE_GROUP_LEVEL: i32 = 30;
+/// The owning program's group key on host headers (what `toggleHostGroup`
+/// needs besides the domain and host keys); empty elsewhere.
+const ROLE_GROUP_PROCESS_KEY: i32 = 31;
 
 #[cxx_qt::bridge]
 pub mod qobject {
@@ -236,6 +242,17 @@ pub mod qobject {
             self: Pin<&mut ConnectionsModel>,
             process_key: &QString,
             domain_key: &QString,
+        );
+
+        /// Toggle a host's expand/collapse state within its domain, which is
+        /// within its program. Ranged signals only, like the other toggles.
+        #[qinvokable]
+        #[cxx_name = "toggleHostGroup"]
+        fn toggle_host_group(
+            self: Pin<&mut ConnectionsModel>,
+            process_key: &QString,
+            domain_key: &QString,
+            host_key: &QString,
         );
 
         /// Parity 2 (pending-decision insight panel): the destination IP
@@ -622,6 +639,8 @@ impl qobject::ConnectionsModel {
             ROLE_STARTED_AT_MS => QVariant::from(&started_at_ms(row)),
             ROLE_APP_ICON => QVariant::from(&QString::from(&app_icon_for_row(row))),
             ROLE_NEEDS_RULE => QVariant::from(&needs_rule_for_row(row)),
+            ROLE_GROUP_LEVEL => QVariant::from(&3i32),
+            ROLE_GROUP_PROCESS_KEY => QVariant::from(&QString::from("")),
             _ => QVariant::default(),
         }
     }
@@ -667,6 +686,8 @@ impl qobject::ConnectionsModel {
         roles.insert(ROLE_STARTED_AT_MS, QByteArray::from("startedAtMs"));
         roles.insert(ROLE_APP_ICON, QByteArray::from("appIcon"));
         roles.insert(ROLE_NEEDS_RULE, QByteArray::from("needsRule"));
+        roles.insert(ROLE_GROUP_LEVEL, QByteArray::from("groupLevel"));
+        roles.insert(ROLE_GROUP_PROCESS_KEY, QByteArray::from("groupProcessKey"));
         roles
     }
 
@@ -944,7 +965,7 @@ impl qobject::ConnectionsModel {
             .iter()
             .map(|r| (r.id.as_str(), r))
             .collect();
-        self.grouping.build_projection(&rows_by_id, &filter)
+        self.grouping.build_host_projection(&rows_by_id, &filter)
     }
 
     /// Swap the grouped projection for `new` with ranged signals (one remove
@@ -1069,6 +1090,28 @@ impl qobject::ConnectionsModel {
             .rust_mut()
             .grouping
             .toggle_domain(&process_key.to_string(), &domain_key.to_string());
+        let projection = self.compute_grouped_projection();
+        self.as_mut().apply_grouped_projection(projection);
+        self.refresh_counts();
+    }
+
+    /// Toggle a host's expand/collapse state and refresh the grouped
+    /// projection. No-op when not currently in grouped mode.
+    fn toggle_host_group(
+        mut self: Pin<&mut Self>,
+        process_key: &QString,
+        domain_key: &QString,
+        host_key: &QString,
+    ) {
+        if !self.grouped {
+            return;
+        }
+        self.as_mut().flush_grouped_messages();
+        self.as_mut().rust_mut().grouping.toggle_host(
+            &process_key.to_string(),
+            &domain_key.to_string(),
+            &host_key.to_string(),
+        );
         let projection = self.compute_grouped_projection();
         self.as_mut().apply_grouped_projection(projection);
         self.refresh_counts();
@@ -1230,11 +1273,21 @@ impl qobject::ConnectionsModel {
         // Translate the chosen id to its current *visible* index for QML. If the
         // target is filtered out of view there's nothing to select. In grouped
         // mode this is a position in the flattened projection rather than the
-        // flat store's visible list; the projection is guaranteed to already
-        // contain the row because `build_projection` force-expands the path
-        // to any group with a pending descendant (see `connections::grouping`
-        // module docs), which satisfies "auto-expand the path to a new
-        // pending row" without any extra state here.
+        // flat store's visible list. A new pending row's host starts collapsed,
+        // so when its program and domain are open (issue #20: never force open
+        // what the user collapsed) open just the host, with ranged signals, so
+        // the row is in the projection to select.
+        if self.grouped
+            && self
+                .as_mut()
+                .rust_mut()
+                .grouping
+                .open_host_of_row_under_open_domain(&target)
+        {
+            let projection = self.compute_grouped_projection();
+            self.as_mut().apply_grouped_projection(projection);
+            self.as_mut().refresh_counts();
+        }
         let vis = if self.grouped {
             self.grouped_projection
                 .iter()
@@ -1410,6 +1463,18 @@ fn needs_rule_for_row(row: &ConnectionRow) -> bool {
 }
 
 fn grouped_entry_data(entry: &VisibleEntry, role: i32, store: &RowStore) -> QVariant {
+    // Roles every tier answers the same way, whatever its shape.
+    match role {
+        ROLE_GROUP_LEVEL => return QVariant::from(&entry.level()),
+        ROLE_GROUP_PROCESS_KEY => {
+            let key = match entry {
+                VisibleEntry::HostHeader { process_key, .. } => process_key.as_str(),
+                _ => "",
+            };
+            return QVariant::from(&QString::from(key));
+        }
+        _ => {}
+    }
     match entry {
         VisibleEntry::ProcessHeader {
             key,
@@ -1703,6 +1768,52 @@ mod tests {
     }
 
     #[test]
+    fn group_level_reports_program_domain_host_connection() {
+        use crate::connections::grouping::GroupCounts;
+        let store = RowStore::default();
+        let counts = GroupCounts::default();
+        let level = |entry: &VisibleEntry| {
+            grouped_entry_data(entry, ROLE_GROUP_LEVEL, &store).value::<i32>()
+        };
+        let program = VisibleEntry::ProcessHeader {
+            key: "p".into(),
+            label: "p".into(),
+            expanded: true,
+            counts,
+        };
+        let domain = VisibleEntry::DomainHeader {
+            process_key: "p".into(),
+            key: "d.com".into(),
+            label: "d.com".into(),
+            expanded: true,
+            counts,
+        };
+        let host = VisibleEntry::HostHeader {
+            process_key: "p".into(),
+            domain_key: "d.com".into(),
+            key: "h.d.com".into(),
+            label: "h.d.com".into(),
+            expanded: true,
+            counts,
+        };
+        let conn = VisibleEntry::Row {
+            id: "1".into(),
+            process_key: "p".into(),
+            domain_key: "d.com".into(),
+            host_key: Some("h.d.com".into()),
+        };
+        assert_eq!(
+            [&program, &domain, &host, &conn].map(level),
+            [Some(0), Some(1), Some(2), Some(3)]
+        );
+        let process_key = |e: &VisibleEntry| {
+            grouped_entry_data(e, ROLE_GROUP_PROCESS_KEY, &store).value::<QString>()
+        };
+        assert_eq!(process_key(&host).map(|k| k.to_string()), Some("p".into()));
+        assert_eq!(process_key(&domain).map(|k| k.to_string()), Some("".into()));
+    }
+
+    #[test]
     fn new_roles_have_distinct_ids_and_names() {
         let ids = [
             ROLE_PROCESS_PATH,
@@ -1710,6 +1821,8 @@ mod tests {
             ROLE_STARTED_AT_MS,
             ROLE_APP_ICON,
             ROLE_NEEDS_RULE,
+            ROLE_GROUP_LEVEL,
+            ROLE_GROUP_PROCESS_KEY,
         ];
         for (i, a) in ids.iter().enumerate() {
             assert!(*a > ROLE_MAKE_RULE_OFFERED);

@@ -114,25 +114,52 @@ Window {
                     probe.mark();
                     model.toggleDomainGroup("p", "example.com");
                     probe.expect(probe.resets === 0, "expanding a domain reset the model");
-                    probe.expect(probe.span(probe.inserted) === "[[2,4]]",
-                                 "domain expand inserts its three rows: " + probe.span(probe.inserted));
-                    probe.expect(model.count === 5, "count after domain expand: " + model.count);
+                    probe.expect(probe.span(probe.inserted) === "[[2,3]]",
+                                 "domain expand inserts its two host headers: " + probe.span(probe.inserted));
+                    probe.expect(model.count === 4, "count after domain expand: " + model.count);
+                    probe.mark();
+                    model.toggleHostGroup("p", "example.com", "y.example.com");
+                    probe.expect(probe.resets === 0, "expanding a host reset the model");
+                    probe.expect(probe.span(probe.inserted) === "[[4,5]]",
+                                 "host expand inserts its two connections: " + probe.span(probe.inserted));
+                    probe.expect(probe.removed.length === 0, "host expand removed rows");
+                    probe.expect(probe.changed === 1, "host header repainted once: " + probe.changed);
+                    probe.expect(model.count === 6, "count after host expand: " + model.count);
+                    probe.mark();
+                    model.toggleHostGroup("p", "example.com", "y.example.com");
+                    probe.expect(probe.resets === 0, "collapsing a host reset the model");
+                    probe.expect(probe.span(probe.removed) === "[[4,5]]",
+                                 "host collapse removes its two connections: " + probe.span(probe.removed));
+                    probe.expect(probe.inserted.length === 0, "host collapse inserted rows");
+                    probe.expect(model.count === 4, "count after host collapse: " + model.count);
                     probe.mark();
                     model.toggleDomainGroup("p", "example.com");
                     probe.expect(probe.resets === 0, "collapsing a domain reset the model");
-                    probe.expect(probe.span(probe.removed) === "[[2,4]]",
-                                 "domain collapse removes its three rows: " + probe.span(probe.removed));
+                    probe.expect(probe.span(probe.removed) === "[[2,3]]",
+                                 "domain collapse removes its two hosts: " + probe.span(probe.removed));
                     probe.expect(probe.inserted.length === 0, "collapse inserted rows");
                     probe.expect(model.count === 2, "count after collapse: " + model.count);
                     probe.mark();
                     model.setFilterQuery("x.example");
                     probe.expect(probe.resets === 0, "a grouped filter reset the model");
-                    probe.expect(model.count === 3, "filter keeps program, domain and the match: " + model.count);
+                    probe.expect(model.count === 4, "filter keeps program, domain, host and the match: " + model.count);
                     probe.expect(probe.inserted.length === 1, "filter opens one window: " + probe.span(probe.inserted));
                     probe.mark();
                     model.setFilterQuery("");
                     probe.expect(probe.resets === 0, "clearing the filter reset the model");
                     probe.expect(model.count === 2, "count after clearing: " + model.count);
+                    probe.mark();
+                    model.toggleDomainGroup("p", "example.com");
+                    model.toggleHostGroup("p", "example.com", "y.example.com");
+                    probe.expect(model.count === 6, "count with a host open: " + model.count);
+                    probe.mark();
+                    model.toggleDomainGroup("p", "example.com");
+                    probe.expect(probe.resets === 0, "collapsing a domain with an open host reset the model");
+                    probe.expect(probe.span(probe.removed) === "[[2,5]]",
+                                 "domain collapse removes its hosts and the open host's rows: "
+                                 + probe.span(probe.removed));
+                    probe.expect(probe.inserted.length === 0, "open-host collapse inserted rows");
+                    probe.expect(model.count === 2, "count after collapsing an open-host domain: " + model.count);
                 } else if (probe.phase === 2) {
                     model.applyServerMessageJson(JSON.stringify({
                         action: "insertConnectionRows",
@@ -142,19 +169,20 @@ Window {
                     model.setPendingOnly(false);
                     model.toggleProcessGroup("q");
                     model.toggleDomainGroup("q", "example.com");
-                    // p, p's collapsed domain, q, q's domain, sel.
-                    probe.expect(model.count === 5, "count before selecting: " + model.count);
+                    model.toggleHostGroup("q", "example.com", "s.example.com");
+                    // p, p's collapsed domain, q, q's domain, q's host, sel.
+                    probe.expect(model.count === 6, "count before selecting: " + model.count);
                 } else if (probe.phase === 4) {
                     const list = probe.findList(page);
                     probe.expect(list !== null, "no ListView under the page");
-                    const item = list ? list.itemAtIndex(4) : null;
-                    probe.expect(item !== null && item.rowId === "sel", "row sel is not at index 4");
+                    const item = list ? list.itemAtIndex(5) : null;
+                    probe.expect(item !== null && item.rowId === "sel", "row sel is not at index 5");
                     if (item) {
                         tc.mouseClick(item, 2, 2);
-                        probe.expect(list.currentIndex === 4, "click did not select: " + list.currentIndex);
+                        probe.expect(list.currentIndex === 5, "click did not select: " + list.currentIndex);
                     }
                     model.toggleProcessGroup("p");
-                    probe.expect(model.count === 4, "count after collapsing p: " + model.count);
+                    probe.expect(model.count === 5, "count after collapsing p: " + model.count);
                 } else if (probe.phase === 5) {
                     const list = probe.findList(page);
                     const cur = list.itemAtIndex(list.currentIndex);
