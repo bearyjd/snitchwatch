@@ -11,14 +11,23 @@ Paths below are under `crates/snitchwatch-kirigami/` unless stated. Plan only; n
    `qml/Theme.qml` colors from Phase 0) that creates or deletes a rule at that row's level.
 3. Inspector as a **side panel**; the OverlaySheet inspector is removed.
 4. Token search, "From now" time filter, denied-only filter.
-5. **World map**: offline country shapes, markers colored by allowed/denied/pending, pulse on connection
-   events, clustered; clicking a marker filters the list.
+5. **World map** (featured, see Layout): offline country shapes, markers colored by allowed/denied/pending,
+   pulse on connection events, clustered; clicking a marker filters the list. Country-level markers only
+   (RESOLVED Q1).
+
+## Layout (RESOLVED Q3, 2026-10-13)
+
+The map is a featured part of the Monitor view, **visible by default**, not behind a toggle: a hero band
+above the tree in a vertical `SplitView` (inspector stays the right-hand side panel, step 5), resizable by
+dragging the handle. The band may be collapsed (a header chevron / drag to zero) and remembers that for the
+session, but a fresh start shows it. When there is no data yet it shows the empty state, never nothing.
+It must degrade on narrow windows: the band shrinks to a minimum height before the tree does.
 
 ## Non-goals
 
 - Byte/throughput charts or "traffic volume" pulses: opensnitchd has no byte counters, so pulses mean
   "a connection event happened", never "data flowed".
-- Online tiles, QtLocation, any network lookup. Rules window and sidebar shell (Phases 3, 4).
+- Online tiles, QtLocation, any network lookup, any geo-IP database or download. Rules window and sidebar shell (Phases 3, 4).
 - Changing the bridge wire protocol unless step 3 proves it necessary.
 
 ## Current state (evidence)
@@ -65,7 +74,12 @@ without lookup. Lookups are already fully offline. No RDAP.
 | MaxMind GeoLite2-City/Country | MaxMind EULA: free account + license key, no redistribution of the DB, must update/delete old copies | Today's de-facto source | Cannot be bundled or Flatpak extra-data'd without each user's key. |
 | IPtoASN / ip2location LITE | Not evaluated in depth (ip2location LITE is CC BY-SA 4.0 per vendor, share-alike; IPtoASN is ASN-only, no coordinates) | Rejected | Share-alike and no coordinates. |
 
-**Recommendation (needs owner sign-off, see Q1):** DB-IP City Lite, **not bundled in the image or Flatpak**;
+**Owner decision (RESOLVED Q1, 2026-10-13): country-level markers only.** No city database, no download
+button, no attribution UI: markers sit at the country centroid taken from the bundled Natural Earth shapes,
+and the existing operator-supplied Country `.mmdb` (`geo/paths.rs`) stays the only IP source. The DB-IP
+text below is kept as the rejected alternative; step 8 shrinks accordingly.
+
+**Rejected alternative (was the recommendation):** DB-IP City Lite, **not bundled in the image or Flatpak**;
 the user chooses to fetch it once with an explicit button in the Geography/Map empty state, saved at the
 existing XDG path. Obligations: CC BY 4.0 credit "IP geolocation by DB-IP" with link in the map's footer and
 About text; no endorsement claim; keep it unmodified or state changes. Fetch cadence monthly, manual (no
@@ -94,15 +108,22 @@ Privacy: every lookup is a local file read; the monitor never sends destination 
 
 ## Work breakdown (small PRs, in order; each TDD, `just check`, cargo test/clippy offscreen, `just qml-test`)
 
-1. **Split `ConnectionsPage.qml`** (no behavior change). Extract `ConnectionRow.qml` (delegate :251-610),
+1. **Split `ConnectionsPage.qml`** (no behavior change). *Landed in `feat/monitor-tree-step1`, which also
+   carries the host level and ranged signals from step 2 (see the note there).* Extract `ConnectionRow.qml` (delegate :251-610),
    `InspectorState.qml`/inspector body, `ConnectionsHeader.qml`. Tests: existing
    `tests/*connections*qml.rs` pass untouched; move the 800 pin in `simulate_connection_qml.rs:327` to
    a per-file budget (page < 400, each new file < 400) and say so. Add `include_str!` guards for new files.
-2. **Host level in the tree** (Rust only). Extend `VisibleEntry` with `HostHeader`, `GroupTree` with a host
+2. **Host level in the tree** (Rust only). *Partly landed with step 1: `GroupTree` tracks hosts,
+   `build_host_projection` emits `HostHeader` rows, the model maps them (depth 2, connections depth 3) and
+   grouped expand/collapse and filter changes use ranged signals (`connections/projection_diff.rs`, 5k-row
+   test). The shipped model still uses the two-level `build_projection`, so the look is unchanged; what
+   remains is the `groupLevel` role, a `toggleHostGroup` invokable and switching the model to the host
+   projection together with the UI that renders host rows.* Extend `VisibleEntry` with `HostHeader`, `GroupTree` with a host
    key, new role `groupLevel` (0 program/1 domain/2 host/3 connection). Tests first in `grouping.rs`:
    aggregation, expand state, filter forces path open, pending badge unchanged, incremental updates.
    Replace the reset-per-change with ranged signals (perf gate above).
-3. **Level rule state** (Rust). New `LevelRules` projection: for a node (program path, scope, host/domain)
+3. **Level rule state** (Rust). Program-level button = `AnyHost` (program-bound) behind a confirm dialog that
+   names scope and duration; the duration is the Settings `default_duration` (RESOLVED Q2). New `LevelRules` projection: for a node (program path, scope, host/domain)
    find existing rules from `RulesModel` data and return {allow, deny, partial, none, pending}; roles
    `levelRuleState`, `levelRuleName`. Add `add_level_rule_message` that drops the `offers_make_rule` gate for
    the button path only (`make_rule.rs:61` stays for the sheet). Tests: each scope maps to the verdict scope
@@ -124,11 +145,10 @@ Privacy: every lookup is a local file read; the monitor never sends destination 
    `docs/`. Tests: file under a size budget (target < 150 KB, measure), every ISO-A2 in the file, round-trip
    check of polygon count. Rendering: `Shape`/`ShapePath` from the preprocessed `SVG path` strings in QtQuick.Shapes
    (in the KDE runtime already; QtLocation would need plugins and tiles, so not used).
-8. **Geo coordinates** (Rust). Extend `geo/resolver.rs` with a `PointLookup` trait (lat/lon + country) over the
-   same `maxminddb` reader (`geoip2::City`); country-centroid fallback from the map file when only a Country
-   DB exists. Tests with canned fakes (existing `CountryLookup` pattern); never a real `.mmdb`.
-   Attribution text + guard test. Download button only if Q1 approves.
-9. **Map view.** `MapView.qml`: shapes, markers by verdict (shape + color), clustering by grid bucket at
+8. **Country markers** (Rust, reduced by Q1). No `PointLookup`, City DB, attribution or download. Marker
+   position = country centroid computed at map-build time (step 7) and stored in the map file; `GeoModel`
+   already supplies per-country counts. Tests: every country the resolver can return has a centroid.
+9. **Map view** (featured band, see Layout; built after the tree, not in step 1). `MapView.qml`: shapes, markers by verdict (shape + color), clustering by grid bucket at
    current zoom (Rust-side, tested), pulse on events (throttled, reduced-motion aware), a country/cluster
    click calls `ConnectionsModel.setFilterQuery("country:XX")` or a geo filter. Tests: cluster math, marker
    click filter, honest-text guard, accessible names.
@@ -136,8 +156,12 @@ Privacy: every lookup is a local file read; the monitor never sends destination 
 
 ## Open questions for the owner
 
-1. **Geo-IP source and attribution.** Approve DB-IP City Lite (CC BY 4.0, visible "IP geolocation by DB-IP"
-   credit, user-initiated download, not bundled), or country-centroid markers only with no city database?
-2. **Rule scope on the button.** Should the program-level button create `AnyHost` (all hosts, program-bound)
-   with a confirm, and which default duration (Settings value from Phase 1 vs Forever)?
-3. **Map placement.** Map as a tab beside the tree in the Monitor page, or a toggleable pane under it?
+All three RESOLVED by the owner on 2026-10-13 (recorded in the step-1 PR).
+
+1. **Geo-IP source and attribution.** RESOLVED: **country-level markers only for now.** No geo-IP database,
+   no download, no DB-IP attribution; centroids come from the bundled map data.
+2. **Rule scope on the button.** RESOLVED: the program-level button creates **`AnyHost` program-bound rules
+   behind a confirm dialog**; the duration is the **Settings `default_duration`** (Phase 1), not Forever.
+3. **Map placement.** RESOLVED: the map is **featured**: visible by default as a prominent, resizable band
+   above the tree (splitter) in the Monitor view, collapsible but starting shown; not a hidden tab or
+   toggle. See Layout.

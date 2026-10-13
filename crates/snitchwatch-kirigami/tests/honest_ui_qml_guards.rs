@@ -66,7 +66,10 @@ const ALL_QML: &[(&str, &str)] = &[
         "ConnectionsPage.qml",
         include_str!("../qml/ConnectionsPage.qml"),
     ),
-    ("ConnectionRow.qml", include_str!("../qml/ConnectionRow.qml")),
+    (
+        "ConnectionRow.qml",
+        include_str!("../qml/ConnectionRow.qml"),
+    ),
     (
         "ConnectionsHeader.qml",
         include_str!("../qml/ConnectionsHeader.qml"),

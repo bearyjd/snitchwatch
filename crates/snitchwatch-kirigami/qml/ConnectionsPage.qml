@@ -158,8 +158,9 @@ Kirigami.ScrollablePage {
         // times out, a snapshot starts with ClearConnectionRows and then
         // re-inserts what is still pending, and a verdict decided elsewhere
         // arrives as an update. Flat mode reports these as rowsRemoved,
-        // rowsInserted and dataChanged; every other mutation (clear, grouped
-        // mode, an active filter) brackets a full reset.
+        // rowsInserted and dataChanged; so do grouped expand/collapse and
+        // grouped filter changes. Every other mutation (clear, rows arriving
+        // in grouped mode, flat filters) brackets a full reset.
         function onRowsRemoved() {
             page.recheckInspectedRow();
         }

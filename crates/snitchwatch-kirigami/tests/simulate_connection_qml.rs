@@ -333,8 +333,14 @@ fn the_inspector_button_is_fixed_text() {
 fn connections_files_stay_within_their_line_budgets() {
     const BUDGET: usize = 400;
     for (name, source) in [
-        ("ConnectionsPage.qml", include_str!("../qml/ConnectionsPage.qml")),
-        ("ConnectionRow.qml", include_str!("../qml/ConnectionRow.qml")),
+        (
+            "ConnectionsPage.qml",
+            include_str!("../qml/ConnectionsPage.qml"),
+        ),
+        (
+            "ConnectionRow.qml",
+            include_str!("../qml/ConnectionRow.qml"),
+        ),
         (
             "ConnectionsHeader.qml",
             include_str!("../qml/ConnectionsHeader.qml"),
@@ -345,6 +351,9 @@ fn connections_files_stay_within_their_line_budgets() {
         ),
     ] {
         let lines = source.lines().count();
-        assert!(lines < BUDGET, "{name} is {lines} lines (budget < {BUDGET})");
+        assert!(
+            lines < BUDGET,
+            "{name} is {lines} lines (budget < {BUDGET})"
+        );
     }
 }

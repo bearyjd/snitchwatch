@@ -10,4 +10,5 @@
 pub mod filter;
 pub mod grouping;
 pub mod outcome;
+pub mod projection_diff;
 pub mod row_store;
