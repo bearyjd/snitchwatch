@@ -8,8 +8,10 @@ use crate::test_daemon::*;
 use serde_json::json;
 use snitchwatch_bridge::rule_io::export_rule;
 use snitchwatch_bridge::ws_messages::RuleCommandOutcome;
+use snitchwatch_bridge::ws_messages::ServerMessage;
 use snitchwatch_proto::protocol::{Action, Notification};
 use std::time::Duration;
+use tokio::sync::broadcast;
 
 fn step(n: &Notification) -> (&'static str, String) {
     let action = if n.r#type == Action::ChangeRule as i32 {
@@ -40,6 +42,28 @@ fn cached_names(daemon: &Daemon) -> Vec<String> {
         .keys()
         .cloned()
         .collect()
+}
+
+/// The `SetRules` lists broadcast before the command's result, by name.
+async fn lists_until_result(rx: &mut broadcast::Receiver<ServerMessage>) -> Vec<Vec<String>> {
+    let mut lists = Vec::new();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match rx.recv().await {
+                Ok(ServerMessage::SetRules { rules }) => lists.push(
+                    rules
+                        .iter()
+                        .map(|rule| rule["name"].as_str().unwrap_or_default().to_string())
+                        .collect(),
+                ),
+                Ok(ServerMessage::RuleCommandResult { .. }) => return,
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("no RuleCommandResult");
+    lists
 }
 
 #[tokio::test]
@@ -256,4 +280,27 @@ async fn names_being_renamed_take_no_other_command() {
     assert!(refused(&outcome).iter().any(|p| p == BUSY));
     let first = daemon.rx.recv().await.unwrap();
     assert_eq!(step(&first), ("change", "200-new".to_string()));
+}
+
+/// A rename is one change to the list: both steps' effects go out in one
+/// `SetRules`, whether the old rule's delete is answered `OK` or refused
+/// (#120 item 11: a refused one used to publish three times).
+#[tokio::test]
+async fn a_rename_publishes_the_list_once() {
+    for stuck in [false, true] {
+        let mut daemon = daemon(vec![bound("100-old", "deny")]);
+        let model = model(&[bound("100-old", "deny")]);
+        if stuck {
+            model.lock().unwrap().stuck_files.insert("100-old".into());
+        }
+        run_model(&mut daemon, model.clone());
+        let commands = commands(&daemon);
+        let mut rx = daemon.broadcast.subscribe();
+        commands.try_route(update("100-old", renamed(), Some("r1")));
+        assert_eq!(
+            lists_until_result(&mut rx).await,
+            vec![vec!["200-new".to_string()]],
+            "stuck: {stuck}"
+        );
+    }
 }

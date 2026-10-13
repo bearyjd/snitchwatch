@@ -84,10 +84,14 @@ struct Answer {
 }
 
 impl Answer {
-    /// Undo a GUI's optimistic change (#48) after anything but a clean OK;
-    /// the result goes only to a request that asked for one.
+    /// Undo a GUI's optimistic change (#48) after anything but an OK; the
+    /// result goes only to a request that asked for one. An `OkWithNote`
+    /// change stands, and the list published with it already shows it.
     fn republish(&self, outcome: &RuleCommandOutcome) {
-        if *outcome != RuleCommandOutcome::Ok {
+        if !matches!(
+            outcome,
+            RuleCommandOutcome::Ok | RuleCommandOutcome::OkWithNote { .. }
+        ) {
             publish_rules(&self.rules, &self.broadcast);
         }
     }
