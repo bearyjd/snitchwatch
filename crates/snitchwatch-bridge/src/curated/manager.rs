@@ -49,9 +49,9 @@ mod state;
 use resolver::withhold;
 pub use resolver::DNS_ACCOUNT_REASON;
 use state::{
-    command_problem, deleted, fail, keep, no_file_marks, rule_name, save_in_order, send_problem,
+    command_problem, deleted, fail, keep, no_file_marks, rule_name, send_problem,
     show_removal_failures, still_edited, summary, track_maybe_applied, without_failed, Problem,
-    Refusal, SaveJob, State,
+    Refusal, State,
 };
 
 /// How long a curated rule command waits for the daemon's reply.
@@ -704,60 +704,6 @@ impl CuratedDefaults {
                 .await
                 .map_err(|error| command_problem(error, refusal)),
             Err(error) => Err(send_problem(error)),
-        }
-    }
-
-    /// Write the choices if they changed, on a blocking thread. A failure
-    /// makes the bridge inert: it must not act on choices it can't keep.
-    async fn save_if_changed(&self) {
-        let Some(job) = self.save_job() else {
-            return;
-        };
-        let inner = self.inner.clone();
-        let saved = tokio::task::spawn_blocking(move || save_in_order(&inner.saver, job))
-            .await
-            .unwrap_or_else(|e| Err(std::io::Error::other(e.to_string())));
-        self.saved(saved);
-    }
-
-    fn save_job(&self) -> Option<SaveJob> {
-        let state = lock(&self.inner.state);
-        match (
-            &state.file,
-            state.inert.is_none() && state.version != state.saved,
-        ) {
-            (Some(file), true) => Some(SaveJob {
-                file: file.clone(),
-                choices: state.choices.clone(),
-                version: state.version,
-            }),
-            _ => None,
-        }
-    }
-
-    fn saved(&self, saved: std::io::Result<u64>) {
-        let mut state = lock(&self.inner.state);
-        match saved {
-            Ok(version) => state.saved = state.saved.max(version),
-            Err(error) => {
-                error!(%error, "curated defaults: choices not saved; changing nothing");
-                state.file = None;
-                state.storage = StorageStatus {
-                    persistent: false,
-                    reason: Some(error.to_string()),
-                    unreadable: false,
-                };
-                state.inert = Some(SAVE_FAILED_REASON.to_string());
-            }
-        }
-    }
-
-    /// Save what changed now, blocking (bridge shutdown); never under the
-    /// state lock, and never over a newer save.
-    pub fn save_now(&self) {
-        if let Some(job) = self.save_job() {
-            let saved = save_in_order(&self.inner.saver, job);
-            self.saved(saved);
         }
     }
 }
