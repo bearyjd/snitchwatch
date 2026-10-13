@@ -12,8 +12,9 @@
 //! - the **period it was fairly counted in** is at least 14 days. That period
 //!   starts at the latest of: when counting began, when the rule was created
 //!   (its `created` time; a rule of unknown age is never called unused), and
-//!   the bridge's **last gap** (a restart, a daemon restart, a burst past the
-//!   daemon's event cap: moments hits may have been lost before). A gap of
+//!   the bridge's **last gap** (a bridge restart judged to have lost hits, a
+//!   daemon restart, a burst past the daemon's event cap: moments hits may
+//!   have been lost before). A gap of
 //!   unknown time leaves no period to trust.
 //!
 //! Every other eligible zero-count rule gets only "No hits since <time>": the
@@ -21,9 +22,11 @@
 //! the three. (A gap of unknown time keeps the counting start and adds that
 //! hits may have been missed.)
 //!
-//! Because the period starts after the last gap, one bridge restart delays
-//! "unused" by 14 days instead of ruling it out for good, and an old gap
-//! costs nothing.
+//! Because the period starts after the last gap, one gap delays "unused" by
+//! 14 days instead of ruling it out for good, and an old gap costs nothing.
+//! Whether a bridge restart is a gap is the bridge's call (N3): a system
+//! (Unix socket) bridge judges it from the daemon's counters and records no
+//! gap when no hit was lost; a TCP bridge always records one.
 //!
 //! What the badge cannot know: when the rule was last *enabled*, or put back
 //! by something other than Snitchwatch. An edit or re-enable made here
