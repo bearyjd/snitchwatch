@@ -8,13 +8,14 @@
 //! through `BridgeFeed::submitVerdict`, which builds the message here and
 //! hands it straight to the bridge's inbound pump.
 //!
-//! **Granular rule scopes (Parity 2):** the dialog offers four durations —
-//! "This time", "For 5 minutes", "Until firewall restarts", "Forever" —
-//! mapped onto the bridge's [`VerdictDuration`], which in turn maps onto
-//! opensnitchd's native `Rule.duration` vocabulary. See [`VerdictDuration`]'s
-//! doc comment for the full mapping table. The third option's QML token is
-//! still `until_quit` (daemon "until restart"); it is labelled for what the
-//! daemon does, since opensnitchd has no per-process rule lifetime.
+//! **Granular rule scopes (Parity 2):** every surface offers four durations —
+//! "Once", "5 minutes", "Until firewall restarts", "Forever" (`qml/Durations.qml` is the
+//! one list) — mapped onto the bridge's [`VerdictDuration`], which in turn
+//! maps onto opensnitchd's native `Rule.duration` vocabulary. See
+//! [`VerdictDuration`]'s doc comment for the full mapping table. The third
+//! option's token is `until_restart` (daemon "until restart"); the old
+//! `until_quit` token is still accepted. A real "until the program quits" is
+//! not offered: opensnitchd has no per-process rule lifetime.
 //!
 //! **Inline buttons:** the Connections page's row and process-header buttons
 //! skip the sheet; `crate::inline_deny` picks their duration.
@@ -89,13 +90,14 @@ pub(crate) fn parse_scope(token: &str) -> VerdictScope {
 /// |-------------------|---------------------------------|
 /// | `this_time`       | [`VerdictDuration::Once`]        |
 /// | `for_5_minutes`   | [`VerdictDuration::FiveMinutes`] |
-/// | `until_quit`      | [`VerdictDuration::UntilRestart`]|
+/// | `until_restart`   | [`VerdictDuration::UntilRestart`]|
+/// | `until_quit` (old)| [`VerdictDuration::UntilRestart`]|
 /// | `forever`         | [`VerdictDuration::Always`]      |
 /// | anything else     | [`VerdictDuration::Once`] (safe default) |
 pub(crate) fn parse_duration(token: &str) -> VerdictDuration {
     match token {
         "for_5_minutes" => VerdictDuration::FiveMinutes,
-        "until_quit" => VerdictDuration::UntilRestart,
+        "until_restart" | "until_quit" => VerdictDuration::UntilRestart,
         "forever" => VerdictDuration::Always,
         _ => VerdictDuration::Once,
     }
@@ -204,6 +206,11 @@ mod tests {
             parse_duration("for_5_minutes"),
             VerdictDuration::FiveMinutes
         );
+        assert_eq!(
+            parse_duration("until_restart"),
+            VerdictDuration::UntilRestart
+        );
+        // The token before the rename keeps working.
         assert_eq!(parse_duration("until_quit"), VerdictDuration::UntilRestart);
         assert_eq!(parse_duration("forever"), VerdictDuration::Always);
     }
@@ -352,6 +359,52 @@ mod tests {
                 limit_to_bridge(msg.clone(), app_bound_rules, bindable),
                 (msg, false)
             );
+        }
+    }
+
+    /// The persistence regression behind "Allow never becomes a rule": with a
+    /// bridge that binds rules and a bindable program, `limit_to_bridge` must
+    /// leave every remembered verdict, "Forever" first, exactly as sent.
+    #[test]
+    fn forever_is_never_downgraded_for_a_bindable_program_on_a_capable_bridge() {
+        for scope in SCOPES {
+            for (duration, remember) in REMEMBERED {
+                let msg = verdict(scope, duration, remember);
+                assert_eq!(
+                    limit_to_bridge(msg.clone(), true, true),
+                    (msg, false),
+                    "{scope:?} {duration:?} {remember:?}"
+                );
+            }
+        }
+    }
+
+    /// Realistic program paths the daemon reports. Every real installed
+    /// program path is bindable, Flatpak ones included; only the synthetic
+    /// `/proc/`, `/memfd:` and `/dev/fd/` names and relative or odd strings
+    /// are not, so path shape is not a second reason "Forever" can't persist
+    /// for Flatpak apps.
+    #[test]
+    fn realistic_program_paths_are_bindable_and_synthetic_ones_are_not() {
+        use snitchwatch_bridge::translator::process_binding::is_bindable_process_path;
+        for bindable in [
+            "/usr/bin/firefox",
+            "/usr/lib64/chromium-browser/chromium-browser",
+            "/app/lib/firefox/firefox",
+            "/var/lib/flatpak/app/org.mozilla.firefox/x86_64/stable/active/files/lib/firefox/firefox",
+        ] {
+            assert!(is_bindable_process_path(bindable), "{bindable}");
+        }
+        for not_bindable in [
+            "",
+            "firefox",
+            "Kernel connection",
+            "/proc/1234/exe",
+            "/memfd:firefox (deleted)",
+            "/dev/fd/5",
+            "/usr/bin/../bin/firefox",
+        ] {
+            assert!(!is_bindable_process_path(not_bindable), "{not_bindable}");
         }
     }
 

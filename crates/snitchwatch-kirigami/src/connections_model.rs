@@ -79,6 +79,19 @@ const ROLE_ANSWER_DEADLINE_MS: i32 = 23;
 /// "Make a rule…" is offered (`make_rule::offers_make_rule`): the prompt was
 /// put off, or the firewall's default action decided the row (E3).
 const ROLE_MAKE_RULE_OFFERED: i32 = 24;
+/// Executable path of the process, empty when the daemon did not report one.
+const ROLE_PROCESS_PATH: i32 = 25;
+/// `"outgoing"` / `"incoming"` as the bridge reports it; empty on headers.
+const ROLE_DIRECTION: i32 = 26;
+/// When the connection started, in Unix ms (a `real`: ms overflow a QML
+/// `int`); -1 on headers.
+const ROLE_STARTED_AT_MS: i32 = 27;
+/// Icon name (or path) for the process, from installed `.desktop` files;
+/// the generic executable icon when none matches, empty on headers.
+const ROLE_APP_ICON: i32 = 28;
+/// Whether Snitchwatch answered the row silently (once-only) and it still
+/// has no rule (`crate::silent_mode`); false on headers.
+const ROLE_NEEDS_RULE: i32 = 29;
 
 #[cxx_qt::bridge]
 pub mod qobject {
@@ -203,6 +216,12 @@ pub mod qobject {
         #[cxx_name = "setGroupedMode"]
         fn set_grouped_mode(self: Pin<&mut ConnectionsModel>, grouped: bool);
 
+        /// Fill the model with fake rows. A no-op unless the process was
+        /// started with `SNITCHWATCH_DEMO=1` (`crate::demo`).
+        #[qinvokable]
+        #[cxx_name = "loadDemoRows"]
+        fn load_demo_rows(self: Pin<&mut ConnectionsModel>);
+
         /// Toggle a top-level process group's expand/collapse state.
         #[qinvokable]
         #[cxx_name = "toggleProcessGroup"]
@@ -276,7 +295,9 @@ pub mod qobject {
         /// `app_bound_rules` is `BridgeFeed.appBoundRulesFor(id)`.
         ///
         /// The duration token `choice` (`"allow"`/`"deny"`) sends for row
-        /// `id`: `"until_quit"` or `"this_time"` (also for an unknown choice).
+        /// `id`: a Deny sends `"until_restart"` or `"this_time"`; an Allow sends
+        /// `allow_duration` (the Settings default) where a rule can be bound,
+        /// else `"this_time"` (also for an unknown choice).
         #[qinvokable]
         #[cxx_name = "inlineDurationFor"]
         fn inline_duration_for(
@@ -284,6 +305,7 @@ pub mod qobject {
             id: &QString,
             choice: &QString,
             app_bound_rules: bool,
+            allow_duration: &QString,
         ) -> QString;
 
         /// What a Deny does for row `id`: `"until_restart"`,
@@ -292,6 +314,13 @@ pub mod qobject {
         #[cxx_name = "inlineDenyFor"]
         fn inline_deny_for(self: &ConnectionsModel, id: &QString, app_bound_rules: bool)
             -> QString;
+
+        /// The oldest row still pending, as the JSON `crate::alert_row`
+        /// builds for the standalone alert (`"{}"` when none waits).
+        /// Read-only, like `isPendingRow`.
+        #[qinvokable]
+        #[cxx_name = "alertRowJson"]
+        fn alert_row_json(self: &ConnectionsModel) -> QString;
 
         /// The first row still pending under process group `key` (what its
         /// "Deny all" tooltip describes), or `""`.
@@ -587,6 +616,11 @@ impl qobject::ConnectionsModel {
             ROLE_OUTCOME_TEXT => QVariant::from(&QString::from(outcome_text(row))),
             ROLE_ANSWER_DEADLINE_MS => QVariant::from(&answer_deadline_ms(row)),
             ROLE_MAKE_RULE_OFFERED => QVariant::from(&crate::make_rule::offers_make_rule(row)),
+            ROLE_PROCESS_PATH => QVariant::from(&QString::from(process_path_text(row))),
+            ROLE_DIRECTION => QVariant::from(&QString::from(&row.direction)),
+            ROLE_STARTED_AT_MS => QVariant::from(&started_at_ms(row)),
+            ROLE_APP_ICON => QVariant::from(&QString::from(&app_icon_for_row(row))),
+            ROLE_NEEDS_RULE => QVariant::from(&needs_rule_for_row(row)),
             _ => QVariant::default(),
         }
     }
@@ -627,7 +661,24 @@ impl qobject::ConnectionsModel {
             QByteArray::from("answerDeadlineMs"),
         );
         roles.insert(ROLE_MAKE_RULE_OFFERED, QByteArray::from("makeRuleOffered"));
+        roles.insert(ROLE_PROCESS_PATH, QByteArray::from("processPath"));
+        roles.insert(ROLE_DIRECTION, QByteArray::from("direction"));
+        roles.insert(ROLE_STARTED_AT_MS, QByteArray::from("startedAtMs"));
+        roles.insert(ROLE_APP_ICON, QByteArray::from("appIcon"));
+        roles.insert(ROLE_NEEDS_RULE, QByteArray::from("needsRule"));
         roles
+    }
+
+    fn load_demo_rows(self: Pin<&mut Self>) {
+        if !crate::demo::enabled() {
+            return;
+        }
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as i64);
+        self.apply_server_message(ServerMessage::InsertConnectionRows {
+            rows: crate::demo::demo_rows(now_ms),
+        });
     }
 
     fn apply_server_message_json(self: Pin<&mut Self>, json: &QString) {
@@ -659,6 +710,10 @@ impl qobject::ConnectionsModel {
             return;
         };
         let qt_thread = self.qt_thread();
+        let icons_thread = qt_thread.clone();
+        crate::app_icons::when_ready(move || {
+            let _ = icons_thread.queue(|qobject| qobject.refresh_app_icons());
+        });
         let session_handles = handles.clone();
         crate::bridge_dispatch::spawn_feed(
             &handles,
@@ -1063,16 +1118,23 @@ impl qobject::ConnectionsModel {
         id: &QString,
         choice: &QString,
         app_bound_rules: bool,
+        allow_duration: &QString,
     ) -> QString {
+        let allow_duration = allow_duration.to_string();
         let token = VerdictChoice::from_token(&choice.to_string()).map_or("this_time", |choice| {
             inline_deny::duration_token_for_row(
                 &self.store,
                 &id.to_string(),
                 choice,
                 app_bound_rules,
+                &allow_duration,
             )
         });
         QString::from(token)
+    }
+
+    fn alert_row_json(&self) -> QString {
+        QString::from(&crate::alert_row::oldest_pending_json(&self.store))
     }
 
     fn inline_deny_for(&self, id: &QString, app_bound_rules: bool) -> QString {
@@ -1215,6 +1277,20 @@ impl qobject::ConnectionsModel {
         self.emit_changed_ops(&ops);
     }
 
+    /// The icon index just became ready: rows drawn before then have the
+    /// generic icon, so every row's `appIcon` is read again.
+    fn refresh_app_icons(mut self: Pin<&mut Self>) {
+        let rows = self.row_count(&QModelIndex::default());
+        if rows <= 0 {
+            return;
+        }
+        let tl = self.index(0, 0, &QModelIndex::default());
+        let br = self.index(rows - 1, 0, &QModelIndex::default());
+        let mut roles = QList::<i32>::default();
+        roles.append(ROLE_APP_ICON);
+        self.as_mut().data_changed(&tl, &br, &roles);
+    }
+
     fn emit_changed_ops(mut self: Pin<&mut Self>, ops: &[ModelOp]) {
         for op in ops {
             if let ModelOp::Changed { indices } = op {
@@ -1267,6 +1343,26 @@ fn answer_deadline_ms(row: &ConnectionRow) -> f64 {
 /// Read one role of a grouped-projection [`VisibleEntry`] into the QVariant
 /// shape `data()` returns. `store` resolves leaf `Row` entries' full
 /// `ConnectionRow` content (the tree only tracks ids).
+/// The row's executable path, empty when the daemon reported none.
+fn process_path_text(row: &ConnectionRow) -> &str {
+    row.process_path.as_deref().unwrap_or("")
+}
+
+/// `startedAtMs` as a `real` (epoch ms overflow a QML `int`).
+fn started_at_ms(row: &ConnectionRow) -> f64 {
+    row.started_at_ms as f64
+}
+
+/// Icon for the row's process; the generic icon when the path is unknown.
+fn app_icon_for_row(row: &ConnectionRow) -> String {
+    crate::app_icons::icon_for_path(process_path_text(row))
+}
+
+/// Whether the GUI answered `row` silently and it is no longer waiting.
+fn needs_rule_for_row(row: &ConnectionRow) -> bool {
+    !is_pending(row) && crate::silent_mode::needs_rule(&row.id)
+}
+
 fn grouped_entry_data(entry: &VisibleEntry, role: i32, store: &RowStore) -> QVariant {
     match entry {
         VisibleEntry::ProcessHeader {
@@ -1296,7 +1392,10 @@ fn grouped_entry_data(entry: &VisibleEntry, role: i32, store: &RowStore) -> QVar
                 QVariant::from(&QString::from(""))
             }
             ROLE_ANSWERED_WHILE_PAUSED | ROLE_MAKE_RULE_OFFERED => QVariant::from(&false),
-            ROLE_ANSWER_DEADLINE_MS => QVariant::from(&-1.0f64),
+            ROLE_ANSWER_DEADLINE_MS | ROLE_STARTED_AT_MS => QVariant::from(&-1.0f64),
+            ROLE_PROCESS_PATH | ROLE_DIRECTION | ROLE_APP_ICON => {
+                QVariant::from(&QString::from(""))
+            }
             _ => QVariant::default(),
         },
         VisibleEntry::DomainHeader {
@@ -1326,8 +1425,13 @@ fn grouped_entry_data(entry: &VisibleEntry, role: i32, store: &RowStore) -> QVar
             ROLE_MATCHED_RULE | ROLE_MATCHED_RULE_DISPLAY | ROLE_OUTCOME_TEXT => {
                 QVariant::from(&QString::from(""))
             }
-            ROLE_ANSWERED_WHILE_PAUSED | ROLE_MAKE_RULE_OFFERED => QVariant::from(&false),
-            ROLE_ANSWER_DEADLINE_MS => QVariant::from(&-1.0f64),
+            ROLE_ANSWERED_WHILE_PAUSED | ROLE_MAKE_RULE_OFFERED | ROLE_NEEDS_RULE => {
+                QVariant::from(&false)
+            }
+            ROLE_ANSWER_DEADLINE_MS | ROLE_STARTED_AT_MS => QVariant::from(&-1.0f64),
+            ROLE_PROCESS_PATH | ROLE_DIRECTION | ROLE_APP_ICON => {
+                QVariant::from(&QString::from(""))
+            }
             _ => QVariant::default(),
         },
         VisibleEntry::Row { id, .. } => {
@@ -1364,6 +1468,11 @@ fn grouped_entry_data(entry: &VisibleEntry, role: i32, store: &RowStore) -> QVar
                 ROLE_OUTCOME_TEXT => QVariant::from(&QString::from(outcome_text(row))),
                 ROLE_ANSWER_DEADLINE_MS => QVariant::from(&answer_deadline_ms(row)),
                 ROLE_MAKE_RULE_OFFERED => QVariant::from(&crate::make_rule::offers_make_rule(row)),
+                ROLE_PROCESS_PATH => QVariant::from(&QString::from(process_path_text(row))),
+                ROLE_DIRECTION => QVariant::from(&QString::from(&row.direction)),
+                ROLE_STARTED_AT_MS => QVariant::from(&started_at_ms(row)),
+                ROLE_APP_ICON => QVariant::from(&QString::from(&app_icon_for_row(row))),
+                ROLE_NEEDS_RULE => QVariant::from(&needs_rule_for_row(row)),
                 _ => QVariant::default(),
             }
         }
@@ -1490,5 +1599,49 @@ mod tests {
     fn collect_new_pending_ids_empty_for_non_insert_batches() {
         assert!(collect_new_pending_ids(&[ServerMessage::ClearConnectionRows]).is_empty());
         assert!(collect_new_pending_ids(&[]).is_empty());
+    }
+
+    #[test]
+    fn new_row_helpers_read_the_bridge_row() {
+        let mut r = row("a", None);
+        assert_eq!(process_path_text(&r), "");
+        r.process_path = Some("/usr/bin/curl".into());
+        r.started_at_ms = 1_760_000_000_123;
+        assert_eq!(process_path_text(&r), "/usr/bin/curl");
+        assert_eq!(started_at_ms(&r), 1_760_000_000_123.0);
+    }
+
+    #[test]
+    fn app_icon_is_generic_without_a_process_path() {
+        assert_eq!(
+            app_icon_for_row(&row("a", None)),
+            crate::app_icons::FALLBACK_ICON
+        );
+    }
+
+    #[test]
+    fn a_silently_answered_row_needs_a_rule_once_it_is_decided() {
+        let mut answered = row("7:silent-answered", None);
+        assert!(!needs_rule_for_row(&answered), "unmarked");
+        crate::silent_mode::mark_needs_rule("7:silent-answered");
+        assert!(!needs_rule_for_row(&answered), "still waiting");
+        answered.action = Some("allow".into());
+        assert!(needs_rule_for_row(&answered));
+        assert!(!needs_rule_for_row(&row("7:other", Some("allow"))));
+    }
+
+    #[test]
+    fn new_roles_have_distinct_ids_and_names() {
+        let ids = [
+            ROLE_PROCESS_PATH,
+            ROLE_DIRECTION,
+            ROLE_STARTED_AT_MS,
+            ROLE_APP_ICON,
+            ROLE_NEEDS_RULE,
+        ];
+        for (i, a) in ids.iter().enumerate() {
+            assert!(*a > ROLE_MAKE_RULE_OFFERED);
+            assert!(!ids[i + 1..].contains(a));
+        }
     }
 }

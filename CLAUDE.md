@@ -29,6 +29,7 @@ just check           # cargo check --workspace && cargo clippy --workspace --all
 just test             # cargo test --workspace
 just test-bridge      # cargo test -p snitchwatch-bridge (fast, most iteration happens here)
 just test-blocklists  # blocklist-specific unit + e2e suite
+just kirigami-screenshots [dir]  # demo-mode (SNITCHWATCH_DEMO=1) offscreen PNGs of the Kirigami pages
 ```
 
 `cargo check` (no args, from repo root) and `cargo check -p snitchwatch-proto`

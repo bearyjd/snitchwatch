@@ -1,6 +1,6 @@
 //! A waiting prompt's desktop notification, from showing it to acting on
-//! the answer (prompt-slot plan Part B; owner decision S5: Allow once and
-//! Deny only).
+//! the answer (prompt-slot plan Part B; Allow follows the Settings duration
+//! since the LS redesign, Deny is remembered until the firewall restarts).
 //!
 //! Runs on the bridge runtime. The notification is sent and heard through
 //! `crate::notification_signals`, so only the notification server's click
@@ -12,7 +12,7 @@
 use std::time::Duration;
 
 use crate::bridge_runtime::{BridgeHandles, BridgeNotice, PendingRow};
-use crate::inline_deny::InlineDeny;
+use crate::inline_deny::{allow_label, InlineDeny};
 use crate::notification_actions::{
     act_and_confirm, pending_body, still_waiting, NoticeAction, ALLOW_ONCE_ACTION, DENY_ACTION,
     REVIEW_ACTION,
@@ -20,12 +20,7 @@ use crate::notification_actions::{
 use crate::notification_signals::{Notice, WaitEnd};
 
 const SUMMARY: &str = "Snitchwatch — pending decision";
-/// Action keys and their labels, as the notification shows them.
-const ACTIONS: [(&str, &str); 3] = [
-    (ALLOW_ONCE_ACTION, "Allow once"),
-    (DENY_ACTION, "Deny"),
-    (REVIEW_ACTION, "Review"),
-];
+/// The action keys, in the order the notification shows them.
 const KEYS: [&str; 3] = [ALLOW_ONCE_ACTION, DENY_ACTION, REVIEW_ACTION];
 /// How often a shown notice checks that its row still waits.
 const ROW_CHECK: Duration = Duration::from_secs(1);
@@ -36,6 +31,9 @@ pub(crate) struct PendingTarget {
     connection_id: u64,
     wire_id: String,
     row: PendingRow,
+    /// The Settings duration an Allow remembers for, read once when the
+    /// notice is shown: its label and its click use the same one.
+    allow_duration: &'static str,
 }
 
 impl PendingTarget {
@@ -50,6 +48,7 @@ impl PendingTarget {
             connection_id,
             wire_id,
             row,
+            allow_duration: crate::settings::normalize_duration(""),
         })
     }
 
@@ -62,7 +61,7 @@ impl PendingTarget {
 /// `on_review` raises the window.
 pub(crate) async fn show_and_answer(
     conn: &zbus::Connection,
-    target: PendingTarget,
+    mut target: PendingTarget,
     on_review: impl FnOnce(),
 ) {
     let deny = InlineDeny::decide(
@@ -72,7 +71,22 @@ pub(crate) async fn show_and_answer(
             .advertises_app_bound_rules(target.connection_id),
     );
     let body = pending_body(&target.row, deny);
-    let mut notice = match Notice::show(conn, SUMMARY, &body, &ACTIONS).await {
+    // A file read: off the runtime's worker, and once, for label and click.
+    target.allow_duration = tokio::task::spawn_blocking(|| {
+        crate::settings::read_settings(&crate::paths::settings_path()).duration_token()
+    })
+    .await
+    .unwrap_or_else(|error| {
+        tracing::warn!(%error, "settings read failed; the default duration is used");
+        crate::settings::normalize_duration("")
+    });
+    let allow = allow_label(deny, target.allow_duration);
+    let actions = [
+        (ALLOW_ONCE_ACTION, allow.as_str()),
+        (DENY_ACTION, "Deny"),
+        (REVIEW_ACTION, "Review"),
+    ];
+    let mut notice = match Notice::show(conn, SUMMARY, &body, &actions).await {
         Ok(notice) => notice,
         Err(error) => {
             tracing::warn!(%error, "pending notification not shown");
@@ -128,6 +142,7 @@ async fn on_action(target: &PendingTarget, key: &str, on_review: impl FnOnce()) 
         target.connection_id,
         &target.wire_id,
         action,
+        target.allow_duration,
     )
     .await;
     tracing::info!(

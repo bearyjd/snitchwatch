@@ -15,7 +15,7 @@
 use snitchwatch_kirigami::bridge_bindings as _;
 
 use cxx_qt_lib::{QQmlApplicationEngine, QString, QUrl};
-use snitchwatch_kirigami::{application, bridge_runtime, logging};
+use snitchwatch_kirigami::{app_icons, application, bridge_runtime, demo, logging};
 
 fn main() {
     // Without this, every `tracing::info!`/`tracing::error!` call in this
@@ -24,6 +24,10 @@ fn main() {
     // a no-op until a subscriber is installed. `SNITCHWATCH_LOG` (or
     // `RUST_LOG`) sets the filter; see `logging` for where it goes.
     logging::init();
+
+    // Index the host's `.desktop` files off the UI thread, so it is ready by
+    // the time rows ask for icons.
+    app_icons::prewarm();
 
     // Kirigami's usual `org.kde.desktop` style needs a real Plasma session and
     // hangs under `QT_QPA_PLATFORM=offscreen`; `Basic` is the lightweight
@@ -42,9 +46,14 @@ fn main() {
     // the UI via the `BridgeFeed` status property (bound to a Kirigami
     // InlineMessage in main.qml). Never panic here — a failed bridge must
     // degrade to a visible status, not a dead window.
-    match bridge_runtime::ensure_started() {
-        (true, msg) => tracing::info!(status = %msg, "bridge client started"),
-        (false, msg) => tracing::error!(status = %msg, "bridge client unavailable"),
+    if demo::enabled() {
+        // Demo mode never starts or contacts a bridge.
+        tracing::info!("SNITCHWATCH_DEMO=1: demo mode, bridge client not started");
+    } else {
+        match bridge_runtime::ensure_started() {
+            (true, msg) => tracing::info!(status = %msg, "bridge client started"),
+            (false, msg) => tracing::error!(status = %msg, "bridge client unavailable"),
+        }
     }
 
     let mut app = application::new();

@@ -71,6 +71,16 @@ finish-args:
   - --persist=.local/share/snitchwatch
   - --filesystem=xdg-config/snitchwatch:create
   - --persist=.local/state/snitchwatch
+  # App icons in the connection list: read-only views of the host's
+  # .desktop files and icon themes, so a process path can be matched to its
+  # launcher's Icon. Flatpak exports (system + user) and the user's own
+  # data dirs only. Host /usr/share/applications is reachable only via
+  # --filesystem=host-os, which is deliberately NOT granted (far too broad):
+  # system-package apps fall back to the generic executable icon in here.
+  - --filesystem=/var/lib/flatpak/exports/share:ro
+  - --filesystem=xdg-data/flatpak/exports/share:ro
+  - --filesystem=xdg-data/applications:ro
+  - --filesystem=xdg-data/icons:ro
 
 modules:
   # Compiler needed by tonic-build. Removed by cleanup before exporting the app.

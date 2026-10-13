@@ -1,4 +1,5 @@
-//! Persisted user preferences (currently just the RDAP opt-in toggle).
+//! Persisted user preferences: the RDAP opt-in, the duration an Allow
+//! remembers, and the silent mode (LS redesign phase 1).
 //!
 //! Pure `std::fs` + `serde_json` logic, no Qt/bridge dependency — mirrors
 //! `crate::autostart`'s split between plain-Rust read/write functions and
@@ -11,10 +12,82 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+/// What happens to a new prompt without anyone being asked (LS redesign
+/// phase 1). `Off` shows the alert; `Allow`/`Deny` answer it once at arrival
+/// and mark the row "needs a rule".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SilentMode {
+    #[default]
+    Off,
+    Allow,
+    Deny,
+}
+
+impl SilentMode {
+    pub fn token(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Allow => "allow",
+            Self::Deny => "deny",
+        }
+    }
+
+    /// `None` for anything but the three tokens: a UI bug must not turn
+    /// into a silent Deny.
+    pub fn from_token(token: &str) -> Option<Self> {
+        match token {
+            "off" => Some(Self::Off),
+            "allow" => Some(Self::Allow),
+            "deny" => Some(Self::Deny),
+            _ => None,
+        }
+    }
+}
+
+/// The duration tokens a default may hold (`pending_decision::parse_duration`
+/// vocabulary). The one list the alert, the sheet and the settings page use is
+/// `qml/Durations.qml`; a test keeps them equal.
+pub const DURATION_TOKENS: [&str; 4] = ["this_time", "for_5_minutes", "until_restart", "forever"];
+
+/// The label `qml/Durations.qml` shows for a duration token (a test keeps the
+/// two equal), for surfaces that cannot read the QML list.
+pub fn duration_label(token: &str) -> &'static str {
+    match normalize_duration(token) {
+        "this_time" => "Once",
+        "for_5_minutes" => "5 minutes",
+        "until_restart" => "Until firewall restarts",
+        _ => "Forever",
+    }
+}
+
+/// What an Allow remembers until the user picks otherwise. Not `this_time`:
+/// the daemon stores only `always` rules, so a once-only Allow means the same
+/// prompt next time.
+pub const DEFAULT_DURATION: &str = "forever";
+
+/// `token` when it names a duration (the pre-rename `until_quit` included),
+/// else [`DEFAULT_DURATION`].
+pub fn normalize_duration(token: &str) -> &'static str {
+    let token = if token == "until_quit" {
+        "until_restart"
+    } else {
+        token
+    };
+    DURATION_TOKENS
+        .into_iter()
+        .find(|known| *known == token)
+        .unwrap_or(DEFAULT_DURATION)
+}
+
+fn default_duration() -> String {
+    DEFAULT_DURATION.to_string()
+}
+
 /// Persisted preferences. `#[serde(default)]` on every field means an older
 /// or partially-written file still parses — missing fields fall back to
 /// their default rather than failing the whole read.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Settings {
     /// Whether the pending-decision insight panel is allowed to query
     /// `rdap.org` for registration info. Opt-in, default off: a firewall
@@ -23,6 +96,35 @@ pub struct Settings {
     /// Reverse DNS (via the system resolver) is unaffected by this flag.
     #[serde(default)]
     pub rdap_enabled: bool,
+    /// The duration token inline and notification Allow/Deny remember for
+    /// (and the alert preselects). See [`normalize_duration`].
+    #[serde(default = "default_duration")]
+    pub default_duration: String,
+    /// `None`: the user has not chosen yet (onboarding asks). Acts as `Off`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub silent_mode: Option<SilentMode>,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            rdap_enabled: false,
+            default_duration: default_duration(),
+            silent_mode: None,
+        }
+    }
+}
+
+impl Settings {
+    /// The duration token to use, always a known one.
+    pub fn duration_token(&self) -> &'static str {
+        normalize_duration(&self.default_duration)
+    }
+
+    /// The mode in force: not chosen acts as `Off`.
+    pub fn effective_silent_mode(&self) -> SilentMode {
+        self.silent_mode.unwrap_or_default()
+    }
 }
 
 /// Read persisted settings, degrading to [`Settings::default`] on any
@@ -76,7 +178,14 @@ mod tests {
     fn write_then_read_settings_round_trip() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("nested").join("settings.json");
-        write_settings(&p, &Settings { rdap_enabled: true }).unwrap();
+        write_settings(
+            &p,
+            &Settings {
+                rdap_enabled: true,
+                ..Settings::default()
+            },
+        )
+        .unwrap();
         assert!(read_rdap_enabled(&p));
     }
 
@@ -84,11 +193,19 @@ mod tests {
     fn write_settings_overwrites_existing_file() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("settings.json");
-        write_settings(&p, &Settings { rdap_enabled: true }).unwrap();
+        write_settings(
+            &p,
+            &Settings {
+                rdap_enabled: true,
+                ..Settings::default()
+            },
+        )
+        .unwrap();
         write_settings(
             &p,
             &Settings {
                 rdap_enabled: false,
+                ..Settings::default()
             },
         )
         .unwrap();
@@ -101,5 +218,64 @@ mod tests {
         let p = dir.path().join("settings.json");
         std::fs::write(&p, "{}").unwrap();
         assert_eq!(read_settings(&p), Settings::default());
+    }
+
+    #[test]
+    fn an_old_file_gets_a_remembering_default_and_no_silent_choice() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("settings.json");
+        std::fs::write(&p, r#"{"rdap_enabled":true}"#).unwrap();
+        let settings = read_settings(&p);
+        assert!(settings.rdap_enabled);
+        assert_eq!(settings.duration_token(), "forever");
+        assert_eq!(settings.silent_mode, None);
+        assert_eq!(settings.effective_silent_mode(), SilentMode::Off);
+    }
+
+    #[test]
+    fn duration_and_silent_mode_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("settings.json");
+        let settings = Settings {
+            default_duration: "until_restart".into(),
+            silent_mode: Some(SilentMode::Deny),
+            ..Settings::default()
+        };
+        write_settings(&p, &settings).unwrap();
+        assert_eq!(read_settings(&p), settings);
+        assert!(std::fs::read_to_string(&p)
+            .unwrap()
+            .contains("\"silent_mode\": \"deny\""));
+    }
+
+    #[test]
+    fn an_unchosen_silent_mode_is_not_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("settings.json");
+        write_settings(&p, &Settings::default()).unwrap();
+        assert!(!std::fs::read_to_string(&p).unwrap().contains("silent_mode"));
+    }
+
+    #[test]
+    fn a_garbled_duration_falls_back_to_forever_and_the_old_token_is_renamed() {
+        let with = |d: &str| Settings {
+            default_duration: d.into(),
+            ..Settings::default()
+        };
+        assert_eq!(with("bogus").duration_token(), "forever");
+        assert_eq!(with("").duration_token(), "forever");
+        assert_eq!(with("until_quit").duration_token(), "until_restart");
+        for token in DURATION_TOKENS {
+            assert_eq!(with(token).duration_token(), token);
+        }
+    }
+
+    #[test]
+    fn silent_mode_tokens_round_trip_and_reject_unknown() {
+        for mode in [SilentMode::Off, SilentMode::Allow, SilentMode::Deny] {
+            assert_eq!(SilentMode::from_token(mode.token()), Some(mode));
+        }
+        assert_eq!(SilentMode::from_token("deny "), None);
+        assert_eq!(SilentMode::from_token(""), None);
     }
 }

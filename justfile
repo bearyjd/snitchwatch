@@ -82,6 +82,18 @@ kirigami-dev:
 kirigami-build:
     cargo build -p snitchwatch-kirigami --release
 
+# Render the Kirigami shell in demo mode (fake rows, no bridge) offscreen and
+# write review screenshots (main.png, alert.png, connections-*.png, rules.png, ...) to
+# `dir`. SNITCHWATCH_SCREENSHOT_DIR is only honoured with SNITCHWATCH_DEMO=1.
+# The Basic style is used because it completes headless; the Flatpak uses the
+# platform style, so colours and metrics differ slightly.
+kirigami-screenshots dir="target/screenshots":
+    mkdir -p {{dir}}
+    SNITCHWATCH_DEMO=1 SNITCHWATCH_SCREENSHOT_DIR="$(realpath {{dir}})" \
+        XDG_RUNTIME_DIR="$(mktemp -d)" \
+        QT_QPA_PLATFORM=offscreen QT_QUICK_BACKEND=software QT_QUICK_CONTROLS_STYLE=Basic \
+        timeout 120 cargo run -p snitchwatch-kirigami
+
 # Qt-level input-routing tests for the Kirigami shell, via qmltestrunner.
 #
 # These synthesise REAL mouse events (QtTest `mouseClick()`), which the

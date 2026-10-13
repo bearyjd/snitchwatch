@@ -277,7 +277,8 @@ async fn turn_on(bridge: &RunningBridge, rx: &mut broadcast::Receiver<ServerMess
     bridge
         .inbound_tx
         .send(ClientMessage::SetCuratedDefaults {
-            request_id: None, reply: None,
+            request_id: None,
+            reply: None,
             ids: vec![FLATPAK.into()],
             on: true,
         })

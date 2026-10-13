@@ -67,6 +67,10 @@ impl PendingRows {
         self.rows.clear();
     }
 
+    fn wire_ids(&self) -> Vec<String> {
+        self.rows.keys().cloned().collect()
+    }
+
     fn get(&self, wire_id: &str) -> Option<&PendingRow> {
         self.rows.get(wire_id)
     }
@@ -88,6 +92,18 @@ pub(super) fn observe(
 }
 
 impl BridgeHandles {
+    /// The live session and the wire ids of the rows now waiting in it, or
+    /// `None` while disconnected.
+    pub fn pending_wire_ids(&self) -> Option<(u64, Vec<String>)> {
+        let state = self
+            .connection
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state
+            .connected
+            .then(|| (state.connection_id, state.pending_rows.wire_ids()))
+    }
+
     /// Row `wire_id` of session `connection_id`, while that session is live
     /// and the row is still waiting for an answer.
     pub fn pending_row(&self, connection_id: u64, wire_id: &str) -> Option<PendingRow> {

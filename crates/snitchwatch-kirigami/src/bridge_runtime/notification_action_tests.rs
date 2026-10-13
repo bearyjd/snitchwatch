@@ -1,5 +1,5 @@
 //! Prompt-slot plan Part B, through the runtime's session state: a desktop
-//! notification's "Allow once" and "Deny" do what the inline buttons do,
+//! notification's "Allow" and "Deny" do what the inline buttons do,
 //! for the row's own session, and do nothing for a row that no longer waits
 //! there. (Kept out of `tests.rs`, which is near the 800-line cap.)
 
@@ -80,7 +80,7 @@ fn queued(
 }
 
 #[tokio::test]
-async fn allow_once_is_once_and_goes_to_the_rows_session() {
+async fn allow_with_a_once_default_is_once_and_goes_to_the_rows_session() {
     let (handles, connection, mut inbound_rx) = handles_and_queue();
     let session = mark_connected(&connection, true);
     insert(
@@ -90,7 +90,7 @@ async fn allow_once_is_once_and_goes_to_the_rows_session() {
     );
 
     assert_eq!(
-        act(&handles, session, "ask-1", NoticeAction::AllowOnce),
+        act(&handles, session, "ask-1", NoticeAction::Allow, "this_time"),
         ActionOutcome::Sent
     );
     assert_eq!(
@@ -102,6 +102,67 @@ async fn allow_once_is_once_and_goes_to_the_rows_session() {
             VerdictDuration::Once
         )
     );
+}
+
+/// The LS redesign's persistence fix: an Allow from a notification remembers
+/// for the Settings duration, where a rule can be bound, and says so when it
+/// can't.
+#[tokio::test]
+async fn allow_follows_the_settings_duration_where_a_rule_can_be_bound() {
+    let cases = [
+        (
+            true,
+            Some("/usr/bin/curl"),
+            "forever",
+            VerdictDuration::Always,
+            ActionOutcome::Sent,
+        ),
+        (
+            true,
+            Some("/usr/bin/curl"),
+            "until_restart",
+            VerdictDuration::UntilRestart,
+            ActionOutcome::Sent,
+        ),
+        (
+            false,
+            Some("/usr/bin/curl"),
+            "forever",
+            VerdictDuration::Once,
+            ActionOutcome::AllowedOnce(InlineDeny::BridgeTooOld),
+        ),
+        (
+            true,
+            Some("Kernel connection"),
+            "forever",
+            VerdictDuration::Once,
+            ActionOutcome::AllowedOnce(InlineDeny::ProgramUnknown),
+        ),
+        // A default of "Once" asked for nothing to remember: nothing to explain.
+        (
+            true,
+            Some("Kernel connection"),
+            "this_time",
+            VerdictDuration::Once,
+            ActionOutcome::Sent,
+        ),
+    ];
+    let (handles, connection, mut inbound_rx) = handles_and_queue();
+    for (app_bound_rules, path, default, duration, outcome) in cases {
+        disconnect_and_discard(&connection, &mut inbound_rx);
+        let session = mark_connected(&connection, app_bound_rules);
+        insert(&connection, session, vec![row("ask-1", path)]);
+        assert_eq!(
+            act(&handles, session, "ask-1", NoticeAction::Allow, default),
+            outcome,
+            "{app_bound_rules} {path:?} {default}"
+        );
+        assert_eq!(
+            queued(&mut inbound_rx),
+            (session, "ask-1".into(), VerdictAction::Allow, duration),
+            "{app_bound_rules} {path:?} {default}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -138,7 +199,7 @@ async fn deny_is_remembered_only_for_a_known_program_on_a_capable_bridge() {
         let session = mark_connected(&connection, app_bound_rules);
         insert(&connection, session, vec![row("ask-1", path)]);
         assert_eq!(
-            act(&handles, session, "ask-1", NoticeAction::Deny),
+            act(&handles, session, "ask-1", NoticeAction::Deny, "this_time"),
             outcome,
             "{app_bound_rules} {path:?}"
         );
@@ -188,9 +249,9 @@ async fn an_action_on_a_row_that_no_longer_waits_sends_nothing() {
         },
     );
     for id in ["ask-1", "ask-2", "ask-3", "ask-9"] {
-        for action in [NoticeAction::AllowOnce, NoticeAction::Deny] {
+        for action in [NoticeAction::Allow, NoticeAction::Deny] {
             assert_eq!(
-                act(&handles, session, id, action),
+                act(&handles, session, id, action, "this_time"),
                 ActionOutcome::NoLongerWaiting,
                 "{id} {action:?}"
             );
@@ -214,13 +275,13 @@ async fn an_action_on_a_row_that_no_longer_waits_sends_nothing() {
     );
     insert(&connection, next, vec![row("ask-4", Some("/usr/bin/curl"))]);
     assert_eq!(
-        act(&handles, session, "ask-4", NoticeAction::AllowOnce),
+        act(&handles, session, "ask-4", NoticeAction::Allow, "this_time"),
         ActionOutcome::NoLongerWaiting
     );
     assert_eq!(handles.pending_row(next, "ask-5"), None);
     assert!(inbound_rx.try_recv().is_err(), "nothing may be sent");
     assert_eq!(
-        act(&handles, next, "ask-4", NoticeAction::AllowOnce),
+        act(&handles, next, "ask-4", NoticeAction::Allow, "this_time"),
         ActionOutcome::Sent
     );
 }
@@ -236,7 +297,7 @@ async fn an_answer_that_cant_be_queued_says_so() {
     );
     drop(inbound_rx);
     assert_eq!(
-        act(&handles, session, "ask-1", NoticeAction::AllowOnce),
+        act(&handles, session, "ask-1", NoticeAction::Allow, "this_time"),
         ActionOutcome::NotSent
     );
 }
@@ -285,7 +346,7 @@ async fn a_pending_notice_is_announced_only_while_its_row_waits_in_its_session()
 }
 
 /// What `act_and_confirm` reports for each way the bridge can settle the
-/// row after an "Allow once" was sent.
+/// row after an Allow was sent.
 #[tokio::test]
 async fn the_bridges_update_tells_a_won_race_from_a_lost_one() {
     use crate::notification_actions::act_and_confirm;
@@ -330,7 +391,7 @@ async fn the_bridges_update_tells_a_won_race_from_a_lost_one() {
         );
         let asking = handles.clone();
         let answer = tokio::spawn(async move {
-            act_and_confirm(&asking, session, "ask-1", NoticeAction::AllowOnce).await
+            act_and_confirm(&asking, session, "ask-1", NoticeAction::Allow, "this_time").await
         });
         // Sent: so it is already listening for the update.
         inbound_rx.recv().await.expect("the answer was sent");
@@ -357,13 +418,13 @@ async fn no_word_from_the_bridge_keeps_the_outcome() {
         vec![row("ask-1", Some("/usr/bin/curl"))],
     );
     assert_eq!(
-        act_and_confirm(&handles, session, "ask-1", NoticeAction::Deny).await,
+        act_and_confirm(&handles, session, "ask-1", NoticeAction::Deny, "this_time").await,
         ActionOutcome::Sent
     );
     assert!(inbound_rx.try_recv().is_ok(), "the answer was sent");
     // A stale row is still refused at once.
     assert_eq!(
-        act_and_confirm(&handles, session, "ask-9", NoticeAction::Deny).await,
+        act_and_confirm(&handles, session, "ask-9", NoticeAction::Deny, "this_time").await,
         ActionOutcome::NoLongerWaiting
     );
 }

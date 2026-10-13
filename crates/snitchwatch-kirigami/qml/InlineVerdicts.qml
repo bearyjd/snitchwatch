@@ -4,11 +4,15 @@
 //
 // Scope is the sheet's default, "This host only". The duration is per row,
 // from `ConnectionsModel.inlineDurationFor` (Rust `inline_deny.rs`):
-//   * Allow sends "This time", the sheet's default.
+//   * Allow sends the Settings duration (`Durations.defaultToken`, "Forever"
+//     unless changed): the daemon stores only "always" rules, so a once-only
+//     Allow would ask again next time. Where a Deny couldn't be remembered
+//     either (no program file, or a bridge without app-bound rules) it can
+//     only send "This time", and says why.
 //   * Deny deliberately doesn't. The daemon never stores a once-only rule, so
 //     it would drop only the packet that asked, and the SYN the kernel resends
 //     a second later would get through or be asked about again. It sends
-//     "until_quit" (daemon "until restart"), a rule the bridge binds to the
+//     "until_restart" (daemon "until restart"), a rule the bridge binds to the
 //     program and this host, when the row's program file is known and its
 //     bridge session advertised app-bound rules. Otherwise it can only send
 //     "This time", and says why.
@@ -17,6 +21,7 @@
 // `pending_decision`'s Rust mapping stays the single source of the wire shape.
 // Every text here is fixed, never built from connection data.
 import QtQuick
+import com.snitchwatch.shell
 
 QtObject {
     id: verdicts
@@ -34,9 +39,12 @@ QtObject {
     readonly property string notRememberedSentence: "Snitchwatch couldn't identify this program's file, so this answer applies only to this connection."
     // The row's bridge didn't advertise app-bound rules (`rowAppBoundRules`).
     readonly property string bridgeTooOldSentence: "This firewall bridge is too old to block just this program, so Deny applies to this connection only."
+    // The same for an Allow that the Settings duration would have remembered.
+    readonly property string bridgeTooOldAllowSentence: "This firewall bridge is too old to remember this program's Allow, so it applies to this connection only."
     // The Deny couldn't be queued: the bridge connection is gone (the page's
     // "no longer waiting" banner names the same cause).
     readonly property string notSentSentence: "The connection to the background service was lost, so this Deny wasn't sent."
+    readonly property string notSentAllowSentence: "The connection to the background service was lost, so this Allow wasn't sent."
     // The same, before a click, while the feed reports no connection.
     readonly property string disconnectedText: "The connection to the background service was lost, so Deny can't be sent."
 
@@ -66,9 +74,10 @@ QtObject {
         }
     }
 
-    // Sends `choice` for `rowId`. Returns why a Deny applies to this
-    // connection only — "not_sent", "program_unknown" or "bridge_too_old" —
-    // else "". Leaves the explanation to the caller, so a batch explains once.
+    // Sends `choice` for `rowId`. Returns why a Deny (or an Allow the
+    // Settings duration would have remembered) applies to this connection
+    // only — "program_unknown" or "bridge_too_old" — or "not_sent" when it
+    // could not be queued, else "". Leaves the explanation to the caller, so a batch explains once.
     function send(rowId, choice) {
         if (verdicts.bridgeFeed === null) {
             // Unreachable in the running app (main.qml always injects the
@@ -80,24 +89,41 @@ QtObject {
         }
         const appBound = verdicts.rowAppBoundRules(rowId);
         const duration = verdicts.model
-            ? verdicts.model.inlineDurationFor(rowId, choice, appBound) : "this_time";
+            ? verdicts.model.inlineDurationFor(rowId, choice, appBound, Durations.defaultToken)
+            : "this_time";
         const queued = verdicts.bridgeFeed.submitVerdict(rowId, choice, "this_host", duration,
                                                          verdicts.rowBindableProcessPath(rowId));
-        if (choice !== "deny") {
+        if (choice !== "allow" && choice !== "deny") {
             return "";
         }
         if (queued === false) {
             return "not_sent";
         }
-        if (duration !== "this_time") {
+        // Once-only although the Settings default remembers: say why. A Deny
+        // that is remembered, or an Allow that asked for nothing more, needs
+        // no words.
+        if (duration !== "this_time" || (choice === "allow" && Durations.defaultToken === "this_time")) {
             return "";
         }
         return verdicts.model ? verdicts.model.inlineDenyFor(rowId, appBound) : "program_unknown";
     }
 
+    // A row's Allow button text: names the duration the click will remember
+    // ("Allow (Forever)"), and is plain "Allow" where it can only be once-only
+    // (the Settings default is Once, or the program/bridge can't remember).
+    // The same duration `send` uses, so the label can't promise more.
+    function allowLabel(rowId) {
+        if (!verdicts.model) {
+            return "Allow";
+        }
+        const token = verdicts.model.inlineDurationFor(rowId, "allow", verdicts.rowAppBoundRules(rowId),
+                                                       Durations.defaultToken);
+        return token === "this_time" ? "Allow" : "Allow (" + Durations.labelFor(token) + ")";
+    }
+
     // A row's inline Allow/Deny.
     function submit(rowId, choice) {
-        verdicts.explain(verdicts.send(rowId, choice));
+        verdicts.explain(verdicts.send(rowId, choice), choice);
     }
 
     // Prompt-slot plan Part C. "Decide later" is offered only while
@@ -148,20 +174,22 @@ QtObject {
             // don't swallow it silently.
             console.warn("InlineVerdicts.submitBatch failed:", e);
         }
-        verdicts.explain(reason);
+        verdicts.explain(reason, choice);
     }
 
-    function onceOnlySentence(reason) {
+    function onceOnlySentence(reason, choice) {
         switch (reason) {
-        case "not_sent": return verdicts.notSentSentence;
-        case "bridge_too_old": return verdicts.bridgeTooOldSentence;
+        case "not_sent": return choice === "allow" ? verdicts.notSentAllowSentence
+                                                   : verdicts.notSentSentence;
+        case "bridge_too_old": return choice === "allow" ? verdicts.bridgeTooOldAllowSentence
+                                                         : verdicts.bridgeTooOldSentence;
         default: return verdicts.notRememberedSentence;
         }
     }
 
-    function explain(reason) {
+    function explain(reason, choice) {
         if (reason !== "") {
-            verdicts.explained(verdicts.onceOnlySentence(reason));
+            verdicts.explained(verdicts.onceOnlySentence(reason, choice));
         }
     }
 

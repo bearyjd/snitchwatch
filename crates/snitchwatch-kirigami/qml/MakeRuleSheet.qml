@@ -115,11 +115,10 @@ ColumnLayout {
                 Layout.fillWidth: true
                 textRole: "label"
                 valueRole: "token"
-                model: [
-                    { label: "For 5 minutes", token: "for_5_minutes" },
-                    { label: "Until firewall restarts", token: "until_quit" },
-                    { label: "Forever", token: "forever" }
-                ]
+                // `Durations.remembered`: a once-only answer can't be added
+                // afterwards.
+                model: Durations.remembered
+                currentIndex: Math.max(0, Durations.indexOf(Durations.defaultToken) - 1)
             }
         }
         RowLayout {

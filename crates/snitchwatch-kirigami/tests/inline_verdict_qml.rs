@@ -18,17 +18,20 @@
 //! asserts what each inline and batch path sent (plan
 //! `2026-10-08-inline-deny-until-restart.md`):
 //!   * scope is always "this_host";
-//!   * Allow is always "this_time";
-//!   * Deny is "until_quit" (daemon "until restart") only for a row whose
+//!   * Allow sends the Settings duration (`Durations.defaultToken`, "forever"
+//!     here) under the same conditions as a remembered Deny, and otherwise
+//!     "this_time" with the same kind of passive notification; a default of
+//!     "this_time" needs no notification;
+//!   * Deny is "until_restart" (daemon "until restart") only for a row whose
 //!     program file is an absolute path AND whose bridge session advertised
 //!     app-bound rules (the stub's `appBoundRulesFor`); otherwise
 //!     "this_time", with a passive notification saying why (the program, or
 //!     the old bridge), once per click — once for a whole "Deny all";
 //!   * the row Deny and "Deny all" tooltips and `Accessible.description`
 //!     say which of these a click does;
-//!   * the decision sheet labels `until_quit` "Until firewall restarts" and
-//!     shows the one-time-Deny hint only while "This time" is selected, for
-//!     a bindable program on a capable bridge.
+//!   * the decision sheet labels `until_restart` "Until firewall restarts",
+//!     opens on the Settings default, and shows the one-time-Deny hint only while
+//!     "Once" is selected, for a bindable program on a capable bridge.
 //!
 //! Honoring the "QML-side JS asserts are not load-bearing" constraint, this
 //! test's Rust-side assertion works in two layers:
@@ -105,6 +108,8 @@ Controls.ApplicationWindow {
 
     readonly property string sentence: "Snitchwatch couldn't identify this program's file, so this answer applies only to this connection."
     readonly property string oldBridge: "This firewall bridge is too old to block just this program, so Deny applies to this connection only."
+    readonly property string oldBridgeAllow: "This firewall bridge is too old to remember this program's Allow, so it applies to this connection only."
+    readonly property string notSentAllow: "The connection to the background service was lost, so this Allow wasn't sent."
     readonly property string untilRestart: "Blocks this program from this host until the firewall restarts"
     readonly property string allUntilRestart: "Blocks this program from each of these hosts until the firewall restarts"
     readonly property string notSent: "The connection to the background service was lost, so this Deny wasn't sent."
@@ -239,7 +244,7 @@ Controls.ApplicationWindow {
     // The sends since the last `expectSent` carried exactly these
     // `bindableProcessPath` flags ("id=true|false", any order). The Rust gate
     // trusts them, so a constant here would undo the inline Deny's
-    // `until_quit` (or let an unidentifiable program through).
+    // `until_restart` (or let an unidentifiable program through).
     function expectBindable(expected, what) {
         const got = feedStub.submitted.map(s => s.rowId + "=" + s.bindable).sort();
         probeWindow.check(JSON.stringify(got) === JSON.stringify(expected.slice().sort()),
@@ -279,26 +284,40 @@ Controls.ApplicationWindow {
         probeWindow.expectShown([], "before any Deny");
 
         probeWindow.expectSent(() => page.submitInlineVerdict("abs", "deny"),
-                               ["abs deny this_host/until_quit"], "abs inline Deny");
+                               ["abs deny this_host/until_restart"], "abs inline Deny");
         probeWindow.expectBindable(["abs=true"], "abs inline Deny");
         probeWindow.expectShown([], "a remembered inline Deny");
         probeWindow.expectSent(() => page.submitInlineVerdict("kernel", "deny"),
                                ["kernel deny this_host/this_time"], "kernel inline Deny");
         probeWindow.expectBindable(["kernel=false"], "kernel inline Deny");
         probeWindow.expectShown([probeWindow.sentence], "a once-only inline Deny");
+        // An Allow remembers for the Settings duration where a rule can be
+        // bound; elsewhere it is once-only and says why, as a Deny does.
         probeWindow.expectSent(() => {
             page.submitInlineVerdict("abs", "allow");
             page.submitInlineVerdict("kernel", "allow");
-        }, ["abs allow this_host/this_time", "kernel allow this_host/this_time"], "inline Allow");
-        probeWindow.expectShown([], "inline Allow");
+        }, ["abs allow this_host/forever", "kernel allow this_host/this_time"], "inline Allow");
+        probeWindow.expectBindable(["abs=true", "kernel=false"], "inline Allow");
+        probeWindow.expectShown([probeWindow.sentence], "inline Allow of an unidentified program");
+        Durations.defaultToken = "until_restart";
+        probeWindow.expectSent(() => page.submitInlineVerdict("abs", "allow"),
+                               ["abs allow this_host/until_restart"], "inline Allow, Until firewall restarts default");
+        Durations.defaultToken = "this_time";
+        probeWindow.expectSent(() => {
+            page.submitInlineVerdict("abs", "allow");
+            page.submitInlineVerdict("kernel", "allow");
+        }, ["abs allow this_host/this_time", "kernel allow this_host/this_time"],
+           "inline Allow, Once default");
+        probeWindow.expectShown([], "inline Allow with a Once default has nothing to explain");
+        Durations.defaultToken = "forever";
 
         // D1: "Deny all (N)" sends each row's own inline Deny.
         probeWindow.expectSent(() => page.submitBatchVerdict("/usr/bin/wget", "deny"),
-                               ["w1 deny this_host/until_quit", "w2 deny this_host/until_quit"],
+                               ["w1 deny this_host/until_restart", "w2 deny this_host/until_restart"],
                                "wget Deny all");
         probeWindow.expectBindable(["w1=true", "w2=true"], "wget Deny all");
         probeWindow.expectSent(() => page.submitBatchVerdict("/usr/bin/wget", "allow"),
-                               ["w1 allow this_host/this_time", "w2 allow this_host/this_time"],
+                               ["w1 allow this_host/forever", "w2 allow this_host/forever"],
                                "wget Allow all");
         probeWindow.expectShown([], "a remembered Deny all / Allow all");
         probeWindow.expectSent(() => page.submitBatchVerdict("Kernel connection", "deny"),
@@ -318,9 +337,13 @@ Controls.ApplicationWindow {
         probeWindow.openOn("abs", "curl", "github.com");
         const sheet = page.decisionSheet;
         const durations = sheet.durationSelector;
-        probeWindow.check(durations.count === 4 && durations.valueAt(2) === "until_quit"
-                          && durations.textAt(2) === "Until firewall restarts",
-                          "D3: until_quit is labelled " + durations.textAt(2));
+        probeWindow.check(durations.count === 4 && durations.valueAt(2) === "until_restart"
+                          && durations.textAt(2) === "Until firewall restarts"
+                          && durations.textAt(0) === "Once" && durations.textAt(1) === "5 minutes"
+                          && durations.textAt(3) === "Forever",
+                          "D3: until_restart is labelled " + durations.textAt(2));
+        probeWindow.check(durations.currentValue === "forever",
+                          "the sheet opens on the Settings default: " + durations.currentValue);
         durations.currentIndex = 0;
         probeWindow.check(sheet.showDenyOnceHint === true, "D2: no hint for This time");
         probeWindow.check(sheet.denyOnceHint.text
@@ -344,6 +367,9 @@ Controls.ApplicationWindow {
         probeWindow.expectSent(() => page.submitInlineVerdict("abs", "deny"),
                                ["abs deny this_host/this_time"], "old bridge: abs inline Deny");
         probeWindow.expectShown([probeWindow.oldBridge], "old bridge: abs inline Deny");
+        probeWindow.expectSent(() => page.submitInlineVerdict("abs", "allow"),
+                               ["abs allow this_host/this_time"], "old bridge: abs inline Allow");
+        probeWindow.expectShown([probeWindow.oldBridgeAllow], "old bridge: abs inline Allow");
         probeWindow.expectSent(() => page.submitBatchVerdict("/usr/bin/wget", "deny"),
                                ["w1 deny this_host/this_time", "w2 deny this_host/this_time"],
                                "old bridge: wget Deny all");
@@ -380,7 +406,7 @@ Controls.ApplicationWindow {
         probeWindow.expectShown([probeWindow.notSent], "lost: kernel inline Deny");
         probeWindow.expectSent(() => page.submitInlineVerdict("abs", "allow"),
                                ["abs allow this_host/this_time"], "lost: abs inline Allow");
-        probeWindow.expectShown([], "lost: inline Allow");
+        probeWindow.expectShown([probeWindow.notSentAllow], "lost: inline Allow");
         feedStub.queue = true;
         feedStub.appBound = true;
     }
@@ -455,15 +481,17 @@ Controls.ApplicationWindow {
                         throw new Error("batch Deny never reached bridgeFeed.submitVerdict");
                     }
                     // The rows above have no program path, so every one is
-                    // once, and each "Deny all" that sent one explained it
-                    // once (the stale header's sent nothing).
+                    // once; the inline Allow explained itself, and each "Deny
+                    // all" that sent one explained it once (the stale
+                    // header's sent nothing).
                     for (const s of feedStub.submitted) {
                         probeWindow.check(s.scope === "this_host" && s.duration === "this_time",
                                           "path-less " + s.choice + " " + s.rowId + " sent "
                                           + s.scope + "/" + s.duration);
                     }
-                    probeWindow.expectShown([probeWindow.sentence, probeWindow.sentence],
-                                            "path-less Deny all clicks");
+                    probeWindow.expectShown([probeWindow.sentence, probeWindow.sentence,
+                                             probeWindow.sentence],
+                                            "path-less inline Allow and Deny all clicks");
                     probeWindow.checkCapableBridge();
                     probeWindow.checkOldBridge();
                     probeWindow.checkLostConnection();

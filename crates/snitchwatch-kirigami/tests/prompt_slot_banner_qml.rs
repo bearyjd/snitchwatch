@@ -3,7 +3,7 @@
 //! `BridgeFeed` and a real `ConnectionsModel`.
 //!   * It shows only for a supporting bridge, a held slot and a live feed.
 //!   * The holder's text (program and host included) is plain text.
-//!   * "Allow once" and "Deny" use the inline semantics (scope, duration and
+//!   * "Allow" and "Deny" use the inline semantics (scope, duration and
 //!     whether the program file is known), only while the model holds the
 //!     row as pending, only once a holder has been shown for `armDelayMs`
 //!     (a double-click can't answer the next holder), and once per holder.
@@ -199,8 +199,8 @@ Controls.ApplicationWindow {
                                        "a holder answered before it was shown long enough");
             } else if (probeWindow.phase === 2) {
                 probeWindow.expectSent(() => banner.answer("allow"),
-                                       ["1:abs allow this_host/this_time bindable=true"],
-                                       "Allow once");
+                                       ["1:abs allow this_host/forever bindable=true"],
+                                       "Allow");
                 probeWindow.expectSent(() => banner.answer("deny"), [],
                                        "a second answer for the same holder");
                 // The next holder takes its place; a quick second click.
@@ -209,7 +209,7 @@ Controls.ApplicationWindow {
                                        "a double-click answered the next holder");
             } else if (probeWindow.phase === 3) {
                 probeWindow.expectSent(() => banner.answer("deny"),
-                                       ["1:abs2 deny this_host/until_quit bindable=true"],
+                                       ["1:abs2 deny this_host/until_restart bindable=true"],
                                        "Deny");
                 statusStub.rowId = "1:kern";
             } else if (probeWindow.phase === 4) {

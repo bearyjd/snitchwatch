@@ -1,12 +1,14 @@
 //! Answering a waiting prompt from its desktop notification (prompt-slot
-//! plan Part B; owner decision S5: "Allow once" and "Deny" only, so a
-//! remembered Allow still needs the window).
+//! plan Part B; owner decision S5 limited it to "Allow once" and "Deny"; the
+//! LS redesign (2026-10-12) made Allow follow the Settings duration, since a
+//! once-only Allow is never stored by the daemon).
 //!
 //! Each action does what the Connections page's inline button does
-//! (`InlineVerdicts.qml`): Allow is once only; Deny is remembered until the
-//! firewall restarts, bound to the program and this host, only for a program
-//! file the bridge can name on a session that advertised app-bound rules
-//! (`crate::inline_deny`), and otherwise once only, with the plain reason.
+//! (`InlineVerdicts.qml`): Allow is remembered for the Settings duration
+//! ("Forever" unless changed), Deny until the firewall restarts, each bound to
+//! the program and this host, only for a program file the bridge can name on a
+//! session that advertised app-bound rules (`crate::inline_deny`), and
+//! otherwise once only, with the plain reason.
 //! It goes through `bridge_feed::dispatch_to`, so #77's gate and the
 //! session-routed send apply too.
 //!
@@ -25,7 +27,7 @@ use tokio::sync::broadcast;
 
 use crate::bridge_runtime::{BridgeHandles, PendingRow, ReceivedServerMessage};
 use crate::connections::outcome::is_pending;
-use crate::inline_deny::InlineDeny;
+use crate::inline_deny::{allow_token, InlineDeny};
 use crate::pending_decision::build_verdict_message;
 
 /// D-Bus action ids for the pending notification's answers.
@@ -74,14 +76,14 @@ pub(crate) const DENY_UNTIL_RESTART: &str =
 /// An answer offered on the pending notification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NoticeAction {
-    AllowOnce,
+    Allow,
     Deny,
 }
 
 impl NoticeAction {
     pub(crate) fn from_id(id: &str) -> Option<Self> {
         match id {
-            ALLOW_ONCE_ACTION => Some(Self::AllowOnce),
+            ALLOW_ONCE_ACTION => Some(Self::Allow),
             DENY_ACTION => Some(Self::Deny),
             _ => None,
         }
@@ -95,6 +97,9 @@ pub(crate) enum ActionOutcome {
     Sent,
     /// A Deny sent for this connection only, and why.
     DeniedOnce(InlineDeny),
+    /// An Allow that should have been remembered sent for this connection
+    /// only, and why.
+    AllowedOnce(InlineDeny),
     /// The row isn't waiting in this session any more; nothing was sent.
     NoLongerWaiting,
     /// It was answered another way first (in the window, by a pause, by the
@@ -107,6 +112,9 @@ pub(crate) enum ActionOutcome {
 /// `InlineVerdicts.qml`'s `bridgeTooOldSentence` (a test keeps them equal).
 pub(crate) const BRIDGE_TOO_OLD: &str =
     "This firewall bridge is too old to block just this program, so Deny applies to this connection only.";
+/// The same for an Allow, which the Settings duration would have remembered.
+pub(crate) const BRIDGE_TOO_OLD_ALLOW: &str =
+    "This firewall bridge is too old to remember this program's Allow, so it applies to this connection only.";
 pub(crate) const NO_LONGER_WAITING: &str =
     "That connection is no longer waiting for an answer, so nothing was sent.";
 pub(crate) const NOT_SENT: &str =
@@ -118,11 +126,15 @@ impl ActionOutcome {
     /// The fixed text of a follow-up notification, when one is needed.
     pub(crate) fn explanation(self) -> Option<&'static str> {
         match self {
-            Self::Sent | Self::DeniedOnce(InlineDeny::UntilRestart) => None,
-            Self::DeniedOnce(InlineDeny::ProgramUnknown) => {
+            Self::Sent
+            | Self::DeniedOnce(InlineDeny::UntilRestart)
+            | Self::AllowedOnce(InlineDeny::UntilRestart) => None,
+            Self::DeniedOnce(InlineDeny::ProgramUnknown)
+            | Self::AllowedOnce(InlineDeny::ProgramUnknown) => {
                 Some(RuleRefusal::ProcessFileUnknown.describe())
             }
             Self::DeniedOnce(InlineDeny::BridgeTooOld) => Some(BRIDGE_TOO_OLD),
+            Self::AllowedOnce(InlineDeny::BridgeTooOld) => Some(BRIDGE_TOO_OLD_ALLOW),
             Self::NoLongerWaiting => Some(NO_LONGER_WAITING),
             Self::AlreadyAnswered => Some(ALREADY_ANSWERED),
             Self::NotSent => Some(NOT_SENT),
@@ -148,11 +160,13 @@ pub(crate) fn still_waiting(
 }
 
 /// Answer row `wire_id` of session `connection_id` with `action`.
+/// `allow_duration` is the Settings default an Allow remembers for.
 pub(crate) fn act(
     handles: &BridgeHandles,
     connection_id: u64,
     wire_id: &str,
     action: NoticeAction,
+    allow_duration: &str,
 ) -> ActionOutcome {
     let Some(row) = handles.pending_row(connection_id, wire_id) else {
         return ActionOutcome::NoLongerWaiting;
@@ -161,17 +175,14 @@ pub(crate) fn act(
         .process_path
         .as_deref()
         .is_some_and(is_bindable_process_path);
-    let (choice, deny) = match action {
-        NoticeAction::AllowOnce => ("allow", None),
-        NoticeAction::Deny => (
-            "deny",
-            Some(InlineDeny::decide(
-                row.process_path.as_deref(),
-                handles.advertises_app_bound_rules(connection_id),
-            )),
-        ),
+    let kind = InlineDeny::decide(
+        row.process_path.as_deref(),
+        handles.advertises_app_bound_rules(connection_id),
+    );
+    let (choice, duration) = match action {
+        NoticeAction::Allow => ("allow", allow_token(kind, allow_duration)),
+        NoticeAction::Deny => ("deny", kind.duration_token()),
     };
-    let duration = deny.map_or("this_time", InlineDeny::duration_token);
     let row_id = format!("{connection_id}:{wire_id}");
     let Some(msg) = build_verdict_message(&row_id, choice, "this_host", duration) else {
         return ActionOutcome::NotSent;
@@ -180,8 +191,14 @@ pub(crate) fn act(
         tracing::warn!(%error, %row_id, "notification answer not sent");
         return ActionOutcome::NotSent;
     }
-    match deny {
-        Some(reason) if reason != InlineDeny::UntilRestart => ActionOutcome::DeniedOnce(reason),
+    match action {
+        NoticeAction::Deny if kind != InlineDeny::UntilRestart => ActionOutcome::DeniedOnce(kind),
+        NoticeAction::Allow
+            if kind != InlineDeny::UntilRestart
+                && crate::settings::normalize_duration(allow_duration) != "this_time" =>
+        {
+            ActionOutcome::AllowedOnce(kind)
+        }
         _ => ActionOutcome::Sent,
     }
 }
@@ -204,14 +221,18 @@ pub(crate) async fn act_and_confirm(
     connection_id: u64,
     wire_id: &str,
     action: NoticeAction,
+    allow_duration: &str,
 ) -> ActionOutcome {
     let mut updates = handles.subscribe();
-    let outcome = act(handles, connection_id, wire_id, action);
-    if !matches!(outcome, ActionOutcome::Sent | ActionOutcome::DeniedOnce(_)) {
+    let outcome = act(handles, connection_id, wire_id, action, allow_duration);
+    if !matches!(
+        outcome,
+        ActionOutcome::Sent | ActionOutcome::DeniedOnce(_) | ActionOutcome::AllowedOnce(_)
+    ) {
         return outcome;
     }
     let ours = match action {
-        NoticeAction::AllowOnce => "allow",
+        NoticeAction::Allow => "allow",
         NoticeAction::Deny => "deny",
     };
     let settled = tokio::time::timeout(
@@ -397,10 +418,10 @@ mod tests {
     }
 
     #[test]
-    fn only_allow_once_and_deny_are_answers() {
+    fn only_allow_and_deny_are_answers() {
         assert_eq!(
             NoticeAction::from_id("allow-once"),
-            Some(NoticeAction::AllowOnce)
+            Some(NoticeAction::Allow)
         );
         assert_eq!(NoticeAction::from_id("deny"), Some(NoticeAction::Deny));
         for other in ["review", "allow", "allow-forever", ""] {
@@ -424,6 +445,18 @@ mod tests {
             Some(BRIDGE_TOO_OLD)
         );
         assert_eq!(
+            ActionOutcome::AllowedOnce(InlineDeny::UntilRestart).explanation(),
+            None
+        );
+        assert_eq!(
+            ActionOutcome::AllowedOnce(InlineDeny::ProgramUnknown).explanation(),
+            Some(RuleRefusal::ProcessFileUnknown.describe())
+        );
+        assert_eq!(
+            ActionOutcome::AllowedOnce(InlineDeny::BridgeTooOld).explanation(),
+            Some(BRIDGE_TOO_OLD_ALLOW)
+        );
+        assert_eq!(
             ActionOutcome::NoLongerWaiting.explanation(),
             Some(NO_LONGER_WAITING)
         );
@@ -438,7 +471,7 @@ mod tests {
     fn the_too_old_sentence_matches_the_inline_one() {
         let inline = include_str!("../qml/InlineVerdicts.qml");
         assert!(
-            inline.contains(BRIDGE_TOO_OLD),
+            inline.contains(BRIDGE_TOO_OLD) && inline.contains(BRIDGE_TOO_OLD_ALLOW),
             "InlineVerdicts.qml drifted"
         );
     }
