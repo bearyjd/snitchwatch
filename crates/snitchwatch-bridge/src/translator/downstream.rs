@@ -51,6 +51,7 @@ pub fn build_set_blocklist_leftovers(mgr: &BlocklistsManager) -> ServerMessage {
             .then(|| mgr.leftover_cause().map(str::to_string))
             .flatten(),
         reason: mgr.leftover_outcome(),
+        files_left: mgr.leftover_files_left(),
     }
 }
 

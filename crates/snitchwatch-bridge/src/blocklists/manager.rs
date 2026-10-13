@@ -30,6 +30,23 @@ use crate::ws_messages::{
 /// What to tell the page about a removal that did not remove everything, or
 /// `None` if it did. A refused delete counts as removed: the daemon stopped
 /// using the rule before it failed to remove the file (tower r12).
+/// What a removal that left nothing to count says about the files the
+/// daemon couldn't remove (#120 item 2): `None` when there are none.
+fn files_left_note(refused: usize) -> Option<String> {
+    match refused {
+        0 => None,
+        1 => Some(
+            "The leftover blocklist rules were removed, but the firewall service couldn't \
+             remove the saved file of 1, so it may come back when the service restarts."
+                .to_string(),
+        ),
+        n => Some(format!(
+            "The leftover blocklist rules were removed, but the firewall service couldn't \
+             remove the saved files of {n}, so they may come back when the service restarts."
+        )),
+    }
+}
+
 fn removal_note(done: &RemovedLeftovers) -> Option<String> {
     let taken = done.removed + done.refused;
     let of = format!("Removed {taken} of {} rules", done.total);
@@ -93,6 +110,11 @@ pub struct BlocklistsManager {
     /// How the last removal of leftover rules went, when it did not fully
     /// succeed, for the page to show under its button.
     leftover_outcome: Mutex<Option<String>>,
+    /// Files the last removal couldn't remove, said while no leftovers are
+    /// counted: refused deletes leave the list, so `leftover_outcome` is
+    /// never shown for them (#120 item 2). Until the next removal, or until
+    /// leftovers are counted again.
+    leftover_files_left: Mutex<Option<String>>,
     /// Lists the daemon refused: how often in a row, and when a refresh tick
     /// may try again (issue #73).
     refusals: Mutex<HashMap<String, backoff::Refusal>>,
@@ -140,6 +162,7 @@ impl BlocklistsManager {
             leftover: None,
             leftover_announced: Mutex::new(None),
             leftover_outcome: Mutex::new(None),
+            leftover_files_left: Mutex::new(None),
             cleanup_pending: Mutex::new(BTreeSet::new()),
             refusals: Mutex::new(HashMap::new()),
             aggregate_cap: AGGREGATE_MAX_HOSTS,
@@ -320,6 +343,15 @@ impl BlocklistsManager {
             .clone()
     }
 
+    /// Saved files the last removal couldn't remove, while no leftovers
+    /// are counted.
+    pub fn leftover_files_left(&self) -> Option<String> {
+        self.leftover_files_left
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
     /// Delete the leftover rules, because the user asked. Does nothing while
     /// this bridge manages its rules. Tells GUIs what is left, and, if some
     /// stay, why.
@@ -331,6 +363,7 @@ impl BlocklistsManager {
         let Some(leftover) = &self.leftover else {
             return;
         };
+        let mut refused = 0;
         let outcome = match leftover.remove_all().await {
             Ok(done) => {
                 info!(
@@ -339,6 +372,7 @@ impl BlocklistsManager {
                     stopped = done.stopped.is_some(),
                     "removed leftover blocklist rules"
                 );
+                refused = done.refused;
                 removal_note(&done)
             }
             Err(e) => {
@@ -349,6 +383,14 @@ impl BlocklistsManager {
                 ))
             }
         };
+        let files_left = match self.leftover_count() {
+            None => files_left_note(refused),
+            Some(_) => None,
+        };
+        *self
+            .leftover_files_left
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = files_left;
         *self
             .leftover_outcome
             .lock()
@@ -371,6 +413,12 @@ impl BlocklistsManager {
             // Nothing left, so nothing to say about how removing it went.
             *self
                 .leftover_outcome
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        } else {
+            // The files came back: the leftover notice says so now.
+            *self
+                .leftover_files_left
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
         }

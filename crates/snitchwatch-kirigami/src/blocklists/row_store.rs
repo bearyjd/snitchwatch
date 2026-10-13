@@ -31,6 +31,8 @@ pub struct SubscriptionsStore {
     leftover_cause: String,
     /// `reason` of the last `SetBlocklistLeftovers`, or "".
     leftover_reason: String,
+    /// `filesLeft` of the last `SetBlocklistLeftovers`, or "".
+    leftover_files_left: String,
 }
 
 /// The download result as shown to the user. `status` only says whether the
@@ -148,6 +150,12 @@ impl SubscriptionsStore {
         &self.leftover_reason
     }
 
+    /// Saved files a removal that left nothing to count couldn't remove
+    /// (#120 item 2), or "".
+    pub fn leftover_files_left(&self) -> &str {
+        &self.leftover_files_left
+    }
+
     /// Apply one bridge message. Returns `true` if the subscription list
     /// changed (the model wrapper resets on `true`).
     pub fn apply(&mut self, msg: &ServerMessage) -> bool {
@@ -164,6 +172,7 @@ impl SubscriptionsStore {
                     self.leftover = 0;
                     self.leftover_cause.clear();
                     self.leftover_reason.clear();
+                    self.leftover_files_left.clear();
                 }
                 true
             }
@@ -171,15 +180,19 @@ impl SubscriptionsStore {
                 count,
                 cause,
                 reason,
+                files_left,
             } => {
                 let cause = cause.clone().unwrap_or_default();
                 let reason = reason.clone().unwrap_or_default();
+                let files_left = files_left.clone().unwrap_or_default();
                 let changed = self.leftover != *count
                     || self.leftover_cause != cause
-                    || self.leftover_reason != reason;
+                    || self.leftover_reason != reason
+                    || self.leftover_files_left != files_left;
                 self.leftover = *count;
                 self.leftover_cause = cause;
                 self.leftover_reason = reason;
+                self.leftover_files_left = files_left;
                 changed
             }
             ServerMessage::SetBlocklistDetails { details } => self.upsert(details.clone()),
@@ -267,14 +280,16 @@ mod tests {
         assert!(s.apply(&ServerMessage::SetBlocklistLeftovers {
             count: 3,
             cause: None,
-            reason: None
+            reason: None,
+            files_left: None,
         }));
         assert_eq!(s.leftover_rules(), 3);
         assert!(
             !s.apply(&ServerMessage::SetBlocklistLeftovers {
                 count: 3,
                 cause: None,
-                reason: None
+                reason: None,
+                files_left: None,
             }),
             "the same count isn't a change"
         );
@@ -291,7 +306,8 @@ mod tests {
         assert!(s.apply(&ServerMessage::SetBlocklistLeftovers {
             count: 0,
             cause: None,
-            reason: None
+            reason: None,
+            files_left: None,
         }));
         assert_eq!(s.leftover_rules(), 0);
     }
@@ -304,6 +320,7 @@ mod tests {
                 count: 2,
                 cause: cause.map(str::to_string),
                 reason: reason.map(str::to_string),
+                files_left: None,
             };
         assert!(s.apply(&told(Some("store_unreadable"), None)));
         assert_eq!(s.leftover_cause(), "store_unreadable");
@@ -336,6 +353,32 @@ mod tests {
         );
     }
 
+    /// #120 item 2: a removal whose deletes were refused leaves nothing to
+    /// count, and says so in `filesLeft`; the next message without it clears
+    /// it, as does an older bridge's summary.
+    #[test]
+    fn the_files_a_removal_left_follow_the_bridge() {
+        let mut s = SubscriptionsStore::new();
+        let told = |files_left: Option<&str>| ServerMessage::SetBlocklistLeftovers {
+            count: 0,
+            cause: None,
+            reason: None,
+            files_left: files_left.map(str::to_string),
+        };
+        assert_eq!(s.leftover_files_left(), "");
+        assert!(s.apply(&told(Some("They may come back."))));
+        assert_eq!(s.leftover_files_left(), "They may come back.");
+        assert!(!s.apply(&told(Some("They may come back."))));
+        assert!(s.apply(&told(None)));
+        assert_eq!(s.leftover_files_left(), "");
+        s.apply(&told(Some("They may come back.")));
+        s.apply(&ServerMessage::SetBlocklists {
+            blocklists: vec![],
+            storage: None,
+        });
+        assert_eq!(s.leftover_files_left(), "");
+    }
+
     #[test]
     fn an_older_bridge_never_leaves_a_stale_leftover_count() {
         let mut s = SubscriptionsStore::new();
@@ -343,6 +386,7 @@ mod tests {
             count: 3,
             cause: None,
             reason: None,
+            files_left: None,
         });
         s.apply(&ServerMessage::SetBlocklists {
             blocklists: vec![],
