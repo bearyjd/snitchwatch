@@ -37,11 +37,11 @@
 //! path to a match open — a filter is an explicit user investigation mode,
 //! and a hidden match would read as "no results".
 //!
-//! Design decision — the host level is data first, display later: the tree
-//! always tracks hosts, but [`GroupTree::build_projection`] keeps the
-//! two-level program > domain > connection projection the shell renders today,
-//! and [`GroupTree::build_host_projection`] adds the host rows between domain
-//! and connection for the monitor-tree UI that follows.
+//! Design decision — the host level: the tree always tracks hosts, and
+//! [`GroupTree::build_host_projection`] (what the shell renders) puts host rows
+//! between domain and connection. Hosts are materialised lazily, only under an
+//! expanded domain. [`GroupTree::build_projection`] keeps the two-level
+//! program > domain > connection shape for callers that do not want hosts.
 //!
 //! Design decision — domain grouping heuristic: exact Public Suffix List
 //! handling is explicitly not required. [`registrable_domain`] uses a
@@ -253,6 +253,19 @@ pub enum VisibleEntry {
         /// `Some` when the row sits under a host header (host projection).
         host_key: Option<String>,
     },
+}
+
+impl VisibleEntry {
+    /// The tier this entry sits on, as the model's `groupLevel` role reports
+    /// it: 0 program, 1 domain, 2 host, 3 connection.
+    pub fn level(&self) -> i32 {
+        match self {
+            VisibleEntry::ProcessHeader { .. } => 0,
+            VisibleEntry::DomainHeader { .. } => 1,
+            VisibleEntry::HostHeader { .. } => 2,
+            VisibleEntry::Row { .. } => 3,
+        }
+    }
 }
 
 /// The incrementally-maintained Process → Domain group tree.
@@ -1356,6 +1369,71 @@ mod tests {
             }
             other => panic!("expected host header, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn entry_levels_run_program_domain_host_connection() {
+        let rows = host_rows();
+        let mut tree = build(&rows);
+        open_all(&mut tree);
+        let proj = tree.build_host_projection(&rows_map(&rows), &ConnectionFilter::default());
+        let levels: Vec<i32> = proj.iter().map(VisibleEntry::level).collect();
+        assert_eq!(levels, vec![0, 1, 2, 3, 3, 2, 3, 1]);
+    }
+
+    #[test]
+    fn hosts_are_materialised_only_under_an_expanded_domain() {
+        let rows = host_rows();
+        let mut tree = build(&rows);
+        tree.set_process_expanded("firefox", true);
+        // A host flagged open under a collapsed domain stays hidden.
+        tree.set_host_expanded("firefox", "github.com", "www.github.com", true);
+        let proj = tree.build_host_projection(&rows_map(&rows), &ConnectionFilter::default());
+        assert_eq!(
+            shape(&proj),
+            vec!["P:firefox", "D:github.com", "D:slack.com"]
+        );
+    }
+
+    #[test]
+    fn domain_and_program_counts_are_the_same_with_or_without_hosts() {
+        let rows = host_rows();
+        let mut tree = build(&rows);
+        open_all(&mut tree);
+        let map = rows_map(&rows);
+        let filter = ConnectionFilter::default();
+        let headers = |proj: Vec<VisibleEntry>| -> Vec<(String, GroupCounts)> {
+            proj.into_iter()
+                .filter_map(|e| match e {
+                    VisibleEntry::ProcessHeader { key, counts, .. }
+                    | VisibleEntry::DomainHeader { key, counts, .. } => Some((key, counts)),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(
+            headers(tree.build_projection(&map, &filter)),
+            headers(tree.build_host_projection(&map, &filter))
+        );
+    }
+
+    #[test]
+    fn host_counts_follow_incremental_updates() {
+        let mut rows = host_rows();
+        let mut tree = build(&rows);
+        open_all(&mut tree);
+        // The pending row on api.github.com gets decided.
+        rows[1].action = Some("deny".to_string());
+        tree.upsert_row(&rows[1]);
+        let proj = tree.build_host_projection(&rows_map(&rows), &ConnectionFilter::default());
+        let api = proj.iter().find_map(|e| match e {
+            VisibleEntry::HostHeader { key, counts, .. } if key == "api.github.com" => {
+                Some(*counts)
+            }
+            _ => None,
+        });
+        let api = api.expect("api.github.com host header");
+        assert_eq!((api.total, api.pending, api.denied), (1, 0, 1));
     }
 
     #[test]

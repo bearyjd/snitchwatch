@@ -32,11 +32,13 @@ Item {
     required property bool pending
 
     // Grouping roles (Little-Snitch-parity Process->Domain view).
-    // depth: 0 = process header, 1 = domain header, 2 = leaf
-    // connection row. Flat mode always reports depth 0 / isGroupHeader
-    // false, so this delegate renders identically to before grouping
-    // was added.
+    // depth is the indent step. groupLevel is the tree tier: 0 = program
+    // header, 1 = domain header, 2 = host header, 3 = connection row. Flat
+    // mode always reports depth 0 / isGroupHeader false (level 3), so this
+    // delegate renders identically to before grouping was added.
     required property int depth
+    required property int groupLevel
+    required property string groupProcessKey
     required property bool isGroupHeader
     required property bool expanded
     required property string groupKey
@@ -84,7 +86,7 @@ Item {
     // button is hidden, so other delegates never look it up.
     readonly property string denyText: !row.isGroupHeader && row.pending
         ? verdictHelper.denyText(row.rowId) : ""
-    readonly property string denyAllText: row.isGroupHeader && row.depth === 0
+    readonly property string denyAllText: row.isGroupHeader && row.groupLevel === 0
         && row.groupPending > 0 ? verdictHelper.denyAllText(row.groupKey) : ""
     // Exposed for the headless probe (tests/inline_verdict_qml.rs).
     property alias denyButton: rowDenyButton
@@ -130,8 +132,10 @@ Item {
         z: 0
         onClicked: {
             if (row.isGroupHeader) {
-                if (row.depth === 0) {
+                if (row.groupLevel === 0) {
                     page.model.toggleProcessGroup(row.groupKey);
+                } else if (row.groupLevel === 2) {
+                    page.model.toggleHostGroup(row.groupProcessKey, row.groupParentKey, row.groupKey);
                 } else {
                     page.model.toggleDomainGroup(row.groupParentKey, row.groupKey);
                 }
@@ -217,7 +221,7 @@ Item {
             visible: row.isGroupHeader
             textFormat: Text.PlainText
             text: row.groupLabel
-            font.bold: true
+            font.bold: row.groupLevel < 2
             color: row.groupPending > 0 ? Kirigami.Theme.neutralTextColor : Kirigami.Theme.textColor
             elide: Text.ElideRight
             Layout.fillWidth: true
@@ -267,7 +271,7 @@ Item {
         // descendant — a domain header or a fully-decided process has
         // nothing to batch-act on.
         RowLayout {
-            visible: row.isGroupHeader && row.depth === 0 && row.groupPending > 0
+            visible: row.isGroupHeader && row.groupLevel === 0 && row.groupPending > 0
             spacing: Kirigami.Units.smallSpacing
 
             Controls.Button {

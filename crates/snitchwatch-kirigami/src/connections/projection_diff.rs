@@ -208,6 +208,35 @@ mod tests {
     }
 
     #[test]
+    fn toggling_one_host_of_5k_rows_is_a_ranged_change_of_its_connections() {
+        let rows = rows_5k();
+        let mut tree = tree_of(&rows);
+        open_everything(&mut tree);
+        let before = project(&tree, &rows);
+
+        tree.toggle_host("proc1", "d3.example", "h7.d3.example");
+        let after = project(&tree, &rows);
+
+        let d = diff(&before, &after);
+        // Its 10 connections go; the host header repaints. No reset.
+        assert_eq!(
+            (d.removed.len(), d.inserted.len(), d.changed.len()),
+            (10, 0, 1)
+        );
+        assert_eq!(apply(&before, &after, &d), after);
+
+        let back = {
+            tree.toggle_host("proc1", "d3.example", "h7.d3.example");
+            project(&tree, &rows)
+        };
+        let d = diff(&after, &back);
+        assert_eq!(
+            (d.removed.len(), d.inserted.len(), d.changed.len()),
+            (0, 10, 1)
+        );
+    }
+
+    #[test]
     fn expanding_is_the_mirror_image_of_collapsing() {
         let rows = rows_5k();
         let mut tree = tree_of(&rows);

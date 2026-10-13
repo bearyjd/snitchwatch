@@ -343,6 +343,12 @@ Controls.ApplicationWindow {
                         }
                     }
                 } else if (probeWindow.phase === 6) {
+                    for (const d of probeWindow.delegates()) {
+                        if (d.isGroupHeader && d.depth === 2 && !d.expanded) {
+                            connModel.toggleHostGroup(d.groupProcessKey, d.groupParentKey, d.groupKey);
+                        }
+                    }
+                } else if (probeWindow.phase === 7) {
                     probeWindow.checkLabels("grouped");
                     // OQ1: the page goes (the drawer's replace destroys it)
                     // while a request waits; its outcome still arrives.

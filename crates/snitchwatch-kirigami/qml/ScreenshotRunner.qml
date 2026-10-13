@@ -39,7 +39,7 @@ Item {
     }
 
     // Expand every collapsed group header at `depth` (0 = process,
-    // 1 = domain; expanding a process already opens its domains). Keys
+    // 1 = domain, 2 = host; expanding a process already opens its domains). Keys
     // are collected first: each toggle reshapes the list.
     function expandDepth(depth) {
         const m = runner.window.connectionsModelRef;
@@ -49,12 +49,14 @@ Item {
         for (let i = 0; i < list.count; i++) {
             const d = list.itemAtIndex(i);
             if (d && d.isGroupHeader && d.depth === depth && !d.expanded) {
-                todo.push({ key: d.groupKey, parent: d.groupParentKey });
+                todo.push({ key: d.groupKey, parent: d.groupParentKey, process: d.groupProcessKey });
             }
         }
         for (const t of todo) {
             if (depth === 0) {
                 m.toggleProcessGroup(t.key);
+            } else if (depth === 2) {
+                m.toggleHostGroup(t.process, t.parent, t.key);
             } else {
                 m.toggleDomainGroup(t.parent, t.key);
             }
