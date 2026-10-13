@@ -25,15 +25,19 @@
 //! - An enabled temporary rule whose duration Go can't parse is stored,
 //!   then refused (`scheduleTemporaryRule`).
 //!
-//! Not modelled: live reload (the watcher's reaction to a removed file),
-//! temporary rules' timers, and multi-rule commands (the bridge sends one
-//! rule per command).
+//! - Live reload ([`LoaderModel::live_reload`], off by default): a rule file
+//!   the daemon itself removed makes the watcher drop that rule from memory
+//!   if it is still an `always` rule (`liveReloadWorker` → `deleteRule`),
+//!   modelled as happening before the command's answer.
+//!
+//! Not modelled: temporary rules' timers, and multi-rule commands (the
+//! bridge sends one rule per command).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
 use snitchwatch_proto::protocol::{
-    Action, Notification, NotificationReply, NotificationReplyCode, Rule,
+    Action, Notification, NotificationReply, NotificationReplyCode, Operator, Rule,
 };
 use tokio::sync::mpsc;
 
@@ -51,6 +55,12 @@ pub struct LoaderModel {
     pub files: BTreeMap<String, Rule>,
     /// Files that can be neither removed nor written (`chattr +i`).
     pub stuck: BTreeSet<String>,
+    /// A rule whose conditions hold one of these values fails to compile.
+    pub uncompilable: BTreeSet<String>,
+    /// `(action, name)` commands that get no answer (and do nothing).
+    pub silent: BTreeSet<(i32, String)>,
+    /// The daemon runs with live reload (on by default in `main.go`).
+    pub live_reload: bool,
 }
 
 pub type SharedLoader = Arc<Mutex<LoaderModel>>;
@@ -73,10 +83,24 @@ impl LoaderModel {
     }
 
     /// The daemon's answer to one command: `Ok(())` or its `ERROR` text.
+    /// A [silent](Self::silent) command counts as `Ok(())`; see
+    /// [`Self::answer`].
     pub fn apply(&mut self, n: &Notification) -> Result<(), String> {
+        self.answer(n).unwrap_or(Ok(()))
+    }
+
+    /// [`Self::apply`], or `None` for a command that gets no answer.
+    pub fn answer(&mut self, n: &Notification) -> Option<Result<(), String>> {
         let Some(rule) = n.rules.first() else {
-            return Ok(());
+            return Some(Ok(()));
         };
+        if self.silent.contains(&(n.r#type, rule.name.clone())) {
+            return None;
+        }
+        Some(self.dispatch(n, rule))
+    }
+
+    fn dispatch(&mut self, n: &Notification, rule: &Rule) -> Result<(), String> {
         if n.r#type == Action::DeleteRule as i32 {
             return self.delete(&rule.name);
         }
@@ -111,15 +135,28 @@ impl LoaderModel {
             .memory
             .get(&rule.name)
             .is_some_and(|old| old.duration == "always" && rule.duration != "always");
-        if loses_file && !self.stuck.contains(&rule.name) {
-            self.files.remove(&rule.name);
-        }
+        let file_removed =
+            loses_file && !self.stuck.contains(&rule.name) && self.files.remove(&rule.name).is_some();
         if rule.enabled {
             // `Compile` (before the rule is stored); the duration is read
             // later, by `scheduleTemporaryRule`.
             let mut compiled = rule.clone();
             compiled.duration = "always".into();
-            validate_rule_shape(&compiled).map_err(|e| format!("(2) error compiling rule: {e}"))?;
+            let failure = if rule.operator.as_ref().is_some_and(|op| {
+                data_of(op)
+                    .iter()
+                    .any(|value| self.uncompilable.contains(value))
+            }) {
+                Some("bad".to_string())
+            } else {
+                validate_rule_shape(&compiled).err().map(|e| e.to_string())
+            };
+            if let Some(failure) = failure {
+                if file_removed {
+                    self.watcher_saw_removal(&rule.name);
+                }
+                return Err(format!("(2) error compiling rule: {failure}"));
+            }
         }
         self.memory.insert(rule.name.clone(), rule.clone());
         // `scheduleTemporaryRule` (`time.ParseDuration`) fails after the
@@ -141,6 +178,18 @@ impl LoaderModel {
         }
         self.files.insert(rule.name.clone(), rule);
         Ok(())
+    }
+
+    /// The live-reload watcher's reaction to a rule file removed by the
+    /// daemon itself (`deleteRule`).
+    fn watcher_saw_removal(&mut self, name: &str) {
+        let always = self
+            .memory
+            .get(name)
+            .is_some_and(|rule| rule.duration == "always");
+        if self.live_reload && always {
+            self.memory.remove(name);
+        }
     }
 
     /// The daemon stores a prompt answer: `Loader.Add` (`main.go` after
@@ -191,6 +240,12 @@ impl LoaderModel {
     }
 }
 
+fn data_of(op: &Operator) -> Vec<String> {
+    std::iter::once(op.data.clone())
+        .chain(op.list.iter().flat_map(data_of))
+        .collect()
+}
+
 /// Answer every command arriving on `inbound` (from
 /// [`crate::MockOpensnitchd::open_notifications`]) from `model`, through
 /// `replies`, and forward each command to the returned receiver once it is
@@ -211,7 +266,11 @@ pub fn spawn_loader_responder(
             if seen_tx.is_closed() {
                 return;
             }
-            let outcome = model.lock().unwrap_or_else(|e| e.into_inner()).apply(&n);
+            let answer = model.lock().unwrap_or_else(|e| e.into_inner()).answer(&n);
+            let Some(outcome) = answer else {
+                let _ = seen_tx.send(n).await;
+                continue;
+            };
             let reply = NotificationReply {
                 id: n.id,
                 code: match outcome {
@@ -232,7 +291,6 @@ pub fn spawn_loader_responder(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use snitchwatch_proto::protocol::Operator;
 
     fn rule(name: &str, enabled: bool, duration: &str) -> Rule {
         Rule {
@@ -381,5 +439,27 @@ mod tests {
         assert_eq!(model.apply(&change(rule("a", true, "5m"))), Ok(()));
         assert!(model.files.is_empty());
         assert_eq!(model.memory["a"].duration, "5m");
+    }
+
+    #[test]
+    fn live_reload_drops_an_always_rule_whose_file_the_failed_change_removed() {
+        for (live_reload, kept) in [(true, false), (false, true)] {
+            let mut model = LoaderModel::with_rules(&[rule("a", true, "always")]);
+            model.live_reload = live_reload;
+            model.uncompilable.insert("example.com".into());
+            let refused = model.apply(&change(rule("a", true, "5m"))).unwrap_err();
+            assert!(refused.contains("compiling"), "{refused}");
+            assert!(model.files.is_empty(), "its file went first");
+            assert_eq!(model.memory.contains_key("a"), kept, "{live_reload}");
+        }
+    }
+
+    #[test]
+    fn a_silent_command_gets_no_answer_and_changes_nothing() {
+        let mut model = LoaderModel::with_rules(&[rule("a", true, "always")]);
+        model.silent.insert((Action::DeleteRule as i32, "a".into()));
+        assert_eq!(model.answer(&delete("a")), None);
+        assert!(model.memory.contains_key("a") && model.files.contains_key("a"));
+        assert_eq!(model.answer(&change(rule("b", true, "5m"))), Some(Ok(())));
     }
 }
