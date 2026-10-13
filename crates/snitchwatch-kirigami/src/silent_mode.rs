@@ -152,6 +152,17 @@ impl Answered {
             .collect()
     }
 
+    /// Take back a row whose answer could not be sent (`qualified` as in a
+    /// plan), so it can be planned again.
+    pub(crate) fn forget(&mut self, qualified: &str) {
+        let Some((session, wire_id)) = qualified.split_once(':') else {
+            return;
+        };
+        if session.parse::<u64>().ok() == self.session {
+            self.wire_ids.remove(wire_id);
+        }
+    }
+
     fn enter(&mut self, session: u64) {
         if self.session != Some(session) {
             self.session = Some(session);
@@ -181,7 +192,8 @@ pub(crate) fn answer_new_rows(
     if !handles.is_current_session(session) {
         return;
     }
-    send_plan(handles, answered.plan(session, message, choice));
+    let plan = answered.plan(session, message, choice);
+    send_plan(handles, answered, plan);
 }
 
 /// Silent mode was just switched to Allow or Deny: answer the rows of the
@@ -197,16 +209,27 @@ pub(crate) fn answer_pending_now(
     let Some((session, wire_ids)) = handles.pending_wire_ids() else {
         return;
     };
-    send_plan(handles, answered.plan_waiting(session, &wire_ids, choice));
+    let plan = answered.plan_waiting(session, &wire_ids, choice);
+    send_plan(handles, answered, plan);
 }
 
 /// Send each answer once-only; a row is marked "needs a rule" only once its
 /// answer is queued, so a row that was never answered does not claim it was.
-fn send_plan(handles: &crate::bridge_runtime::BridgeHandles, plan: Vec<(String, ClientMessage)>) {
+/// A row whose send failed is forgotten, so it is not left unanswered and
+/// unasked: the next snapshot or sweep tries it again, and a switch back to
+/// "Ask me" lets the alert show it.
+fn send_plan(
+    handles: &crate::bridge_runtime::BridgeHandles,
+    answered: &mut Answered,
+    plan: Vec<(String, ClientMessage)>,
+) {
     for (qualified, msg) in plan {
         match crate::bridge_feed::dispatch_to(handles, msg, false) {
             Ok(()) => mark_needs_rule(&qualified),
-            Err(error) => tracing::warn!(%error, row = %qualified, "silent answer not sent"),
+            Err(error) => {
+                answered.forget(&qualified);
+                tracing::warn!(%error, row = %qualified, "silent answer not sent");
+            }
         }
     }
 }
@@ -267,6 +290,20 @@ mod tests {
             .is_empty());
         // A new session asks afresh.
         assert_eq!(answered.plan_waiting(5, &ids, "deny").len(), 2);
+    }
+
+    #[test]
+    fn a_row_whose_answer_was_not_sent_is_planned_again() {
+        let mut answered = Answered::default();
+        let snapshot = insert(vec![row("ask-1", None)]);
+        let plan = answered.plan(2, &snapshot, "deny");
+        assert_eq!(plan.len(), 1);
+        answered.forget(&plan[0].0);
+        assert_eq!(answered.plan(2, &snapshot, "deny").len(), 1);
+        // Another session's id, or a malformed one, forgets nothing.
+        answered.forget("9:ask-1");
+        answered.forget("nonsense");
+        assert!(answered.plan(2, &snapshot, "deny").is_empty());
     }
 
     #[test]

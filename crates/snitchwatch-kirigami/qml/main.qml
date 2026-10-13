@@ -147,6 +147,9 @@ Kirigami.ApplicationWindow {
     NotificationController {
         id: notificationController
         windowActive: root.active
+        // A prompt of this session is asked by the alert; if the alert is not
+        // the active window after the grace period, a notice is the fallback.
+        alertActive: alertHost.alertFocused
     }
 
     // Tray icon state feed (Task 18). The actual `SystemTrayIcon` is declared
@@ -583,7 +586,9 @@ Kirigami.ApplicationWindow {
     }
     // A new prompt does NOT raise this window. The alert (AlertHost.qml ->
     // AlertWindow.qml) is its own window, independent of this one: in "Ask me"
-    // it asks whether this window is shown or hidden to the tray, and in
+    // it asks whether this window is shown or hidden to the tray (if the alert
+    // is still not the active window after 5 s, NotificationController posts
+    // a desktop notice for the prompt), and in
     // "Allow/Deny and record" the prompt is answered silently, so raising the
     // main window for it would be the interruption silent mode exists to avoid.
     // `raiseAndActivate()` below is still how the tray and a notification's

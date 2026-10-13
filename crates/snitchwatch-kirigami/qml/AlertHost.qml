@@ -22,6 +22,11 @@ Item {
     signal notice(string text)
 
     property alias alert: alertWindow
+    // The alert is up and has keyboard focus: the user is looking at it.
+    // main.qml hands it to NotificationController, which posts a desktop
+    // notice for a prompt still waiting if this is false after the grace period.
+    readonly property bool alertFocused: alertWindow.visible
+        && alertWindow.activeFocusItem !== null
     readonly property string mode: host.settings ? host.settings.silentMode : ""
 
     Binding {

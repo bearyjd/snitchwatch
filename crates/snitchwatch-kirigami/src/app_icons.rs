@@ -33,15 +33,17 @@ use std::sync::{Mutex, Once, OnceLock};
 pub const FALLBACK_ICON: &str = "application-x-executable";
 
 /// Directories whose programs may be matched to a `.desktop` entry by
-/// basename alone.
-const BIN_DIRS: [&str; 7] = [
+/// basename alone. The icon is a hint, not the program's identity: a
+/// look-alike in one of these can still borrow an icon, which is why the
+/// alert also shows the full path under the name. `/app/bin` is not here: it
+/// is a path inside a Flatpak sandbox, which names no host program.
+const BIN_DIRS: [&str; 6] = [
     "/usr/bin",
     "/usr/sbin",
     "/usr/local/bin",
     "/bin",
     "/sbin",
     "/usr/libexec",
-    "/app/bin",
 ];
 
 /// Host prefixes under which a Flatpak app id is read from the path.
@@ -390,6 +392,46 @@ pub fn search_dirs(env: impl Fn(&str) -> Option<String>) -> Vec<PathBuf> {
 /// The host's index, once built (see [`prewarm`]).
 static INDEX: OnceLock<AppIconIndex> = OnceLock::new();
 
+/// Callbacks to run once the index is ready, so views that drew the generic
+/// icon meanwhile can ask again.
+#[derive(Default)]
+struct ReadyHooks {
+    ready: bool,
+    hooks: Vec<Box<dyn FnOnce() + Send>>,
+}
+
+impl ReadyHooks {
+    /// Run `hook` now if the index is ready, else when it becomes so.
+    fn add(&mut self, hook: Box<dyn FnOnce() + Send>) {
+        if self.ready {
+            hook();
+        } else {
+            self.hooks.push(hook);
+        }
+    }
+
+    fn mark_ready(&mut self) {
+        self.ready = true;
+        for hook in self.hooks.drain(..) {
+            hook();
+        }
+    }
+}
+
+static READY_HOOKS: Mutex<ReadyHooks> = Mutex::new(ReadyHooks {
+    ready: false,
+    hooks: Vec::new(),
+});
+
+/// Run `hook` (on whatever thread builds the index: keep it short, e.g.
+/// queue to the Qt thread) once the index is ready; now if it already is.
+pub fn when_ready(hook: impl FnOnce() + Send + 'static) {
+    READY_HOOKS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .add(Box::new(hook));
+}
+
 /// Start building the host's index on a background thread, once. Called at
 /// startup so it is ready by the time rows are drawn.
 pub fn prewarm() {
@@ -402,6 +444,10 @@ pub fn prewarm() {
                 let index = AppIconIndex::scan(&search_dirs(env))
                     .with_home(env("HOME").filter(|h| !h.is_empty()));
                 let _ = INDEX.set(index);
+                READY_HOOKS
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .mark_ready();
             });
         if let Err(error) = spawned {
             tracing::warn!(%error, "app icon index not built; generic icons are used");
@@ -432,6 +478,7 @@ pub fn icon_for_path(process_path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     fn write(dir: &Path, name: &str, body: &str) {
         std::fs::write(dir.join(name), body).unwrap();
@@ -568,6 +615,8 @@ mod tests {
             assert_eq!(idx.icon_for(&format!("{dir}/firefox")), "firefox-icon");
         }
         for p in [
+            // A sandbox-internal path names no host program.
+            "/app/bin/firefox",
             "/tmp/x/firefox",
             "/home/u/Downloads/firefox",
             "/usr/lib64/firefox/firefox",
@@ -576,6 +625,27 @@ mod tests {
         ] {
             assert_eq!(idx.icon_for(p), FALLBACK_ICON, "{p}");
         }
+    }
+
+    #[test]
+    fn ready_hooks_run_once_when_ready_and_at_once_after() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let count = Arc::new(AtomicUsize::new(0));
+        let hook = || {
+            let count = count.clone();
+            Box::new(move || {
+                count.fetch_add(1, Ordering::SeqCst);
+            }) as Box<dyn FnOnce() + Send>
+        };
+        let mut hooks = ReadyHooks::default();
+        hooks.add(hook());
+        assert_eq!(count.load(Ordering::SeqCst), 0);
+        hooks.mark_ready();
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+        hooks.mark_ready();
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+        hooks.add(hook());
+        assert_eq!(count.load(Ordering::SeqCst), 2);
     }
 
     #[test]

@@ -31,6 +31,9 @@ pub(crate) struct PendingTarget {
     connection_id: u64,
     wire_id: String,
     row: PendingRow,
+    /// The Settings duration an Allow remembers for, read once when the
+    /// notice is shown: its label and its click use the same one.
+    allow_duration: &'static str,
 }
 
 impl PendingTarget {
@@ -45,6 +48,7 @@ impl PendingTarget {
             connection_id,
             wire_id,
             row,
+            allow_duration: crate::settings::normalize_duration(""),
         })
     }
 
@@ -57,7 +61,7 @@ impl PendingTarget {
 /// `on_review` raises the window.
 pub(crate) async fn show_and_answer(
     conn: &zbus::Connection,
-    target: PendingTarget,
+    mut target: PendingTarget,
     on_review: impl FnOnce(),
 ) {
     let deny = InlineDeny::decide(
@@ -67,9 +71,16 @@ pub(crate) async fn show_and_answer(
             .advertises_app_bound_rules(target.connection_id),
     );
     let body = pending_body(&target.row, deny);
-    let allow_duration =
-        crate::settings::read_settings(&crate::paths::settings_path()).duration_token();
-    let allow = allow_label(deny, allow_duration);
+    // A file read: off the runtime's worker, and once, for label and click.
+    target.allow_duration = tokio::task::spawn_blocking(|| {
+        crate::settings::read_settings(&crate::paths::settings_path()).duration_token()
+    })
+    .await
+    .unwrap_or_else(|error| {
+        tracing::warn!(%error, "settings read failed; the default duration is used");
+        crate::settings::normalize_duration("")
+    });
+    let allow = allow_label(deny, target.allow_duration);
     let actions = [
         (ALLOW_ONCE_ACTION, allow.as_str()),
         (DENY_ACTION, "Deny"),
@@ -126,14 +137,12 @@ async fn on_action(target: &PendingTarget, key: &str, on_review: impl FnOnce()) 
     let Some(action) = NoticeAction::from_id(key) else {
         return;
     };
-    let allow_duration =
-        crate::settings::read_settings(&crate::paths::settings_path()).duration_token();
     let outcome = act_and_confirm(
         &target.handles,
         target.connection_id,
         &target.wire_id,
         action,
-        allow_duration,
+        target.allow_duration,
     )
     .await;
     tracing::info!(

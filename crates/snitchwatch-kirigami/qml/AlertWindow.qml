@@ -239,7 +239,10 @@ Window {
         }
         Keys.onReleased: event => {
             event.accepted = true;
-            alert.keyReleased(event.key);
+            // An auto-repeat "release" is not a real release.
+            if (!event.isAutoRepeat) {
+                alert.keyReleased(event.key);
+            }
         }
 
         ColumnLayout {

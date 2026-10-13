@@ -710,6 +710,10 @@ impl qobject::ConnectionsModel {
             return;
         };
         let qt_thread = self.qt_thread();
+        let icons_thread = qt_thread.clone();
+        crate::app_icons::when_ready(move || {
+            let _ = icons_thread.queue(|qobject| qobject.refresh_app_icons());
+        });
         let session_handles = handles.clone();
         crate::bridge_dispatch::spawn_feed(
             &handles,
@@ -1271,6 +1275,20 @@ impl qobject::ConnectionsModel {
     fn apply_update(mut self: Pin<&mut Self>, rows: Vec<ConnectionRow>) {
         let ops = self.as_mut().rust_mut().store.update_rows(rows);
         self.emit_changed_ops(&ops);
+    }
+
+    /// The icon index just became ready: rows drawn before then have the
+    /// generic icon, so every row's `appIcon` is read again.
+    fn refresh_app_icons(mut self: Pin<&mut Self>) {
+        let rows = self.row_count(&QModelIndex::default());
+        if rows <= 0 {
+            return;
+        }
+        let tl = self.index(0, 0, &QModelIndex::default());
+        let br = self.index(rows - 1, 0, &QModelIndex::default());
+        let mut roles = QList::<i32>::default();
+        roles.append(ROLE_APP_ICON);
+        self.as_mut().data_changed(&tl, &br, &roles);
     }
 
     fn emit_changed_ops(mut self: Pin<&mut Self>, ops: &[ModelOp]) {

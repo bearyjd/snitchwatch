@@ -31,6 +31,23 @@ use common::{capture_stderr, init_headless_qt_env};
 const PROBE_URL: &str = "qrc:/alert_window_probe.qml";
 const DONE_MARKER: &str = "ALERT_WINDOW_PROBE_DONE";
 const ALERT_QML: &str = include_str!("../qml/AlertWindow.qml");
+const ALERT_HOST_QML: &str = include_str!("../qml/AlertHost.qml");
+const MAIN_QML: &str = include_str!("../qml/main.qml");
+
+/// The desktop-notice fallback for an unseen alert needs the alert's focus
+/// state to reach `NotificationController.alertActive`.
+#[test]
+fn the_alerts_focus_reaches_the_notification_controller() {
+    assert!(
+        ALERT_HOST_QML.contains("alertWindow.visible")
+            && ALERT_HOST_QML.contains("alertWindow.activeFocusItem !== null"),
+        "AlertHost.alertFocused must be the alert shown with focus"
+    );
+    assert!(
+        MAIN_QML.contains("alertActive: alertHost.alertFocused"),
+        "main.qml must bind NotificationController.alertActive to the alert's focus"
+    );
+}
 
 #[test]
 fn the_alert_shows_the_oldest_row_ignores_input_until_armed_and_answers_through_the_feed() {
@@ -326,8 +343,9 @@ fn the_alert_wires_keys_to_the_armed_handler_and_waits_one_second() {
         .and_then(|rest| rest.split('}').next())
         .expect("AlertWindow.qml has no Keys.onReleased");
     assert!(
-        released.contains("alert.keyReleased(event.key)"),
-        "a released key must be forgotten: {released}"
+        released.contains("alert.keyReleased(event.key)")
+            && released.contains("!event.isAutoRepeat"),
+        "a real release (not an auto-repeat) must be forgotten: {released}"
     );
     assert!(
         ALERT_QML.contains("onRemembersChanged: alert.arm()"),

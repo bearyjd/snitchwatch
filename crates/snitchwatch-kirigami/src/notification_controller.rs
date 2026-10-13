@@ -15,10 +15,13 @@
 //! Plasma's action-button rendering and Do-Not-Disturb handling apply either
 //! way.
 //!
-//! **This GUI's own prompts get no notice (LS redesign phase 1).** The alert
-//! window is independent of the main window, so a prompt of the live session
-//! is answered by `silent_mode` or asked by the alert, never announced here;
-//! the grace period below applies to other sessions' prompts.
+//! **This GUI's own prompts (LS redesign phase 1).** The alert window is
+//! independent of the main window, so a prompt of the live session is
+//! answered by `silent_mode` (Allow/Deny: no notice, ever) or asked by the
+//! alert ("Ask me"). Only if the alert is not the active window once the
+//! grace period ends (`alertActive`, set from `AlertHost.qml`), a notice is
+//! the fallback, so an alert nobody saw is not a prompt nobody saw. Other
+//! sessions' prompts are gated on the main window as before.
 //!
 //! **Cooldown.** [`crate::notifier::CooldownGate`] is ported unchanged.
 //!
@@ -62,6 +65,7 @@ use tokio::sync::broadcast;
 use crate::bridge_runtime::{BridgeHandles, BridgeNotice, ReceivedNotice};
 use crate::notifier::CooldownGate;
 use crate::pending_notice::{show_and_answer, show_plain, PendingTarget};
+use crate::silent_mode;
 use snitchwatch_bridge::translator::process_binding::RuleRefusal;
 
 /// Per the design spec: a pending row is only worth a fallback desktop
@@ -100,6 +104,11 @@ pub mod qobject {
         /// binding fails toward *not* spamming a notification, not toward
         /// spuriously firing one.
         #[qproperty(bool, window_active, cxx_name = "windowActive")]
+        /// Set by `AlertHost.qml`: the alert window is shown and has focus.
+        /// Gates the fallback notice for a prompt of this GUI's own session
+        /// (which `windowActive` says nothing about). Defaults to `false`:
+        /// unknown means the alert was not seen.
+        #[qproperty(bool, alert_active, cxx_name = "alertActive")]
         type NotificationController = super::NotificationControllerRust;
 
         /// Emitted when the user clicks a notification's "Review" action.
@@ -124,12 +133,14 @@ pub mod qobject {
 /// Rust-side state for [`qobject::NotificationController`].
 pub struct NotificationControllerRust {
     window_active: bool,
+    alert_active: bool,
 }
 
 impl Default for NotificationControllerRust {
     fn default() -> Self {
         Self {
             window_active: true,
+            alert_active: false,
         }
     }
 }
@@ -178,7 +189,9 @@ async fn relay_notices(
 
 /// One notice. A Pending one waits out the grace period first, spawned so
 /// a burst of them doesn't stall DaemonAway/FilterPauseExpired, and is
-/// shown only while its row still waits in its session (Part B).
+/// shown only while its row still waits in its session (Part B). A prompt
+/// of this GUI's own session is held to the alert window instead of the
+/// main one, and never announced in silent allow/deny modes.
 fn relay(
     received: ReceivedNotice,
     handles: &BridgeHandles,
@@ -193,32 +206,25 @@ fn relay(
     let BridgeNotice::Pending { row_id, .. } = notice else {
         let _ = qt_thread.queue(move |qobject| {
             if handles.is_current_session(connection_id) {
-                qobject.maybe_dispatch(notice, gate, None);
+                qobject.maybe_dispatch(notice, gate, None, true);
             }
         });
         return;
     };
-    // This GUI's own session never gets a desktop notice for a prompt: with
-    // silent mode on, `silent_mode` answers it at arrival; with it off, the
-    // alert window (`AlertWindow.qml`, independent of the main window, so
-    // shown whether that is visible or hidden to the tray) asks. A notice
-    // would only duplicate it.
-    if handles.is_current_session(connection_id) {
-        tracing::info!(
-            session = connection_id,
-            row_id,
-            "no pending notice: silent mode or the alert window handles it"
-        );
-        return;
-    }
     tokio::spawn(async move {
         let look = || {
             let (tx, rx) = tokio::sync::oneshot::channel();
             let (handles, notice, gate) = (handles.clone(), notice.clone(), gate.clone());
             let queued = qt_thread.queue(move |qobject| {
-                let look = match PendingTarget::of(&handles, connection_id, &notice) {
-                    Some(target) => qobject.maybe_dispatch(notice, gate, Some(target)),
-                    None => PendingLook::Gone,
+                let current = handles.is_current_session(connection_id);
+                let look = if current && silent_mode::current_choice().is_some() {
+                    // Silent mode answers it; the user chose not to be asked.
+                    PendingLook::Gone
+                } else {
+                    match PendingTarget::of(&handles, connection_id, &notice) {
+                        Some(target) => qobject.maybe_dispatch(notice, gate, Some(target), current),
+                        None => PendingLook::Gone,
+                    }
                 };
                 let _ = tx.send(look);
             });
@@ -271,6 +277,16 @@ where
                 return;
             }
         }
+    }
+}
+
+/// Whether what the user is looking at already shows a waiting prompt: the
+/// alert window for this GUI's own session, the main window otherwise.
+fn front_is_active(current_session: bool, window_active: bool, alert_active: bool) -> bool {
+    if current_session {
+        alert_active
+    } else {
+        window_active
     }
 }
 
@@ -329,8 +345,11 @@ impl qobject::NotificationController {
         notice: BridgeNotice,
         gate: Arc<Mutex<CooldownGate>>,
         target: Option<PendingTarget>,
+        current_session: bool,
     ) -> PendingLook {
-        match may_post(&notice, *self.window_active(), &gate, Instant::now()) {
+        let front_active =
+            front_is_active(current_session, *self.window_active(), *self.alert_active());
+        match may_post(&notice, front_active, &gate, Instant::now()) {
             Gate::WindowActive => PendingLook::WindowActive,
             Gate::CooledDown => {
                 let (kind, row_id) = notice_label(&notice);
@@ -459,6 +478,27 @@ mod tests {
             may_post(&BridgeNotice::DaemonAway, true, &gate, at(3)),
             Gate::Post
         );
+    }
+
+    /// A prompt of this GUI's own session is held back while the alert is
+    /// the active window and posted when it is not, whatever the main
+    /// window does; other sessions follow the main window.
+    #[test]
+    fn the_alert_gates_this_guis_own_prompt_and_the_window_the_others() {
+        assert!(front_is_active(true, false, true));
+        assert!(!front_is_active(true, true, false));
+        assert!(front_is_active(false, true, false));
+        assert!(!front_is_active(false, false, true));
+        let gate = Mutex::new(CooldownGate::new());
+        let pending = BridgeNotice::Pending {
+            row_id: 3,
+            process: "curl".into(),
+        };
+        let now = Instant::now();
+        let held = front_is_active(true, false, true);
+        assert_eq!(may_post(&pending, held, &gate, now), Gate::WindowActive);
+        let unseen = front_is_active(true, true, false);
+        assert_eq!(may_post(&pending, unseen, &gate, now), Gate::Post);
     }
 
     /// The looks a prompt's notice gets, at what time after the prompt.
