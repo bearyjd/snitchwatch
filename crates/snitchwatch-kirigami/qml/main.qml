@@ -63,6 +63,8 @@ Kirigami.ApplicationWindow {
         id: connectionsModel
     }
     property var connectionsModelRef: connectionsModel
+    // For page components, whose own `geoModel` property would shadow the id.
+    property var geoModelRef: geoModel
     // Page navigation that first pops any pushed page (see StackNav.qml).
     StackNav {
         id: nav
@@ -243,6 +245,7 @@ Kirigami.ApplicationWindow {
         // SNITCHWATCH_DEMO=1 only (the model ignores the call otherwise).
         if (appInfo.demoMode) {
             connectionsModel.loadDemoRows();
+            geoModel.loadDemoRows();
             curatedDefaultsModel.loadDemoGroups();
         }
     }
@@ -538,6 +541,7 @@ Kirigami.ApplicationWindow {
         id: connectionsPageComponent
         ConnectionsPage {
             model: root.connectionsModelRef
+            geoModel: root.geoModelRef
             bridgeFeed: root.bridgeFeedRef
             makeRuleController: root.makeRuleControllerRef
 

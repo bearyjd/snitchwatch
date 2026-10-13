@@ -41,6 +41,14 @@ const CONNECTIONS_PAGE: &str = concat!(
     include_str!("../qml/RuleButton.qml"),
     "\n",
     include_str!("../qml/LevelRuleActions.qml"),
+    "\n",
+    include_str!("../qml/MapBand.qml"),
+    "\n",
+    include_str!("../qml/MapView.qml"),
+    "\n",
+    include_str!("../qml/MapMarker.qml"),
+    "\n",
+    include_str!("../qml/MonitorPane.qml"),
 );
 const MAIN_QML: &str = include_str!("../qml/main.qml");
 

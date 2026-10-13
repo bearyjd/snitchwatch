@@ -4,6 +4,7 @@
 // then quits. Never active in a normal session. Extracted from main.qml.
 import QtQuick
 import QtQuick.Window
+import com.snitchwatch.shell
 
 Item {
     id: runner
@@ -33,8 +34,13 @@ Item {
         // button's "Can't add rule" state (no program file known), then the
         // confirm dialog of a program-wide rule.
         { name: "connections-unavailable", page: "connections", filter: "dhclient" },
-        { name: "connections-confirm", confirm: true }
+        { name: "connections-confirm", confirm: true },
+        // The map band collapsed (header only), then a narrow, short window
+        // where the band must give way before the list does.
+        { name: "connections-map-collapsed", page: "connections", mapCollapsed: true },
+        { name: "connections-map-narrow", page: "connections", mapCollapsed: false, size: [440, 520] }
     ]
+    property string sizedFor: ""
 
     function capture(name, item) {
         runner.pending++;
@@ -125,8 +131,22 @@ Item {
                 runner.capture(shot.name, actions.confirmDialog.contentItem);
                 return;
             }
+            if (shot.size && runner.sizedFor !== shot.name) {
+                // Resize now, grab on the next tick once it has laid out.
+                runner.sizedFor = shot.name;
+                runner.window.width = shot.size[0];
+                runner.window.height = shot.size[1];
+                if (shot.page) {
+                    runner.window.pageStack.replace(runner.pages[shot.page]);
+                }
+                MapBandState.collapsed = shot.mapCollapsed === true;
+                return;
+            }
             runner.step++;
-            if (shot.page) {
+            if (shot.mapCollapsed !== undefined) {
+                MapBandState.collapsed = shot.mapCollapsed;
+            }
+            if (shot.page && !shot.size) {
                 runner.window.pageStack.replace(runner.pages[shot.page]);
             }
             if (shot.expandGroups) {

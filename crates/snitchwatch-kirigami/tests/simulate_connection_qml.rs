@@ -370,6 +370,10 @@ fn connections_files_stay_within_their_line_budgets() {
             "ConnectionList.qml",
             include_str!("../qml/ConnectionList.qml"),
         ),
+        ("MapBand.qml", include_str!("../qml/MapBand.qml")),
+        ("MapView.qml", include_str!("../qml/MapView.qml")),
+        ("MapMarker.qml", include_str!("../qml/MapMarker.qml")),
+        ("MonitorPane.qml", include_str!("../qml/MonitorPane.qml")),
     ] {
         let lines = source.lines().count();
         assert!(

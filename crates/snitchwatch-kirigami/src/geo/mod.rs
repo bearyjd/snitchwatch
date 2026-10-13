@@ -17,10 +17,13 @@
 //!   * [`store`] — [`store::GeoStore`], the per-country aggregate, consuming
 //!     the same `ServerMessage` connection-row variants
 //!     `connections::row_store::RowStore` does.
+//!   * [`map_markers`] — the map band's marker join, grid-bucket clustering and
+//!     spoken summaries (Qt-free).
 //!   * [`world_map`] — bundled Natural Earth country shapes and marker
 //!     centroids (offline data, see `docs/map-data.md`).
 
 pub mod flag;
+pub mod map_markers;
 pub mod paths;
 pub mod resolver;
 pub mod store;
@@ -43,7 +46,17 @@ static SHARED_GEO: OnceLock<SharedGeo> = OnceLock::new();
 
 fn shared_geo() -> &'static SharedGeo {
     SHARED_GEO.get_or_init(|| {
-        let outcome = resolver::discover_and_open();
+        // Demo mode never reads a database: a fixed fake lookup stands in so
+        // the map can be reviewed (and screenshotted) offline.
+        let outcome = if crate::demo::enabled() {
+            resolver::DiscoveryOutcome {
+                lookup: Some(std::sync::Arc::new(crate::demo::DemoGeo)),
+                path: PathBuf::from("demo"),
+                available: true,
+            }
+        } else {
+            resolver::discover_and_open()
+        };
         SharedGeo {
             resolver: SharedResolver::new(outcome.lookup),
             available: outcome.available,

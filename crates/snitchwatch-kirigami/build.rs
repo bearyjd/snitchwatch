@@ -16,6 +16,7 @@ fn main() {
             .qml_file(QmlFile::from("qml/Theme.qml").singleton(true))
             .qml_file(QmlFile::from("qml/Durations.qml").singleton(true))
             .qml_file(QmlFile::from("qml/SilentModes.qml").singleton(true))
+            .qml_file(QmlFile::from("qml/MapBandState.qml").singleton(true))
             .qml_files([
                 "qml/main.qml",
                 "qml/TrayMenu.qml",
@@ -31,6 +32,10 @@ fn main() {
                 "qml/InspectorPanel.qml",
                 "qml/ConnectionDetailPage.qml",
                 "qml/ConnectionList.qml",
+                "qml/MapBand.qml",
+                "qml/MapView.qml",
+                "qml/MapMarker.qml",
+                "qml/MonitorPane.qml",
                 "qml/RuleButton.qml",
                 "qml/LevelRuleActions.qml",
                 "qml/InlineVerdicts.qml",

@@ -104,6 +104,30 @@ pub mod qobject {
         #[qinvokable]
         #[cxx_name = "startBridgeFeed"]
         fn start_bridge_feed(self: Pin<&mut GeoModel>);
+
+        /// Demo mode only (`SNITCHWATCH_DEMO=1`, ignored otherwise): feed the
+        /// fake demo rows through the demo country lookup so the map shows
+        /// several countries without a bridge or a GeoIP database.
+        #[qinvokable]
+        #[cxx_name = "loadDemoRows"]
+        fn load_demo_rows(self: Pin<&mut GeoModel>);
+
+        /// Every country outline as one SVG path on the 3600x1800 grid.
+        #[qinvokable]
+        #[cxx_name = "landPath"]
+        fn land_path(self: &GeoModel) -> QString;
+
+        /// JSON array of marker clusters for the map band at `scale` screen
+        /// pixels per grid unit, merging markers within `radius_px`, then any closer than `gap_px`.
+        #[qinvokable]
+        #[cxx_name = "clustersJson"]
+        fn clusters_json(self: &GeoModel, scale: f64, radius_px: f64, gap_px: f64) -> QString;
+
+        /// A connection event touched this country (inserted or updated
+        /// row). Drives the map's pulse; carries no volume.
+        #[qsignal]
+        #[cxx_name = "countryActivity"]
+        fn country_activity(self: Pin<&mut GeoModel>, code: &QString);
     }
 
     // Protected base-class helpers inherited from QAbstractListModel.
@@ -190,6 +214,28 @@ impl qobject::GeoModel {
         }
     }
 
+    fn load_demo_rows(self: Pin<&mut Self>) {
+        if !crate::demo::enabled() {
+            return;
+        }
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as i64);
+        self.apply_server_message(&ServerMessage::InsertConnectionRows {
+            rows: crate::demo::demo_rows(now_ms),
+        });
+    }
+
+    fn land_path(&self) -> QString {
+        QString::from(crate::geo::map_markers::land_path())
+    }
+
+    fn clusters_json(&self, scale: f64, radius_px: f64, gap_px: f64) -> QString {
+        QString::from(&crate::geo::map_markers::clusters_json(
+            &self.rows, scale, radius_px, gap_px,
+        ))
+    }
+
     fn start_bridge_feed(self: Pin<&mut Self>) {
         let Some(handles) = crate::bridge_runtime::handles() else {
             tracing::warn!("GeoModel: bridge not running; live feed disabled");
@@ -247,6 +293,7 @@ impl qobject::GeoModel {
         if !changed {
             return;
         }
+        let activity = crate::geo::map_markers::activity_codes(msg, &self.resolver);
         unsafe {
             self.as_mut().begin_reset_model();
         }
@@ -255,7 +302,10 @@ impl qobject::GeoModel {
         unsafe {
             self.as_mut().end_reset_model();
         }
-        self.refresh_counts();
+        self.as_mut().refresh_counts();
+        for code in activity {
+            self.as_mut().country_activity(&QString::from(&code));
+        }
     }
 
     fn refresh_counts(mut self: Pin<&mut Self>) {

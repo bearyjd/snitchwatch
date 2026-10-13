@@ -50,6 +50,14 @@ const CONNECTIONS_PAGE: &str = concat!(
     include_str!("../qml/RuleButton.qml"),
     "\n",
     include_str!("../qml/LevelRuleActions.qml"),
+    "\n",
+    include_str!("../qml/MapBand.qml"),
+    "\n",
+    include_str!("../qml/MapView.qml"),
+    "\n",
+    include_str!("../qml/MapMarker.qml"),
+    "\n",
+    include_str!("../qml/MonitorPane.qml"),
 );
 const MAIN_QML: &str = include_str!("../qml/main.qml");
 const SIZED_SHEET: &str = include_str!("../qml/SizedOverlaySheet.qml");
@@ -121,6 +129,11 @@ const ALL_QML: &[(&str, &str)] = &[
         include_str!("../qml/DecideLaterButton.qml"),
     ),
     ("RuleButton.qml", include_str!("../qml/RuleButton.qml")),
+    ("MapBand.qml", include_str!("../qml/MapBand.qml")),
+    ("MapBandState.qml", include_str!("../qml/MapBandState.qml")),
+    ("MapMarker.qml", include_str!("../qml/MapMarker.qml")),
+    ("MapView.qml", include_str!("../qml/MapView.qml")),
+    ("MonitorPane.qml", include_str!("../qml/MonitorPane.qml")),
     (
         "LevelRuleActions.qml",
         include_str!("../qml/LevelRuleActions.qml"),
@@ -1052,4 +1065,170 @@ fn rule_button_states_each_have_a_distinct_glyph_and_label() {
         assert!(set.iter().all(|t| !t.is_empty()), "empty text in {set:?}");
     }
     assert!(code.contains("text: root.glyph") && code.contains("text: root.stateLabel"));
+}
+
+/// The map band must say what its markers are and are not (phase 2 risks):
+/// the country is approximate (CDN and anycast addresses can mislead), pulses
+/// mean a connection event and not data volume, and the shapes' source. The
+/// wording is pinned in one `text:` line of `MapBand.qml`, always visible
+/// while the map is shown, and rendered as plain text.
+#[test]
+fn map_footer_states_what_the_markers_mean() {
+    const FOOTER: &str = "Markers show the approximate country of each destination IP (CDN and anycast addresses can mislead). Pulses mean a connection event, not data volume. Country shapes: Natural Earth.";
+    let code = code_lines(include_str!("../qml/MapBand.qml"));
+    let footers: Vec<String> = blocks(&code, "Controls.Label {")
+        .into_iter()
+        .filter(|b| b.contains("id: honestText"))
+        .collect();
+    assert_eq!(footers.len(), 1, "MapBand.qml lost its honest footer");
+    assert_eq!(
+        text_binding(&footers[0]).as_deref().map(str::trim),
+        Some(format!("text: \"{FOOTER}\"").as_str()),
+        "the map footer wording changed; update this pin deliberately"
+    );
+    assert!(footers[0].contains("textFormat: Text.PlainText"));
+    assert!(
+        !footers[0].contains("visible:") && !footers[0].contains("opacity: 0\n"),
+        "the footer must not be hideable on its own"
+    );
+}
+
+/// The missing-database state reuses the Geography page's wording and offers
+/// no download.
+#[test]
+fn map_setup_state_matches_the_geography_page_and_never_downloads() {
+    let map = code_lines(include_str!("../qml/MapView.qml"));
+    assert!(map.contains("No GeoIP database installed"));
+    assert!(map.contains("Snitchwatch never downloads one automatically."));
+    let lower = map.to_lowercase();
+    assert!(!lower.contains("download button") && !lower.contains("onclicked: download"));
+    assert!(include_str!("../qml/GeoPage.qml").contains("No GeoIP database installed"));
+}
+
+/// Colour is never the only cue on a map marker: a distinct shape per
+/// verdict, plus a glyph, plus an accessible name that states the counts.
+#[test]
+fn map_markers_encode_verdict_by_shape_and_glyph_not_colour_alone() {
+    let code = code_lines(include_str!("../qml/MapMarker.qml"));
+    assert!(code_lines(include_str!("../qml/MapView.qml")).contains("longDuration <= 1"));
+    for needle in [
+        "dominant === \"pending\" ? 45 : 0",
+        "dominant === \"denied\" ? \"×\"",
+        "dominant === \"allowed\" ? \"✓\"",
+        "Accessible.name: cluster.summary",
+        "visible: marker.cluster.mixed",
+    ] {
+        assert!(code.contains(needle), "MapMarker.qml lost `{needle}`");
+    }
+}
+
+/// The map band's collapse state and height are session-only: a fresh start
+/// shows the map. Nothing in the band may read or write settings.
+#[test]
+fn map_band_state_is_never_persisted() {
+    for (name, source) in [
+        ("MapBandState.qml", include_str!("../qml/MapBandState.qml")),
+        ("MapBand.qml", include_str!("../qml/MapBand.qml")),
+        ("MonitorPane.qml", include_str!("../qml/MonitorPane.qml")),
+    ] {
+        let lower = code_lines(source).to_lowercase();
+        for forbidden in ["settings", "localstorage", "qt.labs"] {
+            assert!(
+                !lower.contains(forbidden),
+                "{name} must not persist state ({forbidden})"
+            );
+        }
+    }
+    assert!(code_lines(include_str!("../qml/MapBandState.qml"))
+        .contains("property bool collapsed: false"));
+}
+
+/// The map is featured in the LEFT pane: the top of a vertical SplitView,
+/// above the tree, never in the page header or the top bar, and the inspector
+/// stays the right-hand column. Dragging to zero collapses it.
+#[test]
+fn map_band_sits_above_the_tree_in_the_left_pane() {
+    let pane = code_lines(include_str!("../qml/MonitorPane.qml"));
+    assert!(
+        pane.contains("orientation: Qt.Vertical"),
+        "the map/tree split must be vertical"
+    );
+    let band = pane
+        .find("MapBand {")
+        .expect("MonitorPane lost its MapBand");
+    let tree = pane
+        .find("ConnectionList {")
+        .expect("MonitorPane lost its tree");
+    assert!(band < tree, "the map band must sit above the tree");
+    assert!(
+        pane.contains("band.followDrag(band.height)")
+            && code_lines(include_str!("../qml/MapBand.qml"))
+                .contains("MapBandState.collapsed = body < band.collapseBelow"),
+        "dragging to zero must collapse"
+    );
+    assert!(pane.contains("Controls.SplitView.fillHeight: true"));
+    for (name, source) in [
+        (
+            "ConnectionsTopBar.qml",
+            include_str!("../qml/ConnectionsTopBar.qml"),
+        ),
+        (
+            "ConnectionsFilterBar.qml",
+            include_str!("../qml/ConnectionsFilterBar.qml"),
+        ),
+    ] {
+        assert!(
+            !code_lines(source).contains("MapBand"),
+            "{name} must not host the map"
+        );
+    }
+    let page = code_lines(include_str!("../qml/ConnectionsPage.qml"));
+    assert!(
+        !page.contains("MapBand {"),
+        "the page hosts the map through MonitorPane"
+    );
+    let monitor = page
+        .find("MonitorPane {")
+        .expect("the page lost MonitorPane");
+    let inspector = page
+        .find("InspectorPanel {")
+        .expect("the page lost its inspector");
+    assert!(
+        monitor < inspector,
+        "the inspector stays the right-hand panel"
+    );
+}
+
+/// The splitter's height cap in `MonitorPane.qml`: while a handle drag is in
+/// progress the band may grow to its full expanded size even when it starts
+/// collapsed, and it never takes the tree's minimum. `tests/qml/
+/// tst_map_split_drag.qml` mirrors these exact expressions; keep them in step.
+#[test]
+fn map_band_height_cap_lets_a_collapsed_band_reopen() {
+    let pane: String = code_lines(include_str!("../qml/MonitorPane.qml"))
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    for needle in [
+        "Controls.SplitView.maximumHeight: Math.min( split.resizing ? band.chromeHeight + band.maximumBody : band.maximumHeight, Math.max(split.resizing ? band.collapsedHeight : band.minimumHeight, split.height - pane.treeMinimum - pane.handleHeight))",
+        "Controls.SplitView.minimumHeight: split.resizing ? band.collapsedHeight : band.minimumHeight",
+        "onPreferredHeightChanged: if (!split.resizing) pane.applyPreferred()",
+        "onResizingChanged: if (!split.resizing) pane.applyPreferred()",
+    ] {
+        assert!(pane.contains(needle), "MonitorPane.qml lost `{needle}`");
+    }
+    let mirror: String = include_str!("qml/tst_map_split_drag.qml")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    for needle in [
+        "Controls.SplitView.maximumHeight: Math.min( split.resizing ? root.chrome + root.maxBody : root.maximumHeight, Math.max(split.resizing ? root.header : root.minimumHeight, split.height - root.treeMin - root.handleHeight))",
+        "Controls.SplitView.minimumHeight: split.resizing ? root.header : root.minimumHeight",
+        "onPreferredChanged: if (!split.resizing)",
+    ] {
+        assert!(
+            mirror.contains(needle),
+            "tst_map_split_drag.qml drifted from MonitorPane.qml: `{needle}`"
+        );
+    }
 }

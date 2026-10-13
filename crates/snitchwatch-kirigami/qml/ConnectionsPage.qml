@@ -13,9 +13,8 @@
 //     with a visible index; we move `currentIndex` there but never push the
 //     detail page, so it never steals interaction focus from the user.
 //   * Inspector side panel (monitor-tree step 5) — a SplitView column at wide
-//     widths that follows `currentIndex`; under `compactWidth` the same
-//     InspectorPanel lives on a ConnectionDetailPage pushed onto the page
-//     stack by a row click. Replaces the old OverlaySheet inspector.
+//     widths that follows `currentIndex`; under `compactWidth` the same panel
+//     lives on a ConnectionDetailPage pushed by a row click.
 //
 // Little-Snitch-parity grouping (Process -> Domain -> Host -> connection): the
 // header's "Grouped" switch drives `ConnectionsModel.setGrouped`. In grouped
@@ -46,6 +45,9 @@ Kirigami.Page {
     // Injected by the caller (main.qml) so the model's lifetime is owned there.
     property ConnectionsModel model
 
+    // Injected by main.qml for the map above the list; null in isolated tests.
+    property var geoModel: null
+    property alias mapBand: listPane.mapBand
     // Live-wiring hub (Task 13), injected by main.qml. Threaded down to the
     // embedded PendingDecisionSheet so a submitted verdict reaches the bridge's
     // inbound pump. Null in isolated component tests (the sheet no-ops then).
@@ -241,7 +243,7 @@ Kirigami.Page {
         anchors.fill: parent
         orientation: Qt.Horizontal
 
-        ConnectionList {
+        MonitorPane {
             id: listPane
             Controls.SplitView.fillWidth: true
             Controls.SplitView.minimumWidth: Kirigami.Units.gridUnit * 18
