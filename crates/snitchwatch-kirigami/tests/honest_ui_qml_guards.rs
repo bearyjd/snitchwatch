@@ -1217,10 +1217,14 @@ fn map_band_height_cap_lets_a_collapsed_band_reopen() {
     ] {
         assert!(pane.contains(needle), "MonitorPane.qml lost `{needle}`");
     }
-    let mirror = include_str!("qml/tst_map_split_drag.qml");
+    let mirror: String = include_str!("qml/tst_map_split_drag.qml")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
     for needle in [
-        "split.resizing ? root.chrome + root.maxBody : root.maximumHeight",
-        "onPreferredChanged",
+        "Controls.SplitView.maximumHeight: Math.min( split.resizing ? root.chrome + root.maxBody : root.maximumHeight, Math.max(split.resizing ? root.header : root.minimumHeight, split.height - root.treeMin - root.handleHeight))",
+        "Controls.SplitView.minimumHeight: split.resizing ? root.header : root.minimumHeight",
+        "onPreferredChanged: if (!split.resizing)",
     ] {
         assert!(
             mirror.contains(needle),
