@@ -17,8 +17,11 @@
 //!   * [`store`] — [`store::GeoStore`], the per-country aggregate, consuming
 //!     the same `ServerMessage` connection-row variants
 //!     `connections::row_store::RowStore` does.
+//!   * [`world_map`] — bundled Natural Earth country shapes and marker
+//!     centroids (offline data, see `docs/map-data.md`).
 
 pub mod flag;
 pub mod paths;
 pub mod resolver;
 pub mod store;
+pub mod world_map;
