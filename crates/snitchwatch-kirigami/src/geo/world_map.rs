@@ -6,7 +6,8 @@
 //!
 //! Coordinates are an equirectangular grid of [`GRID_WIDTH`] x [`GRID_HEIGHT`]
 //! units (0.1 degree). Countries the 110m set drops (tiny states) have an
-//! empty `path` but still carry a hand-entered centroid.
+//! empty `path` but carry a centroid from a finer Natural Earth file; the few
+//! codes no Natural Earth file has get no marker (`Header::no_marker`).
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -38,6 +39,10 @@ pub struct Header {
     pub degenerate_polygons: usize,
     pub skipped_uncoded: usize,
     pub no_shape: Vec<&'static str>,
+    /// Codes with neither shape nor centroid in any Natural Earth source.
+    pub no_marker: Vec<&'static str>,
+    /// `(url, sha256)` of each supplementary marker-only source.
+    pub supplements: Vec<(&'static str, &'static str)>,
 }
 
 struct Parsed {
@@ -65,7 +70,14 @@ fn parse(raw: &'static str) -> Parsed {
                 "source_polygons" => header.source_polygons = val.parse().unwrap_or(0),
                 "degenerate_polygons" => header.degenerate_polygons = val.parse().unwrap_or(0),
                 "skipped_uncoded" => header.skipped_uncoded = val.parse().unwrap_or(0),
-                "no_shape" => header.no_shape = val.split(' ').collect(),
+                "no_shape" => header.no_shape = val.split_whitespace().collect(),
+                "no_marker" => header.no_marker = val.split_whitespace().collect(),
+                k if k.starts_with("supplement_") => {
+                    if let Some((url, rest)) = val.split_once(" sha256 ") {
+                        let hash = rest.split(' ').next().unwrap_or("");
+                        header.supplements.push((url, hash));
+                    }
+                }
                 _ => {}
             }
             continue;
@@ -131,13 +143,14 @@ MW MX MY MZ NA NC NE NF NG NI NL NO NP NR NU NZ OM PA PE PF PG PH PK PL PM PN PR
 RO RS RU RW SA SB SC SD SE SG SH SI SJ SK SL SM SN SO SR SS ST SV SX SY SZ TC TD TF TG TH TJ TK TL \
 TM TN TO TR TT TV TW TZ UA UG UM US UY UZ VA VC VE VG VI VN VU WF WS YE YT ZA ZM ZW XK";
 
-    /// Codes the 110m set has no shape for (tiny states, small territories, or
-    /// territories folded into a parent such as GF into FR and SJ into NO).
-    /// Their centroids are hand-entered in `scripts/gen_world_map.py`.
-    const NO_SHAPE_110M: &str =
-        "AD AG AI AS AW AX BB BH BL BM BQ BV CC CK CV CW CX DM FM FO GD GF GG \
-GI GP GS GU HK HM IM IO JE KI KM KN KY LC LI MC MF MH MO MP MQ MS MT MU MV NF NR NU PF PM PN PW RE \
-SC SG SH SJ SM ST SX TC TK TO TV UM VA VC VG VI WF WS YT";
+    /// Codes the 110m set has no shape for (tiny states and small territories).
+    /// Their centroids come from the 50m, tiny-countries or 10m files.
+    const NO_SHAPE_110M: &str = "AD AG AI AS AW AX BB BH BL BM BQ CK CV CW DM FM FO GD GG GI GP GS GU HK HM IM IO JE KI KM KN KY LC LI MC MF MH MO MP MQ MS MT MU MV NF NR NU PF PM PN PW SC SG SH SM ST SX TC TK TO TV UM VA VC VG VI WF WS";
+
+    /// Assigned codes no Natural Earth file (110m, 50m, tiny, 10m) has: parts
+    /// of a parent feature (GF in FR, SJ in NO, RE and YT in FR) or uninhabited
+    /// or tiny territories. They get no marker and are never hand-entered.
+    const NO_MARKER: &str = "BV CC CX GF RE SJ YT";
 
     fn words(s: &str) -> Vec<&str> {
         s.split_whitespace().collect()
@@ -158,6 +171,7 @@ SC SG SH SJ SM ST SX TC TK TO TV UM VA VC VG VI WF WS YT";
         let shaped = countries().filter(|c| !c.path.is_empty()).count();
         assert_eq!(shaped, h.source_features - h.skipped_uncoded);
         assert_eq!(countries().count(), shaped + h.no_shape.len());
+        assert_eq!(h.supplements.len(), 3);
     }
 
     #[test]
@@ -170,9 +184,14 @@ SC SG SH SJ SM ST SX TC TK TO TV UM VA VC VG VI WF WS YT";
     }
 
     #[test]
-    fn every_iso_code_has_a_centroid_or_is_documented_no_shape() {
+    fn every_iso_code_has_a_centroid_or_is_documented_no_marker() {
         let no_shape = words(NO_SHAPE_110M);
+        let no_marker = words(NO_MARKER);
         for code in words(ISO_CODES) {
+            if no_marker.contains(&code) {
+                assert!(lookup(code).is_none(), "{code} should have no marker");
+                continue;
+            }
             let c = lookup(code).unwrap_or_else(|| panic!("{code} missing"));
             assert!((0..=GRID_WIDTH).contains(&c.centroid.0), "{code} x");
             assert!((0..=GRID_HEIGHT).contains(&c.centroid.1), "{code} y");
@@ -183,6 +202,7 @@ SC SG SH SJ SM ST SX TC TK TO TV UM VA VC VG VI WF WS YT";
         let mut expected = no_shape;
         expected.sort_unstable();
         assert_eq!(documented, expected);
+        assert_eq!(header().no_marker, no_marker);
     }
 
     #[test]
@@ -223,7 +243,7 @@ SC SG SH SJ SM ST SX TC TK TO TV UM VA VC VG VI WF WS YT";
     }
 
     #[test]
-    fn header_hash_matches_docs_note() {
+    fn header_hashes_match_docs_note() {
         let h = header();
         assert_eq!(h.sha256.len(), 64);
         assert!(
@@ -232,5 +252,10 @@ SC SG SH SJ SM ST SX TC TK TO TV UM VA VC VG VI WF WS YT";
             h.sha256
         );
         assert!(DOCS.contains(h.tag), "docs/map-data.md lacks {}", h.tag);
+        for (url, hash) in &h.supplements {
+            assert_eq!(hash.len(), 64, "{url}");
+            assert!(DOCS.contains(hash), "docs/map-data.md lacks {hash}");
+            assert!(DOCS.contains(url), "docs/map-data.md lacks {url}");
+        }
     }
 }

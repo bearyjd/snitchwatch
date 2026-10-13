@@ -4,7 +4,14 @@
 Dev-time only; offline (never fetched at build or test time). Usage:
 
     python3 -I scripts/gen_world_map.py <ne_110m_admin_0_countries.geojson> \
-        > data/world-map.txt
+        <ne_50m_admin_0_countries.geojson> \
+        <ne_50m_admin_0_tiny_countries.geojson> \
+        <ne_10m_admin_0_countries.geojson> > data/world-map.txt
+
+Shapes come from the 110m file. Codes it drops get a marker-only centroid
+(the feature's LABEL_X/LABEL_Y, else its polygon centroid) from the first of
+the 50m, 50m tiny-countries and 10m files that has the code. Codes none of them
+have get no marker at all; nothing is ever entered by hand.
 
 Source: https://raw.githubusercontent.com/nvkelso/natural-earth-vector/v5.1.2/geojson/ne_110m_admin_0_countries.geojson
 Licence: public domain (https://www.naturalearthdata.com/about/terms-of-use/).
@@ -27,95 +34,34 @@ URL = (
     + TAG
     + "/geojson/ne_110m_admin_0_countries.geojson"
 )
+BASE = "https://raw.githubusercontent.com/nvkelso/natural-earth-vector/" + TAG + "/geojson/"
+# Supplementary marker-only sources, tried in this order.
+SUPPLEMENTS = [
+    ("50m", "ne_50m_admin_0_countries.geojson"),
+    ("tiny", "ne_50m_admin_0_tiny_countries.geojson"),
+    ("10m", "ne_10m_admin_0_countries.geojson"),
+]
 LICENCE_URL = "https://www.naturalearthdata.com/about/terms-of-use/"
 SCALE = 10  # grid units per degree
+
+# Codes a resolver can return for a real country: all 249 assigned ISO 3166-1
+# alpha-2 codes plus XK (Kosovo, user-assigned; used by MaxMind and Natural Earth).
+ISO_CODES = set(
+    """AD AE AF AG AI AL AM AO AQ AR AS AT AU AW AX AZ BA BB BD BE BF BG BH BI BJ BL
+BM BN BO BQ BR BS BT BV BW BY BZ CA CC CD CF CG CH CI CK CL CM CN CO CR CU CV CW CX
+CY CZ DE DJ DK DM DO DZ EC EE EG EH ER ES ET FI FJ FK FM FO FR GA GB GD GE GF GG GH
+GI GL GM GN GP GQ GR GS GT GU GW GY HK HM HN HR HT HU ID IE IL IM IN IO IQ IR IS IT
+JE JM JO JP KE KG KH KI KM KN KP KR KW KY KZ LA LB LC LI LK LR LS LT LU LV LY MA MC
+MD ME MF MG MH MK ML MM MN MO MP MQ MR MS MT MU MV MW MX MY MZ NA NC NE NF NG NI NL
+NO NP NR NU NZ OM PA PE PF PG PH PK PL PM PN PR PS PT PW PY QA RE RO RS RU RW SA SB
+SC SD SE SG SH SI SJ SK SL SM SN SO SR SS ST SV SX SY SZ TC TD TF TG TH TJ TK TL TM
+TN TO TR TT TV TW TZ UA UG UM US UY UZ VA VC VE VG VI VN VU WF WS YE YT ZA ZM ZW XK""".split()
+)
 
 # Natural Earth features that have no usable ISO-A2 (not in ISO 3166-1, no
 # MaxMind code): skipped, and counted in the header.
 UNCODED = {"N. Cyprus", "Somaliland"}
 
-# Countries/territories the 110m set drops (too small). Hand-entered
-# (name, lat, lon) approximate geographic centres, to within about a degree,
-# from the CIA World Factbook "Geographic coordinates" entries (public domain,
-# https://www.cia.gov/the-world-factbook/). Markers only need to land on the
-# right spot of the map, not be surveyed.
-MANUAL = {
-    "AD": ("Andorra", 42.5, 1.5),
-    "AG": ("Antigua and Barbuda", 17.05, -61.8),
-    "AI": ("Anguilla", 18.25, -63.17),
-    "AS": ("American Samoa", -14.33, -170.0),
-    "AW": ("Aruba", 12.5, -69.97),
-    "AX": ("Aland Islands", 60.22, 20.0),
-    "BB": ("Barbados", 13.17, -59.53),
-    "BH": ("Bahrain", 26.0, 50.55),
-    "BL": ("Saint Barthelemy", 17.9, -62.83),
-    "BM": ("Bermuda", 32.33, -64.75),
-    "BQ": ("Bonaire, Sint Eustatius and Saba", 12.18, -68.25),
-    "BV": ("Bouvet Island", -54.43, 3.4),
-    "CC": ("Cocos (Keeling) Islands", -12.17, 96.83),
-    "CK": ("Cook Islands", -21.23, -159.77),
-    "CV": ("Cabo Verde", 16.0, -24.0),
-    "CW": ("Curacao", 12.17, -69.0),
-    "CX": ("Christmas Island", -10.5, 105.67),
-    "DM": ("Dominica", 15.42, -61.33),
-    "FM": ("Micronesia", 6.92, 158.25),
-    "FO": ("Faroe Islands", 62.0, -6.78),
-    "GD": ("Grenada", 12.12, -61.67),
-    "GF": ("French Guiana", 4.0, -53.0),
-    "GG": ("Guernsey", 49.47, -2.58),
-    "GI": ("Gibraltar", 36.13, -5.35),
-    "GP": ("Guadeloupe", 16.25, -61.58),
-    "GS": ("South Georgia and South Sandwich Islands", -54.5, -37.0),
-    "GU": ("Guam", 13.47, 144.78),
-    "HK": ("Hong Kong", 22.25, 114.17),
-    "HM": ("Heard Island and McDonald Islands", -53.1, 72.52),
-    "IM": ("Isle of Man", 54.25, -4.5),
-    "IO": ("British Indian Ocean Territory", -6.0, 71.5),
-    "JE": ("Jersey", 49.25, -2.17),
-    "KI": ("Kiribati", 1.42, 173.0),
-    "KM": ("Comoros", -12.17, 44.25),
-    "KN": ("Saint Kitts and Nevis", 17.33, -62.75),
-    "KY": ("Cayman Islands", 19.5, -80.5),
-    "LC": ("Saint Lucia", 13.88, -60.97),
-    "LI": ("Liechtenstein", 47.27, 9.53),
-    "MC": ("Monaco", 43.73, 7.4),
-    "MF": ("Saint Martin", 18.08, -63.95),
-    "MH": ("Marshall Islands", 9.0, 168.0),
-    "MO": ("Macao", 22.17, 113.55),
-    "MP": ("Northern Mariana Islands", 15.2, 145.75),
-    "MQ": ("Martinique", 14.67, -61.0),
-    "MS": ("Montserrat", 16.75, -62.2),
-    "MT": ("Malta", 35.83, 14.58),
-    "MU": ("Mauritius", -20.28, 57.55),
-    "MV": ("Maldives", 3.25, 73.0),
-    "NF": ("Norfolk Island", -29.03, 167.95),
-    "NR": ("Nauru", -0.53, 166.92),
-    "NU": ("Niue", -19.03, -169.87),
-    "PF": ("French Polynesia", -15.0, -140.0),
-    "PM": ("Saint Pierre and Miquelon", 46.83, -56.33),
-    "PN": ("Pitcairn Islands", -25.07, -130.1),
-    "PW": ("Palau", 7.5, 134.5),
-    "RE": ("Reunion", -21.1, 55.6),
-    "SC": ("Seychelles", -4.58, 55.67),
-    "SG": ("Singapore", 1.37, 103.8),
-    "SH": ("Saint Helena", -15.95, -5.7),
-    "SJ": ("Svalbard and Jan Mayen", 78.0, 20.0),
-    "SM": ("San Marino", 43.77, 12.42),
-    "ST": ("Sao Tome and Principe", 1.0, 7.0),
-    "SX": ("Sint Maarten", 18.03, -63.05),
-    "TC": ("Turks and Caicos Islands", 21.75, -71.58),
-    "TK": ("Tokelau", -9.0, -172.0),
-    "TO": ("Tonga", -20.0, -175.0),
-    "TV": ("Tuvalu", -8.0, 178.0),
-    "UM": ("United States Minor Outlying Islands", 19.3, 166.63),
-    "VA": ("Vatican City", 41.9, 12.45),
-    "VC": ("Saint Vincent and the Grenadines", 13.25, -61.2),
-    "VG": ("British Virgin Islands", 18.5, -64.5),
-    "VI": ("US Virgin Islands", 18.33, -64.83),
-    "WF": ("Wallis and Futuna", -13.3, -176.2),
-    "WS": ("Samoa", -13.58, -172.33),
-    "YT": ("Mayotte", -12.83, 45.17),
-}
 
 
 def gx(lon):
@@ -159,7 +105,25 @@ def polygons(geom):
     return [geom["coordinates"]] if geom["type"] == "Polygon" else geom["coordinates"]
 
 
-def main(path):
+def feature_code(p):
+    code = p["ISO_A2_EH"]
+    return p["ISO_A2"] if code == "-99" else code
+
+
+def feature_centroid(f):
+    """(lon, lat): LABEL_X/LABEL_Y if present, else largest-polygon centroid."""
+    p = f["properties"]
+    if p.get("LABEL_X") is not None and p.get("LABEL_Y") is not None:
+        return p["LABEL_X"], p["LABEL_Y"]
+    g = f["geometry"]
+    if g["type"] == "Point":
+        return tuple(g["coordinates"][:2])
+    best = max(polygons(g), key=lambda poly: ring_area_centroid(poly[0])[0])
+    _, lon, lat = ring_area_centroid(best[0])
+    return lon, lat
+
+
+def main(path, supplement_paths):
     raw = open(path, "rb").read()
     digest = hashlib.sha256(raw).hexdigest()
     feats = json.loads(raw.decode("utf-8"))["features"]
@@ -169,9 +133,7 @@ def main(path):
     skipped = []
     for f in feats:
         p = f["properties"]
-        code = p["ISO_A2_EH"]
-        if code == "-99":
-            code = p["ISO_A2"]
+        code = feature_code(p)
         if code == "-99":
             skipped.append(p["NAME"])
             continue
@@ -185,9 +147,20 @@ def main(path):
         assert code not in rows, code
         rows[code] = (p["NAME"], (gx(clon), gy(clat)), " ".join(paths))
     assert sorted(skipped) == sorted(UNCODED), skipped
-    for code, (name, lat, lon) in MANUAL.items():
-        assert code not in rows, code
-        rows[code] = (name, (gx(lon), gy(lat)), "")
+    # Marker-only centroids for every code the 110m set lacks.
+    wanted = {c for c in ISO_CODES if c not in rows}
+    used = {}
+    sup_meta = []
+    for (label, fname), sp in zip(SUPPLEMENTS, supplement_paths):
+        sraw = open(sp, "rb").read()
+        sup_meta.append((label, fname, hashlib.sha256(sraw).hexdigest()))
+        for f in json.loads(sraw.decode("utf-8"))["features"]:
+            code = feature_code(f["properties"])
+            if code in wanted and code not in used:
+                lon, lat = feature_centroid(f)
+                rows[code] = (f["properties"]["NAME"], (gx(lon), gy(lat)), "")
+                used[code] = label
+    no_marker = sorted(wanted - set(used))
     out = [
         "# snitchwatch world map: Natural Earth 1:110m admin-0 countries (public domain)",
         "# source: " + URL,
@@ -199,9 +172,22 @@ def main(path):
         "# source_polygons: %d" % n_polys,
         "# degenerate_polygons: %d" % n_degenerate,
         "# skipped_uncoded: %d" % len(skipped),
-        "# no_shape: " + " ".join(sorted(MANUAL)),
+        "# no_shape: " + " ".join(sorted(used)),
+        "# no_marker: " + " ".join(no_marker),
         "# format: CODE<TAB>NAME<TAB>CX,CY<TAB>PATH",
     ]
+    for label, fname, sdigest in sup_meta:
+        out.insert(
+            5,
+            "# supplement_%s: %s%s sha256 %s (codes: %s)"
+            % (
+                label,
+                BASE,
+                fname,
+                sdigest,
+                " ".join(sorted(c for c, l in used.items() if l == label)),
+            ),
+        )
     for code in sorted(rows):
         name, (x, y), d = rows[code]
         out.append("%s\t%s\t%d,%d\t%s" % (code, name, x, y, d))
@@ -209,6 +195,6 @@ def main(path):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        sys.exit("usage: gen_world_map.py <ne_110m_admin_0_countries.geojson>")
-    main(sys.argv[1])
+    if len(sys.argv) != 2 + len(SUPPLEMENTS):
+        sys.exit("usage: gen_world_map.py <110m> <50m> <50m tiny> <10m> geojson files")
+    main(sys.argv[1], sys.argv[2:])
