@@ -9,6 +9,7 @@
 
 pub mod filter;
 pub mod grouping;
+pub mod level_rules;
 pub mod outcome;
 pub mod projection_diff;
 pub mod row_store;

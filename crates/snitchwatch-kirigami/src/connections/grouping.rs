@@ -284,6 +284,19 @@ impl GroupTree {
         Self::default()
     }
 
+    /// The host keys currently under a program's domain group.
+    pub fn domain_hosts<'a>(
+        &'a self,
+        process_key: &str,
+        domain_key: &str,
+    ) -> impl Iterator<Item = &'a str> {
+        self.processes
+            .get(process_key)
+            .and_then(|p| p.domains.get(domain_key))
+            .into_iter()
+            .flat_map(|d| d.host_order.iter().map(String::as_str))
+    }
+
     /// Insert a new row or update an existing one (matched by id), keeping
     /// group membership and aggregate counts in sync. Mirrors
     /// `RowStore::insert_rows`/`update_rows`'s "existing id = update in

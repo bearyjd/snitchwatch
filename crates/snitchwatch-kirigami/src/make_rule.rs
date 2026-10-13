@@ -31,16 +31,18 @@
 
 use snitchwatch_bridge::cache::connections::Verdict;
 use snitchwatch_bridge::rule_wire::rule_to_wire;
-use snitchwatch_bridge::translator::verdict::verdict_to_rule;
+use snitchwatch_bridge::translator::verdict::{rule_name_for, verdict_to_rule};
 use snitchwatch_bridge::ws_messages::{
     valid_request_id, ClientMessage, ConnectionRow, RuleCommandOutcome, ServerMessage,
 };
 use snitchwatch_proto::protocol::Connection;
 use std::time::{Duration, Instant};
 
+use crate::connections::level_rules::{resolve, Level, NodeRef};
 use crate::pending_decision::{parse_duration, parse_scope, VerdictChoice};
 pub(crate) use crate::rules::editor_view::{Finished, NO_ANSWER_AFTER};
 use crate::rules::editor_view::{Pending, Wording};
+use crate::settings::Settings;
 
 /// While the bridge hasn't answered yet.
 pub(crate) const SENDING: &str = "Sending the rule to the firewall…";
@@ -112,6 +114,114 @@ pub(crate) fn add_rule_message(
     })
 }
 
+/// Why a level rule (a tree node's rule button) wasn't made. Fixed
+/// sentences ([`Self::reason`]), safe to show.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LevelRuleRefusal {
+    /// The request id isn't valid: no outcome could be shown.
+    BadRequestId,
+    /// The choice isn't allow or deny.
+    UnknownChoice,
+    /// A program-wide rule needs the user's confirmation.
+    NeedsConfirmation,
+    /// No absolute program path to bind the rule to (issue #44).
+    UnknownProgram,
+    /// The Settings duration is "once", which can't be added afterwards.
+    NotRemembered,
+    /// A public suffix (`co.uk`): no rule can cover the whole domain.
+    TooBroad,
+    /// The row's level isn't program, domain or host.
+    UnknownLevel,
+}
+
+impl LevelRuleRefusal {
+    pub(crate) fn reason(self) -> &'static str {
+        match self {
+            Self::BadRequestId => "The rule couldn't be sent.",
+            Self::UnknownChoice => "Choose Allow or Deny.",
+            Self::NeedsConfirmation => "A rule for every connection of a program needs confirming.",
+            Self::UnknownProgram => {
+                "Snitchwatch can't tell which program file this is, so a rule can't be \
+                 tied to it."
+            }
+            Self::NotRemembered => {
+                "Your default duration is \"once\", which a rule can't have. Choose another \
+                 default duration in Settings."
+            }
+            Self::UnknownLevel => "A rule can't be made for this row.",
+            Self::TooBroad => {
+                "This name covers a whole group of unrelated sites, so no one rule can cover \
+                 it. Make rules for its hosts."
+            }
+        }
+    }
+}
+
+/// A level rule's `AddRule`, and the operator it carries (what a pending
+/// command is matched by).
+#[derive(Debug)]
+pub(crate) struct LevelRuleRequest {
+    pub(crate) message: ClientMessage,
+    pub(crate) operator: serde_json::Value,
+}
+
+/// The `AddRule` for a tree node's rule button, made at `now_ms` (Unix ms),
+/// asking for a `RuleCommandResult` under `request_id`. Unlike
+/// [`add_rule_message`] it needs no row the prompt was put off for
+/// ([`offers_make_rule`] stays for the sheet). The rule is bound to the
+/// program; its duration is the Settings default (`settings.duration_token()`).
+///
+/// A program-wide rule (`AnyHost`) is made only when `confirmed` (the confirm
+/// dialog names scope and duration). Nothing is made when the program can't
+/// be bound, the default duration is once-only, or the domain is a public
+/// suffix; the refusal says which.
+pub(crate) fn add_level_rule_message(
+    node: NodeRef<'_>,
+    choice: &str,
+    settings: &Settings,
+    confirmed: bool,
+    now_ms: i64,
+    request_id: &str,
+) -> Result<LevelRuleRequest, LevelRuleRefusal> {
+    use LevelRuleRefusal as Refusal;
+    if !valid_request_id(request_id) {
+        return Err(Refusal::BadRequestId);
+    }
+    let verdict = match VerdictChoice::from_token(choice).ok_or(Refusal::UnknownChoice)? {
+        VerdictChoice::Allow => Verdict::Allow,
+        VerdictChoice::Deny => Verdict::Deny,
+    };
+    if node.level == Level::Program && !confirmed {
+        return Err(Refusal::NeedsConfirmation);
+    }
+    let duration = parse_duration(settings.duration_token());
+    if !duration.remembers() {
+        return Err(Refusal::NotRemembered);
+    }
+    let target = resolve(node);
+    if target.too_broad {
+        return Err(Refusal::TooBroad);
+    }
+    let operator = target.operator.clone().ok_or(Refusal::UnknownProgram)?;
+    let made = verdict_to_rule(verdict, duration, target.scope, &target.conn, now_ms / 1000)
+        .map_err(|_| Refusal::UnknownProgram)?;
+    // The bridge names a rule after the host, which for a domain is made up;
+    // name it for the node, and keep the `-made-` suffix (see the module doc).
+    let name = rule_name_for(verdict, &target.label, 0, &target.conn.process_path);
+    let rule = snitchwatch_proto::protocol::Rule {
+        name: format!("{name}-made-{now_ms}"),
+        ..made
+    };
+    Ok(LevelRuleRequest {
+        message: ClientMessage::AddRule {
+            rule: rule_to_wire(&rule),
+            request_id: Some(request_id.to_owned()),
+            reply: None,
+        },
+        operator,
+    })
+}
+
 /// What the sheet says when the rule wasn't sent, or `None` when `send`
 /// queued it: [`NOT_SENT`] when no rule may be made (`message` is `None`),
 /// otherwise the rule editor's text for why it wasn't queued.
@@ -147,14 +257,14 @@ pub(crate) fn outcome_status(outcome: &RuleCommandOutcome) -> Finished {
 /// known (no result in time, the session gone, the bridge's own timeout or
 /// an unsure result) it is unknown, never "not created" (PR #111).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Ending {
+pub enum Ending {
     NotCreated = 0,
     Created = 1,
     Unknown = 2,
 }
 
 /// The [`Ending`] of the bridge's `outcome`.
-pub(crate) fn ending_of(outcome: &RuleCommandOutcome) -> Ending {
+pub fn ending_of(outcome: &RuleCommandOutcome) -> Ending {
     match outcome {
         RuleCommandOutcome::Ok | RuleCommandOutcome::OkWithNote { .. } => Ending::Created,
         RuleCommandOutcome::Timeout | RuleCommandOutcome::Unsure { .. } => Ending::Unknown,
@@ -224,6 +334,9 @@ impl MakeRuleWait {
             .map(|(tag, done)| (tag.row_id, done, Ending::Unknown))
     }
 }
+
+#[cfg(test)]
+mod level_tests;
 
 #[cfg(test)]
 mod tests {

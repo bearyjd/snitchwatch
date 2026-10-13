@@ -26,6 +26,7 @@ use cxx_qt_lib::{
 
 use crate::connections::filter::ConnectionFilter;
 use crate::connections::grouping::{GroupTree, VisibleEntry};
+use crate::connections::level_rules::{LevelFinished, LevelRules};
 use crate::connections::outcome::{is_pending, outcome_text};
 use crate::connections::projection_diff;
 use crate::connections::row_store::{
@@ -35,6 +36,8 @@ use crate::inline_deny::{self, InlineDeny};
 use crate::pending_decision::VerdictChoice;
 use snitchwatch_bridge::translator::process_binding::is_bindable_process_path;
 use snitchwatch_bridge::ws_messages::{AutoAnswer, ConnectionRow, ServerMessage};
+
+mod level_rule_actions;
 
 // Role ids exposed to the QML delegate. Flat-mode leaf rows use 0-6; the
 // grouping layer (Little-Snitch-parity Process->Domain view) adds 7+. None
@@ -99,6 +102,12 @@ const ROLE_GROUP_LEVEL: i32 = 30;
 /// The owning program's group key on host headers (what `toggleHostGroup`
 /// needs besides the domain and host keys); empty elsewhere.
 const ROLE_GROUP_PROCESS_KEY: i32 = 31;
+/// What a tree header's rule button shows (`connections::level_rules::RuleState::token`):
+/// `none`, `allow`, `deny`, `partial` or `pending`; `none` on connection rows.
+const ROLE_LEVEL_RULE_STATE: i32 = 32;
+/// The name of the rule a delete would remove, only while the state is
+/// `allow`, `deny` or `pending`; empty otherwise.
+const ROLE_LEVEL_RULE_NAME: i32 = 33;
 
 #[cxx_qt::bridge]
 pub mod qobject {
@@ -160,6 +169,20 @@ pub mod qobject {
         #[qsignal]
         #[cxx_name = "autoSelectRequested"]
         fn auto_select_requested(self: Pin<&mut ConnectionsModel>, row: i32);
+
+        /// A rule button's create or delete ended. `level` is 0 program, 1
+        /// domain, 2 host; `ending` is `make_rule::Ending` (0 failed, 1 done,
+        /// 2 unknown); `status` is plain text from the bridge's result.
+        #[qsignal]
+        #[cxx_name = "levelRuleFinished"]
+        fn level_rule_finished(
+            self: Pin<&mut ConnectionsModel>,
+            level: i32,
+            process_key: QString,
+            key: QString,
+            ending: i32,
+            status: QString,
+        );
 
         // --- QAbstractListModel overrides -----------------------------------
         #[qinvokable]
@@ -295,6 +318,40 @@ pub mod qobject {
             duration: &QString,
             request_id: &QString,
         ) -> QString;
+
+        /// A tree row's rule button: make an allow/deny rule at `level` (0
+        /// program, 1 domain, 2 host) for the program `process_key` and, below
+        /// it, the domain or host `key`. Lasts the Settings default duration.
+        /// A program-wide rule needs `confirmed`. Empty when it was queued
+        /// (only sent: `levelRuleFinished` says how it ended); otherwise why
+        /// not, as plain text.
+        #[qinvokable]
+        #[cxx_name = "createLevelRule"]
+        fn create_level_rule(
+            self: Pin<&mut ConnectionsModel>,
+            level: i32,
+            process_key: &QString,
+            key: &QString,
+            choice: &QString,
+            confirmed: bool,
+        ) -> QString;
+
+        /// Delete the one rule the node's `levelRuleState` (`allow` or
+        /// `deny`) stands for. Empty when queued, else why not.
+        #[qinvokable]
+        #[cxx_name = "deleteLevelRule"]
+        fn delete_level_rule(
+            self: Pin<&mut ConnectionsModel>,
+            level: i32,
+            process_key: &QString,
+            key: &QString,
+        ) -> QString;
+
+        /// Give up on rule button commands with no answer in time (called by
+        /// a QML timer); `levelRuleFinished` says the outcome is unknown.
+        #[qinvokable]
+        #[cxx_name = "pollLevelRules"]
+        fn poll_level_rules(self: Pin<&mut ConnectionsModel>);
 
         /// Whether `id` names a row that is still awaiting a decision: present
         /// in the store (independent of the active filter) with no action
@@ -558,6 +615,9 @@ pub struct ConnectionsModelRust {
     pending_grouped_msgs: Vec<BufferedConnectionMessage>,
     /// Whether a debounced flush is already scheduled for the buffer above.
     grouped_flush_scheduled: bool,
+    /// The firewall's rules and the rule button commands in flight, behind
+    /// the `levelRuleState` and `levelRuleName` roles.
+    level_rules: LevelRules,
 }
 
 impl Default for ConnectionsModelRust {
@@ -575,6 +635,7 @@ impl Default for ConnectionsModelRust {
             source_session: None,
             pending_grouped_msgs: Vec::new(),
             grouped_flush_scheduled: false,
+            level_rules: LevelRules::default(),
         }
     }
 }
@@ -596,6 +657,9 @@ impl qobject::ConnectionsModel {
                     .map(|id| format!("{id}:"))
                     .unwrap_or_default(),
             ));
+        }
+        if role == ROLE_LEVEL_RULE_STATE || role == ROLE_LEVEL_RULE_NAME {
+            return self.level_rule_role(index.row(), role);
         }
         if self.grouped {
             let Some(entry) = self.grouped_projection.get(index.row() as usize) else {
@@ -688,6 +752,8 @@ impl qobject::ConnectionsModel {
         roles.insert(ROLE_NEEDS_RULE, QByteArray::from("needsRule"));
         roles.insert(ROLE_GROUP_LEVEL, QByteArray::from("groupLevel"));
         roles.insert(ROLE_GROUP_PROCESS_KEY, QByteArray::from("groupProcessKey"));
+        roles.insert(ROLE_LEVEL_RULE_STATE, QByteArray::from("levelRuleState"));
+        roles.insert(ROLE_LEVEL_RULE_NAME, QByteArray::from("levelRuleName"));
         roles
     }
 
@@ -740,7 +806,7 @@ impl qobject::ConnectionsModel {
         crate::bridge_dispatch::spawn_feed(
             &handles,
             "ConnectionsModel",
-            crate::bridge_dispatch::interests_connections,
+            crate::bridge_dispatch::interests_monitor,
             move |connection_id, msg, _json| {
                 let mut msg = msg.clone();
                 qualify_connection_ids(&mut msg, connection_id);
@@ -768,11 +834,71 @@ impl qobject::ConnectionsModel {
         self.as_mut().apply_message_for_session(msg, None);
     }
 
+    /// The rule list and rule command results go straight to
+    /// [`LevelRules`]: no buffering, no reset, only the two rule roles repaint.
+    fn apply_rules_message(mut self: Pin<&mut Self>, msg: &ServerMessage) {
+        let applied = self.as_mut().rust_mut().level_rules.apply(msg);
+        if applied.rules_changed || applied.finished.is_some() {
+            self.as_mut().notify_level_rules_changed();
+        }
+        if let Some(finished) = applied.finished {
+            self.report_level_finished(finished);
+        }
+    }
+
+    /// Repaint the rule button of every header (a rule change can move any
+    /// of them, and a header's state costs little to ask again).
+    fn notify_level_rules_changed(self: Pin<&mut Self>) {
+        let len = self.grouped_projection.len();
+        if !self.grouped || len == 0 {
+            return;
+        }
+        let no_parent = QModelIndex::default();
+        let (top, bottom) = (
+            self.index(0, 0, &no_parent),
+            self.index(len as i32 - 1, 0, &no_parent),
+        );
+        let mut roles = QList::<i32>::default();
+        roles.append(ROLE_LEVEL_RULE_STATE);
+        roles.append(ROLE_LEVEL_RULE_NAME);
+        self.data_changed(&top, &bottom, &roles);
+    }
+
+    fn report_level_finished(mut self: Pin<&mut Self>, finished: LevelFinished) {
+        self.as_mut().notify_level_rules_changed();
+        self.level_rule_finished(
+            finished.node.level as i32,
+            QString::from(&finished.node.program),
+            QString::from(&finished.node.key),
+            finished.ending as i32,
+            QString::from(&finished.finished.status),
+        );
+    }
+
+    fn level_rule_role(&self, row: i32, role: i32) -> QVariant {
+        level_rule_actions::role(self, row, role)
+    }
+
     fn apply_message_for_session(
         mut self: Pin<&mut Self>,
         msg: ServerMessage,
         connection_id: Option<u64>,
     ) {
+        if matches!(
+            msg,
+            ServerMessage::SetRules { .. }
+                | ServerMessage::UpdateRules { .. }
+                | ServerMessage::RuleCommandResult { .. }
+        ) {
+            self.apply_rules_message(&msg);
+            return;
+        }
+        if matches!(msg, ServerMessage::ClearConnectionRows) {
+            // A new session's snapshot: no result can come for the old one.
+            for finished in self.as_mut().rust_mut().level_rules.abandon_all() {
+                self.as_mut().report_level_finished(finished);
+            }
+        }
         if self.grouped {
             if let Some(handles) = crate::bridge_runtime::handles() {
                 let schedule = {
@@ -1200,6 +1326,30 @@ impl qobject::ConnectionsModel {
             crate::bridge_feed::dispatch_for_row(&id, msg)
         });
         QString::from(problem.unwrap_or(""))
+    }
+
+    fn create_level_rule(
+        self: Pin<&mut Self>,
+        level: i32,
+        process_key: &QString,
+        key: &QString,
+        choice: &QString,
+        confirmed: bool,
+    ) -> QString {
+        level_rule_actions::create(self, level, process_key, key, choice, confirmed)
+    }
+
+    fn delete_level_rule(
+        self: Pin<&mut Self>,
+        level: i32,
+        process_key: &QString,
+        key: &QString,
+    ) -> QString {
+        level_rule_actions::delete(self, level, process_key, key)
+    }
+
+    fn poll_level_rules(self: Pin<&mut Self>) {
+        level_rule_actions::poll(self);
     }
 
     fn inline_duration_for(
@@ -1823,6 +1973,8 @@ mod tests {
             ROLE_NEEDS_RULE,
             ROLE_GROUP_LEVEL,
             ROLE_GROUP_PROCESS_KEY,
+            ROLE_LEVEL_RULE_STATE,
+            ROLE_LEVEL_RULE_NAME,
         ];
         for (i, a) in ids.iter().enumerate() {
             assert!(*a > ROLE_MAKE_RULE_OFFERED);
