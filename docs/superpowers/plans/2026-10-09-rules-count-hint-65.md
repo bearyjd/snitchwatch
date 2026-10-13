@@ -218,10 +218,15 @@ its size, or an add the daemon refused and may have stored: the daemon has
 the name in each case, and saves the answer as `<name>-2`.
 
 All three clear with `replace_all` (an adopted snapshot) and `set_unknown`.
-**The prompt-answer count is never reduced until the next snapshot**, even if
-the extra rule later expires or is deleted from outside: it can hide an
-outside change of that size for as long as the daemon stays connected (days,
-bounded by the number of answers). That is the cheaper error.
+**The prompt-answer count is not reduced at a timed answer's expiry**: the
+daemon drops `<name>-2` as the bridge prunes `<name>`, and still holds the
+original, so the list stays one short. Since #120 item 29 it shrinks when the
+daemon's count settles below it (a debounced run of agreeing readings)
+while nothing else explains a lower count: no refused add, no live
+pruned-timer slack, no listed or left-out temporary rule. Otherwise (e.g. an
+extra rule deleted from outside while a temporary rule is listed) it can
+still hide an outside change of that size until the next snapshot, bounded
+by the number of answers. That is the cheaper error.
 Not covered, on purpose: a command that never got an answer (after its 30 s
 late-reply grace) is a real divergence the hint may report.
 

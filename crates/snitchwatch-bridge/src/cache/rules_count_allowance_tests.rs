@@ -194,6 +194,53 @@ fn a_timed_answer_over_a_disabled_rule_leaves_the_daemon_one_more_after_expiry()
     assert!(!cache.count_mismatch());
 }
 
+/// #120 item 29: the daemon's count settling below the room a prompt answer
+/// made means the extra rule went (a `<name>-2` removed outside the bridge),
+/// so the room goes too, and an outside add after it is said.
+#[test]
+fn the_room_a_prompt_answer_made_shrinks_when_the_daemon_holds_fewer() {
+    let mut cache = synced(vec![
+        rule("other", "always", true),
+        rule("seen", "always", false),
+    ]);
+    cache.note_prompt_answer("seen");
+    cache.upsert(rule("seen", "always", true));
+    settle(&mut cache, 3);
+    assert!(
+        none_flipped(&many(&mut cache, 3, 10)),
+        "the daemon has seen-2"
+    );
+    // seen-2.json removed by hand: the daemon holds what the list shows.
+    assert!(none_flipped(&many(&mut cache, 2, PINGS_TO_CLEAR.into())));
+    // A rule added outside the bridge is no longer hidden by that room.
+    let flips = many(&mut cache, 3, 6);
+    assert!(flips.contains(&true), "{flips:?}");
+    assert!(cache.count_mismatch());
+}
+
+/// Room something else may still need is kept: a refused add the daemon
+/// may hold, or a listed temporary rule whose timer may drop it unseen
+/// (either can make the count agree for a while with the extra rule there).
+#[test]
+fn the_room_a_prompt_answer_made_is_kept_while_anything_else_explains_the_count() {
+    for other in [rule("other", "always", true), rule("other", "5m", false)] {
+        let mut cache = synced(vec![other.clone(), rule("seen", "always", false)]);
+        if other.duration == "always" {
+            cache.apply_refused(&change(rule("refused", "always", true)));
+        }
+        cache.note_prompt_answer("seen");
+        cache.upsert(rule("seen", "always", true));
+        settle(&mut cache, 2);
+        assert!(none_flipped(&many(&mut cache, 2, 10)));
+        assert!(
+            none_flipped(&many(&mut cache, 3, 10)),
+            "{}: room for seen-2 is kept",
+            other.duration
+        );
+        assert!(!cache.count_mismatch());
+    }
+}
+
 // --- M1: a refused add the daemon applied anyway -------------------------
 
 /// Stock `Replace` stores a rule in memory before `Save` can fail, and
