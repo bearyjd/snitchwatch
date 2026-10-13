@@ -60,11 +60,6 @@ Kirigami.ScrollablePage {
     // Exposed for the headless probe (tests/inline_verdict_qml.rs).
     property alias inlineVerdicts: verdictHelper
 
-    // The header rule buttons' commands, confirm and outcome bar.
-    header: LevelRuleActions {
-        id: ruleActions
-        model: page.model
-    }
     property alias levelRules: ruleActions
 
     // Issue #18: a row's inline Allow/Deny. Also the entry point
@@ -215,9 +210,27 @@ Kirigami.ScrollablePage {
         }
     }
 
+    // Heading, search and Grouped only: the title row has a fixed height.
     titleDelegate: ConnectionsHeader {
         model: page.model
         title: page.title
+    }
+
+    // Above the list, in the page content where their height is laid out
+    // rather than overflowed: the wrapping filter switches and summary, then
+    // the header rule buttons' commands, confirm and outcome bar.
+    header: ColumnLayout {
+        spacing: 0
+        ConnectionsFilterBar {
+            id: filterBar
+            Layout.fillWidth: true
+            model: page.model
+        }
+        LevelRuleActions {
+            id: ruleActions
+            Layout.fillWidth: true
+            model: page.model
+        }
     }
 
     Kirigami.PlaceholderMessage {

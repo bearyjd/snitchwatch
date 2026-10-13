@@ -33,6 +33,8 @@ const CONNECTIONS_PAGE: &str = concat!(
     "\n",
     include_str!("../qml/ConnectionsHeader.qml"),
     "\n",
+    include_str!("../qml/ConnectionsFilterBar.qml"),
+    "\n",
     include_str!("../qml/ConnectionInspector.qml"),
     "\n",
     include_str!("../qml/RuleButton.qml"),
@@ -77,6 +79,10 @@ const ALL_QML: &[(&str, &str)] = &[
     (
         "ConnectionsHeader.qml",
         include_str!("../qml/ConnectionsHeader.qml"),
+    ),
+    (
+        "ConnectionsFilterBar.qml",
+        include_str!("../qml/ConnectionsFilterBar.qml"),
     ),
     (
         "ConnectionInspector.qml",
