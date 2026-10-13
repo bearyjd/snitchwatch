@@ -73,6 +73,9 @@ pub struct RulesCache {
     /// Cache revision of each latest refused delete. A retained Subscribe
     /// predating that event cannot prove the file was loaded again.
     files_left_revisions: BTreeMap<String, u64>,
+    /// Marked names the daemon took back as an `always` rule since the mark
+    /// (`rules_refused.rs`): a delete `OK` of one removed its file.
+    files_left_held: BTreeSet<String>,
     /// The debounce behind the Rules page's "different number of rules"
     /// hint (`rules_count.rs`). Not part of the list: no revision bump.
     count_watch: count::CountWatch,
@@ -357,6 +360,9 @@ impl RulesCache {
             for rule in &sent.rules {
                 if rule.duration == "always" {
                     self.forget_file_left(&rule.name);
+                } else {
+                    // Held as a temporary rule now: `Delete` removes no file.
+                    self.files_left_held.remove(&rule.name);
                 }
                 // The daemon makes the rule anew and stamps it, whatever
                 // stamp it carried (`Deserialize`, `rule.Create`; N5).
@@ -369,6 +375,7 @@ impl RulesCache {
         } else if sent.r#type == Action::DeleteRule as i32 {
             for rule in &sent.rules {
                 self.remove(&rule.name);
+                self.forget_file_left_if_held(&rule.name);
             }
         }
     }

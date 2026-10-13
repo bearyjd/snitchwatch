@@ -128,6 +128,41 @@ fn only_a_confirmed_always_change_clears_the_marker() {
     assert!(!marked(&cache, "a"));
 }
 
+/// A refused disabled `always` change after the mark proves the daemon holds
+/// the name as an `always` rule again (only `Save` failed). A delete `OK`
+/// then went through `os.Remove` of its file: the file is gone (#120
+/// item 4).
+#[test]
+fn a_delete_ok_after_the_daemon_held_the_name_again_clears_the_marker() {
+    let mut cache = synced(vec![rule("a", true, "always")]);
+    cache.apply_refused_at(&delete("a"), T);
+    cache.apply_refused_at(&change(rule("a", false, "always")), T);
+    assert!(marked(&cache, "a"), "its old file is still there");
+    let before = cache.revision();
+    cache.apply_confirmed_at(&delete("a"), T);
+    assert!(!marked(&cache, "a"));
+    assert!(cache.revision() > before, "the left-on-disk count changed");
+}
+
+/// The proof lasts only while the daemon still holds an `always` copy: a
+/// temporary change (no file for `Delete` to remove) or a new refused
+/// delete (out of memory again) ends it.
+#[test]
+fn the_daemon_holding_the_name_again_is_forgotten_when_it_stops() {
+    for undo in [change(rule("a", true, "5m")), delete("a")] {
+        let mut cache = synced(vec![rule("a", true, "always")]);
+        cache.apply_refused_at(&delete("a"), T);
+        cache.apply_refused_at(&change(rule("a", false, "always")), T);
+        if undo.r#type == Action::DeleteRule as i32 {
+            cache.apply_refused_at(&undo, T);
+        } else {
+            cache.apply_confirmed_at(&undo, T);
+        }
+        cache.apply_confirmed_at(&delete("a"), T);
+        assert!(marked(&cache, "a"), "after {:?}", undo.r#type);
+    }
+}
+
 /// A disabled rule isn't compiled, so for an `always` one only `Save` can
 /// fail: the daemon holds the rule as sent, and its file is the old one.
 #[test]

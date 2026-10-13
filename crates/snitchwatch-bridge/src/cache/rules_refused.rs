@@ -68,11 +68,20 @@ pub fn applied_but_not_saved(sent: &Notification) -> bool {
 impl RulesCache {
     /// Deleted rules the daemon stopped using but couldn't remove the file
     /// of. A name leaves when a snapshot received after the refusal lists it
-    /// again (the file loaded), or
-    /// a confirmed `always` change rewrites its file; not on a confirmed
-    /// delete, which for a name not in memory touches no file. The curated
-    /// defaults also drop a rule that never had a file
-    /// ([`Self::forget_file_left`]).
+    /// again (the file loaded), or a confirmed `always` change rewrites its
+    /// file. A confirmed delete clears it only when the daemon took the name
+    /// back as an `always` rule since the mark (a refused disabled `always`
+    /// change: only `Save` failed), so `Delete` removed its file (#120
+    /// item 4); otherwise stock `Delete` answers `OK` for a name not in
+    /// memory without touching the file. The curated defaults also drop a
+    /// rule that never had a file ([`Self::forget_file_left`]).
+    ///
+    /// What the replies can't tell, so the marker stays (it over-warns):
+    /// a refused **enabled** `always` change after the mark (a compile error
+    /// leaves the name out of memory, a `Save` failure puts it in; #120
+    /// item 10), a refusal for a file already gone (the daemon's text is
+    /// never read), a file removed or reloaded outside the bridge, and a
+    /// prompt verdict that rewrites the file (it gets no reply).
     pub fn files_left(&self) -> &BTreeSet<String> {
         &self.files_left
     }
@@ -81,9 +90,17 @@ impl RulesCache {
     /// a caller that knows the rule had no file: the curated defaults, for
     /// a rule whose install was refused (#120 item 15).
     pub(crate) fn forget_file_left(&mut self, name: &str) {
+        self.files_left_held.remove(name);
         if self.files_left.remove(name) {
             self.files_left_revisions.remove(name);
             self.revision += 1;
+        }
+    }
+
+    /// A confirmed delete of `name`: see [`Self::files_left`].
+    pub(super) fn forget_file_left_if_held(&mut self, name: &str) {
+        if self.files_left_held.remove(name) {
+            self.forget_file_left(name);
         }
     }
 
@@ -103,6 +120,7 @@ impl RulesCache {
             return;
         }
         self.revision += 1;
+        self.files_left_held.remove(name);
         self.files_left.insert(name.to_string());
         self.files_left_revisions
             .insert(name.to_string(), self.revision);
@@ -126,6 +144,9 @@ impl RulesCache {
             }
             RefusedEffect::AppliedNotSaved => {
                 for rule in &sent.rules {
+                    if self.files_left.contains(&rule.name) {
+                        self.files_left_held.insert(rule.name.clone());
+                    }
                     let restamped = Rule {
                         created: now_secs,
                         ..rule.clone()
