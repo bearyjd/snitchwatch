@@ -559,6 +559,7 @@ fn check_protocol(leaf: Option<&Operator>, destination: Destination) -> Result<(
         Some(op)
             if op.r#type == "regexp"
                 && op.operand == "protocol"
+                && !op.sensitive
                 && allowed.iter().any(|protocol| op.data == protocol.pattern()) =>
         {
             Ok(())
