@@ -1273,11 +1273,21 @@ impl qobject::ConnectionsModel {
         // Translate the chosen id to its current *visible* index for QML. If the
         // target is filtered out of view there's nothing to select. In grouped
         // mode this is a position in the flattened projection rather than the
-        // flat store's visible list; the projection is guaranteed to already
-        // contain the row because `build_projection` force-expands the path
-        // to any group with a pending descendant (see `connections::grouping`
-        // module docs), which satisfies "auto-expand the path to a new
-        // pending row" without any extra state here.
+        // flat store's visible list. A new pending row's host starts collapsed,
+        // so when its program and domain are open (issue #20: never force open
+        // what the user collapsed) open just the host, with ranged signals, so
+        // the row is in the projection to select.
+        if self.grouped
+            && self
+                .as_mut()
+                .rust_mut()
+                .grouping
+                .open_host_of_row_under_open_domain(&target)
+        {
+            let projection = self.compute_grouped_projection();
+            self.as_mut().apply_grouped_projection(projection);
+            self.as_mut().refresh_counts();
+        }
         let vis = if self.grouped {
             self.grouped_projection
                 .iter()

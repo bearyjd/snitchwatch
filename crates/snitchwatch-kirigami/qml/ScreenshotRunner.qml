@@ -48,7 +48,7 @@ Item {
         const todo = [];
         for (let i = 0; i < list.count; i++) {
             const d = list.itemAtIndex(i);
-            if (d && d.isGroupHeader && d.depth === depth && !d.expanded) {
+            if (d && d.isGroupHeader && d.groupLevel === depth && !d.expanded) {
                 todo.push({ key: d.groupKey, parent: d.groupParentKey, process: d.groupProcessKey });
             }
         }

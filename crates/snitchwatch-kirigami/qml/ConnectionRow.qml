@@ -267,7 +267,7 @@ Item {
         }
 
         // Issue #18: per-process batch actions. Only on top-level
-        // process headers (depth 0) with at least one pending
+        // program headers (groupLevel 0) with at least one pending
         // descendant — a domain header or a fully-decided process has
         // nothing to batch-act on.
         RowLayout {

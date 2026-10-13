@@ -450,6 +450,24 @@ impl GroupTree {
         }
     }
 
+    /// Open the host holding row `id`, but only when its program and domain
+    /// are both already open (a collapse there is the user's call and stays).
+    /// Returns true when the host's state changed.
+    pub fn open_host_of_row_under_open_domain(&mut self, id: &str) -> bool {
+        let Some(meta) = self.id_meta.get(id) else {
+            return false;
+        };
+        if !self.expanded_processes.contains(&meta.process_key)
+            || !self
+                .expanded_domains
+                .contains(&composite_key(&meta.process_key, &meta.domain_key))
+        {
+            return false;
+        }
+        let composite = host_composite_key(&meta.process_key, &meta.domain_key, &meta.host_key);
+        self.expanded_hosts.insert(composite)
+    }
+
     /// Number of process groups currently tracked (test/debug helper).
     pub fn process_count(&self) -> usize {
         self.process_order.len()

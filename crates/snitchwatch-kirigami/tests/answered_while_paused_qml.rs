@@ -179,7 +179,7 @@ Window {
                     }
                 } else if (probeWindow.phase === 5) {
                     for (const d of probeWindow.delegates()) {
-                        if (d.isGroupHeader && d.depth === 2 && !d.expanded) {
+                        if (d.isGroupHeader && d.groupLevel === 2 && !d.expanded) {
                             connModel.toggleHostGroup(d.groupProcessKey, d.groupParentKey, d.groupKey);
                         }
                     }

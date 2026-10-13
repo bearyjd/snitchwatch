@@ -148,6 +148,18 @@ Window {
                     model.setFilterQuery("");
                     probe.expect(probe.resets === 0, "clearing the filter reset the model");
                     probe.expect(model.count === 2, "count after clearing: " + model.count);
+                    probe.mark();
+                    model.toggleDomainGroup("p", "example.com");
+                    model.toggleHostGroup("p", "example.com", "y.example.com");
+                    probe.expect(model.count === 6, "count with a host open: " + model.count);
+                    probe.mark();
+                    model.toggleDomainGroup("p", "example.com");
+                    probe.expect(probe.resets === 0, "collapsing a domain with an open host reset the model");
+                    probe.expect(probe.span(probe.removed) === "[[2,5]]",
+                                 "domain collapse removes its hosts and the open host's rows: "
+                                 + probe.span(probe.removed));
+                    probe.expect(probe.inserted.length === 0, "open-host collapse inserted rows");
+                    probe.expect(model.count === 2, "count after collapsing an open-host domain: " + model.count);
                 } else if (probe.phase === 2) {
                     model.applyServerMessageJson(JSON.stringify({
                         action: "insertConnectionRows",

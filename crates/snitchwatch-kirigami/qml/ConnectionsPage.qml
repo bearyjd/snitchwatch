@@ -17,13 +17,14 @@
 //     works identically on narrow and wide windows and matches the pending-row
 //     inspector described in the design spec without a responsive-layout branch).
 //
-// Little-Snitch-parity grouping (Process -> Domain -> connection): the
+// Little-Snitch-parity grouping (Process -> Domain -> Host -> connection): the
 // header's "Grouped" switch drives `ConnectionsModel.setGrouped`. In grouped
 // mode the same `ListView`/delegate renders a mix of row kinds — process
-// headers (depth 0), domain headers (depth 1), and leaf connection rows
-// (depth 2) — distinguished by the `isGroupHeader`/`depth` roles the Rust
-// model exposes; clicking a header toggles its expand state via
-// `toggleProcessGroup`/`toggleDomainGroup` instead of opening the inspector.
+// headers (depth 0), domain headers (depth 1), host headers (depth 2), and
+// leaf connection rows (depth 3) — distinguished by the `isGroupHeader`/`depth`
+// roles the Rust model exposes; clicking a header toggles its expand state via
+// `toggleProcessGroup`/`toggleDomainGroup`/`toggleHostGroup` instead of
+// opening the inspector.
 // All grouping/aggregate logic lives in Rust (`connections::grouping`); this
 // QML only renders the flattened projection and forwards toggle clicks.
 import QtQuick
