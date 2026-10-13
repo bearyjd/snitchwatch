@@ -404,7 +404,9 @@ fn the_shutdown_save_always_writes_and_says_the_run_stopped_cleanly() {
     assert!((before..=now_ms()).contains(&stopped));
     // A periodic save queued before the stop (the ticker's `spawn_blocking`
     // isn't cancelled by aborting the ticker) and run after it writes
-    // nothing.
+    // nothing, although the counts changed (without a `record`, which
+    // would write by itself after the stop).
+    hits.forget(["a"]);
     hits.save_now();
     assert_eq!(stopped_in(&path), Some(stopped));
     hits.save_at_stop();

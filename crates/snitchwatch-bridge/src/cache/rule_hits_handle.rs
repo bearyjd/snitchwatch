@@ -138,7 +138,9 @@ impl RuleHitsHandle {
         // After the state changed, so a stop save that read the state before
         // it is seen to have set `stopped`. The gRPC server stops after the
         // shutdown save: what it counts then is saved too (the file's clean
-        // stop vouches for everything the run counted).
+        // stop vouches for everything the run counted). This writes to disk
+        // from the ping handler and may wait on `saving`, accepted: it only
+        // happens in the shutdown window.
         if lock(&self.inner.persistence).stopped {
             self.save(SaveKind::AfterStop);
         }
@@ -180,6 +182,12 @@ impl RuleHitsHandle {
     /// full disk; on a read-only one it can't, and only the gap in memory
     /// remains). A bridge that doesn't trust the counters rewrites a file
     /// with a baseline too, as the version 1 shape a rollback can read.
+    ///
+    /// Trade-off: a bridge that doesn't trust the counters never consumes a
+    /// clean stop, so one it can't rewrite stays in the file. Unix run A
+    /// writes a stop, TCP run T can't rewrite it and counts hits it never
+    /// saves; if the daemon then restarts, Unix run B judges from A's stop,
+    /// sees no gap, and T's hits are lost unnoticed (#120 item 27).
     pub fn attach_file(&self, path: PathBuf) {
         let loaded = rule_hits_file::load(&path);
         let (mut consume, mut downgrade) = (false, false);

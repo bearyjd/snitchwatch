@@ -83,7 +83,8 @@ impl LoaderModel {
     }
 
     /// The daemon's answer to one command: `Ok(())` or its `ERROR` text.
-    /// A [silent](Self::silent) command counts as `Ok(())`; see
+    /// A [silent](Self::silent) command counts as `Ok(())` here, though the
+    /// daemon sends no reply: callers that model replies use
     /// [`Self::answer`].
     pub fn apply(&mut self, n: &Notification) -> Result<(), String> {
         self.answer(n).unwrap_or(Ok(()))
