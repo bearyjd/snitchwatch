@@ -38,6 +38,7 @@ Item {
                 : (Controls.SplitHandle.hovered ? Qt.alpha(Kirigami.Theme.highlightColor, 0.5)
                                                 : Kirigami.Theme.backgroundColor)
             Accessible.name: "Resize map"
+            Accessible.role: Accessible.Separator
             Rectangle {
                 anchors.centerIn: parent
                 width: Kirigami.Units.gridUnit * 3
@@ -54,10 +55,10 @@ Item {
             connectionsModel: pane.page.model
             // While dragging, the band may go all the way to its header row.
             Controls.SplitView.minimumHeight: split.resizing ? band.collapsedHeight : band.minimumHeight
-            Controls.SplitView.maximumHeight: split.resizing || !MapBandState.collapsed
-                ? Math.max(split.resizing ? band.collapsedHeight : band.minimumHeight, Math.min(band.maximumHeight,
+            Controls.SplitView.maximumHeight: Math.min(
+                split.resizing ? band.chromeHeight + band.maximumBody : band.maximumHeight,
+                Math.max(split.resizing ? band.collapsedHeight : band.minimumHeight,
                     split.height - pane.treeMinimum - pane.handleHeight))
-                : band.collapsedHeight
             Controls.SplitView.preferredHeight: band.preferredHeight
             onHeightChanged: if (split.resizing) band.followDrag(band.height)
             onPreferredHeightChanged: if (!split.resizing) pane.applyPreferred()

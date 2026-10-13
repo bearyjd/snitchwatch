@@ -30,6 +30,8 @@ Item {
     // country, so a refresh updates them in place instead of recreating them
     // (a recreated marker would forget its pulse throttle).
     property var clusterByKey: ({})
+    // Country code -> its cluster's key, so a pulse needs no scan of members.
+    property var keyByCode: ({})
     readonly property var emptyCluster: ({ members: [], total: 0, dominant: "none", mixed: false, summary: "", x: 0, y: 0 })
     // Pulse throttle state per country code, and refresh bookkeeping.
     property var lastPulseMs: ({})
@@ -104,13 +106,18 @@ Item {
     // key survives, add or remove only the difference.
     function applyClusters(clusters) {
         const byKey = {};
+        const byCode = {};
         const keys = [];
         for (const c of clusters) {
             const key = c.members[0].code;
             byKey[key] = c;
             keys.push(key);
+            for (const m of c.members) {
+                byCode[m.code] = key;
+            }
         }
         view.clusterByKey = byKey;
+        view.keyByCode = byCode;
         view.markers = clusters;
         for (let i = markerModel.count - 1; i >= 0; i--) {
             if (!byKey.hasOwnProperty(markerModel.get(i).key)) {
@@ -200,16 +207,21 @@ Item {
     // (state here, so it survives marker changes), and never under reduced
     // motion.
     function pulse(code, nowMs) {
-        if (view.reducedMotion) {
+        // Nothing to animate while the band is collapsed or the map hidden.
+        if (view.reducedMotion || !view.visible) {
             return false;
         }
         const last = view.lastPulseMs[code];
         if (last !== undefined && nowMs - last < view.pulseIntervalMs) {
             return false;
         }
-        for (let i = 0; i < repeater.count; i++) {
-            const item = repeater.itemAt(i);
-            if (item && item.cluster.members.some(m => m.code === code)) {
+        const key = view.keyByCode[code];
+        for (let i = 0; key !== undefined && i < markerModel.count; i++) {
+            if (markerModel.get(i).key === key) {
+                const item = repeater.itemAt(i);
+                if (!item) {
+                    return false;
+                }
                 view.lastPulseMs[code] = nowMs;
                 return item.pulse(nowMs);
             }

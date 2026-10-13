@@ -3,7 +3,8 @@
 // the tree keeps a minimum). Run with `just qml-test`.
 //
 // A structural MIRROR of MonitorPane.qml + MapBand.qml's height logic with
-// plain items (qmltestrunner cannot load com.snitchwatch.shell; see
+// plain items; the SplitView expressions are copied verbatim from the real
+// files and pinned by honest_ui_qml_guards.rs (qmltestrunner cannot load com.snitchwatch.shell; see
 // tst_delegate_input.qml). tests/map_view_qml.rs covers the real band's
 // followDrag(); tests/honest_ui_qml_guards.rs pins the real wiring.
 import QtQuick
@@ -19,6 +20,8 @@ Item {
     readonly property real chrome: 80
     readonly property real minBody: 60
     readonly property real treeMin: 100
+    readonly property real maxBody: 200
+    readonly property real handleHeight: 8
     property bool collapsed: false
     property real bodyHeight: 120
 
@@ -28,21 +31,26 @@ Item {
         if (!root.collapsed) root.bodyHeight = Math.max(root.minBody, body);
     }
     readonly property real preferred: root.collapsed ? root.header : root.chrome + root.bodyHeight
+    readonly property real minimumHeight: root.collapsed ? root.header : root.chrome + root.minBody
+    readonly property real maximumHeight: root.collapsed ? root.header : root.chrome + root.maxBody
+
+    onPreferredChanged: if (!split.resizing) band.Controls.SplitView.preferredHeight = root.preferred
 
     Controls.SplitView {
         id: split
         anchors.fill: parent
         orientation: Qt.Vertical
         onResizingChanged: if (!split.resizing) band.Controls.SplitView.preferredHeight = root.preferred
-        handle: Rectangle { implicitHeight: 8; color: "gray" }
+        handle: Rectangle { implicitHeight: root.handleHeight; color: "gray" }
 
         Rectangle {
             id: band
             color: "lightblue"
-            Controls.SplitView.minimumHeight: split.resizing ? root.header
-                : (root.collapsed ? root.header : root.chrome + root.minBody)
-            Controls.SplitView.maximumHeight: split.resizing || !root.collapsed
-                ? Math.max(root.header, split.height - root.treeMin - 8) : root.header
+            Controls.SplitView.minimumHeight: split.resizing ? root.header : root.minimumHeight
+            Controls.SplitView.maximumHeight: Math.min(
+                split.resizing ? root.chrome + root.maxBody : root.maximumHeight,
+                Math.max(split.resizing ? root.header : root.minimumHeight,
+                    split.height - root.treeMin - root.handleHeight))
             Controls.SplitView.preferredHeight: root.preferred
             onHeightChanged: if (split.resizing) root.followDrag(band.height)
         }
@@ -58,7 +66,7 @@ Item {
         name: "MapSplitDrag"
         when: windowShown
 
-        function handleY() { return band.height + 4; }
+        function handleY() { return band.height + root.handleHeight / 2; }
 
         function init() {
             root.collapsed = false;
@@ -86,11 +94,25 @@ Item {
         }
 
         function test_short_window_shrinks_the_band_first() {
-            root.height = 330;
+            root.height = 280;
             wait(50);
-            compare(tree.height >= root.treeMin, true, "tree " + tree.height);
-            compare(band.height >= root.chrome + root.minBody, true, "band " + band.height);
+            verify(band.height < root.preferred, "band " + band.height + " vs preferred " + root.preferred);
+            verify(band.height >= root.minimumHeight, "band below its minimum: " + band.height);
+            compare(tree.height, root.treeMin);
             root.height = 600;
+        }
+
+        // The bug the first mirror missed: once collapsed, the cap must not
+        // pin the handle at the header, or the band cannot be dragged open.
+        function test_collapsed_band_can_be_dragged_open() {
+            root.collapsed = true;
+            band.Controls.SplitView.preferredHeight = root.preferred;
+            wait(50);
+            compare(band.height, root.header);
+            mouseDrag(root, 200, handleY(), 0, 150, Qt.LeftButton);
+            wait(50);
+            verify(!root.collapsed, "a collapsed band must reopen when dragged out");
+            verify(band.height > root.header + 100, "band height " + band.height);
         }
     }
 }

@@ -1198,3 +1198,33 @@ fn map_band_sits_above_the_tree_in_the_left_pane() {
         "the inspector stays the right-hand panel"
     );
 }
+
+/// The splitter's height cap in `MonitorPane.qml`: while a handle drag is in
+/// progress the band may grow to its full expanded size even when it starts
+/// collapsed, and it never takes the tree's minimum. `tests/qml/
+/// tst_map_split_drag.qml` mirrors these exact expressions; keep them in step.
+#[test]
+fn map_band_height_cap_lets_a_collapsed_band_reopen() {
+    let pane: String = code_lines(include_str!("../qml/MonitorPane.qml"))
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    for needle in [
+        "Controls.SplitView.maximumHeight: Math.min( split.resizing ? band.chromeHeight + band.maximumBody : band.maximumHeight, Math.max(split.resizing ? band.collapsedHeight : band.minimumHeight, split.height - pane.treeMinimum - pane.handleHeight))",
+        "Controls.SplitView.minimumHeight: split.resizing ? band.collapsedHeight : band.minimumHeight",
+        "onPreferredHeightChanged: if (!split.resizing) pane.applyPreferred()",
+        "onResizingChanged: if (!split.resizing) pane.applyPreferred()",
+    ] {
+        assert!(pane.contains(needle), "MonitorPane.qml lost `{needle}`");
+    }
+    let mirror = include_str!("qml/tst_map_split_drag.qml");
+    for needle in [
+        "split.resizing ? root.chrome + root.maxBody : root.maximumHeight",
+        "onPreferredChanged",
+    ] {
+        assert!(
+            mirror.contains(needle),
+            "tst_map_split_drag.qml drifted from MonitorPane.qml: `{needle}`"
+        );
+    }
+}

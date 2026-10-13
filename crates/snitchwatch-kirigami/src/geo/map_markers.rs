@@ -129,7 +129,9 @@ fn merge_close(out: &mut Vec<Cluster>, scale2: f64, gap2: f64) {
 
 fn build(mut members: Vec<Marker>) -> Cluster {
     members.sort_by(|a, b| b.total.cmp(&a.total).then_with(|| a.code.cmp(&b.code)));
-    let total: i32 = members.iter().map(|m| m.total).sum();
+    let total: i32 = members
+        .iter()
+        .fold(0i32, |acc, m| acc.saturating_add(m.total));
     let weight = f64::from(total.max(1));
     let x = members
         .iter()
@@ -145,9 +147,15 @@ fn build(mut members: Vec<Marker>) -> Cluster {
         x,
         y,
         total,
-        allowed: members.iter().map(|m| m.allowed).sum(),
-        denied: members.iter().map(|m| m.denied).sum(),
-        pending: members.iter().map(|m| m.pending).sum(),
+        allowed: members
+            .iter()
+            .fold(0i32, |acc, m| acc.saturating_add(m.allowed)),
+        denied: members
+            .iter()
+            .fold(0i32, |acc, m| acc.saturating_add(m.denied)),
+        pending: members
+            .iter()
+            .fold(0i32, |acc, m| acc.saturating_add(m.pending)),
         members,
     }
 }

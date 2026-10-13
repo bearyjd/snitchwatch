@@ -65,7 +65,8 @@ ColumnLayout {
 
         Controls.ToolButton {
             id: chevronButton
-            // A text glyph, so it shows without an icon theme.
+            // A text glyph, so it shows without an icon theme (QML cannot
+            // tell whether a theme icon will actually render).
             text: MapBandState.collapsed ? "▸" : "▾"
             Accessible.name: MapBandState.collapsed ? "Show map" : "Hide map"
             onClicked: MapBandState.collapsed = !MapBandState.collapsed
