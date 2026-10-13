@@ -296,17 +296,48 @@ pub struct Projection {
     pub(crate) reason: Option<LevelRuleRefusal>,
 }
 
-/// Whether a wildcard over the domain `key` would reach past it: some host
-/// under it has a different registrable root in the Public Suffix List than
-/// `key` (`bucket.s3.amazonaws.com` is its own root, as `s3.amazonaws.com`
-/// is a public suffix, so `*.amazonaws.com` would cover every bucket). The
+/// Domains with a public-suffix rule strictly beneath them, one per line
+/// after the `#` header, sorted. Generated from the rules file the `psl`
+/// crate embeds (`scripts/gen_psl_suffix_parents.py`); a test fails when the
+/// locked `psl` version moves without it.
+static SUFFIX_PARENTS: &str = include_str!("../../data/psl-suffix-parents.txt");
+
+/// Whether the Public Suffix List has a rule strictly beneath the domain
+/// `key` (`s3.amazonaws.com` under `amazonaws.com`), whatever hosts are seen.
+pub fn has_suffix_beneath(key: &str) -> bool {
+    static SORTED: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
+    let parents = SORTED.get_or_init(|| {
+        SUFFIX_PARENTS
+            .lines()
+            .filter(|l| !l.starts_with('#') && !l.is_empty())
+            .collect()
+    });
+    let key = key.to_ascii_lowercase();
+    parents.binary_search(&key.trim_end_matches('.')).is_ok()
+}
+
+/// Whether a wildcard over the domain `key` would reach past it: the Public
+/// Suffix List has a rule under `key` itself ([`has_suffix_beneath`]), or
+/// some host under it has a different registrable root than `key`
+/// (`bucket.s3.amazonaws.com` is its own root, as `s3.amazonaws.com` is a
+/// public suffix, so `*.amazonaws.com` would cover every bucket). The
 /// bridge's prompt flow falls back to the exact host there. Bare IPs are
 /// not hosts; a host that doesn't parse counts as crossing.
 pub fn crosses_delegated_suffix<'a>(key: &str, hosts: impl IntoIterator<Item = &'a str>) -> bool {
+    // The list is punycode; a non-ASCII key can't be looked up, so refuse.
+    if !key.is_ascii() || has_suffix_beneath(key) {
+        return true;
+    }
     let key = key.to_ascii_lowercase();
+    let key = key.trim_end_matches('.');
+    // The grouping key is the last two labels, not a PSL root: `github.io`
+    // is itself a public suffix, so `*.github.io` is every user's site.
+    if addr::parse_dns_name(key).ok().and_then(|n| n.root()) != Some(key) {
+        return true;
+    }
     hosts.into_iter().filter(|h| !is_ip(h)).any(|host| {
         let host = host.to_ascii_lowercase();
-        addr::parse_dns_name(&host).ok().and_then(|n| n.root()) != Some(key.as_str())
+        addr::parse_dns_name(&host).ok().and_then(|n| n.root()) != Some(key)
     })
 }
 

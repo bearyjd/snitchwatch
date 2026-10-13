@@ -52,7 +52,7 @@ fn a_node_the_projection_shows_is_known() {
         node(PROG, Level::Domain, "github.com"),
         node(PROG, Level::Host, "api.github.com"),
     ] {
-        assert_eq!(known_node(&entries, n), Ok(()), "{n:?}");
+        assert_eq!(known_node(true, &entries, n), Ok(()), "{n:?}");
     }
 }
 
@@ -66,10 +66,10 @@ fn a_node_the_projection_does_not_show_is_refused() {
         node(PROG, Level::Program, "github.com"),
         node(PROG, Level::Domain, ""),
     ] {
-        assert_eq!(known_node(&entries, n), Err(NOT_IN_LIST), "{n:?}");
+        assert_eq!(known_node(true, &entries, n), Err(NOT_IN_LIST), "{n:?}");
     }
     assert_eq!(
-        known_node(&[], node(PROG, Level::Program, "")),
+        known_node(true, &[], node(PROG, Level::Program, "")),
         Err(NOT_IN_LIST)
     );
 }
@@ -95,11 +95,11 @@ fn empty_and_oversized_keys_are_refused_even_when_a_node_matches() {
         },
     ];
     assert_eq!(
-        known_node(&entries, node(PROG, Level::Domain, &long)),
+        known_node(true, &entries, node(PROG, Level::Domain, &long)),
         Err(NOT_IN_LIST)
     );
     assert_eq!(
-        known_node(&entries, node(PROG, Level::Domain, "")),
+        known_node(true, &entries, node(PROG, Level::Domain, "")),
         Err(NOT_IN_LIST)
     );
     let exact = "a".repeat(MAX_KEY_BYTES);
@@ -112,11 +112,11 @@ fn empty_and_oversized_keys_are_refused_even_when_a_node_matches() {
         counts,
     }];
     assert_eq!(
-        known_node(&entries, node(PROG, Level::Host, &exact)),
+        known_node(true, &entries, node(PROG, Level::Host, &exact)),
         Ok(())
     );
     assert_eq!(
-        known_node(&entries, node("", Level::Host, &exact)),
+        known_node(true, &entries, node("", Level::Host, &exact)),
         Err(NOT_IN_LIST)
     );
 }
@@ -198,4 +198,12 @@ fn an_unavailable_projection_keeps_its_own_reason() {
         shown_state(&p, || false),
         (RuleState::Unavailable, Some(LevelRuleRefusal::TooBroad))
     );
+}
+
+#[test]
+fn a_flat_model_refuses_every_node_whatever_the_cached_projection_holds() {
+    let entries = shown();
+    let n = node(PROG, Level::Domain, "github.com");
+    assert_eq!(known_node(true, &entries, n), Ok(()));
+    assert_eq!(known_node(false, &entries, n), Err(NOT_IN_LIST));
 }
