@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, r13-candidate]
+    branches: [main, r14-candidate]
   pull_request:
 
 permissions:
