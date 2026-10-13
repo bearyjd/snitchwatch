@@ -108,6 +108,19 @@ QtObject {
         return verdicts.model ? verdicts.model.inlineDenyFor(rowId, appBound) : "program_unknown";
     }
 
+    // A row's Allow button text: names the duration the click will remember
+    // ("Allow (Forever)"), and is plain "Allow" where it can only be once-only
+    // (the Settings default is Once, or the program/bridge can't remember).
+    // The same duration `send` uses, so the label can't promise more.
+    function allowLabel(rowId) {
+        if (!verdicts.model) {
+            return "Allow";
+        }
+        const token = verdicts.model.inlineDurationFor(rowId, "allow", verdicts.rowAppBoundRules(rowId),
+                                                       Durations.defaultToken);
+        return token === "this_time" ? "Allow" : "Allow (" + Durations.labelFor(token) + ")";
+    }
+
     // A row's inline Allow/Deny.
     function submit(rowId, choice) {
         verdicts.explain(verdicts.send(rowId, choice), choice);

@@ -559,7 +559,7 @@ Kirigami.ScrollablePage {
                     Controls.Button {
                         flat: true
                         enabled: !row.submitted
-                        text: "Allow"
+                        text: !row.isGroupHeader && row.pending ? verdictHelper.allowLabel(row.rowId) : "Allow"
                         icon.name: "dialog-ok-apply"
                         onClicked: row.decideOnce("allow", false)
                     }

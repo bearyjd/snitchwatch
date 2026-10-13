@@ -156,7 +156,7 @@ ColumnLayout {
     // live. Maps onto the bridge's `VerdictDuration` — see
     // `pending_decision.rs`'s doc comment for the full duration-mapping
     // table. The list is `Durations.all`, shared with the alert; "Until
-    // Restart" is daemon "until restart" (opensnitchd has no notion of an app
+    // firewall restarts" is daemon "until restart" (opensnitchd has no notion of an app
     // quitting). It opens on the Settings default where that is offered.
     RowLayout {
         Layout.fillWidth: true

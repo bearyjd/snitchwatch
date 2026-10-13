@@ -23,7 +23,7 @@ world map, rules window + factory groups, sidebar shell) are separate PRs.
 
 ## Owner decisions (2026-10-12)
 
-1. Durations offered: **Once / 5 minutes / Until Restart / Forever** — each maps
+1. Durations offered: **Once / 5 minutes / Until firewall restarts / Forever** — each maps
    to a distinct daemon duration. A real "Until Quit" (bridge tracks process exit)
    is deferred. The control is built from one list so this is a one-line change.
 2. Flatpak gets **read-only** access to host `.desktop` files and icon themes for
@@ -47,9 +47,15 @@ world map, rules window + factory groups, sidebar shell) are separate PRs.
   Scope: any / domain / host. Duration: segmented control, preselected from a new
   Settings value. Return = allow, Esc = deny, keys ignored for 1 s after it appears.
 - Inline and notification "Allow" use the Settings duration, not `this_time`.
-- Silent mode, chosen in onboarding, stored in Settings. When silent mode is on,
-  or the window is hidden, Rust answers each new ask at arrival with `Once` + the
-  chosen verdict and marks the row "needs a rule". Only one session answers.
+- Silent mode, chosen in onboarding, stored in Settings. When silent mode is
+  Allow or Deny, Rust answers each new ask at arrival (and each ask already
+  waiting when the mode is switched) with `Once` + the chosen verdict and marks
+  the row "needs a rule". Only one session answers. **Owner decision (replaces
+  "a hidden window behaves like silent mode"):** the alert is its own window,
+  independent of the main window. In "Ask me" it shows for every new prompt
+  whether the main window is visible or hidden to the tray, nothing is
+  auto-answered, a new prompt never raises the main window, and no duplicate
+  desktop notification is sent. Only silent Allow/Deny answer silently.
 - After the GUI quits, the bridge reports no GUI session and the daemon applies its
   own DefaultAction. Deny+record cannot apply then; the UI says so.
 

@@ -1,13 +1,21 @@
 //! Silent mode (LS redesign phase 1): answering a new prompt without asking.
 //!
-//! When the user chose "Allow and record" or "Deny and record", or the main
-//! window is hidden (closing it only hides it to the tray, so nobody is
-//! looking), `BridgeFeed`'s feed task answers each NEW pending row of this
-//! GUI's own bridge session at arrival with `SetVerdict(chosen, this_host,
-//! once)`. A hidden window with silent mode off allows. The answer is
+//! When the user chose "Allow and record" or "Deny and record",
+//! `BridgeFeed`'s feed task answers each NEW pending row of this GUI's own
+//! bridge session at arrival with `SetVerdict(chosen, this_host, once)`, and
+//! switching to one of those modes answers the rows already waiting
+//! ([`answer_pending_now`], same dedup). "Ask me" answers nothing: the alert
+//! window (`AlertWindow.qml`) is independent of the main window and asks
+//! whether that window is shown or hidden to the tray. The answer is
 //! once-only on purpose: it keeps the connection working without storing a
 //! rule nobody reviewed, and the row is marked "needs a rule" (the
 //! `needsRule` role) so the user can make one later.
+//!
+//! **Why Deny is once-only too.** An inline Deny sends `until_restart` so the
+//! SYN the kernel resends is not asked about again. A silent Deny does not:
+//! that is a remembered rule the user never chose, and the row would not
+//! "need a rule" any more. The cost is that a retransmit arrives as a new row
+//! and is denied (and listed) again.
 //!
 //! **Why a GUI-side set and not `ConnectionRow.auto_answer`:** `AutoAnswer` is
 //! the bridge's wire enum (`FilterPaused`, `NoAnswer`) and means "the bridge
@@ -23,39 +31,43 @@
 //! Qt-free: the pure pieces are unit-tested below.
 
 use std::collections::{HashSet, VecDeque};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
-use snitchwatch_bridge::ws_messages::{ClientMessage, ConnectionRow, ServerMessage};
+use snitchwatch_bridge::ws_messages::{ClientMessage, ServerMessage};
 
 use crate::connections::outcome::is_pending;
 use crate::pending_decision::build_verdict_message;
 use crate::settings::SilentMode;
 
-/// The verdict token silent mode answers with, if it answers at all.
-/// A hidden window with silent mode off allows: a prompt nobody can see would
-/// otherwise wait out the bridge's 30 s and fall to the firewall's default.
-pub(crate) fn choice_for(mode: SilentMode, window_visible: bool) -> Option<&'static str> {
-    match (mode, window_visible) {
-        (SilentMode::Allow, _) => Some("allow"),
-        (SilentMode::Deny, _) => Some("deny"),
-        (SilentMode::Off, false) => Some("allow"),
-        (SilentMode::Off, true) => None,
+/// The verdict token silent mode answers with, if it answers at all. "Ask me"
+/// does not, whether or not the main window is shown.
+pub(crate) fn choice_for(mode: SilentMode) -> Option<&'static str> {
+    match mode {
+        SilentMode::Allow => Some("allow"),
+        SilentMode::Deny => Some("deny"),
+        SilentMode::Off => None,
     }
 }
 
-/// What the window and settings last said. The window starts "visible": until
-/// `main.qml` reports otherwise nothing is answered silently.
-static STATE: Mutex<(SilentMode, bool)> = Mutex::new((SilentMode::Off, true));
+/// What the settings last said. Until `AlertHost` reports it nothing is
+/// answered silently.
+static STATE: Mutex<SilentMode> = Mutex::new(SilentMode::Off);
 
-/// Called from QML (`BridgeFeed.setSilentState`) when either input changes.
-pub(crate) fn set_state(mode: SilentMode, window_visible: bool) {
-    *STATE.lock().unwrap_or_else(|p| p.into_inner()) = (mode, window_visible);
+/// Called from QML (`BridgeFeed.setSilentState`) when the mode changes.
+pub(crate) fn set_state(mode: SilentMode) {
+    *STATE.lock().unwrap_or_else(|p| p.into_inner()) = mode;
 }
 
 /// The verdict token silent mode answers with right now, if any.
 pub(crate) fn current_choice() -> Option<&'static str> {
-    let (mode, visible) = *STATE.lock().unwrap_or_else(|p| p.into_inner());
-    choice_for(mode, visible)
+    choice_for(*STATE.lock().unwrap_or_else(|p| p.into_inner()))
+}
+
+/// The rows answered so far, shared by the feed task and the sweep that runs
+/// when the mode changes, so a row is never answered twice.
+pub(crate) fn shared_answered() -> &'static Mutex<Answered> {
+    static ANSWERED: OnceLock<Mutex<Answered>> = OnceLock::new();
+    ANSWERED.get_or_init(Mutex::default)
 }
 
 const NEEDS_RULE_CAP: usize = 4096;
@@ -117,26 +129,46 @@ impl Answered {
         else {
             return Vec::new();
         };
+        self.enter(session);
+        rows.iter()
+            .filter(|row| is_pending(row) && self.wire_ids.insert(row.id.clone()))
+            .filter_map(|row| answer_for(session, &row.id, choice))
+            .collect()
+    }
+
+    /// The silent answers for rows already known to be pending in `session`
+    /// (`wire_ids`), not answered before.
+    pub(crate) fn plan_waiting(
+        &mut self,
+        session: u64,
+        wire_ids: &[String],
+        choice: &str,
+    ) -> Vec<(String, ClientMessage)> {
+        self.enter(session);
+        wire_ids
+            .iter()
+            .filter(|id| self.wire_ids.insert((*id).clone()))
+            .filter_map(|id| answer_for(session, id, choice))
+            .collect()
+    }
+
+    fn enter(&mut self, session: u64) {
         if self.session != Some(session) {
             self.session = Some(session);
             self.wire_ids.clear();
         }
-        rows.iter()
-            .filter(|row| is_pending(row) && self.wire_ids.insert(row.id.clone()))
-            .filter_map(|row| answer_for(session, row, choice))
-            .collect()
     }
 }
 
-fn answer_for(session: u64, row: &ConnectionRow, choice: &str) -> Option<(String, ClientMessage)> {
-    let qualified = format!("{session}:{}", row.id);
+fn answer_for(session: u64, wire_id: &str, choice: &str) -> Option<(String, ClientMessage)> {
+    let qualified = format!("{session}:{wire_id}");
     let msg = build_verdict_message(&qualified, choice, "this_host", "this_time")?;
     Some((qualified, msg))
 }
 
 /// The feed task's hook: answer the new pending rows in `message` if silent
-/// mode (or a hidden window) says to. Runs on the bridge runtime; the send is
-/// a non-blocking `try_send`.
+/// mode says to. Runs on the bridge runtime; the send is a non-blocking
+/// `try_send`.
 pub(crate) fn answer_new_rows(
     handles: &crate::bridge_runtime::BridgeHandles,
     session: u64,
@@ -149,10 +181,32 @@ pub(crate) fn answer_new_rows(
     if !handles.is_current_session(session) {
         return;
     }
-    for (qualified, msg) in answered.plan(session, message, choice) {
-        mark_needs_rule(&qualified);
-        if let Err(error) = crate::bridge_feed::dispatch_to(handles, msg, false) {
-            tracing::warn!(%error, row = %qualified, "silent answer not sent");
+    send_plan(handles, answered.plan(session, message, choice));
+}
+
+/// Silent mode was just switched to Allow or Deny: answer the rows of the
+/// current session that are already waiting, like [`answer_new_rows`] would
+/// have at arrival. Does nothing in "Ask me".
+pub(crate) fn answer_pending_now(
+    handles: &crate::bridge_runtime::BridgeHandles,
+    answered: &mut Answered,
+) {
+    let Some(choice) = current_choice() else {
+        return;
+    };
+    let Some((session, wire_ids)) = handles.pending_wire_ids() else {
+        return;
+    };
+    send_plan(handles, answered.plan_waiting(session, &wire_ids, choice));
+}
+
+/// Send each answer once-only; a row is marked "needs a rule" only once its
+/// answer is queued, so a row that was never answered does not claim it was.
+fn send_plan(handles: &crate::bridge_runtime::BridgeHandles, plan: Vec<(String, ClientMessage)>) {
+    for (qualified, msg) in plan {
+        match crate::bridge_feed::dispatch_to(handles, msg, false) {
+            Ok(()) => mark_needs_rule(&qualified),
+            Err(error) => tracing::warn!(%error, row = %qualified, "silent answer not sent"),
         }
     }
 }
@@ -160,7 +214,9 @@ pub(crate) fn answer_new_rows(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use snitchwatch_bridge::ws_messages::{VerdictAction, VerdictDuration, VerdictScope};
+    use snitchwatch_bridge::ws_messages::{
+        ConnectionRow, VerdictAction, VerdictDuration, VerdictScope,
+    };
 
     fn row(id: &str, action: Option<&str>) -> ConnectionRow {
         ConnectionRow {
@@ -189,14 +245,28 @@ mod tests {
     }
 
     #[test]
-    fn the_chosen_verdict_applies_and_a_hidden_window_allows() {
-        assert_eq!(choice_for(SilentMode::Allow, true), Some("allow"));
-        assert_eq!(choice_for(SilentMode::Allow, false), Some("allow"));
-        assert_eq!(choice_for(SilentMode::Deny, true), Some("deny"));
-        // Hidden does not turn a chosen Deny into an Allow.
-        assert_eq!(choice_for(SilentMode::Deny, false), Some("deny"));
-        assert_eq!(choice_for(SilentMode::Off, true), None);
-        assert_eq!(choice_for(SilentMode::Off, false), Some("allow"));
+    fn the_chosen_verdict_applies_and_ask_me_answers_nothing() {
+        assert_eq!(choice_for(SilentMode::Allow), Some("allow"));
+        assert_eq!(choice_for(SilentMode::Deny), Some("deny"));
+        // The alert window asks; nothing is auto-answered, whatever the
+        // main window is doing.
+        assert_eq!(choice_for(SilentMode::Off), None);
+    }
+
+    #[test]
+    fn waiting_rows_are_answered_once_and_share_the_dedup_with_new_rows() {
+        let mut answered = Answered::default();
+        let ids = vec!["w-1".to_string(), "w-2".to_string()];
+        let plan = answered.plan_waiting(4, &ids, "deny");
+        assert_eq!(plan.len(), 2);
+        assert_eq!(plan[0].0, "4:w-1");
+        assert!(answered.plan_waiting(4, &ids, "deny").is_empty());
+        // A snapshot repeating a swept row does not answer it again.
+        assert!(answered
+            .plan(4, &insert(vec![row("w-1", None)]), "deny")
+            .is_empty());
+        // A new session asks afresh.
+        assert_eq!(answered.plan_waiting(5, &ids, "deny").len(), 2);
     }
 
     #[test]

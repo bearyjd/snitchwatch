@@ -10,7 +10,7 @@ import QtQuick
 QtObject {
     readonly property var all: [
         { label: "Ask me (alerts)", token: "off",
-          detail: "A small alert asks about each new connection." },
+          detail: "A small alert asks about each new connection, even when the main window is closed to the tray." },
         { label: "Allow and record", token: "allow",
           detail: "New connections are allowed once and listed as needing a rule." },
         { label: "Deny and record", token: "deny",

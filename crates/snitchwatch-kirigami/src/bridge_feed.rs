@@ -116,12 +116,13 @@ pub mod qobject {
 
         /// Tell the feed what decides silent answers (`crate::silent_mode`):
         /// `mode` is `SettingsController.silentMode` (`off`, `allow`, `deny`;
-        /// anything else counts as `off`) and `window_visible` whether the
-        /// main window is shown. A hidden window answers new prompts like
-        /// silent mode does. Called from `main.qml` whenever either changes.
+        /// anything else counts as `off`). Switching to `allow` or `deny`
+        /// also answers the prompts already waiting. The main window's
+        /// visibility plays no part: the alert is its own window. Called
+        /// from `AlertHost.qml` whenever the mode changes.
         #[qinvokable]
         #[cxx_name = "setSilentState"]
-        fn set_silent_state(self: &BridgeFeed, mode: &QString, window_visible: bool);
+        fn set_silent_state(self: &BridgeFeed, mode: &QString);
 
         /// Issue #44: the bridge answered a remembered verdict for this
         /// connection only, because it couldn't identify the program's file.
@@ -247,9 +248,22 @@ impl qobject::BridgeFeed {
         }
     }
 
-    fn set_silent_state(&self, mode: &QString, window_visible: bool) {
+    fn set_silent_state(&self, mode: &QString) {
         let mode = crate::settings::SilentMode::from_token(&mode.to_string()).unwrap_or_default();
-        crate::silent_mode::set_state(mode, window_visible);
+        crate::silent_mode::set_state(mode);
+        if crate::silent_mode::current_choice().is_none() {
+            return;
+        }
+        let Some(handles) = crate::bridge_runtime::handles() else {
+            return;
+        };
+        let runtime = handles.runtime().clone();
+        runtime.spawn(async move {
+            let mut answered = crate::silent_mode::shared_answered()
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            crate::silent_mode::answer_pending_now(&handles, &mut answered);
+        });
     }
 
     fn start_bridge_feed(self: Pin<&mut Self>) {
@@ -263,7 +277,6 @@ impl qobject::BridgeFeed {
         let runtime = handles.runtime().clone();
         runtime.spawn(async move {
             use tokio::sync::broadcast::error::RecvError;
-            let mut answered = crate::silent_mode::Answered::default();
             loop {
                 let received = match rx.recv().await {
                     Ok(received) => received,
@@ -271,14 +284,19 @@ impl qobject::BridgeFeed {
                     Err(RecvError::Closed) => break,
                 };
                 let connection_id = received.connection_id;
-                // New prompts are answered at arrival when silent mode (or a
-                // hidden window) says so, before anything is shown.
-                crate::silent_mode::answer_new_rows(
-                    &handles,
-                    connection_id,
-                    &received.message,
-                    &mut answered,
-                );
+                // New prompts are answered at arrival when silent mode says
+                // so, before anything is shown.
+                {
+                    let mut answered = crate::silent_mode::shared_answered()
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner());
+                    crate::silent_mode::answer_new_rows(
+                        &handles,
+                        connection_id,
+                        &received.message,
+                        &mut answered,
+                    );
+                }
                 let Some(row_id) = verdict_not_remembered_row(connection_id, &received.message)
                 else {
                     continue;

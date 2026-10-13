@@ -247,7 +247,6 @@ Kirigami.ApplicationWindow {
         settings: settingsController
         bridgeFeed: bridgeFeed
         model: connectionsModel
-        window: root
         onNotice: text => root.showPassiveNotification(text, "long")
     }
 
@@ -582,36 +581,13 @@ Kirigami.ApplicationWindow {
             model: daemonHealthModel
         }
     }
-    // Tracks the last-seen pending count so we only raise on a *new* pending
-    // arrival, not on every count change (e.g. 2 -> 3 while already visible).
-    property int lastPendingCount: 0
-
-    // Task 7 requirement 1 — raise/focus over fullscreen.
-    //
-    // When a novel connection needs a decision, the window must come to the
-    // front even over a fullscreen game (Bazzite is gaming-focused; a novel
-    // connection often fires right as a game launches). We use Qt's native
-    // window-activation calls rather than assuming the compositor surfaces the
-    // window on its own — the exact "does the prompt actually appear over a
-    // fullscreen game" claim the GUI decision doc flagged as untested.
-    //
-    // MANUAL VERIFICATION: PASSED, 2026-07-11 (real Plasma Wayland session —
-    // see docs/superpowers/plans/2026-07-04-kirigami-shell-rewrite.md's Task 7
-    // checklist for method/detail). On Wayland, raise()/requestActivate() are
-    // still subject to the compositor's focus-stealing-prevention policy in
-    // general; the fallback is the KDE notification with a "Review" action
-    // (Task 17/19) — which is why that path exists regardless.
-    Connections {
-        target: connectionsModel
-        function onPendingCountChanged() {
-            const now = connectionsModel.pendingCount;
-            if (now > root.lastPendingCount) {
-                notificationController.noteRaise(root.visible, root.active);
-                root.raiseAndActivate();
-            }
-            root.lastPendingCount = now;
-        }
-    }
+    // A new prompt does NOT raise this window. The alert (AlertHost.qml ->
+    // AlertWindow.qml) is its own window, independent of this one: in "Ask me"
+    // it asks whether this window is shown or hidden to the tray, and in
+    // "Allow/Deny and record" the prompt is answered silently, so raising the
+    // main window for it would be the interruption silent mode exists to avoid.
+    // `raiseAndActivate()` below is still how the tray and a notification's
+    // "Review" action bring this window back.
 
     // The rule editor for a connection (P2.1): go to the Rules tab and open
     // the editor prefilled from the simulator's prefill form
@@ -622,11 +598,11 @@ Kirigami.ApplicationWindow {
         return rulesPage.openEditor(prefillJson);
     }
 
-    // Shared raise/focus helper (Task 7 requirement 1). Used both by the
-    // in-app pending-row handler above and by the "Review" action on a
-    // fallback desktop notification (Task 17) — same recovery path either
-    // way, so there is exactly one place that needs the manual fullscreen-
-    // focus verification noted above.
+    // Shared raise/focus helper (Task 7 requirement 1). Used by the tray and
+    // by the "Review" action on a desktop notification (Task 17): one place
+    // that needs the manual fullscreen-focus verification (2026-07-11, real
+    // Plasma Wayland session; see the 2026-07-04 plan's Task 7 checklist).
+    // Under the compositor's focus-stealing prevention it may be refused.
     function raiseAndActivate() {
         if (root.visibility === Window.Minimized || root.visibility === Window.Hidden)
             root.showNormal();
@@ -635,9 +611,7 @@ Kirigami.ApplicationWindow {
     }
 
     // Task 17's fallback path: the user clicked "Review" on a desktop
-    // notification because the window was hidden/unfocused when a connection
-    // had been pending for 5+ seconds. Bring the window back exactly like a
-    // fresh pending row would.
+    // notification. Bring the window back.
     Connections {
         target: notificationController
         function onReviewRequested() {
@@ -673,9 +647,8 @@ Kirigami.ApplicationWindow {
     // `on_window_event`/`CloseRequested` handler: closing the window hides it
     // instead of quitting, since the tray icon is the only way back in
     // otherwise. `Qt.quit()` above (tray menu) is the actual exit path.
-    // A hidden window is nobody looking: AlertHost reports it to Rust, which
-    // then answers new prompts at arrival (allow once, or the silent mode's
-    // choice) instead of letting each wait out the bridge's 30 s.
+    // A hidden window changes nothing about prompts: the alert is its own
+    // window and still asks in "Ask me" mode.
     onClosing: function (close) {
         close.accepted = false;
         root.hide();

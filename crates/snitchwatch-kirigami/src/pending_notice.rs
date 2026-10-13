@@ -12,7 +12,7 @@
 use std::time::Duration;
 
 use crate::bridge_runtime::{BridgeHandles, BridgeNotice, PendingRow};
-use crate::inline_deny::InlineDeny;
+use crate::inline_deny::{allow_label, InlineDeny};
 use crate::notification_actions::{
     act_and_confirm, pending_body, still_waiting, NoticeAction, ALLOW_ONCE_ACTION, DENY_ACTION,
     REVIEW_ACTION,
@@ -20,12 +20,7 @@ use crate::notification_actions::{
 use crate::notification_signals::{Notice, WaitEnd};
 
 const SUMMARY: &str = "Snitchwatch — pending decision";
-/// Action keys and their labels, as the notification shows them.
-const ACTIONS: [(&str, &str); 3] = [
-    (ALLOW_ONCE_ACTION, "Allow"),
-    (DENY_ACTION, "Deny"),
-    (REVIEW_ACTION, "Review"),
-];
+/// The action keys, in the order the notification shows them.
 const KEYS: [&str; 3] = [ALLOW_ONCE_ACTION, DENY_ACTION, REVIEW_ACTION];
 /// How often a shown notice checks that its row still waits.
 const ROW_CHECK: Duration = Duration::from_secs(1);
@@ -72,7 +67,15 @@ pub(crate) async fn show_and_answer(
             .advertises_app_bound_rules(target.connection_id),
     );
     let body = pending_body(&target.row, deny);
-    let mut notice = match Notice::show(conn, SUMMARY, &body, &ACTIONS).await {
+    let allow_duration =
+        crate::settings::read_settings(&crate::paths::settings_path()).duration_token();
+    let allow = allow_label(deny, allow_duration);
+    let actions = [
+        (ALLOW_ONCE_ACTION, allow.as_str()),
+        (DENY_ACTION, "Deny"),
+        (REVIEW_ACTION, "Review"),
+    ];
+    let mut notice = match Notice::show(conn, SUMMARY, &body, &actions).await {
         Ok(notice) => notice,
         Err(error) => {
             tracing::warn!(%error, "pending notification not shown");

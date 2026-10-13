@@ -154,27 +154,29 @@ fn pending_exposure_banner_stays_wired_to_oldest_pending_age() {
     );
 }
 
-/// r11 issue A: a new prompt logs, through `NotificationController`, that it
-/// raises the window, before raising it. No harness fires `main.qml`'s
-/// pending-count handler, and a misspelled invokable would only throw at run
-/// time, so the QML call and the Rust `cxx_name` are pinned together here.
+/// LS redesign phase 1, owner decision: the alert is its own window, so a new
+/// prompt never raises the main window (not in "Ask me", where the alert
+/// asks, and not in silent mode, which answers without interrupting). Only the
+/// tray and a notification's "Review" click bring the main window back.
 #[test]
-fn the_prompt_raise_is_logged_through_the_controller() {
-    let controller = include_str!("../src/notification_controller.rs");
-    assert!(
-        controller.contains("#[cxx_name = \"noteRaise\"]"),
-        "NotificationController no longer exposes noteRaise"
-    );
+fn a_new_prompt_never_raises_the_main_window() {
     let main = code_lines(MAIN_QML);
-    let logged = main
-        .find("notificationController.noteRaise(root.visible, root.active);")
-        .expect("main.qml no longer logs the prompt raise");
-    let raised = main[logged..]
-        .find("root.raiseAndActivate();")
-        .expect("the raise no longer follows the log");
     assert!(
-        !main[logged..logged + raised].contains('}'),
-        "the log and the raise are no longer in the same branch"
+        !main.contains("onPendingCountChanged") && !main.contains("noteRaise"),
+        "main.qml reacts to a new prompt again; the alert window handles prompts"
+    );
+    let review = main
+        .split("function onReviewRequested()")
+        .nth(1)
+        .and_then(|rest| rest.split('}').next())
+        .expect("main.qml no longer handles a notification's Review click");
+    assert!(
+        review.contains("root.raiseAndActivate();"),
+        "the Review click no longer raises the window: {review}"
+    );
+    assert!(
+        !include_str!("../src/notification_controller.rs").contains("noteRaise"),
+        "NotificationController still exposes the removed noteRaise"
     );
 }
 
@@ -196,7 +198,7 @@ fn tokens(source: &str) -> Vec<String> {
         .collect()
 }
 
-/// LS redesign phase 1, owner decision 1: Once / 5 minutes / Until Restart /
+/// LS redesign phase 1, owner decision 1: Once / 5 minutes / Until firewall restarts /
 /// Forever, defined once (`Durations.qml`) and used by every surface. The QML
 /// list, the Rust vocabulary and the settings default must agree.
 #[test]
@@ -208,10 +210,18 @@ fn the_duration_list_is_defined_once_and_matches_rust() {
             .map(|t| t.to_string())
             .collect::<Vec<_>>()
     );
-    for label in ["Once", "5 minutes", "Until Restart", "Forever"] {
+    for label in ["Once", "5 minutes", "Until firewall restarts", "Forever"] {
         assert!(
             DURATIONS_QML.contains(&format!("label: \"{label}\"")),
             "Durations.qml lost the {label:?} label"
+        );
+    }
+    // The label Rust puts on a notification's Allow is the QML list's.
+    for token in snitchwatch_kirigami::settings::DURATION_TOKENS {
+        let label = snitchwatch_kirigami::settings::duration_label(token);
+        assert!(
+            DURATIONS_QML.contains(&format!("label: \"{label}\", token: \"{token}\"")),
+            "settings::duration_label({token:?}) = {label:?} drifted from Durations.qml"
         );
     }
     assert!(
@@ -233,7 +243,7 @@ fn the_duration_list_is_defined_once_and_matches_rust() {
         );
         for stale in [
             "until_quit",
-            "Until firewall restarts",
+            "Until Restart",
             "For 5 minutes",
             "\"This time\"",
         ] {
@@ -256,12 +266,12 @@ fn the_silent_mode_list_matches_rust() {
     assert!(SILENT_MODES_QML.contains("the firewall's own default action applies"));
 }
 
-/// Closing the window still only hides it to the tray (`main.qml`), but a
-/// hidden window now means nobody is looking: `AlertHost` reports its
-/// visibility to Rust, which then answers new prompts at arrival, and shows
-/// the alert only while the window is shown and silent mode is off.
+/// Closing the window still only hides it to the tray (`main.qml`), and that
+/// changes nothing about prompts: the alert is its own window. `AlertHost`
+/// reports only the silent mode to Rust (never the window's visibility) and
+/// shows the alert whenever silent mode is off.
 #[test]
-fn a_hidden_window_means_silent_behaviour() {
+fn a_hidden_main_window_does_not_change_how_prompts_are_handled() {
     let main = code_lines(MAIN_QML);
     let closing = main
         .split("onClosing")
@@ -274,13 +284,12 @@ fn a_hidden_window_means_silent_behaviour() {
     );
     let host = code_lines(ALERT_HOST_QML);
     assert!(
-        host.contains("setSilentState(host.mode, host.windowShown)")
-            && host.contains("host.window !== null && host.window.visible"),
-        "AlertHost no longer reports the window's visibility to Rust"
+        host.contains("setSilentState(host.mode)") && !host.contains("windowShown"),
+        "AlertHost must report only the mode to Rust, not the window's visibility"
     );
     assert!(
-        host.contains("active: (host.mode === \"\" || host.mode === \"off\") && host.windowShown"),
-        "the alert must show only while silent mode is off and the window is shown"
+        host.contains("active: host.mode === \"\" || host.mode === \"off\""),
+        "the alert must show whenever silent mode is off, whatever the main window does"
     );
     assert!(main.contains("AlertHost {"), "main.qml lost the AlertHost");
     assert!(

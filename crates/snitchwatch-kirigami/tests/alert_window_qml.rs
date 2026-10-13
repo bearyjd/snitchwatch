@@ -4,8 +4,11 @@
 //!   * it shows the OLDEST pending row, identity first, and moves on to the
 //!     next when that row is decided;
 //!   * every key and click is ignored until `armDelayMs` has passed, again
-//!     after it moves on to the next row (`handleKey` is what the window's
-//!     `Keys.onPressed` calls; a source guard pins that call);
+//!     after it moves on to the next row and when the offered durations
+//!     appear or vanish (`handleKey` is what the window's `Keys.onPressed`
+//!     calls; a source guard pins that call); an auto-repeat, and a key held
+//!     since before arming, never answer;
+//!   * the destination line words an incoming connection as one coming in;
 //!   * Return answers Allow and Esc Deny, through `submitVerdict` with the
 //!     scope, the duration (preselected from `Durations.defaultToken`) and the
 //!     row's `bindableProcessPath`;
@@ -138,6 +141,17 @@ Window {
                                  "preselected: " + alert.scopeToken + "/" + alert.durationToken);
                     probe.expect(alert.remainingSeconds > 25 && alert.remainingSeconds <= 30,
                                  "countdown from the bridge deadline: " + alert.remainingSeconds);
+                    // Outgoing and incoming are worded differently.
+                    probe.expect(alert.destinationText === "wants to connect to example.com:443 (tcp)",
+                                 "outgoing wording: " + alert.destinationText);
+                    const outgoing = alert.row;
+                    alert.row = Object.assign({}, outgoing, { direction: "incoming", protocol: "udp" });
+                    probe.expect(alert.destinationText === "Incoming connection from example.com (udp)",
+                                 "incoming wording: " + alert.destinationText);
+                    alert.row = Object.assign({}, outgoing, { direction: "incoming", host: "" });
+                    probe.expect(alert.destinationText === "Incoming connection from 93.184.216.34 (tcp)",
+                                 "incoming wording by address: " + alert.destinationText);
+                    alert.row = outgoing;
                     // Everything is ignored while unarmed.
                     probe.expect(probe.sent(() => {
                         alert.handleKey(Qt.Key_Return);
@@ -146,14 +160,22 @@ Window {
                         alert.answer("allow");
                         alert.answer("deny");
                     }) === "[]", "input before armed was not ignored");
+                    // Return is still held down when the alert arms (never released);
+                    // Esc was pressed and released while it was not armed.
+                    alert.keyReleased(Qt.Key_Escape);
                     probe.next();
                 } else if (probe.phase === 1 && probe.elapsed() > 600) {
                     probe.expect(alert.armed === true, "armed after the delay");
                     probe.expect(probe.sent(() => alert.handleKey(Qt.Key_A)) === "[]",
                                  "other keys do nothing");
-                    probe.expect(probe.sent(() => alert.handleKey(Qt.Key_Return))
+                    probe.expect(probe.sent(() => alert.handleKey(Qt.Key_Return, true)) === "[]",
+                                 "an auto-repeat does not answer");
+                    probe.expect(probe.sent(() => alert.handleKey(Qt.Key_Return, false)) === "[]",
+                                 "a key held since before arming does not answer");
+                    alert.keyReleased(Qt.Key_Return);
+                    probe.expect(probe.sent(() => alert.handleKey(Qt.Key_Return, false))
                                  === '["old allow this_host/forever bindable=true"]',
-                                 "Return allows the oldest row");
+                                 "a fresh Return press allows the oldest row");
                     probe.expect(alert.shown === false, "answered row is not shown again");
                     // The bridge decides it; the next row takes over, unarmed.
                     probe.decide("old", "allow");
@@ -163,6 +185,7 @@ Window {
                                  "next row appears unarmed");
                     probe.expect(probe.sent(() => alert.handleKey(Qt.Key_Escape)) === "[]",
                                  "Esc is ignored right after the switch");
+                    alert.keyReleased(Qt.Key_Escape);
                     probe.next();
                 } else if (probe.phase === 2 && probe.elapsed() > 600) {
                     probe.expect(alert.armed === true, "armed again after the switch");
@@ -172,6 +195,12 @@ Window {
                     alert.scopeSelector.currentToken = "any_host_on_domain";
                     probe.expect(alert.remembers === false && alert.durationToken === "this_time",
                                  "old bridge: only Once");
+                    // The offered durations vanished under the pointer: wait again.
+                    probe.expect(alert.armed === false, "re-armed when the durations changed");
+                    probe.expect(probe.sent(() => alert.handleKey(Qt.Key_Escape)) === "[]",
+                                 "Esc is ignored right after the durations changed");
+                    alert.keyReleased(Qt.Key_Escape);
+                    alert.armed = true;
                     probe.expect(alert.durationSelector.model.length === 1,
                                  "old bridge: one duration offered");
                     probe.expect(probe.sent(() => alert.handleKey(Qt.Key_Escape))
@@ -287,8 +316,22 @@ fn the_alert_wires_keys_to_the_armed_handler_and_waits_one_second() {
         .and_then(|rest| rest.split('}').next())
         .expect("AlertWindow.qml has no Keys.onPressed");
     assert!(
-        keys.contains("event.accepted = true") && keys.contains("alert.handleKey(event.key)"),
-        "Keys.onPressed must accept every key and call handleKey: {keys}"
+        keys.contains("event.accepted = true")
+            && keys.contains("alert.handleKey(event.key, event.isAutoRepeat)"),
+        "Keys.onPressed must accept every key and call handleKey with isAutoRepeat: {keys}"
+    );
+    let released = ALERT_QML
+        .split("Keys.onReleased")
+        .nth(1)
+        .and_then(|rest| rest.split('}').next())
+        .expect("AlertWindow.qml has no Keys.onReleased");
+    assert!(
+        released.contains("alert.keyReleased(event.key)"),
+        "a released key must be forgotten: {released}"
+    );
+    assert!(
+        ALERT_QML.contains("onRemembersChanged: alert.arm()"),
+        "the alert must re-arm when the offered durations change"
     );
     assert!(
         ALERT_QML.contains("enabled: alert.armed"),

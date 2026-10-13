@@ -9,7 +9,7 @@
 //! hands it straight to the bridge's inbound pump.
 //!
 //! **Granular rule scopes (Parity 2):** every surface offers four durations —
-//! "Once", "5 minutes", "Until Restart", "Forever" (`qml/Durations.qml` is the
+//! "Once", "5 minutes", "Until firewall restarts", "Forever" (`qml/Durations.qml` is the
 //! one list) — mapped onto the bridge's [`VerdictDuration`], which in turn
 //! maps onto opensnitchd's native `Rule.duration` vocabulary. See
 //! [`VerdictDuration`]'s doc comment for the full mapping table. The third

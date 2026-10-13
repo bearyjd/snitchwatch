@@ -112,7 +112,7 @@ Kirigami.ScrollablePage {
                 objectName: "silentModeNote"
                 opacity: 0.7
                 wrapMode: Text.Wrap
-                text: "While the main window is hidden, new connections are answered without asking: allowed once, or denied once if you chose Deny. " + SilentModes.notRunningNote
+                text: "The alert is its own window: in \"Ask me\" it appears for each new connection whether or not the main window is open. \"Allow and record\" and \"Deny and record\" answer without asking, allowing or denying once. " + SilentModes.notRunningNote
             }
         }
 

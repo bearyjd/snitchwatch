@@ -10,8 +10,11 @@
 //   session advertised app-bound rules (#72); otherwise only "Once".
 // * Duration: `Durations.all`, preselected from the Settings default.
 // * Return = Allow, Esc = Deny. Every key and click is ignored for
-//   `armDelayMs` after the alert appears and again after it moves on to the
-//   next row, so a keystroke meant for another window cannot answer it.
+//   `armDelayMs` after the alert appears, after it moves on to the next row,
+//   and when what it offers changes under the pointer (the durations appear
+//   or vanish with the scope), so a keystroke or click meant for another
+//   window or layout cannot answer it. A key held down across the arming
+//   moment, and any auto-repeat, never answers: only a fresh press does.
 // * Closing the window ignores the prompt (the firewall's default applies at
 //   the deadline); only an answer sets a rule duration.
 // * The answer goes through `BridgeFeed.submitVerdict`, whose Rust gate
@@ -19,9 +22,10 @@
 //   cannot be bound. The countdown only displays the bridge's 30 s deadline
 //   (`answerDeadlineMs`); the bridge, not this window, answers at the end.
 //
-// Shown while `active` (main.qml: silent mode off and the main window shown;
-// otherwise `silent_mode.rs` answers new prompts at arrival). Program, path
-// and host come from outside: every such text is PlainText (issue #51).
+// Shown while `active` (AlertHost.qml: silent mode off, "Ask me"), whether the
+// main window is visible or hidden to the tray: the alert is its own window.
+// In silent Allow/Deny `silent_mode.rs` answers new prompts instead. Program,
+// path and host come from outside: every such text is PlainText (issue #51).
 import QtQuick
 import QtQuick.Window
 import QtQuick.Layouts
@@ -55,6 +59,9 @@ Window {
         ? durationChoice.effectiveToken : "this_time"
     // False for `armDelayMs` after the row appears; nothing is answerable then.
     property bool armed: false
+    // Keys pressed while not armed and not yet released: a press of one of
+    // these (some platforms do not flag the repeats) is not a fresh press.
+    property var heldKeys: ({})
     // A row answered or dismissed here and not yet resolved by the bridge is
     // not shown again.
     property string handledRowId: ""
@@ -73,6 +80,20 @@ Window {
     property alias denyButton: denyButton
     property alias keyCatcher: keys
 
+    // What the destination line says. An outgoing connection is the program
+    // reaching out; an incoming one is a peer reaching in, so it is not worded
+    // as the program connecting.
+    readonly property string destinationText: {
+        if (alert.rowId === "") {
+            return "";
+        }
+        const addr = alert.row.host ? alert.row.host : alert.row.dstIp;
+        if (alert.row.direction === "incoming") {
+            return "Incoming connection from " + addr + " (" + alert.row.protocol + ")";
+        }
+        return "wants to connect to " + addr + ":" + alert.row.port + " (" + alert.row.protocol + ")";
+    }
+
     readonly property bool shown: alert.active && alert.rowId !== ""
         && alert.rowId !== alert.handledRowId
 
@@ -80,7 +101,7 @@ Window {
     flags: Qt.Dialog | Qt.WindowStaysOnTopHint
     title: "Snitchwatch: connection request"
     color: Kirigami.Theme.backgroundColor
-    width: Kirigami.Units.gridUnit * 30
+    width: Kirigami.Units.gridUnit * 34
     // Fixed size: the content's own height, not the window's.
     readonly property int fixedHeight: content.implicitHeight + Theme.spacingLarge * 2
     height: alert.fixedHeight
@@ -128,7 +149,12 @@ Window {
         }
     }
 
+    // What is offered changed (a remembered duration appears or goes), so the
+    // buttons may have moved under the pointer: wait again.
+    onRemembersChanged: alert.arm()
+
     onShownChanged: if (alert.shown) {
+        alert.heldKeys = ({});
         alert.arm();
         alert.raise();
         // Return/Esc need the keyboard focus; a compositor may still refuse.
@@ -153,10 +179,15 @@ Window {
         return true;
     }
 
-    // Return = Allow, Esc = Deny; every other key, and any key before the alert
-    // is armed, does nothing (and is not passed on).
-    function handleKey(key) {
+    // Return = Allow, Esc = Deny; every other key, any key before the alert
+    // is armed, an auto-repeat, and a key still held from before it was armed,
+    // does nothing (and is not passed on).
+    function handleKey(key, autoRepeat) {
         if (!alert.armed) {
+            alert.heldKeys[key] = true;
+            return;
+        }
+        if (autoRepeat === true || alert.heldKeys[key] === true) {
             return;
         }
         if (key === Qt.Key_Return || key === Qt.Key_Enter) {
@@ -164,6 +195,11 @@ Window {
         } else if (key === Qt.Key_Escape) {
             alert.answer("deny");
         }
+    }
+
+    // A released key is no longer "held since before arming".
+    function keyReleased(key) {
+        delete alert.heldKeys[key];
     }
 
     Timer {
@@ -199,7 +235,11 @@ Window {
 
         Keys.onPressed: event => {
             event.accepted = true;
-            alert.handleKey(event.key);
+            alert.handleKey(event.key, event.isAutoRepeat);
+        }
+        Keys.onReleased: event => {
+            event.accepted = true;
+            alert.keyReleased(event.key);
         }
 
         ColumnLayout {
@@ -252,8 +292,7 @@ Window {
                 Layout.fillWidth: true
                 wrapMode: Text.Wrap
                 textFormat: Text.PlainText
-                text: alert.rowId === "" ? "" : "wants to connect to " + (alert.row.host ? alert.row.host : alert.row.dstIp) + ":"
-                    + alert.row.port + " (" + alert.row.protocol + ", " + alert.row.direction + ")"
+                text: alert.destinationText
             }
 
             Controls.Label {

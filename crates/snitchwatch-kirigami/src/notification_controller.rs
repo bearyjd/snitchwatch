@@ -15,6 +15,11 @@
 //! Plasma's action-button rendering and Do-Not-Disturb handling apply either
 //! way.
 //!
+//! **This GUI's own prompts get no notice (LS redesign phase 1).** The alert
+//! window is independent of the main window, so a prompt of the live session
+//! is answered by `silent_mode` or asked by the alert, never announced here;
+//! the grace period below applies to other sessions' prompts.
+//!
 //! **Cooldown.** [`crate::notifier::CooldownGate`] is ported unchanged.
 //!
 //! **5-second pending grace period.** Per the original design spec's
@@ -111,12 +116,6 @@ pub mod qobject {
         #[qinvokable]
         #[cxx_name = "startBridgeFeed"]
         fn start_bridge_feed(self: Pin<&mut NotificationController>);
-
-        /// Logs, at INFO, that a new prompt raises the window (`main.qml`,
-        /// Task 7) and how the window was before, for diagnosing a run.
-        #[qinvokable]
-        #[cxx_name = "noteRaise"]
-        fn note_raise(self: &NotificationController, was_visible: bool, was_active: bool);
     }
 
     impl cxx_qt::Threading for NotificationController {}
@@ -151,15 +150,6 @@ impl qobject::NotificationController {
         let gate = Arc::new(Mutex::new(CooldownGate::new()));
         let runtime = handles.runtime().clone();
         runtime.spawn(relay_notices(notice_rx, handles, self.qt_thread(), gate));
-    }
-
-    fn note_raise(&self, was_visible: bool, was_active: bool) {
-        tracing::info!(
-            was_visible,
-            was_active,
-            "a new prompt raises the main window (Task 7); its notice is posted only while \
-             the window isn't active"
-        );
     }
 }
 
@@ -208,14 +198,16 @@ fn relay(
         });
         return;
     };
-    // Silent mode (or a hidden window) answers this prompt at arrival, so
-    // it never goes through the grace period or gets a notice. Skipped only
-    // for this GUI's own session, the one `silent_mode` answers.
-    if handles.is_current_session(connection_id) && crate::silent_mode::current_choice().is_some() {
+    // This GUI's own session never gets a desktop notice for a prompt: with
+    // silent mode on, `silent_mode` answers it at arrival; with it off, the
+    // alert window (`AlertWindow.qml`, independent of the main window, so
+    // shown whether that is visible or hidden to the tray) asks. A notice
+    // would only duplicate it.
+    if handles.is_current_session(connection_id) {
         tracing::info!(
             session = connection_id,
             row_id,
-            "no pending notice: silent mode answers it"
+            "no pending notice: silent mode or the alert window handles it"
         );
         return;
     }

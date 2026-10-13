@@ -232,17 +232,21 @@ impl qobject::SettingsController {
         let qt_thread = self.qt_thread();
         std::thread::spawn(move || {
             let path = settings_path();
-            // Preserve any other persisted fields rather than clobbering
-            // them with a lone-field write.
-            let mut settings = read_settings(&path);
-            settings.rdap_enabled = enabled;
-            let write_err = write_settings(&path, &settings).err();
-            if let Some(e) = write_err {
-                tracing::warn!(error = %e, "failed to persist RDAP setting");
-            }
-            // Re-read from disk rather than trusting `enabled` blindly, so a
-            // failed write still reports the setting's actual on-disk state.
-            let actual = read_settings(&path).rdap_enabled;
+            let actual = {
+                let _write = SETTINGS_WRITE.lock().unwrap_or_else(|p| p.into_inner());
+                // Preserve any other persisted fields rather than clobbering
+                // them with a lone-field write.
+                let mut settings = read_settings(&path);
+                settings.rdap_enabled = enabled;
+                let write_err = write_settings(&path, &settings).err();
+                if let Some(e) = write_err {
+                    tracing::warn!(error = %e, "failed to persist RDAP setting");
+                }
+                // Re-read from disk rather than trusting `enabled` blindly, so
+                // a failed write still reports the setting's actual on-disk
+                // state.
+                read_settings(&path).rdap_enabled
+            };
             let _ = qt_thread.queue(move |mut qobject| {
                 qobject.as_mut().set_rdap_enabled(actual);
                 qobject.as_mut().set_busy(false);
@@ -295,6 +299,12 @@ impl qobject::SettingsController {
     }
 }
 
+/// Held across `persist_preferences`' read-modify-write: two quick changes
+/// (the default duration, then the silent mode) each run on their own thread,
+/// and without it the second could read the file before the first wrote it and
+/// then overwrite the first change.
+static SETTINGS_WRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 impl qobject::SettingsController {
     /// Read-modify-write the settings file off the UI thread (other persisted
     /// fields are kept), then publish what is on disk.
@@ -312,13 +322,16 @@ impl qobject::SettingsController {
                 return;
             }
             let path = settings_path();
-            let mut settings = read_settings(&path);
-            change(&mut settings);
-            if let Err(e) = write_settings(&path, &settings) {
-                tracing::warn!(error = %e, "failed to persist preferences");
-            }
-            // Re-read, so a failed write still reports the on-disk state.
-            let actual = read_settings(&path);
+            let actual = {
+                let _write = SETTINGS_WRITE.lock().unwrap_or_else(|p| p.into_inner());
+                let mut settings = read_settings(&path);
+                change(&mut settings);
+                if let Err(e) = write_settings(&path, &settings) {
+                    tracing::warn!(error = %e, "failed to persist preferences");
+                }
+                // Re-read, so a failed write still reports the on-disk state.
+                read_settings(&path)
+            };
             let _ = qt_thread.queue(move |qobject| qobject.apply_preferences(&actual));
         });
     }

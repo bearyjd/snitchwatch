@@ -50,6 +50,17 @@ impl SilentMode {
 /// `qml/Durations.qml`; a test keeps them equal.
 pub const DURATION_TOKENS: [&str; 4] = ["this_time", "for_5_minutes", "until_restart", "forever"];
 
+/// The label `qml/Durations.qml` shows for a duration token (a test keeps the
+/// two equal), for surfaces that cannot read the QML list.
+pub fn duration_label(token: &str) -> &'static str {
+    match normalize_duration(token) {
+        "this_time" => "Once",
+        "for_5_minutes" => "5 minutes",
+        "until_restart" => "Until firewall restarts",
+        _ => "Forever",
+    }
+}
+
 /// What an Allow remembers until the user picks otherwise. Not `this_time`:
 /// the daemon stores only `always` rules, so a once-only Allow means the same
 /// prompt next time.

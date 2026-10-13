@@ -1,12 +1,13 @@
 //! Silent mode (`crate::silent_mode`), through the runtime's session state:
 //! a new pending row of this GUI's session is answered at arrival with the
-//! chosen verdict, once-only for this host, and marked as needing a rule; a
-//! visible window with silent mode off, or a row of another session, is not
-//! answered. The mode is process-global, so these tests take one lock.
+//! chosen verdict, once-only for this host, and marked as needing a rule;
+//! "Ask me" (whatever the main window is doing) or a row of another session
+//! is not answered, and switching to Allow/Deny answers the rows already
+//! waiting. The mode is process-global, so these tests take one lock.
 
 use super::*;
 use crate::settings::SilentMode;
-use crate::silent_mode::{answer_new_rows, needs_rule, set_state, Answered};
+use crate::silent_mode::{answer_new_rows, answer_pending_now, needs_rule, set_state, Answered};
 use snitchwatch_bridge::ws_messages::{
     ConnectionRow, VerdictAction, VerdictDuration, VerdictScope,
 };
@@ -63,8 +64,8 @@ async fn new_prompts_are_answered_once_for_this_host_by_the_chosen_verdict() {
     let session = mark_connected(&connection, true);
     let mut answered = Answered::default();
 
-    // Silent Deny, window shown.
-    set_state(SilentMode::Deny, true);
+    // Silent Deny.
+    set_state(SilentMode::Deny);
     answer_new_rows(
         &handles,
         session,
@@ -94,32 +95,73 @@ async fn new_prompts_are_answered_once_for_this_host_by_the_chosen_verdict() {
     );
     assert!(inbound_rx.try_recv().is_err());
 
-    // A hidden window with silent mode off allows.
-    set_state(SilentMode::Off, false);
-    answer_new_rows(
-        &handles,
-        session,
-        &arrival(vec![pending("ask-2")]),
-        &mut answered,
-    );
-    let queued = inbound_rx.try_recv().expect("a hidden window answers");
-    assert!(matches!(
-        queued.message,
-        ClientMessage::SetVerdict {
-            verdict: VerdictAction::Allow,
-            duration: Some(VerdictDuration::Once),
-            ..
-        }
-    ));
-    set_state(SilentMode::Off, true);
+    set_state(SilentMode::Off);
 }
 
 #[tokio::test]
-async fn nothing_is_answered_while_the_window_is_shown_and_silent_mode_is_off() {
+async fn switching_to_a_silent_mode_answers_the_rows_already_waiting_once() {
     let _lock = MODE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let (handles, connection, mut inbound_rx) = handles_and_queue();
     let session = mark_connected(&connection, true);
-    set_state(SilentMode::Off, true);
+    let mut answered = Answered::default();
+    set_state(SilentMode::Off);
+
+    // "Ask me": the prompt arrives and waits for the alert.
+    let message = arrival(vec![pending("ask-5"), pending("ask-6")]);
+    pending_rows::observe(&connection, session, &message);
+    answer_new_rows(&handles, session, &message, &mut answered);
+    answer_pending_now(&handles, &mut answered);
+    assert!(inbound_rx.try_recv().is_err(), "Ask me answers nothing");
+
+    // Switching to Deny answers both, once, and a second sweep or a repeat of
+    // the snapshot does not answer them again.
+    set_state(SilentMode::Deny);
+    answer_pending_now(&handles, &mut answered);
+    let mut verdicts = Vec::new();
+    while let Ok(queued) = inbound_rx.try_recv() {
+        assert!(matches!(
+            queued.message,
+            ClientMessage::SetVerdict {
+                verdict: VerdictAction::Deny,
+                duration: Some(VerdictDuration::Once),
+                ..
+            }
+        ));
+        verdicts.push(queued.message);
+    }
+    assert_eq!(verdicts.len(), 2);
+    assert!(needs_rule(&format!("{session}:ask-5")));
+    assert!(needs_rule(&format!("{session}:ask-6")));
+    answer_pending_now(&handles, &mut answered);
+    answer_new_rows(&handles, session, &message, &mut answered);
+    assert!(inbound_rx.try_recv().is_err());
+    set_state(SilentMode::Off);
+}
+
+#[tokio::test]
+async fn a_silent_answer_that_could_not_be_queued_is_not_marked_as_needing_a_rule() {
+    let _lock = MODE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let (handles, connection, inbound_rx) = handles_and_queue();
+    let session = mark_connected(&connection, true);
+    drop(inbound_rx);
+    set_state(SilentMode::Allow);
+    let mut answered = Answered::default();
+    answer_new_rows(
+        &handles,
+        session,
+        &arrival(vec![pending("ask-7")]),
+        &mut answered,
+    );
+    assert!(!needs_rule(&format!("{session}:ask-7")));
+    set_state(SilentMode::Off);
+}
+
+#[tokio::test]
+async fn ask_me_answers_nothing_whatever_the_main_window_is_doing() {
+    let _lock = MODE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let (handles, connection, mut inbound_rx) = handles_and_queue();
+    let session = mark_connected(&connection, true);
+    set_state(SilentMode::Off);
     let mut answered = Answered::default();
     answer_new_rows(
         &handles,
@@ -139,7 +181,7 @@ async fn only_this_guis_current_session_is_answered() {
     disconnect_and_discard(&connection, &mut inbound_rx);
     let current = mark_connected(&connection, true);
     assert_ne!(old, current);
-    set_state(SilentMode::Allow, true);
+    set_state(SilentMode::Allow);
     let mut answered = Answered::default();
     answer_new_rows(
         &handles,
@@ -159,5 +201,5 @@ async fn only_this_guis_current_session_is_answered() {
         inbound_rx.try_recv().is_ok(),
         "the current session's prompt"
     );
-    set_state(SilentMode::Off, true);
+    set_state(SilentMode::Off);
 }

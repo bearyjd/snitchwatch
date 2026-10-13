@@ -2,11 +2,12 @@
 // (LS redesign phase 1), kept out of main.qml.
 //
 // * Publishes the Settings default duration as `Durations.defaultToken`.
-// * Tells Rust (`BridgeFeed.setSilentState`) the silent mode and whether the
-//   main window is shown: silent mode, or a hidden window, makes
-//   `silent_mode.rs` answer new prompts at arrival.
-// * Owns the alert, shown only while silent mode is off and the window shown.
-//   Otherwise nobody would see it, and a prompt is answered at arrival.
+// * Tells Rust (`BridgeFeed.setSilentState`) the silent mode: Allow/Deny make
+//   `silent_mode.rs` answer prompts without asking (new ones at arrival,
+//   waiting ones when the mode is switched).
+// * Owns the alert, shown whenever silent mode is off ("Ask me"). It is its
+//   own window, independent of the main window: it asks whether that window
+//   is visible or hidden to the tray, and nothing is answered for the user.
 import QtQuick
 import com.snitchwatch.shell
 
@@ -17,12 +18,10 @@ Item {
     property var settings: null
     property var bridgeFeed: null
     property var model: null
-    property var window: null
     // Fixed text the alert could not send; main.qml shows it.
     signal notice(string text)
 
     property alias alert: alertWindow
-    readonly property bool windowShown: host.window !== null && host.window.visible
     readonly property string mode: host.settings ? host.settings.silentMode : ""
 
     Binding {
@@ -33,18 +32,17 @@ Item {
 
     function syncSilentState() {
         if (host.bridgeFeed !== null) {
-            host.bridgeFeed.setSilentState(host.mode, host.windowShown);
+            host.bridgeFeed.setSilentState(host.mode);
         }
     }
     onModeChanged: host.syncSilentState()
-    onWindowShownChanged: host.syncSilentState()
     Component.onCompleted: host.syncSilentState()
 
     AlertWindow {
         id: alertWindow
         model: host.model
         bridgeFeed: host.bridgeFeed
-        active: (host.mode === "" || host.mode === "off") && host.windowShown
+        active: host.mode === "" || host.mode === "off"
         onExplained: text => host.notice(text)
     }
 }

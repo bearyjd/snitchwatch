@@ -109,6 +109,16 @@ pub(crate) fn allow_token(deny: InlineDeny, allow_duration: &str) -> &'static st
     }
 }
 
+/// The label of an Allow button that sends [`allow_token`]: plain "Allow"
+/// when it is once-only (by choice or after a downgrade), else with the
+/// duration it will remember, e.g. "Allow (Forever)".
+pub(crate) fn allow_label(deny: InlineDeny, allow_duration: &str) -> String {
+    match allow_token(deny, allow_duration) {
+        "this_time" => "Allow".to_string(),
+        token => format!("Allow ({})", crate::settings::duration_label(token)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -151,6 +161,24 @@ mod tests {
                 .collect(),
         );
         store
+    }
+
+    #[test]
+    fn the_allow_label_names_the_duration_it_will_remember() {
+        use InlineDeny::*;
+        assert_eq!(allow_label(UntilRestart, "forever"), "Allow (Forever)");
+        assert_eq!(
+            allow_label(UntilRestart, "until_restart"),
+            "Allow (Until firewall restarts)"
+        );
+        assert_eq!(
+            allow_label(UntilRestart, "for_5_minutes"),
+            "Allow (5 minutes)"
+        );
+        assert_eq!(allow_label(UntilRestart, "this_time"), "Allow");
+        // Downgraded: honest about it being once-only.
+        assert_eq!(allow_label(ProgramUnknown, "forever"), "Allow");
+        assert_eq!(allow_label(BridgeTooOld, "forever"), "Allow");
     }
 
     #[test]

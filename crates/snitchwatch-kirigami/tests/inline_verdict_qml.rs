@@ -29,8 +29,8 @@
 //!     the old bridge), once per click — once for a whole "Deny all";
 //!   * the row Deny and "Deny all" tooltips and `Accessible.description`
 //!     say which of these a click does;
-//!   * the decision sheet labels `until_restart` "Until Restart", opens on
-//!     the Settings default, and shows the one-time-Deny hint only while
+//!   * the decision sheet labels `until_restart` "Until firewall restarts",
+//!     opens on the Settings default, and shows the one-time-Deny hint only while
 //!     "Once" is selected, for a bindable program on a capable bridge.
 //!
 //! Honoring the "QML-side JS asserts are not load-bearing" constraint, this
@@ -301,7 +301,7 @@ Controls.ApplicationWindow {
         probeWindow.expectShown([probeWindow.sentence], "inline Allow of an unidentified program");
         Durations.defaultToken = "until_restart";
         probeWindow.expectSent(() => page.submitInlineVerdict("abs", "allow"),
-                               ["abs allow this_host/until_restart"], "inline Allow, Until Restart default");
+                               ["abs allow this_host/until_restart"], "inline Allow, Until firewall restarts default");
         Durations.defaultToken = "this_time";
         probeWindow.expectSent(() => {
             page.submitInlineVerdict("abs", "allow");
@@ -338,7 +338,7 @@ Controls.ApplicationWindow {
         const sheet = page.decisionSheet;
         const durations = sheet.durationSelector;
         probeWindow.check(durations.count === 4 && durations.valueAt(2) === "until_restart"
-                          && durations.textAt(2) === "Until Restart"
+                          && durations.textAt(2) === "Until firewall restarts"
                           && durations.textAt(0) === "Once" && durations.textAt(1) === "5 minutes"
                           && durations.textAt(3) === "Forever",
                           "D3: until_restart is labelled " + durations.textAt(2));
