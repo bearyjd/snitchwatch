@@ -60,6 +60,13 @@ Kirigami.ScrollablePage {
     // Exposed for the headless probe (tests/inline_verdict_qml.rs).
     property alias inlineVerdicts: verdictHelper
 
+    // The header rule buttons' commands, confirm and outcome bar.
+    header: LevelRuleActions {
+        id: ruleActions
+        model: page.model
+    }
+    property alias levelRules: ruleActions
+
     // Issue #18: a row's inline Allow/Deny. Also the entry point
     // `tests/inline_verdict_qml.rs` drives, to exercise the click -> submit ->
     // verdict-message path without synthesizing a real mouse click.

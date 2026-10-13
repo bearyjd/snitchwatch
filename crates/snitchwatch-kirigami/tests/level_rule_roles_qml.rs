@@ -100,8 +100,8 @@ Window {
                     probe.setRules([probe.hostRule("r-host", "deny", "WWW.example.com")]);
                     probe.expect(probe.resets === 0 && probe.structural === 0,
                                  "a rule change reset or moved rows");
-                    probe.expect(probe.changes.length === 1 && probe.changes[0] === "0-2:32,33",
-                                 "one dataChanged over the headers for the two roles: " + probe.changes);
+                    probe.expect(probe.changes.length === 1 && probe.changes[0] === "0-2:32,33,34",
+                                 "one dataChanged over the headers for the three roles: " + probe.changes);
                     probe.expect(probe.stateAt(0) === "partial", "program: narrower rule: " + probe.stateAt(0));
                     probe.expect(probe.stateAt(1) === "partial", "domain: narrower rule: " + probe.stateAt(1));
                     probe.expect(probe.stateAt(2) === "deny", "host: deny: " + probe.stateAt(2));
@@ -120,14 +120,14 @@ Window {
                     probe.setRules([]);
                     probe.expect(probe.changes.length === 0, "an unchanged list repainted: " + probe.changes);
                     // Invokables refuse with a reason, and change nothing.
-                    const noBridge = model.createLevelRule(2, probe.prog, "www.example.com", "deny", true);
+                    const noBridge = model.createLevelRule(2, probe.prog, "www.example.com", "deny", true, "");
                     probe.expect(noBridge !== "", "no bridge: must say why");
                     probe.expect(probe.stateAt(2) === "none", "a refused create left pending: " + probe.stateAt(2));
-                    probe.expect(model.createLevelRule(0, probe.prog, "", "deny", false).indexOf("confirm") >= 0,
+                    probe.expect(model.createLevelRule(0, probe.prog, "", "deny", false, "").indexOf("confirm") >= 0,
                                  "program level needs confirming");
-                    probe.expect(model.createLevelRule(2, "curl", "www.example.com", "deny", true) !== "",
+                    probe.expect(model.createLevelRule(2, "curl", "www.example.com", "deny", true, "") !== "",
                                  "unbindable program refused");
-                    probe.expect(model.createLevelRule(7, probe.prog, "x", "deny", true) !== "", "unknown level refused");
+                    probe.expect(model.createLevelRule(7, probe.prog, "x", "deny", true, "") !== "", "unknown level refused");
                     probe.expect(model.deleteLevelRule(2, probe.prog, "www.example.com") !== "", "nothing to delete");
                     probe.expect(probe.resets === 0 && probe.structural === 0, "invokables reset the model");
                     done = true;

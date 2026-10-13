@@ -25,6 +25,10 @@ const CONNECTIONS_PAGE: &str = concat!(
     include_str!("../qml/ConnectionsHeader.qml"),
     "\n",
     include_str!("../qml/ConnectionInspector.qml"),
+    "\n",
+    include_str!("../qml/RuleButton.qml"),
+    "\n",
+    include_str!("../qml/LevelRuleActions.qml"),
 );
 const MAIN_QML: &str = include_str!("../qml/main.qml");
 

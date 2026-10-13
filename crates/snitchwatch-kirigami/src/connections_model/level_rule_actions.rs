@@ -7,13 +7,14 @@
 //! so it is tested without Qt. Nothing from QML is trusted: the node must be
 //! one the model's grouped projection shows right now.
 
+use core::cell::Cell;
 use core::pin::Pin;
 
 use cxx_qt::CxxQtType;
 use cxx_qt_lib::{QString, QVariant};
 use snitchwatch_bridge::ws_messages::ClientMessage;
 
-use super::{qobject::ConnectionsModel, ROLE_LEVEL_RULE_STATE};
+use super::{qobject::ConnectionsModel, ROLE_LEVEL_RULE_REASON, ROLE_LEVEL_RULE_STATE};
 use crate::connections::grouping::VisibleEntry;
 use crate::connections::level_rules::{Level, NodeRef, Projection, RuleState};
 use crate::make_rule::LevelRuleRefusal;
@@ -23,6 +24,10 @@ const ALREADY_WORKING: &str = "Still waiting for the firewall to answer the last
 
 /// Why a command was refused: the node isn't in the list (any more).
 const NOT_IN_LIST: &str = "This row is no longer in the list.";
+
+/// Why a rule was refused: the duration the user was shown is out of date.
+const DURATION_CHANGED: &str =
+    "The default duration changed while you were deciding. Try again to see the new one.";
 
 /// The longest host name or domain (bytes), as DNS allows.
 const MAX_KEY_BYTES: usize = 253;
@@ -112,25 +117,102 @@ fn send_to_current_session(
         .try_send(message)
 }
 
-/// The `levelRuleState` / `levelRuleName` role of the grouped row `row`.
+/// What a node's button shows: its projection, except that a node with no
+/// rule is `Unavailable` when the Settings default duration can't make one.
+/// `remembers` is asked only for such a node.
+fn shown_state(
+    projection: &Projection,
+    remembers: impl FnOnce() -> bool,
+) -> (RuleState, Option<LevelRuleRefusal>) {
+    if projection.state == RuleState::None && !remembers() {
+        return (
+            RuleState::Unavailable,
+            Some(LevelRuleRefusal::NotRemembered),
+        );
+    }
+    (projection.state, projection.reason)
+}
+
+/// The Settings default duration token, read from disk.
+fn read_default_duration() -> &'static str {
+    // Demo mode never reads the user's Settings (as `SettingsController`).
+    if crate::demo::enabled() {
+        return crate::settings::Settings::default().duration_token();
+    }
+    crate::settings::read_settings(&crate::paths::settings_path()).duration_token()
+}
+
+/// The Settings default duration token the model last read. `data()` is asked
+/// for every role of every header on every repaint, so it must not read the
+/// Settings file each time: the token is read once, and again only when
+/// Settings say they changed ([`DurationCache::refresh`]).
+#[derive(Default)]
+pub(super) struct DurationCache(Cell<Option<&'static str>>);
+
+impl DurationCache {
+    /// The cached token, reading it with `read` when there is none yet.
+    pub(super) fn get(&self, read: impl FnOnce() -> &'static str) -> &'static str {
+        self.0.get().unwrap_or_else(|| {
+            let token = read();
+            self.0.set(Some(token));
+            token
+        })
+    }
+
+    /// Read the token again; whether it differs from the one held before.
+    pub(super) fn refresh(&self, read: impl FnOnce() -> &'static str) -> bool {
+        let token = read();
+        self.0.replace(Some(token)) != Some(token)
+    }
+}
+
+/// The Settings default duration token, as a rule made now would take it.
+pub(super) fn default_duration(model: &ConnectionsModel) -> &'static str {
+    model.duration.get(read_default_duration)
+}
+
+/// Re-read the Settings default duration for the model's cache; whether it
+/// changed (the rule roles then need repainting).
+pub(super) fn refresh_default_duration(model: &ConnectionsModel) -> bool {
+    model.duration.refresh(read_default_duration)
+}
+
+/// Why a rule was not made: the dialog showed a duration that is no longer the
+/// Settings one. `shown` is empty when no dialog was asked.
+fn duration_matches(shown: &str, current: &str) -> Result<(), &'static str> {
+    if shown.is_empty() || shown == current {
+        Ok(())
+    } else {
+        Err(DURATION_CHANGED)
+    }
+}
+
+/// The `levelRuleState` / `levelRuleName` / `levelRuleReason` role of the
+/// grouped row `row`.
 pub(super) fn role(model: &ConnectionsModel, row: i32, role: i32) -> QVariant {
     let entry = model
         .grouped
         .then(|| model.grouped_projection.get(row as usize))
         .flatten();
     let projection = entry.and_then(entry_node).map(|node| project(model, node));
-    let text = match (projection, role) {
-        (Some(p), ROLE_LEVEL_RULE_STATE) => p.state.token().to_owned(),
-        (Some(p), _)
-            if matches!(
-                p.state,
-                RuleState::Allow | RuleState::Deny | RuleState::Pending
-            ) =>
-        {
-            p.names.first().cloned().unwrap_or_default()
-        }
-        (None, ROLE_LEVEL_RULE_STATE) => RuleState::None.token().to_owned(),
-        _ => String::new(),
+    let (state, reason) = match &projection {
+        Some(p) => shown_state(p, || {
+            crate::pending_decision::parse_duration(default_duration(model)).remembers()
+        }),
+        None => (RuleState::None, None),
+    };
+    let text = match role {
+        ROLE_LEVEL_RULE_STATE => state.token().to_owned(),
+        ROLE_LEVEL_RULE_REASON => reason.map(|r| r.reason().to_owned()).unwrap_or_default(),
+        _ => projection
+            .filter(|p| {
+                matches!(
+                    p.state,
+                    RuleState::Allow | RuleState::Deny | RuleState::Pending
+                )
+            })
+            .and_then(|p| p.names.first().cloned())
+            .unwrap_or_default(),
     };
     QVariant::from(&QString::from(&text))
 }
@@ -143,6 +225,7 @@ pub(super) fn create(
     key: &QString,
     choice: &QString,
     confirmed: bool,
+    shown_duration: &QString,
 ) -> QString {
     use crate::make_rule::add_level_rule_message;
     let (process_key, key, choice) = (process_key.to_string(), key.to_string(), choice.to_string());
@@ -166,6 +249,12 @@ pub(super) fn create(
     }
     let request_id = crate::rule_commands::next_request_id("level");
     let settings = crate::settings::read_settings(&crate::paths::settings_path());
+    if let Err(reason) = duration_matches(&shown_duration.to_string(), settings.duration_token()) {
+        // The file changed outside this process (no Settings signal): re-read
+        // it so the retry the message asks for shows the new duration.
+        model.as_mut().refresh_level_rule_duration();
+        return QString::from(reason);
+    }
     let request = match add_level_rule_message(
         node,
         &choice,
