@@ -300,6 +300,8 @@ Window {
         },
         function () {
             probe.expect(!page.inspecting, "dismiss left a selection: " + page.inspectId);
+            // p9 is gone, so the new arrival is the oldest pending row.
+            model.applyServerMessageJson(JSON.stringify({ action: "removeConnectionRows", ids: ["p9"] }));
             model.applyServerMessageJson(JSON.stringify({ action: "insertConnectionRows", rows: [
                 probe.row("p10", "p10.example.com", null, null)] }));
         },
