@@ -137,7 +137,7 @@ Item {
                 }
                 return;
             }
-            ListView.view.currentIndex = row.index;
+            row.ListView.view.currentIndex = row.index;
             page.openInspector(row);
         }
     }

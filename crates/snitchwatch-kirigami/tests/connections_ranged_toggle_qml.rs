@@ -31,13 +31,14 @@ fn grouped_toggles_and_filters_use_ranged_signals_not_resets() {
     let qml = r#"
 import QtQuick
 import QtQuick.Window
+import QtTest
 import com.snitchwatch.shell
 
 Window {
     id: probe
     visible: true
-    width: 300
-    height: 300
+    width: 800
+    height: 600
     property var failures: []
     property int phase: 0
     property int resets: 0
@@ -46,6 +47,29 @@ Window {
     property int changed: 0
 
     ConnectionsModel { id: model }
+    QtObject {
+        id: feedStub
+        property bool ok: true
+        function submitVerdict(rowId, choice, scope, duration, bindableProcessPath) {}
+    }
+    // The real page and ConnectionRow delegate over the same model, to prove a
+    // selection survives a collapse above it.
+    ConnectionsPage {
+        id: page
+        anchors.fill: parent
+        bridgeFeed: feedStub
+        model: model
+    }
+    TestCase { id: tc; name: "ranged"; when: false }
+    function findList(item) {
+        if (typeof item.itemAtIndex === "function" && item.currentIndex !== undefined) return item;
+        const kids = item.children || [];
+        for (let i = 0; i < kids.length; ++i) {
+            const f = probe.findList(kids[i]);
+            if (f) return f;
+        }
+        return null;
+    }
     Connections {
         target: model
         function onModelReset() { probe.resets++; }
@@ -109,6 +133,35 @@ Window {
                     model.setFilterQuery("");
                     probe.expect(probe.resets === 0, "clearing the filter reset the model");
                     probe.expect(model.count === 2, "count after clearing: " + model.count);
+                } else if (probe.phase === 2) {
+                    model.applyServerMessageJson(JSON.stringify({
+                        action: "insertConnectionRows",
+                        rows: [probe.row("sel", "s.example.com")].map(r => Object.assign(r, { process: "q" }))
+                    }));
+                } else if (probe.phase === 3) {
+                    model.setPendingOnly(false);
+                    model.toggleProcessGroup("q");
+                    model.toggleDomainGroup("q", "example.com");
+                    // p, p's collapsed domain, q, q's domain, sel.
+                    probe.expect(model.count === 5, "count before selecting: " + model.count);
+                } else if (probe.phase === 4) {
+                    const list = probe.findList(page);
+                    probe.expect(list !== null, "no ListView under the page");
+                    const item = list ? list.itemAtIndex(4) : null;
+                    probe.expect(item !== null && item.rowId === "sel", "row sel is not at index 4");
+                    if (item) {
+                        tc.mouseClick(item, 2, 2);
+                        probe.expect(list.currentIndex === 4, "click did not select: " + list.currentIndex);
+                    }
+                    model.toggleProcessGroup("p");
+                    probe.expect(model.count === 4, "count after collapsing p: " + model.count);
+                } else if (probe.phase === 5) {
+                    const list = probe.findList(page);
+                    const cur = list.itemAtIndex(list.currentIndex);
+                    // Never a different connection: either still "sel" or cleared.
+                    probe.expect(list.currentIndex === -1 || (cur && cur.rowId === "sel"),
+                                 "selection moved to another row: index " + list.currentIndex
+                                 + " id " + (cur ? cur.rowId : "none"));
                     done = true;
                 }
                 probe.phase++;

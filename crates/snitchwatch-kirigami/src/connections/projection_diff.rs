@@ -271,4 +271,27 @@ mod tests {
             current = next;
         }
     }
+
+    /// The app's own projection (program > domain > connection, no host level)
+    /// at 5k rows: collapsing a domain removes exactly its 100 connections.
+    #[test]
+    fn collapsing_one_domain_in_the_apps_projection_of_5k_rows_replays_exactly() {
+        let rows = rows_5k();
+        let mut tree = tree_of(&rows);
+        open_everything(&mut tree);
+        let map: HashMap<&str, &ConnectionRow> = rows.iter().map(|r| (r.id.as_str(), r)).collect();
+        let before = tree.build_projection(&map, &ConnectionFilter::default());
+        // 5 programs + 50 domains + 5000 connections.
+        assert_eq!(before.len(), 5055);
+
+        tree.toggle_domain("proc2", "d4.example");
+        let after = tree.build_projection(&map, &ConnectionFilter::default());
+
+        let d = diff(&before, &after);
+        assert_eq!(
+            (d.removed.len(), d.inserted.len(), d.changed.len()),
+            (100, 0, 1)
+        );
+        assert_eq!(apply(&before, &after, &d), after);
+    }
 }

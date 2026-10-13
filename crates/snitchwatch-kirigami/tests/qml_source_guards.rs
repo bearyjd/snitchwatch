@@ -324,3 +324,25 @@ fn inline_allow_sends_the_settings_duration() {
         "notification Allow no longer follows the Settings duration"
     );
 }
+
+/// `ListView.*` attached properties exist only on the delegate root. Inside a
+/// child item (the row's `MouseArea`) an unqualified `ListView.view` is null, so
+/// the click handler throws and the inspector never opens. Everything but the
+/// root's own `width:` binding must go through the root id (`row.ListView.`).
+#[test]
+fn connection_row_reaches_listview_only_through_the_delegate_root() {
+    let code = code_lines(include_str!("../qml/ConnectionRow.qml"));
+    assert!(
+        code.contains("row.ListView.view.currentIndex = row.index"),
+        "the row click no longer selects its row through the delegate root"
+    );
+    for line in code.lines() {
+        let rest = line.replace("row.ListView.", "");
+        if rest.contains("ListView.") {
+            assert!(
+                line.trim_start().starts_with("width: ListView.view ?"),
+                "unqualified ListView attached property outside the delegate root: {line}"
+            );
+        }
+    }
+}
