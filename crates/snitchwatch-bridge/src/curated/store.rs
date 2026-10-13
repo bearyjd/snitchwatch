@@ -52,6 +52,12 @@ pub struct Choices {
     /// Deliberate modern consent. An enabled legacy id alone grants nothing.
     #[serde(deserialize_with = "read_broad_grants")]
     pub broad_grants: BTreeMap<String, BroadGrant>,
+    /// Entries whose rule file a refused delete may have left behind, which
+    /// may load again at the daemon's next start (#120 item 18): the rules
+    /// cache's marker doesn't outlive the bridge. Written only while set, so
+    /// a file without one is still read by an older bridge.
+    #[serde(skip_serializing_if = "BTreeSet::is_empty")]
+    pub files_left: BTreeSet<String>,
 }
 
 pub const BROAD_CONSENT: &str = "resolver-any-address-v1";
@@ -232,6 +238,20 @@ impl Choices {
         next
     }
 
+    /// Record that `id`'s rule file may remain (a refused delete).
+    pub fn file_left(&self, id: &str) -> Self {
+        let mut next = self.clone();
+        next.files_left.insert(id.to_string());
+        next
+    }
+
+    /// Forget that: the file was rewritten or removed, or there was none.
+    pub fn file_gone(&self, id: &str) -> Self {
+        let mut next = self.clone();
+        next.files_left.remove(id);
+        next
+    }
+
     /// Whether Snitchwatch recorded installing `id`'s rule.
     pub fn was_installed(&self, id: &str) -> bool {
         self.installed_ids.contains(id) || self.installed.contains_key(id)
@@ -317,8 +337,9 @@ pub fn load(path: &Path) -> io::Result<Option<Choices>> {
         + choices.deleted_by_user.len()
         + choices.installed.len()
         + choices.installed_ids.len()
-        + choices.broad_grants.len();
-    if count > 6 * MAX_IDS {
+        + choices.broad_grants.len()
+        + choices.files_left.len();
+    if count > 7 * MAX_IDS {
         return Err(invalid("the file lists too many entries"));
     }
     Ok(Some(lenient(choices)))
@@ -367,6 +388,7 @@ fn cleaned(choices: Choices) -> Choices {
         enabled: choices.enabled.into_iter().filter(valid).collect(),
         disabled: choices.disabled.into_iter().filter(valid).collect(),
         deleted_by_user: choices.deleted_by_user.into_iter().filter(valid).collect(),
+        files_left: choices.files_left.into_iter().filter(valid).collect(),
         installed_ids,
         broad_grants: choices
             .broad_grants

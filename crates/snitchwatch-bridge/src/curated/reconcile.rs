@@ -22,6 +22,12 @@
 //!   the file loads again and lists the rule, at the next daemon start. A
 //!   rule whose refused install wrote no file reads plain `Off` instead:
 //!   it had no file to leave (the manager, #120 item 15).
+//! - The manager saves that "file may remain" note with the choices, so it
+//!   outlives a bridge restart and the cache's cap (#120 item 18). Caveat:
+//!   a note for a file that is really gone (removed by hand, or by an `OK`
+//!   delete the bridge can't tell from one that touched nothing, item 10)
+//!   stays until the entry is installed again or its listed rule deleted:
+//!   it over-warns, never under-warns.
 //! - An install the daemon refused or didn't answer may apply anyway,
 //!   unlisted: stock `replaceUserRule` takes the rule into memory before
 //!   `Save` can fail, and an unanswered one may still be taken
@@ -106,7 +112,8 @@ pub enum EntryStatus {
 
 /// The daemon's side of a plan: its rules, the names it has that were too
 /// large to keep (`RulesCache::left_out`), and the names whose delete it
-/// refused, whose files may remain (`RulesCache::files_left`).
+/// refused, whose files may remain (`RulesCache::files_left`, with the
+/// choices' saved notes).
 #[derive(Debug, Clone, Copy)]
 pub struct DaemonRules<'a> {
     pub rules: &'a BTreeMap<String, Rule>,

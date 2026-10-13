@@ -438,3 +438,34 @@ fn broad_grants_retain_atomic_owner_only_and_no_link_guards() {
     assert!(save(&path, &granted()).is_err());
     assert!(load(&path).is_err());
 }
+
+/// #120 item 18: the "file may remain" bit is kept across a save and a
+/// load, and written only while set, so a file without one is still read by
+/// an older bridge. An id that isn't one is dropped like any other.
+#[test]
+fn a_file_left_bit_round_trips_and_is_written_only_when_set() {
+    let dir = dir();
+    let path = dir.path().join(FILE_NAME);
+    let noted = chosen().file_left("flatpak-flathub");
+    save(&path, &noted).unwrap();
+    assert!(std::fs::read_to_string(&path)
+        .unwrap()
+        .contains(r#""filesLeft":["flatpak-flathub"]"#));
+    assert_eq!(load(&path).unwrap(), Some(noted.clone()));
+    let gone = noted.file_gone("flatpak-flathub");
+    assert_eq!(gone, chosen());
+    save(&path, &gone).unwrap();
+    assert!(!std::fs::read_to_string(&path)
+        .unwrap()
+        .contains("filesLeft"));
+    assert_eq!(load(&path).unwrap(), Some(gone));
+    write(
+        &path,
+        r#"{"version":3,"choices":{"filesLeft":["flatpak-flathub","Not An Id"]}}"#,
+        0o600,
+    );
+    assert_eq!(
+        load(&path).unwrap().unwrap().files_left,
+        ["flatpak-flathub".to_string()].into()
+    );
+}

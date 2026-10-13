@@ -6,12 +6,15 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+use tracing::warn;
+
 use super::super::canonical::is_unedited;
 use super::super::reconcile::{CuratedAction, DaemonRules, EntryStatus};
 use super::super::store::{self, Choices};
 use super::super::wire::CuratedDefaultSummary;
 use super::super::{entries, CuratedEntry};
 use crate::daemon_commands::{CommandError, SendError};
+use crate::rule_name::CURATED_DEFAULT_RULE_NAME_PREFIX;
 use crate::ws_messages::StorageStatus;
 
 pub(super) struct State {
@@ -132,6 +135,58 @@ pub(super) fn track_maybe_applied(
     } else {
         None
     }
+}
+
+/// Record a delete the daemon answered, `OK` or refused after dropping the
+/// rule from memory; returns whether the rule never had a file, so the
+/// cache's marker for it is forgotten. `marked`: a file was noted left.
+/// - A refusal leaves the file (#119), unless the record `dropped` says the
+///   rule never had one (#120 item 15).
+/// - `OK` for a `listed` rule removed its file. `OK` for an unlisted name
+///   may have touched none: on a daemon that rolls a refused install back
+///   (tower #109) the name wasn't in memory, so a file noted before stays
+///   (item 19). The bridge can't tell that from stock, where the file went,
+///   so it keeps warning (item 10: over-warns only).
+/// - The "file may remain" bit is saved with the choices (item 18).
+pub(super) fn deleted(
+    state: &mut State,
+    id: &str,
+    refused: bool,
+    listed: bool,
+    marked: bool,
+    dropped: Option<MaybeApplied>,
+) -> bool {
+    let no_file = dropped.is_some_and(|record| !record.file_possible);
+    let file_left = !no_file && (refused || (marked && !listed));
+    let removed = state.choices.removed(id);
+    let (choices, status) = if file_left {
+        warn!(entry = %id, "a recommended rule's file may remain");
+        (removed.file_left(id), EntryStatus::OffFileLeft)
+    } else if no_file || listed {
+        (removed.file_gone(id), EntryStatus::Off)
+    } else {
+        (removed, EntryStatus::Off)
+    };
+    keep(state, choices);
+    state.failures.remove(id);
+    state.statuses.insert(id.to_string(), status);
+    no_file
+}
+
+/// Names the cache marks as a file left whose record says the rule never
+/// had one: a late `ERROR` to a timed-out delete marks it (#120 item 20).
+pub(super) fn no_file_marks(state: &State, files_left: &BTreeSet<String>) -> Vec<String> {
+    state
+        .maybe_applied
+        .iter()
+        .filter(|(name, record)| !record.file_possible && files_left.contains(*name))
+        .map(|(name, _)| name.clone())
+        .collect()
+}
+
+/// The rule name of the entry `id`.
+pub(super) fn rule_name(id: &str) -> String {
+    format!("{CURATED_DEFAULT_RULE_NAME_PREFIX}{id}")
 }
 
 /// A failed command for an entry, and when it failed.
