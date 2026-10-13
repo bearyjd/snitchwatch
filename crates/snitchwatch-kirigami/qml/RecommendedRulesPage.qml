@@ -116,6 +116,14 @@ Kirigami.ScrollablePage {
     ListView {
         id: list
         model: page.model
+        // Under the bridge's group titles when it sends groups; the flat list otherwise.
+        section.property: page.model && page.model.grouped ? "groupTitle" : ""
+        section.criteria: ViewSection.FullString
+        section.delegate: Kirigami.ListSectionHeader {
+            required property string section
+            width: ListView.view ? ListView.view.width : implicitWidth
+            label: section
+        }
 
         delegate: Controls.ItemDelegate {
             id: row

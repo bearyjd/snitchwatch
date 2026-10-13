@@ -23,7 +23,10 @@ Item {
         { name: "connections-expanded", expand: 0 },
         { name: "connections-flat", flat: true },
         { name: "rules", page: "rules" },
-        { name: "blocklists", page: "blocklists" }
+        { name: "blocklists", page: "blocklists" },
+        { name: "onboarding-groups", page: "curatedGroups" },
+        { name: "onboarding-groups-details", page: "curatedGroups", expandGroups: true },
+        { name: "recommended-rules", page: "recommendedRules" }
     ]
 
     function capture(name, item) {
@@ -89,6 +92,15 @@ Item {
             runner.step++;
             if (shot.page) {
                 runner.window.pageStack.replace(runner.pages[shot.page]);
+            }
+            if (shot.expandGroups) {
+                // The page was just created; its groups appear on the next frame.
+                Qt.callLater(function () {
+                    const groups = runner.window.pageStack.currentItem.step.groupsRepeater;
+                    for (let i = 0; i < groups.count; i++) {
+                        groups.itemAt(i).expanded = true;
+                    }
+                });
             }
             if (shot.expand !== undefined) {
                 runner.expandDepth(shot.expand);

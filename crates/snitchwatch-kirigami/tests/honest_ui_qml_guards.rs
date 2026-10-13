@@ -65,6 +65,14 @@ const ALL_QML: &[(&str, &str)] = &[
         include_str!("../qml/DiagnosticsPage.qml"),
     ),
     (
+        "CuratedGroupsPage.qml",
+        include_str!("../qml/CuratedGroupsPage.qml"),
+    ),
+    (
+        "CuratedGroupsStep.qml",
+        include_str!("../qml/CuratedGroupsStep.qml"),
+    ),
+    (
         "DnsConsentDialog.qml",
         include_str!("../qml/DnsConsentDialog.qml"),
     ),
@@ -621,6 +629,26 @@ fn recommended_rules_page_labels_showing_bridge_text_are_plain_text() {
             "page.unavailableReason",
         ],
         6,
+    );
+}
+
+/// The first-run groups step shows the bridge's group titles and descriptions
+/// and each entry's program, what it allows, why, and status.
+#[test]
+fn curated_groups_step_labels_showing_bridge_text_are_plain_text() {
+    assert_data_labels_plain_text(
+        "CuratedGroupsStep.qml",
+        include_str!("../qml/CuratedGroupsStep.qml"),
+        &[
+            "groupRow.modelData.title",
+            "groupRow.modelData.description",
+            "modelData.program",
+            "modelData.allows",
+            "modelData.why",
+            "modelData.statusText",
+            "step.model.consentResult",
+        ],
+        7,
     );
 }
 

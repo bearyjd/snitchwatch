@@ -24,6 +24,7 @@ const ROLE_PROBLEM: i32 = 6;
 const ROLE_CAN_REMOVE: i32 = 7;
 const ROLE_CAN_KEEP: i32 = 8;
 const ROLE_BROAD: i32 = 9;
+const ROLE_GROUP_TITLE: i32 = 10;
 
 #[cxx_qt::bridge]
 pub mod qobject {
@@ -57,6 +58,8 @@ pub mod qobject {
         #[qproperty(QString, consent_result, cxx_name = "consentResult")]
         #[qproperty(i32, count)]
         #[qproperty(bool, received)]
+        #[qproperty(bool, grouped)]
+        #[qproperty(QString, groups_json, cxx_name = "groupsJson")]
         #[qproperty(QString, unavailable_reason, cxx_name = "unavailableReason")]
         type CuratedDefaultsModel = super::CuratedDefaultsModelRust;
 
@@ -110,6 +113,18 @@ pub mod qobject {
         #[cxx_name = "setEntry"]
         fn set_entry(self: Pin<&mut CuratedDefaultsModel>, id: &QString, on: bool);
 
+        /// Ask to turn one group on or off (`groupsJson`'s `id`): one request
+        /// with the ids of its entries not already that way. The DNS group
+        /// goes through the reviewed consent flow instead.
+        #[qinvokable]
+        #[cxx_name = "setGroup"]
+        fn set_group(self: Pin<&mut CuratedDefaultsModel>, id: &QString, on: bool);
+
+        /// Demo mode only (`SNITCHWATCH_DEMO=1`): load fake grouped rules.
+        #[qinvokable]
+        #[cxx_name = "loadDemoGroups"]
+        fn load_demo_groups(self: Pin<&mut CuratedDefaultsModel>);
+
         /// Ask to turn every listed entry on or off (only those not already
         /// that way).
         #[qinvokable]
@@ -153,6 +168,8 @@ pub struct CuratedDefaultsModelRust {
     consent_result: QString,
     count: i32,
     received: bool,
+    grouped: bool,
+    groups_json: QString,
     unavailable_reason: QString,
 }
 
@@ -177,6 +194,7 @@ impl qobject::CuratedDefaultsModel {
             ROLE_CAN_REMOVE => QVariant::from(&self.store.can_remove(entry)),
             ROLE_BROAD => QVariant::from(&(entry.broad || entry.id == DNS_ID)),
             ROLE_CAN_KEEP => QVariant::from(&self.store.can_keep(entry)),
+            ROLE_GROUP_TITLE => text(self.store.group_title(entry)),
             _ => QVariant::default(),
         }
     }
@@ -194,6 +212,7 @@ impl qobject::CuratedDefaultsModel {
         roles.insert(ROLE_PROBLEM, QByteArray::from("problem"));
         roles.insert(ROLE_CAN_REMOVE, QByteArray::from("canRemove"));
         roles.insert(ROLE_CAN_KEEP, QByteArray::from("canKeep"));
+        roles.insert(ROLE_GROUP_TITLE, QByteArray::from("groupTitle"));
         roles
     }
 
@@ -249,6 +268,9 @@ impl qobject::CuratedDefaultsModel {
         }
         self.as_mut().set_count(next.len() as i32);
         self.as_mut().set_received(next.received());
+        self.as_mut().set_grouped(next.grouped());
+        self.as_mut()
+            .set_groups_json(QString::from(&next.groups_json()));
         self.as_mut()
             .set_unavailable_reason(QString::from(next.unavailable_reason()));
     }
@@ -295,6 +317,29 @@ impl qobject::CuratedDefaultsModel {
         }
         let request = self.store.request(&id.to_string(), on);
         self.emit_client(request);
+    }
+
+    fn set_group(mut self: Pin<&mut Self>, id: &QString, on: bool) {
+        let gid = id.to_string();
+        if self.store.group_is_broad(&gid) {
+            for entry in self.store.group_broad_ids(&gid) {
+                self.as_mut().set_entry(&QString::from(&entry), on);
+            }
+            return;
+        }
+        let request = self.store.request_group(&gid, on);
+        self.emit_client(request);
+    }
+
+    fn load_demo_groups(mut self: Pin<&mut Self>) {
+        if !crate::demo::enabled() {
+            return;
+        }
+        let session = self.store.session();
+        for json in crate::demo::curated_group_messages() {
+            self.as_mut()
+                .apply_session_message(session, &QString::from(&json));
+        }
     }
 
     fn set_all(mut self: Pin<&mut Self>, on: bool) {

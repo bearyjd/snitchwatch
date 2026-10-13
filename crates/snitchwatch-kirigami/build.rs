@@ -37,6 +37,8 @@ fn main() {
                 "qml/ProfilesPage.qml",
                 "qml/RecommendedRulesPage.qml",
                 "qml/DnsConsentDialog.qml",
+                "qml/CuratedGroupsStep.qml",
+                "qml/CuratedGroupsPage.qml",
                 "qml/TrafficPage.qml",
                 "qml/OnboardingPage.qml",
                 "qml/SilentModeChoice.qml",

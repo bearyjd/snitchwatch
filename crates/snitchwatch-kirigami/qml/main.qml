@@ -232,6 +232,7 @@ Kirigami.ApplicationWindow {
         // SNITCHWATCH_DEMO=1 only (the model ignores the call otherwise).
         if (appInfo.demoMode) {
             connectionsModel.loadDemoRows();
+            curatedDefaultsModel.loadDemoGroups();
         }
     }
 
@@ -240,7 +241,12 @@ Kirigami.ApplicationWindow {
         window: root
         dir: appInfo.screenshotDir
         alertWindow: alertHost.alert
-        pages: ({ rules: rulesPageComponent, blocklists: blocklistsPageComponent })
+        pages: ({
+            rules: rulesPageComponent,
+            blocklists: blocklistsPageComponent,
+            curatedGroups: curatedGroupsPageComponent,
+            recommendedRules: recommendedRulesPageComponent
+        })
     }
 
     // The standalone alert and the silent-mode/duration wiring (LS redesign
@@ -262,12 +268,24 @@ Kirigami.ApplicationWindow {
             settings: settingsController
             onDone: {
                 root.silentStepShown = false;
-                root.pageStack.pop();
+                // Offer the rule groups next, only when the bridge sends them.
+                if (curatedDefaultsModel.grouped) {
+                    root.pageStack.replace(curatedGroupsPageComponent);
+                } else {
+                    root.pageStack.pop();
+                }
             }
             onReviewRecommendedRules: {
                 root.silentStepShown = false;
                 root.pageStack.replace(recommendedRulesPageComponent);
             }
+        }
+    }
+    Component {
+        id: curatedGroupsPageComponent
+        CuratedGroupsPage {
+            model: curatedDefaultsModel
+            onDone: root.pageStack.pop()
         }
     }
     Connections {
