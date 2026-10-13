@@ -137,8 +137,7 @@ pub struct GeoModelRust {
 
 impl Default for GeoModelRust {
     fn default() -> Self {
-        let outcome = crate::geo::resolver::discover_and_open();
-        let resolver = SharedResolver::new(outcome.lookup);
+        let (resolver, outcome) = crate::geo::shared_discovery();
         Self {
             store: GeoStore::with_resolver(resolver.clone()),
             resolver,

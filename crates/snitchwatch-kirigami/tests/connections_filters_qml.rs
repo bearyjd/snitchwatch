@@ -51,6 +51,12 @@ Window {
         model: model
         title: "Connections"
     }
+    ConnectionsFilterBar {
+        id: bar
+        y: 100
+        width: parent.width
+        model: model
+    }
     Connections {
         target: model
         function onModelReset() { probe.resets++; }
@@ -72,7 +78,7 @@ Window {
         return null;
     }
     function switchWith(prefix) {
-        return probe.find(hdr, it => typeof it.text === "string" && typeof it.click === "function"
+        return probe.find(bar, it => typeof it.text === "string" && typeof it.click === "function"
                                      && it.text.indexOf(prefix) === 0);
     }
     function searchField() {
@@ -112,6 +118,8 @@ Window {
                     fromNow.click();
                     probe.expect(model.filterSinceMs > 0, "From now did not set a start");
                     probe.expect(model.count === 1, "From now hides the older row: " + model.count);
+                    probe.expect(fromNow.checked && model.filterSummary.indexOf("even if still active") >= 0,
+                                 "From now summary does not explain its semantics: " + model.filterSummary);
                     probe.expect(probe.switchWith("From now (since ") !== null, "From now does not show its start time");
                     probe.switchWith("From now").click();
                     probe.expect(model.filterSinceMs === 0, "From now off did not clear the start");
@@ -123,6 +131,19 @@ Window {
                     probe.expect(denied !== null, "no Denied only switch");
                     denied.click();
                     probe.expect(model.count === 1, "Denied only shows the denied row: " + model.count);
+                    probe.expect(model.filterDeniedOnly && denied.checked, "Denied only switch out of step with the model");
+                    // Both on: nothing can match, and the summary says why.
+                    const pending = probe.switchWith("Pending only");
+                    pending.click();
+                    probe.expect(model.count === 0, "pending and denied together match nothing: " + model.count);
+                    probe.expect(model.filterSummary.indexOf("cannot both match") >= 0, "no explanation: " + model.filterSummary);
+                    pending.click();
+                    probe.expect(!pending.checked && !model.filterPendingOnly, "Pending only did not turn off");
+                    // A change from outside moves the switch.
+                    model.setPendingOnly(true);
+                    probe.expect(pending.checked, "Pending only switch did not follow the model");
+                    model.setPendingOnly(false);
+                    probe.expect(!pending.checked, "Pending only switch did not follow the model off");
                     denied.click();
                     probe.expect(model.count === 5, "Denied only off: " + model.count);
                     // The map-click path: set from outside, the field follows.
@@ -144,12 +165,19 @@ Window {
                     model.setGroupedMode(true);
                 } else if (probe.phase === 3) {
                     probe.resets = 0;
+                    const base = model.count;
+                    probe.expect(base > 1, "grouped baseline: " + base);
                     model.setFilterQuery("host:github");
+                    probe.expect(model.count !== base, "a grouped query did not change the rows: " + model.count + " of " + base);
+                    const queried = model.count;
                     model.setFromNow(true);
+                    probe.expect(model.filterSinceMs > 0, "grouped From now did not set a start");
                     model.setDeniedOnly(true);
+                    probe.expect(model.count !== queried, "grouped denied-only did not change the rows: " + model.count + " of " + queried);
                     model.setDeniedOnly(false);
                     model.setFromNow(false);
                     model.setFilterQuery("");
+                    probe.expect(!model.filterActive, "clearing left a filter active");
                     probe.expect(probe.resets === 0, "a grouped filter change reset the model: " + probe.resets);
                     done = true;
                 }

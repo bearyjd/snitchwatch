@@ -24,6 +24,8 @@ const CONNECTIONS_PAGE: &str = concat!(
     "\n",
     include_str!("../qml/ConnectionsHeader.qml"),
     "\n",
+    include_str!("../qml/ConnectionsFilterBar.qml"),
+    "\n",
     include_str!("../qml/ConnectionInspector.qml"),
 );
 const MAIN_QML: &str = include_str!("../qml/main.qml");

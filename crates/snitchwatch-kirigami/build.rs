@@ -23,6 +23,7 @@ fn main() {
                 "qml/ConnectionsPage.qml",
                 "qml/ConnectionRow.qml",
                 "qml/ConnectionsHeader.qml",
+                "qml/ConnectionsFilterBar.qml",
                 "qml/ConnectionInspector.qml",
                 "qml/InlineVerdicts.qml",
                 "qml/PromptSlotBanner.qml",

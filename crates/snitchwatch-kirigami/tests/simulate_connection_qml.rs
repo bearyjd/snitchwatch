@@ -346,6 +346,10 @@ fn connections_files_stay_within_their_line_budgets() {
             include_str!("../qml/ConnectionsHeader.qml"),
         ),
         (
+            "ConnectionsFilterBar.qml",
+            include_str!("../qml/ConnectionsFilterBar.qml"),
+        ),
+        (
             "ConnectionInspector.qml",
             include_str!("../qml/ConnectionInspector.qml"),
         ),

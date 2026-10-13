@@ -208,9 +208,17 @@ Kirigami.ScrollablePage {
         }
     }
 
+    // Heading, search and Grouped only: the title row has a fixed height.
     titleDelegate: ConnectionsHeader {
         model: page.model
         title: page.title
+    }
+
+    // The wrapping filter switches and summary sit above the list, in the
+    // page content, where their height is laid out rather than overflowed.
+    header: ConnectionsFilterBar {
+        id: filterBar
+        model: page.model
     }
 
     Kirigami.PlaceholderMessage {

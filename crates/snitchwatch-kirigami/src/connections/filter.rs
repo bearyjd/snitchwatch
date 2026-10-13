@@ -40,13 +40,55 @@ enum Term {
     Free(String),
 }
 
-/// Split `query` into terms. Blank input and a known prefix with an empty
-/// value (`host:`) yield no term; an unknown prefix is free text.
+/// Split `query` on whitespace, keeping a double-quoted phrase together with
+/// its quotes stripped. An unterminated quote takes the rest of the string.
+/// The flag is true when the token started with a quote: a phrase is always
+/// free text, even if it contains a colon.
+fn split_tokens(query: &str) -> Vec<(String, bool)> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut started_quoted = false;
+    let mut in_token = false;
+    let mut in_quote = false;
+    for ch in query.chars() {
+        match ch {
+            '"' => {
+                if !in_token {
+                    in_token = true;
+                    started_quoted = true;
+                }
+                in_quote = !in_quote;
+            }
+            c if c.is_whitespace() && !in_quote => {
+                if in_token {
+                    tokens.push((std::mem::take(&mut current), started_quoted));
+                    in_token = false;
+                    started_quoted = false;
+                }
+            }
+            c => {
+                in_token = true;
+                current.push(c);
+            }
+        }
+    }
+    if in_token {
+        tokens.push((current, started_quoted));
+    }
+    tokens
+}
+
+/// Split `query` into terms. Blank input, an empty phrase (`""`) and a known
+/// prefix with an empty value (`host:`) yield no term; an unknown prefix is
+/// free text.
 fn parse_terms(query: &str) -> Vec<Term> {
-    query
-        .split_whitespace()
-        .filter_map(|token| {
+    split_tokens(query)
+        .into_iter()
+        .filter_map(|(token, phrase)| {
             let lower = token.to_lowercase();
+            if phrase {
+                return (!lower.is_empty()).then_some(Term::Free(lower));
+            }
             let Some((prefix, value)) = lower.split_once(':') else {
                 return Some(Term::Free(lower));
             };
@@ -174,9 +216,18 @@ impl ConnectionFilter {
             parts.push("denied only".to_string());
         }
         if self.since_ms.is_some() {
-            parts.push("from now".to_string());
+            // See `matches`: the start time is compared, not activity.
+            parts.push(
+                "from now (hides rows that started earlier, even if still active)".to_string(),
+            );
         }
         let mut text = parts.join(", ");
+        if self.pending_only && self.denied_only {
+            if !text.is_empty() {
+                text.push_str(". ");
+            }
+            text.push_str("Pending only and denied only cannot both match, so no rows match.");
+        }
         for term in &self.terms {
             let note = match term {
                 Term::BadPort(v) => format!("port:{v} is not a port number, so no rows match."),
@@ -201,6 +252,9 @@ impl ConnectionFilter {
         if self.denied_only && Verdict::of(row) != Verdict::Denied {
             return false;
         }
+        // "From now" compares the row's start time, not its activity: a
+        // connection opened before the switch stays hidden even while it is
+        // still active. The summary says so.
         if self.since_ms.is_some_and(|since| row.started_at_ms < since) {
             return false;
         }
@@ -587,8 +641,51 @@ mod tests {
         f.set_since_ms(Some(5));
         assert_eq!(
             f.summary(),
-            "search \"host:a\", pending only, denied only, from now"
+            "search \"host:a\", pending only, denied only, \
+             from now (hides rows that started earlier, even if still active). \
+             Pending only and denied only cannot both match, so no rows match."
         );
+        let mut both = ConnectionFilter::default();
+        both.set_pending_only(true);
+        both.set_denied_only(true);
+        assert!(both.summary().contains("cannot both match"));
+        let mut one = ConnectionFilter::default();
+        one.set_pending_only(true);
+        assert!(!one.summary().contains("cannot both match"));
+    }
+
+    #[test]
+    fn repeated_tokens_are_anded() {
+        let f = ConnectionFilter::new("host:a host:b", false);
+        assert!(f.matches(&row("x", "p", "a.b.com", 1, None)));
+        assert!(!f.matches(&row("y", "p", "a.com", 1, None)));
+        assert!(!f.matches(&row("z", "p", "b.com", 1, None)));
+    }
+
+    #[test]
+    fn quoted_phrases_are_one_free_text_term() {
+        assert_eq!(
+            parse_terms("\"foo bar\" baz"),
+            vec![Term::Free("foo bar".into()), Term::Free("baz".into())]
+        );
+        // Unterminated: the rest of the string is the phrase.
+        assert_eq!(
+            parse_terms("a \"foo bar baz"),
+            vec![Term::Free("a".into()), Term::Free("foo bar baz".into())]
+        );
+        // A phrase is free text even with a colon in it; empty phrases vanish.
+        assert_eq!(
+            parse_terms("\"host:x\" \"\""),
+            vec![Term::Free("host:x".into())]
+        );
+        // A quoted value after a prefix keeps its spaces.
+        assert_eq!(
+            parse_terms("app:\"my app\""),
+            vec![Term::App("my app".into())]
+        );
+        let f = ConnectionFilter::new("\"foo bar\"", false);
+        assert!(f.matches(&row("a", "foo bar", "h", 1, None)));
+        assert!(!f.matches(&row("b", "foo", "bar", 1, None)));
     }
 
     #[test]

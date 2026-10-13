@@ -32,7 +32,6 @@ use crate::connections::projection_diff;
 use crate::connections::row_store::{
     matched_rule_display, matched_rule_name, ModelOp, RowStore, Verdict,
 };
-use crate::geo::resolver::SharedResolver;
 use crate::inline_deny::{self, InlineDeny};
 use crate::pending_decision::VerdictChoice;
 use snitchwatch_bridge::translator::process_binding::is_bindable_process_path;
@@ -173,6 +172,11 @@ pub mod qobject {
         /// Start of "From now" in ms since the epoch, or `0` when it is off.
         /// Session-only; never persisted.
         #[qproperty(i64, filter_since_ms, cxx_name = "filterSinceMs")]
+        /// Whether "Pending only" is on. Named `filter*` so the generated
+        /// property setter does not collide with the `setPendingOnly` command.
+        #[qproperty(bool, filter_pending_only, cxx_name = "filterPendingOnly")]
+        /// Whether "Denied only" is on (see `filterPendingOnly`).
+        #[qproperty(bool, filter_denied_only, cxx_name = "filterDeniedOnly")]
         type ConnectionsModel = super::ConnectionsModelRust;
 
         /// Emitted when the auto-select policy decides a freshly arrived pending
@@ -650,14 +654,16 @@ pub struct ConnectionsModelRust {
     filter_active: bool,
     filter_summary: QString,
     filter_since_ms: i64,
+    filter_pending_only: bool,
+    filter_denied_only: bool,
 }
 
 impl Default for ConnectionsModelRust {
     fn default() -> Self {
         Self {
-            store: RowStore::with_filter(ConnectionFilter::default().with_geo(
-                SharedResolver::new(crate::geo::resolver::discover_and_open().lookup),
-            )),
+            store: RowStore::with_filter(
+                ConnectionFilter::default().with_geo(crate::geo::shared_resolver()),
+            ),
             grouping: GroupTree::default(),
             grouped_projection: Vec::new(),
             grouped: true,
@@ -674,6 +680,8 @@ impl Default for ConnectionsModelRust {
             filter_active: false,
             filter_summary: QString::default(),
             filter_since_ms: 0,
+            filter_pending_only: false,
+            filter_denied_only: false,
         }
     }
 }
@@ -1229,10 +1237,13 @@ impl qobject::ConnectionsModel {
         let active = filter.is_active();
         let summary = QString::from(&filter.summary());
         let since = filter.since_ms().unwrap_or(0);
+        let (pending_only, denied_only) = (filter.pending_only(), filter.denied_only());
         self.as_mut().set_filter_text(text);
         self.as_mut().set_filter_active(active);
         self.as_mut().set_filter_summary(summary);
         self.as_mut().set_filter_since_ms(since);
+        self.as_mut().set_filter_pending_only(pending_only);
+        self.as_mut().set_filter_denied_only(denied_only);
     }
 
     /// Switch between grouped and flat views. A no-op if already in the
