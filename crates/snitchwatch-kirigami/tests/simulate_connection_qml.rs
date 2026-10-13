@@ -92,7 +92,7 @@ Window {
             protocol: row.protocol, verdict: "allowed", pending: false,
             matchedRule: "", matchedRuleDisplay: ""
         });
-        const button = probeWindow.find(Controls.Overlay.overlay, "simulateConnectionButton");
+        const button = probeWindow.find(page, "simulateConnectionButton");
         probeWindow.expect(button !== null, "no Simulate this connection button");
         button.clicked();
     }
@@ -315,13 +315,13 @@ Window {
     );
 }
 
-/// The button's text is fixed (it lives in the inspector component now).
+/// The button's text is fixed (it lives in the inspector panel now).
 #[test]
 fn the_inspector_button_is_fixed_text() {
-    let source = include_str!("../qml/ConnectionInspector.qml");
+    let source = include_str!("../qml/InspectorPanel.qml");
     assert!(
         source.contains("text: \"Simulate this connection\""),
-        "ConnectionInspector.qml lost the Simulate this connection button"
+        "InspectorPanel.qml lost the Simulate this connection button"
     );
 }
 
@@ -350,8 +350,25 @@ fn connections_files_stay_within_their_line_budgets() {
             include_str!("../qml/ConnectionsFilterBar.qml"),
         ),
         (
-            "ConnectionInspector.qml",
-            include_str!("../qml/ConnectionInspector.qml"),
+            "ConnectionsTopBar.qml",
+            include_str!("../qml/ConnectionsTopBar.qml"),
+        ),
+        (
+            "InspectorState.qml",
+            include_str!("../qml/InspectorState.qml"),
+        ),
+        ("HoverTip.qml", include_str!("../qml/HoverTip.qml")),
+        (
+            "InspectorPanel.qml",
+            include_str!("../qml/InspectorPanel.qml"),
+        ),
+        (
+            "ConnectionDetailPage.qml",
+            include_str!("../qml/ConnectionDetailPage.qml"),
+        ),
+        (
+            "ConnectionList.qml",
+            include_str!("../qml/ConnectionList.qml"),
         ),
     ] {
         let lines = source.lines().count();
