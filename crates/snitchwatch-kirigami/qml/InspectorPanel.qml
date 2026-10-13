@@ -1,35 +1,75 @@
-// Connection inspector sheet, split out of ConnectionsPage.qml (monitor-tree
-// step 1) with no behaviour change.
+// Connections inspector side panel (monitor-tree step 5). Replaces the
+// SizedOverlaySheet inspector; the content is the same, only the host moved.
 //
-// Row inspector. For a *pending* row this is where the decision prompt lives
-// (Task 7 wires the verdict actions in); for decided rows it is read-only
-// detail. Kept as an OverlaySheet so it behaves the same at every width.
+// Shows the selected connection's details and every verdict action. Used
+// twice by ConnectionsPage: as the right-hand column of a wide window, and
+// inside a ConnectionDetailPage pushed onto the page stack when the window is
+// too narrow for a column. With nothing selected it shows a placeholder, never
+// empty space. Every datum is PlainText.
 import QtQuick
 import QtQuick.Layouts
 import QtQuick.Controls as Controls
 import org.kde.kirigami as Kirigami
 import com.snitchwatch.shell
 
-SizedOverlaySheet {
-    id: inspector
+ColumnLayout {
+    id: panel
 
-    // The owning ConnectionsPage: the inspector renders its `inspect*`
-    // snapshot and forwards actions to its signals and helpers.
+    // The owning ConnectionsPage: the panel renders its `inspect*` snapshot
+    // and forwards actions to its signals and helpers.
     property var page
     property alias decisionSheet: pendingSheet
     property alias makeRuleSheet: makeRuleSheet
-    title: page.inspectProcess
+    property alias titleLabel: titleLabel
+    // The pushed detail page already has a title bar and a back button.
+    property bool showHeader: true
+    spacing: Kirigami.Units.largeSpacing
+
+    RowLayout {
+        Layout.fillWidth: true
+        visible: panel.showHeader && page.inspecting
+        Kirigami.Heading {
+            id: titleLabel
+            objectName: "inspectorTitle"
+            Layout.fillWidth: true
+            level: 3
+            textFormat: Text.PlainText
+            text: page.inspectProcess
+            elide: Text.ElideMiddle
+        }
+        Controls.ToolButton {
+            objectName: "inspectorCloseButton"
+            icon.name: "window-close"
+            display: Controls.AbstractButton.IconOnly
+            text: "Close details"
+            onClicked: page.dismissInspector()
+        }
+    }
+
+    Kirigami.PlaceholderMessage {
+        objectName: "inspectorPlaceholder"
+        Layout.fillWidth: true
+        Layout.topMargin: Kirigami.Units.gridUnit * 4
+        visible: !page.inspecting
+        icon.name: "view-list-details"
+        text: "Select a connection to see its details"
+    }
 
     ColumnLayout {
-        Layout.preferredWidth: inspector.preferredWidth
+        objectName: "inspectorDetails"
+        Layout.fillWidth: true
+        visible: page.inspecting
         spacing: Kirigami.Units.largeSpacing
 
         Kirigami.FormLayout {
             Layout.fillWidth: true
             Controls.Label {
                 Kirigami.FormData.label: "Host"
+                objectName: "inspectorHost"
                 textFormat: Text.PlainText
                 text: page.inspectHost
+                Layout.fillWidth: true
+                elide: Text.ElideMiddle
             }
             Controls.Label {
                 Kirigami.FormData.label: "Destination IP"
@@ -39,6 +79,7 @@ SizedOverlaySheet {
             }
             Controls.Label {
                 Kirigami.FormData.label: "Port"
+                textFormat: Text.PlainText
                 text: page.inspectPort
             }
             Controls.Label {
@@ -74,7 +115,7 @@ SizedOverlaySheet {
             icon.name: "view-list-details"
             onClicked: {
                 page.showRuleRequested(page.inspectMatchedRule);
-                inspector.close();
+                page.dismissInspector();
             }
         }
 
@@ -85,7 +126,7 @@ SizedOverlaySheet {
             icon.name: "system-run"
             onClicked: {
                 page.simulateConnectionRequested(page.model.simulationPrefillJson(page.inspectId));
-                inspector.close();
+                page.dismissInspector();
             }
         }
 
@@ -118,7 +159,7 @@ SizedOverlaySheet {
             deadlineMs: page.inspectDeadlineMs
             decideLater: page.inspectDecideLater
             bridgeFeed: page.bridgeFeed
-            onDecided: inspector.close()
+            onDecided: page.dismissInspector()
             onExplained: text => page.showPassiveNotice(text)
         }
 

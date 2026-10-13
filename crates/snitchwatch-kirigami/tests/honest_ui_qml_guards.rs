@@ -33,7 +33,11 @@ const CONNECTIONS_PAGE: &str = concat!(
     "\n",
     include_str!("../qml/ConnectionsHeader.qml"),
     "\n",
-    include_str!("../qml/ConnectionInspector.qml"),
+    include_str!("../qml/InspectorPanel.qml"),
+    "\n",
+    include_str!("../qml/ConnectionDetailPage.qml"),
+    "\n",
+    include_str!("../qml/ConnectionList.qml"),
     "\n",
     include_str!("../qml/RuleButton.qml"),
     "\n",
@@ -79,8 +83,16 @@ const ALL_QML: &[(&str, &str)] = &[
         include_str!("../qml/ConnectionsHeader.qml"),
     ),
     (
-        "ConnectionInspector.qml",
-        include_str!("../qml/ConnectionInspector.qml"),
+        "InspectorPanel.qml",
+        include_str!("../qml/InspectorPanel.qml"),
+    ),
+    (
+        "ConnectionDetailPage.qml",
+        include_str!("../qml/ConnectionDetailPage.qml"),
+    ),
+    (
+        "ConnectionList.qml",
+        include_str!("../qml/ConnectionList.qml"),
     ),
     (
         "DecideLaterButton.qml",
@@ -872,6 +884,23 @@ fn overlay_sheet_titles_are_plain_text() {
              PlainText title header (issue #51)"
         );
     }
+}
+
+/// The Connections inspector is a side panel, not a SizedOverlaySheet, so the
+/// sheet-title guard above no longer covers its title. Replacement for that
+/// intent: the panel's heading (the process name is data) must be PlainText.
+#[test]
+fn inspector_panel_title_is_plain_text() {
+    let code = code_lines(include_str!("../qml/InspectorPanel.qml"));
+    let start = code
+        .find("Kirigami.Heading {")
+        .expect("InspectorPanel.qml lost its title heading");
+    let heading = &code[start..];
+    let heading = &heading[..heading.find("\n        }").unwrap_or(heading.len())];
+    assert!(
+        heading.contains("textFormat: Text.PlainText") && heading.contains("page.inspectProcess"),
+        "InspectorPanel.qml's heading must render the process name as PlainText:\n{heading}"
+    );
 }
 
 /// Issue #49: the bridge hardcodes per-connection bytes to 0 and opensnitchd

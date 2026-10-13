@@ -382,6 +382,14 @@ pub mod qobject {
         #[cxx_name = "isPendingRow"]
         fn is_pending_row(self: &ConnectionsModel, id: &QString) -> bool;
 
+        /// Whether the connection `id` is a row of the list as it is drawn now
+        /// (after the filter and, in grouped mode, group expansion). The side
+        /// panel clears its selection when this goes false. Read-only and
+        /// never flushing, like `isPendingRow`.
+        #[qinvokable]
+        #[cxx_name = "isRowVisible"]
+        fn is_row_visible(self: &ConnectionsModel, id: &QString) -> bool;
+
         /// Inline buttons (`crate::inline_deny`; all read-only, never
         /// flushing, like `isPendingRow`, since bindings call them).
         /// `app_bound_rules` is `BridgeFeed.appBoundRulesFor(id)`.
@@ -1319,6 +1327,17 @@ impl qobject::ConnectionsModel {
 
     fn is_pending_row(&self, id: &QString) -> bool {
         self.store.is_pending(&id.to_string()).unwrap_or(false)
+    }
+
+    fn is_row_visible(&self, id: &QString) -> bool {
+        let id = id.to_string();
+        if self.grouped {
+            return self
+                .grouped_projection
+                .iter()
+                .any(|e| matches!(e, VisibleEntry::Row { id: row_id, .. } if *row_id == id));
+        }
+        self.store.visible_index_of(&id).is_some()
     }
 
     fn make_rule(
