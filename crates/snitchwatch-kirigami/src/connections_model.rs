@@ -422,6 +422,14 @@ pub mod qobject {
         #[cxx_name = "visibleRowIndex"]
         fn visible_row_index(self: &ConnectionsModel, id: &QString) -> i32;
 
+        /// The list index of the oldest pending connection row that is drawn
+        /// now, other than `except_id` (-1 if none). The panel selects it when
+        /// it is dismissed, so a prompt that arrived while it was busy is not
+        /// left unseen. Read-only and never flushing.
+        #[qinvokable]
+        #[cxx_name = "oldestPendingRowIndex"]
+        fn oldest_pending_row_index(self: &ConnectionsModel, except_id: &QString) -> i32;
+
         /// Inline buttons (`crate::inline_deny`; all read-only, never
         /// flushing, like `isPendingRow`, since bindings call them).
         /// `app_bound_rules` is `BridgeFeed.appBoundRulesFor(id)`.
@@ -1077,11 +1085,11 @@ impl qobject::ConnectionsModel {
             self.as_mut().end_reset_model();
         }
         self.as_mut().refresh_counts();
-        self.as_mut().maybe_auto_select(&new_pending_ids);
+        let moved = self.as_mut().maybe_auto_select(&new_pending_ids);
 
         // If auto-select didn't move the selection, re-anchor the row the
         // user had selected before the reset (if it still exists/is visible).
-        if !selected_before.is_empty() && self.current_row_id == selected_before {
+        if !moved && !selected_before.is_empty() && self.current_row_id == selected_before {
             let vis = self
                 .grouped_projection
                 .iter()
@@ -1410,6 +1418,20 @@ impl qobject::ConnectionsModel {
         self.store.is_pending(&id.to_string()).unwrap_or(false)
     }
 
+    fn oldest_pending_row_index(&self, except_id: &QString) -> i32 {
+        let except = except_id.to_string();
+        let pending = |id: &str| id != except && self.store.is_pending(id) == Some(true);
+        let index = if self.grouped {
+            self.grouped_projection
+                .iter()
+                .position(|e| matches!(e, VisibleEntry::Row { id, .. } if pending(id)))
+        } else {
+            (0..self.store.visible_len())
+                .position(|i| self.store.visible_row(i).is_some_and(|r| pending(&r.id)))
+        };
+        index.map_or(-1, |i| i as i32)
+    }
+
     fn visible_row_index(&self, id: &QString) -> i32 {
         let id = id.to_string();
         let index = if self.grouped {
@@ -1546,9 +1568,12 @@ impl qobject::ConnectionsModel {
     /// Apply the auto-select-on-new-pending-row policy. Sets `autoSelectRowId`
     /// (which QML watches) when a freshly arrived pending row should take the
     /// selection, without stealing focus from a pending row the user is on.
-    fn maybe_auto_select(mut self: Pin<&mut Self>, new_pending_ids: &[String]) {
+    /// Returns whether it asked QML to select a row. It does not adopt the row
+    /// as the current one: QML may decline (a panel is showing), and says so by
+    /// not calling `setCurrentRowId`.
+    fn maybe_auto_select(mut self: Pin<&mut Self>, new_pending_ids: &[String]) -> bool {
         if new_pending_ids.is_empty() {
-            return;
+            return false;
         }
         let current = self.current_row_id.clone();
         let current_opt = if current.is_empty() {
@@ -1563,7 +1588,7 @@ impl qobject::ConnectionsModel {
         let Some(target) =
             crate::connections::filter::auto_select_target(current_opt, current_is_pending, &refs)
         else {
-            return;
+            return false;
         };
         // Translate the chosen id to its current *visible* index for QML. If the
         // target is filtered out of view there's nothing to select. In grouped
@@ -1590,13 +1615,11 @@ impl qobject::ConnectionsModel {
         } else {
             self.store.visible_index_of(&target)
         };
-        if let Some(vis) = vis {
-            // Adopt the auto-selected row as the current selection so the *next*
-            // pending arrival won't jump the selection off it (surface one
-            // pending decision at a time, per the design spec).
-            self.as_mut().rust_mut().current_row_id = target;
-            self.as_mut().auto_select_requested(vis as i32);
-        }
+        let Some(vis) = vis else {
+            return false;
+        };
+        self.as_mut().auto_select_requested(vis as i32);
+        true
     }
 
     fn apply_insert(mut self: Pin<&mut Self>, rows: Vec<ConnectionRow>) {

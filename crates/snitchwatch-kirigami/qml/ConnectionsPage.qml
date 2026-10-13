@@ -308,9 +308,19 @@ Kirigami.Page {
 
     // Close / finished action: clear the selection.
     function dismissInspector() {
+        const closed = inspect.rowId;
         inspect.clear();
         page.closeDetailPage();
         listPane.view.currentIndex = -1;
+        // A prompt that came in while the panel was busy was not shown.
+        Qt.callLater(page.selectOldestPending, closed);
+    }
+
+    function selectOldestPending(exceptId) {
+        const index = page.model ? page.model.oldestPendingRowIndex(exceptId) : -1;
+        if (index >= 0) {
+            page.selectAuto(index);
+        }
     }
 
     // The list's current row changed (click, auto-select, or the model moving

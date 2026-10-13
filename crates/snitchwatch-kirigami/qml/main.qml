@@ -543,7 +543,7 @@ Kirigami.ApplicationWindow {
 
             // Rule-match diagnostics "Show rule" jump (Parity 4): navigate to
             // the Rules tab and open the matched rule's detail sheet
-            // directly, using the page instance `pageStack.replace` returns
+            // directly, using the page instance `nav.replaceMain` returns
             // rather than a separate lookup/scroll step.
             onShowRuleRequested: function(ruleName) {
                 const rulesPage = nav.replaceMain(rulesPageComponent);

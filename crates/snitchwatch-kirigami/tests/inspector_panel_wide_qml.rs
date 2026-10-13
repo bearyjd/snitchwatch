@@ -232,8 +232,8 @@ Window {
                 probe.row("p3", "p3.example.com", null, null)] }));
         },
         function () {
-            probe.expect(page.inspecting && page.inspectId === "p3",
-                         "idle auto-select did not show the new pending row: " + page.inspectId);
+            probe.expect(page.inspecting && page.inspectId === "p2",
+                         "dismissing did not show the oldest pending row: " + page.inspectId);
             // The decision sheet's insight form wraps inside the 22-unit column.
             const note = probe.findText2(page, "Online research disabled — enable in Settings");
             probe.expect(note !== null, "no Registration info note");
@@ -277,6 +277,24 @@ Window {
             probe.expect(at > 0 && page.connectionList.currentIndex === at,
                          "currentIndex not re-anchored after the filter cleared: "
                          + page.connectionList.currentIndex + " vs " + at);
+        },
+        function () {
+            // A pending row arriving while the panel shows another row is not
+            // shown (and not adopted by the model); closing the panel shows it.
+            model.applyServerMessageJson(JSON.stringify({ action: "removeConnectionRows",
+                                                          ids: ["p2", "p3"] }));
+            probe.select("a");
+            model.applyServerMessageJson(JSON.stringify({ action: "insertConnectionRows", rows: [
+                probe.row("p9", "p9.example.com", null, null)] }));
+        },
+        function () {
+            probe.expect(page.inspecting && page.inspectId === "a",
+                         "a pending arrival replaced the panel: " + page.inspectId);
+            page.dismissInspector();
+        },
+        function () {
+            probe.expect(page.inspecting && page.inspectId === "p9",
+                         "closing the panel did not select the pending row: '" + page.inspectId + "'");
         }
     ]
 

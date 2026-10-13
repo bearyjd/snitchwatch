@@ -163,6 +163,18 @@ Kirigami.ApplicationWindow {
         function () {
             probe.expect(probe.pageStack.depth === 2, "Enter did not open the detail page: "
                          + probe.pageStack.depth);
+            // Back (not the close button): pops the page by the stack's own means.
+            probe.pageStack.pop();
+        },
+        function () {
+            // The pop's animation has finished: the selection ended with the page,
+            // so auto-select works again (it took the oldest pending row).
+            probe.expect(probe.pageStack.depth === 1, "back did not pop");
+            probe.expect(!probe.page.inspecting && probe.page.detailPage === null,
+                         "Back left the selection active");
+            const d = probe.page.connectionList.itemAtIndex(probe.page.connectionList.currentIndex);
+            probe.expect(d && d.pending, "Back did not release auto-select (the oldest pending row "
+                         + "was not selected)");
         }
     ]
 

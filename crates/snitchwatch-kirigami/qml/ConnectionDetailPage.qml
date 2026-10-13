@@ -22,9 +22,20 @@ Kirigami.ScrollablePage {
         showHeader: false
     }
 
-    Component.onDestruction: {
+    // Left by Back (not by the page closing it): nothing is on screen any
+    // more, so the selection ends and auto-select works again. Checked when the
+    // page stops being current, and again on destruction in case that never
+    // fired.
+    function leave() {
         if (page && page.detailPage === detail) {
             page.detailPage = null;
+            page.dismissInspector();
         }
     }
+    onIsCurrentPageChanged: {
+        if (!isCurrentPage) {
+            detail.leave();
+        }
+    }
+    Component.onDestruction: detail.leave()
 }

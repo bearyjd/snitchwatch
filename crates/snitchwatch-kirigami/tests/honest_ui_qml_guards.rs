@@ -939,31 +939,27 @@ fn hover_tip_draws_plain_text() {
 
 /// Navigation must go through `StackNav.replaceMain`: a pushed detail page
 /// sits on top of the page being left, and a bare `pageStack.replace` swaps
-/// that one instead.
+/// that one instead. Only the first-run onboarding Component (its own pushed
+/// pages, replaced in place) may call it directly.
 #[test]
 fn main_navigates_through_the_stack_router() {
-    let drawer = MAIN_QML
-        .split("globalDrawer:")
-        .nth(1)
-        .expect("main.qml lost its drawer");
+    let start = MAIN_QML
+        .find("id: silentModePageComponent")
+        .expect("main.qml lost the onboarding block");
+    let end = MAIN_QML[start..]
+        .find("id: curatedGroupsPageComponent")
+        .expect("main.qml lost the curated groups component")
+        + start;
+    let outside = format!("{}{}", &MAIN_QML[..start], &MAIN_QML[end..]);
     assert!(
-        !code_lines(drawer).contains("pageStack.replace("),
-        "a drawer action replaces the page stack's top page directly; use nav.replaceMain"
+        !code_lines(&outside).contains("pageStack.replace("),
+        "main.qml replaces the page stack's top page directly outside the onboarding block; \
+         use nav.replaceMain"
     );
-    for routed in [
-        "onShowRuleRequested",
-        "onSimulateConnectionRequested",
-        "function openRuleEditor",
-    ] {
-        let at = MAIN_QML
-            .find(routed)
-            .unwrap_or_else(|| panic!("main.qml lost {routed}"));
-        let body = &MAIN_QML[at..at + 260];
-        assert!(
-            body.contains("nav.replaceMain("),
-            "{routed} must navigate through nav.replaceMain:\n{body}"
-        );
-    }
+    assert!(
+        code_lines(MAIN_QML).contains("nav.replaceMain("),
+        "main.qml no longer navigates through StackNav"
+    );
 }
 
 /// Issue #49: the bridge hardcodes per-connection bytes to 0 and opensnitchd
