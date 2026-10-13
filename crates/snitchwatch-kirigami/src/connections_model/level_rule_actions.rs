@@ -56,9 +56,15 @@ fn entry_node(entry: &VisibleEntry) -> Option<NodeRef<'_>> {
     }
 }
 
-/// Whether `node` (named by QML) is a header the projection shows.
-fn known_node(entries: &[VisibleEntry], node: NodeRef<'_>) -> Result<(), &'static str> {
-    let named = !node.program.is_empty()
+/// Whether `node` (named by QML) is a header the projection shows. The
+/// cached projection is only what is on screen while the model is grouped.
+fn known_node(
+    grouped: bool,
+    entries: &[VisibleEntry],
+    node: NodeRef<'_>,
+) -> Result<(), &'static str> {
+    let named = grouped
+        && !node.program.is_empty()
         && node.program.len() <= MAX_PROGRAM_BYTES
         && node.key.len() <= MAX_KEY_BYTES
         && (node.level == Level::Program) == node.key.is_empty();
@@ -148,7 +154,7 @@ pub(super) fn create(
         level,
         key: &key,
     };
-    if let Err(reason) = known_node(&model.grouped_projection, node) {
+    if let Err(reason) = known_node(model.grouped, &model.grouped_projection, node) {
         return QString::from(reason);
     }
     let projection = project(&model, node);
@@ -201,7 +207,7 @@ pub(super) fn delete(
         level,
         key: &key,
     };
-    if let Err(reason) = known_node(&model.grouped_projection, node) {
+    if let Err(reason) = known_node(model.grouped, &model.grouped_projection, node) {
         return QString::from(reason);
     }
     let name = match delete_name(&project(&model, node)) {
