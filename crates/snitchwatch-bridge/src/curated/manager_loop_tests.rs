@@ -255,22 +255,18 @@ fn announced(rx: &mut broadcast::Receiver<ServerMessage>, status: EntryStatus) -
 
 /// PR #119 review M1: stock `replaceUserRule` takes a rule into memory
 /// before `Save` fails, so a refused install may apply though the list
-/// lacks it. Off deletes it, once: more passes send nothing more (no hot
-/// loop), and on again installs once. That install wrote no file and none
-/// was left before it, so the refused delete leaves none: the entry reads
-/// plain `Off`, never "may come back" (#120 item 15).
+/// lacks it. It is turned off and deleted at once (#130), once: more passes
+/// send nothing more (no hot loop), and on again installs once. That
+/// install wrote no file and none was left before it, so the refused delete
+/// leaves none: the entry reads plain `Off`, never "may come back" (#120
+/// item 15).
 #[tokio::test]
 async fn off_after_a_refused_install_deletes_it_once() {
     let harness = Harness::new().connect(Daemon::Refuse, Vec::new());
     let curated = harness.curated();
     turn(&curated, FLATPAK, true);
-    let worker = curated.spawn(harness.rules.synced());
-    eventually("the refused install", || {
-        entry_state(&curated, FLATPAK).status == EntryStatus::NotInstalled
-    })
-    .await;
     let mut rx = harness.broadcast.subscribe();
-    turn(&curated, FLATPAK, false);
+    let worker = curated.spawn(harness.rules.synced());
     eventually("the delete", || harness.seen().len() >= 2).await;
     tokio::time::sleep(SETTLE).await;
     assert_eq!(entry_state(&curated, FLATPAK).status, EntryStatus::Off);

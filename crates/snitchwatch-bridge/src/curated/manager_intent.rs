@@ -509,19 +509,39 @@ impl CuratedDefaults {
                 .send_curated_guarded(command, generation, true)
         };
         let outcome = Self::wait_sent(sent, Refusal::Add).await;
-        let mut state = lock(&self.inner.state);
-        match outcome {
-            Ok(()) => {
-                state.statuses.insert(id.to_owned(), EntryStatus::Installed);
+        let refused = matches!(&outcome, Err(problem) if problem.daemon_refused);
+        {
+            let mut state = lock(&self.inner.state);
+            match outcome {
+                Ok(()) => {
+                    state.statuses.insert(id.to_owned(), EntryStatus::Installed);
+                }
+                Err(problem) => {
+                    if refused {
+                        // Its consent is gone: nothing re-enables it
+                        // without a new ticket (#130).
+                        self.revoke_locked(&mut state, id);
+                    }
+                    fail(
+                        &mut state,
+                        false,
+                        id,
+                        EntryStatus::InstalledButOff,
+                        problem,
+                        generation,
+                    );
+                }
             }
-            Err(problem) => fail(
-                &mut state,
-                false,
-                id,
-                EntryStatus::InstalledButOff,
-                problem,
-                generation,
-            ),
+        }
+        if refused {
+            // Stock `replaceUserRule` may have taken the enabled rule into
+            // memory before `Save` failed, while the list still shows it
+            // off: turn it off again, once (#130, #120 item 12).
+            let name = format!("{CURATED_DEFAULT_RULE_NAME_PREFIX}{id}");
+            let undone = self.inner.commands.send_curated_toggle(&name, false);
+            if Self::wait_sent(undone, Refusal::Remove).await.is_err() {
+                warn!(entry = %id, "a refused re-enable of a recommended rule wasn't undone");
+            }
         }
     }
 }

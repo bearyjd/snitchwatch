@@ -3,7 +3,7 @@
 //! inbound channel like a GUI, and the mock daemon, which checks every rule
 //! the way opensnitchd compiles it.
 
-use mock_opensnitchd::loader::{LoaderModel, SharedLoader};
+use mock_opensnitchd::loader::LoaderModel;
 use mock_opensnitchd::round_trip::as_daemon_reports;
 use snitchwatch_bridge::curated::reconcile::EntryStatus;
 use snitchwatch_bridge::curated::wire::CuratedDefaultSummary;
@@ -542,5 +542,55 @@ async fn an_install_refused_on_save_is_deleted_at_once_and_turned_off() {
     assert_eq!(off.status, EntryStatus::Off);
     assert!(!off.on);
     assert!(model.lock().unwrap().memory.is_empty());
+    s.bridge.shutdown();
+}
+
+/// The Rules page's toggle of the flatpak rule, from the daemon's copy.
+fn rules_page_toggle(rule: &snitchwatch_proto::protocol::Rule, enabled: bool) -> ClientMessage {
+    let mut wire = export_rule(rule);
+    wire["enabled"] = enabled.into();
+    ClientMessage::UpdateRule {
+        rule_id: FLATPAK_RULE.into(),
+        rule: wire,
+        request_id: None,
+        reply: None,
+    }
+}
+
+/// #120 item 12, M1's shape on the Rules page: a recommended rule turned
+/// off there, its file then made immutable, and turned on there again. The
+/// daemon's memory takes the enabled rule before `Save` fails, while the
+/// list still shows it off. The bridge turns it off again, once: memory and
+/// list agree, and nothing more is sent.
+#[tokio::test]
+async fn a_rules_page_turn_on_refused_on_a_stuck_file_is_turned_off_again() {
+    let mut s = start(BridgeMode::System).await;
+    let model = LoaderModel::default().shared();
+    let (_daemon, mut seen) = connect_model(&s.bridge, 1, &model).await;
+    send(&s.bridge, turn(true)).await;
+    let installed = next_command(&mut seen).await.rules[0].clone();
+    entry_until(&mut s.rx, "installed", |e, _| {
+        e.status == EntryStatus::Installed
+    })
+    .await;
+    send(&s.bridge, rules_page_toggle(&installed, false)).await;
+    assert!(!next_command(&mut seen).await.rules[0].enabled);
+    entry_until(&mut s.rx, "installed but off", |e, _| {
+        e.status == EntryStatus::InstalledButOff
+    })
+    .await;
+
+    model.lock().unwrap().stuck.insert(FLATPAK_RULE.into());
+    send(&s.bridge, rules_page_toggle(&installed, true)).await;
+    let on = next_command(&mut seen).await;
+    assert_eq!(on.r#type, Action::ChangeRule as i32);
+    assert!(on.rules[0].enabled);
+    let off = next_command(&mut seen).await;
+    assert_eq!(off.r#type, Action::ChangeRule as i32);
+    assert_eq!(off.rules[0].name, FLATPAK_RULE);
+    assert!(!off.rules[0].enabled);
+    let settled = settled_entry(&mut s, &mut seen).await;
+    assert_eq!(settled.status, EntryStatus::InstalledButOff);
+    assert!(!model.lock().unwrap().memory[FLATPAK_RULE].enabled);
     s.bridge.shutdown();
 }

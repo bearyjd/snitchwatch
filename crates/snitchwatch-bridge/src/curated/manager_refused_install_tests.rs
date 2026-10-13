@@ -68,3 +68,46 @@ async fn turning_a_refused_entry_on_again_forgets_why_it_was_off() {
     assert!(state.on);
     assert_eq!(state.problem, None);
 }
+
+/// The same shape for the DNS entry's explicit re-enable of its rule, off
+/// on the Rules page: refused, the daemon may apply it enabled while the
+/// list shows it off. Its grant is dropped and it is turned off again, once.
+#[tokio::test]
+async fn a_refused_dns_reenable_drops_its_grant_and_is_turned_off_again() {
+    let mut disabled = entries()
+        .iter()
+        .find(|entry| entry.id == DNS)
+        .unwrap()
+        .rule();
+    disabled.enabled = false;
+    let harness = Harness::new().connect(Daemon::Accept, vec![disabled]);
+    let curated = harness.curated();
+    let context = IntentContext::for_test();
+    let ticket = prepare(&curated, &context, Purpose::Keep);
+    submit(&curated, Some(context.clone()), ticket, Purpose::Keep, None);
+    curated.reconcile().await;
+    *harness.policy.lock().unwrap() = Daemon::Refuse;
+    let ticket = prepare(&curated, &context, Purpose::Reenable);
+    submit(&curated, Some(context), ticket, Purpose::Reenable, None);
+    curated.reconcile().await;
+    for _ in 0..3 {
+        curated.reconcile().await;
+    }
+    let sent: Vec<bool> = harness
+        .seen
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|n| {
+            assert_eq!(n.r#type, Action::ChangeRule as i32);
+            n.rules[0].enabled
+        })
+        .collect();
+    assert_eq!(sent, [true, false]);
+    let saved = store::load(&harness.file).unwrap().unwrap();
+    assert!(!saved.broad_grants.contains_key(DNS), "{saved:?}");
+    assert_eq!(
+        entry_state(&curated, DNS).status,
+        EntryStatus::InstalledButOff
+    );
+}
