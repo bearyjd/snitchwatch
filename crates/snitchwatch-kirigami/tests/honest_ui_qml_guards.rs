@@ -23,7 +23,18 @@ const PENDING_SHEET: &str = include_str!("../qml/PendingDecisionSheet.qml");
 const MAKE_RULE_SHEET: &str = include_str!("../qml/MakeRuleSheet.qml");
 const MAKE_RULE_OUTCOMES: &str = include_str!("../qml/MakeRuleOutcomes.qml");
 const MAKE_RULE_CONTROLLER_RS: &str = include_str!("../src/make_rule_controller.rs");
-const CONNECTIONS_PAGE: &str = include_str!("../qml/ConnectionsPage.qml");
+/// The Connections page and the components split out of it (monitor-tree step
+/// 1): guards that used to scan the single page file scan the union, so moving
+/// code between these files never silently drops a check.
+const CONNECTIONS_PAGE: &str = concat!(
+    include_str!("../qml/ConnectionsPage.qml"),
+    "\n",
+    include_str!("../qml/ConnectionRow.qml"),
+    "\n",
+    include_str!("../qml/ConnectionsHeader.qml"),
+    "\n",
+    include_str!("../qml/ConnectionInspector.qml"),
+);
 const MAIN_QML: &str = include_str!("../qml/main.qml");
 const SIZED_SHEET: &str = include_str!("../qml/SizedOverlaySheet.qml");
 
@@ -51,7 +62,19 @@ const ALL_QML: &[(&str, &str)] = &[
     ),
     ("SilentModes.qml", include_str!("../qml/SilentModes.qml")),
     ("BlocklistsPage.qml", BLOCKLISTS_PAGE),
-    ("ConnectionsPage.qml", CONNECTIONS_PAGE),
+    (
+        "ConnectionsPage.qml",
+        include_str!("../qml/ConnectionsPage.qml"),
+    ),
+    ("ConnectionRow.qml", include_str!("../qml/ConnectionRow.qml")),
+    (
+        "ConnectionsHeader.qml",
+        include_str!("../qml/ConnectionsHeader.qml"),
+    ),
+    (
+        "ConnectionInspector.qml",
+        include_str!("../qml/ConnectionInspector.qml"),
+    ),
     (
         "DecideLaterButton.qml",
         include_str!("../qml/DecideLaterButton.qml"),

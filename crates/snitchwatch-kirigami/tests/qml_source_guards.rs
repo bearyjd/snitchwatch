@@ -14,7 +14,18 @@
 //! That leaves a gap exactly where a regression already happened once, so it
 //! gets a cheap guard rather than no guard.
 
-const CONNECTIONS_PAGE: &str = include_str!("../qml/ConnectionsPage.qml");
+/// The Connections page and the components split out of it (monitor-tree step
+/// 1): guards that used to scan the single page file scan the union, so moving
+/// code between these files never silently drops a check.
+const CONNECTIONS_PAGE: &str = concat!(
+    include_str!("../qml/ConnectionsPage.qml"),
+    "\n",
+    include_str!("../qml/ConnectionRow.qml"),
+    "\n",
+    include_str!("../qml/ConnectionsHeader.qml"),
+    "\n",
+    include_str!("../qml/ConnectionInspector.qml"),
+);
 const MAIN_QML: &str = include_str!("../qml/main.qml");
 
 /// Drop whole-line `//` comments so a guard can't trip over prose that merely

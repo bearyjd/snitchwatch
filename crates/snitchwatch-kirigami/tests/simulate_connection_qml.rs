@@ -315,14 +315,36 @@ Window {
     );
 }
 
-/// The button's text is fixed, and the page stays within the size budget.
+/// The button's text is fixed (it lives in the inspector component now).
 #[test]
-fn the_inspector_button_is_fixed_text_and_the_page_stays_small() {
-    let source = include_str!("../qml/ConnectionsPage.qml");
+fn the_inspector_button_is_fixed_text() {
+    let source = include_str!("../qml/ConnectionInspector.qml");
     assert!(
         source.contains("text: \"Simulate this connection\""),
-        "ConnectionsPage.qml lost the Simulate this connection button"
+        "ConnectionInspector.qml lost the Simulate this connection button"
     );
-    let lines = source.lines().count();
-    assert!(lines < 800, "ConnectionsPage.qml is {lines} lines");
+}
+
+/// Per-file size budgets for the Connections page and the components split out
+/// of it (monitor-tree step 1). This replaces the single `ConnectionsPage.qml
+/// < 800` pin: the page budget is now 400 (stricter), and every new file is
+/// held to the same 400, so the page cannot regrow by moving code sideways.
+#[test]
+fn connections_files_stay_within_their_line_budgets() {
+    const BUDGET: usize = 400;
+    for (name, source) in [
+        ("ConnectionsPage.qml", include_str!("../qml/ConnectionsPage.qml")),
+        ("ConnectionRow.qml", include_str!("../qml/ConnectionRow.qml")),
+        (
+            "ConnectionsHeader.qml",
+            include_str!("../qml/ConnectionsHeader.qml"),
+        ),
+        (
+            "ConnectionInspector.qml",
+            include_str!("../qml/ConnectionInspector.qml"),
+        ),
+    ] {
+        let lines = source.lines().count();
+        assert!(lines < BUDGET, "{name} is {lines} lines (budget < {BUDGET})");
+    }
 }
