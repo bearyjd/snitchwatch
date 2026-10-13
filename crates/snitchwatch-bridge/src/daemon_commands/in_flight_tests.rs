@@ -87,3 +87,37 @@ async fn a_command_that_timed_out_stays_in_flight_for_the_late_reply_grace() {
     commands.on_reply(stream.id(), &reply(id2));
     assert_eq!(commands.in_flight(), 0);
 }
+
+/// Pinned, not fixed (#120 item 33): a `PendingReply` dropped before its
+/// answer (here a cancelled `wait`) forgets the command, so it stops
+/// counting as in flight and a later `OK` is ignored, not applied. No
+/// production holder drops one early: see `PendingReply`'s `Drop`.
+#[tokio::test(start_paused = true)]
+async fn a_cancelled_wait_forgets_the_command() {
+    let commands = commands();
+    let (stream, _rx) = commands.open_stream(None);
+    commands.on_reply(stream.id(), &reply(0));
+    commands
+        .rules
+        .cache()
+        .lock()
+        .unwrap()
+        .replace_all(Vec::new());
+    let change = Notification {
+        r#type: Action::ChangeRule as i32,
+        ..command()
+    };
+    let pending = commands.send(change).unwrap();
+    let id = pending.id();
+    let cancelled =
+        tokio::time::timeout(Duration::from_secs(1), pending.wait(Duration::from_secs(5))).await;
+    assert!(cancelled.is_err(), "the wait was cancelled, not answered");
+    assert_eq!(commands.in_flight(), 0);
+    commands.on_reply(stream.id(), &reply(id));
+    assert!(!commands
+        .rules
+        .cache()
+        .lock()
+        .unwrap()
+        .contains("899-firefox"));
+}
