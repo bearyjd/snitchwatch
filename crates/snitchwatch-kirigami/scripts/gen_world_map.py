@@ -6,11 +6,12 @@ Dev-time only; offline (never fetched at build or test time). Usage:
     python3 -I scripts/gen_world_map.py <ne_110m_admin_0_countries.geojson> \
         <ne_50m_admin_0_countries.geojson> \
         <ne_50m_admin_0_tiny_countries.geojson> \
-        <ne_10m_admin_0_countries.geojson> > data/world-map.txt
+        <ne_10m_admin_0_countries.geojson> \
+        <ne_10m_admin_0_map_subunits.geojson> > data/world-map.txt
 
 Shapes come from the 110m file. Codes it drops get a marker-only centroid
 (the feature's LABEL_X/LABEL_Y, else its polygon centroid) from the first of
-the 50m, 50m tiny-countries and 10m files that has the code. Codes none of them
+the 50m, 50m tiny-countries, 10m and 10m map-subunits files that has the code. Codes none of them
 have get no marker at all; nothing is ever entered by hand.
 
 Source: https://raw.githubusercontent.com/nvkelso/natural-earth-vector/v5.1.2/geojson/ne_110m_admin_0_countries.geojson
@@ -40,6 +41,7 @@ SUPPLEMENTS = [
     ("50m", "ne_50m_admin_0_countries.geojson"),
     ("tiny", "ne_50m_admin_0_tiny_countries.geojson"),
     ("10m", "ne_10m_admin_0_countries.geojson"),
+    ("subunits", "ne_10m_admin_0_map_subunits.geojson"),
 ]
 LICENCE_URL = "https://www.naturalearthdata.com/about/terms-of-use/"
 SCALE = 10  # grid units per degree
@@ -196,5 +198,5 @@ def main(path, supplement_paths):
 
 if __name__ == "__main__":
     if len(sys.argv) != 2 + len(SUPPLEMENTS):
-        sys.exit("usage: gen_world_map.py <110m> <50m> <50m tiny> <10m> geojson files")
+        sys.exit("usage: gen_world_map.py <110m> <50m> <50m tiny> <10m> <10m subunits> geojson files")
     main(sys.argv[1], sys.argv[2:])

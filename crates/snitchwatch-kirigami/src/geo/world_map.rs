@@ -145,12 +145,12 @@ TM TN TO TR TT TV TW TZ UA UG UM US UY UZ VA VC VE VG VI VN VU WF WS YE YT ZA ZM
 
     /// Codes the 110m set has no shape for (tiny states and small territories).
     /// Their centroids come from the 50m, tiny-countries or 10m files.
-    const NO_SHAPE_110M: &str = "AD AG AI AS AW AX BB BH BL BM BQ CK CV CW DM FM FO GD GG GI GP GS GU HK HM IM IO JE KI KM KN KY LC LI MC MF MH MO MP MQ MS MT MU MV NF NR NU PF PM PN PW SC SG SH SM ST SX TC TK TO TV UM VA VC VG VI WF WS";
+    const NO_SHAPE_110M: &str = "AD AG AI AS AW AX BB BH BL BM BQ BV CC CK CV CW CX DM FM FO GD GF GG GI GP GS GU HK HM IM IO JE KI KM KN KY LC LI MC MF MH MO MP MQ MS MT MU MV NF NR NU PF PM PN PW RE SC SG SH SJ SM ST SX TC TK TO TV UM VA VC VG VI WF WS YT";
 
-    /// Assigned codes no Natural Earth file (110m, 50m, tiny, 10m) has: parts
-    /// of a parent feature (GF in FR, SJ in NO, RE and YT in FR) or uninhabited
-    /// or tiny territories. They get no marker and are never hand-entered.
-    const NO_MARKER: &str = "BV CC CX GF RE SJ YT";
+    /// Assigned codes no Natural Earth file (110m, 50m, tiny, 10m, 10m
+    /// map-subunits) has. They would get no marker and are never hand-entered.
+    /// Currently empty: the map-subunits file closed the last gaps.
+    const NO_MARKER: &str = "";
 
     fn words(s: &str) -> Vec<&str> {
         s.split_whitespace().collect()
@@ -171,7 +171,7 @@ TM TN TO TR TT TV TW TZ UA UG UM US UY UZ VA VC VE VG VI VN VU WF WS YE YT ZA ZM
         let shaped = countries().filter(|c| !c.path.is_empty()).count();
         assert_eq!(shaped, h.source_features - h.skipped_uncoded);
         assert_eq!(countries().count(), shaped + h.no_shape.len());
-        assert_eq!(h.supplements.len(), 3);
+        assert_eq!(h.supplements.len(), 4);
     }
 
     #[test]
@@ -203,6 +203,53 @@ TM TN TO TR TT TV TW TZ UA UG UM US UY UZ VA VC VE VG VI VN VU WF WS YE YT ZA ZM
         expected.sort_unstable();
         assert_eq!(documented, expected);
         assert_eq!(header().no_marker, no_marker);
+    }
+
+    #[test]
+    fn every_data_line_parses_and_codes_are_unique() {
+        let mut seen = std::collections::HashSet::new();
+        for (n, line) in RAW.lines().enumerate() {
+            if line.starts_with('#') || line.is_empty() {
+                continue;
+            }
+            let bad = |why: &str| panic!("world-map.txt line {}: {why}: {line:.80}", n + 1);
+            let cols: Vec<&str> = line.splitn(4, '\t').collect();
+            if cols.len() != 4 {
+                bad("expected 4 tab-separated columns");
+            }
+            let code = cols[0];
+            if code.len() != 2 || !code.bytes().all(|b| b.is_ascii_uppercase()) {
+                bad("code is not two uppercase letters");
+            }
+            if cols[1].is_empty() {
+                bad("empty name");
+            }
+            if parse_centroid(cols[2]).is_none() {
+                bad("centroid is not X,Y integers");
+            }
+            if !seen.insert(code) {
+                bad("duplicate code");
+            }
+        }
+        assert_eq!(seen.len(), countries().count());
+    }
+
+    #[test]
+    fn russia_is_in_siberia_and_fiji_on_viti_levu() {
+        let deg = |code: &str| {
+            let (x, y) = lookup(code).unwrap().centroid;
+            (f64::from(x) / 10.0 - 180.0, 90.0 - f64::from(y) / 10.0)
+        };
+        let (lon, lat) = deg("RU");
+        assert!(
+            (60.0..=140.0).contains(&lon) && (50.0..=70.0).contains(&lat),
+            "RU {lon},{lat}"
+        );
+        let (lon, lat) = deg("FJ");
+        assert!(
+            (177.5..=178.9).contains(&lon) && (-18.5..=-17.0).contains(&lat),
+            "FJ {lon},{lat}"
+        );
     }
 
     #[test]
