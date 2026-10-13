@@ -420,6 +420,86 @@ pub fn demo_rows(now_ms: i64) -> Vec<ConnectionRow> {
         .collect()
 }
 
+/// Fake grouped recommended rules, as the two messages a bridge that offers
+/// them sends (JSON, in order), so the first-run "Recommended rules" step can
+/// be reviewed without one. Texts follow the reviewed data file's wording.
+pub fn curated_group_messages() -> Vec<String> {
+    let entry = |id: &str, group: &str, program: &str, allows: &str, why: &str, broad: bool| {
+        let mut e = serde_json::json!({
+            "id": id, "group": group, "program": program, "allows": allows,
+            "why": why, "on": false, "status": "off",
+        });
+        if broad {
+            e["broad"] = true.into();
+        }
+        e
+    };
+    let entries = [
+        entry(
+            "networkmanager-connectivity-check",
+            "system-services",
+            "/usr/bin/NetworkManager",
+            "/usr/bin/NetworkManager may connect to fedoraproject.org on TCP port 80.",
+            "NetworkManager checks that this network reaches the internet by loading a test page.",
+            false,
+        ),
+        entry(
+            "chronyd-ntp",
+            "system-services",
+            "/usr/bin/chronyd",
+            "/usr/bin/chronyd may connect to 2.fedora.pool.ntp.org on UDP port 123.",
+            "chronyd sets the clock by asking Fedora's pool of time servers.",
+            false,
+        ),
+        entry(
+            "flatpak-flathub",
+            "app-updates",
+            "/usr/bin/flatpak",
+            "/usr/bin/flatpak may connect to dl.flathub.org on TCP port 443.",
+            "Flatpak downloads app updates and app information from Flathub.",
+            false,
+        ),
+        entry(
+            "tailscale-control",
+            "tailscale",
+            "/usr/bin/tailscaled",
+            "/usr/bin/tailscaled may connect to controlplane.tailscale.com on TCP port 443.",
+            "Tailscale signs in and fetches your network's settings from its coordination server.",
+            false,
+        ),
+        entry(
+            "dns-resolved",
+            "name-resolution",
+            "/usr/lib/systemd/systemd-resolved",
+            "/usr/lib/systemd/systemd-resolved may connect to any address on port 53.",
+            "The system resolver needs to reach its DNS server, which differs on every network.",
+            true,
+        ),
+    ];
+    let groups = [
+        ("system-services", "System services", "Background services that keep the clock and the network working. Each is limited to the one place it needs."),
+        ("app-updates", "App updates", "Flatpak fetching app updates and app information from Flathub."),
+        ("tailscale", "Tailscale", "For people who use Tailscale: its sign-in server only."),
+        ("name-resolution", "Name resolution", "The system resolver reaching its DNS server. This allows any address, so it is a separate choice with its own confirmation."),
+    ];
+    vec![
+        serde_json::json!({
+            "action": "authenticated",
+            "capabilities": ["curatedDefaults", "curatedGroupsV1", "curatedBroadOptInV1"],
+        })
+        .to_string(),
+        serde_json::json!({
+            "action": "setCuratedDefaults",
+            "entries": entries,
+            "groups": groups.iter().map(|(id, title, description)| serde_json::json!({
+                "id": id, "title": title, "description": description,
+            })).collect::<Vec<_>>(),
+            "storage": { "persistent": true },
+        })
+        .to_string(),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -498,5 +578,26 @@ mod tests {
                 "demo.rs must not use {forbidden}"
             );
         }
+    }
+
+    #[test]
+    fn demo_groups_parse_as_a_grouped_offer() {
+        use snitchwatch_bridge::ws_messages::ServerMessage;
+        let msgs: Vec<ServerMessage> = curated_group_messages()
+            .iter()
+            .map(|m| serde_json::from_str(m).unwrap())
+            .collect();
+        assert!(matches!(msgs[0], ServerMessage::Authenticated { .. }));
+        let ServerMessage::SetCuratedDefaults {
+            entries, groups, ..
+        } = &msgs[1]
+        else {
+            panic!("second message offers the rules");
+        };
+        assert_eq!(groups.len(), 4);
+        assert!(entries
+            .iter()
+            .all(|e| groups.iter().any(|g| g.id == e.group)));
+        assert!(entries.iter().filter(|e| e.broad).count() == 1);
     }
 }

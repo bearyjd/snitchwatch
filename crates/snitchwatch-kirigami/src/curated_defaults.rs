@@ -9,6 +9,12 @@
 
 use snitchwatch_bridge::curated::reconcile::EntryStatus;
 use snitchwatch_bridge::curated::wire::CuratedDefaultSummary;
+use snitchwatch_bridge::curated::CuratedGroup;
+
+use crate::curated_groups;
+
+/// The bridge capability that says its groups are meant to be shown.
+pub const GROUPS_CAPABILITY: &str = "curatedGroupsV1";
 use snitchwatch_bridge::ws_messages::{ClientMessage, ServerMessage};
 
 /// What the page knows, for one bridge session.
@@ -21,6 +27,10 @@ pub struct CuratedStore {
     /// A `SetCuratedDefaults` has arrived: the bridge offers them.
     received: bool,
     entries: Vec<CuratedDefaultSummary>,
+    /// The bridge's groups, in display order; empty from an older bridge.
+    groups: Vec<CuratedGroup>,
+    /// This session's bridge advertised `curatedGroupsV1`.
+    groups_capable: bool,
     unavailable: Option<String>,
 }
 
@@ -35,14 +45,25 @@ impl CuratedStore {
             };
             changed = true;
         }
+        if let ServerMessage::Authenticated { capabilities } = msg {
+            let capable = capabilities.iter().any(|c| c == GROUPS_CAPABILITY);
+            changed |= self.groups_capable != capable;
+            self.groups_capable = capable;
+        }
         if let ServerMessage::SetCuratedDefaults {
             entries,
+            groups,
             unavailable,
             ..
         } = msg
         {
             self.received = true;
-            self.entries = entries.clone();
+            self.groups = groups.clone();
+            self.entries = if self.grouped() {
+                curated_groups::in_group_order(groups, entries.clone())
+            } else {
+                entries.clone()
+            };
             self.unavailable = unavailable.clone();
             changed = true;
         }
@@ -63,6 +84,68 @@ impl CuratedStore {
 
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+
+    /// Whether the entries are shown in the bridge's groups. Without the
+    /// capability, or without a group list, the flat list is shown exactly
+    /// as before.
+    pub fn grouped(&self) -> bool {
+        self.groups_capable && !self.groups.is_empty()
+    }
+
+    /// The title of the group `entry` is shown under; empty when flat.
+    pub fn group_title(&self, entry: &CuratedDefaultSummary) -> &str {
+        if self.grouped() {
+            curated_groups::title_of(&self.groups, entry)
+        } else {
+            ""
+        }
+    }
+
+    /// The groups and their entries as JSON for QML; `[]` when flat.
+    pub fn groups_json(&self) -> String {
+        if !self.grouped() {
+            return "[]".to_string();
+        }
+        curated_groups::view_json(&self.groups, &self.entries, status_text)
+    }
+
+    /// Whether group `gid` holds the broad DNS entry, which is turned on by
+    /// its own consent flow, never by a group request.
+    pub fn group_is_broad(&self, gid: &str) -> bool {
+        self.grouped()
+            && curated_groups::entries_of(&self.groups, &self.entries, gid)
+                .into_iter()
+                .any(curated_groups::is_broad)
+    }
+
+    /// The ids of group `gid`'s entries that are DNS (broad).
+    pub fn group_broad_ids(&self, gid: &str) -> Vec<String> {
+        curated_groups::entries_of(&self.groups, &self.entries, gid)
+            .into_iter()
+            .filter(|e| curated_groups::is_broad(e))
+            .map(|e| e.id.clone())
+            .collect()
+    }
+
+    /// One request turning group `gid` on or off: exactly the ids of its
+    /// entries not already that way. `None` when flat, for an unknown or
+    /// broad group turned on, or when there is nothing to change.
+    pub fn request_group(&self, gid: &str, on: bool) -> Option<ClientMessage> {
+        if !self.usable() || !self.grouped() || (on && self.group_is_broad(gid)) {
+            return None;
+        }
+        let ids: Vec<String> = curated_groups::entries_of(&self.groups, &self.entries, gid)
+            .into_iter()
+            .filter(|e| asks_for(e, on))
+            .map(|e| e.id.clone())
+            .collect();
+        (!ids.is_empty()).then_some(ClientMessage::SetCuratedDefaults {
+            ids,
+            on,
+            request_id: None,
+            reply: None,
+        })
     }
 
     pub fn row(&self, index: usize) -> Option<&CuratedDefaultSummary> {
@@ -201,6 +284,7 @@ pub fn status_text(status: EntryStatus) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::curated_broad_consent::DNS_ID;
     use snitchwatch_bridge::ws_messages::StorageStatus;
 
     fn entry(id: &str, on: bool, status: EntryStatus) -> CuratedDefaultSummary {
@@ -451,5 +535,130 @@ mod tests {
         assert!(!status_text(EntryStatus::DeletedOutside).contains("You deleted"));
         let left = status_text(EntryStatus::OffFileLeft);
         assert!(left.starts_with("Turned off") && left.contains("may come back"));
+    }
+
+    fn group(id: &str) -> CuratedGroup {
+        CuratedGroup {
+            id: id.into(),
+            title: format!("Title {id}"),
+            description: format!("About {id}."),
+        }
+    }
+
+    fn in_group(id: &str, group: &str, on: bool) -> CuratedDefaultSummary {
+        CuratedDefaultSummary {
+            group: group.into(),
+            ..entry(id, on, EntryStatus::Off)
+        }
+    }
+
+    fn grouped_message() -> ServerMessage {
+        ServerMessage::SetCuratedDefaults {
+            entries: vec![
+                in_group("flatpak-flathub", "app-updates", false),
+                in_group("chronyc-local", "system-services", false),
+                CuratedDefaultSummary {
+                    broad: true,
+                    ..in_group(DNS_ID, "name-resolution", false)
+                },
+                in_group("avahi", "system-services", true),
+                in_group("networkmanager", "system-services", false),
+            ],
+            groups: vec![
+                group("system-services"),
+                group("app-updates"),
+                group("name-resolution"),
+            ],
+            storage: StorageStatus {
+                persistent: true,
+                reason: None,
+                unreadable: false,
+            },
+            unavailable: None,
+        }
+    }
+
+    fn capable() -> ServerMessage {
+        ServerMessage::Authenticated {
+            capabilities: vec![GROUPS_CAPABILITY.into()],
+        }
+    }
+
+    #[test]
+    fn groups_show_only_with_the_capability_and_a_group_list() {
+        let mut store = CuratedStore::default();
+        store.apply(1, &grouped_message());
+        assert!(!store.grouped(), "groups without the capability stay flat");
+        assert_eq!(store.groups_json(), "[]");
+        assert_eq!(store.row(0).unwrap().id, "flatpak-flathub", "order as sent");
+        assert_eq!(store.group_title(store.row(0).unwrap()), "");
+        assert!(store.request_group("app-updates", true).is_none());
+
+        let mut store = CuratedStore::default();
+        store.apply(1, &capable());
+        store.apply(1, &message(None));
+        assert!(!store.grouped(), "capability without groups stays flat");
+        assert_eq!(store.len(), 4);
+
+        let mut store = CuratedStore::default();
+        store.apply(1, &capable());
+        store.apply(1, &grouped_message());
+        assert!(store.grouped());
+        store.apply(2, &grouped_message());
+        assert!(!store.grouped(), "a new session forgets the capability");
+    }
+
+    #[test]
+    fn grouped_rows_are_contiguous_in_the_bridges_group_order() {
+        let mut store = CuratedStore::default();
+        store.apply(1, &capable());
+        store.apply(1, &grouped_message());
+        let rows: Vec<(&str, &str)> = (0..store.len())
+            .map(|i| {
+                let e = store.row(i).unwrap();
+                (e.id.as_str(), store.group_title(e))
+            })
+            .collect();
+        assert_eq!(rows[0].1, "Title system-services");
+        assert_eq!(rows[2].1, "Title system-services");
+        assert_eq!(rows[3], ("flatpak-flathub", "Title app-updates"));
+        assert_eq!(rows[4], (DNS_ID, "Title name-resolution"));
+    }
+
+    #[test]
+    fn a_group_switch_sends_exactly_that_groups_ids_not_already_on() {
+        let mut store = CuratedStore::default();
+        store.apply(1, &capable());
+        store.apply(1, &grouped_message());
+        let Some(ClientMessage::SetCuratedDefaults { ids, on, .. }) =
+            store.request_group("system-services", true)
+        else {
+            panic!("a request");
+        };
+        assert!(on);
+        let mut ids = ids;
+        ids.sort();
+        assert_eq!(ids, ["chronyc-local", "networkmanager"], "avahi already on");
+        assert!(store.request_group("nope", true).is_none());
+    }
+
+    #[test]
+    fn the_dns_group_is_never_turned_on_by_a_group_request() {
+        let mut store = CuratedStore::default();
+        store.apply(1, &capable());
+        store.apply(1, &grouped_message());
+        assert!(store.group_is_broad("name-resolution"));
+        assert!(!store.group_is_broad("app-updates"));
+        assert_eq!(store.group_broad_ids("name-resolution"), [DNS_ID]);
+        assert!(store.request_group("name-resolution", true).is_none());
+        let mut on = grouped_message();
+        if let ServerMessage::SetCuratedDefaults { entries, .. } = &mut on {
+            entries[2].on = true;
+        }
+        store.apply(1, &on);
+        assert!(
+            store.request_group("name-resolution", false).is_some(),
+            "off is the safe direction"
+        );
     }
 }
