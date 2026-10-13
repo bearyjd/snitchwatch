@@ -315,13 +315,20 @@ pub fn has_suffix_beneath(key: &str) -> bool {
 /// bridge's prompt flow falls back to the exact host there. Bare IPs are
 /// not hosts; a host that doesn't parse counts as crossing.
 pub fn crosses_delegated_suffix<'a>(key: &str, hosts: impl IntoIterator<Item = &'a str>) -> bool {
-    if has_suffix_beneath(key) {
+    // The list is punycode; a non-ASCII key can't be looked up, so refuse.
+    if !key.is_ascii() || has_suffix_beneath(key) {
         return true;
     }
     let key = key.to_ascii_lowercase();
+    let key = key.trim_end_matches('.');
+    // The grouping key is the last two labels, not a PSL root: `github.io`
+    // is itself a public suffix, so `*.github.io` is every user's site.
+    if addr::parse_dns_name(key).ok().and_then(|n| n.root()) != Some(key) {
+        return true;
+    }
     hosts.into_iter().filter(|h| !is_ip(h)).any(|host| {
         let host = host.to_ascii_lowercase();
-        addr::parse_dns_name(&host).ok().and_then(|n| n.root()) != Some(key.as_str())
+        addr::parse_dns_name(&host).ok().and_then(|n| n.root()) != Some(key)
     })
 }
 

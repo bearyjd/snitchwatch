@@ -544,6 +544,34 @@ fn a_domain_with_no_public_suffix_beneath_it_is_fine() {
 }
 
 #[test]
+fn a_domain_key_that_is_itself_a_public_suffix_is_too_broad_with_no_hosts() {
+    let levels = LevelRules::default();
+    // Grouping keys are the last two labels, so `foo.github.io` groups under
+    // `github.io`; with its rows aged out the host check sees nothing.
+    for key in [
+        "github.io",
+        "herokuapp.com",
+        "blogspot.com",
+        "cloudfront.net",
+    ] {
+        assert!(
+            levels.project_in(node(Level::Domain, key), []).too_broad,
+            "{key}"
+        );
+    }
+}
+
+#[test]
+fn a_non_ascii_domain_key_is_refused() {
+    let levels = LevelRules::default();
+    assert!(
+        levels
+            .project_in(node(Level::Domain, "møre-og-romsdal.no"), [])
+            .too_broad
+    );
+}
+
+#[test]
 fn the_suffix_parents_file_matches_the_psl_crate_in_cargo_lock() {
     let data = include_str!("../../../data/psl-suffix-parents.txt");
     let header = data
