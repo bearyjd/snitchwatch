@@ -1,8 +1,31 @@
 {
   "version": 1,
+  "groups": [
+    {
+      "id": "system-services",
+      "title": "System services",
+      "description": "Background services that ship with the system and keep the clock, the network and local-name lookups working. Each is limited to the one place it needs."
+    },
+    {
+      "id": "app-updates",
+      "title": "App updates",
+      "description": "Flatpak fetching app updates and app information from Flathub."
+    },
+    {
+      "id": "tailscale",
+      "title": "Tailscale",
+      "description": "For people who use Tailscale: its sign-in and log servers only. Offered separately because most computers do not run it."
+    },
+    {
+      "id": "name-resolution",
+      "title": "Name resolution",
+      "description": "The system resolver reaching its DNS server. This one allows any address, so it is a separate, deliberate choice with its own confirmation."
+    }
+  ],
   "entries": [
     {
       "id": "networkmanager-connectivity-check",
+      "group": "system-services",
       "path": "/usr/bin/NetworkManager",
       "host": "fedoraproject.org",
       "port": 80,
@@ -12,6 +35,7 @@
     },
     {
       "id": "chronyc-local",
+      "group": "system-services",
       "path": "/usr/bin/chronyc",
       "loopback": true,
       "port": 323,
@@ -20,7 +44,28 @@
       "evidence": "bazzite-tower r10: idle and after update, /usr/bin/chronyc to 127.0.0.1 and ::1 port 323 over udp and udp6"
     },
     {
+      "id": "chronyd-ntp",
+      "group": "system-services",
+      "path": "/usr/bin/chronyd",
+      "host": "2.fedora.pool.ntp.org",
+      "port": 123,
+      "protocol": "udp",
+      "why": "chronyd sets the clock by asking Fedora's pool of time servers. Only 2.fedora.pool.ntp.org, the pool name in this image's chrony.conf, is allowed: a time server you add yourself, or one a network hands out, still asks.",
+      "evidence": "bazzite-tower 2026-10-12: owner reports /usr/bin/chronyd floods prompts; the host name is the pool line in /etc/chrony.conf (pool 2.fedora.pool.ntp.org iburst), not a capture of the ask"
+    },
+    {
+      "id": "avahi-mdns",
+      "group": "system-services",
+      "path": "/usr/bin/avahi-daemon",
+      "multicastDns": true,
+      "port": 5353,
+      "protocol": "udp",
+      "why": "Avahi finds printers, shared folders and .local names on your network by multicast DNS. Only the two fixed multicast addresses are allowed, not any server or computer. Replies Avahi sends straight to one computer still ask.",
+      "evidence": "bazzite-tower 2026-10-12: owner reports /usr/bin/avahi-daemon floods prompts; the destination is the fixed multicast DNS group of RFC 6762, not a capture of the ask"
+    },
+    {
       "id": "flatpak-flathub",
+      "group": "app-updates",
       "path": "/usr/bin/flatpak",
       "host": "dl.flathub.org",
       "port": 443,
@@ -29,7 +74,28 @@
       "evidence": "bazzite-tower r10: after flatpak update --appstream, /usr/bin/flatpak to dl.flathub.org port 443 over tcp6 (held, so the update timed out)"
     },
     {
+      "id": "tailscale-control",
+      "group": "tailscale",
+      "path": "/usr/bin/tailscaled",
+      "host": "controlplane.tailscale.com",
+      "port": 443,
+      "protocol": "tcp",
+      "why": "Tailscale signs in and fetches your network's settings and keys from its coordination server. Only that server is allowed. Traffic to other Tailscale computers and relay servers can't be named in one narrow rule, so it still asks.",
+      "evidence": "bazzite-tower 2026-10-12: owner reports /usr/bin/tailscaled floods prompts; the host is Tailscale's documented coordination server, not a capture of the ask"
+    },
+    {
+      "id": "tailscale-logs",
+      "group": "tailscale",
+      "path": "/usr/bin/tailscaled",
+      "host": "log.tailscale.com",
+      "port": 443,
+      "protocol": "tcp",
+      "why": "Tailscale sends its client logs to log.tailscale.com. Only that server is allowed.",
+      "evidence": "bazzite-tower 2026-10-12: owner reports /usr/bin/tailscaled floods prompts; the host is Tailscale's documented log server, not a capture of the ask"
+    },
+    {
       "id": "dns-resolved",
+      "group": "name-resolution",
       "path": "/usr/lib/systemd/systemd-resolved",
       "anyAddress": true,
       "port": 53,

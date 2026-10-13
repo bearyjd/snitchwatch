@@ -419,3 +419,44 @@ fn legacy_curated_json_stays_compatible_and_defaults_private_reply_absent() {
     )
     .is_err());
 }
+
+#[test]
+fn curated_groups_round_trip_and_an_older_message_without_them_still_parses() {
+    let storage = crate::ws_messages::StorageStatus {
+        persistent: true,
+        reason: None,
+        unreadable: false,
+    };
+    let group = crate::curated::CuratedGroup {
+        id: "tailscale".into(),
+        title: "Tailscale".into(),
+        description: "d".into(),
+    };
+    let with = ServerMessage::SetCuratedDefaults {
+        entries: Vec::new(),
+        groups: vec![group.clone()],
+        storage: storage.clone(),
+        unavailable: None,
+    };
+    let wire = serde_json::to_value(&with).unwrap();
+    assert_eq!(wire["groups"][0]["id"], "tailscale");
+    assert_eq!(wire["groups"][0]["title"], "Tailscale");
+    assert_eq!(serde_json::from_value::<ServerMessage>(wire).unwrap(), with);
+    // No groups: the field is left out, so an older GUI sees the old shape.
+    let plain = serde_json::to_value(ServerMessage::SetCuratedDefaults {
+        entries: Vec::new(),
+        groups: Vec::new(),
+        storage,
+        unavailable: None,
+    })
+    .unwrap();
+    assert!(plain.get("groups").is_none(), "{plain}");
+    // An older bridge's message has no `groups` at all.
+    let old = r#"{"action":"setCuratedDefaults","entries":[],"storage":{"persistent":true,"unreadable":false}}"#;
+    let ServerMessage::SetCuratedDefaults { groups, .. } =
+        serde_json::from_str::<ServerMessage>(old).unwrap()
+    else {
+        panic!()
+    };
+    assert!(groups.is_empty());
+}

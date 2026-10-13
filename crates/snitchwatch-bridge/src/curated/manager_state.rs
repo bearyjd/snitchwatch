@@ -322,6 +322,7 @@ pub(super) fn summary(
     };
     CuratedDefaultSummary {
         id: entry.id.clone(),
+        group: entry.group.clone(),
         program: entry.path.clone(),
         allows: entry.allows(),
         why: entry.why.clone(),

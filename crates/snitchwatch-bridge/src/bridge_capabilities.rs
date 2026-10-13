@@ -43,6 +43,11 @@ pub const CURATED_DEFAULTS: &str = "curatedDefaults";
 /// Feature negotiation only; never authorization.
 pub const CURATED_BROAD_OPT_IN_V1: &str = "curatedBroadOptInV1";
 
+/// `SetCuratedDefaults` carries `groups` and each entry a `group`: a GUI can
+/// offer the defaults by trust boundary (first run). Without it a client
+/// lists the entries flat, as before.
+pub const CURATED_GROUPS_V1: &str = "curatedGroupsV1";
+
 /// The bridge sends `SetBlocklistLeftovers` (issue #73). A bridge without it
 /// never says "none left", so a client must not keep a count an earlier
 /// bridge sent.
@@ -58,6 +63,7 @@ pub fn advertised() -> Vec<String> {
         DECIDE_LATER.to_string(),
         CURATED_DEFAULTS.to_string(),
         CURATED_BROAD_OPT_IN_V1.to_string(),
+        CURATED_GROUPS_V1.to_string(),
         BLOCKLIST_LEFTOVERS.to_string(),
     ]
 }
@@ -107,6 +113,7 @@ mod tests {
                     "decideLater",
                     "curatedDefaults",
                     "curatedBroadOptInV1",
+                    "curatedGroupsV1",
                     "blocklistLeftovers"
                 ],
             })

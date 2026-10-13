@@ -206,6 +206,7 @@ mod tests {
     fn entry(id: &str, on: bool, status: EntryStatus) -> CuratedDefaultSummary {
         CuratedDefaultSummary {
             id: id.into(),
+            group: String::new(),
             program: "/usr/bin/flatpak".into(),
             allows: "/usr/bin/flatpak may connect to dl.flathub.org on TCP port 443.".into(),
             why: "Flatpak downloads app updates.".into(),
@@ -232,6 +233,7 @@ mod tests {
                 broad_entry("dns-on", true, EntryStatus::Installed),
                 entry("chronyc-local", true, EntryStatus::Installed),
             ],
+            groups: Vec::new(),
             storage: StorageStatus {
                 persistent: true,
                 reason: None,
@@ -249,6 +251,7 @@ mod tests {
                 entry("networkmanager", true, EntryStatus::EditedByYou),
                 entry("undecided", true, EntryStatus::InFirewall),
             ],
+            groups: Vec::new(),
             storage: StorageStatus {
                 persistent: true,
                 reason: None,
@@ -349,6 +352,7 @@ mod tests {
                     broad_entry("dns-off", false, EntryStatus::Off),
                     broad_entry("dns-adopt", true, EntryStatus::InFirewall),
                 ],
+                groups: Vec::new(),
                 storage: StorageStatus {
                     persistent: true,
                     reason: None,
