@@ -110,6 +110,12 @@ impl SharedResolver {
         }
     }
 
+    /// Whether a country database backs this resolver. Without one every
+    /// public address resolves to [`Bucket::Unknown`].
+    pub fn has_database(&self) -> bool {
+        self.lookup.is_some()
+    }
+
     /// Resolve `ip`, consulting (and populating) the shared cache first.
     pub fn resolve(&self, ip: &str) -> Resolved {
         if let Some(cached) = self.cache.lock().unwrap().get(ip) {
@@ -121,6 +127,14 @@ impl SharedResolver {
             .unwrap()
             .insert(ip.to_string(), resolved.clone());
         resolved
+    }
+}
+
+impl std::fmt::Debug for SharedResolver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SharedResolver")
+            .field("has_database", &self.has_database())
+            .finish_non_exhaustive()
     }
 }
 
