@@ -156,10 +156,14 @@ Kirigami.Page {
     Connections {
         target: page.model
         function onAutoSelectRequested(row) {
-            // The row was just inserted: select it once the list has it. Calls
-            // coalesce, so keep the topmost (oldest) row asked for meanwhile.
-            page.autoRow = page.autoRow < 0 ? row : Math.min(page.autoRow, row);
-            Qt.callLater(page.runAuto);
+            // The row was just inserted: select it once the list has it. The
+            // index would shift under later inserts, so queue the id (calls
+            // coalesce, and a group header has none).
+            const id = page.model.rowIdAt(row);
+            if (id !== "" && page.autoIds.indexOf(id) < 0) {
+                page.autoIds = page.autoIds.concat([id]);
+                Qt.callLater(page.runAuto);
+            }
         }
         // Issue #49: the bridge removes a pending row when opensnitchd's ask
         // times out, a snapshot starts with ClearConnectionRows and then
@@ -276,11 +280,19 @@ Kirigami.Page {
         }
     }
 
-    property int autoRow: -1
+    // Row ids auto-select asked for since the last `runAuto`.
+    property var autoIds: []
+    // A pending arrival selects the OLDEST pending row (the one waiting
+    // longest); any other id (the grouped re-anchor) selects that row itself.
     function runAuto() {
-        const row = page.autoRow;
-        page.autoRow = -1;
-        page.selectAuto(row);
+        const ids = page.autoIds;
+        page.autoIds = [];
+        const anyPending = ids.some(id => page.model.isPendingRow(id));
+        const index = anyPending ? page.model.oldestPendingRowIndex("")
+            : (ids.length > 0 ? page.model.visibleRowIndex(ids[ids.length - 1]) : -1);
+        if (index >= 0) {
+            page.selectAuto(index);
+        }
     }
 
     // The pushed detail page left the stack (Back): the selection ends with it.

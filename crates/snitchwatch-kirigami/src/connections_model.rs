@@ -422,6 +422,13 @@ pub mod qobject {
         #[cxx_name = "visibleRowIndex"]
         fn visible_row_index(self: &ConnectionsModel, id: &QString) -> i32;
 
+        /// The id of the connection row at list index `index` ("" for a group
+        /// header or an index out of range). `autoSelectRequested` gives an
+        /// index that later inserts shift, so the page keeps the id instead.
+        #[qinvokable]
+        #[cxx_name = "rowIdAt"]
+        fn row_id_at(self: &ConnectionsModel, index: i32) -> QString;
+
         /// The list index of the oldest pending connection row that is drawn
         /// now, other than `except_id` (-1 if none). The panel selects it when
         /// it is dismissed, so a prompt that arrived while it was busy is not
@@ -1416,6 +1423,21 @@ impl qobject::ConnectionsModel {
 
     fn is_pending_row(&self, id: &QString) -> bool {
         self.store.is_pending(&id.to_string()).unwrap_or(false)
+    }
+
+    fn row_id_at(&self, index: i32) -> QString {
+        let Ok(index) = usize::try_from(index) else {
+            return QString::default();
+        };
+        let id = if self.grouped {
+            match self.grouped_projection.get(index) {
+                Some(VisibleEntry::Row { id, .. }) => id.as_str(),
+                _ => "",
+            }
+        } else {
+            self.store.visible_row(index).map_or("", |r| r.id.as_str())
+        };
+        QString::from(id)
     }
 
     fn oldest_pending_row_index(&self, except_id: &QString) -> i32 {
