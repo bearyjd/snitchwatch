@@ -1025,6 +1025,7 @@ fn map_setup_state_matches_the_geography_page_and_never_downloads() {
 #[test]
 fn map_markers_encode_verdict_by_shape_and_glyph_not_colour_alone() {
     let code = code_lines(include_str!("../qml/MapMarker.qml"));
+    assert!(code_lines(include_str!("../qml/MapView.qml")).contains("longDuration <= 1"));
     for needle in [
         "dominant === \"pending\" ? 45 : 0",
         "dominant === \"denied\" ? \"×\"",

@@ -41,6 +41,7 @@ import QtQuick.Window
 import com.snitchwatch.shell
 
 Window {
+    id: root
     visible: true
     width: 900
     height: 800
@@ -72,6 +73,9 @@ Window {
     MapView { id: setup; width: 400; height: 160; geoModel: noDb }
     MapBand { id: shortBand; width: 600; geoModel: stubGeo; availableHeight: 200 }
     MapBand { id: tallBand; width: 600; geoModel: stubGeo; availableHeight: 0 }
+
+    property var keptMarker: null
+    property int refreshesBeforeBurst: 0
 
     function check(cond, msg) {
         if (!cond) throw new Error(msg);
@@ -119,6 +123,9 @@ Window {
                         { code: "CA", name: "Canada", total: 1, summary: "1 allowed" } ] }
                 ];
                 stubGeo.modelReset();
+                // The reset is coalesced (layout may have started a cooldown);
+                // apply it now rather than waiting.
+                view.refresh();
                 check(!view.empty && !view.emptyState.visible, "empty state stays after data");
                 check(view.markerRepeater.count === 2, "expected 2 markers, got " + view.markerRepeater.count);
                 check(band.countryCount === 3, "country count " + band.countryCount);
@@ -156,16 +163,40 @@ Window {
                 stubGeo.countryActivity("DE");
                 check(de.pulseCount === 3, "a burst of events must be throttled");
 
+                // A burst of 200 events: bounded refreshes, the same marker
+                // objects, and at most one pulse per country per 500 ms.
+                const pulsesBefore = de.pulseCount;
+                const refreshesBefore = view.refreshCount;
+                root.keptMarker = de;
+                root.refreshesBeforeBurst = refreshesBefore;
+                de.lastPulseMs = -1e12;
+                delete view.lastPulseMs["DE"];
+                for (let i = 0; i < 200; i++) {
+                    stubGeo.modelReset();
+                    stubGeo.countryActivity("DE");
+                }
+                check(view.refreshCount - refreshesBefore <= 1,
+                      "burst refreshed " + (view.refreshCount - refreshesBefore) + " times");
+                check(de.pulseCount - pulsesBefore <= 1,
+                      "burst pulsed " + (de.pulseCount - pulsesBefore) + " times");
+                check(marker(0) === de, "a refresh recreated the marker");
+
                 // Reduced motion: no animation at all.
                 view.reducedMotion = true;
                 check(de.reducedMotion === true, "reduced motion not passed to markers");
-                check(de.pulse(30000) === false && de.pulseCount === 3, "pulse ran under reduced motion");
+                const quiet = de.pulseCount;
+                check(de.pulse(30000) === false && view.pulse("DE", 30000) === false
+                      && de.pulseCount === quiet, "pulse ran under reduced motion");
                 view.reducedMotion = false;
 
                 // Collapse and expand: session state, chevron driven.
                 band.chevron.clicked();
                 check(MapBandState.collapsed && !view.visible && band.bodyHeight === 0, "did not collapse");
                 check(band.visible, "the header must stay when collapsed");
+                check(band.countryCount === 3, "collapsed map lost its countries");
+                view.openCountryMenu(view.allMembers(), band.chevron);
+                check(view.countryMenu.visible, "Countries menu did not open while collapsed");
+                view.countryMenu.close();
                 band.chevron.clicked();
                 check(!MapBandState.collapsed && view.visible && band.bodyHeight > 0, "did not expand");
 
@@ -179,6 +210,28 @@ Window {
                 check(shortBand.bodyHeight === shortBand.minimumBody,
                       "short page: " + shortBand.bodyHeight + " vs " + shortBand.minimumBody);
                 check(tallBand.bodyHeight > shortBand.bodyHeight, "an unconstrained band keeps its height");
+            } catch (e) {
+                MapBandState.collapsed = false;
+                MapBandState.bodyHeight = 0;
+                Qt.quit();
+                throw e;
+            }
+        }
+    }
+
+    // After the cooldown the queued refresh has run once; markers are the
+    // same objects; then everything is reset and the probe quits.
+    Timer {
+        interval: 900
+        running: true
+        repeat: false
+        onTriggered: {
+            try {
+                const view = page.mapBand.mapView;
+                check(view.refreshCount - root.refreshesBeforeBurst <= 2,
+                      "refreshes after burst: " + (view.refreshCount - root.refreshesBeforeBurst));
+                check(marker(0) === root.keptMarker, "marker recreated by the trailing refresh");
+                check(view.markerRepeater.count === 2, "marker count drifted");
             } finally {
                 MapBandState.collapsed = false;
                 MapBandState.bodyHeight = 0;

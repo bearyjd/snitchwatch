@@ -118,10 +118,10 @@ pub mod qobject {
         fn land_path(self: &GeoModel) -> QString;
 
         /// JSON array of marker clusters for the map band at `scale` screen
-        /// pixels per grid unit, merging markers within `radius_px`.
+        /// pixels per grid unit, merging markers within `radius_px`, then any closer than `gap_px`.
         #[qinvokable]
         #[cxx_name = "clustersJson"]
-        fn clusters_json(self: &GeoModel, scale: f64, radius_px: f64) -> QString;
+        fn clusters_json(self: &GeoModel, scale: f64, radius_px: f64, gap_px: f64) -> QString;
 
         /// A connection event touched this country (inserted or updated
         /// row). Drives the map's pulse; carries no volume.
@@ -230,9 +230,9 @@ impl qobject::GeoModel {
         QString::from(crate::geo::map_markers::land_path())
     }
 
-    fn clusters_json(&self, scale: f64, radius_px: f64) -> QString {
+    fn clusters_json(&self, scale: f64, radius_px: f64, gap_px: f64) -> QString {
         QString::from(&crate::geo::map_markers::clusters_json(
-            &self.rows, scale, radius_px,
+            &self.rows, scale, radius_px, gap_px,
         ))
     }
 

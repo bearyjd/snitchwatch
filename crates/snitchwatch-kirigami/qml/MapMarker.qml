@@ -77,8 +77,8 @@ Controls.AbstractButton {
             scale: 1
             ParallelAnimation {
                 id: pulseAnim
-                NumberAnimation { target: pulseRing; property: "scale"; from: 1; to: 2.2; duration: 600 }
-                NumberAnimation { target: pulseRing; property: "opacity"; from: 0.9; to: 0; duration: 600 }
+                NumberAnimation { target: pulseRing; property: "scale"; from: 1; to: 2.2; duration: Kirigami.Units.veryLongDuration * 1.5 }
+                NumberAnimation { target: pulseRing; property: "opacity"; from: 0.9; to: 0; duration: Kirigami.Units.veryLongDuration * 1.5 }
             }
         }
         // Mixed verdicts: an outer ring around the dominant shape.

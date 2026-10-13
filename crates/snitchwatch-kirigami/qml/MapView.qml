@@ -23,9 +23,22 @@ Item {
     property var connectionsModel: null
     // Animations are off when the platform asks for none (animation speed 0
     // reports longDuration 0). A probe can force it.
-    property bool reducedMotion: Kirigami.Units.longDuration === 0
+    property bool reducedMotion: Kirigami.Units.longDuration <= 1
     // Clusters, as parsed from GeoModel.clustersJson.
     property var markers: []
+    // Marker delegates live in `markerModel`, keyed by the cluster's first
+    // country, so a refresh updates them in place instead of recreating them
+    // (a recreated marker would forget its pulse throttle).
+    property var clusterByKey: ({})
+    readonly property var emptyCluster: ({ members: [], total: 0, dominant: "none", mixed: false, summary: "", x: 0, y: 0 })
+    // Pulse throttle state per country code, and refresh bookkeeping.
+    property var lastPulseMs: ({})
+    property int pulseIntervalMs: 500
+    property int refreshCount: 0
+    property int refreshCooldownMs: 250
+    property bool refreshQueued: false
+    // Markers closer than this on screen merge into one.
+    property real markerGap: Kirigami.Units.gridUnit * 2.2
     // Markers within this many pixels merge.
     property real mergeRadius: Kirigami.Units.gridUnit * 2.5
 
@@ -57,28 +70,89 @@ Item {
     Accessible.role: Accessible.Graphic
     clip: true
 
+    // Rebuild the clusters now. A model reset arrives on every connection
+    // event, so callers go through requestRefresh().
     function refresh() {
+        view.refreshCount++;
         if (!view.geoModel) {
-            view.markers = [];
+            view.applyClusters([]);
             return;
         }
         // A collapsed map has no size, but the country list and count still
         // need its markers; cluster at a nominal scale then.
         const scale = view.mapScale > 0 ? view.mapScale : 0.15;
         try {
-            view.markers = JSON.parse(view.geoModel.clustersJson(scale, view.mergeRadius));
+            view.applyClusters(JSON.parse(
+                view.geoModel.clustersJson(scale, view.mergeRadius, view.markerGap)));
         } catch (e) {
-            view.markers = [];
+            view.applyClusters([]);
         }
     }
-    onMapScaleChanged: refresh()
-    onGeoModelChanged: refresh()
-    Component.onCompleted: refresh()
+
+    // At most one refresh per cooldown: the first runs at once, later ones
+    // within the cooldown collapse into one trailing refresh.
+    function requestRefresh() {
+        if (refreshCooldown.running) {
+            view.refreshQueued = true;
+            return;
+        }
+        view.refresh();
+        refreshCooldown.start();
+    }
+
+    // Update `markers`, and sync `markerModel` in place: keep delegates whose
+    // key survives, add or remove only the difference.
+    function applyClusters(clusters) {
+        const byKey = {};
+        const keys = [];
+        for (const c of clusters) {
+            const key = c.members[0].code;
+            byKey[key] = c;
+            keys.push(key);
+        }
+        view.clusterByKey = byKey;
+        view.markers = clusters;
+        for (let i = markerModel.count - 1; i >= 0; i--) {
+            if (!byKey.hasOwnProperty(markerModel.get(i).key)) {
+                markerModel.remove(i);
+            }
+        }
+        for (let i = 0; i < keys.length; i++) {
+            if (i < markerModel.count && markerModel.get(i).key === keys[i]) {
+                continue;
+            }
+            let from = -1;
+            for (let j = i + 1; j < markerModel.count; j++) {
+                if (markerModel.get(j).key === keys[i]) { from = j; break; }
+            }
+            if (from >= 0) {
+                markerModel.move(from, i, 1);
+            } else {
+                markerModel.insert(i, { key: keys[i] });
+            }
+        }
+    }
+    onMapScaleChanged: requestRefresh()
+    onGeoModelChanged: requestRefresh()
+    Component.onCompleted: requestRefresh()
+
+    Timer {
+        id: refreshCooldown
+        interval: view.refreshCooldownMs
+        onTriggered: {
+            if (view.refreshQueued) {
+                view.refreshQueued = false;
+                view.refresh();
+                refreshCooldown.start();
+            }
+        }
+    }
+    ListModel { id: markerModel }
 
     Connections {
         target: view.geoModel
         ignoreUnknownSignals: true
-        function onModelReset() { view.refresh(); }
+        function onModelReset() { view.requestRefresh(); }
         function onCountryActivity(code) { view.pulse(code, Date.now()); }
     }
 
@@ -122,11 +196,21 @@ Item {
         return out;
     }
 
-    // Pulse the marker showing `code`; each marker throttles itself.
+    // Pulse the marker showing `code`: at most once per interval per country
+    // (state here, so it survives marker changes), and never under reduced
+    // motion.
     function pulse(code, nowMs) {
+        if (view.reducedMotion) {
+            return false;
+        }
+        const last = view.lastPulseMs[code];
+        if (last !== undefined && nowMs - last < view.pulseIntervalMs) {
+            return false;
+        }
         for (let i = 0; i < repeater.count; i++) {
             const item = repeater.itemAt(i);
             if (item && item.cluster.members.some(m => m.code === code)) {
+                view.lastPulseMs[code] = nowMs;
                 return item.pulse(nowMs);
             }
         }
@@ -151,7 +235,9 @@ Item {
         ShapePath {
             fillColor: view.landColor
             strokeColor: view.borderColor
-            strokeWidth: view.mapScale > 0 ? 1 / view.mapScale : 1
+            // Constant in grid units: the item's scale does the rest, so a resize
+            // does not re-stroke the whole path.
+            strokeWidth: 5
             joinStyle: ShapePath.RoundJoin
             PathSvg { path: view.landPath }
         }
@@ -159,16 +245,16 @@ Item {
 
     Repeater {
         id: repeater
-        model: view.markers
+        model: markerModel
         delegate: MapMarker {
             id: mk
-            required property var modelData
-            cluster: modelData
+            required property string key
+            cluster: view.clusterByKey[key] || emptyCluster
             reducedMotion: view.reducedMotion
-            x: view.mapLeft + modelData.x * view.mapScale - width / 2
-            y: view.mapTop + (Math.max(view.gridTop, Math.min(view.gridTop + view.gridHeight, modelData.y))
+            x: view.mapLeft + cluster.x * view.mapScale - width / 2
+            y: view.mapTop + (Math.max(view.gridTop, Math.min(view.gridTop + view.gridHeight, cluster.y))
                               - view.gridTop) * view.mapScale - height / 2
-            onClicked: view.activate(modelData, mk)
+            onClicked: view.activate(cluster, mk)
         }
     }
 

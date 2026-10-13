@@ -68,6 +68,13 @@ pub fn markers(rows: &[DisplayRow]) -> Vec<Marker> {
 /// merges nothing. Output order is stable: busiest cluster first, then by
 /// first member code.
 pub fn cluster(markers: &[Marker], scale: f64, radius_px: f64) -> Vec<Cluster> {
+    cluster_spaced(markers, scale, radius_px, 0.0)
+}
+
+/// [`cluster`], then a second pass: while two clusters sit closer than
+/// `gap_px` on screen (a marker diameter), merge the closest pair, so no two
+/// markers overlap even across a bucket boundary.
+pub fn cluster_spaced(markers: &[Marker], scale: f64, radius_px: f64, gap_px: f64) -> Vec<Cluster> {
     let cell = if scale > 0.0 && radius_px > 0.0 {
         radius_px / scale
     } else {
@@ -87,6 +94,9 @@ pub fn cluster(markers: &[Marker], scale: f64, radius_px: f64) -> Vec<Cluster> {
         buckets.entry(key).or_default().push(m.clone());
     }
     let mut out: Vec<Cluster> = buckets.into_values().map(build).collect();
+    if scale > 0.0 && gap_px > 0.0 {
+        merge_close(&mut out, scale * scale, gap_px * gap_px);
+    }
     out.sort_by(|a, b| {
         b.total
             .cmp(&a.total)
@@ -95,18 +105,40 @@ pub fn cluster(markers: &[Marker], scale: f64, radius_px: f64) -> Vec<Cluster> {
     out
 }
 
+/// Repeatedly merge the closest pair under the gap (squared distances;
+/// `scale2` is scale squared). Ties go to the lowest indices, and `out` is in
+/// a deterministic order (bucket key order), so the result is stable.
+fn merge_close(out: &mut Vec<Cluster>, scale2: f64, gap2: f64) {
+    loop {
+        let mut best: Option<(f64, usize, usize)> = None;
+        for i in 0..out.len() {
+            for j in (i + 1)..out.len() {
+                let d = ((out[i].x - out[j].x).powi(2) + (out[i].y - out[j].y).powi(2)) * scale2;
+                if d < gap2 && best.is_none_or(|(b, _, _)| d < b) {
+                    best = Some((d, i, j));
+                }
+            }
+        }
+        let Some((_, i, j)) = best else { return };
+        let other = out.remove(j);
+        let mut members = std::mem::take(&mut out[i].members);
+        members.extend(other.members);
+        out[i] = build(members);
+    }
+}
+
 fn build(mut members: Vec<Marker>) -> Cluster {
     members.sort_by(|a, b| b.total.cmp(&a.total).then_with(|| a.code.cmp(&b.code)));
     let total: i32 = members.iter().map(|m| m.total).sum();
     let weight = f64::from(total.max(1));
     let x = members
         .iter()
-        .map(|m| f64::from(m.x * m.total))
+        .map(|m| f64::from(m.x) * f64::from(m.total))
         .sum::<f64>()
         / weight;
     let y = members
         .iter()
-        .map(|m| f64::from(m.y * m.total))
+        .map(|m| f64::from(m.y) * f64::from(m.total))
         .sum::<f64>()
         / weight;
     Cluster {
@@ -207,8 +239,8 @@ fn describe_counts(allowed: i32, denied: i32, pending: i32, total: i32) -> Strin
 }
 
 /// The clusters for `rows` as the JSON array `MapView.qml` draws.
-pub fn clusters_json(rows: &[DisplayRow], scale: f64, radius_px: f64) -> String {
-    let clusters = cluster(&markers(rows), scale, radius_px);
+pub fn clusters_json(rows: &[DisplayRow], scale: f64, radius_px: f64, gap_px: f64) -> String {
+    let clusters = cluster_spaced(&markers(rows), scale, radius_px, gap_px);
     Value::Array(clusters.iter().map(Cluster::to_json).collect()).to_string()
 }
 
@@ -319,6 +351,46 @@ mod tests {
     }
 
     #[test]
+    fn clusters_closer_than_a_marker_diameter_merge_across_buckets() {
+        // 20 units apart across a 20-unit bucket edge: 2 clusters by bucket,
+        // 20 px apart at scale 1.
+        let ms = vec![
+            marker("AA", 15, 5, 1),
+            marker("BB", 35, 5, 1),
+            marker("CC", 400, 5, 1),
+        ];
+        assert_eq!(cluster(&ms, 1.0, 20.0).len(), 3);
+        let spaced = cluster_spaced(&ms, 1.0, 20.0, 30.0);
+        assert_eq!(spaced.len(), 2);
+        assert_eq!(spaced[0].members.len(), 2);
+        // A gap under the distance leaves them apart; chains collapse fully.
+        assert_eq!(cluster_spaced(&ms, 1.0, 20.0, 10.0).len(), 3);
+        let chain = vec![
+            marker("AA", 5, 5, 1),
+            marker("BB", 25, 5, 1),
+            marker("CC", 45, 5, 1),
+        ];
+        assert_eq!(cluster_spaced(&chain, 1.0, 20.0, 35.0).len(), 1);
+        // No pair of results is closer than the gap.
+        for (i, a) in spaced.iter().enumerate() {
+            for b in &spaced[i + 1..] {
+                assert!((a.x - b.x).hypot(a.y - b.y) >= 30.0);
+            }
+        }
+    }
+
+    #[test]
+    fn weighted_centroid_does_not_overflow() {
+        let m = Marker {
+            total: 2_000_000_000,
+            x: 3600,
+            ..marker("AA", 0, 0, 0)
+        };
+        let c = build(vec![m, marker("BB", 3600, 0, 1)]);
+        assert!((c.x - 3600.0).abs() < 1.0);
+    }
+
+    #[test]
     fn degenerate_scale_merges_nothing() {
         let ms = vec![marker("AA", 1, 1, 1), marker("BB", 1, 1, 1)];
         assert_eq!(cluster(&ms, 0.0, 20.0).len(), 2);
@@ -386,11 +458,11 @@ mod tests {
     #[test]
     fn json_carries_what_the_view_needs() {
         let rows = vec![row("DE", "Germany", 1, 0, 0)];
-        let v: Value = serde_json::from_str(&clusters_json(&rows, 0.2, 28.0)).unwrap();
+        let v: Value = serde_json::from_str(&clusters_json(&rows, 0.2, 28.0, 0.0)).unwrap();
         assert_eq!(v[0]["members"][0]["code"], "DE");
         assert_eq!(v[0]["summary"], "Germany: 1 allowed");
         assert_eq!(v[0]["dominant"], "allowed");
-        assert_eq!(clusters_json(&[], 0.2, 28.0), "[]");
+        assert_eq!(clusters_json(&[], 0.2, 28.0, 0.0), "[]");
     }
 
     #[test]

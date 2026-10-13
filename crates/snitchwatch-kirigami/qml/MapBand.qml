@@ -141,6 +141,10 @@ ColumnLayout {
         activeFocusOnTab: true
         Accessible.name: "Resize map"
         Accessible.role: Accessible.Slider
+        // QML's Accessible has no value/min/max, so the range is spoken here.
+        Accessible.description: "Height " + Math.round(band.bodyHeight) + " pixels, from "
+            + Math.round(band.minimumBody) + " to " + Math.round(band.maximumBody)
+            + ". Use Up and Down to resize."
         property real startHeight: 0
         Rectangle {
             anchors.centerIn: parent
