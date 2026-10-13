@@ -205,6 +205,9 @@ impl CuratedDefaults {
                     authority_revision: None,
                     grant: None,
                 });
+                // Refusal-only requests change nothing the worker watches;
+                // count the queued reply as a pass so it flushes now (#129).
+                state.requests += 1;
             } else {
                 private(
                     Some(&reply),
