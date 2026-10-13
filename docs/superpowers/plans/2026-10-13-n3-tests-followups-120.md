@@ -29,3 +29,18 @@ Item 27 (owner decision) and the curated/cache production code are out of scope.
   the count hint if the harness allows.
 - **5** One loader model for `test_daemon` and `mock_opensnitchd`.
 - **28** Comment in `hit_badge.rs`.
+
+## As built
+
+- 24, 25, 23: `df19dc4`. 25 is a re-write of the file as a clean stop on any
+  `record` after the shutdown save (the ping handler writes to disk then,
+  only in that window). Residual: a ping handled after the process stops
+  accepting but before exit is still a loss of the documented kind.
+- 26: already in this plan's Limitations; no change. 32: the test kills a
+  mutant that widens the accepted range downward (checked in a private
+  copy); it is a regression pin, not fail-first, and stays as is.
+- 34: `rules_count_hint_unix_tests.rs` (in-crate: `run_with_incoming` is
+  private, so integration tests under `tests/` can only reach TCP). Adopt
+  and re-adopt on a second HELLO stay unit-tested only.
+- 5: the bridge-cli test daemon uses `mock_opensnitchd::loader` (new:
+  `uncompilable`, `silent`, opt-in `live_reload`, `answer`).
