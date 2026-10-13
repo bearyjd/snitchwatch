@@ -135,6 +135,10 @@ fn shown_state(
 
 /// The Settings default duration token, read from disk.
 fn read_default_duration() -> &'static str {
+    // Demo mode never reads the user's Settings (as `SettingsController`).
+    if crate::demo::enabled() {
+        return crate::settings::Settings::default().duration_token();
+    }
     crate::settings::read_settings(&crate::paths::settings_path()).duration_token()
 }
 
@@ -246,6 +250,9 @@ pub(super) fn create(
     let request_id = crate::rule_commands::next_request_id("level");
     let settings = crate::settings::read_settings(&crate::paths::settings_path());
     if let Err(reason) = duration_matches(&shown_duration.to_string(), settings.duration_token()) {
+        // The file changed outside this process (no Settings signal): re-read
+        // it so the retry the message asks for shows the new duration.
+        model.as_mut().refresh_level_rule_duration();
         return QString::from(reason);
     }
     let request = match add_level_rule_message(
