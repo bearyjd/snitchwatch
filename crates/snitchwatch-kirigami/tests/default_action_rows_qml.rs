@@ -316,8 +316,8 @@ Controls.ApplicationWindow {
                     probeWindow.checkNotices([probeWindow.unknownNotice,
                                               probeWindow.unknownNotice], "a gone session");
 
-                    // L1: the inspector closes while its row's rule waits.
-                    page.inspectorSheet.close();
+                    // L1: the inspector panel is dismissed while its row's rule waits.
+                    page.dismissInspector();
                     probeWindow.waits = 0;
                 } else if (probeWindow.phase === 3 && page.makeRuleSheet.visible
                            && probeWindow.waits++ < 20) {

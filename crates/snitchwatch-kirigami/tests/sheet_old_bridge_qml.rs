@@ -135,9 +135,13 @@ Controls.ApplicationWindow {
     function expectSubmit(expected, what) {
         probeWindow.last = "";
         probeWindow.lastBindable = null;
-        page.decisionSheet.submit("allow");
-        probeWindow.check(probeWindow.last === expected, what + ": sent " + probeWindow.last);
         const rowId = expected.split(" ")[0];
+        const sheet = page.decisionSheet;
+        sheet.submit("allow");
+        probeWindow.check(probeWindow.last === expected, what + ": sent " + probeWindow.last);
+        // A decision dismisses the panel (and clears its row); select the same
+        // row again so the next scenario can reuse the sheet.
+        probeWindow.openOn(rowId);
         probeWindow.check(probeWindow.lastBindable === (rowId === "abs" || rowId === "abs2"),
                           what + ": bindable flag " + probeWindow.lastBindable);
     }

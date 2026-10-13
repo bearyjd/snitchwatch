@@ -104,8 +104,8 @@ Window {
         }
     }
 
-    // Every inspector sheet is a SizedOverlaySheet declared directly on its
-    // page; its title must be drawn by a PlainText Heading, not Kirigami's
+    // Every inspector sheet (all but Connections, now a panel) is a
+    // SizedOverlaySheet declared directly on its page; its title must be drawn by a PlainText Heading, not Kirigami's
     // AutoText default, and the heading's hover tooltip must be an explicit
     // ToolTip with a PlainText content item, not the style's AutoText one
     // (reached via the attached `ToolTip.text`). `expectElided` names a title
@@ -356,7 +356,14 @@ Window {
                 checkSheetTitles(blocklistsPage, "BlocklistsPage", "");
                 checkSheetTitles(profilesPage, "ProfilesPage", "");
                 checkSheetTitles(rulesPage, "RulesPage", longRuleName);
-                checkSheetTitles(connectionsPage, "ConnectionsPage", "");
+                // The Connections inspector is a side panel now, not a sheet:
+                // its title (the process name, which is data) must still be a
+                // PlainText heading showing the markup-looking name verbatim.
+                const panelTitle = connectionsPage.activePanel.titleLabel;
+                if (panelTitle.textFormat !== Text.PlainText
+                        || panelTitle.text !== "<b>evil</b>") {
+                    throw new Error("ConnectionsPage panel title is not a verbatim PlainText heading");
+                }
             } finally {
                 Qt.quit();
             }

@@ -10,7 +10,7 @@
 //! Proves: the band is visible by default with its empty state before any data;
 //! a marker has the spoken `Accessible.name` and filters on click; a cluster
 //! lists its countries instead; collapse and expand (session state); height
-//! clamping so the band gives way first on a short page; pulses are throttled
+//! clamping, drag-to-zero collapse and the band above the tree; pulses are throttled
 //! to one per marker per 500 ms and off under reduced motion; the setup text
 //! with no database. Run headless with `QT_QPA_PLATFORM=offscreen`.
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -71,8 +71,6 @@ Window {
     }
     MapView { id: noModel; width: 400; height: 160; geoModel: null }
     MapView { id: setup; width: 400; height: 160; geoModel: noDb }
-    MapBand { id: shortBand; width: 600; geoModel: stubGeo; availableHeight: 200 }
-    MapBand { id: tallBand; width: 600; geoModel: stubGeo; availableHeight: 0 }
 
     property var keptMarker: null
     property int refreshesBeforeBurst: 0
@@ -200,16 +198,36 @@ Window {
                 band.chevron.clicked();
                 check(!MapBandState.collapsed && view.visible && band.bodyHeight > 0, "did not expand");
 
-                // Resizing is clamped; a short page takes the band to its
-                // minimum before the list loses any height.
+                // The band's body is clamped to its minimum and maximum.
                 MapBandState.bodyHeight = 1;
                 check(band.bodyHeight === band.minimumBody, "below minimum: " + band.bodyHeight);
                 MapBandState.bodyHeight = 100000;
                 check(band.bodyHeight === band.maximumBody, "above maximum: " + band.bodyHeight);
                 MapBandState.bodyHeight = 0;
-                check(shortBand.bodyHeight === shortBand.minimumBody,
-                      "short page: " + shortBand.bodyHeight + " vs " + shortBand.minimumBody);
-                check(tallBand.bodyHeight > shortBand.bodyHeight, "an unconstrained band keeps its height");
+                check(band.bodyHeight === band.defaultBody || band.bodyHeight === band.maximumBody,
+                      "default body: " + band.bodyHeight);
+
+                // It sits above the tree in the left pane, the inspector to the right.
+                const tree = page.connectionList;
+                check(band.mapToItem(page, 0, 0).y < tree.mapToItem(page, 0, 0).y, "map not above the tree");
+                check(band.mapToItem(page, 0, 0).x === tree.mapToItem(page, 0, 0).x, "map not in the tree's column");
+                check(band.width === tree.width, "map and tree differ in width");
+                check(tree.height > 0, "tree lost its height");
+
+                // Drag to zero: the handle's move is followed into the session
+                // state; below the threshold the band snaps collapsed, and
+                // dragging back out expands it again.
+                band.followDrag(band.chromeHeight + band.minimumBody * 1.5);
+                check(!MapBandState.collapsed && MapBandState.bodyHeight === band.minimumBody * 1.5,
+                      "a drag did not set the height: " + MapBandState.bodyHeight);
+                band.followDrag(band.chromeHeight + band.collapseBelow - 1);
+                check(MapBandState.collapsed && band.preferredHeight === band.collapsedHeight,
+                      "dragging to zero did not collapse");
+                check(band.minimumHeight === band.collapsedHeight && band.maximumHeight === band.collapsedHeight,
+                      "a collapsed band is only its header");
+                band.followDrag(band.chromeHeight + band.minimumBody);
+                check(!MapBandState.collapsed && band.bodyHeight === band.minimumBody, "did not expand from a drag");
+                MapBandState.bodyHeight = 0;
             } catch (e) {
                 MapBandState.collapsed = false;
                 MapBandState.bodyHeight = 0;

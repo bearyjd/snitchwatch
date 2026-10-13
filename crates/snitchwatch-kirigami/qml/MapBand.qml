@@ -1,11 +1,10 @@
 // The featured map band above the connections tree (LS redesign phase 2,
-// step 9): a header with a collapse chevron, the map, a legend, the honest
-// footer, and a drag handle to resize it.
+// step 9): a header with a collapse chevron, the map, a legend and the honest
+// footer. It is the top item of MonitorPane's vertical SplitView, whose handle
+// resizes it; this file only reports the heights it needs.
 //
 // Visible by default. Collapse and height live in MapBandState, a session-only
-// singleton (never in settings). On a short window the band shrinks to its
-// minimum height before the tree below it does: the page passes its own
-// height as `availableHeight` and the tree keeps `treeMinimum` of it.
+// singleton (never in settings).
 import QtQuick
 import QtQuick.Layouts
 import QtQuick.Controls as Controls
@@ -17,27 +16,47 @@ ColumnLayout {
 
     property var geoModel: null
     property var connectionsModel: null
-    // Height of the page the band sits in; 0 = unconstrained.
-    property real availableHeight: 0
     readonly property real minimumBody: Kirigami.Units.gridUnit * 6
     readonly property real defaultBody: Kirigami.Units.gridUnit * 13
-    readonly property real treeMinimum: Kirigami.Units.gridUnit * 16
-    readonly property real chromeHeight: header.height + footer.height + grip.height
-    readonly property real maximumBody: Math.max(band.minimumBody, Math.min(
-        band.width > 0 ? band.width / 2.5 : band.defaultBody,
-        band.availableHeight > 0 ? band.availableHeight - band.treeMinimum - band.chromeHeight
-                                 : band.defaultBody * 4))
+    // The map is as tall as it is wide / 2.5, so more height is wasted.
+    readonly property real maximumBody: Math.max(band.minimumBody,
+        band.width > 0 ? band.width / 2.5 : band.defaultBody)
+    // The header row and the separator: all that shows when collapsed.
+    readonly property real collapsedHeight: header.implicitHeight + separator.implicitHeight
+    // Everything but the map itself, when expanded (the footer's margins too).
+    readonly property real chromeHeight: band.collapsedHeight
+        + footer.implicitHeight + footer.Layout.topMargin + footer.Layout.bottomMargin
     readonly property real bodyHeight: MapBandState.collapsed ? 0 : Math.max(band.minimumBody,
         Math.min(band.maximumBody, MapBandState.bodyHeight > 0 ? MapBandState.bodyHeight : band.defaultBody))
+    // What MonitorPane's SplitView asks of this item.
+    readonly property real preferredHeight: MapBandState.collapsed ? band.collapsedHeight
+        : band.chromeHeight + band.bodyHeight
+    readonly property real minimumHeight: MapBandState.collapsed ? band.collapsedHeight
+        : band.chromeHeight + band.minimumBody
+    readonly property real maximumHeight: MapBandState.collapsed ? band.collapsedHeight
+        : band.chromeHeight + band.maximumBody
     readonly property int countryCount: map.allMembers().length
+
+    // Dragging the band below this much map snaps it collapsed.
+    readonly property real collapseBelow: band.minimumBody / 2
+
+    // The splitter handle moved the band to `height`: follow it into the
+    // session state, collapsing it when dragged to (nearly) zero.
+    function followDrag(height) {
+        const body = height - band.chromeHeight;
+        MapBandState.collapsed = body < band.collapseBelow;
+        if (!MapBandState.collapsed) {
+            MapBandState.bodyHeight = Math.min(band.maximumBody, Math.max(band.minimumBody, body));
+        }
+    }
 
     // For the headless probes.
     property alias mapView: map
     property alias chevron: chevronButton
     property alias footerText: honestText
-    property alias gripHandle: grip
 
     spacing: 0
+    clip: true
 
     RowLayout {
         id: header
@@ -85,7 +104,8 @@ ColumnLayout {
         id: map
         visible: !MapBandState.collapsed
         Layout.fillWidth: true
-        Layout.preferredHeight: band.bodyHeight
+        Layout.fillHeight: true
+        Layout.minimumHeight: 0
         geoModel: band.geoModel
         connectionsModel: band.connectionsModel
     }
@@ -131,45 +151,8 @@ ColumnLayout {
         }
     }
 
-    // Drag (or Up/Down when focused) to resize the map.
-    Rectangle {
-        id: grip
-        visible: !MapBandState.collapsed
-        Layout.fillWidth: true
-        Layout.preferredHeight: Kirigami.Units.gridUnit * 0.7
-        color: gripDrag.active || activeFocus ? Kirigami.Theme.highlightColor : "transparent"
-        activeFocusOnTab: true
-        Accessible.name: "Resize map"
-        Accessible.role: Accessible.Slider
-        // QML's Accessible has no value/min/max, so the range is spoken here.
-        Accessible.description: "Height " + Math.round(band.bodyHeight) + " pixels, from "
-            + Math.round(band.minimumBody) + " to " + Math.round(band.maximumBody)
-            + ". Use Up and Down to resize."
-        property real startHeight: 0
-        Rectangle {
-            anchors.centerIn: parent
-            width: Kirigami.Units.gridUnit * 3
-            height: 3
-            radius: 1.5
-            color: Kirigami.Theme.textColor
-            opacity: 0.4
-        }
-        HoverHandler { cursorShape: Qt.SizeVerCursor }
-        DragHandler {
-            id: gripDrag
-            target: null
-            xAxis.enabled: false
-            onActiveChanged: if (active) grip.startHeight = band.bodyHeight
-            onActiveTranslationChanged: if (active) {
-                MapBandState.bodyHeight = Math.max(band.minimumBody,
-                    Math.min(band.maximumBody, grip.startHeight + activeTranslation.y));
-            }
-        }
-        Keys.onUpPressed: MapBandState.bodyHeight = Math.max(band.minimumBody, band.bodyHeight - Kirigami.Units.gridUnit)
-        Keys.onDownPressed: MapBandState.bodyHeight = Math.min(band.maximumBody, band.bodyHeight + Kirigami.Units.gridUnit)
-    }
-
     Kirigami.Separator {
+        id: separator
         Layout.fillWidth: true
     }
 }

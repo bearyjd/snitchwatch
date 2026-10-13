@@ -253,6 +253,8 @@ ColumnLayout {
         visible: sheet.remoteIp.length > 0
 
         Controls.Label {
+            Layout.fillWidth: true
+            wrapMode: Text.Wrap
             Kirigami.FormData.label: "Reverse DNS"
             textFormat: Text.PlainText
             text: insight.loading
@@ -262,30 +264,40 @@ ColumnLayout {
                      : "No PTR result for " + sheet.remoteIp)
         }
         Controls.Label {
+            Layout.fillWidth: true
+            wrapMode: Text.Wrap
             Kirigami.FormData.label: "Organization"
             visible: insight.org.length > 0
             textFormat: Text.PlainText
             text: insight.org
         }
         Controls.Label {
+            Layout.fillWidth: true
+            wrapMode: Text.Wrap
             Kirigami.FormData.label: "Registrar"
             visible: insight.registrar.length > 0
             textFormat: Text.PlainText
             text: insight.registrar
         }
         Controls.Label {
+            Layout.fillWidth: true
+            wrapMode: Text.Wrap
             Kirigami.FormData.label: "Country"
             visible: insight.country.length > 0
             textFormat: Text.PlainText
             text: insight.country
         }
         Controls.Label {
+            Layout.fillWidth: true
+            wrapMode: Text.Wrap
             Kirigami.FormData.label: "Registration info"
             visible: !insight.loading && !insight.available && insight.rdapEnabled
             opacity: 0.7
             text: "unavailable (offline?)"
         }
         Controls.Label {
+            Layout.fillWidth: true
+            wrapMode: Text.Wrap
             Kirigami.FormData.label: "Registration info"
             visible: !insight.rdapEnabled
             opacity: 0.7

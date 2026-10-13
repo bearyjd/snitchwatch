@@ -35,7 +35,17 @@ const CONNECTIONS_PAGE: &str = concat!(
     "\n",
     include_str!("../qml/ConnectionsFilterBar.qml"),
     "\n",
-    include_str!("../qml/ConnectionInspector.qml"),
+    include_str!("../qml/ConnectionsTopBar.qml"),
+    "\n",
+    include_str!("../qml/InspectorState.qml"),
+    "\n",
+    include_str!("../qml/HoverTip.qml"),
+    "\n",
+    include_str!("../qml/InspectorPanel.qml"),
+    "\n",
+    include_str!("../qml/ConnectionDetailPage.qml"),
+    "\n",
+    include_str!("../qml/ConnectionList.qml"),
     "\n",
     include_str!("../qml/RuleButton.qml"),
     "\n",
@@ -46,6 +56,8 @@ const CONNECTIONS_PAGE: &str = concat!(
     include_str!("../qml/MapView.qml"),
     "\n",
     include_str!("../qml/MapMarker.qml"),
+    "\n",
+    include_str!("../qml/MonitorPane.qml"),
 );
 const MAIN_QML: &str = include_str!("../qml/main.qml");
 const SIZED_SHEET: &str = include_str!("../qml/SizedOverlaySheet.qml");
@@ -91,8 +103,26 @@ const ALL_QML: &[(&str, &str)] = &[
         include_str!("../qml/ConnectionsFilterBar.qml"),
     ),
     (
-        "ConnectionInspector.qml",
-        include_str!("../qml/ConnectionInspector.qml"),
+        "ConnectionsTopBar.qml",
+        include_str!("../qml/ConnectionsTopBar.qml"),
+    ),
+    (
+        "InspectorState.qml",
+        include_str!("../qml/InspectorState.qml"),
+    ),
+    ("HoverTip.qml", include_str!("../qml/HoverTip.qml")),
+    ("StackNav.qml", include_str!("../qml/StackNav.qml")),
+    (
+        "InspectorPanel.qml",
+        include_str!("../qml/InspectorPanel.qml"),
+    ),
+    (
+        "ConnectionDetailPage.qml",
+        include_str!("../qml/ConnectionDetailPage.qml"),
+    ),
+    (
+        "ConnectionList.qml",
+        include_str!("../qml/ConnectionList.qml"),
     ),
     (
         "DecideLaterButton.qml",
@@ -103,6 +133,7 @@ const ALL_QML: &[(&str, &str)] = &[
     ("MapBandState.qml", include_str!("../qml/MapBandState.qml")),
     ("MapMarker.qml", include_str!("../qml/MapMarker.qml")),
     ("MapView.qml", include_str!("../qml/MapView.qml")),
+    ("MonitorPane.qml", include_str!("../qml/MonitorPane.qml")),
     (
         "LevelRuleActions.qml",
         include_str!("../qml/LevelRuleActions.qml"),
@@ -890,6 +921,60 @@ fn overlay_sheet_titles_are_plain_text() {
     }
 }
 
+/// The Connections inspector is a side panel, not a SizedOverlaySheet, so the
+/// sheet-title guard above no longer covers its title. Replacement for that
+/// intent: the panel's heading (the process name is data) must be PlainText.
+#[test]
+fn inspector_panel_title_is_plain_text() {
+    let code = code_lines(include_str!("../qml/InspectorPanel.qml"));
+    let start = code
+        .find("Kirigami.Heading {")
+        .expect("InspectorPanel.qml lost its title heading");
+    let heading = &code[start..];
+    let heading = &heading[..heading.find("\n        }").unwrap_or(heading.len())];
+    assert!(
+        heading.contains("textFormat: Text.PlainText") && heading.contains("page.inspectProcess"),
+        "InspectorPanel.qml's heading must render the process name as PlainText:\n{heading}"
+    );
+}
+
+/// `HoverTip` is the inspector panel's tooltip for elided data (process and
+/// host names). Like every tooltip it must draw PlainText, never the style's
+/// AutoText label.
+#[test]
+fn hover_tip_draws_plain_text() {
+    let code = code_lines(include_str!("../qml/HoverTip.qml"));
+    assert!(
+        code.contains("textFormat: Text.PlainText") && code.contains("contentItem: Controls.Label"),
+        "HoverTip.qml must draw its text through a PlainText contentItem"
+    );
+}
+
+/// Navigation must go through `StackNav.replaceMain`: a pushed detail page
+/// sits on top of the page being left, and a bare `pageStack.replace` swaps
+/// that one instead. Only the first-run onboarding Component (its own pushed
+/// pages, replaced in place) may call it directly.
+#[test]
+fn main_navigates_through_the_stack_router() {
+    let start = MAIN_QML
+        .find("id: silentModePageComponent")
+        .expect("main.qml lost the onboarding block");
+    let end = MAIN_QML[start..]
+        .find("id: curatedGroupsPageComponent")
+        .expect("main.qml lost the curated groups component")
+        + start;
+    let outside = format!("{}{}", &MAIN_QML[..start], &MAIN_QML[end..]);
+    assert!(
+        !code_lines(&outside).contains("pageStack.replace("),
+        "main.qml replaces the page stack's top page directly outside the onboarding block; \
+         use nav.replaceMain"
+    );
+    assert!(
+        code_lines(MAIN_QML).contains("nav.replaceMain("),
+        "main.qml no longer navigates through StackNav"
+    );
+}
+
 /// Issue #49: the bridge hardcodes per-connection bytes to 0 and opensnitchd
 /// has no per-connection counters, so the "This connection: 0 B sent / 0 B
 /// received" readout and the sparkline fed by those same zeros were always
@@ -1044,6 +1129,7 @@ fn map_band_state_is_never_persisted() {
     for (name, source) in [
         ("MapBandState.qml", include_str!("../qml/MapBandState.qml")),
         ("MapBand.qml", include_str!("../qml/MapBand.qml")),
+        ("MonitorPane.qml", include_str!("../qml/MonitorPane.qml")),
     ] {
         let lower = code_lines(source).to_lowercase();
         for forbidden in ["settings", "localstorage", "qt.labs"] {
@@ -1055,4 +1141,60 @@ fn map_band_state_is_never_persisted() {
     }
     assert!(code_lines(include_str!("../qml/MapBandState.qml"))
         .contains("property bool collapsed: false"));
+}
+
+/// The map is featured in the LEFT pane: the top of a vertical SplitView,
+/// above the tree, never in the page header or the top bar, and the inspector
+/// stays the right-hand column. Dragging to zero collapses it.
+#[test]
+fn map_band_sits_above_the_tree_in_the_left_pane() {
+    let pane = code_lines(include_str!("../qml/MonitorPane.qml"));
+    assert!(
+        pane.contains("orientation: Qt.Vertical"),
+        "the map/tree split must be vertical"
+    );
+    let band = pane
+        .find("MapBand {")
+        .expect("MonitorPane lost its MapBand");
+    let tree = pane
+        .find("ConnectionList {")
+        .expect("MonitorPane lost its tree");
+    assert!(band < tree, "the map band must sit above the tree");
+    assert!(
+        pane.contains("band.followDrag(band.height)")
+            && code_lines(include_str!("../qml/MapBand.qml"))
+                .contains("MapBandState.collapsed = body < band.collapseBelow"),
+        "dragging to zero must collapse"
+    );
+    assert!(pane.contains("Controls.SplitView.fillHeight: true"));
+    for (name, source) in [
+        (
+            "ConnectionsTopBar.qml",
+            include_str!("../qml/ConnectionsTopBar.qml"),
+        ),
+        (
+            "ConnectionsFilterBar.qml",
+            include_str!("../qml/ConnectionsFilterBar.qml"),
+        ),
+    ] {
+        assert!(
+            !code_lines(source).contains("MapBand"),
+            "{name} must not host the map"
+        );
+    }
+    let page = code_lines(include_str!("../qml/ConnectionsPage.qml"));
+    assert!(
+        !page.contains("MapBand {"),
+        "the page hosts the map through MonitorPane"
+    );
+    let monitor = page
+        .find("MonitorPane {")
+        .expect("the page lost MonitorPane");
+    let inspector = page
+        .find("InspectorPanel {")
+        .expect("the page lost its inspector");
+    assert!(
+        monitor < inspector,
+        "the inspector stays the right-hand panel"
+    );
 }

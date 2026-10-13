@@ -23,6 +23,8 @@ Item {
         { name: "alert", alert: true },
         { name: "connections-expanded", expand: 0 },
         { name: "connections-flat", flat: true },
+        // The inspector side panel on a selected row (pending if any).
+        { name: "connections-inspector", select: true },
         { name: "rules", page: "rules" },
         { name: "blocklists", page: "blocklists" },
         { name: "onboarding-groups", page: "curatedGroups" },
@@ -72,6 +74,21 @@ Item {
                 m.toggleDomainGroup(t.parent, t.key);
             }
         }
+    }
+
+    // Select a pending leaf row (else the first) of the flat list, as a click would.
+    function selectConnection() {
+        const list = runner.window.pageStack.currentItem.connectionList;
+        list.forceLayout();
+        let pick = 0;
+        for (let i = 0; i < list.count; i++) {
+            const d = list.itemAtIndex(i);
+            if (d && !d.isGroupHeader && d.pending) {
+                pick = i;
+                break;
+            }
+        }
+        list.currentIndex = pick;
     }
 
     Timer {
@@ -147,6 +164,9 @@ Item {
             }
             if (shot.expand !== undefined) {
                 runner.expandDepth(shot.expand);
+            }
+            if (shot.select) {
+                Qt.callLater(runner.selectConnection);
             }
             if (shot.flat) {
                 runner.window.connectionsModelRef.setGroupedMode(false);

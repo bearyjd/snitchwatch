@@ -10,12 +10,11 @@
 //     `ConnectionsModel.setFilterQuery` / `setPendingOnly`. All filtering logic
 //     lives in Rust (`connections::filter`); QML only forwards user input.
 //   * Auto-select on new pending row — the model emits `autoSelectRequested`
-//     with a visible index; we move `currentIndex` there but do NOT pop the
-//     inspector, so it never steals interaction focus from the user.
-//   * Inspector — a Kirigami.OverlaySheet opened by clicking a row (design
-//     decision: OverlaySheet over a SplitView detail column, chosen because it
-//     works identically on narrow and wide windows and matches the pending-row
-//     inspector described in the design spec without a responsive-layout branch).
+//     with a visible index; we move `currentIndex` there but never push the
+//     detail page, so it never steals interaction focus from the user.
+//   * Inspector side panel (monitor-tree step 5) — a SplitView column at wide
+//     widths that follows `currentIndex`; under `compactWidth` the same panel
+//     lives on a ConnectionDetailPage pushed by a row click.
 //
 // Little-Snitch-parity grouping (Process -> Domain -> Host -> connection): the
 // header's "Grouped" switch drives `ConnectionsModel.setGrouped`. In grouped
@@ -33,22 +32,22 @@ import QtQuick.Controls as Controls
 import org.kde.kirigami as Kirigami
 import com.snitchwatch.shell
 
-Kirigami.ScrollablePage {
+Kirigami.Page {
     id: page
     title: "Connections"
+    padding: 0
+    // PageRow would give this page a fixed column in a wide window.
+    Kirigami.ColumnView.fillWidth: true
 
-    // The page itself, for components declared inside it: their own `page`
-    // property would shadow the `page` id in a `page: page` binding.
+    // The page itself, for components declared inside it (their `page` would shadow the id).
     readonly property var pageRoot: page
 
     // Injected by the caller (main.qml) so the model's lifetime is owned there.
     property ConnectionsModel model
 
-    // Injected by main.qml for the map band; null in isolated tests, where
-    // the band shows its empty state.
+    // Injected by main.qml for the map above the list; null in isolated tests.
     property var geoModel: null
-    property alias mapBand: mapBand
-
+    property alias mapBand: listPane.mapBand
     // Live-wiring hub (Task 13), injected by main.qml. Threaded down to the
     // embedded PendingDecisionSheet so a submitted verdict reaches the bridge's
     // inbound pump. Null in isolated component tests (the sheet no-ops then).
@@ -62,10 +61,9 @@ Kirigami.ScrollablePage {
         bridgeFeed: page.bridgeFeed
         onExplained: text => page.showPassiveNotice(text)
     }
-    // Exposed for the headless probe (tests/inline_verdict_qml.rs).
+    // Exposed for the headless probes (tests/inline_verdict_qml.rs, ...).
     property alias inlineVerdicts: verdictHelper
-
-    property alias levelRules: ruleActions
+    property alias levelRules: topBar.ruleActions
 
     // Issue #18: a row's inline Allow/Deny. Also the entry point
     // `tests/inline_verdict_qml.rs` drives, to exercise the click -> submit ->
@@ -79,59 +77,58 @@ Kirigami.ScrollablePage {
         verdictHelper.submitBatch(processKey, choice, sourceSession);
     }
 
-    // Snapshot of the row currently shown in the inspector sheet.
-    property string inspectId: ""
-    property string inspectProcess: ""
-    property string inspectHost: ""
-    property int inspectPort: 0
-    property string inspectProtocol: ""
-    property string inspectVerdict: ""
-    property bool inspectPending: false
-    // Issue #49: set when the row the inspector was opened on as pending has
-    // since gone away (see `recheckInspectedRow`). Shown as a notice in place of
-    // the decision sheet.
-    property bool inspectNoLongerPending: false
-    // What the inspector's Verdict row says. `inspectVerdict` is the copy taken
-    // when it opened, so for a withdrawn prompt it would still read "pending".
-    readonly property string inspectVerdictText: page.inspectNoLongerPending
-        ? "no longer pending"
-        : (page.inspectPending ? "pending"
-           : page.inspectOutcomeText !== "" ? page.inspectOutcomeText : page.inspectVerdict)
-    // Prompt-slot plan Part C, copied from the row like the rest: when the
-    // bridge answers it (-1: never), a put-off row's label, whether "Make a
-    // rule…" is offered (put off, or decided by the firewall's default
-    // action, E3), and whether its session takes "Decide later".
-    property real inspectDeadlineMs: -1
-    property string inspectOutcomeText: ""
-    property bool inspectMakeRuleOffered: false
-    property bool inspectDecideLater: false
-    // Parity 2 (pending-decision insight panel) — pulled from
-    // `ConnectionsModel.rowDetailsJson` alongside the rest of the inspector
-    // snapshot. Per-connection byte counters are deliberately not surfaced:
-    // the bridge reports them as a hardcoded 0 (issue #49).
-    property string inspectIp: ""
-    // Issue #44: whether an answer for this row's program can be remembered
-    // (`rowDetailsJson`'s `bindableProcessPath`); false until known.
-    property bool inspectBindableProcessPath: false
-    // E3: `rowDetailsJson`'s `alsoListedByDefault` (the two-rows hint).
-    property bool inspectAlsoListedByDefault: false
-    // Whether the inspected row's bridge advertised app-bound rules
-    // (`InlineVerdicts.rowAppBoundRules`); false until known.
-    property bool inspectAppBoundRules: false
-    // Exposed for the headless probes (tests/verdict_not_remembered_qml.rs,
-    // tests/inline_verdict_qml.rs).
-    property alias decisionSheet: inspector.decisionSheet
-    property alias makeRuleSheet: inspector.makeRuleSheet
-    property alias inspectorSheet: inspector
+    // Below this page width the inspector is a pushed page, not a column.
+    readonly property real compactWidth: Kirigami.Units.gridUnit * 45
+    // The window's page stack; null without one (isolated tests: always a column).
+    readonly property var hostStack: Controls.ApplicationWindow.window
+        ? (Controls.ApplicationWindow.window.pageStack || null) : null
+    readonly property bool compact: page.hostStack !== null && page.width < page.compactWidth
+    // The pushed ConnectionDetailPage while one is open (compact mode).
+    property var detailPage: null
+    // The panel currently on screen: the pushed page's, else the column's.
+    readonly property var activePanel: page.detailPage ? page.detailPage.panel : sideLoader.item
+    onCompactChanged: {
+        if (page.compact) {
+            page.pushDetailPage();
+        } else {
+            page.closeDetailPage();
+        }
+    }
+
+    // The selection's snapshot (InspectorState.qml), as `inspect*` for the
+    // panel and the headless probes.
+    InspectorState {
+        id: inspect
+        model: page.model
+        bridgeFeed: page.bridgeFeed
+        verdicts: verdictHelper
+    }
+    property alias inspecting: inspect.inspecting
+    property alias inspectId: inspect.rowId
+    property alias inspectProcess: inspect.process
+    property alias inspectHost: inspect.host
+    property alias inspectPort: inspect.port
+    property alias inspectProtocol: inspect.protocol
+    property alias inspectVerdict: inspect.verdict
+    property alias inspectPending: inspect.pending
+    property alias inspectNoLongerPending: inspect.noLongerPending
+    property alias inspectVerdictText: inspect.verdictText
+    property alias inspectDeadlineMs: inspect.deadlineMs
+    property alias inspectOutcomeText: inspect.outcomeText
+    property alias inspectMakeRuleOffered: inspect.makeRuleOffered
+    property alias inspectDecideLater: inspect.decideLater
+    property alias inspectIp: inspect.ip
+    property alias inspectBindableProcessPath: inspect.bindableProcessPath
+    property alias inspectAlsoListedByDefault: inspect.alsoListedByDefault
+    property alias inspectAppBoundRules: inspect.appBoundRules
+    property alias inspectMatchedRule: inspect.matchedRule
+    property alias inspectMatchedRuleDisplay: inspect.matchedRuleDisplay
+    // For the headless probes and main.qml (the panel on screen).
+    readonly property var decisionSheet: page.activePanel ? page.activePanel.decisionSheet : null
+    readonly property var makeRuleSheet: page.activePanel ? page.activePanel.makeRuleSheet : null
     // The window's MakeRuleController (main.qml), for the Make a rule sheet.
     property var makeRuleController: null
-    property alias connectionList: list
-    // Raw matched-rule name (empty when unknown/not applicable — drives the
-    // "Show rule" button's visibility) and its friendly display string (never
-    // blank — see `connections::row_store::matched_rule_display`).
-    property string inspectMatchedRule: ""
-    property string inspectMatchedRuleDisplay: ""
-
+    property alias connectionList: listPane.view
     // Rule-match diagnostics (Little-Snitch-parity "which rule decided this
     // connection" — jump to the Rules tab). Emitted by the inspector's "Show
     // rule" button; main.qml routes it to a RulesPage navigation + highlight,
@@ -156,11 +153,19 @@ Kirigami.ScrollablePage {
     }
 
     // React to the Rust auto-select policy: move the selection, but never open
-    // the inspector — surfacing a pending row must not grab the user's focus.
+    // the inspector, and never while one is showing (a panel or a half-filled
+    // make-rule form must not change under the user's hands).
     Connections {
         target: page.model
         function onAutoSelectRequested(row) {
-            list.currentIndex = row;
+            // The row was just inserted: select it once the list has it. The
+            // index would shift under later inserts, so queue the id (calls
+            // coalesce, and a group header has none).
+            const id = page.model.rowIdAt(row);
+            if (id !== "" && page.autoIds.indexOf(id) < 0) {
+                page.autoIds = page.autoIds.concat([id]);
+                Qt.callLater(page.runAuto);
+            }
         }
         // Issue #49: the bridge removes a pending row when opensnitchd's ask
         // times out, a snapshot starts with ClearConnectionRows and then
@@ -170,16 +175,23 @@ Kirigami.ScrollablePage {
         // grouped filter changes. Every other mutation (clear, rows arriving
         // in grouped mode, flat filters) brackets a full reset.
         function onRowsRemoved() {
-            page.recheckInspectedRow();
+            inspect.recheck();
+            page.clearIfRowGone();
         }
         function onRowsInserted() {
-            page.recheckInspectedRow();
+            inspect.recheck();
+            page.clearIfRowGone();
         }
         function onDataChanged() {
-            page.recheckInspectedRow();
+            inspect.recheck();
+            page.clearIfRowGone();
         }
         function onModelReset() {
-            page.recheckInspectedRow();
+            inspect.recheck();
+            page.clearIfRowGone();
+            // The reset drops the list's current index; once it has settled,
+            // point it back at the selected row, wherever that now is.
+            Qt.callLater(page.reanchor);
         }
     }
 
@@ -194,7 +206,7 @@ Kirigami.ScrollablePage {
         ignoreUnknownSignals: true
         function onOkChanged() {
             if (page.bridgeFeed.ok === false) {
-                page.recheckInspectedRow();
+                inspect.recheck();
             }
         }
         function onVerdictNotRemembered(rowId) {
@@ -221,139 +233,167 @@ Kirigami.ScrollablePage {
         title: page.title
     }
 
-    // Above the list, in the page content where their height is laid out
-    // rather than overflowed: the wrapping filter switches and summary, then
-    // the header rule buttons' commands, confirm and outcome bar.
-    header: ColumnLayout {
-        spacing: 0
-        // The featured map (visible by default, collapsible, resizable); it
-        // gives up height before the list does. See MapBand.qml.
-        MapBand {
-            id: mapBand
-            Layout.fillWidth: true
-            geoModel: page.geoModel
-            connectionsModel: page.model
-            availableHeight: page.height
-        }
-        ConnectionsFilterBar {
-            id: filterBar
-            Layout.fillWidth: true
-            model: page.model
-        }
-        LevelRuleActions {
-            id: ruleActions
-            Layout.fillWidth: true
-            model: page.model
-        }
-    }
-
-    Kirigami.PlaceholderMessage {
-        anchors.centerIn: parent
-        width: parent.width - (Kirigami.Units.largeSpacing * 4)
-        visible: !page.model || page.model.count === 0
-        icon.name: (page.model && page.model.totalCount > 0) ? "search" : "network-connect"
-        text: (page.model && page.model.totalCount > 0)
-              ? "No matching connections"
-              : "No connections yet"
-        explanation: (page.model && page.model.totalCount > 0)
-              ? "No rows match the current filter."
-              : "New connection prompts and recent decisions will appear here."
-    }
-
-    ListView {
-        id: list
+    // Filters and rule actions, above the list (see ConnectionsTopBar.qml).
+    header: ConnectionsTopBar {
+        id: topBar
         model: page.model
-        currentIndex: -1
-        reuseItems: true
+    }
 
-        // Keep the Rust model's notion of the current selection in sync so its
-        // auto-select policy knows whether the user is investigating a row.
-        onCurrentIndexChanged: {
-            const item = list.itemAtIndex(list.currentIndex);
-            page.model.setCurrentRowId(item ? item.rowId : "");
-        }
+    Controls.SplitView {
+        anchors.fill: parent
+        orientation: Qt.Horizontal
 
-        delegate: ConnectionRow {
+        MonitorPane {
+            id: listPane
+            Controls.SplitView.fillWidth: true
+            Controls.SplitView.minimumWidth: Kirigami.Units.gridUnit * 18
             page: pageRoot
         }
-    }
 
-    // Issue #49: the inspector works from a copy of the row taken when it
-    // opened. If the bridge withdraws that prompt afterwards (the daemon's ask
-    // timed out, rows were cleared, the service restarted), the copy would still
-    // say pending and Allow/Deny would act on a row that no longer exists: the
-    // bridge rejects the verdict while the sheet closes as if it had worked.
-    // A snapshot clears the model and then re-inserts the rows that are still
-    // pending, including this one, so a withdrawn prompt comes back if the very
-    // same id is pending again. Row ids carry the bridge session, so a later
-    // row that reuses the wire id is a different id and cannot revive it. The
-    // inspector itself stays open.
-    function inspectedRowDecidable() {
-        // A closed feed can't carry a verdict, whatever the model still holds
-        // from the lost session.
-        if (page.bridgeFeed && page.bridgeFeed.ok === false) {
-            return false;
-        }
-        return !!page.model && page.model.isPendingRow(page.inspectId);
-    }
-
-    function recheckInspectedRow() {
-        const decidable = page.inspectedRowDecidable();
-        if (page.inspectPending && !decidable) {
-            page.inspectPending = false;
-            page.inspectNoLongerPending = true;
-        } else if (page.inspectNoLongerPending && decidable) {
-            page.inspectPending = true;
-            page.inspectNoLongerPending = false;
+        // The inspector column (compact mode: see ConnectionDetailPage).
+        Controls.ScrollView {
+            id: sideColumn
+            visible: !page.compact
+            Controls.SplitView.preferredWidth: Kirigami.Units.gridUnit * 22
+            Controls.SplitView.minimumWidth: Kirigami.Units.gridUnit * 16
+            contentWidth: availableWidth
+            Loader {
+                id: sideLoader
+                active: !page.compact
+                x: Kirigami.Units.largeSpacing
+                width: sideColumn.availableWidth - Kirigami.Units.largeSpacing * 2
+                sourceComponent: InspectorPanel {
+                    page: pageRoot
+                    width: sideLoader.width
+                }
+            }
         }
     }
 
+    // Row click: select; when compact, push the detail page.
     function openInspector(row) {
-        page.inspectNoLongerPending = false;
-        page.inspectId = row.rowId;
-        page.inspectProcess = row.process;
-        page.inspectHost = row.host;
-        page.inspectPort = row.port;
-        page.inspectProtocol = row.protocol;
-        page.inspectVerdict = row.verdict;
-        page.inspectPending = row.pending;
-        page.inspectMatchedRule = row.matchedRule;
-        page.inspectMatchedRuleDisplay = row.matchedRuleDisplay;
-        page.inspectDeadlineMs = row.answerDeadlineMs > 0 ? row.answerDeadlineMs : -1;
-        page.inspectOutcomeText = row.outcomeText || "";
-        page.inspectMakeRuleOffered = row.makeRuleOffered === true;
-        page.applyRowDetails(row.rowId);
-        page.inspectAppBoundRules = verdictHelper.rowAppBoundRules(row.rowId);
-        page.inspectDecideLater = verdictHelper.rowDecideLater(row.rowId);
-        // The row may be a stale pending one, and with the connection already
-        // down no `ok` change follows to catch it.
-        page.recheckInspectedRow();
-        inspector.open();
+        inspect.snapshot(row);
+        page.pushDetailPage();
     }
 
-    // Parity 2: pull the destination IP for the insight panel. Best-effort —
-    // malformed/missing JSON degrades to a blank value rather than throwing,
-    // since this is a decorative side-channel, never a blocker.
-    function applyRowDetails(id) {
-        page.inspectIp = "";
-        page.inspectBindableProcessPath = false;
-        page.inspectAlsoListedByDefault = false;
-        if (!page.model) {
+    function pushDetailPage() {
+        if (page.compact && page.inspecting && !page.detailPage) {
+            page.detailPage = page.hostStack.push(detailPageComponent, { page: pageRoot });
+        }
+    }
+
+    // Row ids auto-select asked for since the last `runAuto`.
+    property var autoIds: []
+    // The pending row the user last closed: auto-select skips it until it is
+    // decided or removed, so a dismissed prompt does not come back.
+    property string dismissedId: ""
+    // A pending arrival selects the OLDEST pending row (the one waiting
+    // longest); any other id (the grouped re-anchor) selects that row itself.
+    function runAuto() {
+        const ids = page.autoIds;
+        page.autoIds = [];
+        if (page.dismissedId !== "" && !page.model.isPendingRow(page.dismissedId)) {
+            page.dismissedId = "";
+        }
+        const anyPending = ids.some(id => page.model.isPendingRow(id));
+        const index = anyPending ? page.model.oldestPendingRowIndex(page.dismissedId)
+            : (ids.length > 0 ? page.model.visibleRowIndex(ids[ids.length - 1]) : -1);
+        if (index >= 0) page.selectAuto(index);
+    }
+
+    // The pushed detail page left the stack (Back): the selection ends with it.
+    Connections {
+        target: page.hostStack
+        ignoreUnknownSignals: true
+        function onDepthChanged() {
+            const detail = page.detailPage;
+            for (let i = 0; detail && i < page.hostStack.depth; i++) {
+                if (page.hostStack.get(i) === detail) {
+                    return;
+                }
+            }
+            if (detail) {
+                page.detailPageGone();
+            }
+        }
+    }
+
+    function detailPageGone() {
+        page.detailPage = null;
+        page.dismissInspector();
+    }
+
+    function selectAuto(row) {
+        const view = listPane.view;
+        if (page.inspecting) {
             return;
         }
-        try {
-            const details = JSON.parse(page.model.rowDetailsJson(id));
-            page.inspectIp = details.dstIp || "";
-            page.inspectBindableProcessPath = details.bindableProcessPath === true;
-            page.inspectAlsoListedByDefault = details.alsoListedByDefault === true;
-        } catch (e) {
-            // Leave the defaults above.
+        view.forceLayout();
+        view.currentIndex = row;
+        const item = view.itemAtIndex(row);
+        page.model.setCurrentRowId(item ? item.rowId : "");
+        page.followSelection(item);
+    }
+
+    function reanchor() {
+        const index = page.inspecting ? page.model.visibleRowIndex(page.inspectId) : -1;
+        if (index >= 0 && listPane.view.currentIndex !== index) {
+            listPane.view.currentIndex = index;
         }
     }
 
-    // Row inspector (see ConnectionInspector.qml).
-    ConnectionInspector {
-        id: inspector
-        page: pageRoot
+    Component {
+        id: detailPageComponent
+        ConnectionDetailPage {}
+    }
+
+    function closeDetailPage() {
+        const detail = page.detailPage;
+        page.detailPage = null;
+        if (detail && page.hostStack) {
+            page.hostStack.pop(page);
+        }
+    }
+
+    // Close / finished action: clear the selection.
+    function dismissInspector() {
+        const closed = inspect.rowId;
+        page.dismissedId = closed;
+        inspect.clear();
+        page.closeDetailPage();
+        listPane.view.currentIndex = -1;
+        // A prompt that came in while the panel was busy was not shown.
+        Qt.callLater(page.selectOldestPending, closed);
+    }
+
+    function selectOldestPending(exceptId) {
+        const index = page.model ? page.model.oldestPendingRowIndex(exceptId) : -1;
+        if (index >= 0) page.selectAuto(index);
+    }
+
+    // The list's current row changed (click, auto-select, or the model moving
+    // it). A wide window shows it; a compact one waits for a click.
+    function followSelection(item) {
+        if (!item || item.isGroupHeader || item.rowId === page.inspectId) {
+            return;
+        }
+        if (page.inspecting && page.model.visibleRowIndex(page.inspectId) < 0) {
+            page.dismissInspector();
+        } else if (!page.compact) {
+            inspect.snapshot(item);
+        }
+    }
+
+    // The selected row left the list (filter, age-out, collapsed group) or is
+    // still pending but filtered away: nothing to show. A pending row that was
+    // withdrawn keeps its "no longer waiting" notice instead (issue #49).
+    function clearIfRowGone() {
+        if (!page.inspecting || page.inspectNoLongerPending
+                || page.model.visibleRowIndex(page.inspectId) >= 0) {
+            return;
+        }
+        if (!page.inspectPending || page.model.isPendingRow(page.inspectId)) {
+            page.dismissInspector();
+        }
     }
 }

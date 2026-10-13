@@ -65,6 +65,11 @@ Kirigami.ApplicationWindow {
     property var connectionsModelRef: connectionsModel
     // For page components, whose own `geoModel` property would shadow the id.
     property var geoModelRef: geoModel
+    // Page navigation that first pops any pushed page (see StackNav.qml).
+    StackNav {
+        id: nav
+        stack: root.pageStack
+    }
 
     // "Make a rule…" requests (PR #111 review, OQ1). Owned here, not by the
     // Connections page: the drawer's pageStack.replace destroys that page, and
@@ -426,7 +431,7 @@ Kirigami.ApplicationWindow {
         actions: [
             Kirigami.Action {
                 text: "Details"
-                onTriggered: root.pageStack.replace(daemonHealthPageComponent)
+                onTriggered: nav.replaceMain(daemonHealthPageComponent)
             }
         ]
     }
@@ -506,7 +511,7 @@ Kirigami.ApplicationWindow {
         model: root.connectionsModelRef
         bridgeFeed: root.bridgeFeedRef
         onExplained: text => root.showPassiveNotification(text, "long")
-        onReviewRequested: root.pageStack.replace(connectionsPageComponent)
+        onReviewRequested: nav.replaceMain(connectionsPageComponent)
     }
 
     // Keeps ConnectionsModel.oldestPendingAgeSecs (and therefore
@@ -542,17 +547,17 @@ Kirigami.ApplicationWindow {
 
             // Rule-match diagnostics "Show rule" jump (Parity 4): navigate to
             // the Rules tab and open the matched rule's detail sheet
-            // directly, using the page instance `pageStack.replace` returns
+            // directly, using the page instance `nav.replaceMain` returns
             // rather than a separate lookup/scroll step.
             onShowRuleRequested: function(ruleName) {
-                const rulesPage = root.pageStack.replace(rulesPageComponent);
+                const rulesPage = nav.replaceMain(rulesPageComponent);
                 rulesPage.openRuleByName(ruleName);
             }
 
             // "Simulate this connection": same route, to the Simulate sheet,
             // prefilled with what the inspected row carries.
             onSimulateConnectionRequested: function(prefillJson) {
-                const rulesPage = root.pageStack.replace(rulesPageComponent);
+                const rulesPage = nav.replaceMain(rulesPageComponent);
                 rulesPage.openSimulator(prefillJson);
             }
         }
@@ -628,7 +633,7 @@ Kirigami.ApplicationWindow {
     // (`ConnectionsModel.simulationPrefillJson`), the way "Simulate this
     // connection" opens the Simulate sheet. Returns whether it opened.
     function openRuleEditor(prefillJson) {
-        const rulesPage = root.pageStack.replace(rulesPageComponent);
+        const rulesPage = nav.replaceMain(rulesPageComponent);
         return rulesPage.openEditor(prefillJson);
     }
 
@@ -697,52 +702,52 @@ Kirigami.ApplicationWindow {
                 text: "Connections"
                 icon.name: "network-connect"
                 checked: true
-                onTriggered: root.pageStack.replace(connectionsPageComponent)
+                onTriggered: nav.replaceMain(connectionsPageComponent)
             },
             Kirigami.Action {
                 text: "Geography"
                 icon.name: "map-globe"
-                onTriggered: root.pageStack.replace(geoPageComponent)
+                onTriggered: nav.replaceMain(geoPageComponent)
             },
             Kirigami.Action {
                 text: "Rules"
                 icon.name: "view-list-details"
-                onTriggered: root.pageStack.replace(rulesPageComponent)
+                onTriggered: nav.replaceMain(rulesPageComponent)
             },
             Kirigami.Action {
                 text: "Blocklists"
                 icon.name: "edit-delete"
-                onTriggered: root.pageStack.replace(blocklistsPageComponent)
+                onTriggered: nav.replaceMain(blocklistsPageComponent)
             },
             Kirigami.Action {
                 text: "Traffic"
                 icon.name: "office-chart-line"
-                onTriggered: root.pageStack.replace(trafficPageComponent)
+                onTriggered: nav.replaceMain(trafficPageComponent)
             },
             Kirigami.Action {
                 text: "Profiles"
                 icon.name: "preferences-system-network"
-                onTriggered: root.pageStack.replace(profilesPageComponent)
+                onTriggered: nav.replaceMain(profilesPageComponent)
             },
             Kirigami.Action {
                 text: "Recommended background-service rules"
                 icon.name: "checkmark"
-                onTriggered: root.pageStack.replace(recommendedRulesPageComponent)
+                onTriggered: nav.replaceMain(recommendedRulesPageComponent)
             },
             Kirigami.Action {
                 text: "Security Scan"
                 icon.name: "security-low"
-                onTriggered: root.pageStack.replace(scannerPageComponent)
+                onTriggered: nav.replaceMain(scannerPageComponent)
             },
             Kirigami.Action {
                 text: "Settings & Diagnostics"
                 icon.name: "settings-configure"
-                onTriggered: root.pageStack.replace(diagnosticsPageComponent)
+                onTriggered: nav.replaceMain(diagnosticsPageComponent)
             },
             Kirigami.Action {
                 text: "Daemon Health"
                 icon.name: "dialog-warning"
-                onTriggered: root.pageStack.replace(daemonHealthPageComponent)
+                onTriggered: nav.replaceMain(daemonHealthPageComponent)
             }
         ]
     }

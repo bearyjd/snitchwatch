@@ -26,7 +26,17 @@ const CONNECTIONS_PAGE: &str = concat!(
     "\n",
     include_str!("../qml/ConnectionsFilterBar.qml"),
     "\n",
-    include_str!("../qml/ConnectionInspector.qml"),
+    include_str!("../qml/ConnectionsTopBar.qml"),
+    "\n",
+    include_str!("../qml/InspectorState.qml"),
+    "\n",
+    include_str!("../qml/HoverTip.qml"),
+    "\n",
+    include_str!("../qml/InspectorPanel.qml"),
+    "\n",
+    include_str!("../qml/ConnectionDetailPage.qml"),
+    "\n",
+    include_str!("../qml/ConnectionList.qml"),
     "\n",
     include_str!("../qml/RuleButton.qml"),
     "\n",
@@ -37,6 +47,8 @@ const CONNECTIONS_PAGE: &str = concat!(
     include_str!("../qml/MapView.qml"),
     "\n",
     include_str!("../qml/MapMarker.qml"),
+    "\n",
+    include_str!("../qml/MonitorPane.qml"),
 );
 const MAIN_QML: &str = include_str!("../qml/main.qml");
 
