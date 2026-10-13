@@ -37,6 +37,9 @@ pub(super) struct State {
     /// a delete of the name, or an install, is answered, and at a
     /// reconnect.
     pub(super) maybe_applied: BTreeMap<String, MaybeApplied>,
+    /// Entries turned off because the daemon refused their install (#130),
+    /// with why: shown until the entry is turned on again.
+    pub(super) install_refusals: BTreeMap<String, &'static str>,
     /// Bumped by every GUI request taken (a choice, even an unchanged one,
     /// or a removal): each gets a pass (re-review 2, HIGH).
     pub(super) requests: u64,
@@ -63,6 +66,7 @@ impl State {
             removal_failures: BTreeMap::new(),
             removals: BTreeSet::new(),
             maybe_applied: BTreeMap::new(),
+            install_refusals: BTreeMap::new(),
             requests: 0,
             file: None,
             storage: StorageStatus {
@@ -336,6 +340,7 @@ pub(super) fn summary(
                 .consent_problems
                 .get(&entry.id)
                 .or_else(|| state.problems.get(&entry.id))
+                .or_else(|| state.install_refusals.get(&entry.id))
                 .map(|p| p.to_string())
         },
     }

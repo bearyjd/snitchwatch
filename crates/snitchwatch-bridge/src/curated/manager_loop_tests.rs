@@ -37,6 +37,8 @@ fn edited(id: &str) -> Rule {
     rule
 }
 
+/// A refused install is deleted by name once (#130), and neither is sent
+/// again: the entry is off.
 #[tokio::test]
 async fn a_refused_install_is_sent_once_not_in_a_loop() {
     let harness = Harness::new().connect(Daemon::Refuse, Vec::new());
@@ -46,11 +48,16 @@ async fn a_refused_install_is_sent_once_not_in_a_loop() {
     eventually("the first install", || !harness.seen().is_empty()).await;
     tokio::time::sleep(SETTLE).await;
     worker.abort();
-    assert_eq!(harness.seen().len(), 1, "{} sends", harness.seen().len());
     assert_eq!(
-        entry_state(&curated, FLATPAK).status,
-        EntryStatus::NotInstalled
+        harness.seen(),
+        [
+            (Action::ChangeRule as i32, FLATPAK_RULE.into()),
+            (Action::DeleteRule as i32, FLATPAK_RULE.into()),
+        ]
     );
+    let state = entry_state(&curated, FLATPAK);
+    assert_eq!(state.status, EntryStatus::Off);
+    assert!(!state.on);
 }
 
 #[tokio::test]
@@ -77,11 +84,14 @@ async fn a_new_choice_tries_a_failed_command_again() {
     turn(&curated, FLATPAK, true);
     curated.reconcile().await;
     curated.reconcile().await;
-    assert_eq!(harness.seen().len(), 1);
+    curated.reconcile().await;
+    // The refused install, and its delete (#130).
+    assert_eq!(harness.seen().len(), 2);
     turn(&curated, FLATPAK, false);
     turn(&curated, FLATPAK, true);
     curated.reconcile().await;
-    assert_eq!(harness.seen().len(), 2);
+    assert_eq!(harness.seen().len(), 3);
+    assert_eq!(harness.seen()[2].0, Action::ChangeRule as i32);
 }
 
 /// Re-review M1: a first run (or a choices file moved away) deletes

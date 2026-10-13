@@ -213,10 +213,9 @@ async fn a_refused_install_is_not_reported_installed() {
     curated.reconcile().await;
     let state = entry_state(&curated, FLATPAK);
     assert_eq!(state.status, EntryStatus::NotInstalled);
-    assert_eq!(
-        state.problem.as_deref(),
-        Some("The firewall service refused the rule.")
-    );
+    // Turned off again, and why (#130).
+    assert!(!state.on);
+    assert_eq!(state.problem.as_deref(), Some(INSTALL_REFUSED_REASON));
     assert!(store::load(&harness.file)
         .unwrap()
         .unwrap()

@@ -65,6 +65,11 @@ pub const SAVE_FAILED_REASON: &str = "Snitchwatch couldn't save its choices for 
      rules, so it adds and removes none until its background service restarts: rules already \
      in the firewall were left in place.";
 
+/// Why an entry the user turned on is off again: the daemon refused its
+/// install, and the bridge removed what it may have applied (#130).
+pub const INSTALL_REFUSED_REASON: &str = "The firewall service refused the rule, so \
+     Snitchwatch turned it off again. Turn it on to try again.";
+
 #[derive(Clone)]
 pub struct CuratedDefaults {
     inner: Arc<Inner>,
@@ -353,6 +358,8 @@ impl CuratedDefaults {
                 let planned = plan(entries(), daemon, &state.choices);
                 state.statuses = planned.statuses;
                 keep(&mut state, planned.choices);
+                let enabled = state.choices.enabled.clone();
+                state.install_refusals.retain(|id, _| !enabled.contains(id));
                 let actions = without_failed(&mut state, planned.actions, generation);
                 show_removal_failures(&mut state, daemon, generation);
                 let revision = state.broad_revision;
@@ -572,6 +579,20 @@ impl CuratedDefaults {
                     "an install failed after its entry was turned off; the failure isn't kept"
                 );
             }
+            // Refused, maybe after the daemon's memory took the rule (#130):
+            // the entry is off and its consent gone, so nothing reinstalls it
+            // without a new choice, and the next pass deletes the name
+            // (`track_maybe_applied`'s record). No failure is kept: it would
+            // hold that delete back.
+            Err(problem) if problem.daemon_refused && matches!(done, Done::Install(_)) => {
+                warn!(entry = %id, "the firewall service refused a recommended rule; turned off");
+                self.revoke_locked(&mut state, &id);
+                let choices = state.choices.disable(&id);
+                keep(&mut state, choices);
+                state.failures.remove(&id);
+                state.statuses.insert(id.clone(), EntryStatus::NotInstalled);
+                state.install_refusals.insert(id, INSTALL_REFUSED_REASON);
+            }
             Err(problem) => {
                 let status = match done {
                     Done::Install(_) => EntryStatus::NotInstalled,
@@ -762,3 +783,7 @@ mod unanswered_tests;
 #[cfg(test)]
 #[path = "manager_intent_tests.rs"]
 mod intent_tests;
+
+#[cfg(test)]
+#[path = "manager_refused_install_tests.rs"]
+mod refused_install_tests;

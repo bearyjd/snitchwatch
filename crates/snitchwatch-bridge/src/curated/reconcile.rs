@@ -26,7 +26,9 @@
 //!   unlisted: stock `replaceUserRule` takes the rule into memory before
 //!   `Save` can fail, and an unanswered one may still be taken
 //!   ([`DaemonRules::maybe_applied`]). Turned off, such an entry is deleted
-//!   by name, listed or not (PR #119 review M1, #120 item 13).
+//!   by name, listed or not (PR #119 review M1, #120 item 13). The manager
+//!   turns an entry whose install was refused off at once, its consent
+//!   dropped, so that delete follows right away (#130).
 //! - A rule under the prefix that is no longer in the data file is deleted
 //!   only if it is a copy Snitchwatch recorded installing, unedited.
 //! - Nothing outside the prefix is ever touched.
