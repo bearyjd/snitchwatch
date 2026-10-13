@@ -1530,6 +1530,35 @@ mod tests {
     }
 
     #[test]
+    fn denied_only_and_from_now_force_the_host_path_open_and_hide_the_rest() {
+        let mut rows = vec![
+            row("a", "firefox", "api.github.com", "1.1.1.1", Some("deny")),
+            row("b", "firefox", "www.github.com", "1.1.1.1", Some("allow")),
+            row("c", "firefox", "www.github.com", "1.1.1.1", Some("deny")),
+        ];
+        rows[0].started_at_ms = 500;
+        rows[1].started_at_ms = 500;
+        rows[2].started_at_ms = 50;
+        let tree = build(&rows);
+
+        let mut filter = ConnectionFilter::default();
+        filter.set_denied_only(true);
+        let proj = tree.build_host_projection(&rows_map(&rows), &filter);
+        let s = shape(&proj);
+        assert!(s.contains(&"H:api.github.com".to_string()), "{s:?}");
+        assert!(s.contains(&"H:www.github.com".to_string()), "{s:?}");
+        assert!(!s.iter().any(|e| e.starts_with("R:b:")), "{s:?}");
+
+        // From now at 100 leaves only row a; www.github.com has nothing left.
+        filter.set_since_ms(Some(100));
+        let proj = tree.build_host_projection(&rows_map(&rows), &filter);
+        assert_eq!(
+            shape(&proj),
+            vec!["P:firefox", "D:github.com", "H:api.github.com", "R:a:true"]
+        );
+    }
+
+    #[test]
     fn hosts_are_pruned_and_counted_down_as_rows_leave() {
         let rows = host_rows();
         let mut tree = build(&rows);

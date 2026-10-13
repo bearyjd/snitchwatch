@@ -110,6 +110,19 @@ impl SharedResolver {
         }
     }
 
+    /// The cache this resolver shares with its clones; lets a test prove two
+    /// handles are one resolver.
+    #[cfg(test)]
+    pub(crate) fn cache_handle(&self) -> Arc<Mutex<HashMap<String, Resolved>>> {
+        self.cache.clone()
+    }
+
+    /// Whether a country database backs this resolver. Without one every
+    /// public address resolves to [`Bucket::Unknown`].
+    pub fn has_database(&self) -> bool {
+        self.lookup.is_some()
+    }
+
     /// Resolve `ip`, consulting (and populating) the shared cache first.
     pub fn resolve(&self, ip: &str) -> Resolved {
         if let Some(cached) = self.cache.lock().unwrap().get(ip) {
@@ -121,6 +134,14 @@ impl SharedResolver {
             .unwrap()
             .insert(ip.to_string(), resolved.clone());
         resolved
+    }
+}
+
+impl std::fmt::Debug for SharedResolver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SharedResolver")
+            .field("has_database", &self.has_database())
+            .finish_non_exhaustive()
     }
 }
 

@@ -1,8 +1,11 @@
 // Connections page header, split out of ConnectionsPage.qml (monitor-tree
 // step 1) with no behaviour change.
 //
-// Search + pending-only filter live in the page header so they stay visible
-// while the list scrolls.
+// The heading, search field and Grouped switch: one fixed-height row, the
+// page's `titleDelegate`. The filter switches and the summary can wrap onto
+// several lines, so they live in ConnectionsFilterBar.qml, above the list in
+// the page content. Every control only forwards to the model: the token
+// syntax and the matching are decided in Rust (connections/filter.rs).
 import QtQuick
 import QtQuick.Layouts
 import QtQuick.Controls as Controls
@@ -26,13 +29,23 @@ RowLayout {
     Kirigami.SearchField {
         id: search
         Layout.fillWidth: true
-        placeholderText: "Filter by process, host, port…"
-        onTextChanged: header.model.setFilterQuery(text)
-    }
-    Controls.Switch {
-        id: pendingOnly
-        text: "Pending only"
-        onToggled: header.model.setPendingOnly(checked)
+        Layout.minimumWidth: Kirigami.Units.gridUnit * 8
+        placeholderText: "Search, or app: host: port: country:XX"
+        Accessible.name: "Search connections. Use app:, host:, port: or country: and a value; terms are combined."
+        onTextChanged: {
+            if (header.model && text !== header.model.filterText) {
+                header.model.setFilterQuery(text)
+            }
+        }
+        // Follow a query set from elsewhere, such as a map click.
+        Connections {
+            target: header.model
+            function onFilterTextChanged() {
+                if (search.text !== header.model.filterText) {
+                    search.text = header.model.filterText
+                }
+            }
+        }
     }
     Controls.Switch {
         id: grouped

@@ -59,15 +59,9 @@ Kirigami.Page {
         bridgeFeed: page.bridgeFeed
         onExplained: text => page.showPassiveNotice(text)
     }
-    // Exposed for the headless probe (tests/inline_verdict_qml.rs).
+    // Exposed for the headless probes (tests/inline_verdict_qml.rs, ...).
     property alias inlineVerdicts: verdictHelper
-
-    // The header rule buttons' commands, confirm and outcome bar.
-    header: LevelRuleActions {
-        id: ruleActions
-        model: page.model
-    }
-    property alias levelRules: ruleActions
+    property alias levelRules: topBar.ruleActions
 
     // Issue #18: a row's inline Allow/Deny. Also the entry point
     // `tests/inline_verdict_qml.rs` drives, to exercise the click -> submit ->
@@ -99,7 +93,7 @@ Kirigami.Page {
         }
     }
 
-    // Snapshot of the row currently shown in the inspector panel.
+    // Snapshot of the row shown in the panel.
     property string inspectId: ""
     property string inspectProcess: ""
     property string inspectHost: ""
@@ -117,10 +111,9 @@ Kirigami.Page {
         ? "no longer pending"
         : (page.inspectPending ? "pending"
            : page.inspectOutcomeText !== "" ? page.inspectOutcomeText : page.inspectVerdict)
-    // Prompt-slot plan Part C, copied from the row like the rest: when the
-    // bridge answers it (-1: never), a put-off row's label, whether "Make a
-    // rule…" is offered (put off, or decided by the firewall's default
-    // action, E3), and whether its session takes "Decide later".
+    // Prompt-slot plan Part C, copied from the row: when the bridge answers it
+    // (-1: never), a put-off row's label, whether "Make a rule…" is offered (put
+    // off, or decided by the default action, E3), whether it takes "Decide later".
     property real inspectDeadlineMs: -1
     property string inspectOutcomeText: ""
     property bool inspectMakeRuleOffered: false
@@ -237,9 +230,16 @@ Kirigami.Page {
         }
     }
 
+    // Heading, search and Grouped only: the title row has a fixed height.
     titleDelegate: ConnectionsHeader {
         model: page.model
         title: page.title
+    }
+
+    // Filters and rule actions, above the list (see ConnectionsTopBar.qml).
+    header: ConnectionsTopBar {
+        id: topBar
+        model: page.model
     }
 
     Controls.SplitView {

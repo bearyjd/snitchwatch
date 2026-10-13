@@ -162,6 +162,24 @@ pub mod qobject {
         /// the toggle needs to rebracket the Qt model reset and rebuild the
         /// grouped projection.
         #[qproperty(bool, grouped)]
+        /// The search text now in force, so the search field can follow a
+        /// query set from elsewhere (a map click calls `setFilterQuery`).
+        #[qproperty(QString, filter_text, cxx_name = "filterText")]
+        /// Whether any filter (search, pending only, denied only, from now)
+        /// is narrowing the list.
+        #[qproperty(bool, filter_active, cxx_name = "filterActive")]
+        /// Plain-text description of the active filter, including why a term
+        /// matches nothing (no GeoIP database, a bad port). Empty when no
+        /// filter is active.
+        #[qproperty(QString, filter_summary, cxx_name = "filterSummary")]
+        /// Start of "From now" in ms since the epoch, or `0` when it is off.
+        /// Session-only; never persisted.
+        #[qproperty(i64, filter_since_ms, cxx_name = "filterSinceMs")]
+        /// Whether "Pending only" is on. Named `filter*` so the generated
+        /// property setter does not collide with the `setPendingOnly` command.
+        #[qproperty(bool, filter_pending_only, cxx_name = "filterPendingOnly")]
+        /// Whether "Denied only" is on (see `filterPendingOnly`).
+        #[qproperty(bool, filter_denied_only, cxx_name = "filterDeniedOnly")]
         type ConnectionsModel = super::ConnectionsModelRust;
 
         /// Emitted when the auto-select policy decides a freshly arrived pending
@@ -220,7 +238,9 @@ pub mod qobject {
         fn start_bridge_feed(self: Pin<&mut ConnectionsModel>);
 
         // --- Filter / search (Task 8) --------------------------------------
-        /// Set the case-insensitive substring search query. Empty clears it.
+        /// Set the search query: whitespace-separated terms, all of which must
+        /// match. `app:`, `host:`, `port:` and `country:` (ISO-A2) narrow one
+        /// field; anything else is a case-insensitive substring. Empty clears.
         #[qinvokable]
         #[cxx_name = "setFilterQuery"]
         fn set_filter_query(self: Pin<&mut ConnectionsModel>, query: &QString);
@@ -229,6 +249,17 @@ pub mod qobject {
         #[qinvokable]
         #[cxx_name = "setPendingOnly"]
         fn set_pending_only(self: Pin<&mut ConnectionsModel>, pending_only: bool);
+
+        /// Toggle "show only denied rows".
+        #[qinvokable]
+        #[cxx_name = "setDeniedOnly"]
+        fn set_denied_only(self: Pin<&mut ConnectionsModel>, denied_only: bool);
+
+        /// Turn "From now" on (hide rows that started before this moment) or
+        /// off. Turning it on while already on keeps the original start.
+        #[qinvokable]
+        #[cxx_name = "setFromNow"]
+        fn set_from_now(self: Pin<&mut ConnectionsModel>, from_now: bool);
 
         // --- Selection tracking (Task 8 auto-select) ------------------------
         /// Tell the model which row the user currently has selected (empty =
@@ -643,6 +674,13 @@ pub struct ConnectionsModelRust {
     /// The firewall's rules and the rule button commands in flight, behind
     /// the `levelRuleState` and `levelRuleName` roles.
     level_rules: LevelRules,
+    /// Backing fields for the `filter*` qproperties.
+    filter_text: QString,
+    filter_active: bool,
+    filter_summary: QString,
+    filter_since_ms: i64,
+    filter_pending_only: bool,
+    filter_denied_only: bool,
     /// The Settings default duration the rule roles are computed with.
     duration: level_rule_actions::DurationCache,
 }
@@ -650,7 +688,9 @@ pub struct ConnectionsModelRust {
 impl Default for ConnectionsModelRust {
     fn default() -> Self {
         Self {
-            store: RowStore::default(),
+            store: RowStore::with_filter(
+                ConnectionFilter::default().with_geo(crate::geo::shared_resolver()),
+            ),
             grouping: GroupTree::default(),
             grouped_projection: Vec::new(),
             grouped: true,
@@ -663,6 +703,12 @@ impl Default for ConnectionsModelRust {
             pending_grouped_msgs: Vec::new(),
             grouped_flush_scheduled: false,
             level_rules: LevelRules::default(),
+            filter_text: QString::default(),
+            filter_active: false,
+            filter_summary: QString::default(),
+            filter_since_ms: 0,
+            filter_pending_only: false,
+            filter_denied_only: false,
             duration: level_rule_actions::DurationCache::default(),
         }
     }
@@ -817,6 +863,23 @@ impl qobject::ConnectionsModel {
     fn set_pending_only(self: Pin<&mut Self>, pending_only: bool) {
         let mut filter = self.store.filter().clone();
         filter.set_pending_only(pending_only);
+        self.apply_filter(filter);
+    }
+
+    fn set_denied_only(self: Pin<&mut Self>, denied_only: bool) {
+        let mut filter = self.store.filter().clone();
+        filter.set_denied_only(denied_only);
+        self.apply_filter(filter);
+    }
+
+    fn set_from_now(self: Pin<&mut Self>, from_now: bool) {
+        let mut filter = self.store.filter().clone();
+        let since = match (from_now, filter.since_ms()) {
+            (true, Some(started)) => Some(started),
+            (true, None) => Some(now_ms()),
+            (false, _) => None,
+        };
+        filter.set_since_ms(since);
         self.apply_filter(filter);
     }
 
@@ -1196,7 +1259,24 @@ impl qobject::ConnectionsModel {
                 self.as_mut().end_reset_model();
             }
         }
+        self.as_mut().refresh_filter_state();
         self.refresh_counts();
+    }
+
+    /// Mirror the store's filter into the `filter*` properties.
+    fn refresh_filter_state(mut self: Pin<&mut Self>) {
+        let filter = self.store.filter();
+        let text = QString::from(filter.query());
+        let active = filter.is_active();
+        let summary = QString::from(&filter.summary());
+        let since = filter.since_ms().unwrap_or(0);
+        let (pending_only, denied_only) = (filter.pending_only(), filter.denied_only());
+        self.as_mut().set_filter_text(text);
+        self.as_mut().set_filter_active(active);
+        self.as_mut().set_filter_summary(summary);
+        self.as_mut().set_filter_since_ms(since);
+        self.as_mut().set_filter_pending_only(pending_only);
+        self.as_mut().set_filter_denied_only(denied_only);
     }
 
     /// Switch between grouped and flat views. A no-op if already in the

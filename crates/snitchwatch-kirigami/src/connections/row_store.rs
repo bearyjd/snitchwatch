@@ -140,6 +140,16 @@ impl RowStore {
         Self::default()
     }
 
+    /// An empty store whose filter is `filter` (carrying its country resolver
+    /// from the start; [`Self::set_filter`] compares by value and so would not
+    /// swap in a resolver alone).
+    pub fn with_filter(filter: ConnectionFilter) -> Self {
+        Self {
+            filter,
+            ..Self::default()
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.rows.len()
     }
