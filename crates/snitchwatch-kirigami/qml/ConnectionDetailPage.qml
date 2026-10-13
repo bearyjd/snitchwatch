@@ -22,20 +22,14 @@ Kirigami.ScrollablePage {
         showHeader: false
     }
 
-    // Left by Back (not by the page closing it): nothing is on screen any
-    // more, so the selection ends and auto-select works again. Checked when the
-    // page stops being current, and again on destruction in case that never
-    // fired.
-    function leave() {
+    // Popped by Back: ConnectionsPage notices (its stack's depth changed and
+    // this page is gone) and ends the selection. The destruction below covers a
+    // pop that depth didn't reveal. Losing focus or being covered (a second
+    // column in a mid-width window, an onboarding page pushed on top) is NOT
+    // leaving.
+    Component.onDestruction: {
         if (page && page.detailPage === detail) {
-            page.detailPage = null;
-            page.dismissInspector();
+            page.detailPageGone();
         }
     }
-    onIsCurrentPageChanged: {
-        if (!isCurrentPage) {
-            detail.leave();
-        }
-    }
-    Component.onDestruction: detail.leave()
 }

@@ -62,6 +62,10 @@ Kirigami.ApplicationWindow {
         model: model
         bridgeFeed: feedStub
     }
+    Component {
+        id: stubComponent
+        Kirigami.Page {}
+    }
     TestCase { id: tc; name: "panel"; when: false }
 
     function expect(ok, what) { if (!ok) probe.failures.push(what); }
@@ -163,6 +167,21 @@ Kirigami.ApplicationWindow {
         function () {
             probe.expect(probe.pageStack.depth === 2, "Enter did not open the detail page: "
                          + probe.pageStack.depth);
+            // Another page pushed on top (the onboarding page on a daemon
+            // disconnect) must not end the selection or empty the detail page.
+            probe.pageStack.push(stubComponent);
+        },
+        function () {
+            probe.expect(probe.pageStack.depth === 3, "stub not pushed: " + probe.pageStack.depth);
+            probe.expect(probe.page.inspecting && probe.page.detailPage !== null,
+                         "a page pushed on top dismissed the selection");
+            probe.pageStack.pop();
+        },
+        function () {
+            probe.expect(probe.pageStack.depth === 2 && probe.page.inspecting
+                         && probe.page.detailPage !== null,
+                         "popping the page above left the detail page empty: depth "
+                         + probe.pageStack.depth);
             // Back (not the close button): pops the page by the stack's own means.
             probe.pageStack.pop();
         },
@@ -232,6 +251,8 @@ Kirigami.ApplicationWindow {
         .lines()
         .filter(|line| line.contains(PROBE_URL) || line.contains("TypeError"))
         .filter(|line| !line.contains(DONE_MARKER))
+        // Kirigami creates the pages of a bare Component before parenting them.
+        .filter(|line| !line.contains("not placed in the graphics scene"))
         .collect();
     assert!(
         bad_lines.is_empty(),

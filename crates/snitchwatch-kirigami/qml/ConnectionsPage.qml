@@ -156,8 +156,10 @@ Kirigami.Page {
     Connections {
         target: page.model
         function onAutoSelectRequested(row) {
-            // The row was just inserted: select it once the list has it.
-            Qt.callLater(page.selectAuto, row);
+            // The row was just inserted: select it once the list has it. Calls
+            // coalesce, so keep the topmost (oldest) row asked for meanwhile.
+            page.autoRow = page.autoRow < 0 ? row : Math.min(page.autoRow, row);
+            Qt.callLater(page.runAuto);
         }
         // Issue #49: the bridge removes a pending row when opensnitchd's ask
         // times out, a snapshot starts with ClearConnectionRows and then
@@ -272,6 +274,35 @@ Kirigami.Page {
         if (page.compact && page.inspecting && !page.detailPage) {
             page.detailPage = page.hostStack.push(detailPageComponent, { page: pageRoot });
         }
+    }
+
+    property int autoRow: -1
+    function runAuto() {
+        const row = page.autoRow;
+        page.autoRow = -1;
+        page.selectAuto(row);
+    }
+
+    // The pushed detail page left the stack (Back): the selection ends with it.
+    Connections {
+        target: page.hostStack
+        ignoreUnknownSignals: true
+        function onDepthChanged() {
+            const detail = page.detailPage;
+            for (let i = 0; detail && i < page.hostStack.depth; i++) {
+                if (page.hostStack.get(i) === detail) {
+                    return;
+                }
+            }
+            if (detail) {
+                page.detailPageGone();
+            }
+        }
+    }
+
+    function detailPageGone() {
+        page.detailPage = null;
+        page.dismissInspector();
     }
 
     function selectAuto(row) {

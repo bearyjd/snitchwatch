@@ -295,6 +295,17 @@ Window {
         function () {
             probe.expect(page.inspecting && page.inspectId === "p9",
                          "closing the panel did not select the pending row: '" + page.inspectId + "'");
+            // Settled and idle: nothing selected, nothing left pending to pick.
+            page.dismissInspector();
+        },
+        function () {
+            probe.expect(!page.inspecting, "dismiss left a selection: " + page.inspectId);
+            model.applyServerMessageJson(JSON.stringify({ action: "insertConnectionRows", rows: [
+                probe.row("p10", "p10.example.com", null, null)] }));
+        },
+        function () {
+            probe.expect(page.inspecting && page.inspectId === "p10",
+                         "idle: a newly arrived pending row was not shown: '" + page.inspectId + "'");
         }
     ]
 
