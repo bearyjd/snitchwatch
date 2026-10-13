@@ -502,8 +502,94 @@ fn a_domain_with_a_host_under_a_delegated_suffix_is_too_broad() {
     let p = levels.project_in(domain, hosts);
     assert!(p.too_broad);
     assert_eq!(p.state, RuleState::None);
-    // The same domain without such a host is fine.
-    assert!(!levels.project_in(domain, ["ec2.amazonaws.com"]).too_broad);
+}
+
+#[test]
+fn a_domain_with_a_public_suffix_beneath_it_is_too_broad_whatever_is_seen() {
+    let levels = LevelRules::default();
+    let domain = node(Level::Domain, "amazonaws.com");
+    // `s3.amazonaws.com` and `*.compute.amazonaws.com` are suffixes, so
+    // `*.amazonaws.com` covers other tenants' roots even when no such host
+    // is in the tree (#139).
+    assert!(levels.project_in(domain, []).too_broad);
+    assert!(levels.project_in(domain, ["ec2.amazonaws.com"]).too_broad);
+    assert!(
+        levels
+            .project_in(node(Level::Domain, "Amazonaws.COM"), [])
+            .too_broad
+    );
+    assert!(
+        levels
+            .project_in(node(Level::Domain, "compute.amazonaws.com"), [])
+            .too_broad
+    );
+    // `co.uk` is a suffix and is refused too.
+    assert!(
+        levels
+            .project_in(node(Level::Domain, "co.uk"), [])
+            .too_broad
+    );
+}
+
+#[test]
+fn a_domain_with_no_public_suffix_beneath_it_is_fine() {
+    let levels = LevelRules::default();
+    // The PSL has no rule under either of these.
+    for key in ["github.com", "google.com", "example.co.uk"] {
+        let p = levels.project_in(node(Level::Domain, key), [format!("www.{key}").as_str()]);
+        assert!(!p.too_broad, "{key}");
+        assert!(!has_suffix_beneath(key), "{key}");
+    }
+    assert!(has_suffix_beneath("amazonaws.com"));
+}
+
+#[test]
+fn a_domain_key_that_is_itself_a_public_suffix_is_too_broad_with_no_hosts() {
+    let levels = LevelRules::default();
+    // Grouping keys are the last two labels, so `foo.github.io` groups under
+    // `github.io`; with its rows aged out the host check sees nothing.
+    for key in [
+        "github.io",
+        "herokuapp.com",
+        "blogspot.com",
+        "cloudfront.net",
+    ] {
+        assert!(
+            levels.project_in(node(Level::Domain, key), []).too_broad,
+            "{key}"
+        );
+    }
+}
+
+#[test]
+fn a_non_ascii_domain_key_is_refused() {
+    let levels = LevelRules::default();
+    assert!(
+        levels
+            .project_in(node(Level::Domain, "møre-og-romsdal.no"), [])
+            .too_broad
+    );
+}
+
+#[test]
+fn the_suffix_parents_file_matches_the_psl_crate_in_cargo_lock() {
+    let data = include_str!("../../../data/psl-suffix-parents.txt");
+    let header = data
+        .lines()
+        .find_map(|l| l.strip_prefix("# psl-crate-version: "))
+        .expect("version header");
+    let lock = include_str!("../../../../../Cargo.lock");
+    let locked = lock
+        .split("[[package]]")
+        .find(|p| p.trim_start().starts_with("name = \"psl\"\n"))
+        .and_then(|p| p.lines().find_map(|l| l.strip_prefix("version = \"")))
+        .and_then(|v| v.strip_suffix('"'))
+        .expect("psl in Cargo.lock");
+    assert_eq!(
+        header, locked,
+        "the psl crate changed: rerun crates/snitchwatch-kirigami/scripts/gen_psl_suffix_parents.py \
+         and commit data/psl-suffix-parents.txt"
+    );
 }
 
 #[test]
