@@ -89,7 +89,7 @@ Privacy: every lookup is a local file read; the monitor never sends destination 
   distinct glyph (check, cross, half, plus, clock); markers get a shape per verdict and an Accessible.name
   ("3 denied, 1 pending, Germany"); the map has a keyboard-reachable country list (existing GeoPage list).
 - **Rule button safety.** Deny at program level (`AnyHost`) is broad: require confirm text naming scope and
-  duration; unbindable programs (`Cannot name the program`, #44) get a disabled button with a reason.
+  duration; unbindable programs (no bindable process path; see `make_rule.rs:69`, issue #44) get a disabled button with a reason.
 - **Pulse rate.** Throttle to one animation per marker per 500 ms; honour reduced-motion.
 
 ## Work breakdown (small PRs, in order; each TDD, `just check`, cargo test/clippy offscreen, `just qml-test`)
