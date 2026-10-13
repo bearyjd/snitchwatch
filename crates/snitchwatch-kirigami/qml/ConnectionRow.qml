@@ -49,6 +49,9 @@ Item {
     required property int groupAllowed
     required property int groupDenied
     required property int groupBlocklisted
+    // Rule button roles (headers only; "none" and "" elsewhere).
+    required property string levelRuleState
+    required property string levelRuleName
 
     // Rule-match diagnostics roles. Header rows report empty strings
     // for both (see `ConnectionsModel::grouped_entry_data`) since
@@ -88,7 +91,13 @@ Item {
         ? verdictHelper.denyText(row.rowId) : ""
     readonly property string denyAllText: row.isGroupHeader && row.groupLevel === 0
         && row.groupPending > 0 ? verdictHelper.denyAllText(row.groupKey) : ""
-    // Exposed for the headless probe (tests/inline_verdict_qml.rs).
+    // The program a header's rule is about (only a host row carries it as
+    // `groupProcessKey`) and the key below it ("" for a program).
+    readonly property string ruleProgram: row.groupLevel === 0 ? row.groupKey
+        : row.groupLevel === 1 ? row.groupParentKey : row.groupProcessKey
+    readonly property string ruleKey: row.groupLevel === 0 ? "" : row.groupKey
+    // Exposed for the headless probes.
+    property alias ruleButton: headerRuleButton
     property alias denyButton: rowDenyButton
     property alias denyAllButton: batchDenyButton
 
@@ -232,6 +241,19 @@ Item {
             text: row.groupTotal + " connection" + (row.groupTotal === 1 ? "" : "s")
             color: Kirigami.Theme.disabledTextColor
             Layout.alignment: Qt.AlignVCenter
+        }
+
+        RuleButton {
+            id: headerRuleButton
+            objectName: "headerRuleButton"
+            visible: row.isGroupHeader
+            ruleState: row.levelRuleState
+            ruleName: row.levelRuleName
+            level: row.groupLevel
+            Layout.alignment: Qt.AlignVCenter
+            onCreateRequested: choice => page.levelRules.create(
+                row.groupLevel, row.ruleProgram, row.ruleKey, row.groupLabel, choice)
+            onRemoveRequested: page.levelRules.remove(row.groupLevel, row.ruleProgram, row.ruleKey)
         }
 
         Rectangle {
