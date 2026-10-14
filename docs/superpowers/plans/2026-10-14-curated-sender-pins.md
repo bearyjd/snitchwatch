@@ -209,3 +209,32 @@ avahi-daemon) therefore reaches the daemon as `/usr/bin/...`, because
 The only way a `/usr/sbin` path can appear is `CleanPath`'s argv[0]
 fallback (item 41). Such a path matches no curated rule, so it fails
 closed.
+
+### Owner decision (2026-10-14): A, as real behaviour
+
+The `ON_UID_CHANGE` switch and option B are removed. When a confirmed
+lookup finds a service account at a different uid than its copy names, the
+copy is re-pinned to the new uid of the same account, with no new consent,
+and the entry shows a short fixed note.
+
+- An unconfirmed lookup (None, a timeout) never rewrites and never deletes.
+  A None between two confirmed answers changes nothing.
+- The rewrite is atomic: one `CHANGE_RULE` of the same name, which
+  `replaceUserRule` swaps in memory. The rule is never missing, and both
+  uids are allowed for at most that one command.
+- DNS keeps its grant across the move. Grants bind to the account, so a
+  grant still matches after a uid change. A grant saved before this change
+  (hashed with the old fixed uid) is carried over on load when it matches
+  the copy recorded as installed for the entry: that is the grant for "this
+  account at the uid it was installed with". It is then re-stamped with the
+  account form. Without any grant, an enabled DNS copy isn't rewritten, and
+  the entry asks the user to confirm.
+- A refused rewrite takes #130/#149's refused-install path: the entry is
+  turned off, its grant revoked, the name tracked as maybe applied, and a
+  note shown. The next pass deletes the copy, because the old uid may now
+  be another account's. A rewrite that fails without a refusal isn't
+  retried on the same stream. Either way, at most one rewrite is sent per
+  confirmed change.
+- A copy from before the sender pin (legacy upgrade) keeps its own refusal
+  rule: the entry stays on with the old copy, because that copy is the
+  status quo the user chose.
