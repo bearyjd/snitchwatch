@@ -35,6 +35,16 @@ fn left_by(daemon: DaemonBaseline, clean: bool) -> Saved {
     }
 }
 
+/// These tests are about which counter says "restart", not the clean stop's
+/// window: the stop is put a second before the daemon's start, `uptime`
+/// seconds before `first`, so it vouches.
+fn stopped_before_the_daemon_started(saved: Saved, first: i64, uptime: u64) -> Saved {
+    Saved {
+        stopped_unix_ms: Some(first - secs_to_ms(uptime) - 1_000),
+        ..saved
+    }
+}
+
 fn usual(clean: bool) -> Saved {
     left_by(baseline(LAST_PING, UPTIME_THEN, HITS_THEN), clean)
 }
@@ -173,7 +183,11 @@ fn a_restart_without_a_clean_stop_is_a_gap() {
 #[test]
 fn a_counter_that_went_down_is_a_restart_even_when_the_start_time_agrees() {
     // Row 2 on its own: same start time, uptime grew, the counter fell.
-    let mut hits = restored(usual(true));
+    let mut hits = restored(stopped_before_the_daemon_started(
+        usual(true),
+        FIRST,
+        UPTIME_UP,
+    ));
     hits.record(&a_events(3), UPTIME_UP, 3, FIRST, |_| true);
     no_new_gap(&hits);
 }
@@ -183,7 +197,11 @@ fn an_uptime_that_went_down_is_a_restart_even_when_the_start_time_agrees() {
     // Row 2 on its own: the bridge's clock stepped back 2 s since the last
     // run, so the start times agree although the uptime fell.
     let first = LAST_PING - 2_000;
-    let mut hits = restored(usual(true));
+    let mut hits = restored(stopped_before_the_daemon_started(
+        usual(true),
+        first,
+        UPTIME_THEN - 1,
+    ));
     hits.record(&a_events(120), UPTIME_THEN - 1, 120, first, |_| true);
     assert_eq!(hits.last_gap_unix_ms(), Some(NOW - 20 * DAY));
 }
@@ -193,7 +211,7 @@ fn a_daemon_that_started_after_the_last_ping_is_a_restart() {
     // Row 3 on its own: it has run longer, and counted more, than the old
     // one had at the last ping, but it started after that ping.
     let mut hits = restored(left_by(baseline(NOW - DAY, 10, 100), true));
-    hits.record(&a_events(150), 3_600, 150, FIRST, |_| true);
+    hits.record(&a_events(150), 40, 150, FIRST, |_| true);
     no_new_gap(&hits);
 }
 
@@ -543,4 +561,160 @@ fn a_restore_that_cannot_be_trusted_after_all_is_a_gap_now() {
         hits.to_saved().unwrap().daemon,
         Some(baseline(FIRST, UPTIME_UP, HITS_THEN + 2))
     );
+}
+
+// #120 item 27 / #159: a clean stop is believed only when the restarted
+// daemon started at or after it and within `CLEAN_STOP_WINDOW_MS`.
+
+/// The stop `usual(true)` carries.
+const STOPPED: i64 = LAST_PING + 1_000;
+
+/// The restarted daemon started at `start` (ms, a whole second) and its first
+/// ping holds every hit, arriving at `first`.
+fn restart_started_at(start: i64, first: i64) -> RuleHits {
+    let mut hits = restored(usual(true));
+    let uptime = ((first - start) / 1_000) as u64;
+    hits.record(&a_events(3), uptime, 3, first, |_| true);
+    hits
+}
+
+fn gap_at(hits: &RuleHits, at: i64) {
+    assert_eq!(hits.last_gap_unix_ms(), Some(at));
+}
+
+#[test]
+fn a_quick_restart_after_the_stop_is_no_gap() {
+    // A reboot: the daemon starts a minute after the bridge stopped.
+    let hits = restart_started_at(STOPPED + 60_000, FIRST);
+    no_new_gap(&hits);
+}
+
+#[test]
+fn a_restart_after_a_long_power_off_is_a_gap() {
+    // Off for a day: the first ping holds every hit of the new run, but a
+    // stop this old can't vouch for it.
+    let first = STOPPED + DAY + 30_000;
+    let hits = restart_started_at(first - 20_000, first);
+    gap_at(&hits, first);
+}
+
+#[test]
+fn a_daemon_that_started_before_the_stop_is_a_gap() {
+    // The daemon restarted while the bridge was still running (or the clock
+    // stepped back): the stop says nothing about its start.
+    let hits = restart_started_at(STOPPED - 5_000, FIRST);
+    gap_at_first_ping(&hits);
+}
+
+#[test]
+fn the_window_is_inclusive_at_its_far_edge_and_the_stop_at_its_near_one() {
+    let at_stop = restart_started_at(STOPPED, FIRST);
+    no_new_gap(&at_stop);
+    let first = STOPPED + CLEAN_STOP_WINDOW_MS + 30_000;
+    let last_second = restart_started_at(STOPPED + CLEAN_STOP_WINDOW_MS, first);
+    no_new_gap(&last_second);
+    let past = restart_started_at(STOPPED + CLEAN_STOP_WINDOW_MS + 1_000, first);
+    gap_at(&past, first);
+    let before = restart_started_at(STOPPED - 1_000, FIRST);
+    gap_at_first_ping(&before);
+}
+
+#[test]
+fn a_missing_uptime_cannot_place_the_start_and_is_a_gap() {
+    // `Statistics.uptime` absent decodes to 0: the start would read as `now`,
+    // inside any window.
+    let mut hits = restored(usual(true));
+    hits.record(&a_events(3), 0, 3, FIRST, |_| true);
+    gap_at_first_ping(&hits);
+}
+
+#[test]
+fn a_clock_that_stepped_back_past_the_stop_is_a_gap() {
+    // The first ping's time is before the stop: the start estimate is too.
+    let first = STOPPED - 30_000;
+    let hits = restart_started_at(first - 10_000, first);
+    gap_at(&hits, first);
+}
+
+#[test]
+fn a_stale_unix_stop_that_outlives_a_tcp_run_is_a_gap_outside_the_window() {
+    // #159: Unix run A stops (STOPPED); TCP run T keeps the file and counts
+    // hits it never saves; the daemon restarts an hour later and Unix run B
+    // reads A's stop. Its first ping holds every hit of the new run, which
+    // used to read as "no gap".
+    let first = STOPPED + 3_600_000 + 20_000;
+    let hits = restart_started_at(first - 20_000, first);
+    gap_at(&hits, first);
+}
+
+// Review of PR #162: the daemon pings right after it connects, and that ping
+// can carry `uptime` 0. The judgement waits for one that doesn't.
+
+/// A ping of a restarted daemon: `n` hits, the counter at `rule_hits`.
+fn ping(hits: &mut RuleHits, n: usize, uptime: u64, rule_hits: u64, at: i64) {
+    hits.record(&a_events(n), uptime, rule_hits, at, |_| true);
+}
+
+#[test]
+fn a_quick_restart_whose_first_ping_has_no_uptime_is_judged_at_the_next() {
+    let mut hits = restored(usual(true));
+    ping(&mut hits, 2, 0, 2, FIRST);
+    assert!(hits.is_lossy(), "undecided: still provisional");
+    // The daemon started at `FIRST`, after the stop and inside the window;
+    // the two pings together hold every hit of its run.
+    ping(&mut hits, 1, 1, 3, FIRST + 1_000);
+    no_new_gap(&hits);
+}
+
+#[test]
+fn a_restart_judged_late_still_needs_every_hit_to_have_arrived() {
+    let mut hits = restored(usual(true));
+    ping(&mut hits, 2, 0, 2, FIRST);
+    ping(&mut hits, 1, 1, 5, FIRST + 1_000);
+    assert_eq!(hits.last_gap_unix_ms(), Some(FIRST + 1_000));
+}
+
+#[test]
+fn a_counter_that_fell_between_the_deferred_pings_is_a_gap() {
+    // The daemon restarted again before it reported an uptime.
+    let mut hits = restored(usual(true));
+    // 1 + 1 events and `rule_hits` 2 would agree, but it was 3 a ping ago.
+    ping(&mut hits, 1, 0, 3, FIRST);
+    ping(&mut hits, 1, 1, 2, FIRST + 1_000);
+    assert_eq!(hits.last_gap_unix_ms(), Some(FIRST + 1_000));
+}
+
+#[test]
+fn an_uptime_that_never_comes_is_a_gap_in_the_file_and_vouches_for_nothing() {
+    let mut hits = restored(usual(true));
+    ping(&mut hits, 2, 0, 2, FIRST);
+    ping(&mut hits, 1, 0, 3, FIRST + 1_000);
+    assert_eq!(hits.last_gap_unix_ms(), Some(FIRST + 1_000));
+    for saved in [
+        hits.to_saved().unwrap(),
+        hits.to_saved_at_stop(FIRST + 2_000).unwrap(),
+    ] {
+        assert_eq!(saved.last_gap_unix_ms, Some(FIRST + 1_000), "saved");
+        assert_eq!((saved.daemon, saved.stopped_unix_ms), (None, None));
+    }
+}
+
+#[test]
+fn a_restore_with_no_ping_at_all_still_hands_the_old_baseline_on() {
+    // Unchanged by the deferral: nothing was counted yet.
+    let hits = restored(usual(true));
+    assert!(hits.to_saved().unwrap().daemon.is_some());
+}
+
+#[test]
+fn a_daemon_that_restarted_after_the_deferred_ping_is_a_gap() {
+    // Run X pings with uptime 0 (2 hits, counter 2) and dies. Run Y starts a
+    // minute later and loses 2 hits before it pings (1 hit, counter 3). Both
+    // `rule_hits = received` (3 = 2 + 1) and the within-run check (2 -> 3
+    // grew by the 1 received) pass: only Y's start, after X's ping, shows it.
+    let mut hits = restored(usual(true));
+    ping(&mut hits, 2, 0, 2, FIRST);
+    let second = FIRST + 90_000;
+    ping(&mut hits, 1, 30, 3, second);
+    assert_eq!(hits.last_gap_unix_ms(), Some(second));
 }

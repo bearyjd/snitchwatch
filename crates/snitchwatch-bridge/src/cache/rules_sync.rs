@@ -42,6 +42,7 @@ const ACCOUNT_LOOKUP_WAIT: Duration = Duration::from_secs(1);
 #[derive(Debug, Default)]
 pub struct PendingSnapshots {
     pub(super) entries: VecDeque<Staged>,
+    staged: u64,
 }
 
 #[derive(Debug)]
@@ -59,10 +60,13 @@ impl PendingSnapshots {
         self.entries.retain(|staged| {
             staged.key != key && now.saturating_duration_since(staged.at) <= PENDING_SNAPSHOT_TTL
         });
+        self.staged += 1;
+        let mut snapshot = rules.into();
+        snapshot.sequence = self.staged;
         self.entries.push_back(Staged {
             key,
             at: now,
-            snapshot: rules.into(),
+            snapshot,
             adopted_by: Vec::new(),
         });
         while self.entries.len() > PENDING_SNAPSHOT_CAP {
@@ -318,6 +322,7 @@ impl RulesSync {
     }
 
     fn adopt(&self, current: &BecameCurrent<'_>, snapshot: Snapshot) -> Adopted {
+        lock(&self.cache).set_snapshot_sequence(snapshot.sequence);
         if let Some(total) = snapshot.over_limit {
             warn!(
                 stream = current.stream(),

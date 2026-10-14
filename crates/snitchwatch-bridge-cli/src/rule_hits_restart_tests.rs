@@ -262,7 +262,14 @@ async fn a_reboot_after_a_clean_stop_is_no_gap_on_the_unix_socket() {
     )
     .await;
 
-    // The daemon restarted too: its counters start again.
+    // The daemon restarted too: its counters start again. It started after
+    // the stop (#120 item 27): the saved stop is put a minute back.
+    let file = state.join("rule_hits.json");
+    let mut saved = snitchwatch_bridge::cache::rule_hits_file::load(&file)
+        .unwrap()
+        .expect("a saved file");
+    saved.stopped_unix_ms = Some(now_ms() - 60_000);
+    snitchwatch_bridge::cache::rule_hits_file::save(&file, &saved).unwrap();
     let rebooted = DaemonRun::started_secs_ago(20);
     let mut run = start(Transport::Unix, dir.path(), &state, 2).await;
     run.daemon
