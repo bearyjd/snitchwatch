@@ -327,8 +327,10 @@ impl CuratedDefaults {
             let cache = self.inner.rules.lock().unwrap_or_else(|e| e.into_inner());
             let rules = cache.rules().ok_or(IntentError::Unavailable)?;
             let name = entry.rule_name();
+            // The saved note too: the cache's doesn't outlive a restart.
             if cache.left_out().contains_key(&name)
                 || cache.files_left().contains(&name)
+                || state.choices.files_left.contains(&id)
                 || (state.choices.deleted_by_user.contains(&id)
                     && !(purpose == Purpose::Enable && state.choices.disabled.contains(&id)))
             {
@@ -493,6 +495,7 @@ impl CuratedDefaults {
             let cache = self.inner.rules.lock().unwrap_or_else(|e| e.into_inner());
             if cache.left_out().contains_key(&entry.rule_name())
                 || cache.files_left().contains(&entry.rule_name())
+                || state.choices.files_left.contains(id)
             {
                 return;
             }

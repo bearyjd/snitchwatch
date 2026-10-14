@@ -123,3 +123,44 @@ async fn a_late_error_to_the_delete_of_a_rule_with_no_file_leaves_no_warning() {
     assert_ne!(status(&curated), EntryStatus::OffFileLeft);
     assert_eq!(harness.seen().len(), 2, "{:?}", harness.seen());
 }
+
+/// #149 review 2: the DNS entry's consent checks read the saved note too.
+/// After a restart, a new opt-in over a file a refused delete may have left
+/// is refused as stale, and nothing is installed over it.
+#[tokio::test]
+async fn a_dns_opt_in_is_refused_over_a_file_noted_before_a_restart() {
+    use super::intent_tests::{prepare, submit};
+    use crate::curated::intent::IntentContext;
+    use crate::ws_messages::{CuratedIntentPurpose as Purpose, CuratedRequestOutcome, ReplyTo};
+    const DNS: &str = "dns-resolved";
+    let before = Harness::new().connect(Daemon::RefuseDeletes, Vec::new());
+    let curated = before.curated();
+    let context = IntentContext::for_test();
+    let ticket = prepare(&curated, &context, Purpose::Enable);
+    submit(&curated, Some(context), ticket, Purpose::Enable, None);
+    curated.reconcile().await;
+    assert_eq!(entry_state(&curated, DNS).status, EntryStatus::Installed);
+    turn(&curated, DNS, false);
+    curated.reconcile().await;
+    assert_eq!(entry_state(&curated, DNS).status, EntryStatus::OffFileLeft);
+
+    let (harness, curated) = restarted(&before, Daemon::Accept).await;
+    assert_eq!(entry_state(&curated, DNS).status, EntryStatus::OffFileLeft);
+    let context = IntentContext::for_test();
+    let ticket = prepare(&curated, &context, Purpose::Enable);
+    let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+    submit(
+        &curated,
+        Some(context),
+        ticket,
+        Purpose::Enable,
+        Some(ReplyTo::new(tx)),
+    );
+    curated.reconcile().await;
+    let ServerMessage::CuratedDefaultsRequestResult { results, .. } = rx.recv().await.unwrap()
+    else {
+        panic!("no result")
+    };
+    assert_ne!(results[0].outcome, CuratedRequestOutcome::ChoiceAccepted);
+    assert!(harness.seen().is_empty(), "{:?}", harness.seen());
+}
