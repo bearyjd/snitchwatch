@@ -46,11 +46,11 @@ pub async fn start(mode: BridgeMode) -> Setup {
     )
     .await
     .unwrap();
-    // Never the host's accounts: systemd-resolve is 193 here, chrony 991
-    // and avahi 70.
+    // Never the host's accounts: the tower r13's uids (systemd-resolve
+    // 990, chrony 994, avahi 70).
     bridge.set_curated_uid_lookup(std::sync::Arc::new(|name| match name {
-        "systemd-resolve" => Some(193),
-        "chrony" => Some(991),
+        "systemd-resolve" => Some(990),
+        "chrony" => Some(994),
         "avahi" => Some(70),
         _ => None,
     }));

@@ -49,6 +49,12 @@ pub(super) struct State {
     pub(super) withheld: BTreeSet<String>,
     /// The accounts as the last pass found them.
     pub(super) found: super::resolver::Found,
+    /// Entries whose account the last pass found at another uid than their
+    /// copy names (`manager_moved.rs`): never turned on.
+    pub(super) moved: BTreeSet<String>,
+    /// What a moved account does ([`super::moved::ON_UID_CHANGE`]; tests
+    /// set the other answer).
+    pub(super) uid_change: super::moved::UidChange,
     /// Bumped by every GUI request taken (a choice, even an unchanged one,
     /// or a removal): each gets a pass (re-review 2, HIGH).
     pub(super) requests: u64,
@@ -78,6 +84,8 @@ impl State {
             install_refusals: BTreeMap::new(),
             withheld: BTreeSet::new(),
             found: Default::default(),
+            moved: BTreeSet::new(),
+            uid_change: super::moved::ON_UID_CHANGE,
             requests: 0,
             file: None,
             storage: StorageStatus {

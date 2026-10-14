@@ -223,7 +223,7 @@ Controls.ApplicationWindow {
                 expect(dialog.visible && !confirmDns.enabled, "confirmation visible before preparation");
                 const disclosure = find(dialog.contentItem, "dnsConsentDisclosure").text;
                 expect(find(dialog.contentItem, "dnsConsentDisclosure").textFormat === Text.PlainText, "DNS disclosure is markup");
-                for (const word of ["/usr/lib/systemd/systemd-resolved", "UID 193", "TCP/UDP", "53", "IPv4/IPv6", "any destination", "data inside DNS lookups"])
+                for (const word of ["/usr/lib/systemd/systemd-resolved", "systemd-resolve account", "TCP/UDP", "53", "IPv4/IPv6", "any destination", "data inside DNS lookups"])
                     expect(disclosure.indexOf(word) >= 0, "missing disclosure " + word);
                 curated.confirmBroadConsent();
                 expect(probeWindow.sent.length === beforeDns + 1, "confirmed before a ticket");

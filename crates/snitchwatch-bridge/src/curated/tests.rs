@@ -198,7 +198,7 @@ fn each_entry_says_exactly_what_it_allows() {
             "/usr/bin/flatpak may connect to dl.flathub.org on TCP port 443, over IPv4 and IPv6.",
             "/usr/bin/tailscaled may connect to controlplane.tailscale.com on TCP port 443, over IPv4 and IPv6, but only while it runs as root (user ID 0).",
             "/usr/bin/tailscaled may connect to log.tailscale.com on TCP port 443, over IPv4 and IPv6, but only while it runs as root (user ID 0).",
-            "/usr/lib/systemd/systemd-resolved may connect to any address on TCP and UDP port 53, over IPv4 and IPv6, but only while it runs as user ID 193 (the systemd-resolve account).",
+            "/usr/lib/systemd/systemd-resolved may connect to any address on TCP and UDP port 53, over IPv4 and IPv6, but only while it runs as the systemd-resolve account.",
         ]
     );
 }

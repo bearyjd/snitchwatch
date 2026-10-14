@@ -105,7 +105,7 @@ async fn chronyd_is_installed_at_its_accounts_uid() {
         harness.seen(),
         [(Action::ChangeRule as i32, CHRONY_RULE.into())]
     );
-    assert_eq!(uid_sent(&harness, 0), "991");
+    assert_eq!(uid_sent(&harness, 0), "994");
     assert_eq!(entry_state(&curated, CHRONY).status, EntryStatus::Installed);
 }
 
@@ -115,7 +115,7 @@ async fn chronyd_is_installed_at_its_accounts_uid() {
 #[tokio::test]
 async fn an_unknown_account_leaves_an_old_copy_as_it_is() {
     let (harness, curated) = opted_in(CHRONY, Daemon::Accept, vec![legacy(CHRONY, true)]).await;
-    curated.set_uid_lookup(Arc::new(|name| (name == "systemd-resolve").then_some(193)));
+    curated.set_uid_lookup(Arc::new(|name| (name == "systemd-resolve").then_some(990)));
     for _ in 0..3 {
         curated.reconcile().await;
     }
@@ -132,28 +132,13 @@ async fn an_unknown_account_leaves_an_old_copy_as_it_is() {
     );
 }
 
-/// The installed copy names another uid than the account has now: stale,
-/// shown, and kept (item 38's rule: no auto-delete).
-#[tokio::test]
-async fn a_copy_at_another_uid_reads_stale_and_is_kept() {
-    let stale = entry(CHRONY).rule_as(Some(990));
-    let (harness, curated) = opted_in(CHRONY, Daemon::Accept, vec![stale]).await;
-    for _ in 0..3 {
-        curated.reconcile().await;
-    }
-    assert!(harness.seen().is_empty(), "{:?}", harness.seen());
-    let state = entry_state(&curated, CHRONY);
-    assert_eq!(state.status, EntryStatus::Unavailable);
-    assert_eq!(state.problem.as_deref(), Some(ACCOUNT_STALE_REASON));
-}
-
 /// An undecided copy still applies while its account is unknown: it reads
 /// on, with Keep, and the reason is attached; nothing is sent.
 #[tokio::test]
 async fn an_undecided_copy_held_back_still_reads_as_in_the_firewall() {
     let harness = Harness::new().connect(Daemon::Accept, vec![legacy(CHRONY, true)]);
     let curated = harness.curated();
-    curated.set_uid_lookup(Arc::new(|name| (name == "systemd-resolve").then_some(193)));
+    curated.set_uid_lookup(Arc::new(|name| (name == "systemd-resolve").then_some(990)));
     curated.reconcile().await;
     assert!(harness.seen().is_empty(), "{:?}", harness.seen());
     let state = entry_state(&curated, CHRONY);

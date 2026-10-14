@@ -1,14 +1,14 @@
-//! The DNS entry is offered only where its pinned user ID is the system
-//! resolver's account (#120 item 38): a rule pinned to uid 193 would match
-//! any other account an administrator gave that ID. Looked up off the
-//! async threads, one lookup at a time (#155), and not at all by a bridge
-//! that changes no recommended rules. Until it is confirmed the entry is
-//! withheld: nothing is installed or re-enabled for it, its choices and
-//! grant are kept, and a copy already in the firewall is left as it is, so
-//! a lookup that fails for a moment never removes a rule the user opted
-//! into. Turning it off still removes it, as for any entry.
-
-use snitchwatch_proto::protocol::Rule;
+//! Entries pinned to a service account (the DNS entry's `systemd-resolve`,
+//! `chrony`, `avahi`; #120 item 38, items 36/41) are offered only where
+//! that account is found, and installed at the uid it is found at: those
+//! uids are allocated when the image is built. Looked up off the async
+//! threads, one lookup at a time (#155), and not at all by a bridge that
+//! changes no recommended rules. Until an account is confirmed its entry
+//! is withheld: nothing is installed, replaced or re-enabled for it, its
+//! choices and grant are kept, and a copy already in the firewall is left
+//! as it is, so a lookup that fails for a moment never removes a rule the
+//! user opted into. Turning it off still removes it, as for any entry. A
+//! confirmed account at another uid than a copy names is `manager_moved.rs`.
 
 use super::state::State;
 use super::*;
@@ -18,29 +18,17 @@ use super::*;
 /// longer counts as unconfirmed.
 pub const RESOLVER_LOOKUP_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Why the DNS entry is unavailable on this host.
-pub const DNS_ACCOUNT_REASON: &str = "Snitchwatch couldn't confirm that the system resolver's \
-     account (systemd-resolve) is user ID 193 on this computer, so it doesn't install this rule. \
-     A copy already in the firewall is left as it is.";
+/// Why the DNS entry is unavailable on this host: its account wasn't
+/// found.
+pub const DNS_ACCOUNT_REASON: &str = "Snitchwatch couldn't look up the system resolver's \
+     account (systemd-resolve) on this computer, so it doesn't install or update this rule. A \
+     copy already in the firewall is left as it is.";
 
-/// Why the DNS entry is unavailable where the system resolver's account is
-/// definitely another user ID (#155): a copy already in the firewall no
-/// longer names it.
-pub const DNS_STALE_REASON: &str = "On this computer the system resolver's account \
-     (systemd-resolve) isn't user ID 193, so Snitchwatch doesn't install this rule. A copy \
-     already in the firewall is out of date: it is left as it is, and turning this off removes it.";
-
-/// Why an entry pinned to a run-time account is unavailable: its account
+/// Why an entry pinned to a service account is unavailable: its account
 /// wasn't found (#120 36/41).
 pub const ACCOUNT_REASON: &str = "Snitchwatch couldn't look up the account this service runs \
      as on this computer, so it doesn't install or update this rule. A copy already in the \
      firewall is left as it is.";
-
-/// Why an entry pinned to a run-time account is unavailable: the copy in
-/// the firewall names another uid than the account has now.
-pub const ACCOUNT_STALE_REASON: &str = "The copy of this rule in the firewall names a different \
-     user ID than this service's account has on this computer, so it may not match the service. \
-     It is left as it is: turn this off and on again to replace it.";
 
 /// What the last lookup found, by account name: `None` when the account
 /// wasn't found or the lookup failed. Empty until one returns.
@@ -82,49 +70,30 @@ pub(super) fn lock_accounts(inner: &Inner) -> MutexGuard<'_, Accounts> {
     inner.accounts.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// The uid `entry`'s run-time account was found at.
+/// The uid `entry`'s service account was found at. Never root: a service
+/// account that resolves to 0 counts as not found.
 pub(super) fn account_uid(entry: &super::super::CuratedEntry, found: &Found) -> Option<u32> {
     entry
         .account()
         .and_then(|name| found.get(name).copied().flatten())
+        .filter(|uid| *uid != 0)
 }
 
-/// The entries withheld this pass, with why. The DNS entry unless its
-/// account is confirmed at the user ID it pins: a definite other ID reads
-/// stale (#155), no answer unconfirmed. An entry pinned to a run-time
-/// account unless that account was found, and then only while its copy in
-/// `rules`, if any, names the uid found (stale otherwise).
-pub(super) fn withheld(
-    found: &Found,
-    rules: &BTreeMap<String, Rule>,
-) -> BTreeMap<String, &'static str> {
-    let dns = match found.get(super::super::DNS_USER_NAME).copied().flatten() {
-        Some(uid) if uid.to_string() == super::super::DNS_USER_ID => None,
-        Some(_) => Some(DNS_STALE_REASON),
-        None => Some(DNS_ACCOUNT_REASON),
-    };
-    let mut withheld = BTreeMap::new();
-    for entry in entries() {
-        let reason = if entry.any_address {
-            dns
-        } else if entry.account().is_some() {
-            match account_uid(entry, found) {
-                None => Some(ACCOUNT_REASON),
-                Some(uid) => rules
-                    .get(&entry.rule_name())
-                    .filter(|rule| is_unedited(Some(entry), None, rule))
-                    .and_then(super::super::sender_uid)
-                    .filter(|named| *named != uid)
-                    .map(|_| ACCOUNT_STALE_REASON),
-            }
-        } else {
-            None
-        };
-        if let Some(reason) = reason {
-            withheld.insert(entry.id.clone(), reason);
-        }
-    }
-    withheld
+/// The entries withheld this pass, with why: each pinned to a service
+/// account that wasn't found.
+pub(super) fn withheld(found: &Found) -> BTreeMap<String, &'static str> {
+    entries()
+        .iter()
+        .filter(|entry| entry.account().is_some() && account_uid(entry, found).is_none())
+        .map(|entry| {
+            let reason = if entry.any_address {
+                DNS_ACCOUNT_REASON
+            } else {
+                ACCOUNT_REASON
+            };
+            (entry.id.clone(), reason)
+        })
+        .collect()
 }
 
 /// Hold back what would install, replace or re-enable an entry `withheld`

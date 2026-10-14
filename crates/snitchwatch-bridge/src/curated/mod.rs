@@ -52,22 +52,16 @@ const LOOPBACK_PATTERN: &str = r"^(127\.0\.0\.1|::1)$";
 /// The one program that may be offered for any address (owner decision S6,
 /// issue #117), and the one port, transport and sender it gets there: the
 /// system resolver's DNS, whose upstream server differs on every network,
-/// run by its own account. The pin is the user ID, not `user.name`: the
-/// daemon's `Compile` rewrites a `user.name` leaf's data to the uid and
-/// saves the rule that way, so after a restart the file's number would be
-/// looked up as a name and the rule would fail to load. Fedora's
-/// `sysusers.d/systemd-resolve.conf` fixes `systemd-resolve` at 193; a rule
-/// pinned to the wrong ID matches nothing (fail closed).
+/// run by its own account ([`Sender::Account`] `systemd-resolve` in the
+/// data file). Its uid is allocated when the image is built (990 on the
+/// tower's r13, not the uid `sysusers.d` declares), so it is looked up at
+/// run time like any service account, never written into the code.
 const DNS_PROGRAM: &str = "/usr/lib/systemd/systemd-resolved";
 const DNS_PORT: u16 = 53;
-const DNS_USER_ID: &str = "193";
-/// The account [`DNS_USER_ID`] must be on this host (#120 item 38).
-const DNS_USER_NAME: &str = "systemd-resolve";
 
-/// The accounts the manager looks up: the system resolver's, which must be
-/// [`DNS_USER_ID`] (#120 item 38), then each [`Sender::Account`].
+/// The accounts the manager looks up: each [`Sender::Account`].
 pub fn account_names() -> Vec<&'static str> {
-    let mut names = vec![DNS_USER_NAME];
+    let mut names = Vec::new();
     for name in entries().iter().filter_map(CuratedEntry::account) {
         if !names.contains(&name) {
             names.push(name);
@@ -83,8 +77,9 @@ pub fn account_names() -> Vec<&'static str> {
 /// (this computer only, and run by any user on purpose) and `flatpak` (run
 /// by the desktop user, whose uid sandboxed apps share).
 ///
-/// The accounts in the data file are Fedora's packaging names. Whether the
-/// Bazzite image runs each service under them is not yet confirmed (tower).
+/// The accounts in the data file are what the tower's r13 image runs each
+/// service as (2026-10-14): root (0), `avahi` (70, static), `chrony` and
+/// `systemd-resolve` (allocated per image build, so looked up).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub enum Sender {
@@ -151,7 +146,7 @@ pub struct CuratedEntry {
     #[serde(default)]
     pub loopback: bool,
     /// Any address: no destination condition. Only the system resolver's
-    /// DNS ([`DNS_PROGRAM`], run by [`DNS_USER_ID`], port 53, TCP and UDP)
+    /// DNS ([`DNS_PROGRAM`], pinned to its account, port 53, TCP and UDP)
     /// passes [`check_leaves`].
     #[serde(default, rename = "anyAddress")]
     pub any_address: bool,
@@ -301,13 +296,12 @@ impl CuratedEntry {
     /// The daemon rule for this entry, a [`Sender::Account`] pinned to
     /// `account_uid` (other entries ignore it).
     pub fn rule_as(&self, account_uid: Option<u32>) -> Rule {
-        let sender = match (&self.sender, self.any_address) {
-            (_, true) => Some(DNS_USER_ID.to_string()),
-            (Some(Sender::UserId(uid)), false) => Some(uid.to_string()),
-            (Some(Sender::Account(_)), false) => {
+        let sender = match &self.sender {
+            Some(Sender::UserId(uid)) => Some(uid.to_string()),
+            Some(Sender::Account(_)) => {
                 Some(account_uid.map(|uid| uid.to_string()).unwrap_or_default())
             }
-            (None, false) => None,
+            None => None,
         };
         self.build(sender.as_deref())
     }
@@ -383,20 +377,13 @@ impl CuratedEntry {
             (None, false, true) => "the multicast DNS group (224.0.0.251 and ff02::fb)".to_string(),
             (None, false, false) => "this computer only (127.0.0.1 and ::1)".to_string(),
         };
-        let sender = match (&self.sender, self.any_address) {
-            (_, true) => format!(
-                ", but only while it runs as user ID {DNS_USER_ID} (the systemd-resolve account)"
-            ),
-            (Some(Sender::UserId(0)), false) => {
-                ", but only while it runs as root (user ID 0)".into()
-            }
-            (Some(Sender::UserId(uid)), false) => {
-                format!(", but only while it runs as user ID {uid}")
-            }
-            (Some(Sender::Account(name)), false) => {
+        let sender = match &self.sender {
+            Some(Sender::UserId(0)) => ", but only while it runs as root (user ID 0)".into(),
+            Some(Sender::UserId(uid)) => format!(", but only while it runs as user ID {uid}"),
+            Some(Sender::Account(name)) => {
                 format!(", but only while it runs as the {name} account")
             }
-            (None, false) => String::new(),
+            None => String::new(),
         };
         format!(
             "{} may connect to {to} on {} port {}, over IPv4 and IPv6{sender}.",
@@ -442,8 +429,8 @@ impl CuratedEntry {
             return Err("an entry's text isn't short plain text".into());
         }
         match &self.sender {
-            Some(_) if self.any_address => {
-                return Err("the DNS entry's sender is built in".into());
+            Some(Sender::UserId(_)) | None if self.any_address => {
+                return Err("any address needs its sender's account".into());
             }
             Some(Sender::Account(name)) if !valid_account(name) => {
                 return Err("an entry's account isn't an account name".into());
@@ -650,26 +637,21 @@ fn check_destination(rest: &mut Leaves<'_>, program: &str) -> Result<Destination
     Ok(Destination::AnyAddress)
 }
 
-/// The sender's user ID, right after the destination: required, and the
-/// resolver's, for any address; optional, and any one uid, otherwise.
+/// The sender's user ID, right after the destination: required for any
+/// address (the resolver's account, looked up at run time), optional
+/// otherwise; one canonical uid either way. Which uid is the entry's to
+/// say ([`canonical::is_unedited`]) and the manager's to check.
 fn check_sender(rest: &mut Leaves<'_>, destination: Destination) -> Result<(), String> {
     let pinned = rest.peek().is_some_and(|op| op.operand == "user.id");
     if !pinned {
         return if destination == Destination::AnyAddress {
-            Err("any address needs the system resolver's account pinned by user ID".into())
+            Err("any address needs its sender pinned by user ID".into())
         } else {
             Ok(())
         };
     }
     match rest.next() {
-        Some(op)
-            if op.r#type == "simple"
-                && !op.sensitive
-                && canonical_uid(&op.data)
-                && (destination != Destination::AnyAddress || op.data == DNS_USER_ID) =>
-        {
-            Ok(())
-        }
+        Some(op) if op.r#type == "simple" && !op.sensitive && canonical_uid(&op.data) => Ok(()),
         _ => Err("the sender isn't one user ID, or not the one this rule may have".into()),
     }
 }

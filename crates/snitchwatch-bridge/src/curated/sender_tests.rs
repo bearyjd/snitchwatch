@@ -69,7 +69,7 @@ fn chronyd_and_avahi_are_pinned_to_their_accounts_at_run_time() {
         assert_eq!(uid_leaf(&entry.rule()).as_deref(), Some(""));
         assert!(check_curated_rule(&entry.rule()).is_err(), "{id}");
     }
-    assert_eq!(account_names(), ["systemd-resolve", "chrony", "avahi"]);
+    assert_eq!(account_names(), ["chrony", "avahi", "systemd-resolve"]);
 }
 
 #[test]
@@ -81,19 +81,26 @@ fn chronyc_and_flatpak_stay_path_only() {
     }
 }
 
-/// The broad grant hashes the DNS rule: the pins leave it as it was, so no
-/// one who consented is asked again.
+/// The DNS entry is pinned to the `systemd-resolve` account by name, its
+/// uid looked up (the tower's r13 has 990, not the uid `sysusers.d`
+/// declares). The broad grant hashes the rule with that uid left empty, so
+/// a grant names the account, not a uid, and stays good when the uid
+/// moves. A grant made for the old fixed uid no longer matches: those users
+/// confirm once more. It has no unpinned form to recognise: a path-only
+/// any-address copy is never Snitchwatch's.
 #[test]
-fn the_dns_rule_is_unchanged() {
+fn the_dns_rule_is_pinned_to_its_account_by_name() {
     let dns = entry("dns-resolved");
+    assert_eq!(dns.account(), Some("systemd-resolve"));
     assert_eq!(
         operands(&dns.rule()),
         ["process.path", "user.id", "dest.port", "protocol"]
     );
+    assert_eq!(uid_leaf(&dns.rule_as(Some(990))).as_deref(), Some("990"));
     assert!(dns.legacy_rule().is_none());
     assert_eq!(
         store::broad_policy_fingerprint(dns),
-        "28275345efbd13d2f3324a90e9e1270a000613f45fa964c5768ed631102b7f9c"
+        "7163b2719d06123cb49bcef88545687d2ca9b80d6b96c90868fbe14ebf87e520"
     );
 }
 
@@ -117,9 +124,10 @@ fn the_allowlist_takes_a_user_id_only_in_its_place_and_form() {
         l.insert(2, again);
     })
     .is_err());
-    // Any address still needs exactly the resolver's pin.
-    let mut dns = entry("dns-resolved").rule();
-    dns.operator.as_mut().unwrap().list[1].data = "0".into();
+    // Any address still needs a pin.
+    let mut dns = entry("dns-resolved").rule_as(Some(990));
+    assert!(check_curated_rule(&dns).is_ok());
+    dns.operator.as_mut().unwrap().list.remove(1);
     assert!(check_curated_rule(&dns).is_err());
 }
 
@@ -137,12 +145,16 @@ fn a_data_file_sender_is_checked() {
     assert!(bad(r#"{"userId": 0}"#));
     let raw = DATA.replacen(r#""account": "chrony""#, r#""account": "Chrony; rm""#, 1);
     assert!(parse(&raw).is_err(), "not an account name");
-    let raw = DATA.replacen(
-        r#""id": "dns-resolved","#,
-        r#""id": "dns-resolved", "sender": {"userId": 0},"#,
+    // Any address needs an account: never path-only, never a fixed uid.
+    let unpinned = DATA.replacen(r#""sender": {"account": "systemd-resolve"},"#, "", 1);
+    assert_ne!(unpinned, DATA);
+    assert!(parse(&unpinned).is_err(), "a path-only any-address entry");
+    let root = DATA.replacen(
+        r#""sender": {"account": "systemd-resolve"},"#,
+        r#""sender": {"userId": 0},"#,
         1,
     );
-    assert!(parse(&raw).is_err(), "the DNS entry's pin is built in");
+    assert!(parse(&root).is_err(), "an any-address entry at a fixed uid");
 }
 
 #[test]

@@ -441,6 +441,10 @@ impl CuratedDefaults {
             return Err(SendError::ReservedName);
         }
         if let Some(entry) = super::super::entry_for_rule_name(name) {
+            // A moved copy's old uid may be another account's now.
+            if enabled && state.moved.contains(&entry.id) {
+                return Err(SendError::ReservedName);
+            }
             if entry.broad() {
                 if enabled {
                     return Err(SendError::ReservedName);

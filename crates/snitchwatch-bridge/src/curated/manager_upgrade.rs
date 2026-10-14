@@ -1,4 +1,6 @@
-//! Replacing a copy installed before its entry's sender pin (#120 36/41).
+//! Replacing a copy installed before its entry's sender pin (#120 36/41),
+//! or one at a uid its account no longer has (`manager_moved.rs`, switch
+//! A).
 //!
 //! Opensnitchd's `replaceUserRule` swaps a rule of the same name in memory,
 //! keeping the old one if the new one doesn't compile, so one `CHANGE_RULE`
@@ -14,7 +16,7 @@ use super::state::{fail, keep, Refusal};
 use super::*;
 
 impl CuratedDefaults {
-    pub(super) async fn upgrade(&self, id: &str, generation: u64) {
+    pub(super) async fn upgrade(&self, id: &str, generation: u64, revision: u64) {
         let Some(entry) = entries().iter().find(|entry| entry.id == id) else {
             return;
         };
@@ -36,7 +38,23 @@ impl CuratedDefaults {
             else {
                 return;
             };
-            let Some(command) = CuratedCommand::upgrade(entry, current, uid) else {
+            // Turning the broad rule on needs its live grant, as an install
+            // does (#128).
+            let guarded = entry.broad() && current.enabled;
+            if guarded
+                && (state.broad_revision != revision
+                    || !state.choices.has_broad_authority(id)
+                    || state.saved < state.version
+                    || !state.storage.persistent)
+            {
+                return;
+            }
+            let command = if guarded {
+                CuratedCommand::authorized_upgrade(entry, current, uid)
+            } else {
+                CuratedCommand::upgrade(entry, current, uid)
+            };
+            let Some(command) = command else {
                 return;
             };
             let status = if current.enabled {
@@ -46,7 +64,14 @@ impl CuratedDefaults {
             };
             drop(cache);
             let rule = command.rule().cloned();
-            (self.inner.commands.send_curated(command), rule, status)
+            let sent = if guarded {
+                self.inner
+                    .commands
+                    .send_curated_guarded_replace(command, generation)
+            } else {
+                self.inner.commands.send_curated(command)
+            };
+            (sent, rule, status)
         };
         let outcome = Self::wait_sent(sent, Refusal::Add).await;
         let mut state = lock(&self.inner.state);

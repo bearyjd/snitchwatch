@@ -78,7 +78,7 @@ async fn a_refused_dns_reenable_drops_its_grant_and_is_turned_off_again() {
         .iter()
         .find(|entry| entry.id == DNS)
         .unwrap()
-        .rule();
+        .rule_as(Some(990));
     disabled.enabled = false;
     let harness = Harness::new().connect(Daemon::Accept, vec![disabled]);
     let curated = harness.curated();

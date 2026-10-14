@@ -123,8 +123,8 @@ impl Harness {
             self.broadcast.clone(),
         );
         curated.attach_file(self.file.clone());
-        // Never the host's accounts: systemd-resolve is 193 here, chrony
-        // 991 and avahi 70.
+        // Never the host's accounts: the tower r13's uids (systemd-resolve
+        // 990, chrony 994, avahi 70).
         curated.set_uid_lookup(Arc::new(fake_accounts));
         curated
     }
@@ -142,8 +142,8 @@ impl Harness {
 /// The services' accounts, as a test sees them.
 pub(super) fn fake_accounts(name: &str) -> Option<u32> {
     match name {
-        "systemd-resolve" => Some(193),
-        "chrony" => Some(991),
+        "systemd-resolve" => Some(990),
+        "chrony" => Some(994),
         "avahi" => Some(70),
         _ => None,
     }

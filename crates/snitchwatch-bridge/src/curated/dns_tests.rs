@@ -19,9 +19,9 @@ use super::*;
 pub(super) const ID: &str = "dns-resolved";
 pub(super) const NAME: &str = "snitchwatch-default-dns-resolved";
 pub(super) const PATH: &str = "/usr/lib/systemd/systemd-resolved";
-/// The `systemd-resolve` account's user ID on Fedora (its `sysusers.d`
-/// fixes 193).
-pub(super) const UID: u32 = 193;
+/// The `systemd-resolve` account's user ID as these tests' lookup finds it
+/// (the tower's r13 image: allocated per build, so looked up at run time).
+pub(super) const UID: u32 = 990;
 const PROTOCOL_PATTERN: &str = "^(tcp|udp)6?$";
 
 pub(super) fn dns() -> &'static CuratedEntry {
@@ -96,7 +96,7 @@ fn daemon_matches(operator: &Operator, conn: &Conn) -> bool {
 }
 
 fn matches(conn: &Conn) -> bool {
-    daemon_matches(dns().rule().operator.as_ref().unwrap(), conn)
+    daemon_matches(dns().rule_as(Some(UID)).operator.as_ref().unwrap(), conn)
 }
 
 pub(super) fn leaves(rule: &Rule) -> Vec<(&str, &str, &str, bool)> {
@@ -126,7 +126,7 @@ fn the_entry_is_offered_last_with_the_reviewed_name_and_words() {
     assert_eq!(
         entry.allows(),
         "/usr/lib/systemd/systemd-resolved may connect to any address on TCP and UDP port 53, \
-         over IPv4 and IPv6, but only while it runs as user ID 193 (the systemd-resolve account)."
+         over IPv4 and IPv6, but only while it runs as the systemd-resolve account."
     );
     assert_eq!(
         entry.why,
@@ -143,15 +143,15 @@ fn the_entry_is_offered_last_with_the_reviewed_name_and_words() {
 
 #[test]
 fn the_rule_is_the_exact_program_its_account_port_53_and_both_transports_and_nothing_else() {
-    let rule = dns().rule();
+    let rule = dns().rule_as(Some(UID));
     // `user.id`, not `user.name`: Compile rewrites a `user.name` leaf's data
     // to the uid and the daemon then saves it that way, so after a daemon
-    // restart the file's "193" would be looked up as a name and fail.
+    // restart the file's uid would be looked up as a name and fail.
     assert_eq!(
         leaves(&rule),
         [
             ("simple", "process.path", PATH, true),
-            ("simple", "user.id", "193", false),
+            ("simple", "user.id", "990", false),
             ("simple", "dest.port", "53", false),
             ("regexp", "protocol", PROTOCOL_PATTERN, false),
         ]
@@ -315,7 +315,7 @@ fn no_other_entry_matches_a_destination_it_does_not_name() {
 
 #[test]
 fn the_allowlist_takes_only_the_exact_dns_shape() {
-    let base = dns().rule();
+    let base = dns().rule_as(Some(UID));
     let changed = |change: &dyn Fn(&mut Rule)| {
         let mut rule = base.clone();
         change(&mut rule);
@@ -346,16 +346,28 @@ fn the_allowlist_takes_only_the_exact_dns_shape() {
         op.data = "^/usr/lib/systemd/.*$".into();
     })
     .is_err());
-    // The sender: the resolver's own account, as a user ID, exactly. A
-    // destination-less rule without it, or for another user, is refused.
+    // The sender: one user ID, written as the bridge writes one. Which uid
+    // is the resolver account's is the lookup's to say (the manager's
+    // moved check), not the shape's. A destination-less rule without one
+    // is refused.
     for uid in [
-        "0", "1000", "192", "194", "1930", "19", "+193", "0193", "193 ", "", "193-194",
+        "+990",
+        "0990",
+        "990 ",
+        "",
+        "990-991",
+        "-1",
+        "4294967296",
+        "systemd-resolve",
     ] {
         assert!(
             leaf_at(1, &|op| op.data = uid.into()).is_err(),
             "uid {uid:?}"
         );
     }
+    assert!(leaf_at(1, &|op| op.data = "1000".into()).is_ok());
+    // Unresolved, its rule can never be sent.
+    assert!(check_curated_rule(&dns().rule()).is_err());
     assert!(leaf_at(1, &|op| {
         op.operand = "user.name".into();
         op.data = "systemd-resolve".into();
@@ -408,7 +420,7 @@ fn the_allowlist_takes_only_the_exact_dns_shape() {
     })
     .is_err());
     assert!(changed(&|rule| {
-        let again = leaf("simple", "user.id", "193", false);
+        let again = leaf("simple", "user.id", "990", false);
         rule.operator.as_mut().unwrap().list.push(again);
     })
     .is_err());
@@ -462,7 +474,7 @@ fn a_host_entry_cannot_borrow_the_dns_accounts_pin() {
         .unwrap();
     for index in [1, 2, 4] {
         let mut rule = flatpak.rule();
-        let pin = leaf("simple", "user.id", "193", false);
+        let pin = leaf("simple", "user.id", "990", false);
         rule.operator.as_mut().unwrap().list.insert(index, pin);
         assert!(
             !super::canonical::is_unedited(Some(flatpak), None, &rule),
@@ -486,9 +498,17 @@ fn only_the_resolver_can_be_offered_with_no_destination() {
             r#"{{"id": "x", "group": "g", "path": "{path}", "port": {port}, "protocol": "{protocol}", "why": "w", "evidence": "e"{rest}}}"#
         )
     };
-    let any = r#", "anyAddress": true"#;
+    let any = r#", "anyAddress": true, "sender": {"account": "systemd-resolve"}"#;
     assert!(parse(&file(&entry(PATH, 53, "tcp+udp", any))).is_ok());
     for bad in [
+        // Any address with no sender, or a fixed one.
+        entry(PATH, 53, "tcp+udp", r#", "anyAddress": true"#),
+        entry(
+            PATH,
+            53,
+            "tcp+udp",
+            r#", "anyAddress": true, "sender": {"userId": 0}"#,
+        ),
         // Any address for another program, port or transport.
         entry("/usr/bin/curl", 53, "tcp+udp", any),
         entry("/usr/bin/flatpak", 443, "tcp", any),

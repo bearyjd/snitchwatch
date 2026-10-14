@@ -1,4 +1,5 @@
-//! #120 item 38: the DNS entry only where systemd-resolve is uid 193.
+//! #120 item 38: the DNS entry only where the systemd-resolve account is
+//! found, pinned to the uid it is found at.
 
 use super::intent_tests::{prepare, submit};
 use super::tests::*;
@@ -11,19 +12,23 @@ const DNS: &str = "dns-resolved";
 const DNS_RULE: &str = "snitchwatch-default-dns-resolved";
 
 fn dns_rule() -> snitchwatch_proto::protocol::Rule {
-    entries().iter().find(|e| e.id == DNS).unwrap().rule()
+    entries()
+        .iter()
+        .find(|e| e.id == DNS)
+        .unwrap()
+        .rule_as(Some(990))
 }
 
-/// The lookup fails, or finds another uid (stale, #155), or no such
-/// account; with the reason each shows.
+/// The lookup fails, finds no such account, or finds it at root's uid
+/// (never a service account); with the reason each shows.
 fn unconfirmed() -> [(crate::accounts::UidLookup, &'static str); 3] {
     [
         (Arc::new(|_| None), DNS_ACCOUNT_REASON),
-        (Arc::new(|_| Some(991)), DNS_STALE_REASON),
         (
-            Arc::new(|name| (name != "systemd-resolve").then_some(193)),
+            Arc::new(|name| (name != "systemd-resolve").then_some(990)),
             DNS_ACCOUNT_REASON,
         ),
+        (Arc::new(|_| Some(0)), DNS_ACCOUNT_REASON),
     ]
 }
 
@@ -53,7 +58,7 @@ async fn an_opted_in_dns_entry_waits_for_its_account_to_be_confirmed() {
         let saved = store::load(&harness.file).unwrap().unwrap();
         assert!(saved.has_broad_authority(DNS));
 
-        curated.set_uid_lookup(Arc::new(|_| Some(193)));
+        curated.set_uid_lookup(Arc::new(|_| Some(990)));
         curated.reconcile().await;
         assert_eq!(
             harness.seen(),
@@ -139,34 +144,13 @@ async fn a_hung_lookup_counts_as_unconfirmed_and_doesnt_stall_the_pass() {
     let hung = Arc::new(Mutex::new(hung));
     curated.set_uid_lookup(Arc::new(move |_| {
         let _ = hung.lock().unwrap().recv();
-        Some(193)
+        Some(990)
     }));
     let pass = tokio::time::timeout(RESOLVER_LOOKUP_TIMEOUT * 3, curated.reconcile()).await;
     release.send(()).unwrap();
     assert!(pass.is_ok(), "the pass waited on the lookup");
     assert!(harness.seen().is_empty(), "{:?}", harness.seen());
     assert_eq!(entry_state(&curated, DNS).status, EntryStatus::Unavailable);
-}
-
-/// #155: a definite answer that systemd-resolve isn't 193 is not a passing
-/// failure: an installed copy reads stale, with a fixed reason saying how to
-/// remove it, and is still not deleted (item 38's rule).
-#[tokio::test]
-async fn a_definite_uid_mismatch_reads_stale_and_deletes_nothing() {
-    let harness = Harness::new().connect(Daemon::Accept, Vec::new());
-    let curated = harness.curated();
-    opt_in(&curated);
-    curated.reconcile().await;
-    harness.resync(vec![dns_rule()]);
-    curated.set_uid_lookup(Arc::new(|_| Some(991)));
-    for _ in 0..3 {
-        curated.reconcile().await;
-    }
-    assert_eq!(harness.seen().len(), 1, "{:?}", harness.seen());
-    let state = entry_state(&curated, DNS);
-    assert_eq!(state.status, EntryStatus::Unavailable);
-    assert_eq!(state.problem.as_deref(), Some(DNS_STALE_REASON));
-    assert!(state.on);
 }
 
 /// A lookup that blocks until released, counting its calls.
@@ -182,7 +166,7 @@ fn hung_lookup() -> (
     let lookup: crate::accounts::UidLookup = Arc::new(move |name| {
         counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let _ = hung.lock().unwrap().recv();
-        (name == "systemd-resolve").then_some(193)
+        (name == "systemd-resolve").then_some(990)
     });
     (lookup, calls, release)
 }
@@ -259,7 +243,7 @@ async fn an_inert_bridge_looks_no_account_up() {
     let counted = calls.clone();
     curated.set_uid_lookup(Arc::new(move |_| {
         counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        Some(193)
+        Some(990)
     }));
     curated.reconcile().await;
     assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);

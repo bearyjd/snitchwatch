@@ -178,7 +178,7 @@ async fn a_dns_reenable_is_not_sent_over_a_file_noted_after_its_intent() {
         .iter()
         .find(|entry| entry.id == DNS)
         .unwrap()
-        .rule();
+        .rule_as(Some(990));
     disabled.enabled = false;
     let harness = Harness::new().connect(Daemon::Accept, vec![disabled]);
     let curated = harness.curated();

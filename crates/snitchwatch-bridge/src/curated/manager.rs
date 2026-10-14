@@ -42,17 +42,19 @@ use crate::ws_messages::{ClientMessage, ServerMessage, StorageStatus};
 
 #[path = "manager_intent.rs"]
 mod intent;
+#[path = "manager_moved.rs"]
+mod moved;
 #[path = "manager_resolver.rs"]
 mod resolver;
 #[path = "manager_state.rs"]
 mod state;
 #[path = "manager_upgrade.rs"]
 mod upgrade;
-use resolver::withhold;
-pub use resolver::{
-    ACCOUNT_REASON, ACCOUNT_STALE_REASON, DNS_ACCOUNT_REASON, DNS_STALE_REASON,
-    RESOLVER_LOOKUP_TIMEOUT,
+pub use moved::{
+    UidChange, DNS_MOVED_REASON, MOVED_UNDECIDED_REASON, ON_UID_CHANGE, UID_CHANGED_OFF_REASON,
 };
+use resolver::withhold;
+pub use resolver::{ACCOUNT_REASON, DNS_ACCOUNT_REASON, RESOLVER_LOOKUP_TIMEOUT};
 use state::{
     command_problem, deleted, fail, keep, no_file_marks, rule_name, send_problem,
     show_removal_failures, still_edited, summary, track_maybe_applied, without_failed, Problem,
@@ -363,7 +365,8 @@ impl CuratedDefaults {
         } else {
             self.found().await
         };
-        let withheld = resolver::withheld(&found, &rules);
+        let withheld = resolver::withheld(&found);
+        let moved = moved::moved(&found, &rules);
         let (maybe_applied, no_files) = {
             let mut state = lock(&self.inner.state);
             let no_files = no_file_marks(&state, &files_left);
@@ -406,7 +409,9 @@ impl CuratedDefaults {
                 state
                     .install_refusals
                     .retain(|id, (_, seen)| !enabled.contains(id) && *seen == generation);
-                let actions = without_failed(&mut state, planned.actions, generation);
+                let mut actions = planned.actions;
+                actions.extend(self.handle_moved(&mut state, &moved, &rules, generation));
+                let actions = without_failed(&mut state, actions, generation);
                 show_removal_failures(&mut state, daemon, generation);
                 let actions = withhold(&mut state, actions, &withheld, &found);
                 let revision = state.broad_revision;
@@ -525,7 +530,7 @@ impl CuratedDefaults {
 
     async fn apply(&self, action: CuratedAction, generation: u64, revision: u64) {
         let (id, name, outcome, done) = match action {
-            CuratedAction::Upgrade(id) => return self.upgrade(&id, generation).await,
+            CuratedAction::Upgrade(id) => return self.upgrade(&id, generation, revision).await,
             CuratedAction::Install(id) => {
                 let Some(entry) = entries().iter().find(|entry| entry.id == id) else {
                     return;
@@ -550,7 +555,7 @@ impl CuratedDefaults {
                     }
                     let account_uid = resolver::account_uid(entry, &state.found);
                     let command = if entry.broad() {
-                        CuratedCommand::authorized_install(entry)
+                        CuratedCommand::authorized_install(entry, account_uid)
                     } else {
                         CuratedCommand::install_as(entry, account_uid)
                     };
@@ -792,3 +797,7 @@ mod resolver_tests;
 #[cfg(test)]
 #[path = "manager_upgrade_tests.rs"]
 mod upgrade_tests;
+
+#[cfg(test)]
+#[path = "manager_moved_tests.rs"]
+mod moved_tests;

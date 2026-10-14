@@ -374,8 +374,8 @@ where
     // 38); without one every account is unknown (#157).
     #[cfg(test)]
     curated.set_uid_lookup(Arc::new(|name| match name {
-        "systemd-resolve" => Some(193),
-        "chrony" => Some(991),
+        "systemd-resolve" => Some(990),
+        "chrony" => Some(994),
         "avahi" => Some(70),
         _ => None,
     }));
