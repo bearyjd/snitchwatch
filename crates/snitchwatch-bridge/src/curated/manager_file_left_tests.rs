@@ -164,3 +164,36 @@ async fn a_dns_opt_in_is_refused_over_a_file_noted_before_a_restart() {
     assert_ne!(results[0].outcome, CuratedRequestOutcome::ChoiceAccepted);
     assert!(harness.seen().is_empty(), "{:?}", harness.seen());
 }
+
+/// #156: `reenable` honours the saved note too. A note that appears after
+/// a re-enable intent is accepted but before its pass (here set by hand)
+/// stops the re-enable: nothing is sent.
+#[tokio::test]
+async fn a_dns_reenable_is_not_sent_over_a_file_noted_after_its_intent() {
+    use super::intent_tests::{prepare, submit};
+    use crate::curated::intent::IntentContext;
+    use crate::ws_messages::CuratedIntentPurpose as Purpose;
+    const DNS: &str = "dns-resolved";
+    let mut disabled = entries()
+        .iter()
+        .find(|entry| entry.id == DNS)
+        .unwrap()
+        .rule();
+    disabled.enabled = false;
+    let harness = Harness::new().connect(Daemon::Accept, vec![disabled]);
+    let curated = harness.curated();
+    let context = IntentContext::for_test();
+    let ticket = prepare(&curated, &context, Purpose::Keep);
+    submit(&curated, Some(context.clone()), ticket, Purpose::Keep, None);
+    curated.reconcile().await;
+    let ticket = prepare(&curated, &context, Purpose::Reenable);
+    submit(&curated, Some(context), ticket, Purpose::Reenable, None);
+    {
+        let mut state = lock(&curated.inner.state);
+        assert!(state.reenables.contains_key(DNS), "the intent was taken");
+        let choices = state.choices.file_left(DNS);
+        keep(&mut state, choices);
+    }
+    curated.reconcile().await;
+    assert!(harness.seen().is_empty(), "{:?}", harness.seen());
+}
