@@ -119,7 +119,7 @@ async fn a_refused_new_rule_leaves_the_old_one_alone() {
 async fn an_old_rule_whose_file_wont_go_is_renamed_anyway() {
     let mut daemon = daemon(vec![bound("100-old", "deny")]);
     let model = model(&[bound("100-old", "deny")]);
-    model.lock().unwrap().stuck_files.insert("100-old".into());
+    model.lock().unwrap().stuck.insert("100-old".into());
     let seen = run_model(&mut daemon, model.clone());
     let commands = commands(&daemon);
     let mut rx = daemon.broadcast.subscribe();
