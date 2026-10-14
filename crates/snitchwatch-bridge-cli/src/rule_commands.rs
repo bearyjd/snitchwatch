@@ -324,7 +324,7 @@ impl RuleCommands {
                 // `ERROR`: an unanswered turn-on may still be applied later.
                 if !matches!(
                     sent_outcome(send(&name, false), timeout).await,
-                    RuleCommandOutcome::Ok
+                    RuleCommandOutcome::Ok | RuleCommandOutcome::Rejected { .. }
                 ) {
                     warn!(rule = %name, "a refused turn-on of a recommended rule wasn't undone");
                 }
