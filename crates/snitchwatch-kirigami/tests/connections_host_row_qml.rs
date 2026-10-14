@@ -5,6 +5,10 @@
 //! opens the inspector and selects it (the click handler's `ListView.view`
 //! must stay qualified). Any TypeError in the capture fails the test. Run
 //! headless with `QT_QPA_PLATFORM=offscreen`.
+//!
+//! Each phase waits until the tree has the rows it expects, every delegate
+//! created, under a 10 s watchdog (#151: a fixed 100 ms step read a
+//! delegate the view hadn't created yet on a loaded CI runner).
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -62,6 +66,18 @@ Window {
                  action: "allow", bytesSent: 0, bytesReceived: 0, startedAtMs: 1 };
     }
     property int hostIndex: -1
+    // Ticks spent waiting for the current phase's rows (#151).
+    property int waited: 0
+    // Rows each phase needs, every delegate created, before it runs.
+    readonly property var rowsBefore: [0, 0, 1, 2, 4, 6]
+    function ready(rows) {
+        const list = probe.findList(page);
+        if (!list || list.count !== rows) return false;
+        for (let i = 0; i < rows; ++i) {
+            if (list.itemAtIndex(i) === null) return false;
+        }
+        return true;
+    }
     function levels() {
         const list = probe.findList(page);
         const out = [];
@@ -92,6 +108,15 @@ Window {
         onTriggered: {
             let done = false;
             try {
+                const rows = probe.rowsBefore[probe.phase];
+                if (rows > 0 && !probe.ready(rows)) {
+                    // 100 ticks of 100 ms.
+                    if (++probe.waited < 100) return;
+                    const list = probe.findList(page);
+                    throw new Error("timed out waiting for " + rows + " rows, have "
+                                    + (list ? list.count : "no list"));
+                }
+                probe.waited = 0;
                 if (probe.phase === 0) {
                     model.setGroupedMode(true);
                     model.applyServerMessageJson(JSON.stringify({
