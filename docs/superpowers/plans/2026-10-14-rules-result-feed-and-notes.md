@@ -65,3 +65,24 @@ Out of scope (report): rename's first-step refusal of a disabled/enabled
   temporary rule refused -> Rejected; curated turn-off refused ->
   OkWithNote, turn-on still Rejected and undone.
 - kirigami: `CommandNotes` unit tests; a RulesPage QML probe.
+
+## As built
+
+- #153, #154, item 7: `aaad4a2` (`rule_commands/refused.rs`, `IfRefused`;
+  `cache::rules::may_have_applied`). Three older tests that pinned
+  `Rejected` for an enabled `always` refusal now use a temporary rule, the
+  one shape still definitely not applied. Mutants: 5 of 6 killed; the
+  survivor (count disabled `always` as maybe-applied) is equivalent, since
+  that shape is decided as applied-not-saved first.
+- #152: the note carries its rule (`commandNoteRule`), so the inspector
+  shows it only on that rule. No session drop of waiting ids (a click right
+  after a reconnect would lose its result); old-session results never reach
+  the model (`result_feed`), and the wait list is bounded (32). A send that
+  never left the GUI leaves no note, as before. No new roles. Probe mutants
+  (note on any rule, no refresh on result, any id counts, note kept on
+  send): all killed.
+- #151: pin-only. The old probe passed 30/30 idle, 30/30 under 44 CPU
+  burners, and 30/30 with a 1 ms tick; the gated one passes the same.
+- Not done: rename's first-step refusal of an `always` new rule, and
+  rules import (`ImportOutcome::Rejected`), still answer "rejected" where
+  the daemon may have applied the rule.
