@@ -88,9 +88,11 @@ predicate is shared with the cache (one public fn), so the note and the
 cache can't disagree. Not via the `files_left` marker: the rule is still
 listed, the next snapshot would clear the marker while the file still
 holds the enabled version, `leftOnDisk` wording is about deleted rules, and
-curated's reserved-name guards key on `files_left`. No new Kirigami role:
-the Rules page already shows `OkWithNote` notes. Recommended-rule toggles
-(`toggle_curated`) are executor A's.
+curated's reserved-name guards key on `files_left`. No new Kirigami role.
+The note shows only in the rule editor sheet: the Rules page's inspector
+switch and its delete send no request id, so they get no
+`RuleCommandResult`; surfacing the note there is a GUI follow-up.
+Recommended-rule toggles (`toggle_curated`) are executor A's.
 
 ## 2. Blocklists page silent when every leftover delete is refused
 
