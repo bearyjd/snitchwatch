@@ -8,7 +8,6 @@
 //! request: the model routes it through the reviewed consent flow instead.
 
 use serde_json::{json, Value};
-use snitchwatch_bridge::curated::reconcile::EntryStatus;
 use snitchwatch_bridge::curated::wire::CuratedDefaultSummary;
 use snitchwatch_bridge::curated::CuratedGroup;
 
@@ -75,7 +74,7 @@ pub fn entries_of<'a>(
 pub fn view_json(
     groups: &[CuratedGroup],
     entries: &[CuratedDefaultSummary],
-    status_text: fn(EntryStatus) -> &'static str,
+    status_text: fn(&CuratedDefaultSummary) -> &'static str,
 ) -> String {
     let unlisted = (OTHER_TITLE, OTHER_DESCRIPTION, "");
     let listed = groups
@@ -98,7 +97,7 @@ pub fn view_json(
                         "allows": e.allows,
                         "why": e.why,
                         "isOn": e.on,
-                        "statusText": status_text(e.status),
+                        "statusText": status_text(e),
                         "problem": e.problem.as_deref().unwrap_or_default(),
                     })).collect::<Vec<_>>(),
                 })
@@ -111,7 +110,8 @@ pub fn view_json(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::curated_defaults::status_text;
+    use crate::curated_defaults::entry_status_text as status_text;
+    use snitchwatch_bridge::curated::reconcile::EntryStatus;
 
     fn group(id: &str) -> CuratedGroup {
         CuratedGroup {

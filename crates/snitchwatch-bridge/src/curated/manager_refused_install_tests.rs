@@ -111,3 +111,29 @@ async fn a_refused_dns_reenable_drops_its_grant_and_is_turned_off_again() {
         EntryStatus::InstalledButOff
     );
 }
+
+/// #158: the refusal note doesn't outlive a Remove request or a reconnect,
+/// either of which starts afresh; the entry stays off.
+#[tokio::test]
+async fn a_refusal_note_goes_on_remove_and_on_reconnect() {
+    for reconnect in [false, true] {
+        let harness = Harness::new().connect(Daemon::Refuse, Vec::new());
+        let curated = harness.curated();
+        turn(&curated, FLATPAK, true);
+        curated.reconcile().await;
+        curated.reconcile().await;
+        let state = entry_state(&curated, FLATPAK);
+        assert_eq!(state.problem.as_deref(), Some(INSTALL_REFUSED_REASON));
+        if reconnect {
+            harness.resync(Vec::new());
+        } else {
+            let routed =
+                curated.try_route(ClientMessage::RemoveCuratedDefault { id: FLATPAK.into() });
+            assert!(routed.is_none());
+        }
+        curated.reconcile().await;
+        let state = entry_state(&curated, FLATPAK);
+        assert_eq!(state.problem, None, "reconnect: {reconnect}");
+        assert!(!state.on);
+    }
+}

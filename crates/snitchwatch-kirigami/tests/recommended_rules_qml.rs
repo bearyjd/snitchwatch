@@ -258,6 +258,30 @@ Controls.ApplicationWindow {
                 expect(probeWindow.sent.length === beforeReplay, "disconnect replayed confirmation");
                 probeWindow.sent.length = beforeDns;
 
+                // #158: on, but held back on this computer (its account not
+                // confirmed): the switch stays on, the status says so rather
+                // than the inert bridge's sentence, and the reason is shown.
+                const held = entry("dns-resolved", true, "unavailable", true);
+                held.problem = "Snitchwatch couldn't confirm the account.";
+                send([held]);
+                expect(find(row(0), "entrySwitch").checked, "a held-back entry shows off");
+                expect(find(row(0), "statusLabel").text
+                       === "On, but Snitchwatch holds this rule back on this computer; see why below.",
+                       "held back: " + find(row(0), "statusLabel").text);
+                expect(find(row(0), "problemLabel").visible
+                       && find(row(0), "problemLabel").text === held.problem,
+                       "held back without its reason");
+                // #158: a refusal note the bridge cleared (Remove, reconnect)
+                // leaves nothing behind.
+                const refused = entry("flatpak", false, "off");
+                refused.problem = "The firewall service refused the rule.";
+                send([refused]);
+                expect(find(row(0), "problemLabel").visible, "refusal note not shown");
+                send([entry("flatpak", false, "off")]);
+                expect(!find(row(0), "problemLabel").visible, "a cleared note lingers");
+                expect(find(row(0), "statusLabel").text === "Off.", "off: "
+                       + find(row(0), "statusLabel").text);
+
                 // A bridge that never adds them: nothing can be turned on.
                 send([entry("flatpak", false, "unavailable")], "Needs the system service.");
                 expect(find(header, "unavailableBanner").visible, "no unavailable banner");

@@ -41,8 +41,10 @@ pub(super) struct State {
     /// reconnect.
     pub(super) maybe_applied: BTreeMap<String, MaybeApplied>,
     /// Entries turned off because the daemon refused their install (#130),
-    /// with why: shown until the entry is turned on again.
-    pub(super) install_refusals: BTreeMap<String, &'static str>,
+    /// with why and the daemon stream it happened on: shown until the entry
+    /// is turned on again, a Remove is asked for, or the daemon reconnects
+    /// (#158).
+    pub(super) install_refusals: BTreeMap<String, (&'static str, u64)>,
     /// Entries the last pass withheld (`manager_resolver.rs`).
     pub(super) withheld: BTreeSet<String>,
     /// The accounts as the last pass found them.
@@ -403,7 +405,7 @@ pub(super) fn summary(
                 .consent_problems
                 .get(&entry.id)
                 .or_else(|| state.problems.get(&entry.id))
-                .or_else(|| state.install_refusals.get(&entry.id))
+                .or_else(|| state.install_refusals.get(&entry.id).map(|(p, _)| p))
                 .map(|p| p.to_string())
         },
     }

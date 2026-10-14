@@ -11,7 +11,7 @@ use cxx_qt::Threading;
 use cxx_qt_lib::{QByteArray, QHash, QHashPair_i32_QByteArray, QModelIndex, QString, QVariant};
 
 use crate::curated_broad_consent::{BroadConsent, DISCLOSURE, DNS_ID};
-use crate::curated_defaults::{status_text, CuratedStore};
+use crate::curated_defaults::{entry_status_text, CuratedStore};
 use snitchwatch_bridge::ws_messages::{ClientMessage, ServerMessage};
 
 const ROLE_ID: i32 = 0;
@@ -189,7 +189,7 @@ impl qobject::CuratedDefaultsModel {
             ROLE_ALLOWS => text(&entry.allows),
             ROLE_WHY => text(&entry.why),
             ROLE_ON => QVariant::from(&entry.on),
-            ROLE_STATUS => text(status_text(entry.status)),
+            ROLE_STATUS => text(entry_status_text(entry)),
             ROLE_PROBLEM => text(entry.problem.as_deref().unwrap_or_default()),
             ROLE_CAN_REMOVE => QVariant::from(&self.store.can_remove(entry)),
             ROLE_BROAD => QVariant::from(&(entry.broad || entry.id == DNS_ID)),

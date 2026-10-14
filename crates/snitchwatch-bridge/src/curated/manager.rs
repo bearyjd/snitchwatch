@@ -196,6 +196,7 @@ impl CuratedDefaults {
         let mut state = lock(&self.inner.state);
         if state.inert.is_none() && entries().iter().any(|entry| entry.id == id) {
             self.revoke_locked(&mut state, id);
+            state.install_refusals.remove(id);
             state.removals.insert(id.to_string());
             state.removal_failures.remove(id);
             state.requests += 1;
@@ -402,7 +403,9 @@ impl CuratedDefaults {
                 state.statuses = planned.statuses;
                 keep(&mut state, planned.choices);
                 let enabled = state.choices.enabled.clone();
-                state.install_refusals.retain(|id, _| !enabled.contains(id));
+                state
+                    .install_refusals
+                    .retain(|id, (_, seen)| !enabled.contains(id) && *seen == generation);
                 let actions = without_failed(&mut state, planned.actions, generation);
                 show_removal_failures(&mut state, daemon, generation);
                 let actions = withhold(&mut state, actions, &withheld, &found);
@@ -630,7 +633,9 @@ impl CuratedDefaults {
                 keep(&mut state, choices);
                 state.failures.remove(&id);
                 state.statuses.insert(id.clone(), EntryStatus::NotInstalled);
-                state.install_refusals.insert(id, INSTALL_REFUSED_REASON);
+                state
+                    .install_refusals
+                    .insert(id, (INSTALL_REFUSED_REASON, generation));
             }
             (Err(problem), done) => {
                 let status = match done {

@@ -193,6 +193,7 @@ Kirigami.ScrollablePage {
                         Layout.fillWidth: true
                     }
                     Controls.Label {
+                        objectName: "problemLabel"
                         visible: row.problem.length > 0
                         textFormat: Text.PlainText
                         text: row.problem
