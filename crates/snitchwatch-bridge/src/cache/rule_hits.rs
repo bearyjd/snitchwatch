@@ -90,10 +90,12 @@
 //!   connects, and that ping can carry `uptime` 0, which can't place the
 //!   start: the judgement waits for the first ping with an uptime, counting
 //!   the events of the earlier ones toward it (a counter that fell in between
-//!   is a gap, as within a run). While it waits the wire shows a gap, and a save writes that
-//!   gap with no baseline and no clean stop, so a run that ends undecided
-//!   leaves the next one a gap too; Hits the old
-//!   run decided after the last ping counted, until it stopped, are not
+//!   is a gap, as within a run; so is a daemon that started after the first
+//!   deferred ping, another run). While it waits the wire shows a gap, and a
+//!   save writes that gap with no baseline and no clean stop, so a run that
+//!   ends undecided leaves the next one a gap too, and a daemon that never
+//!   reports an uptime keeps the gap shown and never saves a baseline: that
+//!   fails safe. Hits the old run decided after the last ping counted, until it stopped, are not
 //!   recorded or noticed: the documented loss window;
 //! - **anything else** (a start that moved without passing the last ping: a
 //!   suspend, a clock step) cannot be told apart: a gap.
@@ -196,6 +198,9 @@ struct Pending {
 #[derive(Debug, Clone, Copy)]
 struct Deferred {
     received: u64,
+    /// When the first of them arrived: a daemon that started after it is
+    /// another run than the one that sent it.
+    first_ping_unix_ms: i64,
 }
 
 /// The counts. Pure: times and the rule cache's membership are passed in.
@@ -250,6 +255,7 @@ impl RuleHits {
                 // falls meanwhile is a gap in `missed_events`, as in a run.
                 let deferred = Deferred {
                     received: pending.deferred.map_or(0, |d| d.received) + received as u64,
+                    first_ping_unix_ms: pending.deferred.map_or(now_ms, |d| d.first_ping_unix_ms),
                 };
                 self.pending = Some(Pending {
                     deferred: Some(deferred),
@@ -262,7 +268,21 @@ impl RuleHits {
                 self.provisional_gap_unix_ms = None;
                 self.touch();
                 let seen = pending.deferred.map_or(0, |d| d.received);
-                if restart_missed_hits(pending, seen + received as u64, uptime, rule_hits, now_ms) {
+                // The daemon restarted after the deferred ping: its hits since
+                // are another run's, and no sum can show what was lost.
+                let started_since = pending.deferred.is_some_and(|d| {
+                    now_ms.saturating_sub(secs_to_ms(uptime))
+                        > d.first_ping_unix_ms.saturating_add(SAME_START_SLACK_MS)
+                });
+                if started_since
+                    || restart_missed_hits(
+                        pending,
+                        seen + received as u64,
+                        uptime,
+                        rule_hits,
+                        now_ms,
+                    )
+                {
                     self.note_gap(now_ms);
                 }
             }

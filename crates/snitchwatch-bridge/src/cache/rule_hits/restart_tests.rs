@@ -705,3 +705,16 @@ fn a_restore_with_no_ping_at_all_still_hands_the_old_baseline_on() {
     let hits = restored(usual(true));
     assert!(hits.to_saved().unwrap().daemon.is_some());
 }
+
+#[test]
+fn a_daemon_that_restarted_after_the_deferred_ping_is_a_gap() {
+    // Run X pings with uptime 0 (2 hits, counter 2) and dies. Run Y starts a
+    // minute later and loses 2 hits before it pings (1 hit, counter 3). Both
+    // `rule_hits = received` (3 = 2 + 1) and the within-run check (2 -> 3
+    // grew by the 1 received) pass: only Y's start, after X's ping, shows it.
+    let mut hits = restored(usual(true));
+    ping(&mut hits, 2, 0, 2, FIRST);
+    let second = FIRST + 90_000;
+    ping(&mut hits, 1, 30, 3, second);
+    assert_eq!(hits.last_gap_unix_ms(), Some(second));
+}
