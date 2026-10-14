@@ -72,6 +72,13 @@ takes the enabled rule, `Save` fails, `ERROR`; the refusal effect is
   `skip_serializing_if = "BTreeSet::is_empty"`: older files read as before;
   a file without a bit is still read by older bridges. Counted in `load`'s
   cap and cleaned like the other id sets.
+- Downgrade (PR #149 review): the file stays version 3, and `Choices` keeps
+  `deny_unknown_fields`. A file saved while any bit is set has `filesLeft`,
+  which an older bridge rejects as unreadable: it goes inert
+  (`UNREADABLE_REASON`), changing nothing in the firewall, until the file
+  is repaired or removed. That fails safe, and the version is deliberately
+  not bumped: a bump would make an older bridge reject every newer file,
+  not only those with a bit set.
 - Set where a refused delete reads `OffFileLeft` (`apply`, `remove`) and by
   item 19's `OK` arm when marked. Cleared on an install `OK` (file
   rewritten), an `OK` delete of a listed copy (the file loaded, so it was
