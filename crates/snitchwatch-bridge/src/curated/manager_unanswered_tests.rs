@@ -8,7 +8,7 @@
 
 use super::tests::*;
 use super::*;
-use snitchwatch_proto::protocol::{Action, Rule};
+use snitchwatch_proto::protocol::{Action, Notification, Rule};
 
 fn sent(action: Action) -> (i32, String) {
     (action as i32, FLATPAK_RULE.to_string())
@@ -221,4 +221,58 @@ async fn an_answered_removal_forgets_what_may_apply() {
         assert_eq!(harness.seen(), removed);
         assert_eq!(status(&curated), after);
     }
+}
+
+/// #120 item 22: a HELLO that brings no new snapshot from the daemon bumps
+/// the stream generation, but must not make the bridge forget an install
+/// that may have applied: the list it shows is still the one from before.
+///
+/// `hello` says HELLO again; it returns the receiver of a new current stream,
+/// if it opened one (the delete goes there, not to the first stream).
+async fn off_still_deletes_after(
+    hello: impl FnOnce(&Harness) -> Option<tokio::sync::mpsc::Receiver<Notification>>,
+) {
+    let harness = Harness::new().connect(Daemon::SilentInstalls, Vec::new());
+    let curated = harness.curated();
+    unanswered_install(&harness, &curated).await;
+    let mut second = hello(&harness);
+
+    turn(&curated, FLATPAK, false);
+    curated.reconcile().await;
+    let deleted = match second.as_mut() {
+        Some(rx) => rx
+            .try_recv()
+            .ok()
+            .map(|n| (n.r#type, n.rules[0].name.clone())),
+        None => harness.seen().get(1).cloned(),
+    };
+    assert_eq!(
+        deleted,
+        Some(sent(Action::DeleteRule)),
+        "the unanswered install may still be in the daemon's memory"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_second_stream_readopting_the_staged_snapshot_keeps_what_may_apply() {
+    // Two streams of one daemon on the Unix socket's one key both say HELLO
+    // within the staged snapshot's 30 s: the second adopts the same
+    // pre-install snapshot again.
+    off_still_deletes_after(|harness| {
+        let (second, rx) = harness.commands.open_stream(None);
+        harness.commands.on_reply(second.id(), &reply(0, true));
+        std::mem::forget(second);
+        Some(rx)
+    })
+    .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_second_hello_on_the_same_stream_keeps_what_may_apply() {
+    off_still_deletes_after(|harness| {
+        let (_, stream_id) = harness.stream.as_ref().unwrap();
+        harness.commands.on_reply(*stream_id, &reply(0, true));
+        None
+    })
+    .await;
 }

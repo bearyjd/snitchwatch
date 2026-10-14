@@ -233,6 +233,19 @@ enum Delivery {
     CommittedStream,
 }
 
+/// What a guarded curated change may find under its name in the snapshot
+/// that authorized it.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Guard {
+    /// Nothing: an install.
+    Absent,
+    /// The same rule apart from `enabled`, turned to this.
+    Toggle(bool),
+    /// The entry's own unedited copy, replaced at its account's new uid
+    /// (#120 36/41).
+    Replace,
+}
+
 struct Inner {
     transport: DaemonTransport,
     next_stream: StreamId,
@@ -550,7 +563,7 @@ impl DaemonCommands {
         &self,
         mut notification: Notification,
         delivery: Delivery,
-        curated: Option<(u64, Option<bool>)>,
+        curated: Option<(u64, Guard)>,
     ) -> Result<PendingReply, SendError> {
         check_sendable(&notification)?;
         let mut inner = lock(&self.inner);
@@ -587,12 +600,20 @@ impl DaemonCommands {
             }
             let current = rules.get(&rule.name);
             let valid = match reenable {
-                Some(enabled) => current.is_some_and(|current| {
+                Guard::Toggle(enabled) => current.is_some_and(|current| {
                     (!enabled || !current.enabled)
                         && crate::curated::canonical::canonical(current)
                             == crate::curated::canonical::canonical(rule)
                 }),
-                None => current.is_none(),
+                Guard::Absent => current.is_none(),
+                // Never turned on by the replace: a turn-off may have come
+                // in since the caller looked (security review L1).
+                Guard::Replace => current.is_some_and(|current| {
+                    (current.enabled || !rule.enabled)
+                        && crate::curated::entry_for_rule_name(&rule.name).is_some_and(|entry| {
+                            crate::curated::canonical::is_unedited(Some(entry), None, current)
+                        })
+                }),
             };
             if !valid {
                 return Err(SendError::ReservedName);

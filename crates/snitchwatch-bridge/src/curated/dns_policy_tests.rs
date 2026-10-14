@@ -66,15 +66,18 @@ fn it_is_off_by_default_and_turned_on_installs_exactly_its_rule() {
     );
     assert_eq!(plan.statuses[ID], EntryStatus::Off);
 
-    let confirmed = on.installed(ID, &dns().rule());
-    let after = reconcile(&daemon(&[as_reported(&dns().rule())]), &confirmed);
+    let confirmed = on.installed(ID, &dns().rule_as(Some(990)));
+    let after = reconcile(
+        &daemon(&[as_reported(&dns().rule_as(Some(990)))]),
+        &confirmed,
+    );
     assert!(after.actions.is_empty(), "{:?}", after.actions);
     assert_eq!(after.statuses[ID], EntryStatus::Installed);
 }
 
 #[test]
 fn a_first_run_with_the_rule_already_in_the_firewall_changes_nothing() {
-    let rules = daemon(&[as_reported(&dns().rule())]);
+    let rules = daemon(&[as_reported(&dns().rule_as(Some(990)))]);
     let plan = reconcile(&rules, &Choices::default());
     assert!(plan.actions.is_empty(), "{:?}", plan.actions);
     assert_eq!(plan.statuses[ID], EntryStatus::InFirewall);
@@ -82,7 +85,9 @@ fn a_first_run_with_the_rule_already_in_the_firewall_changes_nothing() {
 
 #[test]
 fn a_user_delete_is_respected_and_an_edit_is_left_alone() {
-    let installed = Choices::default().enable(ID).installed(ID, &dns().rule());
+    let installed = Choices::default()
+        .enable(ID)
+        .installed(ID, &dns().rule_as(Some(990)));
     // Deleted outside Snitchwatch: never reinstalled, across restarts too.
     let gone = reconcile(&BTreeMap::new(), &installed);
     assert!(gone.actions.is_empty(), "{:?}", gone.actions);
@@ -93,12 +98,12 @@ fn a_user_delete_is_respected_and_an_edit_is_left_alone() {
 
     // Edited, in each place it could be widened: left alone, never
     // overwritten, never deleted, even on opt-out. A copy that lost its
-    // sender pin, or names another user, is an edit too.
-    let edits: [fn(&mut Rule); 8] = [
+    // sender pin is an edit too. One at another uid is not: the account's
+    // uid moves between image builds (`manager_moved.rs`).
+    let edits: [fn(&mut Rule); 7] = [
         |r| r.operator.as_mut().unwrap().list[2].data = "5353".into(),
         |r| r.operator.as_mut().unwrap().list[0].data = "/usr/bin/curl".into(),
         |r| r.operator.as_mut().unwrap().list[3].data = "^.*$".into(),
-        |r| r.operator.as_mut().unwrap().list[1].data = "1000".into(),
         |r| {
             r.operator.as_mut().unwrap().list.remove(1);
         },
@@ -113,7 +118,7 @@ fn a_user_delete_is_respected_and_an_edit_is_left_alone() {
         },
     ];
     for edit in edits {
-        let mut edited = dns().rule();
+        let mut edited = dns().rule_as(Some(990));
         edit(&mut edited);
         let rules = daemon(&[edited.clone()]);
         let on = reconcile(&rules, &installed);
@@ -128,7 +133,7 @@ fn a_user_delete_is_respected_and_an_edit_is_left_alone() {
     // Off and unedited (a pure toggle isn't an edit): deleted.
     let toggled = Rule {
         enabled: false,
-        ..as_reported(&dns().rule())
+        ..as_reported(&dns().rule_as(Some(990)))
     };
     let off = reconcile(&daemon(&[toggled]), &installed.disable(ID));
     assert_eq!(
@@ -144,9 +149,9 @@ fn a_user_delete_is_respected_and_an_edit_is_left_alone() {
 fn the_daemons_report_of_the_rule_is_unedited() {
     // `user.id` is not rewritten by the daemon's Compile, so what it reports
     // is what was sent, apart from the list's operand and `created`.
-    let reported = as_reported(&dns().rule());
+    let reported = as_reported(&dns().rule_as(Some(990)));
     assert!(is_unedited(Some(dns()), None, &reported));
-    assert_eq!(canonical(&reported), canonical(&dns().rule()));
+    assert_eq!(canonical(&reported), canonical(&dns().rule_as(Some(990))));
     assert!(toggleable(&reported));
     let off = Rule {
         enabled: false,
@@ -157,7 +162,7 @@ fn the_daemons_report_of_the_rule_is_unedited() {
 
 #[test]
 fn the_reserved_name_keeps_users_from_adding_widening_or_deleting_it() {
-    let rule = dns().rule();
+    let rule = dns().rule_as(Some(990));
     // A GUI can't add or import a rule under the name, even the shipped one.
     let problems = rule_policy::validate_user_rule(&rule, PolicyProfile::Editor).unwrap_err();
     assert!(problems.iter().any(|p| p.path == "name"), "{problems:?}");

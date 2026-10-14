@@ -89,6 +89,30 @@ pub fn broad_policy_fingerprint(entry: &super::CuratedEntry) -> String {
 }
 
 impl BroadGrant {
+    /// This grant if it matches `entry`; or, if it was made for `entry`
+    /// pinned to the uid of its recorded installed `copy` (before grants
+    /// left the uid out, 2026-10-14), the same grant for the account,
+    /// whatever uid it moves to. `None` otherwise.
+    fn carried_over(
+        self,
+        entry: &super::CuratedEntry,
+        copy: Option<&CanonicalRule>,
+    ) -> Option<Self> {
+        if self.matches(entry) {
+            return Some(self);
+        }
+        let for_copy = copy.is_some_and(|copy| {
+            let bytes = serde_json::to_vec(copy)
+                .expect("canonical policy contains only JSON-serializable fields");
+            self.policy_sha256 == format!("{:x}", Sha256::digest(bytes))
+        });
+        let carried = Self {
+            policy_sha256: broad_policy_fingerprint(entry),
+            ..self
+        };
+        (for_copy && carried.matches(entry)).then_some(carried)
+    }
+
     fn matches(&self, entry: &super::CuratedEntry) -> bool {
         entry.any_address
             && self.version == GRANT_VERSION
@@ -393,11 +417,14 @@ fn cleaned(choices: Choices) -> Choices {
         broad_grants: choices
             .broad_grants
             .into_iter()
-            .filter(|(id, grant)| {
-                super::entries()
-                    .iter()
-                    .find(|entry| entry.id == *id)
-                    .is_some_and(|entry| grant.matches(entry))
+            .filter_map(|(id, grant)| {
+                let entry = super::entries().iter().find(|entry| entry.id == id)?;
+                let copy = choices
+                    .installed
+                    .get(&id)
+                    .filter(|copy| valid_copy(&id, copy));
+                let grant = grant.carried_over(entry, copy)?;
+                Some((id, grant))
             })
             .collect(),
         installed: choices
@@ -409,7 +436,8 @@ fn cleaned(choices: Choices) -> Choices {
 }
 
 /// A recorded copy is the entry's exact rule (security review L2: a crafted
-/// copy can't make a different port or host read as unedited); for an id
+/// copy can't make a different port or host read as unedited), a run-time
+/// account's at the uid it was installed with; for an id
 /// no longer in the list, a curated rule of that name (only ever used to
 /// delete an identical rule under the prefix).
 fn valid_copy(id: &str, copy: &CanonicalRule) -> bool {
@@ -417,7 +445,9 @@ fn valid_copy(id: &str, copy: &CanonicalRule) -> bool {
         return false;
     }
     match super::entries().iter().find(|entry| entry.id == id) {
-        Some(entry) => *copy == canonical(&entry.rule()),
+        Some(entry) => entry
+            .rule_matching(&copy.to_rule())
+            .is_some_and(|ours| *copy == canonical(&ours)),
         None => super::check_curated_rule(&copy.to_rule()).is_ok(),
     }
 }

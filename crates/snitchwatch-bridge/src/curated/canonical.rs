@@ -114,7 +114,10 @@ impl CanonicalLeaf {
 /// Whether the daemon's `daemon_rule` is unedited: the data file's rule for
 /// `entry` (or, for an entry no longer in the file, the `recorded` copy
 /// Snitchwatch installed), apart from what [`canonical`] ignores. The one
-/// check behind reconcile, the Rules page's toggle and the send path.
+/// check behind reconcile, the Rules page's toggle and the send path. A
+/// run-time account's copy is unedited at the uid it names
+/// ([`CuratedEntry::rule_matching`]); whether that is still the account's
+/// is the manager's to say.
 pub fn is_unedited(
     entry: Option<&CuratedEntry>,
     recorded: Option<&CanonicalRule>,
@@ -122,10 +125,21 @@ pub fn is_unedited(
 ) -> bool {
     let theirs = canonical(daemon_rule);
     match (entry, recorded) {
-        (Some(entry), _) => theirs == canonical(&entry.rule()),
+        (Some(entry), _) => entry
+            .rule_matching(daemon_rule)
+            .is_some_and(|ours| theirs == canonical(&ours)),
         (None, Some(recorded)) => &theirs == recorded,
         (None, None) => false,
     }
+}
+
+/// Whether `daemon_rule` is `entry`'s rule as v1 installed it, before its
+/// sender pin ([`CuratedEntry::legacy_rule`]): Snitchwatch's own copy, to
+/// replace in place or delete, never to install.
+pub fn is_legacy(entry: &CuratedEntry, daemon_rule: &Rule) -> bool {
+    entry
+        .legacy_rule()
+        .is_some_and(|old| canonical(daemon_rule) == canonical(&old))
 }
 
 #[cfg(test)]

@@ -223,7 +223,7 @@ Controls.ApplicationWindow {
                 expect(dialog.visible && !confirmDns.enabled, "confirmation visible before preparation");
                 const disclosure = find(dialog.contentItem, "dnsConsentDisclosure").text;
                 expect(find(dialog.contentItem, "dnsConsentDisclosure").textFormat === Text.PlainText, "DNS disclosure is markup");
-                for (const word of ["/usr/lib/systemd/systemd-resolved", "UID 193", "TCP/UDP", "53", "IPv4/IPv6", "any destination", "data inside DNS lookups"])
+                for (const word of ["/usr/lib/systemd/systemd-resolved", "systemd-resolve account", "TCP/UDP", "53", "IPv4/IPv6", "any destination", "data inside DNS lookups"])
                     expect(disclosure.indexOf(word) >= 0, "missing disclosure " + word);
                 curated.confirmBroadConsent();
                 expect(probeWindow.sent.length === beforeDns + 1, "confirmed before a ticket");
@@ -257,6 +257,35 @@ Controls.ApplicationWindow {
                 curated.confirmBroadConsent();
                 expect(probeWindow.sent.length === beforeReplay, "disconnect replayed confirmation");
                 probeWindow.sent.length = beforeDns;
+
+                // #158: on, but held back on this computer (its account not
+                // confirmed): the switch stays on, the status says so rather
+                // than the inert bridge's sentence, and the reason is shown.
+                const held = entry("dns-resolved", true, "unavailable", true);
+                held.problem = "Snitchwatch couldn't confirm the account.";
+                curated.applyServerMessageJson(JSON.stringify({action:"authenticated", capabilities:["curatedBroadOptInV1"]}));
+                send([entry("dns-resolved", true, "installed", true)]);
+                expect(find(row(0), "reviewDnsButton").enabled, "Review DNS choice off on a usable entry");
+                send([held]);
+                expect(!find(row(0), "reviewDnsButton").enabled,
+                       "Review DNS choice offered while the bridge holds DNS back");
+                expect(find(row(0), "entrySwitch").checked, "a held-back entry shows off");
+                expect(find(row(0), "statusLabel").text
+                       === "On, but Snitchwatch holds this rule back on this computer; see why below.",
+                       "held back: " + find(row(0), "statusLabel").text);
+                expect(find(row(0), "problemLabel").visible
+                       && find(row(0), "problemLabel").text === held.problem,
+                       "held back without its reason");
+                // #158: a refusal note the bridge cleared (Remove, reconnect)
+                // leaves nothing behind.
+                const refused = entry("flatpak", false, "off");
+                refused.problem = "The firewall service refused the rule.";
+                send([refused]);
+                expect(find(row(0), "problemLabel").visible, "refusal note not shown");
+                send([entry("flatpak", false, "off")]);
+                expect(!find(row(0), "problemLabel").visible, "a cleared note lingers");
+                expect(find(row(0), "statusLabel").text === "Off.", "off: "
+                       + find(row(0), "statusLabel").text);
 
                 // A bridge that never adds them: nothing can be turned on.
                 send([entry("flatpak", false, "unavailable")], "Needs the system service.");

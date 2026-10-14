@@ -461,6 +461,12 @@ fn second_run(clean: bool, transport: DaemonTransport) -> (RuleHitsHandle, Share
     assert!(!view(first.message()).lossy, "the first run has no gap");
     if clean {
         first.save_at_stop();
+        // Run two's daemon "started" `uptime` seconds before its first ping,
+        // and the real clock leaves no second between the stop and now: put
+        // the stop a minute back (inside the trust window, before the start).
+        let mut saved = rule_hits_file::load(&path).unwrap().expect("a saved file");
+        saved.stopped_unix_ms = Some(now_ms() - 60_000);
+        rule_hits_file::save(&path, &saved).unwrap();
     } else {
         first.save_now();
     }

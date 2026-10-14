@@ -636,3 +636,26 @@ async fn synthetic_connection_activity_is_rebroadcast_as_traffic_events() {
 
     bridge.shutdown();
 }
+
+/// #157: the system bridge, the one that installs recommended rules, reads
+/// the host's accounts; every other bridge never does. `run_system` needs
+/// socket activation, so this reads its source: dropping the call would
+/// leave DNS, chrony and avahi withheld for good.
+#[test]
+fn run_system_sets_the_hosts_account_lookup() {
+    let source = include_str!("lib.rs");
+    let start = source.find("pub async fn run_system(").expect("run_system");
+    let end = start + source[start..].find("\n}\n").expect("end of run_system");
+    let body: String = source[start..end].split_whitespace().collect();
+    assert!(
+        body.contains(
+            "bridge.set_curated_account_lookups(snitchwatch_bridge::accounts::system_uid_lookup(),snitchwatch_bridge::accounts::system_lookup(),);"
+        ),
+        "run_system no longer sets the host's account lookup"
+    );
+    assert_eq!(
+        source.matches("system_uid_lookup()").count(),
+        1,
+        "the host's account lookup is set somewhere other than run_system"
+    );
+}

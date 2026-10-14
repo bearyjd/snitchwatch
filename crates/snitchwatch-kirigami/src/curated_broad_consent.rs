@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 pub const CAPABILITY: &str = "curatedBroadOptInV1";
 pub const DNS_ID: &str = "dns-resolved";
-pub const DISCLOSURE: &str = "/usr/lib/systemd/systemd-resolved (UID 193) may send DNS over TCP/UDP port 53, using IPv4/IPv6, to any destination. Apps can send data inside DNS lookups. Keeping an enabled rule records this choice without rewriting it. Keeping a disabled rule leaves it disabled; re-enabling requires a separate confirmation.";
+pub const DISCLOSURE: &str = "/usr/lib/systemd/systemd-resolved (running as the systemd-resolve account) may send DNS over TCP/UDP port 53, using IPv4/IPv6, to any destination. Apps can send data inside DNS lookups. Keeping an enabled rule records this choice without rewriting it. Keeping a disabled rule leaves it disabled; re-enabling requires a separate confirmation.";
 
 #[derive(Clone, PartialEq)]
 struct Intent {

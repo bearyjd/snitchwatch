@@ -8,7 +8,7 @@ use std::sync::Mutex;
 
 use tracing::{error, warn};
 
-use super::super::canonical::is_unedited;
+use super::super::canonical::{is_legacy, is_unedited};
 use super::super::reconcile::{CuratedAction, DaemonRules, EntryStatus};
 use super::super::store::{self, Choices};
 use super::super::wire::CuratedDefaultSummary;
@@ -41,10 +41,20 @@ pub(super) struct State {
     /// reconnect.
     pub(super) maybe_applied: BTreeMap<String, MaybeApplied>,
     /// Entries turned off because the daemon refused their install (#130),
-    /// with why: shown until the entry is turned on again.
-    pub(super) install_refusals: BTreeMap<String, &'static str>,
+    /// with why and the daemon stream it happened on: shown until the entry
+    /// is turned on again, a Remove is asked for, or the daemon reconnects
+    /// (#158).
+    pub(super) install_refusals: BTreeMap<String, (&'static str, u64)>,
     /// Entries the last pass withheld (`manager_resolver.rs`).
     pub(super) withheld: BTreeSet<String>,
+    /// The accounts as the last pass found them.
+    pub(super) found: super::resolver::Found,
+    /// Entries whose account the last pass found at another uid than their
+    /// copy names (`manager_moved.rs`): never turned on.
+    pub(super) moved: BTreeSet<String>,
+    /// Entries re-pinned to their account's new uid, on the daemon stream
+    /// it happened on: their note is shown until it reconnects.
+    pub(super) repinned: BTreeMap<String, u64>,
     /// Bumped by every GUI request taken (a choice, even an unchanged one,
     /// or a removal): each gets a pass (re-review 2, HIGH).
     pub(super) requests: u64,
@@ -73,6 +83,9 @@ impl State {
             maybe_applied: BTreeMap::new(),
             install_refusals: BTreeMap::new(),
             withheld: BTreeSet::new(),
+            found: Default::default(),
+            moved: BTreeSet::new(),
+            repinned: BTreeMap::new(),
             requests: 0,
             file: None,
             storage: StorageStatus {
@@ -90,10 +103,11 @@ impl State {
 /// A rule that may apply though the list lacks it ([`State::maybe_applied`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct MaybeApplied {
-    /// The daemon stream's generation it was recorded on. A reconnect's
-    /// snapshot is the daemon's memory, so it is forgotten then (#120
-    /// item 14).
-    pub(super) generation: u64,
+    /// The snapshot (`RulesCache::snapshot_sequence`) it was recorded
+    /// against. A reconnect's snapshot is the daemon's memory, so it is
+    /// forgotten then (#120 item 14); a HELLO that adopts the same snapshot
+    /// again is not a reconnect (item 22).
+    pub(super) epoch: u64,
     /// Whether the rule may have a file, which a refused delete would leave
     /// behind: an unanswered install may have written it, and a refused one
     /// wrote none, so only a file a refused delete left before it counts
@@ -115,7 +129,7 @@ pub(super) fn track_maybe_applied(
     install: bool,
     outcome: &Result<(), Problem>,
     marked: bool,
-    generation: u64,
+    epoch: u64,
 ) -> Option<MaybeApplied> {
     let (refused, unanswered) = match outcome {
         Ok(()) => (false, false),
@@ -128,7 +142,7 @@ pub(super) fn track_maybe_applied(
             .get(name)
             .is_some_and(|record| record.file_possible);
         let record = MaybeApplied {
-            generation,
+            epoch,
             file_possible: unanswered || marked || earlier,
         };
         state.maybe_applied.insert(name.to_string(), record);
@@ -349,12 +363,14 @@ pub(super) fn still_edited(id: &str, daemon: DaemonRules<'_>) -> bool {
         || daemon
             .rules
             .get(&name)
-            .is_some_and(|rule| !is_unedited(Some(entry), None, rule))
+            .is_some_and(|rule| !is_unedited(Some(entry), None, rule) && !is_legacy(entry, rule))
 }
 
 fn action_id(action: &CuratedAction) -> String {
     match action {
-        CuratedAction::Install(id) | CuratedAction::Delete { id, .. } => id.clone(),
+        CuratedAction::Install(id)
+        | CuratedAction::Upgrade(id)
+        | CuratedAction::Delete { id, .. } => id.clone(),
     }
 }
 
@@ -398,7 +414,13 @@ pub(super) fn summary(
                 .consent_problems
                 .get(&entry.id)
                 .or_else(|| state.problems.get(&entry.id))
-                .or_else(|| state.install_refusals.get(&entry.id))
+                .or_else(|| state.install_refusals.get(&entry.id).map(|(p, _)| p))
+                .or_else(|| {
+                    state
+                        .repinned
+                        .contains_key(&entry.id)
+                        .then_some(&super::moved::REPINNED_NOTE)
+                })
                 .map(|p| p.to_string())
         },
     }

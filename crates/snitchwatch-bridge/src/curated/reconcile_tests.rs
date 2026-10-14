@@ -70,7 +70,7 @@ fn broad_install_needs_valid_reviewed_authority_and_preserves_legacy_choices() {
 #[test]
 fn legacy_or_adoption_only_preserves_enabled_and_disabled_rule_bytes() {
     for enabled in [true, false] {
-        let mut rule = dns().rule();
+        let mut rule = dns().rule_as(Some(990));
         rule.enabled = enabled;
         rule.created = 761;
         let rules = daemon(&[rule]);
@@ -108,7 +108,7 @@ fn external_broad_deletion_revokes_grant_and_never_recreates_it() {
     let choices = Choices::default()
         .enable(&dns().id)
         .grant_broad(&dns().id, true)
-        .installed(&dns().id, &dns().rule());
+        .installed(&dns().id, &dns().rule_as(Some(990)));
     let gone = plan(entries(), &BTreeMap::new(), &choices);
     assert!(gone.actions.is_empty());
     assert_eq!(status(&gone, &dns().id), EntryStatus::DeletedOutside);
@@ -121,7 +121,7 @@ fn external_broad_deletion_revokes_grant_and_never_recreates_it() {
 #[test]
 fn legacy_path_only_dns_stays_edited_and_missing_legacy_dns_stays_inert() {
     let choices = Choices::default().enable(&dns().id);
-    let mut path_only = dns().rule();
+    let mut path_only = dns().rule_as(Some(990));
     path_only.operator = path_only
         .operator
         .unwrap()
