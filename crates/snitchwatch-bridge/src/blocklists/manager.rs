@@ -30,23 +30,6 @@ use crate::ws_messages::{
 /// What to tell the page about a removal that did not remove everything, or
 /// `None` if it did. A refused delete counts as removed: the daemon stopped
 /// using the rule before it failed to remove the file (tower r12).
-/// What a removal that left nothing to count says about the files the
-/// daemon couldn't remove (#120 item 2): `None` when there are none.
-fn files_left_note(refused: usize) -> Option<String> {
-    match refused {
-        0 => None,
-        1 => Some(
-            "The leftover blocklist rules were removed, but the firewall service couldn't \
-             remove the saved file of 1, so it may come back when the service restarts."
-                .to_string(),
-        ),
-        n => Some(format!(
-            "The leftover blocklist rules were removed, but the firewall service couldn't \
-             remove the saved files of {n}, so they may come back when the service restarts."
-        )),
-    }
-}
-
 fn removal_note(done: &RemovedLeftovers) -> Option<String> {
     let taken = done.removed + done.refused;
     let of = format!("Removed {taken} of {} rules", done.total);
@@ -71,6 +54,23 @@ fn removal_note(done: &RemovedLeftovers) -> Option<String> {
         )),
         None if done.refused > 0 => Some(format!("{of}.{files}")),
         None => None,
+    }
+}
+
+/// What a removal that left nothing to count says about the files the
+/// daemon couldn't remove (#120 item 2): `None` when there are none.
+fn files_left_note(refused: usize) -> Option<String> {
+    match refused {
+        0 => None,
+        1 => Some(
+            "The leftover blocklist rules were removed, but the firewall service couldn't \
+             remove the saved file of 1, so it may come back when the service restarts."
+                .to_string(),
+        ),
+        n => Some(format!(
+            "The leftover blocklist rules were removed, but the firewall service couldn't \
+             remove the saved files of {n}, so they may come back when the service restarts."
+        )),
     }
 }
 
