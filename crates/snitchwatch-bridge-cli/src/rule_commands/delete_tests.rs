@@ -60,7 +60,7 @@ async fn a_refused_delete_unlists_the_rule_and_says_its_file_may_bring_it_back()
     let rules = [bound("100-a", "deny"), bound("100-b", "deny")];
     let mut daemon = daemon(rules.to_vec());
     let model = model(&rules);
-    model.lock().unwrap().stuck_files.insert("100-a".into());
+    model.lock().unwrap().stuck.insert("100-a".into());
     run_model(&mut daemon, model.clone());
     let commands = commands(&daemon);
     let mut rx = daemon.broadcast.subscribe();
@@ -89,7 +89,7 @@ async fn without_a_request_id_the_list_alone_tells_the_gui() {
     let rules = [bound("100-a", "deny")];
     let mut daemon = daemon(rules.to_vec());
     let model = model(&rules);
-    model.lock().unwrap().stuck_files.insert("100-a".into());
+    model.lock().unwrap().stuck.insert("100-a".into());
     run_model(&mut daemon, model.clone());
     let commands = commands(&daemon);
     let mut rx = daemon.broadcast.subscribe();
@@ -109,13 +109,13 @@ async fn a_second_delete_of_a_name_not_in_memory_keeps_the_note() {
     let rules = [bound("100-a", "deny")];
     let mut daemon = daemon(rules.to_vec());
     let model = model(&rules);
-    model.lock().unwrap().stuck_files.insert("100-a".into());
+    model.lock().unwrap().stuck.insert("100-a".into());
     run_model(&mut daemon, model.clone());
     let commands = commands(&daemon);
     let mut rx = daemon.broadcast.subscribe();
     commands.try_route(delete("100-a", Some("d1")));
     result(&mut rx).await;
-    model.lock().unwrap().stuck_files.clear();
+    model.lock().unwrap().stuck.clear();
 
     commands.try_route(delete("100-a", Some("d2")));
     assert_eq!(result(&mut rx).await, RuleCommandOutcome::Ok);
@@ -132,7 +132,7 @@ async fn a_refused_delete_publishes_the_list_once() {
         let rules = [bound("100-a", "deny")];
         let mut daemon = daemon(rules.to_vec());
         let model = model(&rules);
-        model.lock().unwrap().stuck_files.insert("100-a".into());
+        model.lock().unwrap().stuck.insert("100-a".into());
         run_model(&mut daemon, model.clone());
         let commands = commands(&daemon);
         let mut rx = daemon.broadcast.subscribe();
