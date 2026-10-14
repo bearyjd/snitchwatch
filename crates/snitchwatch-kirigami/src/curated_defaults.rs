@@ -250,13 +250,17 @@ fn asks_for(entry: &CuratedDefaultSummary, on: bool) -> bool {
 /// Without a reason, `Unavailable` is the inert bridge's, said in its
 /// banner.
 pub fn entry_status_text(entry: &CuratedDefaultSummary) -> &'static str {
-    match (entry.status, entry.on, entry.problem.is_some()) {
-        (EntryStatus::Unavailable, true, true) => {
-            "On, but Snitchwatch holds this rule back on this computer; see why below."
-        }
-        (EntryStatus::Unavailable, false, true) => "Not offered on this computer; see why below.",
-        (status, _, _) => status_text(status),
+    match (held_back(entry), entry.on) {
+        (true, true) => "On, but Snitchwatch holds this rule back on this computer; see why below.",
+        (true, false) => "Not offered on this computer; see why below.",
+        (false, _) => status_text(entry.status),
     }
+}
+
+/// Whether the bridge holds `entry` back on this computer, with a reason
+/// (its account unconfirmed, #158): nothing for it can be confirmed now.
+pub fn held_back(entry: &CuratedDefaultSummary) -> bool {
+    entry.status == EntryStatus::Unavailable && entry.problem.is_some()
 }
 
 /// Where an entry stands, in one fixed sentence, as of the firewall

@@ -141,6 +141,8 @@ Kirigami.ScrollablePage {
             required property string problem
             required property bool canRemove
             required property bool canKeep
+            // The bridge holds this entry back here (its account unknown).
+            required property bool heldBack
             // Remove asks first; a model reset (the bridge's answer) ends it.
             property bool confirmingRemove: false
 
@@ -212,7 +214,7 @@ Kirigami.ScrollablePage {
                     Controls.Button {
                         objectName: "reviewDnsButton"
                         visible: row.isBroad && !row.canKeep && !row.canRemove
-                        enabled: page.usable && page.model.broadSupported
+                        enabled: page.usable && page.model.broadSupported && !row.heldBack
                         text: "Review DNS choice…"
                         onClicked: page.model.setEntry(row.entryId, true)
                     }

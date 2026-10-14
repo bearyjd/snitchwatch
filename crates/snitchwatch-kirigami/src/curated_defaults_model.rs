@@ -11,7 +11,7 @@ use cxx_qt::Threading;
 use cxx_qt_lib::{QByteArray, QHash, QHashPair_i32_QByteArray, QModelIndex, QString, QVariant};
 
 use crate::curated_broad_consent::{BroadConsent, DISCLOSURE, DNS_ID};
-use crate::curated_defaults::{entry_status_text, CuratedStore};
+use crate::curated_defaults::{entry_status_text, held_back, CuratedStore};
 use snitchwatch_bridge::ws_messages::{ClientMessage, ServerMessage};
 
 const ROLE_ID: i32 = 0;
@@ -25,6 +25,7 @@ const ROLE_CAN_REMOVE: i32 = 7;
 const ROLE_CAN_KEEP: i32 = 8;
 const ROLE_BROAD: i32 = 9;
 const ROLE_GROUP_TITLE: i32 = 10;
+const ROLE_HELD_BACK: i32 = 11;
 
 #[cxx_qt::bridge]
 pub mod qobject {
@@ -195,6 +196,7 @@ impl qobject::CuratedDefaultsModel {
             ROLE_BROAD => QVariant::from(&(entry.broad || entry.id == DNS_ID)),
             ROLE_CAN_KEEP => QVariant::from(&self.store.can_keep(entry)),
             ROLE_GROUP_TITLE => text(self.store.group_title(entry)),
+            ROLE_HELD_BACK => QVariant::from(&held_back(entry)),
             _ => QVariant::default(),
         }
     }
@@ -213,6 +215,7 @@ impl qobject::CuratedDefaultsModel {
         roles.insert(ROLE_CAN_REMOVE, QByteArray::from("canRemove"));
         roles.insert(ROLE_CAN_KEEP, QByteArray::from("canKeep"));
         roles.insert(ROLE_GROUP_TITLE, QByteArray::from("groupTitle"));
+        roles.insert(ROLE_HELD_BACK, QByteArray::from("heldBack"));
         roles
     }
 

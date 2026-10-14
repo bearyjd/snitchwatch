@@ -263,7 +263,12 @@ Controls.ApplicationWindow {
                 // than the inert bridge's sentence, and the reason is shown.
                 const held = entry("dns-resolved", true, "unavailable", true);
                 held.problem = "Snitchwatch couldn't confirm the account.";
+                curated.applyServerMessageJson(JSON.stringify({action:"authenticated", capabilities:["curatedBroadOptInV1"]}));
+                send([entry("dns-resolved", true, "installed", true)]);
+                expect(find(row(0), "reviewDnsButton").enabled, "Review DNS choice off on a usable entry");
                 send([held]);
+                expect(!find(row(0), "reviewDnsButton").enabled,
+                       "Review DNS choice offered while the bridge holds DNS back");
                 expect(find(row(0), "entrySwitch").checked, "a held-back entry shows off");
                 expect(find(row(0), "statusLabel").text
                        === "On, but Snitchwatch holds this rule back on this computer; see why below.",
