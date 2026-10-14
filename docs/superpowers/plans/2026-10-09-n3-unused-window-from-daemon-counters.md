@@ -188,9 +188,20 @@ gaps, unchanged.
   pre-rollback baseline and clean stop. Rolled forward days later, a daemon
   restart whose first ping holds every hit of its run reads "no gap", and
   every hit of the rollback period is invisible. The same holds for an N3
-  run whose file was unreadable until fixed. Options for later: honour row 5
-  only when the new daemon started within N minutes of `stoppedUnixMs`
-  (gives up "machine off overnight"), or record a boot id.
+  run whose file was unreadable until fixed. Covered by the clean-stop
+  window (next item, #120 item 27): a roll-forward days later is a gap.
+- **The clean-stop window** (#120 item 27, #159; plan
+  `2026-10-14-n3-window-and-hello-race.md`). Row 5 (and the clean-stop part of
+  row 3) believes the saved stop only if the restarted daemon started (`now −
+  uptime`) at or after `stoppedUnixMs` and no more than
+  `CLEAN_STOP_WINDOW_MS` (10 minutes) after it. Otherwise a gap. A missing or
+  zero `uptime`, a start before the stop, and a clock that stepped back are
+  gaps. A machine off for longer than the window reads as a false gap: accepted
+  (a missed gap is the costly error); a boot id was rejected because every
+  reboot would become a gap. This also covers a stale Unix stop that outlives
+  a TCP run (`attach_file` keeps it when it can't rewrite it, #120 item 24).
+  Residual: a TCP run and the daemon restart both inside the window of the
+  stop go unnoticed.
 - **Storage that can't be written to at all for a whole run** (re-review;
   documented, not handled). When the clean stop can't be rewritten out of
   the file, the file is removed; an unlink works on a full disk, but not on

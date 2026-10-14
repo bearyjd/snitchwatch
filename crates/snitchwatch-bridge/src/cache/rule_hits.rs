@@ -83,8 +83,11 @@
 //!   before the last ping counted; neither counter went down): a gap when
 //!   `Δrule_hits ≠ received`, as within a run;
 //! - **it restarted** (a counter went down, or it started after the last ping
-//!   counted): a gap unless the previous run stopped cleanly and this ping
-//!   holds every hit of the new run (`rule_hits = received`). Hits the old
+//!   counted): a gap unless the previous run stopped cleanly, the new daemon
+//!   started at or after that stop and within [`CLEAN_STOP_WINDOW_MS`] (10
+//!   minutes) of it (its start is `now − uptime`; a missing or zero `uptime`
+//!   fails), and this ping holds every hit of the new run
+//!   (`rule_hits = received`). Hits the old
 //!   run decided after the last ping counted, until it stopped, are not
 //!   recorded or noticed: the documented loss window;
 //! - **anything else** (a start that moved without passing the last ping: a
@@ -127,6 +130,12 @@ pub const MAX_FUTURE_SKEW_MS: i64 = 24 * 60 * 60 * 1000;
 /// for one run: each is up to 2 s late (whole-second `uptime`, and up to 1 s
 /// of ping delivery, the daemon's RPC timeout).
 const SAME_START_SLACK_MS: i64 = 5_000;
+/// How long after its `stoppedUnixMs` a clean stop is still believed: the
+/// restarted daemon must have started within this long after the stop (#120
+/// item 27, #159; plan `2026-10-14-n3-window-and-hello-race.md`). Past it, a
+/// restart is a gap even if the first ping holds every hit: a long power-off
+/// is a false gap, accepted, because a missed gap is the costly error.
+pub const CLEAN_STOP_WINDOW_MS: i64 = 10 * 60 * 1000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 struct Stat {
@@ -517,7 +526,9 @@ fn restart_missed_hits(
     let restarted = rule_hits < then.rule_hits
         || uptime < then.uptime
         || started_now >= then.ping_unix_ms.saturating_sub(SAME_START_SLACK_MS);
-    let clean_stop = pending.stopped_unix_ms.is_some();
+    let clean_stop = pending
+        .stopped_unix_ms
+        .is_some_and(|stopped| stop_vouches_for(stopped, uptime, started_now));
     let (daemon, missed) = if restarted {
         ("restarted", !clean_stop || rule_hits != received)
     } else if started_now.abs_diff(started_then) <= SAME_START_SLACK_MS.unsigned_abs() {
@@ -530,6 +541,17 @@ fn restart_missed_hits(
         clean_stop, missed, "rule hit counts: a bridge restart judged from the daemon's counters"
     );
     missed
+}
+
+/// Whether a clean stop at `stopped` vouches for a daemon that started at
+/// `started_now`: at or after the stop, and within [`CLEAN_STOP_WINDOW_MS`] of
+/// it. A zero `uptime` (also what a missing one decodes to) places nothing, and
+/// a start before the stop (or a clock that stepped back) is not a restart
+/// after it: both are a gap.
+fn stop_vouches_for(stopped: i64, uptime: u64, started_now: i64) -> bool {
+    uptime > 0
+        && started_now >= stopped
+        && started_now.saturating_sub(stopped) <= CLEAN_STOP_WINDOW_MS
 }
 
 fn secs_to_ms(secs: u64) -> i64 {

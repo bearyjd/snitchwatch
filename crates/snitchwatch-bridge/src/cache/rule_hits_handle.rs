@@ -187,7 +187,11 @@ impl RuleHitsHandle {
     /// clean stop, so one it can't rewrite stays in the file. Unix run A
     /// writes a stop, TCP run T can't rewrite it and counts hits it never
     /// saves; if the daemon then restarts, Unix run B judges from A's stop,
-    /// sees no gap, and T's hits are lost unnoticed (#120 item 27).
+    /// sees no gap, and T's hits would be lost unnoticed. The trust window
+    /// covers it (#120 item 27, #159): B believes A's stop only if its daemon
+    /// started within [`crate::cache::rule_hits::CLEAN_STOP_WINDOW_MS`] after
+    /// it, so a restart after T's run, past the window, is a gap. Residual: a
+    /// T run and a daemon restart both inside that window go unnoticed.
     pub fn attach_file(&self, path: PathBuf) {
         let loaded = rule_hits_file::load(&path);
         let (mut consume, mut downgrade) = (false, false);
