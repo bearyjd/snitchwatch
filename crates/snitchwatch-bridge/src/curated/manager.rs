@@ -50,9 +50,7 @@ mod resolver;
 mod state;
 #[path = "manager_upgrade.rs"]
 mod upgrade;
-pub use moved::{
-    UidChange, DNS_MOVED_REASON, MOVED_UNDECIDED_REASON, ON_UID_CHANGE, UID_CHANGED_OFF_REASON,
-};
+pub use moved::{DNS_MOVED_REASON, MOVED_UNDECIDED_REASON, REPINNED_NOTE};
 use resolver::withhold;
 pub use resolver::{ACCOUNT_REASON, DNS_ACCOUNT_REASON, RESOLVER_LOOKUP_TIMEOUT};
 use state::{
@@ -409,8 +407,9 @@ impl CuratedDefaults {
                 state
                     .install_refusals
                     .retain(|id, (_, seen)| !enabled.contains(id) && *seen == generation);
+                state.repinned.retain(|_, seen| *seen == generation);
                 let mut actions = planned.actions;
-                actions.extend(self.handle_moved(&mut state, &moved, &rules, generation));
+                actions.extend(self.handle_moved(&mut state, &moved, &rules));
                 let actions = without_failed(&mut state, actions, generation);
                 show_removal_failures(&mut state, daemon, generation);
                 let actions = withhold(&mut state, actions, &withheld, &found);

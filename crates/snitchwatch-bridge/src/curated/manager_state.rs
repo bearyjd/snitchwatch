@@ -52,9 +52,9 @@ pub(super) struct State {
     /// Entries whose account the last pass found at another uid than their
     /// copy names (`manager_moved.rs`): never turned on.
     pub(super) moved: BTreeSet<String>,
-    /// What a moved account does ([`super::moved::ON_UID_CHANGE`]; tests
-    /// set the other answer).
-    pub(super) uid_change: super::moved::UidChange,
+    /// Entries re-pinned to their account's new uid, on the daemon stream
+    /// it happened on: their note is shown until it reconnects.
+    pub(super) repinned: BTreeMap<String, u64>,
     /// Bumped by every GUI request taken (a choice, even an unchanged one,
     /// or a removal): each gets a pass (re-review 2, HIGH).
     pub(super) requests: u64,
@@ -85,7 +85,7 @@ impl State {
             withheld: BTreeSet::new(),
             found: Default::default(),
             moved: BTreeSet::new(),
-            uid_change: super::moved::ON_UID_CHANGE,
+            repinned: BTreeMap::new(),
             requests: 0,
             file: None,
             storage: StorageStatus {
@@ -414,6 +414,12 @@ pub(super) fn summary(
                 .get(&entry.id)
                 .or_else(|| state.problems.get(&entry.id))
                 .or_else(|| state.install_refusals.get(&entry.id).map(|(p, _)| p))
+                .or_else(|| {
+                    state
+                        .repinned
+                        .contains_key(&entry.id)
+                        .then_some(&super::moved::REPINNED_NOTE)
+                })
                 .map(|p| p.to_string())
         },
     }
