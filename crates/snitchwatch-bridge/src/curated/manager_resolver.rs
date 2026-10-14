@@ -10,6 +10,11 @@
 use super::state::State;
 use super::*;
 
+/// How long a pass waits for the lookup: an NSS backend (LDAP, SSSD) may
+/// hang, and a pass carries the user's own deletes too. A lookup that takes
+/// longer counts as unconfirmed.
+pub const RESOLVER_LOOKUP_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Why the DNS entry is unavailable on this host.
 pub const DNS_ACCOUNT_REASON: &str = "Snitchwatch couldn't confirm that the system resolver's \
      account (systemd-resolve) is user ID 193 on this computer, so it doesn't install this rule. \
@@ -53,10 +58,15 @@ impl CuratedDefaults {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
-        let confirmed =
-            tokio::task::spawn_blocking(move || super::super::resolver_account_confirmed(&lookup))
-                .await
-                .unwrap_or(false);
+        let lookup =
+            tokio::task::spawn_blocking(move || super::super::resolver_account_confirmed(&lookup));
+        let confirmed = match tokio::time::timeout(RESOLVER_LOOKUP_TIMEOUT, lookup).await {
+            Ok(confirmed) => confirmed.unwrap_or(false),
+            Err(_) => {
+                warn!("looking up the system resolver's account timed out");
+                false
+            }
+        };
         if confirmed {
             return BTreeSet::new();
         }

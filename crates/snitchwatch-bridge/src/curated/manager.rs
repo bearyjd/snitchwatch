@@ -47,7 +47,7 @@ mod resolver;
 #[path = "manager_state.rs"]
 mod state;
 use resolver::withhold;
-pub use resolver::DNS_ACCOUNT_REASON;
+pub use resolver::{DNS_ACCOUNT_REASON, RESOLVER_LOOKUP_TIMEOUT};
 use state::{
     command_problem, deleted, fail, keep, no_file_marks, rule_name, send_problem,
     show_removal_failures, still_edited, summary, track_maybe_applied, without_failed, Problem,

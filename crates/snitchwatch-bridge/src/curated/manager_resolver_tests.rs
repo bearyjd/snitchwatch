@@ -122,3 +122,24 @@ async fn turning_the_dns_entry_off_still_removes_it_while_unconfirmed() {
         ]
     );
 }
+
+/// #149 review 4: a lookup that hangs (an LDAP or SSSD backend, say) doesn't
+/// stall the pass: after `RESOLVER_LOOKUP_TIMEOUT` the account counts as
+/// unconfirmed, and the pass goes on.
+#[tokio::test]
+async fn a_hung_lookup_counts_as_unconfirmed_and_doesnt_stall_the_pass() {
+    let harness = Harness::new().connect(Daemon::Accept, Vec::new());
+    let curated = harness.curated();
+    opt_in(&curated);
+    let (release, hung) = std::sync::mpsc::channel::<()>();
+    let hung = Arc::new(Mutex::new(hung));
+    curated.set_uid_lookup(Arc::new(move |_| {
+        let _ = hung.lock().unwrap().recv();
+        Some(193)
+    }));
+    let pass = tokio::time::timeout(RESOLVER_LOOKUP_TIMEOUT * 3, curated.reconcile()).await;
+    release.send(()).unwrap();
+    assert!(pass.is_ok(), "the pass waited on the lookup");
+    assert!(harness.seen().is_empty(), "{:?}", harness.seen());
+    assert_eq!(entry_state(&curated, DNS).status, EntryStatus::Unavailable);
+}
