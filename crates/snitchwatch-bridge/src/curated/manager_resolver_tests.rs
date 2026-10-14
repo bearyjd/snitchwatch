@@ -255,15 +255,25 @@ async fn an_inert_bridge_looks_no_account_up() {
 /// person no DNS rule.
 #[tokio::test]
 async fn an_account_outside_the_system_range_is_unconfirmed() {
-    for uid in [SYS_UID_MAX + 1, 1000, 65534, u32::MAX] {
+    for (uid, confirmed) in [
+        (SYS_UID_MAX + 1, false),
+        (65534, false),
+        (u32::MAX, false),
+        (SYS_UID_MAX, true),
+        (1, true),
+    ] {
         let harness = Harness::new().connect(Daemon::Accept, Vec::new());
         let curated = harness.curated();
         opt_in(&curated);
-        curated.set_uid_lookup(Arc::new(move |_| Some(uid)));
+        curated.set_uid_lookup(Arc::new(move |name| {
+            (name == "systemd-resolve").then_some(uid)
+        }));
         curated.reconcile().await;
-        assert!(harness.seen().is_empty(), "{uid}: {:?}", harness.seen());
-        let state = entry_state(&curated, DNS);
-        assert_eq!(state.problem.as_deref(), Some(DNS_ACCOUNT_REASON), "{uid}");
+        assert_eq!(harness.seen().len(), usize::from(confirmed), "{uid}");
+        if !confirmed {
+            let state = entry_state(&curated, DNS);
+            assert_eq!(state.problem.as_deref(), Some(DNS_ACCOUNT_REASON), "{uid}");
+        }
     }
 }
 
