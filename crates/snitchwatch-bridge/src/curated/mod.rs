@@ -538,6 +538,7 @@ fn check_port(leaf: Option<&Operator>, destination: Destination) -> Result<(), S
         Some(op)
             if op.r#type == "simple"
                 && op.operand == "dest.port"
+                && !op.sensitive
                 && op.data.bytes().all(|b| b.is_ascii_digit())
                 && op.data.parse::<u16>().is_ok_and(|port| {
                     port != 0

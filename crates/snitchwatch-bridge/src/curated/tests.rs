@@ -381,3 +381,18 @@ fn a_case_insensitive_protocol_condition_is_refused() {
         assert!(check_curated_rule(&rule).is_err(), "{}", entry.id);
     }
 }
+
+/// #149 review 6: the same for the port condition.
+#[test]
+fn a_case_insensitive_port_condition_is_refused() {
+    for entry in entries() {
+        let mut rule = entry.rule();
+        let leaves = &mut rule.operator.as_mut().unwrap().list;
+        let port = leaves
+            .iter_mut()
+            .find(|leaf| leaf.operand == "dest.port")
+            .unwrap();
+        port.sensitive = true;
+        assert!(check_curated_rule(&rule).is_err(), "{}", entry.id);
+    }
+}
