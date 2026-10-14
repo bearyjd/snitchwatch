@@ -202,6 +202,14 @@ gaps, unchanged.
   read "Unused". Same options as for the rollback.
 - **Two bridges on one state directory** (Unix) at once: no lock. Socket
   activation starts one system bridge, so this is unreachable in practice.
+  The same holds for a late shutdown-window write (`AfterStop`) from a
+  draining old bridge overwriting a new bridge's file.
+- **A TCP run over a Unix run's file** (#120 item 24; folded into the
+  stale-clean-stop question of item 27). A bridge that doesn't trust the
+  counters keeps a clean stop it can't rewrite. Unix run A writes the stop,
+  TCP run T can't rewrite it and counts hits it never saves; if the daemon
+  restarts, Unix run B judges from A's stop, sees no gap, and T's hits
+  vanish silently.
 - **Open question: "stayed up" fooled.** Row 4 trusts a matching start
   time. A baseline recorded late (a ping processed long after the daemon
   serialised it) or a backward wall-clock step between runs could make a

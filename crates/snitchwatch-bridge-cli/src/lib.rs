@@ -807,3 +807,6 @@ mod leftover_unix_tests;
 
 #[cfg(test)]
 mod rule_hits_restart_tests;
+
+#[cfg(test)]
+mod rules_count_hint_unix_tests;

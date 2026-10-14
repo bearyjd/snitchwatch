@@ -6,7 +6,6 @@
 //! exact; where an install goes unanswered, the time is paused, so the
 //! 15 s command timeout passes at once.
 
-use super::state::MaybeApplied;
 use super::tests::*;
 use super::*;
 use snitchwatch_proto::protocol::{Action, Rule};
@@ -95,9 +94,15 @@ async fn an_install_cut_off_by_a_closed_stream_records_nothing() {
         let curated = curated.clone();
         async move { curated.reconcile().await }
     });
-    while harness.seen().is_empty() {
-        tokio::task::yield_now().await;
-    }
+    // Not `yield_now`: a paused clock never fires a timeout around a loop
+    // that never sleeps, and a command that is never sent would hang.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while harness.seen().is_empty() {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("the install was never sent");
     drop(harness.stream.take());
     pass.await.unwrap();
     assert!(lock(&curated.inner.state).maybe_applied.is_empty());
@@ -197,19 +202,20 @@ async fn an_answered_removal_forgets_what_may_apply() {
         (Daemon::Accept, EntryStatus::Off),
         (Daemon::RefuseDeletes, EntryStatus::OffFileLeft),
     ] {
-        let harness = Harness::new().connect(daemon, vec![edited_flatpak()]);
+        // The record comes from a refused install, as in production.
+        let harness = Harness::new().connect(Daemon::Refuse, Vec::new());
         let curated = harness.curated();
-        turn(&curated, FLATPAK, false);
-        let record = MaybeApplied {
-            generation: curated.generation(),
-            file_possible: false,
-        };
-        lock(&curated.inner.state)
+        turn(&curated, FLATPAK, true);
+        curated.reconcile().await;
+        assert!(lock(&curated.inner.state)
             .maybe_applied
-            .insert(FLATPAK_RULE.into(), record);
+            .contains_key(FLATPAK_RULE));
+        *harness.policy.lock().unwrap() = daemon;
+        harness.rules.upsert(edited_flatpak());
+        turn(&curated, FLATPAK, false);
         curated.try_route(ClientMessage::RemoveCuratedDefault { id: FLATPAK.into() });
         curated.reconcile().await;
-        let removed = vec![sent(Action::DeleteRule)];
+        let removed = vec![sent(Action::ChangeRule), sent(Action::DeleteRule)];
         assert_eq!(harness.seen(), removed);
         forced_passes(&curated, false).await;
         assert_eq!(harness.seen(), removed);

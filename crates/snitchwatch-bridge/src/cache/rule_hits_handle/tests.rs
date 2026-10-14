@@ -404,12 +404,38 @@ fn the_shutdown_save_always_writes_and_says_the_run_stopped_cleanly() {
     assert!((before..=now_ms()).contains(&stopped));
     // A periodic save queued before the stop (the ticker's `spawn_blocking`
     // isn't cancelled by aborting the ticker) and run after it writes
-    // nothing, changed counts or not.
-    hits.record(&[ev("a")], 11, 2, &synced(&["a"]));
+    // nothing, although the counts changed (without a `record`, which
+    // would write by itself after the stop).
+    hits.forget(["a"]);
     hits.save_now();
     assert_eq!(stopped_in(&path), Some(stopped));
     hits.save_at_stop();
     assert_eq!(stopped_in(&path), Some(stopped), "one stop save");
+}
+
+#[test]
+fn a_ping_after_the_shutdown_save_is_saved_with_the_clean_stop() {
+    // The gRPC server stops after the shutdown save (#120 item 25): a hit
+    // counted then must reach the file, or the clean stop vouches for less
+    // than the run counted.
+    let dir = state_dir();
+    let path = dir.path().join("rule_hits.json");
+    let (hits, _rx) = unix_handle();
+    hits.attach_file(path.clone());
+    hits.record(&[ev("a")], 10, 1, &synced(&["a"]));
+    hits.save_at_stop();
+    let stopped = stopped_in(&path).expect("a clean stop");
+    hits.record(&[ev("a")], 11, 2, &synced(&["a"]));
+    let late = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        late.contains("\"count\":2"),
+        "the late hit is saved: {late}"
+    );
+    assert!(stopped_in(&path) >= Some(stopped), "still a clean stop");
+    // Nothing counted, nothing written.
+    let before = text_of(&path);
+    hits.record(&[], 12, 2, &synced(&["a"]));
+    assert_eq!(text_of(&path), before);
 }
 
 #[test]
@@ -624,6 +650,8 @@ fn a_clean_stop_that_cannot_be_rewritten_is_removed_with_the_file() {
     first.save_at_stop();
     std::fs::rename(&short, &long).unwrap();
 
+    // Past run one's `since` even on a fast file system.
+    std::thread::sleep(std::time::Duration::from_millis(3));
     let started = now_ms();
     let (second, _rx) = unix_handle();
     second.attach_file(long.clone());
@@ -688,4 +716,22 @@ fn an_untrusting_bridge_that_cannot_rewrite_keeps_the_file() {
     assert!(long.exists(), "the counts are not thrown away");
     tcp.adopt_snapshot(&synced(&["a"]).lock().unwrap());
     assert_eq!(counts(&tcp), vec![("a".to_string(), 1)]);
+}
+
+#[test]
+fn an_untrusting_bridge_that_cannot_rewrite_a_clean_stop_keeps_the_file() {
+    // A Unix-written file with a clean stop: a TCP bridge never trusts the
+    // stop, so it has nothing to consume, and a failed rewrite must not
+    // cost it the counts.
+    let dir = state_dir();
+    let short = dir.path().join("rule_hits.json");
+    let long = dir.path().join(format!("{}.json", "h".repeat(240)));
+    let (unix, _rx) = unix_handle();
+    unix.attach_file(short.clone());
+    unix.record(&[ev("a")], 100, 7, &synced(&["a"]));
+    unix.save_at_stop();
+    std::fs::rename(&short, &long).unwrap();
+    let (tcp, _rx) = handle();
+    tcp.attach_file(long.clone());
+    assert!(long.exists(), "the counts are not thrown away");
 }

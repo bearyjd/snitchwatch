@@ -314,3 +314,32 @@ async fn hits_pinged_before_the_first_hello_survive_a_restart_on_the_unix_socket
     assert_eq!(rule_hits(&mut run).await, (false, None, Some(3)));
     run.bridge.shutdown();
 }
+
+/// Review of PR #123 (#120 item 25): the gRPC server stops after the shutdown
+/// save, so a ping can still arrive after it. It is counted, so the clean
+/// stop in the file must not vouch for less than the run counted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_ping_after_the_shutdown_save_survives_a_restart_on_the_unix_socket() {
+    let (dir, state) = dirs();
+    let daemon = DaemonRun::started_secs_ago(100);
+    let mut run = start(Transport::Unix, dir.path(), &state, 1).await;
+    run.daemon
+        .ping_with_stats(1, daemon.stats(7, 1))
+        .await
+        .unwrap();
+    run.bridge.rule_hits.save_at_stop();
+    run.daemon
+        .ping_with_stats(2, daemon.stats(8, 1))
+        .await
+        .unwrap();
+    assert_eq!(rule_hits(&mut run).await, (false, None, Some(2)));
+    run.bridge.shutdown();
+
+    let mut run = start(Transport::Unix, dir.path(), &state, 2).await;
+    run.daemon
+        .ping_with_stats(3, daemon.stats(9, 1))
+        .await
+        .unwrap();
+    assert_eq!(rule_hits(&mut run).await, (false, None, Some(3)));
+    run.bridge.shutdown();
+}
