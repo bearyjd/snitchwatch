@@ -208,6 +208,14 @@ Window {
                                   && filesLeft.text === "They may come back: <b>x</b>."
                                   && filesLeft.textFormat === Text.PlainText,
                                   "files-left note: '" + filesLeft.text + "'");
+                // Leftovers counted again: their notice speaks, not this note,
+                // even if a bridge sends both.
+                model.applyServerMessageJson(JSON.stringify({
+                    action: "setBlocklistLeftovers", count: 2,
+                    filesLeft: "They may come back: <b>x</b>."
+                }));
+                probeWindow.check(notice.visible && !filesLeft.visible,
+                                  "the files-left note showed beside counted leftovers");
                 probeWindow.leftovers(2);
                 probeWindow.check(!filesLeft.visible, "the files-left note outlived its message");
 

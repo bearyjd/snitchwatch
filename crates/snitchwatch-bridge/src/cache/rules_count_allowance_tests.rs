@@ -276,7 +276,10 @@ fn a_hint_clearing_while_a_timer_may_drop_rules_keeps_the_answers_room() {
     // The bridge prunes it: the daemon still holds seen-2.
     cache.remove("t");
     settle(&mut cache, 3);
-    assert!(none_flipped(&many(&mut cache, 3, 10)), "seen-2 is still room");
+    assert!(
+        none_flipped(&many(&mut cache, 3, 10)),
+        "seen-2 is still room"
+    );
     assert!(!cache.count_mismatch());
 }
 
