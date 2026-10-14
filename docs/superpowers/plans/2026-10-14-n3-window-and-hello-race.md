@@ -45,9 +45,23 @@ the `attach_file` doc (the item-24 trade-off text).
 
 ### Residual
 
+An RTC behind by about the power-off length, before NTP syncs, makes a long
+power-off look like a quick restart (both the stop and the start are read on
+the same wrong clock) and can hide a gap.
+
 A TCP run shorter than the window, followed by a daemon restart inside the
 window, is still not noticed. The TCP run would have to start and end, and the
 daemon restart, all within ~10 minutes of the Unix stop.
+
+### Review round 1 (PR #162)
+
+A first ping with `uptime` 0 (the daemon pings as it connects) used to be a
+gap, so restarting the daemon and bridge together read as one. The judgement
+now waits for the first ping with an uptime, counting the earlier events
+toward `rule_hits = received`; a counter that falls meanwhile is a gap. While
+it waits the gap is shown; a save writes the gap with no baseline and no clean
+stop, so a run that ends undecided leaves the next one a gap, and nothing
+stays pending past the run.
 
 ## Item 22: does `hello()` bumping the generation drop records?
 

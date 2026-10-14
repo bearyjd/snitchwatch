@@ -363,9 +363,17 @@ async fn a_refused_rewrite_record_is_stamped_with_the_snapshot_sequence() {
     let curated = harness.curated();
     // A second HELLO on the same stream: the generation moves, the snapshot
     // doesn't.
+    let (generation, epoch) = (
+        curated.generation(),
+        harness.rules.cache().lock().unwrap().snapshot_sequence(),
+    );
     harness.answer(0, true);
-    let epoch = harness.rules.cache().lock().unwrap().snapshot_sequence();
-    assert_ne!(curated.generation(), epoch);
+    assert_ne!(curated.generation(), generation, "the HELLO moved it");
+    assert_eq!(
+        harness.rules.cache().lock().unwrap().snapshot_sequence(),
+        epoch,
+        "and not the snapshot"
+    );
     turn(&curated, CHRONY, true);
     curated.reconcile().await;
     let records = lock(&curated.inner.state).maybe_applied.clone();

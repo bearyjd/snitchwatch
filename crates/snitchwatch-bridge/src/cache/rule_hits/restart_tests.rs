@@ -646,3 +646,62 @@ fn a_stale_unix_stop_that_outlives_a_tcp_run_is_a_gap_outside_the_window() {
     let hits = restart_started_at(first - 20_000, first);
     gap_at(&hits, first);
 }
+
+// Review of PR #162: the daemon pings right after it connects, and that ping
+// can carry `uptime` 0. The judgement waits for one that doesn't.
+
+/// A ping of a restarted daemon: `n` hits, the counter at `rule_hits`.
+fn ping(hits: &mut RuleHits, n: usize, uptime: u64, rule_hits: u64, at: i64) {
+    hits.record(&a_events(n), uptime, rule_hits, at, |_| true);
+}
+
+#[test]
+fn a_quick_restart_whose_first_ping_has_no_uptime_is_judged_at_the_next() {
+    let mut hits = restored(usual(true));
+    ping(&mut hits, 2, 0, 2, FIRST);
+    assert!(hits.is_lossy(), "undecided: still provisional");
+    // The daemon started at `FIRST`, after the stop and inside the window;
+    // the two pings together hold every hit of its run.
+    ping(&mut hits, 1, 1, 3, FIRST + 1_000);
+    no_new_gap(&hits);
+}
+
+#[test]
+fn a_restart_judged_late_still_needs_every_hit_to_have_arrived() {
+    let mut hits = restored(usual(true));
+    ping(&mut hits, 2, 0, 2, FIRST);
+    ping(&mut hits, 1, 1, 5, FIRST + 1_000);
+    assert_eq!(hits.last_gap_unix_ms(), Some(FIRST + 1_000));
+}
+
+#[test]
+fn a_counter_that_fell_between_the_deferred_pings_is_a_gap() {
+    // The daemon restarted again before it reported an uptime.
+    let mut hits = restored(usual(true));
+    // 1 + 1 events and `rule_hits` 2 would agree, but it was 3 a ping ago.
+    ping(&mut hits, 1, 0, 3, FIRST);
+    ping(&mut hits, 1, 1, 2, FIRST + 1_000);
+    assert_eq!(hits.last_gap_unix_ms(), Some(FIRST + 1_000));
+}
+
+#[test]
+fn an_uptime_that_never_comes_is_a_gap_in_the_file_and_vouches_for_nothing() {
+    let mut hits = restored(usual(true));
+    ping(&mut hits, 2, 0, 2, FIRST);
+    ping(&mut hits, 1, 0, 3, FIRST + 1_000);
+    assert_eq!(hits.last_gap_unix_ms(), Some(FIRST + 1_000));
+    for saved in [
+        hits.to_saved().unwrap(),
+        hits.to_saved_at_stop(FIRST + 2_000).unwrap(),
+    ] {
+        assert_eq!(saved.last_gap_unix_ms, Some(FIRST + 1_000), "saved");
+        assert_eq!((saved.daemon, saved.stopped_unix_ms), (None, None));
+    }
+}
+
+#[test]
+fn a_restore_with_no_ping_at_all_still_hands_the_old_baseline_on() {
+    // Unchanged by the deferral: nothing was counted yet.
+    let hits = restored(usual(true));
+    assert!(hits.to_saved().unwrap().daemon.is_some());
+}

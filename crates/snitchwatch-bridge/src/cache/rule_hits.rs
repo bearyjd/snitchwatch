@@ -85,9 +85,14 @@
 //! - **it restarted** (a counter went down, or it started after the last ping
 //!   counted): a gap unless the previous run stopped cleanly, the new daemon
 //!   started at or after that stop and within [`CLEAN_STOP_WINDOW_MS`] (10
-//!   minutes) of it (its start is `now − uptime`; a missing or zero `uptime`
-//!   fails), and this ping holds every hit of the new run
-//!   (`rule_hits = received`). Hits the old
+//!   minutes) of it (its start is `now − uptime`), and this ping holds every
+//!   hit of the new run (`rule_hits = received`). The daemon pings as it
+//!   connects, and that ping can carry `uptime` 0, which can't place the
+//!   start: the judgement waits for the first ping with an uptime, counting
+//!   the events of the earlier ones toward it (a counter that fell in between
+//!   is a gap, as within a run). While it waits the wire shows a gap, and a save writes that
+//!   gap with no baseline and no clean stop, so a run that ends undecided
+//!   leaves the next one a gap too; Hits the old
 //!   run decided after the last ping counted, until it stopped, are not
 //!   recorded or noticed: the documented loss window;
 //! - **anything else** (a start that moved without passing the last ping: a
@@ -105,6 +110,12 @@
 //! root-only Unix socket ([`RuleHits::trust_daemon_counters`]): over TCP any
 //! local process can send that first ping, so a restore there is a gap at
 //! once, as is a file with no baseline (version 1).
+//!
+//! **Residual (#120 item 27, #159).** The window is not a boot id. Two cases
+//! it cannot see: a TCP run and a daemon restart both inside the window of
+//! the stop, and a real-time clock behind by about the length of the
+//! power-off, before NTP syncs (the daemon's start then reads as soon after
+//! the stop, and a gap can be hidden).
 
 use std::collections::BTreeMap;
 
@@ -177,6 +188,14 @@ pub struct Saved {
 struct Pending {
     daemon: DaemonBaseline,
     stopped_unix_ms: Option<i64>,
+    /// Pings with `uptime` 0 already counted while the judgement waits for
+    /// one with an uptime: their events.
+    deferred: Option<Deferred>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Deferred {
+    received: u64,
 }
 
 /// The counts. Pure: times and the rule cache's membership are passed in.
@@ -224,10 +243,28 @@ impl RuleHits {
             .filter(|event| !event.rule.as_ref().is_some_and(is_default_action_rule))
             .count();
         if let Some(pending) = self.pending.take() {
-            self.provisional_gap_unix_ms = None;
-            self.touch();
-            if restart_missed_hits(pending, received as u64, uptime, rule_hits, now_ms) {
-                self.note_gap(now_ms);
+            if uptime == 0 {
+                // The daemon pings as it connects, before `uptime` reads
+                // above 0: its start can't be placed yet. Wait for a ping
+                // that can, counting these events toward it. A counter that
+                // falls meanwhile is a gap in `missed_events`, as in a run.
+                let deferred = Deferred {
+                    received: pending.deferred.map_or(0, |d| d.received) + received as u64,
+                };
+                self.pending = Some(Pending {
+                    deferred: Some(deferred),
+                    ..pending
+                });
+                // Undecided is a gap, and shown as of this ping.
+                self.provisional_gap_unix_ms = Some(now_ms);
+                self.touch();
+            } else {
+                self.provisional_gap_unix_ms = None;
+                self.touch();
+                let seen = pending.deferred.map_or(0, |d| d.received);
+                if restart_missed_hits(pending, seen + received as u64, uptime, rule_hits, now_ms) {
+                    self.note_gap(now_ms);
+                }
             }
         }
         if self.missed_events(received, uptime, rule_hits, now_ms) {
@@ -369,6 +406,7 @@ impl RuleHits {
                 self.pending = Some(Pending {
                     daemon,
                     stopped_unix_ms: saved.stopped_unix_ms,
+                    deferred: None,
                 });
                 self.provisional_gap_unix_ms = Some(now_ms);
             }
@@ -410,6 +448,11 @@ impl RuleHits {
             .take(MAX_TRACKED_RULES)
             .map(|(name, stat)| wire(name, &stat))
             .collect();
+        // Pings were counted but the restart is still undecided: the saved
+        // baseline can't account for them, so none is saved and the gap is.
+        let undecided = self
+            .pending
+            .is_some_and(|pending| pending.deferred.is_some());
         let daemon = match self.pending {
             // No ping yet: the next run judges from the same one.
             Some(pending) => Some(pending.daemon),
@@ -417,9 +460,13 @@ impl RuleHits {
         };
         Some(Saved {
             since_unix_ms,
-            last_gap_unix_ms: self.last_gap_unix_ms,
+            last_gap_unix_ms: if undecided {
+                self.last_gap_unix_ms()
+            } else {
+                self.last_gap_unix_ms
+            },
             hits,
-            daemon: daemon.filter(|_| self.trust_daemon_counters && complete),
+            daemon: daemon.filter(|_| self.trust_daemon_counters && complete && !undecided),
             stopped_unix_ms: None,
         })
     }
@@ -433,6 +480,8 @@ impl RuleHits {
         let mut saved = self.to_saved()?;
         if self.trust_daemon_counters {
             saved.stopped_unix_ms = match self.pending {
+                // Undecided: it vouches for nothing (no baseline either).
+                Some(pending) if pending.deferred.is_some() => None,
                 Some(pending) => pending.stopped_unix_ms,
                 None => Some(now_ms),
             };
