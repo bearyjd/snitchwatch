@@ -47,7 +47,7 @@ mod resolver;
 #[path = "manager_state.rs"]
 mod state;
 use resolver::withhold;
-pub use resolver::{DNS_ACCOUNT_REASON, RESOLVER_LOOKUP_TIMEOUT};
+pub use resolver::{DNS_ACCOUNT_REASON, DNS_STALE_REASON, RESOLVER_LOOKUP_TIMEOUT};
 use state::{
     command_problem, deleted, fail, keep, no_file_marks, rule_name, send_problem,
     show_removal_failures, still_edited, summary, track_maybe_applied, without_failed, Problem,
@@ -91,8 +91,8 @@ struct Inner {
     /// One save at a time; holds the last version written, so an older
     /// snapshot never replaces a newer one (code review LOW-1).
     saver: Mutex<u64>,
-    /// Finds the system resolver's account (#120 item 38).
-    uid_lookup: Mutex<crate::accounts::UidLookup>,
+    /// The services' accounts and their lookup (#120 item 38, #155).
+    accounts: Mutex<resolver::Accounts>,
     /// Passes run, for the tests of the pass gate.
     #[cfg(test)]
     passes: std::sync::atomic::AtomicU64,
@@ -108,6 +108,8 @@ struct PassKey {
     inert: bool,
     /// GUI requests taken, so each one gets a pass (re-review 2, HIGH).
     requests: u64,
+    /// The account lookup's result changed (#155): a late answer re-plans.
+    accounts: u64,
 }
 
 fn lock(state: &Mutex<State>) -> MutexGuard<'_, State> {
@@ -130,7 +132,7 @@ impl CuratedDefaults {
                 wake: Notify::new(),
                 last: Mutex::new(None),
                 saver: Mutex::new(0),
-                uid_lookup: Mutex::new(crate::accounts::system_uid_lookup()),
+                accounts: Mutex::default(),
                 #[cfg(test)]
                 passes: Default::default(),
             }),
@@ -249,8 +251,10 @@ impl CuratedDefaults {
             (cache.revision(), !cache.is_unknown())
         };
         let generation = self.generation();
+        let accounts = resolver::lock_accounts(&self.inner).epoch;
         let state = lock(&self.inner.state);
         PassKey {
+            accounts,
             revision,
             known,
             generation,
@@ -272,9 +276,12 @@ impl CuratedDefaults {
         tokio::spawn(async move {
             let mut last_pass: Option<PassKey> = None;
             loop {
-                let key = this.pass_key();
+                let mut key = this.pass_key();
                 if last_pass.as_ref() != Some(&key) {
                     this.reconcile().await;
+                    // The accounts as the pass read them: a lookup that
+                    // answered within it needs no second pass.
+                    key.accounts = resolver::lock_accounts(&this.inner).used;
                     last_pass = Some(key);
                     // Something changed during the pass: look again.
                     if last_pass.as_ref() != Some(&this.pass_key()) {
@@ -318,6 +325,11 @@ impl CuratedDefaults {
         self.inner
             .passes
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        {
+            // What this pass reads of the accounts, unless it looks again.
+            let mut accounts = resolver::lock_accounts(&self.inner);
+            accounts.used = accounts.epoch;
+        }
         self.save_if_changed().await;
         self.flush_request_results();
         // The generation first: a HELLO between the two reads then pairs
@@ -339,7 +351,13 @@ impl CuratedDefaults {
             self.announce_changed();
             return;
         };
-        let withheld = self.withheld().await;
+        // A bridge that changes nothing looks no account up (#157).
+        let found = if self.is_inert() {
+            resolver::Found::new()
+        } else {
+            self.found().await
+        };
+        let withheld = resolver::withheld(&found);
         let (maybe_applied, no_files) = {
             let mut state = lock(&self.inner.state);
             let no_files = no_file_marks(&state, &files_left);

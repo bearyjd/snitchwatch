@@ -190,9 +190,10 @@ impl RunningBridge {
         self.daemon_stream_ready.clone()
     }
 
-    /// Where the recommended DNS rule looks up the system resolver's
-    /// account (#120 item 38): the host's account database unless set.
-    /// Tests set a fake before a daemon connects, never reading the host's.
+    /// Where the recommended rules look up the services' accounts (#120
+    /// item 38): none until set, so every account is unknown and nothing
+    /// pinned to one is installed. Only [`run_system`] sets the host's
+    /// account database (#157); tests set a fake.
     pub fn set_curated_uid_lookup(&self, lookup: snitchwatch_bridge::accounts::UidLookup) {
         self.curated.set_uid_lookup(lookup);
     }
@@ -279,7 +280,7 @@ pub async fn run_system(listeners: activation::ActivatedListeners) -> Result<Run
         ws_socket_path: PathBuf::from(activation::GUI_SOCKET_PATH),
         cache_capacity: 10_000,
     };
-    run_with_incoming(
+    let bridge = run_with_incoming(
         config,
         GrpcEndpoint::Unix(PathBuf::from(activation::GRPC_SOCKET_PATH)),
         RootUnixIncoming(listeners.grpc),
@@ -292,7 +293,11 @@ pub async fn run_system(listeners: activation::ActivatedListeners) -> Result<Run
         },
         ANSWER_TIMEOUT,
     )
-    .await
+    .await?;
+    // The one bridge that installs recommended rules reads the host's
+    // accounts; a pass before this one withholds, never deletes (#157).
+    bridge.set_curated_uid_lookup(snitchwatch_bridge::accounts::system_uid_lookup());
+    Ok(bridge)
 }
 
 async fn run_with_incoming<I, IO>(
@@ -365,8 +370,8 @@ where
         ui_service_inner.rules_handle(),
         broadcast_tx.clone(),
     );
-    // This crate's own tests never read the host's accounts (#120 item 38);
-    // integration tests set theirs (`RunningBridge::set_curated_uid_lookup`).
+    // This crate's own tests confirm the accounts with a fake (#120 item
+    // 38); without one every account is unknown (#157).
     #[cfg(test)]
     curated.set_uid_lookup(Arc::new(|name| (name == "systemd-resolve").then_some(193)));
     curated_storage::configure(&curated, &options.storage, options.mode);

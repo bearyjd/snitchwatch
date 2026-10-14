@@ -62,10 +62,10 @@ const DNS_USER_ID: &str = "193";
 /// The account [`DNS_USER_ID`] must be on this host (#120 item 38).
 const DNS_USER_NAME: &str = "systemd-resolve";
 
-/// Whether `lookup` finds the system resolver's account at the user ID the
-/// DNS entry pins (#120 item 38). A failed lookup is not a confirmation.
-pub fn resolver_account_confirmed(lookup: &crate::accounts::UidLookup) -> bool {
-    lookup(DNS_USER_NAME).is_some_and(|uid| uid.to_string() == DNS_USER_ID)
+/// The accounts the manager looks up each pass: the system resolver's,
+/// which must be [`DNS_USER_ID`] (#120 item 38).
+pub fn account_names() -> Vec<&'static str> {
+    vec![DNS_USER_NAME]
 }
 
 /// The multicast DNS group (RFC 6762): `dest.ip` for the one entry that may
