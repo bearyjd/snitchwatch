@@ -58,6 +58,10 @@ pub type SharedRulesCache = Arc<StdMutex<RulesCache>>;
 pub struct RulesCache {
     rules: Option<BTreeMap<String, Rule>>,
     revision: u64,
+    /// The `Subscribe` the list came from ([`Snapshot::sequence`]). The same
+    /// snapshot adopted again (another stream's HELLO, a fall back to the
+    /// current stream) keeps it; a daemon reconnect brings a new one.
+    snapshot_sequence: u64,
     left_out: BTreeMap<String, usize>,
     /// How many rules the daemon's last snapshot had when it was over
     /// [`MAX_SNAPSHOT_RULES`] and so not read at all (issue #61).
@@ -118,6 +122,9 @@ struct Expiry {
 pub(crate) struct Snapshot {
     /// Cache revision when Subscribe was received, before later refusals.
     observed_revision: u64,
+    /// Which staging this is, counted by [`PendingSnapshots::stage`] (the
+    /// daemon's `Subscribe` order); `0` for one never staged.
+    pub(crate) sequence: u64,
     pub(crate) rules: Vec<Rule>,
     /// Name (or, for a name no import could use, a NUL-prefixed index) to
     /// encoded size.
@@ -161,6 +168,16 @@ impl RulesCache {
 
     pub fn revision(&self) -> u64 {
         self.revision
+    }
+
+    /// Which `Subscribe` the list came from, `0` before any: changes when the
+    /// daemon sends a new list, not when a HELLO adopts the same one again.
+    pub fn snapshot_sequence(&self) -> u64 {
+        self.snapshot_sequence
+    }
+
+    pub(crate) fn set_snapshot_sequence(&mut self, sequence: u64) {
+        self.snapshot_sequence = sequence;
     }
 
     /// Daemon rules left out of the list for the size limits.

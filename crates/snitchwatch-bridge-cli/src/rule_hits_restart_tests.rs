@@ -262,8 +262,10 @@ async fn a_reboot_after_a_clean_stop_is_no_gap_on_the_unix_socket() {
     )
     .await;
 
-    // The daemon restarted too: its counters start again.
-    let rebooted = DaemonRun::started_secs_ago(20);
+    // The daemon restarted too: its counters start again. It started after
+    // the stop (#120 item 27): a second has passed since, for an uptime of 1.
+    tokio::time::sleep(std::time::Duration::from_millis(1_200)).await;
+    let rebooted = DaemonRun::started_secs_ago(1);
     let mut run = start(Transport::Unix, dir.path(), &state, 2).await;
     run.daemon
         .ping_with_stats(2, rebooted.stats(1, 1))

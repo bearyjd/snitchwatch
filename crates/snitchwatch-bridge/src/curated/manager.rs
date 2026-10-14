@@ -328,12 +328,13 @@ impl CuratedDefaults {
             let cache = self.inner.rules.lock().unwrap_or_else(|e| e.into_inner());
             let left_out: BTreeSet<String> = cache.left_out().keys().cloned().collect();
             let files_left = cache.files_left().clone();
+            let epoch = cache.snapshot_sequence();
             cache
                 .rules()
                 .cloned()
-                .map(|rules| (rules, left_out, files_left))
+                .map(|rules| (rules, left_out, files_left, epoch))
         };
-        let Some((rules, left_out, mut files_left)) = daemon else {
+        let Some((rules, left_out, mut files_left, epoch)) = daemon else {
             // A removal asked for under the old list doesn't carry over.
             lock(&self.inner.state).removals.clear();
             self.announce_changed();
@@ -343,10 +344,11 @@ impl CuratedDefaults {
         let (maybe_applied, no_files) = {
             let mut state = lock(&self.inner.state);
             let no_files = no_file_marks(&state, &files_left);
-            // A reconnect's snapshot is the daemon's memory (#120 item 14).
+            // A reconnect's snapshot is the daemon's memory (#120 item 14). A
+            // HELLO that brings no new snapshot isn't one (#120 item 22).
             state
                 .maybe_applied
-                .retain(|_, record| record.generation == generation);
+                .retain(|_, record| record.epoch == epoch);
             // Files noted in an earlier bridge run (#120 item 18).
             files_left.extend(state.choices.files_left.iter().map(|id| rule_name(id)));
             let names: BTreeSet<String> = state.maybe_applied.keys().cloned().collect();
@@ -417,7 +419,7 @@ impl CuratedDefaults {
                 state.removals.extend(removals);
                 break;
             }
-            self.remove(&id, daemon, generation).await;
+            self.remove(&id, daemon, generation, epoch).await;
             self.save_if_changed().await;
             self.announce_changed();
         }
@@ -428,7 +430,7 @@ impl CuratedDefaults {
             if !self.still_wanted(&action) {
                 continue;
             }
-            self.apply(action, generation, revision).await;
+            self.apply(action, generation, epoch, revision).await;
             self.save_if_changed().await;
             self.announce_changed();
         }
@@ -493,7 +495,7 @@ impl CuratedDefaults {
             && !cache.left_out().contains_key(name)
     }
 
-    async fn apply(&self, action: CuratedAction, generation: u64, revision: u64) {
+    async fn apply(&self, action: CuratedAction, generation: u64, epoch: u64, revision: u64) {
         let (id, name, outcome, done) = match action {
             CuratedAction::Install(id) => {
                 let Some(entry) = entries().iter().find(|entry| entry.id == id) else {
@@ -558,7 +560,7 @@ impl CuratedDefaults {
         // which the daemon can still take (#120 item 13); not one cut off by
         // a closed stream, whose reconnect lists what the daemon holds.
         let install = matches!(done, Done::Install(_));
-        let dropped = track_maybe_applied(&mut state, &name, install, &outcome, marked, generation);
+        let dropped = track_maybe_applied(&mut state, &name, install, &outcome, marked, epoch);
         let mut no_file = false;
         match (outcome, done) {
             (Ok(()), Done::Install(rule)) => {
@@ -627,7 +629,7 @@ impl CuratedDefaults {
     /// Remove an edited (or unreadable) copy the user confirmed removing,
     /// under exactly that entry's reserved name; an unedited copy is turned
     /// off instead, so nothing is sent for it.
-    async fn remove(&self, id: &str, daemon: DaemonRules<'_>, generation: u64) {
+    async fn remove(&self, id: &str, daemon: DaemonRules<'_>, generation: u64, epoch: u64) {
         let Some(entry) = entries().iter().find(|entry| entry.id == id) else {
             return;
         };
@@ -643,7 +645,7 @@ impl CuratedDefaults {
         let mut state = lock(&self.inner.state);
         // Answered, the name is out of the daemon's memory: no delete by name
         // is owed for it any more (#120 item 17). The copy had a file.
-        track_maybe_applied(&mut state, &name, false, &outcome, false, generation);
+        track_maybe_applied(&mut state, &name, false, &outcome, false, epoch);
         match outcome {
             // A refusal: the daemon dropped the copy before failing on its
             // file, so it is removed as asked, its file left behind.

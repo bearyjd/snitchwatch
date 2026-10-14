@@ -29,11 +29,9 @@ row doesn't use the stop):
   before the stop cannot look as if it started after it by more than ~2 s; a
   false gap in that corner is the safe direction.
 
-This covers #159: a stale Unix stop that outlives a TCP run is old by the time
-the next Unix run's daemon restarts (the TCP run plus the restart take longer
-than the window in practice, and a daemon that restarts within the window of
-the stop did so before the TCP run could have counted unsaved hits, only if
-the TCP run is shorter than the window; see the limitation below).
+This covers #159: a stale Unix stop that outlives a TCP run is outside the
+window by the time the next Unix run's daemon restarts, unless the TCP run and
+the restart both fit inside it (see Residual).
 
 Tests first (`cache/rule_hits/restart_tests.rs`): a long power-off -> gap; a
 quick restart -> no gap; daemon started before the stop -> gap; zero uptime ->
@@ -70,4 +68,18 @@ and this section records that.
 
 ## As built
 
-(filled in below as work lands)
+- 27/#159: `CLEAN_STOP_WINDOW_MS` and `stop_vouches_for` in
+  `cache/rule_hits.rs`; six new tests in `rule_hits/restart_tests.rs` (all six
+  seen failing first), two existing tests re-based onto a stop before the
+  daemon's start, and `second_run` in the handle tests puts the stop a minute
+  back (the real clock leaves no second between the stop and now).
+- 22: **the race is real** (both tests failed first: a second HELLO on the
+  same stream, and a second stream re-adopting the staged snapshot, each made
+  the manager forget an unanswered install, so turning the entry off sent no
+  delete). Fix: records carry the snapshot's sequence instead of the HELLO
+  count. `PendingSnapshots::stage` numbers snapshots, `adopt` stores the
+  number in the cache (`RulesCache::snapshot_sequence`), and the manager
+  keeps a `MaybeApplied` record only while it matches. A daemon reconnect
+  stages a new snapshot, so item 14 still holds. Failure records (`failures`,
+  `removal_failures`) keep the HELLO generation on purpose: a new stream
+  retries a failed command.

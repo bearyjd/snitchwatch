@@ -90,10 +90,11 @@ impl State {
 /// A rule that may apply though the list lacks it ([`State::maybe_applied`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct MaybeApplied {
-    /// The daemon stream's generation it was recorded on. A reconnect's
-    /// snapshot is the daemon's memory, so it is forgotten then (#120
-    /// item 14).
-    pub(super) generation: u64,
+    /// The snapshot (`RulesCache::snapshot_sequence`) it was recorded
+    /// against. A reconnect's snapshot is the daemon's memory, so it is
+    /// forgotten then (#120 item 14); a HELLO that adopts the same snapshot
+    /// again is not a reconnect (item 22).
+    pub(super) epoch: u64,
     /// Whether the rule may have a file, which a refused delete would leave
     /// behind: an unanswered install may have written it, and a refused one
     /// wrote none, so only a file a refused delete left before it counts
@@ -115,7 +116,7 @@ pub(super) fn track_maybe_applied(
     install: bool,
     outcome: &Result<(), Problem>,
     marked: bool,
-    generation: u64,
+    epoch: u64,
 ) -> Option<MaybeApplied> {
     let (refused, unanswered) = match outcome {
         Ok(()) => (false, false),
@@ -128,7 +129,7 @@ pub(super) fn track_maybe_applied(
             .get(name)
             .is_some_and(|record| record.file_possible);
         let record = MaybeApplied {
-            generation,
+            epoch,
             file_possible: unanswered || marked || earlier,
         };
         state.maybe_applied.insert(name.to_string(), record);

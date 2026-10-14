@@ -287,6 +287,7 @@ async fn stale_planned_install_refuses_even_after_a_new_modern_grant() {
         .apply(
             CuratedAction::Install(DNS.into()),
             manager.generation(),
+            0,
             old_revision,
         )
         .await;

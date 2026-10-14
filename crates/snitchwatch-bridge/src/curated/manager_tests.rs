@@ -38,7 +38,7 @@ pub(super) struct Harness {
     pub(super) stream: Option<(StreamRegistration, u64)>,
 }
 
-fn reply(id: u64, ok: bool) -> NotificationReply {
+pub(super) fn reply(id: u64, ok: bool) -> NotificationReply {
     NotificationReply {
         id,
         code: if ok {
