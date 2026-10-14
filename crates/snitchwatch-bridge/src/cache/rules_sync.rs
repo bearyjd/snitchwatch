@@ -47,9 +47,9 @@ pub struct PendingSnapshots {
 #[derive(Debug)]
 pub(super) struct Staged {
     pub(super) key: ConnKey,
-    pub(super) at: Instant,
+    at: Instant,
     pub(super) snapshot: Snapshot,
-    pub(super) adopted_by: Vec<StreamId>,
+    adopted_by: Vec<StreamId>,
 }
 
 impl PendingSnapshots {
