@@ -107,7 +107,7 @@ impl CuratedStore {
         if !self.grouped() {
             return "[]".to_string();
         }
-        curated_groups::view_json(&self.groups, &self.entries, status_text)
+        curated_groups::view_json(&self.groups, &self.entries, entry_status_text)
     }
 
     /// Whether group `gid` holds the broad DNS entry, which is turned on by
@@ -242,6 +242,25 @@ fn asks_for(entry: &CuratedDefaultSummary, on: bool) -> bool {
         return false;
     }
     entry.on != on || (on && entry.status == EntryStatus::InFirewall)
+}
+
+/// [`status_text`] for `entry`, except an entry the bridge holds back on
+/// this computer, with a reason (#158: its account unconfirmed or stale,
+/// #120 item 38): it may still be on, and the reason is shown below it.
+/// Without a reason, `Unavailable` is the inert bridge's, said in its
+/// banner.
+pub fn entry_status_text(entry: &CuratedDefaultSummary) -> &'static str {
+    match (held_back(entry), entry.on) {
+        (true, true) => "On, but Snitchwatch holds this rule back on this computer; see why below.",
+        (true, false) => "Not offered on this computer; see why below.",
+        (false, _) => status_text(entry.status),
+    }
+}
+
+/// Whether the bridge holds `entry` back on this computer, with a reason
+/// (its account unconfirmed, #158): nothing for it can be confirmed now.
+pub fn held_back(entry: &CuratedDefaultSummary) -> bool {
+    entry.status == EntryStatus::Unavailable && entry.problem.is_some()
 }
 
 /// Where an entry stands, in one fixed sentence, as of the firewall
@@ -508,6 +527,31 @@ mod tests {
         assert!(!store.received());
         assert!(store.is_empty());
         assert!(!store.apply(2, &ServerMessage::ClearConnectionRows));
+    }
+
+    /// #158: an entry the bridge holds back on this computer (its account
+    /// unconfirmed or stale) says so, on or off, rather than the inert
+    /// bridge's sentence; that one is kept for an entry with no reason.
+    #[test]
+    fn an_entry_held_back_here_says_so() {
+        let mut held = entry(DNS_ID, true, EntryStatus::Unavailable);
+        held.problem = Some("Snitchwatch couldn't confirm the account.".into());
+        assert_eq!(
+            entry_status_text(&held),
+            "On, but Snitchwatch holds this rule back on this computer; see why below."
+        );
+        held.on = false;
+        assert_eq!(
+            entry_status_text(&held),
+            "Not offered on this computer; see why below."
+        );
+        let inert = entry("flatpak-flathub", false, EntryStatus::Unavailable);
+        assert_eq!(
+            entry_status_text(&inert),
+            status_text(EntryStatus::Unavailable)
+        );
+        let installed = entry("flatpak-flathub", true, EntryStatus::Installed);
+        assert_eq!(entry_status_text(&installed), "Rule installed.");
     }
 
     #[test]

@@ -28,7 +28,7 @@ fn as_reported(rule: &Rule) -> Rule {
 #[test]
 fn the_daemons_report_of_an_entry_is_unedited() {
     for entry in entries() {
-        let reported = as_reported(&entry.rule());
+        let reported = as_reported(&entry.rule_as(Some(991)));
         assert!(is_unedited(Some(entry), None, &reported), "{}", entry.id);
         let off = Rule {
             enabled: false,
@@ -90,7 +90,7 @@ fn a_retired_entry_is_compared_with_its_recorded_copy_only() {
 #[test]
 fn the_canonical_form_round_trips_to_a_curated_rule() {
     for entry in entries() {
-        let form = canonical(&entry.rule());
+        let form = canonical(&entry.rule_as(Some(991)));
         assert_eq!(canonical(&form.to_rule()), form);
         crate::curated::check_curated_rule(&form.to_rule()).unwrap();
         let json = serde_json::to_value(&form).unwrap();

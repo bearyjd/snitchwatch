@@ -111,21 +111,22 @@ fn every_entry_binds_an_absolute_program_and_names_a_destination() {
 fn mdns_is_limited_to_the_multicast_group_on_udp_5353() {
     let avahi = entries().iter().find(|e| e.id == "avahi-mdns").unwrap();
     assert!(!avahi.broad());
-    let mut rule = avahi.rule();
+    let avahi_rule = || avahi.rule_as(Some(70));
+    let mut rule = avahi_rule();
     assert!(check_curated_rule(&rule).is_ok());
     let leaves = &mut rule.operator.as_mut().unwrap().list;
     assert_eq!(leaves[1].data, r"^(224\.0\.0\.251|ff02::fb)$");
     // Not another port, transport, or program.
-    leaves[2].data = "53".into();
+    leaves[3].data = "53".into();
     assert!(check_curated_rule(&rule).is_err());
-    let mut rule = avahi.rule();
-    rule.operator.as_mut().unwrap().list[3].data = Protocol::Tcp.pattern().into();
+    let mut rule = avahi_rule();
+    rule.operator.as_mut().unwrap().list[4].data = Protocol::Tcp.pattern().into();
     assert!(check_curated_rule(&rule).is_err());
-    let mut rule = avahi.rule();
+    let mut rule = avahi_rule();
     rule.operator.as_mut().unwrap().list[0].data = "/usr/bin/flatpak".into();
     assert!(check_curated_rule(&rule).is_err());
     // A widened pattern is refused.
-    let mut rule = avahi.rule();
+    let mut rule = avahi_rule();
     rule.operator.as_mut().unwrap().list[1].data = r"^224\.0\.0\..*$".into();
     assert!(check_curated_rule(&rule).is_err());
 }
@@ -135,15 +136,15 @@ fn the_new_services_are_as_narrow_as_the_protocol_allows() {
     let allows = |id: &str| entries().iter().find(|e| e.id == id).unwrap().allows();
     assert_eq!(
         allows("avahi-mdns"),
-        "/usr/bin/avahi-daemon may connect to the multicast DNS group (224.0.0.251 and ff02::fb) on UDP port 5353, over IPv4 and IPv6."
+        "/usr/bin/avahi-daemon may connect to the multicast DNS group (224.0.0.251 and ff02::fb) on UDP port 5353, over IPv4 and IPv6, but only while it runs as the avahi account."
     );
     assert_eq!(
         allows("chronyd-ntp"),
-        "/usr/bin/chronyd may connect to 2.fedora.pool.ntp.org on UDP port 123, over IPv4 and IPv6."
+        "/usr/bin/chronyd may connect to 2.fedora.pool.ntp.org on UDP port 123, over IPv4 and IPv6, but only while it runs as the chrony account."
     );
     assert_eq!(
         allows("tailscale-control"),
-        "/usr/bin/tailscaled may connect to controlplane.tailscale.com on TCP port 443, over IPv4 and IPv6."
+        "/usr/bin/tailscaled may connect to controlplane.tailscale.com on TCP port 443, over IPv4 and IPv6, but only while it runs as root (user ID 0)."
     );
     // No Tailscale entry can reach any address.
     assert!(entries()
@@ -155,7 +156,7 @@ fn the_new_services_are_as_narrow_as_the_protocol_allows() {
 #[test]
 fn every_entry_builds_a_non_precedence_allow_under_the_reserved_prefix() {
     for entry in entries() {
-        let rule = entry.rule();
+        let rule = entry.rule_as(Some(991));
         assert!(
             rule.name.starts_with("snitchwatch-default-"),
             "{}",
@@ -190,14 +191,14 @@ fn each_entry_says_exactly_what_it_allows() {
     assert_eq!(
         allows,
         [
-            "/usr/bin/NetworkManager may connect to fedoraproject.org on TCP port 80, over IPv4 and IPv6.",
+            "/usr/bin/NetworkManager may connect to fedoraproject.org on TCP port 80, over IPv4 and IPv6, but only while it runs as root (user ID 0).",
             "/usr/bin/chronyc may connect to this computer only (127.0.0.1 and ::1) on UDP port 323, over IPv4 and IPv6.",
-            "/usr/bin/chronyd may connect to 2.fedora.pool.ntp.org on UDP port 123, over IPv4 and IPv6.",
-            "/usr/bin/avahi-daemon may connect to the multicast DNS group (224.0.0.251 and ff02::fb) on UDP port 5353, over IPv4 and IPv6.",
+            "/usr/bin/chronyd may connect to 2.fedora.pool.ntp.org on UDP port 123, over IPv4 and IPv6, but only while it runs as the chrony account.",
+            "/usr/bin/avahi-daemon may connect to the multicast DNS group (224.0.0.251 and ff02::fb) on UDP port 5353, over IPv4 and IPv6, but only while it runs as the avahi account.",
             "/usr/bin/flatpak may connect to dl.flathub.org on TCP port 443, over IPv4 and IPv6.",
-            "/usr/bin/tailscaled may connect to controlplane.tailscale.com on TCP port 443, over IPv4 and IPv6.",
-            "/usr/bin/tailscaled may connect to log.tailscale.com on TCP port 443, over IPv4 and IPv6.",
-            "/usr/lib/systemd/systemd-resolved may connect to any address on TCP and UDP port 53, over IPv4 and IPv6, but only while it runs as user ID 193 (the systemd-resolve account).",
+            "/usr/bin/tailscaled may connect to controlplane.tailscale.com on TCP port 443, over IPv4 and IPv6, but only while it runs as root (user ID 0).",
+            "/usr/bin/tailscaled may connect to log.tailscale.com on TCP port 443, over IPv4 and IPv6, but only while it runs as root (user ID 0).",
+            "/usr/lib/systemd/systemd-resolved may connect to any address on TCP and UDP port 53, over IPv4 and IPv6, but only while it runs as the systemd-resolve account.",
         ]
     );
 }

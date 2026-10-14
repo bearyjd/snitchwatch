@@ -175,7 +175,7 @@ async fn unserverstamped_dead_cancelled_and_other_client_off_intents_refuse() {
 
 #[tokio::test]
 async fn disabled_keep_is_adoption_only_and_explicit_reenable_is_separate() {
-    let mut disabled = dns().rule();
+    let mut disabled = dns().rule_as(Some(990));
     disabled.enabled = false;
     let harness = Harness::new().connect(Daemon::Accept, vec![disabled.clone()]);
     let manager = harness.curated();
@@ -208,7 +208,7 @@ async fn disabled_keep_is_adoption_only_and_explicit_reenable_is_separate() {
 
 #[tokio::test]
 async fn rules_page_off_revokes_saved_authority_and_invalidates_pending_intent() {
-    let harness = Harness::new().connect(Daemon::Accept, vec![dns().rule()]);
+    let harness = Harness::new().connect(Daemon::Accept, vec![dns().rule_as(Some(990))]);
     let manager = harness.curated();
     let context = IntentContext::for_test();
     let ticket = prepare(&manager, &context, Purpose::Keep);
@@ -407,7 +407,7 @@ async fn accepted_choice_revoked_before_save_never_reports_saved_authority() {
 
 #[tokio::test]
 async fn reenable_superseded_by_disabled_keep_does_not_claim_saved_activation() {
-    let mut disabled = dns().rule();
+    let mut disabled = dns().rule_as(Some(990));
     disabled.enabled = false;
     let harness = Harness::new().connect(Daemon::Accept, vec![disabled]);
     let manager = harness.curated();
@@ -446,7 +446,7 @@ async fn reenable_superseded_by_disabled_keep_does_not_claim_saved_activation() 
 #[tokio::test]
 async fn failed_durable_off_blocks_session_and_never_claims_persisted_revocation() {
     use std::os::unix::fs::PermissionsExt;
-    let harness = Harness::new().connect(Daemon::Accept, vec![dns().rule()]);
+    let harness = Harness::new().connect(Daemon::Accept, vec![dns().rule_as(Some(990))]);
     let manager = harness.curated();
     let context = IntentContext::for_test();
     let ticket = prepare(&manager, &context, Purpose::Keep);

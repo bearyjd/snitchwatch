@@ -59,7 +59,7 @@ async fn the_dns_entry_is_off_until_chosen_and_installs_exactly_the_resolver_rul
     assert_eq!(
         listed.allows,
         "/usr/lib/systemd/systemd-resolved may connect to any address on TCP and UDP port 53, \
-         over IPv4 and IPv6, but only while it runs as user ID 193 (the systemd-resolve account)."
+         over IPv4 and IPv6, but only while it runs as the systemd-resolve account."
     );
     assert!(listed
         .why
@@ -111,7 +111,8 @@ async fn the_dns_entry_is_off_until_chosen_and_installs_exactly_the_resolver_rul
                 "/usr/lib/systemd/systemd-resolved",
                 true
             ),
-            ("simple", "user.id", "193", false),
+            // The account's uid as the test lookup finds it.
+            ("simple", "user.id", "990", false),
             ("simple", "dest.port", "53", false),
             ("regexp", "protocol", "^(tcp|udp)6?$", false),
         ]

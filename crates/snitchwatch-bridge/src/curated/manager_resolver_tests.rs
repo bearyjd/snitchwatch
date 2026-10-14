@@ -1,4 +1,5 @@
-//! #120 item 38: the DNS entry only where systemd-resolve is uid 193.
+//! #120 item 38: the DNS entry only where the systemd-resolve account is
+//! found, pinned to the uid it is found at.
 
 use super::intent_tests::{prepare, submit};
 use super::tests::*;
@@ -11,15 +12,23 @@ const DNS: &str = "dns-resolved";
 const DNS_RULE: &str = "snitchwatch-default-dns-resolved";
 
 fn dns_rule() -> snitchwatch_proto::protocol::Rule {
-    entries().iter().find(|e| e.id == DNS).unwrap().rule()
+    entries()
+        .iter()
+        .find(|e| e.id == DNS)
+        .unwrap()
+        .rule_as(Some(990))
 }
 
-/// The lookup fails, or finds another uid, or no such account.
-fn unconfirmed() -> [crate::accounts::UidLookup; 3] {
+/// The lookup fails, finds no such account, or finds it at root's uid
+/// (never a service account); with the reason each shows.
+fn unconfirmed() -> [(crate::accounts::UidLookup, &'static str); 3] {
     [
-        Arc::new(|_| None),
-        Arc::new(|_| Some(991)),
-        Arc::new(|name| (name != "systemd-resolve").then_some(193)),
+        (Arc::new(|_| None), DNS_ACCOUNT_REASON),
+        (
+            Arc::new(|name| (name != "systemd-resolve").then_some(990)),
+            DNS_ACCOUNT_REASON,
+        ),
+        (Arc::new(|_| Some(0)), DNS_ACCOUNT_REASON),
     ]
 }
 
@@ -34,7 +43,7 @@ fn opt_in(curated: &CuratedDefaults) {
 /// says why; its choice and grant stay, so it is installed once confirmed.
 #[tokio::test]
 async fn an_opted_in_dns_entry_waits_for_its_account_to_be_confirmed() {
-    for lookup in unconfirmed() {
+    for (lookup, reason) in unconfirmed() {
         let harness = Harness::new().connect(Daemon::Accept, Vec::new());
         let curated = harness.curated();
         opt_in(&curated);
@@ -45,11 +54,11 @@ async fn an_opted_in_dns_entry_waits_for_its_account_to_be_confirmed() {
         assert!(harness.seen().is_empty(), "{:?}", harness.seen());
         let state = entry_state(&curated, DNS);
         assert_eq!(state.status, EntryStatus::Unavailable);
-        assert_eq!(state.problem.as_deref(), Some(DNS_ACCOUNT_REASON));
+        assert_eq!(state.problem.as_deref(), Some(reason));
         let saved = store::load(&harness.file).unwrap().unwrap();
         assert!(saved.has_broad_authority(DNS));
 
-        curated.set_uid_lookup(Arc::new(|_| Some(193)));
+        curated.set_uid_lookup(Arc::new(|name| (name == "systemd-resolve").then_some(990)));
         curated.reconcile().await;
         assert_eq!(
             harness.seen(),
@@ -63,7 +72,7 @@ async fn an_opted_in_dns_entry_waits_for_its_account_to_be_confirmed() {
 /// and its choices are kept.
 #[tokio::test]
 async fn an_installed_dns_rule_is_left_as_it_is_while_unconfirmed() {
-    for lookup in unconfirmed() {
+    for (lookup, _) in unconfirmed() {
         let harness = Harness::new().connect(Daemon::Accept, Vec::new());
         let curated = harness.curated();
         opt_in(&curated);
@@ -135,11 +144,157 @@ async fn a_hung_lookup_counts_as_unconfirmed_and_doesnt_stall_the_pass() {
     let hung = Arc::new(Mutex::new(hung));
     curated.set_uid_lookup(Arc::new(move |_| {
         let _ = hung.lock().unwrap().recv();
-        Some(193)
+        Some(990)
     }));
     let pass = tokio::time::timeout(RESOLVER_LOOKUP_TIMEOUT * 3, curated.reconcile()).await;
     release.send(()).unwrap();
     assert!(pass.is_ok(), "the pass waited on the lookup");
     assert!(harness.seen().is_empty(), "{:?}", harness.seen());
     assert_eq!(entry_state(&curated, DNS).status, EntryStatus::Unavailable);
+}
+
+/// A lookup that blocks until released, counting its calls.
+fn hung_lookup() -> (
+    crate::accounts::UidLookup,
+    Arc<std::sync::atomic::AtomicUsize>,
+    std::sync::mpsc::Sender<()>,
+) {
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (release, hung) = std::sync::mpsc::channel::<()>();
+    let hung = Arc::new(Mutex::new(hung));
+    let counted = calls.clone();
+    let lookup: crate::accounts::UidLookup = Arc::new(move |name| {
+        counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let _ = hung.lock().unwrap().recv();
+        (name == "systemd-resolve").then_some(990)
+    });
+    (lookup, calls, release)
+}
+
+/// #155: with the account database hung, one lookup is in flight at a
+/// time. Later passes reuse the last result at once, and start no other
+/// blocking thread to strand.
+#[tokio::test]
+async fn a_hung_lookup_is_not_started_again_by_later_passes() {
+    let harness = Harness::new().connect(Daemon::Accept, Vec::new());
+    let curated = harness.curated();
+    opt_in(&curated);
+    let (lookup, calls, release) = hung_lookup();
+    curated.set_uid_lookup(lookup);
+    curated.reconcile().await;
+    for _ in 0..3 {
+        let pass = tokio::time::timeout(Duration::from_secs(1), curated.reconcile()).await;
+        assert!(pass.is_ok(), "a later pass waited on the hung lookup");
+    }
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    drop(release);
+    assert_eq!(entry_state(&curated, DNS).status, EntryStatus::Unavailable);
+}
+
+/// #155: a lookup that answers after its pass gave up is not lost: the
+/// answer changes what a pass reads, so the worker plans again.
+#[tokio::test]
+async fn a_late_lookup_answer_changes_the_pass_key() {
+    let harness = Harness::new().connect(Daemon::Accept, Vec::new());
+    let curated = harness.curated();
+    opt_in(&curated);
+    let (lookup, _, release) = hung_lookup();
+    curated.set_uid_lookup(lookup);
+    curated.reconcile().await;
+    let before = curated.pass_key();
+    drop(release);
+    let changed = tokio::time::timeout(Duration::from_secs(5), async {
+        while curated.pass_key() == before {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await;
+    assert!(changed.is_ok(), "the late answer was dropped");
+    curated.reconcile().await;
+    assert_eq!(
+        harness.seen(),
+        [(Action::ChangeRule as i32, DNS_RULE.into())]
+    );
+}
+
+/// #157: a manager nobody gave a lookup never reads the host's accounts:
+/// every account is unknown, so the DNS entry is withheld.
+#[tokio::test]
+async fn a_new_manager_confirms_no_account_until_given_a_lookup() {
+    let harness = Harness::new().connect(Daemon::Accept, Vec::new());
+    let curated = CuratedDefaults::new(
+        harness.commands.clone(),
+        harness.rules.cache(),
+        harness.broadcast.clone(),
+    );
+    curated.attach_file(harness.file.clone());
+    curated.reconcile().await;
+    assert_eq!(entry_state(&curated, DNS).status, EntryStatus::Unavailable);
+    assert!(lock(&curated.inner.state).withheld.contains(DNS));
+}
+
+/// #157: a bridge that changes no recommended rules looks no account up.
+#[tokio::test]
+async fn an_inert_bridge_looks_no_account_up() {
+    let harness = Harness::new().connect(Daemon::Accept, Vec::new());
+    let curated = harness.curated();
+    curated.set_unavailable("per-user");
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = calls.clone();
+    curated.set_uid_lookup(Arc::new(move |_| {
+        counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Some(990)
+    }));
+    curated.reconcile().await;
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+/// Security review M1 (a): a service account is a system account. A uid
+/// outside 1..=SYS_UID_MAX (a desktop user's, nobody's) is unconfirmed, so
+/// a directory that defines `systemd-resolve` at a person's uid gives that
+/// person no DNS rule.
+#[tokio::test]
+async fn an_account_outside_the_system_range_is_unconfirmed() {
+    for (uid, confirmed) in [
+        (SYS_UID_MAX + 1, false),
+        (65534, false),
+        (u32::MAX, false),
+        (SYS_UID_MAX, true),
+        (1, true),
+    ] {
+        let harness = Harness::new().connect(Daemon::Accept, Vec::new());
+        let curated = harness.curated();
+        opt_in(&curated);
+        curated.set_uid_lookup(Arc::new(move |name| {
+            (name == "systemd-resolve").then_some(uid)
+        }));
+        curated.reconcile().await;
+        assert_eq!(harness.seen().len(), usize::from(confirmed), "{uid}");
+        if !confirmed {
+            let state = entry_state(&curated, DNS);
+            assert_eq!(state.problem.as_deref(), Some(DNS_ACCOUNT_REASON), "{uid}");
+        }
+    }
+}
+
+/// Security review M1 (b): the uid's own name must be the account's. A
+/// reverse lookup that names another account, or none, is unconfirmed.
+#[tokio::test]
+async fn an_account_whose_uid_names_another_account_is_unconfirmed() {
+    let reverse: [(crate::accounts::AccountLookup, bool); 3] = [
+        (Arc::new(|_| Some("alice".into())), false),
+        (Arc::new(|_| None), false),
+        (
+            Arc::new(|uid| (uid == 990).then(|| "systemd-resolve".into())),
+            true,
+        ),
+    ];
+    for (names, confirmed) in reverse {
+        let harness = Harness::new().connect(Daemon::Accept, Vec::new());
+        let curated = harness.curated();
+        opt_in(&curated);
+        curated.set_account_lookups(Arc::new(|_| Some(990)), names);
+        curated.reconcile().await;
+        assert_eq!(harness.seen().len(), usize::from(confirmed), "{confirmed}");
+    }
 }
