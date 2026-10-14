@@ -226,12 +226,13 @@ impl RulesCache {
         let agrees = usize::try_from(reading.reported).is_ok_and(|reported| {
             (expected..=expected.saturating_add(allowance)).contains(&reported)
         });
-        if agrees && watch.run >= PINGS_TO_CLEAR {
+        if agrees && !may_only_clear && watch.run >= PINGS_TO_CLEAR {
             // A run below the room: the daemon holds at most `held` rules the
             // list doesn't show, so at most that many answers' worth. Every
             // other reason here is room for more rules, never fewer, so none
-            // can hide one gone; a timer that may drop a listed rule unseen
-            // (the one way the count reads low) never gets here.
+            // can hide one gone. The one way the count reads low is a timer
+            // that may drop a listed or left-out rule unseen; such readings
+            // can still clear a raised hint, but never shrink the room.
             let held = usize::try_from(reading.reported).unwrap_or(usize::MAX) - expected;
             let renamed = &mut self.may_hold.renamed;
             *renamed = (*renamed).min(u32::try_from(held).unwrap_or(u32::MAX));

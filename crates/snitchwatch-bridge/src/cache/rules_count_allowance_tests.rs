@@ -252,6 +252,34 @@ fn the_room_a_prompt_answer_made_is_kept_for_a_timer_or_a_single_reading() {
     assert!(!cache.count_mismatch());
 }
 
+/// A raised hint still clears while a listed temporary rule's timer may
+/// drop it unseen, but that agreement is no evidence the answers' room went:
+/// the daemon may have dropped the temporary rule, not `seen-2` (PR #150
+/// review M1).
+#[test]
+fn a_hint_clearing_while_a_timer_may_drop_rules_keeps_the_answers_room() {
+    let mut cache = synced(vec![
+        rule("other", "always", true),
+        rule("seen", "always", false),
+    ]);
+    cache.note_prompt_answer("seen");
+    cache.upsert(rule("seen", "always", true));
+    settle(&mut cache, 4);
+    let flips = many(&mut cache, 4, 3);
+    assert_eq!(flips.last(), Some(&true), "{flips:?}");
+    // A temporary rule; the daemon's timer drops it before the bridge's.
+    cache.upsert(rule("t", "5m", true));
+    settle(&mut cache, 3);
+    let flips = many(&mut cache, 3, 6);
+    assert!(flips.contains(&true), "the hint clears: {flips:?}");
+    assert!(!cache.count_mismatch());
+    // The bridge prunes it: the daemon still holds seen-2.
+    cache.remove("t");
+    settle(&mut cache, 3);
+    assert!(none_flipped(&many(&mut cache, 3, 10)), "seen-2 is still room");
+    assert!(!cache.count_mismatch());
+}
+
 /// Room for a refused add is room for more, never fewer: with it, the
 /// prompt answers' room shrinks to what the daemon holds over the list,
 /// and the refused add keeps its own.
