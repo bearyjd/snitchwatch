@@ -291,7 +291,7 @@ async fn a_rename_publishes_the_list_once() {
         let mut daemon = daemon(vec![bound("100-old", "deny")]);
         let model = model(&[bound("100-old", "deny")]);
         if stuck {
-            model.lock().unwrap().stuck_files.insert("100-old".into());
+            model.lock().unwrap().stuck.insert("100-old".into());
         }
         run_model(&mut daemon, model.clone());
         let commands = commands(&daemon);
