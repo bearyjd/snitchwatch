@@ -224,8 +224,9 @@ original, so the list stays one short. Since #120 item 29 it shrinks when the
 daemon's count settles below it (a debounced run of agreeing readings): to
 the daemon's excess over the list. The other reasons are all room for more
 rules, so none can hide one gone; the one way the count reads low, a
-temporary rule's timer dropping a listed rule unseen, already stops these
-readings. While one is listed it can still hide an outside change of that
+temporary rule's timer dropping a listed rule unseen, makes readings no
+evidence for the shrink (they may still clear a raised hint; PR #150
+review M1). While one is listed it can still hide an outside change of that
 size until the next snapshot, bounded by the number of answers. That is the
 cheaper error.
 Not covered, on purpose: a command that never got an answer (after its 30 s
