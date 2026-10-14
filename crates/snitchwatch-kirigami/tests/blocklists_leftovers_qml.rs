@@ -5,7 +5,9 @@
 //! - a count shows in a PlainText label (singular and plural);
 //! - "Remove these rules" asks for confirmation; Cancel sends nothing; Confirm
 //!   sends exactly one `removeLeftoverBlocklistRules`;
-//! - the count going back to 0 hides the notice.
+//! - the count going back to 0 hides the notice;
+//! - a removal whose deletes were all refused shows the bridge's
+//!   `filesLeft` note on its own (#120 item 2).
 //!
 //! Same probe shape as `rules_hits_qml.rs`. Run headless with
 //! `QT_QPA_PLATFORM=offscreen`.
@@ -190,6 +192,32 @@ Window {
                 // The bridge reports none left.
                 probeWindow.leftovers(0);
                 probeWindow.check(!notice.visible, "the notice stayed at zero");
+
+                // #120 item 2: every delete refused leaves nothing to count,
+                // but the saved files may bring the rules back. The bridge's
+                // fixed note shows on its own, as plain text, while nothing
+                // is counted.
+                const filesLeft = probeWindow.part("leftoverFilesLeftText");
+                probeWindow.check(filesLeft !== null && !filesLeft.visible,
+                                  "a files-left note before any removal");
+                model.applyServerMessageJson(JSON.stringify({
+                    action: "setBlocklistLeftovers", count: 0,
+                    filesLeft: "They may come back: <b>x</b>."
+                }));
+                probeWindow.check(filesLeft.visible && !notice.visible
+                                  && filesLeft.text === "They may come back: <b>x</b>."
+                                  && filesLeft.textFormat === Text.PlainText,
+                                  "files-left note: '" + filesLeft.text + "'");
+                // Leftovers counted again: their notice speaks, not this note,
+                // even if a bridge sends both.
+                model.applyServerMessageJson(JSON.stringify({
+                    action: "setBlocklistLeftovers", count: 2,
+                    filesLeft: "They may come back: <b>x</b>."
+                }));
+                probeWindow.check(notice.visible && !filesLeft.visible,
+                                  "the files-left note showed beside counted leftovers");
+                probeWindow.leftovers(2);
+                probeWindow.check(!filesLeft.visible, "the files-left note outlived its message");
 
                 if (probeWindow.failures.length > 0) {
                     throw new Error("leftovers probe: " + probeWindow.failures.join("; "));

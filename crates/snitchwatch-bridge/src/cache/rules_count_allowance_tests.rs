@@ -194,6 +194,114 @@ fn a_timed_answer_over_a_disabled_rule_leaves_the_daemon_one_more_after_expiry()
     assert!(!cache.count_mismatch());
 }
 
+/// #120 item 29: the daemon's count settling below the room a prompt answer
+/// made means the extra rule went (a `<name>-2` removed outside the bridge),
+/// so the room goes too, and an outside add after it is said.
+#[test]
+fn the_room_a_prompt_answer_made_shrinks_when_the_daemon_holds_fewer() {
+    let mut cache = synced(vec![
+        rule("other", "always", true),
+        rule("seen", "always", false),
+    ]);
+    cache.note_prompt_answer("seen");
+    cache.upsert(rule("seen", "always", true));
+    settle(&mut cache, 3);
+    assert!(
+        none_flipped(&many(&mut cache, 3, 10)),
+        "the daemon has seen-2"
+    );
+    // seen-2.json removed by hand: the daemon holds what the list shows.
+    assert!(none_flipped(&many(&mut cache, 2, PINGS_TO_CLEAR.into())));
+    // A rule added outside the bridge is no longer hidden by that room.
+    let flips = many(&mut cache, 3, 6);
+    assert!(flips.contains(&true), "{flips:?}");
+    assert!(cache.count_mismatch());
+}
+
+/// A listed temporary rule's timer may drop it unseen, so a lower count may
+/// hide `seen-2` behind it: the room is kept, and the count is no evidence.
+/// And one lower reading is not a run.
+#[test]
+fn the_room_a_prompt_answer_made_is_kept_for_a_timer_or_a_single_reading() {
+    let mut cache = synced(vec![
+        rule("other", "5m", false),
+        rule("seen", "always", false),
+    ]);
+    cache.note_prompt_answer("seen");
+    cache.upsert(rule("seen", "always", true));
+    settle(&mut cache, 2);
+    assert!(none_flipped(&many(&mut cache, 2, 10)));
+    assert!(
+        none_flipped(&many(&mut cache, 3, 10)),
+        "room for seen-2 is kept"
+    );
+
+    let mut cache = synced(vec![
+        rule("other", "always", true),
+        rule("seen", "always", false),
+    ]);
+    cache.note_prompt_answer("seen");
+    cache.upsert(rule("seen", "always", true));
+    settle(&mut cache, 3);
+    assert!(none_flipped(&many(&mut cache, 3, 5)));
+    assert!(!read(&mut cache, 2));
+    assert!(
+        none_flipped(&many(&mut cache, 3, 10)),
+        "one low reading kept the room"
+    );
+    assert!(!cache.count_mismatch());
+}
+
+/// A raised hint still clears while a listed temporary rule's timer may
+/// drop it unseen, but that agreement is no evidence the answers' room went:
+/// the daemon may have dropped the temporary rule, not `seen-2` (PR #150
+/// review M1).
+#[test]
+fn a_hint_clearing_while_a_timer_may_drop_rules_keeps_the_answers_room() {
+    let mut cache = synced(vec![
+        rule("other", "always", true),
+        rule("seen", "always", false),
+    ]);
+    cache.note_prompt_answer("seen");
+    cache.upsert(rule("seen", "always", true));
+    settle(&mut cache, 4);
+    let flips = many(&mut cache, 4, 3);
+    assert_eq!(flips.last(), Some(&true), "{flips:?}");
+    // A temporary rule; the daemon's timer drops it before the bridge's.
+    cache.upsert(rule("t", "5m", true));
+    settle(&mut cache, 3);
+    let flips = many(&mut cache, 3, 6);
+    assert!(flips.contains(&true), "the hint clears: {flips:?}");
+    assert!(!cache.count_mismatch());
+    // The bridge prunes it: the daemon still holds seen-2.
+    cache.remove("t");
+    settle(&mut cache, 3);
+    assert!(
+        none_flipped(&many(&mut cache, 3, 10)),
+        "seen-2 is still room"
+    );
+    assert!(!cache.count_mismatch());
+}
+
+/// Room for a refused add is room for more, never fewer: with it, the
+/// prompt answers' room shrinks to what the daemon holds over the list,
+/// and the refused add keeps its own.
+#[test]
+fn a_refused_add_keeps_its_own_room_when_the_answers_room_shrinks() {
+    let mut cache = synced(vec![
+        rule("other", "always", true),
+        rule("seen", "always", false),
+    ]);
+    cache.apply_refused(&change(rule("refused", "always", true)));
+    cache.note_prompt_answer("seen");
+    cache.upsert(rule("seen", "always", true));
+    settle(&mut cache, 2);
+    assert!(none_flipped(&many(&mut cache, 2, 10)));
+    assert!(none_flipped(&many(&mut cache, 3, 10)), "the refused add");
+    let flips = many(&mut cache, 4, 6);
+    assert!(flips.contains(&true), "{flips:?}");
+}
+
 // --- M1: a refused add the daemon applied anyway -------------------------
 
 /// Stock `Replace` stores a rule in memory before `Save` can fail, and

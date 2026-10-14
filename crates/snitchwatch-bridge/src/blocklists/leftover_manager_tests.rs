@@ -171,6 +171,7 @@ async fn the_event_pump_follows_every_summary_with_the_leftover_count() {
             count: 2,
             cause: Some("no_state_dir".into()),
             reason: None,
+            files_left: None,
         }
     );
 }
@@ -207,6 +208,7 @@ fn cause_and_reason(mgr: &BlocklistsManager) -> (Option<String>, Option<String>,
             count,
             cause,
             reason,
+            ..
         } => (cause, reason, count),
         other => panic!("expected SetBlocklistLeftovers, got {other:?}"),
     }
@@ -252,9 +254,17 @@ async fn no_leftovers_have_no_cause() {
     );
 }
 
+fn files_left(mgr: &BlocklistsManager) -> Option<String> {
+    match message(mgr) {
+        crate::ws_messages::ServerMessage::SetBlocklistLeftovers { files_left, .. } => files_left,
+        other => panic!("expected SetBlocklistLeftovers, got {other:?}"),
+    }
+}
+
 /// Tower r12: a refused delete comes after the daemon stopped using the
 /// rule, so nothing is left to remove here; the Rules page says the files
-/// may bring them back (`RulesNotShown::left_on_disk`).
+/// may bring them back (`RulesNotShown::left_on_disk`), and so does this
+/// page, though it counts no leftovers any more (#120 item 2).
 #[tokio::test]
 async fn a_refused_removal_leaves_no_leftovers_and_notes_the_files() {
     let h = holding_two();
@@ -263,6 +273,52 @@ async fn a_refused_removal_leaves_no_leftovers_and_notes_the_files() {
     mgr.remove_leftover_rules().await;
     assert_eq!(cause_and_reason(&mgr), (None, None, 0));
     assert_eq!(h.rules.cache().lock().unwrap().files_left().len(), 2);
+    let note = files_left(&mgr).expect("the page says the files stayed");
+    assert!(note.contains("saved files of 2"), "{note}");
+    assert!(note.contains("may come back"), "{note}");
+    assert!(
+        !note.contains("busy"),
+        "fixed text, not the daemon's: {note}"
+    );
+}
+
+/// The note lasts until the next removal, or until leftovers are counted
+/// again (the files came back, and the leftover notice says so instead).
+#[tokio::test]
+async fn the_files_left_note_lasts_until_the_next_removal_or_the_leftovers_return() {
+    let h = holding_two();
+    h.set_daemon(Daemon::RefuseDelete("busy"));
+    let mgr = without_a_state_directory(&h);
+    mgr.remove_leftover_rules().await;
+    assert!(files_left(&mgr).is_some());
+    mgr.announce_leftover_change();
+    assert!(files_left(&mgr).is_some(), "still nothing counted");
+    mgr.remove_leftover_rules().await;
+    assert_eq!(files_left(&mgr), None, "a removal with nothing to remove");
+
+    let h = holding_two();
+    h.set_daemon(Daemon::RefuseDelete("busy"));
+    let mgr = without_a_state_directory(&h);
+    mgr.remove_leftover_rules().await;
+    // The daemon restarted and loaded the files: leftovers again.
+    h.rules.cache().lock().unwrap().replace_all(two_rules(&h));
+    mgr.announce_leftover_change();
+    assert_eq!(mgr.leftover_count(), Some(2));
+    assert_eq!(files_left(&mgr), None);
+}
+
+/// Some removed, the rest refused, nothing counted: only the refused ones
+/// may come back.
+#[tokio::test]
+async fn a_partly_refused_removal_counts_only_the_refused_files() {
+    let h = holding_two();
+    let refused = h.bridge_rule(ADS, ListKind::Ips).name;
+    h.set_daemon(Daemon::RefuseDeleteOf(refused));
+    let mgr = without_a_state_directory(&h);
+    mgr.remove_leftover_rules().await;
+    assert_eq!(mgr.leftover_count(), None);
+    let note = files_left(&mgr).expect("one file stayed");
+    assert!(note.contains("saved file of 1,"), "{note}");
 }
 
 #[tokio::test]

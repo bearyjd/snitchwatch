@@ -206,17 +206,29 @@ upwards, never downwards; a missed hint is the cheaper error.
    `CLOCK_BOOTTIME`; if either counted suspend time, the tolerance would
    silently stop working. `prune_expired_at(now_secs, clock)` notes
    `ends + 5 s` as an allowance when `ends` is still ahead of `clock`, i.e.
-   when the two clocks disagree; in the normal case it notes nothing.
+   when the two clocks disagree. For a change the bridge made that happens
+   only after a suspend. For a snapshot rule it is the usual case: its
+   `created` stamp is older than the timer's start, so after the prune it
+   keeps a tolerance of up to min(age at adoption, duration) + 5 s, and a
+   real +1 mismatch can go unreported for that long (a missed hint, bounded
+   by the duration: the cheaper error; #120 item 30).
 
 `note_prompt_answer` counts a name that is listed, left out of the list for
 its size, or an add the daemon refused and may have stored: the daemon has
 the name in each case, and saves the answer as `<name>-2`.
 
 All three clear with `replace_all` (an adopted snapshot) and `set_unknown`.
-**The prompt-answer count is never reduced until the next snapshot**, even if
-the extra rule later expires or is deleted from outside: it can hide an
-outside change of that size for as long as the daemon stays connected (days,
-bounded by the number of answers). That is the cheaper error.
+**The prompt-answer count is not reduced at a timed answer's expiry**: the
+daemon drops `<name>-2` as the bridge prunes `<name>`, and still holds the
+original, so the list stays one short. Since #120 item 29 it shrinks when the
+daemon's count settles below it (a debounced run of agreeing readings): to
+the daemon's excess over the list. The other reasons are all room for more
+rules, so none can hide one gone; the one way the count reads low, a
+temporary rule's timer dropping a listed rule unseen, makes readings no
+evidence for the shrink (they may still clear a raised hint; PR #150
+review M1). While one is listed it can still hide an outside change of that
+size until the next snapshot, bounded by the number of answers. That is the
+cheaper error.
 Not covered, on purpose: a command that never got an answer (after its 30 s
 late-reply grace) is a real divergence the hint may report.
 

@@ -25,6 +25,9 @@
 //! (opensnitchd removes the file last, and only that can fail; tower r12):
 //! the bridge's list drops it (`RulesCache::apply_refused`), and the result
 //! is `OkWithNote`, saying the file may bring it back at the next restart.
+//! So does a refused turn-off of an `always` rule: a disabled rule isn't
+//! compiled, so only saving it failed, after the daemon took it off; its old
+//! file may turn it back on (#120 item 3).
 //!
 //! A command with a valid `request_id` gets one `RuleCommandResult`, sent
 //! to the asking connection only. Without one it behaves as #48: no
@@ -33,7 +36,7 @@
 
 use crate::busy::{BusyGuard, BusyNames};
 use crate::replier::{display_reason, Replier};
-use snitchwatch_bridge::cache::rules::{publish_rules, SharedRulesCache};
+use snitchwatch_bridge::cache::rules::{applied_but_not_saved, publish_rules, SharedRulesCache};
 use snitchwatch_bridge::curated::manager::CuratedDefaults;
 use snitchwatch_bridge::daemon_commands::{CommandError, DaemonCommands, SendError};
 use snitchwatch_bridge::rule_policy::RuleProblem;
@@ -62,6 +65,12 @@ const DELETED_FILE_LEFT: &str = "Deleted. The firewall stopped using this rule, 
      remove its saved file, so the rule may come back when the firewall restarts. If it does, \
      delete it again on the Rules page.";
 
+/// A refused turn-off's note: the daemon took the rule off, but its saved
+/// file still has it on.
+const TURNED_OFF_FILE_KEPT: &str = "Turned off. The firewall stopped using this rule, but \
+     couldn't save the change, so the rule may come back on when the firewall restarts. If it \
+     does, turn it off again on the Rules page.";
+
 /// The pump's handle for rule commands.
 pub(crate) struct RuleCommands {
     commands: DaemonCommands,
@@ -84,10 +93,14 @@ struct Answer {
 }
 
 impl Answer {
-    /// Undo a GUI's optimistic change (#48) after anything but a clean OK;
-    /// the result goes only to a request that asked for one.
+    /// Undo a GUI's optimistic change (#48) after anything but an OK; the
+    /// result goes only to a request that asked for one. An `OkWithNote`
+    /// change stands, and the list published with it already shows it.
     fn republish(&self, outcome: &RuleCommandOutcome) {
-        if *outcome != RuleCommandOutcome::Ok {
+        if !matches!(
+            outcome,
+            RuleCommandOutcome::Ok | RuleCommandOutcome::OkWithNote { .. }
+        ) {
             publish_rules(&self.rules, &self.broadcast);
         }
     }
@@ -262,6 +275,8 @@ impl RuleCommands {
 
     fn send(&self, notification: Notification, answer: Answer) {
         let delete = notification.r#type == Action::DeleteRule as i32;
+        // Only a pure toggle is sent here, so this is a turn-off.
+        let turn_off_saved = applied_but_not_saved(&notification);
         let sent = self.commands.send(notification);
         let timeout = self.reply_timeout;
         tokio::spawn(async move {
@@ -271,6 +286,12 @@ impl RuleCommands {
                 // stands, so the list isn't sent again.
                 RuleCommandOutcome::Rejected { reason } if delete => {
                     answer.reply(refused_delete_outcome(&reason)).await;
+                }
+                // Likewise the cache shows it off (`apply_refused`, #120
+                // item 3).
+                RuleCommandOutcome::Rejected { reason } if turn_off_saved => {
+                    let note = format!("{TURNED_OFF_FILE_KEPT} ({reason})");
+                    answer.reply(RuleCommandOutcome::OkWithNote { note }).await;
                 }
                 outcome => answer.finish(outcome).await,
             }

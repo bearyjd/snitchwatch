@@ -1,8 +1,11 @@
 //! Tests for [`super`]: the cache, staged snapshots and their limits.
 
 use super::*;
+use crate::cache::rule_hits_handle::RuleHitsHandle;
+use crate::daemon_commands::ConnKey;
 use crate::rule_wire::{rule_from_wire, rule_to_wire};
 use snitchwatch_proto::protocol::Operator;
+use tokio::sync::broadcast;
 
 const T: i64 = 1_800_000_000;
 

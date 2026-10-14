@@ -60,6 +60,7 @@ async fn next_leftovers(
                 count,
                 cause,
                 reason,
+                ..
             } = rx.recv().await.unwrap()
             {
                 return (count, cause, reason);

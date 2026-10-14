@@ -66,6 +66,9 @@ Kirigami.ScrollablePage {
     // shown in PlainText labels only).
     readonly property string leftoverCause: page.model ? page.model.leftoverCause : ""
     readonly property string leftoverReason: page.model ? page.model.leftoverReason : ""
+    // A removal whose deletes the firewall refused counts nothing left, but
+    // the saved files may bring the rules back (#120 item 2; bridge text).
+    readonly property string leftoverFilesLeft: page.model ? page.model.leftoverFilesLeft : ""
     // With an unreadable store the rules are probably lists the user still
     // subscribes to: the page says so, and what removing them does.
     readonly property bool leftoversProbablyWanted: page.leftoverCause === "store_unreadable"
@@ -207,6 +210,16 @@ Kirigami.ScrollablePage {
                     }
                 }
             }
+        }
+        Controls.Label {
+            objectName: "leftoverFilesLeftText"
+            Layout.fillWidth: true
+            Layout.margins: Kirigami.Units.smallSpacing
+            visible: page.leftoverRules === 0 && page.leftoverFilesLeft.length > 0
+            textFormat: Text.PlainText
+            wrapMode: Text.Wrap
+            color: Kirigami.Theme.neutralTextColor
+            text: page.leftoverFilesLeft
         }
         Kirigami.InlineMessage {
             objectName: "perUserBanner"

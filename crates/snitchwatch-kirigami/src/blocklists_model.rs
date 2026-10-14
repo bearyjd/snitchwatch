@@ -77,6 +77,9 @@ pub mod qobject {
         #[qproperty(i32, leftover_rules, cxx_name = "leftoverRules")]
         #[qproperty(QString, leftover_cause, cxx_name = "leftoverCause")]
         #[qproperty(QString, leftover_reason, cxx_name = "leftoverReason")]
+        /// Saved files a removal couldn't remove, while none are counted
+        /// (#120 item 2): bridge text, PlainText only.
+        #[qproperty(QString, leftover_files_left, cxx_name = "leftoverFilesLeft")]
         type BlocklistsModel = super::BlocklistsModelRust;
 
         /// Emitted with a JSON-encoded `ClientMessage` (SubscribeBlocklist /
@@ -225,6 +228,7 @@ pub struct BlocklistsModelRust {
     leftover_rules: i32,
     leftover_cause: QString,
     leftover_reason: QString,
+    leftover_files_left: QString,
 }
 
 impl qobject::BlocklistsModel {
@@ -358,6 +362,8 @@ impl qobject::BlocklistsModel {
             self.as_mut().set_leftover_cause(leftover_cause);
             let leftover_reason = QString::from(self.store.leftover_reason());
             self.as_mut().set_leftover_reason(leftover_reason);
+            let files_left = QString::from(self.store.leftover_files_left());
+            self.as_mut().set_leftover_files_left(files_left);
             self.as_mut().set_count(n);
             self.as_mut().set_storage_persistent(persistent);
             self.as_mut().set_storage_reason(reason);
