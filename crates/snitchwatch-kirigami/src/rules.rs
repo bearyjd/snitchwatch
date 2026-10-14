@@ -16,6 +16,8 @@
 //!   connection against `row_store`'s cached rules the way opensnitchd
 //!   v1.8.0 does: every operand it matches on, its rule order, and its
 //!   comparison semantics. Inputs left blank are reported as not evaluated.
+//! - [`command_notes`]: the results of the Rules page's own toggle and
+//!   delete commands, as notes for the page (#152).
 //! - [`hits`]: the bridge's per-rule hit counts, as the Rules tab may show
 //!   them honestly (P2.6 Part 1).
 //! - [`insights`]: "unused" and "no hits" badges, and the on-demand analysis
@@ -26,6 +28,7 @@
 //!   one-directory constraint noted in [`crate::connections`]).
 
 pub mod all_apps;
+pub mod command_notes;
 pub mod deciding;
 pub mod editor;
 pub mod editor_profile;

@@ -21,7 +21,13 @@
 // `BlocklistsModel.subscribe`/`unsubscribe` uses (no local mutation of the
 // model — the row reflects the server's next `SetRules`/`UpdateRules` push).
 // Only the inspector's switch moves ahead of the bridge, and the inspector
-// re-reads its rule on every model reset (#48).
+// re-reads its rule on every model reset (#48) and every result.
+//
+// Each toggle and delete asks for a result (#152); its note
+// (`model.commandNote`, plain text) shows inside the inspector while it is
+// open, else below the title: e.g. a refused turn-off "may come back on",
+// a refused delete's file may remain, or a change that may or may not
+// have applied (#120 item 7).
 //
 // Hit counts (P2.6 Part 1): each row says how often its rule decided a
 // connection, and the header says what those numbers are: Snitchwatch's own
@@ -111,12 +117,17 @@ Kirigami.ScrollablePage {
     property alias importSheet: importSheet
     property alias ruleEditor: ruleEditor
     property alias inspectorEditButton: inspectEditButton
+    property alias inspectorCommandNote: inspectCommandNote
+    property alias rulesCommandNote: rulesCommandNote
     readonly property bool showsAllAppsNotice: !!page.model && page.model.legacyHostOnlyCount > 0
     // Not `ioStatus.visible`: a child of a hidden header always reads false.
     readonly property bool showsIoStatus: rulesIo.statusText.length > 0 && !importSheet.visible
     // The rule editor's last result once its sheet closed (P2.1).
     readonly property bool showsEditorStatus: ruleEditorController.statusText.length > 0
                                               && !ruleEditor.visible
+    // The last toggle's or delete's note (#152), once the inspector closed.
+    readonly property bool showsCommandNote: !!page.model && page.model.commandNote.length > 0
+                                             && !inspector.visible
     // What the list leaves out (#61); no "No rules yet" while that shows.
     readonly property bool showsNotShown: !!page.model && page.model.notShownText.length > 0
     // Issue #65: the firewall service's rule count differs from the list's.
@@ -213,11 +224,11 @@ Kirigami.ScrollablePage {
         page.checkEditable();
     }
 
-    // The bridge re-sends the whole list after every rule command, whether
-    // the daemon accepted it, refused it or never answered, and clears it
-    // when its daemon stream goes away (#48). Re-read the open rule so the
-    // sheet never keeps a state the daemon doesn't have; close the sheet if
-    // the rule is gone.
+    // The bridge re-sends the whole list after every rule command the daemon
+    // answered or didn't, and clears it when its daemon stream goes away
+    // (#48); a command it refused before sending gets only a result (#152).
+    // Re-read the open rule on both so the sheet never keeps a state the
+    // daemon doesn't have; close the sheet if the rule is gone.
     function refreshInspector() {
         if (!inspector.visible || !page.inspectName || !page.model) return;
         const json = page.model.selectRuleByName(page.inspectName);
@@ -249,6 +260,9 @@ Kirigami.ScrollablePage {
     Connections {
         target: page.model
         function onModelReset() {
+            page.refreshInspector();
+        }
+        function onCommandFinished() {
             page.refreshInspector();
         }
     }
@@ -309,6 +323,7 @@ Kirigami.ScrollablePage {
     // last import or export outcome.
     header: ColumnLayout {
         visible: page.showsAllAppsNotice || page.showsIoStatus || page.showsEditorStatus
+                 || page.showsCommandNote
                  || page.showsNotShown || page.showsCountHint
             || hitsSummaryLabel.text.length > 0 || hitsStorageLabel.text.length > 0
             || analysisLabel.text.length > 0
@@ -403,6 +418,17 @@ Kirigami.ScrollablePage {
             font: Kirigami.Theme.smallFont
             color: Kirigami.Theme.neutralTextColor
             text: page.model ? page.model.countHintText : ""
+        }
+        // The last toggle's or delete's note (#152), plain text.
+        Controls.Label {
+            id: rulesCommandNote
+            objectName: "rulesCommandNote"
+            visible: page.showsCommandNote
+            Layout.fillWidth: true
+            Layout.margins: Kirigami.Units.smallSpacing
+            textFormat: Text.PlainText
+            text: page.model ? page.model.commandNote : ""
+            wrapMode: Text.Wrap
         }
         // The rule editor's last result (P2.1), plain text.
         Controls.Label {
@@ -686,6 +712,17 @@ Kirigami.ScrollablePage {
                     enabled: page.inspectToggleable && (!page.inspectManagedDns || page.inspectEnabled)
                     checked: page.inspectEnabled
                     onToggled: page.setInspectEnabled(checked)
+                }
+                // The bridge's note on this rule's last toggle (#152).
+                Controls.Label {
+                    id: inspectCommandNote
+                    objectName: "inspectCommandNote"
+                    visible: text.length > 0 && !!page.model
+                             && page.model.commandNoteRule === page.inspectName
+                    Layout.fillWidth: true
+                    textFormat: Text.PlainText
+                    wrapMode: Text.Wrap
+                    text: page.model ? page.model.commandNote : ""
                 }
                 Controls.Button {
                     objectName: "reenableDnsButton"
