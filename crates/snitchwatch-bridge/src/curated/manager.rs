@@ -531,7 +531,9 @@ impl CuratedDefaults {
 
     async fn apply(&self, action: CuratedAction, generation: u64, epoch: u64, revision: u64) {
         let (id, name, outcome, done) = match action {
-            CuratedAction::Upgrade(id) => return self.upgrade(&id, generation, revision).await,
+            CuratedAction::Upgrade(id) => {
+                return self.upgrade(&id, generation, epoch, revision).await
+            }
             CuratedAction::Install(id) => {
                 let Some(entry) = entries().iter().find(|entry| entry.id == id) else {
                     return;

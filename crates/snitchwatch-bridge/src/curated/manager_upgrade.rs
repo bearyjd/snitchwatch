@@ -19,7 +19,7 @@ use super::state::{fail, keep, track_maybe_applied, Refusal};
 use super::*;
 
 impl CuratedDefaults {
-    pub(super) async fn upgrade(&self, id: &str, generation: u64, revision: u64) {
+    pub(super) async fn upgrade(&self, id: &str, generation: u64, epoch: u64, revision: u64) {
         let Some(entry) = entries().iter().find(|entry| entry.id == id) else {
             return;
         };
@@ -85,7 +85,7 @@ impl CuratedDefaults {
             // As an install: a refused or unanswered rewrite may apply
             // unlisted (#130, #120 item 13).
             let marked = marked || state.choices.files_left.contains(id);
-            track_maybe_applied(&mut state, &name, true, &outcome, marked, generation);
+            track_maybe_applied(&mut state, &name, true, &outcome, marked, epoch);
         }
         match (outcome, rule) {
             (Ok(()), Some(rule)) => {

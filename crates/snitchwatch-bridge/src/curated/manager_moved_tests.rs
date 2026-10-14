@@ -284,7 +284,7 @@ async fn the_rewrites_backstops_hold() {
         curated.generation(),
         lock(&curated.inner.state).broad_revision,
     );
-    curated.upgrade(DNS, generation, revision).await;
+    curated.upgrade(DNS, generation, 0, revision).await;
     assert!(harness.seen().is_empty(), "{:?}", harness.seen());
 
     let entry = entries().iter().find(|e| e.id == DNS).unwrap();
@@ -353,4 +353,24 @@ async fn a_withheld_entry_is_not_turned_on_from_the_rules_page() {
     curated.set_uid_lookup(Arc::new(|_| None));
     curated.reconcile().await;
     assert!(curated.send_managed_toggle(CHRONY_RULE, false).is_ok());
+}
+
+/// #120 item 22 on the rewrite path: the refused rewrite's record of what may
+/// apply is stamped with the snapshot's sequence, not the HELLO count.
+#[tokio::test]
+async fn a_refused_rewrite_record_is_stamped_with_the_snapshot_sequence() {
+    let harness = Harness::new().connect(Daemon::Refuse, vec![at(CHRONY, 993, true)]);
+    let curated = harness.curated();
+    // A second HELLO on the same stream: the generation moves, the snapshot
+    // doesn't.
+    harness.answer(0, true);
+    let epoch = harness.rules.cache().lock().unwrap().snapshot_sequence();
+    assert_ne!(curated.generation(), epoch);
+    turn(&curated, CHRONY, true);
+    curated.reconcile().await;
+    let records = lock(&curated.inner.state).maybe_applied.clone();
+    assert!(
+        !records.is_empty() && records.values().all(|record| record.epoch == epoch),
+        "{records:?}"
+    );
 }
