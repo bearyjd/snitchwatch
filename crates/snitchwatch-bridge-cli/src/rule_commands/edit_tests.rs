@@ -128,8 +128,13 @@ async fn a_refused_edit_that_keeps_its_file_is_not_resent() {
     let mut edited = broken_timed_edit(&old);
     edited["duration"] = json!("always");
     commands.try_route(update("100-x", edited, Some("e1")));
-    let reason = reason(result(&mut rx).await);
-    assert!(!reason.contains("again"), "{reason}");
+    // An enabled `always` edit may or may not have applied (#120 item 7).
+    match result(&mut rx).await {
+        RuleCommandOutcome::Unsure { reason } => {
+            assert!(!reason.contains("saved the rule again"), "{reason}")
+        }
+        other => panic!("{other:?}"),
+    }
     assert_eq!(changes(&seen).len(), 1);
     assert_eq!(files(&model), vec!["100-x"]);
 }

@@ -455,7 +455,9 @@ pub enum RuleCommandOutcome {
     Timeout,
     /// No firewall service connected; nothing was sent.
     NoDaemon,
-    /// A rename whose outcome isn't known (see the reason).
+    /// A command whose outcome isn't known (see the reason): a rename, or
+    /// a refused change the daemon may or may not have applied (#120 item
+    /// 7). Neither done nor not done.
     Unsure { reason: String },
 }
 

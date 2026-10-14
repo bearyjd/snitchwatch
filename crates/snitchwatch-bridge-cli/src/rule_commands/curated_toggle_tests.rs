@@ -242,3 +242,28 @@ async fn a_refused_turn_on_is_undone_before_another_toggle_is_taken() {
     assert_eq!(refused(&outcomes["b"]), [gates::BUSY]);
     assert_eq!(seen.lock().unwrap().len(), 2, "the second turn-on was sent");
 }
+
+/// #154: a refused turn-off of a recommended rule took it off in memory
+/// (a disabled rule isn't compiled, so only `Save` failed): like any
+/// `always` rule's (#120 item 3), the result says its file may turn it back
+/// on at the next restart, and the list shows it off.
+#[tokio::test]
+async fn a_refused_turn_off_says_the_rule_may_come_back_on() {
+    let rule = shipped();
+    assert!(rule.enabled && rule.duration == "always");
+    let mut daemon = daemon(vec![rule.clone()]);
+    let seen = respond(&mut daemon, |_| Some((false, "save failed".into()))).0;
+    let commands = commands(&daemon);
+    let mut rx = daemon.broadcast.subscribe();
+    commands.try_route(update(&rule.name, switched(&rule, false), Some("off")));
+    match result(&mut rx).await {
+        RuleCommandOutcome::OkWithNote { note } => {
+            assert!(note.contains("may come back on"), "{note}");
+            assert!(note.contains("save failed"), "{note}");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(!daemon.cache.lock().unwrap().rules().unwrap()[&rule.name].enabled);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(seen.lock().unwrap().len(), 1, "a turn-off is never undone");
+}

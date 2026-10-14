@@ -317,13 +317,17 @@ async fn read_only_and_hidden_rules_cannot_be_changed() {
 
 #[tokio::test]
 async fn each_outcome_reaches_the_asking_request() {
-    // 100-a is turned on: a refused turn-off of an `always` rule still
-    // applies (`toggle_tests`, #120 item 3), a refused turn-on doesn't.
+    // 100-a, a temporary rule, is turned on: a refused turn-on of it
+    // doesn't apply (an `always` rule's may: `refused_change_tests`).
+    let temporary = |name: &str| Rule {
+        duration: "until restart".into(),
+        ..bound(name, "deny")
+    };
     let off = Rule {
         enabled: false,
-        ..bound("100-a", "deny")
+        ..temporary("100-a")
     };
-    let mut daemon = daemon(vec![off, bound("100-b", "deny")]);
+    let mut daemon = daemon(vec![off, temporary("100-b")]);
     respond(&mut daemon, |name| match name {
         "100-a" => Some((false, "bad <b>regexp</b>\u{202e}".to_string())),
         "100-b" => None,
@@ -332,7 +336,7 @@ async fn each_outcome_reaches_the_asking_request() {
     let commands = commands(&daemon);
     let mut rx = daemon.broadcast.subscribe();
     let toggle = |name: &str| {
-        let mut rule = export_rule(&bound(name, "deny"));
+        let mut rule = export_rule(&temporary(name));
         rule["enabled"] = json!(name == "100-a");
         rule
     };

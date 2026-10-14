@@ -45,6 +45,7 @@ pub(super) async fn run(
     old: &Rule,
 ) -> RuleCommandOutcome {
     let lost = loses_file(old, &edit.rules[0]);
+    let if_refused = super::IfRefused::of(&edit);
     match step(commands, edit, timeout).await {
         Step::Ok => RuleCommandOutcome::Ok,
         Step::Rejected(text) if lost => {
@@ -63,7 +64,10 @@ pub(super) async fn run(
                 reason: format!("{} {note}", display_reason(&text)),
             }
         }
-        Step::Rejected(text) => super::wait_outcome(Err(CommandError::Rejected(text))),
+        Step::Rejected(text) => if_refused.answer(
+            super::wait_outcome(Err(CommandError::Rejected(text))),
+            super::refused::CHANGED_NOT_SAVED,
+        ),
         Step::Unanswered if lost => {
             forget(rules, &old.name);
             RuleCommandOutcome::Unsure {
