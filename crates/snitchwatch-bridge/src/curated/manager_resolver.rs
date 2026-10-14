@@ -128,7 +128,8 @@ pub(super) fn withheld(
 }
 
 /// Hold back what would install, replace or re-enable an entry `withheld`
-/// this pass, and show it unavailable, saying why.
+/// this pass, and show it unavailable, saying why (an undecided copy in the
+/// firewall keeps its status: it still applies).
 pub(super) fn withhold(
     state: &mut State,
     actions: Vec<CuratedAction>,
@@ -136,7 +137,14 @@ pub(super) fn withhold(
     found: &Found,
 ) -> Vec<CuratedAction> {
     for (id, reason) in withheld {
-        state.statuses.insert(id.clone(), EntryStatus::Unavailable);
+        // An undecided copy still applies, and still reads as on.
+        let undecided = matches!(
+            state.statuses.get(id),
+            Some(EntryStatus::InFirewall | EntryStatus::InFirewallButOff)
+        );
+        if !undecided {
+            state.statuses.insert(id.clone(), EntryStatus::Unavailable);
+        }
         state.problems.insert(id.clone(), reason);
         state.reenables.remove(id);
     }

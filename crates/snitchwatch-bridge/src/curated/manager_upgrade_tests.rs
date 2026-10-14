@@ -146,3 +146,18 @@ async fn a_copy_at_another_uid_reads_stale_and_is_kept() {
     assert_eq!(state.status, EntryStatus::Unavailable);
     assert_eq!(state.problem.as_deref(), Some(ACCOUNT_STALE_REASON));
 }
+
+/// An undecided copy still applies while its account is unknown: it reads
+/// on, with Keep, and the reason is attached; nothing is sent.
+#[tokio::test]
+async fn an_undecided_copy_held_back_still_reads_as_in_the_firewall() {
+    let harness = Harness::new().connect(Daemon::Accept, vec![legacy(CHRONY, true)]);
+    let curated = harness.curated();
+    curated.set_uid_lookup(Arc::new(|name| (name == "systemd-resolve").then_some(193)));
+    curated.reconcile().await;
+    assert!(harness.seen().is_empty(), "{:?}", harness.seen());
+    let state = entry_state(&curated, CHRONY);
+    assert_eq!(state.status, EntryStatus::InFirewall);
+    assert!(state.on);
+    assert_eq!(state.problem.as_deref(), Some(ACCOUNT_REASON));
+}
