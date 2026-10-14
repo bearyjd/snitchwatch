@@ -27,8 +27,12 @@ submission (including a mismatch), malformed input, cancel or lease death
 consumes it. Off/removal from another client invalidates it by entry revision.
 Tickets are never logged, broadcast, saved or replayed after reconnect.
 
-The GUI confirmation must disclose `/usr/lib/systemd/systemd-resolved`, UID193,
-TCP/UDP53, IPv4/IPv6, any destination and data carriage inside DNS lookups.
+The GUI confirmation must disclose `/usr/lib/systemd/systemd-resolved`, its
+account (`systemd-resolve`, whose uid the bridge looks up at run time: it is
+allocated per image build), TCP/UDP 53, IPv4/IPv6, any destination and data
+carriage inside DNS lookups. A grant names the account, not a uid: the
+rule's fingerprint leaves the uid out, so a grant made for the earlier fixed
+uid no longer matches and is asked for once more.
 Bulk enable excludes DNS even when only DNS remains. The bridge cannot prove
 a human clicked a button: an authenticated client can deliberately prepare
 and submit a fresh opt-in.

@@ -469,3 +469,47 @@ fn a_file_left_bit_round_trips_and_is_written_only_when_set() {
         ["flatpak-flathub".to_string()].into()
     );
 }
+
+/// #120 36/41: a choices file from before the sender pins records the
+/// unpinned copy. It loads: that copy is dropped (no longer the entry's
+/// rule), the id still reads installed, and the rest is kept.
+#[test]
+fn a_file_recording_an_unpinned_copy_still_loads() {
+    let nm = entries()
+        .iter()
+        .find(|e| e.id == "networkmanager-connectivity-check")
+        .unwrap();
+    let old = Choices::default()
+        .enable(&nm.id)
+        .installed(&nm.id, &nm.legacy_rule().unwrap())
+        .enable("flatpak-flathub")
+        .installed("flatpak-flathub", &flatpak_rule());
+    let dir = dir();
+    let path = dir.path().join(FILE_NAME);
+    let raw = serde_json::to_string(&FileFormat {
+        version: VERSION,
+        choices: old,
+    })
+    .unwrap();
+    write(&path, &raw, 0o600);
+    let loaded = load(&path).unwrap().unwrap();
+    assert!(!loaded.installed.contains_key(&nm.id));
+    assert!(loaded.installed_ids.contains(&nm.id));
+    assert!(loaded.enabled.contains(&nm.id));
+    assert!(loaded.installed.contains_key("flatpak-flathub"));
+}
+
+/// A run-time account's copy is recorded at the uid it was installed with.
+#[test]
+fn an_account_copy_round_trips() {
+    let chrony = entries().iter().find(|e| e.id == "chronyd-ntp").unwrap();
+    let choices = Choices::default()
+        .enable(&chrony.id)
+        .installed(&chrony.id, &chrony.rule_as(Some(991)));
+    let dir = dir();
+    let path = dir.path().join(FILE_NAME);
+    save(&path, &choices).unwrap();
+    assert_eq!(load(&path).unwrap(), Some(choices));
+    let unresolved = Choices::default().installed(&chrony.id, &chrony.rule());
+    assert!(save(&path, &unresolved).is_err());
+}

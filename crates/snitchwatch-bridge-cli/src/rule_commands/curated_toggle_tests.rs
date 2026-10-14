@@ -158,7 +158,7 @@ async fn generic_dns_reenable_refuses_but_off_and_narrow_toggles_remain_availabl
         .iter()
         .find(|entry| entry.id == "dns-resolved")
         .unwrap();
-    let mut rule = entry.rule();
+    let mut rule = entry.rule_as(Some(990));
     rule.enabled = false;
     let mut daemon = daemon(vec![rule.clone()]);
     let seen = respond(&mut daemon, |_| Some((true, String::new()))).0;

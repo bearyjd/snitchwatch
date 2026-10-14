@@ -31,7 +31,7 @@ use std::time::Duration;
 use tokio::sync::{broadcast, watch, Notify};
 use tracing::{debug, error, info, warn};
 
-use super::canonical::is_unedited;
+use super::canonical::{is_legacy, is_unedited};
 use super::reconcile::{inert_statuses, plan, CuratedAction, DaemonRules, EntryStatus};
 use super::store;
 use super::{entries, groups};
@@ -42,12 +42,17 @@ use crate::ws_messages::{ClientMessage, ServerMessage, StorageStatus};
 
 #[path = "manager_intent.rs"]
 mod intent;
+#[path = "manager_moved.rs"]
+mod moved;
 #[path = "manager_resolver.rs"]
 mod resolver;
 #[path = "manager_state.rs"]
 mod state;
+#[path = "manager_upgrade.rs"]
+mod upgrade;
+pub use moved::{DNS_MOVED_REASON, MOVED_UNDECIDED_REASON, REPINNED_NOTE};
 use resolver::withhold;
-pub use resolver::{DNS_ACCOUNT_REASON, RESOLVER_LOOKUP_TIMEOUT};
+pub use resolver::{ACCOUNT_REASON, DNS_ACCOUNT_REASON, RESOLVER_LOOKUP_TIMEOUT, SYS_UID_MAX};
 use state::{
     command_problem, deleted, fail, keep, no_file_marks, rule_name, send_problem,
     show_removal_failures, still_edited, summary, track_maybe_applied, without_failed, Problem,
@@ -91,8 +96,8 @@ struct Inner {
     /// One save at a time; holds the last version written, so an older
     /// snapshot never replaces a newer one (code review LOW-1).
     saver: Mutex<u64>,
-    /// Finds the system resolver's account (#120 item 38).
-    uid_lookup: Mutex<crate::accounts::UidLookup>,
+    /// The services' accounts and their lookup (#120 item 38, #155).
+    accounts: Mutex<resolver::Accounts>,
     /// Passes run, for the tests of the pass gate.
     #[cfg(test)]
     passes: std::sync::atomic::AtomicU64,
@@ -108,6 +113,8 @@ struct PassKey {
     inert: bool,
     /// GUI requests taken, so each one gets a pass (re-review 2, HIGH).
     requests: u64,
+    /// The account lookup's result changed (#155): a late answer re-plans.
+    accounts: u64,
 }
 
 fn lock(state: &Mutex<State>) -> MutexGuard<'_, State> {
@@ -130,7 +137,7 @@ impl CuratedDefaults {
                 wake: Notify::new(),
                 last: Mutex::new(None),
                 saver: Mutex::new(0),
-                uid_lookup: Mutex::new(crate::accounts::system_uid_lookup()),
+                accounts: Mutex::default(),
                 #[cfg(test)]
                 passes: Default::default(),
             }),
@@ -189,6 +196,7 @@ impl CuratedDefaults {
         let mut state = lock(&self.inner.state);
         if state.inert.is_none() && entries().iter().any(|entry| entry.id == id) {
             self.revoke_locked(&mut state, id);
+            state.install_refusals.remove(id);
             state.removals.insert(id.to_string());
             state.removal_failures.remove(id);
             state.requests += 1;
@@ -249,8 +257,10 @@ impl CuratedDefaults {
             (cache.revision(), !cache.is_unknown())
         };
         let generation = self.generation();
+        let accounts = resolver::lock_accounts(&self.inner).epoch;
         let state = lock(&self.inner.state);
         PassKey {
+            accounts,
             revision,
             known,
             generation,
@@ -272,9 +282,12 @@ impl CuratedDefaults {
         tokio::spawn(async move {
             let mut last_pass: Option<PassKey> = None;
             loop {
-                let key = this.pass_key();
+                let mut key = this.pass_key();
                 if last_pass.as_ref() != Some(&key) {
                     this.reconcile().await;
+                    // The accounts as the pass read them: a lookup that
+                    // answered within it needs no second pass.
+                    key.accounts = resolver::lock_accounts(&this.inner).used;
                     last_pass = Some(key);
                     // Something changed during the pass: look again.
                     if last_pass.as_ref() != Some(&this.pass_key()) {
@@ -318,6 +331,11 @@ impl CuratedDefaults {
         self.inner
             .passes
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        {
+            // What this pass reads of the accounts, unless it looks again.
+            let mut accounts = resolver::lock_accounts(&self.inner);
+            accounts.used = accounts.epoch;
+        }
         self.save_if_changed().await;
         self.flush_request_results();
         // The generation first: a HELLO between the two reads then pairs
@@ -340,7 +358,14 @@ impl CuratedDefaults {
             self.announce_changed();
             return;
         };
-        let withheld = self.withheld().await;
+        // A bridge that changes nothing looks no account up (#157).
+        let found = if self.is_inert() {
+            resolver::Found::new()
+        } else {
+            self.found().await
+        };
+        let withheld = resolver::withheld(&found);
+        let moved = moved::moved(&found, &rules);
         let (maybe_applied, no_files) = {
             let mut state = lock(&self.inner.state);
             let no_files = no_file_marks(&state, &files_left);
@@ -381,10 +406,15 @@ impl CuratedDefaults {
                 state.statuses = planned.statuses;
                 keep(&mut state, planned.choices);
                 let enabled = state.choices.enabled.clone();
-                state.install_refusals.retain(|id, _| !enabled.contains(id));
-                let actions = without_failed(&mut state, planned.actions, generation);
+                state
+                    .install_refusals
+                    .retain(|id, (_, seen)| !enabled.contains(id) && *seen == generation);
+                state.repinned.retain(|_, seen| *seen == generation);
+                let mut actions = planned.actions;
+                actions.extend(self.handle_moved(&mut state, &moved, &rules));
+                let actions = without_failed(&mut state, actions, generation);
                 show_removal_failures(&mut state, daemon, generation);
-                let actions = withhold(&mut state, actions, &withheld);
+                let actions = withhold(&mut state, actions, &withheld, &found);
                 let revision = state.broad_revision;
                 let actions = actions
                     .into_iter()
@@ -458,6 +488,7 @@ impl CuratedDefaults {
                 drop(state);
                 wanted && self.still_missing(&format!("{CURATED_DEFAULT_RULE_NAME_PREFIX}{id}"))
             }
+            CuratedAction::Upgrade(id) => state.choices.enabled.contains(id),
             CuratedAction::Delete { id, name } => {
                 let wanted =
                     !state.choices.enabled.contains(id) || !entries().iter().any(|e| &e.id == id);
@@ -471,8 +502,9 @@ impl CuratedDefaults {
         }
     }
 
-    /// The live list's copy under `name` is still unedited: a copy edited
-    /// since the pass began is left alone.
+    /// The live list's copy under `name` is still unedited (or the entry's
+    /// copy from before its sender pin): a copy edited since the pass began
+    /// is left alone.
     fn still_unedited(
         &self,
         id: &str,
@@ -484,7 +516,9 @@ impl CuratedDefaults {
         cache
             .rules()
             .and_then(|rules| rules.get(name))
-            .is_some_and(|rule| is_unedited(entry, recorded, rule))
+            .is_some_and(|rule| {
+                is_unedited(entry, recorded, rule) || entry.is_some_and(|e| is_legacy(e, rule))
+            })
     }
 
     /// The live list still lacks `name` (code review LOW-7): a copy that
@@ -497,6 +531,7 @@ impl CuratedDefaults {
 
     async fn apply(&self, action: CuratedAction, generation: u64, epoch: u64, revision: u64) {
         let (id, name, outcome, done) = match action {
+            CuratedAction::Upgrade(id) => return self.upgrade(&id, generation, revision).await,
             CuratedAction::Install(id) => {
                 let Some(entry) = entries().iter().find(|entry| entry.id == id) else {
                     return;
@@ -504,7 +539,7 @@ impl CuratedDefaults {
                 let name = entry.rule_name();
                 // The state guard stays held through queue admission: an off
                 // cannot revoke authority between this check and the send.
-                let sent = {
+                let (sent, account_uid) = {
                     let state = lock(&self.inner.state);
                     if state.inert.is_some()
                         || self.generation() != generation
@@ -519,24 +554,27 @@ impl CuratedDefaults {
                     {
                         return;
                     }
+                    let account_uid = resolver::account_uid(entry, &state.found);
                     let command = if entry.broad() {
-                        CuratedCommand::authorized_install(entry)
+                        CuratedCommand::authorized_install(entry, account_uid)
                     } else {
-                        CuratedCommand::install(entry)
+                        CuratedCommand::install_as(entry, account_uid)
                     };
-                    if entry.broad() {
+                    let sent = if entry.broad() {
                         self.inner
                             .commands
                             .send_curated_guarded(command, generation, false)
                     } else {
                         self.inner.commands.send_curated(command)
-                    }
+                    };
+                    (sent, account_uid)
                 };
                 let outcome = Self::wait_sent(sent, Refusal::Add).await;
                 if outcome.is_ok() {
                     info!(entry = %id, "installed a recommended rule");
                 }
-                (id, name, outcome, Done::Install(Box::new(entry.rule())))
+                let rule = entry.rule_as(account_uid);
+                (id, name, outcome, Done::Install(Box::new(rule)))
             }
             CuratedAction::Delete { id, name } => {
                 let Some(command) = CuratedCommand::delete(&name) else {
@@ -601,7 +639,9 @@ impl CuratedDefaults {
                 keep(&mut state, choices);
                 state.failures.remove(&id);
                 state.statuses.insert(id.clone(), EntryStatus::NotInstalled);
-                state.install_refusals.insert(id, INSTALL_REFUSED_REASON);
+                state
+                    .install_refusals
+                    .insert(id, (INSTALL_REFUSED_REASON, generation));
             }
             (Err(problem), done) => {
                 let status = match done {
@@ -754,3 +794,11 @@ mod file_left_tests;
 #[cfg(test)]
 #[path = "manager_resolver_tests.rs"]
 mod resolver_tests;
+
+#[cfg(test)]
+#[path = "manager_upgrade_tests.rs"]
+mod upgrade_tests;
+
+#[cfg(test)]
+#[path = "manager_moved_tests.rs"]
+mod moved_tests;
