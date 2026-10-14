@@ -42,11 +42,16 @@ use crate::ws_messages::{ClientMessage, ServerMessage, StorageStatus};
 
 #[path = "manager_intent.rs"]
 mod intent;
+#[path = "manager_resolver.rs"]
+mod resolver;
 #[path = "manager_state.rs"]
 mod state;
+use resolver::withhold;
+pub use resolver::{DNS_ACCOUNT_REASON, RESOLVER_LOOKUP_TIMEOUT};
 use state::{
-    command_problem, fail, keep, save_in_order, send_problem, show_removal_failures, still_edited,
-    summary, track_maybe_applied, without_failed, Problem, Refusal, SaveJob, State,
+    command_problem, deleted, fail, keep, no_file_marks, rule_name, send_problem,
+    show_removal_failures, still_edited, summary, track_maybe_applied, without_failed, Problem,
+    Refusal, State,
 };
 
 /// How long a curated rule command waits for the daemon's reply.
@@ -65,6 +70,11 @@ pub const SAVE_FAILED_REASON: &str = "Snitchwatch couldn't save its choices for 
      rules, so it adds and removes none until its background service restarts: rules already \
      in the firewall were left in place.";
 
+/// Why an entry the user turned on is off again: the daemon refused its
+/// install, and the bridge removed what it may have applied (#130).
+pub const INSTALL_REFUSED_REASON: &str = "The firewall service refused the rule, so \
+     Snitchwatch turned it off again. Turn it on to try again.";
+
 #[derive(Clone)]
 pub struct CuratedDefaults {
     inner: Arc<Inner>,
@@ -81,6 +91,8 @@ struct Inner {
     /// One save at a time; holds the last version written, so an older
     /// snapshot never replaces a newer one (code review LOW-1).
     saver: Mutex<u64>,
+    /// Finds the system resolver's account (#120 item 38).
+    uid_lookup: Mutex<crate::accounts::UidLookup>,
     /// Passes run, for the tests of the pass gate.
     #[cfg(test)]
     passes: std::sync::atomic::AtomicU64,
@@ -118,6 +130,7 @@ impl CuratedDefaults {
                 wake: Notify::new(),
                 last: Mutex::new(None),
                 saver: Mutex::new(0),
+                uid_lookup: Mutex::new(crate::accounts::system_uid_lookup()),
                 #[cfg(test)]
                 passes: Default::default(),
             }),
@@ -320,20 +333,32 @@ impl CuratedDefaults {
                 .cloned()
                 .map(|rules| (rules, left_out, files_left))
         };
-        let Some((rules, left_out, files_left)) = daemon else {
+        let Some((rules, left_out, mut files_left)) = daemon else {
             // A removal asked for under the old list doesn't carry over.
             lock(&self.inner.state).removals.clear();
             self.announce_changed();
             return;
         };
-        let maybe_applied: BTreeSet<String> = {
+        let withheld = self.withheld().await;
+        let (maybe_applied, no_files) = {
             let mut state = lock(&self.inner.state);
+            let no_files = no_file_marks(&state, &files_left);
             // A reconnect's snapshot is the daemon's memory (#120 item 14).
             state
                 .maybe_applied
                 .retain(|_, record| record.generation == generation);
-            state.maybe_applied.keys().cloned().collect()
+            // Files noted in an earlier bridge run (#120 item 18).
+            files_left.extend(state.choices.files_left.iter().map(|id| rule_name(id)));
+            let names: BTreeSet<String> = state.maybe_applied.keys().cloned().collect();
+            (names, no_files)
         };
+        if !no_files.is_empty() {
+            let mut cache = self.inner.rules.lock().unwrap_or_else(|e| e.into_inner());
+            for name in &no_files {
+                cache.forget_file_left(name);
+                files_left.remove(name);
+            }
+        }
         let daemon = DaemonRules {
             rules: &rules,
             left_out: &left_out,
@@ -353,8 +378,11 @@ impl CuratedDefaults {
                 let planned = plan(entries(), daemon, &state.choices);
                 state.statuses = planned.statuses;
                 keep(&mut state, planned.choices);
+                let enabled = state.choices.enabled.clone();
+                state.install_refusals.retain(|id, _| !enabled.contains(id));
                 let actions = without_failed(&mut state, planned.actions, generation);
                 show_removal_failures(&mut state, daemon, generation);
+                let actions = withhold(&mut state, actions, &withheld);
                 let revision = state.broad_revision;
                 let actions = actions
                     .into_iter()
@@ -512,15 +540,18 @@ impl CuratedDefaults {
                 let Some(command) = CuratedCommand::delete(&name) else {
                     return;
                 };
+                let listed = !self.still_missing(&name);
                 let outcome = self.send(command, Refusal::Remove).await;
                 if outcome.is_ok() {
                     info!(entry = %id, "deleted a recommended rule");
                 }
-                (id, name, outcome, Done::Delete)
+                (id, name, outcome, Done::Delete { listed })
             }
         };
         let marked = self.file_left(&name);
         let mut state = lock(&self.inner.state);
+        // A file noted in an earlier bridge run counts too (#120 item 18).
+        let marked = marked || state.choices.files_left.contains(&id);
         // Stock `replaceUserRule` takes a rule into memory before `Save` can
         // fail: a refused install may apply unlisted until a delete of its
         // name is answered (PR #119 review M1). So may an unanswered one,
@@ -529,53 +560,51 @@ impl CuratedDefaults {
         let install = matches!(done, Done::Install(_));
         let dropped = track_maybe_applied(&mut state, &name, install, &outcome, marked, generation);
         let mut no_file = false;
-        match outcome {
-            Ok(()) => {
-                let (choices, status) = match done {
-                    Done::Install(rule) => {
-                        (state.choices.installed(&id, &rule), EntryStatus::Installed)
-                    }
-                    Done::Delete => (state.choices.removed(&id), EntryStatus::Off),
-                };
+        match (outcome, done) {
+            (Ok(()), Done::Install(rule)) => {
+                // Its file was written: none is left over (item 18).
+                let choices = state.choices.installed(&id, &rule).file_gone(&id);
                 keep(&mut state, choices);
                 state.failures.remove(&id);
-                state.statuses.insert(id, status);
+                state.statuses.insert(id, EntryStatus::Installed);
+            }
+            (Ok(()), Done::Delete { listed }) => {
+                no_file = deleted(&mut state, &id, false, listed, marked, dropped);
             }
             // The daemon dropped the rule before failing on its file: it is
             // off, and nothing is sent again until the daemon lists it again
-            // (the cache no longer does). A rule whose install was refused
-            // (so wrote no file), with no file left before it, had none to
-            // remove: nothing can come back (#120 item 15).
-            Err(problem) if problem.daemon_refused && matches!(done, Done::Delete) => {
-                no_file = dropped.is_some_and(|record| !record.file_possible);
-                let status = if no_file {
-                    info!(entry = %id, "deleted a recommended rule whose install saved no file");
-                    EntryStatus::Off
-                } else {
-                    warn!(entry = %id, "the firewall service couldn't remove a recommended rule's file");
-                    EntryStatus::OffFileLeft
-                };
-                let choices = state.choices.removed(&id);
-                keep(&mut state, choices);
-                state.failures.remove(&id);
-                state.statuses.insert(id, status);
+            // (the cache no longer does).
+            (Err(problem), Done::Delete { listed }) if problem.daemon_refused => {
+                no_file = deleted(&mut state, &id, true, listed, marked, dropped);
             }
             // Turned off while its install was on its way: the failure is
             // for a choice that is gone, and must not hold back the delete
             // the next pass plans (M1). That pass sets the status.
-            Err(problem)
-                if matches!(done, Done::Install(_)) && !state.choices.enabled.contains(&id) =>
-            {
+            (Err(problem), Done::Install(_)) if !state.choices.enabled.contains(&id) => {
                 debug!(
                     entry = %id,
                     problem = problem.text,
                     "an install failed after its entry was turned off; the failure isn't kept"
                 );
             }
-            Err(problem) => {
+            // Refused, maybe after the daemon's memory took the rule (#130):
+            // the entry is off and its consent gone, so nothing reinstalls it
+            // without a new choice, and the next pass deletes the name
+            // (`track_maybe_applied`'s record). No failure is kept: it would
+            // hold that delete back.
+            (Err(problem), Done::Install(_)) if problem.daemon_refused => {
+                warn!(entry = %id, "the firewall service refused a recommended rule; turned off");
+                self.revoke_locked(&mut state, &id);
+                let choices = state.choices.disable(&id);
+                keep(&mut state, choices);
+                state.failures.remove(&id);
+                state.statuses.insert(id.clone(), EntryStatus::NotInstalled);
+                state.install_refusals.insert(id, INSTALL_REFUSED_REASON);
+            }
+            (Err(problem), done) => {
                 let status = match done {
                     Done::Install(_) => EntryStatus::NotInstalled,
-                    Done::Delete => EntryStatus::NotRemoved,
+                    Done::Delete { .. } => EntryStatus::NotRemoved,
                 };
                 fail(&mut state, false, &id, status, problem, generation);
             }
@@ -620,7 +649,7 @@ impl CuratedDefaults {
             // file, so it is removed as asked, its file left behind.
             Err(problem) if problem.daemon_refused => {
                 warn!(entry = %id, "removed an edited recommended rule; its file stays");
-                let choices = state.choices.user_removed(id);
+                let choices = state.choices.user_removed(id).file_left(id);
                 let status = if choices.enabled.contains(id) {
                     EntryStatus::DeletedOutside
                 } else {
@@ -632,7 +661,7 @@ impl CuratedDefaults {
             }
             Ok(()) => {
                 info!(entry = %id, "removed an edited recommended rule at the user's request");
-                let choices = state.choices.user_removed(id);
+                let choices = state.choices.user_removed(id).file_gone(id);
                 let status = if choices.enabled.contains(id) {
                     EntryStatus::DeletedOutside
                 } else {
@@ -677,66 +706,15 @@ impl CuratedDefaults {
             Err(error) => Err(send_problem(error)),
         }
     }
-
-    /// Write the choices if they changed, on a blocking thread. A failure
-    /// makes the bridge inert: it must not act on choices it can't keep.
-    async fn save_if_changed(&self) {
-        let Some(job) = self.save_job() else {
-            return;
-        };
-        let inner = self.inner.clone();
-        let saved = tokio::task::spawn_blocking(move || save_in_order(&inner.saver, job))
-            .await
-            .unwrap_or_else(|e| Err(std::io::Error::other(e.to_string())));
-        self.saved(saved);
-    }
-
-    fn save_job(&self) -> Option<SaveJob> {
-        let state = lock(&self.inner.state);
-        match (
-            &state.file,
-            state.inert.is_none() && state.version != state.saved,
-        ) {
-            (Some(file), true) => Some(SaveJob {
-                file: file.clone(),
-                choices: state.choices.clone(),
-                version: state.version,
-            }),
-            _ => None,
-        }
-    }
-
-    fn saved(&self, saved: std::io::Result<u64>) {
-        let mut state = lock(&self.inner.state);
-        match saved {
-            Ok(version) => state.saved = state.saved.max(version),
-            Err(error) => {
-                error!(%error, "curated defaults: choices not saved; changing nothing");
-                state.file = None;
-                state.storage = StorageStatus {
-                    persistent: false,
-                    reason: Some(error.to_string()),
-                    unreadable: false,
-                };
-                state.inert = Some(SAVE_FAILED_REASON.to_string());
-            }
-        }
-    }
-
-    /// Save what changed now, blocking (bridge shutdown); never under the
-    /// state lock, and never over a newer save.
-    pub fn save_now(&self) {
-        if let Some(job) = self.save_job() {
-            let saved = save_in_order(&self.inner.saver, job);
-            self.saved(saved);
-        }
-    }
 }
 
 /// What a confirmed command records.
 enum Done {
     Install(Box<snitchwatch_proto::protocol::Rule>),
-    Delete,
+    /// `listed`: the rule list had the name when the delete was sent.
+    Delete {
+        listed: bool,
+    },
 }
 
 #[cfg(test)]
@@ -762,3 +740,15 @@ mod unanswered_tests;
 #[cfg(test)]
 #[path = "manager_intent_tests.rs"]
 mod intent_tests;
+
+#[cfg(test)]
+#[path = "manager_refused_install_tests.rs"]
+mod refused_install_tests;
+
+#[cfg(test)]
+#[path = "manager_file_left_tests.rs"]
+mod file_left_tests;
+
+#[cfg(test)]
+#[path = "manager_resolver_tests.rs"]
+mod resolver_tests;

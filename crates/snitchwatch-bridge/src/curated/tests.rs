@@ -367,3 +367,32 @@ fn a_port_is_ascii_digits_only() {
         assert!(check_leaves(&leaves).is_err(), "{bad:?}");
     }
 }
+
+/// #120 item 42: the protocol condition is the one the entry builds, as
+/// written: a case-insensitive one is refused, like every other leaf's.
+#[test]
+fn a_case_insensitive_protocol_condition_is_refused() {
+    for entry in entries() {
+        let mut rule = entry.rule();
+        let leaves = &mut rule.operator.as_mut().unwrap().list;
+        let protocol = leaves.last_mut().unwrap();
+        assert_eq!(protocol.operand, "protocol");
+        protocol.sensitive = true;
+        assert!(check_curated_rule(&rule).is_err(), "{}", entry.id);
+    }
+}
+
+/// #149 review 6: the same for the port condition.
+#[test]
+fn a_case_insensitive_port_condition_is_refused() {
+    for entry in entries() {
+        let mut rule = entry.rule();
+        let leaves = &mut rule.operator.as_mut().unwrap().list;
+        let port = leaves
+            .iter_mut()
+            .find(|leaf| leaf.operand == "dest.port")
+            .unwrap();
+        port.sensitive = true;
+        assert!(check_curated_rule(&rule).is_err(), "{}", entry.id);
+    }
+}

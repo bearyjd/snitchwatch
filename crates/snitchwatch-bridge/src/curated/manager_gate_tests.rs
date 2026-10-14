@@ -62,20 +62,26 @@ async fn a_removal_asked_during_a_refused_one_is_sent() {
     );
 }
 
-/// LOW 1: asking "on" again for an entry already on tries a failed install
-/// again, once.
+/// LOW 1: asking "on" again after a failed install tries it again, once.
+/// A refused install turned the entry off and was deleted (#130).
 #[tokio::test]
 async fn asking_again_for_a_failed_install_runs_a_pass() {
     let harness = Harness::new().connect(Daemon::Refuse, Vec::new());
     let curated = harness.curated();
     turn(&curated, FLATPAK, true);
     let worker = curated.spawn(harness.rules.synced());
-    eventually("the first install", || harness.seen().len() == 1).await;
+    eventually("the first install and its delete", || {
+        harness.seen().len() == 2
+    })
+    .await;
     turn(&curated, FLATPAK, true);
-    eventually("the second install", || harness.seen().len() == 2).await;
+    eventually("the second install and its delete", || {
+        harness.seen().len() == 4
+    })
+    .await;
     tokio::time::sleep(Duration::from_millis(300)).await;
     worker.abort();
-    assert_eq!(harness.seen().len(), 2);
+    assert_eq!(harness.seen().len(), 4);
 }
 
 /// M1: a reconnect mid-pass ends the pass; the new list's edited copy is

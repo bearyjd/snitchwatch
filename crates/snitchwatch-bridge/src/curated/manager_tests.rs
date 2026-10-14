@@ -123,6 +123,8 @@ impl Harness {
             self.broadcast.clone(),
         );
         curated.attach_file(self.file.clone());
+        // Never the host's accounts: systemd-resolve is 193 here.
+        curated.set_uid_lookup(Arc::new(|name| (name == "systemd-resolve").then_some(193)));
         curated
     }
 
@@ -213,10 +215,9 @@ async fn a_refused_install_is_not_reported_installed() {
     curated.reconcile().await;
     let state = entry_state(&curated, FLATPAK);
     assert_eq!(state.status, EntryStatus::NotInstalled);
-    assert_eq!(
-        state.problem.as_deref(),
-        Some("The firewall service refused the rule.")
-    );
+    // Turned off again, and why (#130).
+    assert!(!state.on);
+    assert_eq!(state.problem.as_deref(), Some(INSTALL_REFUSED_REASON));
     assert!(store::load(&harness.file)
         .unwrap()
         .unwrap()

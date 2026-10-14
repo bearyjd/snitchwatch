@@ -97,6 +97,45 @@ fn account_name(uid: u32) -> Option<String> {
     }
 }
 
+/// Looks up the uid of an account name; [`system_uid_lookup`] in
+/// production, a fake in tests (which must never read the host's accounts).
+/// `None` when there is no such account or the lookup failed.
+pub type UidLookup = Arc<dyn Fn(&str) -> Option<u32> + Send + Sync>;
+
+/// The host's account database, through `getpwnam_r`. Blocking: NSS may go
+/// over the network.
+pub fn system_uid_lookup() -> UidLookup {
+    Arc::new(account_uid)
+}
+
+fn account_uid(name: &str) -> Option<u32> {
+    let name = std::ffi::CString::new(name).ok()?;
+    let mut buffer = vec![0u8; 1024];
+    loop {
+        // SAFETY: an all-zero `passwd` is a valid out-parameter; it is only
+        // read after getpwnam_r reports success.
+        let mut entry: libc::passwd = unsafe { std::mem::zeroed() };
+        let mut found: *mut libc::passwd = std::ptr::null_mut();
+        // SAFETY: `name` is NUL-terminated, every pointer is valid for the
+        // call, and `buffer`'s length is passed with it; getpwnam_r writes
+        // only within them.
+        let rc = unsafe {
+            libc::getpwnam_r(
+                name.as_ptr(),
+                &mut entry,
+                buffer.as_mut_ptr().cast(),
+                buffer.len(),
+                &mut found,
+            )
+        };
+        if rc == libc::ERANGE && buffer.len() < MAX_PASSWD_BUFFER {
+            buffer.resize(buffer.len() * 2, 0);
+            continue;
+        }
+        return (rc == 0 && !found.is_null()).then_some(entry.pw_uid);
+    }
+}
+
 /// Look `uids` up with `lookup`, keeping only names fit to show
 /// ([`display_name`]). Blocking: NSS may go over the network.
 pub fn look_up_blocking(lookup: &AccountLookup, uids: Vec<u32>) -> Vec<(u32, Option<String>)> {

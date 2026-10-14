@@ -37,6 +37,8 @@ fn edited(id: &str) -> Rule {
     rule
 }
 
+/// A refused install is deleted by name once (#130), and neither is sent
+/// again: the entry is off.
 #[tokio::test]
 async fn a_refused_install_is_sent_once_not_in_a_loop() {
     let harness = Harness::new().connect(Daemon::Refuse, Vec::new());
@@ -46,11 +48,16 @@ async fn a_refused_install_is_sent_once_not_in_a_loop() {
     eventually("the first install", || !harness.seen().is_empty()).await;
     tokio::time::sleep(SETTLE).await;
     worker.abort();
-    assert_eq!(harness.seen().len(), 1, "{} sends", harness.seen().len());
     assert_eq!(
-        entry_state(&curated, FLATPAK).status,
-        EntryStatus::NotInstalled
+        harness.seen(),
+        [
+            (Action::ChangeRule as i32, FLATPAK_RULE.into()),
+            (Action::DeleteRule as i32, FLATPAK_RULE.into()),
+        ]
     );
+    let state = entry_state(&curated, FLATPAK);
+    assert_eq!(state.status, EntryStatus::Off);
+    assert!(!state.on);
 }
 
 #[tokio::test]
@@ -77,11 +84,14 @@ async fn a_new_choice_tries_a_failed_command_again() {
     turn(&curated, FLATPAK, true);
     curated.reconcile().await;
     curated.reconcile().await;
-    assert_eq!(harness.seen().len(), 1);
+    curated.reconcile().await;
+    // The refused install, and its delete (#130).
+    assert_eq!(harness.seen().len(), 2);
     turn(&curated, FLATPAK, false);
     turn(&curated, FLATPAK, true);
     curated.reconcile().await;
-    assert_eq!(harness.seen().len(), 2);
+    assert_eq!(harness.seen().len(), 3);
+    assert_eq!(harness.seen()[2].0, Action::ChangeRule as i32);
 }
 
 /// Re-review M1: a first run (or a choices file moved away) deletes
@@ -245,22 +255,18 @@ fn announced(rx: &mut broadcast::Receiver<ServerMessage>, status: EntryStatus) -
 
 /// PR #119 review M1: stock `replaceUserRule` takes a rule into memory
 /// before `Save` fails, so a refused install may apply though the list
-/// lacks it. Off deletes it, once: more passes send nothing more (no hot
-/// loop), and on again installs once. That install wrote no file and none
-/// was left before it, so the refused delete leaves none: the entry reads
-/// plain `Off`, never "may come back" (#120 item 15).
+/// lacks it. It is turned off and deleted at once (#130), once: more passes
+/// send nothing more (no hot loop), and on again installs once. That
+/// install wrote no file and none was left before it, so the refused delete
+/// leaves none: the entry reads plain `Off`, never "may come back" (#120
+/// item 15).
 #[tokio::test]
 async fn off_after_a_refused_install_deletes_it_once() {
     let harness = Harness::new().connect(Daemon::Refuse, Vec::new());
     let curated = harness.curated();
     turn(&curated, FLATPAK, true);
-    let worker = curated.spawn(harness.rules.synced());
-    eventually("the refused install", || {
-        entry_state(&curated, FLATPAK).status == EntryStatus::NotInstalled
-    })
-    .await;
     let mut rx = harness.broadcast.subscribe();
-    turn(&curated, FLATPAK, false);
+    let worker = curated.spawn(harness.rules.synced());
     eventually("the delete", || harness.seen().len() >= 2).await;
     tokio::time::sleep(SETTLE).await;
     assert_eq!(entry_state(&curated, FLATPAK).status, EntryStatus::Off);

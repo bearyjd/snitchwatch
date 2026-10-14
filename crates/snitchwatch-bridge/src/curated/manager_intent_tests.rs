@@ -11,7 +11,11 @@ const DNS: &str = "dns-resolved";
 fn dns() -> &'static super::super::CuratedEntry {
     entries().iter().find(|entry| entry.id == DNS).unwrap()
 }
-fn prepare(manager: &CuratedDefaults, context: &IntentContext, purpose: Purpose) -> String {
+pub(super) fn prepare(
+    manager: &CuratedDefaults,
+    context: &IntentContext,
+    purpose: Purpose,
+) -> String {
     let (tx, mut rx) = mpsc::channel(4);
     manager.try_route(ClientMessage::PrepareCuratedBroadOptIn {
         request_id: "intent-test".into(),
@@ -25,7 +29,7 @@ fn prepare(manager: &CuratedDefaults, context: &IntentContext, purpose: Purpose)
     };
     ticket
 }
-fn submit(
+pub(super) fn submit(
     manager: &CuratedDefaults,
     context: Option<IntentContext>,
     ticket: String,

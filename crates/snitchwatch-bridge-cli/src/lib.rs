@@ -190,6 +190,13 @@ impl RunningBridge {
         self.daemon_stream_ready.clone()
     }
 
+    /// Where the recommended DNS rule looks up the system resolver's
+    /// account (#120 item 38): the host's account database unless set.
+    /// Tests set a fake before a daemon connects, never reading the host's.
+    pub fn set_curated_uid_lookup(&self, lookup: snitchwatch_bridge::accounts::UidLookup) {
+        self.curated.set_uid_lookup(lookup);
+    }
+
     /// Signal every background task to stop. Safe to call more than once.
     pub fn shutdown(mut self) {
         self.watchdog_handle.abort();
@@ -358,6 +365,10 @@ where
         ui_service_inner.rules_handle(),
         broadcast_tx.clone(),
     );
+    // This crate's own tests never read the host's accounts (#120 item 38);
+    // integration tests set theirs (`RunningBridge::set_curated_uid_lookup`).
+    #[cfg(test)]
+    curated.set_uid_lookup(Arc::new(|name| (name == "systemd-resolve").then_some(193)));
     curated_storage::configure(&curated, &options.storage, options.mode);
 
     // --- BlocklistsManager: persisted and enforced only when `Persistent` ---

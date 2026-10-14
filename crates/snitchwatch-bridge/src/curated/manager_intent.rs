@@ -237,7 +237,11 @@ impl CuratedDefaults {
             if !valid_request_id(&request_id) || id != "dns-resolved" {
                 return Err(IntentError::InvalidIntent);
             }
-            if state.inert.is_some() || state.file.is_none() || !state.storage.persistent {
+            if state.inert.is_some()
+                || state.file.is_none()
+                || !state.storage.persistent
+                || state.withheld.contains(&id)
+            {
                 return Err(IntentError::Unavailable);
             }
             let entry = entries()
@@ -315,6 +319,7 @@ impl CuratedDefaults {
             if state.inert.is_some()
                 || state.file.is_none()
                 || !state.storage.persistent
+                || state.withheld.contains(&id)
                 || (reply.is_some() && state.request_results.len() >= 256)
             {
                 return Err(IntentError::Unavailable);
@@ -322,8 +327,10 @@ impl CuratedDefaults {
             let cache = self.inner.rules.lock().unwrap_or_else(|e| e.into_inner());
             let rules = cache.rules().ok_or(IntentError::Unavailable)?;
             let name = entry.rule_name();
+            // The saved note too: the cache's doesn't outlive a restart.
             if cache.left_out().contains_key(&name)
                 || cache.files_left().contains(&name)
+                || state.choices.files_left.contains(&id)
                 || (state.choices.deleted_by_user.contains(&id)
                     && !(purpose == Purpose::Enable && state.choices.disabled.contains(&id)))
             {
@@ -488,6 +495,7 @@ impl CuratedDefaults {
             let cache = self.inner.rules.lock().unwrap_or_else(|e| e.into_inner());
             if cache.left_out().contains_key(&entry.rule_name())
                 || cache.files_left().contains(&entry.rule_name())
+                || state.choices.files_left.contains(id)
             {
                 return;
             }
@@ -509,19 +517,39 @@ impl CuratedDefaults {
                 .send_curated_guarded(command, generation, true)
         };
         let outcome = Self::wait_sent(sent, Refusal::Add).await;
-        let mut state = lock(&self.inner.state);
-        match outcome {
-            Ok(()) => {
-                state.statuses.insert(id.to_owned(), EntryStatus::Installed);
+        let refused = matches!(&outcome, Err(problem) if problem.daemon_refused);
+        {
+            let mut state = lock(&self.inner.state);
+            match outcome {
+                Ok(()) => {
+                    state.statuses.insert(id.to_owned(), EntryStatus::Installed);
+                }
+                Err(problem) => {
+                    if refused {
+                        // Its consent is gone: nothing re-enables it
+                        // without a new ticket (#130).
+                        self.revoke_locked(&mut state, id);
+                    }
+                    fail(
+                        &mut state,
+                        false,
+                        id,
+                        EntryStatus::InstalledButOff,
+                        problem,
+                        generation,
+                    );
+                }
             }
-            Err(problem) => fail(
-                &mut state,
-                false,
-                id,
-                EntryStatus::InstalledButOff,
-                problem,
-                generation,
-            ),
+        }
+        if refused {
+            // Stock `replaceUserRule` may have taken the enabled rule into
+            // memory before `Save` failed, while the list still shows it
+            // off: turn it off again, once (#130, #120 item 12).
+            let name = format!("{CURATED_DEFAULT_RULE_NAME_PREFIX}{id}");
+            let undone = self.inner.commands.send_curated_toggle(&name, false);
+            if Self::wait_sent(undone, Refusal::Remove).await.is_err() {
+                warn!(entry = %id, "a refused re-enable of a recommended rule wasn't undone");
+            }
         }
     }
 }

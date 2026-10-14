@@ -59,6 +59,14 @@ const LOOPBACK_PATTERN: &str = r"^(127\.0\.0\.1|::1)$";
 const DNS_PROGRAM: &str = "/usr/lib/systemd/systemd-resolved";
 const DNS_PORT: u16 = 53;
 const DNS_USER_ID: &str = "193";
+/// The account [`DNS_USER_ID`] must be on this host (#120 item 38).
+const DNS_USER_NAME: &str = "systemd-resolve";
+
+/// Whether `lookup` finds the system resolver's account at the user ID the
+/// DNS entry pins (#120 item 38). A failed lookup is not a confirmation.
+pub fn resolver_account_confirmed(lookup: &crate::accounts::UidLookup) -> bool {
+    lookup(DNS_USER_NAME).is_some_and(|uid| uid.to_string() == DNS_USER_ID)
+}
 
 /// The multicast DNS group (RFC 6762): `dest.ip` for the one entry that may
 /// reach it, Avahi's announcements and lookups. Fixed addresses, not a
@@ -530,6 +538,7 @@ fn check_port(leaf: Option<&Operator>, destination: Destination) -> Result<(), S
         Some(op)
             if op.r#type == "simple"
                 && op.operand == "dest.port"
+                && !op.sensitive
                 && op.data.bytes().all(|b| b.is_ascii_digit())
                 && op.data.parse::<u16>().is_ok_and(|port| {
                     port != 0
@@ -559,6 +568,7 @@ fn check_protocol(leaf: Option<&Operator>, destination: Destination) -> Result<(
         Some(op)
             if op.r#type == "regexp"
                 && op.operand == "protocol"
+                && !op.sensitive
                 && allowed.iter().any(|protocol| op.data == protocol.pattern()) =>
         {
             Ok(())

@@ -22,11 +22,19 @@
 //!   the file loads again and lists the rule, at the next daemon start. A
 //!   rule whose refused install wrote no file reads plain `Off` instead:
 //!   it had no file to leave (the manager, #120 item 15).
+//! - The manager saves that "file may remain" note with the choices, so it
+//!   outlives a bridge restart and the cache's cap (#120 item 18). Caveat:
+//!   a note for a file that is really gone (removed by hand, or by an `OK`
+//!   delete the bridge can't tell from one that touched nothing, item 10)
+//!   stays until the entry is installed again or its listed rule deleted:
+//!   it over-warns, never under-warns.
 //! - An install the daemon refused or didn't answer may apply anyway,
 //!   unlisted: stock `replaceUserRule` takes the rule into memory before
 //!   `Save` can fail, and an unanswered one may still be taken
 //!   ([`DaemonRules::maybe_applied`]). Turned off, such an entry is deleted
-//!   by name, listed or not (PR #119 review M1, #120 item 13).
+//!   by name, listed or not (PR #119 review M1, #120 item 13). The manager
+//!   turns an entry whose install was refused off at once, its consent
+//!   dropped, so that delete follows right away (#130).
 //! - A rule under the prefix that is no longer in the data file is deleted
 //!   only if it is a copy Snitchwatch recorded installing, unedited.
 //! - Nothing outside the prefix is ever touched.
@@ -64,7 +72,9 @@ pub enum EntryStatus {
     /// The daemon's rule list isn't known yet: nothing is done.
     Waiting,
     /// This bridge changes no recommended rules (see the message's
-    /// `unavailable`), and the daemon has no rule under this name.
+    /// `unavailable`), and the daemon has no rule under this name; or this
+    /// entry isn't offered on this computer (see its problem: the DNS
+    /// entry's account, #120 item 38).
     Unavailable,
     /// The daemon has this entry's rule, unedited (added earlier) and
     /// enabled, and this bridge changes none, or the user hasn't chosen yet.
@@ -104,7 +114,8 @@ pub enum EntryStatus {
 
 /// The daemon's side of a plan: its rules, the names it has that were too
 /// large to keep (`RulesCache::left_out`), and the names whose delete it
-/// refused, whose files may remain (`RulesCache::files_left`).
+/// refused, whose files may remain (`RulesCache::files_left`, with the
+/// choices' saved notes).
 #[derive(Debug, Clone, Copy)]
 pub struct DaemonRules<'a> {
     pub rules: &'a BTreeMap<String, Rule>,

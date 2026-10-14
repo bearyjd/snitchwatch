@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use mock_opensnitchd::lists::{spawn_responder, ListsPolicy};
+use mock_opensnitchd::loader::{spawn_loader_responder, SharedLoader};
 use mock_opensnitchd::MockOpensnitchd;
 use snitchwatch_bridge::curated::wire::CuratedDefaultSummary;
 use snitchwatch_bridge::ws_messages::{ClientMessage, ServerMessage};
@@ -45,6 +46,10 @@ pub async fn start(mode: BridgeMode) -> Setup {
     )
     .await
     .unwrap();
+    // Never the host's accounts: systemd-resolve is 193 here.
+    bridge.set_curated_uid_lookup(std::sync::Arc::new(|name| {
+        (name == "systemd-resolve").then_some(193)
+    }));
     let rx = bridge.broadcast_tx.subscribe();
     Setup {
         _sockets: sockets,
@@ -77,6 +82,36 @@ pub async fn connect_daemon(
         .unwrap();
     let (replies, inbound) = daemon.open_notifications().await.unwrap();
     let seen = spawn_responder(ListsPolicy::Accept, replies, inbound);
+    let mut ready = bridge.daemon_stream_ready();
+    tokio::time::timeout(WAIT, ready.wait_for(|g| *g >= generation))
+        .await
+        .expect("no HELLO")
+        .unwrap();
+    (daemon, seen)
+}
+
+/// A daemon (re)starting from `model`, answering as its loader would.
+pub async fn connect_model(
+    bridge: &RunningBridge,
+    generation: u64,
+    model: &SharedLoader,
+) -> (MockOpensnitchd, mpsc::Receiver<Notification>) {
+    let mut daemon = MockOpensnitchd::connect(bridge.grpc_endpoint.tcp_addr().unwrap())
+        .await
+        .unwrap();
+    let rules = model.lock().unwrap().snapshot();
+    daemon
+        .subscribe_with_config(ClientConfig {
+            id: 1,
+            name: "mock".into(),
+            version: "mock-1.8.0".into(),
+            rules,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let (replies, inbound) = daemon.open_notifications().await.unwrap();
+    let seen = spawn_loader_responder(model.clone(), replies, inbound);
     let mut ready = bridge.daemon_stream_ready();
     tokio::time::timeout(WAIT, ready.wait_for(|g| *g >= generation))
         .await
