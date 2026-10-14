@@ -198,6 +198,17 @@ impl RunningBridge {
         self.curated.set_uid_lookup(lookup);
     }
 
+    /// [`Self::set_curated_uid_lookup`] with each uid found looked back up
+    /// with `names`: a uid whose own name isn't the account's is
+    /// unconfirmed (security review M1).
+    pub fn set_curated_account_lookups(
+        &self,
+        lookup: snitchwatch_bridge::accounts::UidLookup,
+        names: snitchwatch_bridge::accounts::AccountLookup,
+    ) {
+        self.curated.set_account_lookups(lookup, names);
+    }
+
     /// Signal every background task to stop. Safe to call more than once.
     pub fn shutdown(mut self) {
         self.watchdog_handle.abort();
@@ -296,7 +307,10 @@ pub async fn run_system(listeners: activation::ActivatedListeners) -> Result<Run
     .await?;
     // The one bridge that installs recommended rules reads the host's
     // accounts; a pass before this one withholds, never deletes (#157).
-    bridge.set_curated_uid_lookup(snitchwatch_bridge::accounts::system_uid_lookup());
+    bridge.set_curated_account_lookups(
+        snitchwatch_bridge::accounts::system_uid_lookup(),
+        snitchwatch_bridge::accounts::system_lookup(),
+    );
     Ok(bridge)
 }
 

@@ -308,3 +308,49 @@ async fn the_rewrites_backstops_hold() {
             .is_none()
     );
 }
+
+/// Security review L1: a guarded replace never turns on a copy that is off
+/// now (turned off between the pass's look and the send).
+#[tokio::test]
+async fn a_guarded_replace_never_turns_on_a_copy_that_is_off() {
+    let entry = entries().iter().find(|e| e.id == DNS).unwrap();
+    let harness = Harness::new().connect(Daemon::Accept, vec![at(DNS, 193, false)]);
+    let generation = *harness.commands.stream_ready().borrow();
+    let on = crate::daemon_commands::CuratedCommand::authorized_upgrade(
+        entry,
+        &at(DNS, 193, true),
+        Some(990),
+    )
+    .unwrap();
+    assert!(harness
+        .commands
+        .send_curated_guarded_replace(on, generation)
+        .is_err());
+    let off = crate::daemon_commands::CuratedCommand::authorized_upgrade(
+        entry,
+        &at(DNS, 193, false),
+        Some(990),
+    )
+    .unwrap();
+    assert!(harness
+        .commands
+        .send_curated_guarded_replace(off, generation)
+        .is_ok());
+}
+
+/// Security review L2: while an entry is withheld (its account not yet
+/// confirmed, a first lookup hung), the Rules page can't turn it on; off
+/// still works.
+#[tokio::test]
+async fn a_withheld_entry_is_not_turned_on_from_the_rules_page() {
+    let harness = Harness::new().connect(Daemon::Accept, vec![at(CHRONY, 994, false)]);
+    let curated = harness.curated();
+    curated.set_uid_lookup(Arc::new(|_| None));
+    curated.reconcile().await;
+    assert!(curated.send_managed_toggle(CHRONY_RULE, true).is_err());
+    let harness = Harness::new().connect(Daemon::Accept, vec![at(CHRONY, 994, true)]);
+    let curated = harness.curated();
+    curated.set_uid_lookup(Arc::new(|_| None));
+    curated.reconcile().await;
+    assert!(curated.send_managed_toggle(CHRONY_RULE, false).is_ok());
+}

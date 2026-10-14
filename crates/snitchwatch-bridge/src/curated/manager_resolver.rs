@@ -16,6 +16,13 @@ use super::*;
 /// How long a pass waits for the lookup: an NSS backend (LDAP, SSSD) may
 /// hang, and a pass carries the user's own deletes too. A lookup that takes
 /// longer counts as unconfirmed.
+/// The highest uid a service account may have: Fedora's `SYS_UID_MAX`
+/// (`login.defs`). A service account's uid is in `1..=SYS_UID_MAX`, which
+/// leaves out root, `nobody` (65534) and every person's account (security
+/// review M1: a directory that defines a service account at a person's uid
+/// must not give that person the service's rule).
+pub const SYS_UID_MAX: u32 = 999;
+
 pub const RESOLVER_LOOKUP_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Why the DNS entry is unavailable on this host: its account wasn't
@@ -41,7 +48,7 @@ pub(super) type Found = BTreeMap<&'static str, Option<u32>>;
 pub(super) struct Accounts {
     /// `None` until set: every account is unknown and nothing is looked up
     /// (#157). Only the system bridge sets the host's database.
-    lookup: Option<crate::accounts::UidLookup>,
+    lookup: Option<(crate::accounts::UidLookup, crate::accounts::AccountLookup)>,
     found: Found,
     pub(super) epoch: u64,
     /// The `epoch` of the result the last pass read.
@@ -70,13 +77,13 @@ pub(super) fn lock_accounts(inner: &Inner) -> MutexGuard<'_, Accounts> {
     inner.accounts.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// The uid `entry`'s service account was found at. Never root: a service
-/// account that resolves to 0 counts as not found.
+/// The uid `entry`'s service account was found at: only a system uid
+/// ([`SYS_UID_MAX`]) whose own name is the account's.
 pub(super) fn account_uid(entry: &super::super::CuratedEntry, found: &Found) -> Option<u32> {
     entry
         .account()
         .and_then(|name| found.get(name).copied().flatten())
-        .filter(|uid| *uid != 0)
+        .filter(|uid| (1..=SYS_UID_MAX).contains(uid))
 }
 
 /// The entries withheld this pass, with why: each pinned to a service
@@ -129,12 +136,31 @@ pub(super) fn withhold(
 }
 
 impl CuratedDefaults {
-    /// Look the services' accounts up with `lookup` from now on; the next
-    /// pass plans again.
+    /// [`Self::set_account_lookups`] for a test's fake: each uid's name is
+    /// the account `lookup` gives it.
     pub fn set_uid_lookup(&self, lookup: crate::accounts::UidLookup) {
+        let forward = lookup.clone();
+        let names: crate::accounts::AccountLookup = Arc::new(move |uid| {
+            super::super::account_names()
+                .into_iter()
+                .find(|name| forward(name) == Some(uid))
+                .map(str::to_string)
+        });
+        self.set_account_lookups(lookup, names);
+    }
+
+    /// Look the services' accounts up with `lookup`, and each uid found
+    /// back with `names` (`getpwuid_r` in production): a uid whose own name
+    /// isn't the account's is unconfirmed (security review M1). The next
+    /// pass plans again.
+    pub fn set_account_lookups(
+        &self,
+        lookup: crate::accounts::UidLookup,
+        names: crate::accounts::AccountLookup,
+    ) {
         {
             let mut accounts = lock_accounts(&self.inner);
-            accounts.lookup = Some(lookup);
+            accounts.lookup = Some((lookup, names));
             accounts.found = Found::new();
             accounts.in_flight = false;
             accounts.serial += 1;
@@ -162,9 +188,15 @@ impl CuratedDefaults {
             let inner = self.inner.clone();
             let task = tokio::task::spawn_blocking(move || {
                 let landing = Landing { inner, serial };
+                let (lookup, names) = lookup;
                 let found: Found = super::super::account_names()
                     .into_iter()
-                    .map(|name| (name, lookup(name)))
+                    .map(|name| {
+                        let uid = lookup(name)
+                            .filter(|uid| (1..=SYS_UID_MAX).contains(uid))
+                            .filter(|uid| names(*uid).as_deref() == Some(name));
+                        (name, uid)
+                    })
                     .collect();
                 let mut accounts = lock_accounts(&landing.inner);
                 if accounts.serial == serial && accounts.found != found {

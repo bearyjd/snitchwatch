@@ -441,8 +441,9 @@ impl CuratedDefaults {
             return Err(SendError::ReservedName);
         }
         if let Some(entry) = super::super::entry_for_rule_name(name) {
-            // A moved copy's old uid may be another account's now.
-            if enabled && state.moved.contains(&entry.id) {
+            // A moved copy's old uid may be another account's now; a
+            // withheld one's account isn't confirmed (a lookup may hang).
+            if enabled && (state.moved.contains(&entry.id) || state.withheld.contains(&entry.id)) {
                 return Err(SendError::ReservedName);
             }
             if entry.broad() {

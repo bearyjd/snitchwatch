@@ -52,7 +52,7 @@ mod state;
 mod upgrade;
 pub use moved::{DNS_MOVED_REASON, MOVED_UNDECIDED_REASON, REPINNED_NOTE};
 use resolver::withhold;
-pub use resolver::{ACCOUNT_REASON, DNS_ACCOUNT_REASON, RESOLVER_LOOKUP_TIMEOUT};
+pub use resolver::{ACCOUNT_REASON, DNS_ACCOUNT_REASON, RESOLVER_LOOKUP_TIMEOUT, SYS_UID_MAX};
 use state::{
     command_problem, deleted, fail, keep, no_file_marks, rule_name, send_problem,
     show_removal_failures, still_edited, summary, track_maybe_applied, without_failed, Problem,

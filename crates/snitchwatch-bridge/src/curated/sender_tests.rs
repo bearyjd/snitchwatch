@@ -268,3 +268,11 @@ fn a_legacy_copy_turned_off_is_deleted_and_an_undecided_one_left_alone() {
     );
     assert_eq!(inert[NM], EntryStatus::InFirewall);
 }
+
+/// Security review M1 (c): the any-address rule is never root's.
+#[test]
+fn the_any_address_rule_is_never_pinned_to_root() {
+    let dns = entry("dns-resolved");
+    assert!(check_curated_rule(&dns.rule_as(Some(990))).is_ok());
+    assert!(check_curated_rule(&dns.rule_as(Some(0))).is_err());
+}

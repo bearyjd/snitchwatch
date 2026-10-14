@@ -58,7 +58,7 @@ async fn an_opted_in_dns_entry_waits_for_its_account_to_be_confirmed() {
         let saved = store::load(&harness.file).unwrap().unwrap();
         assert!(saved.has_broad_authority(DNS));
 
-        curated.set_uid_lookup(Arc::new(|_| Some(990)));
+        curated.set_uid_lookup(Arc::new(|name| (name == "systemd-resolve").then_some(990)));
         curated.reconcile().await;
         assert_eq!(
             harness.seen(),
@@ -247,4 +247,44 @@ async fn an_inert_bridge_looks_no_account_up() {
     }));
     curated.reconcile().await;
     assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+/// Security review M1 (a): a service account is a system account. A uid
+/// outside 1..=SYS_UID_MAX (a desktop user's, nobody's) is unconfirmed, so
+/// a directory that defines `systemd-resolve` at a person's uid gives that
+/// person no DNS rule.
+#[tokio::test]
+async fn an_account_outside_the_system_range_is_unconfirmed() {
+    for uid in [SYS_UID_MAX + 1, 1000, 65534, u32::MAX] {
+        let harness = Harness::new().connect(Daemon::Accept, Vec::new());
+        let curated = harness.curated();
+        opt_in(&curated);
+        curated.set_uid_lookup(Arc::new(move |_| Some(uid)));
+        curated.reconcile().await;
+        assert!(harness.seen().is_empty(), "{uid}: {:?}", harness.seen());
+        let state = entry_state(&curated, DNS);
+        assert_eq!(state.problem.as_deref(), Some(DNS_ACCOUNT_REASON), "{uid}");
+    }
+}
+
+/// Security review M1 (b): the uid's own name must be the account's. A
+/// reverse lookup that names another account, or none, is unconfirmed.
+#[tokio::test]
+async fn an_account_whose_uid_names_another_account_is_unconfirmed() {
+    let reverse: [(crate::accounts::AccountLookup, bool); 3] = [
+        (Arc::new(|_| Some("alice".into())), false),
+        (Arc::new(|_| None), false),
+        (
+            Arc::new(|uid| (uid == 990).then(|| "systemd-resolve".into())),
+            true,
+        ),
+    ];
+    for (names, confirmed) in reverse {
+        let harness = Harness::new().connect(Daemon::Accept, Vec::new());
+        let curated = harness.curated();
+        opt_in(&curated);
+        curated.set_account_lookups(Arc::new(|_| Some(990)), names);
+        curated.reconcile().await;
+        assert_eq!(harness.seen().len(), usize::from(confirmed), "{confirmed}");
+    }
 }

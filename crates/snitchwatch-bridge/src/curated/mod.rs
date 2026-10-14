@@ -437,7 +437,9 @@ impl CuratedEntry {
             }
             _ => {}
         }
-        check_curated_rule(&self.rule_as(Some(0)))
+        // The shape, with a system account's uid standing in for one
+        // looked up at run time.
+        check_curated_rule(&self.rule_as(Some(1)))
     }
 }
 
@@ -651,7 +653,15 @@ fn check_sender(rest: &mut Leaves<'_>, destination: Destination) -> Result<(), S
         };
     }
     match rest.next() {
-        Some(op) if op.r#type == "simple" && !op.sensitive && canonical_uid(&op.data) => Ok(()),
+        // Any address is never root's (security review M1).
+        Some(op)
+            if op.r#type == "simple"
+                && !op.sensitive
+                && canonical_uid(&op.data)
+                && !(destination == Destination::AnyAddress && op.data == "0") =>
+        {
+            Ok(())
+        }
         _ => Err("the sender isn't one user ID, or not the one this rule may have".into()),
     }
 }

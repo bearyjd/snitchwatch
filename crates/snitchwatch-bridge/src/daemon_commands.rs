@@ -606,10 +606,13 @@ impl DaemonCommands {
                             == crate::curated::canonical::canonical(rule)
                 }),
                 Guard::Absent => current.is_none(),
+                // Never turned on by the replace: a turn-off may have come
+                // in since the caller looked (security review L1).
                 Guard::Replace => current.is_some_and(|current| {
-                    crate::curated::entry_for_rule_name(&rule.name).is_some_and(|entry| {
-                        crate::curated::canonical::is_unedited(Some(entry), None, current)
-                    })
+                    (current.enabled || !rule.enabled)
+                        && crate::curated::entry_for_rule_name(&rule.name).is_some_and(|entry| {
+                            crate::curated::canonical::is_unedited(Some(entry), None, current)
+                        })
                 }),
             };
             if !valid {

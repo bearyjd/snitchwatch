@@ -649,7 +649,7 @@ fn run_system_sets_the_hosts_account_lookup() {
     let body: String = source[start..end].split_whitespace().collect();
     assert!(
         body.contains(
-            "bridge.set_curated_uid_lookup(snitchwatch_bridge::accounts::system_uid_lookup());"
+            "bridge.set_curated_account_lookups(snitchwatch_bridge::accounts::system_uid_lookup(),snitchwatch_bridge::accounts::system_lookup(),);"
         ),
         "run_system no longer sets the host's account lookup"
     );

@@ -238,3 +238,37 @@ and the entry shows a short fixed note.
 - A copy from before the sender pin (legacy upgrade) keeps its own refusal
   rule: the entry stays on with the old copy, because that copy is the
   status quo the user chose.
+
+## PR #161 security review, round 1
+
+- **M1.** An account's uid is accepted only when it is a system uid,
+  `1..=SYS_UID_MAX`. `SYS_UID_MAX` is 999, Fedora's `login.defs`, which
+  leaves out root, `nobody` and every person's uid.
+  - It must also pass a reverse lookup. `getpwuid_r(uid)` must name the
+    same account, checked in the same single-flight task. A mismatch or a
+    failure counts as unconfirmed.
+  - The allowlist refuses `user.id` 0 for any address.
+  - Production passes both lookups (`set_account_lookups`). Tests' forward
+    fakes derive the reverse from the account list.
+- **L1.** `Guard::Replace` never turns on a copy that is off now.
+- **L2.** A Rules-page turn-on is refused while the entry is withheld, as
+  well as when it has moved. Turning off is allowed.
+- **#157's `run_system` wiring** is caught by
+  `run_system_sets_the_hosts_account_lookup`. The test reads the source,
+  because `run_system` needs socket activation.
+
+### Surviving mutants, and why they are equivalent
+
+- **(a) `track_maybe_applied` for a refused rewrite.** A refused rewrite
+  turns the entry off. The next pass deletes the name whatever the cache
+  shows, because a disabled entry's copy is listed and unedited at either
+  uid. A rewrite that did apply unlisted is at the account's own new uid,
+  so it is harmless until that delete.
+- **(b) The unknown-account filter in `withheld()`, against the
+  transient-None test only.** It is one of three layers:
+  - `withhold()` drops `Upgrade`/`Install` for a withheld entry;
+  - `upgrade()` returns early for a withheld entry;
+  - the send check refuses an empty `user.id`.
+
+  The earlier `an_unknown_account_leaves_an_old_copy_as_it_is` kills the
+  same mutant.
