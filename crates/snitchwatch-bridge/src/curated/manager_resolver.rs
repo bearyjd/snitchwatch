@@ -8,6 +8,8 @@
 //! a lookup that fails for a moment never removes a rule the user opted
 //! into. Turning it off still removes it, as for any entry.
 
+use snitchwatch_proto::protocol::Rule;
+
 use super::state::State;
 use super::*;
 
@@ -27,6 +29,18 @@ pub const DNS_ACCOUNT_REASON: &str = "Snitchwatch couldn't confirm that the syst
 pub const DNS_STALE_REASON: &str = "On this computer the system resolver's account \
      (systemd-resolve) isn't user ID 193, so Snitchwatch doesn't install this rule. A copy \
      already in the firewall is out of date: it is left as it is, and turning this off removes it.";
+
+/// Why an entry pinned to a run-time account is unavailable: its account
+/// wasn't found (#120 36/41).
+pub const ACCOUNT_REASON: &str = "Snitchwatch couldn't look up the account this service runs \
+     as on this computer, so it doesn't install or update this rule. A copy already in the \
+     firewall is left as it is.";
+
+/// Why an entry pinned to a run-time account is unavailable: the copy in
+/// the firewall names another uid than the account has now.
+pub const ACCOUNT_STALE_REASON: &str = "The copy of this rule in the firewall names a different \
+     user ID than this service's account has on this computer, so it may not match the service. \
+     It is left as it is: turn this off and on again to replace it.";
 
 /// What the last lookup found, by account name: `None` when the account
 /// wasn't found or the lookup failed. Empty until one returns.
@@ -68,28 +82,58 @@ pub(super) fn lock_accounts(inner: &Inner) -> MutexGuard<'_, Accounts> {
     inner.accounts.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// The entries withheld this pass, with why: the DNS entry unless its
-/// account is confirmed at the user ID it pins. A definite other ID reads
-/// stale (#155); no answer reads unconfirmed.
-pub(super) fn withheld(found: &Found) -> BTreeMap<String, &'static str> {
-    let reason = match found.get(super::super::DNS_USER_NAME).copied().flatten() {
-        Some(uid) if uid.to_string() == super::super::DNS_USER_ID => return BTreeMap::new(),
-        Some(_) => DNS_STALE_REASON,
-        None => DNS_ACCOUNT_REASON,
-    };
-    entries()
-        .iter()
-        .filter(|entry| entry.any_address)
-        .map(|entry| (entry.id.clone(), reason))
-        .collect()
+/// The uid `entry`'s run-time account was found at.
+pub(super) fn account_uid(entry: &super::super::CuratedEntry, found: &Found) -> Option<u32> {
+    entry
+        .account()
+        .and_then(|name| found.get(name).copied().flatten())
 }
 
-/// Hold back what would install or re-enable an entry `withheld` this
-/// pass, and show it unavailable, saying why.
+/// The entries withheld this pass, with why. The DNS entry unless its
+/// account is confirmed at the user ID it pins: a definite other ID reads
+/// stale (#155), no answer unconfirmed. An entry pinned to a run-time
+/// account unless that account was found, and then only while its copy in
+/// `rules`, if any, names the uid found (stale otherwise).
+pub(super) fn withheld(
+    found: &Found,
+    rules: &BTreeMap<String, Rule>,
+) -> BTreeMap<String, &'static str> {
+    let dns = match found.get(super::super::DNS_USER_NAME).copied().flatten() {
+        Some(uid) if uid.to_string() == super::super::DNS_USER_ID => None,
+        Some(_) => Some(DNS_STALE_REASON),
+        None => Some(DNS_ACCOUNT_REASON),
+    };
+    let mut withheld = BTreeMap::new();
+    for entry in entries() {
+        let reason = if entry.any_address {
+            dns
+        } else if entry.account().is_some() {
+            match account_uid(entry, found) {
+                None => Some(ACCOUNT_REASON),
+                Some(uid) => rules
+                    .get(&entry.rule_name())
+                    .filter(|rule| is_unedited(Some(entry), None, rule))
+                    .and_then(super::super::sender_uid)
+                    .filter(|named| *named != uid)
+                    .map(|_| ACCOUNT_STALE_REASON),
+            }
+        } else {
+            None
+        };
+        if let Some(reason) = reason {
+            withheld.insert(entry.id.clone(), reason);
+        }
+    }
+    withheld
+}
+
+/// Hold back what would install, replace or re-enable an entry `withheld`
+/// this pass, and show it unavailable, saying why.
 pub(super) fn withhold(
     state: &mut State,
     actions: Vec<CuratedAction>,
     withheld: &BTreeMap<String, &'static str>,
+    found: &Found,
 ) -> Vec<CuratedAction> {
     for (id, reason) in withheld {
         state.statuses.insert(id.clone(), EntryStatus::Unavailable);
@@ -97,9 +141,13 @@ pub(super) fn withhold(
         state.reenables.remove(id);
     }
     state.withheld = withheld.keys().cloned().collect();
+    state.found = found.clone();
     actions
         .into_iter()
-        .filter(|action| !matches!(action, CuratedAction::Install(id) if withheld.contains_key(id)))
+        .filter(|action| {
+            !matches!(action, CuratedAction::Install(id) | CuratedAction::Upgrade(id)
+                if withheld.contains_key(id))
+        })
         .collect()
 }
 

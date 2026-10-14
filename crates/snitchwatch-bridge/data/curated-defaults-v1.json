@@ -28,10 +28,11 @@
       "group": "system-services",
       "path": "/usr/bin/NetworkManager",
       "host": "fedoraproject.org",
+      "sender": {"userId": 0},
       "port": 80,
       "protocol": "tcp",
       "why": "NetworkManager checks that this network reaches the internet, and spots a sign-in page such as a hotel's, by loading a test page from fedoraproject.org.",
-      "evidence": "bazzite-tower r10: idle and after update, /usr/bin/NetworkManager to fedoraproject.org port 80 over tcp and tcp6"
+      "evidence": "bazzite-tower r10: idle and after update, /usr/bin/NetworkManager to fedoraproject.org port 80 over tcp and tcp6. Sender pinned to root (NetworkManager runs as root) from Fedora packaging, not yet confirmed on the Bazzite image"
     },
     {
       "id": "chronyc-local",
@@ -41,27 +42,29 @@
       "port": 323,
       "protocol": "udp",
       "why": "chronyc asks the local time service (chronyd) how it is doing. It only talks to this computer.",
-      "evidence": "bazzite-tower r10: idle and after update, /usr/bin/chronyc to 127.0.0.1 and ::1 port 323 over udp and udp6"
+      "evidence": "bazzite-tower r10: idle and after update, /usr/bin/chronyc to 127.0.0.1 and ::1 port 323 over udp and udp6. Bound by its path only: it reaches this computer only, and any user may run chronyc"
     },
     {
       "id": "chronyd-ntp",
       "group": "system-services",
       "path": "/usr/bin/chronyd",
       "host": "2.fedora.pool.ntp.org",
+      "sender": {"account": "chrony"},
       "port": 123,
       "protocol": "udp",
       "why": "chronyd sets the clock by asking Fedora's pool of time servers. Only 2.fedora.pool.ntp.org, the pool name in this image's chrony.conf, is allowed: a time server you add yourself, or one a network hands out, still asks.",
-      "evidence": "bazzite-tower 2026-10-12: owner reports /usr/bin/chronyd floods prompts; the host name is the pool line in /etc/chrony.conf (pool 2.fedora.pool.ntp.org iburst), not a capture of the ask"
+      "evidence": "bazzite-tower 2026-10-12: owner reports /usr/bin/chronyd floods prompts; the host name is the pool line in /etc/chrony.conf (pool 2.fedora.pool.ntp.org iburst), not a capture of the ask. Sender pinned to the chrony account from Fedora packaging, not yet confirmed on the Bazzite image"
     },
     {
       "id": "avahi-mdns",
       "group": "system-services",
       "path": "/usr/bin/avahi-daemon",
       "multicastDns": true,
+      "sender": {"account": "avahi"},
       "port": 5353,
       "protocol": "udp",
       "why": "Avahi finds printers, shared folders and .local names on your network by multicast DNS. Only the two fixed multicast addresses are allowed, not any server or computer. Replies Avahi sends straight to one computer still ask.",
-      "evidence": "bazzite-tower 2026-10-12: owner reports /usr/bin/avahi-daemon floods prompts; the destination is the fixed multicast DNS group of RFC 6762, not a capture of the ask"
+      "evidence": "bazzite-tower 2026-10-12: owner reports /usr/bin/avahi-daemon floods prompts; the destination is the fixed multicast DNS group of RFC 6762, not a capture of the ask. Sender pinned to the avahi account from Fedora packaging, not yet confirmed on the Bazzite image"
     },
     {
       "id": "flatpak-flathub",
@@ -71,27 +74,29 @@
       "port": 443,
       "protocol": "tcp",
       "why": "Flatpak downloads app updates and app information from Flathub.",
-      "evidence": "bazzite-tower r10: after flatpak update --appstream, /usr/bin/flatpak to dl.flathub.org port 443 over tcp6 (held, so the update timed out)"
+      "evidence": "bazzite-tower r10: after flatpak update --appstream, /usr/bin/flatpak to dl.flathub.org port 443 over tcp6 (held, so the update timed out). Bound by its path only: the desktop user runs it, and sandboxed apps share that user ID, so a sender pin would add nothing"
     },
     {
       "id": "tailscale-control",
       "group": "tailscale",
       "path": "/usr/bin/tailscaled",
       "host": "controlplane.tailscale.com",
+      "sender": {"userId": 0},
       "port": 443,
       "protocol": "tcp",
       "why": "Tailscale signs in and fetches your network's settings and keys from its coordination server. Only that server is allowed. Traffic to other Tailscale computers and relay servers can't be named in one narrow rule, so it still asks.",
-      "evidence": "bazzite-tower 2026-10-12: owner reports /usr/bin/tailscaled floods prompts; the host is Tailscale's documented coordination server, not a capture of the ask"
+      "evidence": "bazzite-tower 2026-10-12: owner reports /usr/bin/tailscaled floods prompts; the host is Tailscale's documented coordination server, not a capture of the ask. Sender pinned to root (tailscaled runs as root) from Fedora packaging, not yet confirmed on the Bazzite image"
     },
     {
       "id": "tailscale-logs",
       "group": "tailscale",
       "path": "/usr/bin/tailscaled",
       "host": "log.tailscale.com",
+      "sender": {"userId": 0},
       "port": 443,
       "protocol": "tcp",
       "why": "Tailscale sends its client logs to log.tailscale.com. Only that server is allowed.",
-      "evidence": "bazzite-tower 2026-10-12: owner reports /usr/bin/tailscaled floods prompts; the host is Tailscale's documented log server, not a capture of the ask"
+      "evidence": "bazzite-tower 2026-10-12: owner reports /usr/bin/tailscaled floods prompts; the host is Tailscale's documented log server, not a capture of the ask. Sender pinned to root (tailscaled runs as root) from Fedora packaging, not yet confirmed on the Bazzite image"
     },
     {
       "id": "dns-resolved",

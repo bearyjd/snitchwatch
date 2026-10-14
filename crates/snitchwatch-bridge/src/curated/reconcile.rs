@@ -37,6 +37,12 @@
 //!   dropped, so that delete follows right away (#130).
 //! - A rule under the prefix that is no longer in the data file is deleted
 //!   only if it is a copy Snitchwatch recorded installing, unedited.
+//! - A copy installed before its entry's sender pin (#120 36/41,
+//!   [`is_legacy`]) is still Snitchwatch's own: turned on, it is replaced in
+//!   place by the pinned rule ([`CuratedAction::Upgrade`]: one `CHANGE_RULE`
+//!   of the same name, which the daemon swaps in memory, so the rule is
+//!   never missing, and which only narrows what the user chose, so it asks
+//!   nothing); turned off, deleted; undecided, left as it is.
 //! - Nothing outside the prefix is ever touched.
 //!
 //! Callers run this only on a known rule list (never while the rules cache
@@ -48,7 +54,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use snitchwatch_proto::protocol::Rule;
 
-use super::canonical::is_unedited;
+use super::canonical::{is_legacy, is_unedited};
 use super::store::Choices;
 use super::CuratedEntry;
 use crate::rule_name::CURATED_DEFAULT_RULE_NAME_PREFIX;
@@ -58,6 +64,9 @@ use crate::rule_name::CURATED_DEFAULT_RULE_NAME_PREFIX;
 pub enum CuratedAction {
     /// Install the entry with this id.
     Install(String),
+    /// Replace the entry's copy from before its sender pin with the pinned
+    /// rule, keeping its `enabled` and `created`.
+    Upgrade(String),
     /// Delete the rule `name`: an unedited copy Snitchwatch installed or
     /// adopted (for an entry no longer offered, only one it recorded
     /// installing), or, for an entry turned off, a rule that may apply
@@ -227,6 +236,9 @@ fn plan_entry(
         actions.push(CuratedAction::Install(entry.id.clone()));
         return EntryStatus::Installing;
     };
+    if is_legacy(entry, present) {
+        return plan_legacy(entry, present, choices, next, actions);
+    }
     if !is_unedited(Some(entry), None, present) {
         return EntryStatus::EditedByYou;
     }
@@ -237,7 +249,7 @@ fn plan_entry(
         return in_firewall(present);
     }
     // Our unedited copy (adopted if the record was lost).
-    *next = next.installed(&entry.id, &entry.rule());
+    *next = next.installed(&entry.id, present);
     next.deleted_by_user.remove(&entry.id);
     if !enabled {
         actions.push(CuratedAction::Delete {
@@ -246,6 +258,37 @@ fn plan_entry(
         });
         return EntryStatus::Removing;
     }
+    if present.enabled {
+        EntryStatus::Installed
+    } else {
+        EntryStatus::InstalledButOff
+    }
+}
+
+/// A copy from before the entry's sender pin: left as it is while
+/// undecided (re-review M1), deleted when turned off, replaced in place
+/// when on. It isn't recorded: the record is the pinned rule, once sent.
+fn plan_legacy(
+    entry: &CuratedEntry,
+    present: &Rule,
+    choices: &Choices,
+    next: &mut Choices,
+    actions: &mut Vec<CuratedAction>,
+) -> EntryStatus {
+    let enabled = choices.enabled.contains(&entry.id);
+    if !enabled && !choices.disabled.contains(&entry.id) {
+        return in_firewall(present);
+    }
+    next.installed_ids.insert(entry.id.clone());
+    next.deleted_by_user.remove(&entry.id);
+    if !enabled {
+        actions.push(CuratedAction::Delete {
+            id: entry.id.clone(),
+            name: entry.rule_name(),
+        });
+        return EntryStatus::Removing;
+    }
+    actions.push(CuratedAction::Upgrade(entry.id.clone()));
     if present.enabled {
         EntryStatus::Installed
     } else {
@@ -266,7 +309,9 @@ pub fn inert_statuses(
             let name = entry.rule_name();
             let status = match daemon.rules.get(&name) {
                 _ if daemon.left_out.contains(&name) => EntryStatus::EditedByYou,
-                Some(rule) if is_unedited(Some(entry), None, rule) => in_firewall(rule),
+                Some(rule) if is_unedited(Some(entry), None, rule) || is_legacy(entry, rule) => {
+                    in_firewall(rule)
+                }
                 Some(_) => EntryStatus::EditedByYou,
                 None => EntryStatus::Unavailable,
             };

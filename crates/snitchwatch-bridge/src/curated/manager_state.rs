@@ -8,7 +8,7 @@ use std::sync::Mutex;
 
 use tracing::{error, warn};
 
-use super::super::canonical::is_unedited;
+use super::super::canonical::{is_legacy, is_unedited};
 use super::super::reconcile::{CuratedAction, DaemonRules, EntryStatus};
 use super::super::store::{self, Choices};
 use super::super::wire::CuratedDefaultSummary;
@@ -45,6 +45,8 @@ pub(super) struct State {
     pub(super) install_refusals: BTreeMap<String, &'static str>,
     /// Entries the last pass withheld (`manager_resolver.rs`).
     pub(super) withheld: BTreeSet<String>,
+    /// The accounts as the last pass found them.
+    pub(super) found: super::resolver::Found,
     /// Bumped by every GUI request taken (a choice, even an unchanged one,
     /// or a removal): each gets a pass (re-review 2, HIGH).
     pub(super) requests: u64,
@@ -73,6 +75,7 @@ impl State {
             maybe_applied: BTreeMap::new(),
             install_refusals: BTreeMap::new(),
             withheld: BTreeSet::new(),
+            found: Default::default(),
             requests: 0,
             file: None,
             storage: StorageStatus {
@@ -349,12 +352,14 @@ pub(super) fn still_edited(id: &str, daemon: DaemonRules<'_>) -> bool {
         || daemon
             .rules
             .get(&name)
-            .is_some_and(|rule| !is_unedited(Some(entry), None, rule))
+            .is_some_and(|rule| !is_unedited(Some(entry), None, rule) && !is_legacy(entry, rule))
 }
 
 fn action_id(action: &CuratedAction) -> String {
     match action {
-        CuratedAction::Install(id) | CuratedAction::Delete { id, .. } => id.clone(),
+        CuratedAction::Install(id)
+        | CuratedAction::Upgrade(id)
+        | CuratedAction::Delete { id, .. } => id.clone(),
     }
 }
 

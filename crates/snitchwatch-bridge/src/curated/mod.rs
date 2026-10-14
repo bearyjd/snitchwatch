@@ -10,9 +10,11 @@
 //! system resolver's DNS (owner decision S6): its upstream server changes
 //! with every network, so it is offered for any address, port 53, TCP and
 //! UDP, and no other program can be. A path alone doesn't name a sender
-//! (any user can run that binary with `LD_PRELOAD`), so that entry is also
-//! pinned to the resolver's own account by user ID. Each entry says in plain
-//! text why it is there.
+//! (any user can run that binary with `LD_PRELOAD`, and the daemon falls
+//! back to argv[0] when it can't read the exe link), so that entry is also
+//! pinned to the resolver's own account by user ID, and so is every entry
+//! whose service runs under a fixed account ([`Sender`], #120 items 36/41).
+//! Each entry says in plain text why it is there.
 //!
 //! Nothing is on by default. The user turns entries on (`store`), and
 //! `reconcile` installs them under the reserved `snitchwatch-default-`
@@ -62,10 +64,35 @@ const DNS_USER_ID: &str = "193";
 /// The account [`DNS_USER_ID`] must be on this host (#120 item 38).
 const DNS_USER_NAME: &str = "systemd-resolve";
 
-/// The accounts the manager looks up each pass: the system resolver's,
-/// which must be [`DNS_USER_ID`] (#120 item 38).
+/// The accounts the manager looks up: the system resolver's, which must be
+/// [`DNS_USER_ID`] (#120 item 38), then each [`Sender::Account`].
 pub fn account_names() -> Vec<&'static str> {
-    vec![DNS_USER_NAME]
+    let mut names = vec![DNS_USER_NAME];
+    for name in entries().iter().filter_map(CuratedEntry::account) {
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    names
+}
+
+/// Who may send under an entry's rule (#120 items 36/41), pinned by
+/// `user.id` (not `user.name`: the daemon's `Compile` rewrites a
+/// `user.name` leaf to the uid and saves it that way, so the reloaded rule
+/// fails). An entry without one is bound by its path alone: `chronyc`
+/// (this computer only, and run by any user on purpose) and `flatpak` (run
+/// by the desktop user, whose uid sandboxed apps share).
+///
+/// The accounts in the data file are Fedora's packaging names. Whether the
+/// Bazzite image runs each service under them is not yet confirmed (tower).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub enum Sender {
+    /// A fixed user ID, such as root's 0.
+    UserId(u32),
+    /// A service account, whose uid differs between systems: looked up at
+    /// run time, and installed at the uid found.
+    Account(String),
 }
 
 /// The multicast DNS group (RFC 6762): `dest.ip` for the one entry that may
@@ -132,6 +159,9 @@ pub struct CuratedEntry {
     /// [`MDNS_PROGRAM`], UDP [`MDNS_PORT`], passes [`check_leaves`].
     #[serde(default, rename = "multicastDns")]
     pub multicast_dns: bool,
+    /// Who may send ([`Sender`]); the DNS entry's pin is built in.
+    #[serde(default)]
+    pub sender: Option<Sender>,
     pub port: u16,
     pub protocol: Protocol,
     /// Why it is offered, in plain text.
@@ -180,11 +210,15 @@ pub fn entries() -> &'static [CuratedEntry] {
 }
 
 /// Whether a GUI may turn the daemon's `rule` on or off: an entry's rule,
-/// unedited ([`canonical::is_unedited`]). A copy edited outside
-/// Snitchwatch, or a rule squatting on the prefix, is left alone.
+/// unedited ([`canonical::is_unedited`]), or, while it is on, its copy from
+/// before the sender pin ([`canonical::is_legacy`]), which may only be
+/// turned off. A copy edited outside Snitchwatch, or a rule squatting on
+/// the prefix, is left alone.
 pub fn toggleable(rule: &Rule) -> bool {
-    entry_for_rule_name(&rule.name)
-        .is_some_and(|entry| canonical::is_unedited(Some(entry), None, rule))
+    entry_for_rule_name(&rule.name).is_some_and(|entry| {
+        canonical::is_unedited(Some(entry), None, rule)
+            || (rule.enabled && canonical::is_legacy(entry, rule))
+    })
 }
 
 /// The `enabled` a GUI's wire rule asks for, if it is `current` apart from
@@ -257,8 +291,54 @@ impl CuratedEntry {
         format!("{CURATED_DEFAULT_RULE_NAME_PREFIX}{}", self.id)
     }
 
-    /// The daemon rule for this entry.
+    /// The daemon rule for this entry. An entry pinned to a run-time
+    /// [`Sender::Account`] gets an empty user ID here, which
+    /// [`check_curated_rule`] refuses: use [`Self::rule_as`].
     pub fn rule(&self) -> Rule {
+        self.rule_as(None)
+    }
+
+    /// The daemon rule for this entry, a [`Sender::Account`] pinned to
+    /// `account_uid` (other entries ignore it).
+    pub fn rule_as(&self, account_uid: Option<u32>) -> Rule {
+        let sender = match (&self.sender, self.any_address) {
+            (_, true) => Some(DNS_USER_ID.to_string()),
+            (Some(Sender::UserId(uid)), false) => Some(uid.to_string()),
+            (Some(Sender::Account(_)), false) => {
+                Some(account_uid.map(|uid| uid.to_string()).unwrap_or_default())
+            }
+            (None, false) => None,
+        };
+        self.build(sender.as_deref())
+    }
+
+    /// The rule v1 installed before its sender pin (#120 36/41): still
+    /// Snitchwatch's own copy, replaced in place, never installed again.
+    /// `None` for an entry that has always been bound this way.
+    pub fn legacy_rule(&self) -> Option<Rule> {
+        (self.sender.is_some() && !self.any_address).then(|| self.build(None))
+    }
+
+    /// This entry's rule at the sender `rule` names, if it is a run-time
+    /// account's: the copy is unedited at whatever uid it was installed
+    /// with, and the manager compares that uid with the account's now.
+    /// `None` if it names no uid.
+    pub fn rule_matching(&self, rule: &Rule) -> Option<Rule> {
+        match self.sender {
+            Some(Sender::Account(_)) => sender_uid(rule).map(|uid| self.rule_as(Some(uid))),
+            _ => Some(self.rule()),
+        }
+    }
+
+    /// The run-time account this entry's sender is pinned to.
+    pub fn account(&self) -> Option<&str> {
+        match &self.sender {
+            Some(Sender::Account(name)) => Some(name),
+            _ => None,
+        }
+    }
+
+    fn build(&self, sender: Option<&str>) -> Rule {
         let mut leaves = vec![leaf("simple", "process.path", &self.path, true)];
         if let Some(host) = &self.host {
             leaves.push(leaf("simple", "dest.host", host, false));
@@ -270,9 +350,9 @@ impl CuratedEntry {
             leaves.push(leaf("regexp", "dest.ip", MDNS_PATTERN, false));
         }
         // `any_address` adds no destination condition: that is what it
-        // means. It pins the sender instead.
-        if self.any_address {
-            leaves.push(leaf("simple", "user.id", DNS_USER_ID, false));
+        // means. The sender, if pinned, comes right after the destination.
+        if let Some(uid) = sender {
+            leaves.push(leaf("simple", "user.id", uid, false));
         }
         leaves.push(leaf("simple", "dest.port", &self.port.to_string(), false));
         leaves.push(leaf("regexp", "protocol", self.protocol.pattern(), false));
@@ -303,12 +383,20 @@ impl CuratedEntry {
             (None, false, true) => "the multicast DNS group (224.0.0.251 and ff02::fb)".to_string(),
             (None, false, false) => "this computer only (127.0.0.1 and ::1)".to_string(),
         };
-        let sender = if self.any_address {
-            format!(
+        let sender = match (&self.sender, self.any_address) {
+            (_, true) => format!(
                 ", but only while it runs as user ID {DNS_USER_ID} (the systemd-resolve account)"
-            )
-        } else {
-            String::new()
+            ),
+            (Some(Sender::UserId(0)), false) => {
+                ", but only while it runs as root (user ID 0)".into()
+            }
+            (Some(Sender::UserId(uid)), false) => {
+                format!(", but only while it runs as user ID {uid}")
+            }
+            (Some(Sender::Account(name)), false) => {
+                format!(", but only while it runs as the {name} account")
+            }
+            (None, false) => String::new(),
         };
         format!(
             "{} may connect to {to} on {} port {}, over IPv4 and IPv6{sender}.",
@@ -353,8 +441,46 @@ impl CuratedEntry {
         if !plain_text(&self.why) || !plain_text(&self.evidence) {
             return Err("an entry's text isn't short plain text".into());
         }
-        check_curated_rule(&self.rule())
+        match &self.sender {
+            Some(_) if self.any_address => {
+                return Err("the DNS entry's sender is built in".into());
+            }
+            Some(Sender::Account(name)) if !valid_account(name) => {
+                return Err("an entry's account isn't an account name".into());
+            }
+            _ => {}
+        }
+        check_curated_rule(&self.rule_as(Some(0)))
     }
+}
+
+/// The uid a rule's `user.id` condition names, if it is one.
+pub(crate) fn sender_uid(rule: &Rule) -> Option<u32> {
+    let op = rule.operator.as_ref()?;
+    op.list
+        .iter()
+        .find(|leaf| leaf.operand == "user.id")
+        .filter(|leaf| canonical_uid(&leaf.data))
+        .and_then(|leaf| leaf.data.parse().ok())
+}
+
+/// A uid as the bridge writes one: decimal, no sign, no leading zero.
+fn canonical_uid(data: &str) -> bool {
+    !data.is_empty()
+        && data.bytes().all(|b| b.is_ascii_digit())
+        && (data == "0" || !data.starts_with('0'))
+        && data.parse::<u32>().is_ok()
+}
+
+/// A system account's name: a lowercase letter or `_`, then lowercase
+/// letters, digits, `_` and `-`, at most 32.
+fn valid_account(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    name.len() <= 32
+        && bytes
+            .next()
+            .is_some_and(|b| b.is_ascii_lowercase() || b == b'_')
+        && bytes.all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
 }
 
 fn leaf(r#type: &str, operand: &str, data: &str, sensitive: bool) -> Operator {
@@ -409,12 +535,12 @@ fn plain_text(text: &str) -> bool {
 /// The curated-specific allowlist. A rule under the reserved prefix is sent
 /// only if it is an `always`, non-precedence `allow` with our description,
 /// whose conditions are exactly: an exact `/usr` program path (case
-/// sensitive); one plain host or this computer; one port; one transport.
-/// The one exception is the system resolver's DNS (owner decision S6): no
-/// destination, but its account's user ID pinned right after the path, port
-/// 53, TCP and UDP. A rule with no destination is refused for any other
-/// program, and without that exact pin. It must also pass the rule editor's
-/// policy checks.
+/// sensitive); one plain host or this computer; optionally its sender's
+/// user ID (#120 36/41); one port; one transport. The one exception is the
+/// system resolver's DNS (owner decision S6): no destination, but its
+/// account's user ID pinned right after the path, port 53, TCP and UDP. A
+/// rule with no destination is refused for any other program, and without
+/// that exact pin. It must also pass the rule editor's policy checks.
 pub fn check_curated_rule(rule: &Rule) -> Result<(), String> {
     let id = rule
         .name
@@ -448,6 +574,7 @@ fn check_leaves(leaves: &[Operator]) -> Result<(), String> {
     let mut rest = leaves.iter().peekable();
     let program = check_program(rest.next())?;
     let destination = check_destination(&mut rest, program)?;
+    check_sender(&mut rest, destination)?;
     check_port(rest.next(), destination)?;
     check_protocol(rest.next(), destination)?;
     if rest.next().is_some() || leaves.iter().any(|op| !op.list.is_empty()) {
@@ -520,16 +647,30 @@ fn check_destination(rest: &mut Leaves<'_>, program: &str) -> Result<Destination
     if program != DNS_PROGRAM {
         return Err("only the system resolver's DNS may reach any address".into());
     }
+    Ok(Destination::AnyAddress)
+}
+
+/// The sender's user ID, right after the destination: required, and the
+/// resolver's, for any address; optional, and any one uid, otherwise.
+fn check_sender(rest: &mut Leaves<'_>, destination: Destination) -> Result<(), String> {
+    let pinned = rest.peek().is_some_and(|op| op.operand == "user.id");
+    if !pinned {
+        return if destination == Destination::AnyAddress {
+            Err("any address needs the system resolver's account pinned by user ID".into())
+        } else {
+            Ok(())
+        };
+    }
     match rest.next() {
         Some(op)
             if op.r#type == "simple"
-                && op.operand == "user.id"
                 && !op.sensitive
-                && op.data == DNS_USER_ID =>
+                && canonical_uid(&op.data)
+                && (destination != Destination::AnyAddress || op.data == DNS_USER_ID) =>
         {
-            Ok(Destination::AnyAddress)
+            Ok(())
         }
-        _ => Err("any address needs the system resolver's account pinned by user ID".into()),
+        _ => Err("the sender isn't one user ID, or not the one this rule may have".into()),
     }
 }
 
@@ -581,5 +722,7 @@ fn check_protocol(leaf: Option<&Operator>, destination: Destination) -> Result<(
 mod dns_policy_tests;
 #[cfg(test)]
 mod dns_tests;
+#[cfg(test)]
+mod sender_tests;
 #[cfg(test)]
 mod tests;

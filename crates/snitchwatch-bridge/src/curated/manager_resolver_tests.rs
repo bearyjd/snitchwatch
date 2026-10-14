@@ -218,7 +218,7 @@ async fn a_late_lookup_answer_changes_the_pass_key() {
     curated.set_uid_lookup(lookup);
     curated.reconcile().await;
     let before = curated.pass_key();
-    release.send(()).unwrap();
+    drop(release);
     let changed = tokio::time::timeout(Duration::from_secs(5), async {
         while curated.pass_key() == before {
             tokio::time::sleep(Duration::from_millis(1)).await;

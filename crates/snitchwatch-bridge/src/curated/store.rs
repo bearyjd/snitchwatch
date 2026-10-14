@@ -409,7 +409,8 @@ fn cleaned(choices: Choices) -> Choices {
 }
 
 /// A recorded copy is the entry's exact rule (security review L2: a crafted
-/// copy can't make a different port or host read as unedited); for an id
+/// copy can't make a different port or host read as unedited), a run-time
+/// account's at the uid it was installed with; for an id
 /// no longer in the list, a curated rule of that name (only ever used to
 /// delete an identical rule under the prefix).
 fn valid_copy(id: &str, copy: &CanonicalRule) -> bool {
@@ -417,7 +418,9 @@ fn valid_copy(id: &str, copy: &CanonicalRule) -> bool {
         return false;
     }
     match super::entries().iter().find(|entry| entry.id == id) {
-        Some(entry) => *copy == canonical(&entry.rule()),
+        Some(entry) => entry
+            .rule_matching(&copy.to_rule())
+            .is_some_and(|ours| *copy == canonical(&ours)),
         None => super::check_curated_rule(&copy.to_rule()).is_ok(),
     }
 }

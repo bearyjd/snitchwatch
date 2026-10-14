@@ -31,7 +31,7 @@ use std::time::Duration;
 use tokio::sync::{broadcast, watch, Notify};
 use tracing::{debug, error, info, warn};
 
-use super::canonical::is_unedited;
+use super::canonical::{is_legacy, is_unedited};
 use super::reconcile::{inert_statuses, plan, CuratedAction, DaemonRules, EntryStatus};
 use super::store;
 use super::{entries, groups};
@@ -46,8 +46,13 @@ mod intent;
 mod resolver;
 #[path = "manager_state.rs"]
 mod state;
+#[path = "manager_upgrade.rs"]
+mod upgrade;
 use resolver::withhold;
-pub use resolver::{DNS_ACCOUNT_REASON, DNS_STALE_REASON, RESOLVER_LOOKUP_TIMEOUT};
+pub use resolver::{
+    ACCOUNT_REASON, ACCOUNT_STALE_REASON, DNS_ACCOUNT_REASON, DNS_STALE_REASON,
+    RESOLVER_LOOKUP_TIMEOUT,
+};
 use state::{
     command_problem, deleted, fail, keep, no_file_marks, rule_name, send_problem,
     show_removal_failures, still_edited, summary, track_maybe_applied, without_failed, Problem,
@@ -357,7 +362,7 @@ impl CuratedDefaults {
         } else {
             self.found().await
         };
-        let withheld = resolver::withheld(&found);
+        let withheld = resolver::withheld(&found, &rules);
         let (maybe_applied, no_files) = {
             let mut state = lock(&self.inner.state);
             let no_files = no_file_marks(&state, &files_left);
@@ -400,7 +405,7 @@ impl CuratedDefaults {
                 state.install_refusals.retain(|id, _| !enabled.contains(id));
                 let actions = without_failed(&mut state, planned.actions, generation);
                 show_removal_failures(&mut state, daemon, generation);
-                let actions = withhold(&mut state, actions, &withheld);
+                let actions = withhold(&mut state, actions, &withheld, &found);
                 let revision = state.broad_revision;
                 let actions = actions
                     .into_iter()
@@ -474,6 +479,7 @@ impl CuratedDefaults {
                 drop(state);
                 wanted && self.still_missing(&format!("{CURATED_DEFAULT_RULE_NAME_PREFIX}{id}"))
             }
+            CuratedAction::Upgrade(id) => state.choices.enabled.contains(id),
             CuratedAction::Delete { id, name } => {
                 let wanted =
                     !state.choices.enabled.contains(id) || !entries().iter().any(|e| &e.id == id);
@@ -487,8 +493,9 @@ impl CuratedDefaults {
         }
     }
 
-    /// The live list's copy under `name` is still unedited: a copy edited
-    /// since the pass began is left alone.
+    /// The live list's copy under `name` is still unedited (or the entry's
+    /// copy from before its sender pin): a copy edited since the pass began
+    /// is left alone.
     fn still_unedited(
         &self,
         id: &str,
@@ -500,7 +507,9 @@ impl CuratedDefaults {
         cache
             .rules()
             .and_then(|rules| rules.get(name))
-            .is_some_and(|rule| is_unedited(entry, recorded, rule))
+            .is_some_and(|rule| {
+                is_unedited(entry, recorded, rule) || entry.is_some_and(|e| is_legacy(e, rule))
+            })
     }
 
     /// The live list still lacks `name` (code review LOW-7): a copy that
@@ -513,6 +522,7 @@ impl CuratedDefaults {
 
     async fn apply(&self, action: CuratedAction, generation: u64, revision: u64) {
         let (id, name, outcome, done) = match action {
+            CuratedAction::Upgrade(id) => return self.upgrade(&id, generation).await,
             CuratedAction::Install(id) => {
                 let Some(entry) = entries().iter().find(|entry| entry.id == id) else {
                     return;
@@ -520,7 +530,7 @@ impl CuratedDefaults {
                 let name = entry.rule_name();
                 // The state guard stays held through queue admission: an off
                 // cannot revoke authority between this check and the send.
-                let sent = {
+                let (sent, account_uid) = {
                     let state = lock(&self.inner.state);
                     if state.inert.is_some()
                         || self.generation() != generation
@@ -535,24 +545,27 @@ impl CuratedDefaults {
                     {
                         return;
                     }
+                    let account_uid = resolver::account_uid(entry, &state.found);
                     let command = if entry.broad() {
                         CuratedCommand::authorized_install(entry)
                     } else {
-                        CuratedCommand::install(entry)
+                        CuratedCommand::install_as(entry, account_uid)
                     };
-                    if entry.broad() {
+                    let sent = if entry.broad() {
                         self.inner
                             .commands
                             .send_curated_guarded(command, generation, false)
                     } else {
                         self.inner.commands.send_curated(command)
-                    }
+                    };
+                    (sent, account_uid)
                 };
                 let outcome = Self::wait_sent(sent, Refusal::Add).await;
                 if outcome.is_ok() {
                     info!(entry = %id, "installed a recommended rule");
                 }
-                (id, name, outcome, Done::Install(Box::new(entry.rule())))
+                let rule = entry.rule_as(account_uid);
+                (id, name, outcome, Done::Install(Box::new(rule)))
             }
             CuratedAction::Delete { id, name } => {
                 let Some(command) = CuratedCommand::delete(&name) else {
@@ -770,3 +783,7 @@ mod file_left_tests;
 #[cfg(test)]
 #[path = "manager_resolver_tests.rs"]
 mod resolver_tests;
+
+#[cfg(test)]
+#[path = "manager_upgrade_tests.rs"]
+mod upgrade_tests;

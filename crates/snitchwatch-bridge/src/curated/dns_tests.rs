@@ -452,8 +452,10 @@ fn a_host_or_this_computer_entry_cannot_use_the_both_transports_pattern() {
 
 #[test]
 fn a_host_entry_cannot_borrow_the_dns_accounts_pin() {
-    // A user pin is the DNS shape's own: a host entry with one, in any
-    // place, is not a curated rule.
+    // A host entry's user pin goes right after its destination (#120
+    // 36/41); anywhere else the rule is not a curated rule. In its place it
+    // has the curated shape, but it is still not this entry's rule, which
+    // names no sender, so nothing sends it.
     let flatpak = entries()
         .iter()
         .find(|entry| entry.id == "flatpak-flathub")
@@ -462,7 +464,13 @@ fn a_host_entry_cannot_borrow_the_dns_accounts_pin() {
         let mut rule = flatpak.rule();
         let pin = leaf("simple", "user.id", "193", false);
         rule.operator.as_mut().unwrap().list.insert(index, pin);
-        assert!(check_curated_rule(&rule).is_err(), "pin at {index}");
+        assert!(
+            !super::canonical::is_unedited(Some(flatpak), None, &rule),
+            "pin at {index}"
+        );
+        if index != 2 {
+            assert!(check_curated_rule(&rule).is_err(), "pin at {index}");
+        }
     }
 }
 
