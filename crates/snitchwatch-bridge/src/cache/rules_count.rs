@@ -33,9 +33,8 @@ const PRUNED_SLACK: Duration = Duration::from_secs(5);
 ///   replaces `<name>` in its list. Each such answer is one more rule until
 ///   the next `Subscribe` shows them, even past a timed answer's expiry (the
 ///   daemon drops `<name>-2` as the bridge prunes `<name>`, and still holds
-///   the original). Only a count that settles lower shrinks it, and only
-///   while nothing else explains one (#120 item 29: a `<name>-2` removed
-///   outside the bridge).
+///   the original). Only a count that settles lower shrinks it (#120
+///   item 29: a `<name>-2` removed outside the bridge).
 /// - **A refused add.** `Replace` stores a rule in memory before `Save` can
 ///   fail, and `scheduleTemporaryRule` fails on a duration Go can't parse
 ///   after the rule is stored; both answer `ERROR`. The bridge can't tell
@@ -70,12 +69,6 @@ impl MayHold {
             self.pruned_until
                 .push(ends.checked_add(PRUNED_SLACK).unwrap_or(ends));
         }
-    }
-
-    /// Whether the prompt answers' room is all there is, at `now`: no
-    /// refused add and no pruned timer may explain a lower count instead.
-    fn only_renamed(&self, now: Instant) -> bool {
-        self.refused.is_empty() && self.pruned_until.iter().all(|until| *until <= now)
     }
 
     /// How many more rules the daemon may hold, at `now`.
@@ -204,7 +197,6 @@ impl RulesCache {
         // A hint can still go while a timer may drop rules, never come.
         let may_only_clear = self.timers_may_drop_rules();
         let allowance = self.may_hold.allowance(reading.now);
-        let only_renamed = !may_only_clear && self.may_hold.only_renamed(reading.now);
         let revision = self.revision;
         let watch = &mut self.count_watch;
         let restarted = watch
@@ -234,8 +226,12 @@ impl RulesCache {
         let agrees = usize::try_from(reading.reported).is_ok_and(|reported| {
             (expected..=expected.saturating_add(allowance)).contains(&reported)
         });
-        if agrees && only_renamed && watch.run >= PINGS_TO_CLEAR {
-            // A run below the room: the daemon no longer holds those rules.
+        if agrees && watch.run >= PINGS_TO_CLEAR {
+            // A run below the room: the daemon holds at most `held` rules the
+            // list doesn't show, so at most that many answers' worth. Every
+            // other reason here is room for more rules, never fewer, so none
+            // can hide one gone; a timer that may drop a listed rule unseen
+            // (the one way the count reads low) never gets here.
             let held = usize::try_from(reading.reported).unwrap_or(usize::MAX) - expected;
             let renamed = &mut self.may_hold.renamed;
             *renamed = (*renamed).min(u32::try_from(held).unwrap_or(u32::MAX));

@@ -124,12 +124,15 @@ disabled rule that made the program ask again), so the list is still one
 short. Ending `renamed` there would raise the hint after every
 disable → re-prompt → timed answer. A test pins this first.
 
-Instead, shrink on the daemon's count, only when nothing else can explain
-it: after a debounced run ([`PINGS_TO_CLEAR`] equal readings) with
-`expected <= reported < expected + renamed`, and the allowance is all
-`renamed` (no refused adds, no live pruned-timer slack, no listed or
-left-out temporary rule whose timer may drop it), set `renamed` to
-`reported - expected`. Every #124 guard keeps its test green
+Instead, shrink on the daemon's count: after a debounced run
+([`PINGS_TO_CLEAR`] equal agreeing readings), set `renamed` to at most
+`reported - expected`. The other allowance reasons (refused adds, pruned
+slack) are room for *more* rules, so they can't hide a missing one; the
+only way the count reads low, a listed or left-out temporary rule's timer,
+already makes such readings no evidence (`timers_may_drop_rules`). (As
+implemented: an earlier draft also required no refused adds and no pruned
+slack; mutation testing showed those guards change nothing, and the
+reasoning above says why.) Every #124 guard keeps its test green
 (disable → re-prompt → Always `-2`, refused add applied anyway, suspend).
 If the guarded version turns out not to fire in a useful case, it is
 reported as an owner decision instead.

@@ -218,27 +218,57 @@ fn the_room_a_prompt_answer_made_shrinks_when_the_daemon_holds_fewer() {
     assert!(cache.count_mismatch());
 }
 
-/// Room something else may still need is kept: a refused add the daemon
-/// may hold, or a listed temporary rule whose timer may drop it unseen
-/// (either can make the count agree for a while with the extra rule there).
+/// A listed temporary rule's timer may drop it unseen, so a lower count may
+/// hide `seen-2` behind it: the room is kept, and the count is no evidence.
+/// And one lower reading is not a run.
 #[test]
-fn the_room_a_prompt_answer_made_is_kept_while_anything_else_explains_the_count() {
-    for other in [rule("other", "always", true), rule("other", "5m", false)] {
-        let mut cache = synced(vec![other.clone(), rule("seen", "always", false)]);
-        if other.duration == "always" {
-            cache.apply_refused(&change(rule("refused", "always", true)));
-        }
-        cache.note_prompt_answer("seen");
-        cache.upsert(rule("seen", "always", true));
-        settle(&mut cache, 2);
-        assert!(none_flipped(&many(&mut cache, 2, 10)));
-        assert!(
-            none_flipped(&many(&mut cache, 3, 10)),
-            "{}: room for seen-2 is kept",
-            other.duration
-        );
-        assert!(!cache.count_mismatch());
-    }
+fn the_room_a_prompt_answer_made_is_kept_for_a_timer_or_a_single_reading() {
+    let mut cache = synced(vec![
+        rule("other", "5m", false),
+        rule("seen", "always", false),
+    ]);
+    cache.note_prompt_answer("seen");
+    cache.upsert(rule("seen", "always", true));
+    settle(&mut cache, 2);
+    assert!(none_flipped(&many(&mut cache, 2, 10)));
+    assert!(
+        none_flipped(&many(&mut cache, 3, 10)),
+        "room for seen-2 is kept"
+    );
+
+    let mut cache = synced(vec![
+        rule("other", "always", true),
+        rule("seen", "always", false),
+    ]);
+    cache.note_prompt_answer("seen");
+    cache.upsert(rule("seen", "always", true));
+    settle(&mut cache, 3);
+    assert!(none_flipped(&many(&mut cache, 3, 5)));
+    assert!(!read(&mut cache, 2));
+    assert!(
+        none_flipped(&many(&mut cache, 3, 10)),
+        "one low reading kept the room"
+    );
+    assert!(!cache.count_mismatch());
+}
+
+/// Room for a refused add is room for more, never fewer: with it, the
+/// prompt answers' room shrinks to what the daemon holds over the list,
+/// and the refused add keeps its own.
+#[test]
+fn a_refused_add_keeps_its_own_room_when_the_answers_room_shrinks() {
+    let mut cache = synced(vec![
+        rule("other", "always", true),
+        rule("seen", "always", false),
+    ]);
+    cache.apply_refused(&change(rule("refused", "always", true)));
+    cache.note_prompt_answer("seen");
+    cache.upsert(rule("seen", "always", true));
+    settle(&mut cache, 2);
+    assert!(none_flipped(&many(&mut cache, 2, 10)));
+    assert!(none_flipped(&many(&mut cache, 3, 10)), "the refused add");
+    let flips = many(&mut cache, 4, 6);
+    assert!(flips.contains(&true), "{flips:?}");
 }
 
 // --- M1: a refused add the daemon applied anyway -------------------------
