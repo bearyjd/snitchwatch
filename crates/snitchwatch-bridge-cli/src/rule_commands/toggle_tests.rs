@@ -223,3 +223,49 @@ async fn a_toggle_refused_with_no_list_resets_the_switch() {
     .expect("no list was sent to reset the switch");
     assert!(reset.is_empty(), "{reset:?}");
 }
+
+/// A disabled rule isn't compiled, so turning off an `always` rule can only
+/// fail on `Save`, after the daemon took the rule off (`replaceUserRule`):
+/// the switch stays off, and the result says the old file, which still has
+/// it on, may turn it back on at the next restart (#120 item 3). A temporary
+/// rule has no file to fail on, and turning a rule on may fail to compile.
+#[tokio::test]
+async fn a_refused_turn_off_of_a_saved_rule_says_it_may_come_back_on() {
+    let mut saved = stock("100-a", leaf("simple", "dest.host", "x.example"), "always");
+    saved.enabled = true;
+    let mut daemon = daemon(vec![saved.clone()]);
+    respond(&mut daemon, |_| {
+        Some((false, "open: operation not permitted".into()))
+    });
+    let commands = commands(&daemon);
+    let mut rx = daemon.broadcast.subscribe();
+    commands.try_route(update("100-a", switched(&saved, false), Some("t")));
+    match result(&mut rx).await {
+        RuleCommandOutcome::OkWithNote { note } => {
+            assert!(note.contains("may come back on"), "{note}");
+            assert!(note.contains("operation not permitted"), "{note}");
+        }
+        other => panic!("{other:?}"),
+    }
+    let cache = daemon.cache.lock().unwrap();
+    assert!(
+        !cache.rules().unwrap()["100-a"].enabled,
+        "the daemon holds it off"
+    );
+}
+
+#[tokio::test]
+async fn a_refused_turn_on_is_still_rejected() {
+    let saved = stock("100-a", leaf("simple", "dest.host", "x.example"), "always");
+    let mut daemon = daemon(vec![saved.clone()]);
+    respond(&mut daemon, |_| {
+        Some((false, "(2) error compiling rule".into()))
+    });
+    let commands = commands(&daemon);
+    let mut rx = daemon.broadcast.subscribe();
+    commands.try_route(update("100-a", switched(&saved, true), Some("t")));
+    assert!(matches!(
+        result(&mut rx).await,
+        RuleCommandOutcome::Rejected { .. }
+    ));
+}

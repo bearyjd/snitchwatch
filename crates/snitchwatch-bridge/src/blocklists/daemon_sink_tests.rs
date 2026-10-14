@@ -21,6 +21,8 @@ pub(in crate::blocklists) enum Daemon {
     RefuseChange(&'static str),
     /// Refuses `DELETE_RULE`, accepts `CHANGE_RULE`.
     RefuseDelete(&'static str),
+    /// Refuses the `DELETE_RULE` of this rule, accepts everything else.
+    RefuseDeleteOf(String),
     /// Answers `OK` to this many commands, then stops answering.
     AcceptThenSilent(usize),
     /// Refuses this many commands, then stops answering.
@@ -110,6 +112,15 @@ impl Harness {
                         commands.on_reply(stream_id, &reply(command.id, Err(text)))
                     }
                     Daemon::RefuseDelete(_) => {
+                        commands.on_reply(stream_id, &reply(command.id, Ok(())))
+                    }
+                    Daemon::RefuseDeleteOf(name)
+                        if command.r#type == Action::DeleteRule as i32
+                            && command.rules.iter().any(|rule| rule.name == name) =>
+                    {
+                        commands.on_reply(stream_id, &reply(command.id, Err("busy")))
+                    }
+                    Daemon::RefuseDeleteOf(_) => {
                         commands.on_reply(stream_id, &reply(command.id, Ok(())))
                     }
                     Daemon::AcceptThenSilent(n) if answered < n => {

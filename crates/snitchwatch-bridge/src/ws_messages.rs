@@ -143,12 +143,18 @@ pub enum ServerMessage {
     /// like none), because with an unreadable store they are probably lists
     /// the user still subscribes to. `reason` is how the last removal went
     /// when it didn't fully succeed: plain text, absent otherwise.
+    /// `files_left` (additive, #120 item 2): a removal left nothing to count,
+    /// but the firewall couldn't remove some rules' saved files, which may
+    /// bring them back at its next restart. Fixed plain text, shown while
+    /// `count` is 0; absent otherwise.
     SetBlocklistLeftovers {
         count: u32,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cause: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        files_left: Option<String>,
     },
     /// One page (at most [`BLOCKLIST_ENTRIES_PAGE_MAX`] hosts, starting at
     /// `offset`) of a subscription's `total` hosts, sent only in answer to

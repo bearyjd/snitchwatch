@@ -2,7 +2,9 @@
 //! P2.7) and [`RulesSync::hold_publishes`].
 
 use super::*;
+use crate::cache::rule_hits_handle::RuleHitsHandle;
 use snitchwatch_proto::protocol::Operator;
+use tokio::sync::broadcast;
 
 fn rule(name: &str, duration: &str, created: i64) -> Rule {
     Rule {

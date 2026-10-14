@@ -66,7 +66,23 @@ pub(super) fn deciding(old: &Rule, new: &Rule) -> &'static str {
     }
 }
 
+/// Both steps' effects reach the list in one `SetRules`, sent when the hold
+/// drops, before the result (#120 item 11). Meanwhile other commands'
+/// confirmed changes wait for it too (at most two reply timeouts); the
+/// cache itself follows every reply at once.
 pub(super) async fn run(
+    commands: &DaemonCommands,
+    timeout: Duration,
+    change: Notification,
+    old: &Rule,
+) -> RuleCommandOutcome {
+    let hold = commands.hold_rule_publishes();
+    let outcome = run_steps(commands, timeout, change, old).await;
+    drop(hold);
+    outcome
+}
+
+async fn run_steps(
     commands: &DaemonCommands,
     timeout: Duration,
     change: Notification,

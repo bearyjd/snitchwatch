@@ -30,8 +30,11 @@ const PRUNED_SLACK: Duration = Duration::from_secs(5);
 ///   answer through `addUserRule` → `setUniqueName` (`loader.go`): `<name>-2`
 ///   when `<name>` is in memory, as it is for a rule the user turned off
 ///   (only enabled rules match, so the same program asks again). The bridge
-///   replaces `<name>` in its list. Each such answer is one more rule, for
-///   good; the next `Subscribe` shows them.
+///   replaces `<name>` in its list. Each such answer is one more rule until
+///   the next `Subscribe` shows them, even past a timed answer's expiry (the
+///   daemon drops `<name>-2` as the bridge prunes `<name>`, and still holds
+///   the original). Only a count that settles lower shrinks it (#120
+///   item 29: a `<name>-2` removed outside the bridge).
 /// - **A refused add.** `Replace` stores a rule in memory before `Save` can
 ///   fail, and `scheduleTemporaryRule` fails on a duration Go can't parse
 ///   after the rule is stored; both answer `ERROR`. The bridge can't tell
@@ -223,6 +226,17 @@ impl RulesCache {
         let agrees = usize::try_from(reading.reported).is_ok_and(|reported| {
             (expected..=expected.saturating_add(allowance)).contains(&reported)
         });
+        if agrees && !may_only_clear && watch.run >= PINGS_TO_CLEAR {
+            // A run below the room: the daemon holds at most `held` rules the
+            // list doesn't show, so at most that many answers' worth. Every
+            // other reason here is room for more rules, never fewer, so none
+            // can hide one gone. The one way the count reads low is a timer
+            // that may drop a listed or left-out rule unseen; such readings
+            // can still clear a raised hint, but never shrink the room.
+            let held = usize::try_from(reading.reported).unwrap_or(usize::MAX) - expected;
+            let renamed = &mut self.may_hold.renamed;
+            *renamed = (*renamed).min(u32::try_from(held).unwrap_or(u32::MAX));
+        }
         match (watch.raised, agrees) {
             (false, false) if watch.run >= PINGS_TO_RAISE => watch.raised = true,
             (true, true) if watch.run >= PINGS_TO_CLEAR => watch.raised = false,

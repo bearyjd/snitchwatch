@@ -731,6 +731,15 @@ impl PendingReply {
     }
 }
 
+/// Forgets the waiter outright, not into `late` like a timeout: a later
+/// answer is ignored, and the command stops counting as in flight (#120
+/// item 33, pinned by `a_cancelled_wait_forgets_the_command`). Every holder
+/// awaits [`PendingReply::wait`] to the end in a task of its own (rule
+/// commands, rename and edit steps, `settle_rule_command`, the curated pass,
+/// the profiles enforcer, the blocklist sink and leftover removal); only
+/// shutdown aborts them, and the cache goes with it. A holder that may be
+/// cancelled mid-wait (a `select!` arm, an aborted task) needs this to move
+/// the waiter to `late` first.
 impl Drop for PendingReply {
     fn drop(&mut self) {
         lock(&self.inner).waiters.remove(&self.id);

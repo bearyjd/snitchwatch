@@ -26,6 +26,7 @@ pub(super) fn clear_unreported_leftovers(
             count: 0,
             cause: None,
             reason: None,
+            files_left: None,
         },
     });
 }

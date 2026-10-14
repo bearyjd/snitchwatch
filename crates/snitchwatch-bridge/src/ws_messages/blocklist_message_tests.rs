@@ -58,6 +58,7 @@ fn leftover_blocklist_rules_are_counted_and_removed_by_additive_messages() {
         count: 3,
         cause: None,
         reason: None,
+        files_left: None,
     };
     let json = serde_json::to_value(&msg).unwrap();
     assert_eq!(
@@ -70,10 +71,32 @@ fn leftover_blocklist_rules_are_counted_and_removed_by_additive_messages() {
         count: 3,
         cause: Some(LEFTOVER_CAUSE_STORE_UNREADABLE.into()),
         reason: Some("The rules were not removed.".into()),
+        files_left: None,
     };
     let json = serde_json::to_value(&told).unwrap();
     assert_eq!(json["cause"], "store_unreadable");
     assert_eq!(json["reason"], "The rules were not removed.");
+    assert_eq!(serde_json::from_value::<ServerMessage>(json).unwrap(), told);
+    let files = ServerMessage::SetBlocklistLeftovers {
+        count: 0,
+        cause: None,
+        reason: None,
+        files_left: Some("They may come back.".into()),
+    };
+    let json = serde_json::to_value(&files).unwrap();
+    assert_eq!(
+        json,
+        serde_json::json!({
+            "action": "setBlocklistLeftovers",
+            "count": 0,
+            "filesLeft": "They may come back."
+        })
+    );
+    assert_eq!(
+        serde_json::from_value::<ServerMessage>(json).unwrap(),
+        files
+    );
+    let json = serde_json::to_value(&told).unwrap();
     assert_eq!(serde_json::from_value::<ServerMessage>(json).unwrap(), told);
     assert_eq!(
         serde_json::from_str::<ClientMessage>(r#"{"action":"removeLeftoverBlocklistRules"}"#)

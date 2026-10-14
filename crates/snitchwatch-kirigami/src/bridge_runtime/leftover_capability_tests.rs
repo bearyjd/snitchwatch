@@ -19,7 +19,8 @@ fn a_bridge_without_the_capability_clears_an_earlier_leftover_count() {
         ServerMessage::SetBlocklistLeftovers {
             count: 0,
             cause: None,
-            reason: None
+            reason: None,
+            files_left: None,
         }
     );
 }
@@ -93,6 +94,7 @@ fn leftovers_cleared(seen: &[ReceivedServerMessage]) -> bool {
                     count: 0,
                     cause: None,
                     reason: None,
+                    files_left: None,
                 }
     })
 }
