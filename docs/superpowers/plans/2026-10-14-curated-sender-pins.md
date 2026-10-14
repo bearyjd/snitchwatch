@@ -139,3 +139,73 @@ sent. Then mutate the guard in a private copy to show the test catches it.
   - a DNS mismatch shows stale and doesn't delete;
   - a new manager reads no host account;
   - `install_refusals` cleared.
+
+## Revision (2026-10-14, tower facts on the r13 image)
+
+The tower read these from `ps` and `/proc` on r13:
+
+| service | runs as | uid |
+|---|---|---|
+| NetworkManager | root | 0 |
+| tailscaled | root | 0 |
+| chronyd | `chrony` | 994 (dynamic) |
+| avahi-daemon | `avahi` | 70 (static) |
+| systemd-resolved | `systemd-resolve` | **990** (dynamic) |
+
+`sysusers.d` declares 193 for `systemd-resolve`, but the image's
+`/etc/passwd` has 990. The #121 pin to 193 therefore never matched on the
+tower, and since #149 the DNS entry has shown Unavailable there.
+
+### The DNS entry is pinned by account name
+
+- DNS becomes an ordinary `{"account": "systemd-resolve"}` entry, and
+  `DNS_USER_ID` is gone. The DNS entry is available when the account
+  resolves, whatever uid it resolves to.
+- The allowlist still requires a `user.id` leaf for any address, but takes
+  any canonical uid. The data check requires an account sender on an
+  any-address entry, so no path-only or uid-0 any-address entry can exist.
+- DNS has no legacy form. A copy pinned to 193 is an unedited copy at a uid
+  that has moved (below). A path-only DNS copy (item 40) is never counted
+  as Snitchwatch's.
+- Grant fingerprint: still `canonical(entry.rule())`. For an account entry
+  that rule has an empty uid, so a grant binds to "the resolver's account",
+  not to a uid. Every existing DNS grant (hashed with 193) drops once on
+  load: users who consented re-consent once. `BROAD_CONSENT` is unchanged,
+  for GUI/bridge version skew (item 37).
+
+### A uid that moved (reshapes #155a)
+
+A copy has moved when a confirmed lookup returns a different uid than the
+uid the copy names. It is never detected on an unconfirmed lookup.
+
+What happens next depends on one switch, `ON_UID_CHANGE` in
+`curated/manager_resolver.rs`. It is a placeholder pending the owner's
+decision:
+
+- **A, `Rewrite` (current placeholder).** The upgrade path replaces the
+  copy in place at the new uid, keeping `enabled` and `created`. There is
+  no new consent: it is the same account, and changing passwd needs root.
+  - For DNS, the rewrite goes through the guarded broad send, with #128's
+    checks (live grant, `broad_revision`, saved, persistent storage).
+  - With no live grant (after the fingerprint change, the common case),
+    nothing is sent. The entry shows a fixed stale reason that points to
+    Review/Keep, and a Keep ticket then allows exactly one rewrite.
+- **B, `TurnOff`.** The grant is revoked and the choice turned off, with a
+  note. The next pass deletes the copy. Under a deny default, DNS then
+  stays blocked until the user consents again.
+- Both: an undecided copy at a moved uid is left alone with the reason
+  attached (M1). A refused rewrite isn't retried on the same stream.
+- A moved copy is never turned on: its queued re-enables are dropped, and
+  `send_managed_toggle` refuses turn-on. Turning off stays allowed. The old
+  uid may now belong to another account.
+
+### Paths
+
+`ReadPath` is `readlink(/proc/<pid>/exe)`, which the kernel resolves. A
+service started as `/usr/sbin/chronyd` (or tailscaled, NetworkManager,
+avahi-daemon) therefore reaches the daemon as `/usr/bin/...`, because
+`/usr/sbin` links to `bin`. The data paths already use `/usr/bin`.
+
+The only way a `/usr/sbin` path can appear is `CleanPath`'s argv[0]
+fallback (item 41). Such a path matches no curated rule, so it fails
+closed.
