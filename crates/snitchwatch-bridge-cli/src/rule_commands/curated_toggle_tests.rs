@@ -174,3 +174,71 @@ async fn generic_dns_reenable_refuses_but_off_and_narrow_toggles_remain_availabl
     assert_eq!(result(&mut rx).await, RuleCommandOutcome::Ok);
     assert_eq!(seen.lock().unwrap().len(), 1);
 }
+
+/// #120 item 12: only a turn-on the daemon answered `ERROR` is undone. One
+/// it never answered may still be applied later, and an undo then could
+/// race it: nothing more is sent.
+#[tokio::test]
+async fn an_unanswered_turn_on_is_not_undone() {
+    let rule = Rule {
+        enabled: false,
+        ..shipped()
+    };
+    let mut daemon = daemon(vec![rule.clone()]);
+    let seen = respond(&mut daemon, |_| None).0;
+    let commands = commands(&daemon);
+    let mut rx = daemon.broadcast.subscribe();
+    commands.try_route(update(&rule.name, switched(&rule, true), Some("on")));
+    assert_eq!(result(&mut rx).await, RuleCommandOutcome::Timeout);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(seen.lock().unwrap().len(), 1, "an undo was sent");
+}
+
+/// #120 item 12: a refused turn-on is undone before it is answered, and the
+/// rule stays busy until then: a second turn-on in that window is refused,
+/// so a late undo can never turn off a rule the user turned on again.
+#[tokio::test]
+async fn a_refused_turn_on_is_undone_before_another_toggle_is_taken() {
+    let rule = Rule {
+        enabled: false,
+        ..shipped()
+    };
+    let mut daemon = daemon(vec![rule.clone()]);
+    // The turn-on is refused; the undo gets no answer (300 ms timeout).
+    let seen = respond_to(&mut daemon, |n| {
+        n.rules[0]
+            .enabled
+            .then(|| (false, "save failed".to_string()))
+    })
+    .0;
+    let commands = commands(&daemon);
+    let mut rx = daemon.broadcast.subscribe();
+    commands.try_route(update(&rule.name, switched(&rule, true), Some("a")));
+    for _ in 0..100 {
+        if seen.lock().unwrap().len() >= 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let sent: Vec<bool> = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|n| n.rules[0].enabled)
+        .collect();
+    assert_eq!(sent, [true, false]);
+    commands.try_route(update(&rule.name, switched(&rule, true), Some("b")));
+    let mut outcomes = std::collections::BTreeMap::new();
+    while let Some((id, outcome)) = result_within(&mut rx, Duration::from_secs(2)).await {
+        outcomes.insert(id, outcome);
+        if outcomes.len() == 2 {
+            break;
+        }
+    }
+    assert!(
+        matches!(outcomes.get("a"), Some(RuleCommandOutcome::Rejected { .. })),
+        "{outcomes:?}"
+    );
+    assert_eq!(refused(&outcomes["b"]), [gates::BUSY]);
+    assert_eq!(seen.lock().unwrap().len(), 2, "the second turn-on was sent");
+}

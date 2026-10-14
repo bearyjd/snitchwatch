@@ -280,6 +280,11 @@ impl RuleCommands {
     /// A recommended rule turned on or off. The daemon's `OK` updates the
     /// rule list, whose broadcast also refreshes the Recommended page.
     fn toggle_curated(&self, name: &str, enabled: bool, answer: Answer) {
+        // Busy until answered, the undo included: a toggle taken meanwhile
+        // could be turned off again by a late undo.
+        let Some(guard) = self.claim(&[name], &answer) else {
+            return;
+        };
         let (curated, commands) = (self.curated.clone(), self.commands.clone());
         let send = move |name: &str, enabled: bool| match &curated {
             Some(curated) => curated.send_managed_toggle(name, enabled),
@@ -290,13 +295,12 @@ impl RuleCommands {
         let name = name.to_string();
         tokio::spawn(async move {
             let outcome = sent_outcome(sent, timeout).await;
-            let refused_on = enabled && matches!(outcome, RuleCommandOutcome::Rejected { .. });
-            answer.finish(outcome).await;
-            if refused_on {
+            if enabled && matches!(outcome, RuleCommandOutcome::Rejected { .. }) {
                 // Stock `replaceUserRule` may have taken the rule into memory
                 // before `Save` failed, while the list still shows it off
-                // (#120 item 12): turn it off again, once. A refusal of that
-                // leaves it off in memory too.
+                // (#120 item 12): turn it off again, once, before answering.
+                // A refusal of that leaves it off in memory too. Only an
+                // `ERROR`: an unanswered turn-on may still be applied later.
                 if !matches!(
                     sent_outcome(send(&name, false), timeout).await,
                     RuleCommandOutcome::Ok
@@ -304,6 +308,8 @@ impl RuleCommands {
                     warn!(rule = %name, "a refused turn-on of a recommended rule wasn't undone");
                 }
             }
+            answer.finish(outcome).await;
+            drop(guard);
         });
     }
 }
