@@ -68,7 +68,9 @@ pub fn applied_but_not_saved(sent: &Notification) -> bool {
 /// Whether a refused `sent` may or may not apply: a `CHANGE_RULE` of an
 /// enabled `always` rule, where a compile error leaves the old rule and a
 /// `Save` failure the new one (#120 item 7). The cache stays as it was. A
-/// temporary rule has no file, so only compiling can have failed.
+/// temporary rule has no file, so only compiling can have failed (or
+/// parsing its duration after storing it, which the bridge's duration
+/// checks rule out: `rule_policy::profile::editor_duration`).
 pub fn may_have_applied(sent: &Notification) -> bool {
     sent.r#type == Action::ChangeRule as i32
         && refused_effect(sent) == RefusedEffect::Unknown

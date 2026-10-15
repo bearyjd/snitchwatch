@@ -23,11 +23,11 @@
 // Only the inspector's switch moves ahead of the bridge, and the inspector
 // re-reads its rule on every model reset (#48) and every result.
 //
-// Each toggle and delete asks for a result (#152); its note
-// (`model.commandNote`, plain text) shows inside the inspector while it is
-// open, else below the title: e.g. a refused turn-off "may come back on",
-// a refused delete's file may remain, or a change that may or may not
-// have applied (#120 item 7).
+// Each toggle and delete asks for a result (#152); its note is kept per
+// rule (`rules::command_notes`, plain text): inside the inspector of its
+// rule, and below the title as "<rule>: <note>" once the inspector closed.
+// E.g. a refused turn-off "may come back on", a refused delete's file may
+// remain, or a change that may or may not have applied (#120 item 7).
 //
 // Hit counts (P2.6 Part 1): each row says how often its rule decided a
 // connection, and the header says what those numbers are: Snitchwatch's own
@@ -125,9 +125,16 @@ Kirigami.ScrollablePage {
     // The rule editor's last result once its sheet closed (P2.1).
     readonly property bool showsEditorStatus: ruleEditorController.statusText.length > 0
                                               && !ruleEditor.visible
-    // The last toggle's or delete's note (#152), once the inspector closed.
-    readonly property bool showsCommandNote: !!page.model && page.model.commandNote.length > 0
+    // The toggles' and deletes' notes (#152), once the inspector closed.
+    readonly property bool showsCommandNote: !!page.model && page.model.commandNotesText.length > 0
                                              && !inspector.visible
+    readonly property var commandNotes: !!page.model && page.model.commandNotesJson.length > 0
+        ? JSON.parse(page.model.commandNotesJson) : []
+    // The inspected rule's note, or "".
+    readonly property string inspectCommandNote: {
+        const found = page.commandNotes.find(note => note.rule === page.inspectName);
+        return found ? found.text : "";
+    }
     // What the list leaves out (#61); no "No rules yet" while that shows.
     readonly property bool showsNotShown: !!page.model && page.model.notShownText.length > 0
     // Issue #65: the firewall service's rule count differs from the list's.
@@ -419,7 +426,7 @@ Kirigami.ScrollablePage {
             color: Kirigami.Theme.neutralTextColor
             text: page.model ? page.model.countHintText : ""
         }
-        // The last toggle's or delete's note (#152), plain text.
+        // Each rule's last toggle or delete note (#152), plain text.
         Controls.Label {
             id: rulesCommandNote
             objectName: "rulesCommandNote"
@@ -427,7 +434,7 @@ Kirigami.ScrollablePage {
             Layout.fillWidth: true
             Layout.margins: Kirigami.Units.smallSpacing
             textFormat: Text.PlainText
-            text: page.model ? page.model.commandNote : ""
+            text: page.model ? page.model.commandNotesText : ""
             wrapMode: Text.Wrap
         }
         // The rule editor's last result (P2.1), plain text.
@@ -717,12 +724,11 @@ Kirigami.ScrollablePage {
                 Controls.Label {
                     id: inspectCommandNote
                     objectName: "inspectCommandNote"
-                    visible: text.length > 0 && !!page.model
-                             && page.model.commandNoteRule === page.inspectName
+                    visible: text.length > 0
                     Layout.fillWidth: true
                     textFormat: Text.PlainText
                     wrapMode: Text.Wrap
-                    text: page.model ? page.model.commandNote : ""
+                    text: page.inspectCommandNote
                 }
                 Controls.Button {
                     objectName: "reenableDnsButton"

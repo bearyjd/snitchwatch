@@ -95,7 +95,12 @@ Controls.ApplicationWindow {
                 const pageNote = page.rulesCommandNote;
                 page.inspectorSheet.enter = null;
                 page.inspectorSheet.exit = null;
-                probeWindow.setRules([probeWindow.curl(true)]);
+                const y = probeWindow.curl(true);
+                y.name = "898-other";
+                y.displayName = "898-other (shown)";
+                const yOff = JSON.parse(JSON.stringify(y));
+                yOff.enabled = false;
+                probeWindow.setRules([probeWindow.curl(true), y]);
                 expect(page.openRuleByName("899-curl"), "rule not found");
 
                 // A refused turn-off: the daemon took it off; the note shows
@@ -106,67 +111,73 @@ Controls.ApplicationWindow {
                        "no turn-off sent: " + JSON.stringify(off));
                 expect(typeof off.requestId === "string" && off.requestId.indexOf("rules-") === 0,
                        "the turn-off asked for no result: " + JSON.stringify(off));
+                // PR #163 review: another rule's command, in flight at the
+                // same time, answered Ok, never clears this rule's note.
+                rulesModel.setEnabled("898-other", false);
+                const other = probeWindow.last();
                 const note = "Turned off. <b>may come back on</b>";
                 probeWindow.result("edit-1", { status: "okWithNote", note: "someone else's" });
-                expect(rulesModel.commandNote === "", "another request's result was shown");
-                // The bridge's list shows it off before the result.
-                probeWindow.setRules([probeWindow.curl(false)]);
+                expect(rulesModel.commandNotesText === "", "another request's result was shown");
+                // The bridge's list shows them off before the results.
+                probeWindow.setRules([probeWindow.curl(false), yOff]);
                 probeWindow.result(off.requestId, { status: "okWithNote", note: note });
-                expect(rulesModel.commandNote === note, "note: " + rulesModel.commandNote);
-                expect(probeWindow.finished === 1, "finished " + probeWindow.finished);
+                probeWindow.result(other.requestId, { status: "ok" });
+                expect(probeWindow.finished === 2, "finished " + probeWindow.finished);
                 expect(inNote.visible && inNote.text === note && inNote.textFormat === Text.PlainText,
                        "inspector note: " + inNote.visible + " " + inNote.text);
+                rulesModel.setEnabled("898-other", true);
+                expect(inNote.text === note, "another rule's command cleared the note");
                 probeWindow.result(off.requestId, { status: "okWithNote", note: "again" });
-                expect(rulesModel.commandNote === note && probeWindow.finished === 1,
+                expect(inNote.text === note && probeWindow.finished === 2,
                        "a second result for the same id counted");
 
                 // A refusal re-sends no list: the switch still goes back to
-                // what the list holds. Sending clears the last note.
+                // what the list holds. Sending clears this rule's note.
                 probeWindow.click(sw);
                 const busy = probeWindow.last();
                 expect(busy.rule.enabled === true, "no turn-on sent");
-                expect(rulesModel.commandNote === "", "a new command kept the old note");
+                expect(!inNote.visible, "a new command kept the rule's old note");
                 expect(sw.checked === true, "switch did not move");
                 probeWindow.result(busy.requestId, { status: "refused",
                     problems: [{ path: "name", reason: "busy" }] });
-                expect(rulesModel.commandNote.indexOf("Not sent: ") === 0,
-                       "refusal note: " + rulesModel.commandNote);
+                expect(inNote.text.indexOf("Not sent: ") === 0, "refusal note: " + inNote.text);
                 expect(sw.checked === false && page.inspectEnabled === false,
                        "switch kept a state the list doesn't have");
+
+                // A list that changes the rule since its note drops the note.
+                probeWindow.setRules([probeWindow.curl(true), yOff]);
+                expect(!inNote.visible, "a note outlived a change of its rule: " + inNote.text);
 
                 // A change the daemon may or may not have applied says so.
                 probeWindow.click(sw);
                 probeWindow.result(probeWindow.last().requestId,
                                    { status: "unsure", reason: "may or may not have applied" });
-                expect(rulesModel.commandNote === "may or may not have applied",
-                       "unsure note: " + rulesModel.commandNote);
+                expect(inNote.text === "may or may not have applied", "unsure note: " + inNote.text);
 
-                // Delete closes the inspector: the note shows below the title.
-                page.confirmingDelete = true;
+                // Another rule's inspector doesn't show it.
+                expect(page.openRuleByName("898-other"), "other rule not found");
+                expect(!inNote.visible, "another rule's note shown in the inspector");
+
+                // Delete closes the inspector: the note shows below the title,
+                // with the rule's shown name.
+                rulesModel.setEnabled("898-other", false);
+                probeWindow.result(probeWindow.last().requestId, { status: "okWithNote", note: "y note" });
                 rulesModel.deleteRule("899-curl");
                 const del = probeWindow.last();
                 expect(del.action === "deleteRule" && del.requestId.indexOf("rules-") === 0,
                        "delete asked for no result: " + JSON.stringify(del));
                 page.inspectorSheet.close();
+                probeWindow.setRules([yOff]);
                 probeWindow.result(del.requestId, { status: "okWithNote", note: "file may remain" });
-                expect(pageNote.visible && pageNote.text === "file may remain"
-                       && pageNote.textFormat === Text.PlainText,
-                       "page note: " + pageNote.visible + " " + pageNote.text);
+                expect(pageNote.visible && pageNote.textFormat === Text.PlainText
+                       && pageNote.text === "898-other (shown): y note\n899-curl: file may remain",
+                       "page note: " + pageNote.visible + " " + JSON.stringify(pageNote.text));
 
-                // The inspector shows a note only on the rule it is about.
-                const other = probeWindow.curl(true);
-                other.name = "898-other";
-                other.displayName = other.name;
-                probeWindow.setRules([other]);
-                expect(page.openRuleByName("898-other"), "other rule not found");
-                expect(!inNote.visible, "another rule's note shown in the inspector");
-                page.inspectorSheet.close();
-
-                // An Ok clears it.
-                probeWindow.setRules([probeWindow.curl(true)]);
-                rulesModel.setEnabled("899-curl", false);
+                // An Ok clears its rule's note only.
+                rulesModel.setEnabled("898-other", true);
                 probeWindow.result(probeWindow.last().requestId, { status: "ok" });
-                expect(rulesModel.commandNote === "" && !pageNote.visible, "an Ok left a note");
+                expect(pageNote.text === "899-curl: file may remain",
+                       "after an Ok: " + JSON.stringify(pageNote.text));
                 console.warn("RULES_COMMAND_NOTE_PROBE_DONE");
             } finally {
                 Qt.quit();

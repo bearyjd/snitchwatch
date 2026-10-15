@@ -74,13 +74,28 @@ Out of scope (report): rename's first-step refusal of a disabled/enabled
   one shape still definitely not applied. Mutants: 5 of 6 killed; the
   survivor (count disabled `always` as maybe-applied) is equivalent, since
   that shape is decided as applied-not-saved first.
-- #152: the note carries its rule (`commandNoteRule`), so the inspector
-  shows it only on that rule. No session drop of waiting ids (a click right
-  after a reconnect would lose its result); old-session results never reach
-  the model (`result_feed`), and the wait list is bounded (32). A send that
-  never left the GUI leaves no note, as before. No new roles. Probe mutants
-  (note on any rule, no refresh on result, any id counts, note kept on
-  send): all killed.
+- #152: notes per rule (`commandNotesJson`, `commandNotesText` as
+  "<rule>: <note>" lines; at most 16), so one rule's command or Ok never
+  clears another's note (PR #163 review). A rule's note goes on a new
+  command for it, on its Ok, and when a later list shows the rule changed
+  since the note came. Results now ride the rules feed itself (one ordered
+  subscriber), so the list a command changed, which the bridge publishes
+  before it answers, is applied before the note is taken against it. A new
+  bridge session clears every wait and note: those results can't come (a
+  result goes only to the asking connection), and the resynced list shows
+  the truth; a click in the moment before the new session's first message
+  loses its note that way, accepted. A send that never left the GUI leaves
+  no note, as before. No new roles. Probe mutants all killed: note on any
+  rule, no refresh on result, any id counts, note kept on send, a send or
+  any Ok clearing every note, no drop on a rule change, header without the
+  rule. Session clearing is unit-tested only (the probe has no session).
+- Refused enabled temporary rule: `replaceUserRule` stores it before
+  parsing its duration, which could fail after the rule applied; every
+  enabled rule the bridge sends passes `rule_policy::profile::
+  editor_duration`, so that stays unreachable (documented in `refused.rs`).
+- Curated turn-off: `toggle_curated` has no notification to classify; a
+  test checks `IfRefused::of` says applied-not-saved for every entry
+  turned off.
 - #151: pin-only. The old probe passed 30/30 idle, 30/30 under 44 CPU
   burners, and 30/30 with a 1 ms tick; the gated one passes the same.
 - Not done: rename's first-step refusal of an `always` new rule, and

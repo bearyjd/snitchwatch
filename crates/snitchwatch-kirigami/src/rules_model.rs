@@ -21,7 +21,7 @@ use cxx_qt_lib::{
     QByteArray, QHash, QHashPair_i32_QByteArray, QList, QModelIndex, QString, QVariant,
 };
 
-use crate::rules::command_notes::CommandNotes;
+use crate::rules::command_notes::{CommandNotes, RuleState};
 use crate::rules::hits::{RowHits, RuleHitsView};
 use crate::rules::insights::row::row_insights;
 use crate::rules::insights::shadow::Analysis;
@@ -113,11 +113,13 @@ pub mod qobject {
         /// (`rules::insights::state`): `idle`, `running`, `done`, `tooMany`
         /// or `stale`, with the count of each kind of finding.
         #[qproperty(QString, analysis_json, cxx_name = "analysisJson")]
-        /// What the bridge said about the page's last toggle or delete
-        /// (#152), as plain text; "" after an Ok, and while one is sent.
-        #[qproperty(QString, command_note, cxx_name = "commandNote")]
-        /// The rule `commandNote` is about.
-        #[qproperty(QString, command_note_rule, cxx_name = "commandNoteRule")]
+        /// What the bridge said about the page's toggles and deletes
+        /// (#152), per rule (`rules::command_notes`), as a JSON array of
+        /// `{rule, shown, text}`, oldest first. Plain text.
+        #[qproperty(QString, command_notes_json, cxx_name = "commandNotesJson")]
+        /// The same notes as plain-text lines, "<rule>: <note>"; "" when
+        /// there are none.
+        #[qproperty(QString, command_notes_text, cxx_name = "commandNotesText")]
         type RulesModel = super::RulesModelRust;
 
         /// A result for one of the page's toggles or deletes arrived (Ok or
@@ -258,8 +260,8 @@ pub struct RulesModelRust {
     says_listed: bool,
     analysis: AnalysisState,
     analysis_json: QString,
-    command_note: QString,
-    command_note_rule: QString,
+    command_notes_json: QString,
+    command_notes_text: QString,
     /// The page's toggles and deletes waiting for a result (#152).
     commands: CommandNotes,
 }
@@ -422,19 +424,27 @@ impl qobject::RulesModel {
     }
 
     /// Emit the command about rule `name` that `message` builds under a new
-    /// request id, waiting for its result; the last note goes. Returns the
-    /// id.
+    /// request id, waiting for its result; that rule's note goes. Returns
+    /// the id.
     fn send_command(
         mut self: Pin<&mut Self>,
         name: &str,
         message: impl FnOnce(String) -> ClientMessage,
     ) -> QString {
         let request_id = crate::rule_commands::next_request_id("rules");
-        self.as_mut()
+        let shown = self
+            .store
+            .find_by_name(name)
+            .map_or(name, |rule| rule.shown_name())
+            .to_string();
+        let forgot = self
+            .as_mut()
             .rust_mut()
             .commands
-            .sent(request_id.clone(), name.to_string());
-        self.as_mut().set_command_note(QString::default());
+            .sent(request_id.clone(), name, &shown);
+        if forgot {
+            self.as_mut().publish_command_notes();
+        }
         self.emit_client(message(request_id.clone()));
         QString::from(&request_id)
     }
@@ -482,7 +492,7 @@ impl qobject::RulesModel {
         crate::bridge_dispatch::spawn_feed(
             &handles,
             "RulesModel",
-            crate::bridge_dispatch::interests_rules,
+            interests_rules_and_results,
             move |connection_id, _msg, json| {
                 let session_handles = session_handles.clone();
                 let _ = qt_thread.queue(move |mut qobject| {
@@ -494,22 +504,46 @@ impl qobject::RulesModel {
                 });
             },
         );
-        // Results go only to the asking connection, from the live session.
-        crate::result_feed::spawn_result_feed(
-            self.qt_thread(),
-            "RulesModel",
-            Self::apply_server_message,
-        );
     }
+}
+
+/// The rules feed's messages, and rule command results: one ordered feed, so
+/// the list a command changed (the bridge publishes it before it answers)
+/// is applied before the result's note is taken against it.
+fn interests_rules_and_results(msg: &ServerMessage) -> bool {
+    crate::bridge_dispatch::interests_rules(msg)
+        || crate::rule_commands::interests_rule_results(msg)
 }
 
 impl qobject::RulesModel {
     /// A message from bridge session `connection_id` is about to be applied:
-    /// hit counts an earlier session sent are forgotten first.
+    /// hit counts, waits and notes of an earlier session are forgotten first.
     fn note_session(mut self: Pin<&mut Self>, connection_id: u64) {
+        if self
+            .as_mut()
+            .rust_mut()
+            .commands
+            .note_session(connection_id)
+        {
+            self.as_mut().publish_command_notes();
+        }
         if self.as_mut().rust_mut().hits.note_session(connection_id) {
             self.refresh_hits();
         }
+    }
+
+    /// The rule `name` as the list shows it, to tell a later change.
+    fn rule_state(store: &RulesStore, name: &str) -> RuleState {
+        store
+            .find_by_name(name)
+            .and_then(|rule| serde_json::to_string(rule).ok())
+    }
+
+    fn publish_command_notes(mut self: Pin<&mut Self>) {
+        let json = serde_json::to_string(self.commands.notes()).unwrap_or_default();
+        let text = self.commands.text();
+        self.as_mut().set_command_notes_json(QString::from(&json));
+        self.as_mut().set_command_notes_text(QString::from(&text));
     }
 
     /// Re-reads the hit-count roles of every row and the summary.
@@ -587,10 +621,16 @@ impl qobject::RulesModel {
 
     pub fn apply_server_message(mut self: Pin<&mut Self>, msg: ServerMessage) {
         if let ServerMessage::RuleCommandResult { .. } = msg {
-            if let Some(note) = self.as_mut().rust_mut().commands.on_message(&msg) {
-                self.as_mut()
-                    .set_command_note_rule(QString::from(&note.rule));
-                self.as_mut().set_command_note(QString::from(&note.text));
+            let finished = {
+                let this = self.as_mut().rust_mut().get_mut();
+                let store = &this.store;
+                this.commands
+                    .on_message(&msg, |name| Self::rule_state(store, name))
+            };
+            if let Some(changed) = finished {
+                if changed {
+                    self.as_mut().publish_command_notes();
+                }
                 self.as_mut().command_finished();
             }
             return;
@@ -637,6 +677,15 @@ impl qobject::RulesModel {
         };
         self.as_mut().publish_analysis();
         if changed {
+            let dropped = {
+                let this = self.as_mut().rust_mut().get_mut();
+                let store = &this.store;
+                this.commands
+                    .rules_changed(|name| Self::rule_state(store, name))
+            };
+            if dropped {
+                self.as_mut().publish_command_notes();
+            }
             let n = self.store.len() as i32;
             self.as_mut().set_count(n);
             let flagged = self.store.legacy_host_only_count() as i32;

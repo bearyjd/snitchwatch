@@ -8,6 +8,12 @@
 //!   changed") nor `OkWithNote` (read as done). The list stays as it was
 //!   and nothing on a row records it (#120 item 7, owner decision);
 //! - a temporary rule has no file, so only compiling failed: `Rejected`.
+//!   (`replaceUserRule` stores an enabled timed rule before it parses its
+//!   duration for the expiry timer, which can fail too; unreachable from
+//!   here: every enabled rule the bridge sends passes
+//!   `rule_policy::profile::editor_duration` (the `Editor` profile for an
+//!   add or edit, `enable_problems` for a turn-on), whose timed durations
+//!   are Go `ParseDuration` input within 10 s..1 year.)
 
 use snitchwatch_bridge::cache::rules::{applied_but_not_saved, may_have_applied};
 use snitchwatch_bridge::ws_messages::RuleCommandOutcome;

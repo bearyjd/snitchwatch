@@ -325,7 +325,8 @@ impl RuleCommands {
         tokio::spawn(async move {
             let outcome = sent_outcome(sent, timeout).await;
             // A turn-off took it off in memory (#154; recommended rules are
-            // `always`), and the cache shows it off.
+            // `always`, which `IfRefused::of` confirms for every entry in
+            // `curated_toggle_tests`), and the cache shows it off.
             if !enabled {
                 let outcome = IfRefused::AppliedNotSaved.answer(outcome, TURNED_OFF_FILE_KEPT);
                 answer.finish(outcome).await;

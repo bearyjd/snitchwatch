@@ -1,22 +1,29 @@
 //! The results of the Rules page's own rule commands (#152): its
 //! inspector's switch and its Delete buttons send a request id, and the
-//! bridge's `RuleCommandResult` for it leaves a note for the page, without
+//! bridge's `RuleCommandResult` for it leaves a note on its rule, without
 //! Qt. `crate::rules_model` binds it to QML.
 //!
-//! Only results this page is waiting for count. Results reach it only from
-//! the live bridge session (`crate::result_feed`), and request ids are
-//! unique in the process, so a result for a request sent to an earlier
-//! session can't arrive; its id just ages out of the bounded wait list.
+//! Notes are kept per rule (PR #163 review): a command or result for one
+//! rule never clears another's note. A rule's note goes when a new command
+//! for that rule is sent, when its result is an Ok, and when the rule list
+//! shows the rule changed since the note came (it may contradict it). The
+//! list's change for the command itself arrives first: the bridge publishes
+//! it before it answers, on the same ordered feed. A new bridge session
+//! drops every note and every wait: a result goes only to the connection
+//! that asked, and the resynced list shows what the daemon holds.
 //! Every note is plain text.
 
 use std::collections::VecDeque;
 
+use serde::Serialize;
 use snitchwatch_bridge::ws_messages::ServerMessage;
 
 use super::editor_view::{finished_with, Wording};
 
 /// Most requests waited for at once; the oldest is forgotten past this.
 pub const MAX_WAITING: usize = 32;
+/// Most notes kept; the oldest goes past this.
+pub const MAX_NOTES: usize = 16;
 
 /// What a Rules page result says: an Ok says nothing (the list shows it),
 /// an `OkWithNote` its note, an `Unsure` its reason.
@@ -29,31 +36,61 @@ pub const RULES_PAGE_WORDING: Wording = Wording {
     note_after_saved: false,
 };
 
-/// A note and the rule it is about.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Note {
-    pub rule: String,
-    pub text: String,
+/// A rule as the list shows it now (`None`: not listed), to tell whether
+/// it changed since a note came.
+pub type RuleState = Option<String>;
+
+/// A request waiting for its result.
+#[derive(Debug)]
+struct Waiting {
+    request_id: String,
+    rule: String,
+    shown: String,
 }
 
-/// The requests the Rules page is waiting for: their ids and rule names.
+/// A rule's note.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Note {
+    /// The rule's name (its identity).
+    pub rule: String,
+    /// Its name as shown (`row_store::Rule::shown_name`).
+    pub shown: String,
+    pub text: String,
+    #[serde(skip)]
+    seen: RuleState,
+}
+
+/// The requests the Rules page is waiting for, and its notes.
 #[derive(Debug, Default)]
 pub struct CommandNotes {
-    waiting: VecDeque<(String, String)>,
+    waiting: VecDeque<Waiting>,
+    notes: Vec<Note>,
+    session: Option<u64>,
 }
 
 impl CommandNotes {
-    /// `request_id`, about rule `rule`, was sent.
-    pub fn sent(&mut self, request_id: String, rule: String) {
+    /// `request_id`, about rule `rule` (shown as `shown`), was sent: that
+    /// rule's note goes. Returns whether the notes changed.
+    pub fn sent(&mut self, request_id: String, rule: &str, shown: &str) -> bool {
         if self.waiting.len() >= MAX_WAITING {
             self.waiting.pop_front();
         }
-        self.waiting.push_back((request_id, rule));
+        self.waiting.push_back(Waiting {
+            request_id,
+            rule: rule.to_string(),
+            shown: shown.to_string(),
+        });
+        self.forget(rule)
     }
 
-    /// The note `message` leaves when it is the result of a request this
-    /// page is waiting for ("" for an Ok); the wait for it ends there.
-    pub fn on_message(&mut self, message: &ServerMessage) -> Option<Note> {
+    /// `Some(changed)` when `message` is the result of a request this page
+    /// is waiting for (the wait ends there), with `state` the list's rules
+    /// now; `None` otherwise.
+    pub fn on_message(
+        &mut self,
+        message: &ServerMessage,
+        state: impl Fn(&str) -> RuleState,
+    ) -> Option<bool> {
         let ServerMessage::RuleCommandResult {
             request_id,
             outcome,
@@ -61,116 +98,71 @@ impl CommandNotes {
         else {
             return None;
         };
-        let at = self.waiting.iter().position(|(id, _)| id == request_id)?;
-        let (_, rule) = self.waiting.remove(at)?;
-        Some(Note {
-            rule,
-            text: finished_with(outcome, &RULES_PAGE_WORDING).status,
-        })
+        let at = self
+            .waiting
+            .iter()
+            .position(|waiting| &waiting.request_id == request_id)?;
+        let waiting = self.waiting.remove(at)?;
+        let text = finished_with(outcome, &RULES_PAGE_WORDING).status;
+        let forgot = self.forget(&waiting.rule);
+        if text.is_empty() {
+            return Some(forgot);
+        }
+        if self.notes.len() >= MAX_NOTES {
+            self.notes.remove(0);
+        }
+        self.notes.push(Note {
+            seen: state(&waiting.rule),
+            rule: waiting.rule,
+            shown: waiting.shown,
+            text,
+        });
+        Some(true)
+    }
+
+    /// The rule list changed (`state`: its rules now): notes on rules that
+    /// changed since go. Returns whether any did.
+    pub fn rules_changed(&mut self, state: impl Fn(&str) -> RuleState) -> bool {
+        let before = self.notes.len();
+        self.notes.retain(|note| state(&note.rule) == note.seen);
+        self.notes.len() != before
+    }
+
+    /// A message from bridge session `connection_id`: a new session drops
+    /// every wait and note. Returns whether the notes changed.
+    pub fn note_session(&mut self, connection_id: u64) -> bool {
+        let new = self.session.is_some_and(|id| id != connection_id);
+        self.session = Some(connection_id);
+        if !new {
+            return false;
+        }
+        self.waiting.clear();
+        let had = !self.notes.is_empty();
+        self.notes.clear();
+        had
+    }
+
+    /// The notes, oldest first.
+    pub fn notes(&self) -> &[Note] {
+        &self.notes
+    }
+
+    /// The notes as one plain-text line each, "<rule>: <note>".
+    pub fn text(&self) -> String {
+        self.notes
+            .iter()
+            .map(|note| format!("{}: {}", note.shown, note.text))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn forget(&mut self, rule: &str) -> bool {
+        let before = self.notes.len();
+        self.notes.retain(|note| note.rule != rule);
+        self.notes.len() != before
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use snitchwatch_bridge::rule_policy::RuleProblem;
-    use snitchwatch_bridge::ws_messages::RuleCommandOutcome;
-
-    fn result(id: &str, outcome: RuleCommandOutcome) -> ServerMessage {
-        ServerMessage::RuleCommandResult {
-            request_id: id.into(),
-            outcome,
-        }
-    }
-
-    #[test]
-    fn each_awaited_result_leaves_its_note_once() {
-        let mut notes = CommandNotes::default();
-        notes.sent("rules-1".into(), "100-x".into());
-        let note = RuleCommandOutcome::OkWithNote {
-            note: "may come back on".into(),
-        };
-        assert_eq!(
-            notes.on_message(&result("rules-1", note.clone())),
-            Some(Note {
-                rule: "100-x".into(),
-                text: "may come back on".into()
-            })
-        );
-        assert_eq!(notes.on_message(&result("rules-1", note)), None, "twice");
-        notes.sent("rules-2".into(), "100-x".into());
-        assert_eq!(
-            notes
-                .on_message(&result("rules-2", RuleCommandOutcome::Ok))
-                .map(|note| note.text),
-            Some(String::new())
-        );
-    }
-
-    #[test]
-    fn a_result_nobody_here_asked_for_is_ignored() {
-        let mut notes = CommandNotes::default();
-        notes.sent("rules-1".into(), "100-x".into());
-        let editor = result("edit-1", RuleCommandOutcome::Ok);
-        assert_eq!(notes.on_message(&editor), None);
-        assert_eq!(
-            notes.on_message(&ServerMessage::SetRules { rules: vec![] }),
-            None
-        );
-    }
-
-    #[test]
-    fn every_outcome_says_what_happened_in_plain_words() {
-        let cases = [
-            (
-                RuleCommandOutcome::Rejected {
-                    reason: "bad".into(),
-                },
-                "Not changed: bad",
-            ),
-            (
-                RuleCommandOutcome::Refused {
-                    problems: vec![RuleProblem {
-                        path: "name".into(),
-                        reason: "busy".into(),
-                    }],
-                },
-                "Not sent: ",
-            ),
-            (
-                RuleCommandOutcome::Unsure {
-                    reason: "may or may not have applied".into(),
-                },
-                "may or may not have applied",
-            ),
-            (RuleCommandOutcome::Timeout, RULES_PAGE_WORDING.unknown),
-            (RuleCommandOutcome::NoDaemon, RULES_PAGE_WORDING.no_daemon),
-        ];
-        for (outcome, starts) in cases {
-            let mut notes = CommandNotes::default();
-            notes.sent("r".into(), "100-x".into());
-            let note = notes
-                .on_message(&result("r", outcome.clone()))
-                .unwrap()
-                .text;
-            assert!(note.starts_with(starts), "{outcome:?}: {note}");
-            assert!(!note.is_empty(), "{outcome:?}");
-        }
-    }
-
-    #[test]
-    fn the_wait_list_is_bounded() {
-        let mut notes = CommandNotes::default();
-        for n in 0..=MAX_WAITING {
-            notes.sent(format!("r{n}"), "100-x".into());
-        }
-        assert_eq!(
-            notes.on_message(&result("r0", RuleCommandOutcome::Ok)),
-            None
-        );
-        let last = format!("r{MAX_WAITING}");
-        assert!(notes
-            .on_message(&result(&last, RuleCommandOutcome::Ok))
-            .is_some());
-    }
-}
+#[path = "command_notes_tests.rs"]
+mod tests;

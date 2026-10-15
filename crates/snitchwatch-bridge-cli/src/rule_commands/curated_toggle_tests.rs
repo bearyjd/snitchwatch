@@ -267,3 +267,22 @@ async fn a_refused_turn_off_says_the_rule_may_come_back_on() {
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(seen.lock().unwrap().len(), 1, "a turn-off is never undone");
 }
+
+/// `toggle_curated` answers a refused turn-off as applied, not saved,
+/// without the notification it sent: the same predicate the cache's
+/// `apply_refused` uses must say so for every recommended rule turned off.
+#[test]
+fn every_recommended_turn_off_is_applied_but_not_saved_when_refused() {
+    for entry in entries() {
+        let off = super::steps::change(Rule {
+            enabled: false,
+            ..entry.rule()
+        });
+        assert_eq!(
+            IfRefused::of(&off),
+            IfRefused::AppliedNotSaved,
+            "{}",
+            entry.id
+        );
+    }
+}
