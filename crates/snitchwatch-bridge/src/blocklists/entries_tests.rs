@@ -417,6 +417,26 @@ impl RuleSink for Accepts {
     }
 }
 
+/// [`Accepts`], and it keeps the ids it was asked to take off the daemon.
+#[derive(Default)]
+struct RecordsRemovals(std::sync::Mutex<Vec<String>>);
+
+#[async_trait]
+impl RuleSink for RecordsRemovals {
+    async fn replace_blocklist_rules(
+        &self,
+        _list_id: &str,
+        _hosts: Vec<String>,
+    ) -> Result<(), NotInstalled> {
+        Ok(())
+    }
+
+    async fn remove_blocklist_rules(&self, list_id: &str) -> Result<(), NotInstalled> {
+        self.0.lock().unwrap().push(list_id.to_string());
+        Ok(())
+    }
+}
+
 /// Only lists past the enforcement limit can be past the saved limit (it is
 /// the larger), so clearing costs browsing, never blocking.
 #[tokio::test]
@@ -453,16 +473,21 @@ async fn a_list_the_daemon_enforces_is_never_cleared() {
 #[tokio::test]
 async fn clearing_a_list_the_daemon_held_takes_it_off() {
     let (mgr, _) = manager_of(&[("a", 3), ("b", 3)], 10);
-    let mgr = mgr
-        .with_rule_sink(Arc::new(Accepts))
-        .with_aggregate_cap(100);
+    let sink = Arc::new(RecordsRemovals::default());
+    let mgr = mgr.with_rule_sink(sink.clone()).with_aggregate_cap(100);
     mgr.reconcile().await;
     assert!(matches!(
         mgr.enforcement("b"),
         Enforcement::RuleInstalled { .. }
     ));
+    assert!(sink.0.lock().unwrap().is_empty());
     mgr.refresh_now("a").await.unwrap(); // 10: b no longer fits
     assert!(is_cleared(&mgr, "b"));
+    assert_eq!(
+        *sink.0.lock().unwrap(),
+        ["b"],
+        "the daemon was told to drop b's rule, and only b's"
+    );
     assert!(matches!(
         mgr.enforcement("b"),
         Enforcement::NotEnforced { .. }

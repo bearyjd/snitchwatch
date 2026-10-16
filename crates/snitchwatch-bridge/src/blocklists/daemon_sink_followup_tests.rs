@@ -90,6 +90,37 @@ async fn a_cleanup_retry_with_no_verified_kinds_deletes_nothing() {
     assert!(h.dir.has_list(&list, ListKind::Ips));
 }
 
+/// #109: a blocklist-named rule Snitchwatch didn't make is left alone and
+/// warned about once per name and run; ours are never warned about.
+#[tokio::test]
+async fn a_foreign_blocklist_named_rule_is_left_and_flagged_once() {
+    let h = Harness::new().connect(Daemon::Accept, Vec::new());
+    let sink = h.sink();
+    let foreign = |name: &str| Rule {
+        name: name.into(),
+        action: "allow".into(),
+        ..Rule::default()
+    };
+    let mine = h.bridge_rule(ADS, ListKind::Domains);
+
+    assert!(!sink.ours(&foreign("z00-blocklist:x:domains")));
+    assert!(sink.first_foreign(&foreign("z00-blocklist:y:domains")));
+    assert!(
+        !sink.first_foreign(&foreign("z00-blocklist:y:domains")),
+        "once"
+    );
+    assert!(
+        !sink.first_foreign(&foreign("z00-blocklist:x:domains")),
+        "already flagged by ours()"
+    );
+    assert!(
+        sink.first_foreign(&foreign("z00-blocklist:z:domains")),
+        "another name"
+    );
+    assert!(sink.ours(&mine));
+    assert!(!sink.first_foreign(&mine), "ours are never flagged");
+}
+
 // --- Quick unsubscribe, then resubscribe (issue #73) ---------------------------
 //
 // opensnitchd reloads a list path at most every 30 s and clears a list whose

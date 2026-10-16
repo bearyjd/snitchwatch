@@ -243,7 +243,8 @@ Kirigami.ScrollablePage {
             objectName: "notEnforcedBanner"
             Layout.fillWidth: true
             type: Kirigami.MessageType.Warning
-            visible: page.anyNotEnforced
+            // Not beside the unreadable-store warning, which says why.
+            visible: page.anyNotEnforced && !page.storageUnreadable
             text: "Some blocklists aren't confirmed to be blocking. Open a list to see why."
         }
         Kirigami.InlineMessage {

@@ -225,7 +225,8 @@ private, CGNAT, benchmarking, multicast or reserved networks are never blocked, 
 past 2,000,000 hosts in total (in subscription order) get no rule.
 
 - A per-user bridge saves subscriptions but installs **no** blocklist rule:
-  root opensnitchd would read list files any of your apps could replace.
+  root opensnitchd would read list files any of your apps could replace. The
+  Blocklists page's per-user banner says so once it has a list.
 
 - A list reads "Rule installed" only once opensnitchd answered `OK` to its
   rule(s) or already holds them unchanged; anything else (no daemon, a

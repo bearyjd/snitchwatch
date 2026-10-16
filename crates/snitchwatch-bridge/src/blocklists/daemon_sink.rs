@@ -123,20 +123,24 @@ impl DaemonRuleSink {
     /// [`made_by_bridge`], warning once per name and run about a rule under
     /// a blocklist name that Snitchwatch didn't make.
     fn ours(&self, rule: &Rule) -> bool {
-        let made = made_by_bridge(rule);
-        let first = !made
-            && self
-                .warned
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .insert(rule.name.clone());
-        if first {
+        if self.first_foreign(rule) {
             warn!(
                 name_len = rule.name.len(),
                 "leaving a blocklist-named rule Snitchwatch didn't make"
             );
         }
-        made
+        made_by_bridge(rule)
+    }
+
+    /// Whether `rule` is one Snitchwatch didn't make and this is the first
+    /// time this run it is seen (the warning is once per name).
+    fn first_foreign(&self, rule: &Rule) -> bool {
+        !made_by_bridge(rule)
+            && self
+                .warned
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(rule.name.clone())
     }
 
     pub fn with_timeout(mut self, timeout: Duration) -> Self {

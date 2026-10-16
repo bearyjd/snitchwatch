@@ -238,6 +238,9 @@ impl BlocklistsManager {
             {
                 Ok(true) => {}
                 Ok(false) => continue,
+                // Logged and skipped: this walk runs after every save and at
+                // start, so a store that recovers is cleared on the next pass.
+                // While the disk fails, nothing else can be saved either.
                 Err(e) => {
                     error!(%id, error = %e, "couldn't clear a list past the saved-hosts limit");
                     continue;
