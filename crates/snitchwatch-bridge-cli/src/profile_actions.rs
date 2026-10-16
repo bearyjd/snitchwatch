@@ -1,10 +1,11 @@
 //! Profile messages from GUIs (issue #46): handled by the profile manager,
 //! which only changes its store and asks for an enforcement pass, so the
-//! pump never waits on the daemon here. An `AddProfileRule` with a valid
-//! `request_id` gets one `RuleCommandResult` (P2.1's rule editor, in its
-//! profile mode): ok once the rule is saved to the profile (installing it
-//! is the enforcer's, shown as its status), or refused with the profile
-//! policy's plain-text problems.
+//! pump never waits on the daemon here. An `AddProfileRule`, `CreateProfile`
+//! or `UpdateProfile` with a valid `request_id` gets one `RuleCommandResult`
+//! (P2.1's rule editor, in its profile mode; the Profiles page's form): ok
+//! once it is saved to the profile (installing a rule is the enforcer's,
+//! shown as its status), or refused with the profile policy's plain-text
+//! problems.
 
 use std::sync::Arc;
 
@@ -21,18 +22,27 @@ use crate::replier::Replier;
 
 const GONE: &str = "This profile no longer exists.";
 const NOT_SAVED: &str = "Snitchwatch couldn't save the rule to the profile.";
+const PROFILE_NOT_SAVED: &str = "Snitchwatch couldn't save the profile.";
 
 pub(crate) async fn handle(
     mgr: Arc<ProfilesManager>,
     msg: ClientMessage,
     broadcast: &broadcast::Sender<ServerMessage>,
 ) {
-    let answer = match &msg {
+    let (asked, not_saved) = match &msg {
         ClientMessage::AddProfileRule {
-            request_id: Some(id),
-            reply,
-            ..
-        } if valid_request_id(id) => {
+            request_id, reply, ..
+        } => ((request_id, reply), NOT_SAVED),
+        ClientMessage::CreateProfile {
+            request_id, reply, ..
+        }
+        | ClientMessage::UpdateProfile {
+            request_id, reply, ..
+        } => ((request_id, reply), PROFILE_NOT_SAVED),
+        _ => ((&None, &None), NOT_SAVED),
+    };
+    let answer = match asked {
+        (Some(id), reply) if valid_request_id(id) => {
             Some((id.clone(), Replier::new(reply.clone(), broadcast.clone())))
         }
         _ => None,
@@ -41,7 +51,7 @@ pub(crate) async fn handle(
     if let Some((request_id, replier)) = answer {
         let outcome = match &result {
             Ok(_) => RuleCommandOutcome::Ok,
-            Err(e) => refusal(e),
+            Err(e) => refusal(e, not_saved),
         };
         // Answered at once, never by a task of its own.
         replier.send_now(ServerMessage::RuleCommandResult {
@@ -54,11 +64,11 @@ pub(crate) async fn handle(
     }
 }
 
-fn refusal(error: &anyhow::Error) -> RuleCommandOutcome {
+fn refusal(error: &anyhow::Error, not_saved: &str) -> RuleCommandOutcome {
     let problems = match error.downcast_ref::<ProfilesError>() {
         Some(ProfilesError::Refused(problems)) => problems.clone(),
         Some(ProfilesError::UnknownProfile(_)) => problem(GONE),
-        _ => problem(NOT_SAVED),
+        _ => problem(not_saved),
     };
     RuleCommandOutcome::Refused { problems }
 }
@@ -121,5 +131,55 @@ mod tests {
         let rules = mgr.store().get_profile("home").unwrap().unwrap().rules;
         assert_eq!(rules.len(), 1);
         assert_eq!(rules[0].data, "y.example");
+    }
+
+    fn create(id: &str, request_id: Option<&str>) -> ClientMessage {
+        ClientMessage::CreateProfile {
+            id: id.into(),
+            name: "Home".into(),
+            network_matchers: vec![],
+            request_id: request_id.map(str::to_string),
+            reply: None,
+        }
+    }
+
+    fn update(id: &str, request_id: Option<&str>) -> ClientMessage {
+        ClientMessage::UpdateProfile {
+            id: id.into(),
+            name: "Renamed".into(),
+            network_matchers: vec![],
+            request_id: request_id.map(str::to_string),
+            reply: None,
+        }
+    }
+
+    fn refused_reasons(outcome: Option<RuleCommandOutcome>) -> Vec<String> {
+        match outcome {
+            Some(RuleCommandOutcome::Refused { problems }) => {
+                problems.into_iter().map(|p| p.reason).collect()
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refused_create_or_update_is_answered_with_the_reason() {
+        let mgr = Arc::new(ProfilesManager::new(Arc::new(
+            ProfileStore::open_in_memory().unwrap(),
+        )));
+        let (tx, mut rx) = broadcast::channel(16);
+        handle(mgr.clone(), create("home", Some("c1")), &tx).await;
+        assert_eq!(result(&mut rx), Some(RuleCommandOutcome::Ok));
+        handle(mgr.clone(), create("home", Some("c2")), &tx).await;
+        assert!(refused_reasons(result(&mut rx))[0].contains("already exists"));
+        handle(mgr.clone(), create("bad id!", Some("c3")), &tx).await;
+        assert!(refused_reasons(result(&mut rx))[0].contains("1 to 64"));
+        handle(mgr.clone(), update("home", Some("u1")), &tx).await;
+        assert_eq!(result(&mut rx), Some(RuleCommandOutcome::Ok));
+        handle(mgr.clone(), update("gone", Some("u2")), &tx).await;
+        assert_eq!(refused_reasons(result(&mut rx)), [GONE]);
+        handle(mgr.clone(), create("work", None), &tx).await;
+        handle(mgr.clone(), update("gone", Some("bad id")), &tx).await;
+        assert_eq!(result(&mut rx), None, "no valid id, no result");
     }
 }

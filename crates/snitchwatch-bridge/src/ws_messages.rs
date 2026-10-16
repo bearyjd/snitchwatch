@@ -579,15 +579,28 @@ client_message! {
         #[serde(skip)]
         reply: Option<ReplyTo>,
     },
+    /// `request_id` (optional; see [`valid_request_id`]) asks for a
+    /// [`ServerMessage::RuleCommandResult`]: ok, or refused with the
+    /// reason (an invalid or taken id).
     CreateProfile {
         id: String,
         name: String,
         network_matchers: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+        #[serde(skip)]
+        reply: Option<ReplyTo>,
     },
+    /// `request_id` as for [`ClientMessage::CreateProfile`]; refused when
+    /// the profile no longer exists.
     UpdateProfile {
         id: String,
         name: String,
         network_matchers: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+        #[serde(skip)]
+        reply: Option<ReplyTo>,
     },
     DeleteProfile {
         id: String,

@@ -48,6 +48,7 @@ Kirigami.ScrollablePage {
     // older bridge all mean "kept in memory only".
     readonly property bool storagePersistent: page.model ? page.model.storagePersistent : false
     readonly property string storageReason: page.model ? page.model.storageReason : ""
+    readonly property string profileNote: page.model ? page.model.profileNote : ""
     // Whether the bridge applies the active profile's rules (issue #46 Part
     // 2); not until it says so, and never for an older one.
     readonly property bool appliesRules: page.model ? page.model.appliesRules : false
@@ -142,6 +143,17 @@ Kirigami.ScrollablePage {
             textFormat: Text.PlainText
             wrapMode: Text.Wrap
             text: "Details: " + page.storageReason
+        }
+        // Why the last create/rename/matcher change was refused (#116). The
+        // reason comes from the bridge, so it sits in a PlainText label.
+        Controls.Label {
+            objectName: "profileNote"
+            Layout.fillWidth: true
+            Layout.margins: Kirigami.Units.smallSpacing
+            visible: page.profileNote.length > 0
+            textFormat: Text.PlainText
+            wrapMode: Text.Wrap
+            text: page.profileNote
         }
     }
 
