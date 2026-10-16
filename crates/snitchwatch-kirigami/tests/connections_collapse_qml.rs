@@ -6,7 +6,8 @@
 //!     with a count and last-seen time; a pending prompt of the same flow
 //!     and an event with a different verdict stay rows of their own;
 //!   * #55: after "From now" a repeat starts a new row instead of hiding in
-//!     one from before the cut.
+//!     one from before the cut;
+//!   * #114.3: a remembered answer's event folds into its Ask row's count.
 //!
 //! One probe, steps run one per timer tick. Failures are collected and
 //! thrown together. Headless: `QT_QPA_PLATFORM=offscreen`.
@@ -129,6 +130,21 @@ Window {
                          "a repeat after From now hid in a row from before it");
             probe.expect(probe.repeatText("event-1").indexOf("×3 ") === 0,
                          "From now changed the earlier count: " + probe.repeatText("event-1"));
+            // #114.3: a remembered answer's event folds into its Ask row.
+            const rule = "snitchwatch-allow-twin.example-443-ppython3";
+            probe.insert([Object.assign(probe.row("ask-7", null, probe.t0 + 20000),
+                                        { dstHost: "twin.example" })]);
+            model.applyServerMessageJson(JSON.stringify({ action: "updateConnectionRows", rows: [
+                Object.assign(probe.row("ask-7", "allow", probe.t0 + 20000),
+                              { dstHost: "twin.example", matchedRule: rule })] }));
+            probe.insert([Object.assign(probe.row("event-8", "allow", probe.t0 + 25000),
+                                        { dstHost: "twin.example", matchedRule: rule })]);
+        },
+        function () {
+            probe.expect(probe.delegateFor("event-8") === null, "the twin got its own row");
+            const expected = "×2 · last seen " + Qt.formatTime(new Date(probe.t0 + 25000), "hh:mm:ss");
+            probe.expect(probe.repeatText("ask-7") === expected,
+                         "twin label: '" + probe.repeatText("ask-7") + "' vs '" + expected + "'");
         }
     ]
 

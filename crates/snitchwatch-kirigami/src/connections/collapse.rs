@@ -20,10 +20,25 @@
 //!   rows with different verdicts, rules or destinations never merge.
 //! - An update that changes a row's key releases it (and, for a
 //!   representative, every row it absorbed) as separate rows again.
+//!
+//! Remembered-answer twins (#114.3, a heuristic): for an answer other than
+//! "once" the daemon also reports the asked connection as an event, under
+//! the rule the answer made, so it was listed twice. Exact pairing needs the
+//! pid and source port, which `ConnectionRow` does not carry (adding them,
+//! or dropping the event in the bridge, is possible future bridge work). So
+//! the first event that matches a decided Ask row on the whole
+//! [`CollapseKey`] (same action, the answer's own rule name, same program,
+//! host, IP, port and protocol) and starts within [`TWIN_WINDOW_MS`] of the
+//! Ask folds into that Ask row: it is counted there, not hidden. If the
+//! real twin never comes, the app's next connection under that rule is the
+//! one folded: still counted, never lost, never across verdicts. At most
+//! one event folds into an Ask row.
 
 use std::collections::HashMap;
 
+use snitchwatch_bridge::deferred_answers::ANSWER_TIMEOUT;
 use snitchwatch_bridge::translator::connection::EVENT_ROW_PREFIX;
+use snitchwatch_bridge::translator::verdict::is_answer_name;
 use snitchwatch_bridge::ws_messages::{AutoAnswer, ConnectionRow, ServerMessage};
 
 use super::outcome::is_pending;
@@ -31,6 +46,11 @@ use super::outcome::is_pending;
 /// How close (ms) a repeat must be to the last occurrence of its key to join
 /// that row (owner decision on #55: 10 s).
 pub const COLLAPSE_WINDOW_MS: i64 = 10_000;
+
+/// How long after an Ask row's start the daemon's event for its answer may
+/// come (#114.3): the bridge answers by itself after `ANSWER_TIMEOUT`, plus
+/// [`COLLAPSE_WINDOW_MS`] of slack for the daemon's report.
+pub const TWIN_WINDOW_MS: i64 = ANSWER_TIMEOUT.as_millis() as i64 + COLLAPSE_WINDOW_MS;
 
 /// What two rows must share to collapse: the app, the destination, the port
 /// and the verdict (owner's list), made stricter with the rule, protocol and
@@ -132,6 +152,8 @@ pub struct RowCollapse {
     open: HashMap<CollapseKey, String>,
     /// Absorbed row id -> its representative's id.
     member_of: HashMap<String, String>,
+    /// Decided Ask rows that may still take their twin, by id.
+    asks: HashMap<String, ConnectionRow>,
 }
 
 /// Messages produced while rewriting one incoming message.
@@ -237,10 +259,19 @@ impl RowCollapse {
             return;
         }
         if !collapsible(&row) {
+            self.note_ask(&row);
             out.inserted.push(row);
             return;
         }
         let key = CollapseKey::of(&row);
+        // Asks long past their window can no longer take a twin.
+        let at = row.started_at_ms;
+        self.asks
+            .retain(|_, ask| ask.started_at_ms + 2 * TWIN_WINDOW_MS >= at);
+        if let Some(ask_id) = self.twin_ask(&key, row.started_at_ms) {
+            self.fold_twin(ask_id, row, out);
+            return;
+        }
         let open = self.open.get(&key).cloned();
         if let Some(rep_id) = open {
             if let Some(rep) = self.reps.get_mut(&rep_id) {
@@ -283,9 +314,11 @@ impl RowCollapse {
             return true;
         }
         let Some(rep) = self.reps.get_mut(&row.id) else {
+            self.note_ask(row);
             return false;
         };
-        if collapsible(row) && CollapseKey::of(row) == rep.key {
+        let takes_part = collapsible(row) || !is_event_row_id(&row.id);
+        if takes_part && CollapseKey::of(row) == rep.key {
             rep.row = row.clone();
         } else if let Some(rep) = self.reps.remove(&row.id) {
             self.close(&rep.key, &row.id);
@@ -299,6 +332,7 @@ impl RowCollapse {
     }
 
     fn remove(&mut self, id: String, out: &mut Out) {
+        self.asks.remove(&id);
         if let Some(rep_id) = self.member_of.remove(&id) {
             if let Some(rep) = self.reps.get_mut(&rep_id) {
                 rep.members.retain(|m| m.id != id);
@@ -329,6 +363,47 @@ impl RowCollapse {
             }
         }
         out.removed.push(id);
+    }
+
+    /// Track `row` as an Ask row that may take a twin, or stop tracking it.
+    fn note_ask(&mut self, row: &ConnectionRow) {
+        let waits = !is_event_row_id(&row.id)
+            && row.action.is_some()
+            && !is_pending(row)
+            && row.matched_rule.as_deref().is_some_and(is_answer_name);
+        if waits {
+            self.asks.insert(row.id.clone(), row.clone());
+        } else {
+            self.asks.remove(&row.id);
+        }
+    }
+
+    /// The decided Ask row an event of `key` starting at `at` is the twin of.
+    fn twin_ask(&self, key: &CollapseKey, at: i64) -> Option<String> {
+        self.asks
+            .values()
+            .filter(|ask| {
+                at >= ask.started_at_ms
+                    && at <= ask.started_at_ms + TWIN_WINDOW_MS
+                    && CollapseKey::of(ask) == *key
+            })
+            .min_by(|a, b| (a.started_at_ms, &a.id).cmp(&(b.started_at_ms, &b.id)))
+            .map(|ask| ask.id.clone())
+    }
+
+    /// Fold `twin` into Ask row `ask_id` (its only twin).
+    fn fold_twin(&mut self, ask_id: String, twin: ConnectionRow, out: &mut Out) {
+        let Some(ask) = self.asks.remove(&ask_id) else {
+            return;
+        };
+        let rep = self
+            .reps
+            .entry(ask_id.clone())
+            .or_insert_with(|| Representative::new(ask));
+        rep.last_seen_ms = rep.last_seen_ms.max(twin.started_at_ms);
+        self.member_of.insert(twin.id.clone(), ask_id);
+        rep.members.push(twin);
+        out.touch(&rep.row);
     }
 
     /// Stop `id` taking repeats of `key`.
@@ -529,6 +604,148 @@ mod tests {
         );
         assert_eq!(c.repeat_count("event-1"), 2);
         assert_eq!(c.repeat_count("ask-7"), 1);
+    }
+
+    const ANSWER_RULE: &str = "snitchwatch-allow-example.com-443-ppython3";
+
+    fn ask(id: &str, at: i64, action: Option<&str>) -> ConnectionRow {
+        ConnectionRow {
+            action: action.map(str::to_string),
+            matched_rule: action.map(|_| ANSWER_RULE.to_string()),
+            ..event(id, at, "allow")
+        }
+    }
+
+    fn answer_event(id: &str, at: i64) -> ConnectionRow {
+        ConnectionRow {
+            matched_rule: Some(ANSWER_RULE.into()),
+            ..event(id, at, "allow")
+        }
+    }
+
+    fn decide(id: &str, at: i64) -> ServerMessage {
+        ServerMessage::UpdateConnectionRows {
+            rows: vec![ask(id, at, Some("allow"))],
+        }
+    }
+
+    /// #114.3: the event the daemon reports for a remembered answer folds
+    /// into the answered Ask row and is counted there.
+    #[test]
+    fn a_remembered_answer_twin_folds_into_its_ask_row() {
+        let mut c = RowCollapse::default();
+        let ids = shown(
+            &mut c,
+            vec![
+                insert(vec![ask("ask-1", 1_000, None)]),
+                decide("ask-1", 1_000),
+                insert(vec![answer_event("event-2", 1_000 + TWIN_WINDOW_MS)]),
+            ],
+        );
+        assert_eq!(ids, ["ask-1"]);
+        assert_eq!(c.repeat_count("ask-1"), 2);
+        assert_eq!(c.last_seen_ms("ask-1"), Some(1_000 + TWIN_WINDOW_MS));
+    }
+
+    /// #114.3, no twin ever arrives: the app's next genuine connection under
+    /// the rule is the one folded; it is counted, never lost; at most one
+    /// event folds into an Ask row.
+    #[test]
+    fn without_a_twin_the_next_connection_is_folded_and_counted_once() {
+        let mut c = RowCollapse::default();
+        let ids = shown(
+            &mut c,
+            vec![
+                insert(vec![ask("ask-1", 1_000, Some("allow"))]),
+                insert(vec![answer_event("event-2", 5_000)]),
+                insert(vec![answer_event("event-3", 6_000)]),
+            ],
+        );
+        assert_eq!(ids, ["ask-1", "event-3"]);
+        assert_eq!(c.repeat_count("ask-1"), 2);
+        assert_eq!(c.repeat_count("event-3"), 1);
+    }
+
+    #[test]
+    fn a_twin_never_folds_across_verdicts_rules_or_flows() {
+        let deny = ConnectionRow {
+            action: Some("deny".into()),
+            matched_rule: Some("snitchwatch-deny-example.com-443-ppython3".into()),
+            ..answer_event("event-2", 2_000)
+        };
+        let other_rule = ConnectionRow {
+            matched_rule: Some("snitchwatch-allow-other-443".into()),
+            ..answer_event("event-3", 2_000)
+        };
+        let other_port = ConnectionRow {
+            dst_port: 80,
+            ..answer_event("event-4", 2_000)
+        };
+        let not_answer = ConnectionRow {
+            matched_rule: Some("allow-python".into()),
+            ..answer_event("event-5", 2_000)
+        };
+        for twin in [deny, other_rule, other_port, not_answer] {
+            let mut c = RowCollapse::default();
+            let mut ask_row = ask("ask-1", 1_000, Some("allow"));
+            if twin.matched_rule.as_deref() == Some("allow-python") {
+                ask_row.matched_rule = twin.matched_rule.clone();
+            }
+            let ids = shown(
+                &mut c,
+                vec![insert(vec![ask_row]), insert(vec![twin.clone()])],
+            );
+            assert_eq!(ids.len(), 2, "{} folded", twin.id);
+            assert_eq!(c.repeat_count("ask-1"), 1);
+        }
+    }
+
+    #[test]
+    fn a_twin_needs_a_decided_ask_and_the_answer_window() {
+        let mut c = RowCollapse::default();
+        let ids = shown(
+            &mut c,
+            vec![
+                insert(vec![ask("ask-1", 1_000, None)]),
+                insert(vec![answer_event("event-2", 1_500)]),
+            ],
+        );
+        assert_eq!(
+            ids,
+            ["ask-1", "event-2"],
+            "a pending Ask never takes a twin"
+        );
+
+        let mut c = RowCollapse::default();
+        let ids = shown(
+            &mut c,
+            vec![
+                insert(vec![ask("ask-1", 1_000, Some("allow"))]),
+                insert(vec![answer_event("event-2", 1_000 + TWIN_WINDOW_MS + 1)]),
+                insert(vec![answer_event("event-3", 999)]),
+            ],
+        );
+        assert_eq!(ids, ["ask-1", "event-2", "event-3"], "outside the window");
+    }
+
+    #[test]
+    fn a_folded_twin_is_released_when_the_ask_row_changes() {
+        let mut c = RowCollapse::default();
+        let ids = shown(
+            &mut c,
+            vec![
+                insert(vec![ask("ask-1", 1_000, Some("allow"))]),
+                insert(vec![answer_event("event-2", 2_000)]),
+                ServerMessage::UpdateConnectionRows {
+                    rows: vec![ConnectionRow {
+                        action: Some("deny".into()),
+                        ..ask("ask-1", 1_000, Some("allow"))
+                    }],
+                },
+            ],
+        );
+        assert_eq!(ids, ["ask-1", "event-2"]);
+        assert_eq!(c.repeat_count("ask-1"), 1);
     }
 
     #[test]
