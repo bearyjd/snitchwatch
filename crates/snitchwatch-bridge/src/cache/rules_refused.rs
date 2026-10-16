@@ -187,7 +187,9 @@ impl RulesSync {
     pub(crate) fn apply_refused(&self, sent: &Notification) {
         let changed = {
             let mut cache = super::lock(&self.cache);
-            let changed = cache.apply_refused(sent);
+            let at = super::now_secs();
+            let changed = cache.apply_refused_at(sent, at);
+            self.record(&cache, super::Journaled::Refused(sent.clone(), at));
             if refused_effect(sent) == RefusedEffect::Removed {
                 self.hits
                     .forget(sent.rules.iter().map(|rule| rule.name.as_str()));

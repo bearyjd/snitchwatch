@@ -1,14 +1,26 @@
 # BlueBuild recipe — "batteries-included" Snitchwatch image.
 #
 # Bakes the OpenSnitch daemon (opensnitchd) into a custom Bazzite image and
-# enables it at boot, pre-configured to fail *closed* (DefaultAction: deny)
-# and to dial the Snitchwatch bridge's default gRPC bind (127.0.0.1:50051).
+# enables it at boot.
 #
-# The Snitchwatch GUI itself is NOT baked into this image — it ships as a
-# Flatpak (see ../flatpak/org.snitchwatch.Snitchwatch.yml) and the bridge
-# runs as a per-user systemd service (see ../systemd/snitchwatch-bridge.service),
-# both installed per-user on first run. Only the privileged, host-level
-# daemon belongs in the OS image.
+# On its own this recipe ships the per-user flavour's daemon config:
+# `Server.Address: 127.0.0.1:50051`, `DefaultAction: deny` (settled decision
+# 5: never upstream's fail-open `allow`). That TCP transport is NOT
+# deny-safe: any local process that binds the port first gets the daemon's
+# UI authority, deny or not (#35). It never dials a socket that isn't there.
+#
+# The r15 image adds the system-bridge overlay in the same build:
+# `../system/stage.sh` (with a verified binary) stages the bridge, its
+# service and two socket units, sysusers/tmpfiles, the `opensnitch.service`
+# drop-in, and the fail-closed daemon config (`unix:opensnitchd.sock`,
+# `DefaultAction: deny`). Copy the staged tree in AFTER this recipe's files
+# module, so its config replaces the one below, and enable the two `.socket`
+# units. Config, drop-in and socket are one artifact (PR #166 H1); this
+# recipe never ships the unix address without them (packaging_shape.rs).
+# See ../../docs/packaging/system-bridge-integration.md.
+#
+# The GUI ships as a Flatpak: the system profile
+# (../flatpak/org.snitchwatch.Snitchwatch.system.yml) with the overlay.
 #
 # Build locally (needs the `bluebuild` CLI + podman/buildah on a host that can
 # run OCI builds — NOT possible in the CI sandbox this was authored in):
@@ -44,9 +56,11 @@ modules:
       - libnetfilter_queue
       - https://github.com/evilsocket/opensnitch/releases/download/v1.8.0/opensnitch-1.8.0-1.x86_64.rpm
 
-  # 2. Drop our hardened daemon config into place. This overrides upstream's
-  #    `DefaultAction: allow` (fail-open) with `DefaultAction: deny`
-  #    (fail-closed) and points `Server.Address` at the bridge's default bind.
+  # 2. Drop the per-user flavour's daemon config into place: it overrides
+  #    upstream's fail-open `DefaultAction: allow` with `deny` and points
+  #    `Server.Address` at the per-user bridge's TCP bind (not deny-safe,
+  #    #35). The system overlay's config (deny, the root-only socket)
+  #    replaces it.
   #    It keeps upstream's `ProcMonitorMethod: ebpf`. (A 2026-07-31 note
   #    here briefly shipped `proc`, citing an eBPF module-load failure on
   #    kernel 6.19 — re-verification showed that failure was a *rootless
@@ -57,9 +71,10 @@ modules:
   #    The same module ships the one Snitchwatch rule,
   #    files/system/etc/opensnitchd/rules/000-snitchwatch-bridge-fetch.json:
   #    it lets the *system* bridge (account `snitchwatch`) download
-  #    blocklists over HTTPS. This image has no `snitchwatch` account yet, so
-  #    the daemon logs that it can't compile the rule, skips it, and nothing
-  #    is allowed by it. See ../../docs/superpowers/plans/
+  #    blocklists over HTTPS. Until the image stages the system overlay
+  #    (whose sysusers file creates that account), the daemon logs that it
+  #    can't compile the rule, skips it, and nothing is allowed by it. See
+  #    ../../docs/superpowers/plans/
   #    2026-10-08-packaged-bridge-fetch-rule.md.
   - type: files
     files:

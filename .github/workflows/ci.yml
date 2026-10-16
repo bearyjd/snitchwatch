@@ -24,6 +24,11 @@ permissions:
 # .agent_native/agent_roadmap.md item 6 ("whether these tests pass headless
 # in CI is unverified"). Kept as its own job, not folded into `check`/`test`,
 # so a Qt6/KF6 apt-package hiccup here never blocks the default-members gate.
+#
+# audit job: RustSec `cargo audit` over the whole Cargo.lock (PR #33 owner
+# decision: this check instead of Renovate). Every ignore is listed in the
+# job with its reason; there is no `.cargo/audit.toml`, which would also hide
+# advisories from release.yml's shipped-crate gate.
 jobs:
   check:
     runs-on: ubuntu-latest
@@ -102,6 +107,54 @@ jobs:
 
       - name: cargo test (default-members)
         run: cargo test --locked
+
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          # Not needed by cargo audit; the candidate contract wants every
+          # CI checkout identical.
+          submodules: true
+          persist-credentials: false
+
+      # Same pin as release.yml's audit-bridge job.
+      - name: Install cargo-audit
+        run: cargo install --locked cargo-audit@0.22.2
+
+      # Fails on any vulnerability not ignored below; warnings (unmaintained,
+      # unsound, yanked) are printed but don't fail it. Ignored:
+      # - RUSTSEC-2026-0194, RUSTSEC-2026-0195 (quick-xml 0.37.5 via
+      #   tauri-winrt-notification, 0.38.4 via plist): Windows/macOS-only
+      #   dependencies of notify-rust and the Tauri shell, never compiled on
+      #   Linux (`cargo tree -i quick-xml --target all` finds them, the
+      #   host target doesn't). The fix is quick-xml 0.41, a semver bump
+      #   only those crates' upstreams can make. Recheck when they update.
+      # The two ignores are global, so prove they still only cover crates
+      # Linux never builds (PR #166 L5): every quick-xml in Cargo.lock,
+      # whatever its version, must be unreachable for the Linux target, or
+      # this step fails and the ignores need a fresh look.
+      - name: quick-xml stays off Linux
+        run: |
+          versions=$(awk '/^name = "quick-xml"$/ { getline; gsub(/version = |"/, ""); print }' Cargo.lock)
+          for version in $versions; do
+            tree=$(cargo tree --locked --workspace -e all \
+              --target x86_64-unknown-linux-gnu -i "quick-xml@$version" 2>/dev/null)
+            if [ -n "$tree" ]; then
+              echo "quick-xml $version is built on Linux:"
+              echo "$tree"
+              exit 1
+            fi
+          done
+          echo "checked quick-xml: $versions"
+
+      - name: cargo audit
+        run: |
+          cargo audit \
+            --ignore RUSTSEC-2026-0194 \
+            --ignore RUSTSEC-2026-0195
 
   package-check:
     runs-on: ubuntu-latest

@@ -42,6 +42,13 @@ use crate::rule_name::is_reserved_blocklist_name;
 /// which only notices between its 4 s polls (`operator_lists.go`).
 pub const BLOCKLIST_COMMAND_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// The pause between two `lists` rule deletes (#109.3). Each delete holds
+/// the daemon's loader write lock while the list's monitor stops, up to its
+/// 4 s poll (`loader.go` `Delete`), stalling every verdict; back-to-back
+/// deletes (unsubscribing many lists, the orphan purge, removing leftover
+/// rules) would hold it almost without a break.
+pub const DELETE_SPACING: Duration = Duration::from_secs(1);
+
 /// The rules cache is `Unknown`: no daemon connected, or its rule snapshot
 /// was over the size Snitchwatch reads (`MAX_SNAPSHOT_RULES`).
 const RULES_UNKNOWN_REASON: &str = "Snitchwatch doesn't have the firewall service's rule list \
@@ -77,6 +84,7 @@ pub struct DaemonRuleSink {
     /// kept, and since when ([`RELEASE_GRACE`]).
     released: StdMutex<HashMap<IdComponent, Instant>>,
     release_grace: Duration,
+    delete_spacing: Duration,
 }
 
 impl DaemonRuleSink {
@@ -99,6 +107,7 @@ impl DaemonRuleSink {
             warned: StdMutex::default(),
             released: StdMutex::default(),
             release_grace: RELEASE_GRACE,
+            delete_spacing: DELETE_SPACING,
         }
     }
 
@@ -137,6 +146,12 @@ impl DaemonRuleSink {
             );
         }
         made
+    }
+
+    /// The pause between two deletes ([`DELETE_SPACING`]). Tests.
+    pub fn with_delete_spacing(mut self, spacing: Duration) -> Self {
+        self.delete_spacing = spacing;
+        self
     }
 
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
@@ -224,19 +239,24 @@ impl DaemonRuleSink {
         Ok(())
     }
 
-    /// Delete `names`, stopping at the first the daemon can't be reached
-    /// for. A refused delete is logged and skipped; the names it was refused
-    /// for come back. The daemon dropped such a rule from memory before it
-    /// failed on the file (tower r12), so it is no longer confirmed either.
+    /// Delete `names`, [`DELETE_SPACING`] apart, stopping at the first the
+    /// daemon can't be reached for. A refused delete is logged and skipped;
+    /// the names it was refused for come back. The daemon dropped such a
+    /// rule from memory before it failed on the file (tower r12), so it is
+    /// no longer confirmed either.
     async fn delete(
         &self,
         names: impl IntoIterator<Item = String>,
     ) -> Result<Vec<String>, NotInstalled> {
         let mut refused = Vec::new();
+        let mut sent_one = false;
         for name in names {
             let Some(command) = BlocklistCommand::delete(&name) else {
                 continue;
             };
+            if std::mem::replace(&mut sent_one, true) {
+                tokio::time::sleep(self.delete_spacing).await;
+            }
             match self.send(command).await {
                 Ok(()) => {
                     self.confirmed().remove(&name);
