@@ -3,8 +3,7 @@
 //! These do NOT invoke bluebuild / flatpak-builder / systemd — that needs a
 //! real Bazzite host the CI sandbox lacks. They assert the load-bearing
 //! invariants of the on-disk artifacts so a careless edit can't silently
-//! regress them: the fail-closed daemon default, the daemon's dial-in
-//! address, and — most importantly — that the Flatpak manifest grants the
+//! regress them: the daemon defaults and dial-in addresses (#35), and — most importantly — that the Flatpak manifest grants the
 //! Unix-socket filesystem permission and does NOT grant network access.
 
 use std::path::{Path, PathBuf};
@@ -21,21 +20,92 @@ fn read(rel: &str) -> String {
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {}", path.display(), e))
 }
 
-#[test]
-fn daemon_config_fails_closed_and_dials_bridge_default_bind() {
-    let body = read("packaging/bluebuild/files/system/etc/opensnitchd/default-config.json");
-    let json: serde_json::Value =
-        serde_json::from_str(&body).expect("daemon config must be valid JSON");
+fn daemon_config(rel: &str) -> serde_json::Value {
+    serde_json::from_str(&read(rel)).expect("daemon config must be valid JSON")
+}
 
+/// #35 / PR #166 H1: the system overlay's config fails CLOSED and dials the
+/// system bridge's root-only socket, relative to the daemon's working
+/// directory (/run/snitchwatch, set by the drop-in stage.sh stages with it).
+/// (Whether OpenSnitch 1.8.0 accepts the absolute unix:/// form is
+/// unverified; see docs/packaging/system-bridge-integration.md.)
+#[test]
+fn system_overlay_config_fails_closed_on_the_bridge_socket() {
+    let json = daemon_config("packaging/system/opensnitchd-default-config.json");
     assert_eq!(
         json["DefaultAction"], "deny",
-        "packaged daemon config must fail CLOSED (DefaultAction: deny), not \
-         inherit upstream's fail-open `allow`"
+        "the system overlay's daemon config must fail CLOSED, not inherit \
+         upstream's fail-open `allow`"
     );
-    assert_eq!(
-        json["Server"]["Address"], "127.0.0.1:50051",
-        "Server.Address must point at the bridge's default gRPC bind"
-    );
+    assert_eq!(json["Server"]["Address"], "unix:opensnitchd.sock");
+}
+
+/// PR #166 H1: the recipe's own `files` module ships without the overlay,
+/// so its config must not dial the socket (a `deny` daemon with nothing to
+/// dial locks the network out). It keeps the per-user bridge's TCP address
+/// and, per settled decision 5, `deny`: it still blocks unknown traffic
+/// while no squatter holds the port; the squatter case (#35) is what the
+/// system overlay's socket fixes.
+#[test]
+fn recipe_config_fails_closed_on_the_per_user_tcp_bind() {
+    let json =
+        daemon_config("packaging/bluebuild/files/system/etc/opensnitchd/default-config.json");
+    assert_eq!(json["Server"]["Address"], "127.0.0.1:50051");
+    assert_eq!(json["DefaultAction"], "deny");
+}
+
+fn json_files(dir: &Path, found: &mut Vec<PathBuf>) {
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            json_files(&path, found);
+        } else if path.extension().is_some_and(|ext| ext == "json") {
+            found.push(path);
+        }
+    }
+}
+
+/// PR #166 H1: a `unix:` Server.Address ships only in the staged system
+/// overlay, which installs it with the drop-in and the socket it dials, as
+/// one artifact. Nothing else under packaging/ (the recipe included) may.
+#[test]
+fn a_unix_server_address_ships_only_with_the_socket_and_drop_in() {
+    let mut found = Vec::new();
+    json_files(&workspace_file("packaging"), &mut found);
+    let system = workspace_file("packaging/system").canonicalize().unwrap();
+    let stage = read("packaging/system/stage.sh");
+    let mut unix_configs = 0;
+    for path in found {
+        let Ok(json) =
+            serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(&path).unwrap())
+        else {
+            continue;
+        };
+        let address = json["Server"]["Address"].as_str().unwrap_or_default();
+        if !address.starts_with("unix:") {
+            continue;
+        }
+        unix_configs += 1;
+        let path = path.canonicalize().unwrap();
+        assert!(
+            path.starts_with(&system),
+            "{} ships a unix: Server.Address outside the staged overlay",
+            path.display()
+        );
+        let name = path.file_name().unwrap().to_str().unwrap();
+        assert!(stage.contains(name), "stage.sh doesn't install {name}");
+    }
+    assert_eq!(unix_configs, 1);
+    for staged in [
+        "opensnitch-snitchwatch-system-bridge.conf",
+        "snitchwatch-system-bridge-grpc.socket",
+    ] {
+        assert!(stage.contains(staged), "stage.sh doesn't install {staged}");
+    }
+    let recipe = read("packaging/bluebuild/recipe.yml");
+    for line in recipe.lines().filter(|l| !l.trim_start().starts_with('#')) {
+        assert!(!line.contains("unix:"), "recipe.yml line: {line}");
+    }
 }
 
 #[test]

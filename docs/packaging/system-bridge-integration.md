@@ -1,9 +1,11 @@
 # System bridge integration (overlay, pending a new release)
 
-This overlay is the privileged-host deployment of Snitchwatch. It is separate
-from the existing `snitchwatch-bridge.service` **user** unit and does not
-change that release contract. Do not enable both: the legacy unit uses TCP
-`127.0.0.1:50051`; the system bridge is socket-activated only.
+This overlay is the privileged-host deployment of Snitchwatch, and the only
+deny-safe one: the image path from r15 on (owner decision 2026-10-16, #35).
+It is separate from the existing `snitchwatch-bridge.service` **user** unit
+and does not change that release contract. Do not enable both: the legacy
+unit uses TCP `127.0.0.1:50051`, which any local process can bind first, so
+it is not deny-safe; the system bridge is socket-activated only.
 
 ## Trust boundary
 
@@ -102,25 +104,96 @@ account's bridge download blocklists over HTTPS (TCP 443) under
 [`../../packaging/README.md`](../../packaging/README.md#the-packaged-fetch-rule).
 After the first boot, confirm that
 `sudo grep 'Error compiling list rule' /var/log/opensnitchd.log` (the shipped config sets `LogFile: /var/log/opensnitchd.log`, so the journal won't show it) finds nothing for it. Enable the two `.socket` units in the image/preset; do not
-enable the service directly. For OpenSnitch 1.8.0, configure
-`Server.Address: unix:opensnitchd.sock` and give `opensnitch.service` this
-drop-in so the relative socket address resolves inside the protected runtime
-directory, after systemd has created the listener:
+enable the service directly.
+
+The overlay also stages the daemon's config and its drop-in, as one artifact
+with the socket they dial (PR #166 H1):
+
+- `/etc/opensnitchd/default-config.json` (source:
+  `packaging/system/opensnitchd-default-config.json`): `DefaultAction: deny`
+  and `Server.Address: unix:opensnitchd.sock`. It replaces the bluebuild
+  recipe's own per-user TCP config, so copy the staged tree into the
+  image after the recipe's `files` module.
+- `/usr/lib/systemd/system/opensnitch.service.d/snitchwatch-system-bridge.conf`
+  (source: `packaging/system/opensnitch-snitchwatch-system-bridge.conf`), so
+  the relative address resolves inside the protected runtime directory, after
+  systemd has created the listener:
 
 ```ini
-# /etc/systemd/system/opensnitch.service.d/snitchwatch-system-bridge.conf
 [Unit]
-Requires=snitchwatch-system-bridge-grpc.socket
+Wants=snitchwatch-system-bridge-grpc.socket
 After=snitchwatch-system-bridge-grpc.socket
 
 [Service]
-WorkingDirectory=/run/snitchwatch
+WorkingDirectory=-/run/snitchwatch
 ```
 
-The absolute `unix:///run/snitchwatch/opensnitchd.sock` URI does not work with
-OpenSnitch 1.8.0's address parsing. Verify the daemon connects through the
-relative address and working directory before changing the default action to
-deny.
+Whether the absolute `unix:///run/snitchwatch/opensnitchd.sock` URI works
+with OpenSnitch 1.8.0 is **unverified**. Commit 2690109 recorded that it
+didn't; a PR #166 review reads `config_utils.go` as stripping only `unix:`
+and gRPC's passthrough dialing the absolute path, as upstream's own default
+`unix:///tmp/osui.sock` does. On a test VM, try the absolute address first;
+if the daemon connects through it, switch the config to it, so the address
+no longer depends on the drop-in's working directory. Either way, verify the
+daemon connects before rolling the image out.
+
+### Fail closed, and console recovery
+
+`Wants=` (not `Requires=`) and the `-` on `WorkingDirectory` are deliberate
+(owner decision 2026-10-16): if the socket or `/run/snitchwatch` is missing,
+`opensnitch.service` still starts, has no UI to dial, and applies
+`DefaultAction: deny`. Nothing is let through, and nothing outside the rules
+gets out either, so the desktop may have no network until the bridge is back.
+The bridge can't report this itself: without its socket it isn't running,
+so neither the GUI nor its diagnostics can see it. From a console (a VT
+login works without network):
+
+```bash
+systemctl status snitchwatch-system-bridge-grpc.socket snitchwatch-system-bridge.service
+ls -l /run/snitchwatch/                  # opensnitchd.sock: root root, srw-------
+journalctl -b -u snitchwatch-system-bridge.service -u snitchwatch-system-bridge-grpc.socket
+sudo systemctl reset-failed snitchwatch-system-bridge.service \
+  snitchwatch-system-bridge-grpc.socket snitchwatch-system-bridge-gui.socket
+sudo systemctl start snitchwatch-system-bridge-grpc.socket snitchwatch-system-bridge-gui.socket
+sudo systemctl restart opensnitch.service   # re-dial now, instead of at its next retry
+```
+
+The bridge service has `StartLimitIntervalSec=0` (PR #166 L1): a crash loop
+keeps retrying every 2 s (`RestartSec`) instead of hitting systemd's start
+limit and leaving the bridge and its sockets failed until someone runs the
+`reset-failed` above. A bridge that crashes on every start still needs the
+journal and a fix; under `deny` the network stays closed meanwhile.
+
+### Before rebooting into the image: the `/etc` merge
+
+An image update keeps a locally edited `/etc` file: ostree's three-way merge
+leaves an `/etc/opensnitchd/default-config.json` changed on the host (for
+example by the old per-user setup, or by the daemon saving a CHANGE_CONFIG)
+as it was, on `127.0.0.1:50051`, instead of taking the image's. Before
+rebooting into the new deployment:
+
+```bash
+sudo ostree admin config-diff | grep opensnitchd
+jq .Server.Address /etc/opensnitchd/default-config.json
+```
+
+If `config-diff` lists `M etc/opensnitchd/default-config.json` (locally
+modified), the merge will keep it. Undo the local change before rebooting:
+
+```bash
+sudo cp /usr/etc/opensnitchd/default-config.json /etc/opensnitchd/default-config.json
+sudo ostree admin config-diff | grep opensnitchd   # now lists nothing
+```
+
+`/usr/etc` holds the booted deployment's pristine copy; with `/etc` equal to
+it again, the merge at reboot (rpm-ostree finalizes staged deployments at
+shutdown) takes the new image's file. After the reboot,
+`jq .Server.Address /etc/opensnitchd/default-config.json` must print
+`"unix:opensnitchd.sock"`. If it doesn't (the change was made after the
+check, or deployments weren't staged), repeat the `cp` from the new
+deployment's `/usr/etc` from a console and `sudo systemctl restart
+opensnitch.service`. Never leave `127.0.0.1:50051` with `deny`: that is the
+squattable transport (#35).
 
 ## GUI profile, migration, and verification
 

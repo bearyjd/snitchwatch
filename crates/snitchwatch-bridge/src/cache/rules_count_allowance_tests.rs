@@ -614,11 +614,10 @@ fn hint_messages(rx: &mut broadcast::Receiver<ServerMessage>) -> Vec<bool> {
 }
 
 /// A redialled daemon's old and new streams share the socket's one key. A
-/// second adoption replaces the list with the staged snapshot and drops
-/// what was confirmed in between, so the daemon's count is then really
-/// different from the list's. The watch treats each adoption as a new
-/// baseline (flag cleared, readings quiet), and then says so: the list is
-/// wrong, even if the wording guesses the cause.
+/// second adoption replaces the list with the staged snapshot plus what was
+/// confirmed in between (its journal, #115), so the list still matches the
+/// daemon's count. The watch treats each adoption as a new baseline (flag
+/// cleared, readings quiet), and with the list right never raises.
 #[tokio::test]
 async fn each_adoption_on_the_unix_socket_is_a_new_baseline_for_the_hint() {
     let (tx, mut rx) = broadcast::channel::<ServerMessage>(64);
@@ -644,25 +643,22 @@ async fn each_adoption_on_the_unix_socket_is_a_new_baseline_for_the_hint() {
     }
     assert!(hint_messages(&mut rx).iter().all(|shown| !shown));
 
-    // The new stream's HELLO adopts the staged snapshot again, which lacks c.
+    // The new stream's HELLO adopts the staged snapshot again, which lacks
+    // c, and replays c from its journal.
     let (second, _second_rx) = commands.open_stream(None);
     commands.on_reply(second.id(), &hello());
     assert!(!rules.cache().lock().unwrap().count_mismatch());
     assert_eq!(
         rules.cache().lock().unwrap().rules().unwrap().len(),
-        2,
-        "c is gone"
+        3,
+        "c is kept"
     );
-    // The daemon still has c: its first readings are quiet, then it is said.
-    for _ in 0..usize::from(QUIET_PINGS) + usize::from(PINGS_TO_RAISE) - 1 {
+    for _ in 0..usize::from(QUIET_PINGS) + usize::from(PINGS_TO_RAISE) {
         ping(3);
     }
-    assert!(hint_messages(&mut rx).iter().all(|shown| !shown));
-    ping(3);
-    assert_eq!(
-        hint_messages(&mut rx),
-        vec![true],
-        "the list really differs"
+    assert!(
+        hint_messages(&mut rx).iter().all(|shown| !shown),
+        "the list matches the daemon"
     );
 
     // The second stream closes: the first, current again, holds the same
@@ -673,4 +669,65 @@ async fn each_adoption_on_the_unix_socket_is_a_new_baseline_for_the_hint() {
         ping(3);
     }
     assert!(hint_messages(&mut rx).iter().all(|shown| !shown));
+}
+
+/// PR #166 L3: a journal over its cap isn't replayed, so a second HELLO
+/// adopts the bare snapshot. The daemon still holds what was confirmed in
+/// between, the list doesn't, and after the new baseline the hint says so.
+#[tokio::test]
+async fn an_overflowed_journal_adopts_the_bare_snapshot_and_the_hint_raises() {
+    let (tx, mut rx) = broadcast::channel::<ServerMessage>(1024);
+    let rules = RulesSync::new(tx);
+    let commands = DaemonCommands::new(DaemonTransport::Unix, rules.clone());
+    rules.stage(None, vec![rule("a", "always", true)]);
+    let (first, _first_rx) = commands.open_stream(None);
+    commands.on_reply(first.id(), &hello());
+    let changes = crate::cache::rules::MAX_JOURNAL + 1;
+    // Confirmed on the first stream (as `on_reply` applies an `OK`).
+    for i in 0..changes {
+        rules.apply_confirmed(&change(rule(&format!("r{i}"), "always", true)));
+    }
+    let held = u64::try_from(1 + changes).unwrap();
+
+    let (second, _second_rx) = commands.open_stream(None);
+    commands.on_reply(second.id(), &hello());
+    assert_eq!(rules.cache().lock().unwrap().rules().unwrap().len(), 1);
+    hint_messages(&mut rx);
+    for _ in 0..usize::from(QUIET_PINGS) + usize::from(PINGS_TO_RAISE) {
+        rules.observe_daemon_rules(held, 100, 0);
+    }
+    assert_eq!(hint_messages(&mut rx), vec![true], "the list lost them");
+    drop(second);
+    drop(first);
+}
+
+/// PR #166 I3: a remembered prompt answer is replayed on re-adoption with
+/// its rename allowance: the daemon stored it as `<name>-2`, and the list
+/// shows the answer under `<name>`.
+#[tokio::test]
+async fn a_replayed_prompt_answer_keeps_its_rename_allowance() {
+    let (tx, _rx) = broadcast::channel::<ServerMessage>(64);
+    let rules = RulesSync::new(tx);
+    let commands = DaemonCommands::new(DaemonTransport::Unix, rules.clone());
+    rules.stage(
+        None,
+        vec![rule("other", "always", true), rule("seen", "always", false)],
+    );
+    let (first, _first_rx) = commands.open_stream(None);
+    commands.on_reply(first.id(), &hello());
+    rules.upsert(rule("seen", "always", true));
+    assert_eq!(rules.cache().lock().unwrap().may_hold.renamed, 1);
+
+    let (second, _second_rx) = commands.open_stream(None);
+    commands.on_reply(second.id(), &hello());
+    let cache = rules.cache();
+    let cache = cache.lock().unwrap();
+    assert!(
+        cache.rules().unwrap()["seen"].enabled,
+        "the answer is listed"
+    );
+    assert_eq!(cache.may_hold.renamed, 1, "counted once, as it was");
+    drop(cache);
+    drop(second);
+    drop(first);
 }
