@@ -7,7 +7,6 @@
 //! Ported verbatim from `snitchwatch-tauri::panic_hook` (Task 14): pure `std`,
 //! no Tauri dependency.
 
-use std::fs::OpenOptions;
 use std::io::Write;
 use std::panic::PanicHookInfo;
 use std::path::PathBuf;
@@ -17,7 +16,9 @@ static CRASH_LOG_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
 
 pub fn install(crash_log_path: PathBuf) {
     if let Some(parent) = crash_log_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        if let Err(error) = crate::private_files::ensure_private_dir(parent) {
+            eprintln!("snitchwatch: crash log directory not private: {error}");
+        }
     }
     *CRASH_LOG_PATH.lock().unwrap() = Some(crash_log_path);
 
@@ -38,8 +39,13 @@ fn write_crash_entry(info: &PanicHookInfo<'_>) {
         "----- snitchwatch panic @ {now} -----\n{info}\n{:?}\n\n",
         std::backtrace::Backtrace::force_capture()
     );
-    if let Ok(mut f) = OpenOptions::new().append(true).create(true).open(&path) {
-        let _ = f.write_all(payload.as_bytes());
+    match crate::private_files::open_private_append(&path) {
+        Ok(mut f) => {
+            if let Err(error) = f.write_all(payload.as_bytes()) {
+                eprintln!("snitchwatch: crash log not written: {error}");
+            }
+        }
+        Err(error) => eprintln!("snitchwatch: crash log not opened: {error}"),
     }
     tracing::error!(target: "snitchwatch::panic", "{payload}");
 }

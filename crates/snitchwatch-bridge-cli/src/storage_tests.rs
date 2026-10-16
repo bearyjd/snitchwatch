@@ -377,7 +377,7 @@ fn dir_with_mode(mode: u32) -> (tempfile::TempDir, PathBuf) {
 
 /// The state directory holds the databases and the SQLite files beside them,
 /// so a per-user bridge's must not be writable by anyone else. When it is the
-/// bridge user's own (a umask of 002 makes `~/.local/share/snitchwatch` 0775)
+/// bridge user's own (a umask of 002 makes `~/.local/state/snitchwatch` 0775)
 /// the bridge drops that write access itself and carries on: refusing would
 /// push every such user to memory-only storage.
 #[test]
@@ -421,7 +421,7 @@ fn a_per_user_state_directory_is_used_tightened_or_refused() {
         gid: 1000,
         mode: 0o40700,
     };
-    let dir = Path::new("/home/u/.local/share/snitchwatch");
+    let dir = Path::new("/home/u/.local/state/snitchwatch");
     assert_eq!(plan_user_state_dir(&facts, 1000, dir), Ok(None));
     // Group and mode beyond the write bits don't matter.
     assert_eq!(

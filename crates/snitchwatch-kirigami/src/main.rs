@@ -15,7 +15,9 @@
 use snitchwatch_kirigami::bridge_bindings as _;
 
 use cxx_qt_lib::{QQmlApplicationEngine, QString, QUrl};
-use snitchwatch_kirigami::{app_icons, application, bridge_runtime, demo, logging};
+use snitchwatch_kirigami::{
+    app_icons, application, bridge_runtime, demo, logging, panic_hook, paths,
+};
 
 fn main() {
     // Without this, every `tracing::info!`/`tracing::error!` call in this
@@ -24,6 +26,9 @@ fn main() {
     // a no-op until a subscriber is installed. `SNITCHWATCH_LOG` (or
     // `RUST_LOG`) sets the filter; see `logging` for where it goes.
     logging::init();
+
+    // The Diagnostics page reads this file; nothing wrote it until now.
+    panic_hook::install(paths::crash_log_path());
 
     // Index the host's `.desktop` files off the UI thread, so it is ready by
     // the time rows ask for icons.

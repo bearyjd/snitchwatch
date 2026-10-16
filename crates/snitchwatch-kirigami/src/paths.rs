@@ -85,7 +85,8 @@ fn settings_path_from(xdg_config_home: Option<&str>, home: Option<&str>) -> Path
 }
 
 /// An unset or empty `xdg` value is treated as unset; with no `home` either,
-/// resolution falls back to `/tmp`.
+/// resolution falls back to `/tmp`. (The process-reading `home()` never gets
+/// there: it supplies a per-user root instead.)
 fn xdg_dir_from(xdg: Option<&str>, home: Option<&str>, fallback_subpath: &str) -> PathBuf {
     match xdg {
         Some(p) if !p.is_empty() => PathBuf::from(p),
@@ -98,8 +99,17 @@ fn xdg(name: &str) -> Option<String> {
     std::env::var(name).ok()
 }
 
+/// `HOME`, or with it unset or empty a per-user root under `/tmp` that
+/// [`crate::private_files::ensure_private_dir`] checks (#116).
 fn home() -> Option<String> {
-    std::env::var("HOME").ok()
+    match std::env::var("HOME") {
+        Ok(home) if !home.is_empty() => Some(home),
+        _ => Some(
+            crate::private_files::no_home_root()
+                .to_string_lossy()
+                .into_owned(),
+        ),
+    }
 }
 
 #[cfg(test)]
