@@ -94,14 +94,15 @@ pub fn connection_to_row(conn: &Connection, notification_id: u64) -> ConnectionR
 }
 
 /// Normalize a daemon-reported rule action string the same way
-/// `snitchwatch-kirigami`'s `rules::row_store::Rule::normalized_action` does:
-/// exactly `"allow"` or `"deny"`, folding anything else (opensnitchd's
-/// `"reject"` included) into `"deny"`.
+/// `snitchwatch-kirigami`'s `rules::row_store::Rule::normalized_action` does,
+/// comparing exactly as the daemon does: `"allow"` for exactly `allow`,
+/// `"deny"` for exactly `deny` or `reject`, and `"unrecognised"` for anything
+/// else (including `Allow`, which the daemon does not treat as an allow).
 fn normalized_action(action: &str) -> &'static str {
-    if action.eq_ignore_ascii_case("allow") {
-        "allow"
-    } else {
-        "deny"
+    match action {
+        "allow" => "allow",
+        "deny" | "reject" => "deny",
+        _ => "unrecognised",
     }
 }
 
@@ -154,7 +155,7 @@ pub fn event_to_row(event: &Event, listed: impl Fn(&str) -> Option<bool>) -> Opt
 
 /// Logs, once per `logged` flag (once per bridge run in production), a
 /// default-action event whose action the contract doesn't name. The row
-/// still folds it like any event action ([`normalized_action`]). Returns
+/// still shows it as unrecognised ([`normalized_action`]). Returns
 /// whether it logged.
 fn note_unexpected_default_action(logged: &AtomicBool, action: &str) -> bool {
     if is_contract_default_action(action) || logged.swap(true, Ordering::Relaxed) {
@@ -316,6 +317,31 @@ mod tests {
         };
         let row = event_to_row(&event, |_| Some(false)).unwrap();
         assert_eq!(row.action.as_deref(), Some("deny"));
+    }
+
+    /// #115: the daemon compares actions exactly, so a differently-cased
+    /// `Allow` is not an allow and must never be shown as one.
+    #[test]
+    fn event_to_row_compares_actions_exactly() {
+        for (action, shown) in [
+            ("allow", "allow"),
+            ("deny", "deny"),
+            ("reject", "deny"),
+            ("Allow", "unrecognised"),
+            ("ALLOW", "unrecognised"),
+            ("Deny", "unrecognised"),
+            ("drop", "unrecognised"),
+            ("", "unrecognised"),
+        ] {
+            let event = Event {
+                time: String::new(),
+                connection: Some(sample_connection()),
+                rule: Some(sample_rule("some-rule", action)),
+                unixnano: 1,
+            };
+            let row = event_to_row(&event, |_| Some(false)).unwrap();
+            assert_eq!(row.action.as_deref(), Some(shown), "{action:?}");
+        }
     }
 
     #[test]
@@ -485,14 +511,14 @@ mod tests {
         assert!(!connection_to_row(&sample_connection(), 1).decided_by_default);
     }
 
-    /// Pinned: an action outside the contract folds like any event action,
-    /// "deny" unless it is "allow" (PR #108 review).
+    /// Pinned: an action outside the contract is shown as unrecognised, never
+    /// folded into allow or deny (#115).
     #[test]
-    fn a_default_action_event_with_an_unexpected_action_folds_to_deny() {
+    fn a_default_action_event_with_an_unexpected_action_is_unrecognised() {
         for action in ["drop", "", "ACCEPT"] {
             let row =
                 event_to_row(&event_with(default_action_rule(action)), |_| Some(false)).unwrap();
-            assert_eq!(row.action.as_deref(), Some("deny"), "{action:?}");
+            assert_eq!(row.action.as_deref(), Some("unrecognised"), "{action:?}");
             assert!(row.decided_by_default, "{action:?}");
         }
     }
