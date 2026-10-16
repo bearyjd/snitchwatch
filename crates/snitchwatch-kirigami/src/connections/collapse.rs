@@ -121,8 +121,25 @@ struct Representative {
     key: CollapseKey,
     first_seen_ms: i64,
     last_seen_ms: i64,
-    /// The absorbed rows, in arrival order.
-    members: Vec<ConnectionRow>,
+    /// The absorbed rows, in arrival order. Only id and start are kept:
+    /// every other field shown matches `row` (same key), so a released or
+    /// promoted row is rebuilt from it ([`Representative::member_row`]).
+    members: Vec<Member>,
+}
+
+#[derive(Debug, Clone)]
+struct Member {
+    id: String,
+    started_at_ms: i64,
+}
+
+impl Member {
+    fn of(row: &ConnectionRow) -> Self {
+        Self {
+            id: row.id.clone(),
+            started_at_ms: row.started_at_ms,
+        }
+    }
 }
 
 impl Representative {
@@ -133,6 +150,14 @@ impl Representative {
             last_seen_ms: row.started_at_ms,
             row,
             members: Vec::new(),
+        }
+    }
+
+    fn member_row(&self, member: &Member) -> ConnectionRow {
+        ConnectionRow {
+            id: member.id.clone(),
+            started_at_ms: member.started_at_ms,
+            ..self.row.clone()
         }
     }
 
@@ -154,6 +179,8 @@ pub struct RowCollapse {
     member_of: HashMap<String, String>,
     /// Decided Ask rows that may still take their twin, by id.
     asks: HashMap<String, ConnectionRow>,
+    /// The `at` [`RowCollapse::expire`] last ran for.
+    expired_at: Option<i64>,
 }
 
 /// Messages produced while rewriting one incoming message.
@@ -207,10 +234,17 @@ impl RowCollapse {
         self.reps.get(id).map(|rep| rep.last_seen_ms)
     }
 
+    /// Entries held: representatives, open keys, absorbed ids, waiting asks.
+    #[cfg(test)]
+    fn state_size(&self) -> usize {
+        self.reps.len() + self.open.len() + self.member_of.len() + self.asks.len()
+    }
+
     /// Stop every open row from taking repeats ("From now" was turned on:
     /// a row after the cut must not hide inside one from before it).
     pub fn seal(&mut self) {
         self.open.clear();
+        self.asks.clear();
         self.reps.retain(|_, rep| !rep.members.is_empty());
     }
 
@@ -264,10 +298,7 @@ impl RowCollapse {
             return;
         }
         let key = CollapseKey::of(&row);
-        // Asks long past their window can no longer take a twin.
-        let at = row.started_at_ms;
-        self.asks
-            .retain(|_, ask| ask.started_at_ms + 2 * TWIN_WINDOW_MS >= at);
+        self.expire(row.started_at_ms);
         if let Some(ask_id) = self.twin_ask(&key, row.started_at_ms) {
             self.fold_twin(ask_id, row, out);
             return;
@@ -278,7 +309,7 @@ impl RowCollapse {
                 if rep.takes(&row) {
                     rep.last_seen_ms = rep.last_seen_ms.max(row.started_at_ms);
                     self.member_of.insert(row.id.clone(), rep_id);
-                    rep.members.push(row);
+                    rep.members.push(Member::of(&row));
                     out.touch(&rep.row);
                     return;
                 }
@@ -304,7 +335,7 @@ impl RowCollapse {
                 return false;
             };
             if collapsible(row) && CollapseKey::of(row) == rep.key {
-                rep.members[at] = row.clone();
+                rep.members[at] = Member::of(row);
             } else {
                 rep.members.remove(at);
                 self.member_of.remove(&row.id);
@@ -322,9 +353,9 @@ impl RowCollapse {
             rep.row = row.clone();
         } else if let Some(rep) = self.reps.remove(&row.id) {
             self.close(&rep.key, &row.id);
-            for member in rep.members {
+            for member in &rep.members {
                 self.member_of.remove(&member.id);
-                out.reinserted.push(member);
+                out.reinserted.push(rep.member_row(member));
             }
         }
         out.touch(row);
@@ -343,8 +374,8 @@ impl RowCollapse {
         if let Some(rep) = self.reps.remove(&id) {
             let was_open = self.open.get(&rep.key) == Some(&id);
             self.close(&rep.key, &id);
-            let mut members = rep.members.into_iter();
-            if let Some(first) = members.next() {
+            let mut members = rep.members.iter();
+            if let Some(first) = members.next().map(|m| rep.member_row(m)) {
                 // The oldest repeat takes the removed row's place.
                 let promoted_id = first.id.clone();
                 self.member_of.remove(&promoted_id);
@@ -353,21 +384,26 @@ impl RowCollapse {
                 for member in members {
                     self.member_of
                         .insert(member.id.clone(), promoted_id.clone());
-                    promoted.members.push(member);
+                    promoted.members.push(member.clone());
                 }
                 if was_open {
-                    self.open.insert(rep.key, promoted_id.clone());
+                    self.open.insert(rep.key.clone(), promoted_id.clone());
                 }
                 self.reps.insert(promoted_id, promoted);
                 out.reinserted.push(first);
             }
         }
+        // A row this same message removes must not come back as an insert or
+        // an update (PR #167 review: Remove[rep, repeat] in either order).
+        out.reinserted.retain(|row| row.id != id);
+        out.updated.retain(|row| row.id != id);
         out.removed.push(id);
     }
 
     /// Track `row` as an Ask row that may take a twin, or stop tracking it.
     fn note_ask(&mut self, row: &ConnectionRow) {
         let waits = !is_event_row_id(&row.id)
+            && !row.deferred
             && row.action.is_some()
             && !is_pending(row)
             && row.matched_rule.as_deref().is_some_and(is_answer_name);
@@ -402,8 +438,38 @@ impl RowCollapse {
             .or_insert_with(|| Representative::new(ask));
         rep.last_seen_ms = rep.last_seen_ms.max(twin.started_at_ms);
         self.member_of.insert(twin.id.clone(), ask_id);
-        rep.members.push(twin);
+        rep.members.push(Member::of(&twin));
         out.touch(&rep.row);
+    }
+
+    /// Forget what can no longer take a row starting at `at` (PR #167
+    /// review: the bridge evicts history without telling GUIs, so time is
+    /// the only bound). Runs at most once per [`COLLAPSE_WINDOW_MS`] of `at`:
+    /// open rows whose window ended (alone ones entirely) and Asks past
+    /// their twin window.
+    fn expire(&mut self, at: i64) {
+        if self
+            .expired_at
+            .is_some_and(|last| at < last + COLLAPSE_WINDOW_MS)
+        {
+            return;
+        }
+        self.expired_at = Some(at);
+        let reps = &mut self.reps;
+        self.open.retain(|_, id| {
+            let Some(rep) = reps.get(id) else {
+                return false;
+            };
+            if rep.last_seen_ms + COLLAPSE_WINDOW_MS >= at {
+                return true;
+            }
+            if rep.members.is_empty() {
+                reps.remove(id);
+            }
+            false
+        });
+        self.asks
+            .retain(|_, ask| ask.started_at_ms + 2 * TWIN_WINDOW_MS >= at);
     }
 
     /// Stop `id` taking repeats of `key`.
@@ -746,6 +812,103 @@ mod tests {
         );
         assert_eq!(ids, ["ask-1", "event-2"]);
         assert_eq!(c.repeat_count("ask-1"), 1);
+    }
+
+    /// PR #167 review: after "From now" a new connection must not fold into
+    /// an Ask row from before the cut (the filter hides that row).
+    #[test]
+    fn sealing_stops_an_ask_row_taking_a_twin() {
+        let mut c = RowCollapse::default();
+        let mut store = super::super::row_store::RowStore::new();
+        for out in c.rewrite(insert(vec![ask("ask-1", 1_000, Some("allow"))])) {
+            store.apply(out);
+        }
+        c.seal();
+        for out in c.rewrite(insert(vec![answer_event("event-2", 2_000)])) {
+            store.apply(out);
+        }
+        let ids: Vec<&str> = store.rows().iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, ["ask-1", "event-2"]);
+        assert_eq!(c.repeat_count("ask-1"), 1);
+    }
+
+    #[test]
+    fn a_deferred_ask_row_never_takes_a_twin() {
+        let mut c = RowCollapse::default();
+        let deferred = ConnectionRow {
+            deferred: true,
+            ..ask("ask-1", 1_000, Some("allow"))
+        };
+        let ids = shown(
+            &mut c,
+            vec![
+                insert(vec![deferred]),
+                insert(vec![answer_event("event-2", 2_000)]),
+            ],
+        );
+        assert_eq!(ids, ["ask-1", "event-2"]);
+    }
+
+    /// PR #167 review: one Remove naming a representative and its repeat
+    /// removes both, in either order; nothing comes back.
+    #[test]
+    fn removing_a_representative_and_its_repeat_together_leaves_nothing() {
+        for ids in [["event-1", "event-2"], ["event-2", "event-1"]] {
+            let mut c = RowCollapse::default();
+            let mut store = super::super::row_store::RowStore::new();
+            let mut tree = super::super::grouping::GroupTree::default();
+            for msg in [
+                insert(vec![
+                    event("event-1", 1_000, "deny"),
+                    event("event-2", 1_100, "deny"),
+                ]),
+                ServerMessage::RemoveConnectionRows {
+                    ids: ids.iter().map(|s| s.to_string()).collect(),
+                },
+            ] {
+                for out in c.rewrite(msg) {
+                    match &out {
+                        ServerMessage::InsertConnectionRows { rows }
+                        | ServerMessage::UpdateConnectionRows { rows } => {
+                            rows.iter().for_each(|r| tree.upsert_row(r))
+                        }
+                        ServerMessage::RemoveConnectionRows { ids } => {
+                            ids.iter().for_each(|id| tree.remove_row(id))
+                        }
+                        _ => {}
+                    }
+                    store.apply(out);
+                }
+            }
+            assert!(store.is_empty(), "{ids:?}: {:?}", store.rows());
+            assert_eq!(tree.process_count(), 0, "{ids:?}: the tree kept a row");
+            assert_eq!(c.state_size(), 0, "{ids:?}");
+        }
+    }
+
+    /// PR #167 review: a flood of distinct flows over time keeps the
+    /// collapse state bounded by the flows of the last few windows.
+    #[test]
+    fn a_flood_of_distinct_flows_keeps_the_state_bounded() {
+        let mut c = RowCollapse::default();
+        let per_second = 50;
+        let seconds = 600;
+        for s in 0..seconds {
+            let rows = (0..per_second)
+                .map(|i| ConnectionRow {
+                    dst_port: (s * per_second + i) as u16,
+                    ..event(&format!("event-{s}-{i}"), s * 1_000, "deny")
+                })
+                .collect();
+            c.rewrite(insert(rows));
+        }
+        // Open row + representative per flow of the last two windows.
+        let bound = (per_second * 2 * (2 * COLLAPSE_WINDOW_MS / 1_000 + 1)) as usize;
+        assert!(
+            c.state_size() <= bound,
+            "state {} > bound {bound}",
+            c.state_size()
+        );
     }
 
     #[test]

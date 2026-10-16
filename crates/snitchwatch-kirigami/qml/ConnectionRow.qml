@@ -212,8 +212,8 @@ Item {
             Controls.Label {
                 textFormat: Text.PlainText
                 objectName: "hostLabel"
-                text: row.host + ":" + row.port + "  " + row.protocol + (row.repeatCount > 1 ? "  ×"
-                    + row.repeatCount + " · last seen " + Qt.formatTime(new Date(row.lastSeenMs), "hh:mm:ss") : "")
+                text: (row.repeatCount > 1 ? "×" + row.repeatCount + " · last seen " + Qt.formatTime(
+                    new Date(row.lastSeenMs), "hh:mm:ss") + " · " : "") + row.host + ":" + row.port + "  " + row.protocol
                 opacity: 0.7
                 font: Kirigami.Theme.smallFont
                 elide: Text.ElideMiddle

@@ -86,11 +86,12 @@ Window {
         }
         return null;
     }
-    // The repeat note the host line ends with ("" when none).
+    // The repeat note the host line starts with ("" when none). It leads
+    // the line so a long host's elision never hides it (PR #167 review).
     function repeatText(rowId) {
         const label = probe.find(probe.delegateFor(rowId), "hostLabel");
-        const at = label ? label.text.indexOf("  ×") : -1;
-        return at < 0 ? "" : label.text.slice(at + 2);
+        if (!label || label.text.indexOf("×") !== 0) return "";
+        return label.text.slice(0, label.text.indexOf(" · ", label.text.indexOf("last seen")));
     }
     // Recent enough that "From now" (now) is after them only for the rows
     // inserted before it.
@@ -147,6 +148,21 @@ Window {
             const expected = "×2 · last seen " + Qt.formatTime(new Date(probe.t0 + 25000), "hh:mm:ss");
             probe.expect(probe.repeatText("ask-7") === expected,
                          "twin label: '" + probe.repeatText("ask-7") + "' vs '" + expected + "'");
+            // PR #167 review: after From now, a new connection under an Ask
+            // row's rule is its own row, not folded into the pre-cut Ask.
+            const rule2 = "snitchwatch-allow-cut.example-443-ppython3";
+            probe.insert([Object.assign(probe.row("ask-9", "allow", probe.t0 + 30000),
+                                        { dstHost: "cut.example", matchedRule: rule2 })]);
+            model.setFromNow(true);
+            model.setFromNow(false);
+            probe.insert([Object.assign(probe.row("event-10", "allow", probe.t0 + 31000),
+                                        { dstHost: "cut.example", matchedRule: rule2 })]);
+        },
+        function () {
+            probe.expect(probe.delegateFor("event-10") !== null,
+                         "a connection after From now folded into a pre-cut Ask row");
+            probe.expect(probe.repeatText("ask-9") === "", "the pre-cut Ask row counted it: "
+                         + probe.repeatText("ask-9"));
         }
     ]
 
