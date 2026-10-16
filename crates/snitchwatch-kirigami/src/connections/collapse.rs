@@ -448,9 +448,12 @@ impl RowCollapse {
     /// open rows whose window ended (alone ones entirely) and Asks past
     /// their twin window.
     fn expire(&mut self, at: i64) {
+        // Throttled only within one window after the last run: an `at`
+        // before it (a far-future row came first, clock skew) runs too, and
+        // keeps everything still in its window, so it is safe.
         if self
             .expired_at
-            .is_some_and(|last| at < last + COLLAPSE_WINDOW_MS)
+            .is_some_and(|last| (last..last + COLLAPSE_WINDOW_MS).contains(&at))
         {
             return;
         }
@@ -891,6 +894,26 @@ mod tests {
     #[test]
     fn a_flood_of_distinct_flows_keeps_the_state_bounded() {
         let mut c = RowCollapse::default();
+        flood_stays_bounded(&mut c, 0);
+    }
+
+    /// PR #167 review: one far-future start (clock skew) must not stop
+    /// expiry until real time catches up.
+    #[test]
+    fn a_far_future_row_does_not_stop_expiry() {
+        let mut c = RowCollapse::default();
+        let far = ConnectionRow {
+            dst_port: 1,
+            dst_host: "future.example".into(),
+            ..event("event-future", i64::MAX / 2, "deny")
+        };
+        c.rewrite(insert(vec![far]));
+        flood_stays_bounded(&mut c, 1);
+    }
+
+    /// Feed 600 s of 50 distinct flows and 5 never-twinned Asks a second,
+    /// then check the state against the last windows' flows (+ `extra`).
+    fn flood_stays_bounded(c: &mut RowCollapse, extra: usize) {
         let per_second = 50;
         let seconds = 600;
         let asks_per_second = 5;
@@ -915,7 +938,8 @@ mod tests {
         // the Asks of twice the twin window plus one expiry period.
         let bound = (per_second * 2 * (2 * COLLAPSE_WINDOW_MS / 1_000 + 1)
             + asks_per_second * ((2 * TWIN_WINDOW_MS + COLLAPSE_WINDOW_MS) / 1_000 + 1))
-            as usize;
+            as usize
+            + extra;
         assert!(
             c.state_size() <= bound,
             "state {} > bound {bound}",
