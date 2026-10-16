@@ -11,10 +11,18 @@ ready-to-boot, signed image with the daemon already baked in, use the
 Neither path is "unsupported"; they are two supported shapes of the same
 install, trading image immutability for convenience.
 
-Both paths end in the same place: a host-side `opensnitchd` that fails
-**closed** (`DefaultAction: deny`) and dials the Snitchwatch bridge's gRPC
-server at `127.0.0.1:50051`, plus the GUI as a Flatpak and the bridge as a
-systemd `--user` service.
+> **Not deny-safe (#35, owner decision 2026-10-16).** This page's per-user
+> bridge serves the root daemon on TCP `127.0.0.1:50051`. Any local process
+> that binds that port while no bridge holds it (before login, during a
+> restart, another user's session) gets the daemon's UI authority, including
+> config changes the daemon saves to disk. So on this path keep
+> `DefaultAction: allow` (step 2). Deny-by-default needs the system
+> flavour's root-only Unix socket, which the batteries-included image uses:
+> [system-bridge-integration.md](system-bridge-integration.md).
+
+This path ends in a host-side `opensnitchd` that dials the Snitchwatch
+bridge's gRPC server at `127.0.0.1:50051`, plus the GUI as a Flatpak and the
+bridge as a systemd `--user` service.
 
 ---
 
@@ -62,20 +70,22 @@ fail-open behavior a firewall product should not have. Snitchwatch overrides
 this with a fail-**closed** config that also points the daemon at the
 bridge's default gRPC bind.
 
-Copy the config shipped in this repo into place:
+The config shipped in this repo is the system flavour's (`deny`, dialing
+`unix:opensnitchd.sock`). For this per-user TCP path, install it with the
+address and default action changed:
 
 ```bash
-sudo install -Dm644 \
+jq '.Server.Address = "127.0.0.1:50051" | .DefaultAction = "allow"' \
   packaging/bluebuild/files/system/etc/opensnitchd/default-config.json \
-  /etc/opensnitchd/default-config.json
+  | sudo install -Dm644 /dev/stdin /etc/opensnitchd/default-config.json
 ```
 
-The two fields that matter, relative to upstream's defaults:
+The two fields that matter:
 
-| Field            | Upstream default        | Snitchwatch value     | Why |
-| ---------------- | ----------------------- | --------------------- | --- |
-| `DefaultAction`  | `allow`                 | `deny`                | Fail **closed** when the decision channel (bridge/GUI) is down. |
-| `Server.Address` | `unix:///tmp/osui.sock` | `127.0.0.1:50051`     | Dial the Snitchwatch bridge's default gRPC bind. |
+| Field            | Upstream default        | System flavour (image)   | This TCP path       | Why |
+| ---------------- | ----------------------- | ------------------------ | ------------------- | --- |
+| `DefaultAction`  | `allow`                 | `deny`                   | `allow`             | Fail closed only where the decision channel can't be squatted (#35). |
+| `Server.Address` | `unix:///tmp/osui.sock` | `unix:opensnitchd.sock`  | `127.0.0.1:50051`   | Dial the bridge: the root-only socket, or the per-user bridge's TCP bind. |
 
 > `/etc` is writable on an rpm-ostree system (it is part of the writable
 > `/etc` overlay, not the read-only `/usr` tree), so this `install` needs no
@@ -174,9 +184,10 @@ permission needed or granted.
 Confirm the whole chain, including the fail-open fix:
 
 ```bash
-# Daemon up and fail-closed:
+# Daemon up, dialing the per-user bridge, and not fail-closed (#35):
 systemctl is-active opensnitch.service
-grep '"DefaultAction": "deny"' /etc/opensnitchd/default-config.json
+jq -e '.Server.Address == "127.0.0.1:50051" and .DefaultAction == "allow"' \
+  /etc/opensnitchd/default-config.json
 
 # Bridge up independently of the GUI window:
 systemctl --user is-active snitchwatch-bridge.service
@@ -190,7 +201,7 @@ TOKEN=$(cat "$XDG_RUNTIME_DIR/snitchwatch/token")
 
 Closing the GUI window must NOT stop `snitchwatch-bridge.service`; the daemon
 therefore keeps its interactive AskRule channel and only ever falls back to
-`DefaultAction: deny` on a genuine bridge outage.
+its `DefaultAction` on a genuine bridge outage.
 
 ---
 

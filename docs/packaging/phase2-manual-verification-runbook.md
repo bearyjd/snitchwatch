@@ -36,7 +36,9 @@ bluebuild build packaging/bluebuild/recipe.yml
 **Pass condition:** the image builds without error and produces an OCI
 image with `opensnitchd` installed and enabled by default, plus the
 fail-closed `/etc/opensnitchd/default-config.json`
-(`DefaultAction: deny`, `Server.Address: 127.0.0.1:50051`) baked in at
+(`DefaultAction: deny`, `Server.Address: unix:opensnitchd.sock`, the system
+bridge's root-only socket, #35; the per-user TCP `127.0.0.1:50051` is not
+deny-safe and is not in the image) baked in at
 `packaging/bluebuild/files/system/etc/opensnitchd/default-config.json`.
 
 **Verify the baked config actually landed**, don't just trust the recipe:

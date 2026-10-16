@@ -156,11 +156,14 @@ jq -e '.Server.Address == "127.0.0.1:50051" and .DefaultAction == "allow"' \
 test ! -e /usr/bin/opensnitch-ui   # upstream GUI would fight the bridge for the daemon
 ```
 
-Keep Bazzite's `DefaultAction` at `allow` with the current loopback gRPC
-transport. Before considering deny-by-default, complete
-[#35](https://github.com/bearyjd/snitchwatch/issues/35): migrate the root daemon
-to an authenticated per-user Unix-domain transport. This bridge release does not
-change that transport or the daemon configuration.
+**This per-user TCP flavour is not deny-safe** (owner decision 2026-10-16,
+[#35](https://github.com/bearyjd/snitchwatch/issues/35)): any local process
+that binds `127.0.0.1:50051` while no bridge holds it (before login, between
+restarts, a second user) gets the root daemon's UI authority, including
+config changes the daemon saves. Keep `DefaultAction` at `allow` with it, and
+keep it out of images. The deny-by-default path is the system flavour's
+root-only Unix socket: see [system-bridge-integration.md](system-bridge-integration.md).
+This bridge release does not change the user unit's transport.
 
 ## Cutting a release (maintainer)
 
@@ -244,7 +247,8 @@ inline Deny would block every app from that host until the firewall restarts.
 ## Known limitations
 
 - Concurrent logins of several real users race for `127.0.0.1:50051`; only
-  the first user's bridge binds it.
+  the first user's bridge binds it, and any local process can bind it first
+  (not deny-safe, #35; use the system flavour).
 - A per-user `~/.config/systemd/user/snitchwatch-bridge.service` (e.g. from the
   rpm-ostree-layering dev path) overrides the image's unit for that user —
   remove it to run the image-baked binary.

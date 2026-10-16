@@ -38,9 +38,16 @@ internet access rather than scoped loopback. See
 - **Lightweight / DIY** — layer `opensnitchd` onto stock Bazzite with
   `rpm-ostree`: [`../docs/packaging/rpm-ostree-layering.md`](../docs/packaging/rpm-ostree-layering.md).
 
-Both ship the same fail-**closed** daemon config
+The image ships the system flavour's fail-**closed** daemon config
 ([`bluebuild/files/system/etc/opensnitchd/default-config.json`](bluebuild/files/system/etc/opensnitchd/default-config.json)):
-`DefaultAction: deny` and `Server.Address: 127.0.0.1:50051`.
+`DefaultAction: deny` and `Server.Address: unix:opensnitchd.sock`, the
+system bridge's root-only socket (#35). It needs the system overlay staged
+into the same image (`system/stage.sh`, which also installs the
+`opensnitch.service` drop-in the relative address relies on); see
+[`../docs/packaging/system-bridge-integration.md`](../docs/packaging/system-bridge-integration.md).
+The per-user bridge's TCP `127.0.0.1:50051` is **not deny-safe** (any local
+process can bind the port first) and stays out of the image; the DIY path
+pairs it with `DefaultAction: allow`.
 
 ## The packaged fetch rule
 
@@ -64,8 +71,8 @@ one opensnitchd rule (owner decision, 2026-10-08):
   `user.name` when it loads the rule. Without the `snitchwatch` account it
   logs `Error compiling list rule` and skips the rule; it never broadens
   it.
-  - On today's bluebuild image, which runs the per-user bridge, the rule
-    is inert for this reason.
+  - A host that runs only the per-user bridge has no such account, so
+    the rule is inert there for this reason.
   - With the system-bridge overlay, sysusers creates the account before
     `opensnitch.service` starts.
   - On a live host, restart `opensnitch.service` once after the account

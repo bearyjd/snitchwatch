@@ -1,9 +1,11 @@
 # System bridge integration (overlay, pending a new release)
 
-This overlay is the privileged-host deployment of Snitchwatch. It is separate
-from the existing `snitchwatch-bridge.service` **user** unit and does not
-change that release contract. Do not enable both: the legacy unit uses TCP
-`127.0.0.1:50051`; the system bridge is socket-activated only.
+This overlay is the privileged-host deployment of Snitchwatch, and the only
+deny-safe one: the image path from r15 on (owner decision 2026-10-16, #35).
+It is separate from the existing `snitchwatch-bridge.service` **user** unit
+and does not change that release contract. Do not enable both: the legacy
+unit uses TCP `127.0.0.1:50051`, which any local process can bind first, so
+it is not deny-safe; the system bridge is socket-activated only.
 
 ## Trust boundary
 
@@ -103,12 +105,16 @@ account's bridge download blocklists over HTTPS (TCP 443) under
 After the first boot, confirm that
 `sudo grep 'Error compiling list rule' /var/log/opensnitchd.log` (the shipped config sets `LogFile: /var/log/opensnitchd.log`, so the journal won't show it) finds nothing for it. Enable the two `.socket` units in the image/preset; do not
 enable the service directly. For OpenSnitch 1.8.0, configure
-`Server.Address: unix:opensnitchd.sock` and give `opensnitch.service` this
-drop-in so the relative socket address resolves inside the protected runtime
-directory, after systemd has created the listener:
+`Server.Address: unix:opensnitchd.sock` (the bluebuild image's
+`default-config.json` does) and give `opensnitch.service` this drop-in so the
+relative socket address resolves inside the protected runtime directory,
+after systemd has created the listener. `stage.sh` stages it as
+`/usr/lib/systemd/system/opensnitch.service.d/snitchwatch-system-bridge.conf`
+(source: `packaging/system/opensnitch-snitchwatch-system-bridge.conf`), only
+together with the socket it requires:
 
 ```ini
-# /etc/systemd/system/opensnitch.service.d/snitchwatch-system-bridge.conf
+# /usr/lib/systemd/system/opensnitch.service.d/snitchwatch-system-bridge.conf
 [Unit]
 Requires=snitchwatch-system-bridge-grpc.socket
 After=snitchwatch-system-bridge-grpc.socket

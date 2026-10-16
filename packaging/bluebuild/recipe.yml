@@ -2,13 +2,22 @@
 #
 # Bakes the OpenSnitch daemon (opensnitchd) into a custom Bazzite image and
 # enables it at boot, pre-configured to fail *closed* (DefaultAction: deny)
-# and to dial the Snitchwatch bridge's default gRPC bind (127.0.0.1:50051).
+# and to dial the system bridge's root-only Unix socket
+# (`Server.Address: unix:opensnitchd.sock`, #35).
 #
-# The Snitchwatch GUI itself is NOT baked into this image — it ships as a
-# Flatpak (see ../flatpak/org.snitchwatch.Snitchwatch.yml) and the bridge
-# runs as a per-user systemd service (see ../systemd/snitchwatch-bridge.service),
-# both installed per-user on first run. Only the privileged, host-level
-# daemon belongs in the OS image.
+# That address resolves only with the system-bridge overlay in the same
+# image: `../system/stage.sh` stages the bridge binary, its service and two
+# socket units, sysusers/tmpfiles, and the `opensnitch.service` drop-in
+# (WorkingDirectory=/run/snitchwatch, Requires= the grpc socket). The image
+# build must run it (with a verified binary) and enable the two `.socket`
+# units; this recipe doesn't yet, so a build from it alone dials a socket
+# that doesn't exist and, under `deny`, blocks everything not ruled. See
+# ../../docs/packaging/system-bridge-integration.md.
+#
+# The per-user TCP bridge (../systemd/snitchwatch-bridge.service,
+# 127.0.0.1:50051) is NOT deny-safe and is not part of this image. The GUI
+# ships as the system-profile Flatpak
+# (../flatpak/org.snitchwatch.Snitchwatch.system.yml).
 #
 # Build locally (needs the `bluebuild` CLI + podman/buildah on a host that can
 # run OCI builds — NOT possible in the CI sandbox this was authored in):
@@ -46,7 +55,9 @@ modules:
 
   # 2. Drop our hardened daemon config into place. This overrides upstream's
   #    `DefaultAction: allow` (fail-open) with `DefaultAction: deny`
-  #    (fail-closed) and points `Server.Address` at the bridge's default bind.
+  #    (fail-closed) and points `Server.Address` at the system bridge's
+  #    socket, relative to the drop-in's working directory (OpenSnitch 1.8.0
+  #    can't parse the absolute unix:///run/... form).
   #    It keeps upstream's `ProcMonitorMethod: ebpf`. (A 2026-07-31 note
   #    here briefly shipped `proc`, citing an eBPF module-load failure on
   #    kernel 6.19 — re-verification showed that failure was a *rootless
@@ -57,9 +68,10 @@ modules:
   #    The same module ships the one Snitchwatch rule,
   #    files/system/etc/opensnitchd/rules/000-snitchwatch-bridge-fetch.json:
   #    it lets the *system* bridge (account `snitchwatch`) download
-  #    blocklists over HTTPS. This image has no `snitchwatch` account yet, so
-  #    the daemon logs that it can't compile the rule, skips it, and nothing
-  #    is allowed by it. See ../../docs/superpowers/plans/
+  #    blocklists over HTTPS. Until the image stages the system overlay
+  #    (whose sysusers file creates that account), the daemon logs that it
+  #    can't compile the rule, skips it, and nothing is allowed by it. See
+  #    ../../docs/superpowers/plans/
   #    2026-10-08-packaged-bridge-fetch-rule.md.
   - type: files
     files:

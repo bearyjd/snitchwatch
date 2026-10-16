@@ -220,6 +220,26 @@ fn stager_accepts_a_canonical_nonroot_destination_and_only_stages_files() {
     assert!(root.join("usr/lib/tmpfiles.d/snitchwatch.conf").is_file());
     assert!(root.join("usr/lib/sysusers.d/snitchwatch.conf").is_file());
 
+    // #35: the daemon's drop-in ships with the socket it requires, never
+    // without it (a drop-in alone fails opensnitch.service's start).
+    let drop_in =
+        root.join("usr/lib/systemd/system/opensnitch.service.d/snitchwatch-system-bridge.conf");
+    assert_eq!(
+        std::fs::metadata(&drop_in).unwrap().permissions().mode() & 0o7777,
+        0o644
+    );
+    let drop_in = std::fs::read_to_string(&drop_in).unwrap();
+    for line in [
+        "Requires=snitchwatch-system-bridge-grpc.socket",
+        "After=snitchwatch-system-bridge-grpc.socket",
+        "WorkingDirectory=/run/snitchwatch",
+    ] {
+        assert!(
+            drop_in.lines().any(|l| l.trim() == line),
+            "drop-in missing {line}"
+        );
+    }
+
     // The packaged fetch rule: the bluebuild image's exact bytes, 0644.
     let rule_path = "etc/opensnitchd/rules/000-snitchwatch-bridge-fetch.json";
     let staged = root.join(rule_path);

@@ -111,7 +111,11 @@ The bridge prints `GRPC_LISTEN_ADDR=127.0.0.1:NNNNN`,
 `WS_SOCKET_PATH=/run/user/<uid>/snitchwatch/bridge.sock`, and
 `WS_TOKEN_PATH=/run/user/<uid>/snitchwatch/token` to stdout on startup. Set
 opensnitchd's `default-config.json` `Server.Address` field to the bridge's
-`GRPC_LISTEN_ADDR` (e.g. `127.0.0.1:50051`) so the daemon dials in.
+`GRPC_LISTEN_ADDR` (e.g. `127.0.0.1:50051`) so the daemon dials in. This TCP
+transport is for development and the per-user flavour only: it is **not
+deny-safe** (any local process can bind the port first, #35), so pair it with
+`DefaultAction: allow`. The packaged image uses the system bridge's root-only
+Unix socket ([`docs/packaging/system-bridge-integration.md`](docs/packaging/system-bridge-integration.md)).
 
 You can poke the WebSocket with `websocat`'s Unix-socket mode, presenting
 the token as the first line so the bridge accepts the connection:
@@ -401,13 +405,15 @@ Build one locally with `just release-bridge` (podman).
 
 Upstream OpenSnitch ships `DefaultAction: allow`, so the daemon silently
 **allows** all traffic whenever no UI client is connected. Snitchwatch's
-packaging overrides this with `DefaultAction: deny`
+image overrides this with `DefaultAction: deny`
 ([`packaging/bluebuild/files/system/etc/opensnitchd/default-config.json`](packaging/bluebuild/files/system/etc/opensnitchd/default-config.json)):
 a firewall whose whole premise is "ask before allowing" should fail **closed**
-when its decision channel is down. The bridge runs as its own `--user`
-service precisely so that *closing the GUI window* is not mistaken for *the
-decision channel being down* — the daemon only reaches its deny default on a
-genuine bridge outage.
+when its decision channel is down. That is only safe on the system bridge's
+root-only Unix socket, which the image's config dials (`unix:opensnitchd.sock`);
+the per-user bridge's TCP port is not deny-safe (#35). The bridge runs as its
+own service precisely so that *closing the GUI window* is not mistaken for
+*the decision channel being down* — the daemon only reaches its deny default
+on a genuine bridge outage.
 
 ### Coexistence with upstream `opensnitch-ui`
 

@@ -29,6 +29,10 @@ install -Dm644 "$script_dir/snitchwatch-system-bridge-grpc.socket" \
   "$dest/usr/lib/systemd/system/snitchwatch-system-bridge-grpc.socket"
 install -Dm644 "$script_dir/snitchwatch-system-bridge-gui.socket" \
   "$dest/usr/lib/systemd/system/snitchwatch-system-bridge-gui.socket"
+# The daemon dials the grpc socket above (`Server.Address:
+# unix:opensnitchd.sock`, #35); its drop-in ships only with that socket.
+install -Dm644 "$script_dir/opensnitch-snitchwatch-system-bridge.conf" \
+  "$dest/usr/lib/systemd/system/opensnitch.service.d/snitchwatch-system-bridge.conf"
 install -Dm644 "$script_dir/snitchwatch.conf" "$dest/usr/lib/tmpfiles.d/snitchwatch.conf"
 install -Dm644 "$script_dir/snitchwatch.conf.sysusers" "$dest/usr/lib/sysusers.d/snitchwatch.conf"
 # The one opensnitchd rule Snitchwatch ships: this account's bridge may make

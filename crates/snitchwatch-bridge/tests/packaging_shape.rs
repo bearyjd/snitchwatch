@@ -22,7 +22,7 @@ fn read(rel: &str) -> String {
 }
 
 #[test]
-fn daemon_config_fails_closed_and_dials_bridge_default_bind() {
+fn daemon_config_fails_closed_and_dials_the_system_bridge_socket() {
     let body = read("packaging/bluebuild/files/system/etc/opensnitchd/default-config.json");
     let json: serde_json::Value =
         serde_json::from_str(&body).expect("daemon config must be valid JSON");
@@ -32,9 +32,13 @@ fn daemon_config_fails_closed_and_dials_bridge_default_bind() {
         "packaged daemon config must fail CLOSED (DefaultAction: deny), not \
          inherit upstream's fail-open `allow`"
     );
+    // #35: the system bridge's root-only socket, relative to the daemon's
+    // working directory (/run/snitchwatch, set by the drop-in stage.sh
+    // stages). OpenSnitch 1.8.0 can't parse the absolute unix:/// form, and
+    // the TCP user flavour's 127.0.0.1:50051 isn't deny-safe.
     assert_eq!(
-        json["Server"]["Address"], "127.0.0.1:50051",
-        "Server.Address must point at the bridge's default gRPC bind"
+        json["Server"]["Address"], "unix:opensnitchd.sock",
+        "Server.Address must dial the system bridge's Unix socket"
     );
 }
 
