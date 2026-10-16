@@ -104,6 +104,8 @@ async fn create_profile(bridge: &RunningBridge, id: &str, name: &str) {
             id: id.into(),
             name: name.into(),
             network_matchers: vec![],
+            request_id: None,
+            reply: None,
         })
         .await
         .unwrap();

@@ -66,6 +66,9 @@ pub mod qobject {
         #[qproperty(bool, applies_rules, cxx_name = "appliesRules")]
         /// Why it doesn't, or "".
         #[qproperty(QString, not_applied_reason, cxx_name = "notAppliedReason")]
+        /// Why the last create/rename/matcher change was refused, or "".
+        /// Cleared when the next one is sent.
+        #[qproperty(QString, profile_note, cxx_name = "profileNote")]
         type ProfilesModel = super::ProfilesModelRust;
 
         /// Emitted with a JSON-encoded `ClientMessage` (`CreateProfile` /
@@ -171,6 +174,9 @@ pub struct ProfilesModelRust {
     storage_reason: QString,
     applies_rules: bool,
     not_applied_reason: QString,
+    profile_note: QString,
+    /// The id of the create/update whose answer sets `profile_note`.
+    awaiting: crate::profiles::request_note::Awaiting,
 }
 
 impl qobject::ProfilesModel {
@@ -213,33 +219,39 @@ impl qobject::ProfilesModel {
         }
     }
 
-    fn create_profile(self: Pin<&mut Self>, name: &QString, matchers_csv: &QString) {
+    fn create_profile(mut self: Pin<&mut Self>, name: &QString, matchers_csv: &QString) {
         let name = name.to_string();
         let existing_ids = self.store.ids();
         let id = derive_profile_id(&name, &existing_ids);
         let network_matchers = parse_matchers(&matchers_csv.to_string());
+        let request_id = self.as_mut().expect_answer();
         self.emit_client(ClientMessage::CreateProfile {
             id,
             name,
             network_matchers,
+            request_id: Some(request_id),
+            reply: None,
         });
     }
 
-    fn rename_profile(self: Pin<&mut Self>, id: &QString, name: &QString) {
+    fn rename_profile(mut self: Pin<&mut Self>, id: &QString, name: &QString) {
         let id = id.to_string();
         let Some(existing) = self.store.find_by_id(&id) else {
             tracing::warn!(%id, "ProfilesModel: renameProfile for unknown profile, ignored");
             return;
         };
         let network_matchers = existing.network_matchers.clone();
+        let request_id = self.as_mut().expect_answer();
         self.emit_client(ClientMessage::UpdateProfile {
             id,
             name: name.to_string(),
             network_matchers,
+            request_id: Some(request_id),
+            reply: None,
         });
     }
 
-    fn update_matchers(self: Pin<&mut Self>, id: &QString, matchers_csv: &QString) {
+    fn update_matchers(mut self: Pin<&mut Self>, id: &QString, matchers_csv: &QString) {
         let id = id.to_string();
         let Some(existing) = self.store.find_by_id(&id) else {
             tracing::warn!(%id, "ProfilesModel: updateMatchers for unknown profile, ignored");
@@ -247,10 +259,13 @@ impl qobject::ProfilesModel {
         };
         let name = existing.name.clone();
         let network_matchers = parse_matchers(&matchers_csv.to_string());
+        let request_id = self.as_mut().expect_answer();
         self.emit_client(ClientMessage::UpdateProfile {
             id,
             name,
             network_matchers,
+            request_id: Some(request_id),
+            reply: None,
         });
     }
 
@@ -308,6 +323,15 @@ impl qobject::ProfilesModel {
 
 impl qobject::ProfilesModel {
     pub fn apply_server_message(mut self: Pin<&mut Self>, msg: ServerMessage) {
+        // A rule command result is no profile list change: never reset the
+        // model for one.
+        let consumed = self.as_mut().rust_mut().awaiting.on_message(&msg);
+        if let Some(note) = consumed {
+            if let Some(note) = note {
+                self.set_profile_note(QString::from(&note));
+            }
+            return;
+        }
         let changed = {
             unsafe {
                 self.as_mut().begin_reset_model();
@@ -330,6 +354,13 @@ impl qobject::ProfilesModel {
             self.as_mut().set_applies_rules(applies);
             self.as_mut().set_not_applied_reason(not_applied);
         }
+    }
+
+    /// A new request id whose answer sets the note; clears the old note.
+    fn expect_answer(mut self: Pin<&mut Self>) -> String {
+        let request_id = self.as_mut().rust_mut().awaiting.expect();
+        self.set_profile_note(QString::default());
+        request_id
     }
 
     fn emit_client(mut self: Pin<&mut Self>, msg: ClientMessage) {

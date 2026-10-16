@@ -120,6 +120,8 @@ async fn activate_home_with_a_rule(b: &mut Bridge) {
             id: "home".into(),
             name: "Home".into(),
             network_matchers: vec![],
+            request_id: None,
+            reply: None,
         },
     )
     .await;

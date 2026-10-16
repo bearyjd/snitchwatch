@@ -188,6 +188,7 @@ pub async fn handle_profile_action(
             id,
             name,
             network_matchers,
+            ..
         } => {
             mgr.create_profile(&id, &name, network_matchers).await?;
             Ok(ProfileActionOutcome::Created { id })
@@ -196,6 +197,7 @@ pub async fn handle_profile_action(
             id,
             name,
             network_matchers,
+            ..
         } => {
             mgr.update_profile(&id, &name, network_matchers).await?;
             Ok(ProfileActionOutcome::Updated { id })
@@ -259,6 +261,8 @@ mod profile_action_tests {
             id: "home".into(),
             name: "At Home".into(),
             network_matchers: vec!["Home*".into()],
+            request_id: None,
+            reply: None,
         };
         handle_profile_action(mgr.clone(), action).await.unwrap();
         let profiles = mgr.store().list_profiles().unwrap();
@@ -275,6 +279,8 @@ mod profile_action_tests {
                 id: "home".into(),
                 name: "Home".into(),
                 network_matchers: vec![],
+                request_id: None,
+                reply: None,
             },
         )
         .await
@@ -303,6 +309,8 @@ mod profile_action_tests {
                 id: "home".into(),
                 name: "Home".into(),
                 network_matchers: vec![],
+                request_id: None,
+                reply: None,
             },
         )
         .await
