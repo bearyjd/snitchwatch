@@ -146,16 +146,30 @@ daemon connects before rolling the image out.
 gets out either, so the desktop may have no network until the bridge is back.
 The bridge can't report this itself: without its socket it isn't running,
 so neither the GUI nor its diagnostics can see it. From a console (a VT
-login works without network):
+login works without network), in this order:
 
 ```bash
+# 1. Look.
 systemctl status snitchwatch-system-bridge-grpc.socket snitchwatch-system-bridge.service
-ls -l /run/snitchwatch/                  # opensnitchd.sock: root root, srw-------
+ls -ld /run/snitchwatch /run/snitchwatch-auth   # root root 0711; snitchwatch snitchwatch-ui 2750
+ls -l /run/snitchwatch/                         # opensnitchd.sock: root root, srw-------
 journalctl -b -u snitchwatch-system-bridge.service -u snitchwatch-system-bridge-grpc.socket
+
+# 2. Recreate the runtime directories (the overlay's
+#    /usr/lib/tmpfiles.d/snitchwatch.conf); a no-op if they exist.
+sudo systemd-tmpfiles --create snitchwatch.conf
+
+# 3. Clear the failed state and start both sockets.
 sudo systemctl reset-failed snitchwatch-system-bridge.service \
   snitchwatch-system-bridge-grpc.socket snitchwatch-system-bridge-gui.socket
 sudo systemctl start snitchwatch-system-bridge-grpc.socket snitchwatch-system-bridge-gui.socket
-sudo systemctl restart opensnitch.service   # re-dial now, instead of at its next retry
+ls -l /run/snitchwatch/opensnitchd.sock         # must exist now
+
+# 4. Restart the daemon. Required, not optional: its working directory is
+#    fixed when it starts, so a daemon that started while /run/snitchwatch
+#    was missing stays in / and keeps dialing /opensnitchd.sock until it is
+#    restarted, even with the directory and socket back.
+sudo systemctl restart opensnitch.service
 ```
 
 The bridge service has `StartLimitIntervalSec=0` (PR #166 L1): a crash loop

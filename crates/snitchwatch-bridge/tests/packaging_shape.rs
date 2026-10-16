@@ -54,6 +54,19 @@ fn recipe_config_fails_closed_on_the_per_user_tcp_bind() {
     assert_eq!(json["DefaultAction"], "deny");
 }
 
+/// The two daemon configs differ only in where the daemon dials: the
+/// overlay's must not drift from the recipe's on any other setting.
+#[test]
+fn the_two_daemon_configs_differ_only_in_server_address() {
+    let mut recipe =
+        daemon_config("packaging/bluebuild/files/system/etc/opensnitchd/default-config.json");
+    let mut system = daemon_config("packaging/system/opensnitchd-default-config.json");
+    assert_ne!(recipe["Server"]["Address"], system["Server"]["Address"]);
+    recipe["Server"]["Address"] = serde_json::Value::Null;
+    system["Server"]["Address"] = serde_json::Value::Null;
+    assert_eq!(recipe, system);
+}
+
 fn json_files(dir: &Path, found: &mut Vec<PathBuf>) {
     for entry in std::fs::read_dir(dir).unwrap() {
         let path = entry.unwrap().path();
