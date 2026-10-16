@@ -55,18 +55,19 @@ pub fn section_label(store: &RulesStore, index: usize) -> Option<String> {
 pub fn section_labels(rules: &[Rule]) -> Vec<String> {
     let mut seen = Vec::new();
     let mut previous = None;
+    let mut run_continued = false;
     rules
         .iter()
         .map(|rule| {
             let source = rule.source();
             let kind = discriminant(&source);
-            let continued = previous != Some(kind) && seen.contains(&kind);
             if previous != Some(kind) {
+                run_continued = seen.contains(&kind);
                 seen.push(kind);
             }
             previous = Some(kind);
             let label = source.label();
-            if continued {
+            if run_continued {
                 format!("{label} (continued)")
             } else {
                 label.to_string()
@@ -170,6 +171,24 @@ mod tests {
             ]
         );
         assert_eq!(section_label(&s, 6), None);
+    }
+
+    /// Every row of a continued run reads "(continued)", not just its first.
+    #[test]
+    fn every_row_of_a_continued_run_is_continued() {
+        let s = store(&["100-mine", "850-profile:home:0001-a", "x-mine", "y-mine"]);
+        let labels: Vec<_> = (0..s.len())
+            .map(|i| section_label(&s, i).unwrap())
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                USER_RULES,
+                PROFILE_RULES,
+                "User rules (continued)",
+                "User rules (continued)"
+            ]
+        );
     }
 
     /// The headings follow the list as it changes, not just as first loaded.

@@ -84,11 +84,10 @@ mod tests {
         assert_eq!(*delivered.borrow(), vec!["live"]);
     }
 
-    /// A result feed never asks the bridge for a snapshot, at the start or
-    /// after a lag (PR #111 review): its snapshot request is `no_snapshot`,
-    /// which sends nothing and reports done, and the feed still delivers.
+    /// A result feed keeps delivering after a lag, and its snapshot request
+    /// (`no_snapshot`) sends nothing and reports done (PR #111 review).
     #[tokio::test]
-    async fn a_result_feed_asks_for_no_snapshot_even_after_a_lag() {
+    async fn a_result_feed_keeps_delivering_after_a_lag() {
         use crate::bridge_runtime::ReceivedServerMessage;
         use std::time::Duration;
 
