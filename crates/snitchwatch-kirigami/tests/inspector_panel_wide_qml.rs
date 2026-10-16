@@ -308,6 +308,35 @@ Window {
         function () {
             probe.expect(page.inspecting && page.inspectId === "p10",
                          "idle: a newly arrived pending row was not shown (dismissed p9 must not return): '" + page.inspectId + "'");
+            // Issue #146: every dismissed row is remembered, not just the
+            // last. Dismiss p10 too; the next arrival is shown, not p9.
+            page.dismissInspector();
+        },
+        function () {
+            probe.expect(!page.inspecting, "dismissing p10 selected a dismissed row: " + page.inspectId);
+            model.applyServerMessageJson(JSON.stringify({ action: "insertConnectionRows", rows: [
+                Object.assign(probe.row("p11", "p11.example.com", null, null), { startedAtMs: 3 })] }));
+        },
+        function () {
+            probe.expect(page.inspecting && page.inspectId === "p11",
+                         "a dismissed row (p9 or p10) came back instead of p11: '" + page.inspectId + "'");
+            // Once p9 is decided it leaves the set; a dismissed row that is
+            // decided and then asked again would not stay hidden.
+            model.applyServerMessageJson(JSON.stringify({ action: "updateConnectionRows", rows: [
+                probe.row("p9", "p9.example.com", "allow", "r")] }));
+            page.dismissInspector();
+        },
+        function () {
+            model.applyServerMessageJson(JSON.stringify({ action: "insertConnectionRows", rows: [
+                Object.assign(probe.row("p12", "p12.example.com", null, null), { startedAtMs: 4 })] }));
+        },
+        function () {
+            probe.expect(page.dismissedIds.indexOf("p9") < 0,
+                         "a decided row stayed in the dismissed set: " + JSON.stringify(page.dismissedIds));
+            probe.expect(page.dismissedIds.indexOf("p10") >= 0 && page.dismissedIds.indexOf("p11") >= 0,
+                         "still-pending dismissed rows were pruned: " + JSON.stringify(page.dismissedIds));
+            probe.expect(page.inspecting && page.inspectId === "p12",
+                         "p12 not shown: '" + page.inspectId + "'");
         }
     ]
 

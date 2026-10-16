@@ -9,8 +9,9 @@ use snitchwatch_bridge::ws_messages::ConnectionRow;
 use crate::connections::outcome::is_pending;
 use crate::connections::row_store::RowStore;
 
-/// The oldest pending row (earliest `started_at_ms`; the earlier-inserted row
-/// on a tie), as `{"rowId","process","processPath","appIcon","host","port",
+/// The oldest pending row (earliest `started_at_ms`; on a tie the row earlier
+/// in the store, which `ConnectionsModel.oldestPendingRowIndex` also uses so
+/// the alert and the inspector pick the same row, issue #146), as `{"rowId","process","processPath","appIcon","host","port",
 /// "protocol","direction","answerDeadlineMs","startedAtMs","dstIp",
 /// "bindableProcessPath"}`, or `"{}"` when nothing waits. `answerDeadlineMs`
 /// is `-1` when the bridge will never answer it.
