@@ -43,7 +43,7 @@ use tracing_subscriber::{EnvFilter, Layer};
 const DEFAULT_FILTER: &str = "info";
 
 /// Crates that log WebSocket frames with their payload below info
-/// (tungstenite 0.30 `protocol/mod.rs`: "Received message …", "Sending
+/// (tungstenite's `protocol/mod.rs`: "Received message …", "Sending
 /// frame: …").
 const FRAME_LOGGERS: [&str; 2] = ["tungstenite", "tokio_tungstenite"];
 
