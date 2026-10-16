@@ -63,7 +63,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 
 use crate::bridge_runtime::{BridgeHandles, BridgeNotice, ReceivedNotice};
-use crate::notifier::CooldownGate;
+use crate::notifier::{CooldownGate, FlowKey};
 use crate::pending_notice::{show_and_answer, show_plain, PendingTarget};
 use crate::silent_mode;
 use snitchwatch_bridge::translator::process_binding::RuleRefusal;
@@ -305,6 +305,7 @@ enum Gate {
 /// when it goes out, so a notice held back by the window can go later.
 fn may_post(
     notice: &BridgeNotice,
+    flow: Option<&FlowKey>,
     window_active: bool,
     gate: &Mutex<CooldownGate>,
     now: Instant,
@@ -315,7 +316,7 @@ fn may_post(
     let fires = gate
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .should_fire(notice, now);
+        .should_fire_for_flow(notice, flow, now);
     if fires {
         Gate::Post
     } else {
@@ -349,7 +350,8 @@ impl qobject::NotificationController {
     ) -> PendingLook {
         let front_active =
             front_is_active(current_session, *self.window_active(), *self.alert_active());
-        match may_post(&notice, front_active, &gate, Instant::now()) {
+        let flow = target.as_ref().map(PendingTarget::flow_key);
+        match may_post(&notice, flow.as_ref(), front_active, &gate, Instant::now()) {
             Gate::WindowActive => PendingLook::WindowActive,
             Gate::CooledDown => {
                 let (kind, row_id) = notice_label(&notice);
@@ -470,13 +472,48 @@ mod tests {
         };
         let t0 = Instant::now();
         let at = |secs| t0 + Duration::from_secs(secs);
-        assert_eq!(may_post(&pending, true, &gate, at(0)), Gate::WindowActive);
-        assert_eq!(may_post(&pending, true, &gate, at(1)), Gate::WindowActive);
-        assert_eq!(may_post(&pending, false, &gate, at(2)), Gate::Post);
-        assert_eq!(may_post(&pending, false, &gate, at(3)), Gate::CooledDown);
         assert_eq!(
-            may_post(&BridgeNotice::DaemonAway, true, &gate, at(3)),
+            may_post(&pending, None, true, &gate, at(0)),
+            Gate::WindowActive
+        );
+        assert_eq!(
+            may_post(&pending, None, true, &gate, at(1)),
+            Gate::WindowActive
+        );
+        assert_eq!(may_post(&pending, None, false, &gate, at(2)), Gate::Post);
+        assert_eq!(
+            may_post(&pending, None, false, &gate, at(3)),
+            Gate::CooledDown
+        );
+        assert_eq!(
+            may_post(&BridgeNotice::DaemonAway, None, true, &gate, at(3)),
             Gate::Post
+        );
+    }
+
+    /// #116 L5: a daemon retry is a new row for the same flow, so its
+    /// notice is held back by the flow's cooldown.
+    #[test]
+    fn a_retry_of_the_same_flow_is_cooled_down() {
+        let gate = Mutex::new(CooldownGate::new());
+        let pending = |row_id| BridgeNotice::Pending {
+            row_id,
+            process: "curl".into(),
+        };
+        let flow = FlowKey {
+            session: 1,
+            program: "/usr/bin/curl".into(),
+            host: "example.com".into(),
+        };
+        let t0 = Instant::now();
+        let at = |secs| t0 + Duration::from_secs(secs);
+        assert_eq!(
+            may_post(&pending(1), Some(&flow), false, &gate, at(0)),
+            Gate::Post
+        );
+        assert_eq!(
+            may_post(&pending(2), Some(&flow), false, &gate, at(5)),
+            Gate::CooledDown
         );
     }
 
@@ -496,9 +533,12 @@ mod tests {
         };
         let now = Instant::now();
         let held = front_is_active(true, false, true);
-        assert_eq!(may_post(&pending, held, &gate, now), Gate::WindowActive);
+        assert_eq!(
+            may_post(&pending, None, held, &gate, now),
+            Gate::WindowActive
+        );
         let unseen = front_is_active(true, true, false);
-        assert_eq!(may_post(&pending, unseen, &gate, now), Gate::Post);
+        assert_eq!(may_post(&pending, None, unseen, &gate, now), Gate::Post);
     }
 
     /// The looks a prompt's notice gets, at what time after the prompt.

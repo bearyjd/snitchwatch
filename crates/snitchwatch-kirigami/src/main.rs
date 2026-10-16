@@ -16,7 +16,7 @@ use snitchwatch_kirigami::bridge_bindings as _;
 
 use cxx_qt_lib::{QQmlApplicationEngine, QString, QUrl};
 use snitchwatch_kirigami::{
-    app_icons, application, bridge_runtime, demo, logging, panic_hook, paths,
+    app_icons, application, bridge_runtime, demo, logging, notification_signals, panic_hook, paths,
 };
 
 fn main() {
@@ -76,6 +76,13 @@ fn main() {
     }
 
     if let Some(app) = app.as_mut() {
-        std::process::exit(app.exec());
+        let code = app.exec();
+        // Resident notices would outlive us, with buttons nobody hears.
+        if let Some(handles) = bridge_runtime::handles() {
+            handles
+                .runtime()
+                .block_on(notification_signals::close_all_open());
+        }
+        std::process::exit(code);
     }
 }

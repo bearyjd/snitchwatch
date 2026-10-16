@@ -8,6 +8,8 @@
 
 use super::*;
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const KEYS: [&str; 3] = ["allow-once", "deny", "review"];
@@ -62,8 +64,11 @@ impl PrivateBus {
             .stderr(std::fs::File::create(&log).unwrap())
             .spawn()
             .unwrap();
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while !socket.exists() {
+        // The socket file appears at bind, before the daemon listens: wait
+        // until it takes a connection, or a loaded machine sees "refused"
+        // (#110).
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while std::os::unix::net::UnixStream::connect(&socket).is_err() {
             let exited = daemon.try_wait().unwrap();
             if exited.is_some() || Instant::now() >= deadline {
                 let _ = daemon.kill();
@@ -96,13 +101,18 @@ impl PrivateBus {
         self.serve(FakeServer::default()).await
     }
 
-    /// A fake notification server that never answers `CloseNotification`.
-    pub(crate) async fn notification_server_stuck_on_close(&self) -> Connection {
-        self.serve(FakeServer {
-            stuck_on_close: true,
-            ..FakeServer::default()
-        })
-        .await
+    /// A fake notification server that never answers `CloseNotification`,
+    /// and how many of those it has received.
+    pub(crate) async fn notification_server_stuck_on_close(&self) -> (Connection, Arc<AtomicU32>) {
+        let close_calls = Arc::new(AtomicU32::new(0));
+        let server = self
+            .serve(FakeServer {
+                stuck_on_close: true,
+                close_calls: close_calls.clone(),
+                ..FakeServer::default()
+            })
+            .await;
+        (server, close_calls)
     }
 
     async fn serve(&self, server: FakeServer) -> Connection {
@@ -216,6 +226,9 @@ struct FakeServer {
     last: Option<Notified>,
     /// Never answer `CloseNotification` (it then holds the interface).
     stuck_on_close: bool,
+    /// Counts `CloseNotification` calls received, readable without the
+    /// interface (which a stuck close holds).
+    close_calls: Arc<AtomicU32>,
 }
 
 /// What one `Notify` carried besides its text and actions.
@@ -251,6 +264,7 @@ impl FakeServer {
 
     async fn close_notification(&mut self, id: u32) {
         self.closed.push(id);
+        self.close_calls.fetch_add(1, Ordering::SeqCst);
         if self.stuck_on_close {
             std::future::pending::<()>().await;
         }
@@ -586,4 +600,26 @@ async fn notify_carries_the_resident_and_desktop_entry_hints() {
         "org.snitchwatch.Snitchwatch"
     );
     assert_eq!(notified.hints.len(), 2, "{notified:?}");
+}
+
+/// #116 L3: a notice still shown when the GUI quits is closed on its server;
+/// one already closed (by its caller or by the server) isn't closed twice.
+#[tokio::test(flavor = "multi_thread")]
+async fn shutdown_closes_the_notices_still_open_and_only_those() {
+    let Some(bus) = PrivateBus::start() else {
+        return;
+    };
+    let server = bus.notification_server().await;
+    let listener = bus.connect().await;
+    let still_open = Notice::show(&listener, "s", "b", &ACTIONS).await.unwrap();
+    let closed_by_us = Notice::show(&listener, "s", "b", &ACTIONS).await.unwrap();
+    closed_by_us.close().await;
+    assert_eq!(closed(&server).await, [7], "its own close");
+
+    super::close_open_where(|conn| same_connection(conn, &listener)).await;
+    assert_eq!(closed(&server).await, [7, 7], "one more close, not two");
+    drop(still_open);
+
+    super::close_open_where(|conn| same_connection(conn, &listener)).await;
+    assert_eq!(closed(&server).await, [7, 7], "nothing left to close");
 }
