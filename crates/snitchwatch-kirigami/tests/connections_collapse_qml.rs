@@ -78,8 +78,14 @@ Window {
         }
         return null;
     }
+    // The row's delegate, scrolled into view first (an off-screen row has
+    // none), or null when the list has no such row.
     function delegateFor(rowId) {
         const list = page.connectionList;
+        const at = model.visibleRowIndex(rowId);
+        if (at < 0) return null;
+        list.positionViewAtIndex(at, ListView.Contain);
+        list.forceLayout();
         for (let i = 0; i < list.count; i++) {
             const d = list.itemAtIndex(i);
             if (d && d.rowId === rowId) return d;
