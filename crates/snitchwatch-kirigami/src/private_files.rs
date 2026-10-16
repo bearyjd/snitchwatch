@@ -91,6 +91,33 @@ pub fn open_private_append(path: &Path) -> io::Result<File> {
     Ok(file)
 }
 
+/// A directory owned by someone other than us, for tests, under any uid: `/usr`
+/// when we aren't root, else a temp directory chowned to `nobody` (root can).
+/// The returned guard keeps a temp directory alive.
+#[cfg(test)]
+pub(crate) fn foreign_owned_dir() -> (PathBuf, Option<tempfile::TempDir>) {
+    let (path, guard) = if effective_uid() == 0 {
+        let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/t");
+        std::fs::create_dir_all(&base).unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("foreign")
+            .tempdir_in(base.canonicalize().unwrap())
+            .unwrap();
+        let c = std::ffi::CString::new(dir.path().to_str().unwrap()).unwrap();
+        // SAFETY: a valid NUL-terminated path.
+        assert_eq!(unsafe { libc::chown(c.as_ptr(), 65534, u32::MAX) }, 0);
+        (dir.path().to_path_buf(), Some(dir))
+    } else {
+        (PathBuf::from("/usr"), None)
+    };
+    assert_ne!(
+        std::fs::metadata(&path).unwrap().uid(),
+        effective_uid(),
+        "the fixture must belong to someone else"
+    );
+    (path, guard)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -164,7 +191,8 @@ mod tests {
 
     #[test]
     fn a_root_made_by_someone_else_is_refused() {
-        assert!(ensure_private_root(Path::new("/usr")).is_err());
+        let (foreign, _guard) = foreign_owned_dir();
+        assert!(ensure_private_root(&foreign).is_err());
     }
 
     #[test]

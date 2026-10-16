@@ -148,7 +148,8 @@ mod tests {
     /// read or written, and settings fall back to defaults.
     #[test]
     fn an_untrusted_no_home_root_leaves_settings_unread_and_unwritten() {
-        let root = std::path::Path::new("/usr");
+        let (foreign, _guard) = crate::private_files::foreign_owned_dir();
+        let root = foreign.as_path();
         let checked = crate::private_files::ensure_private_root(root);
         let base = resolve_no_home(root, checked);
         assert_eq!(base, REFUSED_BASE);
