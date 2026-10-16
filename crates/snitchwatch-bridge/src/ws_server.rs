@@ -392,6 +392,8 @@ fn stamp_reply(
         | ClientMessage::PreviewRulesImport { reply, .. }
         | ClientMessage::ApplyRulesImport { reply, .. }
         | ClientMessage::AddProfileRule { reply, .. }
+        | ClientMessage::CreateProfile { reply, .. }
+        | ClientMessage::UpdateProfile { reply, .. }
         | ClientMessage::RequestBlocklistEntries { reply, .. } => *reply = Some(reply_to.clone()),
         ClientMessage::SetCuratedDefaults { reply, .. }
         | ClientMessage::PrepareCuratedBroadOptIn { reply, .. }

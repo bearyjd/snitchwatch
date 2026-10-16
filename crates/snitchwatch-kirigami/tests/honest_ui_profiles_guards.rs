@@ -127,6 +127,7 @@ fn profiles_page_labels_showing_profile_data_are_plain_text() {
             "row.networkMatchers",
             "page.storageReason",
             "page.notAppliedReason",
+            "page.profileNote",
             // Issue #46 Part 2: rules, their status and the firewall's text.
             "ruleRow.modelData.action",
             "ruleRow.modelData.conditions",
@@ -134,6 +135,23 @@ fn profiles_page_labels_showing_profile_data_are_plain_text() {
             "ruleRow.modelData.reason",
             "ruleEditorController.statusText",
         ],
-        9,
+        10,
     );
+}
+
+/// A refused create/rename/matcher change is shown (#116), and its reason,
+/// which comes from the bridge, sits in a PlainText label.
+#[test]
+fn a_refused_profile_change_is_shown_as_plain_text() {
+    let code = code_lines(PROFILES_PAGE);
+    assert!(code.contains(
+        "readonly property string profileNote: page.model ? page.model.profileNote : \"\""
+    ));
+    let labels = blocks(&code, "Controls.Label {");
+    let note = labels
+        .iter()
+        .find(|b| b.contains("objectName: \"profileNote\""))
+        .expect("a profileNote label");
+    assert!(note.contains("textFormat: Text.PlainText"));
+    assert!(note.contains("text: page.profileNote"));
 }
