@@ -173,12 +173,9 @@ fn keep_previous(path: &Path) -> std::io::Result<()> {
 
 /// Open this run's log at `path`, owner-only and empty: see the module doc.
 fn open_log(path: &Path) -> std::io::Result<File> {
-    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     if let Some(dir) = path.parent() {
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(dir)?;
+        crate::private_files::ensure_private_dir(dir)?;
     }
     let file = open_no_follow(
         path,
@@ -195,7 +192,10 @@ fn open_log(path: &Path) -> std::io::Result<File> {
 
 /// `options` plus `O_NOFOLLOW`, `O_NONBLOCK` (a FIFO doesn't hold us up)
 /// and `O_CLOEXEC`.
-fn open_no_follow(path: &Path, options: &mut std::fs::OpenOptions) -> std::io::Result<File> {
+pub(crate) fn open_no_follow(
+    path: &Path,
+    options: &mut std::fs::OpenOptions,
+) -> std::io::Result<File> {
     use std::os::unix::fs::OpenOptionsExt;
     options
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
@@ -225,7 +225,7 @@ fn file_problem(facts: &FileFacts, euid: u32) -> Option<&'static str> {
     }
 }
 
-fn refuse_unless_ours(path: &Path, file: &File) -> std::io::Result<()> {
+pub(crate) fn refuse_unless_ours(path: &Path, file: &File) -> std::io::Result<()> {
     use std::os::unix::fs::MetadataExt;
     let meta = file.metadata()?;
     let facts = FileFacts {
@@ -242,7 +242,7 @@ fn refuse_unless_ours(path: &Path, file: &File) -> std::io::Result<()> {
     }
 }
 
-fn effective_uid() -> u32 {
+pub(crate) fn effective_uid() -> u32 {
     // SAFETY: geteuid takes no arguments, touches no memory and always
     // succeeds.
     unsafe { libc::geteuid() }

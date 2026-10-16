@@ -190,3 +190,50 @@ async fn a_daemon_that_answers_is_asked_about_every_list() {
         vec!["remove:second", "remove:third", "replace:first:8"]
     );
 }
+
+/// #109: after a restart, a list whose first download was refused for room
+/// never had saved hosts, so it isn't said to have lost them; one that was
+/// cleared is.
+#[tokio::test]
+async fn after_a_restart_a_refused_first_download_is_worded_apart_from_a_cleared_list() {
+    use crate::blocklists::STORAGE_LIMIT_REASON_PREFIX;
+    let store = Arc::new(BlocklistStore::open_in_memory().unwrap());
+    let mgr = manager(3).0;
+    let first = mgr.subscription("first").unwrap();
+    let cleared = mgr.cleared_row(&first).last_fetch_status;
+    for (id, status) in [
+        (
+            "never",
+            FetchStatus::Failed {
+                reason: format!("{STORAGE_LIMIT_REASON_PREFIX} 10 hosts across all lists"),
+            },
+        ),
+        ("cleared", cleared),
+    ] {
+        store
+            .upsert_subscription(&Subscription {
+                id: id.into(),
+                url: format!("https://example.invalid/{id}"),
+                display_name: id.into(),
+                format_hint: None,
+                refresh_interval_secs: 86_400,
+                last_fetched_at: None,
+                last_attempt_at: None,
+                last_fetch_status: status,
+                entry_count: 0,
+            })
+            .unwrap();
+    }
+    let restarted = BlocklistsManager::new(store)
+        .with_rule_sink(Arc::new(Log::default()))
+        .with_aggregate_cap(CAP);
+    let reason = |id| match restarted.enforcement(id) {
+        Enforcement::NotEnforced { reason } => reason,
+        other => panic!("{id}: {other:?}"),
+    };
+    let (never, cleared) = (reason("never"), reason("cleared"));
+    assert!(never.starts_with(OVER_LIMIT_REASON_PREFIX), "{never}");
+    assert!(cleared.starts_with(OVER_LIMIT_REASON_PREFIX), "{cleared}");
+    assert!(!never.contains("removed"), "{never}");
+    assert!(cleared.contains("saved hosts were removed"), "{cleared}");
+}

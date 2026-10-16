@@ -66,11 +66,20 @@ Window {
         function onDataChanged(top, bottom, roles) { probe.repaints++; probe.lastRoles = roles; }
     }
     // Rewrites the Settings file; the write finishes before the next tick.
+    // The probe fails if the write didn't land (#116): the file is read back.
     function writeSettings(body) {
         const x = new XMLHttpRequest();
         x.open("PUT", "__SETTINGS_URL__");
         x.onreadystatechange = function () {
-            if (x.readyState === XMLHttpRequest.DONE) probe.wrote = x.status + ":" + x.responseText;
+            if (x.readyState !== XMLHttpRequest.DONE) return;
+            probe.wrote = x.status + ":" + x.responseText;
+            const back = new XMLHttpRequest();
+            back.open("GET", "__SETTINGS_URL__");
+            back.onreadystatechange = function () {
+                if (back.readyState === XMLHttpRequest.DONE && back.responseText !== body)
+                    probe.failures.push("the settings write didn't land (" + probe.wrote + "): read back '" + back.responseText + "'");
+            };
+            back.send();
         };
         x.send(body);
     }

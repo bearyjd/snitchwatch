@@ -185,6 +185,10 @@ fn schema_rows(conn: &Connection) -> rusqlite::Result<Vec<SchemaRow>> {
 /// too. `sqlite_master` keeps the `CREATE` text byte for byte, so even
 /// reindenting a store's `SCHEMA` would refuse every existing file.
 ///
+/// The same goes for `ANALYZE` and `PRAGMA optimize`: they create
+/// `sqlite_stat1`, which this check would refuse. A store that adds either
+/// has to let that one internal table through first.
+///
 /// Call before the store's schema is created.
 pub fn require_known_schema(conn: &Connection, schema: &str) -> Result<(), OpenError> {
     let reference = Connection::open_in_memory()?;
