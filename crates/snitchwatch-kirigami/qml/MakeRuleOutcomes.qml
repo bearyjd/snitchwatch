@@ -40,7 +40,7 @@ QtObject {
         // 2 unknown (Rust `make_rule::Ending`).
         function onFinished(rowId, ending) {
             if (!outcomes.shownInPlace(rowId)) {
-                outcomes.notice(ending === 1 ? outcomes.createdText : ending === 2 ? outcomes.unknownText : outcomes.notCreatedText);
+                outcomes.notice(ending === 1 ? outcomes.createdText : ending === 0 ? outcomes.notCreatedText : outcomes.unknownText);
             }
         }
     }

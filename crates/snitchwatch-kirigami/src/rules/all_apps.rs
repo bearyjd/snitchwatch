@@ -16,13 +16,13 @@
 //! an allow — including one for just this host — and other apps are asked.
 
 use super::row_store::{Rule, RulesStore};
-use snitchwatch_bridge::translator::verdict::{sanitize_for_display, strip_display_hazards};
+use snitchwatch_bridge::translator::verdict::strip_display_hazards;
 
 /// The description `snitchwatch_bridge::translator::verdict::verdict_to_rule`
 /// gives every interactive prompt rule (since M1.5).
 const INTERACTIVE_VERDICT_DESCRIPTION: &str = "snitchwatch interactive verdict";
 
-/// Longest destination shown in a hint (`sanitize_for_display` adds `…`).
+/// Longest destination shown in a hint (`plain_truncated` adds `…`).
 const MAX_TARGET_CHARS: usize = 64;
 
 /// The row badges: a destination-only rule, and one tied to a "program"
@@ -181,13 +181,14 @@ fn unbindable_path(operator: &serde_json::Value) -> Option<String> {
 }
 
 /// For a pre-#50 host scope's operator (one leaf: a `list` has type `list`),
-/// the destination it covers, sanitized for display (the host is DNS/SNI-
-/// influenced, #44 security review S2); `None` for any other shape.
+/// the destination it covers, as plain text for a `PlainText` label (the
+/// host is DNS/SNI-influenced, #44 security review S2: hazards stripped and
+/// bounded, never HTML-escaped); `None` for any other shape.
 fn host_only_target(operator: &serde_json::Value) -> Option<String> {
     let field = |key: &str| operator.get(key).and_then(|v| v.as_str());
     let data = field("data").filter(|d| !d.is_empty())?;
     match (field("type")?, field("operand")?) {
-        ("simple", "dest.host" | "dest.ip") => Some(sanitize_for_display(data, MAX_TARGET_CHARS)),
+        ("simple", "dest.host" | "dest.ip") => Some(plain_truncated(data)),
         ("regexp", "dest.host") => Some(describe_domain_pattern(data)),
         _ => None,
     }
@@ -201,7 +202,7 @@ fn describe_domain_pattern(pattern: &str) -> String {
             .strip_prefix(prefix)?
             .strip_suffix('$')
             .and_then(unescape_literal)
-            .map(|domain| sanitize_for_display(&domain, MAX_TARGET_CHARS))
+            .map(|domain| plain_truncated(&domain))
     };
     if let Some(domain) = parent(r"^(?:[^.]+\.)*") {
         format!("{domain} and its subdomains")
@@ -432,7 +433,9 @@ mod tests {
         assert!(markup
             .all_apps_hint()
             .unwrap()
-            .ends_with(" &lt;b&gt;x&lt;/b&gt;.example."));
+            .ends_with(" <b>x</b>.example."));
+        let amp = host("a", "allow", "a&b.example");
+        assert!(amp.all_apps_hint().unwrap().ends_with(" a&b.example."));
     }
 
     /// Code review C5: a disabled rule changes nothing now, and a read-only
