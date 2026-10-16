@@ -555,18 +555,18 @@ mod tests {
     #[test]
     fn every_key_field_keeps_rows_apart() {
         let base = event("event-0", 1_000, "deny");
-        let variants: Vec<Box<dyn Fn(&mut ConnectionRow)>> = vec![
-            Box::new(|r| r.matched_rule = Some("other-rule".into())),
-            Box::new(|r| r.matched_rule = None),
-            Box::new(|r| r.decided_by_default = true),
-            Box::new(|r| r.auto_answer = Some(AutoAnswer::FilterPaused)),
-            Box::new(|r| r.process = "curl".into()),
-            Box::new(|r| r.process_path = Some("/usr/bin/curl".into())),
-            Box::new(|r| r.dst_host = "other.example".into()),
-            Box::new(|r| r.dst_ip = "203.0.113.9".into()),
-            Box::new(|r| r.dst_port = 80),
-            Box::new(|r| r.protocol = "udp".into()),
-            Box::new(|r| r.direction = "incoming".into()),
+        let variants: [fn(&mut ConnectionRow); 11] = [
+            |r| r.matched_rule = Some("other-rule".into()),
+            |r| r.matched_rule = None,
+            |r| r.decided_by_default = true,
+            |r| r.auto_answer = Some(AutoAnswer::FilterPaused),
+            |r| r.process = "curl".into(),
+            |r| r.process_path = Some("/usr/bin/curl".into()),
+            |r| r.dst_host = "other.example".into(),
+            |r| r.dst_ip = "203.0.113.9".into(),
+            |r| r.dst_port = 80,
+            |r| r.protocol = "udp".into(),
+            |r| r.direction = "incoming".into(),
         ];
         for (i, change) in variants.iter().enumerate() {
             let mut c = RowCollapse::default();
