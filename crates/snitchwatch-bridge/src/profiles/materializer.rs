@@ -58,8 +58,8 @@ pub fn valid_rule_id(id: &str) -> bool {
 pub fn rule_name(profile_id: &str, rule_id: &str) -> String {
     format!(
         "{PROFILE_RULE_NAME_PREFIX}{}:{}",
-        sanitize_id(profile_id),
-        sanitize_id(rule_id)
+        profile_segment(profile_id),
+        rule_id
     )
 }
 
@@ -151,16 +151,34 @@ pub fn made_by_bridge(rule: &Rule) -> bool {
             .is_ok_and(|v| v["snitchwatch"]["source"] == "profile")
 }
 
-fn sanitize_id(id: &str) -> String {
-    id.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect()
+/// Longest profile id used as is in a rule name; anything longer or not a
+/// plain token is cut to [`HASHED_STEM_CHARS`] and hashed.
+const MAX_PLAIN_PROFILE_ID: usize = 64;
+const HASHED_STEM_CHARS: usize = 40;
+
+fn plain_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '-' || c == '_'
+}
+
+/// The profile segment of a rule name. A plain id of up to 64 bytes is used
+/// unchanged. Any other becomes `<cleaned stem>.<16 hex of SHA-256(id)>`, so
+/// a long id can't push the name past the daemon's 200-byte limit and two ids
+/// that clean alike keep different names; the dot never occurs in a plain id.
+fn profile_segment(id: &str) -> String {
+    if id.len() <= MAX_PLAIN_PROFILE_ID && !id.is_empty() && id.chars().all(plain_char) {
+        return id.to_string();
+    }
+    use sha2::{Digest, Sha256};
+    let hash: String = Sha256::digest(id.as_bytes())[..8]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let stem: String = id
+        .chars()
+        .map(|c| if plain_char(c) { c } else { '_' })
+        .take(HASHED_STEM_CHARS)
+        .collect();
+    format!("{stem}.{hash}")
 }
 
 #[cfg(test)]
