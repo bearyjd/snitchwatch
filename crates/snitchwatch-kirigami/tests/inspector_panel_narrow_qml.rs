@@ -214,6 +214,9 @@ Kirigami.ApplicationWindow {
                 }
                 return;
             }
+            // A push or pop animates; under load it can outlast a tick, and
+            // the next step would read the depth too early (#110).
+            if (probe.pageStack.busy === true) return;
             try {
                 probe.steps[probe.step]();
             } catch (e) {
