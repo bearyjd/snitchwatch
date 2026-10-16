@@ -272,9 +272,9 @@ mod tests {
 
     const VENDOR_DEFAULT: &str =
         include_str!("../../../vendor/opensnitch/daemon/data/default-config.json");
-    const PACKAGED: &str = include_str!(
-        "../../../packaging/bluebuild/files/system/etc/opensnitchd/default-config.json"
-    );
+    /// The system overlay's fail-closed config (PR #166 H1).
+    const PACKAGED: &str =
+        include_str!("../../../packaging/system/opensnitchd-default-config.json");
 
     #[test]
     fn the_vendor_default_config_allows_and_the_packaged_one_denies() {
