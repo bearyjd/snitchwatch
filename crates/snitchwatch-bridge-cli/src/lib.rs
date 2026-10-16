@@ -270,6 +270,14 @@ async fn run_tcp(
         .await
         .with_context(|| format!("failed to bind gRPC listener on {}", config.grpc_bind))?;
     let endpoint = GrpcEndpoint::Tcp(grpc_listener.local_addr()?);
+    // #35: any local process that binds the port first, or while this
+    // bridge is down, gets the daemon's UI authority.
+    warn!(
+        addr = %config.grpc_bind,
+        "the daemon connection is TCP, which is not deny-safe: a process that binds the port \
+         first answers for the daemon; use the system bridge's Unix socket \
+         (SNITCHWATCH_SYSTEM_BRIDGE=1)"
+    );
     run_with_incoming(
         config,
         endpoint,

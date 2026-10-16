@@ -2,6 +2,7 @@
 
 use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 fn leaf(operand: &str, data: &str) -> Operator {
     Operator {
@@ -66,7 +67,7 @@ fn lookups_only_show_clean_names() {
             _ => None,
         }
     });
-    let found = look_up_blocking(&lookup, vec![958, 7, 5]);
+    let found = look_up_blocking(&lookup, vec![958, 7, 5], Duration::from_secs(60));
     assert_eq!(
         found,
         vec![(958, Some("snitchwatch".into())), (7, None), (5, None)]
@@ -74,28 +75,142 @@ fn lookups_only_show_clean_names() {
     assert_eq!(calls.load(Ordering::SeqCst), 3);
 }
 
+/// #115: a batch stops starting lookups past its time budget (the first
+/// always runs); the rest are left for a later snapshot.
 #[test]
-fn known_accounts_are_remembered_bounded_and_named_per_rule() {
+fn a_batch_stops_starting_lookups_past_its_budget() {
+    let lookup: AccountLookup = Arc::new(|_| Some("x".into()));
+    let found = look_up_blocking(&lookup, vec![1, 2, 3], Duration::ZERO);
+    assert_eq!(found, vec![(1, Some("x".into()))]);
+}
+
+#[test]
+fn known_accounts_are_named_per_rule() {
+    let now = Instant::now();
     let mut known = KnownAccounts::default();
-    known.learn(vec![(958, Some("snitchwatch".into())), (5, None)]);
-    assert_eq!(known.not_looked_up(BTreeSet::from([5, 958, 6])), vec![6]);
-    assert_eq!(known.claim(BTreeSet::from([6, 8])), vec![6, 8]);
-    assert!(
-        known.claim(BTreeSet::from([6, 8])).is_empty(),
-        "claimed once"
-    );
+    known.learn(vec![(958, Some("snitchwatch".into())), (5, None)], now);
     let rule = with(leaf("user.name", "958"));
     assert_eq!(
         known.names_for(&rule),
         BTreeMap::from([("958".to_string(), "snitchwatch".to_string())])
     );
     assert!(known.names_for(&with(leaf("user.name", "5"))).is_empty());
-    let many: BTreeSet<u32> = (10_000..10_000 + 2 * MAX_LOOKUPS_PER_SNAPSHOT as u32).collect();
-    assert_eq!(known.not_looked_up(many).len(), MAX_LOOKUPS_PER_SNAPSHOT);
-    known.learn(
-        (0..MAX_KNOWN_ACCOUNTS as u32 + 10)
-            .map(|uid| (uid + 20_000, None))
-            .collect(),
+}
+
+/// #115: one batch at a time. Uids wanted meanwhile wait for the running
+/// batch to drain them, and nothing is wanted twice.
+#[test]
+fn one_batch_runs_at_a_time_and_later_uids_queue_for_it() {
+    let now = Instant::now();
+    let mut known = KnownAccounts::default();
+    assert_eq!(known.want(BTreeSet::from([6, 8]), now), Some(vec![6, 8]));
+    assert_eq!(
+        known.want(BTreeSet::from([6, 8, 9]), now),
+        None,
+        "in flight"
     );
-    assert!(known.names.len() <= MAX_KNOWN_ACCOUNTS);
+    assert_eq!(known.next_batch(), Some(vec![9]), "queued for the batch");
+    known.learn(vec![(6, Some("a".into())), (8, None), (9, None)], now);
+    assert_eq!(known.next_batch(), None);
+    assert_eq!(
+        known.want(BTreeSet::from([6, 8, 9, 10]), now),
+        Some(vec![10]),
+        "the batch ended: a new one starts with what isn't known"
+    );
+}
+
+#[test]
+fn a_batch_takes_at_most_the_per_snapshot_limit() {
+    let now = Instant::now();
+    let mut known = KnownAccounts::default();
+    let many: BTreeSet<u32> = (0..2 * MAX_LOOKUPS_PER_SNAPSHOT as u32).collect();
+    assert_eq!(
+        known.want(many.clone(), now).unwrap().len(),
+        MAX_LOOKUPS_PER_SNAPSHOT
+    );
+    known.want(many, now);
+    assert_eq!(
+        known.next_batch().unwrap().len(),
+        MAX_LOOKUPS_PER_SNAPSHOT,
+        "the queue is bounded too"
+    );
+}
+
+/// #115: a lookup that found nothing (no such account, or NSS failed) is
+/// tried again after a cool-down, not remembered as nameless for good.
+#[test]
+fn a_failed_lookup_is_retried_after_a_cool_down() {
+    let then = Instant::now();
+    let mut known = KnownAccounts::default();
+    known.want(BTreeSet::from([5]), then);
+    known.learn(vec![(5, None)], then);
+    assert_eq!(known.next_batch(), None);
+    assert_eq!(known.want(BTreeSet::from([5]), then), None, "cooling down");
+    assert_eq!(
+        known.want(BTreeSet::from([5]), then + MISSING_RETRY),
+        Some(vec![5])
+    );
+}
+
+/// #115: uids a batch ran out of time for are no longer claimed, so a later
+/// snapshot wants them again.
+#[test]
+fn uids_a_batch_ran_out_of_time_for_are_wanted_again() {
+    let now = Instant::now();
+    let mut known = KnownAccounts::default();
+    let batch = known.want(BTreeSet::from([1, 2, 3]), now).unwrap();
+    known.learn(vec![(1, Some("a".into()))], now);
+    known.release(&batch);
+    assert_eq!(known.next_batch(), None);
+    assert_eq!(known.want(BTreeSet::from([1, 2, 3]), now), Some(vec![2, 3]));
+}
+
+/// #115: a full map makes room for one entry; it never forgets everything,
+/// and never what a running batch is looking up.
+#[test]
+fn a_full_map_evicts_one_entry_and_keeps_claims() {
+    let now = Instant::now();
+    let mut known = KnownAccounts::default();
+    let full: Vec<_> = (0..MAX_KNOWN_ACCOUNTS as u32)
+        .map(|uid| (uid, Some(format!("u{uid}"))))
+        .collect();
+    known.learn(full, now);
+    assert_eq!(
+        known.want(BTreeSet::from([50_000, 50_001]), now),
+        Some(vec![50_000, 50_001])
+    );
+    known.learn(vec![(50_000, Some("new".into()))], now);
+    assert_eq!(known.names.len(), MAX_KNOWN_ACCOUNTS);
+    assert_eq!(
+        known
+            .names
+            .values()
+            .filter(|k| matches!(k, Known::Named(_)))
+            .count(),
+        MAX_KNOWN_ACCOUNTS
+    );
+    assert_eq!(
+        known.want(BTreeSet::from([50_001]), now),
+        None,
+        "50001 is still claimed by the running batch"
+    );
+}
+
+/// #115: a batch that ended without finishing (its lookup panicked) frees
+/// the slot and its claims, so the next snapshot looks them up.
+#[test]
+fn an_abandoned_batch_frees_the_slot_and_its_claims() {
+    let now = Instant::now();
+    let mut known = KnownAccounts::default();
+    known.want(BTreeSet::from([6]), now);
+    let serial = known.batch_serial();
+    known.want(BTreeSet::from([7]), now);
+    known.abandon(serial);
+    assert_eq!(known.want(BTreeSet::from([6, 7]), now), Some(vec![6, 7]));
+    known.abandon(serial);
+    assert_eq!(
+        known.want(BTreeSet::from([8]), now),
+        None,
+        "an older batch's guard leaves a newer one alone"
+    );
 }

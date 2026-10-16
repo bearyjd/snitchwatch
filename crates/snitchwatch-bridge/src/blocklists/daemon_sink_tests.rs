@@ -36,6 +36,8 @@ pub(in crate::blocklists) enum Daemon {
 pub(in crate::blocklists) struct Seen {
     pub(in crate::blocklists) command: Notification,
     pub(in crate::blocklists) path_existed: bool,
+    /// When it arrived (tokio's clock, so paused tests can read it).
+    pub(in crate::blocklists) at: tokio::time::Instant,
 }
 
 pub(in crate::blocklists) struct Harness {
@@ -95,6 +97,7 @@ impl Harness {
                 seen.lock().unwrap().push(Seen {
                     command: command.clone(),
                     path_existed,
+                    at: tokio::time::Instant::now(),
                 });
                 let answer = mode.lock().unwrap().clone();
                 match answer {
@@ -170,6 +173,7 @@ impl Harness {
     pub(in crate::blocklists) fn sink(&self) -> DaemonRuleSink {
         DaemonRuleSink::new(self.dir.clone(), self.commands.clone(), self.rules.cache())
             .with_timeout(Duration::from_millis(300))
+            .with_delete_spacing(Duration::ZERO)
     }
 
     pub(in crate::blocklists) fn seen(&self) -> Vec<Seen> {
@@ -464,6 +468,24 @@ async fn unsubscribing_deletes_the_rules_first_then_the_directory() {
     );
     assert!(!h.dir.list_dir(&IdComponent::from_id(ADS)).exists());
     assert!(!sink.is_current(ADS));
+}
+
+/// #109.3: each `lists` rule delete holds the daemon's loader lock for up
+/// to ~4 s, so deletes go out [`DELETE_SPACING`] apart, the first at once.
+#[tokio::test(start_paused = true)]
+async fn deletes_are_spaced_out_and_the_first_goes_at_once() {
+    let h = Harness::new().connect(Daemon::Accept, Vec::new());
+    let sink = h.sink().with_delete_spacing(DELETE_SPACING);
+    sink.replace_blocklist_rules(ADS, hosts(&["a.example", "203.0.113.7"]))
+        .await
+        .unwrap();
+    let installs = h.seen().len();
+    let asked = tokio::time::Instant::now();
+    sink.remove_blocklist_rules(ADS).await.unwrap();
+    let deletes = h.seen().split_off(installs);
+    assert_eq!(deletes.len(), 2);
+    assert!(deletes[0].at - asked < DELETE_SPACING, "the first waited");
+    assert!(deletes[1].at - deletes[0].at >= DELETE_SPACING);
 }
 
 #[tokio::test]
