@@ -122,8 +122,9 @@ struct Expiry {
 pub(crate) struct Snapshot {
     /// Cache revision when Subscribe was received, before later refusals.
     observed_revision: u64,
-    /// Which staging this is, counted by [`PendingSnapshots::stage`] (the
-    /// daemon's `Subscribe` order); `0` for one never staged.
+    /// Which `Subscribe` this is, counted when it arrived
+    /// ([`PendingSnapshots::receive`], the daemon's order, #115); `0` for one
+    /// never staged.
     pub(crate) sequence: u64,
     pub(crate) rules: Vec<Rule>,
     /// Name (or, for a name no import could use, a NUL-prefixed index) to
@@ -135,6 +136,57 @@ pub(crate) struct Snapshot {
     pub(crate) over_limit: Option<usize>,
     /// A rule left out was temporary (`rules_count.rs`).
     pub(crate) left_out_temporary: bool,
+    /// What changed the list while it held this snapshot (#115).
+    pub(crate) journal: Journal,
+}
+
+/// Most changes a staged snapshot's [`Journal`] keeps.
+pub(crate) const MAX_JOURNAL: usize = 256;
+
+/// The changes made to the list while it held a staged snapshot, in order,
+/// replayed when another stream adopts the same snapshot again: the daemon
+/// made them after it sent that snapshot (#115, PR #106 OQ1's cost).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct Journal {
+    pub(crate) changes: Vec<Journaled>,
+    /// Over [`MAX_JOURNAL`]: some were not kept, so it can't be replayed.
+    pub(crate) overflowed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Journaled {
+    /// A command the daemon answered `OK`, and when.
+    Confirmed(Notification, i64),
+    /// A command the daemon refused, and when.
+    Refused(Notification, i64),
+    /// A remembered prompt verdict ([`RulesSync::upsert`]), and when.
+    Prompt(Rule, i64),
+}
+
+impl Journal {
+    fn record(&mut self, change: Journaled) {
+        if self.changes.len() >= MAX_JOURNAL {
+            self.overflowed = true;
+        } else if !self.overflowed {
+            self.changes.push(change);
+        }
+    }
+
+    /// Apply the changes to `cache`, as they were applied.
+    fn replay(&self, cache: &mut RulesCache) {
+        for change in &self.changes {
+            match change {
+                Journaled::Confirmed(sent, at) => cache.apply_confirmed_at(sent, *at),
+                Journaled::Refused(sent, at) => {
+                    cache.apply_refused_at(sent, *at);
+                }
+                Journaled::Prompt(rule, at) => {
+                    cache.note_prompt_answer(&rule.name);
+                    cache.upsert_at(rule.clone(), *at);
+                }
+            }
+        }
+    }
 }
 
 impl From<Vec<Rule>> for Snapshot {
@@ -540,3 +592,7 @@ mod refused_tests;
 #[cfg(test)]
 #[path = "rules_accounts_tests.rs"]
 mod accounts_tests;
+
+#[cfg(test)]
+#[path = "rules_staging_tests.rs"]
+mod staging_tests;

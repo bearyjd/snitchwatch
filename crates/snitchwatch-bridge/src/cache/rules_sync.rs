@@ -2,7 +2,9 @@
 //! staged snapshots ([`PendingSnapshots`]), the commit on HELLO
 //! ([`RulesSync`]), and the publishers that broadcast the list.
 
-use super::{bounded_snapshot, lock, now_secs, Adopted, RulesCache, SharedRulesCache, Snapshot};
+use super::{
+    bounded_snapshot, lock, now_secs, Adopted, Journaled, RulesCache, SharedRulesCache, Snapshot,
+};
 use crate::accounts::{look_up_blocking, user_name_uids, AccountLookup};
 use crate::cache::rule_hits_handle::RuleHitsHandle;
 use crate::daemon_commands::{BecameCurrent, CommandError, ConnKey, PendingReply, StreamId};
@@ -52,9 +54,16 @@ impl Drop for BatchGuard {
 /// snapshot ([`RulesSync::readopt`], review N1). Only within the 30 s: a
 /// stream that becomes current later finds nothing, and the list is
 /// withdrawn until the daemon reconnects. On TCP each connection has its own
-/// key, and a closed stream's list is never handed to another. The cost: adopting it again replaces the list, so a change confirmed
-/// on the old stream between the two adoptions drops off the list (and its
-/// hit count restarts) until the daemon reconnects.
+/// key, and a closed stream's list is never handed to another. Adopting a
+/// snapshot again replaces the list with it and then replays its journal:
+/// what changed the list since it was first adopted (#115). A journal over
+/// [`super::MAX_JOURNAL`] isn't replayed: a HELLO adopts the bare snapshot
+/// (those changes drop off the list until the daemon reconnects), and a
+/// fallback withdraws the list instead. Replayed before the hit counts
+/// follow the list, so a replayed rule keeps its count.
+///
+/// Snapshots of one key are kept by `Subscribe` arrival, not by staging: one
+/// that waited on account names while a newer one staged is dropped (#115).
 #[derive(Debug, Default)]
 pub struct PendingSnapshots {
     pub(super) entries: VecDeque<Staged>,
@@ -70,15 +79,44 @@ pub(super) struct Staged {
 }
 
 impl PendingSnapshots {
-    /// Keep only `key`'s latest snapshot, evicting stale entries and then the
-    /// oldest key past the cap.
-    pub(crate) fn stage(&mut self, key: ConnKey, rules: impl Into<Snapshot>, now: Instant) {
-        self.entries.retain(|staged| {
-            staged.key != key && now.saturating_duration_since(staged.at) <= PENDING_SNAPSHOT_TTL
-        });
+    /// Number a `Subscribe` as it arrives, before anything it awaits: the
+    /// order its snapshot is staged in ([`Self::stage_received`], #115).
+    pub(crate) fn receive(&mut self) -> u64 {
         self.staged += 1;
+        self.staged
+    }
+
+    /// Stage `rules` as a `Subscribe` that arrived now.
+    #[cfg(test)]
+    pub(crate) fn stage(&mut self, key: ConnKey, rules: impl Into<Snapshot>, now: Instant) {
+        let received = self.receive();
+        self.stage_received(key, rules, now, received);
+    }
+
+    /// Keep only `key`'s latest snapshot, evicting stale entries and then the
+    /// oldest key past the cap. Latest by arrival: a `Subscribe` that waited
+    /// (on account names) while a newer one of its key staged is dropped
+    /// (#115: on the Unix socket every stream shares one key).
+    pub(crate) fn stage_received(
+        &mut self,
+        key: ConnKey,
+        rules: impl Into<Snapshot>,
+        now: Instant,
+        received: u64,
+    ) {
+        self.entries
+            .retain(|staged| now.saturating_duration_since(staged.at) <= PENDING_SNAPSHOT_TTL);
+        let newer = self
+            .entries
+            .iter()
+            .any(|staged| staged.key == key && staged.snapshot.sequence > received);
+        if newer {
+            info!("a newer Subscribe's snapshot is staged already; dropped an older one");
+            return;
+        }
+        self.entries.retain(|staged| staged.key != key);
         let mut snapshot = rules.into();
-        snapshot.sequence = self.staged;
+        snapshot.sequence = received;
         self.entries.push_back(Staged {
             key,
             at: now,
@@ -87,6 +125,18 @@ impl PendingSnapshots {
         });
         while self.entries.len() > PENDING_SNAPSHOT_CAP {
             self.entries.pop_front();
+        }
+    }
+
+    /// Note `change` in the journal of the adopted snapshot `sequence`, if
+    /// it is still staged.
+    fn record(&mut self, sequence: u64, change: Journaled) {
+        let staged = self
+            .entries
+            .iter_mut()
+            .find(|staged| staged.snapshot.sequence == sequence && !staged.adopted_by.is_empty());
+        if let Some(staged) = staged {
+            staged.snapshot.journal.record(change);
         }
     }
 
@@ -133,6 +183,13 @@ impl PendingSnapshots {
         staged.adopted_by.push(stream);
         Some(staged.snapshot.clone())
     }
+}
+
+/// When a `Subscribe` arrived ([`RulesSync::receive`]).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Receipt {
+    revision: u64,
+    sequence: u64,
 }
 
 /// Broadcast the full list as `SetRules`, empty while the cache is Unknown
@@ -236,8 +293,10 @@ impl RulesSync {
             self.hits.forget([rule.name.as_str()]);
         }
         let name = rule.name.clone();
+        let at = now_secs();
+        self.record(&cache, Journaled::Prompt(rule.clone(), at));
         cache.note_prompt_answer(&name);
-        cache.upsert(rule);
+        cache.upsert_at(rule, at);
         let rules = cache
             .rules()
             .and_then(|r| r.get(&name))
@@ -309,20 +368,32 @@ impl RulesSync {
     /// oversized snapshot is held as its count, replacing the key's earlier
     /// one like any other.
     pub fn stage(&self, key: ConnKey, rules: Vec<Rule>) {
-        self.stage_at_revision(key, rules, self.snapshot_revision());
+        self.stage_received(key, rules, self.receive());
     }
 
-    /// Capture before any await while handling a received Subscribe.
-    pub(crate) fn snapshot_revision(&self) -> u64 {
-        lock(&self.cache).revision()
+    /// Take before any await while handling a received Subscribe: the cache
+    /// revision the list predates and the Subscribe's arrival order.
+    pub(crate) fn receive(&self) -> Receipt {
+        let revision = lock(&self.cache).revision();
+        let sequence = lock(&self.pending).receive();
+        Receipt { revision, sequence }
     }
 
-    /// Stage with the immutable receipt cutoff, even if account lookup or
-    /// other work let newer refusals arrive before staging.
-    pub(crate) fn stage_at_revision(&self, key: ConnKey, rules: Vec<Rule>, observed_revision: u64) {
+    /// Stage as of `receipt`, even if account lookup or other work let newer
+    /// refusals, or a newer Subscribe, arrive before staging.
+    pub(crate) fn stage_received(&self, key: ConnKey, rules: Vec<Rule>, receipt: Receipt) {
         let mut snapshot = bounded_snapshot(rules);
-        snapshot.observed_revision = observed_revision;
-        lock(&self.pending).stage(key, snapshot, Instant::now());
+        snapshot.observed_revision = receipt.revision;
+        lock(&self.pending).stage_received(key, snapshot, Instant::now(), receipt.sequence);
+    }
+
+    /// Note a change to the list in the journal of the snapshot it holds
+    /// (#115). Called with the cache lock held, so it lands in the order the
+    /// list changed; the pending lock is only ever taken after it.
+    pub(super) fn record(&self, cache: &RulesCache, change: Journaled) {
+        if !cache.is_unknown() {
+            lock(&self.pending).record(cache.snapshot_sequence(), change);
+        }
     }
 
     /// Adopt the connection's fresh staged snapshot, if any, and broadcast
@@ -348,6 +419,10 @@ impl RulesSync {
         let staged =
             lock(&self.pending).adopted_fresh(&current.conn(), current.stream(), Instant::now());
         match staged {
+            Some(snapshot) if snapshot.journal.overflowed => {
+                warn!("too many changes since the snapshot to adopt it again");
+                Adopted::Nothing
+            }
             Some(snapshot) => self.adopt(current, snapshot),
             None => Adopted::Nothing,
         }
@@ -386,6 +461,12 @@ impl RulesSync {
             cache.replace_all_at_revision(snapshot.rules, snapshot.observed_revision);
             cache.set_left_out_at_revision(snapshot.left_out, snapshot.observed_revision);
             cache.note_left_out_temporary(snapshot.left_out_temporary);
+            // Adopted again: what changed since the first adoption (#115).
+            if snapshot.journal.overflowed {
+                warn!("too many changes since the snapshot; adopted it without them");
+            } else {
+                snapshot.journal.replay(&mut cache);
+            }
             self.hits.adopt_snapshot(&cache);
         }
         self.publish();
@@ -418,7 +499,9 @@ impl RulesSync {
     pub(crate) fn apply_confirmed(&self, sent: &Notification) {
         {
             let mut cache = lock(&self.cache);
-            cache.apply_confirmed(sent);
+            let at = now_secs();
+            cache.apply_confirmed_at(sent, at);
+            self.record(&cache, Journaled::Confirmed(sent.clone(), at));
             if sent.r#type == Action::DeleteRule as i32 {
                 self.hits
                     .forget(sent.rules.iter().map(|rule| rule.name.as_str()));

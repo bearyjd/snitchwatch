@@ -614,11 +614,10 @@ fn hint_messages(rx: &mut broadcast::Receiver<ServerMessage>) -> Vec<bool> {
 }
 
 /// A redialled daemon's old and new streams share the socket's one key. A
-/// second adoption replaces the list with the staged snapshot and drops
-/// what was confirmed in between, so the daemon's count is then really
-/// different from the list's. The watch treats each adoption as a new
-/// baseline (flag cleared, readings quiet), and then says so: the list is
-/// wrong, even if the wording guesses the cause.
+/// second adoption replaces the list with the staged snapshot plus what was
+/// confirmed in between (its journal, #115), so the list still matches the
+/// daemon's count. The watch treats each adoption as a new baseline (flag
+/// cleared, readings quiet), and with the list right never raises.
 #[tokio::test]
 async fn each_adoption_on_the_unix_socket_is_a_new_baseline_for_the_hint() {
     let (tx, mut rx) = broadcast::channel::<ServerMessage>(64);
@@ -644,25 +643,22 @@ async fn each_adoption_on_the_unix_socket_is_a_new_baseline_for_the_hint() {
     }
     assert!(hint_messages(&mut rx).iter().all(|shown| !shown));
 
-    // The new stream's HELLO adopts the staged snapshot again, which lacks c.
+    // The new stream's HELLO adopts the staged snapshot again, which lacks
+    // c, and replays c from its journal.
     let (second, _second_rx) = commands.open_stream(None);
     commands.on_reply(second.id(), &hello());
     assert!(!rules.cache().lock().unwrap().count_mismatch());
     assert_eq!(
         rules.cache().lock().unwrap().rules().unwrap().len(),
-        2,
-        "c is gone"
+        3,
+        "c is kept"
     );
-    // The daemon still has c: its first readings are quiet, then it is said.
-    for _ in 0..usize::from(QUIET_PINGS) + usize::from(PINGS_TO_RAISE) - 1 {
+    for _ in 0..usize::from(QUIET_PINGS) + usize::from(PINGS_TO_RAISE) {
         ping(3);
     }
-    assert!(hint_messages(&mut rx).iter().all(|shown| !shown));
-    ping(3);
-    assert_eq!(
-        hint_messages(&mut rx),
-        vec![true],
-        "the list really differs"
+    assert!(
+        hint_messages(&mut rx).iter().all(|shown| !shown),
+        "the list matches the daemon"
     );
 
     // The second stream closes: the first, current again, holds the same
