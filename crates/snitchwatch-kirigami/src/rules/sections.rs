@@ -6,7 +6,7 @@
 
 use std::mem::discriminant;
 
-use super::row_store::{RuleSource, RulesStore};
+use super::row_store::{Rule, RuleSource, RulesStore};
 
 pub const USER_RULES: &str = "User rules";
 pub const PROFILE_RULES: &str = "Profile rules";
@@ -48,20 +48,31 @@ impl RuleSource {
 /// "(continued)" when that source already had a section above. Every
 /// blocklist's rules are one source.
 pub fn section_label(store: &RulesStore, index: usize) -> Option<String> {
-    let rules = store.rules();
-    let kind = discriminant(&rules.get(index)?.source());
-    let same = |i: usize| discriminant(&rules[i].source()) == kind;
-    let start = (0..index)
-        .rev()
-        .take_while(|&i| same(i))
-        .last()
-        .unwrap_or(index);
-    let label = rules[index].source().label();
-    Some(if (0..start).any(same) {
-        format!("{label} (continued)")
-    } else {
-        label.to_string()
-    })
+    store.section_labels().get(index).cloned()
+}
+
+/// [`section_label`] of every rule, in one pass.
+pub fn section_labels(rules: &[Rule]) -> Vec<String> {
+    let mut seen = Vec::new();
+    let mut previous = None;
+    rules
+        .iter()
+        .map(|rule| {
+            let source = rule.source();
+            let kind = discriminant(&source);
+            let continued = previous != Some(kind) && seen.contains(&kind);
+            if previous != Some(kind) {
+                seen.push(kind);
+            }
+            previous = Some(kind);
+            let label = source.label();
+            if continued {
+                format!("{label} (continued)")
+            } else {
+                label.to_string()
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -159,5 +170,20 @@ mod tests {
             ]
         );
         assert_eq!(section_label(&s, 6), None);
+    }
+
+    /// The headings follow the list as it changes, not just as first loaded.
+    #[test]
+    fn headings_follow_a_changed_list() {
+        let mut s = store(&["100-mine", "850-profile:home:0001-a"]);
+        assert_eq!(section_label(&s, 1).unwrap(), PROFILE_RULES);
+        s.apply(&ServerMessage::UpdateRules {
+            rules: vec![
+                serde_json::json!({ "name": "zz-mine", "enabled": true, "action": "allow" }),
+            ],
+        });
+        assert_eq!(section_label(&s, 2).unwrap(), "User rules (continued)");
+        s.apply(&ServerMessage::SetRules { rules: vec![] });
+        assert_eq!(section_label(&s, 0), None);
     }
 }
