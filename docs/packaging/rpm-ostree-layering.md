@@ -12,14 +12,16 @@ Neither path is "unsupported"; they are two supported shapes of the same
 install, trading image immutability for convenience.
 
 > **Not deny-safe (#35, owner decision 2026-10-16).** This page's per-user
-> bridge serves the root daemon on TCP `127.0.0.1:50051`. Any local process
-> that binds that port while no bridge holds it (before login, during a
-> restart, another user's session) gets the daemon's UI authority, including
-> config changes the daemon saves to disk, so `DefaultAction: deny` here
-> doesn't hold against such a process. A deny default that does needs the
-> system flavour's root-only Unix socket, which the batteries-included image
-> adds with the system-bridge overlay:
-> [system-bridge-integration.md](system-bridge-integration.md).
+> bridge serves the root daemon on TCP. TCP `127.0.0.1:50051` isn't
+> protected against port squatting under either `DefaultAction` (#35): any local process that binds the port while no bridge
+> holds it (before login, between restarts, a second user) gets the root
+> daemon's UI authority, including config changes the daemon saves. `deny` is
+> the shipped default (settled decision 5). `allow` avoids a network lockout
+> before the per-user bridge starts at login, at the cost of failing open
+> whenever no bridge is connected. Protection against squatting needs the
+> system flavour's root-only Unix socket: see
+> [system-bridge-integration.md](system-bridge-integration.md) (the
+> batteries-included image adds it with the system-bridge overlay).
 
 This path ends in a host-side `opensnitchd` that dials the Snitchwatch
 bridge's gRPC server at `127.0.0.1:50051`, plus the GUI as a Flatpak and the
@@ -185,9 +187,10 @@ permission needed or granted.
 Confirm the whole chain, including the fail-open fix:
 
 ```bash
-# Daemon up, dialing the per-user bridge, fail-closed:
+# Daemon up, dialing the per-user bridge; deny as shipped, or allow if you
+# chose it (see the note at the top):
 systemctl is-active opensnitch.service
-jq -e '.Server.Address == "127.0.0.1:50051" and .DefaultAction == "deny"' \
+jq -e '.Server.Address == "127.0.0.1:50051" and (.DefaultAction == "deny" or .DefaultAction == "allow")' \
   /etc/opensnitchd/default-config.json
 
 # Bridge up independently of the GUI window:
