@@ -89,6 +89,19 @@ Out of scope (report): rename's first-step refusal of a disabled/enabled
   rule, no refresh on result, any id counts, note kept on send, a send or
   any Ok clearing every note, no drop on a rule change, header without the
   rule. Session clearing is unit-tested only (the probe has no session).
+- Order (PR #163 review 2): a result can reach the GUI before the list
+  its command changed (unordered outbound `select!`; an import holds
+  lists). Notes no longer depend on that order. Each note expects the
+  state the bridge's cache holds after its outcome: an `OkWithNote` was
+  applied (the rule switched as sent, or gone for a delete); anything else
+  left the rule as it was when sent. Until a list shows that, one showing
+  the rule as before is an older list and keeps the note. Once shown, that
+  body is the note's, and any later change drops it. An applied toggle
+  checks only the switch, since the bridge lists the rule it rebuilt.
+  `biased;` in the bridge was rejected: it starves replies and misses the
+  import hold. Probe phases cover result first and list first, plus a later
+  change. The new probe fails on 3699f96. 7 mutants of the
+  expected-state logic were all killed.
 - Refused enabled temporary rule: `replaceUserRule` stores it before
   parsing its duration, which could fail after the rule applied; every
   enabled rule the bridge sends passes `rule_policy::profile::

@@ -21,7 +21,7 @@ use cxx_qt_lib::{
     QByteArray, QHash, QHashPair_i32_QByteArray, QList, QModelIndex, QString, QVariant,
 };
 
-use crate::rules::command_notes::{CommandNotes, RuleState};
+use crate::rules::command_notes::{Applied, CommandNotes, RuleState};
 use crate::rules::hits::{RowHits, RuleHitsView};
 use crate::rules::insights::row::row_insights;
 use crate::rules::insights::shadow::Analysis;
@@ -399,11 +399,14 @@ impl qobject::RulesModel {
             );
             return QString::default();
         };
-        self.send_command(&name.clone(), |request_id| ClientMessage::UpdateRule {
-            rule_id: name,
-            rule,
-            request_id: Some(request_id),
-            reply: None,
+        let applied = Applied::Enabled(enabled);
+        self.send_command(&name.clone(), applied, |request_id| {
+            ClientMessage::UpdateRule {
+                rule_id: name,
+                rule,
+                request_id: Some(request_id),
+                reply: None,
+            }
         })
     }
 
@@ -416,19 +419,22 @@ impl qobject::RulesModel {
             );
             return QString::default();
         }
-        self.send_command(&name.clone(), |request_id| ClientMessage::DeleteRule {
-            rule_id: name,
-            request_id: Some(request_id),
-            reply: None,
+        self.send_command(&name.clone(), Applied::Absent, |request_id| {
+            ClientMessage::DeleteRule {
+                rule_id: name,
+                request_id: Some(request_id),
+                reply: None,
+            }
         })
     }
 
     /// Emit the command about rule `name` that `message` builds under a new
-    /// request id, waiting for its result; that rule's note goes. Returns
-    /// the id.
+    /// request id, waiting for its result; that rule's note goes. `applied`:
+    /// the rule once the command applies. Returns the id.
     fn send_command(
         mut self: Pin<&mut Self>,
         name: &str,
+        applied: Applied,
         message: impl FnOnce(String) -> ClientMessage,
     ) -> QString {
         let request_id = crate::rule_commands::next_request_id("rules");
@@ -437,11 +443,14 @@ impl qobject::RulesModel {
             .find_by_name(name)
             .map_or(name, |rule| rule.shown_name())
             .to_string();
-        let forgot = self
-            .as_mut()
-            .rust_mut()
-            .commands
-            .sent(request_id.clone(), name, &shown);
+        let before = Self::rule_state(&self.store, name);
+        let forgot = self.as_mut().rust_mut().commands.sent(
+            request_id.clone(),
+            name,
+            &shown,
+            before,
+            applied,
+        );
         if forgot {
             self.as_mut().publish_command_notes();
         }
@@ -507,9 +516,9 @@ impl qobject::RulesModel {
     }
 }
 
-/// The rules feed's messages, and rule command results: one ordered feed, so
-/// the list a command changed (the bridge publishes it before it answers)
-/// is applied before the result's note is taken against it.
+/// The rules feed's messages, and rule command results. One feed keeps them
+/// in the order the bridge sent them, but notes don't rely on it: the
+/// bridge doesn't promise a list before its result (`rules::command_notes`).
 fn interests_rules_and_results(msg: &ServerMessage) -> bool {
     crate::bridge_dispatch::interests_rules(msg)
         || crate::rule_commands::interests_rule_results(msg)

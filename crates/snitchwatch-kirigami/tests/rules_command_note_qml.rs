@@ -178,6 +178,32 @@ Controls.ApplicationWindow {
                 probeWindow.result(probeWindow.last().requestId, { status: "ok" });
                 expect(pageNote.text === "899-curl: file may remain",
                        "after an Ok: " + JSON.stringify(pageNote.text));
+                // The rule came back after its delete: a change, the note goes.
+                probeWindow.setRules([probeWindow.curl(true), yOff]);
+                expect(!pageNote.visible, "a delete note outlived the rule's return: "
+                       + JSON.stringify(pageNote.text));
+
+                // PR #163 review: the result can come before the list that
+                // shows the command's change (the bridge doesn't order them).
+                expect(page.openRuleByName("899-curl"), "rule not back");
+                probeWindow.click(sw);
+                probeWindow.result(probeWindow.last().requestId,
+                                   { status: "okWithNote", note: "result first" });
+                expect(inNote.text === "result first", "result-first note: " + inNote.text);
+                probeWindow.setRules([probeWindow.curl(false), yOff]);
+                expect(inNote.text === "result first", "the command's own list dropped the note");
+                // A later change still drops it.
+                probeWindow.setRules([probeWindow.curl(true), yOff]);
+                expect(!inNote.visible, "a note outlived a later change: " + inNote.text);
+                page.inspectorSheet.close();
+
+                // A refused delete, its result first.
+                rulesModel.deleteRule("899-curl");
+                probeWindow.result(probeWindow.last().requestId,
+                                   { status: "okWithNote", note: "file may remain" });
+                probeWindow.setRules([yOff]);
+                expect(pageNote.text === "899-curl: file may remain",
+                       "result-first delete note: " + JSON.stringify(pageNote.text));
                 console.warn("RULES_COMMAND_NOTE_PROBE_DONE");
             } finally {
                 Qt.quit();
