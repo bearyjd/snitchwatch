@@ -284,9 +284,8 @@ Kirigami.Page {
 
     // Row ids auto-select asked for since the last `runAuto`.
     property var autoIds: []
-    // Every pending row the user closed (issue #146: a set, not just the
-    // last): auto-select skips them until they are decided or removed, so a
-    // dismissed prompt does not come back.
+    // Every pending row the user closed (#146): auto-select skips them until
+    // decided or removed, so a dismissed prompt does not come back.
     property var dismissedIds: []
     // A pending arrival selects the OLDEST pending row (the one waiting
     // longest); any other id (the grouped re-anchor) selects that row itself.
@@ -368,8 +367,7 @@ Kirigami.Page {
     }
 
     function selectOldestPending() {
-        const index = page.model
-            ? page.model.oldestPendingRowIndex(JSON.stringify(page.dismissedIds)) : -1;
+        const index = page.model ? page.model.oldestPendingRowIndex(JSON.stringify(page.dismissedIds)) : -1;
         if (index >= 0) page.selectAuto(index);
     }
 

@@ -86,9 +86,11 @@ Window {
         }
         return null;
     }
+    // The repeat note the host line ends with ("" when none).
     function repeatText(rowId) {
-        const label = probe.find(probe.delegateFor(rowId), "repeatLabel");
-        return label && label.visible ? label.text : "";
+        const label = probe.find(probe.delegateFor(rowId), "hostLabel");
+        const at = label ? label.text.indexOf("  ×") : -1;
+        return at < 0 ? "" : label.text.slice(at + 2);
     }
     // Recent enough that "From now" (now) is after them only for the rows
     // inserted before it.
