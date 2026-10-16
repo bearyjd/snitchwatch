@@ -80,8 +80,8 @@ compare against it — compare against the hash pinned in your repo.
   image build or smoke test.
 - `snitchwatch-bridge.service` is a user unit: `ExecStart=/usr/bin/snitchwatch-bridge-cli`,
   binds gRPC on `127.0.0.1:50051` (the address this flavour's opensnitchd
-  config must dial; the image's config dials the system bridge's socket,
-  #35), WS socket + token under `$XDG_RUNTIME_DIR/snitchwatch/`,
+  config must dial; the system overlay's config dials the system bridge's
+  socket, #35), WS socket + token under `$XDG_RUNTIME_DIR/snitchwatch/`,
   `WantedBy=default.target`, and `ConditionUser=!@system` so a globally-enabled
   unit never starts for system accounts (e.g. a display-manager greeter).
 

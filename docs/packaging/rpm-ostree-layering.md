@@ -17,7 +17,8 @@ install, trading image immutability for convenience.
 > restart, another user's session) gets the daemon's UI authority, including
 > config changes the daemon saves to disk. So on this path keep
 > `DefaultAction: allow` (step 2). Deny-by-default needs the system
-> flavour's root-only Unix socket, which the batteries-included image uses:
+> flavour's root-only Unix socket, which the batteries-included image adds
+> with the system-bridge overlay:
 > [system-bridge-integration.md](system-bridge-integration.md).
 
 This path ends in a host-side `opensnitchd` that dials the Snitchwatch
@@ -62,27 +63,28 @@ rpm-ostree status --json | jq '.deployments[0]."requested-packages"'
 
 ---
 
-## 2. Ship the fail-closed daemon config
+## 2. Ship the daemon config
 
 Stock OpenSnitch ships `DefaultAction: allow`, which means that **whenever no
 UI is connected, the daemon silently allows all traffic** — the exact
-fail-open behavior a firewall product should not have. Snitchwatch overrides
-this with a fail-**closed** config that also points the daemon at the
-bridge's default gRPC bind.
+fail-open behavior a firewall product should not have. Snitchwatch's system
+overlay overrides it with `deny`, but only over the root-only socket; on this
+TCP path `deny` would protect nothing (#35), so the config keeps `allow` and
+points the daemon at the bridge's default gRPC bind.
 
-The config shipped in this repo is the system flavour's (`deny`, dialing
-`unix:opensnitchd.sock`). For this per-user TCP path, install it with the
-address and default action changed:
+Install the per-user flavour's config (`127.0.0.1:50051`, `allow`; the
+system flavour's `deny` config is `packaging/system/` and only ships with the
+system bridge's socket):
 
 ```bash
-jq '.Server.Address = "127.0.0.1:50051" | .DefaultAction = "allow"' \
+sudo install -Dm644 \
   packaging/bluebuild/files/system/etc/opensnitchd/default-config.json \
-  | sudo install -Dm644 /dev/stdin /etc/opensnitchd/default-config.json
+  /etc/opensnitchd/default-config.json
 ```
 
 The two fields that matter:
 
-| Field            | Upstream default        | System flavour (image)   | This TCP path       | Why |
+| Field            | Upstream default        | System overlay (image)   | This TCP path       | Why |
 | ---------------- | ----------------------- | ------------------------ | ------------------- | --- |
 | `DefaultAction`  | `allow`                 | `deny`                   | `allow`             | Fail closed only where the decision channel can't be squatted (#35). |
 | `Server.Address` | `unix:///tmp/osui.sock` | `unix:opensnitchd.sock`  | `127.0.0.1:50051`   | Dial the bridge: the root-only socket, or the per-user bridge's TCP bind. |

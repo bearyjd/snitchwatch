@@ -43,11 +43,12 @@ bluebuild build packaging/bluebuild/recipe.yml
 
 **Pass condition:** the image builds without error and produces an OCI
 image with `opensnitchd` installed and enabled by default, plus the
-fail-closed `/etc/opensnitchd/default-config.json`
-(`DefaultAction: deny`, `Server.Address: unix:opensnitchd.sock`, the system
-bridge's root-only socket, #35; the per-user TCP `127.0.0.1:50051` is not
-deny-safe and is not in the image) baked in at
-`packaging/bluebuild/files/system/etc/opensnitchd/default-config.json`.
+recipe's `/etc/opensnitchd/default-config.json` (`DefaultAction: allow`,
+`Server.Address: 127.0.0.1:50051`, the per-user flavour's, from
+`packaging/bluebuild/files/system/etc/opensnitchd/default-config.json`). The
+r15 image stages the system overlay on top, which replaces it with
+`DefaultAction: deny` and `unix:opensnitchd.sock` (#35); verify that image
+per `system-bridge-integration.md`.
 
 **Verify the baked config actually landed**, don't just trust the recipe:
 
@@ -176,7 +177,8 @@ required to keep the tray/diagnostics from false-positiving.
 
 Confirm `opensnitchd`'s `Server.Address` in its `default-config.json` points
 at `127.0.0.1:50051` (matching `SNITCHWATCH_GRPC_BIND` in the systemd unit;
-this step's copied config, not the image's, which dials the system socket),
+this step's copied config, not the r15 image's, whose system overlay dials
+the system socket),
 then generate real traffic from a fresh process and confirm a pending
 decision actually reaches a connected client:
 

@@ -405,12 +405,13 @@ Build one locally with `just release-bridge` (podman).
 
 Upstream OpenSnitch ships `DefaultAction: allow`, so the daemon silently
 **allows** all traffic whenever no UI client is connected. Snitchwatch's
-image overrides this with `DefaultAction: deny`
-([`packaging/bluebuild/files/system/etc/opensnitchd/default-config.json`](packaging/bluebuild/files/system/etc/opensnitchd/default-config.json)):
+system-bridge overlay overrides this with `DefaultAction: deny`
+([`packaging/system/opensnitchd-default-config.json`](packaging/system/opensnitchd-default-config.json)):
 a firewall whose whole premise is "ask before allowing" should fail **closed**
 when its decision channel is down. That is only safe on the system bridge's
-root-only Unix socket, which the image's config dials (`unix:opensnitchd.sock`);
-the per-user bridge's TCP port is not deny-safe (#35). The bridge runs as its
+root-only Unix socket, which that config dials (`unix:opensnitchd.sock`), so
+it ships only with that socket. The per-user bridge's TCP port is not
+deny-safe (#35), so its config keeps `allow`. The bridge runs as its
 own service precisely so that *closing the GUI window* is not mistaken for
 *the decision channel being down* — the daemon only reaches its deny default
 on a genuine bridge outage.

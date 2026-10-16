@@ -38,16 +38,18 @@ internet access rather than scoped loopback. See
 - **Lightweight / DIY** — layer `opensnitchd` onto stock Bazzite with
   `rpm-ostree`: [`../docs/packaging/rpm-ostree-layering.md`](../docs/packaging/rpm-ostree-layering.md).
 
-The image ships the system flavour's fail-**closed** daemon config
-([`bluebuild/files/system/etc/opensnitchd/default-config.json`](bluebuild/files/system/etc/opensnitchd/default-config.json)):
+The r15 image's fail-**closed** daemon config
+([`system/opensnitchd-default-config.json`](system/opensnitchd-default-config.json)):
 `DefaultAction: deny` and `Server.Address: unix:opensnitchd.sock`, the
-system bridge's root-only socket (#35). It needs the system overlay staged
-into the same image (`system/stage.sh`, which also installs the
-`opensnitch.service` drop-in the relative address relies on); see
+system bridge's root-only socket (#35). Only `system/stage.sh` installs it,
+together with the `opensnitch.service` drop-in the relative address relies
+on and the socket it dials: one artifact (PR #166 H1); see
 [`../docs/packaging/system-bridge-integration.md`](../docs/packaging/system-bridge-integration.md).
-The per-user bridge's TCP `127.0.0.1:50051` is **not deny-safe** (any local
-process can bind the port first) and stays out of the image; the DIY path
-pairs it with `DefaultAction: allow`.
+The recipe's own copy
+([`bluebuild/files/system/etc/opensnitchd/default-config.json`](bluebuild/files/system/etc/opensnitchd/default-config.json))
+is the per-user flavour's: `127.0.0.1:50051` with `DefaultAction: allow`.
+That TCP port is **not deny-safe** (any local process can bind it first), so
+it never runs with `deny`; the staged overlay replaces it in the image.
 
 ## The packaged fetch rule
 
@@ -108,7 +110,7 @@ packaging/
 ├── bluebuild/
 │   ├── recipe.yml                                  # batteries-included image recipe
 │   └── files/system/etc/opensnitchd/
-│       ├── default-config.json                     # fail-closed daemon config (canonical)
+│       ├── default-config.json                     # per-user flavour's daemon config (TCP, allow)
 │       └── rules/000-snitchwatch-bridge-fetch.json # the one shipped allow rule (canonical)
 ├── flatpak/
 │   ├── org.snitchwatch.Snitchwatch.yml             # GUI-only Flatpak manifest (no --share=network)

@@ -93,6 +93,9 @@ fn service_is_unprivileged_socket_activation_only() {
         "ProtectControlGroups=true",
         "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6",
         "ReadWritePaths=/run/snitchwatch-auth",
+        // PR #166 L1: under `deny`, a crash loop must not leave the bridge
+        // (and with it the socket) failed for good.
+        "StartLimitIntervalSec=0",
     ] {
         assert!(lines.contains(&expected), "service missing {expected}");
     }
@@ -220,8 +223,7 @@ fn stager_accepts_a_canonical_nonroot_destination_and_only_stages_files() {
     assert!(root.join("usr/lib/tmpfiles.d/snitchwatch.conf").is_file());
     assert!(root.join("usr/lib/sysusers.d/snitchwatch.conf").is_file());
 
-    // #35: the daemon's drop-in ships with the socket it requires, never
-    // without it (a drop-in alone fails opensnitch.service's start).
+    // #35: the daemon's drop-in ships with the socket it dials.
     let drop_in =
         root.join("usr/lib/systemd/system/opensnitch.service.d/snitchwatch-system-bridge.conf");
     assert_eq!(
@@ -229,16 +231,32 @@ fn stager_accepts_a_canonical_nonroot_destination_and_only_stages_files() {
         0o644
     );
     let drop_in = std::fs::read_to_string(&drop_in).unwrap();
+    let drop_in: Vec<&str> = drop_in.lines().map(str::trim).collect();
+    // PR #166 M1, owner decision: fail closed. A failed socket must not keep
+    // the daemon from starting and enforcing `deny`: Wants=, not Requires=,
+    // and a working directory that may be missing.
     for line in [
-        "Requires=snitchwatch-system-bridge-grpc.socket",
+        "Wants=snitchwatch-system-bridge-grpc.socket",
         "After=snitchwatch-system-bridge-grpc.socket",
-        "WorkingDirectory=/run/snitchwatch",
+        "WorkingDirectory=-/run/snitchwatch",
     ] {
-        assert!(
-            drop_in.lines().any(|l| l.trim() == line),
-            "drop-in missing {line}"
-        );
+        assert!(drop_in.contains(&line), "drop-in missing {line}");
     }
+    assert!(
+        !drop_in.iter().any(|l| l.starts_with("Requires=")),
+        "the daemon must start without the socket"
+    );
+
+    // PR #166 H1: the config that dials the socket ships with it.
+    let config = root.join("etc/opensnitchd/default-config.json");
+    assert_eq!(
+        std::fs::metadata(&config).unwrap().permissions().mode() & 0o7777,
+        0o644
+    );
+    assert_eq!(
+        std::fs::read_to_string(&config).unwrap(),
+        file("packaging/system/opensnitchd-default-config.json")
+    );
 
     // The packaged fetch rule: the bluebuild image's exact bytes, 0644.
     let rule_path = "etc/opensnitchd/rules/000-snitchwatch-bridge-fetch.json";
