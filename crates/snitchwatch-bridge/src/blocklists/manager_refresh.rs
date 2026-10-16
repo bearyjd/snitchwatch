@@ -286,14 +286,14 @@ impl BlocklistsManager {
 
     /// `sub` with its saved hosts gone: no hosts, no download time (nothing
     /// is saved from one), and the reason.
-    fn cleared_row(&self, sub: &Subscription) -> Subscription {
+    pub(in crate::blocklists) fn cleared_row(&self, sub: &Subscription) -> Subscription {
         Subscription {
             entry_count: 0,
             last_fetched_at: None,
             last_fetch_status: FetchStatus::Failed {
                 reason: format!(
                     "{STORAGE_LIMIT_REASON_PREFIX} {} hosts across all lists, so this list's \
-                     saved hosts were removed to keep the lists before it. It is past the total \
+                     {SAVED_HOSTS_REMOVED} to keep the lists before it. It is past the total \
                      size limit, so it blocks nothing; only browsing its hosts is lost. Remove a \
                      list to make room.",
                     thousands(self.stored_cap)
@@ -301,6 +301,17 @@ impl BlocklistsManager {
             },
             ..sub.clone()
         }
+    }
+
+    /// What the enforcement of a list whose first download was refused for
+    /// room says (nothing was ever saved, so nothing was removed); GUIs key
+    /// their warning on the prefix.
+    pub(super) fn never_saved_enforcement_reason(&self) -> String {
+        format!(
+            "{OVER_LIMIT_REASON_PREFIX}: the lists before it fill the {} hosts Snitchwatch \
+             saves, so it wasn't downloaded and blocks nothing. Remove a list to make room.",
+            thousands(self.stored_cap)
+        )
     }
 
     /// What a cleared list's enforcement says; GUIs key their warning on the
@@ -358,6 +369,17 @@ fn lists_past_the_limit(in_order: &[Subscription], cap: u64) -> Vec<String> {
         }
     }
     past
+}
+
+/// What a cleared list's status says was done to it.
+const SAVED_HOSTS_REMOVED: &str = "saved hosts were removed";
+
+/// The list's saved hosts were cleared for the limit, as opposed to a first
+/// download that was refused (which saved none).
+pub(super) fn cleared_for_room(sub: &Subscription) -> bool {
+    matches!(&sub.last_fetch_status,
+        FetchStatus::Failed { reason } if reason.contains(SAVED_HOSTS_REMOVED))
+        && refused_for_room(sub)
 }
 
 /// The last download was refused by the limit on saved hosts.

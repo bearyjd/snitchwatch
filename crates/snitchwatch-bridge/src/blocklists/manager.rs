@@ -280,13 +280,16 @@ impl BlocklistsManager {
         if let Some(reason) = self.unavailable_reason() {
             return Enforcement::NotEnforced { reason };
         }
-        let cleared = self
+        let refused = self
             .subscription(id)
-            .is_some_and(|sub| sub.entry_count == 0 && refresh::refused_for_room(&sub));
-        if cleared {
-            return Enforcement::NotEnforced {
-                reason: self.cleared_enforcement_reason(),
+            .filter(|sub| sub.entry_count == 0 && refresh::refused_for_room(sub));
+        if let Some(sub) = refused {
+            let reason = if refresh::cleared_for_room(&sub) {
+                self.cleared_enforcement_reason()
+            } else {
+                self.never_saved_enforcement_reason()
             };
+            return Enforcement::NotEnforced { reason };
         }
         Enforcement::Pending
     }

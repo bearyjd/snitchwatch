@@ -444,6 +444,12 @@ impl RuleSink for DaemonRuleSink {
     async fn retry_cleanup(&self, list_id: &str) -> Result<(), NotInstalled> {
         let list = IdComponent::from_id(list_id);
         let kinds = self.verified().get(&list).cloned().unwrap_or_default();
+        // Nothing verified would read as "the list has no kinds": every rule
+        // and file of it deleted. Only `reinstall_blocklist_rules` knows
+        // better, so this refuses as it does.
+        if kinds.is_empty() {
+            return Err(NotInstalled::new(NO_HOSTS_REASON));
+        }
         self.remove_other_kinds(&list, &kinds).await
     }
 
