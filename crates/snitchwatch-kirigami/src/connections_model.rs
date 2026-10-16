@@ -16,7 +16,7 @@
 //! external-service client exposes the same typed receiver to this model.
 
 use core::pin::Pin;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use cxx_qt::CxxQtType;
 use cxx_qt::Threading;
@@ -437,12 +437,15 @@ pub mod qobject {
         fn row_id_at(self: &ConnectionsModel, index: i32) -> QString;
 
         /// The list index of the oldest pending connection row that is drawn
-        /// now, other than `except_id` (-1 if none). The panel selects it when
+        /// now, other than the ids in `except_ids_json` (a JSON array of row
+        /// ids: every row the user dismissed, issue #146; anything else
+        /// excepts nothing), or -1 if none. On equal starts the row earlier
+        /// in the store wins, as in `alertRowJson`. The panel selects it when
         /// it is dismissed, so a prompt that arrived while it was busy is not
         /// left unseen. Read-only and never flushing.
         #[qinvokable]
         #[cxx_name = "oldestPendingRowIndex"]
-        fn oldest_pending_row_index(self: &ConnectionsModel, except_id: &QString) -> i32;
+        fn oldest_pending_row_index(self: &ConnectionsModel, except_ids_json: &QString) -> i32;
 
         /// Inline buttons (`crate::inline_deny`; all read-only, never
         /// flushing, like `isPendingRow`, since bindings call them).
@@ -1487,20 +1490,33 @@ impl qobject::ConnectionsModel {
         QString::from(id)
     }
 
-    fn oldest_pending_row_index(&self, except_id: &QString) -> i32 {
-        let except = except_id.to_string();
+    fn oldest_pending_row_index(&self, except_ids_json: &QString) -> i32 {
+        let except = parse_except_ids(&except_ids_json.to_string());
         let index = if self.grouped {
+            // The projection's order is not the store's: rank ties by the
+            // store position of each pending row.
+            let store_order: HashMap<&str, usize> = self
+                .store
+                .rows()
+                .iter()
+                .enumerate()
+                .filter(|(_, row)| is_pending(row))
+                .map(|(i, row)| (row.id.as_str(), i))
+                .collect();
             oldest_pending_position(
                 self.grouped_projection.iter().map(|e| match e {
                     VisibleEntry::Row { id, .. } => self.store.row_by_id(id),
                     _ => None,
                 }),
                 &except,
+                |id| store_order.get(id).copied().unwrap_or(usize::MAX),
             )
         } else {
+            // The flat list draws rows in store order already.
             oldest_pending_position(
                 (0..self.store.visible_len()).map(|i| self.store.visible_row(i)),
                 &except,
+                |_| 0,
             )
         };
         index.map_or(-1, |i| i as i32)
@@ -1840,17 +1856,27 @@ fn process_path_text(row: &ConnectionRow) -> &str {
 }
 
 /// Position of the pending row with the smallest `started_at_ms` (the one
-/// waiting longest), skipping `except`; ties go to the topmost. `None` entries
-/// (group headers) are never candidates.
+/// waiting longest), skipping every id in `except`. Ties go to the smallest
+/// `store_order` (the row earlier in the store, the rule `alert_row` uses),
+/// then to the topmost. `None` entries (group headers) are never candidates.
 fn oldest_pending_position<'a>(
     rows: impl Iterator<Item = Option<&'a ConnectionRow>>,
-    except: &str,
+    except: &HashSet<String>,
+    store_order: impl Fn(&str) -> usize,
 ) -> Option<usize> {
     rows.enumerate()
         .filter_map(|(i, r)| r.map(|r| (i, r)))
-        .filter(|(_, r)| r.id != except && is_pending(r))
-        .min_by_key(|(_, r)| r.started_at_ms)
+        .filter(|(_, r)| !except.contains(&r.id) && is_pending(r))
+        .min_by_key(|(_, r)| (r.started_at_ms, store_order(&r.id)))
         .map(|(i, _)| i)
+}
+
+/// The ids in a JSON array of strings; none for anything else.
+fn parse_except_ids(json: &str) -> HashSet<String> {
+    serde_json::from_str::<Vec<String>>(json)
+        .unwrap_or_default()
+        .into_iter()
+        .collect()
 }
 
 /// `startedAtMs` as a `real` (epoch ms overflow a QML `int`).
@@ -2115,12 +2141,70 @@ mod tests {
         let mut d = row("d", Some("allow"));
         d.started_at_ms = 1;
         let list = [None, Some(&a), Some(&b), Some(&c), Some(&d)];
-        assert_eq!(oldest_pending_position(list.iter().copied(), ""), Some(2));
-        assert_eq!(oldest_pending_position(list.iter().copied(), "b"), Some(3));
+        let none: HashSet<String> = HashSet::new();
+        let first = |_: &str| 0;
         assert_eq!(
-            oldest_pending_position([None, Some(&d)].into_iter(), ""),
+            oldest_pending_position(list.iter().copied(), &none, first),
+            Some(2)
+        );
+        let except_b: HashSet<String> = ["b".to_string()].into();
+        assert_eq!(
+            oldest_pending_position(list.iter().copied(), &except_b, first),
+            Some(3)
+        );
+        assert_eq!(
+            oldest_pending_position([None, Some(&d)].into_iter(), &none, first),
             None
         );
+    }
+
+    /// Issue #146: every dismissed row is skipped, not just the last.
+    #[test]
+    fn oldest_pending_position_skips_every_excepted_row() {
+        let rows: Vec<ConnectionRow> = (0..4)
+            .map(|i| {
+                let mut r = row(&format!("p{i}"), None);
+                r.started_at_ms = i;
+                r
+            })
+            .collect();
+        let except: HashSet<String> = ["p0".to_string(), "p1".to_string()].into();
+        assert_eq!(
+            oldest_pending_position(rows.iter().map(Some), &except, |_| 0),
+            Some(2)
+        );
+        let all: HashSet<String> = rows.iter().map(|r| r.id.clone()).collect();
+        assert_eq!(
+            oldest_pending_position(rows.iter().map(Some), &all, |_| 0),
+            None
+        );
+    }
+
+    /// Issue #146 tie-break: equal starts go to the row earlier in the store
+    /// (the rule `alert_row` uses), not the topmost drawn one. Grouped mode
+    /// draws store order A, B, C as A, C, B.
+    #[test]
+    fn oldest_pending_position_breaks_ties_by_store_order() {
+        let (a, b, c) = (row("a", None), row("b", None), row("c", None));
+        let drawn = [None, Some(&a), Some(&c), None, Some(&b)];
+        let store_order = |id: &str| ["a", "b", "c"].iter().position(|s| *s == id).unwrap();
+        let except_a: HashSet<String> = ["a".to_string()].into();
+        assert_eq!(
+            oldest_pending_position(drawn.iter().copied(), &except_a, store_order),
+            Some(4),
+            "b (second in the store) must win over c (drawn first)"
+        );
+    }
+
+    #[test]
+    fn except_ids_parse_from_a_json_array_and_fall_back_to_none() {
+        assert_eq!(
+            parse_except_ids(r#"["a","b"]"#),
+            ["a".to_string(), "b".to_string()].into()
+        );
+        assert!(parse_except_ids("").is_empty());
+        assert!(parse_except_ids("not json").is_empty());
+        assert!(parse_except_ids(r#"{"a":1}"#).is_empty());
     }
 
     #[test]
