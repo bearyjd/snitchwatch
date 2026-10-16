@@ -605,7 +605,7 @@ fn make_rule_notices_are_fixed_text_only() {
         "readonly property string createdText: \"The rule was created.\"",
         "readonly property string notCreatedText: \"A rule couldn't be created. Open that connection to see why.\"",
         "readonly property string unknownText: \"The firewall service didn't confirm the rule. Open that connection to see more.\"",
-        "outcomes.notice(ending === 1 ? outcomes.createdText : ending === 2 ? outcomes.unknownText : outcomes.notCreatedText);",
+        "outcomes.notice(ending === 1 ? outcomes.createdText : ending === 0 ? outcomes.notCreatedText : outcomes.unknownText);",
     ] {
         assert!(has_line(&outcomes, line), "MakeRuleOutcomes.qml lost `{line}`");
     }

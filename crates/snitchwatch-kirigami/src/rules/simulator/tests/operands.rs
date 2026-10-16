@@ -235,6 +235,30 @@ fn every_operand_has_a_positive_and_a_negative_case() {
             false,
         ),
         case(
+            "protocol + (icmp)",
+            simple("protocol", "icmp"),
+            base_with(|i| i.protocol = Some("icmp".to_string())),
+            true,
+        ),
+        case(
+            "protocol - (icmp6 is not icmp)",
+            simple("protocol", "icmp"),
+            base_with(|i| i.protocol = Some("icmp6".to_string())),
+            false,
+        ),
+        case(
+            "dest.port + (853, DNS over TLS)",
+            simple("dest.port", "853"),
+            base_with(|i| i.dest_port = 853),
+            true,
+        ),
+        case(
+            "dest.port - (853 is not 443)",
+            simple("dest.port", "853"),
+            base(),
+            false,
+        ),
+        case(
             "protocol folds case",
             simple("protocol", "TCP"),
             base(),

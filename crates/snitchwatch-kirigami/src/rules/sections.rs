@@ -6,7 +6,7 @@
 
 use std::mem::discriminant;
 
-use super::row_store::{RuleSource, RulesStore};
+use super::row_store::{Rule, RuleSource, RulesStore};
 
 pub const USER_RULES: &str = "User rules";
 pub const PROFILE_RULES: &str = "Profile rules";
@@ -48,20 +48,32 @@ impl RuleSource {
 /// "(continued)" when that source already had a section above. Every
 /// blocklist's rules are one source.
 pub fn section_label(store: &RulesStore, index: usize) -> Option<String> {
-    let rules = store.rules();
-    let kind = discriminant(&rules.get(index)?.source());
-    let same = |i: usize| discriminant(&rules[i].source()) == kind;
-    let start = (0..index)
-        .rev()
-        .take_while(|&i| same(i))
-        .last()
-        .unwrap_or(index);
-    let label = rules[index].source().label();
-    Some(if (0..start).any(same) {
-        format!("{label} (continued)")
-    } else {
-        label.to_string()
-    })
+    store.section_labels().get(index).cloned()
+}
+
+/// [`section_label`] of every rule, in one pass.
+pub fn section_labels(rules: &[Rule]) -> Vec<String> {
+    let mut seen = Vec::new();
+    let mut previous = None;
+    let mut run_continued = false;
+    rules
+        .iter()
+        .map(|rule| {
+            let source = rule.source();
+            let kind = discriminant(&source);
+            if previous != Some(kind) {
+                run_continued = seen.contains(&kind);
+                seen.push(kind);
+            }
+            previous = Some(kind);
+            let label = source.label();
+            if run_continued {
+                format!("{label} (continued)")
+            } else {
+                label.to_string()
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -159,5 +171,38 @@ mod tests {
             ]
         );
         assert_eq!(section_label(&s, 6), None);
+    }
+
+    /// Every row of a continued run reads "(continued)", not just its first.
+    #[test]
+    fn every_row_of_a_continued_run_is_continued() {
+        let s = store(&["100-mine", "850-profile:home:0001-a", "x-mine", "y-mine"]);
+        let labels: Vec<_> = (0..s.len())
+            .map(|i| section_label(&s, i).unwrap())
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                USER_RULES,
+                PROFILE_RULES,
+                "User rules (continued)",
+                "User rules (continued)"
+            ]
+        );
+    }
+
+    /// The headings follow the list as it changes, not just as first loaded.
+    #[test]
+    fn headings_follow_a_changed_list() {
+        let mut s = store(&["100-mine", "850-profile:home:0001-a"]);
+        assert_eq!(section_label(&s, 1).unwrap(), PROFILE_RULES);
+        s.apply(&ServerMessage::UpdateRules {
+            rules: vec![
+                serde_json::json!({ "name": "zz-mine", "enabled": true, "action": "allow" }),
+            ],
+        });
+        assert_eq!(section_label(&s, 2).unwrap(), "User rules (continued)");
+        s.apply(&ServerMessage::SetRules { rules: vec![] });
+        assert_eq!(section_label(&s, 0), None);
     }
 }

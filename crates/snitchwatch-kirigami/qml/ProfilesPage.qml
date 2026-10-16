@@ -145,20 +145,21 @@ Kirigami.ScrollablePage {
         }
     }
 
-    Kirigami.PlaceholderMessage {
-        anchors.centerIn: parent
-        width: parent.width - (Kirigami.Units.largeSpacing * 4)
-        visible: !page.model || page.model.count === 0
-        icon.name: "preferences-system-network"
-        text: "No profiles yet"
-        explanation: "Create a profile above, e.g. \"At Home\" or \"Public Wi-Fi\", then set its network matchers to auto-activate it."
-    }
-
     ListView {
         id: list
         model: page.model
         currentIndex: -1
         reuseItems: true
+
+        Kirigami.PlaceholderMessage {
+            parent: list
+            anchors.centerIn: parent
+            width: list.width - (Kirigami.Units.largeSpacing * 4)
+            visible: !page.model || page.model.count === 0
+            icon.name: "preferences-system-network"
+            text: "No profiles yet"
+            explanation: "Create a profile above, e.g. \"At Home\" or \"Public Wi-Fi\", then set its network matchers to auto-activate it."
+        }
 
         delegate: Controls.ItemDelegate {
             id: row
