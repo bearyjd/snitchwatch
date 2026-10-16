@@ -536,3 +536,7 @@ mod revision_tests;
 #[cfg(test)]
 #[path = "rules_refused_tests.rs"]
 mod refused_tests;
+
+#[cfg(test)]
+#[path = "rules_accounts_tests.rs"]
+mod accounts_tests;

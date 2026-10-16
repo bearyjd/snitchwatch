@@ -24,6 +24,22 @@ const PENDING_SNAPSHOT_CAP: usize = 4;
 const PENDING_SNAPSHOT_TTL: Duration = Duration::from_secs(30);
 /// Longest a `Subscribe` waits for account names (`RulesSync::learn_account_names`).
 const ACCOUNT_LOOKUP_WAIT: Duration = Duration::from_secs(1);
+/// After this long a lookup batch starts no more lookups; the uids it leaves
+/// are looked up for a later snapshot (#115).
+const ACCOUNT_BATCH_BUDGET: Duration = Duration::from_secs(5);
+
+/// Frees the account lookup slot if its batch ends without finishing (a
+/// lookup panicked), so the next snapshot can start one (#115).
+struct BatchGuard {
+    cache: SharedRulesCache,
+    serial: u64,
+}
+
+impl Drop for BatchGuard {
+    fn drop(&mut self) {
+        lock(&self.cache).accounts.abandon(self.serial);
+    }
+}
 
 /// Per-connection `ClientConfig.rules` awaiting that connection's HELLO.
 /// A snapshot stays staged after a stream adopts it, until the next one for
@@ -233,31 +249,52 @@ impl RulesSync {
 
     /// Look up the account names of the `user.name` uids in `rules` that
     /// aren't known yet, so the list can show them (`accounts`, PR #106
-    /// review M4). Before a snapshot is staged, on a blocking thread, and
-    /// waited for at most [`ACCOUNT_LOOKUP_WAIT`]: the daemon gives
-    /// `Subscribe` 10 s and redials after that (`notifications.go`), and NSS
-    /// can be slow. Lookups that finish later are still remembered, and a
-    /// list already shown is published again with the names.
+    /// review M4). Only for what the snapshot will hold: none for one over
+    /// [`super::MAX_SNAPSHOT_RULES`], none for a rule left out for its size.
+    /// Before a snapshot is staged, on a blocking thread, and waited for at
+    /// most [`ACCOUNT_LOOKUP_WAIT`]: the daemon gives `Subscribe` 10 s and
+    /// redials after that (`notifications.go`), and NSS can be slow. One
+    /// batch runs at a time (#115): uids wanted while it runs queue for it,
+    /// and this `Subscribe` doesn't wait. Lookups that finish later are
+    /// still remembered, and a list already shown is published again with
+    /// the names, once the last [`PublishHold`] drops if one is alive.
     pub async fn learn_account_names(&self, lookup: &AccountLookup, rules: &[Rule]) {
-        let wanted = {
-            let uids = rules.iter().flat_map(user_name_uids).collect();
-            lock(&self.cache).accounts.claim(uids)
-        };
-        if wanted.is_empty() {
+        if rules.len() > super::MAX_SNAPSHOT_RULES {
             return;
         }
-        let (lookup, cache, broadcast) =
-            (lookup.clone(), self.cache.clone(), self.broadcast.clone());
-        let learning = tokio::task::spawn_blocking(move || {
-            let found = look_up_blocking(&lookup, wanted);
-            let named = found.iter().any(|(_, name)| name.is_some());
-            let listed = {
-                let mut cache = lock(&cache);
-                cache.accounts.learn(found);
-                !cache.is_unknown()
+        let uids = rules
+            .iter()
+            .filter(|rule| super::within_limits(rule))
+            .flat_map(user_name_uids)
+            .collect();
+        let (batch, serial) = {
+            let mut cache = lock(&self.cache);
+            let Some(batch) = cache.accounts.want(uids, Instant::now()) else {
+                return;
             };
-            if named && listed {
-                publish_rules(&cache, &broadcast);
+            (batch, cache.accounts.batch_serial())
+        };
+        let (lookup, sync) = (lookup.clone(), self.clone());
+        let learning = tokio::task::spawn_blocking(move || {
+            let _guard = BatchGuard {
+                cache: sync.cache.clone(),
+                serial,
+            };
+            let mut batch = Some(batch);
+            while let Some(uids) = batch {
+                let found = look_up_blocking(&lookup, uids.clone(), ACCOUNT_BATCH_BUDGET);
+                let named = found.iter().any(|(_, name)| name.is_some());
+                let listed = {
+                    let mut cache = lock(&sync.cache);
+                    cache.accounts.learn(found, Instant::now());
+                    // Past the budget: not looked up, no longer claimed.
+                    cache.accounts.release(&uids);
+                    batch = cache.accounts.next_batch();
+                    !cache.is_unknown()
+                };
+                if named && listed {
+                    sync.publish_after_command();
+                }
             }
         });
         if tokio::time::timeout(ACCOUNT_LOOKUP_WAIT, learning)
@@ -390,8 +427,8 @@ impl RulesSync {
         self.publish_after_command();
     }
 
-    /// Publish a daemon-answered command's change: at once, or once the
-    /// last [`PublishHold`] drops.
+    /// Publish a daemon-answered command's change (or late account names):
+    /// at once, or once the last [`PublishHold`] drops.
     pub(super) fn publish_after_command(&self) {
         if self.holds.load(Ordering::SeqCst) == 0 {
             self.publish();
