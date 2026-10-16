@@ -165,25 +165,32 @@ async fn a_reconnect_mid_pass_stops_the_actions_after_it() {
     assert_eq!(harness.seen().len(), 1, "{:?}", harness.seen());
 }
 
-/// #113: a HELLO that changes nothing but the stream generation still wakes
-/// the worker, and a command that failed under the old generation is tried
-/// again under the new one (the rule list and the choices are the same).
-#[tokio::test]
+/// #113: a HELLO with no snapshot behind it moves only the stream
+/// generation, and still wakes the worker: an install that got no answer
+/// under the old generation is tried again under the new one (the rule list
+/// and the choices are the same).
+#[tokio::test(start_paused = true)]
 async fn a_hello_that_only_bumps_the_generation_retries_an_old_failure() {
-    let harness = Harness::new().connect(Daemon::RefuseDeletes, vec![flatpak_rule()]);
+    let harness = Harness::new().connect(Daemon::SilentInstalls, Vec::new());
     let curated = harness.curated();
-    turn(&curated, FLATPAK, false);
+    turn(&curated, FLATPAK, true);
     let worker = curated.spawn(harness.rules.synced());
-    eventually("the refused delete", || harness.seen().len() == 1).await;
+    // Past the command timeout (time is paused, so this costs nothing).
+    tokio::time::sleep(COMMAND_TIMEOUT + Duration::from_secs(5)).await;
+    eventually("the unanswered install, shown as failed", || {
+        entry_state(&curated, FLATPAK).status == EntryStatus::NotInstalled
+    })
+    .await;
     tokio::time::sleep(SETTLE).await;
     assert_eq!(harness.seen().len(), 1, "not retried within a generation");
-    harness.resync(vec![flatpak_rule()]);
+    let (_, stream_id) = harness.stream.as_ref().unwrap();
+    harness.commands.on_reply(*stream_id, &reply(0, true));
     eventually("the retry after the new HELLO", || {
         harness.seen().len() == 2
     })
     .await;
     worker.abort();
-    assert_eq!(harness.seen()[1], sent(Action::DeleteRule));
+    assert_eq!(harness.seen()[1], sent(Action::ChangeRule));
 }
 
 /// LOW-2: the same for removals (the removal loop's inert break).

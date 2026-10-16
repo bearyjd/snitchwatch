@@ -623,3 +623,27 @@ async fn shutdown_closes_the_notices_still_open_and_only_those() {
     super::close_open_where(|conn| same_connection(conn, &listener)).await;
     assert_eq!(closed(&server).await, [7, 7], "nothing left to close");
 }
+
+/// #116 L3: a notice the server itself closed (dismissed) is no longer on
+/// the server, so shutdown doesn't close it again.
+#[tokio::test(flavor = "multi_thread")]
+async fn shutdown_leaves_a_notice_the_server_already_closed() {
+    let Some(bus) = PrivateBus::start() else {
+        return;
+    };
+    let server = bus.notification_server().await;
+    let listener = bus.connect().await;
+    let mut notice = Notice::show(&listener, "s", "b", &ACTIONS).await.unwrap();
+    server_closes(&server, 2).await;
+    routed(&server).await;
+    let end = tokio::time::timeout(
+        Duration::from_secs(5),
+        notice.wait(&KEYS, std::future::pending()),
+    )
+    .await
+    .expect("the close never arrived");
+    assert_eq!(end, WaitEnd::Closed(2));
+
+    super::close_open_where(|conn| same_connection(conn, &listener)).await;
+    assert!(closed(&server).await.is_empty(), "closed a second time");
+}
