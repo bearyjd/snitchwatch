@@ -224,6 +224,12 @@ path contract is in `crates/snitchwatch-bridge/src/blocklists/list_dir.rs`).
 private, CGNAT, benchmarking, multicast or reserved networks are never blocked, and lists
 past 2,000,000 hosts in total (in subscription order) get no rule.
 
+- Blocklist URLs may point at your own network: an address in a private
+  range (10/8, 172.16/12, 192.168/16, or IPv6 fc00::/7) is allowed, so a list
+  on a Pi-hole or a NAS works. That is deliberate (a decision of the project
+  owner). The bridge will fetch whatever URL you subscribe to, so only
+  subscribe to a URL you trust. Loopback, link-local, carrier-grade NAT and
+  other reserved addresses are always refused.
 - A per-user bridge saves subscriptions but installs **no** blocklist rule:
   root opensnitchd would read list files any of your apps could replace. The
   Blocklists page's per-user banner says so once it has a list.

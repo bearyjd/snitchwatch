@@ -410,7 +410,10 @@ async fn a_slow_fetch_never_stalls_a_verdict() {
         })
         .await
         .unwrap();
-    let applied = tokio::time::timeout(Duration::from_secs(3), async {
+    // The fetch stays gated until released below, so a verdict that waited
+    // on it would never arrive: the bound only has to outlast a loaded
+    // machine, not measure speed (#110).
+    let applied = tokio::time::timeout(Duration::from_secs(60), async {
         loop {
             if let ServerMessage::UpdateConnectionRows { rows } = rx.recv().await.unwrap() {
                 if rows.iter().any(|row| row.id == pending_id) {
