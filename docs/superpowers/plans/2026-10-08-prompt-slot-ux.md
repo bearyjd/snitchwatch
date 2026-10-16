@@ -435,6 +435,18 @@ Branch `feat/prompt-slot-autoanswer`.
   `verdict_to_rule` and sends it as `AddRule`.
   - It is offered only for a deferred row with a bindable program, and only
     with remembered durations.
+  - **The controller is window-level** (PR #111 review, OQ1). `main.qml`
+    owns the one `MakeRuleController` and its `MakeRuleOutcomes` watch, not
+    the Connections page or the sheet: the drawer replaces pages, which
+    destroys them, and a request's result must still arrive. Its feed
+    carries `RuleCommandResult`s only and never asks for a snapshot.
+  - **Three fixed notices** say how a request ended when its row isn't on
+    screen: "The rule was created.", "A rule couldn't be created. Open that
+    connection to see why.", and "The firewall service didn't confirm the
+    rule. Open that connection to see more." They are fixed text, because a
+    passive notification renders rich text and a refusal's reason comes
+    from the bridge; the reason stays in the sheet's plain-text result. An
+    ending the notice doesn't know reads as the third.
 - **Wording.** Labels say "usually allowed" for an allow, because requeued
   packets can drop under chain churn (tower's r8). They never name an action
   the bridge didn't report.

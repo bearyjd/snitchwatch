@@ -467,10 +467,10 @@ impl ProfilesManager {
     /// reboot before Wi-Fi joins, suspend, a drop) is no change: nothing
     /// happens. Nothing happens either for the network last acted on, nor
     /// while a manual choice made on this network holds (issue #82, also
-    /// after a restart); a choice made with no network known yet is kept by
-    /// the first network that settles. A different network clears the
-    /// choice, and the first profile whose matchers match it is activated;
-    /// none matching leaves the active one.
+    /// after a restart); a choice made with no network known yet (this
+    /// run's click only) is kept by the first network that settles. A
+    /// different network clears the choice, and the first profile whose
+    /// matchers match it is activated; none matching leaves the active one.
     pub async fn on_network_observed(&self, network: Option<String>) -> Result<(), ProfilesError> {
         let Some(network) = network else {
             return Ok(());
