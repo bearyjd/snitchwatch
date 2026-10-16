@@ -128,13 +128,13 @@ impl PendingSnapshots {
         }
     }
 
-    /// Note `change` in the journal of the adopted snapshot `sequence`, if
-    /// it is still staged.
+    /// Note `change` in the journal of the snapshot `sequence` (the one the
+    /// list holds), if it is still staged.
     fn record(&mut self, sequence: u64, change: Journaled) {
         let staged = self
             .entries
             .iter_mut()
-            .find(|staged| staged.snapshot.sequence == sequence && !staged.adopted_by.is_empty());
+            .find(|staged| staged.snapshot.sequence == sequence);
         if let Some(staged) = staged {
             staged.snapshot.journal.record(change);
         }

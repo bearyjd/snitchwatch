@@ -152,6 +152,19 @@ fn a_failed_lookup_is_retried_after_a_cool_down() {
     );
 }
 
+/// #115: uids a batch ran out of time for are no longer claimed, so a later
+/// snapshot wants them again.
+#[test]
+fn uids_a_batch_ran_out_of_time_for_are_wanted_again() {
+    let now = Instant::now();
+    let mut known = KnownAccounts::default();
+    let batch = known.want(BTreeSet::from([1, 2, 3]), now).unwrap();
+    known.learn(vec![(1, Some("a".into()))], now);
+    known.release(&batch);
+    assert_eq!(known.next_batch(), None);
+    assert_eq!(known.want(BTreeSet::from([1, 2, 3]), now), Some(vec![2, 3]));
+}
+
 /// #115: a full map makes room for one entry; it never forgets everything,
 /// and never what a running batch is looking up.
 #[test]

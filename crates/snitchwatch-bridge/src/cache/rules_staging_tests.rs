@@ -153,6 +153,21 @@ fn a_readoption_keeps_changes_confirmed_since_the_first_adoption() {
     drop(older);
 }
 
+/// A refused delete took the rule out of the daemon's memory (tower r12):
+/// adopting the snapshot again doesn't bring it back.
+#[test]
+fn a_second_hello_keeps_a_refused_delete() {
+    let (sync, commands) = unix(vec![rule("a"), rule("b")]);
+    let (older, _older_rx) = commands.open_stream(None);
+    commands.on_reply(older.id(), &hello());
+    sync.apply_refused(&delete("a"));
+    let (newer, _newer_rx) = commands.open_stream(None);
+    commands.on_reply(newer.id(), &hello());
+    assert_eq!(listed(&sync), vec!["b"]);
+    drop(newer);
+    drop(older);
+}
+
 /// A new snapshot is the daemon's word: nothing from the old one's journal
 /// is replayed onto it.
 #[test]
