@@ -478,8 +478,8 @@ Kirigami.ApplicationWindow {
         // Deliberately does not say "silently allowed": that's only true
         // under DefaultAction: allow, opensnitchd's own fail-open default.
         // This repo's shipped packaging config overrides that to
-        // DefaultAction: deny (fail-closed — packaging/bluebuild/files/
-        // system/etc/opensnitchd/default-config.json, CLAUDE.md's settled
+        // DefaultAction: deny (fail-closed — the system flavour's staged
+        // config under packaging/system/, CLAUDE.md's settled
         // decision #5), so on the actual shipped product the real effect is
         // "silently denied" (a legitimate connection blackholed with no
         // signal) — arguably worse, not better. Neither direction is
