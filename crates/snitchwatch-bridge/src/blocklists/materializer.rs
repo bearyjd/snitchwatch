@@ -181,6 +181,25 @@ mod tests {
         IdComponent::from_id(id)
     }
 
+    /// #116: whatever the id (very long, unusual characters), the rule name
+    /// stays inside the daemon's 200-byte limit, via `IdComponent`'s hash.
+    #[test]
+    fn a_very_long_list_id_still_makes_a_name_the_daemon_accepts() {
+        for id in ["x".repeat(5000), "é/ ".repeat(300), "a".repeat(81)] {
+            for kind in ListKind::ALL {
+                let name = list_rule_name(&list(&id), kind);
+                assert!(
+                    name.len() <= crate::rule_name::MAX_RULE_NAME_BYTES,
+                    "{name}"
+                );
+                assert!(
+                    crate::rule_name::validate_rule_name(&name).is_ok(),
+                    "{name}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn one_deny_rule_per_kind_points_at_its_own_directory() {
         let ads = list("ads-0123456789abcdef");

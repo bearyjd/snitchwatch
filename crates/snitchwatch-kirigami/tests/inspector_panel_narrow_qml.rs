@@ -93,6 +93,7 @@ Kirigami.ApplicationWindow {
         return null;
     }
 
+    property int busyTicks: 0
     readonly property var steps: [
         function () {
             probe.page = probe.pageStack.get(0);
@@ -214,6 +215,18 @@ Kirigami.ApplicationWindow {
                 }
                 return;
             }
+            // A push or pop animates; under load it can outlast a tick, and
+            // the next step would read the depth too early (#110).
+            // A stack stuck busy fails the probe after 40 ticks (6 s); it
+            // never hangs it.
+            if (probe.pageStack.busy === true) {
+                if (++probe.busyTicks > 40) {
+                    probe.failures.push("the page stack stayed busy at step " + probe.step);
+                    probe.step = probe.steps.length;
+                }
+                return;
+            }
+            probe.busyTicks = 0;
             try {
                 probe.steps[probe.step]();
             } catch (e) {

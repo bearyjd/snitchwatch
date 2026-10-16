@@ -18,7 +18,7 @@
 //! per-user bridge trusts that nobody but the user and root can write above
 //! its directory, which holds under a home directory; the README says so.
 //! Walking the parents was judged disproportionate: a umask of 002 makes
-//! `~/.local` and `~/.local/share` group-writable (by the user's own private
+//! `~/.local` and `~/.local/state` group-writable (by the user's own private
 //! group), so a strict walk would push those users to memory-only storage,
 //! and telling a private group from a shared one means reading the group
 //! database.
@@ -270,7 +270,7 @@ pub(crate) fn check_system_state_dir(
 /// The databases and the SQLite journals beside them live there, and whoever
 /// can write to the directory can plant a file SQLite then opens (a FIFO hangs
 /// it, a link is followed). A directory that is ours is tightened rather than
-/// refused: a umask of 002 makes `~/.local/share/snitchwatch` 0775, and
+/// refused: a umask of 002 makes `~/.local/state/snitchwatch` 0775, and
 /// refusing would push those users to memory-only storage. Group and others may
 /// still read and enter it, unlike the system directory, which root
 /// opensnitchd also reads and which must be exactly 0700.

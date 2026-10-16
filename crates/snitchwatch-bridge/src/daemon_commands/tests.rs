@@ -383,6 +383,43 @@ async fn only_rule_commands_ever_leave_the_bridge() {
     }
 }
 
+/// #116: the guard is a whitelist, so it must hold for every value of the
+/// wire enum, including ones a newer daemon proto adds and ones that name no
+/// variant at all. Only `CHANGE_RULE` and `DELETE_RULE` go out.
+#[tokio::test]
+async fn every_other_action_value_is_refused_exhaustively() {
+    let commands = commands(DaemonTransport::Tcp);
+    let (s1, mut rx1) = commands.open_stream(addr(1));
+    commands.on_reply(s1.id(), &hello());
+
+    let known: Vec<Action> = (0..=256).filter_map(|n| Action::try_from(n).ok()).collect();
+    assert!(known.contains(&Action::ChangeConfig));
+    assert!(known.len() > ALLOWED_ACTIONS.len());
+
+    let values = (-16..=256).chain([i32::MIN, i32::MAX]);
+    for value in values {
+        let allowed = value == Action::ChangeRule as i32 || value == Action::DeleteRule as i32;
+        let notification = Notification {
+            r#type: value,
+            data: r#"{"Server":{"Address":"127.0.0.1:1"}}"#.into(),
+            ..command()
+        };
+        let sent = commands.send(notification);
+        if allowed {
+            assert!(sent.is_ok(), "{value} was refused");
+        } else {
+            assert!(
+                matches!(sent, Err(SendError::NotAllowed)),
+                "action value {value} was not refused"
+            );
+        }
+    }
+    // Exactly the two allowed values were queued.
+    assert!(rx1.try_recv().is_ok());
+    assert!(rx1.try_recv().is_ok());
+    assert!(rx1.try_recv().is_err());
+}
+
 /// L3: whatever built the command, an unsafe name never reaches the daemon.
 #[tokio::test]
 async fn a_rule_command_with_an_unsafe_name_never_leaves_the_bridge() {

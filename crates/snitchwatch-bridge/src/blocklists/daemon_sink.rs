@@ -132,20 +132,24 @@ impl DaemonRuleSink {
     /// [`made_by_bridge`], warning once per name and run about a rule under
     /// a blocklist name that Snitchwatch didn't make.
     fn ours(&self, rule: &Rule) -> bool {
-        let made = made_by_bridge(rule);
-        let first = !made
-            && self
-                .warned
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .insert(rule.name.clone());
-        if first {
+        if self.first_foreign(rule) {
             warn!(
                 name_len = rule.name.len(),
                 "leaving a blocklist-named rule Snitchwatch didn't make"
             );
         }
-        made
+        made_by_bridge(rule)
+    }
+
+    /// Whether `rule` is one Snitchwatch didn't make and this is the first
+    /// time this run it is seen (the warning is once per name).
+    fn first_foreign(&self, rule: &Rule) -> bool {
+        !made_by_bridge(rule)
+            && self
+                .warned
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(rule.name.clone())
     }
 
     /// The pause between two deletes ([`DELETE_SPACING`]). Tests.
@@ -464,6 +468,12 @@ impl RuleSink for DaemonRuleSink {
     async fn retry_cleanup(&self, list_id: &str) -> Result<(), NotInstalled> {
         let list = IdComponent::from_id(list_id);
         let kinds = self.verified().get(&list).cloned().unwrap_or_default();
+        // Nothing verified would read as "the list has no kinds": every rule
+        // and file of it deleted. Only `reinstall_blocklist_rules` knows
+        // better, so this refuses as it does.
+        if kinds.is_empty() {
+            return Err(NotInstalled::new(NO_HOSTS_REASON));
+        }
         self.remove_other_kinds(&list, &kinds).await
     }
 

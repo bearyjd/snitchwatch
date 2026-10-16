@@ -60,6 +60,67 @@ async fn the_retry_after_a_refused_install_removes_the_kind_the_list_no_longer_h
     assert!(h.dir.has_list(&list, ListKind::Domains));
 }
 
+/// #109: `retry_cleanup` runs only after `files_verified()`, but with no
+/// verified kinds it would delete every rule and file of the list. It
+/// refuses instead, like `reinstall_blocklist_rules`.
+#[tokio::test]
+async fn a_cleanup_retry_with_no_verified_kinds_deletes_nothing() {
+    let h = Harness::new().connect(Daemon::Accept, Vec::new());
+    h.sink()
+        .replace_blocklist_rules(ADS, hosts(&["ads.example", "203.0.113.7"]))
+        .await
+        .unwrap();
+    let list = IdComponent::from_id(ADS);
+
+    // A new run: nothing is verified yet, the daemon holds the rules.
+    let rules = vec![
+        h.bridge_rule(ADS, ListKind::Domains),
+        h.bridge_rule(ADS, ListKind::Ips),
+    ];
+    let h = h.restart().connect(Daemon::Accept, rules);
+    let result = h.sink().retry_cleanup(ADS).await;
+
+    assert!(result.is_err(), "refused: {result:?}");
+    let sent: Vec<_> = h.seen().iter().map(|s| kind_of(&s.command)).collect();
+    assert!(
+        !sent.contains(&delete(&domains_rule())) && !sent.contains(&delete(&ips_rule())),
+        "no rule deleted: {sent:?}"
+    );
+    assert!(h.dir.has_list(&list, ListKind::Domains));
+    assert!(h.dir.has_list(&list, ListKind::Ips));
+}
+
+/// #109: a blocklist-named rule Snitchwatch didn't make is left alone and
+/// warned about once per name and run; ours are never warned about.
+#[tokio::test]
+async fn a_foreign_blocklist_named_rule_is_left_and_flagged_once() {
+    let h = Harness::new().connect(Daemon::Accept, Vec::new());
+    let sink = h.sink();
+    let foreign = |name: &str| Rule {
+        name: name.into(),
+        action: "allow".into(),
+        ..Rule::default()
+    };
+    let mine = h.bridge_rule(ADS, ListKind::Domains);
+
+    assert!(!sink.ours(&foreign("z00-blocklist:x:domains")));
+    assert!(sink.first_foreign(&foreign("z00-blocklist:y:domains")));
+    assert!(
+        !sink.first_foreign(&foreign("z00-blocklist:y:domains")),
+        "once"
+    );
+    assert!(
+        !sink.first_foreign(&foreign("z00-blocklist:x:domains")),
+        "already flagged by ours()"
+    );
+    assert!(
+        sink.first_foreign(&foreign("z00-blocklist:z:domains")),
+        "another name"
+    );
+    assert!(sink.ours(&mine));
+    assert!(!sink.first_foreign(&mine), "ours are never flagged");
+}
+
 // --- Quick unsubscribe, then resubscribe (issue #73) ---------------------------
 //
 // opensnitchd reloads a list path at most every 30 s and clears a list whose

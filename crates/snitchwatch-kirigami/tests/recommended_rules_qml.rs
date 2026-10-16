@@ -171,6 +171,22 @@ Controls.ApplicationWindow {
                        "Keep: " + JSON.stringify(probeWindow.sent));
                 probeWindow.sent.pop();
 
+                // #113: an undecided copy turned off on the Rules page: its
+                // switch reads off, Keep is offered, the status says why, and
+                // "Turn all off" decides it too.
+                send([entry("flatpak", false, "off"), entry("chronyc", true, "installed"),
+                      entry("nm", true, "editedByYou"), entry("held", false, "inFirewallButOff")]);
+                expect(!find(row(3), "entrySwitch").checked, "a rule turned off elsewhere reads on");
+                expect(find(row(3), "keepButton").visible, "no Keep on a rule turned off elsewhere");
+                expect(find(row(3), "statusLabel").text
+                       === "In the firewall (added earlier), turned off on the Rules page.",
+                       "status: " + find(row(3), "statusLabel").text);
+                find(header, "allOffButton").clicked();
+                expect(JSON.stringify(probeWindow.sent[probeWindow.sent.length - 1].ids)
+                       === '["chronyc","nm","held"]',
+                       "Turn all off left it undecided: " + JSON.stringify(probeWindow.sent));
+                probeWindow.sent.pop();
+
                 // Remove: only for the edited rule, and only once confirmed.
                 expect(!find(row(1), "removeButton").visible, "Remove on an unedited rule");
                 const remove = find(row(2), "removeButton");

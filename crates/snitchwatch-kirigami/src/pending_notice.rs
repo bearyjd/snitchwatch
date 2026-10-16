@@ -52,6 +52,20 @@ impl PendingTarget {
         })
     }
 
+    /// The flow this prompt is about, for the notice cooldown: the
+    /// program's path (its name when the daemon sent none) and the host.
+    pub(crate) fn flow_key(&self) -> crate::notifier::FlowKey {
+        crate::notifier::FlowKey {
+            session: self.connection_id,
+            program: self
+                .row
+                .process_path
+                .clone()
+                .unwrap_or_else(|| self.row.process.clone()),
+            host: self.row.dst_host.clone(),
+        }
+    }
+
     pub(crate) fn handles(&self) -> &BridgeHandles {
         &self.handles
     }

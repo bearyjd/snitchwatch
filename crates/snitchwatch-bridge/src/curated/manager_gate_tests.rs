@@ -321,6 +321,7 @@ async fn a_busy_removal_is_sent_once_the_queue_drains() {
     let state = entry_state(&curated, FLATPAK);
     assert_eq!(state.status, EntryStatus::NotRemoved);
     assert!(state.problem.unwrap().contains("busy"));
+    remove(&curated, FLATPAK);
     // The queue drains; the next pass (run here by hand) asks again.
     gate.notify_one();
     eventually("the queue to drain", || harness.seen().len() == queued).await;
@@ -334,4 +335,9 @@ async fn a_busy_removal_is_sent_once_the_queue_drains() {
         deletes,
         [(Action::DeleteRule as i32, FLATPAK_RULE.to_string())]
     );
+    // #113: asking again replaced the earlier "busy" failure: once the
+    // second request is served, neither its text nor its status lingers.
+    let state = entry_state(&curated, FLATPAK);
+    assert_eq!(state.problem, None);
+    assert_ne!(state.status, EntryStatus::NotRemoved);
 }

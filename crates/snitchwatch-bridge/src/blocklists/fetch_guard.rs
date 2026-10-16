@@ -17,8 +17,14 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 
 /// RFC 1918 (10/8, 172.16/12, 192.168/16) and ULA (fc00::/7) addresses.
-/// Allowed: LAN-hosted lists are legitimate (owner decision, 2026-10-08,
-/// issue #45); setting this to `false` blocks them everywhere.
+/// Allowed: LAN-hosted lists (a Pi-hole, a NAS) are a real use. Owner
+/// decisions, 2026-10-08 (issue #45) and again 2026-10-16 (#67 item 6): they
+/// stay allowed. The cost, accepted: a subscription URL can make the bridge
+/// send a GET to a service on the user's own LAN, so a URL from someone
+/// else deserves the same care as any link. Loopback, link-local, CGNAT and
+/// the other reserved ranges stay refused regardless. Setting this to
+/// `false` blocks LAN targets everywhere. The user-facing note is in
+/// README.md ("M4 - Subscribe to a blocklist").
 const ALLOW_LAN_TARGETS: bool = true;
 
 /// Shown when a URL names a refused address (no detail, see the module doc).
