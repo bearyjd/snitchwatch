@@ -72,15 +72,13 @@ Item {
     // silently once-only, so it needs a rule (`silent_mode.rs`).
     required property string appIcon
     required property bool needsRule
-    // Issue #18 double-submit guard: the inline/batch buttons stay
-    // visible until the round trip flips `pending` to false, so a
-    // second click before that arrives would otherwise send a
-    // second (safe but ERROR-logged, feedback-less) SetVerdict.
-    // Reset whenever this delegate instance starts representing a
-    // different row (reuseItems recycles delegates, so `rowId`
-    // changing is the reliable "this is a new row now" signal) or
-    // when the row's own pending state changes (a fresh pending
-    // arrival on the same id, or a decision landing).
+    // Issue #55: daemon events this row stands for, and the last one's time.
+    required property int repeatCount
+    required property real lastSeenMs
+    // Issue #18 double-submit guard: the buttons stay until `pending` flips,
+    // so a second click would send a second SetVerdict. Reset when the
+    // delegate shows another row (reuseItems: `rowId` changes) or the row's
+    // pending state changes.
     property bool submitted: false
     onRowIdChanged: row.submitted = false
     onPendingChanged: row.submitted = false
@@ -213,7 +211,9 @@ Item {
             }
             Controls.Label {
                 textFormat: Text.PlainText
-                text: row.host + ":" + row.port + "  " + row.protocol
+                objectName: "hostLabel"
+                text: (row.repeatCount > 1 ? "×" + row.repeatCount + " · last seen " + Qt.formatTime(
+                    new Date(row.lastSeenMs), "hh:mm:ss") + " · " : "") + row.host + ":" + row.port + "  " + row.protocol
                 opacity: 0.7
                 font: Kirigami.Theme.smallFont
                 elide: Text.ElideMiddle

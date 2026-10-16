@@ -16,7 +16,7 @@
 //! external-service client exposes the same typed receiver to this model.
 
 use core::pin::Pin;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use cxx_qt::CxxQtType;
 use cxx_qt::Threading;
@@ -24,6 +24,7 @@ use cxx_qt_lib::{
     QByteArray, QHash, QHashPair_i32_QByteArray, QList, QModelIndex, QString, QVariant,
 };
 
+use crate::connections::collapse::RowCollapse;
 use crate::connections::filter::ConnectionFilter;
 use crate::connections::grouping::{GroupTree, VisibleEntry};
 use crate::connections::level_rules::{LevelFinished, LevelRules};
@@ -111,6 +112,12 @@ const ROLE_LEVEL_RULE_STATE: i32 = 32;
 const ROLE_LEVEL_RULE_NAME: i32 = 33;
 /// Why the state is `unavailable` (fixed plain text); empty otherwise.
 const ROLE_LEVEL_RULE_REASON: i32 = 34;
+/// How many daemon events a connection row stands for (issue #55): 1 unless
+/// repeats collapsed into it; 0 on headers.
+const ROLE_REPEAT_COUNT: i32 = 35;
+/// When a collapsed row's flow was last seen (epoch ms as a `real`); its own
+/// start when nothing collapsed into it, -1 on headers.
+const ROLE_LAST_SEEN_MS: i32 = 36;
 
 #[cxx_qt::bridge]
 pub mod qobject {
@@ -430,12 +437,15 @@ pub mod qobject {
         fn row_id_at(self: &ConnectionsModel, index: i32) -> QString;
 
         /// The list index of the oldest pending connection row that is drawn
-        /// now, other than `except_id` (-1 if none). The panel selects it when
+        /// now, other than the ids in `except_ids_json` (a JSON array of row
+        /// ids: every row the user dismissed, issue #146; anything else
+        /// excepts nothing), or -1 if none. On equal starts the row earlier
+        /// in the store wins, as in `alertRowJson`. The panel selects it when
         /// it is dismissed, so a prompt that arrived while it was busy is not
         /// left unseen. Read-only and never flushing.
         #[qinvokable]
         #[cxx_name = "oldestPendingRowIndex"]
-        fn oldest_pending_row_index(self: &ConnectionsModel, except_id: &QString) -> i32;
+        fn oldest_pending_row_index(self: &ConnectionsModel, except_ids_json: &QString) -> i32;
 
         /// Inline buttons (`crate::inline_deny`; all read-only, never
         /// flushing, like `isPendingRow`, since bindings call them).
@@ -659,6 +669,9 @@ fn mirror_into_grouping(rust: &mut ConnectionsModelRust, msg: &ServerMessage) {
 /// Rust-side state for [`qobject::ConnectionsModel`].
 pub struct ConnectionsModelRust {
     store: RowStore,
+    /// Repeated event rows shown as one (issue #55), in front of `store`
+    /// and `grouping`.
+    collapse: RowCollapse,
     /// Process -> Domain group tree (Little-Snitch-parity grouped view),
     /// mirrored incrementally alongside `store` from every applied
     /// `ServerMessage` — see `apply_server_message`'s grouping-mirror step.
@@ -707,6 +720,7 @@ impl Default for ConnectionsModelRust {
             store: RowStore::with_filter(
                 ConnectionFilter::default().with_geo(crate::geo::shared_resolver()),
             ),
+            collapse: RowCollapse::default(),
             grouping: GroupTree::default(),
             grouped_projection: Vec::new(),
             grouped: true,
@@ -753,6 +767,9 @@ impl qobject::ConnectionsModel {
             ROLE_LEVEL_RULE_STATE | ROLE_LEVEL_RULE_NAME | ROLE_LEVEL_RULE_REASON
         ) {
             return self.level_rule_role(index.row(), role);
+        }
+        if matches!(role, ROLE_REPEAT_COUNT | ROLE_LAST_SEEN_MS) {
+            return self.repeat_role(index.row(), role);
         }
         if self.grouped {
             let Some(entry) = self.grouped_projection.get(index.row() as usize) else {
@@ -848,6 +865,8 @@ impl qobject::ConnectionsModel {
         roles.insert(ROLE_LEVEL_RULE_STATE, QByteArray::from("levelRuleState"));
         roles.insert(ROLE_LEVEL_RULE_NAME, QByteArray::from("levelRuleName"));
         roles.insert(ROLE_LEVEL_RULE_REASON, QByteArray::from("levelRuleReason"));
+        roles.insert(ROLE_REPEAT_COUNT, QByteArray::from("repeatCount"));
+        roles.insert(ROLE_LAST_SEEN_MS, QByteArray::from("lastSeenMs"));
         roles
     }
 
@@ -888,15 +907,21 @@ impl qobject::ConnectionsModel {
         self.apply_filter(filter);
     }
 
-    fn set_from_now(self: Pin<&mut Self>, from_now: bool) {
+    fn set_from_now(mut self: Pin<&mut Self>, from_now: bool) {
         let mut filter = self.store.filter().clone();
         let since = match (from_now, filter.since_ms()) {
             (true, Some(started)) => Some(started),
             (true, None) => Some(now_ms()),
             (false, _) => None,
         };
+        let cut = since.is_some() && since != filter.since_ms();
         filter.set_since_ms(since);
-        self.apply_filter(filter);
+        self.as_mut().apply_filter(filter);
+        if cut {
+            // A repeat after the cut must not join (and hide in) a row that
+            // started before it.
+            self.as_mut().rust_mut().collapse.seal();
+        }
     }
 
     fn set_current_row_id(mut self: Pin<&mut Self>, id: &QString) {
@@ -991,6 +1016,20 @@ impl qobject::ConnectionsModel {
         level_rule_actions::role(self, row, role)
     }
 
+    /// The `repeatCount` / `lastSeenMs` roles of list row `row`.
+    fn repeat_role(&self, row: i32, role: i32) -> QVariant {
+        let id = self.row_id_at(row).to_string();
+        let found = self.store.row_by_id(&id);
+        if role == ROLE_REPEAT_COUNT {
+            let count = found.map_or(0, |_| self.collapse.repeat_count(&id));
+            return QVariant::from(&(count as i32));
+        }
+        let last_seen = found.map_or(-1.0, |row| {
+            self.collapse.last_seen_ms(&id).unwrap_or(row.started_at_ms) as f64
+        });
+        QVariant::from(&last_seen)
+    }
+
     fn apply_message_for_session(
         mut self: Pin<&mut Self>,
         msg: ServerMessage,
@@ -1080,8 +1119,10 @@ impl qobject::ConnectionsModel {
             let mut rust = self.as_mut().rust_mut();
             rust.source_session = source_session;
             for msg in msgs {
-                mirror_into_grouping(&mut rust, &msg);
-                rust.store.apply(msg);
+                for msg in rust.collapse.rewrite(msg) {
+                    mirror_into_grouping(&mut rust, &msg);
+                    rust.store.apply(msg);
+                }
             }
             if rust.store.is_filtered() {
                 rust.store.recompute_visible();
@@ -1113,7 +1154,18 @@ impl qobject::ConnectionsModel {
         // Ids that arrive *pending* in this batch — captured before mutation so
         // the auto-select policy can react to them afterward.
         let new_pending_ids = collect_new_pending_ids(std::slice::from_ref(&msg));
+        // Repeated event rows collapse before the store and the tree see them.
+        let msgs = self.as_mut().rust_mut().collapse.rewrite(msg);
+        for msg in msgs {
+            self.as_mut().apply_rewritten(msg);
+        }
+        self.as_mut().refresh_counts();
+        self.maybe_auto_select(&new_pending_ids);
+    }
 
+    /// Replay one (already collapsed) message behind the correct Qt
+    /// begin/end signals.
+    fn apply_rewritten(mut self: Pin<&mut Self>, msg: ServerMessage) {
         // Mirror the same delta into the Process->Domain group tree, Qt-free
         // and incremental (see `connections::grouping` module docs), so both
         // projections stay live regardless of which one is currently on
@@ -1183,8 +1235,6 @@ impl qobject::ConnectionsModel {
                 }
             }
         }
-        self.as_mut().refresh_counts();
-        self.maybe_auto_select(&new_pending_ids);
     }
 
     /// Rebuild the cached flattened grouped projection from the current
@@ -1440,20 +1490,33 @@ impl qobject::ConnectionsModel {
         QString::from(id)
     }
 
-    fn oldest_pending_row_index(&self, except_id: &QString) -> i32 {
-        let except = except_id.to_string();
+    fn oldest_pending_row_index(&self, except_ids_json: &QString) -> i32 {
+        let except = parse_except_ids(&except_ids_json.to_string());
         let index = if self.grouped {
+            // The projection's order is not the store's: rank ties by the
+            // store position of each pending row.
+            let store_order: HashMap<&str, usize> = self
+                .store
+                .rows()
+                .iter()
+                .enumerate()
+                .filter(|(_, row)| is_pending(row))
+                .map(|(i, row)| (row.id.as_str(), i))
+                .collect();
             oldest_pending_position(
                 self.grouped_projection.iter().map(|e| match e {
                     VisibleEntry::Row { id, .. } => self.store.row_by_id(id),
                     _ => None,
                 }),
                 &except,
+                |id| store_order.get(id).copied().unwrap_or(usize::MAX),
             )
         } else {
+            // The flat list draws rows in store order already.
             oldest_pending_position(
                 (0..self.store.visible_len()).map(|i| self.store.visible_row(i)),
                 &except,
+                |_| 0,
             )
         };
         index.map_or(-1, |i| i as i32)
@@ -1793,17 +1856,27 @@ fn process_path_text(row: &ConnectionRow) -> &str {
 }
 
 /// Position of the pending row with the smallest `started_at_ms` (the one
-/// waiting longest), skipping `except`; ties go to the topmost. `None` entries
-/// (group headers) are never candidates.
+/// waiting longest), skipping every id in `except`. Ties go to the smallest
+/// `store_order` (the row earlier in the store, the rule `alert_row` uses),
+/// then to the topmost. `None` entries (group headers) are never candidates.
 fn oldest_pending_position<'a>(
     rows: impl Iterator<Item = Option<&'a ConnectionRow>>,
-    except: &str,
+    except: &HashSet<String>,
+    store_order: impl Fn(&str) -> usize,
 ) -> Option<usize> {
     rows.enumerate()
         .filter_map(|(i, r)| r.map(|r| (i, r)))
-        .filter(|(_, r)| r.id != except && is_pending(r))
-        .min_by_key(|(_, r)| r.started_at_ms)
+        .filter(|(_, r)| !except.contains(&r.id) && is_pending(r))
+        .min_by_key(|(_, r)| (r.started_at_ms, store_order(&r.id)))
         .map(|(i, _)| i)
+}
+
+/// The ids in a JSON array of strings; none for anything else.
+fn parse_except_ids(json: &str) -> HashSet<String> {
+    serde_json::from_str::<Vec<String>>(json)
+        .unwrap_or_default()
+        .into_iter()
+        .collect()
 }
 
 /// `startedAtMs` as a `real` (epoch ms overflow a QML `int`).
@@ -2068,12 +2141,70 @@ mod tests {
         let mut d = row("d", Some("allow"));
         d.started_at_ms = 1;
         let list = [None, Some(&a), Some(&b), Some(&c), Some(&d)];
-        assert_eq!(oldest_pending_position(list.iter().copied(), ""), Some(2));
-        assert_eq!(oldest_pending_position(list.iter().copied(), "b"), Some(3));
+        let none: HashSet<String> = HashSet::new();
+        let first = |_: &str| 0;
         assert_eq!(
-            oldest_pending_position([None, Some(&d)].into_iter(), ""),
+            oldest_pending_position(list.iter().copied(), &none, first),
+            Some(2)
+        );
+        let except_b: HashSet<String> = ["b".to_string()].into();
+        assert_eq!(
+            oldest_pending_position(list.iter().copied(), &except_b, first),
+            Some(3)
+        );
+        assert_eq!(
+            oldest_pending_position([None, Some(&d)].into_iter(), &none, first),
             None
         );
+    }
+
+    /// Issue #146: every dismissed row is skipped, not just the last.
+    #[test]
+    fn oldest_pending_position_skips_every_excepted_row() {
+        let rows: Vec<ConnectionRow> = (0..4)
+            .map(|i| {
+                let mut r = row(&format!("p{i}"), None);
+                r.started_at_ms = i;
+                r
+            })
+            .collect();
+        let except: HashSet<String> = ["p0".to_string(), "p1".to_string()].into();
+        assert_eq!(
+            oldest_pending_position(rows.iter().map(Some), &except, |_| 0),
+            Some(2)
+        );
+        let all: HashSet<String> = rows.iter().map(|r| r.id.clone()).collect();
+        assert_eq!(
+            oldest_pending_position(rows.iter().map(Some), &all, |_| 0),
+            None
+        );
+    }
+
+    /// Issue #146 tie-break: equal starts go to the row earlier in the store
+    /// (the rule `alert_row` uses), not the topmost drawn one. Grouped mode
+    /// draws store order A, B, C as A, C, B.
+    #[test]
+    fn oldest_pending_position_breaks_ties_by_store_order() {
+        let (a, b, c) = (row("a", None), row("b", None), row("c", None));
+        let drawn = [None, Some(&a), Some(&c), None, Some(&b)];
+        let store_order = |id: &str| ["a", "b", "c"].iter().position(|s| *s == id).unwrap();
+        let except_a: HashSet<String> = ["a".to_string()].into();
+        assert_eq!(
+            oldest_pending_position(drawn.iter().copied(), &except_a, store_order),
+            Some(4),
+            "b (second in the store) must win over c (drawn first)"
+        );
+    }
+
+    #[test]
+    fn except_ids_parse_from_a_json_array_and_fall_back_to_none() {
+        assert_eq!(
+            parse_except_ids(r#"["a","b"]"#),
+            ["a".to_string(), "b".to_string()].into()
+        );
+        assert!(parse_except_ids("").is_empty());
+        assert!(parse_except_ids("not json").is_empty());
+        assert!(parse_except_ids(r#"{"a":1}"#).is_empty());
     }
 
     #[test]

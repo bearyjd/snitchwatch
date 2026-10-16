@@ -284,19 +284,17 @@ Kirigami.Page {
 
     // Row ids auto-select asked for since the last `runAuto`.
     property var autoIds: []
-    // The pending row the user last closed: auto-select skips it until it is
+    // Every pending row the user closed (#146): auto-select skips them until
     // decided or removed, so a dismissed prompt does not come back.
-    property string dismissedId: ""
+    property var dismissedIds: []
     // A pending arrival selects the OLDEST pending row (the one waiting
     // longest); any other id (the grouped re-anchor) selects that row itself.
     function runAuto() {
         const ids = page.autoIds;
         page.autoIds = [];
-        if (page.dismissedId !== "" && !page.model.isPendingRow(page.dismissedId)) {
-            page.dismissedId = "";
-        }
+        page.dismissedIds = page.dismissedIds.filter(id => page.model.isPendingRow(id));
         const anyPending = ids.some(id => page.model.isPendingRow(id));
-        const index = anyPending ? page.model.oldestPendingRowIndex(page.dismissedId)
+        const index = anyPending ? page.model.oldestPendingRowIndex(JSON.stringify(page.dismissedIds))
             : (ids.length > 0 ? page.model.visibleRowIndex(ids[ids.length - 1]) : -1);
         if (index >= 0) page.selectAuto(index);
     }
@@ -358,16 +356,18 @@ Kirigami.Page {
     // Close / finished action: clear the selection.
     function dismissInspector() {
         const closed = inspect.rowId;
-        page.dismissedId = closed;
+        if (closed !== "" && page.dismissedIds.indexOf(closed) < 0) {
+            page.dismissedIds = page.dismissedIds.concat([closed]);
+        }
         inspect.clear();
         page.closeDetailPage();
         listPane.view.currentIndex = -1;
         // A prompt that came in while the panel was busy was not shown.
-        Qt.callLater(page.selectOldestPending, closed);
+        Qt.callLater(page.selectOldestPending);
     }
 
-    function selectOldestPending(exceptId) {
-        const index = page.model ? page.model.oldestPendingRowIndex(exceptId) : -1;
+    function selectOldestPending() {
+        const index = page.model ? page.model.oldestPendingRowIndex(JSON.stringify(page.dismissedIds)) : -1;
         if (index >= 0) page.selectAuto(index);
     }
 
