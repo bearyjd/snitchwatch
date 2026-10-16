@@ -6,8 +6,9 @@
 //!   * `setEnabled(name, enabled)` / `deleteRule(name)` are `qinvokable`s that emit
 //!     the bridge's typed `ClientMessage` (JSON) for the live feed to
 //!     forward — mirroring `BlocklistsModel::subscribe`/`unsubscribe`'s "emit
-//!     signal, no local mutation, wait for the server round-trip" pattern. No
-//!     bridge changes.
+//!     signal, no local mutation, wait for the server round-trip" pattern.
+//!     Each asks for a result; the result's note is `commandNote` (#152,
+//!     `rules::command_notes`).
 //!
 //! Rule list updates are low-frequency whole-list replaces/upserts (same
 //! reasoning as `BlocklistsModel`), so this wrapper brackets every applied
@@ -20,6 +21,7 @@ use cxx_qt_lib::{
     QByteArray, QHash, QHashPair_i32_QByteArray, QList, QModelIndex, QString, QVariant,
 };
 
+use crate::rules::command_notes::{Applied, CommandNotes, RuleState};
 use crate::rules::hits::{RowHits, RuleHitsView};
 use crate::rules::insights::row::row_insights;
 use crate::rules::insights::shadow::Analysis;
@@ -111,7 +113,20 @@ pub mod qobject {
         /// (`rules::insights::state`): `idle`, `running`, `done`, `tooMany`
         /// or `stale`, with the count of each kind of finding.
         #[qproperty(QString, analysis_json, cxx_name = "analysisJson")]
+        /// What the bridge said about the page's toggles and deletes
+        /// (#152), per rule (`rules::command_notes`), as a JSON array of
+        /// `{rule, shown, text}`, oldest first. Plain text.
+        #[qproperty(QString, command_notes_json, cxx_name = "commandNotesJson")]
+        /// The same notes as plain-text lines, "<rule>: <note>"; "" when
+        /// there are none.
+        #[qproperty(QString, command_notes_text, cxx_name = "commandNotesText")]
         type RulesModel = super::RulesModelRust;
+
+        /// A result for one of the page's toggles or deletes arrived (Ok or
+        /// not). A refusal re-sends no list, so the page re-reads its rule.
+        #[qsignal]
+        #[cxx_name = "commandFinished"]
+        fn command_finished(self: Pin<&mut RulesModel>);
 
         /// Emitted with a JSON-encoded `ClientMessage` (`UpdateRule` /
         /// `DeleteRule`) for the live bridge feed to forward.
@@ -148,15 +163,17 @@ pub mod qobject {
         /// Set a rule's enabled flag (emits `UpdateRule` with the rule's full
         /// payload, `enabled` set to the given value, every other field
         /// preserved). The desired value, not a flip: see
-        /// `RulesStore::rule_json_with_enabled`.
+        /// `RulesStore::rule_json_with_enabled`. Returns its request id, or
+        /// "" when nothing was sent.
         #[qinvokable]
         #[cxx_name = "setEnabled"]
-        fn set_enabled(self: Pin<&mut RulesModel>, name: &QString, enabled: bool);
+        fn set_enabled(self: Pin<&mut RulesModel>, name: &QString, enabled: bool) -> QString;
 
-        /// Delete a rule by name (emits `DeleteRule`).
+        /// Delete a rule by name (emits `DeleteRule`). Returns its request
+        /// id, or "" when nothing was sent.
         #[qinvokable]
         #[cxx_name = "deleteRule"]
-        fn delete_rule(self: Pin<&mut RulesModel>, name: &QString);
+        fn delete_rule(self: Pin<&mut RulesModel>, name: &QString) -> QString;
 
         /// Look up a rule by name (Little-Snitch-parity rule-match
         /// diagnostics' "Show rule" jump, invoked from `ConnectionsPage.qml`'s
@@ -243,6 +260,10 @@ pub struct RulesModelRust {
     says_listed: bool,
     analysis: AnalysisState,
     analysis_json: QString,
+    command_notes_json: QString,
+    command_notes_text: QString,
+    /// The page's toggles and deletes waiting for a result (#152).
+    commands: CommandNotes,
 }
 
 impl qobject::RulesModel {
@@ -369,36 +390,72 @@ impl qobject::RulesModel {
         }
     }
 
-    fn set_enabled(self: Pin<&mut Self>, name: &QString, enabled: bool) {
+    fn set_enabled(self: Pin<&mut Self>, name: &QString, enabled: bool) -> QString {
         let name = name.to_string();
-        match self.store.rule_json_with_enabled(&name, enabled) {
-            Some(rule) => self.emit_client(ClientMessage::UpdateRule {
-                rule_id: name,
-                rule,
-                request_id: None,
-                reply: None,
-            }),
-            None => tracing::warn!(
+        let Some(rule) = self.store.rule_json_with_enabled(&name, enabled) else {
+            tracing::warn!(
                 name_len = name.len(),
                 "RulesModel: setEnabled for an unknown or read-only rule, ignored"
-            ),
-        }
+            );
+            return QString::default();
+        };
+        let applied = Applied::Enabled(enabled);
+        self.send_command(&name.clone(), applied, |request_id| {
+            ClientMessage::UpdateRule {
+                rule_id: name,
+                rule,
+                request_id: Some(request_id),
+                reply: None,
+            }
+        })
     }
 
-    fn delete_rule(self: Pin<&mut Self>, name: &QString) {
+    fn delete_rule(self: Pin<&mut Self>, name: &QString) -> QString {
         let name = name.to_string();
         if !self.store.is_deletable(&name) {
             tracing::warn!(
                 name_len = name.len(),
                 "RulesModel: deleteRule for an unknown or read-only rule, ignored"
             );
-            return;
+            return QString::default();
         }
-        self.emit_client(ClientMessage::DeleteRule {
-            rule_id: name,
-            request_id: None,
-            reply: None,
-        });
+        self.send_command(&name.clone(), Applied::Absent, |request_id| {
+            ClientMessage::DeleteRule {
+                rule_id: name,
+                request_id: Some(request_id),
+                reply: None,
+            }
+        })
+    }
+
+    /// Emit the command about rule `name` that `message` builds under a new
+    /// request id, waiting for its result; that rule's note goes. `applied`:
+    /// the rule once the command applies. Returns the id.
+    fn send_command(
+        mut self: Pin<&mut Self>,
+        name: &str,
+        applied: Applied,
+        message: impl FnOnce(String) -> ClientMessage,
+    ) -> QString {
+        let request_id = crate::rule_commands::next_request_id("rules");
+        let shown = self
+            .store
+            .find_by_name(name)
+            .map_or(name, |rule| rule.shown_name())
+            .to_string();
+        let before = Self::rule_state(&self.store, name);
+        let forgot = self.as_mut().rust_mut().commands.sent(
+            request_id.clone(),
+            name,
+            &shown,
+            before,
+            applied,
+        );
+        if forgot {
+            self.as_mut().publish_command_notes();
+        }
+        self.emit_client(message(request_id.clone()));
+        QString::from(&request_id)
     }
 
     fn select_rule_by_name(self: Pin<&mut Self>, name: &QString) -> QString {
@@ -444,7 +501,7 @@ impl qobject::RulesModel {
         crate::bridge_dispatch::spawn_feed(
             &handles,
             "RulesModel",
-            crate::bridge_dispatch::interests_rules,
+            interests_rules_and_results,
             move |connection_id, _msg, json| {
                 let session_handles = session_handles.clone();
                 let _ = qt_thread.queue(move |mut qobject| {
@@ -459,13 +516,43 @@ impl qobject::RulesModel {
     }
 }
 
+/// The rules feed's messages, and rule command results. One feed keeps them
+/// in the order the bridge sent them, but notes don't rely on it: the
+/// bridge doesn't promise a list before its result (`rules::command_notes`).
+fn interests_rules_and_results(msg: &ServerMessage) -> bool {
+    crate::bridge_dispatch::interests_rules(msg)
+        || crate::rule_commands::interests_rule_results(msg)
+}
+
 impl qobject::RulesModel {
     /// A message from bridge session `connection_id` is about to be applied:
-    /// hit counts an earlier session sent are forgotten first.
+    /// hit counts, waits and notes of an earlier session are forgotten first.
     fn note_session(mut self: Pin<&mut Self>, connection_id: u64) {
+        if self
+            .as_mut()
+            .rust_mut()
+            .commands
+            .note_session(connection_id)
+        {
+            self.as_mut().publish_command_notes();
+        }
         if self.as_mut().rust_mut().hits.note_session(connection_id) {
             self.refresh_hits();
         }
+    }
+
+    /// The rule `name` as the list shows it, to tell a later change.
+    fn rule_state(store: &RulesStore, name: &str) -> RuleState {
+        store
+            .find_by_name(name)
+            .and_then(|rule| serde_json::to_string(rule).ok())
+    }
+
+    fn publish_command_notes(mut self: Pin<&mut Self>) {
+        let json = serde_json::to_string(self.commands.notes()).unwrap_or_default();
+        let text = self.commands.text();
+        self.as_mut().set_command_notes_json(QString::from(&json));
+        self.as_mut().set_command_notes_text(QString::from(&text));
     }
 
     /// Re-reads the hit-count roles of every row and the summary.
@@ -542,6 +629,21 @@ impl qobject::RulesModel {
     }
 
     pub fn apply_server_message(mut self: Pin<&mut Self>, msg: ServerMessage) {
+        if let ServerMessage::RuleCommandResult { .. } = msg {
+            let finished = {
+                let this = self.as_mut().rust_mut().get_mut();
+                let store = &this.store;
+                this.commands
+                    .on_message(&msg, |name| Self::rule_state(store, name))
+            };
+            if let Some(changed) = finished {
+                if changed {
+                    self.as_mut().publish_command_notes();
+                }
+                self.as_mut().command_finished();
+            }
+            return;
+        }
         // Counts change every few seconds on a busy system: only the count
         // roles are refreshed, never a model reset, which would throw away
         // the list's scroll position.
@@ -584,6 +686,15 @@ impl qobject::RulesModel {
         };
         self.as_mut().publish_analysis();
         if changed {
+            let dropped = {
+                let this = self.as_mut().rust_mut().get_mut();
+                let store = &this.store;
+                this.commands
+                    .rules_changed(|name| Self::rule_state(store, name))
+            };
+            if dropped {
+                self.as_mut().publish_command_notes();
+            }
             let n = self.store.len() as i32;
             self.as_mut().set_count(n);
             let flagged = self.store.legacy_host_only_count() as i32;

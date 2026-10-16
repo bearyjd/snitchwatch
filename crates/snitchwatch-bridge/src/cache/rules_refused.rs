@@ -65,6 +65,21 @@ pub fn applied_but_not_saved(sent: &Notification) -> bool {
     refused_effect(sent) == RefusedEffect::AppliedNotSaved
 }
 
+/// Whether a refused `sent` may or may not apply: a `CHANGE_RULE` of an
+/// enabled `always` rule, where a compile error leaves the old rule and a
+/// `Save` failure the new one (#120 item 7). The cache stays as it was. A
+/// temporary rule has no file, so only compiling can have failed (or
+/// parsing its duration after storing it, which the bridge's duration
+/// checks rule out: `rule_policy::profile::editor_duration`).
+pub fn may_have_applied(sent: &Notification) -> bool {
+    sent.r#type == Action::ChangeRule as i32
+        && refused_effect(sent) == RefusedEffect::Unknown
+        && sent
+            .rules
+            .iter()
+            .any(|rule| rule.enabled && rule.duration == "always")
+}
+
 impl RulesCache {
     /// Deleted rules the daemon stopped using but couldn't remove the file
     /// of. A name leaves when a snapshot received after the refusal lists it

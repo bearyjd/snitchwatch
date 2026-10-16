@@ -254,9 +254,15 @@ async fn a_refused_turn_off_of_a_saved_rule_says_it_may_come_back_on() {
     );
 }
 
+/// A temporary rule has no file: a refused turn-on failed to compile. (An
+/// `always` one may or may not have applied: `refused_change_tests`.)
 #[tokio::test]
-async fn a_refused_turn_on_is_still_rejected() {
-    let saved = stock("100-a", leaf("simple", "dest.host", "x.example"), "always");
+async fn a_refused_turn_on_of_a_temporary_rule_is_still_rejected() {
+    let saved = stock(
+        "100-a",
+        leaf("simple", "dest.host", "x.example"),
+        "until restart",
+    );
     let mut daemon = daemon(vec![saved.clone()]);
     respond(&mut daemon, |_| {
         Some((false, "(2) error compiling rule".into()))
