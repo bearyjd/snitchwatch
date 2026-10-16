@@ -101,7 +101,7 @@ async fn close_open_where(which: impl Fn(&Connection) -> bool) {
 
 /// Close every notice this process still has on a server. For shutdown: a
 /// resident notice would otherwise stay, its buttons dead.
-pub(crate) async fn close_all_open() {
+pub async fn close_all_open() {
     close_open_where(|_| true).await;
 }
 
