@@ -47,9 +47,10 @@ on and the socket it dials: one artifact (PR #166 H1); see
 [`../docs/packaging/system-bridge-integration.md`](../docs/packaging/system-bridge-integration.md).
 The recipe's own copy
 ([`bluebuild/files/system/etc/opensnitchd/default-config.json`](bluebuild/files/system/etc/opensnitchd/default-config.json))
-is the per-user flavour's: `127.0.0.1:50051` with `DefaultAction: allow`.
-That TCP port is **not deny-safe** (any local process can bind it first), so
-it never runs with `deny`; the staged overlay replaces it in the image.
+is the per-user flavour's: `127.0.0.1:50051` with `DefaultAction: deny`.
+That TCP port is **not deny-safe**: any local process that binds it first
+gets the daemon's UI authority, whatever the default. The staged overlay
+replaces it in the image.
 
 ## The packaged fetch rule
 
@@ -110,7 +111,7 @@ packaging/
 ├── bluebuild/
 │   ├── recipe.yml                                  # batteries-included image recipe
 │   └── files/system/etc/opensnitchd/
-│       ├── default-config.json                     # per-user flavour's daemon config (TCP, allow)
+│       ├── default-config.json                     # per-user flavour's daemon config (TCP, deny)
 │       └── rules/000-snitchwatch-bridge-fetch.json # the one shipped allow rule (canonical)
 ├── flatpak/
 │   ├── org.snitchwatch.Snitchwatch.yml             # GUI-only Flatpak manifest (no --share=network)

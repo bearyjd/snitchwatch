@@ -7,8 +7,8 @@ passes in CI — this runbook is only for the parts that need a real Bazzite
 host. Run these in order; each one builds on the state left by the previous.
 
 **Flavour (#35, 2026-10-16):** Steps 3 onward verify the **per-user TCP
-bridge** (`127.0.0.1:50051`), which is not deny-safe: run them with
-`DefaultAction: allow`. The r15 image uses the system bridge's root-only
+bridge** (`127.0.0.1:50051`), which is not deny-safe (a process that binds
+the port first answers for the daemon). The r15 image uses the system bridge's root-only
 socket instead; verify that per
 [`system-bridge-integration.md`](system-bridge-integration.md) and the tower
 list in `docs/superpowers/plans/2026-10-16-r15-A.md` (`ss -xl` shows
@@ -43,7 +43,7 @@ bluebuild build packaging/bluebuild/recipe.yml
 
 **Pass condition:** the image builds without error and produces an OCI
 image with `opensnitchd` installed and enabled by default, plus the
-recipe's `/etc/opensnitchd/default-config.json` (`DefaultAction: allow`,
+recipe's `/etc/opensnitchd/default-config.json` (`DefaultAction: deny`,
 `Server.Address: 127.0.0.1:50051`, the per-user flavour's, from
 `packaging/bluebuild/files/system/etc/opensnitchd/default-config.json`). The
 r15 image stages the system overlay on top, which replaces it with

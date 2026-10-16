@@ -113,8 +113,8 @@ The bridge prints `GRPC_LISTEN_ADDR=127.0.0.1:NNNNN`,
 opensnitchd's `default-config.json` `Server.Address` field to the bridge's
 `GRPC_LISTEN_ADDR` (e.g. `127.0.0.1:50051`) so the daemon dials in. This TCP
 transport is for development and the per-user flavour only: it is **not
-deny-safe** (any local process can bind the port first, #35), so pair it with
-`DefaultAction: allow`. The packaged image uses the system bridge's root-only
+deny-safe** (any local process that binds the port first answers for the
+daemon, whatever its `DefaultAction`, #35). The packaged image uses the system bridge's root-only
 Unix socket ([`docs/packaging/system-bridge-integration.md`](docs/packaging/system-bridge-integration.md)).
 
 You can poke the WebSocket with `websocat`'s Unix-socket mode, presenting
@@ -410,8 +410,9 @@ system-bridge overlay overrides this with `DefaultAction: deny`
 a firewall whose whole premise is "ask before allowing" should fail **closed**
 when its decision channel is down. That is only safe on the system bridge's
 root-only Unix socket, which that config dials (`unix:opensnitchd.sock`), so
-it ships only with that socket. The per-user bridge's TCP port is not
-deny-safe (#35), so its config keeps `allow`. The bridge runs as its
+it ships only with that socket. The per-user bridge's config keeps `deny`
+too, but its TCP port is not deny-safe (#35): a process that binds it first
+answers for the daemon. The bridge runs as its
 own service precisely so that *closing the GUI window* is not mistaken for
 *the decision channel being down* — the daemon only reaches its deny default
 on a genuine bridge outage.

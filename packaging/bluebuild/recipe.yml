@@ -4,10 +4,10 @@
 # enables it at boot.
 #
 # On its own this recipe ships the per-user flavour's daemon config:
-# `Server.Address: 127.0.0.1:50051`, `DefaultAction: allow`. That TCP
-# transport is NOT deny-safe (any local process can bind the port first,
-# #35), so it fails open rather than claiming a protection it can't give,
-# and an image built from this recipe alone never locks the network out.
+# `Server.Address: 127.0.0.1:50051`, `DefaultAction: deny` (settled decision
+# 5: never upstream's fail-open `allow`). That TCP transport is NOT
+# deny-safe: any local process that binds the port first gets the daemon's
+# UI authority, deny or not (#35). It never dials a socket that isn't there.
 #
 # The r15 image adds the system-bridge overlay in the same build:
 # `../system/stage.sh` (with a verified binary) stages the bridge, its
@@ -56,10 +56,11 @@ modules:
       - libnetfilter_queue
       - https://github.com/evilsocket/opensnitch/releases/download/v1.8.0/opensnitch-1.8.0-1.x86_64.rpm
 
-  # 2. Drop the per-user flavour's daemon config into place: it points
-  #    `Server.Address` at the per-user bridge's TCP bind and keeps
-  #    `DefaultAction: allow`, because TCP isn't deny-safe (#35). The system
-  #    overlay's config (deny, the root-only socket) replaces it.
+  # 2. Drop the per-user flavour's daemon config into place: it overrides
+  #    upstream's fail-open `DefaultAction: allow` with `deny` and points
+  #    `Server.Address` at the per-user bridge's TCP bind (not deny-safe,
+  #    #35). The system overlay's config (deny, the root-only socket)
+  #    replaces it.
   #    It keeps upstream's `ProcMonitorMethod: ebpf`. (A 2026-07-31 note
   #    here briefly shipped `proc`, citing an eBPF module-load failure on
   #    kernel 6.19 — re-verification showed that failure was a *rootless

@@ -32,7 +32,7 @@ install -Dm644 "$script_dir/snitchwatch-system-bridge-gui.socket" \
 # The daemon dials the grpc socket above (`Server.Address:
 # unix:opensnitchd.sock`, `DefaultAction: deny`, #35). Its config and its
 # drop-in ship only here, with that socket: one artifact (PR #166 H1). This
-# config replaces the bluebuild recipe's own TCP/allow one, so the overlay
+# config replaces the bluebuild recipe's own TCP one, so the overlay
 # is copied into the image after the recipe's files module.
 install -Dm644 "$script_dir/opensnitch-snitchwatch-system-bridge.conf" \
   "$dest/usr/lib/systemd/system/opensnitch.service.d/snitchwatch-system-bridge.conf"

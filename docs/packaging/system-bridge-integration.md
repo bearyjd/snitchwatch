@@ -112,7 +112,7 @@ with the socket they dial (PR #166 H1):
 - `/etc/opensnitchd/default-config.json` (source:
   `packaging/system/opensnitchd-default-config.json`): `DefaultAction: deny`
   and `Server.Address: unix:opensnitchd.sock`. It replaces the bluebuild
-  recipe's own per-user TCP/`allow` config, so copy the staged tree into the
+  recipe's own per-user TCP config, so copy the staged tree into the
   image after the recipe's `files` module.
 - `/usr/lib/systemd/system/opensnitch.service.d/snitchwatch-system-bridge.conf`
   (source: `packaging/system/opensnitch-snitchwatch-system-bridge.conf`), so

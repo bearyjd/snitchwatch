@@ -42,14 +42,16 @@ fn system_overlay_config_fails_closed_on_the_bridge_socket() {
 
 /// PR #166 H1: the recipe's own `files` module ships without the overlay,
 /// so its config must not dial the socket (a `deny` daemon with nothing to
-/// dial locks the network out). It keeps the per-user flavour's TCP
-/// address, which is not deny-safe, so with `allow` (#35).
+/// dial locks the network out). It keeps the per-user bridge's TCP address
+/// and, per settled decision 5, `deny`: it still blocks unknown traffic
+/// while no squatter holds the port; the squatter case (#35) is what the
+/// system overlay's socket fixes.
 #[test]
-fn recipe_config_dials_tcp_with_allow() {
+fn recipe_config_fails_closed_on_the_per_user_tcp_bind() {
     let json =
         daemon_config("packaging/bluebuild/files/system/etc/opensnitchd/default-config.json");
     assert_eq!(json["Server"]["Address"], "127.0.0.1:50051");
-    assert_eq!(json["DefaultAction"], "allow");
+    assert_eq!(json["DefaultAction"], "deny");
 }
 
 fn json_files(dir: &Path, found: &mut Vec<PathBuf>) {
