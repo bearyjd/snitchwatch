@@ -26,15 +26,30 @@ fn no_home_root_for(uid: u32) -> PathBuf {
 /// directory of ours, 0700. Under [`no_home_root`] that root is held to the
 /// same rule, since `/tmp` lets anyone create it first.
 pub fn ensure_private_dir(dir: &Path) -> io::Result<()> {
+    let root = no_home_root();
+    if dir.starts_with(&root) {
+        ensure_private_root(&root)?;
+    }
     std::fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
         .create(dir)?;
-    let root = no_home_root();
     for ancestor in dir.ancestors().filter(|a| a.starts_with(&root)) {
         tighten_own_dir(ancestor)?;
     }
     tighten_own_dir(dir)
+}
+
+/// Make `root` (one level, not recursive, so a planted symlink is never
+/// followed into creating something) and require it to be a real directory of
+/// ours, 0700.
+pub fn ensure_private_root(root: &Path) -> io::Result<()> {
+    match std::fs::DirBuilder::new().mode(0o700).create(root) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error),
+    }
+    tighten_own_dir(root)
 }
 
 fn tighten_own_dir(dir: &Path) -> io::Result<()> {
@@ -134,6 +149,22 @@ mod tests {
         let state = dir.path().join("state");
         std::fs::write(&state, "x").unwrap();
         assert!(ensure_private_dir(&state).is_err());
+    }
+
+    #[test]
+    fn a_planted_symlink_root_is_refused_and_nothing_is_made_under_it() {
+        let dir = scratch();
+        let target = dir.path().join("attacker");
+        std::fs::create_dir(&target).unwrap();
+        let root = dir.path().join("snitchwatch-1000");
+        std::os::unix::fs::symlink(&target, &root).unwrap();
+        assert!(ensure_private_root(&root).is_err());
+        assert_eq!(std::fs::read_dir(&target).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn a_root_made_by_someone_else_is_refused() {
+        assert!(ensure_private_root(Path::new("/usr")).is_err());
     }
 
     #[test]

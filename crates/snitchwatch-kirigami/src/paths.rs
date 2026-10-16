@@ -99,16 +99,40 @@ fn xdg(name: &str) -> Option<String> {
     std::env::var(name).ok()
 }
 
-/// `HOME`, or with it unset or empty a per-user root under `/tmp` that
-/// [`crate::private_files::ensure_private_dir`] checks (#116).
+/// Where nothing can be created or read: the no-`HOME` base when its root
+/// can't be trusted, so no setting is read from or written into it.
+const REFUSED_BASE: &str = "/proc/snitchwatch-no-trusted-home";
+
+/// `HOME`, or with it unset or empty a per-user root under `/tmp`. That root
+/// is checked once, here, before any path under it is handed out (settings
+/// and autostart too, not only the logs): if it isn't a real directory of
+/// ours, every path points somewhere that can't exist, so settings read as
+/// defaults and can't be written (#116 review M1).
 fn home() -> Option<String> {
     match std::env::var("HOME") {
         Ok(home) if !home.is_empty() => Some(home),
-        _ => Some(
-            crate::private_files::no_home_root()
-                .to_string_lossy()
-                .into_owned(),
-        ),
+        _ => Some(no_home_base()),
+    }
+}
+
+fn no_home_base() -> String {
+    static BASE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    BASE.get_or_init(|| {
+        let root = crate::private_files::no_home_root();
+        resolve_no_home(&root, crate::private_files::ensure_private_root(&root))
+    })
+    .clone()
+}
+
+fn resolve_no_home(root: &std::path::Path, checked: std::io::Result<()>) -> String {
+    match checked {
+        Ok(()) => root.to_string_lossy().into_owned(),
+        Err(error) => {
+            tracing::warn!(%error, root = %root.display(),
+                "HOME is unset and the per-user fallback directory isn't ours; \
+                 settings are not read or saved");
+            REFUSED_BASE.to_string()
+        }
     }
 }
 
@@ -119,6 +143,24 @@ mod tests {
     // These exercise the pure `*_from` resolvers with explicit inputs. They
     // must never call `std::env::set_var`/`remove_var`: env vars are
     // process-global and `cargo test` runs tests on parallel threads.
+
+    /// #116 review M1: a refused no-HOME root hands out paths that can't be
+    /// read or written, and settings fall back to defaults.
+    #[test]
+    fn an_untrusted_no_home_root_leaves_settings_unread_and_unwritten() {
+        let root = std::path::Path::new("/usr");
+        let checked = crate::private_files::ensure_private_root(root);
+        let base = resolve_no_home(root, checked);
+        assert_eq!(base, REFUSED_BASE);
+        let path = settings_path_from(None, Some(&base));
+        assert!(path.starts_with(REFUSED_BASE));
+        assert_eq!(
+            crate::settings::read_settings(&path),
+            crate::settings::Settings::default()
+        );
+        assert!(crate::settings::write_settings(&path, &Default::default()).is_err());
+        assert!(!std::path::Path::new(REFUSED_BASE).exists());
+    }
 
     #[test]
     fn state_dir_uses_xdg_when_set() {
