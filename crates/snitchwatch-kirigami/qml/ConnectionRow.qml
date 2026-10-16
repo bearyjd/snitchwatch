@@ -72,6 +72,11 @@ Item {
     // silently once-only, so it needs a rule (`silent_mode.rs`).
     required property string appIcon
     required property bool needsRule
+    // Issue #55: how many daemon events of this flow and verdict the row
+    // stands for (repeats within 10 s collapse into it) and when the last
+    // one was seen.
+    required property int repeatCount
+    required property real lastSeenMs
     // Issue #18 double-submit guard: the inline/batch buttons stay
     // visible until the round trip flips `pending` to false, so a
     // second click before that arrives would otherwise send a
@@ -219,6 +224,17 @@ Item {
                 elide: Text.ElideMiddle
                 Layout.fillWidth: true
             }
+        }
+
+        Controls.Label {
+            objectName: "repeatLabel"
+            visible: !row.isGroupHeader && row.repeatCount > 1
+            textFormat: Text.PlainText
+            text: "×" + row.repeatCount + " · last seen "
+                + Qt.formatTime(new Date(row.lastSeenMs), "hh:mm:ss")
+            opacity: 0.7
+            font: Kirigami.Theme.smallFont
+            Layout.alignment: Qt.AlignVCenter
         }
 
         Controls.Label {

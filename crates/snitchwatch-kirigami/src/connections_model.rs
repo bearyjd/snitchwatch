@@ -24,6 +24,7 @@ use cxx_qt_lib::{
     QByteArray, QHash, QHashPair_i32_QByteArray, QList, QModelIndex, QString, QVariant,
 };
 
+use crate::connections::collapse::RowCollapse;
 use crate::connections::filter::ConnectionFilter;
 use crate::connections::grouping::{GroupTree, VisibleEntry};
 use crate::connections::level_rules::{LevelFinished, LevelRules};
@@ -111,6 +112,12 @@ const ROLE_LEVEL_RULE_STATE: i32 = 32;
 const ROLE_LEVEL_RULE_NAME: i32 = 33;
 /// Why the state is `unavailable` (fixed plain text); empty otherwise.
 const ROLE_LEVEL_RULE_REASON: i32 = 34;
+/// How many daemon events a connection row stands for (issue #55): 1 unless
+/// repeats collapsed into it; 0 on headers.
+const ROLE_REPEAT_COUNT: i32 = 35;
+/// When a collapsed row's flow was last seen (epoch ms as a `real`); its own
+/// start when nothing collapsed into it, -1 on headers.
+const ROLE_LAST_SEEN_MS: i32 = 36;
 
 #[cxx_qt::bridge]
 pub mod qobject {
@@ -659,6 +666,9 @@ fn mirror_into_grouping(rust: &mut ConnectionsModelRust, msg: &ServerMessage) {
 /// Rust-side state for [`qobject::ConnectionsModel`].
 pub struct ConnectionsModelRust {
     store: RowStore,
+    /// Repeated event rows shown as one (issue #55), in front of `store`
+    /// and `grouping`.
+    collapse: RowCollapse,
     /// Process -> Domain group tree (Little-Snitch-parity grouped view),
     /// mirrored incrementally alongside `store` from every applied
     /// `ServerMessage` — see `apply_server_message`'s grouping-mirror step.
@@ -707,6 +717,7 @@ impl Default for ConnectionsModelRust {
             store: RowStore::with_filter(
                 ConnectionFilter::default().with_geo(crate::geo::shared_resolver()),
             ),
+            collapse: RowCollapse::default(),
             grouping: GroupTree::default(),
             grouped_projection: Vec::new(),
             grouped: true,
@@ -753,6 +764,9 @@ impl qobject::ConnectionsModel {
             ROLE_LEVEL_RULE_STATE | ROLE_LEVEL_RULE_NAME | ROLE_LEVEL_RULE_REASON
         ) {
             return self.level_rule_role(index.row(), role);
+        }
+        if matches!(role, ROLE_REPEAT_COUNT | ROLE_LAST_SEEN_MS) {
+            return self.repeat_role(index.row(), role);
         }
         if self.grouped {
             let Some(entry) = self.grouped_projection.get(index.row() as usize) else {
@@ -848,6 +862,8 @@ impl qobject::ConnectionsModel {
         roles.insert(ROLE_LEVEL_RULE_STATE, QByteArray::from("levelRuleState"));
         roles.insert(ROLE_LEVEL_RULE_NAME, QByteArray::from("levelRuleName"));
         roles.insert(ROLE_LEVEL_RULE_REASON, QByteArray::from("levelRuleReason"));
+        roles.insert(ROLE_REPEAT_COUNT, QByteArray::from("repeatCount"));
+        roles.insert(ROLE_LAST_SEEN_MS, QByteArray::from("lastSeenMs"));
         roles
     }
 
@@ -888,15 +904,21 @@ impl qobject::ConnectionsModel {
         self.apply_filter(filter);
     }
 
-    fn set_from_now(self: Pin<&mut Self>, from_now: bool) {
+    fn set_from_now(mut self: Pin<&mut Self>, from_now: bool) {
         let mut filter = self.store.filter().clone();
         let since = match (from_now, filter.since_ms()) {
             (true, Some(started)) => Some(started),
             (true, None) => Some(now_ms()),
             (false, _) => None,
         };
+        let cut = since.is_some() && since != filter.since_ms();
         filter.set_since_ms(since);
-        self.apply_filter(filter);
+        self.as_mut().apply_filter(filter);
+        if cut {
+            // A repeat after the cut must not join (and hide in) a row that
+            // started before it.
+            self.as_mut().rust_mut().collapse.seal();
+        }
     }
 
     fn set_current_row_id(mut self: Pin<&mut Self>, id: &QString) {
@@ -991,6 +1013,20 @@ impl qobject::ConnectionsModel {
         level_rule_actions::role(self, row, role)
     }
 
+    /// The `repeatCount` / `lastSeenMs` roles of list row `row`.
+    fn repeat_role(&self, row: i32, role: i32) -> QVariant {
+        let id = self.row_id_at(row).to_string();
+        let found = self.store.row_by_id(&id);
+        if role == ROLE_REPEAT_COUNT {
+            let count = found.map_or(0, |_| self.collapse.repeat_count(&id));
+            return QVariant::from(&(count as i32));
+        }
+        let last_seen = found.map_or(-1.0, |row| {
+            self.collapse.last_seen_ms(&id).unwrap_or(row.started_at_ms) as f64
+        });
+        QVariant::from(&last_seen)
+    }
+
     fn apply_message_for_session(
         mut self: Pin<&mut Self>,
         msg: ServerMessage,
@@ -1080,8 +1116,10 @@ impl qobject::ConnectionsModel {
             let mut rust = self.as_mut().rust_mut();
             rust.source_session = source_session;
             for msg in msgs {
-                mirror_into_grouping(&mut rust, &msg);
-                rust.store.apply(msg);
+                for msg in rust.collapse.rewrite(msg) {
+                    mirror_into_grouping(&mut rust, &msg);
+                    rust.store.apply(msg);
+                }
             }
             if rust.store.is_filtered() {
                 rust.store.recompute_visible();
@@ -1113,7 +1151,18 @@ impl qobject::ConnectionsModel {
         // Ids that arrive *pending* in this batch — captured before mutation so
         // the auto-select policy can react to them afterward.
         let new_pending_ids = collect_new_pending_ids(std::slice::from_ref(&msg));
+        // Repeated event rows collapse before the store and the tree see them.
+        let msgs = self.as_mut().rust_mut().collapse.rewrite(msg);
+        for msg in msgs {
+            self.as_mut().apply_rewritten(msg);
+        }
+        self.as_mut().refresh_counts();
+        self.maybe_auto_select(&new_pending_ids);
+    }
 
+    /// Replay one (already collapsed) message behind the correct Qt
+    /// begin/end signals.
+    fn apply_rewritten(mut self: Pin<&mut Self>, msg: ServerMessage) {
         // Mirror the same delta into the Process->Domain group tree, Qt-free
         // and incremental (see `connections::grouping` module docs), so both
         // projections stay live regardless of which one is currently on
@@ -1183,8 +1232,6 @@ impl qobject::ConnectionsModel {
                 }
             }
         }
-        self.as_mut().refresh_counts();
-        self.maybe_auto_select(&new_pending_ids);
     }
 
     /// Rebuild the cached flattened grouped projection from the current

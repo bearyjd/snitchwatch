@@ -22,7 +22,10 @@ Item {
         }
     }
 
+    // Issue #114.1: the page is a plain Page (not a ScrollablePage, which
+    // hides every child but its list), so this sibling of the list shows.
     Kirigami.PlaceholderMessage {
+        objectName: "connectionsEmptyPlaceholder"
         anchors.centerIn: parent
         width: parent.width - (Kirigami.Units.largeSpacing * 4)
         visible: !page.model || page.model.count === 0
