@@ -27,7 +27,9 @@ ExecStart=/usr/bin/snitchwatch-bridge-cli
 # Stable gRPC bind so opensnitchd's Server.Address (127.0.0.1:50051) has a
 # fixed target to dial. The bridge-cli otherwise defaults to an ephemeral
 # port (127.0.0.1:0), which is fine for tests but not for a daemon that needs
-# a known address to connect to.
+# a known address to connect to. Not deny-safe (#35): any local process can
+# bind the port first, so pair it with DefaultAction allow; the image uses
+# the system bridge's root-only socket instead.
 Environment=SNITCHWATCH_GRPC_BIND=127.0.0.1:50051
 # WS Unix domain socket + handshake token live under
 # $XDG_RUNTIME_DIR/snitchwatch/ (this is the default the bridge-cli picks when

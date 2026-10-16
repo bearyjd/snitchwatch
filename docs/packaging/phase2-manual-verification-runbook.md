@@ -6,6 +6,14 @@ flags as "not verifiable in the CI sandbox." Everything else in Phase 2
 passes in CI — this runbook is only for the parts that need a real Bazzite
 host. Run these in order; each one builds on the state left by the previous.
 
+**Flavour (#35, 2026-10-16):** Steps 3 onward verify the **per-user TCP
+bridge** (`127.0.0.1:50051`), which is not deny-safe: run them with
+`DefaultAction: allow`. The r15 image uses the system bridge's root-only
+socket instead; verify that per
+[`system-bridge-integration.md`](system-bridge-integration.md) and the tower
+list in `docs/superpowers/plans/2026-10-16-r15-A.md` (`ss -xl` shows
+`/run/snitchwatch/opensnitchd.sock`, nothing listens on `127.0.0.1:50051`).
+
 **Needs:** a real Bazzite (or Fedora Silverblue/Kinoite-family) host with
 `bluebuild`, `podman`/`buildah`, `flatpak-builder`, and the KDE runtime
 (`org.kde.Platform`) installed. None of this is runnable in a CI sandbox or
@@ -167,7 +175,8 @@ stats-driven rows (the connection table, traffic graphs), just no longer
 required to keep the tray/diagnostics from false-positiving.
 
 Confirm `opensnitchd`'s `Server.Address` in its `default-config.json` points
-at `127.0.0.1:50051` (matching `SNITCHWATCH_GRPC_BIND` in the systemd unit),
+at `127.0.0.1:50051` (matching `SNITCHWATCH_GRPC_BIND` in the systemd unit;
+this step's copied config, not the image's, which dials the system socket),
 then generate real traffic from a fresh process and confirm a pending
 decision actually reaches a connected client:
 
