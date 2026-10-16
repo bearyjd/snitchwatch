@@ -132,6 +132,24 @@ jobs:
       #   Linux (`cargo tree -i quick-xml --target all` finds them, the
       #   host target doesn't). The fix is quick-xml 0.41, a semver bump
       #   only those crates' upstreams can make. Recheck when they update.
+      # The two ignores are global, so prove they still only cover crates
+      # Linux never builds (PR #166 L5): every quick-xml in Cargo.lock,
+      # whatever its version, must be unreachable for the Linux target, or
+      # this step fails and the ignores need a fresh look.
+      - name: quick-xml stays off Linux
+        run: |
+          versions=$(awk '/^name = "quick-xml"$/ { getline; gsub(/version = |"/, ""); print }' Cargo.lock)
+          for version in $versions; do
+            tree=$(cargo tree --locked --workspace -e all \
+              --target x86_64-unknown-linux-gnu -i "quick-xml@$version" 2>/dev/null)
+            if [ -n "$tree" ]; then
+              echo "quick-xml $version is built on Linux:"
+              echo "$tree"
+              exit 1
+            fi
+          done
+          echo "checked quick-xml: $versions"
+
       - name: cargo audit
         run: |
           cargo audit \

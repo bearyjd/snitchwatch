@@ -128,10 +128,14 @@ After=snitchwatch-system-bridge-grpc.socket
 WorkingDirectory=-/run/snitchwatch
 ```
 
-The absolute `unix:///run/snitchwatch/opensnitchd.sock` URI does not work with
-OpenSnitch 1.8.0's address parsing. Verify the daemon connects through the
-relative address and working directory on a test VM before rolling the image
-out.
+Whether the absolute `unix:///run/snitchwatch/opensnitchd.sock` URI works
+with OpenSnitch 1.8.0 is **unverified**. Commit 2690109 recorded that it
+didn't; a PR #166 review reads `config_utils.go` as stripping only `unix:`
+and gRPC's passthrough dialing the absolute path, as upstream's own default
+`unix:///tmp/osui.sock` does. On a test VM, try the absolute address first;
+if the daemon connects through it, switch the config to it, so the address
+no longer depends on the drop-in's working directory. Either way, verify the
+daemon connects before rolling the image out.
 
 ### Fail closed, and console recovery
 

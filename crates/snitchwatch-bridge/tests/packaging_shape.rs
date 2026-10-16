@@ -27,7 +27,8 @@ fn daemon_config(rel: &str) -> serde_json::Value {
 /// #35 / PR #166 H1: the system overlay's config fails CLOSED and dials the
 /// system bridge's root-only socket, relative to the daemon's working
 /// directory (/run/snitchwatch, set by the drop-in stage.sh stages with it).
-/// OpenSnitch 1.8.0 can't parse the absolute unix:/// form.
+/// (Whether OpenSnitch 1.8.0 accepts the absolute unix:/// form is
+/// unverified; see docs/packaging/system-bridge-integration.md.)
 #[test]
 fn system_overlay_config_fails_closed_on_the_bridge_socket() {
     let json = daemon_config("packaging/system/opensnitchd-default-config.json");

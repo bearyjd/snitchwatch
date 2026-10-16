@@ -373,10 +373,15 @@ impl RulesSync {
 
     /// Take before any await while handling a received Subscribe: the cache
     /// revision the list predates and the Subscribe's arrival order.
+    /// Both under the cache lock (then the pending lock, the one order), so
+    /// no refusal or other Subscribe lands between them (PR #166 I2).
     pub(crate) fn receive(&self) -> Receipt {
-        let revision = lock(&self.cache).revision();
+        let cache = lock(&self.cache);
         let sequence = lock(&self.pending).receive();
-        Receipt { revision, sequence }
+        Receipt {
+            revision: cache.revision(),
+            sequence,
+        }
     }
 
     /// Stage as of `receipt`, even if account lookup or other work let newer
