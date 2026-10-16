@@ -176,7 +176,7 @@ pub struct ProfilesModelRust {
     not_applied_reason: QString,
     profile_note: QString,
     /// The id of the create/update whose answer sets `profile_note`.
-    awaiting: Option<String>,
+    awaiting: crate::profiles::request_note::Awaiting,
 }
 
 impl qobject::ProfilesModel {
@@ -323,10 +323,11 @@ impl qobject::ProfilesModel {
 
 impl qobject::ProfilesModel {
     pub fn apply_server_message(mut self: Pin<&mut Self>, msg: ServerMessage) {
-        if let ServerMessage::RuleCommandResult { .. } = msg {
-            let note = crate::profiles::request_note::note_for(self.awaiting.as_deref(), &msg);
+        // A rule command result is no profile list change: never reset the
+        // model for one.
+        let consumed = self.as_mut().rust_mut().awaiting.on_message(&msg);
+        if let Some(note) = consumed {
             if let Some(note) = note {
-                self.as_mut().rust_mut().awaiting = None;
                 self.set_profile_note(QString::from(&note));
             }
             return;
@@ -357,8 +358,7 @@ impl qobject::ProfilesModel {
 
     /// A new request id whose answer sets the note; clears the old note.
     fn expect_answer(mut self: Pin<&mut Self>) -> String {
-        let request_id = crate::profiles::request_note::next_request_id();
-        self.as_mut().rust_mut().awaiting = Some(request_id.clone());
+        let request_id = self.as_mut().rust_mut().awaiting.expect();
         self.set_profile_note(QString::default());
         request_id
     }

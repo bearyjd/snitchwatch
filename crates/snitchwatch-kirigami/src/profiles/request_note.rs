@@ -17,9 +17,37 @@ pub fn next_request_id() -> String {
     )
 }
 
-/// The note `message` sets, if it answers the request `awaiting`: the
-/// refusal's reasons for a plain-text label, or "" for an ok. `None` for
-/// any other message, including another request's result.
+/// The request whose answer sets the note.
+#[derive(Debug, Default)]
+pub struct Awaiting(Option<String>);
+
+impl Awaiting {
+    /// Start waiting on a new request; returns its id.
+    pub fn expect(&mut self) -> String {
+        let id = next_request_id();
+        self.0 = Some(id.clone());
+        id
+    }
+
+    /// Route `message`. `None`: not a rule command result, so the caller
+    /// handles it (and must not skip it). `Some(note)`: it was one and is
+    /// consumed; `note` is the new text if it answered the awaited request
+    /// (which then stops being awaited), else `None`.
+    pub fn on_message(&mut self, message: &ServerMessage) -> Option<Option<String>> {
+        if !matches!(message, ServerMessage::RuleCommandResult { .. }) {
+            return None;
+        }
+        let note = note_for(self.0.as_deref(), message);
+        if note.is_some() {
+            self.0 = None;
+        }
+        Some(note)
+    }
+}
+
+/// The note `message` sets, if it answers the request `awaiting`: what to
+/// show for the outcome ("" when it succeeded). `None` for any other
+/// message, including another request's result.
 pub fn note_for(awaiting: Option<&str>, message: &ServerMessage) -> Option<String> {
     let ServerMessage::RuleCommandResult {
         request_id,
@@ -31,20 +59,30 @@ pub fn note_for(awaiting: Option<&str>, message: &ServerMessage) -> Option<Strin
     if awaiting != Some(request_id.as_str()) {
         return None;
     }
+    let plain = |text: &str| strip_display_hazards(text);
     Some(match outcome {
+        RuleCommandOutcome::Ok => String::new(),
+        RuleCommandOutcome::OkWithNote { note } => plain(note),
+        RuleCommandOutcome::Rejected { reason } => plain(reason),
         RuleCommandOutcome::Refused { problems } => {
-            let reasons: Vec<String> = problems
-                .iter()
-                .map(|p| strip_display_hazards(&p.reason))
-                .collect();
+            let reasons: Vec<String> = problems.iter().map(|p| plain(&p.reason)).collect();
             if reasons.is_empty() {
                 "The change was refused.".to_string()
             } else {
                 reasons.join("; ")
             }
         }
-        RuleCommandOutcome::Ok => String::new(),
-        _ => "The change wasn't saved.".to_string(),
+        RuleCommandOutcome::Unsure { reason } => {
+            let reason = plain(reason);
+            if reason.is_empty() {
+                "Whether the change was saved is unknown.".to_string()
+            } else {
+                reason
+            }
+        }
+        RuleCommandOutcome::Timeout | RuleCommandOutcome::NoDaemon => {
+            "The change wasn't saved.".to_string()
+        }
     })
 }
 
@@ -104,5 +142,71 @@ mod tests {
         let (a, b) = (next_request_id(), next_request_id());
         assert_ne!(a, b);
         assert!(snitchwatch_bridge::ws_messages::valid_request_id(&a));
+    }
+
+    #[test]
+    fn every_outcome_has_its_own_note() {
+        let note = |outcome| note_for(Some("a"), &result("a", outcome)).unwrap();
+        assert_eq!(note(RuleCommandOutcome::Ok), "");
+        assert_eq!(
+            note(RuleCommandOutcome::OkWithNote {
+                note: "saved, but x".into()
+            }),
+            "saved, but x"
+        );
+        assert_eq!(
+            note(RuleCommandOutcome::Rejected {
+                reason: "no".into()
+            }),
+            "no"
+        );
+        assert_eq!(note(refused("taken")), "taken");
+        assert_eq!(
+            note(RuleCommandOutcome::Refused { problems: vec![] }),
+            "The change was refused."
+        );
+        assert_eq!(
+            note(RuleCommandOutcome::Unsure {
+                reason: "maybe".into()
+            }),
+            "maybe"
+        );
+        assert_eq!(
+            note(RuleCommandOutcome::Unsure { reason: "".into() }),
+            "Whether the change was saved is unknown."
+        );
+        assert_eq!(
+            note(RuleCommandOutcome::Timeout),
+            "The change wasn't saved."
+        );
+        assert_eq!(
+            note(RuleCommandOutcome::NoDaemon),
+            "The change wasn't saved."
+        );
+    }
+
+    #[test]
+    fn a_result_is_always_consumed_but_only_the_awaited_one_sets_the_note() {
+        let mut awaiting = Awaiting::default();
+        let id = awaiting.expect();
+        // Not a result: left to the caller.
+        assert_eq!(
+            awaiting.on_message(&ServerMessage::ClearConnectionRows),
+            None
+        );
+        // An unrelated result: consumed, no note, still waiting.
+        assert_eq!(
+            awaiting.on_message(&result("other", refused("x"))),
+            Some(None)
+        );
+        // The awaited one: consumed, sets the note, stops waiting.
+        assert_eq!(
+            awaiting.on_message(&result(&id, refused("taken"))),
+            Some(Some("taken".to_string()))
+        );
+        assert_eq!(
+            awaiting.on_message(&result(&id, refused("again"))),
+            Some(None)
+        );
     }
 }
