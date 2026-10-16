@@ -83,4 +83,46 @@ mod tests {
         from_current_session(is_current, 2, "live", |m| delivered.borrow_mut().push(m));
         assert_eq!(*delivered.borrow(), vec!["live"]);
     }
+
+    /// A result feed keeps delivering after a lag, and its snapshot request
+    /// (`no_snapshot`) sends nothing and reports done (PR #111 review).
+    #[tokio::test]
+    async fn a_result_feed_keeps_delivering_after_a_lag() {
+        use crate::bridge_runtime::ReceivedServerMessage;
+        use std::time::Duration;
+
+        let (btx, brx) = tokio::sync::broadcast::channel(1);
+        let (dtx, mut drx) = tokio::sync::mpsc::unbounded_channel();
+        let feed = tokio::spawn(run_feed(
+            brx,
+            no_snapshot,
+            "test-results",
+            interests_rule_results,
+            move |_id, _message, json| {
+                let _ = dtx.send(json);
+            },
+        ));
+        // Past the capacity of one: the next recv() sees Lagged.
+        let result = || ServerMessage::RuleCommandResult {
+            request_id: "r".into(),
+            outcome: snitchwatch_bridge::ws_messages::RuleCommandOutcome::Ok,
+        };
+        for _ in 0..3 {
+            btx.send(ReceivedServerMessage {
+                connection_id: 1,
+                message: result(),
+            })
+            .unwrap();
+        }
+        tokio::time::timeout(Duration::from_secs(1), drx.recv())
+            .await
+            .expect("no delivery after the lag")
+            .expect("deliver channel closed");
+        assert!(no_snapshot().is_ok(), "done, so never retried");
+        drop(btx);
+        tokio::time::timeout(Duration::from_secs(1), feed)
+            .await
+            .expect("feed did not exit")
+            .unwrap();
+    }
 }

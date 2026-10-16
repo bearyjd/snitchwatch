@@ -274,21 +274,22 @@ Kirigami.ScrollablePage {
         }
     }
 
-    Kirigami.PlaceholderMessage {
-        anchors.centerIn: parent
-        width: parent.width - (Kirigami.Units.largeSpacing * 4)
-        visible: !page.model || page.model.count === 0
-        icon.name: "edit-delete"
-        text: "No blocklist subscriptions yet"
-        explanation: "Subscribe to a blocklist URL above to block its hosts for every app. "
-            + "Hosts are matched by exact name, not subdomains."
-    }
-
     ListView {
         id: list
         model: page.model
         currentIndex: -1
         reuseItems: true
+
+        Kirigami.PlaceholderMessage {
+            parent: list
+            anchors.centerIn: parent
+            width: list.width - (Kirigami.Units.largeSpacing * 4)
+            visible: !page.model || page.model.count === 0
+            icon.name: "edit-delete"
+            text: "No blocklist subscriptions yet"
+            explanation: "Subscribe to a blocklist URL above to block its hosts for every app. "
+                + "Hosts are matched by exact name, not subdomains."
+        }
 
         delegate: Controls.ItemDelegate {
             id: row

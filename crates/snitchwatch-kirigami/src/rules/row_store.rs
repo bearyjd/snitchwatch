@@ -254,6 +254,9 @@ fn summarize_operator(
 #[derive(Debug, Default)]
 pub struct RulesStore {
     rules: Vec<Rule>,
+    /// `rules::sections::section_labels` of `rules`, rebuilt whenever they
+    /// change so a per-row heading lookup is O(1).
+    section_labels: Vec<String>,
 }
 
 impl RulesStore {
@@ -271,6 +274,10 @@ impl RulesStore {
 
     pub fn rules(&self) -> &[Rule] {
         &self.rules
+    }
+
+    pub fn section_labels(&self) -> &[String] {
+        &self.section_labels
     }
 
     pub fn row(&self, index: usize) -> Option<&Rule> {
@@ -303,6 +310,7 @@ impl RulesStore {
                 let changed = rules != self.rules;
                 if changed {
                     self.rules = rules;
+                    self.refresh_section_labels();
                 }
                 changed
             }
@@ -313,10 +321,17 @@ impl RulesStore {
                         changed |= self.upsert(rule);
                     }
                 }
+                if changed {
+                    self.refresh_section_labels();
+                }
                 changed
             }
             _ => false,
         }
+    }
+
+    fn refresh_section_labels(&mut self) {
+        self.section_labels = super::sections::section_labels(&self.rules);
     }
 
     fn upsert(&mut self, rule: Rule) -> bool {
