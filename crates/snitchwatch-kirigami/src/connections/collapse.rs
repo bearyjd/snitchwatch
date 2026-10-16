@@ -893,6 +893,7 @@ mod tests {
         let mut c = RowCollapse::default();
         let per_second = 50;
         let seconds = 600;
+        let asks_per_second = 5;
         for s in 0..seconds {
             let rows = (0..per_second)
                 .map(|i| ConnectionRow {
@@ -901,9 +902,20 @@ mod tests {
                 })
                 .collect();
             c.rewrite(insert(rows));
+            // Answered Asks that never get a twin wait only so long.
+            let asks = (0..asks_per_second)
+                .map(|i| ConnectionRow {
+                    dst_port: (s * asks_per_second + i) as u16,
+                    ..ask(&format!("ask-{s}-{i}"), s * 1_000, Some("allow"))
+                })
+                .collect();
+            c.rewrite(insert(asks));
         }
-        // Open row + representative per flow of the last two windows.
-        let bound = (per_second * 2 * (2 * COLLAPSE_WINDOW_MS / 1_000 + 1)) as usize;
+        // Open row + representative per flow of the last two windows, and
+        // the Asks of twice the twin window plus one expiry period.
+        let bound = (per_second * 2 * (2 * COLLAPSE_WINDOW_MS / 1_000 + 1)
+            + asks_per_second * ((2 * TWIN_WINDOW_MS + COLLAPSE_WINDOW_MS) / 1_000 + 1))
+            as usize;
         assert!(
             c.state_size() <= bound,
             "state {} > bound {bound}",
