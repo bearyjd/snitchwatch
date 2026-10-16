@@ -103,8 +103,11 @@ fn create_profile_round_trips() {
         id: "home".into(),
         name: "At Home".into(),
         network_matchers: vec!["Home*".into()],
+        request_id: None,
+        reply: None,
     };
     let json = serde_json::to_string(&action).unwrap();
+    assert!(!json.contains("requestId"), "{json}");
     assert!(json.contains(r#""action":"createProfile""#));
     assert!(json.contains(r#""networkMatchers""#));
     assert_eq!(
@@ -157,4 +160,35 @@ fn add_and_remove_profile_rule_round_trip() {
         serde_json::from_str::<ClientMessage>(&json).unwrap(),
         remove
     );
+}
+
+/// Additive wire change: a client from before `request_id` sends neither
+/// field and still decodes; one that sends it gets it back.
+#[test]
+fn profile_requests_take_an_optional_request_id() {
+    let old = r#"{"action":"createProfile","id":"home","name":"At Home","networkMatchers":[]}"#;
+    assert!(matches!(
+        serde_json::from_str::<ClientMessage>(old).unwrap(),
+        ClientMessage::CreateProfile {
+            request_id: None,
+            reply: None,
+            ..
+        }
+    ));
+    let old = r#"{"action":"updateProfile","id":"home","name":"At Home","networkMatchers":[]}"#;
+    assert!(matches!(
+        serde_json::from_str::<ClientMessage>(old).unwrap(),
+        ClientMessage::UpdateProfile {
+            request_id: None,
+            reply: None,
+            ..
+        }
+    ));
+    let new = r#"{"action":"updateProfile","id":"home","name":"x","networkMatchers":[],"requestId":"p-1"}"#;
+    match serde_json::from_str::<ClientMessage>(new).unwrap() {
+        ClientMessage::UpdateProfile { request_id, .. } => {
+            assert_eq!(request_id.as_deref(), Some("p-1"))
+        }
+        other => panic!("{other:?}"),
+    }
 }

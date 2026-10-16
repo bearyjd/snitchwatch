@@ -99,7 +99,9 @@ pub fn interests_blocklist_entries(msg: &ServerMessage) -> bool {
 pub fn interests_profiles(msg: &ServerMessage) -> bool {
     matches!(
         msg,
-        ServerMessage::SetProfiles { .. } | ServerMessage::ProfileChanged { .. }
+        ServerMessage::SetProfiles { .. }
+            | ServerMessage::ProfileChanged { .. }
+            | ServerMessage::RuleCommandResult { .. }
     )
 }
 
@@ -589,6 +591,7 @@ mod tests {
                 id,
                 name,
                 network_matchers,
+                ..
             } => {
                 assert_eq!(id, "home");
                 assert_eq!(name, "At Home");

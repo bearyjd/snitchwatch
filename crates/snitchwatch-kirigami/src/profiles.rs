@@ -2,6 +2,7 @@
 //!
 //! - [`row_store`]: pure, Qt-free store for the flat profile list — fully
 //!   unit-tested here.
+//! - [`request_note`]: the note for a refused create/rename/matcher change.
 //! - [`rules_view`]: a profile's rules and their status as the page lists
 //!   them (issue #46 Part 2).
 //! - The cxx-qt `QAbstractListModel` wrapper that binds this to QML lives in
@@ -9,6 +10,7 @@
 //!   with the other `#[cxx_qt::bridge]` files, per the same cxx-qt-build
 //!   one-directory constraint noted in [`crate::connections`]).
 
+pub mod request_note;
 pub mod row_store;
 pub mod rules_view;
 
