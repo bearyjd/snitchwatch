@@ -139,6 +139,53 @@ async fn a_failed_save_after_an_ok_skips_the_next_install() {
     assert!(curated.is_inert());
 }
 
+/// #113: a reconnect in the middle of a pass ends the action loop: what
+/// remains was planned against the old rule list. The refusing daemon keeps
+/// the live re-checks (`still_missing`, `still_unedited`) from explaining a
+/// skipped command by themselves: the rule is missing and unedited either way.
+#[tokio::test]
+async fn a_reconnect_mid_pass_stops_the_actions_after_it() {
+    let harness = Harness::new().connect(Daemon::Refuse, Vec::new());
+    let curated = harness.curated();
+    turn(&curated, "chronyc-local", true);
+    turn(&curated, FLATPAK, true);
+    curated.save_if_changed().await;
+    let gate = Arc::new(tokio::sync::Notify::new());
+    *harness.hold.lock().unwrap() = Some(gate.clone());
+    let pass = tokio::spawn({
+        let curated = curated.clone();
+        async move { curated.reconcile().await }
+    });
+    wait_until(|| !harness.seen().is_empty()).await;
+    // The daemon reconnects (a HELLO, the same empty list) while it holds
+    // the first command.
+    harness.resync(Vec::new());
+    gate.notify_one();
+    pass.await.unwrap();
+    assert_eq!(harness.seen().len(), 1, "{:?}", harness.seen());
+}
+
+/// #113: a HELLO that changes nothing but the stream generation still wakes
+/// the worker, and a command that failed under the old generation is tried
+/// again under the new one (the rule list and the choices are the same).
+#[tokio::test]
+async fn a_hello_that_only_bumps_the_generation_retries_an_old_failure() {
+    let harness = Harness::new().connect(Daemon::RefuseDeletes, vec![flatpak_rule()]);
+    let curated = harness.curated();
+    turn(&curated, FLATPAK, false);
+    let worker = curated.spawn(harness.rules.synced());
+    eventually("the refused delete", || harness.seen().len() == 1).await;
+    tokio::time::sleep(SETTLE).await;
+    assert_eq!(harness.seen().len(), 1, "not retried within a generation");
+    harness.resync(vec![flatpak_rule()]);
+    eventually("the retry after the new HELLO", || {
+        harness.seen().len() == 2
+    })
+    .await;
+    worker.abort();
+    assert_eq!(harness.seen()[1], sent(Action::DeleteRule));
+}
+
 /// LOW-2: the same for removals (the removal loop's inert break).
 #[tokio::test]
 async fn a_failed_save_after_a_removal_skips_the_next_removal() {
