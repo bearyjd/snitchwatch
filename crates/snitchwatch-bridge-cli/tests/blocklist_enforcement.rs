@@ -100,6 +100,26 @@ async fn connect_daemon(
     (daemon, seen)
 }
 
+/// [`connect_daemon`], and wait for the reconcile the HELLO's snapshot asks
+/// for, so a subscribe that follows is not overtaken by it (#110): that
+/// reconcile retries a refused list at once, as a new snapshot should, and a
+/// test of one try per subscribe would otherwise count it too.
+async fn connect_daemon_settled(
+    bridge: &RunningBridge,
+    rx: &mut broadcast::Receiver<ServerMessage>,
+    policy: ListsPolicy,
+) -> (MockOpensnitchd, mpsc::Receiver<Notification>) {
+    let connected = connect_daemon(bridge, policy).await;
+    tokio::time::timeout(WAIT, async {
+        while !matches!(rx.recv().await, Ok(ServerMessage::SetRules { .. })) {}
+    })
+    .await
+    .expect("the daemon's snapshot was never committed");
+    // The reconcile is queued by the commit; give the worker the turn.
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    connected
+}
+
 async fn subscribe(bridge: &RunningBridge) {
     bridge
         .inbound_tx
@@ -287,7 +307,7 @@ async fn a_daemon_that_refuses_lists_rules_leaves_the_list_not_enforced_saying_w
     let mut setup = start(true).await;
     let (bridge, rx) = (&setup.bridge, &mut setup.rx);
     let (_daemon, mut seen) =
-        connect_daemon(bridge, ListsPolicy::RefuseLists(LISTS_REFUSAL.into())).await;
+        connect_daemon_settled(bridge, rx, ListsPolicy::RefuseLists(LISTS_REFUSAL.into())).await;
     subscribe(bridge).await;
     let list = list_until(rx, "a refusal", |l| {
         l.enforcement == ENFORCEMENT_NOT_ENFORCED && l.enforcement_reason.is_some()

@@ -178,6 +178,12 @@ impl CuratedStore {
 
     /// The request keeping `id`'s rule: it is turned on, so Snitchwatch
     /// adopts the copy already there and sends nothing.
+    ///
+    /// The "only an undecided copy" check is this GUI's, from its last
+    /// list: on the wire Keep is `SetCuratedDefaults { on: true }`. If the
+    /// page is stale and the copy has just gone, the bridge installs the
+    /// shipped rule, which is what choosing to keep it meant. So "nothing is
+    /// sent" holds only while the list is current (#113, by design).
     pub fn keeping(&self, id: &str) -> Option<ClientMessage> {
         self.entries
             .iter()
@@ -241,7 +247,9 @@ fn asks_for(entry: &CuratedDefaultSummary, on: bool) -> bool {
     if on && (entry.broad || entry.id == "dns-resolved") {
         return false;
     }
-    entry.on != on || (on && entry.status == EntryStatus::InFirewall)
+    entry.on != on
+        || (on && entry.status == EntryStatus::InFirewall)
+        || (!on && entry.status == EntryStatus::InFirewallButOff)
 }
 
 /// [`status_text`] for `entry`, except an entry the bridge holds back on
@@ -414,6 +422,49 @@ mod tests {
                 request_id: None,
                 reply: None,
             })
+        );
+    }
+
+    /// #113: an undecided copy turned off on the Rules page reads off, so it
+    /// would stay undecided and apply again if enabled later. "Turn all off"
+    /// decides it too (the safe direction).
+    #[test]
+    fn turn_all_off_includes_an_undecided_copy_that_is_off() {
+        let mut store = CuratedStore::default();
+        store.apply(
+            1,
+            &ServerMessage::SetCuratedDefaults {
+                entries: vec![
+                    entry("flatpak-flathub", false, EntryStatus::Off),
+                    entry("held-off", false, EntryStatus::InFirewallButOff),
+                ],
+                groups: Vec::new(),
+                storage: StorageStatus {
+                    persistent: true,
+                    reason: None,
+                    unreadable: false,
+                },
+                unavailable: None,
+            },
+        );
+        assert_eq!(
+            store.request_all(false),
+            Some(ClientMessage::SetCuratedDefaults {
+                ids: vec!["held-off".into()],
+                on: false,
+                request_id: None,
+                reply: None,
+            })
+        );
+        assert_eq!(
+            store.request_all(true),
+            Some(ClientMessage::SetCuratedDefaults {
+                ids: vec!["flatpak-flathub".into(), "held-off".into()],
+                on: true,
+                request_id: None,
+                reply: None,
+            }),
+            "turning on is unchanged: both read off"
         );
     }
 

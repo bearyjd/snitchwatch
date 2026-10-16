@@ -30,11 +30,16 @@
 //!   end the wait: a server can still show it, in a history, and send its
 //!   click later. Any other close (dismissed, closed by a call, undefined)
 //!   ends it.
+//! - a notice still on the server when the GUI quits would outlive it, a
+//!   resident one with buttons nobody hears (#116 L3), so every shown notice
+//!   is listed until it is closed or the server closes it, and
+//!   [`close_all_open`] closes the rest at shutdown.
 //! - it names its desktop entry, the Flatpak app id, so the server can tie
 //!   it to the app rather than guess from the sender's process.
 
 use std::collections::HashMap;
 use std::future::Future;
+use std::sync::Mutex;
 
 use futures_util::StreamExt;
 use zbus::fdo::{DBusProxy, NameOwnerChanged, NameOwnerChangedStream};
@@ -50,6 +55,55 @@ pub(crate) const INTERFACE: &str = "org.freedesktop.Notifications";
 pub(crate) const DESKTOP_ENTRY: &str = "org.snitchwatch.Snitchwatch";
 /// `NotificationClosed` reasons, from the Desktop Notifications spec.
 pub(crate) const EXPIRED: u32 = 1;
+
+/// A shown notice that is still on its server.
+struct OpenNotice {
+    conn: Connection,
+    owner: OwnedUniqueName,
+    id: u32,
+}
+
+/// Every shown notice not yet closed, for [`close_all_open`].
+static OPEN: Mutex<Vec<OpenNotice>> = Mutex::new(Vec::new());
+
+fn open_notices() -> std::sync::MutexGuard<'static, Vec<OpenNotice>> {
+    OPEN.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Whether `a` and `b` are one client's connection: a unique name is only
+/// unique on its own bus, so the bus's GUID is part of it.
+pub(crate) fn same_connection(a: &Connection, b: &Connection) -> bool {
+    a.server_guid() == b.server_guid() && a.unique_name() == b.unique_name()
+}
+
+fn forget(conn: &Connection, owner: &UniqueName<'_>, id: u32) {
+    let mut open = open_notices();
+    if let Some(at) = open.iter().position(|open| {
+        open.id == id && open.owner.as_ref() == *owner && same_connection(&open.conn, conn)
+    }) {
+        open.remove(at);
+    }
+}
+
+/// Close the open notices `which` picks, each on the server that showed it.
+async fn close_open_where(which: impl Fn(&Connection) -> bool) {
+    let (closing, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut *open_notices())
+        .into_iter()
+        .partition(|open| which(&open.conn));
+    open_notices().extend(kept);
+    futures_util::future::join_all(
+        closing
+            .iter()
+            .map(|open| close_on(&open.conn, &open.owner, open.id)),
+    )
+    .await;
+}
+
+/// Close every notice this process still has on a server. For shutdown: a
+/// resident notice would otherwise stay, its buttons dead.
+pub async fn close_all_open() {
+    close_open_where(|_| true).await;
+}
 
 /// What one message means for notification `id`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -209,6 +263,11 @@ impl Notice {
             us = ?conn.unique_name().map(|name| name.as_str()),
             "notice shown"
         );
+        open_notices().push(OpenNotice {
+            conn: conn.clone(),
+            owner: owner.clone(),
+            id,
+        });
         Ok(Self {
             conn: conn.clone(),
             owner,
@@ -243,7 +302,10 @@ impl Notice {
                             tracing::info!(id = self.id, "notice expired; its buttons still count");
                             continue;
                         }
-                        Signal::Closed(reason) => WaitEnd::Closed(reason),
+                        Signal::Closed(reason) => {
+                            forget(&self.conn, &self.owner, self.id);
+                            WaitEnd::Closed(reason)
+                        }
                         Signal::Ignore => continue,
                     },
                     Some(Err(error)) => {
@@ -265,6 +327,7 @@ impl Notice {
     /// server's notification with this id is somebody else's.
     pub(crate) async fn close(&self) {
         tracing::info!(id = self.id, server = %self.owner, "closing notice");
+        forget(&self.conn, &self.owner, self.id);
         close_on(&self.conn, &self.owner, self.id).await;
     }
 }

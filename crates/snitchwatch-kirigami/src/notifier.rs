@@ -37,8 +37,19 @@ impl From<&Notice> for NoticeKey {
     }
 }
 
+/// What a pending prompt is about: the session, the program and the host.
+/// A daemon retry makes a new row (and `row_id`) for the same flow (#116 L5),
+/// so a Pending notice also has a cooldown of its own per flow.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FlowKey {
+    pub session: u64,
+    pub program: String,
+    pub host: String,
+}
+
 pub struct CooldownGate {
     last_fired: HashMap<NoticeKey, Instant>,
+    last_fired_flow: HashMap<FlowKey, Instant>,
     cooldown: Duration,
 }
 
@@ -46,6 +57,7 @@ impl CooldownGate {
     pub fn new() -> Self {
         Self {
             last_fired: HashMap::new(),
+            last_fired_flow: HashMap::new(),
             cooldown: DEFAULT_COOLDOWN,
         }
     }
@@ -53,8 +65,35 @@ impl CooldownGate {
     pub fn with_cooldown(cooldown: Duration) -> Self {
         Self {
             last_fired: HashMap::new(),
+            last_fired_flow: HashMap::new(),
             cooldown,
         }
+    }
+
+    /// [`should_fire`](Self::should_fire), and for a notice that has a
+    /// `flow`, also no second notice for that flow within the cooldown. A
+    /// notice held back by either takes neither.
+    pub fn should_fire_for_flow(
+        &mut self,
+        notice: &Notice,
+        flow: Option<&FlowKey>,
+        now: Instant,
+    ) -> bool {
+        let cooled = |last: Option<&Instant>| {
+            last.is_none_or(|prev| now.duration_since(*prev) >= self.cooldown)
+        };
+        if let Some(flow) = flow {
+            if !cooled(self.last_fired_flow.get(flow)) {
+                return false;
+            }
+        }
+        if !self.should_fire(notice, now) {
+            return false;
+        }
+        if let Some(flow) = flow {
+            self.last_fired_flow.insert(flow.clone(), now);
+        }
+        true
     }
 
     pub fn should_fire(&mut self, notice: &Notice, now: Instant) -> bool {
@@ -114,6 +153,39 @@ mod tests {
         assert!(gate.should_fire(&row_a, t0));
         assert!(gate.should_fire(&row_b, t0));
         assert!(!gate.should_fire(&row_a, t0 + Duration::from_secs(5)));
+    }
+
+    /// #116 L5: daemon retries are new rows for one flow; they share a notice.
+    #[test]
+    fn retries_of_one_flow_share_a_pending_cooldown() {
+        let mut gate = CooldownGate::with_cooldown(Duration::from_secs(60));
+        let t0 = Instant::now();
+        let pending = |row_id| Notice::Pending {
+            row_id,
+            process: "curl".into(),
+        };
+        let flow = |session, program: &str, host: &str| FlowKey {
+            session,
+            program: program.into(),
+            host: host.into(),
+        };
+        let curl = flow(1, "/usr/bin/curl", "example.com");
+        assert!(gate.should_fire_for_flow(&pending(1), Some(&curl), t0));
+        let later = t0 + Duration::from_secs(5);
+        assert!(!gate.should_fire_for_flow(&pending(2), Some(&curl), later));
+        // Another host, program or session is another flow.
+        for (row_id, other) in (10..).zip([
+            flow(1, "/usr/bin/curl", "example.org"),
+            flow(1, "/usr/bin/wget", "example.com"),
+            flow(2, "/usr/bin/curl", "example.com"),
+        ]) {
+            assert!(gate.should_fire_for_flow(&pending(row_id), Some(&other), later));
+        }
+        // The held-back retry took no cooldown of its own: row 2 is still
+        // free to fire once the flow's window ends.
+        assert!(gate.should_fire_for_flow(&pending(2), Some(&curl), t0 + Duration::from_secs(61)));
+        // Without a flow it is the per-row cooldown alone.
+        assert!(gate.should_fire_for_flow(&pending(99), None, later));
     }
 
     /// Issue #44: each answered row gets its own notice.

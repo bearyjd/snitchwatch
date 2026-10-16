@@ -42,6 +42,7 @@ pub mod panic_hook;
 pub mod paths;
 pub mod pending_decision;
 pub mod pending_notice;
+pub mod private_files;
 pub mod profiles;
 pub mod profiles_model;
 pub mod prompt_slot_status;

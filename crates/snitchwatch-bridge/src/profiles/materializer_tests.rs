@@ -169,7 +169,26 @@ fn profile_band_sorts_before_blocklist_band() {
 fn ids_with_special_chars_are_sanitized_in_the_name() {
     let name = rule_name("ho/me:x", "r1");
     assert!(!name.contains('/'), "{name}");
-    assert!(name.starts_with("850-profile:ho_me_x:"), "{name}");
+    assert!(name.starts_with("850-profile:ho_me_x."), "{name}");
+}
+
+/// #116: a profile id that isn't a plain short token is cut down and hashed,
+/// so its rule names stay under the daemon's 200-byte limit and two ids that
+/// sanitize alike don't share a name.
+#[test]
+fn a_long_or_odd_profile_id_gets_a_short_hashed_name() {
+    let long = "p".repeat(500);
+    let name = rule_name(&long, &"r".repeat(MAX_RULE_ID_LEN));
+    assert!(
+        name.len() <= crate::rule_name::MAX_RULE_NAME_BYTES,
+        "{name}"
+    );
+    assert_ne!(rule_name(&long, "r1"), rule_name(&format!("{long}x"), "r1"));
+    assert_ne!(rule_name("a/b", "r1"), rule_name("a_b", "r1"));
+    assert_eq!(rule_name("a/b", "r1"), rule_name("a/b", "r1"));
+    // A plain token is used as is.
+    assert_eq!(rule_name("home_2-x", "r1"), "850-profile:home_2-x:r1");
+    assert!(crate::rule_name::validate_rule_name(&name).is_ok());
 }
 
 #[test]

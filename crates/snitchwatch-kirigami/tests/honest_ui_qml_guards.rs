@@ -202,7 +202,7 @@ const ALL_QML: &[(&str, &str)] = &[
 /// Issue #45 PR B: blocklists are enforced through daemon rules, but only a
 /// list whose rule the daemon accepted says so. The Blocklists header holds
 /// two warnings, neither dismissable nor jargon-laden:
-/// - one keyed on `page.anyNotEnforced` (any list not "rule installed",
+/// - one keyed on `page.anyNotEnforced` (and not the unreadable store) (any list not "rule installed",
 ///   defaulting to false only while there is no model), saying lists are
 ///   not blocking and where to see why;
 /// - one keyed on `!page.storagePersistent`, saying subscriptions are lost
@@ -260,7 +260,10 @@ fn assert_enforcement_keyed_banners(page_name: &str, source: &str) {
         }
     };
     // A pending list isn't known not to block, only not confirmed to.
-    keyed("page.anyNotEnforced", &["aren't confirmed"]);
+    keyed(
+        "page.anyNotEnforced && !page.storageUnreadable",
+        &["aren't confirmed"],
+    );
     keyed(
         "page.perUserBlocklists",
         &["system-wide", "doesn't apply blocklists"],

@@ -553,7 +553,7 @@ async fn a_server_that_never_closes_doesnt_delay_the_answer() {
     let Some(bus) = PrivateBus::start() else {
         return;
     };
-    let server = bus.notification_server_stuck_on_close().await;
+    let (server, close_calls) = bus.notification_server_stuck_on_close().await;
     let listener = bus.connect().await;
     let (handles, connection, mut inbound_rx) = handles_and_queue();
     let session = mark_connected(&connection, true);
@@ -578,7 +578,18 @@ async fn a_server_that_never_closes_doesnt_delay_the_answer() {
     }
 
     server_clicks(&server, "allow-once").await;
-    tokio::time::timeout(CLOSE_WAIT / 2, inbound_rx.recv())
+    // The bound starts once the server has the close in hand, and sits just
+    // under CLOSE_WAIT: an answer held up by the close would arrive a whole
+    // CLOSE_WAIT after that, and load can't push a prompt answer that far.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while close_calls.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the notice was never closed"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    tokio::time::timeout(CLOSE_WAIT - Duration::from_millis(300), inbound_rx.recv())
         .await
         .expect("the answer waited on CloseNotification")
         .expect("the answer was queued");

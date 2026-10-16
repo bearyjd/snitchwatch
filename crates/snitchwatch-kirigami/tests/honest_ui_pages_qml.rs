@@ -302,6 +302,16 @@ Window {
                 if (!unreadable || unreadable.visible !== true) {
                     throw new Error("BlocklistsPage: no warning for an unreadable store");
                 }
+                // With a list that isn't confirmed too, the unreadable-store
+                // warning stands alone: the generic one adds nothing (#109).
+                blocklistsPage.model.applyServerMessageJson(JSON.stringify({
+                    action: "setBlocklists", blocklists: [list("not_enforced")],
+                    storage: { persistent: true, unreadable: true, reason: "x" }
+                }));
+                if (blocklistsPage.anyNotEnforced !== true) {
+                    throw new Error("BlocklistsPage: the unconfirmed-list case is not live");
+                }
+                checkBlocklistsBanners(blocklistsPage, true, false);
                 blocklistsPage.model.applyServerMessageJson(JSON.stringify({
                     action: "setBlocklists", blocklists: [],
                     storage: { persistent: false, reason: "blocklist store: <b>locked</b>" }
