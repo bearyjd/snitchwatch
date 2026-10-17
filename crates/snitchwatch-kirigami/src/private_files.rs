@@ -30,9 +30,11 @@ pub fn ensure_private_dir(dir: &Path) -> io::Result<()> {
 }
 
 /// [`ensure_private_dir`], returning the directory to use. A symlink in
-/// place of `dir` (stow, dotfile managers) is followed once to a real
-/// directory, which must pass the same checks; under [`no_home_root`] a
-/// symlink is never followed.
+/// place of `dir` (stow, dotfile managers) is followed exactly one hop, to a
+/// real directory of ours. That target is never chmodded: if it is open to
+/// group or others it is refused rather than silently narrowed (only a
+/// directory that isn't a symlink is tightened to 0700). Under
+/// [`no_home_root`] a symlink is never followed.
 fn resolve_private_dir(dir: &Path) -> io::Result<PathBuf> {
     let root = no_home_root();
     if dir.starts_with(&root) {
@@ -45,13 +47,50 @@ fn resolve_private_dir(dir: &Path) -> io::Result<PathBuf> {
     for ancestor in dir.ancestors().filter(|a| a.starts_with(&root)) {
         tighten_own_dir(ancestor)?;
     }
-    let real = if !dir.starts_with(&root) && std::fs::symlink_metadata(dir)?.is_symlink() {
-        dir.canonicalize()?
-    } else {
-        dir.to_path_buf()
+    if !dir.starts_with(&root) && std::fs::symlink_metadata(dir)?.is_symlink() {
+        let target = follow_one_hop(dir)?;
+        check_followed_dir(&target)?;
+        return Ok(target);
+    }
+    tighten_own_dir(dir)?;
+    Ok(dir.to_path_buf())
+}
+
+/// Where the symlink `link` points, read once (a relative target is taken
+/// from the link's parent). The target must be a real directory, not another
+/// symlink: a chain is refused, not walked.
+fn follow_one_hop(link: &Path) -> io::Result<PathBuf> {
+    let raw = std::fs::read_link(link)?;
+    let target = match link.parent() {
+        Some(parent) => parent.join(&raw),
+        None => raw,
     };
-    tighten_own_dir(&real)?;
-    Ok(real)
+    let meta = std::fs::symlink_metadata(&target)?;
+    if meta.file_type().is_symlink() {
+        return Err(refused(
+            &target,
+            "is itself a symlink (only one hop is followed)",
+        ));
+    }
+    if !meta.is_dir() {
+        return Err(refused(&target, "isn't a directory"));
+    }
+    Ok(target)
+}
+
+/// A followed target must be ours and closed to group and others already.
+fn check_followed_dir(dir: &Path) -> io::Result<()> {
+    let meta = std::fs::symlink_metadata(dir)?;
+    if meta.uid() != effective_uid() {
+        return Err(refused(dir, "belongs to another user"));
+    }
+    if meta.permissions().mode() & 0o077 != 0 {
+        return Err(refused(
+            dir,
+            "is reached through a symlink and is open to group or others (chmod 700 it yourself)",
+        ));
+    }
+    Ok(())
 }
 
 /// Make `root` (one level, not recursive, so a planted symlink is never
@@ -126,18 +165,28 @@ impl Drop for TempGuard<'_> {
 /// Write `body` to `path` atomically, in a private directory: a private temp
 /// file (`O_EXCL`, no-follow, 0600) beside it is written and synced, then
 /// renamed over `path`, so a crash leaves the old content whole. `path` itself
-/// must not be a symlink, FIFO, file of another user or hard-linked file; a
-/// symlinked *directory* of ours is resolved and checked like any other.
+/// must not be a symlink, FIFO, file of another user or hard-linked file. These
+/// final-path checks are policy, not an accident of the open: the rename
+/// replaces the directory entry, so without them a planted link or hard link
+/// would simply be replaced. A symlinked *directory* is followed one hop only
+/// (see [`ensure_private_dir`]) and must already be private.
 pub fn write_private(path: &Path, body: &[u8]) -> io::Result<()> {
-    write_private_with(path, body, || Ok(()))
+    write_private_with(path, body, || Ok(()), sync_dir)
+}
+
+/// Flush the directory entry created by the rename.
+fn sync_dir(dir: &Path) -> io::Result<()> {
+    File::open(dir)?.sync_all()
 }
 
 /// [`write_private`] with a hook run after the temp file is synced and before
-/// the rename, so tests can fail or crash at exactly that point.
+/// the rename, so tests can fail or crash at exactly that point; `after_rename`
+/// syncs the directory (a failure is a write error, but the renamed file stays).
 fn write_private_with(
     path: &Path,
     body: &[u8],
     before_rename: impl FnOnce() -> io::Result<()>,
+    after_rename: impl FnOnce(&Path) -> io::Result<()>,
 ) -> io::Result<()> {
     use std::io::Write;
     let name = path
@@ -177,7 +226,7 @@ fn write_private_with(
     before_rename()?;
     std::fs::rename(&temp, &target)?;
     guard.0 = None;
-    Ok(())
+    after_rename(&dir)
 }
 
 /// The final path, if it exists, must be a regular file of ours with one name.
@@ -273,12 +322,64 @@ mod tests {
         let dir = scratch();
         let target = dir.path().join("elsewhere");
         std::fs::create_dir(&target).unwrap();
-        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o700)).unwrap();
         let state = dir.path().join("state");
         std::os::unix::fs::symlink(&target, &state).unwrap();
         ensure_private_dir(&state).unwrap();
         assert_eq!(mode(&target), 0o700);
         assert!(std::fs::symlink_metadata(&state).unwrap().is_symlink());
+        // A relative link target is read from the link's parent.
+        let rel = dir.path().join("rel");
+        std::os::unix::fs::symlink("elsewhere", &rel).unwrap();
+        assert_eq!(resolve_private_dir(&rel).unwrap(), target);
+    }
+
+    /// A followed target is never chmodded: open to others, it is refused.
+    #[test]
+    fn a_followed_target_open_to_others_is_refused_not_narrowed() {
+        let dir = scratch();
+        let target = dir.path().join("elsewhere");
+        std::fs::create_dir(&target).unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o750)).unwrap();
+        let state = dir.path().join("state");
+        std::os::unix::fs::symlink(&target, &state).unwrap();
+        let error = ensure_private_dir(&state).unwrap_err();
+        assert!(
+            error.to_string().contains("open to group or others"),
+            "{error}"
+        );
+        assert_eq!(mode(&target), 0o750, "the target was not narrowed");
+        assert!(write_private(&state.join("settings.json"), b"x").is_err());
+        assert!(!target.join("settings.json").exists());
+    }
+
+    #[test]
+    fn a_two_hop_symlink_chain_is_refused() {
+        let dir = scratch();
+        let real = dir.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let hop1 = dir.path().join("hop1");
+        std::os::unix::fs::symlink(&real, &hop1).unwrap();
+        let hop2 = dir.path().join("hop2");
+        std::os::unix::fs::symlink(&hop1, &hop2).unwrap();
+        let error = ensure_private_dir(&hop2).unwrap_err();
+        assert!(error.to_string().contains("only one hop"), "{error}");
+        assert!(ensure_private_dir(&hop1).is_ok());
+    }
+
+    #[test]
+    fn a_failed_directory_sync_is_an_error_but_keeps_the_renamed_file() {
+        let dir = scratch();
+        let path = dir.path().join("settings.json");
+        write_private(&path, b"old").unwrap();
+        let result =
+            write_private_with(&path, b"new", || Ok(()), |_| Err(io::Error::other("sync")));
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"new");
+        assert_eq!(names(dir.path()), vec!["settings.json"]);
+        assert!(sync_dir(dir.path()).is_ok());
+        assert!(sync_dir(&dir.path().join("missing")).is_err());
     }
 
     #[test]
@@ -312,6 +413,7 @@ mod tests {
         let dir = scratch();
         let real = dir.path().join("dotfiles");
         std::fs::create_dir(&real).unwrap();
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o700)).unwrap();
         let cfg = dir.path().join("cfg");
         std::os::unix::fs::symlink(&real, &cfg).unwrap();
         write_private(&cfg.join("settings.json"), b"hello").unwrap();
@@ -353,11 +455,16 @@ mod tests {
         let dir = scratch();
         let path = dir.path().join("settings.json");
         write_private(&path, b"old").unwrap();
-        let result = write_private_with(&path, b"new", || {
-            // The temp is fully written by now; the old file is untouched.
-            assert_eq!(std::fs::read(&path).unwrap(), b"old");
-            Err(io::Error::other("injected"))
-        });
+        let result = write_private_with(
+            &path,
+            b"new",
+            || {
+                // The temp is fully written by now; the old file is untouched.
+                assert_eq!(std::fs::read(&path).unwrap(), b"old");
+                Err(io::Error::other("injected"))
+            },
+            sync_dir,
+        );
         assert!(result.is_err());
         assert_eq!(std::fs::read(&path).unwrap(), b"old");
         assert_eq!(names(dir.path()), vec!["settings.json"]);
@@ -369,7 +476,7 @@ mod tests {
         let path = dir.path().join("settings.json");
         write_private(&path, b"old").unwrap();
         let crashed = std::panic::catch_unwind(|| {
-            let _ = write_private_with(&path, b"new", || panic!("crash"));
+            let _ = write_private_with(&path, b"new", || panic!("crash"), sync_dir);
         });
         assert!(crashed.is_err());
         assert_eq!(std::fs::read(&path).unwrap(), b"old");
@@ -407,15 +514,20 @@ mod tests {
         assert!(write_private(&path, b"x").is_err());
         assert_eq!(std::fs::read(&victim).unwrap(), b"keep");
         assert!(!path.exists());
-        write_private_with(&dir.path().join("other.json"), b"y", || {
-            let temps: Vec<_> = names(dir.path())
-                .into_iter()
-                .filter(|n| n.contains("other.json.tmp"))
-                .collect();
-            assert_eq!(temps.len(), 1);
-            assert_eq!(mode(&dir.path().join(&temps[0])), 0o600);
-            Ok(())
-        })
+        write_private_with(
+            &dir.path().join("other.json"),
+            b"y",
+            || {
+                let temps: Vec<_> = names(dir.path())
+                    .into_iter()
+                    .filter(|n| n.contains("other.json.tmp"))
+                    .collect();
+                assert_eq!(temps.len(), 1);
+                assert_eq!(mode(&dir.path().join(&temps[0])), 0o600);
+                Ok(())
+            },
+            sync_dir,
+        )
         .unwrap();
     }
 
