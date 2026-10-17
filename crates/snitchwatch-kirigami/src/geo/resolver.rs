@@ -232,13 +232,13 @@ pub struct DiscoveryOutcome {
     pub available: bool,
 }
 
-/// Production entry point: reads `$SNITCHWATCH_GEOIP_DB`, `$HOME` and
-/// `$XDG_DATA_HOME` from the process environment — the only place the geo
+/// Production entry point: reads `$SNITCHWATCH_GEOIP_DB`, `$XDG_DATA_HOME` and
+/// the home base ([`crate::paths::home_base`], never a bare `/tmp`) from the process environment — the only place the geo
 /// module does — and runs [`discover_and_open_with`] against the real
 /// filesystem.
 pub fn discover_and_open() -> DiscoveryOutcome {
     let env_override = std::env::var("SNITCHWATCH_GEOIP_DB").ok();
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+    let home = crate::paths::home_base();
     let xdg_data_home = std::env::var("XDG_DATA_HOME").ok();
     discover_and_open_with(
         |p| p.exists(),

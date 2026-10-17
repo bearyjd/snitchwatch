@@ -137,15 +137,14 @@ pub fn read_settings(path: &Path) -> Settings {
         .unwrap_or_default()
 }
 
-/// Persist `settings` as pretty-printed JSON, creating the parent directory
-/// if needed (mirrors `autostart::write_autostart_desktop`).
+/// Persist `settings` as pretty-printed JSON, into an owner-only directory it
+/// creates or re-checks (0700), as an owner-only file (0600).
 pub fn write_settings(path: &Path, settings: &Settings) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
     let body = serde_json::to_string_pretty(settings)
         .unwrap_or_else(|_| "{\"rdap_enabled\":false}".to_string());
-    std::fs::write(path, body)
+    // Re-checks the directory on every write (#170): the cached no-HOME root
+    // check can go stale if `/tmp/snitchwatch-<uid>` is recreated meanwhile.
+    crate::private_files::write_private(path, body.as_bytes())
 }
 
 /// Convenience read for the one flag `PendingInsight::lookup` needs, without
@@ -187,6 +186,24 @@ mod tests {
         )
         .unwrap();
         assert!(read_rdap_enabled(&p));
+    }
+
+    /// #170: a settings write re-checks its directory: a foreign-owned one is
+    /// refused and nothing lands in it; a symlinked file isn't followed.
+    #[test]
+    fn write_settings_refuses_a_foreign_dir_and_a_symlinked_file() {
+        let (foreign, _guard) = crate::private_files::foreign_owned_dir();
+        let p = foreign.join("settings.json");
+        assert!(write_settings(&p, &Settings::default()).is_err());
+        assert!(!p.exists());
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target");
+        std::fs::write(&target, "keep").unwrap();
+        let link = dir.path().join("settings.json");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(write_settings(&link, &Settings::default()).is_err());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep");
     }
 
     #[test]

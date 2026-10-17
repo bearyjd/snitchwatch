@@ -83,6 +83,26 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
 
+    /// #170: the refused no-HOME base finds nothing, so no database is
+    /// taken from a shared directory.
+    #[test]
+    fn a_refused_home_base_yields_no_candidate_under_tmp() {
+        let base = "/proc/snitchwatch-no-trusted-home";
+        let seen = std::cell::RefCell::new(Vec::new());
+        let found = discover_with(
+            |p| {
+                seen.borrow_mut().push(p.to_path_buf());
+                false
+            },
+            None,
+            base,
+            None,
+        );
+        assert_eq!(found, None);
+        assert!(seen.borrow().iter().any(|p| p.starts_with(base)));
+        assert!(!seen.borrow().iter().any(|p| p.starts_with("/tmp")));
+    }
+
     #[test]
     fn env_override_wins_when_present() {
         let found = discover_with(
