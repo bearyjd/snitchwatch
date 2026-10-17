@@ -64,7 +64,7 @@ fn a_current_entry_is_not_an_orphan() {
 #[test]
 fn a_rule_with_a_saved_copy_is_not_an_orphan() {
     let present = rule(GONE, true);
-    let rules = list(&[present.clone()]);
+    let rules = list(std::slice::from_ref(&present));
     let recorded = Choices::default().installed("retired-service", &present);
     assert!(recorded.installed.contains_key("retired-service"));
     assert!(!is_orphan(GONE, entries(), &rules, &none(), &recorded));
