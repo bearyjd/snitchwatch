@@ -238,7 +238,7 @@ pub struct DiscoveryOutcome {
 /// filesystem.
 pub fn discover_and_open() -> DiscoveryOutcome {
     let env_override = std::env::var("SNITCHWATCH_GEOIP_DB").ok();
-    let home = crate::paths::home_base();
+    let home = crate::paths::home_base_rechecked();
     let xdg_data_home = std::env::var("XDG_DATA_HOME").ok();
     discover_and_open_with(
         |p| p.exists(),
