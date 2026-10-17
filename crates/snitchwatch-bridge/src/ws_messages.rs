@@ -414,7 +414,6 @@ pub enum ServerMessage {
     },
 }
 
-/// What happened to a rule command (P2.1). Every reason is plain text.
 fn is_zero(n: &u32) -> bool {
     *n == 0
 }

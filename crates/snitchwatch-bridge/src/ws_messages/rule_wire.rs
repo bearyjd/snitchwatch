@@ -3,6 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 
+/// What happened to a rule command (P2.1). Every reason is plain text.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(
     tag = "status",
