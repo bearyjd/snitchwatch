@@ -238,6 +238,17 @@ impl DaemonCommands {
         )
     }
 
+    /// A delete decided from the rule list of daemon stream `generation`
+    /// (#113's orphans): queued only while that stream's list is the cache's
+    /// and still lists the name; [`SendError::NoDaemon`] after a HELLO.
+    pub(crate) fn send_curated_guarded_delete(
+        &self,
+        command: CuratedCommand,
+        generation: u64,
+    ) -> Result<PendingReply, SendError> {
+        self.send_curated_guarded_as(command, generation, Guard::Present)
+    }
+
     /// A GUI's pure toggle of the curated rule `name` (plan item 13): the
     /// data file's rule, sent only while the daemon's cached copy is that
     /// rule apart from `enabled`. The GUI supplies nothing else, so it can't
@@ -556,6 +567,52 @@ mod tests {
                     generation,
                     false
                 )
+                .err(),
+            Some(SendError::ReservedName)
+        );
+        assert!(rx.try_recv().is_err());
+    }
+
+    /// #113: an orphan's delete is queued only on the daemon stream whose
+    /// list it was decided from, and only while that list still has it.
+    #[tokio::test]
+    async fn a_guarded_delete_needs_the_same_stream_and_a_listed_name() {
+        let name = "snitchwatch-default-retired-service";
+        let listed = Rule {
+            name: name.into(),
+            enabled: true,
+            ..Default::default()
+        };
+        let (commands, mut rx, stream) = connected(vec![listed.clone()]);
+        let generation = *commands.stream_ready().borrow();
+        let delete = || CuratedCommand::delete(name).unwrap();
+        // A HELLO between the manager's check and the dispatch.
+        commands.rules.stage(None, vec![listed]);
+        commands.on_reply(
+            stream.id(),
+            &snitchwatch_proto::protocol::NotificationReply {
+                id: 0,
+                code: snitchwatch_proto::protocol::NotificationReplyCode::Ok as i32,
+                data: String::new(),
+            },
+        );
+        assert_eq!(
+            commands
+                .send_curated_guarded_delete(delete(), generation)
+                .err(),
+            Some(SendError::NoDaemon)
+        );
+        assert!(rx.try_recv().is_err());
+        let generation = *commands.stream_ready().borrow();
+        assert!(commands
+            .send_curated_guarded_delete(delete(), generation)
+            .is_ok());
+        assert_eq!(rx.try_recv().unwrap().rules[0].name, name);
+        // Gone from the list (same stream): not sent.
+        commands.rules.cache().lock().unwrap().remove(name);
+        assert_eq!(
+            commands
+                .send_curated_guarded_delete(delete(), generation)
                 .err(),
             Some(SendError::ReservedName)
         );

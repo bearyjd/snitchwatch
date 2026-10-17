@@ -244,6 +244,9 @@ pub(crate) enum Guard {
     /// The entry's own unedited copy, replaced at its account's new uid
     /// (#120 36/41).
     Replace,
+    /// A rule listed under the name: a delete decided from that list
+    /// (#113's orphans).
+    Present,
 }
 
 struct Inner {
@@ -606,6 +609,7 @@ impl DaemonCommands {
                             == crate::curated::canonical::canonical(rule)
                 }),
                 Guard::Absent => current.is_none(),
+                Guard::Present => current.is_some(),
                 // Never turned on by the replace: a turn-off may have come
                 // in since the caller looked (security review L1).
                 Guard::Replace => current.is_some_and(|current| {

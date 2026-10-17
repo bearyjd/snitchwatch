@@ -28,6 +28,7 @@
 pub mod canonical;
 pub mod intent;
 pub mod manager;
+pub mod orphans;
 pub mod reconcile;
 pub mod store;
 pub mod wire;
