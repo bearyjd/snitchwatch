@@ -435,6 +435,7 @@ fn curated_groups_round_trip_and_an_older_message_without_them_still_parses() {
     let with = ServerMessage::SetCuratedDefaults {
         entries: Vec::new(),
         groups: vec![group.clone()],
+        orphans: Vec::new(),
         storage: storage.clone(),
         unavailable: None,
     };
@@ -446,6 +447,7 @@ fn curated_groups_round_trip_and_an_older_message_without_them_still_parses() {
     let plain = serde_json::to_value(ServerMessage::SetCuratedDefaults {
         entries: Vec::new(),
         groups: Vec::new(),
+        orphans: Vec::new(),
         storage,
         unavailable: None,
     })
@@ -459,4 +461,58 @@ fn curated_groups_round_trip_and_an_older_message_without_them_still_parses() {
         panic!()
     };
     assert!(groups.is_empty());
+}
+
+/// #113: the orphan list is left out when empty (and by an older bridge),
+/// and round-trips when sent; the removal request is its own action.
+#[test]
+fn set_curated_defaults_orphans_are_optional_on_the_wire() {
+    use crate::curated::wire::CuratedOrphanSummary;
+    let storage = crate::ws_messages::StorageStatus {
+        persistent: true,
+        reason: None,
+        unreadable: false,
+    };
+    let orphan = CuratedOrphanSummary {
+        id: "retired".into(),
+        enabled: true,
+        file_left: false,
+        problem: None,
+    };
+    let with = ServerMessage::SetCuratedDefaults {
+        entries: Vec::new(),
+        groups: Vec::new(),
+        orphans: vec![orphan],
+        storage: storage.clone(),
+        unavailable: None,
+    };
+    let wire = serde_json::to_value(&with).unwrap();
+    assert_eq!(wire["orphans"][0]["id"], "retired");
+    assert_eq!(serde_json::from_value::<ServerMessage>(wire).unwrap(), with);
+    let plain = serde_json::to_value(ServerMessage::SetCuratedDefaults {
+        entries: Vec::new(),
+        groups: Vec::new(),
+        orphans: Vec::new(),
+        storage,
+        unavailable: None,
+    })
+    .unwrap();
+    assert!(plain.get("orphans").is_none(), "{plain}");
+    let old = r#"{"action":"setCuratedDefaults","entries":[],"storage":{"persistent":true,"unreadable":false}}"#;
+    let ServerMessage::SetCuratedDefaults { orphans, .. } =
+        serde_json::from_str::<ServerMessage>(old).unwrap()
+    else {
+        panic!()
+    };
+    assert!(orphans.is_empty());
+    let ask = crate::ws_messages::decode_client_message(
+        r#"{"action":"removeCuratedOrphan","id":"retired"}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        ask,
+        ClientMessage::RemoveCuratedOrphan {
+            id: "retired".into()
+        }
+    );
 }

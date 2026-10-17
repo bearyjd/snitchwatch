@@ -109,7 +109,8 @@ pub fn apply(
         | ClientMessage::KeepCuratedBroadDefault { .. }
         | ClientMessage::CancelCuratedBroadOptIn { .. }
         | ClientMessage::SetCuratedDefaults { .. }
-        | ClientMessage::RemoveCuratedDefault { .. } => Ok(UpstreamEffect::None),
+        | ClientMessage::RemoveCuratedDefault { .. }
+        | ClientMessage::RemoveCuratedOrphan { .. } => Ok(UpstreamEffect::None),
     }
 }
 

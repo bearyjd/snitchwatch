@@ -196,6 +196,12 @@ pub enum ServerMessage {
         /// without groups.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         groups: Vec<crate::curated::CuratedGroup>,
+        /// Rules under the curated prefix that no entry offers and that
+        /// Snitchwatch recorded no copy of (#113, "No longer recommended").
+        /// Left out when there are none, and by an older bridge, so a GUI
+        /// offers their Remove only when a bridge lists them.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        orphans: Vec<crate::curated::wire::CuratedOrphanSummary>,
         storage: StorageStatus,
         /// Why this bridge never installs them (the per-user bridge, or no
         /// saved settings); `None` when it does.
@@ -661,6 +667,14 @@ client_message! {
     /// user confirmed (prompt-slot D, code review M2). Only that entry's own
     /// reserved name is ever deleted; an unknown id does nothing.
     RemoveCuratedDefault {
+        id: String,
+    },
+    /// Remove the rule `snitchwatch-default-<id>` listed under "No longer
+    /// recommended" (#113), after the user confirmed. The bridge deletes it
+    /// only if it is still an orphan when the command is sent: in no current
+    /// entry, with no recorded copy (`curated::orphans`). Anything else does
+    /// nothing.
+    RemoveCuratedOrphan {
         id: String,
     },
     /// Rule import/export (roadmap P2.7); handled by bridge-cli's
