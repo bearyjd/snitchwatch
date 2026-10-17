@@ -24,6 +24,29 @@ const PENDING_SNAPSHOT_CAP: usize = 4;
 /// A staged snapshot older than this is never committed, and is evicted by
 /// the next `stage` or commit.
 const PENDING_SNAPSHOT_TTL: Duration = Duration::from_secs(30);
+/// The staged snapshots' clock. `Instant::now()`, except that tests can
+/// age the current thread's clock with [`advance_clock`] to pass the TTL.
+#[cfg(not(test))]
+fn now() -> Instant {
+    Instant::now()
+}
+
+#[cfg(test)]
+thread_local! {
+    static CLOCK_SKEW: std::cell::Cell<Duration> = const { std::cell::Cell::new(Duration::ZERO) };
+}
+
+#[cfg(test)]
+fn now() -> Instant {
+    Instant::now() + CLOCK_SKEW.with(|skew| skew.get())
+}
+
+/// Move this thread's staged-snapshot clock forward by `by` (tests only).
+#[cfg(test)]
+pub(crate) fn advance_clock(by: Duration) {
+    CLOCK_SKEW.with(|skew| skew.set(skew.get() + by));
+}
+
 /// Longest a `Subscribe` waits for account names (`RulesSync::learn_account_names`).
 const ACCOUNT_LOOKUP_WAIT: Duration = Duration::from_secs(1);
 /// After this long a lookup batch starts no more lookups; the uids it leaves
@@ -389,7 +412,7 @@ impl RulesSync {
     pub(crate) fn stage_received(&self, key: ConnKey, rules: Vec<Rule>, receipt: Receipt) {
         let mut snapshot = bounded_snapshot(rules);
         snapshot.observed_revision = receipt.revision;
-        lock(&self.pending).stage_received(key, snapshot, Instant::now(), receipt.sequence);
+        lock(&self.pending).stage_received(key, snapshot, now(), receipt.sequence);
     }
 
     /// Note a change to the list in the journal of the snapshot it holds
@@ -407,8 +430,7 @@ impl RulesSync {
     /// count, until its stream closes or stops being current
     /// ([`Self::withdraw`], PR #106 review L1).
     pub(crate) fn commit(&self, current: &BecameCurrent<'_>) -> Adopted {
-        let staged =
-            lock(&self.pending).adopt_fresh(&current.conn(), current.stream(), Instant::now());
+        let staged = lock(&self.pending).adopt_fresh(&current.conn(), current.stream(), now());
         match staged {
             Some(snapshot) => self.adopt(current, snapshot),
             None => Adopted::Nothing,
@@ -421,8 +443,7 @@ impl RulesSync {
     /// order on the Unix socket's one key). [`Adopted::Nothing`] otherwise,
     /// and the caller withdraws.
     pub(crate) fn readopt(&self, current: &BecameCurrent<'_>) -> Adopted {
-        let staged =
-            lock(&self.pending).adopted_fresh(&current.conn(), current.stream(), Instant::now());
+        let staged = lock(&self.pending).adopted_fresh(&current.conn(), current.stream(), now());
         match staged {
             Some(snapshot) if snapshot.journal.overflowed => {
                 warn!("too many changes since the snapshot to adopt it again");
