@@ -42,6 +42,11 @@ fn now() -> Instant {
 }
 
 /// Move this thread's staged-snapshot clock forward by `by` (tests only).
+///
+/// The skew is thread-local: it applies only to clock reads on the calling
+/// thread, so use it from a current-thread runtime (the `#[tokio::test]`
+/// default). `rules_count`'s `awaiting_adoption` reads `Instant::now()`
+/// directly and does not see it.
 #[cfg(test)]
 pub(crate) fn advance_clock(by: Duration) {
     CLOCK_SKEW.with(|skew| skew.set(skew.get() + by));
