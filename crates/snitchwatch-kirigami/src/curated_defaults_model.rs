@@ -61,6 +61,7 @@ pub mod qobject {
         #[qproperty(bool, received)]
         #[qproperty(bool, grouped)]
         #[qproperty(QString, groups_json, cxx_name = "groupsJson")]
+        #[qproperty(QString, orphans_json, cxx_name = "orphansJson")]
         #[qproperty(QString, unavailable_reason, cxx_name = "unavailableReason")]
         type CuratedDefaultsModel = super::CuratedDefaultsModelRust;
 
@@ -138,6 +139,13 @@ pub mod qobject {
         #[cxx_name = "removeEntry"]
         fn remove_entry(self: Pin<&mut CuratedDefaultsModel>, id: &QString);
 
+        /// Ask to remove a rule listed under "No longer recommended"
+        /// (`orphansJson`'s `orphanId`, #113). Call only after the user
+        /// confirmed; ignored for any rule not listed as removable.
+        #[qinvokable]
+        #[cxx_name = "removeOrphan"]
+        fn remove_orphan(self: Pin<&mut CuratedDefaultsModel>, id: &QString);
+
         /// Keep an undecided rule already in the firewall (turn it on, so
         /// it is adopted; nothing is sent). Ignored for any other entry.
         #[qinvokable]
@@ -171,6 +179,7 @@ pub struct CuratedDefaultsModelRust {
     received: bool,
     grouped: bool,
     groups_json: QString,
+    orphans_json: QString,
     unavailable_reason: QString,
 }
 
@@ -275,6 +284,8 @@ impl qobject::CuratedDefaultsModel {
         self.as_mut()
             .set_groups_json(QString::from(&next.groups_json()));
         self.as_mut()
+            .set_orphans_json(QString::from(&next.orphans_json()));
+        self.as_mut()
             .set_unavailable_reason(QString::from(next.unavailable_reason()));
     }
 
@@ -362,6 +373,11 @@ impl qobject::CuratedDefaultsModel {
             self.as_mut().sync_consent();
         }
         let request = self.store.removal(&id.to_string());
+        self.emit_client(request);
+    }
+
+    fn remove_orphan(self: Pin<&mut Self>, id: &QString) {
+        let request = self.store.orphan_removal(&id.to_string());
         self.emit_client(request);
     }
 

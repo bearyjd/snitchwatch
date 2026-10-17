@@ -24,6 +24,7 @@ pub mod curated_broad_consent;
 pub mod curated_defaults;
 pub mod curated_defaults_model;
 pub mod curated_groups;
+pub mod curated_orphans;
 pub mod daemon_health_model;
 pub mod demo;
 pub mod geo;

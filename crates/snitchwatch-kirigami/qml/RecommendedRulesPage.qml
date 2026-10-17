@@ -11,6 +11,9 @@
 // installed" shows only after the firewall service accepted the rule.
 // Statuses are as of the firewall service's last rule list. A rule edited
 // outside Snitchwatch can be removed here, only after a confirmation.
+// So can a rule under Snitchwatch's reserved name that is no longer
+// recommended and that Snitchwatch kept no copy of (#113, "No longer
+// recommended"): the Rules page refuses those names, so this is the only way.
 //
 // Every text from the bridge goes in a PlainText label; the warnings are
 // fixed text (issue #51).
@@ -32,6 +35,12 @@ Kirigami.ScrollablePage {
     // The switches only ask the bridge; they work while it adds these rules.
     readonly property bool usable: page.received && page.unavailableReason.length === 0
     property alias entriesList: list
+    // Rules no longer recommended (#113), from the bridge; [] from an older one.
+    readonly property var orphans: {
+        const json = page.model ? page.model.orphansJson : "";
+        if (json.length === 0) return [];
+        try { return JSON.parse(json); } catch (e) { return []; }
+    }
 
     property alias dnsConsentDialog: dnsConsent
     DnsConsentDialog { id: dnsConsent; consentModel: page.model }
@@ -123,6 +132,100 @@ Kirigami.ScrollablePage {
             required property string section
             width: ListView.view ? ListView.view.width : implicitWidth
             label: section
+        }
+
+        footer: ColumnLayout {
+            objectName: "orphansSection"
+            width: ListView.view ? ListView.view.width : implicitWidth
+            visible: page.orphans.length > 0
+            spacing: Kirigami.Units.smallSpacing
+
+            Kirigami.ListSectionHeader {
+                Layout.fillWidth: true
+                label: "No longer recommended"
+            }
+            Controls.Label {
+                objectName: "orphansExplanation"
+                Layout.fillWidth: true
+                Layout.margins: Kirigami.Units.smallSpacing
+                wrapMode: Text.Wrap
+                text: "These rules use a name reserved for Snitchwatch's recommended rules, but "
+                    + "Snitchwatch no longer recommends them and kept no copy of them, so it "
+                    + "won't remove them by itself. They can't be removed on the Rules page; "
+                    + "remove them here."
+            }
+            Repeater {
+                id: orphanRows
+                objectName: "orphanRows"
+                model: page.orphans
+                delegate: ColumnLayout {
+                    id: orphanRow
+                    required property var modelData
+                    Layout.fillWidth: true
+                    Layout.margins: Kirigami.Units.smallSpacing
+                    spacing: Kirigami.Units.smallSpacing
+                    // Remove asks first; a new list from the bridge ends it.
+                    property bool confirmingRemove: false
+
+                    Controls.Label {
+                        objectName: "orphanName"
+                        textFormat: Text.PlainText
+                        text: orphanRow.modelData.ruleName
+                        font.bold: true
+                        elide: Text.ElideMiddle
+                        Layout.fillWidth: true
+                    }
+                    Controls.Label {
+                        objectName: "orphanStatus"
+                        textFormat: Text.PlainText
+                        text: orphanRow.modelData.statusText
+                        wrapMode: Text.Wrap
+                        font: Kirigami.Theme.smallFont
+                        Layout.fillWidth: true
+                    }
+                    Controls.Label {
+                        objectName: "orphanProblem"
+                        visible: orphanRow.modelData.problem.length > 0
+                        textFormat: Text.PlainText
+                        text: orphanRow.modelData.problem
+                        wrapMode: Text.Wrap
+                        color: Kirigami.Theme.negativeTextColor
+                        font: Kirigami.Theme.smallFont
+                        Layout.fillWidth: true
+                    }
+                    Controls.Button {
+                        objectName: "orphanRemoveButton"
+                        visible: orphanRow.modelData.canRemove && !orphanRow.confirmingRemove
+                        text: "Remove…"
+                        onClicked: orphanRow.confirmingRemove = true
+                    }
+                    Controls.Label {
+                        objectName: "orphanRemoveQuestion"
+                        visible: orphanRow.modelData.canRemove && orphanRow.confirmingRemove
+                        text: "Remove the firewall's rule under this name? Snitchwatch no longer "
+                            + "recommends it, and it may allow or block something; see the Rules "
+                            + "page."
+                        wrapMode: Text.Wrap
+                        Layout.fillWidth: true
+                    }
+                    RowLayout {
+                        visible: orphanRow.modelData.canRemove && orphanRow.confirmingRemove
+                        Controls.Button {
+                            objectName: "orphanRemoveConfirm"
+                            text: "Remove rule"
+                            onClicked: {
+                                orphanRow.confirmingRemove = false;
+                                page.model.removeOrphan(orphanRow.modelData.orphanId);
+                            }
+                        }
+                        Controls.Button {
+                            objectName: "orphanRemoveCancel"
+                            text: "Cancel"
+                            onClicked: orphanRow.confirmingRemove = false
+                        }
+                    }
+                }
+            }
         }
 
         delegate: Controls.ItemDelegate {
