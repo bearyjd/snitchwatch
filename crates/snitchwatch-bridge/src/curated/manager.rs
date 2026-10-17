@@ -44,6 +44,8 @@ use crate::ws_messages::{ClientMessage, ServerMessage, StorageStatus};
 mod intent;
 #[path = "manager_moved.rs"]
 mod moved;
+#[path = "manager_orphans.rs"]
+mod orphans;
 #[path = "manager_resolver.rs"]
 mod resolver;
 #[path = "manager_state.rs"]
@@ -220,6 +222,7 @@ impl CuratedDefaults {
                 .map(|entry| summary(entry, &state, rules_known))
                 .collect(),
             groups: groups().to_vec(),
+            orphans: self.orphan_summaries(&state),
             storage: state.storage.clone(),
             unavailable: state.inert.clone(),
         }
@@ -354,7 +357,7 @@ impl CuratedDefaults {
         };
         let Some((rules, left_out, mut files_left, epoch)) = daemon else {
             // A removal asked for under the old list doesn't carry over.
-            lock(&self.inner.state).removals.clear();
+            lock(&self.inner.state).clear_removals();
             self.announce_changed();
             return;
         };
@@ -427,9 +430,11 @@ impl CuratedDefaults {
                 )
             }
         };
+        let orphan_removals = self.take_orphan_removals(generation);
         self.save_if_changed().await;
         self.announce_changed();
-        if actions.is_empty() && removals.is_empty() && reenables.is_empty() {
+        let idle = actions.is_empty() && removals.is_empty() && reenables.is_empty();
+        if idle && orphan_removals.is_empty() {
             return;
         }
         // One rule-list broadcast for the pass (if any command changed it).
@@ -453,6 +458,7 @@ impl CuratedDefaults {
             self.save_if_changed().await;
             self.announce_changed();
         }
+        self.remove_orphans(orphan_removals, generation).await;
         for (action, revision) in actions {
             if self.generation() != generation {
                 break;

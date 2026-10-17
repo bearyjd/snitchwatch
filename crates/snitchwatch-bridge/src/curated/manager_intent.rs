@@ -59,6 +59,7 @@ impl CuratedDefaults {
                 reply,
             } => self.choose_legacy(&ids, on, request_id, reply),
             ClientMessage::RemoveCuratedDefault { id } => self.ask_removal(&id),
+            ClientMessage::RemoveCuratedOrphan { id } => self.ask_orphan_removal(&id),
             ClientMessage::PrepareCuratedBroadOptIn {
                 request_id,
                 id,
