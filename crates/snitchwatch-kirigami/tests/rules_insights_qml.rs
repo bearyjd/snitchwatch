@@ -24,7 +24,11 @@ mod common;
 use common::{capture_stderr, init_headless_qt_env};
 
 const PROBE_URL: &str = "qrc:/rules_insights_probe.qml";
-const RULES_PAGE: &str = include_str!("../qml/RulesPage.qml");
+const RULES_PAGE: &str = concat!(
+    include_str!("../qml/RulesPage.qml"),
+    "\n",
+    include_str!("../qml/RulesInspectorSheet.qml"),
+);
 
 /// The page's title bar (where the button lives) isn't instantiated outside
 /// an application window, so the probe can't click it; this pins what it does.

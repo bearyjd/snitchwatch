@@ -110,14 +110,14 @@ Kirigami.ScrollablePage {
     property string inspectNotEditable: ""
     // Exposed for the headless inspector probe (tests/rules_inspector_qml.rs).
     property alias inspectorSheet: inspector
-    property alias inspectorEnabledSwitch: inspectEnabledSwitch
-    property alias inspectorDeleteButton: inspectDeleteButton
+    property alias inspectorEnabledSwitch: inspector.enabledSwitch
+    property alias inspectorDeleteButton: inspector.deleteButton
     property alias rulesList: list
     property alias rulesIo: rulesIo
     property alias importSheet: importSheet
     property alias ruleEditor: ruleEditor
-    property alias inspectorEditButton: inspectEditButton
-    property alias inspectorCommandNote: inspectCommandNote
+    property alias inspectorEditButton: inspector.editButton
+    property alias inspectorCommandNote: inspector.commandNote
     property alias rulesCommandNote: rulesCommandNote
     readonly property bool showsAllAppsNotice: !!page.model && page.model.legacyHostOnlyCount > 0
     // Not `ioStatus.visible`: a child of a hidden header always reads false.
@@ -254,14 +254,14 @@ Kirigami.ScrollablePage {
         if (!page.model) return;
         if (page.inspectManagedDns && enabled) {
             if (page.curatedModel) page.curatedModel.reenableDns();
-            inspectEnabledSwitch.checked = Qt.binding(function () { return page.inspectEnabled; });
+            inspector.enabledSwitch.checked = Qt.binding(function () { return page.inspectEnabled; });
             return;
         }
         if (page.inspectManagedDns && !enabled && page.curatedModel)
             page.curatedModel.revokeBroadConsent();
         page.model.setEnabled(page.inspectName, enabled);
         page.inspectEnabled = enabled;
-        inspectEnabledSwitch.checked = Qt.binding(function () { return page.inspectEnabled; });
+        inspector.enabledSwitch.checked = Qt.binding(function () { return page.inspectEnabled; });
     }
 
     Connections {
@@ -661,167 +661,10 @@ Kirigami.ScrollablePage {
         inspector.open();
     }
 
-    // Rule detail + enable/disable + delete. Kept as an OverlaySheet, same as
-    // BlocklistsPage's inspector, so it behaves identically at every width.
-    SizedOverlaySheet {
+    // The rule detail sheet (enable/disable, Edit, delete).
+    RulesInspectorSheet {
         id: inspector
-        title: page.inspectSource === "blocklist" ? ("blocklist: " + page.inspectBlocklistId) : page.inspectDisplayName
-
-        ColumnLayout {
-            Layout.preferredWidth: inspector.preferredWidth
-            spacing: Kirigami.Units.largeSpacing
-
-            Kirigami.FormLayout {
-                Layout.fillWidth: true
-                Controls.Label {
-                    Kirigami.FormData.label: "Name"
-                    textFormat: Text.PlainText
-                    text: page.inspectDisplayName
-                    elide: Text.ElideMiddle
-                }
-                Controls.Label {
-                    Kirigami.FormData.label: "Source"
-                    textFormat: Text.PlainText
-                    text: page.inspectSourceLabel
-                }
-                Controls.Label {
-                    Kirigami.FormData.label: "Action"
-                    textFormat: Text.PlainText
-                    text: page.inspectAction
-                    color: page.actionColor(page.inspectAction)
-                }
-                Controls.Label {
-                    Kirigami.FormData.label: "Duration"
-                    textFormat: Text.PlainText
-                    text: page.inspectDuration
-                }
-                Controls.Label {
-                    Kirigami.FormData.label: "Target"
-                    visible: page.inspectOperatorSummary.length > 0
-                    textFormat: Text.PlainText
-                    text: page.inspectOperatorSummary
-                    wrapMode: Text.Wrap
-                }
-                Controls.Label {
-                    objectName: "inspectHowItDecides"
-                    Kirigami.FormData.label: "Order"
-                    Layout.fillWidth: true
-                    textFormat: Text.PlainText
-                    wrapMode: Text.Wrap
-                    text: "Position " + (page.inspectPrecedence + 1) + " of "
-                          + (page.model ? page.model.count : 0) + " in the order the firewall "
-                          + "checks rules (turned-off rules are counted, but skipped). "
-                          + page.inspectHowItDecides
-                }
-                Controls.Switch {
-                    id: inspectEnabledSwitch
-                    Kirigami.FormData.label: "Enabled"
-                    enabled: page.inspectToggleable && (!page.inspectManagedDns || page.inspectEnabled)
-                    checked: page.inspectEnabled
-                    onToggled: page.setInspectEnabled(checked)
-                }
-                // The bridge's note on this rule's last toggle (#152).
-                Controls.Label {
-                    id: inspectCommandNote
-                    objectName: "inspectCommandNote"
-                    visible: text.length > 0
-                    Layout.fillWidth: true
-                    textFormat: Text.PlainText
-                    wrapMode: Text.Wrap
-                    text: page.inspectCommandNote
-                }
-                Controls.Button {
-                    objectName: "reenableDnsButton"
-                    visible: page.inspectManagedDns && !page.inspectEnabled && page.inspectToggleable
-                    enabled: page.curatedModel && page.curatedModel.broadSupported
-                    text: "Re-enable DNS…"
-                    onClicked: page.curatedModel.reenableDns()
-                }
-                Controls.Label {
-                    textFormat: Text.PlainText
-                    wrapMode: Text.Wrap
-                    Layout.fillWidth: true
-                    visible: page.inspectManagedDns && page.curatedModel && page.curatedModel.consentResult.length > 0
-                    text: page.curatedModel ? page.curatedModel.consentResult : ""
-                }
-                Controls.Label {
-                    Kirigami.FormData.label: "Read-only"
-                    visible: page.inspectReadOnlyReason.length > 0
-                    textFormat: Text.PlainText
-                    text: page.inspectReadOnlyReason
-                    wrapMode: Text.Wrap
-                    Layout.fillWidth: true
-                }
-            }
-
-            Kirigami.Separator {
-                Layout.fillWidth: true
-            }
-
-            Controls.Button {
-                id: inspectEditButton
-                objectName: "inspectEditButton"
-                Layout.fillWidth: true
-                visible: !page.confirmingDelete
-                enabled: page.inspectNotEditable.length === 0
-                text: "Edit…"
-                icon.name: "document-edit"
-                onClicked: page.editInspected()
-            }
-            // A read-only rule already says why above.
-            Controls.Label {
-                objectName: "inspectNotEditable"
-                visible: page.inspectReadOnlyReason.length === 0 && page.inspectNotEditable.length > 0
-                Layout.fillWidth: true
-                textFormat: Text.PlainText
-                text: page.inspectNotEditable
-                wrapMode: Text.Wrap
-            }
-
-            // Two-step confirmation kept inline (no separate dialog type
-            // introduced) — mirrors the sheet's existing button-row pattern.
-            Controls.Button {
-                id: inspectDeleteButton
-                Layout.fillWidth: true
-                visible: !page.confirmingDelete
-                enabled: page.inspectDeletable
-                text: "Delete rule"
-                icon.name: "edit-delete-remove"
-                onClicked: page.confirmingDelete = true
-            }
-
-            ColumnLayout {
-                Layout.fillWidth: true
-                visible: page.confirmingDelete
-                spacing: Kirigami.Units.smallSpacing
-
-                Controls.Label {
-                    Layout.fillWidth: true
-                    text: "Delete this rule permanently?"
-                    color: Kirigami.Theme.negativeTextColor
-                    wrapMode: Text.Wrap
-                }
-                RowLayout {
-                    Layout.fillWidth: true
-                    spacing: Kirigami.Units.largeSpacing
-                    Controls.Button {
-                        Layout.fillWidth: true
-                        text: "Cancel"
-                        onClicked: page.confirmingDelete = false
-                    }
-                    Controls.Button {
-                        Layout.fillWidth: true
-                        text: "Confirm delete"
-                        icon.name: "edit-delete-remove"
-                        onClicked: {
-                            page.model.deleteRule(page.inspectName);
-                            page.confirmingDelete = false;
-                            inspector.close();
-                        }
-                    }
-                }
-            }
-        }
+        host: page
     }
 
     // Rule editor (P2.1): "New rule…", the inspector's Edit, and

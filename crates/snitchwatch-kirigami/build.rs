@@ -46,6 +46,7 @@ fn main() {
                 "qml/MakeRuleOutcomes.qml",
                 "qml/BlocklistsPage.qml",
                 "qml/RulesPage.qml",
+                "qml/RulesInspectorSheet.qml",
                 "qml/RulesInsightsText.qml",
                 "qml/RulesEmptyPlaceholder.qml",
                 "qml/RuleSimulatorSheet.qml",

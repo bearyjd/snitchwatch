@@ -6,6 +6,10 @@
 //! file that declares `mod qml_guard_support;`, not as a test of its own.
 #![allow(dead_code)]
 
+mod sources;
+#[allow(unused_imports)]
+pub use sources::*;
+
 /// Drop whole-line `//` comments so a guard can't trip over prose that merely
 /// names the thing it forbids (same helper shape as `qml_source_guards.rs`).
 pub fn code_lines(source: &str) -> String {

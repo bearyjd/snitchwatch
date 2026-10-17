@@ -56,7 +56,14 @@ fn the_make_rule_controller_lives_in_main_qml_only() {
         "MakeRuleController {\n        id: makeRuleController\n        Component.onCompleted: startBridgeFeed()"
     ));
     for (name, source) in [
-        ("RulesPage.qml", include_str!("../qml/RulesPage.qml")),
+        (
+            "RulesPage.qml",
+            concat!(
+                include_str!("../qml/RulesPage.qml"),
+                "\n",
+                include_str!("../qml/RulesInspectorSheet.qml")
+            ),
+        ),
         (
             "MakeRuleSheet.qml",
             include_str!("../qml/MakeRuleSheet.qml"),
