@@ -162,8 +162,8 @@ impl Representative {
     }
 
     fn takes(&self, row: &ConnectionRow) -> bool {
-        row.started_at_ms >= self.first_seen_ms - COLLAPSE_WINDOW_MS
-            && row.started_at_ms <= self.last_seen_ms + COLLAPSE_WINDOW_MS
+        row.started_at_ms >= self.first_seen_ms.saturating_sub(COLLAPSE_WINDOW_MS)
+            && row.started_at_ms <= self.last_seen_ms.saturating_add(COLLAPSE_WINDOW_MS)
     }
 }
 
@@ -420,7 +420,7 @@ impl RowCollapse {
             .values()
             .filter(|ask| {
                 at >= ask.started_at_ms
-                    && at <= ask.started_at_ms + TWIN_WINDOW_MS
+                    && at <= ask.started_at_ms.saturating_add(TWIN_WINDOW_MS)
                     && CollapseKey::of(ask) == *key
             })
             .min_by(|a, b| (a.started_at_ms, &a.id).cmp(&(b.started_at_ms, &b.id)))
@@ -453,7 +453,7 @@ impl RowCollapse {
         // keeps everything still in its window, so it is safe.
         if self
             .expired_at
-            .is_some_and(|last| (last..last + COLLAPSE_WINDOW_MS).contains(&at))
+            .is_some_and(|last| (last..last.saturating_add(COLLAPSE_WINDOW_MS)).contains(&at))
         {
             return;
         }
@@ -463,7 +463,7 @@ impl RowCollapse {
             let Some(rep) = reps.get(id) else {
                 return false;
             };
-            if rep.last_seen_ms + COLLAPSE_WINDOW_MS >= at {
+            if rep.last_seen_ms.saturating_add(COLLAPSE_WINDOW_MS) >= at {
                 return true;
             }
             if rep.members.is_empty() {
@@ -472,7 +472,7 @@ impl RowCollapse {
             false
         });
         self.asks
-            .retain(|_, ask| ask.started_at_ms + 2 * TWIN_WINDOW_MS >= at);
+            .retain(|_, ask| ask.started_at_ms.saturating_add(2 * TWIN_WINDOW_MS) >= at);
     }
 
     /// Stop `id` taking repeats of `key`.
