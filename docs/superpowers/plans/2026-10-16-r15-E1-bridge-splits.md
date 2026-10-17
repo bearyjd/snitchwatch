@@ -51,3 +51,14 @@ struct literal in `run_with_incoming` and the tests read them).
   must not get A's list back; assert the list-then-withdraw transient.
 - Unix HELLO-adopting-nothing test: skipped if it needs a production clock
   hook (recorded in the final report).
+
+## As built
+- `grpc_server/tests/mod.rs` also holds the cross-file fixtures (lifecycle and
+  rules-service helpers) and shared imports.
+- `ws_messages.rs` split into `diagnostic_wire`, `rule_wire`, `reply_to`,
+  `status_wire`, `profile_wire`.
+- cli `lib.rs` re-exports use `#[cfg(test)] use` for `Notice`/`TrayState`, which
+  the already-separate test files take through `use super::*`.
+- Unix HELLO-adopting-nothing test: skipped. A stale staged snapshot needs
+  `PENDING_SNAPSHOT_TTL` (30 s, `std::time::Instant` read inside `RulesSync`)
+  to pass, which is a production clock hook.
