@@ -328,3 +328,44 @@ async fn a_subscribe_whose_connection_never_says_hello_never_replaces_the_cache(
     assert!(cached(&svc).is_unknown());
     assert!(rx.try_recv().is_err());
 }
+
+/// PR #106 review N1 on TCP, where another local process may hold any
+/// stream: B adopts its own snapshot, A's later HELLO takes the list, then A
+/// closes. B, current again, must not get A's list back: it is withdrawn,
+/// and (N8) its subscribers see the empty `SetRules` and then a
+/// `RulesNotShown` that no longer says `listed`.
+#[tokio::test]
+async fn a_closing_tcp_holder_withdraws_the_list_instead_of_handing_it_to_the_other_stream() {
+    let (svc, _cache, mut rx) = rules_service(DaemonTransport::Tcp);
+    let (a, b) = (
+        Some(std::net::SocketAddr::from(([127, 0, 0, 1], 1001))),
+        Some(std::net::SocketAddr::from(([127, 0, 0, 1], 1002))),
+    );
+    svc.rules.stage(a, vec![daemon_rule("from-a")]);
+    svc.rules.stage(b, vec![daemon_rule("from-b")]);
+    let commands = svc.daemon_commands();
+    let (stream_a, _a_rx) = commands.open_stream(a);
+    let (stream_b, _b_rx) = commands.open_stream(b);
+
+    commands.on_reply(stream_b.id(), &hello());
+    assert!(cached(&svc).contains("from-b"), "B adopted its own list");
+    commands.on_reply(stream_a.id(), &hello());
+    assert!(cached(&svc).contains("from-a"), "A's HELLO took the list");
+    std::iter::from_fn(|| rx.try_recv().ok()).for_each(drop);
+
+    drop(stream_a);
+
+    assert!(cached(&svc).is_unknown(), "withdrawn, not handed to B");
+    let after: Vec<ServerMessage> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+    assert!(
+        matches!(
+            after.as_slice(),
+            [
+                ServerMessage::SetRules { rules },
+                ServerMessage::RulesNotShown { listed: false, .. },
+            ] if rules.is_empty()
+        ),
+        "the empty list, then a not-shown that is not `listed`: {after:?}"
+    );
+    drop(stream_b);
+}
