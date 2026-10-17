@@ -7,6 +7,11 @@ use serde::{Deserialize, Serialize};
 
 mod blocklist_wire;
 mod curated_wire;
+mod diagnostic_wire;
+mod profile_wire;
+mod reply_to;
+mod rule_wire;
+mod status_wire;
 mod verdict_wire;
 pub use crate::curated::intent::IntentContext;
 pub use blocklist_wire::{
@@ -19,6 +24,11 @@ pub use curated_wire::{
     IntentDecodeError,
 };
 
+pub use diagnostic_wire::{CheckKind, CheckStatus, DiagnosticCheck};
+pub use profile_wire::{ProfileRuleWire, ProfileSummary};
+pub use reply_to::ReplyTo;
+pub use rule_wire::{RuleCommandOutcome, RuleHitWire};
+pub use status_wire::{AboutInfo, ConnectionsStatus, StorageStatus, TrafficEvent};
 pub use verdict_wire::{
     effective_verdict_duration, AutoAnswer, ConnectionRow, VerdictAction, VerdictDuration,
     VerdictScope,
@@ -26,34 +36,6 @@ pub use verdict_wire::{
 
 use crate::notice::Notice;
 use crate::tray_state::TrayState;
-
-/// Which readiness/connectivity property a diagnostic check covers.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum CheckKind {
-    DaemonReachable,
-    FirewallRunning,
-    EbpfSupport,
-    NftablesSupport,
-}
-
-/// Result of one diagnostic check. `Unknown` covers "can't assess yet"
-/// (e.g. opensnitchd connected but hasn't sent a `ClientConfig` yet) —
-/// never reported as `Ok` or `Failed` when the bridge genuinely doesn't
-/// know.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "status", rename_all = "snake_case")]
-pub enum CheckStatus {
-    Ok,
-    Failed { detail: String },
-    Unknown,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct DiagnosticCheck {
-    pub kind: CheckKind,
-    pub status: CheckStatus,
-}
 
 /// Server → client message envelope. Each variant matches one of the 22
 /// `handleServerCommand` cases in the LS UI's `app.js`.
@@ -433,34 +415,6 @@ pub enum ServerMessage {
 }
 
 /// What happened to a rule command (P2.1). Every reason is plain text.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(
-    tag = "status",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum RuleCommandOutcome {
-    /// The daemon answered OK (both steps, for a rename).
-    Ok,
-    /// Done, with something the user should know (a renamed rule's old
-    /// file the daemon couldn't remove).
-    OkWithNote { note: String },
-    /// The daemon answered ERROR, or a rename was undone; why.
-    Rejected { reason: String },
-    /// The bridge didn't send it: the rule policy's problems.
-    Refused {
-        problems: Vec<crate::rule_policy::RuleProblem>,
-    },
-    /// No answer in time: it may or may not have been applied.
-    Timeout,
-    /// No firewall service connected; nothing was sent.
-    NoDaemon,
-    /// A command whose outcome isn't known (see the reason): a rename, or
-    /// a refused change the daemon may or may not have applied (#120 item
-    /// 7). Neither done nor not done.
-    Unsure { reason: String },
-}
-
 fn is_zero(n: &u32) -> bool {
     *n == 0
 }
@@ -473,18 +427,6 @@ fn is_false(flag: &bool) -> bool {
 /// or `-`. Anything else is treated as absent.
 pub fn valid_request_id(id: &str) -> bool {
     (1..=64).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
-}
-
-/// One rule's count in [`ServerMessage::RuleHits`], and in the saved hit
-/// counts file.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RuleHitWire {
-    /// The daemon's rule name.
-    pub name: String,
-    pub count: u64,
-    /// When the rule last decided a connection, in Unix milliseconds.
-    pub last_hit_unix_ms: i64,
 }
 
 /// Client → server messages. These come from the UI's `sendAction(type, payload)`
@@ -787,148 +729,6 @@ fn redacted_message_debug<T: Serialize>(
         }
     }
     f.debug_tuple(name).field(&value).finish()
-}
-
-/// A channel back to one WebSocket connection, stamped on rule import and
-/// export requests by `ws_server` so their answers reach only the GUI that
-/// asked. Never serialized. Clones share the connection's "stopped reading"
-/// mark, so a GUI that stops reading is waited on once, not per request.
-#[derive(Clone)]
-pub struct ReplyTo {
-    tx: tokio::sync::mpsc::Sender<ServerMessage>,
-    stalled: std::sync::Arc<std::sync::atomic::AtomicBool>,
-}
-
-impl ReplyTo {
-    /// One connection's channel (call once per connection, then clone).
-    pub fn new(tx: tokio::sync::mpsc::Sender<ServerMessage>) -> Self {
-        Self {
-            tx,
-            stalled: std::sync::Arc::default(),
-        }
-    }
-
-    /// Deliver `message`, waiting for room; `false` when the connection is
-    /// gone.
-    pub async fn send(&self, message: ServerMessage) -> bool {
-        self.tx.send(message).await.is_ok()
-    }
-
-    /// Deliver `message` only if there is room now.
-    pub fn try_send(&self, message: ServerMessage) -> bool {
-        self.tx.try_send(message).is_ok()
-    }
-
-    /// Whether the connection was found not reading its answers.
-    pub fn stalled(&self) -> bool {
-        self.stalled.load(std::sync::atomic::Ordering::SeqCst)
-    }
-
-    pub fn mark_stalled(&self) {
-        self.stalled
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    /// The connection took an answer again: it is reading after all.
-    pub fn clear_stalled(&self) {
-        self.stalled
-            .store(false, std::sync::atomic::Ordering::SeqCst);
-    }
-}
-
-impl std::fmt::Debug for ReplyTo {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("ReplyTo")
-    }
-}
-
-impl PartialEq for ReplyTo {
-    fn eq(&self, other: &Self) -> bool {
-        self.tx.same_channel(&other.tx)
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct TrafficEvent {
-    pub timestamp_ms: i64,
-    pub bytes_in: u64,
-    pub bytes_out: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub enum ConnectionsStatus {
-    Connected,
-    Reconnecting,
-    Disconnected,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct AboutInfo {
-    pub snitchwatch_version: String,
-    pub opensnitchd_version: String,
-    pub ebpf_commit: String,
-}
-
-/// Where the bridge keeps blocklist subscriptions (`SetBlocklists`) or
-/// profiles (`SetProfiles`); each store reports its own.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct StorageStatus {
-    /// True only when the data is saved in a state directory and survives a
-    /// restart.
-    pub persistent: bool,
-    /// Why storage is not persistent, when it was configured but unusable,
-    /// or, with `unreadable`, why the saved subscriptions couldn't be read.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-    /// The saved data couldn't be read, so Snitchwatch leaves the firewall's
-    /// rules for it as they are and installs nothing: blocklists (issue
-    /// #45) and the recommended rules' choices (prompt-slot D). Its own
-    /// state, apart from `persistent`. An unreadable profile store is
-    /// reported as not persistent instead.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub unreadable: bool,
-}
-
-/// One rule override within a profile, as carried over the wire (mirrors
-/// `snitchwatch_bridge::profiles::store::ProfileRule`, kept as a distinct
-/// type here the same way `BlocklistSummary` is distinct from
-/// `blocklists::store::Subscription` — the wire shape is the stable
-/// contract, the store shape is free to evolve independently).
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProfileRuleWire {
-    pub id: String,
-    pub action: String,
-    /// Part 1's single condition (empty when `operator` is set).
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub operand: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub data: String,
-    /// The rule editor's conditions in #48's wire shape (issue #46 Part 2).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub operator: Option<serde_json::Value>,
-    /// Bridge to GUI, while the rule's profile is active: one of the
-    /// `ENFORCEMENT_*` values ("rule_installed" only after the daemon's
-    /// correlated OK). Empty for a profile that isn't active, and from an
-    /// older bridge.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub enforcement: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub enforcement_reason: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProfileSummary {
-    pub id: String,
-    pub name: String,
-    pub network_matchers: Vec<String>,
-    pub rules: Vec<ProfileRuleWire>,
-    pub active: bool,
 }
 
 #[cfg(test)]
