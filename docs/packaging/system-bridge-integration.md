@@ -105,6 +105,7 @@ failed to load on the owner's laptop kernel before (snitchwatch#6), so it
 stays off until there is evidence it loads on kernel 7.2. The BTF
 requirement is explained in
 `docs/superpowers/specs/2026-07-14-daemon-kernel-diagnostics-design.md`.
+
 `/etc/opensnitchd/rules/000-snitchwatch-bridge-fetch.json` lets this
 account's bridge download blocklists over HTTPS (TCP 443) under
 `DefaultAction: deny`. Denies and blocklists still win; see
