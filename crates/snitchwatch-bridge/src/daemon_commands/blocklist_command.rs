@@ -399,6 +399,30 @@ mod tests {
         assert!(stream_rx.try_recv().is_err());
     }
 
+    /// A HELLO that adopts nothing (its staged snapshot outlived the TTL)
+    /// withdraws the list another stream committed, and a leftover delete
+    /// then gets `NoDaemon` (#115, Unix shared key).
+    #[tokio::test]
+    async fn a_hello_that_adopts_nothing_withdraws_the_list() {
+        let rules = RulesSync::new(broadcast::channel(8).0);
+        let commands = DaemonCommands::new(DaemonTransport::Unix, rules.clone());
+        rules.stage(None, Vec::new());
+        let (first, mut first_rx) = commands.open_stream(None);
+        commands.on_reply(first.id(), &hello());
+        assert!(rules.has_list(), "the first HELLO adopted the snapshot");
+
+        crate::cache::rules::advance_clock(std::time::Duration::from_secs(31));
+        let (second, mut second_rx) = commands.open_stream(None);
+        commands.on_reply(second.id(), &hello());
+
+        assert!(!rules.has_list(), "the list is withdrawn");
+        assert!(matches!(
+            commands.send_leftover_delete(the_delete()),
+            Err(SendError::NoDaemon)
+        ));
+        assert!(first_rx.try_recv().is_err() && second_rx.try_recv().is_err());
+    }
+
     #[tokio::test]
     async fn only_a_delete_can_be_sent_that_way() {
         let (_state, _dir, install) = installed();
