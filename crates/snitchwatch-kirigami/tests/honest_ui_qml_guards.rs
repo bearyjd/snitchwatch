@@ -15,7 +15,11 @@ use qml_guard_support::*;
 const BLOCKLISTS_PAGE: &str = include_str!("../qml/BlocklistsPage.qml");
 const PROFILES_PAGE: &str = include_str!("../qml/ProfilesPage.qml");
 const RECOMMENDED_PAGE: &str = include_str!("../qml/RecommendedRulesPage.qml");
-const RULES_PAGE: &str = include_str!("../qml/RulesPage.qml");
+const RULES_PAGE: &str = concat!(
+    include_str!("../qml/RulesPage.qml"),
+    "\n",
+    include_str!("../qml/RulesInspectorSheet.qml"),
+);
 const SIMULATOR_SHEET: &str = include_str!("../qml/RuleSimulatorSheet.qml");
 const IMPORT_SHEET: &str = include_str!("../qml/RulesImportSheet.qml");
 const EDITOR_SHEET: &str = include_str!("../qml/RuleEditorSheet.qml");
@@ -192,6 +196,10 @@ const ALL_QML: &[(&str, &str)] = &[
         include_str!("../qml/RulesInsightsText.qml"),
     ),
     ("RulesPage.qml", RULES_PAGE),
+    (
+        "RulesInspectorSheet.qml",
+        include_str!("../qml/RulesInspectorSheet.qml"),
+    ),
     ("ScannerPage.qml", include_str!("../qml/ScannerPage.qml")),
     ("SizedOverlaySheet.qml", SIZED_SHEET),
     ("TrafficPage.qml", include_str!("../qml/TrafficPage.qml")),

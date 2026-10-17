@@ -18,7 +18,11 @@ mod common;
 use common::{capture_stderr, init_headless_qt_env};
 
 const PROBE_URL: &str = "qrc:/rules_all_apps_probe.qml";
-const RULES_PAGE: &str = include_str!("../qml/RulesPage.qml");
+const RULES_PAGE: &str = concat!(
+    include_str!("../qml/RulesPage.qml"),
+    "\n",
+    include_str!("../qml/RulesInspectorSheet.qml"),
+);
 const RULES_MODEL: &str = include_str!("../src/rules_model.rs");
 
 fn code_lines(source: &str) -> String {
