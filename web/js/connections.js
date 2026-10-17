@@ -264,7 +264,7 @@ function arrowFor(dir) {
  * @returns {string}
  */
 function emojiFor(action) {
-  const suffix = action.toLowerCase() === 'allow' ? 'allow' : 'deny';
+  const suffix = action === 'allow' ? 'allow' : 'deny';
   return `<svg width="14" height="14"><use href="#rule-${suffix}"/></svg>`;
 }
 
@@ -1480,7 +1480,7 @@ function handleSetInspector(msg) {
 
   const text = document.createElement('span');
   text.className = 'host';
-  text.textContent = msg.defaultAction.toLowerCase() === 'allow'
+  text.textContent = msg.defaultAction === 'allow'
     ? t('default-allow')
     : t('default-deny');
   defaultRule.appendChild(text);

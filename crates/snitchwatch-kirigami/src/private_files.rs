@@ -91,6 +91,27 @@ pub fn open_private_append(path: &Path) -> io::Result<File> {
     Ok(file)
 }
 
+/// Write `body` to `path` (created or truncated), in a private directory,
+/// opened like [`open_private_append`]: no symlink or FIFO, ours, one link,
+/// 0600. The file is only truncated after those checks pass.
+pub fn write_private(path: &Path, body: &[u8]) -> io::Result<()> {
+    use std::io::Write;
+    if let Some(dir) = path.parent() {
+        ensure_private_dir(dir)?;
+    }
+    let mut file = open_no_follow(
+        path,
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .mode(0o600),
+    )?;
+    refuse_unless_ours(path, &file)?;
+    file.set_len(0)?;
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    file.write_all(body)
+}
+
 /// A directory owned by someone other than us, for tests, under any uid: `/usr`
 /// when we aren't root, else a temp directory chowned to `nobody` (root can).
 /// The returned guard keeps a temp directory alive.
@@ -187,6 +208,42 @@ mod tests {
         std::os::unix::fs::symlink(&target, &root).unwrap();
         assert!(ensure_private_root(&root).is_err());
         assert_eq!(std::fs::read_dir(&target).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn a_written_file_is_0600_and_replaces_its_contents() {
+        let dir = scratch();
+        let path = dir.path().join("cfg/settings.json");
+        write_private(&path, b"first contents").unwrap();
+        write_private(&path, b"two").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"two");
+        assert_eq!(mode(&path), 0o600);
+        assert_eq!(mode(path.parent().unwrap()), 0o700);
+    }
+
+    #[test]
+    fn writing_through_a_symlink_or_into_a_foreign_dir_is_refused() {
+        let dir = scratch();
+        let target = dir.path().join("target");
+        std::fs::write(&target, "keep").unwrap();
+        let link = dir.path().join("link.json");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(write_private(&link, b"x").is_err());
+        assert_eq!(std::fs::read(&target).unwrap(), b"keep");
+        let (foreign, _guard) = foreign_owned_dir();
+        assert!(write_private(&foreign.join("settings.json"), b"x").is_err());
+        assert!(!foreign.join("settings.json").exists());
+    }
+
+    #[test]
+    fn writing_to_a_hard_linked_file_is_refused() {
+        let dir = scratch();
+        let original = dir.path().join("original");
+        std::fs::write(&original, "keep").unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::hard_link(&original, &path).unwrap();
+        assert!(write_private(&path, b"x").is_err());
+        assert_eq!(std::fs::read(&original).unwrap(), b"keep");
     }
 
     #[test]

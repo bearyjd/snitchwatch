@@ -109,9 +109,19 @@ const REFUSED_BASE: &str = "/proc/snitchwatch-no-trusted-home";
 /// ours, every path points somewhere that can't exist, so settings read as
 /// defaults and can't be written (#116 review M1).
 fn home() -> Option<String> {
-    match std::env::var("HOME") {
-        Ok(home) if !home.is_empty() => Some(home),
-        _ => Some(no_home_base()),
+    Some(home_base())
+}
+
+/// The base every per-user path hangs off: `HOME`, or the checked no-`HOME`
+/// root. Also the GeoIP lookup's base, so it never searches a shared `/tmp`.
+pub(crate) fn home_base() -> String {
+    home_from(std::env::var("HOME").ok(), no_home_base)
+}
+
+fn home_from(home: Option<String>, no_home: impl FnOnce() -> String) -> String {
+    match home {
+        Some(home) if !home.is_empty() => home,
+        _ => no_home(),
     }
 }
 
@@ -143,6 +153,16 @@ mod tests {
     // These exercise the pure `*_from` resolvers with explicit inputs. They
     // must never call `std::env::set_var`/`remove_var`: env vars are
     // process-global and `cargo test` runs tests on parallel threads.
+
+    /// #170: with `HOME` unset or empty the base is the checked fallback,
+    /// never a bare `/tmp`.
+    #[test]
+    fn an_unset_or_empty_home_uses_the_checked_fallback() {
+        let fallback = || REFUSED_BASE.to_string();
+        assert_eq!(home_from(None, fallback), REFUSED_BASE);
+        assert_eq!(home_from(Some(String::new()), fallback), REFUSED_BASE);
+        assert_eq!(home_from(Some("/home/a".into()), fallback), "/home/a");
+    }
 
     /// #116 review M1: a refused no-HOME root hands out paths that can't be
     /// read or written, and settings fall back to defaults.

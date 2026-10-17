@@ -692,3 +692,24 @@ fn sealing_starts_a_new_row_for_the_next_repeat() {
     assert_eq!(ids, ["event-1", "event-3"]);
     assert_eq!(c.repeat_count("event-1"), 2, "sealing keeps the count");
 }
+
+/// #172: window sums at the ends of the i64 range must saturate, not panic
+/// (debug builds overflowed on `last + WINDOW` / `first - WINDOW`).
+#[test]
+fn window_arithmetic_at_the_i64_extremes_does_not_overflow() {
+    for at in [i64::MAX, i64::MAX - 1, i64::MIN, i64::MIN + 1] {
+        let mut c = RowCollapse::default();
+        let ids = shown(
+            &mut c,
+            vec![
+                insert(vec![event("event-1", at, "deny")]),
+                insert(vec![event("event-2", at, "deny")]),
+                insert(vec![ask("ask-1", at, Some("allow"))]),
+                insert(vec![event("event-3", at, "allow")]),
+                insert(vec![event("event-4", i64::MAX, "deny")]),
+                insert(vec![event("event-5", i64::MIN, "deny")]),
+            ],
+        );
+        assert!(!ids.is_empty(), "at={at}");
+    }
+}

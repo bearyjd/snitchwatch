@@ -98,6 +98,14 @@ packaging/system/stage.sh /path/to/image-root \
 
 The staged overlay supplies sysusers, tmpfiles, one system service, two
 socket units, and the one packaged opensnitchd rule.
+
+Both shipped opensnitchd configs set `"ProcMonitorMethod": "ebpf"`. The
+bazzite-tower image overwrites it to `"proc"` after `stage.sh` runs: eBPF
+failed to load on the owner's laptop kernel before (snitchwatch#6), so it
+stays off until there is evidence it loads on kernel 7.2. The BTF
+requirement is explained in
+`docs/superpowers/specs/2026-07-14-daemon-kernel-diagnostics-design.md`.
+
 `/etc/opensnitchd/rules/000-snitchwatch-bridge-fetch.json` lets this
 account's bridge download blocklists over HTTPS (TCP 443) under
 `DefaultAction: deny`. Denies and blocklists still win; see
