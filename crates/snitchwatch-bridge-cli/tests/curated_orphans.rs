@@ -115,6 +115,59 @@ async fn an_orphan_is_listed_refused_by_the_rules_page_and_removed_from_recommen
     s.bridge.shutdown();
 }
 
+/// The same, as a GUI does it: over the authenticated WebSocket, the list
+/// arrives in a `setCuratedDefaults` frame and `removeCuratedOrphan` deletes
+/// exactly that rule.
+#[tokio::test]
+async fn an_orphan_is_listed_and_removed_over_the_websocket() {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+    let s = start(BridgeMode::System).await;
+    let model = LoaderModel::with_rules(&[retired_rule(true)]).shared();
+    let (_daemon, mut seen) = connect_model(&s.bridge, 1, &model).await;
+    let transport = tokio::net::UnixStream::connect(&s.bridge.ws_socket_path)
+        .await
+        .unwrap();
+    let (mut gui, _) = tokio_tungstenite::client_async("ws://localhost/stream", transport)
+        .await
+        .unwrap();
+    gui.send(Message::Text(s.bridge.ws_token.as_str().into()))
+        .await
+        .unwrap();
+    let ack = gui.next().await.unwrap().unwrap();
+    assert!(ack.to_string().contains("authenticated"), "{ack}");
+    gui.send(Message::Text(r#"{"action":"requestSnapshot"}"#.into()))
+        .await
+        .unwrap();
+    let listed = tokio::time::timeout(WAIT, async {
+        loop {
+            if let Message::Text(text) = gui.next().await.unwrap().unwrap() {
+                let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+                if value["action"] == "setCuratedDefaults" && value["orphans"].is_array() {
+                    break value;
+                }
+            }
+        }
+    })
+    .await
+    .expect("no orphan list over the socket");
+    assert_eq!(listed["orphans"][0]["id"], RETIRED, "{listed}");
+    assert_eq!(listed["orphans"][0]["enabled"], true, "{listed}");
+
+    gui.send(Message::Text(
+        r#"{"action":"removeCuratedOrphan","id":"retired-service"}"#.into(),
+    ))
+    .await
+    .unwrap();
+    let delete = next_command(&mut seen).await;
+    assert_eq!(delete.r#type, Action::DeleteRule as i32);
+    assert_eq!(delete.rules.len(), 1);
+    assert_eq!(delete.rules[0].name, RETIRED_RULE);
+    nothing_sent(&mut seen).await;
+    assert!(!model.lock().unwrap().memory.contains_key(RETIRED_RULE));
+    s.bridge.shutdown();
+}
+
 /// Tower r12's immutable file: the daemon drops the rule from memory and
 /// refuses. The page says the file may remain, offers no second Remove,
 /// and nothing more is sent.

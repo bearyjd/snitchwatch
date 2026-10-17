@@ -117,6 +117,8 @@ Controls.ApplicationWindow {
                       { id: "off", enabled: false, problem: probeWindow.markup },
                       { id: "old", enabled: true }]);
                 expect(section().visible, "no section for listed orphans");
+                expect(Math.abs(section().width - page.entriesList.width) < 1,
+                       "section width " + section().width + " vs " + page.entriesList.width);
                 expect(find(section(), "orphanRows").count === 3,
                        "rows: " + find(section(), "orphanRows").count);
                 const name = find(orphanRow(2), "orphanName");

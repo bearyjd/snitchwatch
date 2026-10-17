@@ -136,7 +136,7 @@ Kirigami.ScrollablePage {
 
         footer: ColumnLayout {
             objectName: "orphansSection"
-            width: ListView.view ? ListView.view.width : implicitWidth
+            width: list.width
             visible: page.orphans.length > 0
             spacing: Kirigami.Units.smallSpacing
 
