@@ -31,48 +31,6 @@ pub struct BridgeHandles {
     connection: Arc<Mutex<ConnectionState>>,
 }
 
-/// A service message labelled with the authenticated WebSocket session that
-/// received it. Qt delivery is asynchronous, so consumers must retain this
-/// label until their queued Qt callback runs; a callback from an older service
-/// instance must not mutate a model after reconnect.
-#[derive(Clone, Debug)]
-pub struct ReceivedServerMessage {
-    pub connection_id: u64,
-    pub message: ServerMessage,
-}
-
-/// Session-labelled shell state, subject to the same queued-Qt stale-frame
-/// guard as model messages.
-#[derive(Clone, Debug)]
-pub struct ReceivedTrayState {
-    pub connection_id: u64,
-    pub state: BridgeTrayState,
-}
-
-/// Session-labelled filter-pause state (issue #47), routed and guarded the
-/// same way as [`ReceivedTrayState`].
-#[derive(Clone, Debug)]
-pub struct ReceivedPauseState {
-    pub connection_id: u64,
-    pub state: BridgePauseState,
-}
-
-/// The bridge's last `PromptSlot` (prompt-slot plan, part A), session-
-/// labelled and guarded like [`ReceivedTrayState`]. Empty until one arrives.
-#[derive(Clone, Debug, Default)]
-pub struct ReceivedPromptSlot {
-    pub connection_id: u64,
-    pub holder: Option<snitchwatch_bridge::prompt_slot::PromptSlotHolder>,
-    pub holders: u32,
-    pub defaulted_at_least: Option<u64>,
-}
-
-#[derive(Clone, Debug)]
-pub struct ReceivedNotice {
-    pub connection_id: u64,
-    pub notice: BridgeNotice,
-}
-
 /// Senders for the shell state the runtime forwards next to the model feed:
 /// tray state, desktop notices, filter-pause state and the prompt slot.
 struct ShellFeeds {
@@ -314,53 +272,6 @@ fn resolve_token_path(
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."))
         .join("token")
-}
-
-/// Where the shell's link to the bridge service stands. The bridge banner
-/// picks its sentence from this state, never from [`LinkStatus::detail`], which
-/// carries error text and is only ever shown.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum LinkState {
-    /// Starting up, or the first attempt hasn't finished.
-    #[default]
-    Connecting,
-    Connected,
-    /// The connection was lost or couldn't be made; the client keeps trying.
-    Retrying,
-    /// The client couldn't be started at all; nothing will retry.
-    Failed,
-    /// The client finished (its sender went away); nothing will retry.
-    Stopped,
-}
-
-impl LinkState {
-    /// The word `BridgeFeed.linkState` carries to QML.
-    pub fn token(self) -> &'static str {
-        match self {
-            Self::Connecting => "connecting",
-            Self::Connected => "connected",
-            Self::Retrying => "retrying",
-            Self::Failed => "failed",
-            Self::Stopped => "stopped",
-        }
-    }
-}
-
-/// The link's [`LinkState`] and the message that goes with it.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct LinkStatus {
-    pub state: LinkState,
-    /// A message for the user to read, not to parse: it can carry error text.
-    pub detail: String,
-}
-
-impl LinkStatus {
-    fn connecting() -> Self {
-        Self {
-            state: LinkState::Connecting,
-            detail: "Connecting to bridge service…".to_string(),
-        }
-    }
 }
 
 fn set_status(status: &Arc<Mutex<LinkStatus>>, state: LinkState, detail: impl Into<String>) {
@@ -837,44 +748,17 @@ use leftover_capability::clear_unreported_leftovers;
 #[path = "bridge_runtime/leftover_capability_tests.rs"]
 mod leftover_capability_tests;
 
+#[path = "bridge_runtime/received.rs"]
+mod received;
+pub use received::{
+    ReceivedNotice, ReceivedPauseState, ReceivedPromptSlot, ReceivedServerMessage,
+    ReceivedTrayState,
+};
+
+#[path = "bridge_runtime/link.rs"]
+mod link;
+pub use link::{LinkState, LinkStatus};
+
 #[cfg(test)]
-mod curated_consent_tests {
-    use super::*;
-    fn prepare() -> ClientMessage {
-        serde_json::from_value(serde_json::json!({"action":"prepareCuratedBroadOptIn","requestId":"dns-1-1","id":"dns-resolved","purpose":"enable"})).unwrap()
-    }
-    #[tokio::test]
-    async fn modern_queue_requires_current_capable_origin_and_never_replays() {
-        let (broadcast_tx, _) = broadcast::channel(8);
-        let (inbound_tx, mut rx) = mpsc::channel(1);
-        let connection = Arc::new(Mutex::new(ConnectionState::default()));
-        let handles = BridgeHandles {
-            broadcast_tx,
-            inbound_tx,
-            runtime: Handle::current(),
-            connection: connection.clone(),
-        };
-        let session = mark_connected(&connection, false);
-        assert!(handles.try_send_for_session(session, prepare()).is_err());
-        connection.lock().unwrap().curated_broad_opt_in = true;
-        assert!(
-            handles.try_send(prepare()).is_err(),
-            "generic send assigned modern intent a session"
-        );
-        assert_eq!(handles.try_send_for_session(session, prepare()), Ok(()));
-        assert_eq!(
-            handles.try_send_for_session(session, prepare()),
-            Err(SendClientMessageError::Full)
-        );
-        disconnect_and_discard(&connection, &mut rx);
-        assert!(rx.try_recv().is_err(), "queued consent survived disconnect");
-        let next = mark_connected(&connection, false);
-        connection.lock().unwrap().curated_broad_opt_in = true;
-        assert!(!handles.advertises_curated_broad_opt_in(session));
-        assert!(handles.advertises_curated_broad_opt_in(next));
-        assert_eq!(
-            handles.try_send_for_session(session, prepare()),
-            Err(SendClientMessageError::StaleSession)
-        );
-    }
-}
+#[path = "bridge_runtime/curated_consent_tests.rs"]
+mod curated_consent_tests;
