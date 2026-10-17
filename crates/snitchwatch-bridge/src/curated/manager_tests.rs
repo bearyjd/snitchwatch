@@ -22,6 +22,8 @@ pub(super) enum Daemon {
     /// Never answers a `CHANGE_RULE` (its waiter times out); accepts the
     /// rest.
     SilentInstalls,
+    /// Never answers a `DELETE_RULE`; accepts the rest.
+    SilentDeletes,
 }
 
 pub(super) struct Harness {
@@ -95,6 +97,10 @@ impl Harness {
                         continue
                     }
                     Daemon::SilentInstalls => true,
+                    Daemon::SilentDeletes if command.r#type == Action::DeleteRule as i32 => {
+                        continue
+                    }
+                    Daemon::SilentDeletes => true,
                 };
                 commands.on_reply(stream_id, &reply(command.id, ok));
             }

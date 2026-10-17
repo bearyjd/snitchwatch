@@ -34,6 +34,29 @@ pub struct CuratedDefaultSummary {
     pub problem: Option<String>,
 }
 
+/// A rule under the curated prefix that no entry offers and Snitchwatch
+/// recorded no copy of (#113, `super::orphans`): listed under "No longer
+/// recommended" with Remove. Only the bridge's own facts: the id from its
+/// reserved name, whether it is enabled, and fixed text; never the rule's
+/// daemon-sourced content.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CuratedOrphanSummary {
+    /// The id under the prefix (`snitchwatch-default-<id>`).
+    pub id: String,
+    /// Whether the daemon's rule is enabled (it may be turned off on the
+    /// Rules page).
+    pub enabled: bool,
+    /// The daemon refused its delete after dropping it from memory: its file
+    /// may remain and bring it back when the service restarts. Not
+    /// removable until then. Omitted when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub file_left: bool,
+    /// Why the last removal failed, in fixed text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub problem: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -84,6 +107,35 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<CuratedDefaultSummary>(wire).unwrap(),
             summary(false)
+        );
+    }
+
+    /// An orphan summary leaves out `fileLeft` and `problem` when unset.
+    #[test]
+    fn an_orphan_summary_round_trips_and_leaves_out_its_unset_fields() {
+        let plain = CuratedOrphanSummary {
+            id: "retired".into(),
+            enabled: false,
+            file_left: false,
+            problem: None,
+        };
+        let wire = serde_json::to_value(&plain).unwrap();
+        assert_eq!(wire, serde_json::json!({"id": "retired", "enabled": false}));
+        assert_eq!(
+            serde_json::from_value::<CuratedOrphanSummary>(wire).unwrap(),
+            plain
+        );
+        let left = CuratedOrphanSummary {
+            file_left: true,
+            problem: Some("p".into()),
+            ..plain
+        };
+        let wire = serde_json::to_value(&left).unwrap();
+        assert_eq!(wire["fileLeft"], true);
+        assert_eq!(wire["problem"], "p");
+        assert_eq!(
+            serde_json::from_value::<CuratedOrphanSummary>(wire).unwrap(),
+            left
         );
     }
 

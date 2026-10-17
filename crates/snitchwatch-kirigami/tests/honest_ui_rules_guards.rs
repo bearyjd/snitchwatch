@@ -316,7 +316,8 @@ fn blocklists_page_labels_showing_subscription_data_are_plain_text() {
 }
 
 /// Prompt-slot D: each entry's program, what it allows, why, its status and
-/// problem, and the bridge's reasons are the bridge's text.
+/// problem, and the bridge's reasons are the bridge's text; so are a "No
+/// longer recommended" rule's name (#113: the daemon's), status and problem.
 #[test]
 fn recommended_rules_page_labels_showing_bridge_text_are_plain_text() {
     assert_data_labels_plain_text(
@@ -329,8 +330,11 @@ fn recommended_rules_page_labels_showing_bridge_text_are_plain_text() {
             "row.statusText",
             "row.problem",
             "page.unavailableReason",
+            "orphanRow.modelData.ruleName",
+            "orphanRow.modelData.statusText",
+            "orphanRow.modelData.problem",
         ],
-        6,
+        9,
     );
 }
 

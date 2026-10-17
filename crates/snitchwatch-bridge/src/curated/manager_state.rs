@@ -33,6 +33,10 @@ pub(super) struct State {
     pub(super) removal_failures: BTreeMap<String, Failure>,
     /// Entries the user confirmed removing (edited copies, M2).
     pub(super) removals: BTreeSet<String>,
+    /// Orphans (#113) the user confirmed removing, by id.
+    pub(super) orphan_removals: BTreeSet<String>,
+    /// Orphan removals that failed, by id (`manager_orphans.rs`).
+    pub(super) orphan_failures: BTreeMap<String, super::orphans::OrphanFailure>,
     /// Rule names whose install the daemon refused or didn't answer: stock
     /// `replaceUserRule` takes a rule into memory before `Save` can fail,
     /// so it may apply though the list lacks it (PR #119 review M1), and an
@@ -80,6 +84,8 @@ impl State {
             failures: BTreeMap::new(),
             removal_failures: BTreeMap::new(),
             removals: BTreeSet::new(),
+            orphan_removals: BTreeSet::new(),
+            orphan_failures: BTreeMap::new(),
             maybe_applied: BTreeMap::new(),
             install_refusals: BTreeMap::new(),
             withheld: BTreeSet::new(),
@@ -97,6 +103,14 @@ impl State {
             version: 0,
             saved: 0,
         }
+    }
+}
+
+impl State {
+    /// Forget the removals asked for: they were for a list no longer known.
+    pub(super) fn clear_removals(&mut self) {
+        self.removals.clear();
+        self.orphan_removals.clear();
     }
 }
 

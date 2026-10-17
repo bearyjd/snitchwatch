@@ -31,6 +31,8 @@ pub struct CuratedStore {
     groups: Vec<CuratedGroup>,
     /// This session's bridge advertised `curatedGroupsV1`.
     groups_capable: bool,
+    /// Rules no longer recommended (#113); empty from an older bridge.
+    orphans: Vec<snitchwatch_bridge::curated::wire::CuratedOrphanSummary>,
     unavailable: Option<String>,
 }
 
@@ -53,11 +55,13 @@ impl CuratedStore {
         if let ServerMessage::SetCuratedDefaults {
             entries,
             groups,
+            orphans,
             unavailable,
             ..
         } = msg
         {
             self.received = true;
+            self.orphans = orphans.clone();
             self.groups = groups.clone();
             self.entries = if self.grouped() {
                 curated_groups::in_group_order(groups, entries.clone())
@@ -233,6 +237,16 @@ impl CuratedStore {
         })
     }
 
+    /// The rules no longer recommended, as JSON for QML (#113).
+    pub fn orphans_json(&self) -> String {
+        crate::curated_orphans::view_json(&self.orphans, self.usable())
+    }
+
+    /// The request removing the orphan `id`, once the user confirmed.
+    pub fn orphan_removal(&self, id: &str) -> Option<ClientMessage> {
+        crate::curated_orphans::removal(&self.orphans, self.usable(), id)
+    }
+
     /// The request removing `id`'s edited rule, once the user confirmed.
     pub fn removal(&self, id: &str) -> Option<ClientMessage> {
         self.entries
@@ -345,6 +359,7 @@ mod tests {
                 entry("chronyc-local", true, EntryStatus::Installed),
             ],
             groups: Vec::new(),
+            orphans: Vec::new(),
             storage: StorageStatus {
                 persistent: true,
                 reason: None,
@@ -363,6 +378,7 @@ mod tests {
                 entry("undecided", true, EntryStatus::InFirewall),
             ],
             groups: Vec::new(),
+            orphans: Vec::new(),
             storage: StorageStatus {
                 persistent: true,
                 reason: None,
@@ -439,6 +455,7 @@ mod tests {
                     entry("held-off", false, EntryStatus::InFirewallButOff),
                 ],
                 groups: Vec::new(),
+                orphans: Vec::new(),
                 storage: StorageStatus {
                     persistent: true,
                     reason: None,
@@ -507,6 +524,7 @@ mod tests {
                     broad_entry("dns-adopt", true, EntryStatus::InFirewall),
                 ],
                 groups: Vec::new(),
+                orphans: Vec::new(),
                 storage: StorageStatus {
                     persistent: true,
                     reason: None,
@@ -664,6 +682,7 @@ mod tests {
                 group("app-updates"),
                 group("name-resolution"),
             ],
+            orphans: Vec::new(),
             storage: StorageStatus {
                 persistent: true,
                 reason: None,
