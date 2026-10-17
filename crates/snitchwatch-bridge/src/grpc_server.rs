@@ -669,7 +669,7 @@ use pending_cleanup::PendingCleanup;
 mod replies;
 
 #[cfg(test)]
-#[path = "grpc_server/tests.rs"]
+#[path = "grpc_server/tests/mod.rs"]
 mod tests;
 
 #[cfg(test)]
