@@ -566,6 +566,8 @@ fn bounded_snapshot(rules: Vec<Rule>) -> Snapshot {
 
 #[path = "rules_sync.rs"]
 mod sync;
+#[cfg(test)]
+pub(crate) use sync::advance_clock;
 pub use sync::{
     prune_expired_rules_every, publish_rules, settle_rule_command, PendingSnapshots, PublishHold,
     RulesSync,
