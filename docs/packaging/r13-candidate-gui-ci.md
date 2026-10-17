@@ -1,8 +1,8 @@
-# r14 system GUI candidate CI
+# r15 system GUI candidate CI
 
-The fixed destinations are `r14-candidate` (branch, tag, draft prerelease). The
-earlier `r13-candidate` branch, tag and prerelease remain r13's immutable
-accepted record and are never replaced. The Flatpak ostree branch, bundle
+The fixed destinations are `r15-candidate` (branch, tag, draft prerelease). The
+earlier `r13-candidate` and `r14-candidate` branches, tags and prereleases
+remain immutable prior records and are never replaced. The Flatpak ostree branch, bundle
 filename (`snitchwatch-system-r13-candidate.flatpak`) and artifact name
 (`r13-system-gui-candidate`) keep their r13 identifiers because downstream
 consumers reference them.
@@ -15,8 +15,8 @@ not establish runtime acceptance or authorize stable publication.
 
 The primary must independently obtain resolved source/workflow reviews and
 successful native/QML CI at the immutable head. Only then may the primary set
-the repository variable `R14_CANDIDATE_REVIEWED_SHA` to that full lowercase SHA
-and push that same commit to `r14-candidate`. An absent or different variable
+the repository variable `R15_CANDIDATE_REVIEWED_SHA` to that full lowercase SHA
+and push that same commit to `r15-candidate`. An absent or different variable
 holds both build and publisher. Branch movement invalidates that authorization;
 a changed head needs fresh review and green CI. The variable is owner-managed
 authorization, not a candidate-authored PASS receipt. Review the workflow and
@@ -61,7 +61,7 @@ restores caches, unpacks a Flatpak or executes candidate code. The write token
 is repository-wide; fixed reviewed publisher code enforces the target boundary.
 
 The publisher attests the validated bundle and packet as data. It explicitly
-creates the lightweight `refs/tags/r14-candidate` at the reviewed commit before
+creates the lightweight `refs/tags/r15-candidate` at the reviewed commit before
 creating a draft prerelease: GitHub draft releases do not create their tag.
 An existing tag must already point directly to that exact commit. Only a 404
 from the tag lookup permits creation; lookup errors and creation conflicts
