@@ -28,19 +28,22 @@ pub(super) struct OrphanFailure {
 
 impl CuratedDefaults {
     /// Queue the removal of the orphan `id`, asked for by a GUI. Refused
-    /// (nothing queued) on an inert bridge, and for an id that can't be one:
-    /// invalid, a current entry, or one Snitchwatch recorded installing.
+    /// (nothing queued) on an inert bridge, and for anything the cached list
+    /// doesn't show as an orphan now, so the queue holds listed orphans only.
+    /// A "file may remain" note stays until the daemon reconnects.
     pub(super) fn ask_orphan_removal(&self, id: &str) {
         let mut state = lock(&self.inner.state);
-        if state.inert.is_some()
-            || !valid_id(id)
-            || entries().iter().any(|entry| entry.id == id)
-            || state.choices.was_installed(id)
-        {
+        if state.inert.is_some() || !valid_id(id) || !self.still_orphan(&rule_name(id), &state) {
             warn!(orphan = %id, "removal asked for a rule that isn't an orphan; ignored");
             return;
         }
-        state.orphan_failures.remove(id);
+        if !state
+            .orphan_failures
+            .get(id)
+            .is_some_and(|failure| failure.file_left)
+        {
+            state.orphan_failures.remove(id);
+        }
         state.orphan_removals.insert(id.to_string());
         state.requests += 1;
         drop(state);
@@ -142,7 +145,10 @@ impl CuratedDefaults {
     async fn remove_orphan(&self, id: &str, generation: u64) {
         let name = rule_name(id);
         // The state guard stays held from the re-check through queue
-        // admission: no choice or list read here can change in between.
+        // admission, so the choices it read can't change in between. The
+        // rule list can (a HELLO): the guarded dispatch re-reads it under
+        // the cache lock and queues only on the same daemon stream, while
+        // the name is still listed.
         let sent = {
             let state = lock(&self.inner.state);
             if state.inert.is_some() || self.generation() != generation {
@@ -155,8 +161,17 @@ impl CuratedDefaults {
             let Some(command) = CuratedCommand::delete(&name) else {
                 return;
             };
-            self.inner.commands.send_curated(command)
+            self.inner
+                .commands
+                .send_curated_guarded_delete(command, generation)
         };
+        if sent.is_err() && self.generation() != generation {
+            // A HELLO came in: the follow-up pass re-checks it on the new list.
+            lock(&self.inner.state)
+                .orphan_removals
+                .insert(id.to_string());
+            return;
+        }
         let outcome = Self::wait_sent(sent, Refusal::Remove).await;
         let mut state = lock(&self.inner.state);
         match outcome {

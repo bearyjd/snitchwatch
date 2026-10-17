@@ -203,6 +203,117 @@ async fn an_unanswered_removal_is_shown_as_failed() {
     assert_eq!(harness.seen().len(), 1, "sent again: {:?}", harness.seen());
 }
 
+/// LOW-2: a request for an id the cached list doesn't show as an orphan
+/// is never queued, so the queue holds listed orphans only.
+#[tokio::test]
+async fn a_request_for_an_unlisted_id_is_not_queued() {
+    let harness = Harness::new().connect(Daemon::Accept, vec![orphan_rule(RETIRED_RULE, true)]);
+    let curated = harness.curated();
+    curated.reconcile().await;
+    for i in 0..50 {
+        ask(&curated, &format!("not-listed-{i}"));
+    }
+    ask(&curated, FLATPAK);
+    assert!(lock(&curated.inner.state).orphan_removals.is_empty());
+    ask(&curated, RETIRED);
+    assert_eq!(
+        lock(&curated.inner.state)
+            .orphan_removals
+            .iter()
+            .collect::<Vec<_>>(),
+        [RETIRED]
+    );
+}
+
+/// LOW-3: asking again keeps a "file may remain" note; only a reconnect
+/// ends it.
+#[tokio::test]
+async fn asking_again_keeps_a_file_left_note() {
+    let harness =
+        Harness::new().connect(Daemon::RefuseDeletes, vec![orphan_rule(RETIRED_RULE, true)]);
+    let curated = harness.curated();
+    curated.reconcile().await;
+    ask(&curated, RETIRED);
+    curated.reconcile().await;
+    // Listed again on the same stream (say, a late list update).
+    harness
+        .rules
+        .cache()
+        .lock()
+        .unwrap()
+        .upsert(orphan_rule(RETIRED_RULE, true));
+    ask(&curated, RETIRED);
+    let state = lock(&curated.inner.state);
+    assert!(state.orphan_removals.contains(RETIRED), "not queued");
+    assert!(
+        state
+            .orphan_failures
+            .get(RETIRED)
+            .is_some_and(|f| f.file_left),
+        "the file-left note was cleared by a second ask"
+    );
+}
+
+/// A HELLO in the middle of the removals re-queues the rest, and the
+/// follow-up pass re-checks them against the new list.
+#[tokio::test]
+async fn a_reconnect_mid_removal_requeues_and_rechecks_on_the_new_list() {
+    let harness = Harness::new().connect(
+        Daemon::Accept,
+        vec![
+            orphan_rule(OTHER_RULE, true),
+            orphan_rule(RETIRED_RULE, true),
+        ],
+    );
+    let curated = harness.curated();
+    curated.reconcile().await;
+    ask(&curated, OTHER);
+    ask(&curated, RETIRED);
+    let gate = Arc::new(tokio::sync::Notify::new());
+    *harness.hold.lock().unwrap() = Some(gate.clone());
+    let pass = tokio::spawn({
+        let curated = curated.clone();
+        async move { curated.reconcile().await }
+    });
+    eventually("the first delete", || !harness.seen().is_empty()).await;
+    // The daemon restarts; its new list no longer has the second one.
+    harness.resync(vec![orphan_rule(OTHER_RULE, true)]);
+    gate.notify_one();
+    pass.await.unwrap();
+    assert!(
+        lock(&curated.inner.state).orphan_removals.contains(RETIRED),
+        "not re-queued"
+    );
+    curated.reconcile().await;
+    assert_eq!(
+        harness.seen(),
+        [(Action::DeleteRule as i32, OTHER_RULE.to_string())]
+    );
+    assert!(lock(&curated.inner.state).orphan_removals.is_empty());
+}
+
+/// An orphan that became a recorded copy between the request and the send
+/// (an edited one, so the plan leaves it too) is not deleted.
+#[tokio::test]
+async fn an_orphan_recorded_before_the_send_is_not_deleted() {
+    let mut recorded = super::super::tests::flatpak_rule();
+    recorded.name = RETIRED_RULE.into();
+    let mut edited = recorded.clone();
+    edited.operator.as_mut().unwrap().list[2].data = "8443".into();
+    let harness = Harness::new().connect(Daemon::Accept, vec![edited]);
+    let curated = harness.curated();
+    curated.reconcile().await;
+    assert_eq!(orphans_of(&curated).len(), 1);
+    ask(&curated, RETIRED);
+    {
+        let mut state = lock(&curated.inner.state);
+        state.choices = state.choices.installed(RETIRED, &recorded);
+    }
+    curated.reconcile().await;
+    assert!(harness.seen().is_empty(), "{:?}", harness.seen());
+    assert!(orphans_of(&curated).is_empty());
+}
+
 /// An inert bridge lists none and removes none.
 #[tokio::test]
 async fn an_inert_bridge_lists_and_removes_no_orphans() {
