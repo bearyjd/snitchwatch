@@ -26,6 +26,14 @@ fn no_home_root_for(uid: u32) -> PathBuf {
 /// directory of ours, 0700. Under [`no_home_root`] that root is held to the
 /// same rule, since `/tmp` lets anyone create it first.
 pub fn ensure_private_dir(dir: &Path) -> io::Result<()> {
+    resolve_private_dir(dir).map(|_| ())
+}
+
+/// [`ensure_private_dir`], returning the directory to use. A symlink in
+/// place of `dir` (stow, dotfile managers) is followed once to a real
+/// directory, which must pass the same checks; under [`no_home_root`] a
+/// symlink is never followed.
+fn resolve_private_dir(dir: &Path) -> io::Result<PathBuf> {
     let root = no_home_root();
     if dir.starts_with(&root) {
         ensure_private_root(&root)?;
@@ -37,7 +45,13 @@ pub fn ensure_private_dir(dir: &Path) -> io::Result<()> {
     for ancestor in dir.ancestors().filter(|a| a.starts_with(&root)) {
         tighten_own_dir(ancestor)?;
     }
-    tighten_own_dir(dir)
+    let real = if !dir.starts_with(&root) && std::fs::symlink_metadata(dir)?.is_symlink() {
+        dir.canonicalize()?
+    } else {
+        dir.to_path_buf()
+    };
+    tighten_own_dir(&real)?;
+    Ok(real)
 }
 
 /// Make `root` (one level, not recursive, so a planted symlink is never
@@ -91,25 +105,98 @@ pub fn open_private_append(path: &Path) -> io::Result<File> {
     Ok(file)
 }
 
-/// Write `body` to `path` (created or truncated), in a private directory,
-/// opened like [`open_private_append`]: no symlink or FIFO, ours, one link,
-/// 0600. The file is only truncated after those checks pass.
-pub fn write_private(path: &Path, body: &[u8]) -> io::Result<()> {
-    use std::io::Write;
-    if let Some(dir) = path.parent() {
-        ensure_private_dir(dir)?;
+/// How many temp names are tried before giving up on a name clash.
+const TEMP_ATTEMPTS: u32 = 8;
+
+fn temp_name(file_name: &str, attempt: u32) -> String {
+    format!(".{file_name}.tmp-{}-{attempt}", std::process::id())
+}
+
+/// Removes the temp file on drop (an error or a panic) unless disarmed.
+struct TempGuard<'a>(Option<&'a Path>);
+
+impl Drop for TempGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(path) = self.0 {
+            let _ = std::fs::remove_file(path);
+        }
     }
-    let mut file = open_no_follow(
-        path,
-        std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .mode(0o600),
-    )?;
-    refuse_unless_ours(path, &file)?;
-    file.set_len(0)?;
-    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-    file.write_all(body)
+}
+
+/// Write `body` to `path` atomically, in a private directory: a private temp
+/// file (`O_EXCL`, no-follow, 0600) beside it is written and synced, then
+/// renamed over `path`, so a crash leaves the old content whole. `path` itself
+/// must not be a symlink, FIFO, file of another user or hard-linked file; a
+/// symlinked *directory* of ours is resolved and checked like any other.
+pub fn write_private(path: &Path, body: &[u8]) -> io::Result<()> {
+    write_private_with(path, body, || Ok(()))
+}
+
+/// [`write_private`] with a hook run after the temp file is synced and before
+/// the rename, so tests can fail or crash at exactly that point.
+fn write_private_with(
+    path: &Path,
+    body: &[u8],
+    before_rename: impl FnOnce() -> io::Result<()>,
+) -> io::Result<()> {
+    use std::io::Write;
+    let name = path
+        .file_name()
+        .ok_or_else(|| refused(path, "has no file name"))?;
+    let name_str = name.to_string_lossy();
+    let dir = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => resolve_private_dir(parent)?,
+        _ => resolve_private_dir(Path::new("."))?,
+    };
+    let target = dir.join(name);
+    check_final_path(&target, &name_str)?;
+
+    let mut attempt = 0;
+    let (mut file, temp) = loop {
+        let temp = dir.join(temp_name(&name_str, attempt));
+        match open_no_follow(
+            &temp,
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600),
+        ) {
+            Ok(file) => break (file, temp),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                attempt += 1;
+                if attempt >= TEMP_ATTEMPTS {
+                    return Err(error);
+                }
+            }
+            Err(error) => return Err(error),
+        }
+    };
+    let mut guard = TempGuard(Some(&temp));
+    file.write_all(body)?;
+    file.sync_all()?;
+    before_rename()?;
+    std::fs::rename(&temp, &target)?;
+    guard.0 = None;
+    Ok(())
+}
+
+/// The final path, if it exists, must be a regular file of ours with one name.
+fn check_final_path(target: &Path, name: &str) -> io::Result<()> {
+    match std::fs::symlink_metadata(target) {
+        Ok(meta) if meta.file_type().is_symlink() => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "{name} is a symlink; Snitchwatch writes only regular files it owns ({})",
+                target.display()
+            ),
+        )),
+        Ok(_) => {
+            let existing = open_no_follow(target, std::fs::OpenOptions::new().read(true))?;
+            refuse_unless_ours(target, &existing)
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 /// A directory owned by someone other than us, for tests, under any uid: `/usr`
@@ -179,16 +266,157 @@ mod tests {
         assert_eq!(mode(&dir.path().join("a")), 0o700);
     }
 
+    /// #176: a symlinked directory we own resolves to a real directory that
+    /// is then held to the same rule (ours, tightened to 0700).
     #[test]
-    fn a_symlink_in_place_of_the_directory_is_refused() {
+    fn a_symlinked_dir_is_resolved_and_its_target_tightened() {
         let dir = scratch();
         let target = dir.path().join("elsewhere");
         std::fs::create_dir(&target).unwrap();
         std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)).unwrap();
         let state = dir.path().join("state");
         std::os::unix::fs::symlink(&target, &state).unwrap();
+        ensure_private_dir(&state).unwrap();
+        assert_eq!(mode(&target), 0o700);
+        assert!(std::fs::symlink_metadata(&state).unwrap().is_symlink());
+    }
+
+    #[test]
+    fn a_symlink_to_a_foreign_dir_or_a_file_is_refused() {
+        let dir = scratch();
+        let (foreign, _guard) = foreign_owned_dir();
+        let before = mode(&foreign);
+        let state = dir.path().join("state");
+        std::os::unix::fs::symlink(&foreign, &state).unwrap();
         assert!(ensure_private_dir(&state).is_err());
-        assert_eq!(mode(&target), 0o755, "the link's target was not touched");
+        assert_eq!(mode(&foreign), before, "a foreign target is left alone");
+
+        let file = dir.path().join("file");
+        std::fs::write(&file, "x").unwrap();
+        let to_file = dir.path().join("to_file");
+        std::os::unix::fs::symlink(&file, &to_file).unwrap();
+        assert!(ensure_private_dir(&to_file).is_err());
+    }
+
+    #[test]
+    fn a_dangling_symlink_in_place_of_the_directory_is_refused() {
+        let dir = scratch();
+        let state = dir.path().join("state");
+        std::os::unix::fs::symlink(dir.path().join("missing"), &state).unwrap();
+        assert!(ensure_private_dir(&state).is_err());
+        assert!(!dir.path().join("missing").exists());
+    }
+
+    #[test]
+    fn writing_through_a_symlinked_parent_lands_in_the_real_dir() {
+        let dir = scratch();
+        let real = dir.path().join("dotfiles");
+        std::fs::create_dir(&real).unwrap();
+        let cfg = dir.path().join("cfg");
+        std::os::unix::fs::symlink(&real, &cfg).unwrap();
+        write_private(&cfg.join("settings.json"), b"hello").unwrap();
+        assert_eq!(std::fs::read(real.join("settings.json")).unwrap(), b"hello");
+        assert_eq!(mode(&real.join("settings.json")), 0o600);
+        assert_eq!(mode(&real), 0o700);
+    }
+
+    #[test]
+    fn a_symlinked_file_gets_a_clear_message() {
+        let dir = scratch();
+        let target = dir.path().join("target");
+        std::fs::write(&target, "keep").unwrap();
+        let link = dir.path().join("settings.json");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let error = write_private(&link, b"x").unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("is a symlink; Snitchwatch writes only regular files it owns"),
+            "{error}"
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), b"keep");
+    }
+
+    fn names(dir: &Path) -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        v.sort();
+        v
+    }
+
+    /// #176: the file is replaced by a rename, so a failure or crash before
+    /// it leaves the old content whole, and no temp file is left behind.
+    #[test]
+    fn a_failure_before_the_rename_keeps_the_old_content_and_leaves_no_temp() {
+        let dir = scratch();
+        let path = dir.path().join("settings.json");
+        write_private(&path, b"old").unwrap();
+        let result = write_private_with(&path, b"new", || {
+            // The temp is fully written by now; the old file is untouched.
+            assert_eq!(std::fs::read(&path).unwrap(), b"old");
+            Err(io::Error::other("injected"))
+        });
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"old");
+        assert_eq!(names(dir.path()), vec!["settings.json"]);
+    }
+
+    #[test]
+    fn a_crash_mid_write_keeps_the_old_content() {
+        let dir = scratch();
+        let path = dir.path().join("settings.json");
+        write_private(&path, b"old").unwrap();
+        let crashed = std::panic::catch_unwind(|| {
+            let _ = write_private_with(&path, b"new", || panic!("crash"));
+        });
+        assert!(crashed.is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"old");
+        assert_eq!(names(dir.path()), vec!["settings.json"]);
+    }
+
+    /// `O_EXCL`: a regular file already sitting at every temp name is never
+    /// reused or truncated.
+    #[test]
+    fn an_existing_temp_file_is_never_reused() {
+        let dir = scratch();
+        let path = dir.path().join("settings.json");
+        for attempt in 0..TEMP_ATTEMPTS {
+            std::fs::write(dir.path().join(temp_name("settings.json", attempt)), "mine").unwrap();
+        }
+        assert!(write_private(&path, b"x").is_err());
+        assert!(!path.exists());
+        for attempt in 0..TEMP_ATTEMPTS {
+            let temp = dir.path().join(temp_name("settings.json", attempt));
+            assert_eq!(std::fs::read(temp).unwrap(), b"mine");
+        }
+    }
+
+    #[test]
+    fn the_temp_file_is_private_and_a_planted_one_is_not_followed() {
+        let dir = scratch();
+        let path = dir.path().join("settings.json");
+        let victim = dir.path().join("victim");
+        std::fs::write(&victim, "keep").unwrap();
+        // Plant symlinks at every temp name the first attempts would use.
+        for attempt in 0..TEMP_ATTEMPTS {
+            let planted = dir.path().join(temp_name("settings.json", attempt));
+            std::os::unix::fs::symlink(&victim, &planted).unwrap();
+        }
+        assert!(write_private(&path, b"x").is_err());
+        assert_eq!(std::fs::read(&victim).unwrap(), b"keep");
+        assert!(!path.exists());
+        write_private_with(&dir.path().join("other.json"), b"y", || {
+            let temps: Vec<_> = names(dir.path())
+                .into_iter()
+                .filter(|n| n.contains("other.json.tmp"))
+                .collect();
+            assert_eq!(temps.len(), 1);
+            assert_eq!(mode(&dir.path().join(&temps[0])), 0o600);
+            Ok(())
+        })
+        .unwrap();
     }
 
     #[test]

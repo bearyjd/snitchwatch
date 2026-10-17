@@ -118,6 +118,22 @@ pub(crate) fn home_base() -> String {
     home_from(std::env::var("HOME").ok(), no_home_base)
 }
 
+/// [`home_base`] for a use that must not trust the cached check (the GeoIP
+/// lookup, #176): with `HOME` unset the no-`HOME` root is checked again now,
+/// the way [`write_settings`](crate::settings::write_settings) re-checks it.
+pub(crate) fn home_base_rechecked() -> String {
+    home_base_rechecked_from(
+        std::env::var("HOME").ok(),
+        &crate::private_files::no_home_root(),
+    )
+}
+
+fn home_base_rechecked_from(home: Option<String>, root: &std::path::Path) -> String {
+    home_from(home, || {
+        resolve_no_home(root, crate::private_files::ensure_private_root(root))
+    })
+}
+
 fn home_from(home: Option<String>, no_home: impl FnOnce() -> String) -> String {
     match home {
         Some(home) if !home.is_empty() => home,
@@ -273,6 +289,28 @@ mod tests {
         assert_eq!(
             settings_path_from(None, Some("/home/alice")),
             PathBuf::from("/home/alice/.config/snitchwatch/settings.json")
+        );
+    }
+
+    /// #176: unlike the cached base, the re-check notices a root that is no
+    /// longer ours, and leaves a set `HOME` alone.
+    #[test]
+    fn a_rechecked_base_refuses_a_root_that_is_not_ours() {
+        let (foreign, _guard) = crate::private_files::foreign_owned_dir();
+        assert_eq!(home_base_rechecked_from(None, &foreign), REFUSED_BASE);
+        assert_eq!(
+            home_base_rechecked_from(Some(String::new()), &foreign),
+            REFUSED_BASE
+        );
+        assert_eq!(
+            home_base_rechecked_from(Some("/home/x".into()), &foreign),
+            "/home/x"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let ours = dir.path().join("snitchwatch-root");
+        assert_eq!(
+            home_base_rechecked_from(None, &ours),
+            ours.to_string_lossy()
         );
     }
 }

@@ -188,16 +188,21 @@ Window {
                 probeWindow.expect(sheet.simulateUnevaluated.indexOf("050-uid") >= 0,
                     "uid should be unknown: " + sheet.simulateUnevaluated);
 
-                // A row with no process path: unknown, not an empty path.
+                // A row with no process path: unknown, not an empty path. It is
+                // also a DNS query (udp/53) whose name is its own IP, so its
+                // host is unknown (blank, box unticked), not the known-empty one.
                 probeWindow.simulateRow({ id: "r2", process: "curl", dstHost: "10.0.0.5",
                                           dstPort: 53, protocol: "udp" });
                 probeWindow.expect(probeWindow.field("simProcessPath").text === "",
                     "the process name leaked into the path");
                 probeWindow.expect(probeWindow.field("simDestIp").text === "10.0.0.5", "r2 ip");
                 // The IP is the row's fallback for a missing host, not the
-                // host: the daemon's DstHost for a bare IP is "".
+                // host: the text stays blank.
                 probeWindow.expect(probeWindow.field("simHost").text === "",
                     "r2 host: " + probeWindow.field("simHost").text);
+                probeWindow.expect(probeWindow.field("simHostEmpty").checked === false
+                                   && probeWindow.field("simHost").enabled === true,
+                    "r2: an unknown host is blank, unticked and editable");
                 probeWindow.expect(probeWindow.field("simProtocol").currentValue === "udp", "r2 protocol");
                 sheet.runSimulation();
                 probeWindow.expect(sheet.simulateMatchedRule === "",
@@ -227,6 +232,8 @@ Window {
                 probeWindow.expect(probeWindow.field("simHost").text === ""
                                    && probeWindow.field("simHostEmpty").checked === true,
                     "r6: host should be known empty");
+                probeWindow.expect(probeWindow.field("simHost").enabled === false,
+                    "r6: ticking the box should disable the host field");
                 sheet.runSimulation();
                 probeWindow.expect(sheet.simulateMatchedRule === "" && sheet.simulateUnevaluated === "",
                     "r6: an empty host is known, so the rule just doesn't match: " + sheet.simulateUnevaluated);
@@ -234,6 +241,8 @@ Window {
                 sheet.prefill({});
                 probeWindow.expect(probeWindow.field("simHostEmpty").checked === false,
                     "an empty prefill left the box ticked");
+                probeWindow.expect(probeWindow.field("simHost").enabled === true,
+                    "an empty prefill left the host field disabled");
 
                 // No destination IP known, and an IPv6-flavoured protocol.
                 probeWindow.simulateRow({ id: "r3", process: "dig", dstHost: "",
