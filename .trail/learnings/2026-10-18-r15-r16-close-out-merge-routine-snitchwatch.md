@@ -33,4 +33,4 @@ touches:
 - Test clock seam in cache/rules_sync.rs is thread-local (current-thread runtimes only) and does not cover rules_count's awaiting_adoption.
 - Settings dir that is a symlink is followed one hop only and must be ours and already 0700; stow users with a 0755 package dir must chmod 700 it (release-note line).
 - GitHub API calls sometimes hang for minutes; wrap with `timeout` and retry rather than assuming CI failed.
-- `trail init --no-agents` was run on 2026-10-18; it wrote .trail/, .claude/settings.json and 3 files in ~/.claude/. Nothing is committed yet.
+- `trail init --no-agents` was run on 2026-10-18; it wrote .trail/, .claude/settings.json and 3 files in ~/.claude/. It was committed in PR #183.
