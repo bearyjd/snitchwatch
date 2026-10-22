@@ -130,7 +130,8 @@ Build order inside phase 0: 0d (calm notices), 0a (names), 0b (counts), 0c
    time window, exception-first default. GUI-only, directly answers the screenshot.
 1. Status page v1 (counters + health, no history).
 2. Verdict and reason labels on rows (data already present).
-3. Connection explanation panel and glossary.
+3. Connection explanation panel and glossary (the first slice is phase-0 item 0e,
+   the right-click "What is this?" sheet).
 4. Search chips over live data; prompt grouping/digest (needs owner choices).
 5. History search once the store exists (r17 WS1).
 Keep every file under the 800-line rule; add QML tests next to the existing ones.

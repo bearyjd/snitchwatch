@@ -4,8 +4,8 @@ Status: draft plan, no code. Release: r16 (owner, 2026-10-22), GUI-only, shipped
 as the GUI artifact; it does not touch the image, units, sockets or daemon config.
 Parent plan: `2026-10-22-gui-clarity-overhaul.md` (evidence from the owner's
 screenshot). Each item below is its own small PR, test first, built in the order
-0d, 0a, 0b, 0c (the owner's stated pain first; the parent plan lists them in a
-different order).
+0d, 0a, 0b, 0c, 0e (the owner's stated pain first; the parent plan lists them in a
+different order). 0e is a stretch item: if phase 0 grows it moves to r17.
 
 ## Goal
 The Connections view should tell the owner what matters and what things are:
@@ -213,6 +213,168 @@ fail.
   rule and first-seen cases; `filter.rs` unit tests; `tests/connections_filters_qml.rs`,
   `connections_filter_layout_qml.rs`, `connections_header_qml.rs`.
 
+### 0e. Right-click "What is this?" (explain a program-to-destination pair)
+Owner request (2026-10-22): a right-click on an item that says what it is, shows the
+process, and lets them search the web, so they can judge "should this process be
+communicating this way to wherever it is". The sheet gives EVIDENCE; it never gives a
+verdict. Depends on 0a for names; if 0a has not landed the sheet shows the raw name
+only.
+- Surface: a NEW `WhatIsThisSheet.qml` (the `SizedOverlaySheet` pattern used by
+  `RuleSimulatorSheet`, `RulesInspectorSheet`), instantiated in `ConnectionsPage.qml`
+  next to the existing sheets (works from both the wide layout and the pushed narrow
+  page; the inspector is selection-bound and `ConnectionDetailPage` only wraps it).
+  Facts come from a new Rust `explain.rs` and a `ConnectionsModel` invokable
+  `explainJson(kind, key)`: `kind` is `row` (key = row id) or `group` (key =
+  `groupKey`), because group headers have no row id. The facts are SNAPSHOTTED when
+  the sheet opens (collapsed representatives and rows can disappear while it is
+  open, and delegates are pooled with `reuseItems: true`); the new `Controls.Menu`
+  closes `onPooled` like the existing `headerRuleButton`. `connections_model.rs` (648
+  lines) gets only the invokable.
+- Entry points: (1) right-click on a row and on a group header (`ConnectionRow.qml`,
+  `isGroupHeader` at `:42`; a row-level `TapHandler { acceptedButtons:
+  Qt.RightButton }` calling the menu, not on the Buttons, because the delegate comment
+  at `:115-122` and `tests/qml/tst_delegate_input.qml` pin a double-fire behaviour that
+  must be re-verified); (2) the keyboard: `Keys.onMenuPressed` and Shift+F10 on the
+  list, acting on `currentItem` (mirrors `Keys.onReturnPressed`/`onEnterPressed`,
+  `ConnectionList.qml:55-56`); (3) a visible "What is this?" button in the inspector
+  panel, so a mouse-only or screen-reader user always has a path.
+- What the sheet shows (GUI-only, no wire change), in three blocks:
+  * Program: friendly name and raw name from 0a with its trust marker, the full
+    path, and, for a group header, the number of destinations in the held rows with
+    the top few.
+  * Destination: hostname, destination IP, country via the geo resolver on
+    `row.dst_ip` (`geo/resolver.rs:58`; the resolver is owned by `GeoModel`, so access
+    from `ConnectionsModel` is UNVERIFIED and may need the handle passed in; without a
+    database it says "Unknown"), the port and protocol in plain words (a small const
+    table; nothing exists today), and a known-services line when the host matches the
+    static table (below).
+  * This pairing: the verdict and the reason (`outcome.rs::outcome_text`, the
+    delegate's `matchedRuleDisplay`/`outcomeText`), and first seen / last seen / count
+    computed DIRECTLY from the held rows for the pair key
+    `(program, destination)`: program = `process_path`; destination = `dst_host` (lowercased, one trailing dot stripped, so `Example.com` and
+    `example.com.` do not split the counts) when it is a real hostname, else `dst_ip` (the bridge puts the IP in `dst_host` when the
+    daemon sent no name, `translator/connection.rs:59-62`, so an IP-only row is a
+    destination-IP pair, never a hostname pair). Rows whose `process_path` is `None`
+    (`<unknown>` programs, `verdict_wire.rs:96`) are NOT merged into one program: the
+    sheet says "program path unknown" and shows no pair counts for them. Values: `min`
+    and `max` of `started_at_ms` and the number of rows. A test covers a `None` path
+    and an IP-only destination. Do not use the collapse
+    `Representative`: its `CollapseKey` (`collapse.rs:59-71`) also includes verdict,
+    rule, port, protocol and direction, so its numbers are per verdict and port, and
+    non-collapsible rows (no event row id, no action, deferred or pending) have none.
+    A group header uses the same computation over all rows of the group. These are counts of HELD rows, labelled so.
+- Known-services table: `data/known-services.txt` (domain, service, category),
+  loaded with `include_str!` like the other data files
+  (`connections/level_rules.rs:303`). Hand-listed SINGLE-TENANT domains only (for
+  example `datadoghq.com`); never tenant or multi-tenant suffixes (`amazonaws.com`,
+  `cloudfront.net`, `github.io`, ...), because a subdomain there says nothing about the
+  owner. Matching does NOT use `registrable_domain` (`grouping/keys.rs:34` is a
+  heuristic with a 23-entry `TWO_PART_TLDS` list, not the `psl` crate, which the GUI
+  crate does not depend on, and it has no IP guard) and does not need any PSL logic:
+  normalise first (lowercase, strip one trailing dot; reject anything with a port, an
+  IP literal (`is_ip`, `keys.rs:18`) or an `xn--` label), then match on WHOLE LABELS:
+  `host == entry` or `host` ends with `"." + entry`. A data test fails the build if
+  `crosses_delegated_suffix(entry, [])` (`level_rules.rs:326`) is true for any entry.
+  That function combines `has_suffix_beneath` (`:307`, a lookup in
+  `data/psl-suffix-parents.txt`, which lists only domains with a rule STRICTLY
+  beneath them and does not contain `github.io` or `herokuapp.com`) with the `addr`
+  root check (`:335`) that catches entries which are themselves public suffixes. The
+  test carries `github.io`, `herokuapp.com` and `blogspot.com` as negative fixtures
+  that must be rejected.
+  Tests pin: `datadoghq.com.evil.com`, `evil-datadoghq.com`, `foo.com.tr` and other
+  unlisted multi-part suffixes, a tenant suffix, trailing dot, uppercase, `host:port`,
+  an IPv6 literal and an `xn--` host all behave as stated.
+- The hostname is NOT verified for this connection: `dst_host` is whatever name the
+  daemon attached (`translator/connection.rs:59-62`; derived from DNS replies, which a
+  local or on-path actor can influence). The sheet labels it "hostname as reported by
+  the daemon (not verified)" and the known-services line reads "this name matches a
+  domain registered to Datadog (an observability service)", never that the connection
+  really goes there or that this program's use is legitimate.
+- Honest wording rule (tested, scoped): the sheet's STATIC text (literals in
+  `WhatIsThisSheet.qml` and `explain.rs`) never uses verdict words (safe, malicious,
+  suspicious, normal, trusted, legitimate). The guard scans those static literals
+  only, with the exact word list in the test; dynamic fields (hostnames, rule names,
+  program names such as `safebrowsing.*` or an `allow-trusted` rule) are exempt from
+  the word list but MUST render as plain text (next bullet).
+- Hostile text: every dynamic field (`dst_host`, `process`, `process_path`, rule
+  names, friendly names) is rendered with `textFormat: Text.PlainText`, never in an
+  `InlineMessage`, and the editable query field's label too. The sheet TITLE is a
+  static string (the guard checks only the expressions listed in `PAGES`, not `title:`,
+  `honest_ui_external_text_guards.rs:133-166`), so a dynamic "What is <process>?" title
+  is not allowed. List every dynamic expression the sheet shows in `Label`, `Heading`, `Text`,
+  `PlaceholderMessage` and `ToolTip.text` in `PAGES`; those are the items the guard
+  scans (`violations()`, `honest_ui_external_text_guards.rs:~120-150`, which ignores
+  `Accessible.*`, `MenuItem`/`Action` text and `TextField`). So `Accessible.*`, menu
+  entries and the sheet title carry STATIC strings only, enforced by a source guard
+  that these properties contain only string literals; the editable query `TextField`
+  is plain text by nature and its default text is built by `explain.rs`. Extend the
+  guard's self-test probes for any new item kind it learns to scan.
+  Bidirectional-override and control characters are stripped or escaped in ALL
+  displayed dynamic fields, not just the query, so an RLO hostname cannot visually
+  spoof a trusted name. Tests: a QML load test with `<b>`/`<a href>` and an RLO
+  character in each field; a unit test for the stripping helper.
+- Web search (user-initiated only): a "Search the web" button opens the default
+  browser with `Qt.openUrlExternally`; nothing runs unless the user clicks.
+  * Default query: a program NAME plus the destination HOSTNAME. The program part is
+    only a desktop-file `Name=` or a name that exactly equals the path's basename, and
+    never `<unknown>`, a name derived from a path DIRECTORY (the 0a
+    `.../<app>/versions/<semver>` heuristic takes `<app>` from a directory that may be
+    `/home/<user>/...`), or anything containing a path separator or a username-like
+    component. When the name came from the heuristic the program part defaults OFF
+    (the user can tick it on). Tests: a heuristic name, `<unknown>` and a basename that
+    embeds a username never appear in the default query.
+    A `dst_host` that is really an IP is NOT a hostname: the bridge sets `dst_host`
+    to the IP when the daemon sent no name (`translator/connection.rs:59-62`, pinned
+    by the test at `:227-231`), so `explain.rs` treats any `dst_host` that parses as
+    an IP (v4, v6, bracketed, with a port) as "no hostname" and leaves it out. A test
+    with an IP-only row asserts no IP appears in the default query.
+  * The host checkbox defaults OFF for single-label hosts and `.local`, `.internal`,
+    `.lan`, `.corp` names and addresses in RFC1918 or link-local space (internal
+    service names must not go to a search engine by accident).
+  * The query is shown in an editable field BEFORE opening, with a line saying what
+    will be sent and to which engine. Never the path, never usernames. Normalise the
+    text: strip control and bidirectional-override characters, cap the length (for
+    example 200 characters), then URL-encode every part; test all three.
+  * Engine: a `search_engine` setting in `settings.rs` (298 lines; serde default so
+    old files load), chosen from a FIXED allow-list of URL templates (Google by
+    default, as the owner asked; DuckDuckGo and one more), never a free-form string; a
+    combo in "Settings & Diagnostics" (`DiagnosticsPage.qml`, 200 lines).
+  * A "Copy" button for the query text as an alternative (needs a small new clipboard
+    helper; none exists).
+  * UNVERIFIED: opening a URL from the Flatpak sandbox. The manifest grants no network
+    and no portal talk-name for it (`packaging/flatpak/...yml:23-31, 62-63`);
+    `Qt.openUrlExternally` normally goes through the OpenURI portal. Test on a real
+    Flatpak early; if it needs a manifest permission, that is a separate packaging
+    change for the tower's cut process, not part of this GUI PR.
+- Explicitly NOT in 0e (each needs more than the GUI):
+  * PID: `ConnectionRow` has no pid (the bridge never carries the daemon's
+    `process_id`). Adding it is an additive wire field and a bridge change, so it goes
+    through the tower's review; and a PID is stale or reused for short-lived
+    connections, so it would be labelled "PID when the connection was made".
+  * "On blocklist X": there is no membership query. The only host-level wire is the
+    paged `RequestBlocklistEntries`, one subscription at a time. A truthful answer needs
+    a new bridge request such as `QueryBlocklistMembership{host}`. Until then the sheet
+    says "blocked by a blocklist rule" only when the matched rule says so.
+  * "Usual or unusual for this pair" over weeks: needs the r17 history store.
+  * Command line and environment: never shown (they can hold secrets).
+- Read-only: the sheet changes nothing, hides nothing and answers nothing; its only
+  actions are Search and Copy (and a link to the existing make-rule flow, if the owner
+  wants it).
+- File budget: new files `WhatIsThisSheet.qml`, `src/explain.rs`,
+  `data/known-services.txt`; touched files all under 800 lines (`ConnectionRow.qml`
+  398, `ConnectionList.qml` 71, `ConnectionsPage.qml` 399, `InspectorPanel.qml` 195,
+  `DiagnosticsPage.qml` 200, `settings.rs` 298, `settings_controller.rs` 355,
+  `connections_model.rs` 648: invokable only).
+- Tests: `explain.rs` unit tests (facts, port words, first/last seen, group vs row
+  snapshots); known-services parse and the spoof/tenant/normalisation cases; URL builder
+  tests (encoding, control/bidi stripping, length cap, no IP, no path, host checkbox
+  defaults); settings default and allow-list tests; the scoped honest-wording guard;
+  the plain-text guard and hostile-text load test; `qml_source_guards.rs` and a
+  `tests/qml/tst_delegate_input.qml` structural mirror for the right-click and keyboard
+  paths; headless QML tests need `QT_QPA_PLATFORM=offscreen` and are exploratory in this
+  sandbox (CLAUDE.md), and `just check`/`just test` (which pass `--workspace`) stay
+  mandatory because kirigami is outside the default members.
+
 ## Constraints and risks
 - Files near the 800-line limit (`grouping.rs` 704, `filter.rs` 719,
   `notification_controller.rs` 616, `connections_model.rs` 648): extract before
@@ -227,6 +389,8 @@ fail.
   default.
 
 ## Open questions for the owner
+A. 0e: is Google as the default search engine fine, and should the default query
+   include the destination hostname (with a checkbox to drop it)?
 1. (decided for phase 0: only recommended rules count as "handled"; user-written
    rules are revisited later with the exact-path restriction above.)
 2. Is 1 h the right window for suppressing repeats of the same program+host?

@@ -34,7 +34,8 @@ and platform/engine foundations, split across releases as below.
   checklist. Optional small diagnosability pieces: structured fields on log
   lines, GUI-side lag diagnostics. ALSO (owner, 2026-10-22): GUI clarity phase 0
   (friendly program names, per-group verdict counts with a time window,
-  exception-first Connections default, one notice per retrying program), because
+  exception-first Connections default, one notice per retrying program, plus a
+  stretch item: right-click "What is this?" for a program-to-destination pair), because
   the current Connections view is "not helpful". It is GUI-only (the GUI ships as
   its own artifact, separate from the image-side eBPF work); plan:
   `2026-10-22-gui-clarity-overhaul.md` (evidence, all phases) and
