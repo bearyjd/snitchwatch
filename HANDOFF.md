@@ -1,8 +1,9 @@
 # Linux App Firewall + Bazzite Security Scanner — Handoff (updated 2026-10-22)
 
-> **Read `.omc/STATE.md` first if you're picking this repo up cold.** It is
-> the current status (main SHA, open issues, in-flight work).
-> Everything below is a dated history: accurate as a record of what was
+> **Start with the "2026-10-22 (current)" section just below.** It is the
+> current status. (A local, gitignored `.omc/STATE.md` may also exist on the
+> owner's machine; it is not in a fresh clone.)
+> Everything after that section is a dated history: accurate as a record of what was
 > decided and why, but stale as a status report. The 2026-10-09 section was
 > current then; roughly 100 commits have merged since (r14/r15 work, up to
 > `bfc76e6`). For the open items, see `gh issue view 178`.
@@ -12,8 +13,9 @@
 r15 is out. `main` is `bfc76e6`: #185 (rustls-webpki 0.103.16, webpki-roots
 1.0.10 for RUSTSEC-2026-0382/-0381), #184 (rust 1.99.0 in
 `packaging/release/pins.env`) and #186 (the unanswered-prompt log line now
-names path and destination, escaped). The tower promoted r15 (registry tag
-`snitchwatch-system` -> sha256:cc09a1b9...); the owner accepted it on the laptop.
+names path and destination, escaped). Per the tower session (not verifiable
+from this repo): it promoted r15 (registry tag `snitchwatch-system` ->
+sha256:cc09a1b9...) and the owner accepted it on the laptop.
 Still the owner's: switch the laptop to the stable tag, publish the stable r15
 GUI release from the `r15-candidate` assets. Do not touch the `r15-candidate`
 branch/release/tag or `R15_CANDIDATE_REVIEWED_SHA`. #35 stays open until the
@@ -22,9 +24,9 @@ owner confirms the root-only socket check; #178 is unchanged.
 Roadmap (owner, 2026-10-22): r15 = improved GUI + Bazzite update (done); r16 =
 eBPF process monitoring on its own, plus measurement groundwork; r17 =
 history/export/rule suggestions/uid-aware rules/upstream daemon patches. Plans:
-`docs/superpowers/plans/2026-10-22-r16-platform-upgrade.md` and
-`2026-10-22-log-export-for-analysis.md`. Current-state file: `.omc/STATE.md`
-(local, gitignored).
+`docs/superpowers/plans/2026-10-22-r16-platform-upgrade.md`,
+`2026-10-22-log-export-for-analysis.md`, and the specs
+`2026-10-22-ebpf-groundwork.md` and `2026-10-22-r16-measurement-series.md`.
 
 ## 2026-10-09 (as of then)
 
