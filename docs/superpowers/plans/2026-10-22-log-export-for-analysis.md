@@ -36,8 +36,11 @@ JSON, plus a small summary: counts by process, destination, verdict, rule class
   counts. Profile/network identity, rule names and descriptions, rule operators and
   notices are NOT exported. A test enumerates every `ConnectionRow` field and fails
   when one is not classified (kept / hashed / class / dropped) at each level.
-- Fields exported at every level: timestamps (`started_at_ms`), byte counts,
-  ports, protocol, direction and verdict. The `none` warning lists them too.
+- Per-row fields kept at `hosts-hashed` and `none` (aggregated only at
+  `summary-only`): timestamps (`started_at_ms`), byte counts, ports, protocol,
+  direction and verdict. The `none` warning lists them too. Housekeeping fields
+  `id`, `answer_deadline_ms`, `deferred` and `decided_by_default` are kept as-is
+  (a counter and timestamps/booleans; no user data).
 - Stable schema with a `schema` version field. Same input gives the same output
   (sorted keys, fixed timestamp format) so it can be tested with golden files.
 - Source: the connection cache and counters, not log scraping. Logs stay for
@@ -73,10 +76,12 @@ The data names programs, hosts, IPs and local usernames.
   copy-on-write filesystems); say so in the UI.
 - Redaction levels, each defined by what it CONTAINS:
   * `summary-only` (default): aggregate counts and intervals only, keyed by
-    process basename and a keyed hash of the destination. No raw rows, hostnames,
+    process basename (only for allowlisted paths, else its keyed hash) and a keyed
+    hash of the destination. No raw rows, hostnames,
     IPs or paths.
   * `hosts-hashed`: raw rows with hostnames and IPs replaced by a keyed hash;
-    paths scrubbed (below); ports, protocol, verdict and process basename kept.
+    paths scrubbed (below); ports, protocol, verdict kept; the process basename is kept only for allowlisted
+    paths and hashed otherwise.
   * `none`: raw rows. Only after the user accepts a per-export warning that names
     what it contains (process paths, hostnames, IPs, local usernames).
 - Hashing: HMAC with a random per-export key that is generated for the export and
@@ -104,8 +109,8 @@ The data names programs, hosts, IPs and local usernames.
   `snitchwatch-allow-<host>-<port>-p<program>`). At `summary-only` and
   `hosts-hashed`, replace `matched_rule` by its class: `once-off` (name starts
   `snitchwatch-allow-`/`snitchwatch-deny-`, i.e. `is_answer_name`), `recommended`
-  (a curated entry id), `user-rule` (any other named rule), `default-action`
-  (decided by the daemon default), `unmatched` (no rule). Only the `none` LEVEL
+  (name starts `snitchwatch-default-`, `rule_name.rs` `CURATED_DEFAULT_RULE_NAME_PREFIX`), `user-rule` (any other named rule), `default-action`
+  (decided by the daemon default; unrelated to the `snitchwatch-default-` prefix), `unmatched` (no rule). Only the `none` LEVEL
   keeps the raw name. A
   fixture with a `snitchwatch-allow-example.com-443-p...` name must show the host
   absent from the output at both redacted levels.
