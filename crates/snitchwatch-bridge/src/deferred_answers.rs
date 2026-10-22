@@ -58,9 +58,23 @@ pub(crate) async fn answer_unanswered(
     let Some(row) = cache.defer_pending(row_id, action, Some(AutoAnswer::NoAnswer)) else {
         return false;
     };
-    tracing::info!(%row_id, "nobody answered the prompt; the daemon applies its default action");
+    tracing::info!(
+        %row_id,
+        asked = %describe_unanswered(&row),
+        "nobody answered the prompt; the daemon applies its default action"
+    );
     let _ = broadcast_tx.send(ServerMessage::UpdateConnectionRows { rows: vec![row] });
     true
+}
+
+/// Who asked and for what, for the journal: the bridge's log is otherwise the
+/// only record of a prompt nobody saw. The daemon's uid is not kept on the row.
+fn describe_unanswered(row: &ConnectionRow) -> String {
+    let program = row.process_path.as_deref().unwrap_or(&row.process);
+    format!(
+        "{program} -> {}:{}/{}",
+        row.dst_host, row.dst_port, row.protocol
+    )
 }
 
 /// What "Decide later" did.
@@ -111,4 +125,35 @@ pub async fn decide_later(
     }
     tracing::info!(%row_id, ?outcome, "prompt decided later");
     Ok(outcome)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::translator::connection::connection_to_row;
+    use snitchwatch_proto::protocol::Connection;
+
+    fn row_for(process_path: &str, dst_host: &str) -> ConnectionRow {
+        let conn = Connection {
+            protocol: "tcp".into(),
+            dst_ip: "9.9.9.9".into(),
+            dst_host: dst_host.into(),
+            dst_port: 443,
+            process_path: process_path.into(),
+            ..Default::default()
+        };
+        connection_to_row(&conn, 7)
+    }
+
+    #[test]
+    fn the_unanswered_summary_names_the_program_and_destination() {
+        let summary = describe_unanswered(&row_for("/usr/bin/curl", "example.org"));
+        assert_eq!(summary, "/usr/bin/curl -> example.org:443/tcp");
+    }
+
+    #[test]
+    fn the_unanswered_summary_falls_back_to_the_process_name_without_a_path() {
+        let summary = describe_unanswered(&row_for("", "example.org"));
+        assert_eq!(summary, "<unknown> -> example.org:443/tcp");
+    }
 }
