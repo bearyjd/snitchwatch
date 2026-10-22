@@ -32,7 +32,13 @@ and platform/engine foundations, split across releases as below.
   config + the tower's checks), plus the cheap measurement groundwork it needs:
   long-uptime CPU/RSS sample series, CI canary for pinned toolchains, release cut
   checklist. Optional small diagnosability pieces: structured fields on log
-  lines, GUI-side lag diagnostics. Target date: "when ready".
+  lines, GUI-side lag diagnostics. ALSO (owner, 2026-10-22): GUI clarity phase 0
+  (friendly program names, per-group verdict counts with a time window,
+  exception-first Connections default, one notice per retrying program), because
+  the current Connections view is "not helpful". It is GUI-only (the GUI ships as
+  its own artifact, separate from the image-side eBPF work); plan:
+  `2026-10-22-gui-clarity-overhaul.md` (evidence, all phases) and
+  `2026-10-22-gui-phase0-clarity.md` (the r16 scope). Target date: "when ready".
 - r17: observability and rules: history store, redacted export + analysis, rule
   suggestions, GUI history view + Export button, uid-aware rules, upstream daemon
   patches (the open items in #178), hardware proof.
@@ -74,7 +80,7 @@ Gate: security-reviewer pass on the design before code.
   depends on WS1's history store.
 - Stay clear of the daemon-reload gap (needs upstream; tracked in #178).
 
-### WS3 GUI (r17)
+### WS3 GUI (phase 0 in r16; the rest r17)
 Needs the owner's pain points before design (ask: which screens hurt?). Likely:
 the Export action (WS1), a history/pattern view and rule suggestions (WS2),
 onboarding for the deny-by-default stance. Keep file sizes under the 800-line
