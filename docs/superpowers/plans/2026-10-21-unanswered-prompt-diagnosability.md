@@ -1,6 +1,6 @@
 # Unanswered-prompt diagnosability (post-r14 tower finding)
 
-**Do not merge before r15 is cut.** The tower (r14 boot, 2026-10-21) asked that
+**Status 2026-10-22: item 1 shipped in #186 (r15). Items 2-3 are open.** (Original note: do not merge before r15 is cut.) The tower (r14 boot, 2026-10-21) asked that
 nothing ship until its r15 cut; this is a bridge-code change, not packaging, so
 it goes to r16 at the earliest.
 
