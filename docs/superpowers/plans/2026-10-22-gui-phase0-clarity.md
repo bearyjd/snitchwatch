@@ -54,25 +54,26 @@ fail.
   reconnect the first ask of an already-seen pair fires again; a reconnect is a new
   session with new rows, intended):
   1. The first pending ask for a (program, host) with no live posted notice fires.
-  2. A repeat of the same (program, host) within 1 h of a LIVE posted notice does
-     not fire; it increments a "retried N times" counter. The 1 h entry exists only
-     while the notice is live, so it is cleared on EVERY exit of the notice, whatever
-     the reason: `show_and_answer` (`pending_notice.rs`) returns for any `WaitEnd`
-     (answered incl. once-off, row decided by the daemon after a timeout, notice
-     dismissed or replaced while the row is still pending, `ServerChanged`,
-     `Action(Review)`), and ALSO when `Notice::show` fails (`pending_notice.rs:
-     103-109`) or the session bus is unavailable (`notification_controller.rs:
-     380-384`), where nothing was shown although `may_post` already recorded the
-     flow (`:319`). Hook: add `CooldownGate::clear_flow(&FlowKey)` and call it
-     unconditionally at those exits; pass the `Arc<Mutex<CooldownGate>>` and the
-     `FlowKey` from `maybe_dispatch` (`:347`, where the gate is in scope) through
-     `dispatch_pending` into `show_and_answer`. (Note: the per-notice poll there is
-     `row_stops_waiting`, `pending_notice.rs:130-138`, built on `pending_row`;
-     `still_waiting` is imported in `pending_notice.rs:17`, not in the controller.)
-     The next ask for that pair then needs a human and fires again. Put the clear in
-     a drop guard inside `dispatch_pending`'s spawned future so it also runs if the
-     task is ever aborted (today it is a detached runtime task that is not aborted
-     before process exit, `bridge_runtime.rs:225`, so this is defence in depth).
+  2. A repeat of the same (program, host) within 1 h of a POSTED notice does not
+     fire; it increments a "retried N times" counter. The suppression is kept for the
+     hour AFTER the notice ends if it ended by `WaitEnd::Stopped` (the row stopped
+     waiting: daemon timeout or answered elsewhere) or `WaitEnd::Closed(_)` (the user
+     dismissed it, or it expired): the notification is resident and a pending row
+     times out after ~30 s, so clearing then would re-notify a retrying program about
+     every 30 s, which is exactly the complaint. The pending ROW, the banner and
+     Review are unaffected; only further desktop NOTICES for that flow are coalesced.
+     (Amended 2026-10-22: the first draft cleared on every exit; implementation review
+     showed that defeats the one-hour goal.)
+     The entry is CLEARED, so the next ask notifies again, when: the user answered
+     through the notice (`WaitEnd::Action`), `WaitEnd::ServerChanged` (buttons
+     voided), `Notice::show` failed or the session bus was unavailable (nothing was
+     shown, `pending_notice.rs:103-109`, `notification_controller.rs:380-384`), and on
+     any task cancellation or exit that reported no outcome (fail open). Hook:
+     `CooldownGate::clear_flow(&FlowKey)` called from a drop guard created in
+     `dispatch_pending` before `runtime.spawn` and moved into the future;
+     `show_and_answer` returns a small `NoticeEnd` outcome and the guard is marked
+     `hold` only for Stopped/Closed. Entries now outlive the notice, so the gate prunes
+     expired entries when the map grows past a small bound.
   3. A new host of the same program fires normally, subject to the existing 30 s
      per-flow gate. No digest in phase 0.
 - Gate shape: `CooldownGate` has a single `cooldown` shared by its maps
@@ -98,9 +99,12 @@ fail.
 - Reword `prompt_slot_text.rs::banner_text` (`:44-70`) so the global default-action
   figure is not presented as per-program retries.
 - File budget: `notification_controller.rs` is 616 lines; split it before adding.
-- Tests: `notifier.rs` gate tests with an injected `Instant` (cases 1-3, clear-on-
-  answer, clear-on-daemon-timeout, dismissed-notice-then-retry, show-failure-then-retry,
-  bus-failure-then-retry, reconnect fires the first ask again; `with_cooldown` already exists),
+- Tests: `notifier.rs` gate tests with an injected `Instant` (cases 1-3;
+  hold-after-daemon-timeout and hold-after-dismiss still Repeat 40 minutes later and
+  fire after the hour; clear-on-answer, clear-on-ServerChanged, clear-on-show-failure,
+  clear-on-bus-failure and a guard dropped with no outcome all let the next ask fire;
+  pruning of expired entries; reconnect fires the first ask again; `with_cooldown`
+  already exists),
   `may_post` tests (window-active then repeat still posts later), the
   banner/row-survives test, a model-role + QML test for the retry counter,
   `prompt_slot_text.rs`, `tests/prompt_slot_banner_qml.rs`.
