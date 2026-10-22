@@ -1,12 +1,22 @@
-# Linux App Firewall + Bazzite Security Scanner — Handoff (updated 2026-10-09)
+# Linux App Firewall + Bazzite Security Scanner — Handoff (updated 2026-10-21)
 
-> **Read this first if you're picking this repo up cold.** Everything below
-> the "Current status" section is the *original* handoff from 2026-07-04,
-> kept for history/decision rationale — it is accurate as a record of what
-> was decided and why, but stale as a status report. Trust the "2026-10-09
-> (current)" section for "what's true today."
+> **Read `.omc/STATE.md` first if you're picking this repo up cold.** It is
+> the current status (main SHA, tower hold, open issues, in-flight work).
+> Everything below is a dated history: accurate as a record of what was
+> decided and why, but stale as a status report. The 2026-10-09 section was
+> current then; roughly 98 commits have merged since (r14-r16 work, up to
+> `da5d7f1`). For the open items, see `gh issue view 178`.
 
-## 2026-10-09 (current)
+## 2026-10-21 (current)
+
+Pointer only; details live in `.omc/STATE.md`. `main` is at `da5d7f1`, no open
+PRs. The tower accepted r14 on the laptop; r15 is not cut, so packaging,
+daemon-config, unit and socket changes are on hold. Open issues #178 and #35
+both wait on the daemon or tower. Local branch
+`feat/unanswered-prompt-context` (log text for unanswered prompts) is waiting
+for the r15 cut.
+
+## 2026-10-09 (as of then)
 
 `main` is at `49e957d`, CI green. The 2026-10-08 evening section below
 describes `9f5e2d6`; the five PRs here merged after it, all on 2026-10-09 UTC.
