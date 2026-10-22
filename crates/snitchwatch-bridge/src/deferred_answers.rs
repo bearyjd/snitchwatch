@@ -69,11 +69,17 @@ pub(crate) async fn answer_unanswered(
 
 /// Who asked and for what, for the journal: the bridge's log is otherwise the
 /// only record of a prompt nobody saw. The daemon's uid is not kept on the row.
+/// The path and host come from the daemon and can hold newlines or escape
+/// codes, which `tracing` writes raw in a non-message field, so they are
+/// escaped here: a crafted name must not forge a journal line.
 fn describe_unanswered(row: &ConnectionRow) -> String {
     let program = row.process_path.as_deref().unwrap_or(&row.process);
     format!(
-        "{program} -> {}:{}/{}",
-        row.dst_host, row.dst_port, row.protocol
+        "{} -> {}:{}/{}",
+        program.escape_debug(),
+        row.dst_host.escape_debug(),
+        row.dst_port,
+        row.protocol.escape_debug()
     )
 }
 
@@ -149,6 +155,16 @@ mod tests {
     fn the_unanswered_summary_names_the_program_and_destination() {
         let summary = describe_unanswered(&row_for("/usr/bin/curl", "example.org"));
         assert_eq!(summary, "/usr/bin/curl -> example.org:443/tcp");
+    }
+
+    #[test]
+    fn the_unanswered_summary_cannot_forge_a_journal_line() {
+        let summary = describe_unanswered(&row_for("/tmp/a\nINFO forged line\r\x1b[2J", "h\nost"));
+        assert!(
+            !summary.contains(['\n', '\r', '\x1b']),
+            "control characters must be escaped: {summary:?}"
+        );
+        assert!(summary.contains("\\n"), "{summary:?}");
     }
 
     #[test]
