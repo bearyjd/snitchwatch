@@ -17,8 +17,9 @@ names path and destination, escaped). Per the tower session (not verifiable
 from this repo): it promoted r15 (registry tag `snitchwatch-system` ->
 sha256:cc09a1b9...) and the owner accepted it on the laptop.
 Still the owner's: switch the laptop to the stable tag, publish the stable r15
-GUI release from the `r15-candidate` assets. Do not touch the `r15-candidate`
-branch/release/tag or `R15_CANDIDATE_REVIEWED_SHA`. #35 stays open until the
+GUI release from the `r15-candidate` assets. The tower session owns every
+`r<N>-candidate` branch/release/tag and every `R<N>_CANDIDATE_REVIEWED_SHA`
+variable (r15 and later); we never push or set them, we only send the merged sha. #35 stays open until the
 owner confirms the root-only socket check; #178 is unchanged.
 
 Note: older sections below say the recommended DNS rule is pinned to `user.id`

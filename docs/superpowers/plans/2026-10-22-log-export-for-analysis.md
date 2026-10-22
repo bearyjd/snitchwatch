@@ -30,6 +30,14 @@ A read-only export of recent connection rows and events as newline-delimited
 JSON, plus a small summary: counts by process, destination, verdict, rule class
 (see Privacy: names are redacted), auto-answer reason; unmatched-prompt rate per minute; repeat intervals per
 (process, destination); feed-lag and re-broadcast counts.
+- Export goes through a dedicated, allowlisted export DTO (not a serialization of
+  `ConnectionRow` or the WS messages), so new fields are dropped by default. v1
+  event types: connection rows, the summary counters, and feed-lag/re-broadcast
+  counts. Profile/network identity, rule names and descriptions, rule operators and
+  notices are NOT exported. A test enumerates every `ConnectionRow` field and fails
+  when one is not classified (kept / hashed / class / dropped) at each level.
+- Fields exported at every level: timestamps (`started_at_ms`), byte counts,
+  ports, protocol, direction and verdict. The `none` warning lists them too.
 - Stable schema with a `schema` version field. Same input gives the same output
   (sorted keys, fixed timestamp format) so it can be tested with golden files.
 - Source: the connection cache and counters, not log scraping. Logs stay for
@@ -39,8 +47,11 @@ JSON, plus a small summary: counts by process, destination, verdict, rule class
   the file with the user's own permissions (GUI side: `private_files::write_private`
   in `snitchwatch-kirigami`). The bridge never writes to a user-named path and
   never makes a network call. There is no CLI subcommand in v1.
-- The bridge's own on-disk history (below) uses the bridge crate's private-file
-  helper (`snitchwatch-bridge/src/state_file.rs`), not the GUI's.
+- The bridge's own on-disk history (below) needs a NEW bridge-side append helper:
+  `snitchwatch-bridge/src/state_file.rs` only has read and an atomic replace
+  (temp file + rename), and the append helper `open_private_append` lives in the
+  GUI crate (`snitchwatch-kirigami/src/private_files.rs`), which the bridge must
+  not depend on. Reuse its checks (owner, no symlink, 0600), written for the bridge.
 - Tests: golden-file test with fixture rows (use `MockOpensnitchd` per
   CLAUDE.md, never a live daemon); redaction tests (below).
 
@@ -71,28 +82,43 @@ The data names programs, hosts, IPs and local usernames.
 - Hashing: HMAC with a random per-export key that is generated for the export and
   DISCARDED (never written to the file), so a reader cannot dictionary-test common
   hostnames against the hashes, and two exports cannot be linked by hash. Values
-  are stable within one export.
+  are stable within one export. Trade-off: hashes cannot be compared across
+  exports, so "which destination is noisy over time" is only answerable within one
+  export at the redacted levels; an owner-held persistent key (0600) would allow
+  cross-export comparison but makes a leaked export dictionary-testable. Default:
+  discard (open question 2).
 - Path handling is an ALLOWLIST, not a scrub list. At `summary-only` and
-  `hosts-hashed`, keep a path only if it starts with `/usr/`, `/opt/`, `/app/`,
-  `/bin/` or `/sbin/`. Every other path (home directories incl. `/var/home` and
+  `hosts-hashed`, keep a path only if its NORMALIZED form (no `..`, no `//`, no
+  trailing ` (deleted)`) starts with `/usr/`, `/opt/`, `/app/`, `/bin/` or
+  `/sbin/`; anything that fails normalization is treated as not allowlisted. Every other path (home directories incl. `/var/home` and
   `/home`, `/root`, `/var/roothome`, `.var/app`, `/run/media/<user>`,
   `/run/user/<uid>`, `/var/mnt`, `/tmp`, volume labels) becomes
   `<path>:<keyed hash of the basename, 8 hex>`; the raw basename is not kept
-  either, because it can carry user text. Process args, env and cwd are never
+  either, because it can carry user text. The same applies to the row's `process`
+  field (the raw comm/basename, `verdict_wire.rs` `ConnectionRow.process`): for a
+  non-allowlisted path it is replaced by the same keyed hash, so a script name in
+  a home directory cannot leak through it. Process args, env and cwd are never
   exported. A fixture with each path form above must pass.
 - Rule names are data too: `ConnectionRow.matched_rule` for once-off rules is
   built from the host and process path (`translator/verdict.rs::rule_name_for`,
   `snitchwatch-allow-<host>-<port>-p<program>`). At `summary-only` and
-  `hosts-hashed`, replace `matched_rule` by its class (`once-off`, `user-rule`,
-  `recommended`, `default-action`, `none`); only `none` keeps the name. A
+  `hosts-hashed`, replace `matched_rule` by its class: `once-off` (name starts
+  `snitchwatch-allow-`/`snitchwatch-deny-`, i.e. `is_answer_name`), `recommended`
+  (a curated entry id), `user-rule` (any other named rule), `default-action`
+  (decided by the daemon default), `unmatched` (no rule). Only the `none` LEVEL
+  keeps the raw name. A
   fixture with a `snitchwatch-allow-example.com-443-p...` name must show the host
   absent from the output at both redacted levels.
 - The exported file records its level (`redaction` field).
 - Access model (honest limits): the per-export warning is a consent control, not
   a security boundary, because any authenticated socket client can already read
-  every live row. The real boundary is who can connect to the bridge socket; the
-  system socket is root-only after #35's work, to be re-verified before history is
-  enabled. Per-user scoping on a multi-user host needs a uid on `ConnectionRow`
+  every live row. The real boundary is who can connect to the bridge's GUI socket:
+  `/run/snitchwatch/bridge.sock`, owner root, group `snitchwatch-ui`, mode 0660
+  (`packaging/system/snitchwatch-system-bridge-gui.socket`). The opensnitchd gRPC
+  socket is the root-only one (0600); do not conflate them. So every member of
+  `snitchwatch-ui` can read history and request any export level. Before history
+  is enabled the owner must confirm that group's members are trusted, or enabling
+  history and the `none` level must be restricted to uid 0 (open question 1). Per-user scoping on a multi-user host needs a uid on `ConnectionRow`
   (a row/wire change, not in v1); the WS server already knows each client's peer
   uid (`ws_server.rs:161-196`). Record this as a known limit in the user docs.
 - security-reviewer pass on the request, the redaction, the history store and the
@@ -121,7 +147,8 @@ The data names programs, hosts, IPs and local usernames.
   it, and who can connect to the socket.
 
 ## Open questions for the owner
-1. Who may trigger an export on a multi-user host (see the access model)?
+1. Who may enable history and request the `none` level: every member of
+   `snitchwatch-ui`, or uid 0 only (see the access model)?
 2. Default level is `summary-only`; is that too coarse for your first analyses,
    and should `hosts-hashed` be the default instead?
 
