@@ -102,9 +102,14 @@ socket units, and the one packaged opensnitchd rule.
 Both shipped opensnitchd configs set `"ProcMonitorMethod": "ebpf"`. The
 bazzite-tower image overwrites it to `"proc"` after `stage.sh` runs: eBPF
 failed to load on the owner's laptop kernel before (snitchwatch#6), so it
-stays off until there is evidence it loads on kernel 7.2. The BTF
+stays off until there is evidence it loads on kernel 7.2. (Correction,
+2026-10-22: the #6 failure was later shown to be a rootless-container
+permission artifact, see `packaging/bluebuild/recipe.yml`; and the tower image
+installs no eBPF module files, so ebpf could not load there anyway. See
+`docs/superpowers/specs/2026-10-22-ebpf-groundwork.md`.) The BTF
 requirement is explained in
-`docs/superpowers/specs/2026-07-14-daemon-kernel-diagnostics-design.md`.
+`docs/superpowers/specs/2026-07-14-daemon-kernel-diagnostics-design.md`; the
+modules are not CO-RE, so matching kernel headers matter more than BTF.
 
 `/etc/opensnitchd/rules/000-snitchwatch-bridge-fetch.json` lets this
 account's bridge download blocklists over HTTPS (TCP 443) under
