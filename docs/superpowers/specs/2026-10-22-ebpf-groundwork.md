@@ -9,13 +9,15 @@ Items marked UNVERIFIED were not tested.
   `daemon/procmon/ebpf/ebpf.go:132`), `opensnitch-procs.o` (exec/exit events;
   `procmon/ebpf/events.go:96`), `opensnitch-dns.o` (DNS hook;
   `daemon/dns/ebpfhook.go:118`).
-- Search path: `/usr/local/lib/opensnitchd/ebpf`, then `/usr/lib/opensnitchd/ebpf`
-  (`daemon/core/ebpf.go:14-17`). If `Ebpf.ModulesPath` is set, only that path is
-  searched. Our shipped configs set no `ModulesPath`.
+- Search path: `/usr/local/lib/opensnitchd/ebpf`, then `/usr/lib/opensnitchd/ebpf`,
+  then the deprecated `/etc/opensnitchd` (`daemon/core/ebpf.go:14-17`; a stale `.o`
+  in `/etc/opensnitchd` could be picked up). If `Ebpf.ModulesPath` is set, only
+  that path is searched. Our shipped configs set no `ModulesPath`.
 
 ## How they are built (upstream)
-- `ebpf_prog/Makefile`: clang -> LLVM IR -> `llc -march=bpf`, then `llvm-strip -g`;
-  output `.o` files land in `ebpf_prog/`. No vmlinux.h, no bpftool step.
+- `ebpf_prog/Makefile`: clang -> LLVM IR -> `llc -march=bpf`; output `.o` files
+  land in `ebpf_prog/`. (`llvm-strip -g` is a separate step in `ebpf_prog/README:20`,
+  not in the Makefile.) No vmlinux.h, no bpftool step.
 - NOT CO-RE. The sources include kernel headers (`net/sock.h`, `linux/sched.h`)
   and compile struct layouts from them; `BPF_CORE_READ` is unused. The README says
   "Compilation requires getting kernel sources for now" and gives the Fedora
@@ -33,9 +35,12 @@ Items marked UNVERIFIED were not tested.
   error` or `[eBPF] module collection error` and finally returns "unable to load
   eBPF module ... Your kernel version might not be compatible". That one message
   covers a missing file, a verifier failure and a permissions failure alike.
-- The daemon does NOT exit: `procmon/monitor/init.go` stops the eBPF state, records
-  the error and falls back to `ProcMonitorMethod: proc` ("Process monitor method
-  /proc"). `opensnitch-dns.o` failing only warns. So enabling ebpf degrades to
+- The daemon does NOT exit. If the MAIN module fails, `procmon/monitor/init.go`
+  stops the eBPF state, records the error and falls back to `ProcMonitorMethod:
+  proc` ("Process monitor method /proc"). If only `opensnitch-procs.o` is missing,
+  it stays on ebpf, logs "Process monitor method ebpf" and starts the proc
+  monitors alongside (`init.go:101-108`), so read the log for which case you are
+  in. `opensnitch-dns.o` failing only warns. So enabling ebpf degrades to
   today's behaviour rather than breaking the firewall (the tower's note that the
   daemon "degrades badly" should be measured, not assumed).
 

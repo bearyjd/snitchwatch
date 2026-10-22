@@ -21,6 +21,10 @@ GUI release from the `r15-candidate` assets. Do not touch the `r15-candidate`
 branch/release/tag or `R15_CANDIDATE_REVIEWED_SHA`. #35 stays open until the
 owner confirms the root-only socket check; #178 is unchanged.
 
+Note: older sections below say the recommended DNS rule is pinned to `user.id`
+193. That was history: since #161 the rule is pinned by account NAME
+(`systemd-resolve`) and the uid is looked up at runtime (`curated/manager_resolver.rs`).
+
 Roadmap (owner, 2026-10-22): r15 = improved GUI + Bazzite update (done); r16 =
 eBPF process monitoring on its own, plus measurement groundwork; r17 =
 history/export/rule suggestions/uid-aware rules/upstream daemon patches. Plans:

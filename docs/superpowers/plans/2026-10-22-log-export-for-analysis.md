@@ -27,8 +27,8 @@ new rule would cover, whether feed lag correlates with traffic bursts.
 
 ### 1. Deterministic export (build first)
 A read-only export of recent connection rows and events as newline-delimited
-JSON, plus a small summary: counts by process, destination, verdict, matched
-rule, auto-answer reason; unmatched-prompt rate per minute; repeat intervals per
+JSON, plus a small summary: counts by process, destination, verdict, rule class
+(see Privacy: names are redacted), auto-answer reason; unmatched-prompt rate per minute; repeat intervals per
 (process, destination); feed-lag and re-broadcast counts.
 - Stable schema with a `schema` version field. Same input gives the same output
   (sorted keys, fixed timestamp format) so it can be tested with golden files.
@@ -54,7 +54,12 @@ labelled as such; it never edits rules.
 
 ## Privacy and security (why this needs review)
 The data names programs, hosts, IPs and local usernames.
-- Off by default; explicit user action per export. No background upload.
+- Exports are off until the user triggers one, per export. No background upload.
+- History (the rolling raw-row store) is OFF until the owner enables it in
+  settings. It holds plaintext raw rows (hostnames, IPs, paths) protected only by
+  0600/0700 and whatever disk encryption the host has. "Clear history" unlinks and
+  overwrites the segments on a best-effort basis (not a guarantee on SSDs or
+  copy-on-write filesystems); say so in the UI.
 - Redaction levels, each defined by what it CONTAINS:
   * `summary-only` (default): aggregate counts and intervals only, keyed by
     process basename and a keyed hash of the destination. No raw rows, hostnames,
@@ -67,10 +72,21 @@ The data names programs, hosts, IPs and local usernames.
   DISCARDED (never written to the file), so a reader cannot dictionary-test common
   hostnames against the hashes, and two exports cannot be linked by hash. Values
   are stable within one export.
-- Path scrub: replace the username in `/var/home/<user>` (Bazzite/atomic),
-  `/home/<user>`, `/root`, `/var/roothome` and `.var/app/<app-id>` paths with
-  `<user>`; process args, env and cwd are never exported. A fixture with each
-  path form must pass.
+- Path handling is an ALLOWLIST, not a scrub list. At `summary-only` and
+  `hosts-hashed`, keep a path only if it starts with `/usr/`, `/opt/`, `/app/`,
+  `/bin/` or `/sbin/`. Every other path (home directories incl. `/var/home` and
+  `/home`, `/root`, `/var/roothome`, `.var/app`, `/run/media/<user>`,
+  `/run/user/<uid>`, `/var/mnt`, `/tmp`, volume labels) becomes
+  `<path>:<keyed hash of the basename, 8 hex>`; the raw basename is not kept
+  either, because it can carry user text. Process args, env and cwd are never
+  exported. A fixture with each path form above must pass.
+- Rule names are data too: `ConnectionRow.matched_rule` for once-off rules is
+  built from the host and process path (`translator/verdict.rs::rule_name_for`,
+  `snitchwatch-allow-<host>-<port>-p<program>`). At `summary-only` and
+  `hosts-hashed`, replace `matched_rule` by its class (`once-off`, `user-rule`,
+  `recommended`, `default-action`, `none`); only `none` keeps the name. A
+  fixture with a `snitchwatch-allow-example.com-443-p...` name must show the host
+  absent from the output at both redacted levels.
 - The exported file records its level (`redaction` field).
 - Access model (honest limits): the per-export warning is a consent control, not
   a security boundary, because any authenticated socket client can already read
@@ -111,7 +127,8 @@ The data names programs, hosts, IPs and local usernames.
 
 ## Phases
 1. Plan approved + open questions answered.
-2. Add structured fields to the log lines analysis needs (small, bridge-only).
+2. Add structured fields to the log lines analysis needs (small, bridge-only; may
+   land earlier, in r16, as a diagnosability piece).
 3. Deterministic export + schema + golden tests + redaction tests.
 4. security-reviewer + code-reviewer; docs.
 5. Optional offline analysis script on the export.

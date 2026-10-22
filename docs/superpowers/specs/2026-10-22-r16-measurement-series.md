@@ -32,11 +32,13 @@ series, so it needs no redaction.
   `systemd-journal`/`adm`. Run the collector as root (a system timer or sudo by
   the owner), or in user mode drop the fd count and the journal-derived asks/min
   and record only CPU, RSS, threads, load and fork rate.
-- Appends one NDJSON line per process per minute to
-  `$XDG_STATE_HOME/snitchwatch/measure/<run-id>.ndjson`, mode 0600, directory
-  0700 (same private-file rules as other state files).
-- Runs as a user systemd timer or a foreground script the owner starts; the
-  tower or owner runs it on the laptop. Nothing in the firewall path changes.
+- Appends one NDJSON line per process per minute to `--out-dir`, mode 0600,
+  directory 0700 (same private-file rules as other state files). Default: when
+  run as root, `/var/lib/snitchwatch/measure/<run-id>.ndjson`; in user mode,
+  `$XDG_STATE_HOME/snitchwatch/measure/` (fallback `~/.local/state/...`).
+- Runs as a root systemd timer/unit (needed for fd counts and the journal) or as a
+  foreground script the owner starts with sudo; the tower or owner runs it on the
+  laptop. Nothing in the firewall path changes.
 
 ## Runs and comparison
 - Run A: `ProcMonitorMethod: proc` (today). Run B: `ebpf`, same host and image.
@@ -47,8 +49,9 @@ series, so it needs no redaction.
   (MiB/h), peak RSS, fork-rate and asks/min medians for context.
 
 ## r16 acceptance gate (matches the plan)
-Ship ebpf only if run B shows lower mean CPU than run A's baseline (~20.5% of a
-core) and an RSS slope no worse than run A, with no daemon errors or degraded
+Ship ebpf only if run B shows lower mean CPU than a FRESH run A on the same
+host under comparable conditions (the ~20.5% of a core figure is a sanity
+reference only, since readings vary by day) and an RSS slope no worse than run A, with no daemon errors or degraded
 state in the log. Fallback to `proc` stays tested.
 
 ## Open questions

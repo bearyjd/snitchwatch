@@ -41,7 +41,8 @@ and platform/engine foundations, split across releases as below.
 - r16 gates: (1) run the daemon as root with ebpf and capture the log; (2) build
   or supply the three modules in the image build; (3) flip config + the tower's
   verifiers together with a tested `proc` fallback; (4) ship only if a full day
-  on eBPF has lower mean CPU than the `proc` baseline (~20.5% of a core), an RSS
+  on eBPF has lower mean CPU than a fresh `proc` run under comparable conditions
+  (~20.5% of a core is a sanity reference), an RSS
   slope no worse than `proc`, and no daemon errors (same gate as the measurement
   note).
 - Open: whether "the big jump" is the eBPF move or something else.
@@ -50,7 +51,8 @@ and platform/engine foundations, split across releases as below.
 
 ### WS1 Observability and export (r17; plan: 2026-10-22-log-export-for-analysis.md)
 Redacted-by-default export (GUI Export action; bridge redacts; GUI writes the
-file), rolling on-disk history bounded by size and age, structured log fields.
+file), rolling on-disk history bounded by size and age (off until enabled).
+Structured log fields may land earlier, in r16, as a small diagnosability piece.
 This also provides the history store that WS2 and WS3 build on.
 Gate: security-reviewer pass on the design before code.
 
@@ -133,7 +135,9 @@ Facts from the repo:
   root on kernel 7.2.0.
 - The modules are NOT CO-RE: they need kernel headers matching the running
   kernel. BTF is not the real precondition (the laptop has it anyway, per tower).
-- The daemon falls back to `proc` on its own when the main module fails to load.
+- The daemon falls back to `proc` on its own when the MAIN module fails to load;
+  if only the procs module is missing it stays on ebpf with the proc monitors
+  alongside (see the groundwork note for how to read the log).
 - Per tower: the image no longer ships the opensnitch RPM; it builds a patched
   daemon from Go source (pinned b404c4c) and installs no `.o` module files, so
   ebpf currently has nothing to load. The tower's stage/verify code hard-requires
