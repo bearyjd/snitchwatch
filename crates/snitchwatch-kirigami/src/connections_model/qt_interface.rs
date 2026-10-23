@@ -73,6 +73,10 @@ impl qobject::ConnectionsModel {
             ROLE_NEEDS_RULE => QVariant::from(&needs_rule_for_row(row)),
             ROLE_GROUP_LEVEL => QVariant::from(&3i32),
             ROLE_GROUP_PROCESS_KEY => QVariant::from(&QString::from("")),
+            ROLE_PROGRAM_LABEL
+            | ROLE_PROGRAM_LABEL_UNVERIFIED
+            | ROLE_PROGRAM_PATH_TAIL
+            | ROLE_PROGRAM_PATH_FULL => program_label::role_for_row(row, role),
             _ => QVariant::default(),
         }
     }
@@ -125,6 +129,13 @@ impl qobject::ConnectionsModel {
         roles.insert(ROLE_LEVEL_RULE_REASON, QByteArray::from("levelRuleReason"));
         roles.insert(ROLE_REPEAT_COUNT, QByteArray::from("repeatCount"));
         roles.insert(ROLE_LAST_SEEN_MS, QByteArray::from("lastSeenMs"));
+        roles.insert(ROLE_PROGRAM_LABEL, QByteArray::from("programLabel"));
+        roles.insert(
+            ROLE_PROGRAM_LABEL_UNVERIFIED,
+            QByteArray::from("programLabelUnverified"),
+        );
+        roles.insert(ROLE_PROGRAM_PATH_TAIL, QByteArray::from("programPathTail"));
+        roles.insert(ROLE_PROGRAM_PATH_FULL, QByteArray::from("programPathFull"));
         roles
     }
 

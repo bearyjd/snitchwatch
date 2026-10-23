@@ -405,3 +405,22 @@ fn name_decodes_desktop_entry_escapes_before_sanitizing() {
     assert_eq!(name(r"Name=A\qB"), Some("A\\qB".into()));
     assert_eq!(name("Name=A\\"), Some("A\\".into()));
 }
+
+#[test]
+fn path_caches_are_capped_by_clear_and_refill() {
+    let mut cache: HashMap<String, u32> = HashMap::new();
+    for i in 0..3 {
+        insert_capped(&mut cache, 3, &format!("/p{i}"), i);
+    }
+    assert_eq!(cache.len(), 3);
+    insert_capped(&mut cache, 3, "/p1", 9); // existing key: no clear
+    assert_eq!((cache.len(), cache["/p1"]), (3, 9));
+    insert_capped(&mut cache, 3, "/new", 7);
+    assert_eq!(cache.len(), 1);
+    assert_eq!(cache["/new"], 7);
+}
+
+#[test]
+fn name_for_path_has_no_name_for_an_empty_path() {
+    assert_eq!(name_for_path(""), None);
+}

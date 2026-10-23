@@ -53,10 +53,14 @@ Window {
             required property real startedAtMs
             required property string appIcon
             required property bool needsRule
+            required property string programLabel
+            required property bool programLabelUnverified
+            required property string programPathTail
             Component.onCompleted: probe.seen.push({
                 id: rowId, header: isGroupHeader, path: processPath,
                 direction: direction, started: startedAtMs, icon: appIcon,
-                needsRule: needsRule })
+                needsRule: needsRule, label: programLabel,
+                unverified: programLabelUnverified, tail: programPathTail })
         }
     }
 
@@ -82,13 +86,21 @@ Window {
                         action: "insertConnectionRows",
                         rows: [
                             probe.row("a", "/usr/sbin/unknown-daemon", "incoming", 1760000000123),
-                            probe.row("b", null, "outgoing", 5)
+                            probe.row("b", null, "outgoing", 5),
+                            Object.assign(probe.row("c", "/home/u/x/claude/versions/9.9", "outgoing", 6),
+                                          { process: "9.9" })
                         ]
                     }));
                 } else {
                     const a = probe.seen.find(s => s.id === "a");
                     const b = probe.seen.find(s => s.id === "b");
-                    probe.expect(!!a && !!b, "both rows reach the delegate");
+                    const c = probe.seen.find(s => s.id === "c");
+                    probe.expect(!!a && !!b && !!c, "all rows reach the delegate");
+                    if (c) {
+                        probe.expect(c.label === "claude 9.9" && c.unverified === true
+                                     && c.tail === "…/versions/9.9",
+                                     "crafted path: " + c.label + "/" + c.unverified + "/" + c.tail);
+                    }
                     if (a && b) {
                         probe.expect(a.path === "/usr/sbin/unknown-daemon", "processPath: " + a.path);
                         probe.expect(a.direction === "incoming", "direction: " + a.direction);
@@ -96,6 +108,10 @@ Window {
                         probe.expect(a.icon === "application-x-executable", "unmatched path gets the generic icon: " + a.icon);
                         probe.expect(a.needsRule === false && b.needsRule === false,
                                      "rows nobody answered silently need no rule");
+                        probe.expect(a.label === "p" && a.unverified === false && a.tail === "",
+                                     "plain-path row: " + a.label + "/" + a.unverified + "/" + a.tail);
+                        probe.expect(b.label === "p" && b.unverified === false && b.tail === "",
+                                     "no-path row: " + b.label + "/" + b.unverified + "/" + b.tail);
                         probe.expect(b.path === "", "missing path is empty: '" + b.path + "'");
                         probe.expect(b.icon === "application-x-executable", "no path gets the generic icon: " + b.icon);
                     }

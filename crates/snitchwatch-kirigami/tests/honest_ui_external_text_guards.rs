@@ -13,6 +13,16 @@
 
 const PAGES: &[(&str, &str, &[&str], usize)] = &[
     (
+        "ProgramLabel.qml",
+        include_str!("../qml/ProgramLabel.qml"),
+        &[
+            "part.src.programLabel",
+            "part.src.programPathTail",
+            "part.src.programPathFull",
+        ],
+        2,
+    ),
+    (
         "main.qml",
         include_str!("../qml/main.qml"),
         &["bridgeFeed.statusText"],

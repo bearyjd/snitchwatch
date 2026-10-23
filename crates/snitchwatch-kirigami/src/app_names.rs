@@ -54,7 +54,7 @@ impl ProgramName {
 
 /// Characters removed from display names: control, format, invisible, filler
 /// and variation-selector characters (explicit ranges; no Unicode tables).
-fn is_stripped(c: char) -> bool {
+pub(crate) fn is_stripped(c: char) -> bool {
     c.is_control()
         || matches!(c,
             '\u{AD}' | '\u{34F}' | '\u{600}'..='\u{605}' | '\u{61C}' | '\u{6DD}' | '\u{70F}'

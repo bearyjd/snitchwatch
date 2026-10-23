@@ -75,6 +75,10 @@ Item {
     // Issue #55: daemon events this row stands for, and the last one's time.
     required property int repeatCount
     required property real lastSeenMs
+    required property string programPathFull
+    required property string programLabel
+    required property bool programLabelUnverified
+    required property string programPathTail
     // Issue #18 double-submit guard: the buttons stay until `pending` flips,
     // so a second click would send a second SetVerdict. Reset when the
     // delegate shows another row (reuseItems: `rowId` changes) or the row's
@@ -202,12 +206,10 @@ Item {
             visible: !row.isGroupHeader
             Layout.fillWidth: true
             spacing: 0
-            Controls.Label {
-                textFormat: Text.PlainText
-                text: row.process
-                font.bold: row.pending
-                elide: Text.ElideRight
+            ProgramLabel {
                 Layout.fillWidth: true
+                src: row
+                bold: row.pending
             }
             Controls.Label {
                 textFormat: Text.PlainText
@@ -234,14 +236,12 @@ Item {
             Layout.alignment: Qt.AlignVCenter
         }
 
-        Controls.Label {
+        ProgramLabel {
             visible: row.isGroupHeader
-            textFormat: Text.PlainText
-            text: row.groupLabel
-            font.bold: row.groupLevel < 2
-            color: row.groupPending > 0 ? Kirigami.Theme.neutralTextColor : Kirigami.Theme.textColor
-            elide: Text.ElideRight
             Layout.fillWidth: true
+            src: row
+            bold: row.groupLevel < 2
+            labelColor: row.groupPending > 0 ? Kirigami.Theme.neutralTextColor : Kirigami.Theme.textColor
         }
 
         Controls.Label {

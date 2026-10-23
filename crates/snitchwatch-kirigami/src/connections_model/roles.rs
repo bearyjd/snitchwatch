@@ -78,3 +78,17 @@ pub(super) const ROLE_REPEAT_COUNT: i32 = 35;
 /// When a collapsed row's flow was last seen (epoch ms as a `real`); its own
 /// start when nothing collapsed into it, -1 on headers.
 pub(super) const ROLE_LAST_SEEN_MS: i32 = 36;
+/// Friendly program label (`crate::app_names`); on connection rows and program
+/// headers the sanitized name or heuristic/desktop label, on domain and host
+/// headers their own label.
+pub(super) const ROLE_PROGRAM_LABEL: i32 = 37;
+/// Whether `programLabel` came from a forgeable source or was altered, so the
+/// UI shows the unverified marker and the real path. False on domain/host headers.
+pub(super) const ROLE_PROGRAM_LABEL_UNVERIFIED: i32 = 38;
+/// Short tail of the real executable path, only while `programLabelUnverified`;
+/// empty otherwise.
+pub(super) const ROLE_PROGRAM_PATH_TAIL: i32 = 39;
+/// The full real path with control, bidi and format characters shown as
+/// visible escapes (`program_label::path_full_display`), for the tooltip;
+/// empty when there is no path.
+pub(super) const ROLE_PROGRAM_PATH_FULL: i32 = 40;

@@ -33,6 +33,8 @@ pub const CONNECTIONS_PAGE: &str = concat!(
     "\n",
     include_str!("../../qml/HoverTip.qml"),
     "\n",
+    include_str!("../../qml/ProgramLabel.qml"),
+    "\n",
     include_str!("../../qml/InspectorPanel.qml"),
     "\n",
     include_str!("../../qml/ConnectionDetailPage.qml"),
@@ -103,6 +105,10 @@ pub const ALL_QML: &[(&str, &str)] = &[
         include_str!("../../qml/InspectorState.qml"),
     ),
     ("HoverTip.qml", include_str!("../../qml/HoverTip.qml")),
+    (
+        "ProgramLabel.qml",
+        include_str!("../../qml/ProgramLabel.qml"),
+    ),
     ("StackNav.qml", include_str!("../../qml/StackNav.qml")),
     (
         "InspectorPanel.qml",

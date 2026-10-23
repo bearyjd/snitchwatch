@@ -32,6 +32,8 @@ const CONNECTIONS_PAGE: &str = concat!(
     "\n",
     include_str!("../qml/HoverTip.qml"),
     "\n",
+    include_str!("../qml/ProgramLabel.qml"),
+    "\n",
     include_str!("../qml/InspectorPanel.qml"),
     "\n",
     include_str!("../qml/ConnectionDetailPage.qml"),
@@ -369,4 +371,45 @@ fn connection_row_reaches_listview_only_through_the_delegate_root() {
             );
         }
     }
+}
+
+/// 0a: the Connections list shows the friendly program label through
+/// `ProgramLabel.qml`, which flags a label that cannot be trusted with a
+/// marker, the path tail and a real-path tooltip, all plain text. The leaf and
+/// program-header labels no longer show the raw `process` / `groupLabel`.
+#[test]
+fn connection_row_shows_the_friendly_label_with_its_real_path() {
+    let row = code_lines(include_str!("../qml/ConnectionRow.qml"));
+    for needed in [
+        "required property string programLabel",
+        "required property bool programLabelUnverified",
+        "required property string programPathTail",
+        "required property string programPathFull",
+        "src: row",
+    ] {
+        assert!(row.contains(needed), "ConnectionRow.qml lost: {needed}");
+    }
+    assert_eq!(
+        row.matches("ProgramLabel {").count(),
+        2,
+        "leaf and program header"
+    );
+    assert!(
+        !row.contains("text: row.process\n") && !row.contains("text: row.groupLabel\n"),
+        "a leaf or program-header label shows the raw name again"
+    );
+    let part = code_lines(include_str!("../qml/ProgramLabel.qml"));
+    for needed in [
+        "text: part.src.programLabel + (part.programUnverified ? \" ?\" : \"\")",
+        "text: part.src.programPathTail",
+        "part.src.programPathFull",
+        "text: part.fullPath",
+    ] {
+        assert!(part.contains(needed), "ProgramLabel.qml lost: {needed}");
+    }
+    assert_eq!(
+        part.matches("onlyWhen: part.programUnverified").count(),
+        2,
+        "the name and the tail each need the unverified-only real-path HoverTip"
+    );
 }

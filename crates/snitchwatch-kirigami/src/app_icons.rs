@@ -33,6 +33,18 @@ use std::sync::{Mutex, Once, OnceLock};
 /// Generic icon name used when no `.desktop` entry matches.
 pub const FALLBACK_ICON: &str = "application-x-executable";
 
+/// Most entries in each per-path result cache; when full it is cleared and
+/// refilled, so a long run over many distinct paths cannot grow it unbounded.
+const MAX_CACHED_PATHS: usize = 4096;
+
+/// Insert into a cache holding at most `cap` entries (clear-and-refill).
+fn insert_capped<V>(cache: &mut HashMap<String, V>, cap: usize, key: &str, value: V) {
+    if cache.len() >= cap && !cache.contains_key(key) {
+        cache.clear();
+    }
+    cache.insert(key.to_string(), value);
+}
+
 /// Directories whose programs may be matched to a `.desktop` entry by
 /// basename alone. The icon is a hint, not the program's identity: a
 /// look-alike in one of these can still borrow an icon, which is why the
@@ -517,9 +529,30 @@ pub fn icon_for_path(process_path: &str) -> String {
     }
     let icon = index.icon_for(process_path);
     if let Ok(mut c) = cache.lock() {
-        c.insert(process_path.to_string(), icon.clone());
+        insert_capped(&mut c, MAX_CACHED_PATHS, process_path, icon.clone());
     }
     icon
+}
+
+/// `.desktop` display name for a process path, from the same index and match
+/// rules as [`icon_for_path`]. `None` when nothing matches or while the index
+/// is still being built (not cached then); cached per path afterwards. A
+/// label only, never proof of identity (see [`crate::app_names`]).
+pub fn name_for_path(process_path: &str) -> Option<String> {
+    static CACHE: OnceLock<Mutex<HashMap<String, Option<String>>>> = OnceLock::new();
+    let Some(index) = INDEX.get() else {
+        prewarm();
+        return None;
+    };
+    let cache = CACHE.get_or_init(Mutex::default);
+    if let Some(hit) = cache.lock().ok().and_then(|c| c.get(process_path).cloned()) {
+        return hit;
+    }
+    let name = index.name_for(process_path);
+    if let Ok(mut c) = cache.lock() {
+        insert_capped(&mut c, MAX_CACHED_PATHS, process_path, name.clone());
+    }
+    name
 }
 
 #[cfg(test)]

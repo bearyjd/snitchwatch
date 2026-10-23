@@ -214,6 +214,10 @@ pub(super) fn grouped_entry_data(entry: &VisibleEntry, role: i32, store: &RowSto
             ROLE_PROCESS_PATH | ROLE_DIRECTION | ROLE_APP_ICON => {
                 QVariant::from(&QString::from(""))
             }
+            ROLE_PROGRAM_LABEL
+            | ROLE_PROGRAM_LABEL_UNVERIFIED
+            | ROLE_PROGRAM_PATH_TAIL
+            | ROLE_PROGRAM_PATH_FULL => program_label::role_for_program_header(key, label, role),
             _ => QVariant::default(),
         },
         VisibleEntry::DomainHeader {
@@ -247,9 +251,13 @@ pub(super) fn grouped_entry_data(entry: &VisibleEntry, role: i32, store: &RowSto
                 QVariant::from(&false)
             }
             ROLE_ANSWER_DEADLINE_MS | ROLE_STARTED_AT_MS => QVariant::from(&-1.0f64),
-            ROLE_PROCESS_PATH | ROLE_DIRECTION | ROLE_APP_ICON => {
-                QVariant::from(&QString::from(""))
-            }
+            ROLE_PROCESS_PATH
+            | ROLE_DIRECTION
+            | ROLE_APP_ICON
+            | ROLE_PROGRAM_PATH_TAIL
+            | ROLE_PROGRAM_PATH_FULL => QVariant::from(&QString::from("")),
+            ROLE_PROGRAM_LABEL => QVariant::from(&QString::from(label)),
+            ROLE_PROGRAM_LABEL_UNVERIFIED => QVariant::from(&false),
             _ => QVariant::default(),
         },
         VisibleEntry::HostHeader {
@@ -317,6 +325,10 @@ pub(super) fn grouped_entry_data(entry: &VisibleEntry, role: i32, store: &RowSto
                 ROLE_STARTED_AT_MS => QVariant::from(&started_at_ms(row)),
                 ROLE_APP_ICON => QVariant::from(&QString::from(&app_icon_for_row(row))),
                 ROLE_NEEDS_RULE => QVariant::from(&needs_rule_for_row(row)),
+                ROLE_PROGRAM_LABEL
+                | ROLE_PROGRAM_LABEL_UNVERIFIED
+                | ROLE_PROGRAM_PATH_TAIL
+                | ROLE_PROGRAM_PATH_FULL => program_label::role_for_row(row, role),
                 _ => QVariant::default(),
             }
         }
