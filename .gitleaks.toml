@@ -1,0 +1,10 @@
+title = "snitchwatch gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Deliberately public, test-only material"
+paths = [
+  '''tests/fixtures/tls/localhost-test-only\.key\.der''',
+]
