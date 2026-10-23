@@ -282,9 +282,135 @@ fn new_roles_have_distinct_ids_and_names() {
         ROLE_GROUP_PROCESS_KEY,
         ROLE_LEVEL_RULE_STATE,
         ROLE_LEVEL_RULE_NAME,
+        ROLE_PROGRAM_LABEL,
+        ROLE_PROGRAM_LABEL_UNVERIFIED,
+        ROLE_PROGRAM_PATH_TAIL,
+        ROLE_PROGRAM_PATH_FULL,
     ];
     for (i, a) in ids.iter().enumerate() {
         assert!(*a > ROLE_MAKE_RULE_OFFERED);
         assert!(!ids[i + 1..].contains(a));
     }
+}
+
+fn program_roles(entry: &VisibleEntry, store: &RowStore) -> (String, bool, String) {
+    let q = |role| {
+        grouped_entry_data(entry, role, store)
+            .value::<QString>()
+            .map(|s| s.to_string())
+            .unwrap()
+    };
+    let flag = grouped_entry_data(entry, ROLE_PROGRAM_LABEL_UNVERIFIED, store)
+        .value::<bool>()
+        .unwrap();
+    (q(ROLE_PROGRAM_LABEL), flag, q(ROLE_PROGRAM_PATH_TAIL))
+}
+
+#[test]
+fn program_label_roles_on_leaf_and_every_header_tier() {
+    use crate::connections::grouping::GroupCounts;
+    let path = "/home/u/x/claude/versions/9.9";
+    let mut store = RowStore::default();
+    let mut r = row("1", None);
+    r.process = "9.9".into();
+    r.process_path = Some(path.into());
+    store.apply(ServerMessage::InsertConnectionRows { rows: vec![r] });
+    let leaf = VisibleEntry::Row {
+        id: "1".into(),
+        process_key: path.into(),
+        domain_key: "d.com".into(),
+        host_key: None,
+    };
+    assert_eq!(
+        program_roles(&leaf, &store),
+        ("claude 9.9".into(), true, "…/versions/9.9".into())
+    );
+    // The raw roles are untouched.
+    let text = |entry: &VisibleEntry, role| {
+        grouped_entry_data(entry, role, &store)
+            .value::<QString>()
+            .unwrap()
+            .to_string()
+    };
+    assert_eq!(text(&leaf, ROLE_PROCESS), "9.9");
+    assert_eq!(text(&leaf, ROLE_PROCESS_PATH), path);
+    let counts = GroupCounts::default();
+    let program = |key: &str, label: &str| VisibleEntry::ProcessHeader {
+        key: key.into(),
+        label: label.into(),
+        expanded: false,
+        counts,
+    };
+    let header = program(path, "9.9");
+    assert_eq!(
+        program_roles(&header, &store),
+        ("claude 9.9".into(), true, "…/versions/9.9".into())
+    );
+    assert_eq!(text(&header, ROLE_GROUP_LABEL), "9.9");
+    assert_eq!(text(&header, ROLE_GROUP_KEY), path);
+    assert_eq!(text(&header, ROLE_PROCESS_PATH), "");
+    assert_eq!(
+        program_roles(&program("curl", "curl"), &store),
+        ("curl".into(), false, "".into())
+    );
+    let domain = VisibleEntry::DomainHeader {
+        process_key: path.into(),
+        key: "d.com".into(),
+        label: "d.com".into(),
+        expanded: false,
+        counts,
+    };
+    let host = VisibleEntry::HostHeader {
+        process_key: path.into(),
+        domain_key: "d.com".into(),
+        key: "h.d.com".into(),
+        label: "h.d.com".into(),
+        expanded: false,
+        counts,
+    };
+    for entry in [&domain, &host] {
+        let (label, _, _) = program_roles(entry, &store);
+        assert_eq!(
+            program_roles(entry, &store),
+            (label.clone(), false, "".into())
+        );
+        assert_eq!(label, text(entry, ROLE_GROUP_LABEL));
+    }
+}
+
+/// The friendly label never changes which group a row is in.
+#[test]
+fn group_key_stays_the_path_whatever_the_label() {
+    use crate::connections::grouping::GroupTree;
+    let mut tree = GroupTree::new();
+    let mut a = row("a", None);
+    a.process = "9.9".into();
+    a.process_path = Some("/home/u/x/claude/versions/9.9".into());
+    let mut b = row("b", None);
+    b.process = "9.9".into();
+    b.process_path = Some("/home/v/y/claude/versions/9.9".into());
+    tree.upsert_row(&a);
+    tree.upsert_row(&b);
+    assert_eq!(tree.process_count(), 2, "same label, different paths");
+    let rows = [&a, &b];
+    let map: std::collections::HashMap<&str, &ConnectionRow> =
+        rows.iter().map(|r| (r.id.as_str(), *r)).collect();
+    let keys: Vec<String> = tree
+        .build_projection(
+            &map,
+            &crate::connections::filter::ConnectionFilter::default(),
+        )
+        .iter()
+        .filter_map(|e| match e {
+            VisibleEntry::ProcessHeader { key, .. } => Some(key.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        keys,
+        [
+            "/home/u/x/claude/versions/9.9",
+            "/home/v/y/claude/versions/9.9"
+        ]
+    );
 }

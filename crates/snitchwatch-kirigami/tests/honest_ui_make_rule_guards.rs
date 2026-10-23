@@ -16,6 +16,8 @@ fn connections_page_labels_showing_connection_data_are_plain_text() {
             "row.host",
             "row.verdict",
             "row.groupLabel",
+            "part.src.programLabel",
+            "part.src.programPathTail",
             "page.inspectHost",
             "page.inspectIp",
             "page.inspectProtocol",

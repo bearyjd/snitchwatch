@@ -28,6 +28,7 @@ fn main() {
                 "qml/ConnectionsTopBar.qml",
                 "qml/StackNav.qml",
                 "qml/HoverTip.qml",
+                "qml/ProgramLabel.qml",
                 "qml/InspectorState.qml",
                 "qml/InspectorPanel.qml",
                 "qml/ConnectionDetailPage.qml",

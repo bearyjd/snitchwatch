@@ -519,7 +519,8 @@ impl qobject::ConnectionsModel {
     }
 
     /// The icon index just became ready: rows drawn before then have the
-    /// generic icon, so every row's `appIcon` is read again.
+    /// generic icon and no `.desktop` name, so every row's `appIcon` and
+    /// program-label roles are read again.
     pub(super) fn refresh_app_icons(mut self: Pin<&mut Self>) {
         let rows = self.row_count(&QModelIndex::default());
         if rows <= 0 {
@@ -529,6 +530,10 @@ impl qobject::ConnectionsModel {
         let br = self.index(rows - 1, 0, &QModelIndex::default());
         let mut roles = QList::<i32>::default();
         roles.append(ROLE_APP_ICON);
+        roles.append(ROLE_PROGRAM_LABEL);
+        roles.append(ROLE_PROGRAM_LABEL_UNVERIFIED);
+        roles.append(ROLE_PROGRAM_PATH_TAIL);
+        roles.append(ROLE_PROGRAM_PATH_FULL);
         self.as_mut().data_changed(&tl, &br, &roles);
     }
 

@@ -42,6 +42,7 @@ mod level_rule_actions;
 
 mod apply;
 mod helpers;
+mod program_label;
 mod qt_interface;
 mod queries;
 mod roles;
