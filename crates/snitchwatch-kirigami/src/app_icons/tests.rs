@@ -325,3 +325,83 @@ fn xdg_data_home_comes_first_then_the_home_data_dir() {
     assert_eq!(dirs[0], PathBuf::from("/data/applications"));
     assert_eq!(dirs[1], PathBuf::from("/home/u/.local/share/applications"));
 }
+
+fn named(name_lines: &str) -> String {
+    format!("[Desktop Entry]\nType=Application\n{name_lines}\nExec=a\nIcon=i\n")
+}
+
+#[test]
+fn name_key_is_the_unlocalized_one_first_occurrence_wins() {
+    let name = |body: &str| parse_desktop(&named(body), "a").unwrap().name;
+    assert_eq!(name("Name[de]=Deutsch\nName=Plain"), Some("Plain".into()));
+    assert_eq!(name("Name=First\nName=Second"), Some("First".into()));
+    assert_eq!(name("Name[de]=Deutsch"), None);
+    assert_eq!(name("GenericName=Browser"), None);
+    assert_eq!(name("Name="), None);
+}
+
+#[test]
+fn name_is_sanitized_and_capped() {
+    let name = |body: &str| parse_desktop(&named(body), "a").unwrap().name;
+    assert_eq!(name("Name=Fire\u{202E}fox\u{7}"), Some("Firefox".into()));
+    let long = format!("Name={}", "n".repeat(200));
+    assert_eq!(name(&long).unwrap().chars().count(), 80);
+    assert_eq!(name("Name=\u{202E}\u{200F}"), None);
+}
+
+#[test]
+fn an_entry_without_an_icon_is_still_rejected_despite_a_name() {
+    let body = "[Desktop Entry]\nType=Application\nName=Nice\nExec=a\n";
+    assert!(parse_desktop(body, "a").is_none());
+}
+
+#[test]
+fn name_for_mirrors_icon_for_matching() {
+    let dir = tempfile::tempdir().unwrap();
+    let body =
+        "[Desktop Entry]\nType=Application\nName=Pretty App\nExec=/opt/pretty/run\nIcon=pi\n";
+    write(dir.path(), "pretty.desktop", body);
+    write(
+        dir.path(),
+        "tool.desktop",
+        "[Desktop Entry]\nType=Application\nName=Tool\nExec=tool\nIcon=ti\n",
+    );
+    let idx = AppIconIndex::scan(&[dir.path().to_path_buf()]);
+    assert_eq!(
+        idx.name_for("/opt/pretty/run").as_deref(),
+        Some("Pretty App")
+    );
+    assert_eq!(idx.name_for("/usr/bin/tool").as_deref(), Some("Tool"));
+    // Basename alone proves nothing outside the standard bin dirs.
+    assert_eq!(idx.name_for("/tmp/tool"), None);
+    assert_eq!(idx.name_for("/usr/bin/other"), None);
+    assert_eq!(idx.name_for(""), None);
+}
+
+#[test]
+fn name_for_matches_flatpak_by_app_id() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "org.mozilla.firefox.desktop",
+        "[Desktop Entry]\nType=Application\nName=Firefox\nExec=/usr/bin/flatpak run org.mozilla.firefox\nIcon=ff\n",
+    );
+    let idx =
+        AppIconIndex::scan(&[dir.path().to_path_buf()]).with_home(Some("/home/u".to_string()));
+    let real = "/home/u/.local/share/flatpak/app/org.mozilla.firefox/x/y/files/bin/f";
+    assert_eq!(idx.name_for(real).as_deref(), Some("Firefox"));
+    assert_eq!(
+        idx.name_for("/tmp/flatpak/app/org.mozilla.firefox/x/y/files/bin/f"),
+        None
+    );
+}
+
+#[test]
+fn name_decodes_desktop_entry_escapes_before_sanitizing() {
+    let name = |body: &str| parse_desktop(&named(body), "a").unwrap().name;
+    assert_eq!(name(r"Name=A\sB"), Some("A B".into()));
+    assert_eq!(name(r"Name=A\tB\nC\rD"), Some("A B C D".into()));
+    assert_eq!(name(r"Name=A\\B"), Some("A\\B".into()));
+    assert_eq!(name(r"Name=A\qB"), Some("A\\qB".into()));
+    assert_eq!(name("Name=A\\"), Some("A\\".into()));
+}
