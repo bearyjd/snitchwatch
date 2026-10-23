@@ -725,6 +725,10 @@ mod verdict_gate_tests;
 mod prompt_slot_tests;
 
 #[cfg(test)]
+#[path = "bridge_runtime/test_link.rs"]
+pub(crate) mod test_link;
+
+#[cfg(test)]
 #[path = "bridge_runtime/decide_later_tests.rs"]
 mod decide_later_tests;
 
