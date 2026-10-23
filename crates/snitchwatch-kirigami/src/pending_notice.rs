@@ -71,13 +71,36 @@ impl PendingTarget {
     }
 }
 
+/// How a pending notice ended, for the notice gate (0d).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NoticeEnd {
+    /// It was never shown.
+    NotShown,
+    /// The user acted through it.
+    Answered,
+    /// Its buttons were voided by a new server.
+    Voided,
+    /// Its row stopped waiting, or the user dismissed it. (A server-side expiry
+    /// does not end the wait: the notification is resident.)
+    Ended,
+}
+
+impl NoticeEnd {
+    /// Only a notice that ran its course keeps its flow's repeats coalesced
+    /// for the rest of the repeat window; every other end lets the next ask
+    /// notify (fail open).
+    pub(crate) fn holds_the_repeat_window(self) -> bool {
+        self == NoticeEnd::Ended
+    }
+}
+
 /// Show `target`'s notification on `conn` and act on its answer.
 /// `on_review` raises the window.
 pub(crate) async fn show_and_answer(
     conn: &zbus::Connection,
     mut target: PendingTarget,
     on_review: impl FnOnce(),
-) {
+) -> NoticeEnd {
     let deny = InlineDeny::decide(
         target.row.process_path.as_deref(),
         target
@@ -104,7 +127,7 @@ pub(crate) async fn show_and_answer(
         Ok(notice) => notice,
         Err(error) => {
             tracing::warn!(%error, "pending notification not shown");
-            return;
+            return NoticeEnd::NotShown;
         }
     };
     tracing::info!(
@@ -119,11 +142,19 @@ pub(crate) async fn show_and_answer(
             // slow `CloseNotification` mustn't delay the answer (PR #112
             // review L2), nor the answer the close.
             tokio::join!(on_action(&target, key, on_review), notice.close());
+            NoticeEnd::Answered
         }
         // A new server voids the notice's buttons, so it goes; the row
         // still waits, to be answered in the window.
-        WaitEnd::Stopped | WaitEnd::ServerChanged => notice.close().await,
-        WaitEnd::Closed(_) => {}
+        WaitEnd::ServerChanged => {
+            notice.close().await;
+            NoticeEnd::Voided
+        }
+        WaitEnd::Stopped => {
+            notice.close().await;
+            NoticeEnd::Ended
+        }
+        WaitEnd::Closed(_) => NoticeEnd::Ended,
     }
 }
 

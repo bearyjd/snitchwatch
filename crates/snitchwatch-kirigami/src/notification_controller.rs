@@ -23,7 +23,8 @@
 //! the fallback, so an alert nobody saw is not a prompt nobody saw. Other
 //! sessions' prompts are gated on the main window as before.
 //!
-//! **Cooldown.** [`crate::notifier::CooldownGate`] is ported unchanged.
+//! **Cooldown.** [`crate::notifier::CooldownGate`], extended in 0d with a
+//! one-hour repeat window per flow.
 //!
 //! **5-second pending grace period.** Per the original design spec's
 //! "Pending decision" notification rule ("only if the Snitchwatch window is
@@ -63,7 +64,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 
 use crate::bridge_runtime::{BridgeHandles, BridgeNotice, ReceivedNotice};
-use crate::notifier::{CooldownGate, FlowKey};
+use crate::notifier::{CooldownGate, FlowDecision, FlowKey};
 use crate::pending_notice::{show_and_answer, show_plain, PendingTarget};
 use crate::silent_mode;
 use snitchwatch_bridge::translator::process_binding::RuleRefusal;
@@ -77,7 +78,7 @@ const WINDOW_RECHECK: Duration = Duration::from_secs(1);
 
 /// One look, on the Qt thread, at a waiting prompt's notice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PendingLook {
+pub(crate) enum PendingLook {
     /// The window is active: the prompt is in front of the user there.
     WindowActive,
     /// Posted, or held back by the cooldown: nothing more to do.
@@ -292,18 +293,21 @@ fn front_is_active(current_session: bool, window_active: bool, alert_active: boo
 
 /// Whether a notice may go out now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Gate {
+pub(crate) enum Gate {
     Post,
     /// A Pending notice while the window is active.
     WindowActive,
     /// The same notice went out within the cooldown.
     CooledDown,
+    /// A repeat of a flow whose notice was posted within the repeat window.
+    Repeat,
 }
 
 /// A Pending notice doesn't go out while the window is active, and no
-/// notice goes out twice within the cooldown. The cooldown is taken only
-/// when it goes out, so a notice held back by the window can go later.
-fn may_post(
+/// notice goes out twice within the cooldown. The cooldown, and the flow's
+/// posted-notice entry, are taken only when it goes out, so a notice held back by
+/// the window can go later.
+pub(crate) fn may_post(
     notice: &BridgeNotice,
     flow: Option<&FlowKey>,
     window_active: bool,
@@ -313,14 +317,62 @@ fn may_post(
     if matches!(notice, BridgeNotice::Pending { .. }) && window_active {
         return Gate::WindowActive;
     }
-    let fires = gate
+    let decision = gate
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .should_fire_for_flow(notice, flow, now);
-    if fires {
-        Gate::Post
-    } else {
-        Gate::CooledDown
+        .decide_for_flow(notice, flow, now);
+    match decision {
+        FlowDecision::Fire => Gate::Post,
+        FlowDecision::Repeat => Gate::Repeat,
+        FlowDecision::CooledDown => Gate::CooledDown,
+    }
+}
+
+/// Ends a flow's posted-notice entry when dropped, unless it is told to
+/// hold: only a notice that ran its course (its row stopped waiting, or
+/// the user dismissed it) keeps its repeats coalesced; whatever
+/// else ends the task (answered, voided, not shown, no session bus,
+/// aborted) lets the flow's next ask notify.
+struct ClearFlowOnDrop {
+    gate: Arc<Mutex<CooldownGate>>,
+    flow: FlowKey,
+    hold: bool,
+}
+
+impl ClearFlowOnDrop {
+    fn new(gate: Arc<Mutex<CooldownGate>>, flow: FlowKey) -> Self {
+        Self {
+            gate,
+            flow,
+            hold: false,
+        }
+    }
+
+    /// Keep the entry past the drop, for the rest of the repeat window.
+    fn hold(&mut self) {
+        self.hold = true;
+    }
+}
+
+impl Drop for ClearFlowOnDrop {
+    fn drop(&mut self) {
+        if self.hold {
+            return;
+        }
+        self.gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear_flow(&self.flow);
+    }
+}
+
+/// What a look at the notice reports for a gate result. Only the window
+/// holds the notice back to be looked at again; a Repeat or a cooldown
+/// touches no row and no banner.
+pub(crate) fn look_for(gate: Gate) -> PendingLook {
+    match gate {
+        Gate::WindowActive => PendingLook::WindowActive,
+        Gate::Post | Gate::CooledDown | Gate::Repeat => PendingLook::Done,
     }
 }
 
@@ -351,32 +403,42 @@ impl qobject::NotificationController {
         let front_active =
             front_is_active(current_session, *self.window_active(), *self.alert_active());
         let flow = target.as_ref().map(PendingTarget::flow_key);
-        match may_post(&notice, flow.as_ref(), front_active, &gate, Instant::now()) {
-            Gate::WindowActive => PendingLook::WindowActive,
+        let verdict = may_post(&notice, flow.as_ref(), front_active, &gate, Instant::now());
+        match verdict {
+            Gate::WindowActive => {}
             Gate::CooledDown => {
                 let (kind, row_id) = notice_label(&notice);
                 tracing::info!(kind, ?row_id, "notice held back by its cooldown");
-                PendingLook::Done
             }
-            Gate::Post => {
-                match target {
-                    Some(target) => {
-                        tracing::info!("posting the pending notice: the window isn't active");
-                        self.as_mut().dispatch_pending(target);
-                    }
-                    None => dispatch(notice),
+            Gate::Repeat => {
+                let (kind, row_id) = notice_label(&notice);
+                tracing::info!(kind, ?row_id, "notice held back: its flow's notice is live");
+            }
+            Gate::Post => match target {
+                Some(target) => {
+                    tracing::info!("posting the pending notice: the window isn't active");
+                    self.as_mut().dispatch_pending(target, gate);
                 }
-                PendingLook::Done
-            }
+                None => dispatch(notice),
+            },
         }
+        look_for(verdict)
     }
 
     /// The pending notice, on the bridge runtime (`crate::pending_notice`).
     /// "Review" raises the window through `reviewRequested`.
-    fn dispatch_pending(self: Pin<&mut Self>, target: PendingTarget) {
+    fn dispatch_pending(
+        self: Pin<&mut Self>,
+        target: PendingTarget,
+        gate: Arc<Mutex<CooldownGate>>,
+    ) {
         let qt_thread = self.qt_thread();
         let runtime = target.handles().runtime().clone();
+        // Made here, not in the future, so a future dropped before its first
+        // poll clears the flow too.
+        let live = ClearFlowOnDrop::new(gate, target.flow_key());
         runtime.spawn(async move {
+            let mut live = live;
             let conn = match zbus::Connection::session().await {
                 Ok(conn) => conn,
                 Err(error) => {
@@ -384,10 +446,13 @@ impl qobject::NotificationController {
                     return;
                 }
             };
-            show_and_answer(&conn, target, move || {
+            let end = show_and_answer(&conn, target, move || {
                 let _ = qt_thread.queue(|qobject| qobject.review_requested());
             })
             .await;
+            if end.holds_the_repeat_window() {
+                live.hold();
+            }
         });
     }
 }
@@ -431,186 +496,5 @@ fn notice_text(notice: &BridgeNotice) -> Option<(&'static str, String)> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Issue #44: the fixed explanation, with no "Review" action.
-    #[test]
-    fn verdict_not_remembered_is_explained() {
-        let notice = BridgeNotice::VerdictNotRemembered { row_id: 3 };
-        let (summary, body) = notice_text(&notice).unwrap();
-        assert_eq!(summary, "Snitchwatch — answer not remembered");
-        assert_eq!(body, RuleRefusal::ProcessFileUnknown.describe());
-    }
-
-    /// Prompt-slot plan, part A: the release summary, fixed text around
-    /// the count, with no "Review" (the prompt is already answered).
-    #[test]
-    fn a_prompt_slot_summary_is_fixed_text() {
-        let notice = BridgeNotice::PromptSlotSummary {
-            row_id: 3,
-            count: 2,
-        };
-        let (summary, body) = notice_text(&notice).unwrap();
-        assert_eq!(summary, "Snitchwatch — while a prompt was open");
-        assert_eq!(
-            body,
-            "While that prompt was open, the firewall applied its default action 2 times \
-             (retries count again)."
-        );
-    }
-
-    /// r11 issue A: a Pending notice held back because the window is
-    /// active doesn't take its cooldown, so it can go out once the window
-    /// isn't active, once. Other notices aren't held back by the window.
-    #[test]
-    fn a_notice_held_back_by_the_window_can_go_later() {
-        let gate = Mutex::new(CooldownGate::new());
-        let pending = BridgeNotice::Pending {
-            row_id: 3,
-            process: "curl".into(),
-        };
-        let t0 = Instant::now();
-        let at = |secs| t0 + Duration::from_secs(secs);
-        assert_eq!(
-            may_post(&pending, None, true, &gate, at(0)),
-            Gate::WindowActive
-        );
-        assert_eq!(
-            may_post(&pending, None, true, &gate, at(1)),
-            Gate::WindowActive
-        );
-        assert_eq!(may_post(&pending, None, false, &gate, at(2)), Gate::Post);
-        assert_eq!(
-            may_post(&pending, None, false, &gate, at(3)),
-            Gate::CooledDown
-        );
-        assert_eq!(
-            may_post(&BridgeNotice::DaemonAway, None, true, &gate, at(3)),
-            Gate::Post
-        );
-    }
-
-    /// #116 L5: a daemon retry is a new row for the same flow, so its
-    /// notice is held back by the flow's cooldown.
-    #[test]
-    fn a_retry_of_the_same_flow_is_cooled_down() {
-        let gate = Mutex::new(CooldownGate::new());
-        let pending = |row_id| BridgeNotice::Pending {
-            row_id,
-            process: "curl".into(),
-        };
-        let flow = FlowKey {
-            session: 1,
-            program: "/usr/bin/curl".into(),
-            host: "example.com".into(),
-        };
-        let t0 = Instant::now();
-        let at = |secs| t0 + Duration::from_secs(secs);
-        assert_eq!(
-            may_post(&pending(1), Some(&flow), false, &gate, at(0)),
-            Gate::Post
-        );
-        assert_eq!(
-            may_post(&pending(2), Some(&flow), false, &gate, at(5)),
-            Gate::CooledDown
-        );
-    }
-
-    /// A prompt of this GUI's own session is held back while the alert is
-    /// the active window and posted when it is not, whatever the main
-    /// window does; other sessions follow the main window.
-    #[test]
-    fn the_alert_gates_this_guis_own_prompt_and_the_window_the_others() {
-        assert!(front_is_active(true, false, true));
-        assert!(!front_is_active(true, true, false));
-        assert!(front_is_active(false, true, false));
-        assert!(!front_is_active(false, false, true));
-        let gate = Mutex::new(CooldownGate::new());
-        let pending = BridgeNotice::Pending {
-            row_id: 3,
-            process: "curl".into(),
-        };
-        let now = Instant::now();
-        let held = front_is_active(true, false, true);
-        assert_eq!(
-            may_post(&pending, None, held, &gate, now),
-            Gate::WindowActive
-        );
-        let unseen = front_is_active(true, true, false);
-        assert_eq!(may_post(&pending, None, unseen, &gate, now), Gate::Post);
-    }
-
-    /// The looks a prompt's notice gets, at what time after the prompt.
-    async fn looks(script: Vec<PendingLook>) -> Vec<Duration> {
-        let start = tokio::time::Instant::now();
-        let times = Arc::new(Mutex::new(Vec::new()));
-        let seen = times.clone();
-        let mut script = script.into_iter();
-        post_once_the_window_is_not_active(1, 3, move || {
-            seen.lock().unwrap().push(start.elapsed());
-            let look = script.next().expect("looked again after the end");
-            async move { look }
-        })
-        .await;
-        let times = times.lock().unwrap().clone();
-        times
-    }
-
-    /// r11 issue A: the prompt raised the window, so the window was active
-    /// when the grace period ended; it was closed later, with the prompt
-    /// still waiting. The notice goes out then, not never.
-    #[tokio::test(start_paused = true)]
-    async fn hiding_the_window_later_still_posts_the_notice() {
-        use PendingLook::{Done, Gone, WindowActive};
-        let secs = |list: &[u64]| -> Vec<Duration> {
-            list.iter().map(|secs| Duration::from_secs(*secs)).collect()
-        };
-        // Posted at the end of the grace period, as before.
-        assert_eq!(looks(vec![Done]).await, secs(&[5]));
-        // Held back by the active window, then posted once it isn't.
-        assert_eq!(
-            looks(vec![WindowActive, WindowActive, WindowActive, Done]).await,
-            secs(&[5, 6, 7, 8])
-        );
-        // Answered in the window: no more looks once the row stops waiting.
-        assert_eq!(looks(vec![WindowActive, Gone]).await, secs(&[5, 6]));
-    }
-
-    /// PR #112 review L1: a notice is logged by kind and row only.
-    #[test]
-    fn a_notice_is_logged_without_its_connection_details() {
-        let cases = [
-            (
-                BridgeNotice::Pending {
-                    row_id: 3,
-                    process: "/tmp/x/curl".into(),
-                },
-                ("pending", Some(3)),
-            ),
-            (
-                BridgeNotice::DenyScopeNarrowed {
-                    row_id: 4,
-                    what: "/usr/bin/curl → example.com".into(),
-                    reason: "no program file".into(),
-                },
-                ("deny_scope_narrowed", Some(4)),
-            ),
-            (BridgeNotice::DaemonAway, ("daemon_away", None)),
-        ];
-        for (notice, label) in cases {
-            assert_eq!(notice_label(&notice), label);
-        }
-    }
-
-    /// A Pending notice never goes out as plain text: only through
-    /// `pending_notice`, with its actions heard from the server alone.
-    #[test]
-    fn a_pending_notice_has_no_plain_text_form() {
-        let notice = BridgeNotice::Pending {
-            row_id: 3,
-            process: "curl".into(),
-        };
-        assert_eq!(notice_text(&notice), None);
-    }
-}
+#[path = "notification_controller/tests.rs"]
+mod tests;
