@@ -17,15 +17,15 @@ pub(super) const CLASSES: [(&str, &[&str]); 8] = [
     (
         "interpreters",
         &[
-            "python*", "perl", "ruby", "node*", "bun", "deno", "java", "lua*", "php*", "dotnet",
-            "tclsh", "awk", "gawk",
+            "python*", "perl*", "ruby*", "node*", "bun", "deno", "java", "lua*", "php*", "dotnet",
+            "tclsh", "awk", "gawk", "gjs", "mono", "julia", "pwsh",
         ],
     ),
     ("toolchains", &["go", "cargo", "rustc"]),
     (
         "shells and runners",
         &[
-            "bash", "sh", "zsh", "fish", "dash", "busybox", "env", "xargs",
+            "bash", "sh", "zsh", "fish", "dash", "ksh", "csh", "tcsh", "busybox", "env", "xargs",
         ],
     ),
     ("privilege tools", &["sudo", "pkexec"]),

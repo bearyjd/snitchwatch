@@ -103,8 +103,6 @@ fn a_name_that_only_starts_like_an_exact_entry_is_not_on_the_list() {
         "gitg",
         "sshd",
         "ssh-agent",
-        "rubyx",
-        "perlbrew",
         "cargo-watch",
         "firefox",
         "NetworkManager",

@@ -3,7 +3,7 @@
 
 /// Words that pass judgement. Kept here, not in the module, so the guard
 /// does not match itself.
-const VERDICT_WORDS: [&str; 15] = [
+const VERDICT_WORDS: [&str; 21] = [
     "safe",
     "malicious",
     "suspicious",
@@ -19,6 +19,12 @@ const VERDICT_WORDS: [&str; 15] = [
     "verified",
     "genuine",
     "bad",
+    "good",
+    "clean",
+    "infected",
+    "attack",
+    "unsafe",
+    "suspect",
 ];
 
 const SOURCES: [(&str, &str); 9] = [
@@ -115,7 +121,7 @@ fn the_scanner_finds_literals_and_skips_comments_and_chars() {
         let c = format!("{} of {}", x, y);
     "#;
     assert_eq!(literals(sample), ["runs from", r#"say \"hi\""#, "{} of {}"]);
-    assert_eq!(verdicts_in("This is Safe, not unsafe"), ["safe"]);
+    assert_eq!(verdicts_in("This is Safe, not unsafe"), ["safe", "unsafe"]);
     assert!(verdicts_in("an uncommon port").is_empty());
 }
 

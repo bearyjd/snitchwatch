@@ -176,7 +176,7 @@ fn a_directory_rule_under_a_user_directory_is_offered_but_not_suggested() {
 fn the_decision_does_not_depend_on_what_the_program_is_called() {
     // A desktop entry (or any name) is never an input: only the path, the
     // flags and the counts decide. Same facts, different names, same answer.
-    for name in ["app", "firefox", "Firefox", "org.mozilla.firefox", "gjs"] {
+    for name in ["app", "firefox", "Firefox", "org.mozilla.firefox", "eog"] {
         let named = one(prog(name, "/opt/mozilla/firefox", &[("a.example", 2)]));
         assert!(!named.selected_by_suggest, "{name}");
         assert_eq!(named.choices.len(), 3, "{name}");
