@@ -104,7 +104,7 @@ The whole project depends on opensnitchd's `AskRule` actually delivering the UX 
 - [ ] **Step 1: Initialize git repository**
 
 ```bash
-cd /var/home/user/Documents/vibe-code/opensnitch-gui
+cd /var/home/<user>/Documents/vibe-code/opensnitch-gui
 git init
 git branch -m main
 ```

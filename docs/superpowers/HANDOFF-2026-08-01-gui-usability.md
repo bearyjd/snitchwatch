@@ -118,8 +118,8 @@ up came from the daemon's own log, the vendored Go source, or the journal.
 
 ## Environment notes for the next session
 
-- **Build**: this box's dev shell bind-mounts `/home/user` and
-  `/var/home/user` to the same directory without a symlink, so cxx-qt's
+- **Build**: this box's dev shell bind-mounts `/home/<user>` and
+  `/var/home/<user>` to the same directory without a symlink, so cxx-qt's
   include-prefix check panics if cargo is invoked from mixed path
   spellings. Use one consistently; recover with `cargo clean -p cxx-qt
   -p cxx-qt-lib -p cxx-qt-build -p kirigami-spike -p snitchwatch-kirigami`.
