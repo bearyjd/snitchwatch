@@ -1,12 +1,21 @@
 # Linux App Firewall + Bazzite Security Scanner — Handoff (updated 2026-10-22)
 
-> **Start with the "2026-10-22 (current)" section just below.** It is the
+> **Start with the "2026-10-23 (learning mode built)" section, then "2026-10-22 (current)" (its `main` sha is stale).** It is the
 > current status. (A local, gitignored `.omc/STATE.md` may also exist on the
 > owner's machine; it is not in a fresh clone.)
 > Everything after that section is a dated history: accurate as a record of what was
 > decided and why, but stale as a status report. The 2026-10-09 section was
 > current then; roughly 100 commits have merged since (r14/r15 work, up to
 > `bfc76e6`). For the open items, see `gh issue view 178`.
+
+## 2026-10-23 (learning mode built)
+GUI learning mode is merged to `main` (#195 setting + fail-closed end, #196 recorder + banner,
+#197 proposal logic, #198 bulk-rule sequencer, #199 review page + Start learning). Plan and
+honest limits: `docs/superpowers/plans/2026-10-22-gui-learning-mode.md`. GUI-only; no bridge,
+wire or packaging change, nothing in r15. Still the owner's: try learning mode on the laptop
+BEFORE any GUI release (it allows everything once during the window; nothing is ticked for you).
+Not merged on purpose: 0c exception-first default. Next GUI items: 0b group counts, 0e
+"What is this?".
 
 ## 2026-10-22 (current)
 
