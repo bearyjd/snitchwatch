@@ -145,10 +145,40 @@ fn heuristic_label(path: &str) -> Option<String> {
 
 /// `<...>/<app>/versions/<semver>` -> `<app> <semver>`.
 fn versions_label(path: &str) -> Option<String> {
+    let (app, version) = versions_parts(path)?;
+    Some(format!("{app} {version}"))
+}
+
+/// `<app>` and `<semver>` of a `<...>/<app>/versions/<semver>` path.
+fn versions_parts(path: &str) -> Option<(&str, &str)> {
     let mut parts = path.rsplit('/');
     let (version, dir, app) = (parts.next()?, parts.next()?, parts.next()?);
     (dir == "versions" && is_semver_like(version) && is_app_component(app))
-        .then(|| format!("{app} {version}"))
+        .then_some((app, version))
+}
+
+/// A path the versions heuristic matches, split: `<dir>/<app>/versions/<version>`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct VersionedBinary<'a> {
+    /// Everything before `/<app>/versions/<version>` (empty for a file at
+    /// `/<app>/versions/<version>`).
+    pub dir: &'a str,
+    pub app: &'a str,
+    pub version: &'a str,
+}
+
+/// Splits `path` when the versions heuristic matches it and it is absolute,
+/// without control characters (as [`friendly_name`] requires). A suggestion
+/// shape only, never proof of what a program is.
+pub(crate) fn versioned_binary(path: &str) -> Option<VersionedBinary<'_>> {
+    if path.chars().any(char::is_control) {
+        return None;
+    }
+    let (app, version) = versions_parts(path)?;
+    let tail_len = "/".len() + app.len() + "/versions/".len() + version.len();
+    let dir = path.get(..path.len().checked_sub(tail_len)?)?;
+    path.starts_with('/')
+        .then_some(VersionedBinary { dir, app, version })
 }
 
 fn is_app_component(app: &str) -> bool {

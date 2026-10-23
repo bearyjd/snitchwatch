@@ -318,3 +318,26 @@ fn range_endpoints_are_stripped() {
         assert_eq!(sanitize_display(&format!("a{c}b")), "ab", "{c:?}");
     }
 }
+
+#[test]
+fn versioned_binary_splits_what_the_label_heuristic_matches() {
+    let v = versioned_binary("/home/u/.local/share/claude/versions/2.1.308").unwrap();
+    assert_eq!(v.dir, "/home/u/.local/share");
+    assert_eq!((v.app, v.version), ("claude", "2.1.308"));
+    let top = versioned_binary("/app/versions/1.2").unwrap();
+    assert_eq!((top.dir, top.app), ("", "app"));
+    for path in [
+        "app/versions/1.2",
+        "/usr/bin/curl",
+        "/x/bin/versions/1.2",
+        "/x/app/versions/latest",
+        "/x/app/versions/1.2\n",
+        "/x/app/versions/1.2/extra",
+    ] {
+        assert_eq!(versioned_binary(path), None, "{path:?}");
+    }
+    // The label and the split agree on every absolute path they both read.
+    for path in ["/a/b/versions/1.2.3", "/opt/tool/versions/9.9-rc1"] {
+        assert!(versions_label(path).is_some() && versioned_binary(path).is_some());
+    }
+}
