@@ -55,10 +55,12 @@ fail.
   session with new rows, intended):
   1. The first pending ask for a (program, host) with no live posted notice fires.
   2. A repeat of the same (program, host) within 1 h of a POSTED notice does not
-     fire; it increments a "retried N times" counter. The suppression is kept for the
+     fire; it is suppressed silently (a "retried N times" counter is deferred, see
+     below). The suppression is kept for the
      hour AFTER the notice ends if it ended by `WaitEnd::Stopped` (the row stopped
      waiting: daemon timeout or answered elsewhere) or `WaitEnd::Closed(_)` (the user
-     dismissed it, or it expired): the notification is resident and a pending row
+     dismissed it): the notification is resident (a server-side expiry does not end the
+     wait) and a pending row
      times out after ~30 s, so clearing then would re-notify a retrying program about
      every 30 s, which is exactly the complaint. The pending ROW, the banner and
      Review are unaffected; only further desktop NOTICES for that flow are coalesced.
@@ -80,11 +82,26 @@ fail.
   (`notifier.rs:53`; `with_cooldown` sets it). The 1 h repeat window is a SEPARATE
   field/map (`repeat_window`) with its own constructor parameter, leaving the 30 s
   per-flow gate for new flows unchanged; tests inject `Instant` for both.
-- Retry counter home: a daemon retry makes a NEW row and `row_id` (`notifier.rs:
-  40-42`) and #167's collapse window is only 10 s (`collapse.rs:48`), so its repeat
-  count cannot cover 1 h. Key the counter on `FlowKey` (suppressed-notice count) and
-  render it on the NEWEST pending row of that flow (needs a model role and a QML
-  test).
+- DEFERRED (own PR, after 0a/0b): the "retried N times" counter. Part 1 already stops
+  the repeat popups. A daemon retry makes a NEW row and `row_id` (`notifier.rs:40-42`)
+  and #167's collapse window is only 10 s (`collapse.rs:48`), so the collapse repeat
+  count cannot cover 1 h; the count must be `CooldownGate::suppressed(&FlowKey)`. It
+  needs a transport from the controller's gate to the row model, which share no state
+  today (separate siblings in `main.qml`). Design (from the code map): a
+  `retries: Arc<Mutex<HashMap<FlowKey, u32>>>` in `BridgeHandles` (GUI-only, not wire),
+  written by the controller when `may_post` returns `Repeat` (read `gate.suppressed`,
+  never taking the handles lock while holding the gate lock) and cleared with the flow;
+  the program/host/session derivation shared with `flow_key()` in one function so the
+  two sides cannot drift (`process_path_text` falls back to `""` where `flow_key()` uses
+  the raw `process`: test both shapes); a new role `retriedCount`
+  (`ROLE_RETRIED_COUNT = 37`) returned only for the NEWEST pending row of the flow
+  (greatest `started_at_ms`, mirroring `oldest_pending_*` in `row_store.rs:183-208`);
+  refreshed by polling on the existing 1 s pending-age timer (`main.qml`, which runs
+  only while a pending row exists), so it lags up to a second; new code in
+  `src/connections_model/retries.rs` (`apply.rs` and `connections_model.rs` are near the
+  limit). Label it separately from the collapse `x N` text (for example "notice held
+  back N times in the last hour"), not as "retried". Every test fixture that builds
+  `BridgeHandles` literally (five test files) must add the field.
 - DEFERRED to a later phase (own plan): a program digest for many new hosts. It
   needs a GUI-local notice kind (the bridge `Notice` enum has no digest variant), a
   gate poll method such as `due_digest(now)` driven by one per-feed-task ticker that
@@ -96,8 +113,12 @@ fail.
   still opens it. DaemonAway, FilterPauseExpired and the other kinds are untouched.
   A test asserts that a suppressed notice never removes or hides a pending row or
   the banner.
-- Reword `prompt_slot_text.rs::banner_text` (`:44-70`) so the global default-action
-  figure is not presented as per-program retries.
+- Banner wording: NOT changed (decided 2026-10-22, after part 1). The text "the
+  firewall applied its default action N times (retries count again)" is firewall-wide
+  and already says so; the same sentence is in the bridge's own desktop notice
+  (`snitchwatch-bridge/src/notice.rs:69-70`), so rewording only the GUI copy would make
+  the two disagree and rewording the bridge copy is a bridge change (tower review). The
+  earlier worry that it reads as per-program was this plan's own inference.
 - File budget: `notification_controller.rs` is 616 lines; split it before adding.
 - Tests: `notifier.rs` gate tests with an injected `Instant` (cases 1-3;
   hold-after-daemon-timeout and hold-after-dismiss still Repeat 40 minutes later and
@@ -106,8 +127,7 @@ fail.
   pruning of expired entries; reconnect fires the first ask again; `with_cooldown`
   already exists),
   `may_post` tests (window-active then repeat still posts later), the
-  banner/row-survives test, a model-role + QML test for the retry counter,
-  `prompt_slot_text.rs`, `tests/prompt_slot_banner_qml.rs`.
+  banner/row-survives test.
 
 ### 0a. Friendly program names (labelled by how much they can be trusted)
 - Today: the bridge derives `process` as the basename of `process_path`
@@ -393,9 +413,9 @@ only.
   default.
 
 ## Open questions for the owner
-A. 0e: is Google as the default search engine fine, and should the default query
-   include the destination hostname (with a checkbox to drop it)?
+A. (answered 2026-10-22: Google is the default engine; the hostname is included by
+   default for public hostnames, with a checkbox to drop it.)
 1. (decided for phase 0: only recommended rules count as "handled"; user-written
    rules are revisited later with the exact-path restriction above.)
-2. Is 1 h the right window for suppressing repeats of the same program+host?
+2. (answered 2026-10-22: one hour is the right window.)
 3. Hide the background group by default, or only collapse it?
