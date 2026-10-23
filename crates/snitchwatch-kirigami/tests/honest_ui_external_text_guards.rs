@@ -66,6 +66,59 @@ const PAGES: &[(&str, &str, &[&str], usize)] = &[
         4,
     ),
     (
+        // Learning mode's review page and its parts (L4b): every recorded
+        // string (names, paths, hosts, flags, rule sentences) is data.
+        "LearningReviewRow.qml",
+        include_str!("../qml/LearningReviewRow.qml"),
+        &[
+            "row.info.programPathFull",
+            "modelData.host",
+            "modelData.hosts",
+            "modelData.title",
+            "modelData.note",
+            "modelData",
+        ],
+        6,
+    ),
+    (
+        "LearningSummaryDialog.qml",
+        include_str!("../qml/LearningSummaryDialog.qml"),
+        &[
+            "dialog.summary.droppedNames",
+            "modelData",
+            "dialog.summary.count",
+        ],
+        4,
+    ),
+    (
+        "LearningProgressList.qml",
+        include_str!("../qml/LearningProgressList.qml"),
+        &[
+            "list.progress.summary",
+            "modelData.label",
+            "modelData.status",
+        ],
+        3,
+    ),
+    (
+        "LearningReviewPage.qml",
+        include_str!("../qml/LearningReviewPage.qml"),
+        &[
+            "learnedPath",
+            "notices.dropped",
+            "notices.dirsFull",
+            "fileNotice",
+            "statusText",
+        ],
+        5,
+    ),
+    (
+        "LearningStartPanel.qml",
+        include_str!("../qml/LearningStartPanel.qml"),
+        &["learningStartError"],
+        1,
+    ),
+    (
         "GeoPage.qml",
         include_str!("../qml/GeoPage.qml"),
         &["row.countryName", "dbPath"],

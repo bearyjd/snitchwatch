@@ -108,6 +108,30 @@ pub const ALL_QML: &[(&str, &str)] = &[
         "LearningBanner.qml",
         include_str!("../../qml/LearningBanner.qml"),
     ),
+    (
+        "LearningLimitsList.qml",
+        include_str!("../../qml/LearningLimitsList.qml"),
+    ),
+    (
+        "LearningProgressList.qml",
+        include_str!("../../qml/LearningProgressList.qml"),
+    ),
+    (
+        "LearningReviewPage.qml",
+        include_str!("../../qml/LearningReviewPage.qml"),
+    ),
+    (
+        "LearningReviewRow.qml",
+        include_str!("../../qml/LearningReviewRow.qml"),
+    ),
+    (
+        "LearningStartPanel.qml",
+        include_str!("../../qml/LearningStartPanel.qml"),
+    ),
+    (
+        "LearningSummaryDialog.qml",
+        include_str!("../../qml/LearningSummaryDialog.qml"),
+    ),
     ("HoverTip.qml", include_str!("../../qml/HoverTip.qml")),
     (
         "ProgramLabel.qml",

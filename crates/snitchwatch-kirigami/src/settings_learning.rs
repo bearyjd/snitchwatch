@@ -28,18 +28,20 @@
 //! window is still live on disk, a restart re-reads Allow plus the live window
 //! and applies it, for as long as the window has left (up to 7 days). An
 //! EXPIRED window is ended again at every startup and never applies Allow. It
-//! needs a persistently failing settings write, and L1 has no control that
-//! starts learning, so it is unreachable today. L2 to L4 must keep it in mind
-//! (the plan's "Honest limits" gets a line in the L5 documentation phase).
+//! needs a persistently failing settings write. Since L4b a control starts
+//! learning (`start`), so the limit is reachable: `start` itself refuses while
+//! the override holds or a window runs, but a window started while writes
+//! worked and a later explicit mode choice whose write fails is this case (the
+//! plan's "Honest limits" gets a line in the L5 documentation phase).
 
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 
 use crate::learning::{self, Clocks, Ticker};
-#[cfg(test)]
-use crate::settings::Learning;
-use crate::settings::{read_settings, write_settings, Settings, SilentMode};
+use crate::settings::{
+    read_settings, write_settings, Learning, Settings, SilentMode, LEARNING_MAX_MS,
+};
 
 /// `None`: no override. `Some(mode)`: the intended `silent_mode` (itself
 /// optional, because "unchosen" is a value).
@@ -82,6 +84,15 @@ pub struct SettingsStore {
     /// Whether the last write attempt worked, so a failing write is logged
     /// once per change of state instead of at every attempt.
     last_write_ok: AtomicBool,
+    /// Orders "recording stops" (a worker thread, after a snapshot that says
+    /// the window is over) against "a snapshot is applied" (the Qt thread,
+    /// which may START a window and so turn recording on). Without it a
+    /// stale worker could pass the newest-snapshot check, a Start be
+    /// applied, and the worker then switch recording off: a window that
+    /// allows everything and records nothing. The Qt side holds it only while applying a
+    /// snapshot; the deletion of the saved list (`delete_record`) also holds it
+    /// while it waits for the writer thread (bounded by its timeout).
+    gate: Mutex<()>,
 }
 
 impl SettingsStore {
@@ -92,7 +103,25 @@ impl SettingsStore {
             generation: AtomicU64::new(0),
             claimed: AtomicU64::new(0),
             last_write_ok: AtomicBool::new(true),
+            gate: Mutex::new(()),
         }
+    }
+
+    /// Held by the Qt thread from claiming a snapshot until it has applied it.
+    pub fn gate(&self) -> MutexGuard<'_, ()> {
+        self.gate.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Run `end` (recording stops) only if `applied` says the window is over
+    /// and is the newest word on it, with no snapshot being applied
+    /// meanwhile. True when `end` ran.
+    pub fn end_learning_if_latest(&self, applied: &Applied, end: impl FnOnce()) -> bool {
+        let _gate = self.gate();
+        let ends = self.ends_learning(applied);
+        if ends {
+            end();
+        }
+        ends
     }
 
     fn intent(&self) -> Intent {
@@ -291,6 +320,80 @@ pub fn stop(store: &SettingsStore, path: &Path, clocks: &dyn Clocks) -> Applied 
     })
 }
 
+/// Why [`start`] did nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartRefusal {
+    /// A window is running; it is never extended, only restarted after it
+    /// ends.
+    Running,
+    /// The settings file could not be written, so a start would not hold.
+    WriteFailed,
+    /// Not above zero, or longer than the 7 day maximum.
+    BadDuration,
+}
+
+impl StartRefusal {
+    pub fn text(self) -> &'static str {
+        match self {
+            Self::Running => "Learning is already running.",
+            Self::WriteFailed => {
+                "The settings file could not be written, so learning was not started."
+            }
+            Self::BadDuration => "The length must be above zero and at most 7 days.",
+        }
+    }
+}
+
+/// The owner pressed "Start learning": a window of `duration_ms` begins,
+/// `silent_mode` becomes Allow and the mode it replaced is kept to restore
+/// when the window ends. Not an explicit mode choice (that would end it).
+pub fn start(
+    store: &SettingsStore,
+    path: &Path,
+    clocks: &dyn Clocks,
+    duration_ms: i64,
+) -> Result<Applied, StartRefusal> {
+    if !(1..=LEARNING_MAX_MS).contains(&duration_ms) {
+        return Err(StartRefusal::BadDuration);
+    }
+    if store.write_failed() {
+        return Err(StartRefusal::WriteFailed);
+    }
+    let now = clocks.wall_ms();
+    let mut running = false;
+    let applied = store.transact(path, now, None, |settings| {
+        if let Some(window) = &settings.learning {
+            if !learning::is_expired(window, now) {
+                running = true;
+                return;
+            }
+            // Over but not yet ended: end it, restoring its mode, then begin.
+            *settings = learning::end(settings.clone());
+        }
+        settings.learning = Some(Learning::begin(now, duration_ms, settings.silent_mode));
+        settings.silent_mode = Some(SilentMode::Allow);
+    });
+    if running {
+        return Err(StartRefusal::Running);
+    }
+    // A failed write leaves the file as it was (and the override unset when
+    // nothing was intended): no window is then in force, and saying "started"
+    // would be false.
+    let began = applied
+        .settings
+        .learning
+        .as_ref()
+        .is_some_and(|window| window.started_ms == now);
+    if !began {
+        return Err(StartRefusal::WriteFailed);
+    }
+    Ok(applied)
+}
+
 #[cfg(test)]
 #[path = "settings_learning/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "settings_learning/start_tests.rs"]
+mod start_tests;

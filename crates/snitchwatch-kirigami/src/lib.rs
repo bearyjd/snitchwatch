@@ -37,6 +37,8 @@ pub mod insight_model;
 pub mod learned;
 pub mod learning;
 pub mod learning_review;
+pub mod learning_review_controller;
+pub mod learning_review_session;
 pub mod logging;
 pub mod make_rule;
 pub mod make_rule_controller;

@@ -92,6 +92,8 @@ pub mod qobject {
         #[qproperty(QString, learned_notice, cxx_name = "learnedNotice")]
         /// Where the saved list lives.
         #[qproperty(QString, learned_path, cxx_name = "learnedPath")]
+        /// A fixed sentence when "Start learning" did nothing, else empty.
+        #[qproperty(QString, learning_start_error, cxx_name = "learningStartError")]
         /// True when upstream opensnitch-ui was detected (package installed
         /// or its autostart entry present) — see `crate::coexistence`.
         #[qproperty(bool, coexistence_conflict, cxx_name = "coexistenceConflict")]
@@ -168,6 +170,13 @@ pub mod qobject {
         #[cxx_name = "stopLearning"]
         fn stop_learning(self: Pin<&mut SettingsController>);
 
+        /// "Start learning" for `hours` (above zero, at most 7 days): `allow`
+        /// and a recording window, under the settings lock. Refused (see
+        /// `learningStartError`) while one runs or the file cannot be written.
+        #[qinvokable]
+        #[cxx_name = "startLearning"]
+        fn start_learning(self: Pin<&mut SettingsController>, hours: i32);
+
         /// Re-read the recorder's counters (cheap, no disk): the banner's
         /// timer calls it while a window runs.
         #[qinvokable]
@@ -202,6 +211,7 @@ pub struct SettingsControllerRust {
     dropped_count: i32,
     learned_notice: QString,
     learned_path: QString,
+    learning_start_error: QString,
     coexistence_conflict: bool,
     coexistence_detail: QString,
     busy: bool,
@@ -225,6 +235,7 @@ impl Default for SettingsControllerRust {
             dropped_count: 0,
             learned_notice: QString::default(),
             learned_path: QString::from(&*learned_path().to_string_lossy()),
+            learning_start_error: QString::default(),
             coexistence_conflict: false,
             coexistence_detail: QString::from("Checking\u{2026}"),
             busy: false,
@@ -305,6 +316,7 @@ impl qobject::SettingsController {
             let _ = qt_thread.queue(move |mut qobject| {
                 // The RDAP value is always shown; the other preferences only
                 // if no newer snapshot was applied already (never in demo mode).
+                let _gate = SETTINGS_WRITE.gate();
                 let outcome = SETTINGS_WRITE.toggle_outcome(&actual, crate::demo::enabled());
                 qobject.as_mut().set_rdap_enabled(outcome.rdap_enabled);
                 if let Some(settings) = outcome.preferences {
@@ -375,6 +387,48 @@ impl qobject::SettingsController {
         });
     }
 
+    fn start_learning(mut self: Pin<&mut Self>, hours: i32) {
+        if crate::demo::enabled() {
+            return;
+        }
+        self.as_mut().set_learning_start_error(QString::default());
+        // Rules are being applied from the record: not now.
+        if crate::learning_review_controller::applying_now() {
+            self.as_mut().set_learning_start_error(QString::from(
+                "Rules are being applied from the recorded list; wait until that ends.",
+            ));
+            return;
+        }
+        let duration_ms = i64::from(hours).saturating_mul(3_600_000);
+        let qt_thread = self.qt_thread();
+        std::thread::spawn(move || {
+            let started = settings_learning::start(
+                &SETTINGS_WRITE,
+                &settings_path(),
+                &SystemClocks,
+                duration_ms,
+            );
+            match started {
+                Ok(applied) => {
+                    push_forced_state(&applied);
+                    let _ = qt_thread.queue(move |mut qobject| {
+                        qobject
+                            .as_mut()
+                            .set_learning_start_error(QString::default());
+                        qobject.apply_if_newest(&applied);
+                    });
+                }
+                Err(refusal) => {
+                    let _ = qt_thread.queue(move |mut qobject| {
+                        qobject
+                            .as_mut()
+                            .set_learning_start_error(QString::from(refusal.text()));
+                    });
+                }
+            }
+        });
+    }
+
     fn refresh_learning_status(mut self: Pin<&mut Self>) {
         let status = crate::learned::status();
         let count = |n: u64| i32::try_from(n).unwrap_or(i32::MAX);
@@ -427,7 +481,7 @@ impl qobject::SettingsController {
 /// The settings write lock and the forced-mode override
 /// (`crate::settings_learning`): every write of the settings file goes through
 /// it, so a failed restore of a learning window cannot leave Allow applied.
-static SETTINGS_WRITE: SettingsStore = SettingsStore::new();
+pub(crate) static SETTINGS_WRITE: SettingsStore = SettingsStore::new();
 
 /// Running time of the GUI since the last learning tick.
 static TICKER: std::sync::Mutex<Ticker> = std::sync::Mutex::new(Ticker::new());
@@ -462,9 +516,11 @@ fn push_forced_state(applied: &Applied) {
     if SETTINGS_WRITE.write_failed() {
         crate::silent_mode::set_state(SETTINGS_WRITE.honor_mode(SilentMode::Off));
     }
-    if SETTINGS_WRITE.ends_learning(applied) {
+    // Under the settings gate: a Start applied on the Qt thread meanwhile
+    // cannot be followed by this switching recording off.
+    SETTINGS_WRITE.end_learning_if_latest(applied, || {
         crate::learned::set_active(false);
-    }
+    });
 }
 
 impl qobject::SettingsController {
@@ -495,6 +551,7 @@ impl qobject::SettingsController {
     /// Apply a transaction's snapshot unless a newer one was applied already
     /// (queue order is not transaction order) or this is demo mode.
     fn apply_if_newest(self: Pin<&mut Self>, applied: &Applied) {
+        let _gate = SETTINGS_WRITE.gate();
         if SETTINGS_WRITE.claim(applied.generation, crate::demo::enabled()) {
             self.apply_preferences(&applied.settings);
         }

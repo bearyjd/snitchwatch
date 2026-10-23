@@ -4,11 +4,9 @@
 // The sentence in the InlineMessage is fixed text (InlineMessage renders its
 // text as markup, issue #51). Everything that varies, the time left, the
 // count and the notices, is in PlainText labels: the notice text comes from
-// the saved list's state. There is NO "Review" button yet: the review page
-// arrives in a later phase, and learning cannot be started until it does.
-//
-// "Stop learning" ends the window through SettingsController.stopLearning(),
-// which restores the mode it replaced.
+// the saved list's state. "Review" asks the host to open the review page
+// (`reviewRequested`); "Stop learning" ends the window through
+// SettingsController.stopLearning(), which restores the mode it replaced.
 import QtQuick
 import QtQuick.Layouts
 import QtQuick.Controls as Controls
@@ -17,6 +15,9 @@ import org.kde.kirigami as Kirigami
 ColumnLayout {
     id: banner
     spacing: 0
+
+    // The owner pressed Review: the host opens the review page.
+    signal reviewRequested()
 
     // SettingsController, or a stand-in with learningActive, learningEndsMs,
     // programsSeen, learningIncomplete, droppedCount, learnedNotice,
@@ -65,6 +66,11 @@ ColumnLayout {
                 text: "Stop learning"
                 icon.name: "media-playback-stop"
                 onTriggered: banner.settings.stopLearning()
+            },
+            Kirigami.Action {
+                text: "Review"
+                icon.name: "view-list-details"
+                onTriggered: banner.reviewRequested()
             }
         ]
     }

@@ -42,6 +42,12 @@ fn main() {
                 "qml/InlineVerdicts.qml",
                 "qml/PromptSlotBanner.qml",
                 "qml/LearningBanner.qml",
+                "qml/LearningReviewPage.qml",
+                "qml/LearningReviewRow.qml",
+                "qml/LearningStartPanel.qml",
+                "qml/LearningLimitsList.qml",
+                "qml/LearningSummaryDialog.qml",
+                "qml/LearningProgressList.qml",
                 "qml/PendingDecisionSheet.qml",
                 "qml/DecideLaterButton.qml",
                 "qml/MakeRuleSheet.qml",
@@ -94,6 +100,7 @@ fn main() {
     .file("src/prompt_slot_status.rs")
     .file("src/geo_model.rs")
     .file("src/scanner_controller.rs")
+    .file("src/learning_review_controller.rs")
     .file("src/daemon_health_model.rs");
     // SAFETY: only add the crate-owned header directory; preserve builder flags.
     unsafe {
