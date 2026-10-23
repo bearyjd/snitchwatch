@@ -17,6 +17,21 @@ BEFORE any GUI release (it allows everything once during the window; nothing is 
 Not merged on purpose: 0c exception-first default. Next GUI items: 0b group counts, 0e
 "What is this?".
 
+What the laptop gets from r15 vs. what is only on `main` (as of `main` 4025e9d):
+- In r15 (code sha `bfc76e6`): the improved GUI and Bazzite update, rustls-webpki/webpki-roots
+  bump (RUSTSEC-2026-0382/-0381, #185), rust 1.99.0 release pin (#184), the lock fix, and the
+  unanswered-prompt log line naming path and destination (#186). Shipped default stays deny.
+- Only on `main`, in no release yet (r16 GUI): learning mode (#195-#200), friendly program
+  names in Connections (#192, #193), one desktop notice per program and host per hour (#190).
+  eBPF process monitoring is r16 too (the `proc` override is an eBPF module build gap).
+- To try learning mode the owner needs a GUI build that includes it: either the tower session
+  cuts an r16 GUI candidate (the tower owns every `r<N>-candidate` branch and variable; we
+  only send it the merged sha) or a local `cargo build -p snitchwatch-kirigami` from `main`.
+- Owner-only items: switch the laptop to the stable r15 tag and publish the stable r15 GUI
+  release (assets come from `r15-candidate`); eBPF root-run test; root-only socket check
+  (then close #35). The exact laptop switch commands are NOT documented in this repo; do not
+  invent them.
+
 ## 2026-10-22 (current)
 
 r15 is out. `main` is `bfc76e6`: #185 (rustls-webpki 0.103.16, webpki-roots
