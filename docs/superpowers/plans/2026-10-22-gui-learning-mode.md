@@ -172,6 +172,19 @@ row reuses the 0a program label, its "unverified" marker and the real-path displ
   is still absolute, `process_binding.rs`; Flatpak exports are wrappers; `/opt`,
   `/usr/local` and the user Flatpak tree never qualify). So the one-decision-per-program
   cost for broad programs (a browser, a sync tool) is the owner's explicit tick, once.
+- Per-program actions, all explicit (owner, 2026-10-22: "block or allow this program should
+  be allowed"): for ANY listed program the owner can choose Allow (any destination), Allow
+  (only these destinations) or BLOCK THIS PROGRAM. Block creates one DENY rule on the exact
+  `process.path`, any destination, name `snitchwatch-learned-block-<hash>`, duration
+  "always"; a deny rule wins over allows (`docs/packaging/system-bridge-integration.md:116`:
+  "Denies and blocklists still win"). Block is never ticked by default and never by "Select
+  suggested"; a flagged program shows Block prominently as one of its choices, nothing more.
+  Because a block can break the machine, blocking a program on a system path or one whose
+  name is a known system service (for example `NetworkManager`, `systemd-*`, `dbus-*`,
+  `chronyd`, `rpm-ostree`) shows a plain warning ("blocking this may stop networking or
+  updates") and needs its own confirmation in the summary. A program with no bindable path
+  cannot be blocked (non-selectable, as for allows). Block rules go through the same
+  sequencer and outcomes as allow rules.
 - A tick on a row IS the per-row confirmation of a Program-wide rule (the summary dialog
   repeats every rule in plain words before anything is sent; it does not replace the tick).
 - DUAL-USE list: a tested set, matched by basename AND by path, a SECOND filter on top of
@@ -290,6 +303,9 @@ Each file stays under 800 lines.
   nothing); the dual-use list by basename and path; the 10-host limit; the three rule shapes;
   directory-rule escaping, `sensitive=true`, `(deleted)`/extra-slash refusal and RE2
   validation against the GUI simulator; non-selectable unknown-path programs; hostile paths.
+- Block action (L3/L4): the deny rule shape (exact `process.path`, any destination, the
+  `snitchwatch-learned-block-` name), never ticked or selected by default, the system-service
+  warning and separate confirmation, non-bindable paths are non-selectable.
 - Sequencer (L4): one-at-a-time ordering; every `RuleCommandOutcome` (including `OkWithNote`
   and `Refused`); name-collision skip and no overwrite; an empty or Unknown rules list aborts
   the batch; Timeout reconciliation by content; `NoDaemon` and 3 consecutive Timeouts abort;
@@ -313,9 +329,13 @@ Fixing the bridge's all-apps wording for regexp rules, history-based drift detec
 first-seen baseline, a blocklist-membership flag (needs a new bridge request), a PID,
 exporting the learned data, per-user scoping on a multi-user host.
 
-## Open questions for the owner
-1. Default learning length: 24 h, with a 7-day maximum?
-2. Is 25 distinct destinations the right fan-out line?
-3. Should the review also offer an explicit "block this program" for flagged programs, or
-   leave those at the default deny with no rule?
-4. Order: build this before 0b/0c, since it addresses the clicking directly?
+## Decided by the owner (2026-10-22)
+1. Learning length: default 24 h, maximum 7 days.
+2. The 25-destination line is accepted as a starting display threshold (it only decides
+   whether the review shows a program's hosts or one "any destination" choice; it approves
+   nothing and is adjustable; a program that reaches 25 hosts on purpose still shows its
+   flags).
+3. The review also offers an explicit "Block this program" (and Allow) for any listed
+   program: designed above.
+4. Order: build learning mode BEFORE phase-0 items 0b and 0c (the planner's recommendation,
+   accepted).
