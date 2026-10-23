@@ -41,6 +41,7 @@ fn main() {
                 "qml/LevelRuleActions.qml",
                 "qml/InlineVerdicts.qml",
                 "qml/PromptSlotBanner.qml",
+                "qml/LearningBanner.qml",
                 "qml/PendingDecisionSheet.qml",
                 "qml/DecideLaterButton.qml",
                 "qml/MakeRuleSheet.qml",

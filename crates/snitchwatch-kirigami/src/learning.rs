@@ -45,6 +45,14 @@ pub fn is_expired(learning: &Learning, now_wall_ms: i64) -> bool {
     now_wall_ms >= learning.ends_ms || learning.elapsed_ms >= learning.duration_ms
 }
 
+/// How long `learning` still has to run at wall-clock `now_wall_ms`: the
+/// nearer of its two bounds (never negative). The banner shows it.
+pub fn remaining_ms(learning: &Learning, now_wall_ms: i64) -> i64 {
+    let by_clock = learning.ends_ms.saturating_sub(now_wall_ms);
+    let by_running_time = learning.duration_ms.saturating_sub(learning.elapsed_ms);
+    by_clock.min(by_running_time).max(0)
+}
+
 /// `learning` with `running_delta_ms` of running time added (never negative).
 pub fn advance(learning: &Learning, running_delta_ms: i64) -> Learning {
     Learning {
@@ -135,6 +143,21 @@ mod tests {
         assert!(!is_expired(&l, l.ends_ms - 1));
         assert!(is_expired(&l, l.ends_ms));
         assert!(is_expired(&l, l.ends_ms + 1));
+    }
+
+    #[test]
+    fn the_time_left_is_the_nearer_of_the_two_bounds() {
+        let l = win();
+        assert_eq!(remaining_ms(&l, START), LEARNING_DEFAULT_MS);
+        assert_eq!(remaining_ms(&l, START + 1_000), LEARNING_DEFAULT_MS - 1_000);
+        // Running time nearly used up: it ends first.
+        let tired = Learning {
+            elapsed_ms: LEARNING_DEFAULT_MS - 500,
+            ..win()
+        };
+        assert_eq!(remaining_ms(&tired, START), 500);
+        // Over (or a clock far past the end): zero, never negative.
+        assert_eq!(remaining_ms(&l, l.ends_ms + 10), 0);
     }
 
     #[test]

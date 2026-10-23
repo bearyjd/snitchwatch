@@ -56,6 +56,7 @@ use snitchwatch_bridge::ws_messages::ConnectionRow;
 
 mod keys;
 
+pub(crate) use keys::is_ip;
 pub use keys::registrable_domain;
 use keys::{composite_key, domain_key, host_composite_key, host_key, process_key};
 

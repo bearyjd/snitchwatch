@@ -53,6 +53,19 @@ const PAGES: &[(&str, &str, &[&str], usize)] = &[
         1,
     ),
     (
+        // Learning mode's banner: the saved list's state and path, and the
+        // counters, are all in PlainText labels under a fixed-text message.
+        "LearningBanner.qml",
+        include_str!("../qml/LearningBanner.qml"),
+        &[
+            "banner.timeLeft",
+            "droppedCount",
+            "learnedNotice",
+            "learnedPath",
+        ],
+        4,
+    ),
+    (
         "GeoPage.qml",
         include_str!("../qml/GeoPage.qml"),
         &["row.countryName", "dbPath"],

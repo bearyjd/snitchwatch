@@ -19,8 +19,8 @@ use cxx_qt_lib::QString;
 use crate::autostart::{read_autostart_state, remove_autostart_desktop, write_autostart_desktop};
 use crate::coexistence::check_coexistence;
 use crate::crash_log::read_crash_log_tail;
-use crate::learning::{Clocks, SystemClocks, Ticker};
-use crate::paths::{autostart_path, crash_log_path, settings_path};
+use crate::learning::{self, Clocks, SystemClocks, Ticker};
+use crate::paths::{autostart_path, crash_log_path, learned_path, settings_path};
 use crate::settings::{read_settings, Settings, SilentMode};
 use crate::settings_learning::{self, Applied, SettingsStore};
 
@@ -73,6 +73,25 @@ pub mod qobject {
         /// mode in force is an in-process override (never Allow); a later
         /// phase shows "the settings file could not be written".
         #[qproperty(bool, settings_write_failed, cxx_name = "settingsWriteFailed")]
+        /// Whether a learning window is running (never while the forced-mode
+        /// override holds). The banner shows only then.
+        #[qproperty(bool, learning_active, cxx_name = "learningActive")]
+        /// When the window ends, wall-clock milliseconds since the epoch (the
+        /// nearer of its two bounds, as of the last change); 0 without one.
+        #[qproperty(i64, learning_ends_ms, cxx_name = "learningEndsMs")]
+        /// How many programs learning mode has recorded (polled by
+        /// `refreshLearningStatus`).
+        #[qproperty(i32, programs_seen, cxx_name = "programsSeen")]
+        /// Some connections were missed (the feed lagged), so the record is
+        /// not complete.
+        #[qproperty(bool, learning_incomplete, cxx_name = "learningIncomplete")]
+        /// Programs the record refused or dropped to stay within its caps.
+        #[qproperty(i32, dropped_count, cxx_name = "droppedCount")]
+        /// A fixed sentence about the saved list (damaged, not ours, could not
+        /// be saved, no file lock), or empty.
+        #[qproperty(QString, learned_notice, cxx_name = "learnedNotice")]
+        /// Where the saved list lives.
+        #[qproperty(QString, learned_path, cxx_name = "learnedPath")]
         /// True when upstream opensnitch-ui was detected (package installed
         /// or its autostart entry present) — see `crate::coexistence`.
         #[qproperty(bool, coexistence_conflict, cxx_name = "coexistenceConflict")]
@@ -143,6 +162,18 @@ pub mod qobject {
         #[cxx_name = "tickLearning"]
         fn tick_learning(self: Pin<&mut SettingsController>);
 
+        /// "Stop learning": ends the window now (restoring the mode it
+        /// replaced) under the settings lock, then saves what was seen.
+        #[qinvokable]
+        #[cxx_name = "stopLearning"]
+        fn stop_learning(self: Pin<&mut SettingsController>);
+
+        /// Re-read the recorder's counters (cheap, no disk): the banner's
+        /// timer calls it while a window runs.
+        #[qinvokable]
+        #[cxx_name = "refreshLearningStatus"]
+        fn refresh_learning_status(self: Pin<&mut SettingsController>);
+
         /// Re-run the opensnitch-ui coexistence check off the UI thread.
         /// Called on page load and from the Diagnostics page's "Check again"
         /// button.
@@ -164,6 +195,13 @@ pub struct SettingsControllerRust {
     silent_mode: QString,
     preferences_loaded: bool,
     settings_write_failed: bool,
+    learning_active: bool,
+    learning_ends_ms: i64,
+    programs_seen: i32,
+    learning_incomplete: bool,
+    dropped_count: i32,
+    learned_notice: QString,
+    learned_path: QString,
     coexistence_conflict: bool,
     coexistence_detail: QString,
     busy: bool,
@@ -180,6 +218,13 @@ impl Default for SettingsControllerRust {
             silent_mode: QString::default(),
             preferences_loaded: false,
             settings_write_failed: false,
+            learning_active: false,
+            learning_ends_ms: 0,
+            programs_seen: 0,
+            learning_incomplete: false,
+            dropped_count: 0,
+            learned_notice: QString::default(),
+            learned_path: QString::from(&*learned_path().to_string_lossy()),
             coexistence_conflict: false,
             coexistence_detail: QString::from("Checking\u{2026}"),
             busy: false,
@@ -256,7 +301,7 @@ impl qobject::SettingsController {
                 None,
                 move |settings| settings.rdap_enabled = enabled,
             );
-            push_forced_state();
+            push_forced_state(&actual);
             let _ = qt_thread.queue(move |mut qobject| {
                 // The RDAP value is always shown; the other preferences only
                 // if no newer snapshot was applied already (never in demo mode).
@@ -281,13 +326,17 @@ impl qobject::SettingsController {
                 // An expired learning window is ended (and its mode restored)
                 // BEFORE anything is applied: a saved Allow from a window that
                 // ran out while the GUI was closed is never applied.
+                // An old saved list is deleted, then the recorder is pointed at
+                // the file (nothing is read or written before this).
+                crate::learned::discard_stale(&learned_path());
+                crate::learned::attach(&learned_path());
                 let settings = settings_learning::startup(
                     &SETTINGS_WRITE,
                     &settings_path(),
                     &SystemClocks,
                     &TICKER,
                 );
-                push_forced_state();
+                push_forced_state(&settings);
                 Some(settings)
             };
             let _ = qt_thread.queue(move |qobject| match applied {
@@ -305,9 +354,36 @@ impl qobject::SettingsController {
         std::thread::spawn(move || {
             let applied =
                 settings_learning::tick(&SETTINGS_WRITE, &settings_path(), &SystemClocks, &TICKER);
-            push_forced_state();
+            push_forced_state(&applied);
             let _ = qt_thread.queue(move |qobject| qobject.apply_if_newest(&applied));
         });
+    }
+
+    fn stop_learning(self: Pin<&mut Self>) {
+        if crate::demo::enabled() {
+            return;
+        }
+        let qt_thread = self.qt_thread();
+        std::thread::spawn(move || {
+            let applied = settings_learning::stop(&SETTINGS_WRITE, &settings_path(), &SystemClocks);
+            push_forced_state(&applied);
+            // Off the Qt thread, so waiting for the disk is fine here.
+            if !crate::learned::flush_and_wait(LEARNED_FLUSH_WAIT) {
+                tracing::warn!("learned: the saved list was not written in time");
+            }
+            let _ = qt_thread.queue(move |qobject| qobject.apply_if_newest(&applied));
+        });
+    }
+
+    fn refresh_learning_status(mut self: Pin<&mut Self>) {
+        let status = crate::learned::status();
+        let count = |n: u64| i32::try_from(n).unwrap_or(i32::MAX);
+        self.as_mut()
+            .set_programs_seen(i32::try_from(status.programs_seen).unwrap_or(i32::MAX));
+        self.as_mut().set_learning_incomplete(status.incomplete);
+        self.as_mut().set_dropped_count(count(status.dropped));
+        self.as_mut()
+            .set_learned_notice(QString::from(&crate::learned::notice_text(&status)));
     }
 
     fn choose_default_duration(self: Pin<&mut Self>, token: &QString) {
@@ -369,12 +445,25 @@ pub(crate) fn forced_or(requested: SilentMode) -> SilentMode {
     SETTINGS_WRITE.honor_mode(requested)
 }
 
-/// While the override holds, the silent-answer state is set at once from the
-/// worker thread (the property push that follows comes a moment later), so an
-/// expired window's Allow is not answered on in between.
-fn push_forced_state() {
+/// How long Stop waits for the saved list to be written (it is off the Qt thread).
+const LEARNED_FLUSH_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// What the worker thread publishes at once after a settings transaction, not
+/// waiting for the Qt thread:
+/// * while the override holds, the silent-answer state (the property push that
+///   follows comes a moment later), so an expired window's Allow is not
+///   answered on in between;
+/// * a window that is over (or not in force) stops the recording and saves
+///   what was seen. Only ever to false, and only from the newest snapshot
+///   (`SettingsStore::ends_learning`): starting one is applied in order on the
+///   Qt thread (`apply_preferences`), and a late stale snapshot must not stop
+///   what a newer one started.
+fn push_forced_state(applied: &Applied) {
     if SETTINGS_WRITE.write_failed() {
         crate::silent_mode::set_state(SETTINGS_WRITE.honor_mode(SilentMode::Off));
+    }
+    if SETTINGS_WRITE.ends_learning(applied) {
+        crate::learned::set_active(false);
     }
 }
 
@@ -398,7 +487,7 @@ impl qobject::SettingsController {
             }
             let actual =
                 SETTINGS_WRITE.transact(&settings_path(), SystemClocks.wall_ms(), explicit, change);
-            push_forced_state();
+            push_forced_state(&actual);
             let _ = qt_thread.queue(move |qobject| qobject.apply_if_newest(&actual));
         });
     }
@@ -414,6 +503,9 @@ impl qobject::SettingsController {
     fn apply_preferences(mut self: Pin<&mut Self>, settings: &Settings) {
         // The override has the last word: Allow is never applied while it holds.
         let settings = &SETTINGS_WRITE.honor(settings.clone());
+        // Before the silent mode property moves: its change sweeps the waiting
+        // rows, and an Allow answered then must already be recorded.
+        self.as_mut().publish_learning(settings);
         self.as_mut()
             .set_settings_write_failed(SETTINGS_WRITE.write_failed());
         self.as_mut()
@@ -421,6 +513,20 @@ impl qobject::SettingsController {
         let mode = settings.silent_mode.map_or("", SilentMode::token);
         self.as_mut().set_silent_mode(QString::from(mode));
         self.as_mut().set_preferences_loaded(true);
+    }
+
+    /// Tell the recorder and the banner whether a window runs. A window that
+    /// just began sweeps the rows already waiting.
+    fn publish_learning(mut self: Pin<&mut Self>, settings: &Settings) {
+        let window = settings.learning.as_ref();
+        if crate::learned::set_active(window.is_some()) {
+            crate::silent_mode::learning_started();
+        }
+        let now = SystemClocks.wall_ms();
+        let ends = window.map_or(0, |w| now.saturating_add(learning::remaining_ms(w, now)));
+        self.as_mut().set_learning_active(window.is_some());
+        self.as_mut().set_learning_ends_ms(ends);
+        self.refresh_learning_status();
     }
 
     /// Apply an autostart read/write outcome from a queued `CxxQtThread`

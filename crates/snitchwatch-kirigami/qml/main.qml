@@ -514,6 +514,23 @@ Kirigami.ApplicationWindow {
         onReviewRequested: nav.replaceMain(connectionsPageComponent)
     }
 
+    // Learning mode (phase L2): on every page while a window runs, below the
+    // banners above. No Review button until the review page exists.
+    LearningBanner {
+        id: learningBanner
+        z: 998
+        anchors {
+            top: promptSlotBanner.visible ? promptSlotBanner.bottom
+                : (pendingExposureBanner.visible ? pendingExposureBanner.bottom
+                : (daemonHealthBanner.visible ? daemonHealthBanner.bottom
+                : (bridgeBanner.visible ? bridgeBanner.bottom : parent.top)))
+            left: parent.left
+            right: parent.right
+            margins: Kirigami.Units.smallSpacing
+        }
+        settings: settingsController
+    }
+
     // Keeps ConnectionsModel.oldestPendingAgeSecs (and therefore
     // pendingExposureBanner above) live: that property only changes
     // automatically on the next bridge message, so elapsed wall-clock time

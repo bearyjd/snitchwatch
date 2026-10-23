@@ -15,7 +15,7 @@ pub(super) const TWO_PART_TLDS: &[&str] = &[
 ];
 
 /// True when `host` parses as a literal IPv4/IPv6 address.
-pub(super) fn is_ip(host: &str) -> bool {
+pub(crate) fn is_ip(host: &str) -> bool {
     host.parse::<std::net::IpAddr>().is_ok()
 }
 
