@@ -19,8 +19,10 @@ use cxx_qt_lib::QString;
 use crate::autostart::{read_autostart_state, remove_autostart_desktop, write_autostart_desktop};
 use crate::coexistence::check_coexistence;
 use crate::crash_log::read_crash_log_tail;
+use crate::learning::{Clocks, SystemClocks, Ticker};
 use crate::paths::{autostart_path, crash_log_path, settings_path};
-use crate::settings::{read_settings, write_settings, Settings, SilentMode};
+use crate::settings::{read_settings, Settings, SilentMode};
+use crate::settings_learning::{self, Applied, SettingsStore};
 
 const CRASH_LOG_TAIL_LINES: usize = 200;
 
@@ -67,6 +69,10 @@ pub mod qobject {
         /// Whether the persisted settings have been read yet, so the
         /// onboarding step is not shown on a stale empty `silentMode`.
         #[qproperty(bool, preferences_loaded, cxx_name = "preferencesLoaded")]
+        /// True while the settings file could not be written and the silent
+        /// mode in force is an in-process override (never Allow); a later
+        /// phase shows "the settings file could not be written".
+        #[qproperty(bool, settings_write_failed, cxx_name = "settingsWriteFailed")]
         /// True when upstream opensnitch-ui was detected (package installed
         /// or its autostart entry present) — see `crate::coexistence`.
         #[qproperty(bool, coexistence_conflict, cxx_name = "coexistenceConflict")]
@@ -129,6 +135,14 @@ pub mod qobject {
         #[cxx_name = "chooseSilentMode"]
         fn choose_silent_mode(self: Pin<&mut SettingsController>, token: &QString);
 
+        /// The learning window's expiry timer (`AlertHost.qml`, about once a
+        /// minute): saves the running time of a live window and ends an
+        /// expired one, restoring the mode it replaced. Writes nothing when no
+        /// window is running.
+        #[qinvokable]
+        #[cxx_name = "tickLearning"]
+        fn tick_learning(self: Pin<&mut SettingsController>);
+
         /// Re-run the opensnitch-ui coexistence check off the UI thread.
         /// Called on page load and from the Diagnostics page's "Check again"
         /// button.
@@ -149,6 +163,7 @@ pub struct SettingsControllerRust {
     default_duration: QString,
     silent_mode: QString,
     preferences_loaded: bool,
+    settings_write_failed: bool,
     coexistence_conflict: bool,
     coexistence_detail: QString,
     busy: bool,
@@ -164,6 +179,7 @@ impl Default for SettingsControllerRust {
             default_duration: QString::from(crate::settings::DEFAULT_DURATION),
             silent_mode: QString::default(),
             preferences_loaded: false,
+            settings_write_failed: false,
             coexistence_conflict: false,
             coexistence_detail: QString::from("Checking\u{2026}"),
             busy: false,
@@ -231,24 +247,24 @@ impl qobject::SettingsController {
         self.as_mut().set_busy(true);
         let qt_thread = self.qt_thread();
         std::thread::spawn(move || {
-            let path = settings_path();
-            let actual = {
-                let _write = SETTINGS_WRITE.lock().unwrap_or_else(|p| p.into_inner());
-                // Preserve any other persisted fields rather than clobbering
-                // them with a lone-field write.
-                let mut settings = read_settings(&path);
-                settings.rdap_enabled = enabled;
-                let write_err = write_settings(&path, &settings).err();
-                if let Some(e) = write_err {
-                    tracing::warn!(error = %e, "failed to persist RDAP setting");
-                }
-                // Re-read from disk rather than trusting `enabled` blindly, so
-                // a failed write still reports the setting's actual on-disk
-                // state.
-                read_settings(&path).rdap_enabled
-            };
+            // Preserves any other persisted fields rather than clobbering them
+            // with a lone-field write, and ends an expired learning window like
+            // every other write; the transaction reports the on-disk state.
+            let actual = SETTINGS_WRITE.transact(
+                &settings_path(),
+                SystemClocks.wall_ms(),
+                None,
+                move |settings| settings.rdap_enabled = enabled,
+            );
+            push_forced_state();
             let _ = qt_thread.queue(move |mut qobject| {
-                qobject.as_mut().set_rdap_enabled(actual);
+                // The RDAP value is always shown; the other preferences only
+                // if no newer snapshot was applied already (never in demo mode).
+                let outcome = SETTINGS_WRITE.toggle_outcome(&actual, crate::demo::enabled());
+                qobject.as_mut().set_rdap_enabled(outcome.rdap_enabled);
+                if let Some(settings) = outcome.preferences {
+                    qobject.as_mut().apply_preferences(settings);
+                }
                 qobject.as_mut().set_busy(false);
             });
         });
@@ -258,18 +274,47 @@ impl qobject::SettingsController {
         let qt_thread = self.qt_thread();
         std::thread::spawn(move || {
             // Demo mode (screenshots) must not depend on this machine's file.
-            let settings = if crate::demo::enabled() {
-                Settings::default()
+            let applied = if crate::demo::enabled() {
+                // No transaction in demo mode: applied as is.
+                None
             } else {
-                read_settings(&settings_path())
+                // An expired learning window is ended (and its mode restored)
+                // BEFORE anything is applied: a saved Allow from a window that
+                // ran out while the GUI was closed is never applied.
+                let settings = settings_learning::startup(
+                    &SETTINGS_WRITE,
+                    &settings_path(),
+                    &SystemClocks,
+                    &TICKER,
+                );
+                push_forced_state();
+                Some(settings)
             };
-            let _ = qt_thread.queue(move |qobject| qobject.apply_preferences(&settings));
+            let _ = qt_thread.queue(move |qobject| match applied {
+                Some(applied) => qobject.apply_if_newest(&applied),
+                None => qobject.apply_preferences(&Settings::default()),
+            });
+        });
+    }
+
+    fn tick_learning(self: Pin<&mut Self>) {
+        if crate::demo::enabled() {
+            return;
+        }
+        let qt_thread = self.qt_thread();
+        std::thread::spawn(move || {
+            let applied =
+                settings_learning::tick(&SETTINGS_WRITE, &settings_path(), &SystemClocks, &TICKER);
+            push_forced_state();
+            let _ = qt_thread.queue(move |qobject| qobject.apply_if_newest(&applied));
         });
     }
 
     fn choose_default_duration(self: Pin<&mut Self>, token: &QString) {
         let token = crate::settings::normalize_duration(&token.to_string());
-        self.persist_preferences(move |settings| settings.default_duration = token.to_string());
+        self.persist_preferences(None, move |settings| {
+            settings.default_duration = token.to_string();
+        });
     }
 
     fn choose_silent_mode(self: Pin<&mut Self>, token: &QString) {
@@ -278,7 +323,11 @@ impl qobject::SettingsController {
             tracing::warn!("SettingsController: unknown silent mode ignored");
             return;
         };
-        self.persist_preferences(move |settings| settings.silent_mode = Some(mode));
+        // A manual change ends any learning window and keeps this mode.
+        self.persist_preferences(Some(mode), move |settings| {
+            settings.silent_mode = Some(mode);
+            settings.learning = None;
+        });
     }
 
     fn refresh_coexistence(mut self: Pin<&mut Self>) {
@@ -299,17 +348,43 @@ impl qobject::SettingsController {
     }
 }
 
-/// Held across `persist_preferences`' read-modify-write: two quick changes
-/// (the default duration, then the silent mode) each run on their own thread,
-/// and without it the second could read the file before the first wrote it and
-/// then overwrite the first change.
-static SETTINGS_WRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// The settings write lock and the forced-mode override
+/// (`crate::settings_learning`): every write of the settings file goes through
+/// it, so a failed restore of a learning window cannot leave Allow applied.
+static SETTINGS_WRITE: SettingsStore = SettingsStore::new();
+
+/// Running time of the GUI since the last learning tick.
+static TICKER: std::sync::Mutex<Ticker> = std::sync::Mutex::new(Ticker::new());
+
+/// True while the settings file could not be written and an in-process
+/// override holds the silent mode (the `settingsWriteFailed` property's source;
+/// also what the headless probe waits for).
+pub fn settings_write_failed() -> bool {
+    SETTINGS_WRITE.write_failed()
+}
+
+/// The silent mode to push to the silent-answer state: `requested`, unless the
+/// forced-mode override holds (`BridgeFeed.setSilentState`).
+pub(crate) fn forced_or(requested: SilentMode) -> SilentMode {
+    SETTINGS_WRITE.honor_mode(requested)
+}
+
+/// While the override holds, the silent-answer state is set at once from the
+/// worker thread (the property push that follows comes a moment later), so an
+/// expired window's Allow is not answered on in between.
+fn push_forced_state() {
+    if SETTINGS_WRITE.write_failed() {
+        crate::silent_mode::set_state(SETTINGS_WRITE.honor_mode(SilentMode::Off));
+    }
+}
 
 impl qobject::SettingsController {
     /// Read-modify-write the settings file off the UI thread (other persisted
-    /// fields are kept), then publish what is on disk.
+    /// fields are kept), then publish what is in force. `explicit` is the
+    /// silent mode the owner just chose, if this is that change.
     fn persist_preferences(
         self: Pin<&mut Self>,
+        explicit: Option<SilentMode>,
         change: impl FnOnce(&mut Settings) + Send + 'static,
     ) {
         let qt_thread = self.qt_thread();
@@ -321,22 +396,26 @@ impl qobject::SettingsController {
                 let _ = qt_thread.queue(move |qobject| qobject.apply_preferences(&settings));
                 return;
             }
-            let path = settings_path();
-            let actual = {
-                let _write = SETTINGS_WRITE.lock().unwrap_or_else(|p| p.into_inner());
-                let mut settings = read_settings(&path);
-                change(&mut settings);
-                if let Err(e) = write_settings(&path, &settings) {
-                    tracing::warn!(error = %e, "failed to persist preferences");
-                }
-                // Re-read, so a failed write still reports the on-disk state.
-                read_settings(&path)
-            };
-            let _ = qt_thread.queue(move |qobject| qobject.apply_preferences(&actual));
+            let actual =
+                SETTINGS_WRITE.transact(&settings_path(), SystemClocks.wall_ms(), explicit, change);
+            push_forced_state();
+            let _ = qt_thread.queue(move |qobject| qobject.apply_if_newest(&actual));
         });
     }
 
+    /// Apply a transaction's snapshot unless a newer one was applied already
+    /// (queue order is not transaction order) or this is demo mode.
+    fn apply_if_newest(self: Pin<&mut Self>, applied: &Applied) {
+        if SETTINGS_WRITE.claim(applied.generation, crate::demo::enabled()) {
+            self.apply_preferences(&applied.settings);
+        }
+    }
+
     fn apply_preferences(mut self: Pin<&mut Self>, settings: &Settings) {
+        // The override has the last word: Allow is never applied while it holds.
+        let settings = &SETTINGS_WRITE.honor(settings.clone());
+        self.as_mut()
+            .set_settings_write_failed(SETTINGS_WRITE.write_failed());
         self.as_mut()
             .set_default_duration(QString::from(settings.duration_token()));
         let mode = settings.silent_mode.map_or("", SilentMode::token);
