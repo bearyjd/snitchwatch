@@ -582,3 +582,144 @@ fn the_rdap_toggle_in_demo_mode_sets_the_property_and_applies_nothing_else() {
     assert!(outcome.rdap_enabled);
     assert!(outcome.preferences.is_none());
 }
+
+// --- Stop (phase L2) -----------------------------------------------------------
+
+#[test]
+fn stop_ends_a_live_window_and_restores_the_previous_mode() {
+    let fx = Fixture::new();
+    fx.seed(&learning_settings(Some(SilentMode::Deny)));
+    let store = SettingsStore::new();
+    let applied = stop(&store, &fx.path(), &Fake::at(START + 1_000, 0));
+    assert_eq!(applied.settings.silent_mode, Some(SilentMode::Deny));
+    assert_eq!(applied.settings.learning, None);
+    assert_eq!(fx.disk().silent_mode, Some(SilentMode::Deny));
+    assert_eq!(fx.disk().learning, None);
+    assert!(!store.write_failed());
+}
+
+#[test]
+fn stop_restores_an_unchosen_mode_as_unchosen() {
+    let fx = Fixture::new();
+    fx.seed(&learning_settings(None));
+    let store = SettingsStore::new();
+    let applied = stop(&store, &fx.path(), &Fake::at(START + 1_000, 0));
+    assert_eq!(applied.settings.silent_mode, None);
+    assert_eq!(fx.disk().silent_mode, None);
+}
+
+#[test]
+fn a_stop_that_cannot_be_written_never_leaves_allow_applied() {
+    let fx = Fixture::new();
+    fx.seed(&learning_settings(Some(SilentMode::Deny)));
+    fx.read_only();
+    let store = SettingsStore::new();
+    let applied = stop(&store, &fx.path(), &Fake::at(START + 1_000, 0));
+    // The disk still says Allow plus a live window, but nothing applies it.
+    assert_eq!(fx.disk().silent_mode, Some(SilentMode::Allow));
+    assert_eq!(applied.settings.silent_mode, Some(SilentMode::Deny));
+    assert_eq!(applied.settings.learning, None);
+    assert!(store.write_failed(), "the notice is up");
+    assert_eq!(store.honor_mode(SilentMode::Allow), SilentMode::Deny);
+    // The first working write puts the restore on disk.
+    fx.writable();
+    let again = store.transact(&fx.path(), START + 2_000, None, unrelated);
+    assert_eq!(again.settings.silent_mode, Some(SilentMode::Deny));
+    assert_eq!(fx.disk().silent_mode, Some(SilentMode::Deny));
+    assert_eq!(fx.disk().learning, None);
+    assert!(!store.write_failed());
+}
+
+#[test]
+fn stop_without_a_window_changes_nothing() {
+    let fx = Fixture::new();
+    let plain = Settings {
+        silent_mode: Some(SilentMode::Allow),
+        ..Settings::default()
+    };
+    fx.seed(&plain);
+    let store = SettingsStore::new();
+    let applied = stop(&store, &fx.path(), &Fake::at(START + 1_000, 0));
+    assert_eq!(applied.settings, plain);
+    assert!(!store.write_failed());
+}
+
+#[test]
+fn learning_is_in_force_only_while_no_override_holds() {
+    let fx = Fixture::new();
+    fx.seed(&learning_settings(Some(SilentMode::Deny)));
+    let store = SettingsStore::new();
+    // Live window, no override: in force.
+    let live = fx.disk();
+    assert_eq!(store.learning_in_force(&live), live.learning);
+    assert!(live.learning.is_some());
+    // A restore that cannot be written: the window is over, whatever the disk says.
+    fx.read_only();
+    let ended = stop(&store, &fx.path(), &Fake::at(START + 1_000, 0));
+    assert_eq!(store.learning_in_force(&ended.settings), None);
+    assert!(
+        fx.disk().learning.is_some(),
+        "the disk still holds the window"
+    );
+    assert_eq!(
+        store.learning_in_force(&fx.disk()),
+        None,
+        "but it is not in force"
+    );
+}
+
+#[test]
+fn a_failed_explicit_deny_over_a_live_window_puts_no_learning_in_force() {
+    let fx = Fixture::new();
+    fx.seed(&learning_settings(Some(SilentMode::Off)));
+    fx.read_only();
+    let store = SettingsStore::new();
+    let applied = store.transact(&fx.path(), START + 1_000, Some(SilentMode::Deny), |s| {
+        s.silent_mode = Some(SilentMode::Deny);
+        s.learning = None;
+    });
+    assert_eq!(applied.settings.silent_mode, Some(SilentMode::Deny));
+    assert!(store.write_failed());
+    assert!(fx.disk().learning.is_some());
+    assert_eq!(store.learning_in_force(&fx.disk()), None);
+}
+
+// --- a stale snapshot cannot stop a newer window (L2) -----------------------------
+
+#[test]
+fn only_the_newest_snapshot_may_stop_the_recording() {
+    let fx = Fixture::new();
+    fx.seed(&Settings::default());
+    let store = SettingsStore::new();
+    // Three transactions, as three worker threads would commit them: an
+    // unrelated write (no window), one that starts a window, and Stop.
+    let before = store.transact(&fx.path(), START, None, unrelated);
+    let started = store.transact(&fx.path(), START + 1, None, |s| {
+        s.silent_mode = Some(SilentMode::Allow);
+        s.learning = Some(window(Some(SilentMode::Off)));
+    });
+    // The old worker thread only now gets to publish: a newer snapshot exists.
+    assert!(before.settings.learning.is_none());
+    assert!(
+        !store.ends_learning(&before),
+        "a stale 'no window' must not stop a window a newer snapshot started"
+    );
+    assert!(!store.ends_learning(&started), "a live window is not ended");
+
+    let stopped = stop(&store, &fx.path(), &Fake::at(START + 2, 0));
+    assert!(store.ends_learning(&stopped), "the newest word: it is over");
+    assert!(!store.ends_learning(&before), "still stale");
+    assert!(!store.ends_learning(&started), "still stale");
+}
+
+#[test]
+fn a_snapshot_is_the_latest_until_another_is_committed() {
+    let fx = Fixture::new();
+    fx.seed(&Settings::default());
+    let store = SettingsStore::new();
+    let first = store.transact(&fx.path(), START, None, unrelated);
+    assert!(store.is_latest(first.generation));
+    let second = store.transact(&fx.path(), START, None, unrelated);
+    assert!(!store.is_latest(first.generation));
+    assert!(store.is_latest(second.generation));
+}

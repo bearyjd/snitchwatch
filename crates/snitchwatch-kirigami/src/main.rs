@@ -77,6 +77,9 @@ fn main() {
 
     if let Some(app) = app.as_mut() {
         let code = app.exec();
+        // What learning mode saw in the last moments is still in memory (a
+        // burst is saved a couple of seconds after it starts).
+        snitchwatch_kirigami::learned::flush_and_wait(std::time::Duration::from_secs(3));
         // Resident notices would outlive us, with buttons nobody hears.
         if let Some(handles) = bridge_runtime::handles() {
             handles

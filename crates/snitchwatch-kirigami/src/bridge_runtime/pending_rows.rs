@@ -23,6 +23,24 @@ pub struct PendingRow {
     pub process: String,
     pub process_path: Option<String>,
     pub dst_host: String,
+    /// The destination address (the key when `dst_host` is empty).
+    pub dst_ip: String,
+    pub port: u16,
+    pub protocol: String,
+}
+
+impl PendingRow {
+    /// What is kept of `row`.
+    pub fn from_row(row: &ConnectionRow) -> Self {
+        Self {
+            process: row.process.clone(),
+            process_path: row.process_path.clone(),
+            dst_host: row.dst_host.clone(),
+            dst_ip: row.dst_ip.clone(),
+            port: row.dst_port,
+            protocol: row.protocol.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -33,14 +51,7 @@ pub(super) struct PendingRows {
 impl PendingRows {
     fn upsert(&mut self, row: &ConnectionRow) {
         if is_pending(row) {
-            self.rows.insert(
-                row.id.clone(),
-                PendingRow {
-                    process: row.process.clone(),
-                    process_path: row.process_path.clone(),
-                    dst_host: row.dst_host.clone(),
-                },
-            );
+            self.rows.insert(row.id.clone(), PendingRow::from_row(row));
         } else {
             self.rows.remove(&row.id);
         }
@@ -67,8 +78,8 @@ impl PendingRows {
         self.rows.clear();
     }
 
-    fn wire_ids(&self) -> Vec<String> {
-        self.rows.keys().cloned().collect()
+    fn snapshot(&self) -> HashMap<String, PendingRow> {
+        self.rows.clone()
     }
 
     fn get(&self, wire_id: &str) -> Option<&PendingRow> {
@@ -92,16 +103,17 @@ pub(super) fn observe(
 }
 
 impl BridgeHandles {
-    /// The live session and the wire ids of the rows now waiting in it, or
-    /// `None` while disconnected.
-    pub fn pending_wire_ids(&self) -> Option<(u64, Vec<String>)> {
+    /// The live session and the rows now waiting in it, keyed by wire id, or
+    /// `None` while disconnected. The runtime pump feeds it without loss, so
+    /// it is what a sweep re-reads after the broadcast channel lagged.
+    pub fn pending_rows_snapshot(&self) -> Option<(u64, HashMap<String, PendingRow>)> {
         let state = self
             .connection
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         state
             .connected
-            .then(|| (state.connection_id, state.pending_rows.wire_ids()))
+            .then(|| (state.connection_id, state.pending_rows.snapshot()))
     }
 
     /// Row `wire_id` of session `connection_id`, while that session is live
@@ -164,6 +176,21 @@ mod tests {
         });
         assert_eq!(waiting(&rows), ["ask-1", "ask-2", "ask-3"]);
         assert_eq!(rows.get("ask-1").unwrap().dst_host, "example.com");
+        // The full key of a waiting row, for a sweep of the rows already waiting.
+        assert_eq!(
+            rows.get("ask-1").unwrap(),
+            &PendingRow {
+                process: "curl".into(),
+                process_path: Some("/usr/bin/curl".into()),
+                dst_host: "example.com".into(),
+                dst_ip: "93.184.216.34".into(),
+                port: 443,
+                protocol: "tcp".into(),
+            }
+        );
+        let snapshot = rows.snapshot();
+        assert_eq!(snapshot.len(), 3);
+        assert_eq!(snapshot["ask-2"].port, 443);
 
         // Answered, put off, removed.
         rows.observe(&ServerMessage::UpdateConnectionRows {

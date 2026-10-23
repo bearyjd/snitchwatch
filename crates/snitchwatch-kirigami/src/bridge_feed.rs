@@ -283,7 +283,14 @@ impl qobject::BridgeFeed {
             loop {
                 let received = match rx.recv().await {
                     Ok(received) => received,
-                    Err(RecvError::Lagged(_)) => continue,
+                    // Rows may have been missed: learning mode's record says so,
+                    // and the rows still waiting (the runtime pump keeps them
+                    // without loss) are swept.
+                    Err(RecvError::Lagged(missed)) => {
+                        tracing::warn!(missed, "BridgeFeed: the feed lagged");
+                        crate::silent_mode::on_lagged(&handles);
+                        continue;
+                    }
                     Err(RecvError::Closed) => break,
                 };
                 let connection_id = received.connection_id;

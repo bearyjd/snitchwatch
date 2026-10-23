@@ -37,6 +37,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use crate::learning::{self, Clocks, Ticker};
+#[cfg(test)]
+use crate::settings::Learning;
 use crate::settings::{read_settings, write_settings, Settings, SilentMode};
 
 /// `None`: no override. `Some(mode)`: the intended `silent_mode` (itself
@@ -117,6 +119,28 @@ impl SettingsStore {
             },
             None => settings,
         }
+    }
+
+    /// Whether a worker thread holding the snapshot numbered `generation` may
+    /// act on it at once (without waiting for the Qt thread): only if no newer
+    /// transaction was committed meanwhile, so a late, stale snapshot cannot
+    /// undo what a newer one did.
+    pub fn is_latest(&self, generation: u64) -> bool {
+        generation >= self.generation.load(Ordering::SeqCst)
+    }
+
+    /// Whether `applied` says the learning window is over and is the newest
+    /// word on it: recording stops now.
+    pub fn ends_learning(&self, applied: &Applied) -> bool {
+        applied.settings.learning.is_none() && self.is_latest(applied.generation)
+    }
+
+    /// The learning window in force: the one in `settings`, unless the
+    /// override holds (then none, because Allow is not applied and nothing is
+    /// answered, so nothing must be recorded).
+    #[cfg(test)]
+    pub fn learning_in_force(&self, settings: &Settings) -> Option<Learning> {
+        self.honor(settings.clone()).learning
     }
 
     /// The mode to push to the silent-answer state: the override's, if any.
@@ -252,6 +276,18 @@ pub fn tick(
             .learning
             .as_ref()
             .map(|window| learning::advance(window, delta));
+    })
+}
+
+/// The owner pressed "Stop learning": the window is over now, like an expired
+/// one, so a restore that cannot be written is held as the override (Allow is
+/// never applied) and written by the next transaction that works.
+pub fn stop(store: &SettingsStore, path: &Path, clocks: &dyn Clocks) -> Applied {
+    let now = clocks.wall_ms();
+    store.transact(path, now, None, |settings| {
+        if let Some(window) = settings.learning.as_mut() {
+            window.ends_ms = window.ends_ms.min(now);
+        }
     })
 }
 

@@ -30,11 +30,12 @@
 //!
 //! Qt-free: the pure pieces are unit-tested below.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Mutex, OnceLock};
 
-use snitchwatch_bridge::ws_messages::{ClientMessage, ServerMessage};
+use snitchwatch_bridge::ws_messages::{ClientMessage, ServerMessage, VerdictAction};
 
+use crate::bridge_runtime::PendingRow;
 use crate::connections::outcome::is_pending;
 use crate::pending_decision::build_verdict_message;
 use crate::settings::SilentMode;
@@ -105,6 +106,28 @@ pub(crate) fn needs_rule(qualified_id: &str) -> bool {
     with_registry(|registry| registry.ids.contains(qualified_id))
 }
 
+/// One silent answer, planned: the session-qualified row id, the verdict, and
+/// the row it answers (what learning mode records once the answer was sent).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PlannedAnswer {
+    pub(crate) qualified_id: String,
+    pub(crate) msg: ClientMessage,
+    pub(crate) row: PendingRow,
+}
+
+impl PlannedAnswer {
+    /// Whether the verdict is an Allow (learning records only those).
+    fn is_allow(&self) -> bool {
+        matches!(
+            self.msg,
+            ClientMessage::SetVerdict {
+                verdict: VerdictAction::Allow,
+                ..
+            }
+        )
+    }
+}
+
 /// The rows already answered in one bridge session, so a resync snapshot that
 /// repeats them is not answered twice. Forgets everything when the session
 /// changes: a new bridge has new prompts.
@@ -112,44 +135,51 @@ pub(crate) fn needs_rule(qualified_id: &str) -> bool {
 pub(crate) struct Answered {
     session: Option<u64>,
     wire_ids: HashSet<String>,
+    /// The subset answered with Allow, for the learning sweeps: a row denied
+    /// before learning began must not be recorded as allowed.
+    allowed: HashSet<String>,
 }
 
 impl Answered {
-    /// The silent answers `message` calls for in `session`, as
-    /// `(qualified row id, SetVerdict)`. Only rows still pending that this
-    /// instance has not answered before.
+    /// The silent answers `message` calls for in `session`. Only rows still
+    /// pending that this instance has not answered before.
     pub(crate) fn plan(
         &mut self,
         session: u64,
         message: &ServerMessage,
         choice: &str,
-    ) -> Vec<(String, ClientMessage)> {
+    ) -> Vec<PlannedAnswer> {
         let (ServerMessage::InsertConnectionRows { rows }
         | ServerMessage::UpdateConnectionRows { rows }) = message
         else {
             return Vec::new();
         };
         self.enter(session);
-        rows.iter()
+        let planned: Vec<PlannedAnswer> = rows
+            .iter()
             .filter(|row| is_pending(row) && self.wire_ids.insert(row.id.clone()))
-            .filter_map(|row| answer_for(session, &row.id, choice))
-            .collect()
+            .filter_map(|row| answer_for(session, &row.id, choice, PendingRow::from_row(row)))
+            .collect();
+        self.note_allowed(session, &planned);
+        planned
     }
 
     /// The silent answers for rows already known to be pending in `session`
-    /// (`wire_ids`), not answered before.
+    /// (`waiting`, by wire id), not answered before.
     pub(crate) fn plan_waiting(
         &mut self,
         session: u64,
-        wire_ids: &[String],
+        waiting: &HashMap<String, PendingRow>,
         choice: &str,
-    ) -> Vec<(String, ClientMessage)> {
+    ) -> Vec<PlannedAnswer> {
         self.enter(session);
-        wire_ids
+        let planned: Vec<PlannedAnswer> = waiting
             .iter()
-            .filter(|id| self.wire_ids.insert((*id).clone()))
-            .filter_map(|id| answer_for(session, id, choice))
-            .collect()
+            .filter(|(id, _)| self.wire_ids.insert((*id).clone()))
+            .filter_map(|(id, row)| answer_for(session, id, choice, row.clone()))
+            .collect();
+        self.note_allowed(session, &planned);
+        planned
     }
 
     /// Take back a row whose answer could not be sent (`qualified` as in a
@@ -160,6 +190,21 @@ impl Answered {
         };
         if session.parse::<u64>().ok() == self.session {
             self.wire_ids.remove(wire_id);
+            self.allowed.remove(wire_id);
+        }
+    }
+
+    /// Whether row `wire_id` of `session` was answered with Allow here.
+    fn was_allowed(&self, session: u64, wire_id: &str) -> bool {
+        self.session == Some(session) && self.allowed.contains(wire_id)
+    }
+
+    fn note_allowed(&mut self, session: u64, planned: &[PlannedAnswer]) {
+        let prefix = format!("{session}:");
+        for answer in planned.iter().filter(|a| a.is_allow()) {
+            if let Some(wire_id) = answer.qualified_id.strip_prefix(&prefix) {
+                self.allowed.insert(wire_id.to_string());
+            }
         }
     }
 
@@ -167,14 +212,19 @@ impl Answered {
         if self.session != Some(session) {
             self.session = Some(session);
             self.wire_ids.clear();
+            self.allowed.clear();
         }
     }
 }
 
-fn answer_for(session: u64, wire_id: &str, choice: &str) -> Option<(String, ClientMessage)> {
-    let qualified = format!("{session}:{wire_id}");
-    let msg = build_verdict_message(&qualified, choice, "this_host", "this_time")?;
-    Some((qualified, msg))
+fn answer_for(session: u64, wire_id: &str, choice: &str, row: PendingRow) -> Option<PlannedAnswer> {
+    let qualified_id = format!("{session}:{wire_id}");
+    let msg = build_verdict_message(&qualified_id, choice, "this_host", "this_time")?;
+    Some(PlannedAnswer {
+        qualified_id,
+        msg,
+        row,
+    })
 }
 
 /// The feed task's hook: answer the new pending rows in `message` if silent
@@ -206,11 +256,66 @@ pub(crate) fn answer_pending_now(
     let Some(choice) = current_choice() else {
         return;
     };
-    let Some((session, wire_ids)) = handles.pending_wire_ids() else {
+    let Some((session, waiting)) = handles.pending_rows_snapshot() else {
         return;
     };
-    let plan = answered.plan_waiting(session, &wire_ids, choice);
+    let plan = answered.plan_waiting(session, &waiting, choice);
     send_plan(handles, answered, plan);
+}
+
+/// Record, for learning mode, the waiting rows that were already answered with
+/// Allow (the recorder dedupes by qualified id, so a row recorded when it was
+/// answered is not counted twice). Needed when learning starts over rows
+/// answered before it, and after a lag: the answered-set dedup stops
+/// [`answer_pending_now`] from planning those again.
+pub(crate) fn record_answered_rows(
+    handles: &crate::bridge_runtime::BridgeHandles,
+    answered: &Answered,
+) {
+    let Some((session, waiting)) = handles.pending_rows_snapshot() else {
+        return;
+    };
+    for (wire_id, row) in waiting
+        .iter()
+        .filter(|(wire_id, _)| answered.was_allowed(session, wire_id))
+    {
+        crate::learned::record(&format!("{session}:{wire_id}"), row);
+    }
+}
+
+/// The sweep that follows a lag of the broadcast channel (rows may have been
+/// missed) and the start of a learning window: answer the rows still waiting
+/// that were never answered, then record the ones answered earlier.
+pub(crate) fn sweep_waiting(
+    handles: &crate::bridge_runtime::BridgeHandles,
+    answered: &mut Answered,
+) {
+    answer_pending_now(handles, answered);
+    record_answered_rows(handles, answered);
+}
+
+/// The feed task fell behind and missed messages: the review must say so, and
+/// the rows still waiting are swept (the runtime pump that feeds the waiting
+/// rows is lossless).
+pub(crate) fn on_lagged(handles: &crate::bridge_runtime::BridgeHandles) {
+    crate::learned::note_lagged();
+    spawn_sweep(handles);
+}
+
+/// A learning window began: sweep the rows already waiting.
+pub(crate) fn learning_started() {
+    if let Some(handles) = crate::bridge_runtime::handles() {
+        spawn_sweep(&handles);
+    }
+}
+
+fn spawn_sweep(handles: &crate::bridge_runtime::BridgeHandles) {
+    let handles = handles.clone();
+    let runtime = handles.runtime().clone();
+    runtime.spawn(async move {
+        let mut answered = shared_answered().lock().unwrap_or_else(|p| p.into_inner());
+        sweep_waiting(&handles, &mut answered);
+    });
 }
 
 /// Send each answer once-only; a row is marked "needs a rule" only once its
@@ -221,11 +326,20 @@ pub(crate) fn answer_pending_now(
 fn send_plan(
     handles: &crate::bridge_runtime::BridgeHandles,
     answered: &mut Answered,
-    plan: Vec<(String, ClientMessage)>,
+    plan: Vec<PlannedAnswer>,
 ) {
-    for (qualified, msg) in plan {
-        match crate::bridge_feed::dispatch_to(handles, msg, false) {
-            Ok(()) => mark_needs_rule(&qualified),
+    for answer in plan {
+        let is_allow = answer.is_allow();
+        let qualified = answer.qualified_id;
+        match crate::bridge_feed::dispatch_to(handles, answer.msg, false) {
+            Ok(()) => {
+                mark_needs_rule(&qualified);
+                // Learning records what was REALLY answered, and only after the
+                // send worked: a failed one is forgotten and planned again.
+                if is_allow {
+                    crate::learned::record(&qualified, &answer.row);
+                }
+            }
             Err(error) => {
                 answered.forget(&qualified);
                 tracing::warn!(%error, row = %qualified, "silent answer not sent");
@@ -263,6 +377,12 @@ mod tests {
         }
     }
 
+    fn waiting(ids: &[&str]) -> HashMap<String, PendingRow> {
+        ids.iter()
+            .map(|id| (id.to_string(), PendingRow::from_row(&row(id, None))))
+            .collect()
+    }
+
     fn insert(rows: Vec<ConnectionRow>) -> ServerMessage {
         ServerMessage::InsertConnectionRows { rows }
     }
@@ -279,17 +399,19 @@ mod tests {
     #[test]
     fn waiting_rows_are_answered_once_and_share_the_dedup_with_new_rows() {
         let mut answered = Answered::default();
-        let ids = vec!["w-1".to_string(), "w-2".to_string()];
-        let plan = answered.plan_waiting(4, &ids, "deny");
+        let waiting = waiting(&["w-1", "w-2"]);
+        let mut plan = answered.plan_waiting(4, &waiting, "deny");
+        plan.sort_by(|a, b| a.qualified_id.cmp(&b.qualified_id));
         assert_eq!(plan.len(), 2);
-        assert_eq!(plan[0].0, "4:w-1");
-        assert!(answered.plan_waiting(4, &ids, "deny").is_empty());
+        assert_eq!(plan[0].qualified_id, "4:w-1");
+        assert_eq!(plan[0].row, waiting["w-1"], "the answer carries its row");
+        assert!(answered.plan_waiting(4, &waiting, "deny").is_empty());
         // A snapshot repeating a swept row does not answer it again.
         assert!(answered
             .plan(4, &insert(vec![row("w-1", None)]), "deny")
             .is_empty());
         // A new session asks afresh.
-        assert_eq!(answered.plan_waiting(5, &ids, "deny").len(), 2);
+        assert_eq!(answered.plan_waiting(5, &waiting, "deny").len(), 2);
     }
 
     #[test]
@@ -298,7 +420,7 @@ mod tests {
         let snapshot = insert(vec![row("ask-1", None)]);
         let plan = answered.plan(2, &snapshot, "deny");
         assert_eq!(plan.len(), 1);
-        answered.forget(&plan[0].0);
+        answered.forget(&plan[0].qualified_id);
         assert_eq!(answered.plan(2, &snapshot, "deny").len(), 1);
         // Another session's id, or a malformed one, forgets nothing.
         answered.forget("9:ask-1");
@@ -311,8 +433,13 @@ mod tests {
         let mut answered = Answered::default();
         let plan = answered.plan(3, &insert(vec![row("ask-1", None)]), "deny");
         assert_eq!(plan.len(), 1);
-        let (qualified, msg) = &plan[0];
-        assert_eq!(qualified, "3:ask-1");
+        let PlannedAnswer {
+            qualified_id,
+            msg,
+            row: planned_row,
+        } = &plan[0];
+        assert_eq!(qualified_id, "3:ask-1");
+        assert_eq!(planned_row, &PendingRow::from_row(&row("ask-1", None)));
         assert_eq!(
             msg,
             &ClientMessage::SetVerdict {
@@ -364,6 +491,27 @@ mod tests {
         assert!(answered
             .plan(1, &ServerMessage::ClearConnectionRows, "allow")
             .is_empty());
+    }
+
+    #[test]
+    fn only_allowed_rows_are_remembered_as_allowed_and_a_forgotten_one_is_not() {
+        let mut answered = Answered::default();
+        let snapshot = insert(vec![row("a-1", None)]);
+        answered.plan(6, &snapshot, "deny");
+        assert!(!answered.was_allowed(6, "a-1"), "a Deny is not an allow");
+        let mut answered = Answered::default();
+        let plan = answered.plan(6, &snapshot, "allow");
+        assert!(answered.was_allowed(6, "a-1"));
+        assert!(!answered.was_allowed(7, "a-1"), "another session's row");
+        answered.forget(&plan[0].qualified_id);
+        assert!(
+            !answered.was_allowed(6, "a-1"),
+            "an unsent answer is not one"
+        );
+        // A new session forgets them all.
+        answered.plan(6, &snapshot, "allow");
+        answered.plan(8, &snapshot, "allow");
+        assert!(!answered.was_allowed(6, "a-1"));
     }
 
     #[test]

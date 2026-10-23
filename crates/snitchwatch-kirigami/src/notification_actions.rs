@@ -337,6 +337,9 @@ mod tests {
             process: process.into(),
             process_path: Some(format!("/usr/bin/{process}")),
             dst_host: dst_host.into(),
+            dst_ip: "93.184.216.34".into(),
+            port: 443,
+            protocol: "tcp".into(),
         }
     }
 
@@ -365,6 +368,9 @@ mod tests {
             process: "firefox".into(),
             process_path: Some("/tmp/x/firefox".into()),
             dst_host: format!("login.microsoft.com.{}.evil.tld", "a".repeat(300)),
+            dst_ip: "203.0.113.9".into(),
+            port: 443,
+            protocol: "tcp".into(),
         };
         let body = pending_body(&spoof, InlineDeny::ProgramUnknown);
         assert!(

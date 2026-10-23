@@ -39,6 +39,12 @@ pub fn settings_path() -> PathBuf {
     settings_path_from(xdg("XDG_CONFIG_HOME").as_deref(), home().as_deref())
 }
 
+/// What learning mode recorded (`crate::learned`): programs and destinations,
+/// 0600, deleted after 30 days. Its advisory lock is `<this path>.lock`.
+pub fn learned_path() -> PathBuf {
+    learned_path_from(xdg("XDG_CONFIG_HOME").as_deref(), home().as_deref())
+}
+
 pub fn bridge_log_path() -> PathBuf {
     state_dir().join("bridge.log")
 }
@@ -82,6 +88,10 @@ fn opensnitch_ui_autostart_path_from(xdg_config_home: Option<&str>, home: Option
 
 fn settings_path_from(xdg_config_home: Option<&str>, home: Option<&str>) -> PathBuf {
     config_dir_from(xdg_config_home, home).join("settings.json")
+}
+
+fn learned_path_from(xdg_config_home: Option<&str>, home: Option<&str>) -> PathBuf {
+    config_dir_from(xdg_config_home, home).join("learned.json")
 }
 
 /// An unset or empty `xdg` value is treated as unset; with no `home` either,
@@ -277,6 +287,18 @@ mod tests {
         assert_eq!(
             opensnitch_ui_autostart_path_from(None, Some("/home/alice")),
             PathBuf::from("/home/alice/.config/autostart/opensnitch_ui.desktop")
+        );
+    }
+
+    #[test]
+    fn learned_path_sits_next_to_the_settings_file() {
+        assert_eq!(
+            learned_path_from(Some("/tmp/cfg"), None),
+            PathBuf::from("/tmp/cfg/snitchwatch/learned.json")
+        );
+        assert_eq!(
+            learned_path_from(None, Some("/home/alice")),
+            PathBuf::from("/home/alice/.config/snitchwatch/learned.json")
         );
     }
 

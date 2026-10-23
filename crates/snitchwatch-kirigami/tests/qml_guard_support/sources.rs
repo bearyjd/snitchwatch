@@ -104,6 +104,10 @@ pub const ALL_QML: &[(&str, &str)] = &[
         "InspectorState.qml",
         include_str!("../../qml/InspectorState.qml"),
     ),
+    (
+        "LearningBanner.qml",
+        include_str!("../../qml/LearningBanner.qml"),
+    ),
     ("HoverTip.qml", include_str!("../../qml/HoverTip.qml")),
     (
         "ProgramLabel.qml",
