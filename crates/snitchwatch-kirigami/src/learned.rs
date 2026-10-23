@@ -23,7 +23,7 @@ use std::time::Duration;
 pub use aggregate::*;
 pub use classify::{path_flag, PathFlag};
 pub use shared::{Shared, Status, SEEN_CAP};
-pub use store::{Backend, FileBackend, Notice};
+pub use store::{Backend, FileBackend, Loaded, Notice};
 
 use crate::bridge_runtime::PendingRow;
 use crate::learning::{Clocks, SystemClocks};
@@ -106,10 +106,28 @@ pub fn clear() {
     global().clear();
 }
 
+/// Forget everything and delete the file, and say whether the file is gone
+/// (waits for the writer, so call it off the Qt thread).
+pub fn clear_and_wait(timeout: Duration) -> Result<(), Notice> {
+    global().clear_and_wait(timeout)
+}
+
 /// Save what is unsaved and wait a little for it (Stop, quitting).
 pub fn flush_and_wait(timeout: Duration) -> bool {
     global().flush_and_wait(timeout)
 }
+
+/// What is stored in `path`, after saving what is unsaved. The review reads
+/// this and not the memory, which is empty after a restart (it is filled only
+/// when a window starts) and would count a stored list twice if merged.
+/// Call it off the Qt thread: it waits for the writer.
+pub fn stored(path: &Path) -> Loaded {
+    flush_and_wait(STORED_FLUSH_WAIT);
+    FileBackend::new(path.to_path_buf()).load(SystemClocks.wall_ms())
+}
+
+/// How long [`stored`] waits for unsaved rows to be written.
+const STORED_FLUSH_WAIT: Duration = Duration::from_secs(3);
 
 /// One lock for every test that flips `LEARNING` or touches the process-wide
 /// recorder (or the silent state it follows): they share state, so they run

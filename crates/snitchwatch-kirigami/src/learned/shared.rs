@@ -34,7 +34,7 @@ enum Msg {
     Dirty,
     Load,
     Flush(Sender<()>),
-    Clear(Sender<()>),
+    Clear(Sender<Result<(), Notice>>),
 }
 
 #[derive(Default)]
@@ -206,11 +206,26 @@ impl Shared {
         done.recv_timeout(timeout).is_ok()
     }
 
-    /// Forget everything and delete the file.
+    /// Forget everything and delete the file, without waiting.
     pub fn clear(&self) {
         self.reset();
         let (ack, _unheard) = mpsc::channel();
         self.send(Msg::Clear(ack));
+    }
+
+    /// Forget everything and delete the file, and wait (up to `timeout`) for
+    /// the writer to say what happened. With no file attached there is
+    /// nothing to delete. A writer that does not answer in time is an error:
+    /// the deletion is then unconfirmed.
+    pub fn clear_and_wait(&self, timeout: Duration) -> Result<(), Notice> {
+        self.reset();
+        if lock(&self.tx).is_none() {
+            return Ok(());
+        }
+        let (ack, done) = mpsc::channel();
+        self.send(Msg::Clear(ack));
+        done.recv_timeout(timeout)
+            .unwrap_or(Err(Notice::WriteFailed))
     }
 
     fn do_load(&self) {
@@ -259,13 +274,13 @@ impl Shared {
         }
     }
 
-    fn do_clear(&self) {
+    fn do_clear(&self) -> Result<(), Notice> {
         let Some(backend) = lock(&self.backend).clone() else {
-            return;
+            return Ok(());
         };
-        if let Err(notice) = backend.clear() {
+        backend.clear().inspect_err(|&notice| {
             lock(&self.inner).notice = Some(notice);
-        }
+        })
     }
 }
 
@@ -289,11 +304,9 @@ fn run(shared: &Weak<Shared>, rx: &Receiver<Msg>, debounce: Duration) {
                 let _ = ack.send(());
                 ok
             }
-            Msg::Clear(ack) => {
-                let ok = alive(&Shared::do_clear);
-                let _ = ack.send(());
-                ok
-            }
+            Msg::Clear(ack) => alive(&|shared: &Shared| {
+                let _ = ack.send(shared.do_clear());
+            }),
             Msg::Dirty => debounced_flush(shared, rx, debounce),
         };
         if !keep_going {
@@ -326,8 +339,7 @@ fn debounced_flush(shared: &Weak<Shared>, rx: &Receiver<Msg>, debounce: Duration
                 return true;
             }
             Ok(Msg::Clear(ack)) => {
-                live.do_clear();
-                let _ = ack.send(());
+                let _ = ack.send(live.do_clear());
                 return true;
             }
             Err(RecvTimeoutError::Timeout) => {

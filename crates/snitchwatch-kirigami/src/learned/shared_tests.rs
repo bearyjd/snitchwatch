@@ -33,6 +33,7 @@ struct Fake {
     gate: Mutex<Option<mpsc::Receiver<()>>>,
     entered: Mutex<Option<Sender<()>>>,
     cleared: AtomicBool,
+    fail_clear: AtomicBool,
 }
 
 impl Backend for Fake {
@@ -63,6 +64,9 @@ impl Backend for Fake {
     }
 
     fn clear(&self) -> Result<(), Notice> {
+        if self.fail_clear.load(Ordering::SeqCst) {
+            return Err(Notice::WriteFailed);
+        }
         self.cleared.store(true, Ordering::SeqCst);
         *self.stored.lock().unwrap() = Aggregate::default();
         Ok(())
@@ -330,4 +334,41 @@ fn quitting_saves_what_the_debounce_has_not_yet_written() {
     assert_eq!(stored_connections(&fake, "/usr/bin/curl"), 0, "nothing yet");
     assert!(shared.flush_and_wait(Duration::from_secs(10)));
     assert_eq!(stored_connections(&fake, "/usr/bin/curl"), 2);
+}
+
+#[test]
+fn clear_and_wait_returns_what_the_file_did() {
+    let (shared, fake) = recorder();
+    shared.record("1:a", &row("/usr/bin/curl", "example.com"), T0);
+    assert!(shared.flush_and_wait(Duration::from_secs(10)));
+    assert_eq!(shared.clear_and_wait(Duration::from_secs(10)), Ok(()));
+    assert!(fake.cleared.load(Ordering::SeqCst), "gone when it returns");
+
+    fake.fail_clear.store(true, Ordering::SeqCst);
+    assert_eq!(
+        shared.clear_and_wait(Duration::from_secs(10)),
+        Err(Notice::WriteFailed),
+        "a failed deletion is not reported as done"
+    );
+}
+
+#[test]
+fn clear_and_wait_with_no_file_attached_has_nothing_to_delete() {
+    let shared = Shared::new(Duration::from_millis(30));
+    assert_eq!(shared.clear_and_wait(Duration::from_millis(50)), Ok(()));
+}
+
+#[test]
+fn clear_and_wait_is_unconfirmed_when_the_writer_is_busy() {
+    let (shared, fake) = recorder();
+    let (release, gate) = mpsc::channel();
+    *fake.gate.lock().unwrap() = Some(gate);
+    shared.record("1:a", &row("/usr/bin/curl", "example.com"), T0);
+    // The writer is stuck in a save; the deletion queues behind it.
+    std::thread::sleep(Duration::from_millis(80));
+    assert_eq!(
+        shared.clear_and_wait(Duration::from_millis(100)),
+        Err(Notice::WriteFailed)
+    );
+    let _ = release.send(());
 }

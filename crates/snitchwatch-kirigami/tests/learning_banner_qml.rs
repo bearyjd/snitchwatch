@@ -1,6 +1,7 @@
 //! Learning mode phase L2: the banner (`qml/LearningBanner.qml`).
 //!   * Source guards: its sentence is fixed text, every label is PlainText,
-//!     it has a Stop button and NO Review button, and `main.qml` mounts it
+//!     it has a Stop and a Review button (L4b added Review, and with it the
+//!     review page), and `main.qml` mounts it, opens the review page from it
 //!     and stays under the 800-line cap.
 //!   * A probe in the window: hidden without a window; with one it shows the
 //!     time left, the count (singular and plural), the incomplete and dropped
@@ -72,17 +73,14 @@ fn the_message_is_fixed_text_and_every_dynamic_label_is_plain_text() {
 }
 
 #[test]
-fn stop_is_the_only_action_and_there_is_no_review_button() {
+fn stop_and_review_are_the_only_actions() {
     let code = code_lines(BANNER);
-    assert_eq!(code.matches("Kirigami.Action {").count(), 1);
+    assert_eq!(code.matches("Kirigami.Action {").count(), 2);
     assert!(code.contains("text: \"Stop learning\""));
     assert!(code.contains("banner.settings.stopLearning()"));
-    for review in ["Review", "reviewRequested", "review"] {
-        assert!(
-            !code.contains(review),
-            "no review page exists yet, so no Review button ({review})"
-        );
-    }
+    assert!(code.contains("text: \"Review\""));
+    assert!(code.contains("signal reviewRequested()"));
+    assert!(code.contains("banner.reviewRequested()"));
 }
 
 #[test]
@@ -91,6 +89,10 @@ fn main_qml_mounts_the_banner_and_stays_under_the_line_cap() {
     let mounts = blocks(&code, "LearningBanner {");
     assert_eq!(mounts.len(), 1);
     assert!(mounts[0].contains("settings: settingsController"));
+    assert!(
+        mounts[0].contains("onReviewRequested: nav.replaceMain(learningReviewPageComponent)"),
+        "the banner's Review does not open the review page"
+    );
     assert!(
         MAIN.lines().count() <= 800,
         "main.qml is {} lines",
@@ -191,9 +193,12 @@ Item {
         function refreshLearningStatus() { refreshes++; }
     }
 
+    property int reviews: 0
+
     LearningBanner {
         id: banner
         settings: stub
+        onReviewRequested: probe.reviews++
     }
 
     function check(ok, what) {
@@ -257,13 +262,18 @@ Item {
             check(label.textFormat === Text.PlainText, "a label is " + label.textFormat);
         }
 
-        // Stop calls the controller once; it is the only action.
+        // Stop calls the controller once; Review only asks the host to open
+        // the page. Those are the two actions.
         const message = findAction(banner);
         check(message !== null, "no message with actions");
-        check(message.actions.length === 1 && message.actions[0].text === "Stop learning",
+        check(message.actions.length === 2 && message.actions[0].text === "Stop learning"
+              && message.actions[1].text === "Review",
               "actions: " + message.actions.length);
         message.actions[0].trigger();
         check(stub.stops === 1, "Stop was not called once: " + stub.stops);
+        message.actions[1].trigger();
+        check(probe.reviews === 1, "Review was not requested once: " + reviews);
+        check(stub.stops === 1, "Review stopped learning");
 
         // The window ends: the banner goes away.
         stub.learningActive = false;

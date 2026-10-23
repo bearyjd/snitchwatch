@@ -97,7 +97,9 @@ pub(super) fn scope_hash(parts: &[&str]) -> String {
 pub(super) fn is_usable_host(host: &str) -> bool {
     !host.is_empty()
         && host.len() <= MAX_HOST_BYTES
-        && !host.chars().any(|c| c.is_whitespace() || c.is_control())
+        && !host
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control() || crate::app_names::is_stripped(c))
 }
 
 fn conn(path: &str) -> Connection {

@@ -179,6 +179,12 @@ Kirigami.ApplicationWindow {
         id: scannerController
     }
 
+    // Learning mode's review page state (L4b). Lives here so a running batch
+    // survives navigating away; it reads nothing until the page asks.
+    LearningReviewController {
+        id: learningReviewController
+    }
+
     // Daemon/kernel readiness diagnostics (Task 8/9). Polls the bridge for
     // opensnitchd reachability and kernel prerequisite health; the banner
     // and DaemonHealthPage below both bind to this.
@@ -515,7 +521,7 @@ Kirigami.ApplicationWindow {
     }
 
     // Learning mode (phase L2): on every page while a window runs, below the
-    // banners above. No Review button until the review page exists.
+    // banners above.
     LearningBanner {
         id: learningBanner
         z: 998
@@ -529,6 +535,7 @@ Kirigami.ApplicationWindow {
             margins: Kirigami.Units.smallSpacing
         }
         settings: settingsController
+        onReviewRequested: nav.replaceMain(learningReviewPageComponent)
     }
 
     // Keeps ConnectionsModel.oldestPendingAgeSecs (and therefore
@@ -627,6 +634,13 @@ Kirigami.ApplicationWindow {
         id: scannerPageComponent
         ScannerPage {
             controller: scannerController
+        }
+    }
+    Component {
+        id: learningReviewPageComponent
+        LearningReviewPage {
+            controller: learningReviewController
+            settings: settingsController
         }
     }
     Component {
@@ -750,6 +764,11 @@ Kirigami.ApplicationWindow {
                 text: "Recommended background-service rules"
                 icon.name: "checkmark"
                 onTriggered: nav.replaceMain(recommendedRulesPageComponent)
+            },
+            Kirigami.Action {
+                text: "Make rules from what I saw"
+                icon.name: "view-list-details"
+                onTriggered: nav.replaceMain(learningReviewPageComponent)
             },
             Kirigami.Action {
                 text: "Security Scan"

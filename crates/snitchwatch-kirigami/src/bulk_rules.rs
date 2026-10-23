@@ -36,6 +36,7 @@ pub use plan::{BulkPlan, PlanError, PlannedRule, LEGACY_ALLOW_PREFIX};
 pub use progress::{AbortReason, BatchState, Counts, NotSentWhy, Progress, Row, RowStatus};
 pub use run::run;
 pub use sink::{Incoming, RuleSink, SendError, SessionLost, Settings};
+pub use snapshot::{ListView, Listing};
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

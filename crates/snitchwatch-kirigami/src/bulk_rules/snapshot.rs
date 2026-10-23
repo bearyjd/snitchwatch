@@ -88,6 +88,11 @@ impl ListView {
         }
     }
 
+    /// The rules read so far.
+    pub fn rules(&self) -> &[Rule] {
+        self.store.rules()
+    }
+
     pub fn find(&self, name: &str) -> Option<&Rule> {
         self.store.find_by_name(name)
     }

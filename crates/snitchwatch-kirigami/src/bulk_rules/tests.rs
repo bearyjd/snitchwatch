@@ -1,7 +1,7 @@
 mod bridge_sink;
 mod cancel_and_queue;
 mod collisions;
-mod fake;
+pub(crate) mod fake;
 mod outcomes;
 mod plan;
 mod reconcile;
