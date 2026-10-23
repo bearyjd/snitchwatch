@@ -24,6 +24,7 @@
 //! caching it, so rows read before then keep the generic icon until they are
 //! read again. Apps installed while the GUI runs show it until restart.
 
+use crate::app_names::clean_display;
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -63,6 +64,9 @@ pub struct DesktopEntry {
     icon: String,
     /// Flatpak app id, when the entry declares or implies one.
     flatpak_id: Option<String>,
+    /// The unlocalized `Name=`, sanitized. A label only: a desktop file in a
+    /// user-writable directory can name any program anything.
+    name: Option<String>,
 }
 
 /// Split an `Exec=` value into tokens, honouring double quotes and backslash
@@ -101,6 +105,32 @@ fn exec_tokens(exec: &str) -> Vec<String> {
         tokens.push(cur);
     }
     tokens
+}
+
+/// Decode the Desktop Entry value escapes `\s`, `\n`, `\t`, `\r` and `\\`;
+/// any other backslash is kept as written.
+fn unescape(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut chars = value.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('s') => out.push(' '),
+            Some('n') => out.push('\n'),
+            Some('t') => out.push('\t'),
+            Some('r') => out.push('\r'),
+            Some('\\') => out.push('\\'),
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            None => out.push('\\'),
+        }
+    }
+    out
 }
 
 fn basename(path: &str) -> &str {
@@ -142,6 +172,7 @@ fn looks_like_app_id(s: &str) -> bool {
 pub fn parse_desktop(contents: &str, stem: &str) -> Option<DesktopEntry> {
     let (mut in_entry, mut kind_ok) = (false, true);
     let (mut exec, mut try_exec, mut icon, mut x_flatpak) = (None, None, None, None);
+    let mut name: Option<String> = None;
     for line in contents.lines().map(str::trim) {
         if line.starts_with('[') {
             in_entry = line == "[Desktop Entry]";
@@ -160,6 +191,10 @@ pub fn parse_desktop(contents: &str, stem: &str) -> Option<DesktopEntry> {
             "TryExec" => try_exec = Some(value.to_string()),
             "Icon" => icon = Some(value.to_string()),
             "X-Flatpak" => x_flatpak = Some(value.to_string()),
+            // Only the exact key (`Name[de]` is a different one). The FIRST
+            // `Name=` wins: if it cleans to empty there is no name, and later
+            // lines are ignored.
+            "Name" if name.is_none() => name = Some(clean_display(&unescape(value))),
             _ => {}
         }
     }
@@ -188,6 +223,7 @@ pub fn parse_desktop(contents: &str, stem: &str) -> Option<DesktopEntry> {
         programs,
         icon,
         flatpak_id,
+        name: name.filter(|n| !n.is_empty()),
     })
 }
 
@@ -311,8 +347,21 @@ impl AppIconIndex {
 
     /// Icon for a process path, or [`FALLBACK_ICON`].
     pub fn icon_for(&self, process_path: &str) -> String {
+        self.matching_entry(process_path)
+            .map_or_else(|| FALLBACK_ICON.to_string(), |e| e.icon.clone())
+    }
+
+    /// Display name of the entry [`Self::icon_for`] would pick, if it has one.
+    /// A label only: the matching rules are the icon's, so a name is as
+    /// unverified as an icon is.
+    pub fn name_for(&self, process_path: &str) -> Option<String> {
+        self.matching_entry(process_path)
+            .and_then(|e| e.name.clone())
+    }
+
+    fn matching_entry(&self, process_path: &str) -> Option<&DesktopEntry> {
         if process_path.is_empty() {
-            return FALLBACK_ICON.to_string();
+            return None;
         }
         if let Some(id) = flatpak_app_id_from_path(process_path, self.home.as_deref()) {
             if let Some(e) = self
@@ -320,7 +369,7 @@ impl AppIconIndex {
                 .iter()
                 .find(|e| e.flatpak_id.as_deref() == Some(id.as_str()))
             {
-                return e.icon.clone();
+                return Some(e);
             }
         }
         let base = basename(process_path);
@@ -337,9 +386,7 @@ impl AppIconIndex {
                 })
             })
         };
-        hit(true)
-            .or_else(|| by_name.then(|| hit(false)).flatten())
-            .map_or_else(|| FALLBACK_ICON.to_string(), |e| e.icon.clone())
+        hit(true).or_else(|| by_name.then(|| hit(false)).flatten())
     }
 }
 

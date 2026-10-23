@@ -8,6 +8,7 @@
 
 pub(crate) mod alert_row;
 pub mod app_icons;
+pub mod app_names;
 pub mod application;
 pub mod autostart;
 pub mod blocklists;
