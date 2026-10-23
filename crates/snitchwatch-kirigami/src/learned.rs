@@ -21,6 +21,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 pub use aggregate::*;
+pub use classify::{path_flag, PathFlag};
 pub use shared::{Shared, Status, SEEN_CAP};
 pub use store::{Backend, FileBackend, Notice};
 

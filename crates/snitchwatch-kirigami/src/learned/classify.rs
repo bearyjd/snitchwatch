@@ -78,14 +78,35 @@ pub(super) fn is_uncommon_port(port: u16, protocol: &str) -> bool {
     !COMMON_PORTS.contains(&port)
 }
 
+/// Why a program's path is flagged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathFlag {
+    /// The file no longer exists (`(deleted)` suffix).
+    Deleted,
+    /// It is under this user-writable or temporary directory.
+    Under(&'static str),
+}
+
+/// Why a program at `path` counts as running from a user-writable or
+/// temporary place, or from a file that no longer exists; `None` when it
+/// does not.
+pub fn path_flag(path: &str) -> Option<PathFlag> {
+    if path.trim_end().ends_with(DELETED_SUFFIX) {
+        return Some(PathFlag::Deleted);
+    }
+    FLAGGED_DIRS
+        .iter()
+        .find(|dir| {
+            path.strip_prefix(**dir)
+                .is_some_and(|rest| rest.starts_with('/'))
+        })
+        .map(|dir| PathFlag::Under(dir))
+}
+
 /// Whether a program at `path` runs from a user-writable or temporary place,
 /// or from a file that no longer exists.
 pub(super) fn is_path_flagged(path: &str) -> bool {
-    path.trim_end().ends_with(DELETED_SUFFIX)
-        || FLAGGED_DIRS.iter().any(|dir| {
-            path.strip_prefix(dir)
-                .is_some_and(|rest| rest.starts_with('/'))
-        })
+    path_flag(path).is_some()
 }
 
 /// The directory part of `path` (`/` for a file at the root, the path itself
@@ -185,6 +206,18 @@ mod tests {
         ] {
             assert!(!is_path_flagged(path), "{path}");
         }
+    }
+
+    #[test]
+    fn the_path_flag_names_the_directory_or_the_deleted_file() {
+        assert_eq!(path_flag("/tmp/x"), Some(PathFlag::Under("/tmp")));
+        assert_eq!(
+            path_flag("/var/home/u/x"),
+            Some(PathFlag::Under("/var/home"))
+        );
+        assert_eq!(path_flag("/usr/bin/x (deleted)"), Some(PathFlag::Deleted));
+        assert_eq!(path_flag("/tmp/x (deleted)"), Some(PathFlag::Deleted));
+        assert_eq!(path_flag("/usr/bin/x"), None);
     }
 
     #[test]
