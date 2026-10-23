@@ -1,6 +1,7 @@
 # GUI learning mode and bulk rule creation (DRAFT, r16 GUI item)
 
-Status: draft plan, no code. GUI-only: no bridge, wire message or packaging change (one
+Status: IMPLEMENTED in the GUI (L1 #195, L2 #196, L3 #197, L4a #198, L4b #199, docs L5); not yet tried on the
+laptop or shipped in a GUI release (the owner tries it first). GUI-only: no bridge, wire message or packaging change (one
 documented cosmetic limit in the bridge's import preview, below, is accepted, not fixed
 here). Owner decisions (2026-10-22): the shipped `DefaultAction` STAYS `deny` (settled
 decision 5 in CLAUDE.md is not reopened); the clicking is fixed by a learning mode; the end
@@ -266,6 +267,24 @@ row reuses the 0a program label, its "unverified" marker and the real-path displ
   during the learning window; each suggested row shows its host list inline so the owner can
   untick it.
 - The bridge's import preview and rule editor call a directory rule "all apps" (known limit).
+- On the shipped limits text the GUI shows these lines on the review page (the wording is
+  pinned by tests); the lines below are the ones found while building it:
+- A dual-use program (interpreter, shell, network tool) is never ticked by "Select suggested",
+  but "any destination" is still offered for it, with a warning and an extra confirmation.
+- A failed explicit Deny of a learning window followed by a restart while the window is still
+  live brings Allow back (pinned by tests in `settings_learning.rs`; the end is fail-closed
+  everywhere else).
+- The recorder, not the owner, can miss a record at quit (the flush can miss a late record), a
+  second damaged `learned.json` replaces the older `.corrupt` backup, and without the lock file
+  (degraded mode) a racing writer can lose a record. These are LOW and recorded in the module docs.
+- Class-B directory entries hold at most 8 programs; beyond that only a count is kept. A
+  truncated or control-character path is NON-SELECTABLE (no exact-path rule is ever built from it).
+- The sequencer reads the rules list before every rule and never overwrites a rule you edited,
+  but a rule edited in the few milliseconds between that check and the send can still be replaced
+  (the bridge replaces same-name rules). A batch in flight when the app quits keeps the rules
+  already added and keeps the recorded list.
+- The review reads the SAVED list, not the live recorder, so a very recent connection may show on
+  the next refresh.
 
 ## Files and budgets (800-line rule)
 New: `src/learning.rs` (mode, clocks, end handler), `src/learned.rs` (aggregator,

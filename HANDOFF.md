@@ -8,6 +8,15 @@
 > current then; roughly 100 commits have merged since (r14/r15 work, up to
 > `bfc76e6`). For the open items, see `gh issue view 178`.
 
+## 2026-10-23 (learning mode built)
+GUI learning mode is merged to `main` (#195 setting + fail-closed end, #196 recorder + banner,
+#197 proposal logic, #198 bulk-rule sequencer, #199 review page + Start learning). Plan and
+honest limits: `docs/superpowers/plans/2026-10-22-gui-learning-mode.md`. GUI-only; no bridge,
+wire or packaging change, nothing in r15. Still the owner's: try learning mode on the laptop
+BEFORE any GUI release (it allows everything once during the window; nothing is ticked for you).
+Not merged on purpose: 0c exception-first default. Next GUI items: 0b group counts, 0e
+"What is this?".
+
 ## 2026-10-22 (current)
 
 r15 is out. `main` is `bfc76e6`: #185 (rustls-webpki 0.103.16, webpki-roots
