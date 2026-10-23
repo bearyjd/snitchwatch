@@ -274,15 +274,16 @@ row reuses the 0a program label, its "unverified" marker and the real-path displ
 - A failed explicit Deny of a learning window followed by a restart while the window is still
   live brings Allow back (pinned by tests in `settings_learning.rs`; the end is fail-closed
   everywhere else).
-- The recorder, not the owner, can miss a record at quit (the flush can miss a late record), a
+- The recorder can miss a record at quit (the flush waits at most 3 seconds), a
   second damaged `learned.json` replaces the older `.corrupt` backup, and without the lock file
-  (degraded mode) a racing writer can lose a record. These are LOW and recorded in the module docs.
+  (degraded mode) a racing writer can lose a record. These are minor; they are noted in code comments and tests, not graded elsewhere.
 - Class-B directory entries hold at most 8 programs; beyond that only a count is kept. A
   truncated or control-character path is NON-SELECTABLE (no exact-path rule is ever built from it).
-- The sequencer reads the rules list before every rule and never overwrites a rule you edited,
-  but a rule edited in the few milliseconds between that check and the send can still be replaced
-  (the bridge replaces same-name rules). A batch in flight when the app quits keeps the rules
-  already added and keeps the recorded list.
+- The sequencer checks its live view of the rules list before every rule and never overwrites a
+  rule you edited, but a rule edited in the window between that check and the send (one bridge
+  round trip) can still be replaced
+  (the bridge replaces same-name rules). A batch in flight when the app quits is cancelled before its next rule; the rules already
+  added (including one already sent) stay, and the recorded list is kept.
 - The review reads the SAVED list, not the live recorder, so a very recent connection may show on
   the next refresh.
 

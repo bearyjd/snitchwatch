@@ -1,6 +1,6 @@
 # Linux App Firewall + Bazzite Security Scanner — Handoff (updated 2026-10-22)
 
-> **Start with the "2026-10-22 (current)" section just below.** It is the
+> **Start with the "2026-10-23 (learning mode built)" section, then "2026-10-22 (current)" (its `main` sha is stale).** It is the
 > current status. (A local, gitignored `.omc/STATE.md` may also exist on the
 > owner's machine; it is not in a fresh clone.)
 > Everything after that section is a dated history: accurate as a record of what was
