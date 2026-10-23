@@ -413,3 +413,54 @@ fn connection_row_shows_the_friendly_label_with_its_real_path() {
         "the name and the tail each need the unverified-only real-path HoverTip"
     );
 }
+
+/// Learning mode phase L1: the fail-closed end reaches the silent-answer state
+/// by two routes that must both stay wired. `AlertHost` pushes the (already
+/// overridden) `silentMode` property through `setSilentState`, whose Rust side
+/// lets the forced-mode override win, and a timer runs the expiry check.
+#[test]
+fn the_learning_end_stays_wired_into_the_silent_state_push() {
+    let host = code_lines(ALERT_HOST_QML);
+    assert!(
+        host.contains(
+            "readonly property string mode: host.settings ? host.settings.silentMode : \"\""
+        ) && host.contains("host.bridgeFeed.setSilentState(host.mode)"),
+        "AlertHost must push settingsController.silentMode (the possibly overridden mode)"
+    );
+    assert!(
+        host.contains("interval: 60000")
+            && host.contains("running: host.settings !== null")
+            && host.contains("host.settings.tickLearning()"),
+        "AlertHost lost the learning expiry timer"
+    );
+    let feed = include_str!("../src/bridge_feed.rs");
+    let push = feed
+        .split("fn set_silent_state(&self")
+        .nth(1)
+        .and_then(|rest| rest.split("fn start_bridge_feed").next())
+        .expect("bridge_feed.rs has no set_silent_state");
+    assert!(
+        push.contains("forced_or(mode)")
+            && push.find("forced_or(mode)") < push.find("silent_mode::set_state"),
+        "set_silent_state must apply the forced-mode override before setting the state"
+    );
+    let controller = include_str!("../src/settings_controller.rs");
+    for needed in [
+        "settings_learning::startup(",
+        "SETTINGS_WRITE.transact(",
+        "settings_learning::tick(",
+        "SETTINGS_WRITE.honor(",
+        "apply_if_newest(",
+        "SETTINGS_WRITE.claim(",
+        "settings_write_failed",
+    ] {
+        assert!(
+            controller.contains(needed),
+            "settings_controller.rs lost {needed}"
+        );
+    }
+    assert!(
+        !controller.contains("write_settings("),
+        "every settings write must go through the SETTINGS_WRITE transaction"
+    );
+}

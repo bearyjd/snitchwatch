@@ -2,7 +2,9 @@
 // (LS redesign phase 1), kept out of main.qml.
 //
 // * Publishes the Settings default duration as `Durations.defaultToken`.
-// * Tells Rust (`BridgeFeed.setSilentState`) the silent mode: Allow/Deny make
+// * Tells Rust (`BridgeFeed.setSilentState`) the silent mode (the property
+//   `settingsController.silentMode`; Rust lets a forced-mode override win when
+//   the settings file could not be written): Allow/Deny make
 //   `silent_mode.rs` answer prompts without asking (new ones at arrival,
 //   waiting ones when the mode is switched).
 // * Owns the alert, shown whenever silent mode is off ("Ask me"). It is its
@@ -42,6 +44,16 @@ Item {
     }
     onModeChanged: host.syncSilentState()
     Component.onCompleted: host.syncSilentState()
+
+    // Learning-window expiry (phase L1): about once a minute, while the GUI
+    // runs, Rust saves the window's running time and ends an expired one
+    // (restoring the mode it replaced). A no-op when no window is running.
+    Timer {
+        interval: 60000
+        repeat: true
+        running: host.settings !== null
+        onTriggered: host.settings.tickLearning()
+    }
 
     AlertWindow {
         id: alertWindow

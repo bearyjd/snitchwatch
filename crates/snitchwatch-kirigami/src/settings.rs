@@ -103,6 +103,11 @@ pub struct Settings {
     /// `None`: the user has not chosen yet (onboarding asks). Acts as `Off`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub silent_mode: Option<SilentMode>,
+    /// A running learning window (a time-bounded "Allow and record"), if any.
+    /// See [`Learning`] and `crate::learning`. Read through [`read_settings`],
+    /// which clamps it, so a hand-edited file cannot create a longer window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub learning: Option<Learning>,
 }
 
 impl Default for Settings {
@@ -111,6 +116,77 @@ impl Default for Settings {
             rdap_enabled: false,
             default_duration: default_duration(),
             silent_mode: None,
+            learning: None,
+        }
+    }
+}
+
+/// Default length of a learning window: 24 hours.
+pub const LEARNING_DEFAULT_MS: i64 = 24 * 60 * 60 * 1000;
+/// The longest a learning window may ever be: 7 days.
+pub const LEARNING_MAX_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+
+/// A learning window, persisted next to `silent_mode` while it runs. It can
+/// only END EARLY: it is over when the wall clock passes `ends_ms` OR the
+/// running time counted in `elapsed_ms` reaches `duration_ms`, so a clock set
+/// backwards cannot stretch it (`crate::learning::is_expired`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Learning {
+    /// Wall-clock start, milliseconds since the Unix epoch.
+    pub started_ms: i64,
+    /// Wall-clock end, milliseconds since the Unix epoch.
+    pub ends_ms: i64,
+    /// Intended length of the window.
+    pub duration_ms: i64,
+    /// Time the GUI has actually been running inside the window, saved about
+    /// once a minute.
+    pub elapsed_ms: i64,
+    /// What `silent_mode` was before the window, restored when it ends.
+    /// `None` is "unchosen" and is restored as unchosen, not as `Off`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_mode: Option<SilentMode>,
+}
+
+impl Learning {
+    /// A window starting at `now_ms` lasting `duration_ms`, bounded by
+    /// [`LEARNING_MAX_MS`] (a negative length is an already-over window).
+    pub fn begin(now_ms: i64, duration_ms: i64, previous_mode: Option<SilentMode>) -> Self {
+        Self {
+            started_ms: now_ms,
+            ends_ms: now_ms.saturating_add(duration_ms),
+            duration_ms,
+            elapsed_ms: 0,
+            previous_mode,
+        }
+        .clamped()
+    }
+
+    /// The same window forced inside the limits: never longer than
+    /// [`LEARNING_MAX_MS`], never ending later than `started_ms` plus that.
+    /// Any negative figure makes it an already-over window (zero length), so
+    /// a damaged file ends learning instead of extending it.
+    pub fn clamped(&self) -> Self {
+        if [
+            self.started_ms,
+            self.ends_ms,
+            self.duration_ms,
+            self.elapsed_ms,
+        ]
+        .iter()
+        .any(|v| *v < 0)
+        {
+            return Self {
+                duration_ms: 0,
+                elapsed_ms: 0,
+                ..self.clone()
+            };
+        }
+        Self {
+            duration_ms: self.duration_ms.min(LEARNING_MAX_MS),
+            ends_ms: self
+                .ends_ms
+                .min(self.started_ms.saturating_add(LEARNING_MAX_MS)),
+            ..self.clone()
         }
     }
 }
@@ -131,10 +207,14 @@ impl Settings {
 /// failure (missing file, unreadable, malformed JSON) — a corrupt or absent
 /// settings file must never crash or block startup.
 pub fn read_settings(path: &Path) -> Settings {
-    std::fs::read_to_string(path)
+    let settings: Settings = std::fs::read_to_string(path)
         .ok()
         .and_then(|body| serde_json::from_str(&body).ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    Settings {
+        learning: settings.learning.as_ref().map(Learning::clamped),
+        ..settings
+    }
 }
 
 /// Persist `settings` as pretty-printed JSON, into an owner-only directory it
@@ -294,5 +374,102 @@ mod tests {
         }
         assert_eq!(SilentMode::from_token("deny "), None);
         assert_eq!(SilentMode::from_token(""), None);
+    }
+
+    fn window() -> Learning {
+        Learning {
+            started_ms: 1_000,
+            ends_ms: 1_000 + LEARNING_DEFAULT_MS,
+            duration_ms: LEARNING_DEFAULT_MS,
+            elapsed_ms: 60_000,
+            previous_mode: Some(SilentMode::Deny),
+        }
+    }
+
+    #[test]
+    fn an_old_file_has_no_learning_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("settings.json");
+        std::fs::write(&p, r#"{"rdap_enabled":true,"silent_mode":"deny"}"#).unwrap();
+        let settings = read_settings(&p);
+        assert_eq!(settings.learning, None);
+        assert_eq!(settings.silent_mode, Some(SilentMode::Deny));
+        write_settings(&p, &settings).unwrap();
+        assert!(!std::fs::read_to_string(&p).unwrap().contains("learning"));
+    }
+
+    #[test]
+    fn a_learning_window_round_trips_including_an_unchosen_previous_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("settings.json");
+        for previous_mode in [None, Some(SilentMode::Off), Some(SilentMode::Deny)] {
+            let settings = Settings {
+                silent_mode: Some(SilentMode::Allow),
+                learning: Some(Learning {
+                    previous_mode,
+                    ..window()
+                }),
+                ..Settings::default()
+            };
+            write_settings(&p, &settings).unwrap();
+            assert_eq!(read_settings(&p), settings);
+        }
+    }
+
+    #[test]
+    fn a_hostile_file_cannot_create_a_longer_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("settings.json");
+        std::fs::write(
+            &p,
+            r#"{"silent_mode":"allow","learning":{"started_ms":5,"ends_ms":9223372036854775807,
+               "duration_ms":9223372036854775807,"elapsed_ms":0}}"#,
+        )
+        .unwrap();
+        let learning = read_settings(&p).learning.unwrap();
+        assert_eq!(learning.duration_ms, LEARNING_MAX_MS);
+        assert_eq!(learning.ends_ms, 5 + LEARNING_MAX_MS);
+        assert_eq!(learning.previous_mode, None);
+    }
+
+    #[test]
+    fn negative_figures_make_an_already_over_window() {
+        for hostile in [
+            Learning {
+                duration_ms: -1,
+                ..window()
+            },
+            Learning {
+                ends_ms: -1,
+                ..window()
+            },
+            Learning {
+                started_ms: -1,
+                ..window()
+            },
+            Learning {
+                elapsed_ms: -1,
+                ..window()
+            },
+        ] {
+            let clamped = hostile.clamped();
+            assert_eq!(clamped.duration_ms, 0, "{hostile:?}");
+            assert!(clamped.elapsed_ms >= clamped.duration_ms);
+        }
+    }
+
+    #[test]
+    fn begin_clamps_the_length_and_survives_extreme_input() {
+        let l = Learning::begin(1_000, LEARNING_DEFAULT_MS, None);
+        assert_eq!(
+            (l.started_ms, l.ends_ms, l.elapsed_ms),
+            (1_000, 1_000 + LEARNING_DEFAULT_MS, 0)
+        );
+        let long = Learning::begin(1_000, i64::MAX, Some(SilentMode::Off));
+        assert_eq!(long.duration_ms, LEARNING_MAX_MS);
+        assert_eq!(long.ends_ms, 1_000 + LEARNING_MAX_MS);
+        let late = Learning::begin(i64::MAX, LEARNING_MAX_MS, None);
+        assert_eq!(late.ends_ms, i64::MAX);
+        assert_eq!(Learning::begin(1_000, -5, None).duration_ms, 0);
     }
 }

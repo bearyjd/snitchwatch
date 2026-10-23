@@ -250,6 +250,9 @@ impl qobject::BridgeFeed {
 
     fn set_silent_state(&self, mode: &QString) {
         let mode = crate::settings::SilentMode::from_token(&mode.to_string()).unwrap_or_default();
+        // A settings file that could not be written leaves an in-process
+        // override that wins over the (possibly stale) property pushed here.
+        let mode = crate::settings_controller::forced_or(mode);
         crate::silent_mode::set_state(mode);
         if crate::silent_mode::current_choice().is_none() {
             return;
