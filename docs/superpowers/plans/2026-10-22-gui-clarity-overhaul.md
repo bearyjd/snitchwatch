@@ -87,8 +87,8 @@ Ideas, to be chosen with the owner, not all built:
   recommended scope pre-selected.
 - Owner chose this as the main pain: "popups for every new connection". Target:
   a new (program, host) still notifies once;
-  repeats of the same pair are suppressed for 1 h and shown as a counter
-  ("retried N times"); a new host of the same program still notifies; pending
+  repeats of the same pair are suppressed for 1 h (a "retried N times" counter is
+  deferred past phase 0); a new host of the same program still notifies; pending
   notices keep their per-flow gate; a program digest for many new hosts is deferred
   (details in the phase-0 plan).
 - Rate limit and de-duplicate prompts for retrying programs (the ~2/min idle
