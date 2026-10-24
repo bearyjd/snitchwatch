@@ -84,14 +84,14 @@ Item {
     // delegate shows another row (reuseItems: `rowId` changes) or the row's
     // pending state changes.
     property bool submitted: false
-    onRowIdChanged: { row.submitted = false; if (rowActions) rowActions.close(); }
+    onRowIdChanged: row.submitted = false
     onPendingChanged: row.submitted = false
     onGroupPendingChanged: row.submitted = false
-    onGroupKeyChanged: { row.submitted = false; if (rowActions) rowActions.close(); }
-    onGroupLevelChanged: { row.submitted = false; if (rowActions) rowActions.close(); }
-    onGroupParentKeyChanged: { row.submitted = false; if (rowActions) rowActions.close(); }
-    onGroupProcessKeyChanged: { row.submitted = false; if (rowActions) rowActions.close(); }
-    onSourceSessionChanged: { row.submitted = false; if (rowActions) rowActions.close(); }
+    onGroupKeyChanged: row.submitted = false
+    onGroupLevelChanged: row.submitted = false
+    onGroupParentKeyChanged: row.submitted = false
+    onGroupProcessKeyChanged: row.submitted = false
+    onSourceSessionChanged: row.submitted = false
 
     // What this row's Deny, or this header's "Deny all", does: the
     // buttons' tooltip and accessible description. Empty where the
@@ -108,8 +108,6 @@ Item {
     Connections {
         target: row.ListView
         function onPooled() {
-            headerRuleButton.closeMenus();
-            rowActions.close();
             row.submitted = false;
         }
     }
@@ -117,9 +115,7 @@ Item {
     property alias ruleButton: headerRuleButton
     property alias denyButton: rowDenyButton
     property alias denyAllButton: batchDenyButton
-    property alias actions: rowActions
-
-    ConnectionActions { id: rowActions; page: row.page; owner: row }
+    readonly property var actions: row.page.connectionActions
 
     // Single latch-and-dispatch for all 4 verdict buttons. Kept as one
     // function so the re-entry guard can't be present on some sites
@@ -148,12 +144,12 @@ Item {
         row.submitted = true;
         if (batch) {
             if (!page.submitGroupVerdict(n.program, n.level, n.key, n.domain,
-                                         choice, n.session)) row.submitted = false;
+                                         choice, n.session, true)) row.submitted = false;
         } else if (choice === "later") {
             // Part C "Decide later": not a verdict QML builds.
             verdictHelper.decideLater(n.rowId);
         } else {
-            if (!page.submitInlineVerdict(n.rowId, choice)) row.submitted = false;
+            if (!page.submitInlineVerdict(n.rowId, choice, true)) row.submitted = false;
         }
     }
 
@@ -166,7 +162,7 @@ Item {
         acceptedButtons: Qt.LeftButton | Qt.RightButton
         onClicked: mouse => {
             if (mouse.button === Qt.RightButton) {
-                rowActions.open(row, mouse.x, mouse.y);
+                row.actions.open(row, mouse.x, mouse.y);
                 return;
             }
             if (row.isGroupHeader) {
@@ -393,7 +389,7 @@ Item {
         // Last on the row, at a fixed width, so the rule-state column lines
         // up; the badge and Allow all / Deny all sit to its left. Its picks
         // carry the node as copied when its menu opened (this delegate is
-        // reused for other rows), and the menus close when it is pooled.
+        // reused for other rows). The page owns the popup through live updates.
         RuleButton {
             id: headerRuleButton
             objectName: "headerRuleButton"
@@ -405,6 +401,8 @@ Item {
             program: row.ruleProgram
             nodeKey: row.ruleKey
             nodeLabel: row.groupLabel
+            menuActions: row.actions
+            menuRow: row
             Layout.preferredWidth: implicitWidth
             Layout.alignment: Qt.AlignVCenter
             onCreateRequested: (level, program, key, label, choice) => row.page.levelRules.create(
@@ -419,7 +417,7 @@ Item {
             icon.name: "application-menu"
             onClicked: {
                 const point = mapToItem(row, 0, height);
-                rowActions.open(row, point.x, point.y);
+                row.actions.open(row, point.x, point.y);
             }
             Accessible.name: "Actions for this group"
         }

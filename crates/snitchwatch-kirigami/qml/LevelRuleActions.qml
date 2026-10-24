@@ -90,21 +90,39 @@ ColumnLayout {
 
     // A button's choice. A program-wide rule (level 0) waits for the dialog;
     // domain and host rules go straight out.
-    function create(level, program, key, label, choice) {
+    function sessionValid(session) {
+        return session === undefined || (session !== "" && actions.model
+            && typeof actions.model.currentSourceSession === "function"
+            && actions.model.currentSourceSession() === session);
+    }
+
+    function recheckAsked() {
+        const a = actions.asked;
+        if (a && !actions.sessionValid(a.session)) {
+            actions.asked = null;
+            confirmDialog.close();
+            actions.note(actions.nodeId(a.level, a.program, a.key), a.label,
+                         "The background service changed while you were deciding. Open the menu again.");
+        }
+    }
+
+    function create(level, program, key, label, choice, sourceSession) {
+        if (!actions.sessionValid(sourceSession)) return;
         if (level === 0) {
             // The duration is the model's, as `createLevelRule` will take it.
             // `durationToken` goes back with the confirm: the model refuses it
             // if Settings changed what was shown.
             const token = actions.model.levelRuleDuration();
             actions.asked = { level: level, program: program, key: key, label: label, choice: choice,
-                              duration: Durations.labelFor(token), durationToken: token };
+                              duration: Durations.labelFor(token), durationToken: token, session: sourceSession };
             confirmDialog.open();
             return;
         }
         actions.send(level, program, key, label, choice, false, "");
     }
 
-    function remove(level, program, key, label) {
+    function remove(level, program, key, label, sourceSession) {
+        if (!actions.sessionValid(sourceSession)) return;
         const why = actions.model.deleteLevelRule(level, program, key);
         actions.sent(level, program, key, label, why);
     }
@@ -127,7 +145,7 @@ ColumnLayout {
     function accepted() {
         const a = actions.asked;
         actions.asked = null;
-        if (a !== null) {
+        if (a !== null && actions.sessionValid(a.session)) {
             actions.send(a.level, a.program, a.key, a.label, a.choice, true, a.durationToken);
         }
     }
@@ -135,6 +153,8 @@ ColumnLayout {
     Connections {
         target: actions.model
         ignoreUnknownSignals: true
+        function onModelReset() { actions.recheckAsked(); }
+        function onDataChanged() { actions.recheckAsked(); }
         function onLevelRuleFinished(level, program, key, ending, status) {
             const id = actions.nodeId(level, program, key);
             const label = actions.inFlight[id] !== undefined ? actions.inFlight[id]
@@ -142,6 +162,15 @@ ColumnLayout {
             actions.track(id, null);
             actions.note(id, label, status);
         }
+    }
+
+    // A reconnect can precede its new snapshot; do not leave an old-session
+    // confirmation actionable while that snapshot is still queued.
+    Timer {
+        interval: 200
+        repeat: true
+        running: actions.asked !== null && actions.asked.session !== undefined
+        onTriggered: actions.recheckAsked()
     }
 
     // Commands with no answer in time end as "unknown" through the model.

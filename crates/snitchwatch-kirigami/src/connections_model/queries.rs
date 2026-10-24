@@ -52,6 +52,13 @@ impl qobject::ConnectionsModel {
         }))
     }
 
+    pub(super) fn current_source_session(&self) -> QString {
+        let session = self.source_session.filter(|id| {
+            crate::bridge_runtime::handles().is_none_or(|handles| handles.is_current_session(*id))
+        });
+        QString::from(&session.map(|id| format!("{id}:")).unwrap_or_default())
+    }
+
     pub(super) fn is_pending_row(&self, id: &QString) -> bool {
         self.store.is_pending(&id.to_string()).unwrap_or(false)
     }

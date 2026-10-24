@@ -6,8 +6,8 @@
 //! model, which refuse (no firewall connected). Messages start with the label
 //! of their node and one node's never clears another's; the dialog names the
 //! program file and the duration the model will use; a keyboard accept on the
-//! menu sends nothing before the dialog's accept; the menus of a pooled row
-//! close. Run headless with
+//! menu sends nothing before the dialog's accept; session-bound confirmations
+//! survive ordinary resets and refuse replacement sessions. Run headless with
 //! `QT_QPA_PLATFORM=offscreen`.
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -56,6 +56,9 @@ Window {
         property var calls: []
         property int polls: 0
         property string answer: ""
+        property string session: "1:"
+        signal modelReset()
+        function currentSourceSession() { return session; }
         signal levelRuleFinished(int level, string processKey, string key, int ending, string status)
         function createLevelRule(level, p, k, choice, confirmed, shown) {
             calls.push(["create", level, p, k, choice, confirmed, shown].join("|"));
@@ -253,12 +256,23 @@ Window {
                     probe.pooled = dom;
                     tc.mouseClick(dom.ruleButton.button);
                 } else if (probe.phase === 8) {
-                    probe.expect(probe.pooled.ruleButton.chooseMenu.visible, "row menu did not open");
+                    probe.expect(page.connectionActions.menu.visible, "row menu did not open");
                     tc.mouseClick(probe.findList(page).itemAtIndex(0), 2, 2);
                 } else if (probe.phase === 9) {
                     probe.expect(probe.findList(page).count === 1, "group did not collapse: " + probe.findList(page).count);
-                    probe.expect(!probe.pooled.ruleButton.chooseMenu.visible && probe.pooled.ruleButton.node === null,
-                                 "a pooled row kept its menu open");
+                    // Clicking outside the popup dismisses it before collapsing.
+                    probe.expect(!page.connectionActions.menu.visible,
+                                 "outside click kept the page menu open");
+                    const sent = stub.calls.length;
+                    actions.create(0, "/usr/bin/p", "", "p", "allow", "1:");
+                    probe.expect(actions.confirmDialog.visible, "session-bound confirm did not open");
+                    stub.modelReset();
+                    probe.expect(actions.asked !== null, "ordinary reset dismissed rule confirmation");
+                    stub.session = "2:";
+                    stub.modelReset();
+                    probe.expect(actions.asked === null, "replacement session retained old confirmation");
+                    actions.accepted();
+                    probe.expect(stub.calls.length === sent, "old confirmation sent to replacement service");
                     done = true;
                 }
                 probe.phase++;

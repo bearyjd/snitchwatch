@@ -1,31 +1,9 @@
-// Connections list page (Task 8 — view layer + filter/search/inspector).
-//
-// Binds a ListView to the Rust `ConnectionsModel` (Task 6). Row delegate shows
-// process / host:port / protocol with a verdict marker: a hollow ◐ for pending
-// rows, allow-green / deny-red for decided ones (per the design spec's
-// pending-row styling).
-//
-// This page adds the Task 8 remainder:
-//   * Search/filter — the header SearchField and "pending only" toggle drive
-//     `ConnectionsModel.setFilterQuery` / `setPendingOnly`. All filtering logic
-//     lives in Rust (`connections::filter`); QML only forwards user input.
-//   * Auto-select on new pending row — the model emits `autoSelectRequested`
-//     with a visible index; we move `currentIndex` there but never push the
-//     detail page, so it never steals interaction focus from the user.
-//   * Inspector side panel (monitor-tree step 5) — a SplitView column at wide
-//     widths that follows `currentIndex`; under `compactWidth` the same panel
-//     lives on a ConnectionDetailPage pushed by a row click.
-//
-// Little-Snitch-parity grouping (Process -> Domain -> Host -> connection): the
-// header's "Grouped" switch drives `ConnectionsModel.setGrouped`. In grouped
-// mode the same `ListView`/delegate renders a mix of row kinds — process
-// headers (depth 0), domain headers (depth 1), host headers (depth 2), and
-// leaf connection rows (depth 3) — distinguished by the `isGroupHeader`/`depth`
-// roles the Rust model exposes; clicking a header toggles its expand state via
-// `toggleProcessGroup`/`toggleDomainGroup`/`toggleHostGroup` instead of
-// opening the inspector.
-// All grouping/aggregate logic lives in Rust (`connections::grouping`); this
-// QML only renders the flattened projection and forwards toggle clicks.
+// Connections view: filtering, app/domain/host grouping and the inspector.
+// Rust owns filtering and aggregates; QML renders the flattened projection.
+// Header clicks expand groups; leaf clicks inspect a connection. Pending-row
+// auto-selection updates the list without pushing a page or stealing focus.
+// The inspector follows selection in a wide pane and opens a detail page below
+// compactWidth. Menus belong to this page so live updates cannot destroy them.
 import QtQuick
 import QtQuick.Layouts
 import QtQuick.Controls as Controls
@@ -62,14 +40,16 @@ Kirigami.Page {
         onExplained: text => page.showPassiveNotice(text)
     }
     // Exposed for the headless probes (tests/inline_verdict_qml.rs, ...).
+    ConnectionActions { id: persistentActions; page: page.pageRoot }
+    property alias connectionActions: persistentActions
     property alias inlineVerdicts: verdictHelper
     property alias levelRules: topBar.ruleActions
 
     // Issue #18: a row's inline Allow/Deny. Also the entry point
     // `tests/inline_verdict_qml.rs` drives, to exercise the click -> submit ->
     // verdict-message path without synthesizing a real mouse click.
-    function submitInlineVerdict(rowId, choice) {
-        return verdictHelper.submit(rowId, choice);
+    function submitInlineVerdict(rowId, choice, once) {
+        return verdictHelper.submit(rowId, choice, once);
     }
 
     // Issue #18: a process header's "Allow all"/"Deny all".
@@ -77,8 +57,8 @@ Kirigami.Page {
         return verdictHelper.submitBatch(processKey, choice, sourceSession);
     }
 
-    function submitGroupVerdict(program, level, key, parentDomain, choice, sourceSession) {
-        return verdictHelper.submitGroupBatch(program, level, key, parentDomain, choice, sourceSession);
+    function submitGroupVerdict(program, level, key, parentDomain, choice, sourceSession, once) {
+        return verdictHelper.submitGroupBatch(program, level, key, parentDomain, choice, sourceSession, once);
     }
 
     // Below this page width the inspector is a pushed page, not a column.

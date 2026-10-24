@@ -353,6 +353,12 @@ pub mod qobject {
         #[cxx_name = "isPendingRow"]
         fn is_pending_row(self: &ConnectionsModel, id: &QString) -> bool;
 
+        /// Session of the current snapshot, independent of filtering and delegates.
+        /// Read-only: safe from modelReset callbacks, without a nested flush.
+        #[qinvokable]
+        #[cxx_name = "currentSourceSession"]
+        fn current_source_session(self: &ConnectionsModel) -> QString;
+
         /// Where the connection `id` sits in the list as it is drawn now (after
         /// the filter and, in grouped mode, group expansion), or -1 if it is not
         /// a row of it. The side panel clears its selection on -1 and re-points

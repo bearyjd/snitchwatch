@@ -30,6 +30,23 @@ QtObject {
     // Null in isolated component tests; nothing is sent then.
     property var bridgeFeed: null
 
+    // UI decisions survive delegate recycling. Keep each accepted pending id
+    // latched until the model says it was answered or removed.
+    property var submittedIds: ({})
+    property Connections submissionWatch: Connections {
+        target: verdicts.model
+        function onModelReset() { verdicts.pruneSubmitted(); }
+        function onDataChanged() { verdicts.pruneSubmitted(); }
+        function onRowsRemoved() { verdicts.pruneSubmitted(); }
+    }
+    function pruneSubmitted() {
+        const keep = {};
+        for (const id of Object.keys(verdicts.submittedIds)) {
+            if (verdicts.model && verdicts.model.isPendingRow(id)) keep[id] = true;
+        }
+        verdicts.submittedIds = keep;
+    }
+
     // A once-only Deny's explanation, for the page to show.
     signal explained(string text)
 
@@ -78,7 +95,8 @@ QtObject {
     // Settings duration would have remembered) applies to this connection
     // only — "program_unknown" or "bridge_too_old" — or "not_sent" when it
     // could not be queued, else "". Leaves the explanation to the caller, so a batch explains once.
-    function send(rowId, choice) {
+    function send(rowId, choice, once) {
+        if (once && verdicts.submittedIds[rowId]) return "already_sent";
         if (verdicts.bridgeFeed === null) {
             // Unreachable in the running app (main.qml always injects the
             // feed) — but the caller has already latched `row.submitted`, so
@@ -98,6 +116,11 @@ QtObject {
         }
         if (queued === false) {
             return "not_sent";
+        }
+        if (once) {
+            const submitted = Object.assign({}, verdicts.submittedIds);
+            submitted[rowId] = true;
+            verdicts.submittedIds = submitted;
         }
         // Once-only although the Settings default remembers: say why. A Deny
         // that is remembered, or an Allow that asked for nothing more, needs
@@ -122,8 +145,9 @@ QtObject {
     }
 
     // A row's inline Allow/Deny.
-    function submit(rowId, choice) {
-        const reason = verdicts.send(rowId, choice);
+    function submit(rowId, choice, once) {
+        const reason = verdicts.send(rowId, choice, once);
+        if (reason === "already_sent") return false;
         verdicts.explain(reason, choice);
         return reason !== "not_sent";
     }
@@ -155,7 +179,7 @@ QtObject {
         return verdicts.submitGroupBatch(processKey, 0, "", "", choice, sourceSession);
     }
 
-    function submitGroupBatch(program, level, key, parentDomain, choice, sourceSession) {
+    function submitGroupBatch(program, level, key, parentDomain, choice, sourceSession, once) {
         if (!verdicts.model) {
             return false;
         }
@@ -169,7 +193,8 @@ QtObject {
                 if (sourceSession && !id.startsWith(sourceSession)) {
                     continue;
                 }
-                const why = verdicts.send(id, choice);
+                const why = verdicts.send(id, choice, once);
+                if (why === "already_sent") continue;
                 sent = sent || why !== "not_sent";
                 // A lost connection outranks why a sent Deny was once-only.
                 if (why === "not_sent" || reason === "") {

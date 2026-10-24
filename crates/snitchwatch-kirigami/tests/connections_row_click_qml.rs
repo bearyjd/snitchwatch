@@ -44,6 +44,7 @@ Window {
     property var failures: []
     property int phase: 0
     property var menuRow: null
+    readonly property var liveActions: page.connectionActions
 
     QtObject {
         id: feedStub
@@ -55,11 +56,42 @@ Window {
             return true;
         }
     }
+    QtObject {
+        id: ruleStub
+        property var calls: []
+        property string session: "1:"
+        signal levelRuleFinished(int level, string processKey, string key, int ending, string status)
+        function createLevelRule(level, program, key, choice, confirmed, duration) {
+            calls = calls.concat([[level, program, key, choice]]);
+            return "";
+        }
+        function currentSourceSession() { return session; }
+        function deleteLevelRule(level, program, key) {
+            calls = calls.concat([["remove", level, program, key]]);
+            return "";
+        }
+        function pollLevelRules() {}
+        function levelRuleDuration() { return "forever"; }
+    }
     ConnectionsPage {
         id: page
         anchors.fill: parent
         bridgeFeed: feedStub
         model: ConnectionsModel { id: model }
+    }
+    // An authoritative session change fixture, independent of recycled rows.
+    Item {
+        id: sessionPage
+        property var bridgeFeed: feedStub
+        property var levelRules: page.levelRules
+        property var model: QtObject {
+            id: sessionModel
+            property string session: ""
+            signal modelReset()
+            signal dataChanged()
+            signal rowsRemoved()
+            function currentSourceSession() { return session; }
+        }
     }
     TestCase { id: tc; name: "rowclick"; when: false }
 
@@ -114,11 +146,18 @@ Window {
         probe.menuRow = probe.header(level, key);
         const expanded = probe.menuRow.expanded;
         tc.mouseClick(probe.menuRow, 2, 2, Qt.RightButton);
-        probe.expect(probe.menuRow.actions.menu.visible, "right click did not open actions");
+        probe.expect(probe.liveActions.menu.visible, "right click did not open actions");
         probe.expect(probe.menuRow.expanded === expanded, "right click expanded/collapsed group");
     }
+    function menuItem(name) {
+        for (let i = 0; i < probe.liveActions.menu.count; ++i) {
+            const item = probe.liveActions.menu.itemAt(i);
+            if (item && item.objectName === name) return item;
+        }
+        throw new Error("missing menu action " + name);
+    }
     function clickPending(allow) {
-        const item = probe.menuRow.actions.menu.itemAt(allow ? 0 : 1);
+        const item = probe.menuItem(allow ? "allowPendingAction" : "denyPendingAction");
         tc.mouseClick(item, item.width / 2, item.height / 2);
     }
 
@@ -160,28 +199,39 @@ Window {
                     ] }));
                 } else if (probe.phase === 4) {
                     probe.rightClick(0, "/usr/bin/app");
+                    model.applyServerMessageJson(JSON.stringify({ action: "insertConnectionRows", rows: [
+                        probe.pending("s:new-app", "aaa", "new.net")
+                    ] }));
                 } else if (probe.phase === 5) {
+                    probe.expect(probe.liveActions.menu.visible,
+                                 "live traffic reset dismissed open actions menu");
                     probe.clickPending(false);
                     probe.expectSent(["s:www", "s:api", "s:other"], "deny");
                     // Context and inline buttons share the duplicate-submit guard.
+                    probe.expect(probe.liveActions.target.program === "/usr/bin/app",
+                                 "live update redirected menu to another app");
+                    probe.menuRow = probe.header(0, "/usr/bin/app");
                     probe.menuRow.decideOnce("allow", true);
                     probe.expectSent([], "allow");
+                    page.inlineVerdicts.submittedIds = ({}); // Stub feed never acknowledges.
                     model.toggleProcessGroup("/usr/bin/app");
                 } else if (probe.phase === 7) {
                     probe.menuRow = probe.header(1, "example.com");
                     const handle = probe.named(probe.menuRow, "groupActionsButton");
                     probe.expect(handle !== null, "group Actions handle missing");
                     tc.mouseClick(handle, handle.width / 2, handle.height / 2);
-                    probe.expect(probe.menuRow.actions.menu.visible, "Actions handle did not open menu");
+                    probe.expect(probe.liveActions.menu.visible, "Actions handle did not open menu");
                 } else if (probe.phase === 8) {
                     probe.clickPending(true);
                     probe.expectSent(["s:www", "s:api"], "allow");
+                    page.inlineVerdicts.submittedIds = ({});
                     model.toggleDomainGroup("/usr/bin/app", "example.com");
                 } else if (probe.phase === 10) {
                     probe.rightClick(2, "www.example.com");
                 } else if (probe.phase === 11) {
                     probe.clickPending(false);
                     probe.expectSent(["s:www"], "deny");
+                    page.inlineVerdicts.submittedIds = ({});
                     model.setFilterQuery("www.example.com");
                 } else if (probe.phase === 13) {
                     // A filtered header still acts on its complete subtree.
@@ -193,11 +243,105 @@ Window {
                     probe.expectSent(["s:www", "s:api"], "deny");
                     page.submitGroupVerdict("/usr/bin/app", 0, "", "", "allow", "old:");
                     probe.expectSent([], "allow");
-                    // Recycled/changed targets must dismiss the old menu.
+                    // The target session must be checked at dispatch and on reset,
+                    // independently of the old delegate (which can be destroyed).
+                    probe.liveActions.page = sessionPage;
                     probe.rightClick(1, "example.com");
-                    probe.menuRow.sourceSession = "replacement:";
-                    probe.expect(!probe.menuRow.actions.menu.visible,
-                                 "menu survived a source-session change");
+                    sessionModel.session = "replacement:";
+                    sessionModel.modelReset();
+                    probe.liveActions.decide("allow");
+                    probe.expectSent([], "allow");
+                    model.applyServerMessageJson(JSON.stringify({ action: "insertConnectionRows", rows: [
+                        probe.pending("s:session-check", "aaa", "new.net")
+                    ] }));
+                } else if (probe.phase === 15) {
+                    probe.expect(!probe.liveActions.menu.visible,
+                                 "menu survived an invalid source session");
+                    probe.liveActions.page = page;
+                    model.setFilterQuery("");
+                    page.inlineVerdicts.submittedIds = ({});
+                } else if (probe.phase === 17) {
+                    // The explicit Actions handle must also survive live resets.
+                    probe.menuRow = probe.header(1, "example.com");
+                    const handle = probe.named(probe.menuRow, "groupActionsButton");
+                    tc.mouseClick(handle, handle.width / 2, handle.height / 2);
+                    model.setFilterQuery("other.net");
+                    model.applyServerMessageJson(JSON.stringify({ action: "updateConnectionRows", rows: [
+                        Object.assign(probe.pending("s:other", "app", "other.net"), { action: "deny" })
+                    ] }));
+                } else if (probe.phase === 18) {
+                    probe.expect(probe.liveActions.menu.visible, "verdict update dismissed Actions popup");
+                    probe.clickPending(true);
+                    probe.expectSent(["s:www", "s:api"], "allow");
+                    page.inlineVerdicts.submittedIds = ({});
+                    model.setFilterQuery("");
+                } else if (probe.phase === 20) {
+                    // A RuleButton routes through the same persistent page owner.
+                    const domain = probe.header(1, "example.com");
+                    domain.sourceSession = "1:";
+                    sessionModel.session = "1:";
+                    probe.liveActions.page = sessionPage;
+                    tc.mouseClick(domain.ruleButton.button);
+                    probe.expect(probe.liveActions.rulesOnly && probe.liveActions.menu.visible,
+                                 "RuleButton did not open persistent popup");
+                    page.levelRules.model = ruleStub;
+                    model.applyServerMessageJson(JSON.stringify({ action: "insertConnectionRows", rows: [
+                        probe.pending("s:rule-refresh", "zzz", "last.net")
+                    ] }));
+                } else if (probe.phase === 21) {
+                    probe.expect(probe.liveActions.menu.visible, "live reset dismissed RuleButton popup");
+                    const item = probe.menuItem("denyGroupRuleAction");
+                    tc.mouseClick(item, item.width / 2, item.height / 2);
+                    probe.expect(JSON.stringify(ruleStub.calls) === JSON.stringify([[1, "/usr/bin/app", "example.com", "deny"]]),
+                                 "RuleButton pick redirected target: " + JSON.stringify(ruleStub.calls));
+                } else if (probe.phase === 23) {
+                    const domain = probe.header(1, "example.com");
+                    domain.levelRuleState = "allow";
+                    domain.sourceSession = "1:";
+                    tc.mouseClick(domain.ruleButton.button);
+                    model.applyServerMessageJson(JSON.stringify({ action: "insertConnectionRows", rows: [
+                        probe.pending("s:remove-refresh", "zzz", "last.net")
+                    ] }));
+                } else if (probe.phase === 24) {
+                    probe.expect(probe.liveActions.menu.visible, "live reset dismissed remove-rule popup");
+                    const item = probe.menuItem("removeGroupRuleAction");
+                    tc.mouseClick(item, item.width / 2, item.height / 2);
+                    probe.expect(JSON.stringify(ruleStub.calls[1]) === JSON.stringify(["remove", 1, "/usr/bin/app", "example.com"]),
+                                 "remove-rule pick redirected target: " + JSON.stringify(ruleStub.calls));
+                    probe.liveActions.page = page;
+                    model.setGroupedMode(false);
+                } else if (probe.phase === 26) {
+                    const leaf = page.connectionList.itemAtIndex(model.visibleRowIndex("s:www"));
+                    tc.mouseClick(leaf, 2, 2, Qt.RightButton);
+                    model.applyServerMessageJson(JSON.stringify({ action: "insertConnectionRows", rows: [
+                        probe.pending("s:leaf-refresh", "aaa", "first.net")
+                    ] }));
+                } else if (probe.phase === 27) {
+                    probe.expect(probe.liveActions.menu.visible, "flat insert dismissed leaf popup");
+                    probe.clickPending(false);
+                    probe.expectSent(["s:www"], "deny");
+                } else if (probe.phase === 28) {
+                    const leaf = page.connectionList.itemAtIndex(model.visibleRowIndex("s:api"));
+                    tc.mouseClick(leaf, 2, 2, Qt.RightButton);
+                    model.applyServerMessageJson(JSON.stringify({ action: "updateConnectionRows", rows: [
+                        Object.assign(probe.pending("s:api", "app", "api.example.com"), { action: "allow" })
+                    ] }));
+                } else if (probe.phase === 29) {
+                    probe.expect(!probe.liveActions.menu.visible, "answered leaf kept an actionable menu");
+                    probe.liveActions.decide("deny");
+                    probe.expectSent([], "deny");
+                } else if (probe.phase === 30) {
+                    // Decided leaves still have useful navigation actions.
+                    const leaf = page.connectionList.itemAtIndex(model.visibleRowIndex("s:api"));
+                    tc.mouseClick(leaf, 2, 2, Qt.RightButton);
+                    model.applyServerMessageJson(JSON.stringify({ action: "insertConnectionRows", rows: [
+                        probe.pending("s:decided-refresh", "aaa", "first.net")
+                    ] }));
+                } else if (probe.phase === 31) {
+                    probe.expect(probe.liveActions.menu.visible, "traffic dismissed a decided leaf context menu");
+                    const item = probe.menuItem("groupConnectionsAction");
+                    tc.mouseClick(item, item.width / 2, item.height / 2);
+                    probe.expect(model.grouped, "decided leaf Group connections action did nothing");
                     done = true;
                 }
                 probe.phase++;
