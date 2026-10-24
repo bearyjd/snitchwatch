@@ -169,20 +169,15 @@ pub fn resolve(ip: &str, lookup: Option<&dyn CountryLookup>) -> Resolved {
 /// [`CountryLookup`] plus a `Mutex`-guarded per-IP cache, wrapped in `Arc`
 /// internally so cloning is cheap.
 ///
-/// The point of sharing this (rather than each consumer owning its own
-/// cache) is the live feed: `GeoModel::start_bridge_feed`'s Tokio task
-/// resolves every incoming row's destination IP *before* queueing the
-/// message onto the Qt thread — that's the actual GeoIP lookup work, done
-/// off the UI thread as specced. When the message reaches the Qt thread and
-/// `GeoStore::apply` asks this same `SharedResolver` (a clone, same
-/// underlying cache) to resolve the identical IP, it's already warm: a
-/// `HashMap` get, never a database read. `GeoStore` never needs its own
-/// separate cache or to know whether it's running the first (cold) or a
-/// later (warm) resolution — the cache makes that transparent.
+/// Clones use one immutable database selection and a bounded canonical-IP
+/// working cache. Cache residency is an optimization only: live feed consumers
+/// retain off-thread prepared facts with each queued message, so an eviction
+/// never requires database decoding on the Qt thread.
 #[derive(Clone)]
 pub struct SharedResolver {
     lookup: Option<Arc<dyn CountryLookup>>,
     cache: Arc<Mutex<HashMap<String, Resolved>>>,
+    cache_limit: usize,
 }
 
 impl SharedResolver {
@@ -190,6 +185,15 @@ impl SharedResolver {
         Self {
             lookup,
             cache: Arc::new(Mutex::new(HashMap::new())),
+            cache_limit: 65_536,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_cache_limit(lookup: Option<Arc<dyn CountryLookup>>, limit: usize) -> Self {
+        Self {
+            cache_limit: limit.max(1),
+            ..Self::new(lookup)
         }
     }
 
@@ -227,7 +231,7 @@ impl SharedResolver {
         let mut cache = self.cache.lock().unwrap();
         // Bounded working set. Existing tracked rows retain their own place;
         // eviction only makes a later lookup cold, never changes identity.
-        if cache.len() >= 65_536 {
+        if cache.len() >= self.cache_limit {
             cache.clear();
         }
         cache.insert(key, resolved.clone());

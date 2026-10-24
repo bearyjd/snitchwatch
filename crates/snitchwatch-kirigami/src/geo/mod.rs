@@ -28,6 +28,7 @@ pub mod flag;
 pub mod install;
 pub mod map_markers;
 pub mod paths;
+pub mod prepared;
 pub mod resolver;
 pub mod store;
 pub mod world_map;

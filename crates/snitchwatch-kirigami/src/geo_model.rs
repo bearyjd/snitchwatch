@@ -16,15 +16,11 @@
 //! construction-time `env!(...)` read) and drive `GeoPage.qml`'s setup
 //! placeholder when no GeoLite2-Country database is installed.
 //!
-//! Live wiring (`start_bridge_feed`) follows `ConnectionsModel`/`TrafficModel`'s
-//! shape exactly: subscribe to the bridge's `broadcast::Receiver<ServerMessage>`
-//! on its own Tokio task, filter with `bridge_dispatch::interests_geo`, and
-//! `qt_thread.queue(...)` onto `applyServerMessageJson`. The one addition
-//! specific to this model: before queueing, the feed task also resolves every
-//! row's destination IP through the same [`crate::geo::resolver::SharedResolver`]
-//! `GeoStore` uses — that's the actual GeoIP database read, done off the Qt
-//! thread. By the time the message reaches `GeoStore::apply` on the Qt thread,
-//! the resolver's shared cache is already warm, so `apply` never blocks on I/O.
+//! Live wiring prepares a bounded typed payload off the Qt thread. It carries
+//! authoritative per-ID geographic results and activity codes independently of
+//! shared-cache residency. The Qt thread applies those supplied facts without
+//! resolving IPs, including snapshots larger than the bounded resolver cache.
+//! Direct JSON injection remains an explicit synchronous fixture/demo path.
 
 use core::pin::Pin;
 use cxx_qt::CxxQtType;
@@ -344,45 +340,29 @@ impl qobject::GeoModel {
             return;
         };
         let qt_thread = self.qt_thread();
-        let resolver = self.resolver.clone();
+        let preparer = std::sync::Mutex::new(crate::geo::prepared::GeoMessagePreparer::new(
+            self.resolver.clone(),
+        ));
         let session_handles = handles.clone();
         crate::bridge_dispatch::spawn_feed(
             &handles,
             "GeoModel",
             crate::bridge_dispatch::interests_geo,
-            move |connection_id, msg, json| {
-                // Resolve every row's destination IP here, off the Qt
-                // thread — this is the actual GeoIP database read.
-                // `resolver` shares its cache with the Qt-thread-side
-                // `GeoStore`, so the queued apply below only ever hits
-                // the now-warm cache.
-                warm_resolver_cache(&resolver, msg);
+            move |connection_id, msg, _json| {
+                if !session_handles.is_current_session(connection_id) {
+                    return;
+                }
+                let mut prepared = preparer.lock().unwrap().prepare(connection_id, msg);
+                prepared.qualify_ids(connection_id);
                 let session_handles = session_handles.clone();
                 let _ = qt_thread.queue(move |qobject| {
                     if !session_handles.is_current_session(connection_id) {
                         return;
                     }
-                    qobject.apply_server_message_json(&QString::from(&json));
+                    qobject.apply_prepared_message(prepared);
                 });
             },
         );
-    }
-}
-
-/// Resolve every connection row's destination IP carried by `msg`, warming
-/// `resolver`'s shared cache ahead of the Qt-thread-side `GeoStore::apply`
-/// call. A no-op for message variants that carry no rows (removal only
-/// touches ids already resolved on a prior insert/update; move/clear carry
-/// no IPs at all).
-fn warm_resolver_cache(resolver: &SharedResolver, msg: &ServerMessage) {
-    match msg {
-        ServerMessage::InsertConnectionRows { rows }
-        | ServerMessage::UpdateConnectionRows { rows } => {
-            for row in rows {
-                resolver.resolve(&row.dst_ip);
-            }
-        }
-        _ => {}
     }
 }
 
@@ -407,6 +387,27 @@ impl qobject::GeoModel {
         self.as_mut().refresh_counts();
         self.as_mut().hierarchy_changed();
         for code in activity {
+            self.as_mut().country_activity(&QString::from(&code));
+        }
+    }
+
+    fn apply_prepared_message(
+        mut self: Pin<&mut Self>,
+        prepared: crate::geo::prepared::PreparedGeoMessage,
+    ) {
+        if !self.as_mut().rust_mut().store.apply_prepared(&prepared) {
+            return;
+        }
+        unsafe {
+            self.as_mut().begin_reset_model();
+        }
+        self.as_mut().rust_mut().rows = self.store.display_rows();
+        unsafe {
+            self.as_mut().end_reset_model();
+        }
+        self.as_mut().refresh_counts();
+        self.as_mut().hierarchy_changed();
+        for code in prepared.activity_codes {
             self.as_mut().country_activity(&QString::from(&code));
         }
     }

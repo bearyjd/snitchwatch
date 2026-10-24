@@ -95,6 +95,7 @@ fn main() {
     // The native read accessor is linked only by its regression test and is
     // never exposed to the application's QML module.
     .file("src/clipboard_native_test.rs")
+    .file("src/delegate_incubation_test.rs")
     .file("src/bridge_bindings.rs")
     .file("src/bridge_feed.rs")
     .file("src/connections_model.rs")
@@ -127,4 +128,5 @@ fn main() {
     println!("cargo:rerun-if-changed=include/application.h");
     println!("cargo:rerun-if-changed=include/clipboard.h");
     println!("cargo:rerun-if-changed=tests/support/clipboard_native.h");
+    println!("cargo:rerun-if-changed=tests/support/delegate_incubation.h");
 }
