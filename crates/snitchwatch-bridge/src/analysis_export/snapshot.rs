@@ -229,7 +229,7 @@ fn classify_rule(name: Option<&str>, decided_by_default: bool) -> ExportRuleClas
         return ExportRuleClass::Default;
     }
     match name {
-        None => ExportRuleClass::Unknown,
+        None | Some("") => ExportRuleClass::Unknown,
         Some(name) if is_reserved_blocklist_name(name) => ExportRuleClass::Blocklist,
         Some(name) if is_reserved_profile_name(name) => ExportRuleClass::Profile,
         Some(name) if is_reserved_packaged_name(name) => ExportRuleClass::Packaged,

@@ -437,3 +437,51 @@ fn protocol_and_auto_answer_allowlists_do_not_retain_source_text() {
         );
     }
 }
+
+#[test]
+fn empty_event_rule_is_unknown_unless_explicitly_decided_by_default() {
+    use crate::translator::connection::event_to_row;
+    use snitchwatch_proto::protocol::{Connection, Event, Rule};
+
+    // Stock daemon events can report a real, unnamed rule without the default marker.
+    let mut event = Event {
+        connection: Some(Connection {
+            protocol: "tcp".into(),
+            dst_host: "example.invalid".into(),
+            process_path: "/usr/bin/example".into(),
+            ..Default::default()
+        }),
+        rule: Some(Rule {
+            action: "deny".into(),
+            duration: "always".into(),
+            ..Default::default()
+        }),
+        unixnano: 1_000_000,
+        ..Default::default()
+    };
+    let mut translated = event_to_row(&event, |_| Some(false)).unwrap();
+    assert_eq!(translated.matched_rule.as_deref(), Some(""));
+    assert!(!translated.decided_by_default);
+    assert_eq!(
+        capture(std::slice::from_ref(&translated), 123, &control())
+            .unwrap()
+            .rows[0]
+            .rule_class,
+        ExportRuleClass::Unknown
+    );
+
+    // An explicit default flag takes precedence even if an empty name is present.
+    translated.decided_by_default = true;
+    assert_eq!(
+        capture(&[translated], 123, &control()).unwrap().rows[0].rule_class,
+        ExportRuleClass::Default
+    );
+    event.rule.as_mut().unwrap().description = crate::daemon_contract::DEFAULT_ACTION_MARKER.into();
+    let translated = event_to_row(&event, |_| Some(false)).unwrap();
+    assert!(translated.decided_by_default);
+    assert_eq!(translated.matched_rule, None);
+    assert_eq!(
+        capture(&[translated], 123, &control()).unwrap().rows[0].rule_class,
+        ExportRuleClass::Default
+    );
+}
