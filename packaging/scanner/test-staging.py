@@ -2,6 +2,7 @@
 """No privilege requests, live installation or execution of staged binaries."""
 import hashlib
 import os
+import shutil
 from pathlib import Path
 import stat
 import subprocess
@@ -24,10 +25,11 @@ class ScannerStaging(unittest.TestCase):
         self.binary.chmod(0o755)
         self.digest = hashlib.sha256(self.binary.read_bytes()).hexdigest()
 
-    def stage(self, dest=None, digest=None):
+    def stage(self, dest=None, digest=None, broker=None, env=None):
         return subprocess.run(["bash", str(HERE / "stage.sh"), str(dest or self.dest),
                                str(self.binary), digest or self.digest,
-                               str(self.binary), self.digest], capture_output=True, text=True)
+                               str(broker or self.binary), self.digest], capture_output=True, text=True,
+                              env={**os.environ, "TMPDIR": str(self.root), **(env or {})})
 
     def test_complete_idempotent_artifact_and_fixed_policy(self):
         for _ in range(2):
@@ -52,7 +54,49 @@ class ScannerStaging(unittest.TestCase):
     def test_bad_hash_and_live_root_rejected(self):
         self.assertNotEqual(self.stage(digest="0" * 64).returncode, 0)
         self.assertFalse(self.dest.exists())
+        self.assertEqual(list(self.root.glob("snitchwatch-scanner-stage.*")), [])
         self.assertNotEqual(self.stage(dest=Path("/")).returncode, 0)
+
+    def test_mutated_inputs_cannot_replace_verified_bytes(self):
+        original = self.binary.read_bytes()
+        broker = self.root / "fake-broker"
+        broker.write_bytes(original)
+        broker.chmod(0o755)
+        shim_dir = self.root / "shim"
+        shim_dir.mkdir()
+        shim = shim_dir / "sha256sum"
+        # Run the real hash, then change that input before returning to stage.sh.
+        # This deterministically exercises the gap between verification and copy.
+        shim.write_text(r"""#!/usr/bin/env python3
+import os
+from pathlib import Path
+import subprocess
+import sys
+subprocess.run([os.environ["REAL_SHA256SUM"], *sys.argv[1:]], check=True)
+count_file = Path(os.environ["HASH_COUNT"])
+count = int(count_file.read_text()) if count_file.exists() else 0
+sources = [os.environ["SOURCE_SCANNER"], os.environ["SOURCE_BROKER"]]
+Path(sources[count]).write_bytes(b"#!/bin/sh\nexit 42\n")
+count_file.write_text(str(count + 1))
+""")
+        shim.chmod(0o755)
+        count = self.root / "hash-count"
+        result = self.stage(broker=broker, env={
+            "PATH": f"{shim_dir}{os.pathsep}{os.environ['PATH']}",
+            "REAL_SHA256SUM": shutil.which("sha256sum"),
+            "HASH_COUNT": str(count), "SOURCE_SCANNER": str(self.binary),
+            "SOURCE_BROKER": str(broker),
+        })
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(count.read_text(), "2")
+        for name in ("snitchwatch-scanner-privileged", "snitchwatch-scanner-broker"):
+            staged = self.dest / "usr/libexec" / name
+            self.assertEqual(staged.read_bytes(), original)
+            self.assertEqual(hashlib.sha256(staged.read_bytes()).hexdigest(), self.digest)
+        self.assertNotEqual(self.binary.read_bytes(), original)
+        self.assertNotEqual(broker.read_bytes(), original)
+        self.assertFalse(self.marker.exists())
+        self.assertEqual(list(self.root.glob("snitchwatch-scanner-stage.*")), [])
 
     def test_symlink_cannot_escape_stage(self):
         self.dest.mkdir()

@@ -16,7 +16,8 @@ bash packaging/scanner/stage.sh /tmp/snitchwatch-scanner-package \
 ```
 
 Use SHA256 values verified against the intended build artifacts. The staging
-script refuses `/` and never runs supplied executables. Install the staged tree
+script refuses `/`, snapshots both inputs in a private temporary directory,
+validates and installs those same bytes, and never runs supplied executables. Install the staged tree
 through the host's image/package mechanism, with all files owned by root and
 directories writable only by root. It is not a Flatpak install. On an immutable
 Bazzite host this means adding the staged tree to the image (after the existing
