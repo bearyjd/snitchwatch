@@ -133,10 +133,12 @@ test-blocklists:
 # Rust packaging/release shape tests plus the release-tarball packer tests, and
 # shellchecks the release scripts (skipped when shellcheck isn't installed).
 package-check:
+    bash -n packaging/scanner/stage.sh
+    python3 packaging/scanner/test-staging.py
     python3 -c "import yaml,sys; yaml.safe_load(open('packaging/bluebuild/recipe.yml')); yaml.safe_load(open('packaging/flatpak/org.snitchwatch.Snitchwatch.yml')); yaml.safe_load(open('.github/workflows/release.yml')); print('YAML ok')"
     python3 -c "import json; json.load(open('packaging/bluebuild/files/system/etc/opensnitchd/default-config.json')); json.load(open('packaging/bluebuild/files/system/etc/opensnitchd/rules/000-snitchwatch-bridge-fetch.json')); json.load(open('packaging/system/opensnitchd-default-config.json')); print('JSON ok')"
     bash packaging/release/verify-unit.sh
-    if command -v shellcheck >/dev/null 2>&1; then shellcheck packaging/release/*.sh; else echo "shellcheck not installed — skipped"; fi
+    if command -v shellcheck >/dev/null 2>&1; then shellcheck packaging/release/*.sh packaging/scanner/stage.sh; else echo "shellcheck not installed — skipped"; fi
     cargo test -p snitchwatch-bridge --test packaging_shape --test release_shape --test release_artifact
     # The release tarball's feature set (no embedded web UI, decision I) —
     # nothing else builds it, so lint and test it here.
