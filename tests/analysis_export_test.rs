@@ -1,9 +1,15 @@
 //! Production authenticated WS + mock-daemon acceptance. GUI preview/save is
 //! verified separately by Kirigami's actual-controller probe; this crate stays Qt-free.
+//! Success bytes can arrive before the old worker/supervisor admission is reaped.
+//! Fresh clients require a first-attempt success; only explicit follow-up requests
+//! may handle bounded, typed Busy backpressure after a known earlier success.
 use futures_util::{SinkExt, StreamExt};
 use mock_opensnitchd::MockOpensnitchd;
 use serde_json::{json, Value};
-use snitchwatch_bridge::bridge_capabilities::AI_CACHE_SUMMARY_EXPORT_V1;
+use snitchwatch_bridge::{
+    analysis_export::ExportError, bridge_capabilities::AI_CACHE_SUMMARY_EXPORT_V1,
+    ws_messages::valid_request_id,
+};
 use snitchwatch_bridge_cli::{run, BridgeConfig, RunningBridge};
 use snitchwatch_proto::protocol::{
     ClientConfig, Connection, Event, Notification, NotificationReply, Rule, Statistics,
@@ -206,7 +212,15 @@ async fn frame(ws: &mut Ws) -> (Value, usize) {
             match ws.next().await {
                 Some(Ok(Message::Text(text))) => {
                     return (
-                        serde_json::from_str(&text).expect("server JSON invalid"),
+                        {
+                            let value: Value = serde_json::from_str(&text)
+                                .unwrap_or_else(|_| panic!("server JSON invalid"));
+                            assert!(
+                                value.is_object() && value["action"].is_string(),
+                                "server envelope invalid"
+                            );
+                            value
+                        },
                         text.len(),
                     )
                 }
@@ -224,27 +238,103 @@ fn is_export(value: &Value) -> bool {
         Some("cacheSummaryExport" | "cacheSummaryExportRefused")
     )
 }
-async fn export(ws: &mut Ws, id: &str, filters: Value) -> (String, Value, usize) {
+fn refusal_reason(value: &Value) -> ExportError {
+    let fields = value.as_object().expect("export refusal envelope invalid");
+    // A Busy frame must not smuggle artifact/selector/path fields that would
+    // otherwise disappear into retry handling. Only the exact static schema fits.
+    assert!(
+        fields.len() == 3
+            && ["action", "requestId", "reason"]
+                .iter()
+                .all(|field| fields.contains_key(*field)),
+        "export refusal field shape invalid"
+    );
+    serde_json::from_value(value["reason"].clone())
+        .unwrap_or_else(|_| panic!("mock export refusal had an invalid static code"))
+}
+fn unexpected_refusal(reason: ExportError, id: &str) -> ! {
+    // Only a finite fixture position is diagnostic; never print a request/body.
+    let phase = match id {
+        "privacy-selected" => 1,
+        "privacy-missing" => 2,
+        "privacy-empty" => 3,
+        "privacy-all" => 4,
+        _ => 0,
+    };
+    panic!("valid mock export refused: reason={reason} phase={phase}");
+}
+async fn request_export(
+    ws: &mut Ws,
+    id: &str,
+    filters: &Value,
+) -> Result<(String, Value, usize), ExportError> {
+    assert!(valid_request_id(id), "fixture export request ID invalid");
     send(ws, json!({"action":"requestCacheSummaryExport","requestId":id,"schemaVersion":1,"filters":filters})).await;
     for _ in 0..FRAME_LIMIT {
         let (value, bytes) = frame(ws).await;
-        if is_export(&value) {
-            assert_eq!(value["requestId"], id);
-            assert_eq!(
-                value["action"], "cacheSummaryExport",
-                "valid mock export must succeed"
+        if value["action"]
+            .as_str()
+            .is_some_and(|action| action.starts_with("cacheSummaryExport"))
+        {
+            assert!(is_export(&value), "unknown export reply action");
+            assert!(
+                value["requestId"].as_str() == Some(id),
+                "mock export reply correlation mismatch"
             );
+            if value["action"] == "cacheSummaryExportRefused" {
+                return Err(refusal_reason(&value));
+            }
             assert!(bytes <= 1_052_658 && bytes + 14 <= 1_052_672);
             let artifact = value["artifact"]
                 .as_str()
                 .expect("artifact must be UTF-8 JSON")
                 .to_owned();
             assert!(artifact.len() <= 1_048_576);
-            let document = serde_json::from_str(&artifact).expect("artifact JSON invalid");
-            return (artifact, document, bytes);
+            let document =
+                serde_json::from_str(&artifact).unwrap_or_else(|_| panic!("artifact JSON invalid"));
+            return Ok((artifact, document, bytes));
         }
     }
     panic!("no export within bounded fixture frames");
+}
+async fn initial_export(ws: &mut Ws, id: &str, filters: Value) -> (String, Value, usize) {
+    // A fresh isolated client has no prior worker to reap: no refusal is expected.
+    request_export(ws, id, &filters)
+        .await
+        .unwrap_or_else(|reason| unexpected_refusal(reason, id))
+}
+async fn followup_export(ws: &mut Ws, id: &str, filters: Value) -> (String, Value, usize) {
+    const MAX_ATTEMPTS: usize = 32;
+    // Call only after this client has positively received an earlier success.
+    // Neither those bytes nor a broadcast snapshot proves admission is free.
+    tokio::time::timeout(Duration::from_secs(3), async {
+        let mut busy_refusals = 0usize;
+        for attempt in 1..=MAX_ATTEMPTS {
+            let request_id = format!("{id}-{attempt}");
+            match request_export(ws, &request_id, &filters).await {
+                Ok(export) => {
+                    if busy_refusals > 0 {
+                        eprintln!("follow-up export admission: busy_refusals={busy_refusals}");
+                    }
+                    return export;
+                }
+                Err(ExportError::Busy) => {
+                    busy_refusals += 1;
+                    assert!(
+                        attempt < MAX_ATTEMPTS,
+                        "follow-up admission remained busy at attempt cap"
+                    );
+                    // Pacing follows a proven correlated, exact-schema Busy;
+                    // this delay is never a readiness or absence assertion.
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                Err(reason) => unexpected_refusal(reason, id),
+            }
+        }
+        unreachable!("finite follow-up attempts must return or fail")
+    })
+    .await
+    .unwrap_or_else(|_| panic!("follow-up export exceeded total deadline"))
 }
 async fn refusal(ws: &mut Ws, id: &str, schema: u64, filters: Value) -> Value {
     send(ws, json!({"action":"requestCacheSummaryExport","requestId":id,"schemaVersion":schema,"filters":filters})).await;
@@ -375,7 +465,7 @@ async fn two_clients_receive_only_their_export() {
     let mut a = fixture.connect().await;
     let mut b = fixture.connect().await;
     fixture.populate(nine_events()).await;
-    let (_, first, _) = export(&mut a, "a-first", selection()).await;
+    let (_, first, _) = initial_export(&mut a, "a-first", selection()).await;
     assert_base_counts(&first, 2, 1);
     broadcast_delivery_barrier(&mut a, &mut b).await;
     let refused = refusal(&mut a, "a-version", 2, json!({})).await;
@@ -384,13 +474,13 @@ async fn two_clients_receive_only_their_export() {
     let refused = refusal(&mut a, "a-filter", 1, json!({"mode":"raw"})).await;
     assert_eq!(refused["reason"], "invalidRequest");
     broadcast_delivery_barrier(&mut a, &mut b).await;
-    let (_, second, _) = export(&mut a, "a-second", selection()).await;
+    let (_, second, _) = followup_export(&mut a, "a-second", selection()).await;
     assert_base_counts(&second, 2, 1);
     for field in ["appRef", "destinationRef"] {
         assert_ne!(first["groups"][0][field], second["groups"][0][field]);
     }
     broadcast_delivery_barrier(&mut a, &mut b).await;
-    let (_, own, _) = export(&mut b, "b-own", selection()).await;
+    let (_, own, _) = initial_export(&mut b, "b-own", selection()).await;
     assert_base_counts(&own, 2, 1);
     broadcast_delivery_barrier(&mut a, &mut b).await;
     fixture.finish().await;
@@ -401,7 +491,7 @@ async fn cache_export_end_to_end_privacy() {
     let mut fixture = Fixture::start(64).await;
     let mut ws = fixture.connect().await;
     fixture.populate(nine_events()).await;
-    let (artifact, document, _) = export(&mut ws, "privacy-selected", selection()).await;
+    let (artifact, document, _) = initial_export(&mut ws, "privacy-selected", selection()).await;
     assert_artifact_private(&artifact);
     assert!(
         artifact.contains(DISCLOSED_BASENAME),
@@ -412,7 +502,7 @@ async fn cache_export_end_to_end_privacy() {
     assert_eq!(document["groups"][0]["firstObservedAtMs"], 1000);
     assert_eq!(document["groups"][0]["lastObservedAtMs"], 1001);
     assert_eq!(document["groups"][0]["verdict"], "allow");
-    let (artifact, document, _) = export(
+    let (artifact, document, _) = followup_export(
         &mut ws,
         "privacy-missing",
         json!({"app":{"kind":"missingPath"}}),
@@ -421,9 +511,9 @@ async fn cache_export_end_to_end_privacy() {
     assert_artifact_private(&artifact);
     assert_base_counts(&document, 1, 1);
     assert!(document["groups"][0].get("appBasename").is_none());
-    let (_, document, _) = export(&mut ws, "privacy-empty", json!({"verdicts":[]})).await;
+    let (_, document, _) = followup_export(&mut ws, "privacy-empty", json!({"verdicts":[]})).await;
     assert_base_counts(&document, 0, 0);
-    let (artifact, document, _) = export(&mut ws, "privacy-all", json!({})).await;
+    let (artifact, document, _) = followup_export(&mut ws, "privacy-all", json!({})).await;
     assert_artifact_private(&artifact);
     assert_base_counts(&document, 7, 4);
     let invalid_selector = format!(
@@ -475,7 +565,7 @@ async fn bounded_whole_group_omissions_over_real_ws() {
         })
         .collect();
     fixture.populate(events).await;
-    let (artifact, document, _) = export(&mut ws, "bounded", json!({})).await;
+    let (artifact, document, _) = initial_export(&mut ws, "bounded", json!({})).await;
     assert!(!artifact.contains("PRIVATE-SELECTOR-DIRECTORY"));
     assert!(!artifact.contains("PRIVATE-HOST-"));
     assert_eq!(
