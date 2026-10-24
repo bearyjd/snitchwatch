@@ -15,10 +15,12 @@
 //!    mutates the cache (resolving pending rows by firing the oneshot).
 
 pub mod activation;
+mod analysis_export;
 mod busy;
 pub mod cli;
 mod config;
 pub mod curated_storage;
+pub mod logging;
 mod profile_actions;
 pub mod profile_storage;
 mod relays;
@@ -463,6 +465,8 @@ where
     // Profile-related messages are routed to `ProfilesManager` directly
     // (mirroring `handle_blocklist_action`'s treatment of blocklist
     // messages); everything else goes through the connection-cache pump.
+    let analysis_exports = analysis_export::AnalysisExports::new(cache.clone());
+    let exports_for_pump = analysis_exports.clone();
     let cache_for_upstream = cache.clone();
     let profiles_for_upstream = profiles_mgr;
     let blocklists_for_upstream = blocklists_mgr;
@@ -477,6 +481,9 @@ where
     let curated_for_pump = curated.clone();
     tokio::spawn(async move {
         while let Some(msg) = inbound_rx.recv().await {
+            let Some(msg) = exports_for_pump.try_route(msg) else {
+                continue;
+            };
             // Blocklist messages go to the single blocklist worker; queueing
             // never waits on a fetch (issue #45).
             let Some(msg) = blocklist_worker.try_route(msg) else {
@@ -665,6 +672,7 @@ where
         pause_expiry_handle,
         pause_clear_handle,
         blocklist_tasks,
+        analysis_exports,
         profile_tasks,
         rule_hits,
         rule_hits_ticker,

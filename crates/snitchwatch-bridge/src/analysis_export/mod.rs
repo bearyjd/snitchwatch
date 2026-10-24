@@ -6,7 +6,8 @@ mod redaction;
 mod session;
 mod snapshot;
 pub use session::{
-    prepare_reply, ExportRun, ExportSession, ExportSessionGuard, PendingExportReply, PreparedExport,
+    prepare_reply, ExportRun, ExportSession, ExportSessionGuard, PendingExportReply,
+    PreparedExport, WeakExportSession,
 };
 
 pub use build::{build, ANALYSIS_PROMPT};

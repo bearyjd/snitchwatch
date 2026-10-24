@@ -84,12 +84,7 @@ fn print_early_exit(early: EarlyExit) -> std::io::Result<()> {
 }
 
 async fn run_bridge() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
+    snitchwatch_bridge_cli::logging::init();
 
     let bridge = match std::env::var_os("SNITCHWATCH_SYSTEM_BRIDGE") {
         Some(mode) if mode == std::ffi::OsStr::new("1") => {

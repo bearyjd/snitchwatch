@@ -157,3 +157,32 @@ async fn expired_admission_and_cancel_never_release_an_existing_worker() {
         .admit("next", Instant::now() + Duration::from_secs(10))
         .is_ok());
 }
+
+#[tokio::test]
+async fn identical_request_ids_still_have_distinct_private_slots() {
+    let a = ExportSession::new();
+    let b = ExportSession::new();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let run_a = a.admit("same-id", deadline).unwrap();
+    let run_b = b.admit("same-id", deadline).unwrap();
+    let wire_a: Arc<str> = Arc::from("private-wire-A");
+    let wire_b: Arc<str> = Arc::from("private-wire-B");
+    assert!(run_a.publish(PreparedExport {
+        artifact: Arc::from("artifact-A"),
+        wire: wire_a.clone()
+    }));
+    assert!(Arc::ptr_eq(&a.queued_wire().unwrap(), &wire_a));
+    assert!(b.queued_wire().is_none());
+    assert!(run_b.publish(PreparedExport {
+        artifact: Arc::from("artifact-B"),
+        wire: wire_b.clone()
+    }));
+    assert!(Arc::ptr_eq(&a.queued_wire().unwrap(), &wire_a));
+    assert!(Arc::ptr_eq(&b.queued_wire().unwrap(), &wire_b));
+    a.cancel("same-id");
+    assert!(a.queued_wire().is_none());
+    assert!(Arc::ptr_eq(&b.queued_wire().unwrap(), &wire_b));
+    let pending_b = b.next_reply().await.unwrap();
+    assert!(pending_b.is_current());
+    assert_eq!(&*pending_b.wire, "private-wire-B");
+}
