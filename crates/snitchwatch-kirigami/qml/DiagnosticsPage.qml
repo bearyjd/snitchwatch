@@ -19,6 +19,7 @@ Kirigami.ScrollablePage {
 
     // Injected by main.qml so the controller's lifetime is owned there.
     property SettingsController controller
+    property GeoModel geoModel
 
     Component.onCompleted: {
         if (page.controller) {
@@ -33,6 +34,13 @@ Kirigami.ScrollablePage {
     ColumnLayout {
         width: page.width
         spacing: Kirigami.Units.largeSpacing
+
+        GeoDatabaseSettings {
+            Layout.fillWidth: true
+            model: page.geoModel
+        }
+
+        Kirigami.Separator { Layout.fillWidth: true }
 
         Kirigami.FormLayout {
             Layout.fillWidth: true

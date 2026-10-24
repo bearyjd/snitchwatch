@@ -622,6 +622,7 @@ Kirigami.ApplicationWindow {
         id: diagnosticsPageComponent
         DiagnosticsPage {
             controller: settingsController
+            geoModel: root.geoModelRef
         }
     }
     Component {

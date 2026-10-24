@@ -19,8 +19,14 @@ use cxx_qt_lib::{QByteArray, QGuiApplication, QQmlApplicationEngine, QUrl};
 #[allow(unused_imports)]
 use snitchwatch_kirigami::geo_model as _;
 
+mod common;
+use common::{capture_stderr, init_headless_qt_env};
+
 #[test]
 fn geo_model_registers_and_ingest_invokable_runs() {
+    init_headless_qt_env();
+    // Fedora's Qt logging configuration can suppress the positive marker.
+    std::env::set_var("QT_LOGGING_RULES", "qml.warning=true");
     if std::env::var_os("QT_QPA_PLATFORM").is_none() {
         std::env::set_var("QT_QPA_PLATFORM", "offscreen");
     }
@@ -40,8 +46,23 @@ fn geo_model_registers_and_ingest_invokable_runs() {
 import QtQuick
 import com.snitchwatch.shell
 
-QtObject {
+Item {
+    width: 640
+    height: 720
     property GeoModel model: GeoModel {}
+    GeoDatabaseSettings {
+        id: databaseSettings
+        width: parent.width
+        model: parent.model
+    }
+    function find(item, name) {
+        if (item.objectName === name) return item;
+        for (let child of item.children) {
+            let found = find(child, name);
+            if (found) return found;
+        }
+        return null;
+    }
     Component.onCompleted: {
         model.applyServerMessageJson(JSON.stringify({
             action: "insertConnectionRows",
@@ -57,6 +78,28 @@ QtObject {
         // Best-effort visibility only (not load-bearing — see module docs).
         console.log("[test] GeoModel.count after insert =", model.count,
                     "dbAvailable =", model.dbAvailable, "dbPath =", model.dbPath);
+        if (!model.dbInstallPath.endsWith("/snitchwatch/GeoLite2-Country.mmdb"))
+            throw new Error("Missing app-data install location");
+        if (find(databaseSettings, "geoDatabasePath").text !== model.dbInstallPath)
+            throw new Error("Install location is not displayed");
+        if (!find(databaseSettings, "geoDownloadButton") || !find(databaseSettings, "geoInstallButton").enabled)
+            throw new Error("Missing download or install button");
+        model.dbAvailable = true;
+        model.dbSource = "IP Geolocation by DB-IP · CC BY 4.0 · database build 1790818572 (Unix time)";
+        if (find(databaseSettings, "geoDatabaseSource").text !== model.dbSource)
+            throw new Error("Active database source attribution is not displayed");
+        model.dbBuildEpoch = 1790818572;
+        if (find(databaseSettings, "geoDatabaseBuild").text.indexOf("2026-10-01") < 0)
+            throw new Error("Database build date is not displayed in UTC");
+        model.installDatabase("https://example.invalid/database.mmdb");
+        if (model.dbInstallBusy || model.dbInstallError.length === 0)
+            throw new Error("Nonlocal file was not rejected");
+        if (find(databaseSettings, "geoInstallError").text !== model.dbInstallError)
+            throw new Error("Install error is not displayed");
+        model.dbRestartRequired = true;
+        if (!find(databaseSettings, "geoRestartNotice").visible)
+            throw new Error("Restart notice is not displayed");
+        console.warn("[test] geo database controls passed");
     }
 }
 "#;
@@ -69,12 +112,14 @@ QtObject {
         })
     });
 
-    if let Some(engine) = engine.as_mut() {
-        engine.load_data(
-            &QByteArray::from(qml),
-            &QUrl::from("qrc:/inline_geo_model_probe.qml"),
-        );
-    }
+    let captured = capture_stderr(|| {
+        if let Some(engine) = engine.as_mut() {
+            engine.load_data(
+                &QByteArray::from(qml),
+                &QUrl::from("qrc:/inline_geo_model_probe.qml"),
+            );
+        }
+    });
     drop(guard);
 
     assert!(
@@ -82,6 +127,11 @@ QtObject {
         "GeoModel QML probe failed: root object was null — the type failed to register as \
          a QML element or did not compile against its QAbstractListModel base"
     );
+    assert!(
+        captured.contains("[test] geo database controls passed"),
+        "{captured}"
+    );
+    assert!(!captured.contains("Error:"), "{captured}");
 
     let _ = app.as_mut();
 }

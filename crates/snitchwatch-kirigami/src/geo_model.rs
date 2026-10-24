@@ -29,7 +29,9 @@
 use core::pin::Pin;
 use cxx_qt::CxxQtType;
 use cxx_qt::Threading;
-use cxx_qt_lib::{QByteArray, QHash, QHashPair_i32_QByteArray, QModelIndex, QString, QVariant};
+use cxx_qt_lib::{
+    QByteArray, QHash, QHashPair_i32_QByteArray, QModelIndex, QString, QUrl, QVariant,
+};
 
 use crate::geo::resolver::SharedResolver;
 use crate::geo::store::GeoStore;
@@ -49,6 +51,8 @@ pub mod qobject {
     unsafe extern "C++" {
         include!("cxx-qt-lib/qstring.h");
         type QString = cxx_qt_lib::QString;
+        include!("cxx-qt-lib/qurl.h");
+        type QUrl = cxx_qt_lib::QUrl;
         include!("cxx-qt-lib/qvariant.h");
         type QVariant = cxx_qt_lib::QVariant;
         include!("cxx-qt-lib/qmodelindex.h");
@@ -70,7 +74,17 @@ pub mod qobject {
         #[qproperty(i32, max_total, cxx_name = "maxTotal")]
         #[qproperty(bool, db_available, cxx_name = "dbAvailable")]
         #[qproperty(QString, db_path, cxx_name = "dbPath")]
+        #[qproperty(QString, db_source, cxx_name = "dbSource")]
+        #[qproperty(f64, db_build_epoch, cxx_name = "dbBuildEpoch")]
+        #[qproperty(QString, db_install_path, cxx_name = "dbInstallPath")]
+        #[qproperty(bool, db_install_busy, cxx_name = "dbInstallBusy")]
+        #[qproperty(bool, db_restart_required, cxx_name = "dbRestartRequired")]
+        #[qproperty(QString, db_install_error, cxx_name = "dbInstallError")]
         type GeoModel = super::GeoModelRust;
+
+        #[qinvokable]
+        #[cxx_name = "installDatabase"]
+        fn install_database(self: Pin<&mut GeoModel>, url: &QUrl);
 
         // --- QAbstractListModel overrides -----------------------------------
         #[qinvokable]
@@ -157,6 +171,12 @@ pub struct GeoModelRust {
     max_total: i32,
     db_available: bool,
     db_path: QString,
+    db_source: QString,
+    db_build_epoch: f64,
+    db_install_path: QString,
+    db_install_busy: bool,
+    db_restart_required: bool,
+    db_install_error: QString,
 }
 
 impl Default for GeoModelRust {
@@ -170,11 +190,44 @@ impl Default for GeoModelRust {
             max_total: 0,
             db_available: outcome.available,
             db_path: QString::from(&outcome.path.display().to_string()),
+            db_source: QString::from(&outcome.source),
+            db_build_epoch: outcome.build_epoch as f64,
+            db_install_path: QString::from(
+                &crate::geo::install::target_path().display().to_string(),
+            ),
+            db_install_busy: false,
+            db_restart_required: false,
+            db_install_error: QString::default(),
         }
     }
 }
 
 impl qobject::GeoModel {
+    fn install_database(mut self: Pin<&mut Self>, url: &QUrl) {
+        if self.db_install_busy {
+            return;
+        }
+        let Some(source) = url.to_local_file() else {
+            self.set_db_install_error(QString::from("Choose a local .mmdb file."));
+            return;
+        };
+        let source = std::path::PathBuf::from(source.to_string());
+        let target = crate::geo::install::target_path();
+        self.as_mut().set_db_install_busy(true);
+        self.as_mut().set_db_install_error(QString::default());
+        let qt_thread = self.qt_thread();
+        std::thread::spawn(move || {
+            let result = crate::geo::install::install(&source, &target);
+            let _ = qt_thread.queue(move |mut model| {
+                model.as_mut().set_db_install_busy(false);
+                match result {
+                    Ok(()) => model.as_mut().set_db_restart_required(true),
+                    Err(error) => model.as_mut().set_db_install_error(QString::from(&error)),
+                }
+            });
+        });
+    }
+
     fn row_count(&self, _parent: &QModelIndex) -> i32 {
         self.rows.len() as i32
     }

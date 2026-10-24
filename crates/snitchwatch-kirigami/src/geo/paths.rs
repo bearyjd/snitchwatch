@@ -1,8 +1,7 @@
-//! GeoLite2-Country `.mmdb` discovery.
+//! Country `.mmdb` discovery, including packaged DB-IP Country Lite.
 //!
-//! We never download or vendor a GeoIP database (see the design spec's
-//! privacy/non-goals). Instead we look for one an operator has placed
-//! themselves, in this priority order:
+//! Runtime discovery is offline. Operator databases take precedence over
+//! the pinned DB-IP fallback distributed through application releases:
 //!
 //!   1. `$SNITCHWATCH_GEOIP_DB` — explicit override, any path.
 //!   2. `$XDG_DATA_HOME/snitchwatch/GeoLite2-Country.mmdb` (falling back to
@@ -11,6 +10,8 @@
 //!   3. Common system package locations:
 //!      `/usr/share/GeoIP/GeoLite2-Country.mmdb`,
 //!      `/var/lib/GeoIP/GeoLite2-Country.mmdb`.
+//!   4. Packaged `/app/share/snitchwatch/dbip-country-lite.mmdb`, then
+//!      `/usr/share/snitchwatch/dbip-country-lite.mmdb`.
 //!
 //! If none exist, [`discover_with`] returns `None` and the caller degrades
 //! to the no-DB setup state — this is expected/common, not an error.
@@ -45,6 +46,8 @@ fn candidate_paths(home: &str, xdg_data_home: Option<&str>) -> Vec<PathBuf> {
         data_home_dir(home, xdg_data_home).join("GeoLite2-Country.mmdb"),
         PathBuf::from("/usr/share/GeoIP/GeoLite2-Country.mmdb"),
         PathBuf::from("/var/lib/GeoIP/GeoLite2-Country.mmdb"),
+        PathBuf::from("/app/share/snitchwatch/dbip-country-lite.mmdb"),
+        PathBuf::from("/usr/share/snitchwatch/dbip-country-lite.mmdb"),
     ]
 }
 
@@ -82,6 +85,31 @@ pub fn discover_with(
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    #[test]
+    fn packaged_country_is_last_fallback_after_existing_overrides() {
+        let priority = [
+            "/custom/country.mmdb",
+            "/xdg/snitchwatch/GeoLite2-Country.mmdb",
+            "/usr/share/GeoIP/GeoLite2-Country.mmdb",
+            "/var/lib/GeoIP/GeoLite2-Country.mmdb",
+            "/app/share/snitchwatch/dbip-country-lite.mmdb",
+            "/usr/share/snitchwatch/dbip-country-lite.mmdb",
+        ];
+        for first in 0..priority.len() {
+            let found = discover_with(
+                |p| {
+                    priority[first..]
+                        .iter()
+                        .any(|candidate| p == Path::new(candidate))
+                },
+                Some(priority[0]),
+                "/home/alice",
+                Some("/xdg"),
+            );
+            assert_eq!(found, Some(PathBuf::from(priority[first])));
+        }
+    }
 
     /// #170: the refused no-HOME base finds nothing, so no database is
     /// taken from a shared directory.

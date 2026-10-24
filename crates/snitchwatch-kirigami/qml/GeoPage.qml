@@ -2,7 +2,7 @@
 // aggregation, without a heavy map widget.
 //
 // Two graceful-degradation states before the real list shows:
-//   * no GeoLite2-Country.mmdb installed at all -> setup placeholder pointing
+//   * no country database installed at all -> setup placeholder pointing
 //     at where to place one (Kirigami.PlaceholderMessage, not an error);
 //   * a database is installed but no connections have been aggregated yet ->
 //     "no data yet" placeholder (mirrors ConnectionsPage's empty state).
@@ -26,6 +26,15 @@ Kirigami.ScrollablePage {
         id: list
         model: page.model && page.model.dbAvailable ? page.model : null
         reuseItems: true
+        header: Controls.Label {
+            objectName: "geoPageDatabaseSource"
+            width: list.width
+            visible: page.model && page.model.dbAvailable
+            wrapMode: Text.Wrap
+            textFormat: Text.PlainText
+            padding: Kirigami.Units.smallSpacing
+            text: page.model ? page.model.dbSource : ""
+        }
 
         ColumnLayout {
             parent: list
@@ -38,17 +47,13 @@ Kirigami.ScrollablePage {
                 Layout.fillWidth: true
                 icon.name: "map-globe"
                 text: "No GeoIP database installed"
-                explanation: "Place a GeoLite2-Country.mmdb file at the path shown here. Local-network traffic still appears in the list; public destinations show as “Unknown” until a database is installed. Snitchwatch never downloads one automatically."
+                explanation: "Install a country database below to identify public destinations. Local-network traffic does not need a database."
             }
             // A host path, so it sits in a PlainText label, not in the
             // PlaceholderMessage's explanation, which renders markup (issue #51).
-            Controls.Label {
-                objectName: "geoDatabasePath"
+            GeoDatabaseSettings {
                 Layout.fillWidth: true
-                horizontalAlignment: Text.AlignHCenter
-                wrapMode: Text.WrapAnywhere
-                textFormat: Text.PlainText
-                text: page.model ? page.model.dbPath : ""
+                model: page.model
             }
         }
 
