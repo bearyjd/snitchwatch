@@ -439,9 +439,11 @@ impl RowStore {
     }
     /// Prune only after the complete grouped batch; later buffered inserts
     /// may already have supplied facts before an earlier Clear is applied.
-    pub fn prune_prepared_geo(&mut self) {
-        let ids = self.rows.iter().map(|row| row.id.as_str()).collect();
-        self.filter.retain_prepared_geo(&ids);
+    pub fn prune_prepared_geo(&mut self, absorbed: impl Fn(&str) -> bool) {
+        let ids: std::collections::HashSet<_> =
+            self.rows.iter().map(|row| row.id.as_str()).collect();
+        self.filter
+            .retain_prepared_geo(|id| ids.contains(id) || absorbed(id));
     }
 
     pub fn filter(&self) -> &ConnectionFilter {

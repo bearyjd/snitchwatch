@@ -17,10 +17,7 @@
 
 pub use super::geo_scope::GeoScope;
 use snitchwatch_bridge::ws_messages::ConnectionRow;
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-};
+use std::{collections::HashMap, sync::Arc};
 
 use super::geo_scope::GeoIdentity;
 use super::row_store::Verdict;
@@ -190,9 +187,9 @@ impl ConnectionFilter {
     pub fn clear_prepared_geo(&mut self) {
         self.prepared_geo = Some(Arc::new(HashMap::new()));
     }
-    pub fn retain_prepared_geo(&mut self, ids: &HashSet<&str>) {
+    pub fn retain_prepared_geo(&mut self, keep: impl Fn(&str) -> bool) {
         if let Some(facts) = &mut self.prepared_geo {
-            Arc::make_mut(facts).retain(|id, _| ids.contains(id.as_str()));
+            Arc::make_mut(facts).retain(|id, _| keep(id));
         }
     }
     pub fn geo_scope(&self) -> Option<&GeoScope> {

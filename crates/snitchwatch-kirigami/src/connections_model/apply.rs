@@ -172,7 +172,10 @@ impl qobject::ConnectionsModel {
             if rust.store.is_filtered() {
                 rust.store.recompute_visible();
             }
-            rust.store.prune_prepared_geo();
+            let ConnectionsModelRust {
+                store, collapse, ..
+            } = &mut *rust;
+            store.prune_prepared_geo(|id| collapse.contains_absorbed(id));
         }
         self.as_mut().rebuild_grouped_projection();
         unsafe {
@@ -205,7 +208,13 @@ impl qobject::ConnectionsModel {
         for msg in msgs {
             self.as_mut().apply_rewritten(msg);
         }
-        self.as_mut().rust_mut().store.prune_prepared_geo();
+        {
+            let mut rust = self.as_mut().rust_mut();
+            let ConnectionsModelRust {
+                store, collapse, ..
+            } = &mut *rust;
+            store.prune_prepared_geo(|id| collapse.contains_absorbed(id));
+        }
         self.as_mut().refresh_counts();
         self.maybe_auto_select(&new_pending_ids);
     }

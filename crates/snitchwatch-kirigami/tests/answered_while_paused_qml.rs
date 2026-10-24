@@ -87,9 +87,17 @@ Window {
         list.forceLayout();
         const found = [];
         for (let i = 0; i < list.count; i++) {
+            // Materialize the real row/header before reading it. The map is
+            // resizable, so this fixture must not depend on viewport height.
+            list.positionViewAtIndex(i, ListView.Contain);
+            list.forceLayout();
             const item = list.itemAtIndex(i);
             if (item) {
-                found.push(item);
+                // Primitive keys survive delegate pooling while we scroll.
+                found.push({isGroupHeader:item.isGroupHeader,depth:item.depth,
+                    expanded:item.expanded,groupLevel:item.groupLevel,
+                    groupKey:item.groupKey,groupParentKey:item.groupParentKey,
+                    groupProcessKey:item.groupProcessKey,rowId:item.rowId});
             }
         }
         return found;
@@ -114,9 +122,14 @@ Window {
             waiting: "pending",
             newer: "allowed"
         };
-        const shown = probeWindow.delegates();
+        const list=page.connectionList;
         for (const id of Object.keys(expected)) {
-            const item = shown.find(d => !d.isGroupHeader && d.rowId === id);
+            const index=connModel.visibleRowIndex(id);
+            if (index>=0) {
+                list.positionViewAtIndex(index,ListView.Contain);
+                list.forceLayout();
+            }
+            const item=index>=0 ? list.itemAtIndex(index) : null;
             if (!item) {
                 probeWindow.failures.push(view + ": no row delegate for " + id);
                 continue;

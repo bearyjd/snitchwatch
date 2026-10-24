@@ -28,6 +28,7 @@ import com.snitchwatch.shell
 Window {
     id: root;visible:true;width:1000;height:800
     ConnectionsModel {id:conn}
+    ConnectionsModel {id:repeats}
     ConnectionsPage {id:page;anchors.fill:parent;model:conn;geoModel:geo}
     QtObject {
         id:geo
@@ -47,6 +48,25 @@ Window {
     }
     Timer {interval:100;running:true;onTriggered:{
         try {
+            repeats.setGroupedMode(false);
+            function event(id,ip,started) {return {id:id,process:"browser",processPath:"/usr/bin/browser",dstHost:"repeat.example",dstIp:ip,dstPort:443,protocol:"tcp",direction:"outgoing",action:"allow",bytesSent:0,bytesReceived:0,startedAtMs:started};}
+            function repeatMessage(action,rows) {repeats.applyServerMessageJson(JSON.stringify({action:action,rows:rows}));}
+            const local="192.168.1.1",nextLocal="192.168.1.2";
+            repeatMessage("insertConnectionRows",[event("event-a",local,1000),event("event-b",local,1001)]);
+            check(repeats.totalCount===1,"fixture must collapse two event rows");
+            repeats.setGeoScope("ip","ip:"+local);
+            repeats.applyServerMessageJson(JSON.stringify({action:"removeConnectionRows",ids:["event-a"]}));
+            check(repeats.matchingCount===1 && repeats.rowIdAt(0)==="event-b","promoted repeat retains prepared exact-IP facts");
+            repeats.setGeoScope("city","local:unknown-city");check(repeats.matchingCount===1,"promoted repeat retains unavailable-city facts");
+            repeats.setGeoScope("country","local");check(repeats.matchingCount===1,"promoted repeat retains country facts");
+            repeats.applyServerMessageJson(JSON.stringify({action:"clearConnectionRows"}));
+            repeats.setGeoScope("","");
+            repeatMessage("insertConnectionRows",[event("event-c",local,2000),event("event-d",local,2001)]);
+            repeatMessage("updateConnectionRows",[event("event-c",nextLocal,2002)]);
+            repeats.setGeoScope("ip","ip:"+local);
+            check(repeats.matchingCount===1 && repeats.rowIdAt(0)==="event-d","key-change release retains old member identity");
+            repeats.setGeoScope("ip","ip:"+nextLocal);
+            check(repeats.matchingCount===1 && repeats.rowIdAt(0)==="event-c","updated representative gets new identity");
             conn.setGroupedMode(false);
             insert("1.1.1.1","browser","1.1.1.1");insert("11.1.1.1","browser","11.1.1.1");insert("other","other","1.1.1.1");
             conn.setFilterQuery("app:browser");check(conn.count===2 && conn.matchingCount===2,"fixture rows/search leaves");

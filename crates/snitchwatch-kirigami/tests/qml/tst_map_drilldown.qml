@@ -45,6 +45,7 @@ Item {
             return {version:1,observedConnections:2,countries:{"country:US":{key:"country:US",code:"US",name:"United States",counts:counts,cities:{"city:one":city,"country:US:unknown-city":fallback}}}};
         }
         function init() {
+            map.width=900;map.height=450;
             map.geoModel=geo;
             geo.data = data();
             connections.geoScopeKind = ""; connections.geoScopeKey = "";
@@ -71,6 +72,17 @@ Item {
             const polar = map.camera.project(1900,50);
             verify(polar.y >= 0 && polar.y <= map.height,"polar point can be focused beyond former cropped map");
             map.clearScope(); compare(connections.geoScopeKind,""); compare(connections.filterText,"app:browser");
+        }
+        function test_scale_bucket_never_uses_a_larger_than_actual_scale() {
+            const next=data(),ips=next.countries["country:US"].cities["city:one"].ips;
+            ips["ip:8.8.8.8"].coordinates={latitude:0,longitude:-80};
+            ips["ip:8.8.4.4"].coordinates={latitude:0,longitude:-47.9};
+            for (const ip of Object.values(ips)) ip.counts={total:1000,allowed:1000,denied:0,pending:0};
+            geo.data=next;geo.hierarchyChanged();wait(10);
+            map.width=504;map.height=252;map.camera.reset();
+            connections.setGeoScope("city","city:one");wait(10);map.refresh();
+            compare(map.markers.length,1,"non-exact resize bucket must merge buttons that overlap at actual scale");
+            map.clearScope();
         }
         function test_global_city_labels_include_country_context() {
             const unavailable=map.hierarchy.byKey["country:US:unknown-city"];

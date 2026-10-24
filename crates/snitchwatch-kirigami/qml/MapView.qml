@@ -193,7 +193,7 @@ Item {
         view.loadHierarchy();
         view.updateSemanticLevel();
         if (hierarchy.available) {
-            const bucket=Math.round(Math.log(Math.max(view.mapScale,0.001))/Math.LN2*4);
+            const bucket=Math.floor(Math.log(Math.max(view.mapScale,0.001))/Math.LN2*4);
             const cacheKey=hierarchy.revision+":"+semanticLevel+":"+activeGeoScope.kind+":"+activeGeoScope.key+":"+bucket;
             if (!semanticCache[cacheKey] && Object.keys(semanticCache).length>=8) semanticCache={};
             if (!semanticCache[cacheKey]) semanticCache[cacheKey]=hierarchy.clusters(
