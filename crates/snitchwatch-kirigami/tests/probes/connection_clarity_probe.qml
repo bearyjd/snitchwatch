@@ -93,7 +93,7 @@ Window {
             expect(!!explanation, "missing factual explanation");
             if (explanation) {
                 expect(explanation.textFormat === Text.PlainText, "explanation renders markup");
-                for (const value of [path, host, ip, "443", "tcp", "recorded-rule", "recorded", "current policy"])
+                for (const value of [path, host, ip, "443", "tcp", "recorded-rule", "recorded", "Current rules may differ"])
                     expect(explanation.text.indexOf(value)>=0, "explanation missing " + value + ": " + explanation.text);
                 expect(explanation.text.indexOf("friendly label")<0, "display name presented as executable");
             }
@@ -247,6 +247,26 @@ Window {
             page.connectionActions.decide("allow");
             const actual=feed.submitted.slice().sort((a,b)=>a[0].localeCompare(b[0]));
             expect(JSON.stringify(actual)===JSON.stringify([["group-known","allow","this_host","for_5_minutes",true],["group-unknown","allow","this_host","this_time",false]]),"heterogeneous group payload differs: " + JSON.stringify(actual));
+            // The producer substitutes IP into dstHost when DNS is absent.
+            const ipOnly=row("ip-only",path,ip,ip,443); ipOnly.action=null;
+            rows.applyServerMessageJson(JSON.stringify({action:"insertConnectionRows",rows:[ipOnly]}));
+            rows.pendingRowIdsForProcess("");
+            const payload=page.inlineVerdicts.payloadFor("ip-only","allow");
+            const description=page.inlineVerdicts.scopeFor(payload);
+            expect(description.indexOf("recorded destination host/IP")>=0 && description.indexOf(ip)>=0
+                   && description.indexOf("exact host " + ip)<0,"IP fallback misclassified: " + description);
+            expect(description.indexOf("any port")>=0 && description.indexOf("any protocol")>=0
+                   && payload.scope==="this_host" && payload.duration==="for_5_minutes","IP fallback changed scope/duration");
+            page.connectionActions.close();
+            rows.setGroupedMode(false);
+        },
+        function () {
+            tc.mouseClick(delegate("ip-only"),2,2);
+            const explanation=find(page,"connectionExplanation");
+            expect(explanation && explanation.text.indexOf("recorded destination host/IP " + ip)>=0,
+                   "IP fallback explanation claims hostname provenance: " + (explanation ? explanation.text : "missing"));
+            checkCopy("copyHost",ip);
+            checkCopy("copyIp",ip);
         }
     ]
     Timer {

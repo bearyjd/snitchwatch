@@ -104,9 +104,10 @@ QtObject {
     }
 
     function scopeFor(payload) {
-        const destination = payload.host !== "" ? "exact host " + payload.host
-            : payload.ip !== "" ? "exact IP " + payload.ip : "destination unknown";
-        return "Recorded executable: " + (payload.processPath || "unknown") + "; " + destination
+        // dstHost can be the producer's IP fallback; it carries no DNS provenance.
+        const destination = payload.host || payload.ip || "unknown";
+        return "Recorded executable: " + (payload.processPath || "unknown")
+            + "; recorded destination host/IP: " + destination
             + "; any port; any protocol. "
             + (payload.bindableProcessPath && payload.appBoundRules
                 ? "Remembered rules bind to this executable."

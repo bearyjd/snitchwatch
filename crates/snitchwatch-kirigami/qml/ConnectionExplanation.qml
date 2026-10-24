@@ -11,9 +11,9 @@ Controls.Label {
     wrapMode: Text.WrapAnywhere
     function known(value) { return value === undefined || value === null || value === "" || value === 0 ? "unknown" : String(value); }
     text: "What is this?\nThe recorded executable " + known(snapshot.processPath)
-        + " has destination host " + known(snapshot.dstHost) + " (IP " + known(snapshot.dstIp)
+        + " has recorded destination host/IP " + known(snapshot.dstHost) + " (IP " + known(snapshot.dstIp)
         + "), port " + known(snapshot.dstPort) + ", protocol " + known(snapshot.protocol) + ".\n"
         + "Recorded verdict: " + known(recordedVerdict) + ". Recorded matched rule: " + known(snapshot.matchedRule)
         + ". These fields come from the connection record. They do not identify an owner, reputation or purpose. "
-        + "The recorded verdict does not replay current policy. Missing fields remain unknown."
+        + "These details describe the recorded connection. Current rules may differ."
 }
