@@ -61,18 +61,12 @@ fn the_bridge_banner_is_plain_text_and_says_the_right_thing_in_every_link_state(
     for (url, ok) in loaded {
         assert!(ok, "banner probe {url} failed to load (QML parse error)");
     }
-    // `main.qml` creates its pages before a page stack holds them, which Qt
-    // reports once per page outside an event loop. That predates this check
-    // and says nothing about the banner.
     let bad_lines: Vec<&str> = captured
         .lines()
         .filter(|line| {
             line.contains(PROBE_URL)
                 || line.contains(STATES_PROBE_URL)
                 || line.contains(SHELL_QML_PREFIX)
-        })
-        .filter(|line| {
-            !line.ends_with("Created graphical object was not placed in the graphics scene.")
         })
         .collect();
     assert!(
