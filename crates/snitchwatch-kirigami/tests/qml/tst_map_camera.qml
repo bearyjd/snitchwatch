@@ -21,12 +21,12 @@ Item {
             if (splitOnZoom) {
                 const de = { code: "DE", name: "Germany", total: 1, summary: "1 allowed" };
                 const fr = { code: "FR", name: "France", total: 1, summary: "1 allowed" };
-                if (scale < 0.5) return JSON.stringify([{ x: 1800, y: 780, total: 2, dominant: "allowed", mixed: false,
+                if (scale < 0.5) return JSON.stringify([{ x: 1800, y: 900, total: 2, dominant: "allowed", mixed: false,
                     summary: "2 countries", members: [de, fr] }]);
-                return JSON.stringify([de, fr].map((m, i) => ({ x: 1600 + i * 400, y: 780,
+                return JSON.stringify([de, fr].map((m, i) => ({ x: 1600 + i * 400, y: 900,
                     total: 1, dominant: "allowed", mixed: false, summary: m.name, members: [m] })));
             }
-            return JSON.stringify([{ x: 1800, y: 780, total: 1, dominant: "allowed", mixed: false,
+            return JSON.stringify([{ x: 1800, y: 900, total: 1, dominant: "allowed", mixed: false,
                 summary: "Germany: 1 allowed", members: [{ code: "DE", name: "Germany", total: 1, summary: "1 allowed" }] }]);
         }
     }
@@ -64,7 +64,7 @@ Item {
             map.refresh();
             map.camera.minimumZoom = 1;
             map.camera.maximumZoom = 16;
-            MapBandState.camera = { zoom: 1, x: 1800, y: 780 };
+            MapBandState.camera = { zoom: 1, x: 1800, y: 900 };
         }
         function test_cluster_focus_splits_with_effective_scale() {
             geo.splitOnZoom = true;
@@ -85,7 +85,7 @@ Item {
             near(map.camera.project(1900, 800).x, 450, "focused x");
             near(map.camera.project(1900, 800).y, 200, "focused y");
             verify(map.camera.fitBounds(1500, 600, 2100, 960, 20));
-            near(map.camera.zoom, 4, "360 grid units fit in 360 viewport pixels");
+            near(map.camera.zoom, 4.5, "360 grid units fit in 360 viewport pixels");
             near(map.camera.project(1500, 600).x, 150, "fit west");
             near(map.camera.project(2100, 960).y, 380, "fit south");
             verify(!map.camera.fitBounds(3500, 600, 100, 960, 20), "wrapped extent requires explicit caller policy");
@@ -96,9 +96,9 @@ Item {
         function test_small_viewport_and_collapsed_geometry_stay_finite() {
             map.width = 1;
             map.height = 1;
-            map.camera.focusPoint(3600, 1500, 16);
-            near(map.camera.project(3600, 1500).x, 1, "tiny viewport east bound");
-            near(map.camera.project(3600, 1500).y, 1, "tiny viewport south bound");
+            map.camera.focusPoint(3600, 1800, 16);
+            near(map.camera.project(3600, 1800).x, 1, "tiny viewport east bound");
+            near(map.camera.project(3600, 1800).y, 1, "tiny viewport south bound");
             map.width = 0;
             map.height = 0;
             map.camera.zoomAt(2, 0, 0);
@@ -108,7 +108,7 @@ Item {
             map.width = 900;
             map.height = 400;
             map.camera.reset();
-            near(map.camera.project(1800, 780).x, 450, "reopened viewport midpoint");
+            near(map.camera.project(1800, 900).x, 450, "reopened viewport midpoint");
         }
         function test_controls_and_session_restore() {
             const component = Qt.createComponent("../../qml/MapBand.qml");
@@ -138,12 +138,12 @@ Item {
             compare(connections.query, "app:browser", "controls preserve search");
         }
         function test_projection_and_alignment() {
-            near(map.mapScale, 0.25, "independent 900/3600 fit scale");
-            const origin = map.camera.project(0, 60);
-            near(origin.x, 0, "cropped origin x");
-            near(origin.y, 20, "cropped origin y");
+            near(map.mapScale, 2/9, "independent 900/3600 fit scale");
+            const origin = map.camera.project(0, 0);
+            near(origin.x, 50, "cropped origin x");
+            near(origin.y, 0, "cropped origin y");
             map.camera.zoomAt(2, 450, 200);
-            const point = map.camera.project(1800, 780);
+            const point = map.camera.project(1800, 900);
             near(point.x, 450, "grid midpoint x");
             near(point.y, 200, "cropped midpoint y");
             const marker = map.markerRepeater.itemAt(0);
@@ -151,14 +151,14 @@ Item {
             near(marker.y + marker.height / 2, point.y, "marker y matches geometry projection");
             near(map.landItem.x, map.camera.project(0, 0).x, "shape shares x transform");
             near(map.landItem.y, map.camera.project(0, 0).y, "shape shares y transform");
-            tryVerify(() => Math.abs(geo.lastScale - 0.5) < 0.001);
+            tryVerify(() => Math.abs(geo.lastScale - 4/9) < 0.001);
         }
         function test_zoom_keeps_country_borders_readable() {
             const outline = map.landItem.data[0];
             verify(outline && outline.strokeWidth !== undefined, "production country outline exists");
-            near(outline.strokeWidth * map.mapScale, 1.25, "fitted-world stroke width");
+            near(outline.strokeWidth * map.mapScale, 10/9, "fitted-world stroke width");
             map.camera.zoomAt(16, 450, 200);
-            near(outline.strokeWidth * map.mapScale, 1.25, "zoomed outline stays at fitted-world screen width");
+            near(outline.strokeWidth * map.mapScale, 10/9, "zoomed outline stays at fitted-world screen width");
         }
         function test_clipped_markers_leave_keyboard_traversal() {
             const marker = map.markerRepeater.itemAt(0);
@@ -188,7 +188,7 @@ Item {
             map.camera.zoomAt(1e-6, 450, 200);
             compare(map.camera.zoom, 1);
             near(map.camera.centerX, 1800, "fit horizontal center");
-            near(map.camera.centerY, 780, "fit vertical center");
+            near(map.camera.centerY, 900, "fit vertical center");
         }
         function test_drag_marker_cancels_click_and_bounds() {
             map.camera.zoomAt(4, 450, 200);
@@ -197,11 +197,11 @@ Item {
             verify(map.camera.centerX < 1800, "drag starting over marker pans the map");
             compare(connections.query, "app:browser", "drag must not activate country filter");
             map.camera.panBy(1e6, 1e6);
-            near(map.camera.project(0, 60).x, 0, "pan cannot expose west edge");
-            near(map.camera.project(0, 60).y, 0, "pan cannot expose north edge");
+            near(map.camera.project(0, 0).x, 0, "pan cannot expose west edge");
+            near(map.camera.project(0, 0).y, 0, "pan cannot expose north edge");
             map.camera.panBy(-2e6, -2e6);
-            near(map.camera.project(3600, 1500).x, 900, "pan cannot expose east edge");
-            near(map.camera.project(3600, 1500).y, 400, "pan cannot expose south edge");
+            near(map.camera.project(3600, 1800).x, 900, "pan cannot expose east edge");
+            near(map.camera.project(3600, 1800).y, 400, "pan cannot expose south edge");
         }
         function test_country_click_keyboard_reset_and_resize() {
             const marker = map.markerRepeater.itemAt(0);
@@ -222,7 +222,7 @@ Item {
             keyClick(Qt.Key_Home);
             compare(map.camera.zoom, 1);
             near(map.camera.centerX, 1800, "reset longitude");
-            near(map.camera.centerY, 780, "reset latitude");
+            near(map.camera.centerY, 900, "reset latitude");
             compare(connections.query, "country:DE", "camera reset retains country filter");
         }
         function test_touch_pinch() {
@@ -237,12 +237,12 @@ Item {
             touch.move(0, map, 250, 140).move(1, map, 650, 260).commit();
             wait(30);
             verify(map.camera.zoom > 2, "real two-finger pinch zooms production map");
-            near(map.camera.project(1800, 780).x, 450, "pinch center x");
-            near(map.camera.project(1800, 780).y, 200, "pinch center y");
+            near(map.camera.project(1800, 900).x, 450, "pinch center x");
+            near(map.camera.project(1800, 900).y, 200, "pinch center y");
             touch.move(0, map, 270, 150).move(1, map, 670, 270).commit();
             wait(30);
-            near(map.camera.project(1800, 780).x, 470, "two-finger translation x");
-            near(map.camera.project(1800, 780).y, 210, "two-finger translation y");
+            near(map.camera.project(1800, 900).x, 470, "two-finger translation x");
+            near(map.camera.project(1800, 900).y, 210, "two-finger translation y");
             touch.release(0, map, 270, 150).release(1, map, 670, 270).commit();
         }
     }

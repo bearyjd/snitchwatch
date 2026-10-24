@@ -1,13 +1,6 @@
-// The world map itself: country shapes plus clustered verdict markers.
-//
-// Shapes are one SVG path string from Rust (GeoModel.landPath, Natural Earth
-// 110m on a 0.1 degree equirectangular grid), drawn with a single ShapePath;
-// nothing is loaded from disk or the network here. Markers come from
-// GeoModel.clustersJson, which merges nearby countries at the current scale.
-// Clicking a country filters the Connections list (`country:XX`); clicking a
-// cluster focuses its existing aggregate location and lists its countries.
-//
-// `markers` is a plain JS array property so a probe can set it directly.
+// Observed country → city → IP map with one shared camera transform.
+// Hierarchy snapshots are coalesced and cached independently of navigation.
+// Country-only models retain the original cluster interface for isolated probes.
 import QtQuick
 import QtQuick.Shapes
 import QtQuick.Controls as Controls
@@ -20,14 +13,13 @@ Item {
     // GeoModel and ConnectionsModel; either may be null (isolated tests).
     property var geoModel: null
     property var connectionsModel: null
+    property bool ready: false
     // Animations are off when the platform asks for none (animation speed 0
     // reports longDuration 0). A probe can force it.
     property bool reducedMotion: Kirigami.Units.longDuration <= 1
     // Clusters, as parsed from GeoModel.clustersJson.
     property var markers: []
-    // Marker delegates live in `markerModel`, keyed by the cluster's first
-    // country, so a refresh updates them in place instead of recreating them
-    // (a recreated marker would forget its pulse throttle).
+    // Stable membership fingerprints preserve delegates and pulse throttles.
     property var clusterByKey: ({})
     // Country code -> its cluster's key, so a pulse needs no scan of members.
     property var keyByCode: ({})
@@ -43,8 +35,50 @@ Item {
     // Markers within this many pixels merge.
     property real mergeRadius: Kirigami.Units.gridUnit * 2.5
 
-    // Visible slice of the 3600x1800 grid: Antarctica and the high Arctic are
-    // cropped so the inhabited world gets the band.
+    property alias hierarchy: hierarchy
+    property alias activeGeoScope: drilldown.activeGeoScope
+    property alias highlightedDestinations: drilldown.highlightedDestinations
+    property alias highlightedRows: drilldown.highlightedRows
+    property alias highlightedKeys: drilldown.highlightedKeys
+    property int semanticLevel: 0
+    property bool hierarchyDirty: true
+    property var countryAnchors: []
+    property var semanticCache: ({})
+    readonly property var scopeNodes: hierarchy.available ? hierarchy.children(activeGeoScope.kind,activeGeoScope.key) : []
+    MapHierarchy { id: hierarchy }
+    MapDrilldown { id: drilldown; mapView: view }
+
+    function loadHierarchy() {
+        if (!hierarchyDirty || !geoModel || typeof geoModel.hierarchyJson !== "function") return;
+        hierarchyDirty=false;
+        try {
+            // Country anchors are retained only as country-level fallbacks.
+            countryAnchors=JSON.parse(geoModel.clustersJson(100,0,0));
+            hierarchy.load(JSON.parse(geoModel.hierarchyJson()),countryAnchors);
+            semanticCache={};
+            highlightRows(highlightedRows);
+        } catch (error) { console.warn("Geographic snapshot unavailable: "+error); }
+    }
+    function updateSemanticLevel() {
+        if (activeGeoScope.kind==="city" || activeGeoScope.kind==="ip") { semanticLevel=2;return; }
+        const zoom=camera.zoom;
+        if (semanticLevel===0 && zoom>=3) semanticLevel=1;
+        else if (semanticLevel===1 && zoom<2.4) semanticLevel=0;
+        else if (semanticLevel===1 && zoom>=10) semanticLevel=2;
+        else if (semanticLevel===2 && zoom<8) semanticLevel=zoom<2.4 ? 0 : 1;
+        if (activeGeoScope.kind==="country") semanticLevel=Math.max(1,semanticLevel);
+    }
+    // Keep the map's public interaction surface while its controller owns
+    // semantic scope and selection state independently of display delegates.
+    function focusNodes(nodes, nextZoom) { drilldown.focusNodes(nodes,nextZoom); }
+    function selectNode(node) { drilldown.selectNode(node); }
+    function syncScopeFromModel() { drilldown.syncScopeFromModel(); }
+    function clearScope() { drilldown.clearScope(); }
+    function scopeBack() { drilldown.scopeBack(); }
+    function highlightRows(ids) { drilldown.highlightRows(ids); }
+    function isHighlighted(cluster) { return drilldown.isHighlighted(cluster); }
+
+    // The full equirectangular world includes polar database estimates.
     readonly property real gridWidth: camera.gridWidth
     readonly property real gridTop: camera.gridTop
     readonly property real gridHeight: camera.gridHeight
@@ -73,7 +107,7 @@ Item {
         Qt.alpha(Kirigami.Theme.textColor, 0.16))
     readonly property color borderColor: Qt.alpha(Kirigami.Theme.textColor, 0.22)
 
-    Accessible.name: "World map of connection destinations by approximate country"
+    Accessible.name: "World map of observed connection destinations by approximate database location"
     Accessible.role: Accessible.Graphic
     clip: true
     activeFocusOnTab: true
@@ -93,7 +127,18 @@ Item {
     // Rebuild the clusters now. A model reset arrives on every connection
     // event, so callers go through requestRefresh().
     function refresh() {
+        if (!view.ready) return;
         view.refreshCount++;
+        view.loadHierarchy();
+        view.updateSemanticLevel();
+        if (hierarchy.available) {
+            const bucket=Math.floor(Math.log(Math.max(view.mapScale,0.001))/Math.LN2*4);
+            const cacheKey=hierarchy.revision+":"+semanticLevel+":"+activeGeoScope.kind+":"+activeGeoScope.key+":"+bucket;
+            if (!semanticCache[cacheKey] && Object.keys(semanticCache).length>=8) semanticCache={};
+            if (!semanticCache[cacheKey]) semanticCache[cacheKey]=hierarchy.clusters(
+                hierarchy.nodes(semanticLevel,activeGeoScope.kind,activeGeoScope.key),Math.pow(2,bucket/4),Math.max(markerGap,Kirigami.Units.gridUnit*2.2+Kirigami.Units.smallSpacing*2));
+            view.applyClusters(semanticCache[cacheKey]);return;
+        }
         if (!view.geoModel) {
             view.applyClusters([]);
             return;
@@ -123,11 +168,23 @@ Item {
     // Update `markers`, and sync `markerModel` in place: keep delegates whose
     // key survives, add or remove only the difference.
     function applyClusters(clusters) {
+        // Bound labels separately from geography. Nearby button centers never
+        // acquire invented positions; long names elide and remain in the tip.
+        for (const cluster of clusters) {
+            let labelWidth=160;
+            for (const other of clusters) {
+                if (other===cluster) continue;
+                const dx=Math.abs(cluster.x-other.x)*view.mapScale;
+                const dy=Math.abs(cluster.y-other.y)*view.mapScale;
+                if (dy<28 && other.members.length===1) labelWidth=Math.min(labelWidth,dx-8);
+            }
+            cluster.labelWidth=Math.max(0,labelWidth);
+        }
         const byKey = {};
         const byCode = {};
         const keys = [];
         for (const c of clusters) {
-            const key = c.members[0].code;
+            const key = c.key || c.members[0].code;
             byKey[key] = c;
             keys.push(key);
             for (const m of c.members) {
@@ -158,8 +215,11 @@ Item {
         }
     }
     onMapScaleChanged: requestRefresh()
-    onGeoModelChanged: requestRefresh()
-    Component.onCompleted: requestRefresh()
+    onGeoModelChanged: { hierarchy.clear();semanticCache={};hierarchyDirty=true;requestRefresh(); }
+    Component.onCompleted: {
+        view.ready=true;
+        view.requestRefresh();
+    }
 
     Timer {
         id: refreshCooldown
@@ -178,6 +238,7 @@ Item {
         target: view.geoModel
         ignoreUnknownSignals: true
         function onModelReset() { view.requestRefresh(); }
+        function onHierarchyChanged() { view.hierarchyDirty=true; view.requestRefresh(); }
         function onCountryActivity(code) { view.pulse(code, Date.now()); }
     }
 
@@ -192,10 +253,11 @@ Item {
     // countries.
     function activate(cluster, anchor) {
         if (cluster.members.length === 1) {
-            view.filterCountry(cluster.members[0].code);
+            if (hierarchy.available) view.selectNode(cluster.members[0]);
+            else view.filterCountry(cluster.members[0].code);
         } else {
             view.openCountryMenu(cluster.members, anchor);
-            camera.focusPoint(cluster.x, cluster.y, camera.zoom * 2);
+            if (!hierarchy.available || cluster.members.some(m=>m.kind!=="ip")) camera.focusPoint(cluster.x, cluster.y, camera.zoom * 2);
         }
     }
 
@@ -203,15 +265,12 @@ Item {
     // alternative to hitting the markers.
     function openCountryMenu(members, anchor) {
         countryMenu.members = members;
-        if (anchor) {
-            countryMenu.popup(anchor, 0, anchor.height);
-        } else {
-            countryMenu.popup();
-        }
+        countryMenu.popup(anchor);
     }
 
     // All countries currently shown, busiest first.
     function allMembers() {
+        if (hierarchy.available) return hierarchy.countries;
         const out = [];
         for (const c of view.markers) {
             for (const m of c.members) {
@@ -283,6 +342,9 @@ Item {
             required property string key
             cluster: view.clusterByKey[key] || emptyCluster
             reducedMotion: view.reducedMotion
+            highlighted: view.isHighlighted(cluster)
+            labelWidth: Math.max(0,Math.min(cluster.labelWidth===undefined ? 160 : cluster.labelWidth,
+                2*(mk.x+mk.width/2-4),2*(view.width-mk.x-mk.width/2-4)))
             x: view.mapLeft + cluster.x * view.mapScale - width / 2
             y: view.mapTop + (cluster.y - view.gridTop) * view.mapScale - height / 2
             enabled: x + width > 0 && y + height > 0 && x < view.width && y < view.height
@@ -306,6 +368,8 @@ Item {
             textFormat: Text.PlainText
             wrapMode: Text.Wrap
             text: view.dbMissing ? "No GeoIP database installed"
+                : hierarchy.available && activeGeoScope.kind!=="" && scopeNodes.length===0 ? "No observed destinations in this scope"
+                : hierarchy.available && hierarchy.snapshot.observedConnections>0 ? "No coordinates for these destinations"
                 : (view.geoModel ? "No destinations to place yet" : "No map data")
         }
         Controls.Label {
@@ -316,21 +380,17 @@ Item {
             font: Kirigami.Theme.smallFont
             text: view.dbMissing
                 ? "Place a GeoLite2-Country.mmdb file at the path shown on the Geography page. Snitchwatch never downloads one automatically."
-                : "Markers appear here as connections to public addresses are seen."
+                : hierarchy.available && view.empty
+                  ? "Use Destinations for observed IPs without coordinates, or World / Back to change geographic scope."
+                  : "Markers appear here as connections to public addresses are seen."
         }
     }
 
-    Controls.Menu {
+    MapDestinationsPopup {
         id: countryMenu
-        property var members: []
-        Repeater {
-            model: countryMenu.members
-            delegate: Controls.MenuItem {
-                required property var modelData
-                // Names come from the GeoIP file: plain text only.
-                text: modelData.name + " (" + modelData.summary + ")"
-                onTriggered: view.filterCountry(modelData.code)
-            }
+        onSelected: node => {
+            if (hierarchy.available) view.selectNode(node);
+            else view.filterCountry(node.code);
         }
     }
 }

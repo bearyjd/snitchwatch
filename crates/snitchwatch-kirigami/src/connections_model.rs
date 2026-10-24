@@ -25,7 +25,7 @@ use cxx_qt_lib::{
 };
 
 use crate::connections::collapse::RowCollapse;
-use crate::connections::filter::ConnectionFilter;
+use crate::connections::filter::{ConnectionFilter, GeoScope};
 use crate::connections::grouping::{GroupTree, VisibleEntry};
 use crate::connections::level_rules::{LevelFinished, LevelRules};
 use crate::connections::outcome::{is_pending, outcome_text};
@@ -41,6 +41,7 @@ use snitchwatch_bridge::ws_messages::{AutoAnswer, ConnectionRow, ServerMessage};
 pub(crate) mod level_rule_actions;
 
 mod apply;
+mod geography;
 mod helpers;
 mod program_label;
 mod qt_interface;
@@ -78,6 +79,10 @@ pub mod qobject {
         /// Number of rows currently *visible* (after any active filter). This
         /// is what the bound `ListView` shows.
         #[qproperty(i32, count)]
+        /// Filtered connection leaves, independent of headers and collapse.
+        #[qproperty(i32, matching_count, cxx_name = "matchingCount")]
+        #[qproperty(QString, geo_scope_kind, cxx_name = "geoScopeKind")]
+        #[qproperty(QString, geo_scope_key, cxx_name = "geoScopeKey")]
         /// Number of rows still awaiting a decision, across the *whole* store
         /// (independent of the filter) — drives the pending badge/tray.
         #[qproperty(i32, pending_count, cxx_name = "pendingCount")]
@@ -145,6 +150,10 @@ pub mod qobject {
             status: QString,
         );
 
+        #[qsignal]
+        #[cxx_name = "geographicSelectionRequested"]
+        fn geographic_selection_requested(self: Pin<&mut ConnectionsModel>, id: QString);
+
         // --- QAbstractListModel overrides -----------------------------------
         #[qinvokable]
         #[cxx_override]
@@ -184,6 +193,18 @@ pub mod qobject {
         #[qinvokable]
         #[cxx_name = "setFilterQuery"]
         fn set_filter_query(self: Pin<&mut ConnectionsModel>, query: &QString);
+
+        /// Apply an exact geographic scope AND existing search. Empty clears
+        /// geography only; invalid input retains the previous scope.
+        #[qinvokable]
+        #[cxx_name = "setGeoScope"]
+        fn set_geo_scope(self: Pin<&mut ConnectionsModel>, kind: &QString, key: &QString) -> bool;
+
+        /// Stable IDs under the selected visible row/app/domain/host, with
+        /// existing search and geographic scope applied.
+        #[qinvokable]
+        #[cxx_name = "destinationRowIdsJson"]
+        fn destination_row_ids_json(self: &ConnectionsModel, index: i32) -> QString;
 
         /// Toggle "show only pending rows".
         #[qinvokable]
@@ -565,6 +586,12 @@ pub struct ConnectionsModelRust {
     /// the `#[cxx_qt::bridge]` block. Defaults to `true` (grouped view).
     grouped: bool,
     count: i32,
+    matching_count: i32,
+    geo_scope_kind: QString,
+    geo_scope_key: QString,
+    // Only explicit JSON/demo injection uses synchronous fixture preparation.
+    // The live bridge feed always supplies off-thread prepared facts.
+    fixture_geo_preparer: Option<crate::geo::prepared::GeoMessagePreparer>,
     pending_count: i32,
     total_count: i32,
     /// Backing field for the `oldestPendingAgeSecs` qproperty. See its doc
@@ -598,13 +625,19 @@ impl Default for ConnectionsModelRust {
     fn default() -> Self {
         Self {
             store: RowStore::with_filter(
-                ConnectionFilter::default().with_geo(crate::geo::shared_resolver()),
+                ConnectionFilter::default()
+                    .with_geo(crate::geo::shared_resolver())
+                    .prepared_only(),
             ),
             collapse: RowCollapse::default(),
             grouping: GroupTree::default(),
             grouped_projection: Vec::new(),
             grouped: true,
             count: 0,
+            matching_count: 0,
+            geo_scope_kind: QString::default(),
+            geo_scope_key: QString::default(),
+            fixture_geo_preparer: None,
             pending_count: 0,
             total_count: 0,
             oldest_pending_age_secs: -1,

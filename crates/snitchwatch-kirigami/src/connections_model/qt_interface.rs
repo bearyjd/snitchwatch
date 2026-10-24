@@ -208,6 +208,9 @@ impl qobject::ConnectionsModel {
             let _ = icons_thread.queue(|qobject| qobject.refresh_app_icons());
         });
         let session_handles = handles.clone();
+        let geo_preparer = std::sync::Mutex::new(crate::geo::prepared::GeoMessagePreparer::new(
+            crate::geo::shared_resolver(),
+        ));
         crate::bridge_dispatch::spawn_feed(
             &handles,
             "ConnectionsModel",
@@ -215,11 +218,21 @@ impl qobject::ConnectionsModel {
             move |connection_id, msg, _json| {
                 let mut msg = msg.clone();
                 qualify_connection_ids(&mut msg, connection_id);
+                if !session_handles.is_current_session(connection_id) {
+                    return;
+                }
+                // Retained facts cross the queue with the original all-row
+                // message. No resolver call is permitted in the Qt callback.
+                let prepared = geo_preparer
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .prepare(connection_id, &msg);
                 let session_handles = session_handles.clone();
-                let _ = qt_thread.queue(move |qobject| {
+                let _ = qt_thread.queue(move |mut qobject| {
                     if !session_handles.is_current_session(connection_id) {
                         return;
                     }
+                    qobject.as_mut().install_prepared_geo(prepared);
                     qobject.apply_message_for_session(msg, Some(connection_id));
                 });
             },

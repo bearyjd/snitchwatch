@@ -68,26 +68,33 @@ Window {
     property int hostIndex: -1
     // Ticks spent waiting for the current phase's rows (#151).
     property int waited: 0
-    // Rows each phase needs, every delegate created, before it runs.
+    // Materialize real virtualized rows one at a time; do not require every
+    // delegate to remain instantiated together in this short window.
     readonly property var rowsBefore: [0, 0, 1, 2, 4, 6]
+    function at(index) {
+        const list=probe.findList(page);
+        list.positionViewAtIndex(index,ListView.Contain);
+        list.forceLayout();
+        return list.itemAtIndex(index);
+    }
     function ready(rows) {
         const list = probe.findList(page);
         if (!list || list.count !== rows) return false;
         for (let i = 0; i < rows; ++i) {
-            if (list.itemAtIndex(i) === null) return false;
+            if (probe.at(i) === null) return false;
         }
         return true;
     }
     function levels() {
         const list = probe.findList(page);
         const out = [];
-        for (let i = 0; i < list.count; ++i) out.push(list.itemAtIndex(i).groupLevel);
+        for (let i = 0; i < list.count; ++i) out.push(probe.at(i).groupLevel);
         return out.join(",");
     }
     // Click the header at `index` the way a user would.
     function click(index) {
         const list = probe.findList(page);
-        const item = list.itemAtIndex(index);
+        const item = probe.at(index);
         probe.expect(item !== null && item.isGroupHeader, "no header at " + index);
         if (item) tc.mouseClick(item, 2, 2);
     }
@@ -134,7 +141,11 @@ Window {
                 } else if (probe.phase === 4) {
                     probe.expect(probe.levels() === "0,1,2,2", "after domain click: " + probe.levels());
                     const list = probe.findList(page);
-                    const hosts = [2, 3].map(i => list.itemAtIndex(i)).filter(it => it.groupLabel === "y.example.com");
+                    const hosts=[];
+                    for (const index of [2,3]) {
+                        const item=probe.at(index);
+                        if(item && item.groupLabel==="y.example.com") hosts.push({groupTotal:item.groupTotal,expanded:item.expanded,index:index});
+                    }
                     probe.expect(hosts.length === 1, "no y.example.com host row");
                     probe.expect(hosts[0].groupTotal === 2, "host count: " + hosts[0].groupTotal);
                     probe.expect(!hosts[0].expanded, "host should start collapsed");
@@ -143,15 +154,16 @@ Window {
                 } else if (probe.phase === 5) {
                     probe.expect(probe.levels().split(",").length === 6, "after host click: " + probe.levels());
                     const list = probe.findList(page);
-                    const hostItem = list.itemAtIndex(probe.hostIndex);
-                    probe.expect(hostItem.expanded, "host should be expanded");
-                    const item = list.itemAtIndex(probe.hostIndex + 1);
+                    const hostExpanded = probe.at(probe.hostIndex).expanded;
+                    probe.expect(hostExpanded, "host should be expanded");
+                    const item = probe.at(probe.hostIndex + 1);
                     probe.expect(item !== null && item.groupLevel === 3 && item.depth === 3,
                                  "no connection row under the host");
                     if (item) {
-                        probe.expect(page.inspectId !== item.rowId, "inspector open too early");
+                        const clickedId=item.rowId;
+                        probe.expect(page.inspectId !== clickedId, "inspector open too early");
                         tc.mouseClick(item, 2, 2);
-                        probe.expect(page.inspectId === item.rowId,
+                        probe.expect(page.inspectId === clickedId,
                                      "inspector did not open for the clicked row: '" + page.inspectId + "'");
                         probe.expect(list.currentIndex === item.index,
                                      "currentIndex not set: " + list.currentIndex);

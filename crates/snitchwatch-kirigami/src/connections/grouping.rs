@@ -417,6 +417,50 @@ impl GroupTree {
         self.pending_row_ids_for_group(process_key, 0, "", "")
     }
 
+    /// All descendants, including collapsed rows. Filtering belongs to the
+    /// caller, so highlighting never changes app/domain/host action targets.
+    pub fn row_ids_for_group(
+        &self,
+        process_key: &str,
+        level: i32,
+        key: &str,
+        parent_domain: &str,
+    ) -> Vec<String> {
+        let Some(pg) = self.processes.get(process_key) else {
+            return Vec::new();
+        };
+        pg.domain_order
+            .iter()
+            .filter_map(|key| pg.domains.get(key))
+            .flat_map(|domain| domain.row_order.iter())
+            .filter(|id| {
+                self.id_meta
+                    .get(id.as_str())
+                    .is_some_and(|meta| match level {
+                        0 => key.is_empty(),
+                        1 => meta.domain_key == key,
+                        2 => meta.host_key == key && meta.domain_key == parent_domain,
+                        _ => false,
+                    })
+            })
+            .cloned()
+            .collect()
+    }
+    /// An explicit IP map activation reveals one matching leaf.
+    pub fn reveal_row(&mut self, id: &str) {
+        let Some(meta) = self.id_meta.get(id) else {
+            return;
+        };
+        let (process, domain, host) = (
+            meta.process_key.clone(),
+            meta.domain_key.clone(),
+            meta.host_key.clone(),
+        );
+        self.set_process_expanded(&process, true);
+        self.set_domain_expanded(&process, &domain, true);
+        self.set_host_expanded(&process, &domain, &host, true);
+    }
+
     /// Pending descendants of a program (0), domain (1), or host (2).
     /// Includes collapsed and filtered descendants, but never another app.
     pub fn pending_row_ids_for_group(

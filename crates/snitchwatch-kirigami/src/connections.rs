@@ -9,6 +9,7 @@
 
 pub mod collapse;
 pub mod filter;
+pub mod geo_scope;
 pub mod grouping;
 pub mod level_rules;
 pub mod outcome;

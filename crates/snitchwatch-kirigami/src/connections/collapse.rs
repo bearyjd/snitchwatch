@@ -224,6 +224,12 @@ impl Out {
 }
 
 impl RowCollapse {
+    /// Absorbed accepted events can reappear after their representative is
+    /// removed or changes key. Their prepared geography must survive too.
+    pub fn contains_absorbed(&self, id: &str) -> bool {
+        self.member_of.contains_key(id)
+    }
+
     /// How many rows `id` stands for (1 when it absorbed none).
     pub fn repeat_count(&self, id: &str) -> usize {
         self.reps.get(id).map_or(1, |rep| 1 + rep.members.len())

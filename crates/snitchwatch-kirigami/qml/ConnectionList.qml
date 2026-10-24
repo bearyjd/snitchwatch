@@ -50,6 +50,17 @@ Item {
         cacheBuffer: 0
         Controls.ScrollBar.vertical: Controls.ScrollBar {}
 
+        // Explicit map selection belongs to the list that materializes the
+        // target. Keep the inspector/form guard and re-resolve the stable ID.
+        function selectGeographicRow(id) {
+            if (pane.page.inspecting) return;
+            const index=pane.page.model.visibleRowIndex(id);
+            if (index<0) return;
+            list.forceLayout();list.currentIndex=index;
+            const item=list.itemAtIndex(index);
+            if (item && !item.isGroupHeader) pane.page.openInspector(item);
+        }
+
         // Keyboard: Tab focuses the list, arrows move the selection (the wide
         // panel follows it), Enter opens it (the pushed page, when compact).
         focus: true

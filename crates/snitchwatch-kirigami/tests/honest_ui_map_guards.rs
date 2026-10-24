@@ -62,7 +62,7 @@ fn rule_button_states_each_have_a_distinct_glyph_and_label() {
 /// while the map is shown, and rendered as plain text.
 #[test]
 fn map_footer_states_what_the_markers_mean() {
-    const FOOTER: &str = "Markers show the approximate country of each destination IP (CDN and anycast addresses can mislead). Pulses mean a connection event, not data volume. Country shapes: Natural Earth.";
+    const FOOTER: &str = "Markers show approximate database locations of observed destination IPs, not physical endpoints (CDN and anycast addresses can mislead). Coincident IPs share a selectable stack; missing city/coordinates stay in Destinations. Pulses mean a connection event, not data volume. Country shapes: Natural Earth.";
     let code = code_lines(include_str!("../qml/MapBand.qml"));
     let footers: Vec<String> = blocks(&code, "Controls.Label {")
         .into_iter()
@@ -219,4 +219,26 @@ fn map_band_height_cap_lets_a_collapsed_band_reopen() {
             "tst_map_split_drag.qml drifted from MonitorPane.qml: `{needle}`"
         );
     }
+}
+
+#[test]
+fn geographic_destination_labels_are_plain_text() {
+    assert_data_labels_plain_text(
+        "MapDestinationsPopup.qml",
+        include_str!("../qml/MapDestinationsPopup.qml"),
+        &["modelData.name"],
+        1,
+    );
+    assert_data_labels_plain_text(
+        "MapBand.qml",
+        include_str!("../qml/MapBand.qml"),
+        &["map.activeGeoScope.name"],
+        1,
+    );
+    assert_data_labels_plain_text(
+        "MapMarker.qml",
+        include_str!("../qml/MapMarker.qml"),
+        &["marker.cluster.members[0].name"],
+        1,
+    );
 }

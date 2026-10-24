@@ -11,6 +11,7 @@ impl qobject::ConnectionsModel {
     /// (flat mode, headless tests, bridge-less operation) the message applies
     /// immediately via [`Self::apply_now`].
     pub fn apply_server_message(mut self: Pin<&mut Self>, msg: ServerMessage) {
+        self.as_mut().prepare_fixture_geo(&msg);
         self.as_mut().apply_message_for_session(msg, None);
     }
 
@@ -171,6 +172,10 @@ impl qobject::ConnectionsModel {
             if rust.store.is_filtered() {
                 rust.store.recompute_visible();
             }
+            let ConnectionsModelRust {
+                store, collapse, ..
+            } = &mut *rust;
+            store.prune_prepared_geo(|id| collapse.contains_absorbed(id));
         }
         self.as_mut().rebuild_grouped_projection();
         unsafe {
@@ -202,6 +207,13 @@ impl qobject::ConnectionsModel {
         let msgs = self.as_mut().rust_mut().collapse.rewrite(msg);
         for msg in msgs {
             self.as_mut().apply_rewritten(msg);
+        }
+        {
+            let mut rust = self.as_mut().rust_mut();
+            let ConnectionsModelRust {
+                store, collapse, ..
+            } = &mut *rust;
+            store.prune_prepared_geo(|id| collapse.contains_absorbed(id));
         }
         self.as_mut().refresh_counts();
         self.maybe_auto_select(&new_pending_ids);
@@ -377,10 +389,14 @@ impl qobject::ConnectionsModel {
     pub(super) fn refresh_filter_state(mut self: Pin<&mut Self>) {
         let filter = self.store.filter();
         let text = QString::from(filter.query());
+        let kind = QString::from(filter.geo_scope().map(GeoScope::kind).unwrap_or(""));
+        let key = QString::from(&filter.geo_scope().map(GeoScope::key).unwrap_or_default());
         let active = filter.is_active();
         let summary = QString::from(&filter.summary());
         let since = filter.since_ms().unwrap_or(0);
         let (pending_only, denied_only) = (filter.pending_only(), filter.denied_only());
+        self.as_mut().set_geo_scope_kind(kind);
+        self.as_mut().set_geo_scope_key(key);
         self.as_mut().set_filter_text(text);
         self.as_mut().set_filter_active(active);
         self.as_mut().set_filter_summary(summary);
@@ -560,11 +576,13 @@ impl qobject::ConnectionsModel {
         } else {
             self.store.visible_len() as i32
         };
+        let matching = self.store.visible_len() as i32;
         let total = self.store.len() as i32;
         let pending = self.store.rows().iter().filter(|r| is_pending(r)).count() as i32;
         // `totalCount` stays the whole store so the view can distinguish
         // empty from filtered.
         self.as_mut().set_count(visible);
+        self.as_mut().set_matching_count(matching);
         self.as_mut().set_total_count(total);
         self.as_mut().set_pending_count(pending);
         self.as_mut().refresh_pending_age();

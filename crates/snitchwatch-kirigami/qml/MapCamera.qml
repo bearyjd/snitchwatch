@@ -6,10 +6,10 @@ QtObject {
     property real viewportWidth: 0
     property real viewportHeight: 0
     readonly property real gridWidth: 3600
-    readonly property real gridTop: 60
-    readonly property real gridHeight: 1440
+    readonly property real gridTop: 0
+    readonly property real gridHeight: 1800
     property real minimumZoom: 1
-    property real maximumZoom: 16
+    property real maximumZoom: 128
     readonly property real lowerZoom: isFinite(minimumZoom) ? Math.max(1, minimumZoom) : 1
     readonly property real upperZoom: isFinite(maximumZoom) ? Math.max(lowerZoom, maximumZoom) : lowerZoom
     readonly property real fitScale: viewportWidth > 0 && viewportHeight > 0
@@ -19,7 +19,7 @@ QtObject {
     readonly property real top: viewportHeight / 2 - (centerY - gridTop) * scale
     property real zoom: 1
     property real centerX: 1800
-    property real centerY: 780
+    property real centerY: 900
     signal moved()
 
     function project(x, y) {
