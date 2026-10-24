@@ -79,6 +79,7 @@ Window {
         }
         function pollLevelRules() { polls++; }
         // Not the QML default ("forever"): the dialog must ask the model.
+        function levelRuleScopeText(level, program, key) { return "Executable " + program + "; " + (level === 0 ? "any host" : key) + "; any port; any protocol"; }
         function levelRuleDuration() { return "for_5_minutes"; }
     }
     LevelRuleActions { id: actions; model: stub; width: 600 }
@@ -142,8 +143,8 @@ Window {
                     probe.expect(actions.confirmDialog.visible, "program level did not open the confirm");
                     probe.expect(stub.calls.length === 0, "sent before accept: " + stub.calls.join(","));
                     const text = actions.confirmText;
-                    probe.expect(text.indexOf("any host") >= 0 && text.indexOf("for p.") >= 0
-                                 && text.indexOf("The rule lasts: 5 minutes.") >= 0
+                    probe.expect(text.indexOf("any host") >= 0 && text.indexOf("Executable /usr/bin/p") >= 0
+                                 && text.indexOf("Duration: 5 minutes.") >= 0
                                  && text.indexOf(Durations.labelFor(Durations.defaultToken)) < 0
                                  && text.indexOf("Deny") >= 0, "confirm text: " + text);
                     // It names the program file as plain text, not just the process.
@@ -187,7 +188,7 @@ Window {
                     stub.calls = [];
                     actions.create(1, "/usr/bin/p", "example.com", "example.com", "deny", "1:");
                     probe.expect(!actions.confirmDialog.opened, "domain level opened a confirm");
-                    probe.expect(stub.calls.join(",") === "create|1|/usr/bin/p|example.com|deny|false|", "domain call: " + stub.calls.join(","));
+                    probe.expect(stub.calls.join(",") === "create|1|/usr/bin/p|example.com|deny|false|for_5_minutes", "domain call: " + stub.calls.join(","));
                     probe.expect(actions.pollTimer.running, "timer off for a domain command");
                     probe.expect(JSON.stringify(stub.origins[1]) === JSON.stringify(["create", "1:"]),
                                  "immediate create lost captured session: " + JSON.stringify(stub.origins));

@@ -45,9 +45,9 @@ ColumnLayout {
     property alias confirmDialog: confirmDialog
     property alias confirmBodyLabel: confirmBody
     property alias confirmProgramLabel: confirmProgram
+    RuleScopePreview { id: scopePreview }
     readonly property string confirmText: actions.asked === null ? ""
-        : (actions.asked.choice === "deny" ? "Deny" : "Allow") + " any host for " + actions.asked.label
-          + ". The rule lasts: " + actions.asked.duration + "."
+        : (actions.asked.choice === "deny" ? "Deny. " : "Allow. ") + actions.asked.scopeText
 
     visible: actions.message !== ""
     spacing: Kirigami.Units.smallSpacing
@@ -98,27 +98,32 @@ ColumnLayout {
 
     function recheckAsked() {
         const a = actions.asked;
-        if (a && !actions.sessionValid(a.session)) {
+        if (a && (!actions.sessionValid(a.session) || actions.model.levelRuleDuration() !== a.durationToken)) {
             actions.asked = null;
             confirmDialog.close();
             actions.note(actions.nodeId(a.level, a.program, a.key), a.label,
-                         "The background service changed while you were deciding. Open the menu again.");
+                         "The background service or duration changed while you were deciding. Open the menu again.");
         }
     }
 
-    function create(level, program, key, label, choice, sourceSession) {
+    function create(level, program, key, label, choice, sourceSession, shownDuration) {
         if (!actions.sessionValid(sourceSession)) return;
+        const token = shownDuration === undefined ? actions.model.levelRuleDuration() : shownDuration;
+        if (token !== actions.model.levelRuleDuration()) {
+            actions.note(actions.nodeId(level, program, key), label, "The duration changed. Open the menu again.");
+            return;
+        }
         if (level === 0) {
             // The duration is the model's, as `createLevelRule` will take it.
             // `durationToken` goes back with the confirm: the model refuses it
             // if Settings changed what was shown.
-            const token = actions.model.levelRuleDuration();
             actions.asked = { level: level, program: program, key: key, label: label, choice: choice,
-                              duration: Durations.labelFor(token), durationToken: token, session: sourceSession };
+                              duration: Durations.labelFor(token), durationToken: token, session: sourceSession,
+                              scopeText: scopePreview.describe(actions.model, level, program, key, token) };
             confirmDialog.open();
             return;
         }
-        actions.send(level, program, key, label, choice, false, "", sourceSession);
+        actions.send(level, program, key, label, choice, false, token, sourceSession);
     }
 
     function remove(level, program, key, label, sourceSession, ruleName, ruleState) {
@@ -149,7 +154,7 @@ ColumnLayout {
     function accepted() {
         const a = actions.asked;
         actions.asked = null;
-        if (a !== null && actions.sessionValid(a.session)) {
+        if (a !== null && actions.sessionValid(a.session) && actions.model.levelRuleDuration() === a.durationToken) {
             actions.send(a.level, a.program, a.key, a.label, a.choice, true, a.durationToken, a.session);
         }
     }
@@ -173,7 +178,7 @@ ColumnLayout {
     Timer {
         interval: 200
         repeat: true
-        running: actions.asked !== null && actions.asked.session !== undefined
+        running: actions.asked !== null
         onTriggered: actions.recheckAsked()
     }
 

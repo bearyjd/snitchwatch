@@ -24,6 +24,10 @@ fn main() {
                 "qml/ConnectionsPage.qml",
                 "qml/ConnectionRow.qml",
                 "qml/ConnectionActions.qml",
+                "qml/ClipboardCopy.qml",
+                "qml/ConnectionDetailsCopy.qml",
+                "qml/ConnectionExplanation.qml",
+                "qml/RuleScopePreview.qml",
                 "qml/ConnectionsHeader.qml",
                 "qml/ConnectionsFilterBar.qml",
                 "qml/ConnectionsTopBar.qml",
@@ -83,6 +87,10 @@ fn main() {
     )
     .qt_module("Widgets")
     .file("src/application.rs")
+    .file("src/clipboard.rs")
+    // The native read accessor is linked only by its regression test and is
+    // never exposed to the application's QML module.
+    .file("src/clipboard_native_test.rs")
     .file("src/bridge_bindings.rs")
     .file("src/bridge_feed.rs")
     .file("src/connections_model.rs")
@@ -108,8 +116,11 @@ fn main() {
     unsafe {
         builder.cc_builder(|cc| {
             cc.include("include");
+            cc.include("tests/support");
         })
     }
     .build();
     println!("cargo:rerun-if-changed=include/application.h");
+    println!("cargo:rerun-if-changed=include/clipboard.h");
+    println!("cargo:rerun-if-changed=tests/support/clipboard_native.h");
 }
