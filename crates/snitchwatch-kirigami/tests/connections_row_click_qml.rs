@@ -59,11 +59,22 @@ Window {
     QtObject {
         id: ruleStub
         property var calls: []
+        property var origins: []
+        property string currentRule: "rule-A"
         property string session: "1:"
         signal levelRuleFinished(int level, string processKey, string key, int ending, string status)
         function createLevelRule(level, program, key, choice, confirmed, duration) {
             calls = calls.concat([[level, program, key, choice]]);
             return "";
+        }
+        function createLevelRuleForSession(level, program, key, choice, duration, sourceSession) {
+            origins.push(["create", sourceSession]);
+            return createLevelRule(level, program, key, choice, level === 0 && duration !== "", duration);
+        }
+        function deleteLevelRuleForSession(level, program, key, sourceSession, name, state) {
+            origins.push(["delete", sourceSession, name, state]);
+            if (name !== currentRule) return "The rule changed while you were deciding.";
+            return deleteLevelRule(level, program, key);
         }
         function currentSourceSession() { return session; }
         function deleteLevelRule(level, program, key) {
@@ -297,6 +308,7 @@ Window {
                 } else if (probe.phase === 23) {
                     const domain = probe.header(1, "example.com");
                     domain.levelRuleState = "allow";
+                    domain.levelRuleName = "rule-A";
                     domain.sourceSession = "1:";
                     tc.mouseClick(domain.ruleButton.button);
                     model.applyServerMessageJson(JSON.stringify({ action: "insertConnectionRows", rows: [
@@ -304,10 +316,18 @@ Window {
                     ] }));
                 } else if (probe.phase === 24) {
                     probe.expect(probe.liveActions.menu.visible, "live reset dismissed remove-rule popup");
+                    probe.expect(probe.liveActions.target.ruleName === "rule-A", "popup did not snapshot exact rule identity");
+                    // The same node now represents another rule; keep the captured menu open
+                    // and click its actual remove item. The unseen rule must not be deleted.
+                    ruleStub.currentRule = "rule-B";
+                    probe.header(1, "example.com").levelRuleName = "rule-B";
+                    sessionModel.dataChanged();
                     const item = probe.menuItem("removeGroupRuleAction");
                     tc.mouseClick(item, item.width / 2, item.height / 2);
-                    probe.expect(JSON.stringify(ruleStub.calls[1]) === JSON.stringify(["remove", 1, "/usr/bin/app", "example.com"]),
-                                 "remove-rule pick redirected target: " + JSON.stringify(ruleStub.calls));
+                    probe.expect(ruleStub.calls.length === 1,
+                                 "remove-rule pick deleted replacement: " + JSON.stringify(ruleStub.calls));
+                    probe.expect(JSON.stringify(ruleStub.origins[1]) === JSON.stringify(["delete", "1:", "rule-A", "allow"]),
+                                 "remove-rule lost captured identity/session: " + JSON.stringify(ruleStub.origins));
                     probe.liveActions.page = page;
                     model.setGroupedMode(false);
                 } else if (probe.phase === 26) {

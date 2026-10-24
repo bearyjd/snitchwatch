@@ -38,7 +38,7 @@ use crate::pending_decision::VerdictChoice;
 use snitchwatch_bridge::translator::process_binding::is_bindable_process_path;
 use snitchwatch_bridge::ws_messages::{AutoAnswer, ConnectionRow, ServerMessage};
 
-mod level_rule_actions;
+pub(crate) mod level_rule_actions;
 
 mod apply;
 mod helpers;
@@ -320,6 +320,33 @@ pub mod qobject {
             level: i32,
             process_key: &QString,
             key: &QString,
+        ) -> QString;
+
+        /// A menu's captured session must survive through final queue admission.
+        /// Program-wide creation requires its nonempty reviewed duration token.
+        #[qinvokable]
+        #[cxx_name = "createLevelRuleForSession"]
+        fn create_level_rule_for_session(
+            self: Pin<&mut ConnectionsModel>,
+            level: i32,
+            process_key: &QString,
+            key: &QString,
+            choice: &QString,
+            shown_duration: &QString,
+            source_session: &QString,
+        ) -> QString;
+
+        /// Delete only the exact rule name and state shown in the captured menu.
+        #[qinvokable]
+        #[cxx_name = "deleteLevelRuleForSession"]
+        fn delete_level_rule_for_session(
+            self: Pin<&mut ConnectionsModel>,
+            level: i32,
+            process_key: &QString,
+            key: &QString,
+            source_session: &QString,
+            rule_name: &QString,
+            rule_state: &QString,
         ) -> QString;
 
         /// The Settings default duration token (`this_time`, `for_5_minutes`,

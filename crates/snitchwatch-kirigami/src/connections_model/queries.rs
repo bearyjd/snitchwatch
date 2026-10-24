@@ -163,6 +163,7 @@ impl qobject::ConnectionsModel {
         confirmed: bool,
         shown_duration: &QString,
     ) -> QString {
+        let session = self.source_session;
         level_rule_actions::create(
             self,
             level,
@@ -171,6 +172,8 @@ impl qobject::ConnectionsModel {
             choice,
             confirmed,
             shown_duration,
+            session,
+            false,
         )
     }
 
@@ -180,7 +183,61 @@ impl qobject::ConnectionsModel {
         process_key: &QString,
         key: &QString,
     ) -> QString {
-        level_rule_actions::delete(self, level, process_key, key)
+        let session = self.source_session;
+        level_rule_actions::delete(self, level, process_key, key, session, None)
+    }
+
+    pub(super) fn create_level_rule_for_session(
+        self: Pin<&mut Self>,
+        level: i32,
+        process_key: &QString,
+        key: &QString,
+        choice: &QString,
+        shown_duration: &QString,
+        source_session: &QString,
+    ) -> QString {
+        let session =
+            match level_rule_actions::captured_session(self.source_session, source_session) {
+                Ok(session) => session,
+                Err(reason) => return QString::from(reason),
+            };
+        level_rule_actions::create(
+            self,
+            level,
+            process_key,
+            key,
+            choice,
+            // Only program confirmation sends a reviewed duration token.
+            level == 0 && !shown_duration.is_empty(),
+            shown_duration,
+            Some(session),
+            true,
+        )
+    }
+
+    pub(super) fn delete_level_rule_for_session(
+        self: Pin<&mut Self>,
+        level: i32,
+        process_key: &QString,
+        key: &QString,
+        source_session: &QString,
+        rule_name: &QString,
+        rule_state: &QString,
+    ) -> QString {
+        let session =
+            match level_rule_actions::captured_session(self.source_session, source_session) {
+                Ok(session) => session,
+                Err(reason) => return QString::from(reason),
+            };
+        let (name, state) = (rule_name.to_string(), rule_state.to_string());
+        level_rule_actions::delete(
+            self,
+            level,
+            process_key,
+            key,
+            Some(session),
+            Some((&name, &state)),
+        )
     }
 
     pub(super) fn poll_level_rules(self: Pin<&mut Self>) {

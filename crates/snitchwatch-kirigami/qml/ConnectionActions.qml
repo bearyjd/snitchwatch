@@ -19,7 +19,7 @@ Item {
         return { rowId: row.rowId, pending: row.pending, header: row.isGroupHeader,
             level: row.groupLevel, program: row.ruleProgram, key: row.ruleKey, domain: row.groupParentKey,
             label: row.isGroupHeader ? row.groupLabel : row.process + " → " + row.host, count: row.groupPending, session: row.sourceSession,
-            ruleState: row.levelRuleState, ruleReason: row.levelRuleReason };
+            ruleState: row.levelRuleState, ruleName: row.levelRuleName, ruleReason: row.levelRuleReason };
     }
 
     function show(target, anchor, x, y, rulesOnly) {
@@ -152,7 +152,7 @@ Item {
             text: "Remove rule for this " + actions.scope
             onTriggered: {
                 const n = actions.target;
-                if (actions.valid() && n.session !== "") actions.page.levelRules.remove(n.level, n.program, n.key, n.label, n.session);
+                if (actions.valid() && n.session !== "") actions.page.levelRules.remove(n.level, n.program, n.key, n.label, n.session, n.ruleName, n.ruleState);
             }
         }
         Controls.MenuItem {

@@ -118,18 +118,22 @@ ColumnLayout {
             confirmDialog.open();
             return;
         }
-        actions.send(level, program, key, label, choice, false, "");
+        actions.send(level, program, key, label, choice, false, "", sourceSession);
     }
 
-    function remove(level, program, key, label, sourceSession) {
+    function remove(level, program, key, label, sourceSession, ruleName, ruleState) {
         if (!actions.sessionValid(sourceSession)) return;
-        const why = actions.model.deleteLevelRule(level, program, key);
+        const why = sourceSession === undefined
+            ? actions.model.deleteLevelRule(level, program, key)
+            : actions.model.deleteLevelRuleForSession(level, program, key, sourceSession, ruleName, ruleState);
         actions.sent(level, program, key, label, why);
     }
 
     // `shownDuration`: the duration token the user was shown ("" if none was).
-    function send(level, program, key, label, choice, confirmed, shownDuration) {
-        const why = actions.model.createLevelRule(level, program, key, choice, confirmed, shownDuration);
+    function send(level, program, key, label, choice, confirmed, shownDuration, sourceSession) {
+        const why = sourceSession === undefined
+            ? actions.model.createLevelRule(level, program, key, choice, confirmed, shownDuration)
+            : actions.model.createLevelRuleForSession(level, program, key, choice, shownDuration, sourceSession);
         actions.sent(level, program, key, label, why);
     }
 
@@ -146,7 +150,7 @@ ColumnLayout {
         const a = actions.asked;
         actions.asked = null;
         if (a !== null && actions.sessionValid(a.session)) {
-            actions.send(a.level, a.program, a.key, a.label, a.choice, true, a.durationToken);
+            actions.send(a.level, a.program, a.key, a.label, a.choice, true, a.durationToken, a.session);
         }
     }
 

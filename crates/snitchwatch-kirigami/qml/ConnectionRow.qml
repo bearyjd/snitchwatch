@@ -1,11 +1,5 @@
-// One row of the Connections list: a leaf connection, or a process/domain
-// group header in the grouped projection. Split out of ConnectionsPage.qml
-// (monitor-tree step 1) with no behaviour change.
-//
-// Instantiated only as the ListView delegate, so the Rust model's roles
-// arrive as the required properties below. `page` is the ConnectionsPage that
-// owns the list: the row forwards clicks and verdicts to it and never holds
-// state of its own beyond the double-submit latch.
+// A Connections list delegate: connection or group header. Rust model roles
+// arrive as required properties; clicks and verdicts go to the owning page.
 import QtQuick
 import QtQuick.Layouts
 import QtQuick.Controls as Controls
@@ -31,11 +25,8 @@ Item {
     required property string verdict
     required property bool pending
 
-    // Grouping roles (Little-Snitch-parity Process->Domain view).
-    // depth is the indent step. groupLevel is the tree tier: 0 = program
-    // header, 1 = domain header, 2 = host header, 3 = connection row. Flat
-    // mode always reports depth 0 / isGroupHeader false (level 3), so this
-    // delegate renders identically to before grouping was added.
+    // depth controls indentation; groupLevel: program=0, domain=1, host=2,
+    // connection=3. Flat connections have depth 0 and isGroupHeader=false.
     required property int depth
     required property int groupLevel
     required property string groupProcessKey
@@ -117,20 +108,9 @@ Item {
     property alias denyAllButton: batchDenyButton
     readonly property var actions: row.page.connectionActions
 
-    // Single latch-and-dispatch for all 4 verdict buttons. Kept as one
-    // function so the re-entry guard can't be present on some sites
-    // and missing on others — it already was once, leaving "Allow
-    // all" able to double-submit every pending row under a process.
-    // `batch` picks the process-group action over the single-row one.
-    //
-    // These buttons used to ALSO carry a `TapHandler`, added on the
-    // theory that a nested action needs its own pointer grab. Measured
-    // with QtTest `mouseClick()` against this exact delegate shape
-    // (Item > MouseArea z:0 + content z:1 > Button): one real click
-    // fires `onClicked` AND `onTapped` — 1 each, identical across the
-    // Basic/Fusion/Material/Universal styles — while the underlying
-    // MouseArea correctly stays silent. So the TapHandler was pure
-    // double-dispatch and is gone; plain `onClicked` is sufficient.
+    // Share one submission latch across every verdict button. Plain onClicked
+    // receives nested button clicks; adding TapHandler dispatches twice, as
+    // measured by QtTest across Basic/Fusion/Material/Universal styles.
     readonly property bool decideLaterOffered: !row.isGroupHeader && row.pending
         && verdictHelper.rowDecideLater(row.rowId)
 
@@ -268,19 +248,9 @@ Item {
         }
 
         Rectangle {
-            // Pending-count badge. Groups are never force-expanded
-            // for pending rows (grouping.rs module doc), so this
-            // badge is the only signal that a collapsed group hides
-            // undecided connections — it must read as a badge, not
-            // as body text.
-            //
-            // Issue #31: this used to fill with neutralBackgroundColor
-            // under a neutralTextColor label. Under Fusion/Basic those
-            // two roles resolve to the identical orange, so the label
-            // vanished into its own fill. Border-only sidesteps the
-            // pairing entirely — neutralTextColor is already used bare
-            // (no fill) elsewhere on this page, e.g. the verdict Label
-            // above, so it's proven to read against the row background.
+            // Collapsed groups expose pending connections through this badge.
+            // Use a border: Fusion/Basic can give neutral background and text
+            // the same color, making a filled badge unreadable (issue #31).
             visible: row.isGroupHeader && row.groupPending > 0
             color: "transparent"
             border.color: Kirigami.Theme.neutralTextColor

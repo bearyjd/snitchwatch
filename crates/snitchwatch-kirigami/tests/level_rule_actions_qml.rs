@@ -54,6 +54,7 @@ Window {
     QtObject {
         id: stub
         property var calls: []
+        property var origins: []
         property int polls: 0
         property string answer: ""
         property string session: "1:"
@@ -63,6 +64,14 @@ Window {
         function createLevelRule(level, p, k, choice, confirmed, shown) {
             calls.push(["create", level, p, k, choice, confirmed, shown].join("|"));
             return answer;
+        }
+        function createLevelRuleForSession(level, p, k, choice, shown, sourceSession) {
+            origins.push(["create", sourceSession]);
+            return createLevelRule(level, p, k, choice, level === 0 && shown !== "", shown);
+        }
+        function deleteLevelRuleForSession(level, p, k, sourceSession, name, state) {
+            origins.push(["delete", sourceSession, name, state]);
+            return deleteLevelRule(level, p, k);
         }
         function deleteLevelRule(level, p, k) {
             calls.push(["delete", level, p, k].join("|"));
@@ -161,9 +170,11 @@ Window {
                     probe.expect(stub.calls.length === 0, "sent after cancel: " + stub.calls.join(","));
                     probe.expect(!actions.pollTimer.running, "timer running after cancel");
                     // Accepting sends once, confirmed.
-                    actions.create(0, "/usr/bin/p", "", "p", "allow");
+                    actions.create(0, "/usr/bin/p", "", "p", "allow", "1:");
                     actions.confirmDialog.customFooterActions[0].trigger();
                     probe.expect(stub.calls.join(",") === "create|0|/usr/bin/p||allow|true|for_5_minutes", "accepted call: " + stub.calls.join(","));
+                    probe.expect(JSON.stringify(stub.origins) === JSON.stringify([["create", "1:"]]),
+                                 "confirmation lost captured session: " + JSON.stringify(stub.origins));
                     probe.expect(actions.pollTimer.running, "timer off with a command waiting");
                 } else if (probe.phase === 2) {
                     probe.expect(stub.polls >= 1, "poll never called while waiting: " + stub.polls);
@@ -174,10 +185,12 @@ Window {
                     probe.expect(actions.visible, "message bar hidden");
                     // Domain level: straight out, no confirm, confirmed=false.
                     stub.calls = [];
-                    actions.create(1, "/usr/bin/p", "example.com", "example.com", "deny");
+                    actions.create(1, "/usr/bin/p", "example.com", "example.com", "deny", "1:");
                     probe.expect(!actions.confirmDialog.opened, "domain level opened a confirm");
                     probe.expect(stub.calls.join(",") === "create|1|/usr/bin/p|example.com|deny|false|", "domain call: " + stub.calls.join(","));
                     probe.expect(actions.pollTimer.running, "timer off for a domain command");
+                    probe.expect(JSON.stringify(stub.origins[1]) === JSON.stringify(["create", "1:"]),
+                                 "immediate create lost captured session: " + JSON.stringify(stub.origins));
                     // Two in flight: the timer runs until both end.
                     actions.remove(2, "/usr/bin/p", "a.example.com", "a.example.com");
                     stub.levelRuleFinished(1, "/usr/bin/p", "example.com", 0, "The rule wasn't created: nope");
