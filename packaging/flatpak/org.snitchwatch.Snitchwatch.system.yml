@@ -66,6 +66,8 @@ finish-args:
   # renders via the host compositor's StatusNotifierItem support on Plasma).
   - --talk-name=org.freedesktop.Notifications
   - --talk-name=org.kde.StatusNotifierWatcher
+  # Fixed no-input host scanner API; never permits arbitrary host commands.
+  - --talk-name=org.snitchwatch.Scanner
   # Reach the host-side system bridge. These mounts are read-only: the host
   # socket's root:snitchwatch-ui 0660 mode authorizes connect(), while the
   # token remains compatibility-only during the migration. The Flatpak cannot

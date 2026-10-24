@@ -61,6 +61,8 @@ finish-args:
   # renders via the host compositor's StatusNotifierItem support on Plasma).
   - --talk-name=org.freedesktop.Notifications
   - --talk-name=org.kde.StatusNotifierWatcher
+  # Fixed no-input host scanner API; never permits arbitrary host commands.
+  - --talk-name=org.snitchwatch.Scanner
   # Reach the host-side bridge's Unix domain socket + handshake token under
   # $XDG_RUNTIME_DIR/snitchwatch/. Read-write (NOT :ro) because connect()ing
   # to a Unix socket needs write access, and the same grant covers reading

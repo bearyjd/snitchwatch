@@ -37,7 +37,6 @@
       (e.g. /usr/libexec/snitchwatch-scanner-privileged) in the package spec.
     -->
     <annotate key="org.freedesktop.policykit.exec.path">/usr/libexec/snitchwatch-scanner-privileged</annotate>
-    <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
   </action>
 
 </policyconfig>
