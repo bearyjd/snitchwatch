@@ -85,6 +85,8 @@ finish-args:
   - --filesystem=xdg-data/icons:ro
 
 modules:
+  # Offline, release-pinned country data and redistribution attribution.
+  - ../geo/dbip-country-lite.json
   # Compiler needed by tonic-build. Removed by cleanup before exporting the app.
   - name: protobuf-compiler
     buildsystem: simple

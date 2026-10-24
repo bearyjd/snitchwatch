@@ -1,0 +1,12 @@
+IP Geolocation by DB-IP — https://db-ip.com
+
+DB-IP Country Lite, October 2026 (2026-10), by DB-IP.com / Eris Networks S.A.S.
+Source: https://db-ip.com/db/download/ip-to-country-lite
+Licensed under Creative Commons Attribution 4.0 International (CC BY 4.0):
+https://creativecommons.org/licenses/by/4.0/
+The full license is included in CC-BY-4.0.txt.
+
+The database contents are unmodified. The upstream gzip archive is decompressed
+and its database file is installed as dbip-country-lite.mmdb.
+Country Lite has reduced coverage and accuracy. It is geographic context,
+not a security or threat verdict.

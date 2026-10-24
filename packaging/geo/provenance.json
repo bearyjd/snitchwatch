@@ -1,0 +1,31 @@
+{
+  "dataset": "DB-IP Country Lite",
+  "release": "2026-10",
+  "verified_date_utc": "2026-10-24",
+  "official_download_page": "https://db-ip.com/db/download/ip-to-country-lite",
+  "official_license_page": "https://db-ip.com/db/lite.php",
+  "official_schema_page": "https://db-ip.com/db/format/ip-to-country-lite/mmdb.html",
+  "archive_url": "https://download.db-ip.com/free/dbip-country-lite-2026-10.mmdb.gz",
+  "archive_bytes": 4123384,
+  "archive_sha256": "4cd44536ddfd40fec7eca94a233f7d19f38d470e6522e653cb8d27001f5fe177",
+  "database_bytes": 8348509,
+  "database_sha256": "dbd70ccfa2a13627eaf4913d19920a1a229f1b3c5439ac01c509995b6364202a",
+  "official_page_database_md5": "b8647f712bcabbe01f8afe3ff9e7569e",
+  "official_page_database_sha1": "e515b63075ad48847f9c4332b724742e8ba15b0e",
+  "metadata": {
+    "database_type": "DBIP-Country-Lite",
+    "build_epoch": 1790818572,
+    "build_utc": "2026-10-01T01:36:12Z",
+    "binary_format_major_version": 2,
+    "binary_format_minor_version": 0,
+    "ip_version": 6,
+    "node_count": 1383101,
+    "record_size": 24
+  },
+  "license": "CC-BY-4.0",
+  "license_url": "https://creativecommons.org/licenses/by/4.0/",
+  "license_text_url": "https://creativecommons.org/licenses/by/4.0/legalcode.txt",
+  "license_text_sha256": "9ba9550ad48438d0836ddab3da480b3b69ffa0aac7b7878b5a0039e7ab429411",
+  "attribution": "IP Geolocation by DB-IP — https://db-ip.com",
+  "modifications": "None to database contents; gzip decompressed and filename normalized."
+}
