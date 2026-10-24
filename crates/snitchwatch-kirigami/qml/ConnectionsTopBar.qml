@@ -4,6 +4,7 @@
 // ConnectionsPage.qml to keep it under its line budget.
 import QtQuick
 import QtQuick.Layouts
+import QtQuick.Controls as Controls
 
 ColumnLayout {
     id: bar
@@ -11,6 +12,7 @@ ColumnLayout {
     property var model
     property alias filterBar: filters
     property alias ruleActions: actions
+    signal analysisExportRequested()
     spacing: 0
 
     ConnectionsFilterBar {
@@ -22,5 +24,11 @@ ColumnLayout {
         id: actions
         Layout.fillWidth: true
         model: bar.model
+    }
+    Controls.Button {
+        objectName: "openAnalysisExport"
+        text: "AI-ready cache summary…"
+        icon.name: "document-export"
+        onClicked: bar.analysisExportRequested()
     }
 }

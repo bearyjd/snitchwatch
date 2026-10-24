@@ -19,6 +19,7 @@ Kirigami.Page {
 
     // The page itself, for components declared inside it (their `page` would shadow the id).
     readonly property var pageRoot: page
+    signal analysisExportRequested()
 
     // Injected by the caller (main.qml) so the model's lifetime is owned there.
     property ConnectionsModel model
@@ -228,6 +229,7 @@ Kirigami.Page {
     header: ConnectionsTopBar {
         id: topBar
         model: page.model
+        onAnalysisExportRequested: page.analysisExportRequested()
     }
 
     Controls.SplitView {

@@ -217,7 +217,7 @@ pub async fn run_feed<F, R>(
                 }
                 match encode_server(&received.message) {
                     Ok(json) => deliver(received.connection_id, &received.message, json),
-                    Err(e) => tracing::warn!(feed = label, error = %e, "feed: encode failed"),
+                    Err(_) => tracing::warn!(feed = label, "feed: encode failed"),
                 }
             }
             Err(RecvError::Lagged(n)) => {

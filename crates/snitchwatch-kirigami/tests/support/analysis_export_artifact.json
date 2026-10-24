@@ -1,0 +1,2 @@
+{"format":"snitchwatch-cache-summary","schemaVersion":1,"redactionVersion":1,
+"counts":{"retained":4,"inspected":3,"acceptedSnapshot":3,"selected":2,"emitted":2,"emittedGroups":1},"groups":[{"appBasename":"<b>curl-é</b>"}],"prompt":"line\nquoted \"text\""}

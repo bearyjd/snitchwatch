@@ -100,6 +100,10 @@ pub const ALL_QML: &[(&str, &str)] = &[
     ("AlertHost.qml", include_str!("../../qml/AlertHost.qml")),
     ("AlertWindow.qml", include_str!("../../qml/AlertWindow.qml")),
     (
+        "AnalysisExportSheet.qml",
+        include_str!("../../qml/AnalysisExportSheet.qml"),
+    ),
+    (
         "ConnectionActions.qml",
         include_str!("../../qml/ConnectionActions.qml"),
     ),

@@ -79,6 +79,10 @@ Kirigami.ApplicationWindow {
         Component.onCompleted: startBridgeFeed()
     }
     property var makeRuleControllerRef: makeRuleController
+    // Page replacement must not destroy an admitted local Save or its outcome.
+    AnalysisExportController { id: analysisExportController; objectName: "analysisExportController"; Component.onCompleted: startBridgeFeed() }
+    AnalysisExportSheet { id: analysisExportSheet; controller: analysisExportController }
+    readonly property alias analysisExport: analysisExportSheet
     MakeRuleOutcomes {
         controller: makeRuleController
         shownInPlace: function (rowId) {
@@ -568,6 +572,7 @@ Kirigami.ApplicationWindow {
             geoModel: root.geoModelRef
             bridgeFeed: root.bridgeFeedRef
             makeRuleController: root.makeRuleControllerRef
+            onAnalysisExportRequested: analysisExportSheet.open()
 
             // Rule-match diagnostics "Show rule" jump (Parity 4): navigate to
             // the Rules tab and open the matched rule's detail sheet
@@ -702,7 +707,8 @@ Kirigami.ApplicationWindow {
 
         onActivated: function (reason) {
             if (reason === Labs.SystemTrayIcon.Trigger) {
-                root.visible ? root.hide() : root.raiseAndActivate();
+                if (root.visible && !analysisExportController.saving) root.hide();
+                else root.raiseAndActivate();
             }
         }
 
@@ -711,6 +717,7 @@ Kirigami.ApplicationWindow {
         menu: TrayMenu {
             controller: trayController
             window: root
+            windowDismissalAllowed: !analysisExportController.saving
         }
     }
 
@@ -722,7 +729,7 @@ Kirigami.ApplicationWindow {
     // window and still asks in "Ask me" mode.
     onClosing: function (close) {
         close.accepted = false;
-        root.hide();
+        if (!analysisExportController.saving) root.hide();
     }
 
     globalDrawer: Kirigami.GlobalDrawer {

@@ -31,6 +31,8 @@ Labs.Menu {
     required property TrayController controller
     // The main window, for Show/Hide. Must provide raiseAndActivate().
     required property var window
+    // A committed background Save must keep its outcome window available.
+    property bool windowDismissalAllowed: true
 
     // Pause only while filtering can be paused, Resume only while it is
     // paused; "reconnect" (DaemonDown) and "default" offer neither.
@@ -43,7 +45,11 @@ Labs.Menu {
 
     Labs.MenuItem {
         text: trayMenu.window.visible ? "Hide window" : "Show window"
-        onTriggered: trayMenu.window.visible ? trayMenu.window.hide() : trayMenu.window.raiseAndActivate()
+        enabled: !trayMenu.window.visible || trayMenu.windowDismissalAllowed
+        onTriggered: {
+            if (!trayMenu.window.visible) trayMenu.window.raiseAndActivate();
+            else if (trayMenu.windowDismissalAllowed) trayMenu.window.hide();
+        }
     }
     Labs.MenuItem {
         separator: true

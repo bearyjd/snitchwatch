@@ -1,6 +1,7 @@
 # AI-ready cache summary export
 
-Status: **APPROVED by owner 2026-10-24 — implementation and verification pending.**
+Status: **APPROVED by owner 2026-10-24.** Implementation and verification
+evidence: [source, tests and delivery boundary](../../../.superpowers/sdd/2026-10-24-ai-ready-cache-export/evidence.md).
 Baseline: main `d543cfd5765ac62ef631d6542c4062db72e75053` (2026-10-24).
 Owner authorized implementation using TDD → PR → independent adversarial
 review/fix/re-review → exact-head green CI → merge. Independent security design

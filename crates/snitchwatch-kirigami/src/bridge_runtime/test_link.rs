@@ -48,4 +48,8 @@ impl TestLink {
         state.connected = connected;
         state.connection_id = connection_id;
     }
+
+    pub fn set_analysis_export(&self, capable: bool) {
+        self.connection.lock().expect("lock").analysis_export = capable;
+    }
 }
