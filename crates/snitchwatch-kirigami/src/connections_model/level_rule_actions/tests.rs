@@ -246,3 +246,40 @@ fn a_shown_duration_must_still_be_the_current_one() {
         Err(DURATION_CHANGED)
     );
 }
+
+#[test]
+fn deletion_requires_the_rule_name_and_state_shown_in_the_menu() {
+    let replacement = projection(RuleState::Allow, &["rule-B"], 1);
+    assert_eq!(
+        checked_delete_name(&replacement, Some(("rule-A", "allow"))),
+        Err(RULE_CHANGED)
+    );
+    assert_eq!(
+        checked_delete_name(&replacement, Some(("rule-B", "deny"))),
+        Err(RULE_CHANGED)
+    );
+    assert_eq!(
+        checked_delete_name(&replacement, Some(("rule-B", "allow"))),
+        Ok("rule-B".into())
+    );
+    assert_eq!(
+        checked_delete_name(&replacement, Some(("", "allow"))),
+        Err(RULE_CHANGED)
+    );
+}
+
+#[test]
+fn menu_session_tokens_must_match_the_model_snapshot() {
+    for token in ["", "0:", "1", "1::", "other:", "2:"] {
+        assert_eq!(
+            captured_session(Some(1), &QString::from(token)),
+            Err(SESSION_CHANGED),
+            "{token}"
+        );
+    }
+    assert_eq!(
+        captured_session(None, &QString::from("1:")),
+        Err(SESSION_CHANGED)
+    );
+    assert_eq!(captured_session(Some(1), &QString::from("1:")), Ok(1));
+}

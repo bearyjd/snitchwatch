@@ -414,6 +414,21 @@ impl GroupTree {
     /// batch action needs to reach) and of the active filter (a batch action
     /// on a header should not silently skip filtered-out rows).
     pub fn pending_row_ids(&self, process_key: &str) -> Vec<String> {
+        self.pending_row_ids_for_group(process_key, 0, "", "")
+    }
+
+    /// Pending descendants of a program (0), domain (1), or host (2).
+    /// Includes collapsed and filtered descendants, but never another app.
+    pub fn pending_row_ids_for_group(
+        &self,
+        process_key: &str,
+        level: i32,
+        key: &str,
+        parent_domain: &str,
+    ) -> Vec<String> {
+        if !(0..=2).contains(&level) || (level == 0 && !key.is_empty()) {
+            return Vec::new();
+        }
         let Some(pg) = self.processes.get(process_key) else {
             return Vec::new();
         };
@@ -424,7 +439,15 @@ impl GroupTree {
             .filter(|id| {
                 self.id_meta
                     .get(id.as_str())
-                    .map(|meta| meta.verdict == Verdict::Pending)
+                    .map(|meta| {
+                        meta.verdict == Verdict::Pending
+                            && match level {
+                                0 => true,
+                                1 => meta.domain_key == key,
+                                2 => meta.host_key == key && meta.domain_key == parent_domain,
+                                _ => false,
+                            }
+                    })
                     .unwrap_or(false)
             })
             .cloned()

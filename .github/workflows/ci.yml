@@ -103,10 +103,14 @@ jobs:
             libgtk-3-dev \
             librsvg2-dev \
             patchelf \
-            protobuf-compiler
+            protobuf-compiler \
+            dbus-daemon
 
       - name: cargo test (default-members)
         run: cargo test --locked
+
+      - name: Scanner broker private D-Bus integration
+        run: dbus-run-session -- cargo test -p scanner-broker private_bus --locked -- --ignored
 
   audit:
     runs-on: ubuntu-latest

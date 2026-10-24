@@ -14,41 +14,22 @@ use snitchwatch_proto::protocol::alert;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
-pub const EBPF_TROUBLESHOOTING: &str = "This kernel doesn't expose BTF \
-    (/sys/kernel/btf/vmlinux missing), which opensnitchd's default \
-    ProcMonitorMethod: ebpf requires. Either upgrade to a kernel built with \
-    CONFIG_DEBUG_INFO_BTF=y, or set ProcMonitorMethod to proc in \
-    opensnitchd's config as a fallback (slower, more overhead, but works on \
-    any kernel).";
-
-/// Used instead of [`EBPF_TROUBLESHOOTING`] when a daemon alert maps to
-/// `EbpfSupport` but the local probe says BTF *is* present — using the
-/// "kernel doesn't expose BTF" copy there would be actively false. This
-/// covers exactly the issue #6 scenario the whole overlay exists for:
-/// opensnitchd v1.8.0's bundled eBPF module can fail to load on kernel
-/// 6.19+ regardless of BTF presence, and the daemon is the only thing that
-/// knows that.
-pub const EBPF_DAEMON_REPORTED_TROUBLESHOOTING: &str = "BTF is present on \
-    this kernel, but opensnitchd still failed to initialize its eBPF \
-    process monitor. Set ProcMonitorMethod to proc in opensnitchd's config \
-    as a fallback.";
+pub const PROCESS_MONITOR_TROUBLESHOOTING: &str = "opensnitchd reported a \
+    process-monitor issue. The GUI supports both /proc and eBPF monitoring. \
+    Check the daemon log for the active method and error details. For eBPF \
+    load errors, check that the installed modules match the running kernel; \
+    ProcMonitorMethod: proc is also supported as a fallback.";
 
 pub const NFTABLES_TROUBLESHOOTING: &str = "The nft firewall backend \
     opensnitchd depends on isn't available on this host. Install the \
     nftables package, and confirm the kernel wasn't built without \
     CONFIG_NF_TABLES.";
 
-/// Runs the two local (opensnitchd-independent) checks: eBPF/BTF support
-/// and nftables support. Always returns exactly these two checks, in this
-/// order.
+/// Reports local nftables readiness and leaves process-monitor state unknown.
+/// opensnitchd supports both /proc and eBPF, and BTF presence proves neither
+/// eBPF compatibility nor the active method (v1.8's modules are not CO-RE).
+/// Retains the legacy `EbpfSupport` wire kind for daemon monitor alerts.
 pub fn local_checks(probe: &dyn KernelProbe) -> Vec<DiagnosticCheck> {
-    let ebpf_status = if probe.btf_vmlinux_exists() {
-        CheckStatus::Ok
-    } else {
-        CheckStatus::Failed {
-            detail: EBPF_TROUBLESHOOTING.to_string(),
-        }
-    };
     let nftables_status = if probe.nft_on_path() && probe.nf_tables_module_loaded() {
         CheckStatus::Ok
     } else {
@@ -59,7 +40,7 @@ pub fn local_checks(probe: &dyn KernelProbe) -> Vec<DiagnosticCheck> {
     vec![
         DiagnosticCheck {
             kind: CheckKind::EbpfSupport,
-            status: ebpf_status,
+            status: CheckStatus::Unknown,
         },
         DiagnosticCheck {
             kind: CheckKind::NftablesSupport,
@@ -205,18 +186,8 @@ impl DiagnosticsCtx {
         // ("error:"/"warning:") onto the appended detail text.
         if let Some(alert) = self.ebpf_alert() {
             if let Some(ebpf) = checks.iter_mut().find(|c| c.kind == CheckKind::EbpfSupport) {
-                // Only claim "kernel doesn't expose BTF" when the local
-                // probe actually found that — otherwise that copy would be
-                // self-contradictory (see `EBPF_DAEMON_REPORTED_TROUBLESHOOTING`'s
-                // doc comment).
-                let probe_ok = matches!(ebpf.status, CheckStatus::Ok);
-                let base = if probe_ok {
-                    EBPF_DAEMON_REPORTED_TROUBLESHOOTING
-                } else {
-                    EBPF_TROUBLESHOOTING
-                };
                 ebpf.status = CheckStatus::Failed {
-                    detail: append_daemon_alert(base, &alert),
+                    detail: append_daemon_alert(PROCESS_MONITOR_TROUBLESHOOTING, &alert),
                 };
             }
         }
@@ -293,31 +264,31 @@ mod tests {
     use std::time::Instant;
 
     #[test]
-    fn all_ok_probe_yields_two_ok_checks() {
+    fn nftables_ready_does_not_claim_process_monitor_capability() {
         let checks = local_checks(&FakeKernelProbe::all_ok());
         assert_eq!(checks.len(), 2);
-        assert!(checks.iter().all(|c| c.status == CheckStatus::Ok));
+        assert!(checks.iter().all(|c| c.status
+            == if c.kind == CheckKind::EbpfSupport {
+                CheckStatus::Unknown
+            } else {
+                CheckStatus::Ok
+            }));
     }
 
     #[test]
-    fn missing_btf_yields_failed_ebpf_check() {
-        let probe = FakeKernelProbe {
-            btf: false,
-            nft_on_path: true,
-            nf_tables_loaded: true,
-        };
+    fn monitor_state_is_independent_of_local_firewall_probe_failure() {
+        let probe = FakeKernelProbe::default();
         let checks = local_checks(&probe);
         let ebpf = checks
             .iter()
             .find(|c| c.kind == CheckKind::EbpfSupport)
             .unwrap();
-        assert!(matches!(ebpf.status, CheckStatus::Failed { .. }));
+        assert_eq!(ebpf.status, CheckStatus::Unknown);
     }
 
     #[test]
     fn missing_nft_binary_yields_failed_nftables_check() {
         let probe = FakeKernelProbe {
-            btf: true,
             nft_on_path: false,
             nf_tables_loaded: true,
         };
@@ -444,11 +415,9 @@ mod tests {
     }
 
     #[test]
-    fn proc_monitor_alert_fails_ebpf_check_even_when_probe_passes() {
+    fn process_monitor_error_remains_visible_with_healthy_firewall() {
         let liveness = DaemonLiveness::new();
         let firewall_status = Arc::new(StdMutex::new(Some(true)));
-        // The probe itself says everything's fine (BTF present) — the
-        // daemon's own alert must still win.
         let probe: Arc<dyn kernel_probe::KernelProbe> =
             Arc::new(kernel_probe::testing::FakeKernelProbe::all_ok());
         let alert_store = Arc::new(DaemonAlertStore::new());
@@ -467,12 +436,8 @@ mod tests {
         match &ebpf.status {
             CheckStatus::Failed { detail } => {
                 assert!(detail.contains("eBPF module failed to load"));
-                // Probe passed (BTF present), so the detail must use the
-                // self-consistent "daemon reported" copy, not the
-                // "kernel doesn't expose BTF" copy — that would be false
-                // here.
-                assert!(detail.contains("BTF is present on this kernel"));
-                assert!(!detail.contains("doesn't expose BTF"));
+                assert!(detail.contains("both /proc and eBPF"));
+                assert!(!detail.contains("BTF"));
                 // Severity is surfaced, not silently discarded.
                 assert!(detail.contains("(error,"));
             }
@@ -481,11 +446,10 @@ mod tests {
     }
 
     #[test]
-    fn proc_monitor_alert_uses_btf_missing_copy_when_probe_also_fails() {
+    fn process_monitor_warning_preserves_severity_without_guessing_cause() {
         let liveness = DaemonLiveness::new();
         let firewall_status = Arc::new(StdMutex::new(Some(true)));
         let probe: Arc<dyn kernel_probe::KernelProbe> = Arc::new(FakeKernelProbe {
-            btf: false,
             nft_on_path: true,
             nf_tables_loaded: true,
         });
@@ -504,9 +468,7 @@ mod tests {
             .unwrap();
         match &ebpf.status {
             CheckStatus::Failed { detail } => {
-                // Both the probe and the daemon agree BTF is the problem —
-                // the standard BTF-missing copy is accurate here.
-                assert!(detail.contains("doesn't expose BTF"));
+                assert!(!detail.contains("BTF"));
                 assert!(detail.contains("eBPF module failed to load"));
                 assert!(detail.contains("(warning,"));
             }
@@ -578,7 +540,12 @@ mod tests {
         let ctx = DiagnosticsCtx::new(liveness, firewall_status, probe, alert_store);
 
         let checks = ctx.report();
-        assert!(checks.iter().all(|c| c.status == CheckStatus::Ok));
+        assert!(checks.iter().all(|c| c.status
+            == if c.kind == CheckKind::EbpfSupport {
+                CheckStatus::Unknown
+            } else {
+                CheckStatus::Ok
+            }));
     }
 
     // The tests below exercise the real shape opensnitchd v1.8.0 actually
@@ -650,7 +617,7 @@ mod tests {
             .iter()
             .find(|c| c.kind == CheckKind::EbpfSupport)
             .unwrap();
-        assert_eq!(ebpf.status, CheckStatus::Ok);
+        assert_eq!(ebpf.status, CheckStatus::Unknown);
     }
 
     #[test]
@@ -668,7 +635,12 @@ mod tests {
         let ctx = DiagnosticsCtx::new(liveness, firewall_status, probe, alert_store);
 
         let checks = ctx.report();
-        assert!(checks.iter().all(|c| c.status == CheckStatus::Ok));
+        assert!(checks.iter().all(|c| c.status
+            == if c.kind == CheckKind::EbpfSupport {
+                CheckStatus::Unknown
+            } else {
+                CheckStatus::Ok
+            }));
     }
 
     #[test]
@@ -699,11 +671,8 @@ mod tests {
             .iter()
             .find(|c| c.kind == CheckKind::EbpfSupport)
             .unwrap();
-        // This sandbox's kernel genuinely has BTF (verified: FakeKernelProbe
-        // isn't in play for `local_checks` here — it is; `all_ok()` reports
-        // BTF present), so once the alert stops overriding it, the local
-        // probe alone yields Ok.
-        assert_eq!(ebpf_after.status, CheckStatus::Ok);
+        // Clearing a reported alert does not prove an active monitor method.
+        assert_eq!(ebpf_after.status, CheckStatus::Unknown);
     }
 
     #[test]

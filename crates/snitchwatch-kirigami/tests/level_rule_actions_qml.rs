@@ -6,8 +6,8 @@
 //! model, which refuse (no firewall connected). Messages start with the label
 //! of their node and one node's never clears another's; the dialog names the
 //! program file and the duration the model will use; a keyboard accept on the
-//! menu sends nothing before the dialog's accept; the menus of a pooled row
-//! close. Run headless with
+//! menu sends nothing before the dialog's accept; session-bound confirmations
+//! survive ordinary resets and refuse replacement sessions. Run headless with
 //! `QT_QPA_PLATFORM=offscreen`.
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -54,12 +54,24 @@ Window {
     QtObject {
         id: stub
         property var calls: []
+        property var origins: []
         property int polls: 0
         property string answer: ""
+        property string session: "1:"
+        signal modelReset()
+        function currentSourceSession() { return session; }
         signal levelRuleFinished(int level, string processKey, string key, int ending, string status)
         function createLevelRule(level, p, k, choice, confirmed, shown) {
             calls.push(["create", level, p, k, choice, confirmed, shown].join("|"));
             return answer;
+        }
+        function createLevelRuleForSession(level, p, k, choice, shown, sourceSession) {
+            origins.push(["create", sourceSession]);
+            return createLevelRule(level, p, k, choice, level === 0 && shown !== "", shown);
+        }
+        function deleteLevelRuleForSession(level, p, k, sourceSession, name, state) {
+            origins.push(["delete", sourceSession, name, state]);
+            return deleteLevelRule(level, p, k);
         }
         function deleteLevelRule(level, p, k) {
             calls.push(["delete", level, p, k].join("|"));
@@ -158,9 +170,11 @@ Window {
                     probe.expect(stub.calls.length === 0, "sent after cancel: " + stub.calls.join(","));
                     probe.expect(!actions.pollTimer.running, "timer running after cancel");
                     // Accepting sends once, confirmed.
-                    actions.create(0, "/usr/bin/p", "", "p", "allow");
+                    actions.create(0, "/usr/bin/p", "", "p", "allow", "1:");
                     actions.confirmDialog.customFooterActions[0].trigger();
                     probe.expect(stub.calls.join(",") === "create|0|/usr/bin/p||allow|true|for_5_minutes", "accepted call: " + stub.calls.join(","));
+                    probe.expect(JSON.stringify(stub.origins) === JSON.stringify([["create", "1:"]]),
+                                 "confirmation lost captured session: " + JSON.stringify(stub.origins));
                     probe.expect(actions.pollTimer.running, "timer off with a command waiting");
                 } else if (probe.phase === 2) {
                     probe.expect(stub.polls >= 1, "poll never called while waiting: " + stub.polls);
@@ -171,10 +185,12 @@ Window {
                     probe.expect(actions.visible, "message bar hidden");
                     // Domain level: straight out, no confirm, confirmed=false.
                     stub.calls = [];
-                    actions.create(1, "/usr/bin/p", "example.com", "example.com", "deny");
+                    actions.create(1, "/usr/bin/p", "example.com", "example.com", "deny", "1:");
                     probe.expect(!actions.confirmDialog.opened, "domain level opened a confirm");
                     probe.expect(stub.calls.join(",") === "create|1|/usr/bin/p|example.com|deny|false|", "domain call: " + stub.calls.join(","));
                     probe.expect(actions.pollTimer.running, "timer off for a domain command");
+                    probe.expect(JSON.stringify(stub.origins[1]) === JSON.stringify(["create", "1:"]),
+                                 "immediate create lost captured session: " + JSON.stringify(stub.origins));
                     // Two in flight: the timer runs until both end.
                     actions.remove(2, "/usr/bin/p", "a.example.com", "a.example.com");
                     stub.levelRuleFinished(1, "/usr/bin/p", "example.com", 0, "The rule wasn't created: nope");
@@ -253,12 +269,23 @@ Window {
                     probe.pooled = dom;
                     tc.mouseClick(dom.ruleButton.button);
                 } else if (probe.phase === 8) {
-                    probe.expect(probe.pooled.ruleButton.chooseMenu.visible, "row menu did not open");
+                    probe.expect(page.connectionActions.menu.visible, "row menu did not open");
                     tc.mouseClick(probe.findList(page).itemAtIndex(0), 2, 2);
                 } else if (probe.phase === 9) {
                     probe.expect(probe.findList(page).count === 1, "group did not collapse: " + probe.findList(page).count);
-                    probe.expect(!probe.pooled.ruleButton.chooseMenu.visible && probe.pooled.ruleButton.node === null,
-                                 "a pooled row kept its menu open");
+                    // Clicking outside the popup dismisses it before collapsing.
+                    probe.expect(!page.connectionActions.menu.visible,
+                                 "outside click kept the page menu open");
+                    const sent = stub.calls.length;
+                    actions.create(0, "/usr/bin/p", "", "p", "allow", "1:");
+                    probe.expect(actions.confirmDialog.visible, "session-bound confirm did not open");
+                    stub.modelReset();
+                    probe.expect(actions.asked !== null, "ordinary reset dismissed rule confirmation");
+                    stub.session = "2:";
+                    stub.modelReset();
+                    probe.expect(actions.asked === null, "replacement session retained old confirmation");
+                    actions.accepted();
+                    probe.expect(stub.calls.length === sent, "old confirmation sent to replacement service");
                     done = true;
                 }
                 probe.phase++;

@@ -38,6 +38,7 @@ snitchwatch-bridge = { path = "../snitchwatch-bridge", default-features = false 
 # The rule editor reads checked rules' conditions (`protocol::Operator`), and
 # "Make a rule…" builds a daemon `Connection` for the bridge's rule builder.
 snitchwatch-proto = { path = "../snitchwatch-proto" }
+scanner-broker = { path = "../scanner-broker" }
 # Public Suffix List lookup, as the bridge does it (a domain rule must not
 # cross a delegated suffix such as `s3.amazonaws.com`).
 addr = { workspace = true }

@@ -30,6 +30,23 @@ QtObject {
     // Null in isolated component tests; nothing is sent then.
     property var bridgeFeed: null
 
+    // UI decisions survive delegate recycling. Keep each accepted pending id
+    // latched until the model says it was answered or removed.
+    property var submittedIds: ({})
+    property Connections submissionWatch: Connections {
+        target: verdicts.model
+        function onModelReset() { verdicts.pruneSubmitted(); }
+        function onDataChanged() { verdicts.pruneSubmitted(); }
+        function onRowsRemoved() { verdicts.pruneSubmitted(); }
+    }
+    function pruneSubmitted() {
+        const keep = {};
+        for (const id of Object.keys(verdicts.submittedIds)) {
+            if (verdicts.model && verdicts.model.isPendingRow(id)) keep[id] = true;
+        }
+        verdicts.submittedIds = keep;
+    }
+
     // A once-only Deny's explanation, for the page to show.
     signal explained(string text)
 
@@ -78,14 +95,15 @@ QtObject {
     // Settings duration would have remembered) applies to this connection
     // only — "program_unknown" or "bridge_too_old" — or "not_sent" when it
     // could not be queued, else "". Leaves the explanation to the caller, so a batch explains once.
-    function send(rowId, choice) {
+    function send(rowId, choice, once) {
+        if (once && verdicts.submittedIds[rowId]) return "already_sent";
         if (verdicts.bridgeFeed === null) {
             // Unreachable in the running app (main.qml always injects the
             // feed) — but the caller has already latched `row.submitted`, so
             // a silent return here would leave a permanently un-decidable
             // row with no trace of why. Never swallow this.
             console.warn("InlineVerdicts.send: no bridgeFeed; verdict dropped for", rowId);
-            return "";
+            return "not_sent";
         }
         const appBound = verdicts.rowAppBoundRules(rowId);
         const duration = verdicts.model
@@ -98,6 +116,11 @@ QtObject {
         }
         if (queued === false) {
             return "not_sent";
+        }
+        if (once) {
+            const submitted = Object.assign({}, verdicts.submittedIds);
+            submitted[rowId] = true;
+            verdicts.submittedIds = submitted;
         }
         // Once-only although the Settings default remembers: say why. A Deny
         // that is remembered, or an Allow that asked for nothing more, needs
@@ -122,8 +145,11 @@ QtObject {
     }
 
     // A row's inline Allow/Deny.
-    function submit(rowId, choice) {
-        verdicts.explain(verdicts.send(rowId, choice), choice);
+    function submit(rowId, choice, once) {
+        const reason = verdicts.send(rowId, choice, once);
+        if (reason === "already_sent") return false;
+        verdicts.explain(reason, choice);
+        return reason !== "not_sent";
     }
 
     // Prompt-slot plan Part C. "Decide later" is offered only while
@@ -150,19 +176,26 @@ QtObject {
     // process group `processKey`, each with its own duration. No new WS
     // protocol — this is just N SetVerdict messages.
     function submitBatch(processKey, choice, sourceSession) {
+        return verdicts.submitGroupBatch(processKey, 0, "", "", choice, sourceSession);
+    }
+
+    function submitGroupBatch(program, level, key, parentDomain, choice, sourceSession, once) {
         if (!verdicts.model) {
-            return;
+            return false;
         }
         let reason = "";
+        let sent = false;
         try {
-            const ids = JSON.parse(verdicts.model.pendingRowIdsForProcess(processKey));
+            const ids = JSON.parse(verdicts.model.pendingRowIdsForGroup(program, level, key, parentDomain));
             for (const id of ids) {
                 // The synchronous model flush may have installed a replacement
                 // service's snapshot since this header was displayed.
                 if (sourceSession && !id.startsWith(sourceSession)) {
                     continue;
                 }
-                const why = verdicts.send(id, choice);
+                const why = verdicts.send(id, choice, once);
+                if (why === "already_sent") continue;
+                sent = sent || why !== "not_sent";
                 // A lost connection outranks why a sent Deny was once-only.
                 if (why === "not_sent" || reason === "") {
                     reason = why || reason;
@@ -175,6 +208,8 @@ QtObject {
             console.warn("InlineVerdicts.submitBatch failed:", e);
         }
         verdicts.explain(reason, choice);
+        if (!sent && reason === "") verdicts.explained("No pending connections remain in this group.");
+        return sent;
     }
 
     function onceOnlySentence(reason, choice) {

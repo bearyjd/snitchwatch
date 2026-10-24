@@ -63,6 +63,12 @@ Structured log fields may land earlier, in r16, as a small diagnosability piece.
 This also provides the history store that WS2 and WS3 build on.
 Gate: security-reviewer pass on the design before code.
 
+Owner addition (2026-10-24 UTC): AI-ready manual export for Claude,
+ChatGPT/OpenAI, or OpenRouter analysis is approved as a feature direction.
+Start with provider-independent files, redaction preview, and a supplied analysis
+prompt; direct API integrations and automated analysis remain later proposals.
+See the AI-ready export section of `2026-10-22-log-export-for-analysis.md`.
+
 ### WS2 Rules and prompt quality (mostly r17)
 - Measure first: unmatched asks per minute at idle becomes a tracked number
   (WS1 history gives it). The r15 log line already names path+destination.

@@ -22,6 +22,8 @@ const CONNECTIONS_PAGE: &str = concat!(
     "\n",
     include_str!("../qml/ConnectionRow.qml"),
     "\n",
+    include_str!("../qml/ConnectionActions.qml"),
+    "\n",
     include_str!("../qml/ConnectionsHeader.qml"),
     "\n",
     include_str!("../qml/ConnectionsFilterBar.qml"),
@@ -117,6 +119,11 @@ fn verdict_buttons_all_dispatch_through_the_single_guard() {
          guard has been duplicated, which is how it previously ended up missing \
          from the batch handlers."
     );
+    // Delegate lifetime no longer owns context menus. The real-click probe
+    // verifies both entry points share InlineVerdicts' per-pending-id guard
+    // through model resets and delegate replacement.
+    assert!(code.contains("page.submitInlineVerdict(n.rowId, choice, true)"));
+    assert!(code.contains("actions.page.inlineVerdicts.submit(n.rowId, choice, true)"));
 }
 
 /// Issue #31: the pending-count badge used to fill with `neutralBackgroundColor`

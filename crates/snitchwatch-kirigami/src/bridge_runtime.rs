@@ -637,12 +637,14 @@ fn forward_shell_message(
 
 /// Start the client runtime once. This is non-fatal even when the service is
 /// down: the reconnect task continues and the UI can display its live status.
+/// The boolean reports runtime startup, not whether the asynchronous connection
+/// has completed. Use [`link_status`] for the connection state.
 pub fn ensure_started() -> (bool, String) {
     let outcome = STARTED.get_or_init(|| match start_inner() {
         Ok(runtime) => Outcome::Running(Box::new(runtime)),
         Err(error) => Outcome::Failed(format!("{error:#}")),
     });
-    status_of(outcome)
+    startup_status_of(outcome)
 }
 
 pub fn handles() -> Option<BridgeHandles> {
@@ -699,9 +701,9 @@ fn link_of(outcome: &Outcome) -> LinkStatus {
     }
 }
 
-fn status_of(outcome: &Outcome) -> (bool, String) {
+fn startup_status_of(outcome: &Outcome) -> (bool, String) {
     let link = link_of(outcome);
-    (link.state == LinkState::Connected, link.detail)
+    (matches!(outcome, Outcome::Running(_)), link.detail)
 }
 
 pub use snitchwatch_bridge::filter_pause::PauseState as BridgePauseState;

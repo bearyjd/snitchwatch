@@ -299,6 +299,8 @@ async fn hiding_the_window_later_still_posts_the_notice() {
     };
     // Posted at the end of the grace period, as before.
     assert_eq!(looks(vec![Done]).await, secs(&[5]));
+    // Answered or silently handled before the first check: stop immediately.
+    assert_eq!(looks(vec![Gone]).await, secs(&[5]));
     // Held back by the active window, then posted once it isn't.
     assert_eq!(
         looks(vec![WindowActive, WindowActive, WindowActive, Done]).await,
