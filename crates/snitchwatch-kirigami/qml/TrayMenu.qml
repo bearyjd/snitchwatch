@@ -2,9 +2,7 @@
 //
 // Flat on purpose: Plasma's dbusmenu export rendered a nested Labs.Menu as a
 // bare "Pause filtering" entry with no submenu, and activating it did nothing
-// (VM run r6). A possible second cause: on a Labs.Menu, `visible` means "the
-// popup is open", so the old submenu's `visible:` binding never meant "show
-// this entry". Every pause length is therefore its own top-level item, wired
+// (VM run r6). Every pause length is therefore its own top-level item, wired
 // straight to TrayController.pauseFor — the bridge accepts only these three
 // lengths and ends every pause on its own (issue #47).
 //
@@ -24,6 +22,11 @@ import com.snitchwatch.shell
 
 Labs.Menu {
     id: trayMenu
+
+    // KDE's platform tray backend forwards this property to QMenu::setVisible.
+    // Its default true opens a parentless popup during startup, before input.
+    // The tray still exports every action and opens its menu when requested.
+    visible: false
 
     required property TrayController controller
     // The main window, for Show/Hide. Must provide raiseAndActivate().
