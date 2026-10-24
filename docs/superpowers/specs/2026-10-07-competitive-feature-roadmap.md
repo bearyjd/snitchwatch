@@ -1,5 +1,10 @@
 # Snitchwatch feature roadmap — competitive analysis
 
+> Historical snapshot of October 7 code and product research. For the refreshed
+> landscape, current baseline and proposed next work, use the
+> [October 24 competitive feature roadmap](2026-10-24-competitive-feature-roadmap.md).
+> Old gap and release-status cells below are not a current inventory.
+
 **Date:** 2026-10-07
 **Status:** Research complete; roadmap proposed, not yet owner-approved.
 Phase ordering and the non-goals below are recommendations — the settled

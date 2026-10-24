@@ -37,8 +37,11 @@ JSON, plus a small summary: counts by process, destination, verdict, rule class
   notices are NOT exported. A test enumerates every `ConnectionRow` field and fails
   when one is not classified (kept / hashed / class / dropped) at each level.
 - Per-row fields kept at `hosts-hashed` and `none` (aggregated only at
-  `summary-only`): timestamps (`started_at_ms`), byte counts, ports, protocol,
-  direction and verdict. The `none` warning lists them too. Housekeeping fields
+  `summary-only`): timestamps (`started_at_ms`), ports, protocol, direction and
+  verdict. Byte counts are included only when genuine counters become available;
+  today's translator supplies placeholder zeroes, which must be exported as
+  unavailable rather than measured zero. The `none` warning lists the included
+  fields too. Housekeeping fields
   `id`, `answer_deadline_ms`, `deferred` and `decided_by_default` are kept as-is
   (a counter and timestamps/booleans; no user data).
 - Stable schema with a `schema` version field. Same input gives the same output
@@ -65,6 +68,44 @@ deterministic export. Runs OUTSIDE the bridge, on the exported file:
 - an LLM pass the owner starts by hand on an export they have reviewed.
 The bridge never calls out to a model. Probabilistic output is advisory and
 labelled as such; it never edits rules.
+
+### AI-ready export package (owner-approved feature, 2026-10-24 UTC)
+
+The owner explicitly requested export for analysis with Claude, ChatGPT/OpenAI,
+or models accessed through OpenRouter, then approved adding it to the roadmap.
+This approves the feature direction; implementation still needs a design and the
+review described below. It does not authorize automatic uploads or rule changes.
+
+- Start with a manual, provider-independent download: versioned JSON/JSONL,
+  a human-readable summary, a field dictionary, and an optional CSV projection.
+  The package includes an analysis prompt the user can copy into their chosen
+  tool. No API key or paid provider account is required to export.
+- Let the user choose a time window and app/domain/verdict filters, then preview
+  the export and its redaction level. Preserve the existing default
+  `summary-only` policy and the allowlisted DTO; optional fields must not bypass
+  the privacy rules below. Matched rules use class only at `summary-only` and
+  `hosts-hashed`; raw rule names appear only at `none` after the existing
+  per-export warning.
+- Where observed, include connection counts, first/last-seen times, verdicts,
+  durations, auto-answer reasons, and rule matches. Describe sampling, truncation,
+  missed events, unavailable fields, and time-zone information. Do not invent
+  byte counts, complete session history, or attribution certainty.
+- Ask the model to explain noisy apps, repeated denies, unfamiliar destinations,
+  changes from a baseline, and possible rule simplifications. Every finding
+  should cite event/group identifiers, distinguish evidence from speculation,
+  and describe what further evidence would confirm it.
+- Treat domain names, process names, and rule text as untrusted data in the
+  analysis prompt. Model recommendations are a reviewable report; importing or
+  applying any resulting policy is a separate, explicit action.
+- Later, separately scoped options: user-triggered provider adapters for
+  Anthropic/OpenAI/OpenRouter, local-model analysis, and scheduled reports.
+  Provider routing, credentials, costs, retention, and upload consent need their
+  own design; they are not requirements for the first export release.
+
+Acceptance: export a fixture-selected time window reproducibly; preview the exact
+fields before saving; retain stable references within the file; pass redaction
+and truncation tests; and use the same file with different AI tools without
+changing firewall policy or sending data from the bridge.
 
 ## Privacy and security (why this needs review)
 The data names programs, hosts, IPs and local usernames.
