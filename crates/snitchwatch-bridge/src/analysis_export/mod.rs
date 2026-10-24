@@ -3,7 +3,12 @@
 mod build;
 mod dto;
 mod redaction;
+mod session;
 mod snapshot;
+pub use session::{
+    prepare_reply, ExportRun, ExportSession, ExportSessionGuard, PendingExportReply,
+    PreparedExport, WeakExportSession,
+};
 
 pub use build::{build, ANALYSIS_PROMPT};
 pub use redaction::fresh_key;
@@ -19,3 +24,8 @@ pub use snapshot::{capture, Snapshot};
 
 #[cfg(test)]
 mod snapshot_tests;
+
+#[cfg(test)]
+mod session_tests;
+#[cfg(test)]
+mod wire_tests;

@@ -24,11 +24,18 @@ impl ReplyTo {
     /// Deliver `message`, waiting for room; `false` when the connection is
     /// gone.
     pub async fn send(&self, message: ServerMessage) -> bool {
+        // Artifacts use ExportSession's one expiring slot exclusively.
+        if matches!(&message, ServerMessage::CacheSummaryExport { .. }) {
+            return false;
+        }
         self.tx.send(message).await.is_ok()
     }
 
     /// Deliver `message` only if there is room now.
     pub fn try_send(&self, message: ServerMessage) -> bool {
+        if matches!(&message, ServerMessage::CacheSummaryExport { .. }) {
+            return false;
+        }
         self.tx.try_send(message).is_ok()
     }
 

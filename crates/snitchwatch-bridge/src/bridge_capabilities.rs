@@ -53,6 +53,9 @@ pub const CURATED_GROUPS_V1: &str = "curatedGroupsV1";
 /// bridge sent.
 pub const BLOCKLIST_LEFTOVERS: &str = "blocklistLeftovers";
 
+/// Private bounded cache summary protocol; advertised only after service hookup.
+pub const AI_CACHE_SUMMARY_EXPORT_V1: &str = "aiCacheSummaryExportV1";
+
 /// What this bridge advertises to every authenticated client.
 pub fn advertised() -> Vec<String> {
     vec![
@@ -65,6 +68,7 @@ pub fn advertised() -> Vec<String> {
         CURATED_BROAD_OPT_IN_V1.to_string(),
         CURATED_GROUPS_V1.to_string(),
         BLOCKLIST_LEFTOVERS.to_string(),
+        AI_CACHE_SUMMARY_EXPORT_V1.to_string(),
     ]
 }
 
@@ -114,7 +118,8 @@ mod tests {
                     "curatedDefaults",
                     "curatedBroadOptInV1",
                     "curatedGroupsV1",
-                    "blocklistLeftovers"
+                    "blocklistLeftovers",
+                    "aiCacheSummaryExportV1"
                 ],
             })
         );

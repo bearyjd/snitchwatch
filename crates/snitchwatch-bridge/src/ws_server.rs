@@ -270,6 +270,9 @@ async fn pump_authenticated<S, R>(
     // Answers meant for this connection only (rule import/export, P2.7).
     let (reply_tx, reply_rx) = mpsc::channel::<ServerMessage>(REPLY_QUEUE);
     let reply_to = crate::ws_messages::ReplyTo::new(reply_tx);
+    let exports = crate::analysis_export::ExportSession::new();
+    let export_outbound_guard = exports.drop_guard();
+    let export_inbound_guard = exports.drop_guard();
     let intent = crate::curated::intent::IntentContext::websocket();
     let outbound_guard = intent.drop_guard();
     let inbound_guard = intent.drop_guard();
@@ -279,10 +282,12 @@ async fn pump_authenticated<S, R>(
     let generation = handles.presence.current_generation();
     let outbound = async {
         let _guard = outbound_guard;
-        forward_outbound(sender, broadcast_rx, reply_rx).await;
+        let _export_guard = export_outbound_guard;
+        forward_outbound(sender, broadcast_rx, reply_rx, exports.clone()).await;
     };
     let inbound = async {
         let _guard = inbound_guard;
+        let _export_guard = export_inbound_guard;
         while let Some(Ok(msg)) = receiver.next().await {
             match msg {
                 // `ws_handler` sets the same bound on the transport; this
@@ -301,6 +306,7 @@ async fn pump_authenticated<S, R>(
                         let parsed = stamp_sender(parsed, generation, peer_uid);
                         let parsed = stamp_reply(parsed, &reply_to);
                         let parsed = stamp_intent(parsed, &intent);
+                        let parsed = stamp_export_session(parsed, &exports);
                         if handles.inbound.send(parsed).await.is_err() {
                             break;
                         }
@@ -312,7 +318,12 @@ async fn pump_authenticated<S, R>(
                         // Never log submitted fields or decoder errors: a
                         // malformed ticket may otherwise appear in diagnostics.
                         warn!("client message rejected by protocol validation");
-                        if let Some(request_id) = error.request_id {
+                        if let Some(reason) = error.export {
+                            let _ = reply_to.try_send(ServerMessage::CacheSummaryExportRefused {
+                                request_id: error.request_id.unwrap_or_default(),
+                                reason,
+                            });
+                        } else if let Some(request_id) = error.request_id {
                             let _ = reply_to.try_send(ServerMessage::CuratedDefaultsRequestResult {
                                 request_id: Some(request_id),
                                 results: vec![crate::ws_messages::CuratedRequestResult {
@@ -344,48 +355,95 @@ async fn forward_outbound<S>(
     mut sender: S,
     mut broadcast_rx: broadcast::Receiver<ServerMessage>,
     mut reply_rx: mpsc::Receiver<ServerMessage>,
+    exports: crate::analysis_export::ExportSession,
 ) where
     S: futures_util::Sink<Message> + Unpin,
 {
     use futures_util::SinkExt;
-    loop {
-        let msg = tokio::select! {
-            received = broadcast_rx.recv() => match received {
-                Ok(ServerMessage::CuratedBroadOptInPrepared { .. }
-                    | ServerMessage::CuratedDefaultsRequestResult { .. }) => {
-                    warn!("private curated response rejected from broadcast channel");
+    let forward = async {
+        loop {
+            let msg = tokio::select! {
+                received = broadcast_rx.recv() => match received {
+                    Ok(ServerMessage::CuratedBroadOptInPrepared { .. }
+                        | ServerMessage::CuratedDefaultsRequestResult { .. }
+                        | ServerMessage::CacheSummaryExport { .. }
+                        | ServerMessage::CacheSummaryExportRefused { .. }) => {
+                        warn!("private response rejected from broadcast channel");
+                        continue;
+                    }
+                    Ok(msg) => msg,
+                    Err(_) => break,
+                },
+                Some(msg) = reply_rx.recv() => {
+                    if matches!(msg, ServerMessage::CacheSummaryExport { .. }) {
+                        warn!("artifact rejected from generic reply channel");
+                        continue;
+                    }
+                    msg
+                },
+                pending = exports.next_reply() => {
+                    let Some(pending) = pending else { break; };
+                    if !pending.is_current() { continue; }
+                    // The full already-capped JSON envelope is exactly one text
+                    // frame. Both expiry and cancellation cover actual sink.send.
+                    let sent = tokio::select! {
+                        biased;
+                        _ = pending.invalidated() => false,
+                        result = tokio::time::timeout_at(pending.expires_at,
+                            sender.send(Message::Text(pending.wire.to_string()))) => matches!(result, Ok(Ok(()))),
+                    };
+                    drop(pending);
+                    // An interrupted sink may have partially accepted a frame;
+                    // ending this connection avoids reusing uncertain sink state.
+                    if !sent { break; }
                     continue;
                 }
-                Ok(msg) => msg,
-                Err(_) => break,
-            },
-            Some(msg) = reply_rx.recv() => msg,
-        };
-        let json = match serde_json::to_string(&msg) {
-            Ok(json) => json,
-            Err(error) => {
-                error!(%error, "failed to serialize ServerMessage");
-                continue;
+            };
+            let json = match serde_json::to_string(&msg) {
+                Ok(json) => json,
+                Err(_) => {
+                    error!("failed to serialize ServerMessage");
+                    continue;
+                }
+            };
+            if sender.send(Message::Text(json)).await.is_err() {
+                break;
             }
-        };
-        if sender.send(Message::Text(json)).await.is_err() {
-            break;
         }
+    };
+    tokio::select! {
+        _ = forward => {},
+        _ = exports.expire_queued_replies() => {},
     }
 }
 
 /// Answers queued for one connection before its sender waits.
 const REPLY_QUEUE: usize = 32;
 
-/// Give a rule import/export request, a rule command or a blocklist entries
-/// request a channel back to its own connection. Overwrites whatever it carried; the field is never
-/// deserialized anyway.
+/// Bind summary requests and cancellation to this authenticated connection.
+fn stamp_export_session(
+    mut message: ClientMessage,
+    exports: &crate::analysis_export::ExportSession,
+) -> ClientMessage {
+    match &mut message {
+        ClientMessage::RequestCacheSummaryExport { session, .. }
+        | ClientMessage::CancelCacheSummaryExport { session, .. } => {
+            *session = Some(exports.clone())
+        }
+        _ => {}
+    }
+    message
+}
+
+/// Stamp the sending connection's private channel; never accept one from JSON.
 fn stamp_reply(
     mut message: ClientMessage,
     reply_to: &crate::ws_messages::ReplyTo,
 ) -> ClientMessage {
     match &mut message {
-        ClientMessage::AddRule { reply, .. }
+        ClientMessage::RequestCacheSummaryExport { reply, .. }
+        | ClientMessage::CancelCacheSummaryExport { reply, .. }
+        | ClientMessage::AddRule { reply, .. }
         | ClientMessage::UpdateRule { reply, .. }
         | ClientMessage::DeleteRule { reply, .. }
         | ClientMessage::ExportRules { reply, .. }
