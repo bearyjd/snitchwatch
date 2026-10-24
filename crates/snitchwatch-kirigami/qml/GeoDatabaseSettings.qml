@@ -17,7 +17,7 @@ ColumnLayout {
     Controls.Label {
         Layout.fillWidth: true
         wrapMode: Text.Wrap
-        text: "Packaged releases include DB-IP Country Lite. To use newer data, download DB-IP Country Lite (no account required), decompress the .gz archive, then select the extracted .mmdb file. Existing MaxMind GeoLite2 Country and GeoIP2 Country databases are also supported."
+        text: "Snitchwatch can use bundled DB-IP Country Lite or an installed country database. To use newer data, download DB-IP Country Lite (no account required), decompress the .gz archive, then select the extracted .mmdb file. Existing MaxMind GeoLite2 Country and GeoIP2 Country databases are also supported."
     }
     Controls.Label {
         text: "Install location"
