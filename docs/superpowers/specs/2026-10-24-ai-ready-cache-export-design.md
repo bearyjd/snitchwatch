@@ -1,12 +1,16 @@
 # AI-ready cache summary export
 
-Status: **DRAFT — awaiting owner scope approval and independent security review.**
+Status: **APPROVED by owner 2026-10-24 — implementation and verification pending.**
 Baseline: main `d543cfd5765ac62ef631d6542c4062db72e75053` (2026-10-24).
-No implementation/deployment/history authorization is implied.
+Owner authorized implementation using TDD → PR → independent adversarial
+review/fix/re-review → exact-head green CI → merge. Independent security design
+review was conditional: implementation must verify the stated privacy, resource,
+session and private-save guarantees. Host deployment and persistent history remain
+outside this authorization.
 
-## Scope and decisions for the owner
+## Approved scope and decisions
 
-Approve together:
+Owner approved together on 2026-10-24:
 1. Deliver a manual cache-only summary phase before persistent history. This changes
    history-first ordering, retaining the
    [export plan](../plans/2026-10-22-log-export-for-analysis.md)'s privacy direction.
@@ -152,5 +156,6 @@ preview/save bytes; safe directory/file modes, symlink and no-overwrite tests.
 Use MockOpensnitchd, never a live daemon. Independent security/code review and GUI
 interaction evidence precede completion.
 
-Draft provenance: local/unpushed. After approval: TDD → PR → independent
-review/fix/re-review → green CI → merge. Host deployment remains separate.
+Design provenance: local/unpushed; owner approved 2026-10-24. Execute TDD → PR →
+independent review/fix/re-review → exact-head green CI → merge. Host deployment
+remains separate; conditional design review is not implementation approval.
