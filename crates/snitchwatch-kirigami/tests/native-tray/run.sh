@@ -1,8 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Host driver: compile and run inside the installed KDE SDK. Every D-Bus
-# connection belongs to a fresh bus with no desktop service activation.
+# Compile and run with native KDE dependencies or inside the installed KDE
+# SDK. Every D-Bus connection belongs to a fresh bus without desktop services.
+case "${1:-}" in
+    "") probe_mode=sdk ;;
+    --native) probe_mode=native ;;
+    *) echo "Usage: $0 [--native]" >&2; exit 2 ;;
+esac
+if (( $# > 1 )); then
+    echo "Usage: $0 [--native]" >&2
+    exit 2
+fi
 test_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 repo_dir=$(cd -- "$test_dir/../../../.." && pwd)
 probe_build_dir=$(mktemp -d /tmp/snitchwatch-native-tray.XXXXXX)
@@ -29,6 +38,16 @@ c++ -fPIC -I"$build_dir" \
     $(pkg-config --cflags --libs Qt6Widgets Qt6Qml Qt6Quick Qt6DBus)
 exec "$build_dir/probe" "$qml_dir"
 SDK_SCRIPT
+
+if [[ "$probe_mode" == native ]]; then
+    timeout 60s dbus-run-session --config-file="$test_dir/session.conf" -- \
+        env QT_QPA_PLATFORM=offscreen QT_QPA_PLATFORMTHEME=kde \
+        XDG_CURRENT_DESKTOP=KDE QT_NO_XDG_DESKTOP_PORTAL=1 \
+        QT_QUICK_BACKEND=software \
+        sh "$probe_build_dir/run-fixture.sh" "$test_dir" "$probe_build_dir" \
+        "$repo_dir/crates/snitchwatch-kirigami/qml"
+    exit
+fi
 
 timeout 60s dbus-run-session --config-file="$test_dir/session.conf" -- \
     flatpak run --user --socket=session-bus --nosocket=wayland --nosocket=x11 \
