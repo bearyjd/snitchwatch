@@ -129,6 +129,18 @@ Controls.ApplicationWindow {
                 expect(sw.checked === false && page.inspectEnabled === false,
                        "switch does not show the daemon's state");
 
+                // The model's enabled role must not override Item.enabled:
+                // an off rule is still selectable and can be turned back on.
+                page.rulesList.currentIndex = 0;
+                page.rulesList.forceLayout();
+                const disabledRow = page.rulesList.currentItem;
+                expect(disabledRow !== null && disabledRow.enabled
+                       && disabledRow.ruleEnabled === false,
+                       "disabled rule inherited the model flag as Item.enabled");
+                page.openInspector(disabledRow);
+                expect(page.inspectEnabled === false && !sw.checked,
+                       "delegate path lost the disabled rule flag");
+
                 // A JS assignment breaks a plain `checked:` binding; the
                 // switch must still follow the daemon's list afterwards.
                 sw.checked = true;
@@ -310,6 +322,12 @@ Controls.ApplicationWindow {
     assert!(
         root_ok.load(Ordering::SeqCst),
         "RulesPage inspector probe failed to load (QML parse error)"
+    );
+    assert!(
+        !captured
+            .lines()
+            .any(|line| line.contains("enabled") && line.contains("overrides")),
+        "RulesPage delegate overrides a base property:\n{captured}"
     );
     let bad_lines: Vec<&str> = captured
         .lines()

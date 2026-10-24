@@ -38,7 +38,7 @@ use crate::pending_decision::VerdictChoice;
 use snitchwatch_bridge::translator::process_binding::is_bindable_process_path;
 use snitchwatch_bridge::ws_messages::{AutoAnswer, ConnectionRow, ServerMessage};
 
-mod level_rule_actions;
+pub(crate) mod level_rule_actions;
 
 mod apply;
 mod helpers;
@@ -322,6 +322,33 @@ pub mod qobject {
             key: &QString,
         ) -> QString;
 
+        /// A menu's captured session must survive through final queue admission.
+        /// Program-wide creation requires its nonempty reviewed duration token.
+        #[qinvokable]
+        #[cxx_name = "createLevelRuleForSession"]
+        fn create_level_rule_for_session(
+            self: Pin<&mut ConnectionsModel>,
+            level: i32,
+            process_key: &QString,
+            key: &QString,
+            choice: &QString,
+            shown_duration: &QString,
+            source_session: &QString,
+        ) -> QString;
+
+        /// Delete only the exact rule name and state shown in the captured menu.
+        #[qinvokable]
+        #[cxx_name = "deleteLevelRuleForSession"]
+        fn delete_level_rule_for_session(
+            self: Pin<&mut ConnectionsModel>,
+            level: i32,
+            process_key: &QString,
+            key: &QString,
+            source_session: &QString,
+            rule_name: &QString,
+            rule_state: &QString,
+        ) -> QString;
+
         /// The Settings default duration token (`this_time`, `for_5_minutes`,
         /// `until_restart`, `forever`) a rule button's rule would take now:
         /// the one `createLevelRule` sends.
@@ -352,6 +379,12 @@ pub mod qobject {
         #[qinvokable]
         #[cxx_name = "isPendingRow"]
         fn is_pending_row(self: &ConnectionsModel, id: &QString) -> bool;
+
+        /// Session of the current snapshot, independent of filtering and delegates.
+        /// Read-only: safe from modelReset callbacks, without a nested flush.
+        #[qinvokable]
+        #[cxx_name = "currentSourceSession"]
+        fn current_source_session(self: &ConnectionsModel) -> QString;
 
         /// Where the connection `id` sits in the list as it is drawn now (after
         /// the filter and, in grouped mode, group expansion), or -1 if it is not
@@ -428,6 +461,18 @@ pub mod qobject {
         #[qinvokable]
         #[cxx_name = "pendingRowIdsForProcess"]
         fn pending_row_ids_for_process(self: Pin<&mut ConnectionsModel>, key: &QString) -> QString;
+
+        /// Pending descendants of this program/domain/host, including hidden rows.
+        /// Flushes grouped messages before resolving the selected subtree.
+        #[qinvokable]
+        #[cxx_name = "pendingRowIdsForGroup"]
+        fn pending_row_ids_for_group(
+            self: Pin<&mut ConnectionsModel>,
+            program: &QString,
+            level: i32,
+            key: &QString,
+            parent_domain: &QString,
+        ) -> QString;
 
         /// Recompute `oldestPendingAgeSecs` against the current wall clock.
         /// Call this from a QML `Timer` tick (elapsed time changes with no

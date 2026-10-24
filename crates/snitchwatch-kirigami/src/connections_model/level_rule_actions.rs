@@ -32,6 +32,34 @@ const DURATION_CHANGED: &str =
 /// The longest host name or domain (bytes), as DNS allows.
 const MAX_KEY_BYTES: usize = 253;
 
+const SESSION_CHANGED: &str =
+    "The background service changed while you were deciding. Open the menu again.";
+const RULE_CHANGED: &str = "The rule changed while you were deciding. Open the menu again.";
+
+/// Parse the opaque QML snapshot token and bind it to the model's source.
+pub(super) fn captured_session(current: Option<u64>, shown: &QString) -> Result<u64, &'static str> {
+    let shown = shown.to_string();
+    let session = shown
+        .strip_suffix(':')
+        .and_then(|id| id.parse::<u64>().ok());
+    session
+        .filter(|id| *id != 0 && Some(*id) == current)
+        .ok_or(SESSION_CHANGED)
+}
+
+fn checked_delete_name(
+    projection: &Projection,
+    expected: Option<(&str, &str)>,
+) -> Result<String, &'static str> {
+    let name = delete_name(projection)?;
+    if expected.is_some_and(|(shown_name, shown_state)| {
+        shown_name != name || shown_state != projection.state.token()
+    }) {
+        return Err(RULE_CHANGED);
+    }
+    Ok(name)
+}
+
 /// The longest program path (bytes), `PATH_MAX`.
 const MAX_PROGRAM_BYTES: usize = 4096;
 
@@ -107,14 +135,16 @@ fn project(model: &ConnectionsModel, node: NodeRef<'_>) -> Projection {
     model.level_rules.project_in(node, hosts)
 }
 
-/// Queue `message` for the live bridge session, whichever it is (a header
-/// has no row, so no row session).
-fn send_to_current_session(
+/// Queue admission receives the captured session, even after settings I/O.
+pub(crate) fn send_to_session(
+    handles: Option<&crate::bridge_runtime::BridgeHandles>,
+    expected_session: Option<u64>,
     message: ClientMessage,
 ) -> Result<(), crate::bridge_runtime::SendClientMessageError> {
-    crate::bridge_runtime::handles()
-        .ok_or(crate::bridge_runtime::SendClientMessageError::Disconnected)?
-        .try_send(message)
+    let handles = handles.ok_or(crate::bridge_runtime::SendClientMessageError::Disconnected)?;
+    let session =
+        expected_session.ok_or(crate::bridge_runtime::SendClientMessageError::StaleSession)?;
+    handles.try_send_for_session(session, message)
 }
 
 /// What a node's button shows: its projection, except that a node with no
@@ -218,6 +248,7 @@ pub(super) fn role(model: &ConnectionsModel, row: i32, role: i32) -> QVariant {
 }
 
 /// `createLevelRule`: the empty string when sent, else why not.
+#[allow(clippy::too_many_arguments)] // Mirrors the QML rule command with its captured origin.
 pub(super) fn create(
     mut model: Pin<&mut ConnectionsModel>,
     level: i32,
@@ -226,6 +257,8 @@ pub(super) fn create(
     choice: &QString,
     confirmed: bool,
     shown_duration: &QString,
+    expected_session: Option<u64>,
+    require_empty: bool,
 ) -> QString {
     use crate::make_rule::add_level_rule_message;
     let (process_key, key, choice) = (process_key.to_string(), key.to_string(), choice.to_string());
@@ -243,6 +276,9 @@ pub(super) fn create(
     let projection = project(&model, node);
     if projection.state == RuleState::Pending {
         return QString::from(ALREADY_WORKING);
+    }
+    if require_empty && projection.state != RuleState::None {
+        return QString::from(RULE_CHANGED);
     }
     if projection.too_broad {
         return QString::from(LevelRuleRefusal::TooBroad.reason());
@@ -267,7 +303,10 @@ pub(super) fn create(
         Err(refusal) => return QString::from(refusal.reason()),
     };
     let operator = request.operator;
-    let problem = crate::make_rule::send_problem(Some(request.message), send_to_current_session);
+    let handles = crate::bridge_runtime::handles();
+    let problem = crate::make_rule::send_problem(Some(request.message), |message| {
+        send_to_session(handles.as_ref(), expected_session, message)
+    });
     if let Some(problem) = problem {
         return QString::from(problem);
     }
@@ -286,6 +325,8 @@ pub(super) fn delete(
     level: i32,
     process_key: &QString,
     key: &QString,
+    expected_session: Option<u64>,
+    expected_rule: Option<(&str, &str)>,
 ) -> QString {
     let (process_key, key) = (process_key.to_string(), key.to_string());
     let Some(level) = Level::from_i32(level) else {
@@ -299,7 +340,7 @@ pub(super) fn delete(
     if let Err(reason) = known_node(model.grouped, &model.grouped_projection, node) {
         return QString::from(reason);
     }
-    let name = match delete_name(&project(&model, node)) {
+    let name = match checked_delete_name(&project(&model, node), expected_rule) {
         Ok(name) => name,
         Err(reason) => return QString::from(reason),
     };
@@ -309,7 +350,10 @@ pub(super) fn delete(
         request_id: Some(request_id.clone()),
         reply: None,
     };
-    let problem = crate::make_rule::send_problem(Some(message), send_to_current_session);
+    let handles = crate::bridge_runtime::handles();
+    let problem = crate::make_rule::send_problem(Some(message), |message| {
+        send_to_session(handles.as_ref(), expected_session, message)
+    });
     if let Some(problem) = problem {
         return QString::from(problem);
     }

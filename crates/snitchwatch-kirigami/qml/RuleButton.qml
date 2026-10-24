@@ -39,6 +39,9 @@ Item {
 
     // The node as it was when the open menu was opened, or null.
     property var node: null
+    // Rows use a page-owned popup; standalone buttons keep their local menu.
+    property var menuActions: null
+    property var menuRow: null
 
     readonly property string levelName: root.level === 0 ? "program"
         : root.level === 1 ? "domain" : "host"
@@ -92,6 +95,10 @@ Item {
     implicitHeight: button.implicitHeight
 
     function openMenu(menu) {
+        if (root.menuActions) {
+            root.menuActions.openRule(root.menuRow, button);
+            return;
+        }
         root.node = { level: root.level, program: root.program, key: root.nodeKey, label: root.nodeLabel };
         menu.popup(button, 0, button.height);
     }
@@ -143,6 +150,7 @@ Item {
 
     Controls.Menu {
         id: chooseMenu
+        popupType: Controls.Popup.Item
         Controls.MenuItem {
             text: "Allow"
             icon.name: "dialog-ok-apply"
@@ -156,6 +164,7 @@ Item {
     }
     Controls.Menu {
         id: removeMenu
+        popupType: Controls.Popup.Item
         Controls.MenuItem {
             text: "Remove rule"
             icon.name: "edit-delete"

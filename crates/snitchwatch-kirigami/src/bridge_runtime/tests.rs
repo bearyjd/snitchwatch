@@ -880,23 +880,58 @@ fn a_runtime_that_could_not_start_is_failed_and_not_ok() {
     let link = link_of(&outcome);
     assert_eq!(link.state, LinkState::Failed);
     assert!(link.detail.contains("no async runtime"), "{link:?}");
-    assert_eq!(status_of(&outcome), (false, link.detail));
+    assert_eq!(startup_status_of(&outcome), (false, link.detail));
 }
 
 #[test]
-fn only_the_connected_state_is_ok() {
-    for (state, ok) in [
-        (LinkState::Connecting, false),
-        (LinkState::Connected, true),
-        (LinkState::Retrying, false),
-        (LinkState::Failed, false),
-        (LinkState::Stopped, false),
+fn a_started_runtime_is_successful_before_the_connection_completes() {
+    // No reconnect task: exercise startup reporting without contacting a service.
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    let (broadcast_tx, _) = broadcast::channel(1);
+    let (inbound_tx, _) = mpsc::channel(1);
+    let status = Arc::new(Mutex::new(LinkStatus::connecting()));
+    let outcome = Outcome::Running(Box::new(ClientRuntime {
+        handles: BridgeHandles {
+            broadcast_tx,
+            inbound_tx,
+            runtime: runtime.handle().clone(),
+            connection: Arc::new(Mutex::new(ConnectionState::default())),
+        },
+        status: status.clone(),
+        tray_tx: watch::channel(ReceivedTrayState {
+            connection_id: 0,
+            state: BridgeTrayState::Idle,
+        })
+        .0,
+        notice_tx: broadcast::channel(1).0,
+        pause_tx: pause_channel().0,
+        slot_tx: watch::channel(ReceivedPromptSlot::default()).0,
+        _runtime: runtime,
+    }));
+    for state in [
+        LinkState::Connecting,
+        LinkState::Connected,
+        LinkState::Retrying,
+        LinkState::Failed,
+        LinkState::Stopped,
     ] {
         let link = LinkStatus {
             state,
-            detail: "Connected to bridge service".to_string(),
+            detail: format!("state: {}", state.token()),
         };
-        assert_eq!(link.state == LinkState::Connected, ok, "{state:?}");
+        *status.lock().unwrap() = link.clone();
+        assert_eq!(
+            startup_status_of(&outcome),
+            (true, link.detail.clone()),
+            "{state:?}"
+        );
+        assert_eq!(
+            link_of(&outcome),
+            link,
+            "connection status stays independent"
+        );
     }
 }
 
@@ -958,4 +993,59 @@ async fn a_connected_client_is_connected_and_stopped_once_its_sender_goes_away()
     let link = status.lock().unwrap().clone();
     assert_eq!(link.state, LinkState::Stopped, "{link:?}");
     server.abort();
+}
+
+#[tokio::test]
+async fn level_rule_mutations_never_recapture_a_replacement_session() {
+    let (broadcast_tx, _) = broadcast::channel(1);
+    let (inbound_tx, mut inbound_rx) = mpsc::channel(4);
+    let connection = Arc::new(Mutex::new(ConnectionState::default()));
+    let handles = BridgeHandles {
+        broadcast_tx,
+        inbound_tx,
+        runtime: Handle::current(),
+        connection: connection.clone(),
+    };
+    let shown_session = mark_connected(&connection, false);
+    // The QML check already passed. Settings I/O or another thread now permits
+    // disconnect/reconnect before the Rust mutation reaches queue admission.
+    disconnect_and_discard(&connection, &mut inbound_rx);
+    let replacement_session = mark_connected(&connection, false);
+    let create = serde_json::from_value(serde_json::json!({
+        "action": "addRule", "requestId": "level-create", "rule": {
+            "name": "new", "enabled": true, "action": "allow", "duration": "always",
+            "operator": { "type": "simple", "operand": "process.path", "data": "/usr/bin/curl", "sensitive": true }
+        }
+    })).unwrap();
+    let delete = ClientMessage::DeleteRule {
+        rule_id: "shown-rule".into(),
+        request_id: Some("level-delete".into()),
+        reply: None,
+    };
+    for message in [create, delete] {
+        assert_eq!(
+            crate::connections_model::level_rule_actions::send_to_session(
+                Some(&handles),
+                Some(shown_session),
+                message,
+            ),
+            Err(SendClientMessageError::StaleSession),
+        );
+        assert!(
+            inbound_rx.try_recv().is_err(),
+            "old menu command entered replacement queue"
+        );
+    }
+    assert_eq!(
+        crate::connections_model::level_rule_actions::send_to_session(
+            Some(&handles),
+            Some(replacement_session),
+            ClientMessage::RecheckDiagnostics,
+        ),
+        Ok(()),
+    );
+    assert_eq!(
+        inbound_rx.try_recv().unwrap().connection_id,
+        replacement_session
+    );
 }

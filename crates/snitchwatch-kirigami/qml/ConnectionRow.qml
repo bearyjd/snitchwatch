@@ -1,11 +1,5 @@
-// One row of the Connections list: a leaf connection, or a process/domain
-// group header in the grouped projection. Split out of ConnectionsPage.qml
-// (monitor-tree step 1) with no behaviour change.
-//
-// Instantiated only as the ListView delegate, so the Rust model's roles
-// arrive as the required properties below. `page` is the ConnectionsPage that
-// owns the list: the row forwards clicks and verdicts to it and never holds
-// state of its own beyond the double-submit latch.
+// A Connections list delegate: connection or group header. Rust model roles
+// arrive as required properties; clicks and verdicts go to the owning page.
 import QtQuick
 import QtQuick.Layouts
 import QtQuick.Controls as Controls
@@ -31,11 +25,8 @@ Item {
     required property string verdict
     required property bool pending
 
-    // Grouping roles (Little-Snitch-parity Process->Domain view).
-    // depth is the indent step. groupLevel is the tree tier: 0 = program
-    // header, 1 = domain header, 2 = host header, 3 = connection row. Flat
-    // mode always reports depth 0 / isGroupHeader false (level 3), so this
-    // delegate renders identically to before grouping was added.
+    // depth controls indentation; groupLevel: program=0, domain=1, host=2,
+    // connection=3. Flat connections have depth 0 and isGroupHeader=false.
     required property int depth
     required property int groupLevel
     required property string groupProcessKey
@@ -86,14 +77,20 @@ Item {
     property bool submitted: false
     onRowIdChanged: row.submitted = false
     onPendingChanged: row.submitted = false
+    onGroupPendingChanged: row.submitted = false
+    onGroupKeyChanged: row.submitted = false
+    onGroupLevelChanged: row.submitted = false
+    onGroupParentKeyChanged: row.submitted = false
+    onGroupProcessKeyChanged: row.submitted = false
+    onSourceSessionChanged: row.submitted = false
 
     // What this row's Deny, or this header's "Deny all", does: the
     // buttons' tooltip and accessible description. Empty where the
     // button is hidden, so other delegates never look it up.
     readonly property string denyText: !row.isGroupHeader && row.pending
         ? verdictHelper.denyText(row.rowId) : ""
-    readonly property string denyAllText: row.isGroupHeader && row.groupLevel === 0
-        && row.groupPending > 0 ? verdictHelper.denyAllText(row.groupKey) : ""
+    readonly property string denyAllText: row.isGroupHeader
+        && row.groupPending > 0 ? verdictHelper.denyAllText(row.ruleProgram) : ""
     // The program a header's rule is about (only a host row carries it as
     // `groupProcessKey`) and the key below it ("" for a program).
     readonly property string ruleProgram: row.groupLevel === 0 ? row.groupKey
@@ -102,43 +99,37 @@ Item {
     Connections {
         target: row.ListView
         function onPooled() {
-            headerRuleButton.closeMenus();
+            row.submitted = false;
         }
     }
     // Exposed for the headless probes.
     property alias ruleButton: headerRuleButton
     property alias denyButton: rowDenyButton
     property alias denyAllButton: batchDenyButton
+    readonly property var actions: row.page.connectionActions
 
-    // Single latch-and-dispatch for all 4 verdict buttons. Kept as one
-    // function so the re-entry guard can't be present on some sites
-    // and missing on others — it already was once, leaving "Allow
-    // all" able to double-submit every pending row under a process.
-    // `batch` picks the process-group action over the single-row one.
-    //
-    // These buttons used to ALSO carry a `TapHandler`, added on the
-    // theory that a nested action needs its own pointer grab. Measured
-    // with QtTest `mouseClick()` against this exact delegate shape
-    // (Item > MouseArea z:0 + content z:1 > Button): one real click
-    // fires `onClicked` AND `onTapped` — 1 each, identical across the
-    // Basic/Fusion/Material/Universal styles — while the underlying
-    // MouseArea correctly stays silent. So the TapHandler was pure
-    // double-dispatch and is gone; plain `onClicked` is sufficient.
+    // Share one submission latch across every verdict button. Plain onClicked
+    // receives nested button clicks; adding TapHandler dispatches twice, as
+    // measured by QtTest across Basic/Fusion/Material/Universal styles.
     readonly property bool decideLaterOffered: !row.isGroupHeader && row.pending
         && verdictHelper.rowDecideLater(row.rowId)
 
-    function decideOnce(choice, batch) {
+    function decideOnce(choice, batch, target) {
         if (row.submitted) {
             return;
         }
+        const n = target || { rowId: row.rowId, program: row.ruleProgram,
+            level: row.groupLevel, key: row.ruleKey, domain: row.groupParentKey,
+            session: row.sourceSession };
         row.submitted = true;
         if (batch) {
-            page.submitBatchVerdict(row.groupKey, choice, row.sourceSession);
+            if (!page.submitGroupVerdict(n.program, n.level, n.key, n.domain,
+                                         choice, n.session, true)) row.submitted = false;
         } else if (choice === "later") {
             // Part C "Decide later": not a verdict QML builds.
-            verdictHelper.decideLater(row.rowId);
+            verdictHelper.decideLater(n.rowId);
         } else {
-            page.submitInlineVerdict(row.rowId, choice);
+            if (!page.submitInlineVerdict(n.rowId, choice, true)) row.submitted = false;
         }
     }
 
@@ -148,7 +139,12 @@ Item {
     MouseArea {
         anchors.fill: parent
         z: 0
-        onClicked: {
+        acceptedButtons: Qt.LeftButton | Qt.RightButton
+        onClicked: mouse => {
+            if (mouse.button === Qt.RightButton) {
+                row.actions.open(row, mouse.x, mouse.y);
+                return;
+            }
             if (row.isGroupHeader) {
                 if (row.groupLevel === 0) {
                     page.model.toggleProcessGroup(row.groupKey);
@@ -252,19 +248,9 @@ Item {
         }
 
         Rectangle {
-            // Pending-count badge. Groups are never force-expanded
-            // for pending rows (grouping.rs module doc), so this
-            // badge is the only signal that a collapsed group hides
-            // undecided connections — it must read as a badge, not
-            // as body text.
-            //
-            // Issue #31: this used to fill with neutralBackgroundColor
-            // under a neutralTextColor label. Under Fusion/Basic those
-            // two roles resolve to the identical orange, so the label
-            // vanished into its own fill. Border-only sidesteps the
-            // pairing entirely — neutralTextColor is already used bare
-            // (no fill) elsewhere on this page, e.g. the verdict Label
-            // above, so it's proven to read against the row background.
+            // Collapsed groups expose pending connections through this badge.
+            // Use a border: Fusion/Basic can give neutral background and text
+            // the same color, making a filled badge unreadable (issue #31).
             visible: row.isGroupHeader && row.groupPending > 0
             color: "transparent"
             border.color: Kirigami.Theme.neutralTextColor
@@ -283,12 +269,10 @@ Item {
             }
         }
 
-        // Issue #18: per-process batch actions. Only on top-level
-        // program headers (groupLevel 0) with at least one pending
-        // descendant — a domain header or a fully-decided process has
-        // nothing to batch-act on.
+        // Batch pending decisions at every tree level. The subtree includes
+        // collapsed and filtered descendants, always within this program.
         RowLayout {
-            visible: row.isGroupHeader && row.groupLevel === 0 && row.groupPending > 0
+            visible: row.isGroupHeader && row.groupPending > 0
             spacing: Kirigami.Units.smallSpacing
 
             Controls.Button {
@@ -375,7 +359,7 @@ Item {
         // Last on the row, at a fixed width, so the rule-state column lines
         // up; the badge and Allow all / Deny all sit to its left. Its picks
         // carry the node as copied when its menu opened (this delegate is
-        // reused for other rows), and the menus close when it is pooled.
+        // reused for other rows). The page owns the popup through live updates.
         RuleButton {
             id: headerRuleButton
             objectName: "headerRuleButton"
@@ -387,12 +371,25 @@ Item {
             program: row.ruleProgram
             nodeKey: row.ruleKey
             nodeLabel: row.groupLabel
+            menuActions: row.actions
+            menuRow: row
             Layout.preferredWidth: implicitWidth
             Layout.alignment: Qt.AlignVCenter
             onCreateRequested: (level, program, key, label, choice) => row.page.levelRules.create(
                 level, program, key, label, choice)
             onRemoveRequested: (level, program, key, label) => row.page.levelRules.remove(
                 level, program, key, label)
+        }
+        Controls.ToolButton {
+            objectName: "groupActionsButton"
+            visible: row.isGroupHeader
+            text: "Actions"
+            icon.name: "application-menu"
+            onClicked: {
+                const point = mapToItem(row, 0, height);
+                row.actions.open(row, point.x, point.y);
+            }
+            Accessible.name: "Actions for this group"
         }
     }
 }

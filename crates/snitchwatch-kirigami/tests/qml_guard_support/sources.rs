@@ -61,6 +61,10 @@ pub const SIZED_SHEET: &str = include_str!("../../qml/SizedOverlaySheet.qml");
 pub const ALL_QML: &[(&str, &str)] = &[
     ("AlertHost.qml", include_str!("../../qml/AlertHost.qml")),
     ("AlertWindow.qml", include_str!("../../qml/AlertWindow.qml")),
+    (
+        "ConnectionActions.qml",
+        include_str!("../../qml/ConnectionActions.qml"),
+    ),
     ("Durations.qml", include_str!("../../qml/Durations.qml")),
     (
         "ScreenshotRunner.qml",

@@ -480,7 +480,10 @@ Kirigami.ScrollablePage {
             required property string readOnlyReason
             required property bool deletable
             required property bool toggleable
-            required property bool enabled
+            // Keep the rule flag separate from Item.enabled so disabled rules
+            // remain interactive and can be enabled again in the inspector.
+            required property var model
+            readonly property bool ruleEnabled: model.enabled
             // Named `ruleAction` (not `action`) because `Controls.ItemDelegate`
             // (an `AbstractButton` subclass) already declares a built-in
             // `action` property for binding a `QQuickAction` — reusing that
@@ -516,8 +519,8 @@ Kirigami.ScrollablePage {
                 spacing: Kirigami.Units.largeSpacing
 
                 Controls.Label {
-                    text: row.enabled ? "●" : "○"
-                    color: row.enabled ? page.actionColor(row.ruleAction) : Kirigami.Theme.disabledTextColor
+                    text: row.ruleEnabled ? "●" : "○"
+                    color: row.ruleEnabled ? page.actionColor(row.ruleAction) : Kirigami.Theme.disabledTextColor
                     Layout.alignment: Qt.AlignVCenter
                 }
 
@@ -647,7 +650,7 @@ Kirigami.ScrollablePage {
         page.inspectReadOnlyReason = row.readOnlyReason;
         page.inspectDeletable = row.deletable;
         page.inspectToggleable = row.toggleable;
-        page.inspectEnabled = row.enabled;
+        page.inspectEnabled = row.ruleEnabled;
         page.inspectAction = row.ruleAction;
         page.inspectDuration = row.duration;
         page.inspectOperatorSummary = row.operatorSummary;

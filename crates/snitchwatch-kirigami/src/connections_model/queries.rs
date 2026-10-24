@@ -52,6 +52,13 @@ impl qobject::ConnectionsModel {
         }))
     }
 
+    pub(super) fn current_source_session(&self) -> QString {
+        let session = self.source_session.filter(|id| {
+            crate::bridge_runtime::handles().is_none_or(|handles| handles.is_current_session(*id))
+        });
+        QString::from(&session.map(|id| format!("{id}:")).unwrap_or_default())
+    }
+
     pub(super) fn is_pending_row(&self, id: &QString) -> bool {
         self.store.is_pending(&id.to_string()).unwrap_or(false)
     }
@@ -156,6 +163,7 @@ impl qobject::ConnectionsModel {
         confirmed: bool,
         shown_duration: &QString,
     ) -> QString {
+        let session = self.source_session;
         level_rule_actions::create(
             self,
             level,
@@ -164,6 +172,8 @@ impl qobject::ConnectionsModel {
             choice,
             confirmed,
             shown_duration,
+            session,
+            false,
         )
     }
 
@@ -173,7 +183,61 @@ impl qobject::ConnectionsModel {
         process_key: &QString,
         key: &QString,
     ) -> QString {
-        level_rule_actions::delete(self, level, process_key, key)
+        let session = self.source_session;
+        level_rule_actions::delete(self, level, process_key, key, session, None)
+    }
+
+    pub(super) fn create_level_rule_for_session(
+        self: Pin<&mut Self>,
+        level: i32,
+        process_key: &QString,
+        key: &QString,
+        choice: &QString,
+        shown_duration: &QString,
+        source_session: &QString,
+    ) -> QString {
+        let session =
+            match level_rule_actions::captured_session(self.source_session, source_session) {
+                Ok(session) => session,
+                Err(reason) => return QString::from(reason),
+            };
+        level_rule_actions::create(
+            self,
+            level,
+            process_key,
+            key,
+            choice,
+            // Only program confirmation sends a reviewed duration token.
+            level == 0 && !shown_duration.is_empty(),
+            shown_duration,
+            Some(session),
+            true,
+        )
+    }
+
+    pub(super) fn delete_level_rule_for_session(
+        self: Pin<&mut Self>,
+        level: i32,
+        process_key: &QString,
+        key: &QString,
+        source_session: &QString,
+        rule_name: &QString,
+        rule_state: &QString,
+    ) -> QString {
+        let session =
+            match level_rule_actions::captured_session(self.source_session, source_session) {
+                Ok(session) => session,
+                Err(reason) => return QString::from(reason),
+            };
+        let (name, state) = (rule_name.to_string(), rule_state.to_string());
+        level_rule_actions::delete(
+            self,
+            level,
+            process_key,
+            key,
+            Some(session),
+            Some((&name, &state)),
+        )
     }
 
     pub(super) fn poll_level_rules(self: Pin<&mut Self>) {
@@ -240,5 +304,22 @@ impl qobject::ConnectionsModel {
         let now = now_ms();
         let age = pending_age_secs(self.store.oldest_pending_started_at_ms(now), now);
         self.as_mut().set_oldest_pending_age_secs(age);
+    }
+
+    pub(super) fn pending_row_ids_for_group(
+        mut self: Pin<&mut Self>,
+        program: &QString,
+        level: i32,
+        key: &QString,
+        parent_domain: &QString,
+    ) -> QString {
+        self.as_mut().flush_grouped_messages();
+        let ids = self.grouping.pending_row_ids_for_group(
+            &program.to_string(),
+            level,
+            &key.to_string(),
+            &parent_domain.to_string(),
+        );
+        QString::from(&serde_json::to_string(&ids).expect("string ids serialize"))
     }
 }

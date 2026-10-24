@@ -359,6 +359,41 @@ fn move_to_front_of_unknown_id_is_a_no_op() {
 // --- pending_row_ids (issue #18 batch actions) ------------------------
 
 #[test]
+fn grouped_bulk_actions_stay_within_the_selected_app_domain_and_host() {
+    // A shared destination IP must never widen a hostname/domain selection.
+    let rows = vec![
+        row("www", "app", "www.example.com", "1.1.1.1", None),
+        row("api", "app", "api.example.com", "1.1.1.1", None),
+        row("other-domain", "app", "www.other.net", "1.1.1.1", None),
+        row("other-app", "another", "www.example.com", "1.1.1.1", None),
+        row("decided", "app", "www.example.com", "1.1.1.1", Some("deny")),
+    ];
+    let tree = build(&rows); // All groups collapsed: hidden pending rows count.
+    assert_eq!(
+        tree.pending_row_ids_for_group("app", 0, "", ""),
+        vec!["www", "api", "other-domain"]
+    );
+    assert_eq!(
+        tree.pending_row_ids_for_group("app", 1, "example.com", ""),
+        vec!["www", "api"]
+    );
+    assert_eq!(
+        tree.pending_row_ids_for_group("app", 2, "www.example.com", "example.com"),
+        vec!["www"]
+    );
+    assert!(tree
+        .pending_row_ids_for_group("app", 2, "www.example.com", "other.net")
+        .is_empty());
+    assert!(tree.pending_row_ids_for_group("app", 3, "", "").is_empty());
+    assert!(tree
+        .pending_row_ids_for_group("app", 0, "example.com", "")
+        .is_empty());
+    assert!(tree
+        .pending_row_ids_for_group("missing", 0, "", "")
+        .is_empty());
+}
+
+#[test]
 fn pending_row_ids_collects_only_pending_rows_under_a_process_in_display_order() {
     // Insertion order deliberately differs from lexical id/domain order
     // (slack.com before github.com; "c" before "a") so a regression that
