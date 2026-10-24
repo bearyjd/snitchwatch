@@ -91,6 +91,12 @@ Item {
         model.dbBuildEpoch = 1790818572;
         if (find(databaseSettings, "geoDatabaseBuild").text.indexOf("2026-10-01") < 0)
             throw new Error("Database build date is not displayed in UTC");
+        for (let epoch of [0, -1, 18446744073709551615, Infinity, NaN]) {
+            model.dbBuildEpoch = epoch;
+            const build = find(databaseSettings, "geoDatabaseBuild");
+            if (!build.visible || build.text !== "Database build date unknown.")
+                throw new Error("Invalid or absent build epoch did not render as unknown");
+        }
         model.installDatabase("https://example.invalid/database.mmdb");
         if (model.dbInstallBusy || model.dbInstallError.length === 0)
             throw new Error("Nonlocal file was not rejected");

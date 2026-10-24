@@ -10,6 +10,14 @@ ColumnLayout {
     property GeoModel model
     spacing: Kirigami.Units.smallSpacing
 
+    function buildDateText(epoch) {
+        const date = new Date(epoch * 1000);
+        if (epoch <= 0 || isNaN(date.getTime()))
+            return "Database build date unknown.";
+        return "Database built: " + date.toISOString().split("T")[0]
+            + " (UTC). Bundled data updates with Snitchwatch releases.";
+    }
+
     Kirigami.Heading {
         level: 3
         text: "GeoIP database"
@@ -43,12 +51,10 @@ ColumnLayout {
     }
     Controls.Label {
         objectName: "geoDatabaseBuild"
-        visible: settings.model && settings.model.dbAvailable && settings.model.dbBuildEpoch > 0
+        visible: settings.model && settings.model.dbAvailable
         Layout.fillWidth: true
         wrapMode: Text.Wrap
-        text: settings.model && settings.model.dbBuildEpoch > 0
-            ? "Database built: " + new Date(settings.model.dbBuildEpoch * 1000).toISOString().slice(0, 10) + " (UTC). Bundled data updates with Snitchwatch releases."
-            : ""
+        text: settings.model ? settings.buildDateText(settings.model.dbBuildEpoch) : ""
     }
     Controls.Label {
         objectName: "geoActiveDatabasePath"

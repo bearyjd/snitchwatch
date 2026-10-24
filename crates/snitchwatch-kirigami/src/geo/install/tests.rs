@@ -4,6 +4,15 @@ use std::os::unix::fs::{symlink, PermissionsExt};
 // A tiny synthetic MMDB: one IPv4 search node, one country record, and real
 // binary metadata. No vendor data, network, environment mutation or mocks.
 pub(crate) fn fixture(database_type: &str) -> Vec<u8> {
+    tree_fixture(database_type, &[[17, 17]], 24, 4)
+}
+
+fn tree_fixture(
+    database_type: &str,
+    nodes: &[[u32; 2]],
+    record_size: u16,
+    ip_version: u8,
+) -> Vec<u8> {
     fn string(value: &str) -> Vec<u8> {
         assert!(value.len() < 29);
         let mut out = vec![0x40 | value.len() as u8];
@@ -18,7 +27,25 @@ pub(crate) fn fixture(database_type: &str) -> Vec<u8> {
         }
         out
     }
-    let mut out = vec![0, 0, 17, 0, 0, 17];
+    let mut out = Vec::new();
+    for &[left, right] in nodes {
+        match record_size {
+            24 => {
+                out.extend_from_slice(&left.to_be_bytes()[1..]);
+                out.extend_from_slice(&right.to_be_bytes()[1..]);
+            }
+            28 => {
+                out.extend_from_slice(&left.to_be_bytes()[1..]);
+                out.push(((left >> 20) as u8 & 0xf0) | ((right >> 24) as u8 & 0x0f));
+                out.extend_from_slice(&right.to_be_bytes()[1..]);
+            }
+            32 => {
+                out.extend_from_slice(&left.to_be_bytes());
+                out.extend_from_slice(&right.to_be_bytes());
+            }
+            _ => panic!("unsupported fixture record size"),
+        }
+    }
     out.extend([0; 16]);
     out.extend(map(vec![(
         "country",
@@ -31,12 +58,123 @@ pub(crate) fn fixture(database_type: &str) -> Vec<u8> {
         ("build_epoch", vec![1, 2, 1]),
         ("database_type", string(database_type)),
         ("description", map(vec![])),
-        ("ip_version", vec![0xa1, 4]),
+        ("ip_version", vec![0xa1, ip_version]),
         ("languages", vec![0, 4]),
-        ("node_count", vec![0xc1, 1]),
-        ("record_size", vec![0xa1, 24]),
+        ("node_count", {
+            let mut value = vec![0xc4];
+            value.extend_from_slice(&(nodes.len() as u32).to_be_bytes());
+            value
+        }),
+        ("record_size", vec![0xa1, record_size as u8]),
     ]));
     out
+}
+
+// Run hostile trees in a disposable process: the pre-fix iterator can allocate
+// indefinitely before yielding even its first record. Both memory/CPU limits
+// and a parent deadline protect the ordinary test runner.
+#[test]
+fn hostile_search_trees_are_bounded_and_preserve_the_installed_database() {
+    use std::os::unix::process::CommandExt;
+    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+    command
+        .args([
+            "--exact",
+            "geo::install::tests::hostile_search_tree_child",
+            "--nocapture",
+        ])
+        .env("SNITCHWATCH_HOSTILE_TREE_CHILD", "1");
+    unsafe {
+        command.pre_exec(|| {
+            let memory = libc::rlimit {
+                rlim_cur: 128 * 1024 * 1024,
+                rlim_max: 128 * 1024 * 1024,
+            };
+            let cpu = libc::rlimit {
+                rlim_cur: 2,
+                rlim_max: 2,
+            };
+            let core = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            if libc::setrlimit(libc::RLIMIT_DATA, &memory) != 0
+                || libc::setrlimit(libc::RLIMIT_CPU, &cpu) != 0
+                || libc::setrlimit(libc::RLIMIT_CORE, &core) != 0
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = command.spawn().unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            assert!(
+                status.success(),
+                "hostile-tree validation child failed: {status}"
+            );
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("hostile-tree validation exceeded five seconds");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn hostile_search_tree_child() {
+    if std::env::var_os("SNITCHWATCH_HOSTILE_TREE_CHILD").is_none() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("hostile.mmdb");
+    let target = dir.path().join("installed.mmdb");
+    let original = fixture("GeoLite2-Country");
+    std::fs::write(&target, &original).unwrap();
+    for record_size in [24, 28, 32] {
+        for ip_version in [4, 6] {
+            let depth = if ip_version == 4 { 33 } else { 129 };
+            let mut too_deep = vec![[depth + 16, depth + 16]; depth as usize];
+            for node in 0..depth - 1 {
+                too_deep[node as usize][0] = node + 1;
+            }
+            // Acyclic, tiny DAG with exponentially many empty network paths.
+            // No yielded record means a record counter cannot bound this.
+            let mut empty_dag = vec![[31, 31]; 31];
+            for node in 0..30 {
+                empty_dag[node] = [(node + 1) as u32; 2];
+            }
+            for nodes in [vec![[0, 17]], vec![[1, 18], [0, 18]], too_deep, empty_dag] {
+                let bytes = tree_fixture("GeoLite2-Country", &nodes, record_size, ip_version);
+                std::fs::write(&source, bytes).unwrap();
+                assert!(
+                    install(&source, &target).is_err(),
+                    "accepted malformed {record_size}/{ip_version} tree"
+                );
+                assert_eq!(std::fs::read(&target).unwrap(), original);
+            }
+        }
+    }
+}
+
+#[test]
+fn valid_tree_record_sizes_and_shared_subtrees_remain_supported() {
+    for record_size in [24, 28, 32] {
+        for ip_version in [4, 6] {
+            let bytes = tree_fixture(
+                "GeoLite2-Country",
+                &[[1, 1], [18, 18]],
+                record_size,
+                ip_version,
+            );
+            validate(&bytes).unwrap();
+        }
+    }
 }
 
 #[test]
@@ -84,6 +222,11 @@ fn dbip_official_file_compatibility() {
     let reader = maxminddb::Reader::from_source(&bytes).unwrap();
     assert_eq!(reader.metadata().database_type, "DBIP-Country-Lite");
     assert_eq!(reader.metadata().build_epoch, 1_790_818_572);
+    assert_eq!(reader.metadata().node_count, 1_383_101);
+    assert_eq!(
+        reader.networks(Default::default()).unwrap().count(),
+        1_382_908
+    );
     let lookup = MmdbLookup::open(&path).unwrap();
     assert_eq!(
         lookup.lookup("8.8.8.8".parse().unwrap()).unwrap().code,
@@ -201,6 +344,29 @@ fn corrupt_tree_and_country_records_are_rejected() {
     let index = bytes.windows(2).position(|p| p == b"US").unwrap();
     bytes[index] = b'1';
     assert!(validate(&bytes).is_err());
+}
+
+#[test]
+fn invalid_later_country_record_preserves_existing_database() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("download.mmdb");
+    let target = dir.path().join("installed.mmdb");
+    let original = fixture("GeoLite2-Country");
+    let mut bytes = original.clone();
+    let marker = bytes
+        .windows(14)
+        .position(|p| p == b"\xab\xcd\xefMaxMind.com")
+        .unwrap();
+    let mut second_record = bytes[22..marker].to_vec();
+    let code = second_record.windows(2).position(|p| p == b"US").unwrap();
+    second_record[code] = b'1';
+    let second_pointer = (17 + second_record.len() as u32).to_be_bytes();
+    bytes[3..6].copy_from_slice(&second_pointer[1..]);
+    bytes.splice(marker..marker, second_record);
+    std::fs::write(&source, bytes).unwrap();
+    std::fs::write(&target, &original).unwrap();
+    assert!(install(&source, &target).is_err());
+    assert_eq!(std::fs::read(&target).unwrap(), original);
 }
 
 #[test]

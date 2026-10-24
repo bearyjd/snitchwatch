@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 const MAX_DATABASE_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_NETWORKS: usize = 2_000_000;
 
+mod tree;
+
 /// Always install in app data, never in a system database or an env override.
 pub fn target_path() -> PathBuf {
     super::paths::default_suggested_path(
@@ -44,6 +46,10 @@ fn validate(bytes: &[u8]) -> Result<(), String> {
             "Choose an extracted DB-IP Country Lite, GeoLite2-Country or GeoIP2-Country .mmdb file.".into(),
         );
     }
+    // The library iterator does not bound internal-node traversal between
+    // yielded records. Validate its entire reachable graph before calling it.
+    // Allow empty leaves and shared IPv4 aliases as well as data records.
+    tree::validate(bytes, reader.metadata(), MAX_NETWORKS * 4 + 1)?;
     let mut countries = false;
     for (count, result) in reader
         .networks(Default::default())
