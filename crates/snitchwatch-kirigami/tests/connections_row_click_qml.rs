@@ -82,6 +82,7 @@ Window {
             return "";
         }
         function pollLevelRules() {}
+        function levelRuleScopeText(level, program, key) { return "Executable " + program + "; " + (level === 0 ? "any host" : key) + "; any port; any protocol"; }
         function levelRuleDuration() { return "forever"; }
     }
     ConnectionsPage {

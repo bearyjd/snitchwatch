@@ -68,6 +68,20 @@ ColumnLayout {
         visible: page.inspecting
         spacing: Kirigami.Units.largeSpacing
 
+        ConnectionExplanation {
+            Layout.fillWidth: true
+            snapshot: page.inspectDetails
+            recordedVerdict: page.inspectVerdictText
+        }
+        ConnectionDetailsCopy {
+            Layout.fillWidth: true
+            snapshot: page.inspectDetails
+            available: page.inspecting && page.inspectSameSource
+                && (!page.bridgeFeed || page.bridgeFeed.ok !== false)
+            validSnapshot: () => page.model && page.inspectSession === page.model.currentSourceSession()
+                && (!page.bridgeFeed || page.bridgeFeed.ok !== false)
+        }
+
         Kirigami.FormLayout {
             Layout.fillWidth: true
             Controls.Label {

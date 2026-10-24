@@ -43,6 +43,13 @@ QtObject {
     // (issue #49). `bindableProcessPath` (issue #44): whether an answer for
     // this program can be remembered; `alsoListedByDefault` is E3's hint.
     property string ip: ""
+    property var details: ({})
+    property string sourceSession: ""
+    property bool sameSource: false
+    onSourceSessionChanged: state.refreshSource()
+    function refreshSource() {
+        state.sameSource = !!state.model && state.sourceSession === state.model.currentSourceSession();
+    }
     property bool bindableProcessPath: false
     property bool alsoListedByDefault: false
     // Whether the row's bridge advertised app-bound rules; false until known.
@@ -57,6 +64,7 @@ QtObject {
         state.inspecting = true;
         state.noLongerPending = false;
         state.rowId = row.rowId;
+        state.sourceSession = row.sourceSession || "";
         state.process = row.process;
         state.host = row.host;
         state.port = row.port;
@@ -87,6 +95,7 @@ QtObject {
     // is a decorative side-channel, never a blocker.
     function applyDetails(id) {
         state.ip = "";
+        state.details = ({});
         state.bindableProcessPath = false;
         state.alsoListedByDefault = false;
         if (!state.model) {
@@ -94,6 +103,7 @@ QtObject {
         }
         try {
             const details = JSON.parse(state.model.rowDetailsJson(id));
+            state.details = details;
             state.ip = details.dstIp || "";
             state.bindableProcessPath = details.bindableProcessPath === true;
             state.alsoListedByDefault = details.alsoListedByDefault === true;
@@ -117,6 +127,7 @@ QtObject {
     }
 
     function recheck() {
+        state.refreshSource();
         const ok = state.decidable();
         if (state.pending && !ok) {
             state.pending = false;

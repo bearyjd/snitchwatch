@@ -13,6 +13,18 @@
 
 const PAGES: &[(&str, &str, &[&str], usize)] = &[
     (
+        "ConnectionActions.qml",
+        include_str!("../qml/ConnectionActions.qml"),
+        &["parent.text"],
+        2,
+    ),
+    (
+        "ConnectionExplanation.qml",
+        include_str!("../qml/ConnectionExplanation.qml"),
+        &["known(snapshot.", "recordedVerdict"],
+        1,
+    ),
+    (
         "ProgramLabel.qml",
         include_str!("../qml/ProgramLabel.qml"),
         &[

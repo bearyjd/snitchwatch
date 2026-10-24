@@ -19,6 +19,16 @@ pub const MAKE_RULE_CONTROLLER_RS: &str = include_str!("../../src/make_rule_cont
 /// 1): guards that used to scan the single page file scan the union, so moving
 /// code between these files never silently drops a check.
 pub const CONNECTIONS_PAGE: &str = concat!(
+    include_str!("../../qml/ConnectionActions.qml"),
+    "\n",
+    include_str!("../../qml/ClipboardCopy.qml"),
+    "\n",
+    include_str!("../../qml/ConnectionDetailsCopy.qml"),
+    "\n",
+    include_str!("../../qml/ConnectionExplanation.qml"),
+    "\n",
+    include_str!("../../qml/RuleScopePreview.qml"),
+    "\n",
     include_str!("../../qml/ConnectionsPage.qml"),
     "\n",
     include_str!("../../qml/ConnectionRow.qml"),
@@ -59,6 +69,22 @@ pub const SIZED_SHEET: &str = include_str!("../../qml/SizedOverlaySheet.qml");
 /// Every QML file the shell ships, for the guards that must hold everywhere
 /// (checked against the directory by `all_qml_files_are_covered`).
 pub const ALL_QML: &[(&str, &str)] = &[
+    (
+        "ClipboardCopy.qml",
+        include_str!("../../qml/ClipboardCopy.qml"),
+    ),
+    (
+        "ConnectionDetailsCopy.qml",
+        include_str!("../../qml/ConnectionDetailsCopy.qml"),
+    ),
+    (
+        "ConnectionExplanation.qml",
+        include_str!("../../qml/ConnectionExplanation.qml"),
+    ),
+    (
+        "RuleScopePreview.qml",
+        include_str!("../../qml/RuleScopePreview.qml"),
+    ),
     ("AlertHost.qml", include_str!("../../qml/AlertHost.qml")),
     ("AlertWindow.qml", include_str!("../../qml/AlertWindow.qml")),
     (

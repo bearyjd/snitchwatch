@@ -14,6 +14,15 @@ impl qobject::ConnectionsModel {
 
         #[derive(serde::Serialize)]
         struct RowDetails<'a> {
+            #[serde(rename = "processPath")]
+            process_path: &'a str,
+            #[serde(rename = "dstHost")]
+            dst_host: &'a str,
+            #[serde(rename = "dstPort")]
+            dst_port: u16,
+            protocol: &'a str,
+            #[serde(rename = "matchedRule")]
+            matched_rule: &'a str,
             #[serde(rename = "dstIp")]
             dst_ip: &'a str,
             #[serde(rename = "bytesSent")]
@@ -27,6 +36,11 @@ impl qobject::ConnectionsModel {
         }
 
         let details = RowDetails {
+            process_path: row.process_path.as_deref().unwrap_or_default(),
+            dst_host: &row.dst_host,
+            dst_port: row.dst_port,
+            protocol: &row.protocol,
+            matched_rule: row.matched_rule.as_deref().unwrap_or_default(),
             dst_ip: &row.dst_ip,
             bytes_sent: row.bytes_sent,
             bytes_received: row.bytes_received,
@@ -39,6 +53,40 @@ impl qobject::ConnectionsModel {
             tracing::error!(error = %e, "ConnectionsModel: row details serialize failed");
             "{}".to_string()
         }))
+    }
+
+    pub(super) fn level_rule_scope_text(
+        &self,
+        level: i32,
+        program: &QString,
+        key: &QString,
+    ) -> QString {
+        use crate::connections::level_rules::{resolve, Level, NodeRef};
+        let Some(level) = Level::from_i32(level) else {
+            return QString::from("Rule unavailable: unknown scope");
+        };
+        let program = program.to_string();
+        let key = key.to_string();
+        let target = resolve(NodeRef {
+            level,
+            program: &program,
+            key: &key,
+        });
+        if !target.bindable {
+            return QString::from("Rule unavailable: executable binding unknown");
+        }
+        if target.too_broad {
+            return QString::from("Rule unavailable: this domain cannot be covered safely");
+        }
+        let destination = match target.effective {
+            Level::Program => "any host".to_owned(),
+            Level::Domain => format!("domain {key} and its subdomains"),
+            Level::Host if key.parse::<std::net::IpAddr>().is_ok() => format!("exact IP {key}"),
+            Level::Host => format!("exact host {key}"),
+        };
+        QString::from(&format!(
+            "Executable {program}; {destination}; any port; any protocol"
+        ))
     }
 
     pub(super) fn simulation_prefill_json(&self, id: &QString) -> QString {

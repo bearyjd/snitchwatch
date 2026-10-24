@@ -18,6 +18,14 @@
 /// 1): guards that used to scan the single page file scan the union, so moving
 /// code between these files never silently drops a check.
 const CONNECTIONS_PAGE: &str = concat!(
+    include_str!("../qml/ClipboardCopy.qml"),
+    "\n",
+    include_str!("../qml/ConnectionDetailsCopy.qml"),
+    "\n",
+    include_str!("../qml/ConnectionExplanation.qml"),
+    "\n",
+    include_str!("../qml/RuleScopePreview.qml"),
+    "\n",
     include_str!("../qml/ConnectionsPage.qml"),
     "\n",
     include_str!("../qml/ConnectionRow.qml"),

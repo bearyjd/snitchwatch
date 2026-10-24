@@ -102,6 +102,9 @@ Kirigami.Page {
     property alias inspectMakeRuleOffered: inspect.makeRuleOffered
     property alias inspectDecideLater: inspect.decideLater
     property alias inspectIp: inspect.ip
+    property alias inspectDetails: inspect.details
+    property alias inspectSession: inspect.sourceSession
+    property alias inspectSameSource: inspect.sameSource
     property alias inspectBindableProcessPath: inspect.bindableProcessPath
     property alias inspectAlsoListedByDefault: inspect.alsoListedByDefault
     property alias inspectAppBoundRules: inspect.appBoundRules

@@ -15,8 +15,16 @@ Item {
     readonly property string scope: !target ? "group"
         : target.level === 0 ? "app" : target.level === 1 ? "domain" : "host"
 
+    ClipboardCopy { id: clipboard }
+    RuleScopePreview { id: scopePreview }
+
     function snapshot(row) {
-        return { rowId: row.rowId, pending: row.pending, header: row.isGroupHeader,
+        let details = ({});
+        try { details = JSON.parse(actions.page.model.rowDetailsJson(row.rowId)); } catch (e) {}
+        const duration = actions.page.levelRules.model.levelRuleDuration();
+        return { details: details, durationToken: duration,
+            scopeText: row.isGroupHeader ? scopePreview.describe(actions.page.levelRules.model, row.groupLevel, row.ruleProgram, row.ruleKey, duration) : "This connection only; this attempt only; no remembered rule",
+            rowId: row.rowId, pending: row.pending, header: row.isGroupHeader,
             level: row.groupLevel, program: row.ruleProgram, key: row.ruleKey, domain: row.groupParentKey,
             label: row.isGroupHeader ? row.groupLabel : row.process + " → " + row.host, count: row.groupPending, session: row.sourceSession,
             ruleState: row.levelRuleState, ruleName: row.levelRuleName, ruleReason: row.levelRuleReason };
@@ -77,7 +85,7 @@ Item {
 
     function create(choice) {
         const n = actions.target;
-        if (actions.valid() && n.session !== "") actions.page.levelRules.create(n.level, n.program, n.key, n.label, choice, n.session);
+        if (actions.valid() && n.session !== "") actions.page.levelRules.create(n.level, n.program, n.key, n.label, choice, n.session, n.durationToken);
     }
 
     Connections {
@@ -100,6 +108,34 @@ Item {
             enabled: false
             text: actions.target ? actions.target.label || actions.target.rowId : ""
             contentItem: Controls.Label { text: parent.text; textFormat: Text.PlainText; elide: Text.ElideMiddle }
+        }
+        Controls.MenuItem {
+            enabled: false
+            objectName: "connectionScopePreview"
+            text: !actions.target ? "" : !actions.target.header ? actions.target.scopeText
+                : (actions.target.ruleState === "none" ? actions.target.scopeText
+                   : actions.target.ruleName ? "Existing rule: " + actions.target.ruleName + ". Removal deletes this captured rule."
+                   : "Captured " + actions.scope + " group.")
+                  + " Pending decisions affect currently matching requests at dispatch, this attempt only; no remembered rule."
+            contentItem: Controls.Label { text: parent.text; textFormat: Text.PlainText; wrapMode: Text.WrapAnywhere }
+        }
+        Repeater {
+            model: [
+                { name: "copyExecutable", label: "Copy executable path", key: "processPath" },
+                { name: "copyHost", label: "Copy host", key: "dstHost" },
+                { name: "copyIp", label: "Copy destination IP", key: "dstIp" },
+                { name: "copyPort", label: "Copy port", key: "dstPort" }
+            ]
+            Controls.MenuItem {
+                required property var modelData
+                readonly property var value: actions.target && actions.target.details ? actions.target.details[modelData.key] : undefined
+                objectName: modelData.name
+                text: modelData.label
+                visible: !actions.rulesOnly && !!actions.target && !actions.target.header
+                height: visible ? implicitHeight : 0
+                enabled: actions.valid() && value !== undefined && value !== null && String(value) !== "" && (modelData.key !== "dstPort" || String(value) !== "0")
+                onTriggered: if (actions.valid()) clipboard.copy(String(value))
+            }
         }
         Controls.MenuItem {
             objectName: "allowPendingAction"

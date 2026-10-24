@@ -267,6 +267,16 @@ pub mod qobject {
         #[cxx_name = "rowDetailsJson"]
         fn row_details_json(self: &ConnectionsModel, id: &QString) -> QString;
 
+        /// Effective operand scope from the same resolver used by createLevelRule.
+        #[qinvokable]
+        #[cxx_name = "levelRuleScopeText"]
+        fn level_rule_scope_text(
+            self: &ConnectionsModel,
+            level: i32,
+            program: &QString,
+            key: &QString,
+        ) -> QString;
+
         /// "Simulate this connection": the Simulate sheet's fields for row
         /// `id`, JSON-encoded (`rules::simulator::SimulationForm`). Only what
         /// the row carries is set; every other field is a blank string, which
