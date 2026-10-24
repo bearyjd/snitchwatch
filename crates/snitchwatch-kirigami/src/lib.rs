@@ -7,6 +7,7 @@
 //! `crates/kirigami-spike/tests/link_770.rs`).
 
 pub(crate) mod alert_row;
+pub mod analysis_export;
 pub mod app_icons;
 pub mod app_names;
 pub mod application;
