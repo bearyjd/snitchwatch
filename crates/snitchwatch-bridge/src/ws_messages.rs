@@ -5,6 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
+mod analysis_export_wire;
 mod blocklist_wire;
 mod curated_wire;
 mod diagnostic_wire;
@@ -46,6 +47,14 @@ use crate::tray_state::TrayState;
     rename_all_fields = "camelCase"
 )]
 pub enum ServerMessage {
+    CacheSummaryExport {
+        request_id: String,
+        artifact: String,
+    },
+    CacheSummaryExportRefused {
+        request_id: String,
+        reason: crate::analysis_export::ExportError,
+    },
     /// Explicit acknowledgement that the first WebSocket frame contained the
     /// current service token. This is sent directly to the just-authenticated
     /// client before any broadcast traffic, so external clients must not
@@ -451,6 +460,23 @@ macro_rules! client_message {
     };
 }
 client_message! {
+    RequestCacheSummaryExport {
+        request_id: String,
+        schema_version: u64,
+        filters: crate::analysis_export::ExportFilters,
+        #[serde(skip)]
+        reply: Option<ReplyTo>,
+        #[serde(skip)]
+        session: Option<crate::analysis_export::ExportSession>,
+    },
+    CancelCacheSummaryExport {
+        request_id: String,
+        schema_version: u64,
+        #[serde(skip)]
+        reply: Option<ReplyTo>,
+        #[serde(skip)]
+        session: Option<crate::analysis_export::ExportSession>,
+    },
     SetVerdict {
         row_id: String,
         /// "allow" or "deny" — named `verdict` to avoid colliding with the
@@ -717,13 +743,27 @@ impl<'de> Deserialize<'de> for ClientMessage {
 
 impl std::fmt::Debug for ClientMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        redacted_message_debug(self, "ClientMessage", f)
+        match self {
+            Self::RequestCacheSummaryExport { .. } => {
+                f.write_str("ClientMessage(RequestCacheSummaryExport)")
+            }
+            Self::CancelCacheSummaryExport { .. } => {
+                f.write_str("ClientMessage(CancelCacheSummaryExport)")
+            }
+            _ => redacted_message_debug(self, "ClientMessage", f),
+        }
     }
 }
 
 impl std::fmt::Debug for ServerMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        redacted_message_debug(self, "ServerMessage", f)
+        match self {
+            Self::CacheSummaryExport { .. } => f.write_str("ServerMessage(CacheSummaryExport)"),
+            Self::CacheSummaryExportRefused { .. } => {
+                f.write_str("ServerMessage(CacheSummaryExportRefused)")
+            }
+            _ => redacted_message_debug(self, "ServerMessage", f),
+        }
     }
 }
 

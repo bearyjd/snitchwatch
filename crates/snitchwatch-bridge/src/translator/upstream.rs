@@ -97,6 +97,8 @@ pub fn apply(
         | ClientMessage::SetFilteringPaused { .. }
         | ClientMessage::RecheckDiagnostics
         // Routed to bridge-cli's `rules_import` task before this point.
+        | ClientMessage::RequestCacheSummaryExport { .. }
+        | ClientMessage::CancelCacheSummaryExport { .. }
         | ClientMessage::ExportRules { .. }
         | ClientMessage::PreviewRulesImport { .. }
         | ClientMessage::ApplyRulesImport { .. }

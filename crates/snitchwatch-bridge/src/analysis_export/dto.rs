@@ -13,7 +13,7 @@ pub const MAX_REQUIRED_FIELD_BYTES: usize = 4096;
 pub const MAX_COPIED_INPUT_BYTES: usize = 8_388_608;
 pub const MAX_EMITTED_GROUPS: usize = 2000;
 
-#[derive(Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ExportFilters {
     pub window: Option<TimeWindow>,

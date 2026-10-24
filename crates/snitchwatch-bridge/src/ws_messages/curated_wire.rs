@@ -39,10 +39,20 @@ pub struct CuratedRequestResult {
 }
 
 /// Fixed, non-secret failure information; never holds the submitted frame.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct IntentDecodeError {
     pub modern: bool,
+    pub export: Option<crate::analysis_export::ExportError>,
     pub request_id: Option<String>,
+}
+
+impl std::fmt::Debug for IntentDecodeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IntentDecodeError")
+            .field("modern", &self.modern)
+            .field("export", &self.export)
+            .finish_non_exhaustive()
+    }
 }
 
 fn modern_action(action: &str) -> bool {
@@ -55,7 +65,94 @@ fn modern_action(action: &str) -> bool {
     )
 }
 
-pub(super) struct RawFields(Vec<(String, Value)>);
+pub(super) struct RawFields(Vec<(String, Value)>, bool);
+
+// Preserve nested duplicate evidence for export DTOs while keeping legacy
+// JSON-map semantics for clients that predate the strict export protocol.
+struct CheckedValue {
+    value: Value,
+    duplicate: bool,
+}
+impl<'de> Deserialize<'de> for CheckedValue {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct ValueVisitor;
+        impl<'de> Visitor<'de> for ValueVisitor {
+            type Value = CheckedValue;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a JSON value")
+            }
+            fn visit_bool<E: serde::de::Error>(self, value: bool) -> Result<CheckedValue, E> {
+                Ok(CheckedValue {
+                    value: Value::Bool(value),
+                    duplicate: false,
+                })
+            }
+            fn visit_i64<E: serde::de::Error>(self, value: i64) -> Result<CheckedValue, E> {
+                Ok(CheckedValue {
+                    value: value.into(),
+                    duplicate: false,
+                })
+            }
+            fn visit_u64<E: serde::de::Error>(self, value: u64) -> Result<CheckedValue, E> {
+                Ok(CheckedValue {
+                    value: value.into(),
+                    duplicate: false,
+                })
+            }
+            fn visit_f64<E: serde::de::Error>(self, value: f64) -> Result<CheckedValue, E> {
+                Ok(CheckedValue {
+                    value: serde_json::Number::from_f64(value)
+                        .map(Value::Number)
+                        .ok_or_else(|| E::custom("invalid number"))?,
+                    duplicate: false,
+                })
+            }
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<CheckedValue, E> {
+                self.visit_string(value.to_owned())
+            }
+            fn visit_string<E: serde::de::Error>(self, value: String) -> Result<CheckedValue, E> {
+                Ok(CheckedValue {
+                    value: Value::String(value),
+                    duplicate: false,
+                })
+            }
+            fn visit_unit<E: serde::de::Error>(self) -> Result<CheckedValue, E> {
+                Ok(CheckedValue {
+                    value: Value::Null,
+                    duplicate: false,
+                })
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> Result<CheckedValue, A::Error> {
+                let mut values = Vec::new();
+                let mut duplicate = false;
+                while let Some(child) = seq.next_element::<CheckedValue>()? {
+                    duplicate |= child.duplicate;
+                    values.push(child.value);
+                }
+                Ok(CheckedValue {
+                    value: Value::Array(values),
+                    duplicate,
+                })
+            }
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<CheckedValue, A::Error> {
+                let mut values = serde_json::Map::new();
+                let mut duplicate = false;
+                while let Some((key, child)) = map.next_entry::<String, CheckedValue>()? {
+                    duplicate |= child.duplicate;
+                    duplicate |= values.insert(key, child.value).is_some();
+                }
+                Ok(CheckedValue {
+                    value: Value::Object(values),
+                    duplicate,
+                })
+            }
+        }
+        deserializer.deserialize_any(ValueVisitor)
+    }
+}
 impl<'de> Deserialize<'de> for RawFields {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         struct FieldsVisitor;
@@ -66,10 +163,12 @@ impl<'de> Deserialize<'de> for RawFields {
             }
             fn visit_map<M: MapAccess<'de>>(self, mut map: M) -> Result<RawFields, M::Error> {
                 let mut fields = Vec::new();
-                while let Some(field) = map.next_entry()? {
-                    fields.push(field);
+                let mut duplicate = false;
+                while let Some((key, child)) = map.next_entry::<String, CheckedValue>()? {
+                    duplicate |= child.duplicate;
+                    fields.push((key, child.value));
                 }
-                Ok(RawFields(fields))
+                Ok(RawFields(fields, duplicate))
             }
         }
         deserializer.deserialize_map(FieldsVisitor)
@@ -187,9 +286,17 @@ fn valid_submission(request_id: &str, id: &str, ticket: &str, consent: &str) -> 
         && consent == crate::curated::intent::CONSENT_VERSION
 }
 
+/// Production text boundary: export frames receive a streaming classification
+/// pass and an 8 KiB raw byte cap before strict DTO materialization. Programmatic
+/// `ClientMessage` serde cannot measure original whitespace/escaping bytes; it
+/// preserves the same strict export semantics and duplicate-field rejection.
 pub fn decode_client_message(text: &str) -> Result<ClientMessage, IntentDecodeError> {
+    if let Some(result) = super::analysis_export_wire::decode_export_frame(text) {
+        return result;
+    }
     let fields = serde_json::from_str::<RawFields>(text).map_err(|_| IntentDecodeError {
         modern: false,
+        export: None,
         request_id: None,
     })?;
     let result = decode_fields(fields);
@@ -203,6 +310,7 @@ pub fn decode_client_message(text: &str) -> Result<ClientMessage, IntentDecodeEr
             ) => {
                 return Err(IntentDecodeError {
                     modern: true,
+                    export: None,
                     request_id: Some(request_id),
                 })
             }
@@ -213,7 +321,16 @@ pub fn decode_client_message(text: &str) -> Result<ClientMessage, IntentDecodeEr
 }
 
 pub(super) fn decode_fields(fields: RawFields) -> Result<ClientMessage, IntentDecodeError> {
+    let nested_duplicate = fields.1;
     let fields = fields.0;
+    if fields.iter().any(|(key, value)| {
+        key == "action"
+            && value
+                .as_str()
+                .is_some_and(super::analysis_export_wire::export_action)
+    }) {
+        return super::analysis_export_wire::decode_export_fields(fields, nested_duplicate);
+    }
     let modern = fields
         .iter()
         .any(|(key, value)| key == "action" && value.as_str().is_some_and(modern_action));
@@ -223,6 +340,7 @@ pub(super) fn decode_fields(fields: RawFields) -> Result<ClientMessage, IntentDe
         ))
         .map_err(|_| IntentDecodeError {
             modern: false,
+            export: None,
             request_id: None,
         });
     }
@@ -239,6 +357,7 @@ pub(super) fn decode_fields(fields: RawFields) -> Result<ClientMessage, IntentDe
     };
     let error = IntentDecodeError {
         modern: true,
+        export: None,
         request_id,
     };
     let mut map = serde_json::Map::new();

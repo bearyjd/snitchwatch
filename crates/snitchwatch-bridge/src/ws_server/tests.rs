@@ -766,7 +766,12 @@ async fn curated_tickets_cannot_be_forwarded_from_broadcast() {
         sent_tx.send(message).await.map_err(|_| ())?;
         Ok::<_, ()>(sent_tx)
     });
-    let task = tokio::spawn(forward_outbound(Box::pin(sink), broadcast_rx, reply_rx));
+    let task = tokio::spawn(forward_outbound(
+        Box::pin(sink),
+        broadcast_rx,
+        reply_rx,
+        crate::analysis_export::ExportSession::new(),
+    ));
     broadcasts
         .send(ServerMessage::CuratedBroadOptInPrepared {
             request_id: "req".into(),
@@ -796,4 +801,294 @@ async fn curated_tickets_cannot_be_forwarded_from_broadcast() {
     );
     assert!(sent_rx.try_recv().is_err());
     task.abort();
+}
+
+#[tokio::test]
+async fn analysis_export_private_real_websocket_and_refusals() {
+    use crate::analysis_export::*;
+    let dir = tempfile::tempdir().unwrap();
+    let token = Token::generate();
+    let (path, broadcasts, mut inbound, server) =
+        spawn_server_with_inbound(&dir, token.clone()).await;
+    let mut requester = connect(&path).await;
+    let mut observer = connect(&path).await;
+    for socket in [&mut requester, &mut observer] {
+        socket
+            .send(TMessage::Text(token.as_str().into()))
+            .await
+            .unwrap();
+        assert!(socket
+            .next()
+            .await
+            .unwrap()
+            .unwrap()
+            .into_text()
+            .unwrap()
+            .contains("authenticated"));
+    }
+    requester.send(TMessage::Text(r#"{"action":"requestCacheSummaryExport","requestId":"private-1","schemaVersion":1,"filters":{}}"#.into())).await.unwrap();
+    let message = inbound.recv().await.unwrap();
+    let ClientMessage::RequestCacheSummaryExport {
+        reply: Some(_),
+        session: Some(session),
+        request_id,
+        ..
+    } = message
+    else {
+        panic!("trusted session required")
+    };
+    let run = session
+        .admit(
+            &request_id,
+            std::time::Instant::now() + std::time::Duration::from_secs(10),
+        )
+        .unwrap();
+    let snapshot = capture(&[], 100, run.control()).unwrap();
+    let document = build(
+        &snapshot,
+        &ExportFilters::default(),
+        &fresh_key().unwrap(),
+        run.control(),
+    )
+    .unwrap();
+    let prepared = prepare_reply(&request_id, document, run.control()).unwrap();
+    let exact_wire = prepared.wire.clone();
+    assert!(run.publish(prepared));
+    drop(run);
+    let TMessage::Text(wire) = requester.next().await.unwrap().unwrap() else {
+        panic!("one text frame required")
+    };
+    assert_eq!(wire, &*exact_wire);
+    assert!(wire.len() + 14 <= 1_052_672);
+    broadcasts
+        .send(ServerMessage::CacheSummaryExport {
+            request_id: "broadcast-canary".into(),
+            artifact: "secret-broadcast-canary".into(),
+        })
+        .unwrap();
+    broadcasts
+        .send(ServerMessage::CacheSummaryExportRefused {
+            request_id: "broadcast-canary".into(),
+            reason: ExportError::Internal,
+        })
+        .unwrap();
+    broadcasts.send(ServerMessage::ClearConnectionRows).unwrap();
+    for socket in [&mut requester, &mut observer] {
+        assert_eq!(
+            socket.next().await.unwrap().unwrap().into_text().unwrap(),
+            r#"{"action":"clearConnectionRows"}"#
+        );
+    }
+    requester.send(TMessage::Text(r#"{"action":"requestCacheSummaryExport","requestId":"invalid-1","schemaVersion":1,"filters":{"window":{"fromMs":0,"fromMs":1,"toMs":2}}}"#.into())).await.unwrap();
+    let reply: ServerMessage = serde_json::from_str(
+        &requester
+            .next()
+            .await
+            .unwrap()
+            .unwrap()
+            .into_text()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        reply,
+        ServerMessage::CacheSummaryExportRefused {
+            request_id: "invalid-1".into(),
+            reason: ExportError::InvalidRequest
+        }
+    );
+    requester
+        .send(TMessage::Text(
+            r#"{"action":"cancelCacheSummaryExport","requestId":"private-1","schemaVersion":1}"#
+                .into(),
+        ))
+        .await
+        .unwrap();
+    let ClientMessage::CancelCacheSummaryExport {
+        session: Some(cancel_session),
+        reply: Some(_),
+        ..
+    } = inbound.recv().await.unwrap()
+    else {
+        panic!("cancel context missing")
+    };
+    assert_eq!(cancel_session, session);
+    requester.send(TMessage::Text(r#"{"action":"requestCacheSummaryExport","requestId":"bad id","schemaVersion":1,"filters":{}}"#.into())).await.unwrap();
+    let refusal: ServerMessage = serde_json::from_str(
+        &requester
+            .next()
+            .await
+            .unwrap()
+            .unwrap()
+            .into_text()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        refusal,
+        ServerMessage::CacheSummaryExportRefused {
+            request_id: String::new(),
+            reason: ExportError::InvalidRequest
+        }
+    );
+    broadcasts.send(ServerMessage::ClearConnectionRows).unwrap();
+    assert_eq!(
+        observer.next().await.unwrap().unwrap().into_text().unwrap(),
+        r#"{"action":"clearConnectionRows"}"#
+    );
+    requester.close(None).await.unwrap();
+    // Dropping either socket future cancels an already stamped, retained context.
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(1), session.next_reply())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(matches!(
+        session.admit(
+            "disconnect",
+            std::time::Instant::now() + std::time::Duration::from_secs(1)
+        ),
+        Err(ExportError::Unavailable)
+    ));
+    server.abort();
+}
+
+#[tokio::test(start_paused = true)]
+async fn analysis_export_socket_send_deadline_releases_only_after_send_drop() {
+    use crate::analysis_export::*;
+    let (_broadcasts, broadcast_rx) = broadcast::channel(8);
+    let (_reply_tx, reply_rx) = mpsc::channel(8);
+    let session = ExportSession::new();
+    let run = session
+        .admit(
+            "r",
+            std::time::Instant::now() + std::time::Duration::from_secs(10),
+        )
+        .unwrap();
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let entered_sink = entered.clone();
+    let sink = futures_util::sink::unfold((), move |(), _: Message| {
+        entered_sink.notify_one();
+        std::future::pending::<Result<(), ()>>()
+    });
+    let task = tokio::spawn(forward_outbound(
+        Box::pin(sink),
+        broadcast_rx,
+        reply_rx,
+        session.clone(),
+    ));
+    assert!(run.publish(PreparedExport {
+        artifact: Arc::from("{}"),
+        wire: Arc::from("{}")
+    }));
+    entered.notified().await;
+    tokio::time::advance(std::time::Duration::from_secs(5)).await;
+    task.await.unwrap();
+    assert!(matches!(
+        session.admit(
+            "replacement",
+            std::time::Instant::now() + std::time::Duration::from_secs(10)
+        ),
+        Err(ExportError::Busy)
+    ));
+    drop(run);
+    assert!(session
+        .admit(
+            "replacement",
+            std::time::Instant::now() + std::time::Duration::from_secs(10)
+        )
+        .is_ok());
+}
+
+#[tokio::test(start_paused = true)]
+async fn analysis_export_queued_bytes_expire_while_unrelated_send_stalls() {
+    use crate::analysis_export::*;
+    let (broadcasts, broadcast_rx) = broadcast::channel(8);
+    let (_reply_tx, reply_rx) = mpsc::channel(8);
+    let session = ExportSession::new();
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let entered_sink = entered.clone();
+    let sink = futures_util::sink::unfold((), move |(), _: Message| {
+        entered_sink.notify_one();
+        std::future::pending::<Result<(), ()>>()
+    });
+    let task = tokio::spawn(forward_outbound(
+        Box::pin(sink),
+        broadcast_rx,
+        reply_rx,
+        session.clone(),
+    ));
+    broadcasts.send(ServerMessage::ClearConnectionRows).unwrap();
+    entered.notified().await;
+    let run = session
+        .admit(
+            "r",
+            std::time::Instant::now() + std::time::Duration::from_secs(10),
+        )
+        .unwrap();
+    let wire: Arc<str> = Arc::from("private-queued-canary");
+    let bytes = Arc::downgrade(&wire);
+    assert!(run.publish(PreparedExport {
+        artifact: Arc::from("{}"),
+        wire
+    }));
+    tokio::task::yield_now().await;
+    tokio::time::advance(std::time::Duration::from_secs(5)).await;
+    tokio::task::yield_now().await;
+    assert!(bytes.upgrade().is_none());
+    assert!(matches!(
+        session.admit(
+            "next",
+            std::time::Instant::now() + std::time::Duration::from_secs(10)
+        ),
+        Err(ExportError::Busy)
+    ));
+    task.abort();
+    let _ = task.await;
+}
+
+#[tokio::test]
+async fn analysis_export_outbound_failure_cancels_retained_worker() {
+    use crate::analysis_export::*;
+    let mut handles = default_handles();
+    let (inbound_tx, mut inbound_rx) = mpsc::channel(8);
+    handles.inbound = inbound_tx;
+    let _broadcast_keepalive = handles.broadcast.clone();
+    let frames = futures_util::stream::iter([Ok(Message::Text(
+        r#"{"action":"requestCacheSummaryExport","requestId":"r","schemaVersion":1,"filters":{}}"#
+            .into(),
+    ))])
+    .chain(futures_util::stream::pending());
+    let sink = futures_util::sink::unfold((), |(), _: Message| async { Err::<(), ()>(()) });
+    let task = tokio::spawn(pump_authenticated(
+        Box::pin(sink),
+        Box::pin(frames),
+        handles,
+        None,
+    ));
+    let ClientMessage::RequestCacheSummaryExport {
+        session: Some(session),
+        ..
+    } = inbound_rx.recv().await.unwrap()
+    else {
+        panic!("session missing")
+    };
+    let run = session
+        .admit(
+            "r",
+            std::time::Instant::now() + std::time::Duration::from_secs(10),
+        )
+        .unwrap();
+    assert!(run.publish(PreparedExport {
+        artifact: Arc::from("{}"),
+        wire: Arc::from("{}")
+    }));
+    task.await.unwrap();
+    assert_eq!(run.control().check(), Err(ExportError::Cancelled));
+    assert!(!run.publish(PreparedExport {
+        artifact: Arc::from("{}"),
+        wire: Arc::from("{}")
+    }));
+    assert!(session.next_reply().await.is_none());
 }

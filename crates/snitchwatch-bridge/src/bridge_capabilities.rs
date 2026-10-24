@@ -53,6 +53,9 @@ pub const CURATED_GROUPS_V1: &str = "curatedGroupsV1";
 /// bridge sent.
 pub const BLOCKLIST_LEFTOVERS: &str = "blocklistLeftovers";
 
+/// Private bounded cache summary protocol; advertised only after service hookup.
+pub const AI_CACHE_SUMMARY_EXPORT_V1: &str = "aiCacheSummaryExportV1";
+
 /// What this bridge advertises to every authenticated client.
 pub fn advertised() -> Vec<String> {
     vec![
