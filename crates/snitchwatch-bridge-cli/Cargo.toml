@@ -32,6 +32,8 @@ serde_json = { workspace = true }
 libc = "0.2"
 
 [dev-dependencies]
+# Exercise the same log -> tracing adapter used by tungstenite frame records.
+log = "0.4"
 tempfile = { workspace = true }
 # Plants an unreadable row in a saved profile store (issue #46).
 rusqlite = { workspace = true }

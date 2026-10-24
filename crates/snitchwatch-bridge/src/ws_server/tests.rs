@@ -837,6 +837,33 @@ async fn analysis_export_private_real_websocket_and_refusals() {
     else {
         panic!("trusted session required")
     };
+    observer.send(TMessage::Text(r#"{"action":"requestCacheSummaryExport","requestId":"private-1","schemaVersion":1,"filters":{}}"#.into())).await.unwrap();
+    let ClientMessage::RequestCacheSummaryExport {
+        session: Some(observer_session),
+        request_id: observer_id,
+        ..
+    } = inbound.recv().await.unwrap()
+    else {
+        panic!("observer context missing")
+    };
+    assert_eq!(observer_id, request_id);
+    assert_ne!(observer_session, session);
+    observer
+        .send(TMessage::Text(
+            r#"{"action":"cancelCacheSummaryExport","requestId":"private-1","schemaVersion":1}"#
+                .into(),
+        ))
+        .await
+        .unwrap();
+    let ClientMessage::CancelCacheSummaryExport {
+        session: Some(observer_cancel),
+        ..
+    } = inbound.recv().await.unwrap()
+    else {
+        panic!("observer cancel context missing")
+    };
+    assert_eq!(observer_cancel, observer_session);
+    assert_ne!(observer_cancel, session);
     let run = session
         .admit(
             &request_id,
@@ -913,6 +940,7 @@ async fn analysis_export_private_real_websocket_and_refusals() {
         panic!("cancel context missing")
     };
     assert_eq!(cancel_session, session);
+    assert_ne!(cancel_session, observer_session);
     requester.send(TMessage::Text(r#"{"action":"requestCacheSummaryExport","requestId":"bad id","schemaVersion":1,"filters":{}}"#.into())).await.unwrap();
     let refusal: ServerMessage = serde_json::from_str(
         &requester

@@ -36,6 +36,10 @@ path = "../default_applied_events_test.rs"
 name = "forever_persists"
 path = "../forever_persists_test.rs"
 
+[[test]]
+name = "analysis_export"
+path = "../analysis_export_test.rs"
+
 [dev-dependencies]
 snitchwatch-bridge = { path = "../../crates/snitchwatch-bridge", default-features = false }
 snitchwatch-bridge-cli = { path = "../../crates/snitchwatch-bridge-cli", default-features = false }
