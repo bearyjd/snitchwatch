@@ -298,7 +298,11 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
     const REPORT: &str = r#"{"scan_id":1,"new":[],"still_outstanding":[],"resolved":[],"informational":[],"skipped":[]}"#;
+    // A parallel spawn can inherit another fixture's writable fd until exec,
+    // causing ETXTBSY even after std::fs::write closes the original fd.
+    static FAKE_PROCESS_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     async fn fake(script: &str, timeout: Duration) -> Reply {
+        let _fixture_guard = FAKE_PROCESS_LOCK.lock().await;
         let dir = tempfile::tempdir().unwrap();
         let exe = dir.path().join("fake-pkexec");
         std::fs::write(&exe, format!("#!/bin/sh\n{script}\n")).unwrap();
@@ -438,6 +442,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires a private session: dbus-run-session -- cargo test -p scanner-broker private_bus -- --ignored"]
     async fn private_bus_method_has_no_inputs_and_rejects_concurrent_calls() {
+        let _fixture_guard = FAKE_PROCESS_LOCK.lock().await;
         let dir = tempfile::tempdir().unwrap();
         let exe = dir.path().join("fake-pkexec");
         std::fs::write(
