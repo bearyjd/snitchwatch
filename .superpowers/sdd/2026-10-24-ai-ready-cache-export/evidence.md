@@ -7,8 +7,8 @@ The owner-approved increment is manual summary JSON from the shared current conn
 - Private filesystem writer/view: PR [221](https://github.com/bearyjd/snitchwatch/pull/221), reviewed `cf2a6c5fb49249896ad8eeb3e8c6c20897035cb1`; merged `db9fbc26ff29ddcd7c220376824e8a00d75744b2`.
 - Bounded projection/HMAC/grouping: PR [220](https://github.com/bearyjd/snitchwatch/pull/220), reviewed final `ebc1713e4038a4ddaf709606a9a228fc27b13121`; merged `5b0b3aa83267c0983ed210f8a288bd984bcebb90`. Its final test-only scanner fixture mutex fixes a reproduced inherited-writer `ETXTBSY` race.
 - Private protocol/workers/logging: PR [222](https://github.com/bearyjd/snitchwatch/pull/222), reviewed `5671071582630f579ca5b5ea6d77cce06aefd626`; merged `db0a21667a3c1f3dea1308bf96d6c3395db502b0` after all six exact-head CI checks passed.
-- Backend acceptance: reviewed `8df36f64890dc7fa23cd1bed617eae9bc58b63e1`.
-- GUI and whole-feature source: independently reviewed `90f75359dc724e219e5f50dcdb415f954315990e`, with layout-only re-review at `56c86d052b05cf76680eeccadbcb0e6af3249e2a`, PR [223](https://github.com/bearyjd/snitchwatch/pull/223). The final documentation update preserves its product/test source at `56c86d0`. Exact-head CI is a required merge gate on the final PR head.
+- Backend acceptance: reviewed `8df36f64890dc7fa23cd1bed617eae9bc58b63e1`; the test-only follow-up client correction was independently reviewed at `58c53b4b438d2afcdf3ac6b4adf241ed723e9899`.
+- GUI and whole-feature source: independently reviewed `90f75359dc724e219e5f50dcdb415f954315990e`, with layout-only re-review at `56c86d052b05cf76680eeccadbcb0e6af3249e2a`, PR [223](https://github.com/bearyjd/snitchwatch/pull/223). GUI and production sources remain identical to `56c86d0`; the acceptance-test client correction below changes only the backend test harness. Exact-head CI is a required merge gate on the final PR head.
 
 ## Verification
 
@@ -17,11 +17,19 @@ Genuine failing assertions preceded fixes for snapshot classification, private r
 | Gate | Source | Result |
 |---|---|---|
 | Bridge/CLI, no default features | `5671071` | 1,825 passed; all-target Clippy `-D warnings` passed |
-| Backend acceptance, production WS/MockOpensnitchd | `8df36f6` | 3 passed; strict Clippy passed |
+| Backend acceptance, production WS/MockOpensnitchd | `58c53b4` | 3 passed; 32 constrained suites/96 scenario executions passed; strict Clippy passed |
 | Workspace default members | `8df36f6` | 2,056 passed, one existing ignored; strict Clippy passed |
 | Packaging checks | `8df36f6` | 8 Python and 90 Rust tests passed; shellcheck/systemd/YAML/JSON and release-feature Clippy passed |
 | Native GUI/full integrations | `56c86d0` | 1,642 passed, four existing ignored; 88 harnesses |
 | GUI all-target Clippy | `56c86d0` | `-D warnings` passed |
+
+### Follow-up admission contract
+
+A success reply can reach the client before the worker, supervisor and reply guards finish retiring. Admission correctly remains Busy during that interval. The original CI failure recorded a refusal without its reason; a controlled parallel run on one child-only CPU captured Busy on the fourth request after three successes. The existing held-supervisor regression independently consumes success and requires Busy until the supervisor is released. The original CI refusal reason cannot be recovered from its log.
+
+The acceptance client keeps the first export strict and one-shot. Explicit follow-ups after success have a three-second total deadline and 32-attempt cap, fresh valid correlated IDs, and retry only a typed Busy refusal with exactly the three expected fields and no artifact. Ten-millisecond pacing occurs only after observed Busy; it is not a readiness or absence proof. Other refusals, malformed or mismatched replies fail immediately. Success size, schema, count, privacy and isolation assertions are unchanged. The constrained verification exercised three observed Busy responses across 96 passing scenario executions.
+
+Default-member results at `8df36f6` precede that test-client correction. Corrected-head default-member tests/Clippy and all six exact-head CI checks are required before merge; their final logs belong to the delivery evidence packet.
 
 The three backend scenarios exercise exact nine-row filter/count/privacy expectations, correlated two-client success/refusals and fresh references, and a real 2,000-group response reduced to 500 groups. Exactly 1,000 groups/observations are omitted for artifact size and 500 for wire size. Actual artifact and escaped reply limits hold; no export-triggered daemon policy notification or provider call occurs.
 
