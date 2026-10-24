@@ -4175,6 +4175,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "scanner-broker"
+version = "0.1.1"
+dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "zbus 5.14.0",
+]
+
+[[package]]
 name = "scanner-cli"
 version = "0.1.1"
 dependencies = [
@@ -4207,6 +4219,7 @@ version = "0.1.1"
 dependencies = [
  "anyhow",
  "chrono",
+ "libc",
  "rusqlite",
  "serde",
  "serde_json",
@@ -4702,6 +4715,7 @@ dependencies = [
  "notify-rust",
  "regex",
  "reqwest 0.12.28",
+ "scanner-broker",
  "serde",
  "serde_json",
  "snitchwatch-bridge",
@@ -7103,6 +7117,7 @@ dependencies = [
  "rustix 1.1.4",
  "serde",
  "serde_repr",
+ "tokio",
  "tracing",
  "uds_windows",
  "uuid",
