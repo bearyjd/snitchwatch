@@ -7,8 +7,10 @@
 //! # Design invariants (do not regress)
 //!
 //! - **Never a daemon.** This is a transient binary. There is no server,
-//!   socket listener, background thread, timer, or systemd service anywhere
-//!   in this crate. Every host read is a one-shot. Component B's whole design
+//!   socket listener or persistent systemd service in this crate. A bounded
+//!   watchdog thread exists only for the lifetime of a scan invocation and
+//!   terminates its process group if checks hang. Every host read is a one-shot.
+//!   Component B's whole design
 //!   exists to avoid the "always-on privileged daemon"; reintroducing any
 //!   long-running privileged process here is a real regression, not a nit.
 //! - **Delegate, don't reimplement.** Detection primitives (`chkrootkit`,

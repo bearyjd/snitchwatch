@@ -6,7 +6,8 @@ license.workspace = true
 
 # Component B privileged tier. This crate is a SEPARATE, ON-DEMAND binary
 # invoked via polkit/pkexec — it is deliberately NOT a daemon, has no
-# long-running process, no systemd unit, and no background thread. See
+# persistent process or systemd unit. Its invocation-scoped watchdog bounds
+# execution and kills hung check children. See
 # docs/superpowers/specs/2026-07-04-scanner-privileged-tier-design.md.
 
 [lib]

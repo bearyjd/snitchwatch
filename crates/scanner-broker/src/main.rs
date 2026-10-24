@@ -16,7 +16,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
     loop {
         tokio::time::sleep(Duration::from_secs(1)).await;
-        if broker.idle_for(Duration::from_secs(30)) {
+        if broker.claim_idle_shutdown(Duration::from_secs(30)) {
             return Ok(());
         }
     }

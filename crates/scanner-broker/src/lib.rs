@@ -1,12 +1,14 @@
 //! Unprivileged, narrowly scoped session-bus adapter for the host scanner.
 //! The wire method accepts no executable, path, arguments or environment.
+//! The scanner reserves stdout for JSON and stderr for diagnostics. A watchdog
+//! timeout requires both its exact stderr marker and SIGKILL. The watchdog's
+//! marker is best effort: if its pipe is full or unavailable, termination still
+//! occurs and the broker reports generic failure because the cause is unknown.
 use std::{
+    os::unix::process::ExitStatusExt,
     path::Path,
     process::Stdio,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
-    },
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 use tokio::{
@@ -21,6 +23,9 @@ pub const SCANNER: &str = "/usr/libexec/snitchwatch-scanner-privileged";
 pub const MAX_REPORT: usize = 4 * 1024 * 1024;
 const MAX_ERROR: usize = 64 * 1024;
 const SCAN_TIMEOUT: Duration = Duration::from_secs(600);
+// Matches the privileged watchdog's single atomic diagnostic write. A signal
+// alone cannot distinguish its deadline from an unrelated kill or OOM event.
+const WATCHDOG_TIMEOUT_MARKER: &[u8] = b"\nSNITCHWATCH_SCANNER_WATCHDOG_TIMEOUT\n";
 pub type Reply = (String, String);
 
 /// Wire schema emitted by scanner-privileged::main::print_json. Keep this
@@ -136,6 +141,13 @@ async fn run_process(pkexec: &Path, scanner: &Path, timeout: Duration) -> Reply 
                     String::from_utf8_lossy(&stderr).trim()
                 ),
             ),
+            None if status.signal() == Some(libc::SIGKILL)
+                && stderr
+                    .windows(WATCHDOG_TIMEOUT_MARKER.len())
+                    .any(|part| part == WATCHDOG_TIMEOUT_MARKER) =>
+            {
+                reply("timeout", "The host scanner reached its execution limit.")
+            }
             _ => reply(
                 "failed",
                 format!(
@@ -173,16 +185,26 @@ async fn run_process(pkexec: &Path, scanner: &Path, timeout: Duration) -> Reply 
 
 #[derive(Clone)]
 pub struct Broker {
-    busy: Arc<AtomicBool>,
-    last_finished: Arc<Mutex<Instant>>,
+    state: Arc<Mutex<BrokerState>>,
     #[cfg(test)]
     fake_process: Option<(std::path::PathBuf, std::path::PathBuf)>,
+}
+enum BrokerState {
+    Idle { last_finished: Instant },
+    Running,
+    Stopping,
+}
+#[derive(Debug)]
+enum AdmissionError {
+    Busy,
+    Stopping,
 }
 impl Default for Broker {
     fn default() -> Self {
         Self {
-            busy: Arc::new(AtomicBool::new(false)),
-            last_finished: Arc::new(Mutex::new(Instant::now())),
+            state: Arc::new(Mutex::new(BrokerState::Idle {
+                last_finished: Instant::now(),
+            })),
             #[cfg(test)]
             fake_process: None,
         }
@@ -191,20 +213,34 @@ impl Default for Broker {
 struct ScanGuard<'a>(&'a Broker);
 impl Drop for ScanGuard<'_> {
     fn drop(&mut self) {
-        *self.0.last_finished.lock().unwrap() = Instant::now();
-        self.0.busy.store(false, Ordering::Release);
+        *self.0.state.lock().unwrap() = BrokerState::Idle {
+            last_finished: Instant::now(),
+        };
     }
 }
 impl Broker {
-    fn begin(&self) -> Option<ScanGuard<'_>> {
-        self.busy
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .ok()
-            .map(|_| ScanGuard(self))
+    fn begin(&self) -> Result<ScanGuard<'_>, AdmissionError> {
+        let mut state = self.state.lock().unwrap();
+        match *state {
+            BrokerState::Idle { .. } => {
+                *state = BrokerState::Running;
+                Ok(ScanGuard(self))
+            }
+            BrokerState::Running => Err(AdmissionError::Busy),
+            BrokerState::Stopping => Err(AdmissionError::Stopping),
+        }
     }
-    pub fn idle_for(&self, duration: Duration) -> bool {
-        !self.busy.load(Ordering::Acquire)
-            && self.last_finished.lock().unwrap().elapsed() >= duration
+    /// Claim shutdown under the same lock as admission. Once this succeeds no
+    /// later request can start work while the main loop drops the connection.
+    pub fn claim_idle_shutdown(&self, duration: Duration) -> bool {
+        let mut state = self.state.lock().unwrap();
+        if matches!(*state, BrokerState::Idle { last_finished } if last_finished.elapsed() >= duration)
+        {
+            *state = BrokerState::Stopping;
+            true
+        } else {
+            false
+        }
     }
 }
 #[zbus::interface(name = "org.snitchwatch.Scanner1")]
@@ -218,8 +254,17 @@ impl Broker {
                 "RunDeepScan takes no arguments".into(),
             ));
         }
-        let Some(_guard) = self.begin() else {
-            return Ok(reply("busy", "A host deep scan is already running."));
+        let _guard = match self.begin() {
+            Ok(guard) => guard,
+            Err(AdmissionError::Busy) => {
+                return Ok(reply("busy", "A host deep scan is already running."))
+            }
+            Err(AdmissionError::Stopping) => {
+                return Ok(reply(
+                    "failed",
+                    "The host scanner broker is shutting down. Retry the scan.",
+                ))
+            }
         };
         // No environment override or caller-provided values cross this boundary.
         #[cfg(test)]
@@ -302,15 +347,79 @@ mod tests {
             "failed"
         );
     }
+    #[tokio::test]
+    async fn recognizes_only_the_watchdogs_explicit_kill_contract() {
+        let marker = "SNITCHWATCH_SCANNER_WATCHDOG_TIMEOUT";
+        let marked_kill = format!("printf '\\n{marker}\\n' >&2\nkill -KILL $$");
+        assert_eq!(
+            fake(&marked_kill, Duration::from_secs(2)).await.0,
+            "timeout"
+        );
+        for script in [
+            "kill -KILL $$".to_string(),
+            format!("printf '\\n{marker}\\n' >&2\nexit 1"),
+            format!("printf '\\n{marker}\\n' >&2\nkill -TERM $$"),
+            format!("printf 'prefix-{marker}\\n' >&2\nkill -KILL $$"),
+            format!("printf '\\n{marker}' >&2\nkill -KILL $$"),
+        ] {
+            assert_eq!(fake(&script, Duration::from_secs(2)).await.0, "failed");
+        }
+    }
     #[test]
     fn rejects_overlap_and_exits_only_when_idle() {
         let broker = Broker::default();
         let first = broker.begin().unwrap();
-        assert!(broker.begin().is_none());
-        assert!(!broker.idle_for(Duration::ZERO));
+        assert!(broker.begin().is_err());
+        assert!(!broker.claim_idle_shutdown(Duration::ZERO));
         drop(first);
-        assert!(broker.idle_for(Duration::ZERO));
-        assert!(broker.begin().is_some());
+        let retry = broker.begin().expect("finished work must permit retries");
+        drop(retry);
+        assert!(broker.claim_idle_shutdown(Duration::ZERO));
+        assert!(broker.begin().is_err());
+    }
+    #[test]
+    fn idle_shutdown_claim_prevents_later_admission() {
+        let broker = Broker::default();
+        std::thread::scope(|scope| {
+            let (claimed, claim) = std::sync::mpsc::channel();
+            let broker = &broker;
+            let request = scope.spawn(move || {
+                claim.recv().unwrap();
+                assert!(
+                    broker.begin().is_err(),
+                    "shutdown won, so no scan may start"
+                );
+            });
+            assert!(broker.claim_idle_shutdown(Duration::ZERO));
+            claimed.send(()).unwrap();
+            request.join().unwrap();
+        });
+    }
+    #[test]
+    fn admitted_scan_prevents_shutdown_until_its_guard_finishes() {
+        let broker = Broker::default();
+        std::thread::scope(|scope| {
+            let (admitted, admission) = std::sync::mpsc::channel();
+            let (finish, finished) = std::sync::mpsc::channel();
+            let broker = &broker;
+            let request = scope.spawn(move || {
+                let _scan = broker.begin().unwrap();
+                admitted.send(()).unwrap();
+                finished.recv().unwrap();
+            });
+            admission.recv().unwrap();
+            assert!(!broker.claim_idle_shutdown(Duration::ZERO));
+            assert!(broker.begin().is_err());
+            finish.send(()).unwrap();
+            request.join().unwrap();
+        });
+        assert!(!broker.claim_idle_shutdown(Duration::from_secs(30)));
+        let retry = broker
+            .begin()
+            .expect("a rejected shutdown must permit retries");
+        drop(retry);
+        assert!(broker.claim_idle_shutdown(Duration::ZERO));
+        assert!(broker.begin().is_err());
     }
     #[test]
     fn rejects_truncated_and_unstructured_reports() {
@@ -378,7 +487,7 @@ mod tests {
         let first = proxy.call::<_, _, Reply>("RunDeepScan", &());
         let second = async {
             for _ in 0..100 {
-                if broker.busy.load(Ordering::Acquire) {
+                if matches!(*broker.state.lock().unwrap(), BrokerState::Running) {
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(2)).await;
@@ -388,6 +497,6 @@ mod tests {
         let (first, second) = tokio::join!(first, second);
         assert_eq!(first.unwrap().0, "ok");
         assert_eq!(second.unwrap().0, "busy");
-        assert!(broker.idle_for(Duration::ZERO));
+        assert!(broker.claim_idle_shutdown(Duration::ZERO));
     }
 }
