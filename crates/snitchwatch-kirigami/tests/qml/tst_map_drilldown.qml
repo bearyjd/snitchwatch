@@ -73,6 +73,24 @@ Item {
             verify(polar.y >= 0 && polar.y <= map.height,"polar point can be focused beyond former cropped map");
             map.clearScope(); compare(connections.geoScopeKind,""); compare(connections.filterText,"app:browser");
         }
+        function test_large_selection_highlights_ip_and_ancestors_without_changing_scope() {
+            map.selectNode(map.hierarchy.byKey["country:US"]);
+            const scope=connections.geoScopeKey,zoom=map.camera.zoom,x=map.camera.centerX,y=map.camera.centerY;
+            const index={},rows={},ids=[];
+            for(let i=0;i<10000;i++) {
+                const id="selection-"+i,key="ip:selection-"+i;
+                index[key]={key:key,kind:"ip",countryKey:"country:US",cityKey:"city:one"};rows[id]=key;ids.push(id);
+            }
+            map.hierarchy.byKey=index;map.hierarchy.destinationByRow=rows;
+            map.highlightRows(ids);
+            compare(map.highlightedDestinations.length,10000,"all selected destinations retained");
+            verify(map.isHighlighted({members:[{key:"ip:selection-9999",kind:"ip"}]}));
+            verify(map.isHighlighted({members:[{key:"city:one",kind:"city"}]}));
+            verify(map.isHighlighted({members:[{key:"country:US",kind:"country"}]}));
+            verify(!map.isHighlighted({members:[{key:"ip:unselected",kind:"ip"}]}));
+            compare(connections.geoScopeKey,scope);compare(map.camera.zoom,zoom);compare(map.camera.centerX,x);compare(map.camera.centerY,y);
+            map.clearScope();
+        }
         function test_scale_bucket_never_uses_a_larger_than_actual_scale() {
             const next=data(),ips=next.countries["country:US"].cities["city:one"].ips;
             ips["ip:8.8.8.8"].coordinates={latitude:0,longitude:-80};

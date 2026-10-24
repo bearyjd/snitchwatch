@@ -67,6 +67,12 @@ Window {
             check(repeats.matchingCount===1 && repeats.rowIdAt(0)==="event-d","key-change release retains old member identity");
             repeats.setGeoScope("ip","ip:"+nextLocal);
             check(repeats.matchingCount===1 && repeats.rowIdAt(0)==="event-c","updated representative gets new identity");
+            repeats.applyServerMessageJson(JSON.stringify({action:"clearConnectionRows"}));
+            repeats.setGeoScope("","");repeats.setGroupedMode(true);
+            const orderA=event("order-a",local,3000),orderB=event("order-b",local,3001),orderC=event("order-c",local,3002);
+            orderA.dstHost="a.example.com";orderB.dstHost="b.other.com";orderC.dstHost="c.example.com";
+            repeatMessage("insertConnectionRows",[orderA,orderB,orderC]);
+            check(JSON.stringify(JSON.parse(repeats.destinationRowIdsJson(0)))===JSON.stringify(["order-a","order-c","order-b"]),"app destination order follows domain traversal after filtering");
             conn.setGroupedMode(false);
             insert("1.1.1.1","browser","1.1.1.1");insert("11.1.1.1","browser","11.1.1.1");insert("other","other","1.1.1.1");
             conn.setFilterQuery("app:browser");check(conn.count===2 && conn.matchingCount===2,"fixture rows/search leaves");

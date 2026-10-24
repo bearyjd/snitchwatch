@@ -71,13 +71,21 @@ impl qobject::ConnectionsModel {
                 .map(|row| vec![row.id.clone()])
                 .unwrap_or_default()
         };
+        // Resolve membership in one store pass. Calling row_by_id for every
+        // descendant would make a large app selection quadratic on Qt.
+        let selected: std::collections::HashSet<_> = ids.iter().map(String::as_str).collect();
+        let matching: std::collections::HashSet<_> = self
+            .store
+            .rows()
+            .iter()
+            .filter(|row| selected.contains(row.id.as_str()) && self.store.filter().matches(row))
+            .map(|row| row.id.as_str())
+            .collect();
+        // Keep the process/domain/host traversal order exposed before this
+        // optimization; hash iteration never determines the returned order.
         let ids: Vec<_> = ids
             .into_iter()
-            .filter(|id| {
-                self.store
-                    .row_by_id(id)
-                    .is_some_and(|row| self.store.filter().matches(row))
-            })
+            .filter(|id| matching.contains(id.as_str()))
             .collect();
         QString::from(&serde_json::to_string(&ids).expect("connection IDs serialize"))
     }

@@ -38,6 +38,7 @@ Item {
     property var activeGeoScope: ({kind:"",key:"",name:"World",countryKey:"",cityKey:""})
     property var highlightedDestinations: []
     property var highlightedRows: []
+    property var highlightedKeys: ({})
     property int semanticLevel: 0
     property bool hierarchyDirty: true
     property var countryAnchors: []
@@ -132,12 +133,20 @@ Item {
     }
     function highlightRows(ids) {
         highlightedRows=ids;
-        highlightedDestinations=ids.map(id=>hierarchy.destinationByRow[id]).filter(key=>key!==undefined);
+        const destinations=[],keys={};
+        for (const id of ids) {
+            const key=hierarchy.destinationByRow[id];
+            if (key===undefined) continue;
+            destinations.push(key);
+            keys[key]=true;
+            const node=hierarchy.byKey[key];
+            if (node) {keys[node.countryKey]=true;keys[node.cityKey]=true;}
+        }
+        highlightedDestinations=destinations;
+        highlightedKeys=keys;
     }
     function isHighlighted(cluster) {
-        return cluster.members.some(n=>highlightedDestinations.indexOf(n.key)>=0 || (n.kind!=="ip" && highlightedDestinations.some(key=>{
-            const ip=hierarchy.byKey[key];return ip && (n.kind==="country" ? ip.countryKey===n.key : ip.cityKey===n.key);
-        })));
+        return cluster.members.some(node=>highlightedKeys[node.key]===true);
     }
 
     // The full equirectangular world includes polar database estimates.
