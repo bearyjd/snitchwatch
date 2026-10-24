@@ -3,15 +3,17 @@
 **Date:** 2026-10-24 UTC. Primary-source research checked October 23; this document
 was prepared across the UTC date boundary. **Status:** research and proposed
 backlog, not approval to implement every item. The owner approved the direction
-of manual AI-ready log export; its design still needs the existing security gate.
+of manual AI-ready log export and the dedicated current-cache summary design.
+The first cache-summary increment is implemented in source. Release and
+deployment status remain separate from source implementation.
 Scope is Component A: Kirigami GUI + bridge on OpenSnitch, including host/image
 dependencies. The owner-requested repair to the existing GUI/host-scanner bridge
 is included; broader Component B scanner redesign, a replacement firewall engine,
 and router features are outside this roadmap.
 
 The highest-value sequence is: finish validating the current GUI fixes; deliver
-r16's process-monitoring reliability and GUI clarity; then make r17 history and
-manual analysis export trustworthy. Rule ergonomics, profiles and deeper app
+r16's process-monitoring reliability and GUI clarity; then deepen r17 history.
+Manual current-cache analysis export is the initial analysis increment. Rule ergonomics, profiles and deeper app
 identity follow that evidence. More features should reduce uncertainty and work
 for the user, rather than merely add screens.
 
@@ -98,7 +100,7 @@ Source changes, reviewed commits and installed artifacts must remain distinct.
 | GeoIP setup | Bundle DB-IP Country Lite with attribution and release-based updates; retain optional MaxMind and validated user imports | Official pinned input and real format compatibility; user overrides preserved; corrupt inputs preserve the existing database; no broad sandbox permissions |
 | Map drilldown | Owner-approved country → city → observed IP map navigation, exact geographic scope AND existing search, synchronized tree/inspector, coincident IP stacks and honest unavailable-location lists | City data/camera merged (#218/#217); semantic navigation implemented in [#219](https://github.com/bearyjd/snitchwatch/pull/219); [implementation and evidence](../plans/2026-10-24-geographic-map-drilldown.md); merge requires full GUI checks, independent review and green CI; no rebuilt release claim |
 | Deep Scan | Replace the invalid in-sandbox `pkexec` launch with a constrained host integration and useful unavailable/denied/error states | Separately installed host helper and authorization, fixed command, bounded results; host packaging and GUI proof are separate gates |
-| AI-ready export | Manual provider-independent files and an analysis prompt for Claude, ChatGPT/OpenAI or OpenRouter | Existing r17 export plan, redaction preview, explicit export; no automatic rule application |
+| AI-ready export | Manual provider-independent cache-summary JSON and an analysis prompt for Claude, ChatGPT/OpenAI or OpenRouter | Implemented summary increment; exact preview and explicit private save. Historical/detail formats remain future work; no automatic rule application |
 
 The owner subsequently approved the [bounded overnight implementation plan](../plans/2026-10-24-overnight-gui-fixes-and-features.md),
 including offline explanations (D01), scope previews (P03), and copy-details
@@ -176,10 +178,10 @@ CC BY 4.0; the packaging work must pin actual bytes and install that attribution
 
 | ID | Candidate / user outcome | Baseline | Boundary | Priority; dependency | Precedent |
 |---|---|---|---|---|---|
-| X01 | Manual versioned JSONL export plus summary, dictionary and optional CSV | New | UI + Bridge + Data | P2; owner-approved direction; allowlisted export DTO | [NETIQ], [GW], [OS-X] |
-| X02 | Filtered export preview with summary-only default and exact field/redaction display | New | UI + Bridge + Data | P2; X01 security design; no raw policy snapshot shortcut | [LS7], [WAZ] |
-| X03 | Portable analysis prompt for Claude, ChatGPT/OpenAI or OpenRouter | New | UI + Data | P2; X01; require evidence references and uncertainty | [LS7] beta precedent; provider-neutral proposal |
-| X04 | Useful summaries/chunks with stable within-export pseudonyms and explicit gaps | New | Bridge + Data | P2; X01, sampling/truncation metadata and token-size budget | [GW], [NETIQ] |
+| X01 | Versioned export family: current-cache summary JSON first; historical JSONL and optional CSV later | Summary implemented; other formats future | UI + Bridge + Data | P2 for broader formats; separate scope/security review | [NETIQ], [GW], [OS-X] |
+| X02 | Exact plain-text preview, independent filters and explicit private Save | Current-cache summary implemented | UI + Bridge + Data | Further detail/redaction levels remain future work | [LS7], [WAZ] |
+| X03 | Portable analysis prompt for Claude, ChatGPT/OpenAI or OpenRouter | Included in summary JSON | UI + Data | Evidence references and uncertainty; no provider API or automatic rules | [LS7] beta precedent; provider-neutral proposal |
+| X04 | Bounded summaries with per-export pseudonyms and known omissions/unknown coverage | Summary implemented; chunking future | Bridge + Data | P2 for token-aware chunking; current caps/coverage documented | [GW], [NETIQ] |
 | X05 | Validated rule import preview with diff, selective apply and recovery | Extend | UI + Bridge + Data | P3; extend existing import, reject unsupported policy | [PM-A], [LS-G], [WFC] |
 | X06 | Authenticated read-only CLI/local API for selected diagnostics | Research | Bridge | P3; authorization and transport review, no new open network listener by default | [PM-A], [LS-CLI], [NETIQ] |
 | X07 | Optional syslog/JSONL integration with explicit fields, retries and failure status | Research | Bridge + Data | P3; verify pinned upstream integration, privacy review | [OS-X] |
@@ -245,27 +247,13 @@ decision stays deferred unless that evidence justifies reopening it.
 
 ## Manual AI-ready export: accepted direction and safe boundary
 
-Implement the [existing export plan](../plans/2026-10-22-log-export-for-analysis.md),
-not a second incompatible format. A user chooses a time window/app/domain/verdict
-selection, previews exactly what leaves, then saves provider-independent JSONL,
-summary, dictionary, optional CSV and a reusable analysis prompt. The same files
-can be used manually with Claude, ChatGPT/OpenAI, or models through OpenRouter.
-Export itself needs no provider account or API key.
+The approved first increment is the [current-cache summary design](2026-10-24-ai-ready-cache-export-design.md). It exports one bounded JSON document containing aggregate observations, coverage and omission counts, a dictionary and a reusable provider-neutral prompt. The user independently chooses an exact app or missing-path category, UTC window and verdicts, previews the exact artifact, then explicitly saves those same bytes privately. GUI search and map selection do not define its scope. Implementation and delivery evidence are tracked in the [implementation plan](../plans/2026-10-24-ai-ready-cache-export.md).
 
-Keep `summary-only` as the default: aggregate counts/intervals with approved
-pseudonymous keys, not raw connection rows, hostnames, paths or policy snapshots.
-More detailed export levels follow the plan's allowlist, per-export consent and
-redaction rules. Include stable references within an export, schema/redaction
-version, selected window/timezone, source coverage, gaps, truncation and unavailable
-fields. Attempts are not sessions; missing byte counts are not zero bytes.
+This increment uses per-export pseudonyms for identities and discloses basenames only from normalized allowlisted paths. Such paths prove neither ownership nor package provenance. It describes a shared, incomplete current cache; observations are not sessions. Direction, durations and measured bytes are unavailable. Requests and replies have explicit bounds, cancellation and private connection routing.
 
-The supplied prompt asks for noisy apps, repeated denies, unfamiliar destinations
-and possible rule simplifications, with event/group references and evidence versus
-hypothesis separated. Metadata is untrusted input: bound/escape fields, protect CSV
-formulas, and tell the model to treat log text as data rather than instructions.
-Analysis produces a report. Rule application remains a separate explicit action
-with deterministic validation. Uploads, provider credentials, local-model runners
-and scheduled analysis are later proposals, not requirements of this accepted MVP.
+The same file can be used manually with Claude, ChatGPT/OpenAI or models through OpenRouter. Export needs no provider account or API key. Preview is plain text, source metadata is untrusted data, and the prompt separates evidence from hypotheses. There are no uploads, provider calls or policy changes in this increment.
+
+The [broader historical export plan](../plans/2026-10-22-log-export-for-analysis.md) remains future work: persisted history, domain selection, detailed/raw levels, JSONL and CSV are not part of the approved cache-summary increment. Provider credentials, local-model runners and scheduled analysis also remain later proposals. Rule application requires a separate explicit action and deterministic validation.
 
 ## Recommended next steps and success evidence
 
@@ -283,10 +271,10 @@ and scheduled analysis are later proposals, not requirements of this accepted MV
 4. **Design and review r17 history first:** opt-in storage, retention/disk caps,
    gaps and event-time rule identity. Verify bounded growth and failure behavior;
    distinguish stored events from complete network capture.
-5. **Deliver manual AI-ready export:** reproducible fixture-selected exports,
-   exact preview, summary-only default, redaction/truncation/CSV tests and stable
-   references. Demonstrate manual use of one schema in different AI tools with
-   zero bridge uploads and zero policy mutations.
+5. **Deliver the approved cache-summary increment:** fixture-selected JSON,
+   exact preview/save bytes, per-export references, bounded redaction/truncation
+   and honest coverage. Verify private delivery and no export-triggered uploads
+   or policy mutations. Track historical/detail formats separately.
 6. **Connect explanation to action:** history row → matched rule → simulator →
    scoped temporary exception. Measure repeated unmatched asks/minute and time
    to explain a deny before and after, with no target invented before baseline.
