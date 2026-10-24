@@ -13,6 +13,7 @@ Item {
     // GeoModel and ConnectionsModel; either may be null (isolated tests).
     property var geoModel: null
     property var connectionsModel: null
+    property bool ready: false
     // Animations are off when the platform asks for none (animation speed 0
     // reports longDuration 0). A probe can force it.
     property bool reducedMotion: Kirigami.Units.longDuration <= 1
@@ -35,16 +36,17 @@ Item {
     property real mergeRadius: Kirigami.Units.gridUnit * 2.5
 
     property alias hierarchy: hierarchy
-    property var activeGeoScope: ({kind:"",key:"",name:"World",countryKey:"",cityKey:""})
-    property var highlightedDestinations: []
-    property var highlightedRows: []
-    property var highlightedKeys: ({})
+    property alias activeGeoScope: drilldown.activeGeoScope
+    property alias highlightedDestinations: drilldown.highlightedDestinations
+    property alias highlightedRows: drilldown.highlightedRows
+    property alias highlightedKeys: drilldown.highlightedKeys
     property int semanticLevel: 0
     property bool hierarchyDirty: true
     property var countryAnchors: []
     property var semanticCache: ({})
     readonly property var scopeNodes: hierarchy.available ? hierarchy.children(activeGeoScope.kind,activeGeoScope.key) : []
     MapHierarchy { id: hierarchy }
+    MapDrilldown { id: drilldown; mapView: view }
 
     function loadHierarchy() {
         if (!hierarchyDirty || !geoModel || typeof geoModel.hierarchyJson !== "function") return;
@@ -66,88 +68,15 @@ Item {
         else if (semanticLevel===2 && zoom<8) semanticLevel=zoom<2.4 ? 0 : 1;
         if (activeGeoScope.kind==="country") semanticLevel=Math.max(1,semanticLevel);
     }
-    function focusNodes(nodes, nextZoom) {
-        const points=nodes.map(n=>n.position).filter(p=>p && isFinite(p.x) && isFinite(p.y));
-        if (!points.length) return;
-        let minX=Infinity,maxX=-Infinity,minY=Infinity,maxY=-Infinity;
-        for (const point of points) {
-            minX=Math.min(minX,point.x);maxX=Math.max(maxX,point.x);
-            minY=Math.min(minY,point.y);maxY=Math.max(maxY,point.y);
-        }
-        if (maxX-minX<1 && maxY-minY<1) camera.focusPoint(minX,minY,nextZoom);
-        else {
-            // This map has one non-wrapping world. Date-line branches therefore
-            // fit both edges rather than inventing a midpoint near Greenwich.
-            camera.fitBounds(minX,minY,maxX,maxY,24);
-            if (maxX-minX<1800 && camera.zoom<nextZoom && maxX-minX<400 && maxY-minY<250)
-                camera.focusPoint((minX+maxX)/2,(minY+maxY)/2,nextZoom);
-        }
-    }
-    function selectNode(node) {
-        const key=node.key || (node.code ? "country:"+node.code : "");
-        const kind=node.kind || "country";
-        if (connectionsModel && typeof connectionsModel.setGeoScope === "function") {
-            if (!connectionsModel.setGeoScope(kind,key)) return;
-        } else if (connectionsModel) { connectionsModel.setFilterQuery("country:"+node.code); }
-        activeGeoScope={kind:kind,key:key,name:node.name,countryKey:node.countryKey || key,cityKey:node.cityKey || (kind==="city" ? key : "")};
-        semanticCache={};
-        if (kind==="country") {
-            semanticLevel=1;
-            const children=hierarchy.children(kind,key).filter(n=>n.position && n.approximate);
-            if (children.length) focusNodes(children,Math.max(4,camera.zoom));
-            else if (node.position) camera.focusPoint(node.position.x,node.position.y,Math.max(4,camera.zoom));
-            // Automatic fit exposes cities first. A later deliberate zoom may
-            // cross the IP threshold; live refreshes never move the camera.
-            if (camera.zoom>8) camera.setCamera(8,camera.centerX,camera.centerY);
-            semanticLevel=1;
-        } else if (kind==="city") {
-            semanticLevel=2;
-            if (node.position) camera.focusPoint(node.position.x,node.position.y,Math.max(12,camera.zoom));
-        }
-        requestRefresh();
-    }
-    function syncScopeFromModel() {
-        if (!connectionsModel || connectionsModel.geoScopeKind === undefined) return;
-        const kind=connectionsModel.geoScopeKind,key=connectionsModel.geoScopeKey;
-        if (activeGeoScope.kind===kind && activeGeoScope.key===key) return;
-        const node=hierarchy.byKey[key];
-        activeGeoScope={kind:kind,key:key,name:node ? node.name : kind ? activeGeoScope.name : "World",
-            countryKey:node ? node.countryKey : activeGeoScope.countryKey,
-            cityKey:node ? node.cityKey || (kind==="city" ? key : "") : activeGeoScope.cityKey};
-        semanticCache={};requestRefresh();
-    }
-    Connections {
-        target: view.connectionsModel
-        ignoreUnknownSignals: true
-        function onGeoScopeKindChanged() { Qt.callLater(view.syncScopeFromModel); }
-        function onGeoScopeKeyChanged() { Qt.callLater(view.syncScopeFromModel); }
-    }
-    function clearScope() {
-        if (connectionsModel && typeof connectionsModel.setGeoScope === "function") connectionsModel.setGeoScope("","");
-        activeGeoScope={kind:"",key:"",name:"World",countryKey:"",cityKey:""}; semanticCache={};requestRefresh();
-    }
-    function scopeBack() {
-        const s=activeGeoScope;
-        const key=s.kind==="ip" ? s.cityKey : s.kind==="city" ? s.countryKey : "";
-        if (key && hierarchy.byKey[key]) selectNode(hierarchy.byKey[key]); else clearScope();
-    }
-    function highlightRows(ids) {
-        highlightedRows=ids;
-        const destinations=[],keys={};
-        for (const id of ids) {
-            const key=hierarchy.destinationByRow[id];
-            if (key===undefined) continue;
-            destinations.push(key);
-            keys[key]=true;
-            const node=hierarchy.byKey[key];
-            if (node) {keys[node.countryKey]=true;keys[node.cityKey]=true;}
-        }
-        highlightedDestinations=destinations;
-        highlightedKeys=keys;
-    }
-    function isHighlighted(cluster) {
-        return cluster.members.some(node=>highlightedKeys[node.key]===true);
-    }
+    // Keep the map's public interaction surface while its controller owns
+    // semantic scope and selection state independently of display delegates.
+    function focusNodes(nodes, nextZoom) { drilldown.focusNodes(nodes,nextZoom); }
+    function selectNode(node) { drilldown.selectNode(node); }
+    function syncScopeFromModel() { drilldown.syncScopeFromModel(); }
+    function clearScope() { drilldown.clearScope(); }
+    function scopeBack() { drilldown.scopeBack(); }
+    function highlightRows(ids) { drilldown.highlightRows(ids); }
+    function isHighlighted(cluster) { return drilldown.isHighlighted(cluster); }
 
     // The full equirectangular world includes polar database estimates.
     readonly property real gridWidth: camera.gridWidth
@@ -198,6 +127,7 @@ Item {
     // Rebuild the clusters now. A model reset arrives on every connection
     // event, so callers go through requestRefresh().
     function refresh() {
+        if (!view.ready) return;
         view.refreshCount++;
         view.loadHierarchy();
         view.updateSemanticLevel();
@@ -286,7 +216,10 @@ Item {
     }
     onMapScaleChanged: requestRefresh()
     onGeoModelChanged: { hierarchy.clear();semanticCache={};hierarchyDirty=true;requestRefresh(); }
-    Component.onCompleted: requestRefresh()
+    Component.onCompleted: {
+        view.ready=true;
+        view.requestRefresh();
+    }
 
     Timer {
         id: refreshCooldown

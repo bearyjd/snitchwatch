@@ -62,6 +62,8 @@ const CONNECTIONS_PAGE: &str = concat!(
     "\n",
     include_str!("../qml/MapHierarchy.qml"),
     "\n",
+    include_str!("../qml/MapDrilldown.qml"),
+    "\n",
     include_str!("../qml/MapDestinationsPopup.qml"),
     "\n",
     include_str!("../qml/MapCamera.qml"),

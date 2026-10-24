@@ -41,6 +41,7 @@ fn main() {
                 "qml/MapBand.qml",
                 "qml/MapView.qml",
                 "qml/MapHierarchy.qml",
+                "qml/MapDrilldown.qml",
                 "qml/MapDestinationsPopup.qml",
                 "qml/MapCamera.qml",
                 "qml/MapNavigation.qml",
