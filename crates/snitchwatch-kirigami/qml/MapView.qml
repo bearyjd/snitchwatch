@@ -5,8 +5,7 @@
 // nothing is loaded from disk or the network here. Markers come from
 // GeoModel.clustersJson, which merges nearby countries at the current scale.
 // Clicking a country filters the Connections list (`country:XX`); clicking a
-// cluster lists its countries in a menu, because filter tokens are AND-ed and
-// one filter cannot cover several countries.
+// cluster focuses its existing aggregate location and lists its countries.
 //
 // `markers` is a plain JS array property so a probe can set it directly.
 import QtQuick
@@ -46,13 +45,19 @@ Item {
 
     // Visible slice of the 3600x1800 grid: Antarctica and the high Arctic are
     // cropped so the inhabited world gets the band.
-    readonly property real gridWidth: 3600
-    readonly property real gridTop: 60
-    readonly property real gridHeight: 1440
-    readonly property real mapScale: width > 0 && height > 0
-        ? Math.min(width / gridWidth, height / gridHeight) : 0
-    readonly property real mapLeft: (width - gridWidth * mapScale) / 2
-    readonly property real mapTop: (height - gridHeight * mapScale) / 2
+    readonly property real gridWidth: camera.gridWidth
+    readonly property real gridTop: camera.gridTop
+    readonly property real gridHeight: camera.gridHeight
+    readonly property real mapScale: camera.scale
+    readonly property real mapLeft: camera.left
+    readonly property real mapTop: camera.top
+    property alias camera: camera
+    property alias landItem: land
+    MapCamera {
+        id: camera
+        viewportWidth: view.width
+        viewportHeight: view.height
+    }
 
     readonly property bool dbMissing: !!geoModel && geoModel.dbAvailable === false
     readonly property bool empty: markers.length === 0
@@ -71,6 +76,19 @@ Item {
     Accessible.name: "World map of connection destinations by approximate country"
     Accessible.role: Accessible.Graphic
     clip: true
+    activeFocusOnTab: true
+    Accessible.description: "Use plus and minus to zoom, arrow keys to pan, and Home to fit the world."
+    Keys.onPressed: event => {
+        if (event.key === Qt.Key_Plus || event.key === Qt.Key_Equal) camera.zoomAt(1.5, width / 2, height / 2);
+        else if (event.key === Qt.Key_Minus) camera.zoomAt(1 / 1.5, width / 2, height / 2);
+        else if (event.key === Qt.Key_Home || event.key === Qt.Key_0) camera.reset();
+        else if (event.key === Qt.Key_Left) camera.panBy(60, 0);
+        else if (event.key === Qt.Key_Right) camera.panBy(-60, 0);
+        else if (event.key === Qt.Key_Up) camera.panBy(0, 60);
+        else if (event.key === Qt.Key_Down) camera.panBy(0, -60);
+        else return;
+        event.accepted = true;
+    }
 
     // Rebuild the clusters now. A model reset arrives on every connection
     // event, so callers go through requestRefresh().
@@ -177,6 +195,7 @@ Item {
             view.filterCountry(cluster.members[0].code);
         } else {
             view.openCountryMenu(cluster.members, anchor);
+            camera.focusPoint(cluster.x, cluster.y, camera.zoom * 2);
         }
     }
 
@@ -234,6 +253,8 @@ Item {
         color: view.oceanColor
     }
 
+    MapNavigation { anchors.fill: parent; camera: view.camera }
+
     Shape {
         id: land
         visible: view.landPath !== ""
@@ -247,9 +268,8 @@ Item {
         ShapePath {
             fillColor: view.landColor
             strokeColor: view.borderColor
-            // Constant in grid units: the item's scale does the rest, so a resize
-            // does not re-stroke the whole path.
-            strokeWidth: 5
+            // Keep the fitted-world appearance while zoom adds detail.
+            strokeWidth: 5 / camera.zoom
             joinStyle: ShapePath.RoundJoin
             PathSvg { path: view.landPath }
         }
@@ -264,8 +284,10 @@ Item {
             cluster: view.clusterByKey[key] || emptyCluster
             reducedMotion: view.reducedMotion
             x: view.mapLeft + cluster.x * view.mapScale - width / 2
-            y: view.mapTop + (Math.max(view.gridTop, Math.min(view.gridTop + view.gridHeight, cluster.y))
-                              - view.gridTop) * view.mapScale - height / 2
+            y: view.mapTop + (cluster.y - view.gridTop) * view.mapScale - height / 2
+            enabled: x + width > 0 && y + height > 0 && x < view.width && y < view.height
+            activeFocusOnTab: enabled
+            Accessible.ignored: !enabled
             onClicked: view.activate(cluster, mk)
         }
     }

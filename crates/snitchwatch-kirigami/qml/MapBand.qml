@@ -16,6 +16,20 @@ ColumnLayout {
 
     property var geoModel: null
     property var connectionsModel: null
+    property bool cameraReady: false
+    Component.onCompleted: {
+        const saved = MapBandState.camera;
+        map.camera.setCamera(saved.zoom, saved.x, saved.y);
+        band.cameraReady = true;
+    }
+    Connections {
+        target: map.camera
+        function onMoved() {
+            if (band.cameraReady) {
+                MapBandState.camera = { zoom: map.camera.zoom, x: map.camera.centerX, y: map.camera.centerY };
+            }
+        }
+    }
     readonly property real minimumBody: Kirigami.Units.gridUnit * 6
     readonly property real defaultBody: Kirigami.Units.gridUnit * 13
     // The map is as tall as it is wide / 2.5, so more height is wasted.
@@ -90,6 +104,29 @@ ColumnLayout {
             opacity: 0.7
             text: band.countryCount === 0 ? "no destinations yet"
                 : band.countryCount + (band.countryCount === 1 ? " country" : " countries")
+        }
+        Controls.ToolButton {
+            objectName: "mapZoomOut"
+            text: "−"
+            visible: !MapBandState.collapsed
+            enabled: map.camera.zoom > map.camera.lowerZoom
+            Accessible.name: "Zoom out"
+            onClicked: map.camera.zoomAt(1 / 1.5, map.width / 2, map.height / 2)
+        }
+        Controls.ToolButton {
+            objectName: "mapZoomIn"
+            text: "+"
+            visible: !MapBandState.collapsed
+            enabled: map.camera.zoom < map.camera.upperZoom
+            Accessible.name: "Zoom in"
+            onClicked: map.camera.zoomAt(1.5, map.width / 2, map.height / 2)
+        }
+        Controls.ToolButton {
+            objectName: "mapFit"
+            text: "Fit"
+            visible: !MapBandState.collapsed
+            Accessible.name: "Fit world map"
+            onClicked: map.camera.reset()
         }
         Controls.ToolButton {
             id: countriesButton

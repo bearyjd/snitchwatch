@@ -61,6 +61,10 @@ pub const CONNECTIONS_PAGE: &str = concat!(
     "\n",
     include_str!("../../qml/MapView.qml"),
     "\n",
+    include_str!("../../qml/MapCamera.qml"),
+    "\n",
+    include_str!("../../qml/MapNavigation.qml"),
+    "\n",
     include_str!("../../qml/MapMarker.qml"),
     "\n",
     include_str!("../../qml/MonitorPane.qml"),
@@ -194,6 +198,11 @@ pub const ALL_QML: &[(&str, &str)] = &[
     ),
     ("MapMarker.qml", include_str!("../../qml/MapMarker.qml")),
     ("MapView.qml", include_str!("../../qml/MapView.qml")),
+    ("MapCamera.qml", include_str!("../../qml/MapCamera.qml")),
+    (
+        "MapNavigation.qml",
+        include_str!("../../qml/MapNavigation.qml"),
+    ),
     ("MonitorPane.qml", include_str!("../../qml/MonitorPane.qml")),
     (
         "LevelRuleActions.qml",

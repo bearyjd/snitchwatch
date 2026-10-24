@@ -40,6 +40,8 @@ fn main() {
                 "qml/ConnectionList.qml",
                 "qml/MapBand.qml",
                 "qml/MapView.qml",
+                "qml/MapCamera.qml",
+                "qml/MapNavigation.qml",
                 "qml/MapMarker.qml",
                 "qml/MonitorPane.qml",
                 "qml/RuleButton.qml",

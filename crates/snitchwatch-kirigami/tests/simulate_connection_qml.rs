@@ -382,6 +382,11 @@ fn connections_files_stay_within_their_line_budgets() {
         ),
         ("MapBand.qml", include_str!("../qml/MapBand.qml")),
         ("MapView.qml", include_str!("../qml/MapView.qml")),
+        ("MapCamera.qml", include_str!("../qml/MapCamera.qml")),
+        (
+            "MapNavigation.qml",
+            include_str!("../qml/MapNavigation.qml"),
+        ),
         ("MapMarker.qml", include_str!("../qml/MapMarker.qml")),
         ("MonitorPane.qml", include_str!("../qml/MonitorPane.qml")),
     ] {
