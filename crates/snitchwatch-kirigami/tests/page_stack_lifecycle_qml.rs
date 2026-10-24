@@ -50,6 +50,14 @@ fn page_routes_attach_and_destroy_pages_without_scene_warnings() {
 
 const PROBE_URL: &str = "qrc:/page_stack_lifecycle_probe.qml";
 const DONE: &str = "PAGE_STACK_LIFECYCLE_DONE";
+
+#[test]
+fn both_screenshot_routes_use_the_owned_page_helper() {
+    let source = include_str!("../qml/ScreenshotRunner.qml");
+    assert!(!source.contains("pageStack.replace("));
+    assert_eq!(source.matches("runner.replacePage(shot.page)").count(), 2);
+}
+
 const PROBE: &str = r#"
 import QtQuick
 import org.kde.kirigami as Kirigami
@@ -65,6 +73,11 @@ Kirigami.ApplicationWindow {
     property var shell: null
     property bool shellExercised: false
     StackNav { id: nav; stack: probe.pageStack }
+    ScreenshotRunner {
+        id: screenshots
+        window: probe
+        pages: ({rules: otherPage, connections: firstPage})
+    }
     Component {
         id: firstPage
         Kirigami.Page {
@@ -121,9 +134,17 @@ Kirigami.ApplicationWindow {
                     probe.expect(rejected, "missing component accepted");
                     probe.expect(probe.pageStack.currentItem === replacement
                                  && probe.pageStack.depth === 1, "failed creation changed route");
+                    const screenshotRules = screenshots.replacePage("rules");
+                    probe.expect(screenshotRules === probe.pageStack.currentItem
+                                 && screenshotRules.title === "Rules", "screenshot Rules route");
+                    const screenshotConnections = screenshots.replacePage("connections");
+                    probe.expect(screenshotConnections === probe.pageStack.currentItem
+                                 && screenshotConnections.title === "Connections", "screenshot Connections route");
+                    probe.expect(screenshots.step === 0 && screenshots.pending === 0,
+                                 "navigation unexpectedly captured a screenshot");
                     gc();
                 }
-                if (probe.destroyed === 22) {
+                if (probe.destroyed === 24) {
                     if (!probe.shellExercised) {
                         const shell = probe.shell;
                         probe.expect(shell.pageStack.depth === 1
@@ -144,7 +165,7 @@ Kirigami.ApplicationWindow {
                     console.warn("PAGE_STACK_LIFECYCLE_DONE");
                     Qt.quit();
                 } else if (probe.ticks > 100) {
-                    throw new Error("removed pages retained: destroyed " + probe.destroyed + " of 22");
+                    throw new Error("removed pages retained: destroyed " + probe.destroyed + " of 24");
                 }
             } catch (error) {
                 stop();
