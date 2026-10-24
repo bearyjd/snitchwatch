@@ -21,27 +21,49 @@ use scanner_privileged::{run_privileged_scan, ScanReport, ScanStore};
 
 const DEFAULT_DB: &str = "/var/lib/snitchwatch-scanner/scans.db";
 
+#[derive(Debug)]
 struct Args {
     db: PathBuf,
     json: bool,
 }
 
-fn parse_args() -> Args {
+fn parse_args_from(args: impl IntoIterator<Item = String>, elevated: bool) -> anyhow::Result<Args> {
     let mut db = PathBuf::from(DEFAULT_DB);
     let mut json = false;
-    let mut it = std::env::args().skip(1);
+    let mut it = args.into_iter();
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--db" => {
-                if let Some(v) = it.next() {
-                    db = PathBuf::from(v);
-                }
+                anyhow::ensure!(
+                    !elevated,
+                    "--db is only supported for unprivileged development scans"
+                );
+                db = PathBuf::from(
+                    it.next()
+                        .ok_or_else(|| anyhow::anyhow!("--db requires a path"))?,
+                );
             }
             "--json" => json = true,
-            _ => {}
+            _ => anyhow::bail!("unknown scanner argument: {arg}"),
         }
     }
-    Args { db, json }
+    Ok(Args { db, json })
+}
+
+/// A root scan cannot be killed by its unprivileged broker. Bound its entire
+/// process group here as well, including hung checks that inherit that group.
+fn start_privileged_watchdog() -> anyhow::Result<()> {
+    let pid = unsafe { libc::getpid() };
+    if unsafe { libc::setpgid(0, 0) } != 0 && unsafe { libc::getpgrp() } != pid {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(540));
+        unsafe {
+            libc::killpg(pid, libc::SIGKILL);
+        }
+    });
+    Ok(())
 }
 
 /// Best-effort active-deployment checksum from `rpm-ostree status --json`.
@@ -123,11 +145,15 @@ fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    let args = parse_args();
+    let elevated = unsafe { libc::geteuid() } == 0;
+    let args = parse_args_from(std::env::args().skip(1), elevated)?;
+    if elevated {
+        start_privileged_watchdog()?;
+    }
 
     if let Some(parent) = args.db.parent() {
         if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent).ok();
+            std::fs::create_dir_all(parent)?;
         }
     }
 
@@ -150,5 +176,30 @@ fn main() -> anyhow::Result<()> {
         Ok(())
     } else {
         std::process::exit(2);
+    }
+}
+
+#[cfg(test)]
+mod argument_tests {
+    use super::*;
+    #[test]
+    fn elevated_scan_cannot_choose_its_write_path() {
+        let args = ["--db", "/tmp/caller-selected.db", "--json"].map(String::from);
+        assert!(parse_args_from(args.clone(), true)
+            .unwrap_err()
+            .to_string()
+            .contains("unprivileged"));
+        assert_eq!(
+            parse_args_from(args, false).unwrap().db,
+            PathBuf::from("/tmp/caller-selected.db")
+        );
+        let fixed = parse_args_from(["--json".into()], true).unwrap();
+        assert_eq!(fixed.db, PathBuf::from(DEFAULT_DB));
+        assert!(fixed.json);
+    }
+    #[test]
+    fn invalid_arguments_are_rejected_before_any_scan() {
+        assert!(parse_args_from(["--db".into()], false).is_err());
+        assert!(parse_args_from(["--anything".into()], true).is_err());
     }
 }

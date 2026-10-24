@@ -31,6 +31,7 @@ pub mod qobject {
         /// Non-empty when the last scan attempt failed (pkexec missing,
         /// scanner binary missing, polkit prompt denied, etc.).
         #[qproperty(QString, error_text, cxx_name = "errorText")]
+        #[qproperty(QString, error_title, cxx_name = "errorTitle")]
         /// True while a scan is in flight (polkit prompt + the scan itself
         /// can both take real wall-clock time).
         #[qproperty(bool, busy)]
@@ -51,12 +52,18 @@ pub mod qobject {
 pub struct ScannerControllerRust {
     report_json: QString,
     error_text: QString,
+    error_title: QString,
     busy: bool,
 }
 
 impl qobject::ScannerController {
     fn run_scan(mut self: Pin<&mut Self>) {
+        if self.busy {
+            return;
+        }
         self.as_mut().set_busy(true);
+        self.as_mut().set_error_text(QString::default());
+        self.as_mut().set_error_title(QString::default());
         let qt_thread = self.qt_thread();
         std::thread::spawn(move || {
             let result = crate::scanner::run_deep_scan();
@@ -65,9 +72,11 @@ impl qobject::ScannerController {
                     Ok(json) => {
                         qobject.as_mut().set_report_json(QString::from(&json));
                         qobject.as_mut().set_error_text(QString::default());
+                        qobject.as_mut().set_error_title(QString::default());
                     }
                     Err(e) => {
-                        qobject.as_mut().set_error_text(QString::from(&e));
+                        qobject.as_mut().set_error_title(QString::from(e.title));
+                        qobject.as_mut().set_error_text(QString::from(&e.detail));
                     }
                 }
                 qobject.as_mut().set_busy(false);

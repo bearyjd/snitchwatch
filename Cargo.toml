@@ -11,6 +11,7 @@ members = [
     "crates/scanner-core",
     "crates/scanner-cli",
     "crates/scanner-privileged",
+    "crates/scanner-broker",
     "tests/mock_opensnitchd",
     "tests/integration",
 ]
@@ -29,6 +30,7 @@ default-members = [
     "crates/scanner-core",
     "crates/scanner-cli",
     "crates/scanner-privileged",
+    "crates/scanner-broker",
     "tests/mock_opensnitchd",
     "tests/integration",
 ]

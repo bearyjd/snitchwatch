@@ -39,11 +39,13 @@ Kirigami.ScrollablePage {
         spacing: Kirigami.Units.smallSpacing
 
         Kirigami.InlineMessage {
+            objectName: "scannerStatusMessage"
             Layout.fillWidth: true
             Layout.margins: Kirigami.Units.smallSpacing
             visible: true
             type: Kirigami.MessageType.Error
-            text: "The deep scan failed."
+            text: page.controller && page.controller.errorTitle.length > 0
+                ? page.controller.errorTitle : "The deep scan failed."
         }
         Controls.Label {
             Layout.fillWidth: true
@@ -71,6 +73,7 @@ Kirigami.ScrollablePage {
 
         RowLayout {
             Controls.Button {
+                objectName: "scannerRunButton"
                 text: page.controller && page.controller.busy ? "Scanning…" : "Run Deep Scan"
                 enabled: page.controller && !page.controller.busy
                 onClicked: page.controller.runScan()
