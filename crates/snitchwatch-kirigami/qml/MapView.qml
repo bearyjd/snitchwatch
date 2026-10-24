@@ -268,9 +268,8 @@ Item {
         ShapePath {
             fillColor: view.landColor
             strokeColor: view.borderColor
-            // Constant in grid units: the item's scale does the rest, so a resize
-            // does not re-stroke the whole path.
-            strokeWidth: 5
+            // Keep the fitted-world appearance while zoom adds detail.
+            strokeWidth: 5 / camera.zoom
             joinStyle: ShapePath.RoundJoin
             PathSvg { path: view.landPath }
         }
@@ -286,6 +285,9 @@ Item {
             reducedMotion: view.reducedMotion
             x: view.mapLeft + cluster.x * view.mapScale - width / 2
             y: view.mapTop + (cluster.y - view.gridTop) * view.mapScale - height / 2
+            enabled: x + width > 0 && y + height > 0 && x < view.width && y < view.height
+            activeFocusOnTab: enabled
+            Accessible.ignored: !enabled
             onClicked: view.activate(cluster, mk)
         }
     }

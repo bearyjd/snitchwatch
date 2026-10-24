@@ -153,6 +153,27 @@ Item {
             near(map.landItem.y, map.camera.project(0, 0).y, "shape shares y transform");
             tryVerify(() => Math.abs(geo.lastScale - 0.5) < 0.001);
         }
+        function test_zoom_keeps_country_borders_readable() {
+            const outline = map.landItem.data[0];
+            verify(outline && outline.strokeWidth !== undefined, "production country outline exists");
+            near(outline.strokeWidth * map.mapScale, 1.25, "fitted-world stroke width");
+            map.camera.zoomAt(16, 450, 200);
+            near(outline.strokeWidth * map.mapScale, 1.25, "zoomed outline stays at fitted-world screen width");
+        }
+        function test_clipped_markers_leave_keyboard_traversal() {
+            const marker = map.markerRepeater.itemAt(0);
+            marker.forceActiveFocus();
+            verify(marker.activeFocus);
+            map.camera.focusPoint(2700, 900, 8);
+            wait(20);
+            verify(!marker.enabled && !marker.activeFocusOnTab, "completely clipped marker cannot be activated or tabbed to");
+            verify(!marker.activeFocus, "moving outside viewport releases existing marker focus");
+            map.forceActiveFocus();
+            keyClick(Qt.Key_Tab);
+            verify(!marker.activeFocus, "real Tab skips clipped production marker");
+            map.camera.reset();
+            verify(marker.enabled && marker.activeFocusOnTab, "visible marker becomes keyboard reachable again");
+        }
         function test_wheel_anchor_limits_and_search() {
             map.camera.zoomAt(2, 450, 200);
             const before = map.camera.unproject(350, 180);

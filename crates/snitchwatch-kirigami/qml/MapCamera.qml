@@ -20,7 +20,7 @@ QtObject {
     property real zoom: 1
     property real centerX: 1800
     property real centerY: 780
-    property var sessionState: null
+    signal moved()
 
     function project(x, y) {
         return Qt.point(left + x * scale, top + (y - gridTop) * scale);
@@ -38,7 +38,7 @@ QtObject {
         zoom = Math.max(lowerZoom, Math.min(upperZoom, nextZoom));
         centerX = scale > 0 ? boundedCenter(x, 0, gridWidth, viewportWidth, scale) : x;
         centerY = scale > 0 ? boundedCenter(y, gridTop, gridHeight, viewportHeight, scale) : y;
-        if (sessionState) sessionState.camera = { zoom: zoom, x: centerX, y: centerY };
+        moved();
         return true;
     }
     function zoomAt(factor, x, y) {
@@ -67,10 +67,4 @@ QtObject {
     onViewportHeightChanged: setCamera(zoom, centerX, centerY)
     onLowerZoomChanged: setCamera(zoom, centerX, centerY)
     onUpperZoomChanged: setCamera(zoom, centerX, centerY)
-    onSessionStateChanged: {
-        if (sessionState) {
-            const saved = sessionState.camera;
-            setCamera(saved.zoom, saved.x, saved.y);
-        }
-    }
 }

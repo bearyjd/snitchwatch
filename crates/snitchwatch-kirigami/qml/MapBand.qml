@@ -16,6 +16,20 @@ ColumnLayout {
 
     property var geoModel: null
     property var connectionsModel: null
+    property bool cameraReady: false
+    Component.onCompleted: {
+        const saved = MapBandState.camera;
+        map.camera.setCamera(saved.zoom, saved.x, saved.y);
+        band.cameraReady = true;
+    }
+    Connections {
+        target: map.camera
+        function onMoved() {
+            if (band.cameraReady) {
+                MapBandState.camera = { zoom: map.camera.zoom, x: map.camera.centerX, y: map.camera.centerY };
+            }
+        }
+    }
     readonly property real minimumBody: Kirigami.Units.gridUnit * 6
     readonly property real defaultBody: Kirigami.Units.gridUnit * 13
     // The map is as tall as it is wide / 2.5, so more height is wasted.
@@ -132,7 +146,6 @@ ColumnLayout {
         Layout.minimumHeight: 0
         geoModel: band.geoModel
         connectionsModel: band.connectionsModel
-        camera.sessionState: MapBandState
     }
 
     ColumnLayout {
