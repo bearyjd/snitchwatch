@@ -121,8 +121,14 @@ const PAGES: &[(&str, &str, &[&str], usize)] = &[
     (
         "GeoPage.qml",
         include_str!("../qml/GeoPage.qml"),
-        &["row.countryName", "dbPath"],
+        &["row.countryName", "dbSource"],
         2,
+    ),
+    (
+        "GeoDatabaseSettings.qml",
+        include_str!("../qml/GeoDatabaseSettings.qml"),
+        &["dbPath", "dbSource", "dbInstallPath", "dbInstallError"],
+        4,
     ),
 ];
 

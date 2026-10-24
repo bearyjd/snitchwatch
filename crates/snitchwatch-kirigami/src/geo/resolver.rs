@@ -202,6 +202,20 @@ impl MmdbLookup {
         let reader = maxminddb::Reader::open_readfile(path)?;
         Ok(Self { reader })
     }
+
+    /// Identity comes from MMDB metadata, never a potentially renamed filename.
+    pub fn source_label(&self) -> String {
+        match self.reader.metadata().database_type.as_str() {
+            "DBIP-Country-Lite" => "IP Geolocation by DB-IP (https://db-ip.com) · CC BY 4.0".into(),
+            "GeoLite2-Country" => "GeoLite2 Country by MaxMind (https://www.maxmind.com)".into(),
+            "GeoIP2-Country" => "GeoIP2 Country by MaxMind (https://www.maxmind.com)".into(),
+            kind => format!("MMDB dataset: {kind}"),
+        }
+    }
+
+    pub fn build_epoch(&self) -> u64 {
+        self.reader.metadata().build_epoch
+    }
 }
 
 impl CountryLookup for MmdbLookup {
@@ -230,6 +244,8 @@ pub struct DiscoveryOutcome {
     /// default location an operator should place one at.
     pub path: PathBuf,
     pub available: bool,
+    pub source: String,
+    pub build_epoch: u64,
 }
 
 /// Production entry point: reads `$SNITCHWATCH_GEOIP_DB`, `$XDG_DATA_HOME` and
@@ -264,6 +280,8 @@ pub fn discover_and_open_with(
     match super::paths::discover_with(exists, env_override, home, xdg_data_home) {
         Some(path) => match MmdbLookup::open(&path) {
             Ok(lookup) => DiscoveryOutcome {
+                source: lookup.source_label(),
+                build_epoch: lookup.build_epoch(),
                 lookup: Some(Arc::new(lookup)),
                 path,
                 available: true,
@@ -279,6 +297,8 @@ pub fn discover_and_open_with(
                     lookup: None,
                     path,
                     available: false,
+                    source: String::new(),
+                    build_epoch: 0,
                 }
             }
         },
@@ -286,13 +306,15 @@ pub fn discover_and_open_with(
             let suggested = super::paths::default_suggested_path(home, xdg_data_home);
             tracing::info!(
                 suggested_path = %suggested.display(),
-                "geo: no GeoLite2-Country.mmdb found; geographic breakdown will show \
+                "geo: no country database found; geographic breakdown will show \
                  Local network / Unknown only until one is installed"
             );
             DiscoveryOutcome {
                 lookup: None,
                 path: suggested,
                 available: false,
+                source: String::new(),
+                build_epoch: 0,
             }
         }
     }

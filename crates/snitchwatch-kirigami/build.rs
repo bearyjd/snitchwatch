@@ -76,6 +76,7 @@ fn main() {
                 "qml/AlertWindow.qml",
                 "qml/DiagnosticsPage.qml",
                 "qml/GeoPage.qml",
+                "qml/GeoDatabaseSettings.qml",
                 "qml/ScannerPage.qml",
                 "qml/DaemonHealthPage.qml",
             ]),

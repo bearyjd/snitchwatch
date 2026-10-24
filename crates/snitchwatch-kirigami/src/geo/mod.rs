@@ -23,6 +23,7 @@
 //!     centroids (offline data, see `docs/map-data.md`).
 
 pub mod flag;
+pub mod install;
 pub mod map_markers;
 pub mod paths;
 pub mod resolver;
@@ -40,6 +41,8 @@ struct SharedGeo {
     resolver: SharedResolver,
     available: bool,
     path: PathBuf,
+    source: String,
+    build_epoch: u64,
 }
 
 static SHARED_GEO: OnceLock<SharedGeo> = OnceLock::new();
@@ -53,6 +56,8 @@ fn shared_geo() -> &'static SharedGeo {
                 lookup: Some(std::sync::Arc::new(crate::demo::DemoGeo)),
                 path: PathBuf::from("demo"),
                 available: true,
+                source: "Demo country data".into(),
+                build_epoch: 0,
             }
         } else {
             resolver::discover_and_open()
@@ -61,6 +66,8 @@ fn shared_geo() -> &'static SharedGeo {
             resolver: SharedResolver::new(outcome.lookup),
             available: outcome.available,
             path: outcome.path,
+            source: outcome.source,
+            build_epoch: outcome.build_epoch,
         }
     })
 }
@@ -81,6 +88,8 @@ pub fn shared_discovery() -> (SharedResolver, resolver::DiscoveryOutcome) {
             lookup: None,
             path: geo.path.clone(),
             available: geo.available,
+            source: geo.source.clone(),
+            build_epoch: geo.build_epoch,
         },
     )
 }

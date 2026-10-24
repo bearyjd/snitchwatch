@@ -19,8 +19,14 @@ use cxx_qt_lib::{QByteArray, QGuiApplication, QQmlApplicationEngine, QUrl};
 #[allow(unused_imports)]
 use snitchwatch_kirigami::geo_model as _;
 
+mod common;
+use common::{capture_stderr, init_headless_qt_env};
+
 #[test]
 fn geo_model_registers_and_ingest_invokable_runs() {
+    init_headless_qt_env();
+    // Fedora's Qt logging configuration can suppress the positive marker.
+    std::env::set_var("QT_LOGGING_RULES", "qml.warning=true");
     if std::env::var_os("QT_QPA_PLATFORM").is_none() {
         std::env::set_var("QT_QPA_PLATFORM", "offscreen");
     }
@@ -38,10 +44,34 @@ fn geo_model_registers_and_ingest_invokable_runs() {
     // test binary; an unregistered type would leave the root object null.
     let qml = r#"
 import QtQuick
+import QtQuick.Window
 import com.snitchwatch.shell
 
-QtObject {
+Window {
+    id: probeWindow
+    visible: true
+    width: 500
+    height: 320
     property GeoModel model: GeoModel {}
+    GeoPage {
+        id: geoPage
+        anchors.fill: parent
+        model: probeWindow.model
+    }
+    GeoDatabaseSettings {
+        id: databaseSettings
+        x: -1000
+        width: parent.width
+        model: probeWindow.model
+    }
+    function find(item, name) {
+        if (item.objectName === name) return item;
+        for (let child of item.children) {
+            let found = find(child, name);
+            if (found) return found;
+        }
+        return null;
+    }
     Component.onCompleted: {
         model.applyServerMessageJson(JSON.stringify({
             action: "insertConnectionRows",
@@ -57,6 +87,63 @@ QtObject {
         // Best-effort visibility only (not load-bearing — see module docs).
         console.log("[test] GeoModel.count after insert =", model.count,
                     "dbAvailable =", model.dbAvailable, "dbPath =", model.dbPath);
+        if (!model.dbInstallPath.endsWith("/snitchwatch/GeoLite2-Country.mmdb"))
+            throw new Error("Missing app-data install location");
+        if (find(databaseSettings, "geoDatabasePath").text !== model.dbInstallPath)
+            throw new Error("Install location is not displayed");
+        if (!find(databaseSettings, "geoDownloadButton") || !find(databaseSettings, "geoInstallButton").enabled)
+            throw new Error("Missing download or install button");
+        model.dbAvailable = true;
+        model.dbSource = "IP Geolocation by DB-IP · CC BY 4.0 · database build 1790818572 (Unix time)";
+        if (find(databaseSettings, "geoDatabaseSource").text !== model.dbSource)
+            throw new Error("Active database source attribution is not displayed");
+        model.dbBuildEpoch = 1790818572;
+        if (find(databaseSettings, "geoDatabaseBuild").text.indexOf("2026-10-01") < 0)
+            throw new Error("Database build date is not displayed in UTC");
+        for (let epoch of [0, -1, 18446744073709551615, Infinity, NaN]) {
+            model.dbBuildEpoch = epoch;
+            const build = find(databaseSettings, "geoDatabaseBuild");
+            if (!build.visible || build.text !== "Database build date unknown.")
+                throw new Error("Invalid or absent build epoch did not render as unknown");
+        }
+        model.installDatabase("https://example.invalid/database.mmdb");
+        if (model.dbInstallBusy || model.dbInstallError.length === 0)
+            throw new Error("Nonlocal file was not rejected");
+        if (find(databaseSettings, "geoInstallError").text !== model.dbInstallError)
+            throw new Error("Install error is not displayed");
+        model.dbRestartRequired = true;
+        if (!find(databaseSettings, "geoRestartNotice").visible)
+            throw new Error("Restart notice is not displayed");
+        model.dbAvailable = false;
+        console.warn("[test] geo database controls passed");
+    }
+    Timer {
+        interval: 100
+        running: true
+        onTriggered: {
+            try {
+                const view = geoPage.flickable;
+                if (view.contentHeight <= view.height)
+                    throw new Error("No-database setup does not participate in scrolling");
+                for (const name of ["geoDownloadButton", "geoInstallButton", "geoInstallError", "geoRestartNotice"]) {
+                    const item = find(geoPage, name);
+                    if (!item || !item.visible)
+                        throw new Error("Setup control or feedback missing: " + name);
+                    const top = item.mapToItem(view.contentItem, 0, 0).y;
+                    view.contentY = Math.max(view.originY, Math.min(top, view.originY + view.contentHeight - view.height));
+                    const visibleTop = item.mapToItem(view, 0, 0).y;
+                    if (visibleTop < -1 || visibleTop + item.height > view.height + 1)
+                        throw new Error("Cannot reveal setup control or feedback at 500x320: " + name);
+                }
+                model.dbAvailable = true;
+                const source = find(geoPage, "geoPageDatabaseSource");
+                if (!source || !source.visible || source.text !== model.dbSource)
+                    throw new Error("Active-view provider attribution disappeared");
+                console.warn("[test] minimum-window geo setup scroll passed");
+            } finally {
+                Qt.quit();
+            }
+        }
     }
 }
 "#;
@@ -69,18 +156,34 @@ QtObject {
         })
     });
 
-    if let Some(engine) = engine.as_mut() {
-        engine.load_data(
-            &QByteArray::from(qml),
-            &QUrl::from("qrc:/inline_geo_model_probe.qml"),
-        );
-    }
+    let captured = capture_stderr(|| {
+        if let Some(engine) = engine.as_mut() {
+            engine.load_data(
+                &QByteArray::from(qml),
+                &QUrl::from("qrc:/inline_geo_model_probe.qml"),
+            );
+        }
+        if root_ok.load(Ordering::SeqCst) {
+            if let Some(app) = app.as_mut() {
+                app.exec();
+            }
+        }
+    });
     drop(guard);
 
     assert!(
         root_ok.load(Ordering::SeqCst),
         "GeoModel QML probe failed: root object was null — the type failed to register as \
          a QML element or did not compile against its QAbstractListModel base"
+    );
+    assert!(
+        captured.contains("[test] geo database controls passed"),
+        "{captured}"
+    );
+    assert!(!captured.contains("Error:"), "{captured}");
+    assert!(
+        captured.contains("[test] minimum-window geo setup scroll passed"),
+        "{captured}"
     );
 
     let _ = app.as_mut();

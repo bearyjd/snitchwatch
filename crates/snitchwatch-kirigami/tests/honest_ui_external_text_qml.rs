@@ -79,7 +79,8 @@ Window {
     // plain text: a warning-free load alone would pass without `PlainText`.
     readonly property var externalTextLabels: [
         "daemonHealthTroubleshooting", "autostartError", "coexistenceDetail",
-        "scannerErrorText", "scannerFindingPath", "wizardDetail", "geoDatabasePath"
+        "scannerErrorText", "scannerFindingPath", "wizardDetail", "geoDatabasePath",
+        "geoDatabaseSource", "geoActiveDatabasePath", "geoInstallError", "geoPageDatabaseSource"
     ]
 
     function checkPlainText() {
@@ -161,14 +162,17 @@ Window {
                 still_outstanding: [], resolved: [], informational: [], skipped: []
             });
             wizard.detail = probeWindow.markup;
-            geo.dbAvailable = false;
+            geo.dbAvailable = true;
             geo.dbPath = probeWindow.markup;
+            geo.dbSource = probeWindow.markup;
+            geo.dbInstallPath = probeWindow.markup;
+            geo.dbInstallError = probeWindow.markup;
     }
     function populate() {
         probeWindow.setExternalText();
             const area = probeWindow.contentItem;
             probeWindow.make("DaemonHealthPage.qml", area, { model: health });
-            probeWindow.make("DiagnosticsPage.qml", area, { controller: settings });
+            probeWindow.make("DiagnosticsPage.qml", area, { controller: settings, geoModel: geo });
             probeWindow.make("ScannerPage.qml", area, { controller: scanner });
             probeWindow.make("OnboardingPage.qml", area, { controller: wizard });
             probeWindow.make("GeoPage.qml", area, { model: geo });
