@@ -100,7 +100,10 @@ kirigami-screenshots dir="target/screenshots":
 # cxx-qt test harness cannot do — cxx-qt-lib exposes no way to post a
 # QMouseEvent, so `cargo test` can only call QML functions directly.
 #
-# They test structural mirrors of the delegates, NOT the real pages:
+# Most tests use structural mirrors of delegates. The map camera tests load
+# the production QML files, exposing their real QML-only singletons through
+# tests/qml/imports. No Rust model types are needed by that slice.
+# For other pages,
 # qmltestrunner cannot load `com.snitchwatch.shell` because cxx-qt links
 # those types statically into each binary rather than shipping a QML plugin.
 # `tests/qml_source_guards.rs` covers the real files.
@@ -109,7 +112,7 @@ kirigami-screenshots dir="target/screenshots":
 # the Kirigami build already requires.
 qml-test:
     QT_QPA_PLATFORM=offscreen QT_QUICK_CONTROLS_STYLE=Basic QT_FORCE_STDERR_LOGGING=1 \
-        qmltestrunner-qt6 -input crates/snitchwatch-kirigami/tests/qml
+        qmltestrunner-qt6 -import crates/snitchwatch-kirigami/tests/qml/imports -input crates/snitchwatch-kirigami/tests/qml
 
 # Playwright smoke test for the Tauri shell (requires `npm install` in tests/tauri_smoke first)
 tauri-smoke:

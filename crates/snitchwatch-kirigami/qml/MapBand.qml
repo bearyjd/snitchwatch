@@ -92,6 +92,29 @@ ColumnLayout {
                 : band.countryCount + (band.countryCount === 1 ? " country" : " countries")
         }
         Controls.ToolButton {
+            objectName: "mapZoomOut"
+            text: "−"
+            visible: !MapBandState.collapsed
+            enabled: map.camera.zoom > map.camera.lowerZoom
+            Accessible.name: "Zoom out"
+            onClicked: map.camera.zoomAt(1 / 1.5, map.width / 2, map.height / 2)
+        }
+        Controls.ToolButton {
+            objectName: "mapZoomIn"
+            text: "+"
+            visible: !MapBandState.collapsed
+            enabled: map.camera.zoom < map.camera.upperZoom
+            Accessible.name: "Zoom in"
+            onClicked: map.camera.zoomAt(1.5, map.width / 2, map.height / 2)
+        }
+        Controls.ToolButton {
+            objectName: "mapFit"
+            text: "Fit"
+            visible: !MapBandState.collapsed
+            Accessible.name: "Fit world map"
+            onClicked: map.camera.reset()
+        }
+        Controls.ToolButton {
             id: countriesButton
             text: "Countries"
             icon.name: "view-list-details"
@@ -109,6 +132,7 @@ ColumnLayout {
         Layout.minimumHeight: 0
         geoModel: band.geoModel
         connectionsModel: band.connectionsModel
+        camera.sessionState: MapBandState
     }
 
     ColumnLayout {
