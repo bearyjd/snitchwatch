@@ -44,7 +44,7 @@ def main():
     root = Path(__file__).resolve().parents[2]
     sha = run("git", "rev-parse", "HEAD", cwd=root)
     if (os.environ["GITHUB_REPOSITORY"] != "bearyjd/snitchwatch"
-            or os.environ["GITHUB_REF"] != "refs/heads/r15-candidate"
+            or os.environ["GITHUB_REF"] != "refs/heads/r15.1-candidate"
             or sha != os.environ["GITHUB_SHA"]
             or sha != os.environ["REVIEWED_SHA"]
             or os.environ["GITHUB_WORKFLOW_SHA"] != sha):
@@ -85,7 +85,7 @@ def main():
         commits = {ref: run("flatpak", "info", "--user", "--show-commit", ref) for ref in refs}
         state, app, repo = work / "state", work / "app", work / "repo"
         command = ["flatpak-builder", "--user", "--arch=x86_64", "--disable-cache", "--keep-build-dirs",
-                   "--default-branch=r13-candidate", f"--state-dir={state}", f"--repo={repo}",
+                   "--default-branch=r15.1-candidate", f"--state-dir={state}", f"--repo={repo}",
                    str(app), str(manifest)]
         with (output / "build.log").open("w") as log:
             subprocess.run(command, cwd=source, stdout=log, stderr=subprocess.STDOUT, check=True)
@@ -114,9 +114,9 @@ def main():
         for socket in ["/run/snitchwatch:ro", "/run/snitchwatch-auth:ro"]:
             if socket not in config["Context"].get("filesystems", "").split(";"):
                 raise ValueError("missing read-only system transport permission")
-        bundle = output / "snitchwatch-system-r13-candidate.flatpak"
+        bundle = output / "snitchwatch-system-r15.flatpak"
         subprocess.run(["flatpak", "build-bundle", "--arch=x86_64", str(repo), str(bundle), APP,
-                        "r13-candidate"], check=True)
+                        "r15.1-candidate"], check=True)
         shutil.copyfile(manifest, output / "system-manifest.yml")
         (output / "metadata.ini").write_bytes(metadata)
         shutil.copyfile(app / "files/manifest.json", output / "resolved-manifest.json")
@@ -139,7 +139,7 @@ def main():
             "binary_path": "/app/bin/snitchwatch-kirigami", "binary_sha256": digest(binary),
             "unstripped_binary_sha256": digest(unstripped), "linker_comment": comment,
             "hardening": {"header": header, "segments": segments, "dynamic": dynamic},
-            "flatpak_commit": run("ostree", f"--repo={repo}", "rev-parse", f"app/{APP}/x86_64/r13-candidate"),
+            "flatpak_commit": run("ostree", f"--repo={repo}", "rev-parse", f"app/{APP}/x86_64/r15.1-candidate"),
             "tools": {tool: run(tool, "--version") for tool in ["flatpak", "flatpak-builder", "readelf", "python3"]},
             "sdk_tools": sdk_tools,
             "generator_environment": run("python3", "-m", "pip", "freeze", "--all"),
@@ -152,7 +152,7 @@ def main():
         (output / "provenance.json").write_text(canonical(evidence))
         assets = {path.name: {"sha256": digest(path), "size": path.stat().st_size}
                   for path in sorted(output.iterdir())}
-        packet = {"schema": 1, "repository": "bearyjd/snitchwatch", "target": "r15-candidate",
+        packet = {"schema": 1, "repository": "bearyjd/snitchwatch", "target": "r15.1-candidate",
                   "ref": os.environ["GITHUB_REF"], "source_commit": sha,
                   "workflow_sha": os.environ["GITHUB_WORKFLOW_SHA"],
                   "workflow_ref": os.environ["GITHUB_WORKFLOW_REF"],

@@ -1,11 +1,13 @@
-# r15 system GUI candidate CI
+# r15.1 system GUI candidate CI
 
-The fixed destinations are `r15-candidate` (branch, tag, draft prerelease). The
-earlier `r13-candidate` and `r14-candidate` branches, tags and prereleases
-remain immutable prior records and are never replaced. The Flatpak ostree branch, bundle
-filename (`snitchwatch-system-r13-candidate.flatpak`) and artifact name
-(`r13-system-gui-candidate`) keep their r13 identifiers because downstream
-consumers reference them.
+The fixed destinations are `r15.1-candidate` (branch, tag, draft prerelease).
+Earlier `r13-candidate`, `r14-candidate`, and `r15-candidate` records and the
+stable `r15` release are never replaced. New builds name the bundle
+`snitchwatch-system-r15.flatpak`, as requested for the r15 GUI line. This outer
+filename does not identify the source: the packet binds the exact commit and bytes.
+The Flatpak ostree branch is `r15.1-candidate` and the Actions artifact name is
+`r15.1-system-gui-candidate`. Published releases and their identity packets
+retain their original filenames and bytes.
 
 `.github/workflows/candidate-gui.yml` produces a clean system-profile GUI
 Flatpak from the exact reviewed source and OpenSnitch gitlink. It does not
@@ -15,13 +17,13 @@ not establish runtime acceptance or authorize stable publication.
 
 The primary must independently obtain resolved source/workflow reviews and
 successful native/QML CI at the immutable head. Only then may the primary set
-the repository variable `R15_CANDIDATE_REVIEWED_SHA` to that full lowercase SHA
-and push that same commit to `r15-candidate`. An absent or different variable
+the repository variable `R15_1_CANDIDATE_REVIEWED_SHA` to that full lowercase SHA
+and push that same commit to `r15.1-candidate`. An absent or different variable
 holds both build and publisher. Branch movement invalidates that authorization;
 a changed head needs fresh review and green CI. The variable is owner-managed
 authorization, not a candidate-authored PASS receipt. Review the workflow and
-credential scope before setting it. This implementation has not been executed
-on GitHub or accepted for publication.
+credential scope before setting it. The r15.1 publication round requires its own exact-head review, green CI,
+and runtime acceptance; earlier release acceptance does not authorize it.
 
 The new workflow uses a branch push so it can run before any main merge. GitHub
 requires default-branch registration for manual-dispatch and workflow-run
@@ -61,7 +63,7 @@ restores caches, unpacks a Flatpak or executes candidate code. The write token
 is repository-wide; fixed reviewed publisher code enforces the target boundary.
 
 The publisher attests the validated bundle and packet as data. It explicitly
-creates the lightweight `refs/tags/r15-candidate` at the reviewed commit before
+creates the lightweight `refs/tags/r15.1-candidate` at the reviewed commit before
 creating a draft prerelease: GitHub draft releases do not create their tag.
 An existing tag must already point directly to that exact commit. Only a 404
 from the tag lookup permits creation; lookup errors and creation conflicts
