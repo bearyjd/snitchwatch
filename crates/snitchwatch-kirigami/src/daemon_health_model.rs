@@ -48,9 +48,9 @@ fn status_summary(checks: &[DiagnosticCheck]) -> String {
     ]
     .iter()
     .all(|kind| {
-        checks
-            .iter()
-            .any(|c| c.kind == *kind && c.status == CheckStatus::Ok)
+        let mut matching = checks.iter().filter(|c| c.kind == *kind);
+        matches!(matching.next(), Some(check) if check.status == CheckStatus::Ok)
+            && matching.next().is_none()
     }) {
         SUMMARY_HEALTHY.to_string()
     } else {
@@ -247,6 +247,51 @@ mod tests {
             });
             assert_eq!(status_summary(&checks), SUMMARY_PENDING);
             assert!(!has_problem(&checks));
+        }
+    }
+
+    #[test]
+    fn duplicate_required_checks_never_report_healthy() {
+        for duplicate_kind in [
+            CheckKind::DaemonReachable,
+            CheckKind::FirewallRunning,
+            CheckKind::NftablesSupport,
+        ] {
+            for duplicate_status in [
+                CheckStatus::Unknown,
+                CheckStatus::Ok,
+                CheckStatus::Failed {
+                    detail: "duplicate failed".to_string(),
+                },
+            ] {
+                for insert_first in [false, true] {
+                    let expected = if matches!(duplicate_status, CheckStatus::Failed { .. }) {
+                        SUMMARY_PROBLEM
+                    } else {
+                        SUMMARY_PENDING
+                    };
+                    let mut checks = [
+                        CheckKind::DaemonReachable,
+                        CheckKind::FirewallRunning,
+                        CheckKind::NftablesSupport,
+                    ]
+                    .map(|kind| DiagnosticCheck {
+                        kind,
+                        status: CheckStatus::Ok,
+                    })
+                    .to_vec();
+                    let duplicate = DiagnosticCheck {
+                        kind: duplicate_kind,
+                        status: duplicate_status.clone(),
+                    };
+                    if insert_first {
+                        checks.insert(0, duplicate);
+                    } else {
+                        checks.push(duplicate);
+                    }
+                    assert_eq!(status_summary(&checks), expected);
+                }
+            }
         }
     }
 
