@@ -1,0 +1,21 @@
+{
+  "name": "dbip-country-lite",
+  "buildsystem": "simple",
+  "build-commands": [
+    "gzip -dc dbip-country-lite-2026-10.mmdb.gz > dbip-country-lite.mmdb",
+    "install -Dm644 dbip-country-lite.mmdb /app/share/snitchwatch/dbip-country-lite.mmdb",
+    "install -Dm644 CC-BY-4.0.txt /app/share/licenses/snitchwatch/dbip-country-lite/CC-BY-4.0.txt",
+    "install -Dm644 ATTRIBUTION.txt /app/share/licenses/snitchwatch/dbip-country-lite/ATTRIBUTION.txt",
+    "install -Dm644 provenance.json /app/share/snitchwatch/dbip-country-lite.provenance.json"
+  ],
+  "sources": [
+    {
+      "type": "file",
+      "url": "https://download.db-ip.com/free/dbip-country-lite-2026-10.mmdb.gz",
+      "sha256": "4cd44536ddfd40fec7eca94a233f7d19f38d470e6522e653cb8d27001f5fe177"
+    },
+    { "type": "file", "path": "CC-BY-4.0.txt" },
+    { "type": "file", "path": "ATTRIBUTION.txt" },
+    { "type": "file", "path": "provenance.json" }
+  ]
+}
