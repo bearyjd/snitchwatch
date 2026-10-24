@@ -31,6 +31,7 @@ fn main() {
                 "qml/ConnectionsHeader.qml",
                 "qml/ConnectionsFilterBar.qml",
                 "qml/ConnectionsTopBar.qml",
+                "qml/AnalysisExportSheet.qml",
                 "qml/StackNav.qml",
                 "qml/HoverTip.qml",
                 "qml/ProgramLabel.qml",
@@ -104,6 +105,10 @@ fn main() {
     .file("src/blocklists_model.rs")
     .file("src/rules_model.rs")
     .file("src/rules_io_controller.rs")
+    .file("src/analysis_export_controller.rs")
+    // Native factory/inspection wrappers are referenced only by cfg(test)
+    // controller tests; no QML or production injection API is registered.
+    .file("src/analysis_export_native_test.rs")
     .file("src/rule_editor_controller.rs")
     .file("src/make_rule_controller.rs")
     .file("src/profiles_model.rs")

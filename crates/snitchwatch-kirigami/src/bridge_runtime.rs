@@ -60,6 +60,7 @@ struct ConnectionState {
     /// The same for `bridge_capabilities::DECIDE_LATER`.
     decide_later: bool,
     curated_broad_opt_in: bool,
+    analysis_export: bool,
     /// This session's waiting prompts, for desktop notifications.
     pending_rows: pending_rows::PendingRows,
 }
@@ -85,6 +86,12 @@ impl std::fmt::Display for SendClientMessageError {
 }
 
 impl BridgeHandles {
+    /// The live session only when its bridge explicitly supports private summaries.
+    pub fn analysis_export_session(&self) -> Option<u64> {
+        let state = self.connection.lock().unwrap_or_else(|p| p.into_inner());
+        (state.connected && state.analysis_export).then_some(state.connection_id)
+    }
+
     pub fn subscribe(&self) -> broadcast::Receiver<ReceivedServerMessage> {
         self.broadcast_tx.subscribe()
     }
@@ -184,6 +191,14 @@ impl BridgeHandles {
             return Err(SendClientMessageError::Disconnected);
         }
         if expected_session.is_some_and(|id| id != connection.connection_id) {
+            return Err(SendClientMessageError::StaleSession);
+        }
+        if matches!(
+            message,
+            ClientMessage::RequestCacheSummaryExport { .. }
+                | ClientMessage::CancelCacheSummaryExport { .. }
+        ) && (expected_session.is_none() || !connection.analysis_export)
+        {
             return Err(SendClientMessageError::StaleSession);
         }
         // Reviewed DNS intent must retain its originating session through queue
@@ -418,6 +433,8 @@ async fn connect_and_relay(
     {
         let mut state = connection.lock().unwrap_or_else(|p| p.into_inner());
         state.curated_broad_opt_in = advertised(crate::curated_broad_consent::CAPABILITY);
+        state.analysis_export =
+            advertised(snitchwatch_bridge::bridge_capabilities::AI_CACHE_SUMMARY_EXPORT_V1);
     }
     let _ = broadcast_tx.send(ReceivedServerMessage {
         connection_id,
@@ -457,8 +474,8 @@ async fn connect_and_relay(
                     // A newer bridge may send actions this client doesn't
                     // know. Skip them: dropping the connection would reconnect
                     // forever, cancelling pending prompts each time.
-                    Err(error) => {
-                        tracing::warn!(%error, "skipping a bridge message this client can't parse");
+                    Err(_) => {
+                        tracing::warn!("skipping an unrecognized bridge message");
                     }
                 },
                 Some(Ok(Message::Close(_))) | None => anyhow::bail!("bridge closed the WebSocket"),
@@ -482,12 +499,13 @@ async fn await_authentication_ack(
                 anyhow::anyhow!("timed out waiting for bridge authentication acknowledgement")
             })?;
         match incoming {
-            Some(Ok(Message::Text(text))) => match serde_json::from_str::<ServerMessage>(&text)? {
+            Some(Ok(Message::Text(text))) => match serde_json::from_str::<ServerMessage>(&text)
+                .map_err(|_| anyhow::anyhow!("invalid bridge authentication acknowledgement"))?
+            {
                 ServerMessage::Authenticated { capabilities } => return Ok(capabilities),
-                other => anyhow::bail!(
-                    "bridge sent {:?} before authentication acknowledgement",
-                    other
-                ),
+                _ => {
+                    anyhow::bail!("unexpected message before bridge authentication acknowledgement")
+                }
             },
             Some(Ok(Message::Close(_))) | None => {
                 anyhow::bail!("bridge closed before authentication acknowledgement")
@@ -523,6 +541,7 @@ fn mark_connected_with(
     state.pause_answers_waiting = pause_answers_waiting;
     state.decide_later = false;
     state.curated_broad_opt_in = false;
+    state.analysis_export = false;
     state.pending_rows.clear();
     state.connection_id
 }
@@ -573,6 +592,7 @@ fn disconnect_and_discard(
         state.pause_answers_waiting = false;
         state.decide_later = false;
         state.curated_broad_opt_in = false;
+        state.analysis_export = false;
         state.pending_rows.clear();
     }
     while inbound_rx.try_recv().is_ok() {}
@@ -768,3 +788,7 @@ pub use link::{LinkState, LinkStatus};
 #[cfg(test)]
 #[path = "bridge_runtime/curated_consent_tests.rs"]
 mod curated_consent_tests;
+
+#[cfg(test)]
+#[path = "bridge_runtime/analysis_export_tests.rs"]
+mod analysis_export_tests;

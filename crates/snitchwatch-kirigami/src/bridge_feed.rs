@@ -220,8 +220,8 @@ impl qobject::BridgeFeed {
             Ok(msg) => {
                 dispatch(msg, false);
             }
-            Err(e) => {
-                tracing::warn!(error = %e, %json, "BridgeFeed: bad ClientMessage JSON, dropped")
+            Err(_) => {
+                tracing::warn!("BridgeFeed: invalid client message dropped")
             }
         }
     }
