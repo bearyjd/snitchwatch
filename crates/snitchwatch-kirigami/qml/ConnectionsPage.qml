@@ -66,6 +66,7 @@ Kirigami.Page {
     // The window's page stack; null without one (isolated tests: always a column).
     readonly property var hostStack: Controls.ApplicationWindow.window
         ? (Controls.ApplicationWindow.window.pageStack || null) : null
+    StackNav { id: detailNav; stack: page.hostStack }
     readonly property bool compact: page.hostStack !== null && page.width < page.compactWidth
     // The pushed ConnectionDetailPage while one is open (compact mode).
     property var detailPage: null
@@ -265,7 +266,7 @@ Kirigami.Page {
 
     function pushDetailPage() {
         if (page.compact && page.inspecting && !page.detailPage) {
-            page.detailPage = page.hostStack.push(detailPageComponent, { page: pageRoot });
+            page.detailPage = detailNav.push(detailPageComponent, { page: pageRoot });
         }
     }
 

@@ -15,6 +15,11 @@ Item {
     property string dir: ""
     property var alertWindow: null
     property var pages: ({})
+    StackNav { id: pageNav; stack: runner.window ? runner.window.pageStack : null }
+
+    function replacePage(name) {
+        return pageNav.replace(runner.pages[name]);
+    }
 
     property int step: 0
     property int pending: 0
@@ -137,7 +142,7 @@ Item {
                 runner.window.width = shot.size[0];
                 runner.window.height = shot.size[1];
                 if (shot.page) {
-                    runner.window.pageStack.replace(runner.pages[shot.page]);
+                    runner.replacePage(shot.page);
                 }
                 MapBandState.collapsed = shot.mapCollapsed === true;
                 return;
@@ -147,7 +152,7 @@ Item {
                 MapBandState.collapsed = shot.mapCollapsed;
             }
             if (shot.page && !shot.size) {
-                runner.window.pageStack.replace(runner.pages[shot.page]);
+                runner.replacePage(shot.page);
             }
             if (shot.expandGroups) {
                 // The page was just created; its groups appear on the next frame.
