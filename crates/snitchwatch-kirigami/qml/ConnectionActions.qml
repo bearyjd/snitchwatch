@@ -2,6 +2,7 @@
 // target before opening: ListView delegates can be recycled while it is open.
 import QtQuick
 import QtQuick.Controls as Controls
+import com.snitchwatch.shell
 
 Item {
     id: actions
@@ -22,8 +23,12 @@ Item {
         let details = ({});
         try { details = JSON.parse(actions.page.model.rowDetailsJson(row.rowId)); } catch (e) {}
         const duration = actions.page.levelRules.model.levelRuleDuration();
-        return { details: details, durationToken: duration,
-            scopeText: row.isGroupHeader ? scopePreview.describe(actions.page.levelRules.model, row.groupLevel, row.ruleProgram, row.ruleKey, duration) : "This connection only; this attempt only; no remembered rule",
+        const allowPayload = row.isGroupHeader ? null : actions.page.inlineVerdicts.payloadFor(row.rowId, "allow");
+        const denyPayload = row.isGroupHeader ? null : actions.page.inlineVerdicts.payloadFor(row.rowId, "deny");
+        return { details: details, durationToken: duration, decisionDefault: Durations.defaultToken,
+            allowPayload: allowPayload, denyPayload: denyPayload,
+            scopeText: row.isGroupHeader ? scopePreview.describe(actions.page.levelRules.model, row.groupLevel, row.ruleProgram, row.ruleKey, duration)
+                : actions.page.inlineVerdicts.scopeFor(allowPayload),
             rowId: row.rowId, pending: row.pending, header: row.isGroupHeader,
             level: row.groupLevel, program: row.ruleProgram, key: row.ruleKey, domain: row.groupParentKey,
             label: row.isGroupHeader ? row.groupLabel : row.process + " → " + row.host, count: row.groupPending, session: row.sourceSession,
@@ -66,6 +71,35 @@ Item {
                 && !actions.page.model.isPendingRow(n.rowId)))) actions.close();
     }
 
+    function pendingGroupScope() {
+        const n = actions.target;
+        if (!n || !n.header) return "";
+        const destination = n.level === 0 ? "all destination groups"
+            : n.level === 1 ? "domain group " + n.key
+            : "host group " + n.key + (n.domain ? " under domain " + n.domain : "");
+        return "Pending requests for app group " + n.program + "; " + destination + ". ";
+    }
+
+    function pendingLabel(choice) {
+        const n = actions.target;
+        if (!n) return "";
+        const verb = choice === "deny" ? "Deny" : "Allow";
+        if (n.header) {
+            const duration = choice === "deny" ? "until_restart" : n.decisionDefault;
+            return verb + " each request in this " + actions.scope + " group: its recorded host/IP; "
+                + Durations.labelFor(duration) + " when its executable and service support app-bound rules; otherwise Once.";
+        }
+        const payload = choice === "deny" ? n.denyPayload : n.allowPayload;
+        return verb + " this connection (" + Durations.labelFor(payload.duration) + ")"
+            + (payload.duration === "this_time" ? "; this request only, no remembered rule" : "");
+    }
+
+    function decisionUnchanged(n, choice) {
+        if (n.header) return choice === "deny" || n.decisionDefault === Durations.defaultToken;
+        const captured = choice === "deny" ? n.denyPayload : n.allowPayload;
+        return JSON.stringify(captured) === JSON.stringify(actions.page.inlineVerdicts.payloadFor(n.rowId, choice));
+    }
+
     function decide(choice) {
         const n = actions.target;
         if (!actions.valid() || actions.submitted) return;
@@ -73,6 +107,11 @@ Item {
             // Flush grouped updates only on dispatch, never from model callbacks.
             actions.page.model.pendingRowIdsForProcess("");
             if (!actions.valid() || !actions.page.model.isPendingRow(n.rowId)) return;
+        }
+        if (!actions.decisionUnchanged(n, choice)) {
+            actions.close();
+            actions.page.showPassiveNotice("The decision details changed. Open the menu again to review them.");
+            return;
         }
         actions.submitted = true;
         if (n.header) {
@@ -113,10 +152,10 @@ Item {
             enabled: false
             objectName: "connectionScopePreview"
             text: !actions.target ? "" : !actions.target.header ? actions.target.scopeText
-                : (actions.target.ruleState === "none" ? actions.target.scopeText
+                : (actions.target.ruleState === "none" ? "New rule: " + actions.target.scopeText
                    : actions.target.ruleName ? "Existing rule: " + actions.target.ruleName + ". Removal deletes this captured rule."
                    : "Captured " + actions.scope + " group.")
-                  + " Pending decisions affect currently matching requests at dispatch, this attempt only; no remembered rule."
+                  + " " + actions.pendingGroupScope() + "Pending actions select currently matching requests at dispatch. Each request uses its own recorded host/IP, any port and any protocol; remembered rules bind to that request's executable."
             contentItem: Controls.Label { text: parent.text; textFormat: Text.PlainText; wrapMode: Text.WrapAnywhere }
         }
         Repeater {
@@ -142,9 +181,8 @@ Item {
             visible: !actions.rulesOnly && !!actions.target && (actions.target.header ? actions.target.count > 0 : actions.target.pending)
             height: visible ? implicitHeight : 0
             enabled: actions.connected && !actions.submitted
-            text: actions.target && actions.target.header
-                ? "Allow all pending in this " + actions.scope
-                : "Allow this connection"
+            text: actions.pendingLabel("allow")
+            contentItem: Controls.Label { objectName: "allowPendingPreview"; text: parent.text; textFormat: Text.PlainText; wrapMode: Text.WrapAnywhere }
             onTriggered: actions.decide("allow")
         }
         Controls.MenuItem {
@@ -152,9 +190,8 @@ Item {
             visible: !actions.rulesOnly && !!actions.target && (actions.target.header ? actions.target.count > 0 : actions.target.pending)
             height: visible ? implicitHeight : 0
             enabled: actions.connected && !actions.submitted
-            text: actions.target && actions.target.header
-                ? "Deny all pending in this " + actions.scope
-                : "Deny this connection"
+            text: actions.pendingLabel("deny")
+            contentItem: Controls.Label { objectName: "denyPendingPreview"; text: parent.text; textFormat: Text.PlainText; wrapMode: Text.WrapAnywhere }
             onTriggered: actions.decide("deny")
         }
         Controls.MenuSeparator {

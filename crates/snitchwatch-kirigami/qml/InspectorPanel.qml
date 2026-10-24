@@ -71,7 +71,7 @@ ColumnLayout {
         ConnectionExplanation {
             Layout.fillWidth: true
             snapshot: page.inspectDetails
-            recordedVerdict: page.inspectVerdictText
+            recordedVerdict: page.inspectVerdict
         }
         ConnectionDetailsCopy {
             Layout.fillWidth: true

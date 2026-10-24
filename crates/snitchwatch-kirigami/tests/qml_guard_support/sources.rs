@@ -19,6 +19,8 @@ pub const MAKE_RULE_CONTROLLER_RS: &str = include_str!("../../src/make_rule_cont
 /// 1): guards that used to scan the single page file scan the union, so moving
 /// code between these files never silently drops a check.
 pub const CONNECTIONS_PAGE: &str = concat!(
+    include_str!("../../qml/InlineVerdicts.qml"),
+    "\n",
     include_str!("../../qml/ConnectionActions.qml"),
     "\n",
     include_str!("../../qml/ClipboardCopy.qml"),

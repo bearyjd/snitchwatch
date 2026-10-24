@@ -18,7 +18,13 @@ Window {
     QtObject {
         id: feed
         property bool ok: true
-        function submitVerdict() { return true; }
+        property bool appBound: true
+        property var submitted: []
+        function appBoundRulesFor(id) { return appBound && id !== "unknown"; }
+        function submitVerdict(id, choice, scope, duration, bound) {
+            submitted = submitted.concat([[id, choice, scope, duration, bound]]);
+            return true;
+        }
     }
     ConnectionsPage {
         id: page
@@ -172,6 +178,9 @@ Window {
         function () {
             const copy=find(page,"copyExecutable");
             expect(page.inspectNoLongerPending,"withdrawn pending inspector did not remain");
+            const recorded=find(page,"connectionExplanation");
+            expect(recorded && recorded.text.indexOf("Recorded verdict: " + page.inspectVerdict + ".")>=0,
+                   "lifecycle status mislabeled as recorded verdict: " + (recorded ? recorded.text : "missing"));
             expect(copy && copy.enabled,"historical same-session copy disabled");
             checkCopy("copyExecutable","/pending");
             checkCopy("copyPort","443");
@@ -182,6 +191,62 @@ Window {
             expect(pasted.text==="443","replacement session copied stale bytes: " + pasted.text);
             page.inspectSession="";
             checkCopy("copyExecutable","/pending");
+            Durations.defaultToken="for_5_minutes";
+            page.dismissInspector();
+            const remembered=row("decision",path,"api.example.com",ip,443); remembered.action=null;
+            rows.applyServerMessageJson(JSON.stringify({ action: "insertConnectionRows", rows: [remembered] }));
+        },
+        function () {
+            const target=page.connectionActions.snapshot(delegate("decision"));
+            page.connectionActions.show(target,page,0,0,false);
+            const allow=find(page.connectionActions.menu.contentItem,"allowPendingAction");
+            const deny=find(page.connectionActions.menu.contentItem,"denyPendingAction");
+            expect(allow && allow.text.indexOf("5 minutes")>=0,"Allow preview omits actual remembered duration: " + (allow ? allow.text : "missing"));
+            expect(deny && deny.text.indexOf("Until firewall restarts")>=0,"Deny preview omits actual remembered duration: " + (deny ? deny.text : "missing"));
+            const scope=find(page.connectionActions.menu.contentItem,"connectionScopePreview");
+            expect(scope && scope.text.indexOf("no remembered rule")<0,"preview falsely promises no remembered rule");
+            page.connectionActions.decide("allow");
+            expect(JSON.stringify(feed.submitted[feed.submitted.length-1])===JSON.stringify(["decision","allow","this_host","for_5_minutes",true]),"production Allow payload unexpected: " + JSON.stringify(feed.submitted));
+            page.inlineVerdicts.submittedIds=({});
+            page.connectionActions.show(target,page,0,0,false);
+            page.connectionActions.decide("deny");
+            expect(JSON.stringify(feed.submitted[feed.submitted.length-1])===JSON.stringify(["decision","deny","this_host","until_restart",true]),"production Deny payload unexpected: " + JSON.stringify(feed.submitted));
+            page.inlineVerdicts.submittedIds=({});
+            page.connectionActions.show(target,page,0,0,false);
+            const before=feed.submitted.length;
+            feed.appBound=false;
+            page.connectionActions.decide("allow");
+            expect(feed.submitted.length===before,"changed capability dispatched old preview");
+            feed.appBound=true;
+            page.connectionActions.show(target,page,0,0,false);
+            Durations.defaultToken="forever";
+            page.connectionActions.decide("allow");
+            expect(feed.submitted.length===before,"changed Allow duration dispatched old preview");
+            Durations.defaultToken="for_5_minutes";
+            page.connectionActions.show(target,page,0,0,false);
+            const changed=row("decision",path,"changed.example.com",ip,443); changed.action=null;
+            rows.applyServerMessageJson(JSON.stringify({action:"insertConnectionRows",rows:[changed]}));
+            page.connectionActions.decide("allow");
+            expect(feed.submitted.length===before,"changed destination dispatched old preview");
+            page.connectionActions.close();
+            rows.applyServerMessageJson(JSON.stringify({action:"clearConnectionRows"}));
+            rows.setGroupedMode(true);
+            const known=row("group-known","/usr/bin/group","a.example.com",ip,443); known.action=null; known.process="/usr/bin/group";
+            const unknown=row("group-unknown",null,"b.example.com","192.0.2.1",80); unknown.action=null; unknown.process="/usr/bin/group";
+            rows.applyServerMessageJson(JSON.stringify({action:"insertConnectionRows",rows:[known,unknown]}));
+        },
+        function () {
+            const group=page.connectionList.itemAtIndex(0);
+            expect(group && group.isGroupHeader && group.groupLevel===0,"missing heterogeneous group");
+            const target=page.connectionActions.snapshot(group);
+            page.connectionActions.show(target,page,0,0,false);
+            const preview=find(page.connectionActions.menu.contentItem,"allowPendingPreview");
+            expect(preview && preview.text.indexOf("each request")>=0 && preview.text.indexOf("5 minutes")>=0
+                   && preview.text.indexOf("Once")>=0 && preview.text.indexOf("host")>=0,"group preview lost per-request fallback: " + (preview ? preview.text : "missing"));
+            feed.submitted=[]; page.inlineVerdicts.submittedIds=({});
+            page.connectionActions.decide("allow");
+            const actual=feed.submitted.slice().sort((a,b)=>a[0].localeCompare(b[0]));
+            expect(JSON.stringify(actual)===JSON.stringify([["group-known","allow","this_host","for_5_minutes",true],["group-unknown","allow","this_host","this_time",false]]),"heterogeneous group payload differs: " + JSON.stringify(actual));
         }
     ]
     Timer {

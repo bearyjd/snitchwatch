@@ -91,6 +91,28 @@ QtObject {
         }
     }
 
+    // Shared by the menu preview and send: these are the actual submitted
+    // tokens plus the captured record fields that give this_host its target.
+    function payloadFor(rowId, choice) {
+        const appBound = verdicts.rowAppBoundRules(rowId);
+        let details = ({});
+        try { if (verdicts.model) details = JSON.parse(verdicts.model.rowDetailsJson(rowId)); } catch (e) {}
+        return { rowId: rowId, choice: choice, scope: "this_host",
+            duration: verdicts.model ? verdicts.model.inlineDurationFor(rowId, choice, appBound, Durations.defaultToken) : "this_time",
+            bindableProcessPath: verdicts.rowBindableProcessPath(rowId), appBoundRules: appBound,
+            processPath: details.processPath || "", host: details.dstHost || "", ip: details.dstIp || "" };
+    }
+
+    function scopeFor(payload) {
+        const destination = payload.host !== "" ? "exact host " + payload.host
+            : payload.ip !== "" ? "exact IP " + payload.ip : "destination unknown";
+        return "Recorded executable: " + (payload.processPath || "unknown") + "; " + destination
+            + "; any port; any protocol. "
+            + (payload.bindableProcessPath && payload.appBoundRules
+                ? "Remembered rules bind to this executable."
+                : "Executable binding or app-bound rule support is unavailable; this request only.");
+    }
+
     // Sends `choice` for `rowId`. Returns why a Deny (or an Allow the
     // Settings duration would have remembered) applies to this connection
     // only — "program_unknown" or "bridge_too_old" — or "not_sent" when it
@@ -105,12 +127,11 @@ QtObject {
             console.warn("InlineVerdicts.send: no bridgeFeed; verdict dropped for", rowId);
             return "not_sent";
         }
-        const appBound = verdicts.rowAppBoundRules(rowId);
-        const duration = verdicts.model
-            ? verdicts.model.inlineDurationFor(rowId, choice, appBound, Durations.defaultToken)
-            : "this_time";
-        const queued = verdicts.bridgeFeed.submitVerdict(rowId, choice, "this_host", duration,
-                                                         verdicts.rowBindableProcessPath(rowId));
+        const payload = verdicts.payloadFor(rowId, choice);
+        const appBound = payload.appBoundRules;
+        const duration = payload.duration;
+        const queued = verdicts.bridgeFeed.submitVerdict(payload.rowId, payload.choice, payload.scope,
+                                                         duration, payload.bindableProcessPath);
         if (choice !== "allow" && choice !== "deny") {
             return "";
         }

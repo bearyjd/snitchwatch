@@ -18,6 +18,7 @@ pub mod bridge_dispatch;
 pub mod bridge_feed;
 pub mod bridge_runtime;
 pub mod bulk_rules;
+pub mod clipboard;
 pub mod coexistence;
 pub mod connections;
 pub mod connections_model;

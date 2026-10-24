@@ -1,19 +1,12 @@
-// A GUI-only clipboard writer. Plain text preserves captured bytes literally.
+// Preserve the captured string without TextEdit's newline normalization.
 import QtQuick
+import com.snitchwatch.shell
 
 Item {
-    id: clipboard
     width: 0
     height: 0
     function copy(value) {
-        buffer.text = value;
-        buffer.selectAll();
-        buffer.copy();
-        buffer.text = "";
+        writer.write(value);
     }
-    TextEdit {
-        id: buffer
-        visible: false
-        textFormat: TextEdit.PlainText
-    }
+    NativeClipboard { id: writer }
 }
