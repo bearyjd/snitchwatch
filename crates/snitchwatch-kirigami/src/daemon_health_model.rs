@@ -7,7 +7,7 @@
 use core::pin::Pin;
 use cxx_qt::Threading;
 use cxx_qt_lib::QString;
-use snitchwatch_bridge::ws_messages::{CheckStatus, DiagnosticCheck, ServerMessage};
+use snitchwatch_bridge::ws_messages::{CheckKind, CheckStatus, DiagnosticCheck, ServerMessage};
 
 /// True if any check in the report is `Failed`.
 fn has_problem(checks: &[DiagnosticCheck]) -> bool {
@@ -29,20 +29,32 @@ fn troubleshooting_text(checks: &[DiagnosticCheck]) -> String {
         .join("\n\n")
 }
 
-/// The only two sentences [`status_summary`] returns. The summary goes into
+/// Fixed sentences returned by [`status_summary`]. The summary goes into
 /// `main.qml`'s `Kirigami.InlineMessage`, which renders its text as markup
 /// (issue #51), so it must never carry a check's detail: that text comes from
 /// the bridge's daemon and kernel probes and belongs in the PlainText
 /// troubleshooting label.
-const SUMMARY_HEALTHY: &str = "Everything looks healthy";
-const SUMMARY_PROBLEM: &str =
-    "Connection or kernel problem detected — see Daemon Health for details";
+const SUMMARY_HEALTHY: &str = "Daemon reachable; firewall checks passed";
+const SUMMARY_PENDING: &str = "Waiting for complete daemon health information";
+const SUMMARY_PROBLEM: &str = "Daemon or firewall issue reported — see Daemon Health for details";
 
 fn status_summary(checks: &[DiagnosticCheck]) -> String {
     if has_problem(checks) {
         SUMMARY_PROBLEM.to_string()
-    } else {
+    } else if [
+        CheckKind::DaemonReachable,
+        CheckKind::FirewallRunning,
+        CheckKind::NftablesSupport,
+    ]
+    .iter()
+    .all(|kind| {
+        let mut matching = checks.iter().filter(|c| c.kind == *kind);
+        matches!(matching.next(), Some(check) if check.status == CheckStatus::Ok)
+            && matching.next().is_none()
+    }) {
         SUMMARY_HEALTHY.to_string()
+    } else {
+        SUMMARY_PENDING.to_string()
     }
 }
 
@@ -99,7 +111,7 @@ impl Default for DaemonHealthModelRust {
     fn default() -> Self {
         Self {
             has_problem: false,
-            status_summary: QString::from(SUMMARY_HEALTHY),
+            status_summary: QString::from(SUMMARY_PENDING),
             troubleshooting_text: QString::default(),
         }
     }
@@ -172,7 +184,6 @@ impl qobject::DaemonHealthModel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use snitchwatch_bridge::ws_messages::CheckKind;
 
     #[test]
     fn derive_status_summary_ok_when_all_checks_pass() {
@@ -196,6 +207,92 @@ mod tests {
         ];
         assert!(!has_problem(&checks));
         assert_eq!(troubleshooting_text(&checks), "");
+        assert_eq!(status_summary(&checks), SUMMARY_HEALTHY);
+    }
+
+    #[test]
+    fn unreported_monitor_method_allows_healthy_proc_or_ebpf() {
+        let checks = [
+            (CheckKind::DaemonReachable, CheckStatus::Ok),
+            (CheckKind::FirewallRunning, CheckStatus::Ok),
+            (CheckKind::NftablesSupport, CheckStatus::Ok),
+            (CheckKind::EbpfSupport, CheckStatus::Unknown),
+        ]
+        .map(|(kind, status)| DiagnosticCheck { kind, status });
+        assert!(!has_problem(&checks));
+        assert_eq!(status_summary(&checks), SUMMARY_HEALTHY);
+        assert!(troubleshooting_text(&checks).is_empty());
+    }
+
+    #[test]
+    fn incomplete_required_health_stays_pending() {
+        assert_eq!(status_summary(&[]), SUMMARY_PENDING);
+        for missing in [
+            CheckKind::DaemonReachable,
+            CheckKind::FirewallRunning,
+            CheckKind::NftablesSupport,
+        ] {
+            let checks = [
+                CheckKind::DaemonReachable,
+                CheckKind::FirewallRunning,
+                CheckKind::NftablesSupport,
+            ]
+            .map(|kind| DiagnosticCheck {
+                kind,
+                status: if kind == missing {
+                    CheckStatus::Unknown
+                } else {
+                    CheckStatus::Ok
+                },
+            });
+            assert_eq!(status_summary(&checks), SUMMARY_PENDING);
+            assert!(!has_problem(&checks));
+        }
+    }
+
+    #[test]
+    fn duplicate_required_checks_never_report_healthy() {
+        for duplicate_kind in [
+            CheckKind::DaemonReachable,
+            CheckKind::FirewallRunning,
+            CheckKind::NftablesSupport,
+        ] {
+            for duplicate_status in [
+                CheckStatus::Unknown,
+                CheckStatus::Ok,
+                CheckStatus::Failed {
+                    detail: "duplicate failed".to_string(),
+                },
+            ] {
+                for insert_first in [false, true] {
+                    let expected = if matches!(duplicate_status, CheckStatus::Failed { .. }) {
+                        SUMMARY_PROBLEM
+                    } else {
+                        SUMMARY_PENDING
+                    };
+                    let mut checks = [
+                        CheckKind::DaemonReachable,
+                        CheckKind::FirewallRunning,
+                        CheckKind::NftablesSupport,
+                    ]
+                    .map(|kind| DiagnosticCheck {
+                        kind,
+                        status: CheckStatus::Ok,
+                    })
+                    .to_vec();
+                    let duplicate = DiagnosticCheck {
+                        kind: duplicate_kind,
+                        status: duplicate_status.clone(),
+                    };
+                    if insert_first {
+                        checks.insert(0, duplicate);
+                    } else {
+                        checks.push(duplicate);
+                    }
+                    assert_eq!(status_summary(&checks), expected);
+                }
+            }
+        }
     }
 
     #[test]
@@ -203,15 +300,15 @@ mod tests {
         let checks = vec![DiagnosticCheck {
             kind: CheckKind::EbpfSupport,
             status: CheckStatus::Failed {
-                detail: "no BTF".to_string(),
+                detail: "process monitor failed".to_string(),
             },
         }];
         assert!(has_problem(&checks));
-        assert!(troubleshooting_text(&checks).contains("no BTF"));
+        assert!(troubleshooting_text(&checks).contains("process monitor failed"));
     }
 
     #[test]
-    fn the_summary_is_one_of_two_fixed_sentences_whatever_the_details_say() {
+    fn the_summary_uses_fixed_sentences_whatever_the_details_say() {
         let markup = "<b>bold</b> <img src='https://example.invalid/x.png'> &amp;";
         let failed = |kind| DiagnosticCheck {
             kind,
@@ -236,7 +333,9 @@ mod tests {
         for checks in reports {
             let summary = status_summary(&checks);
             assert!(
-                summary == SUMMARY_HEALTHY || summary == SUMMARY_PROBLEM,
+                summary == SUMMARY_HEALTHY
+                    || summary == SUMMARY_PROBLEM
+                    || summary == SUMMARY_PENDING,
                 "{summary}"
             );
             assert!(
