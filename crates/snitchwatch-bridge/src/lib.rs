@@ -7,6 +7,7 @@
 //! windowing system.
 
 pub mod accounts;
+pub mod analysis_export;
 pub mod auth;
 pub mod blocklists;
 pub mod bridge_capabilities;
