@@ -43,6 +43,106 @@ Item {
     // Markers within this many pixels merge.
     property real mergeRadius: Kirigami.Units.gridUnit * 2.5
 
+    property alias hierarchy: hierarchy
+    property var activeGeoScope: ({kind:"",key:"",name:"World",countryKey:"",cityKey:""})
+    property var highlightedDestinations: []
+    property var highlightedRows: []
+    property int semanticLevel: 0
+    property bool hierarchyDirty: true
+    property var countryAnchors: []
+    property var semanticCache: ({})
+    readonly property var scopeNodes: hierarchy.available ? hierarchy.children(activeGeoScope.kind,activeGeoScope.key) : []
+    MapHierarchy { id: hierarchy }
+
+    function loadHierarchy() {
+        if (!hierarchyDirty || !geoModel || typeof geoModel.hierarchyJson !== "function") return;
+        hierarchyDirty=false;
+        try {
+            // Country anchors are retained only as country-level fallbacks.
+            countryAnchors=JSON.parse(geoModel.clustersJson(100,0,0));
+            hierarchy.load(JSON.parse(geoModel.hierarchyJson()),countryAnchors);
+            semanticCache={};
+            highlightRows(highlightedRows);
+        } catch (error) { console.warn("Geographic snapshot unavailable: "+error); }
+    }
+    function updateSemanticLevel() {
+        const zoom=camera.zoom;
+        if (semanticLevel===0 && zoom>=3) semanticLevel=1;
+        else if (semanticLevel===1 && zoom<2.4) semanticLevel=0;
+        else if (semanticLevel===1 && zoom>=10) semanticLevel=2;
+        else if (semanticLevel===2 && zoom<8) semanticLevel=zoom<2.4 ? 0 : 1;
+    }
+    function focusNodes(nodes, nextZoom) {
+        const points=nodes.map(n=>n.position).filter(p=>p && isFinite(p.x) && isFinite(p.y));
+        if (!points.length) return;
+        let minX=Infinity,maxX=-Infinity,minY=Infinity,maxY=-Infinity;
+        for (const point of points) {
+            minX=Math.min(minX,point.x);maxX=Math.max(maxX,point.x);
+            minY=Math.min(minY,point.y);maxY=Math.max(maxY,point.y);
+        }
+        if (maxX-minX<1 && maxY-minY<1) camera.focusPoint(minX,minY,nextZoom);
+        else {
+            // This map has one non-wrapping world. Date-line branches therefore
+            // fit both edges rather than inventing a midpoint near Greenwich.
+            camera.fitBounds(minX,minY,maxX,maxY,24);
+            if (maxX-minX<1800 && camera.zoom<nextZoom && maxX-minX<400 && maxY-minY<250)
+                camera.focusPoint((minX+maxX)/2,(minY+maxY)/2,nextZoom);
+        }
+    }
+    function selectNode(node) {
+        const key=node.key || (node.code ? "country:"+node.code : "");
+        const kind=node.kind || "country";
+        if (connectionsModel && typeof connectionsModel.setGeoScope === "function") {
+            if (!connectionsModel.setGeoScope(kind,key)) return;
+        } else if (connectionsModel) { connectionsModel.setFilterQuery("country:"+node.code); }
+        activeGeoScope={kind:kind,key:key,name:node.name,countryKey:node.countryKey || key,cityKey:node.cityKey || (kind==="city" ? key : "")};
+        semanticCache={};
+        if (kind==="country") {
+            semanticLevel=1;
+            const children=hierarchy.children(kind,key).filter(n=>n.position && n.approximate);
+            if (children.length) focusNodes(children,Math.max(4,camera.zoom));
+            else if (node.position) camera.focusPoint(node.position.x,node.position.y,Math.max(4,camera.zoom));
+        } else if (kind==="city") {
+            semanticLevel=2;
+            if (node.position) camera.focusPoint(node.position.x,node.position.y,Math.max(12,camera.zoom));
+        }
+        requestRefresh();
+    }
+    function syncScopeFromModel() {
+        if (!connectionsModel || connectionsModel.geoScopeKind === undefined) return;
+        const kind=connectionsModel.geoScopeKind,key=connectionsModel.geoScopeKey;
+        if (activeGeoScope.kind===kind && activeGeoScope.key===key) return;
+        const node=hierarchy.byKey[key];
+        activeGeoScope={kind:kind,key:key,name:node ? node.name : kind ? activeGeoScope.name : "World",
+            countryKey:node ? node.countryKey : activeGeoScope.countryKey,
+            cityKey:node ? node.cityKey || (kind==="city" ? key : "") : activeGeoScope.cityKey};
+        semanticCache={};requestRefresh();
+    }
+    Connections {
+        target: view.connectionsModel
+        ignoreUnknownSignals: true
+        function onGeoScopeKindChanged() { Qt.callLater(view.syncScopeFromModel); }
+        function onGeoScopeKeyChanged() { Qt.callLater(view.syncScopeFromModel); }
+    }
+    function clearScope() {
+        if (connectionsModel && typeof connectionsModel.setGeoScope === "function") connectionsModel.setGeoScope("","");
+        activeGeoScope={kind:"",key:"",name:"World",countryKey:"",cityKey:""}; semanticCache={};requestRefresh();
+    }
+    function scopeBack() {
+        const s=activeGeoScope;
+        const key=s.kind==="ip" ? s.cityKey : s.kind==="city" ? s.countryKey : "";
+        if (key && hierarchy.byKey[key]) selectNode(hierarchy.byKey[key]); else clearScope();
+    }
+    function highlightRows(ids) {
+        highlightedRows=ids;
+        highlightedDestinations=ids.map(id=>hierarchy.destinationByRow[id]).filter(key=>key!==undefined);
+    }
+    function isHighlighted(cluster) {
+        return cluster.members.some(n=>highlightedDestinations.indexOf(n.key)>=0 || (n.kind!=="ip" && highlightedDestinations.some(key=>{
+            const ip=hierarchy.byKey[key];return ip && (n.kind==="country" ? ip.countryKey===n.key : ip.cityKey===n.key);
+        })));
+    }
+
     // Visible slice of the 3600x1800 grid: Antarctica and the high Arctic are
     // cropped so the inhabited world gets the band.
     readonly property real gridWidth: camera.gridWidth
@@ -94,6 +194,16 @@ Item {
     // event, so callers go through requestRefresh().
     function refresh() {
         view.refreshCount++;
+        view.loadHierarchy();
+        view.updateSemanticLevel();
+        if (hierarchy.available) {
+            const bucket=Math.round(Math.log(Math.max(view.mapScale,0.001))/Math.LN2*4);
+            const cacheKey=hierarchy.revision+":"+semanticLevel+":"+activeGeoScope.kind+":"+activeGeoScope.key+":"+bucket;
+            if (!semanticCache[cacheKey] && Object.keys(semanticCache).length>=8) semanticCache={};
+            if (!semanticCache[cacheKey]) semanticCache[cacheKey]=hierarchy.clusters(
+                hierarchy.nodes(semanticLevel,activeGeoScope.kind,activeGeoScope.key),Math.pow(2,bucket/4),markerGap);
+            view.applyClusters(semanticCache[cacheKey]);return;
+        }
         if (!view.geoModel) {
             view.applyClusters([]);
             return;
@@ -127,7 +237,7 @@ Item {
         const byCode = {};
         const keys = [];
         for (const c of clusters) {
-            const key = c.members[0].code;
+            const key = c.key || c.members[0].code;
             byKey[key] = c;
             keys.push(key);
             for (const m of c.members) {
@@ -158,7 +268,7 @@ Item {
         }
     }
     onMapScaleChanged: requestRefresh()
-    onGeoModelChanged: requestRefresh()
+    onGeoModelChanged: { hierarchy.clear();semanticCache={};hierarchyDirty=true;requestRefresh(); }
     Component.onCompleted: requestRefresh()
 
     Timer {
@@ -178,6 +288,7 @@ Item {
         target: view.geoModel
         ignoreUnknownSignals: true
         function onModelReset() { view.requestRefresh(); }
+        function onHierarchyChanged() { view.hierarchyDirty=true; view.requestRefresh(); }
         function onCountryActivity(code) { view.pulse(code, Date.now()); }
     }
 
@@ -192,10 +303,11 @@ Item {
     // countries.
     function activate(cluster, anchor) {
         if (cluster.members.length === 1) {
-            view.filterCountry(cluster.members[0].code);
+            if (hierarchy.available) view.selectNode(cluster.members[0]);
+            else view.filterCountry(cluster.members[0].code);
         } else {
             view.openCountryMenu(cluster.members, anchor);
-            camera.focusPoint(cluster.x, cluster.y, camera.zoom * 2);
+            if (!hierarchy.available || cluster.members.some(m=>m.kind!=="ip")) camera.focusPoint(cluster.x, cluster.y, camera.zoom * 2);
         }
     }
 
@@ -203,15 +315,12 @@ Item {
     // alternative to hitting the markers.
     function openCountryMenu(members, anchor) {
         countryMenu.members = members;
-        if (anchor) {
-            countryMenu.popup(anchor, 0, anchor.height);
-        } else {
-            countryMenu.popup();
-        }
+        countryMenu.popup(anchor);
     }
 
     // All countries currently shown, busiest first.
     function allMembers() {
+        if (hierarchy.available) return hierarchy.countries;
         const out = [];
         for (const c of view.markers) {
             for (const m of c.members) {
@@ -283,6 +392,7 @@ Item {
             required property string key
             cluster: view.clusterByKey[key] || emptyCluster
             reducedMotion: view.reducedMotion
+            highlighted: view.isHighlighted(cluster)
             x: view.mapLeft + cluster.x * view.mapScale - width / 2
             y: view.mapTop + (cluster.y - view.gridTop) * view.mapScale - height / 2
             enabled: x + width > 0 && y + height > 0 && x < view.width && y < view.height
@@ -320,17 +430,11 @@ Item {
         }
     }
 
-    Controls.Menu {
+    MapDestinationsPopup {
         id: countryMenu
-        property var members: []
-        Repeater {
-            model: countryMenu.members
-            delegate: Controls.MenuItem {
-                required property var modelData
-                // Names come from the GeoIP file: plain text only.
-                text: modelData.name + " (" + modelData.summary + ")"
-                onTriggered: view.filterCountry(modelData.code)
-            }
+        onSelected: node => {
+            if (hierarchy.available) view.selectNode(node);
+            else view.filterCountry(node.code);
         }
     }
 }

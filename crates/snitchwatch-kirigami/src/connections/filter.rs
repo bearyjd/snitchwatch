@@ -716,4 +716,97 @@ mod tests {
         assert_eq!(auto_select_target(None, false, &[]), None);
         assert_eq!(auto_select_target(Some("x"), false, &[]), None);
     }
+    #[test]
+    fn geographic_scope_preserves_query_and_matches_canonical_ip_exactly() {
+        let mut f = ConnectionFilter::new("app:fire", false);
+        f.set_geo_scope(GeoScope::parse("ip", "ip:2001:4860:4860::8888"));
+        let matching = ip_row("a", "firefox", "dns", "2001:4860:4860:0:0:0:0:8888", 443, 0);
+        assert!(f.matches(&matching));
+        assert!(!f.matches(&ip_row("b", "firefox", "dns", "2001:4860:4860::8889", 443, 0)));
+        assert!(!f.matches(&ip_row("c", "other", "dns", "2001:4860:4860::8888", 443, 0)));
+        f.set_geo_scope(GeoScope::parse("ip", "ip:1.1.1.1"));
+        assert!(!f.matches(&ip_row("d", "firefox", "dns", "11.1.1.1", 443, 0)));
+        assert_eq!(f.query(), "app:fire");
+        f.set_geo_scope(None);
+        assert!(f.matches(&matching));
+        assert_eq!(f.query(), "app:fire");
+    }
+
+    #[test]
+    fn geographic_scope_country_and_unavailable_city_use_shared_bucket_identity() {
+        let mut f = with_geo("app:fire");
+        f.set_geo_scope(GeoScope::parse("country", "country:DE"));
+        assert!(f.matches(&ip_row("a", "firefox", "dns", "1.1.1.1", 443, 0)));
+        assert!(!f.matches(&ip_row("b", "firefox", "dns", "2.2.2.2", 443, 0)));
+        f.set_geo_scope(GeoScope::parse("city", "country:DE:unknown-city"));
+        assert!(f.matches(&ip_row("a", "firefox", "dns", "1.1.1.1", 443, 0)));
+        f.set_geo_scope(GeoScope::parse("country", "local"));
+        assert!(f.matches(&ip_row("c", "firefox", "router", "192.168.1.1", 443, 0)));
+        f.set_geo_scope(GeoScope::parse("country", "unknown"));
+        assert!(f.matches(&ip_row("d", "firefox", "dns", "9.9.9.9", 443, 0)));
+        assert!(!f.matches(&ip_row("c", "firefox", "router", "192.168.1.1", 443, 0)));
+    }
+
+    #[test]
+    fn geographic_scope_city_uses_shared_composite_key_including_subdivision() {
+        use crate::geo::resolver::{CountryInfo,CountryLookup,GeoPlace,GeoCoordinates};
+        struct Cities;
+        impl CountryLookup for Cities {
+            fn lookup(&self,_ip:std::net::IpAddr)->Option<CountryInfo> { None }
+            fn lookup_place(&self,ip:std::net::IpAddr)->Option<GeoPlace> {
+                Some(GeoPlace {country:CountryInfo {code:"US".into(),name:"United States".into()},
+                    subdivisions:vec![if ip.to_string()=="1.1.1.1" {"North"} else {"South"}.into()],
+                    city:Some("Same city".into()),coordinates:GeoCoordinates::new(Some(1.0),Some(2.0)),
+                    provider:"fixture".into(),precision:None})
+            }
+        }
+        let geo=SharedResolver::new(Some(Arc::new(Cities)));
+        let key=geo.resolve("1.1.1.1").place.unwrap().city_key();
+        let mut f=ConnectionFilter::default().with_geo(geo);
+        f.set_geo_scope(GeoScope::parse("city",&key));
+        assert!(f.is_active());
+        assert!(f.matches(&ip_row("a","firefox","h","1.1.1.1",443,0)));
+        assert!(!f.matches(&ip_row("b","firefox","h","2.2.2.2",443,0)));
+        let old=f.clone();
+        f.set_geo_scope(GeoScope::parse("city","city:removed"));
+        assert_ne!(f,old,"scope participates in projection identity");
+        assert!(!f.matches(&ip_row("a","firefox","h","1.1.1.1",443,0)),"vanished city stays empty");
+    }
+
+    #[test]
+    fn geographic_scope_rejects_invalid_inputs() {
+        for (kind,key) in [("ip","ip:1.1.1"),("ip","1.1.1.1"),("country","country:DEU"),
+            ("country","country:de"),("city",""),("city","country:DE"),("wat","country:DE")] {
+            assert!(GeoScope::parse(kind,key).is_none(),"{kind}: {key}");
+        }
+    }
+
+    #[test]
+    fn prepared_geographic_scope_never_decodes_after_shared_cache_overflow() {
+        use crate::geo::resolver::{CountryInfo,CountryLookup};
+        use std::sync::atomic::{AtomicUsize,Ordering};
+        struct Counting(Arc<AtomicUsize>);
+        impl CountryLookup for Counting {
+            fn lookup(&self,_ip:std::net::IpAddr)->Option<CountryInfo>{
+                self.0.fetch_add(1,Ordering::SeqCst);
+                Some(CountryInfo {code:"DE".into(),name:"Germany".into()})
+            }
+        }
+        let calls=Arc::new(AtomicUsize::new(0));
+        let geo=SharedResolver::new(Some(Arc::new(Counting(calls.clone()))));
+        let r=ip_row("prepared","browser","dns","1.1.1.1",443,0);
+        let mut facts=std::collections::HashMap::new();facts.insert(r.id.clone(),geo.resolve(&r.dst_ip));
+        for i in 0..65_538u32 {geo.resolve(&std::net::Ipv4Addr::from(0x0b00_0000+i).to_string());}
+        let before=calls.load(Ordering::SeqCst);
+        let mut f=ConnectionFilter::default().with_geo(geo).prepared_only();
+        f.merge_prepared_geo(facts);
+        for scope in [("country","country:DE"),("city","country:DE:unknown-city"),("ip","ip:1.1.1.1")] {
+            f.set_geo_scope(GeoScope::parse(scope.0,scope.1));assert!(f.matches(&r));
+        }
+        let mut untracked=r.clone();untracked.id="outside-geo-capacity".into();
+        assert!(!f.matches(&untracked),"missing prepared facts must not masquerade as Unknown or broaden scope");
+        f.set_query("country:DE");f.set_geo_scope(None);assert!(f.matches(&r));
+        assert_eq!(calls.load(Ordering::SeqCst),before,"scope evaluation decoded MMDB on Qt-equivalent path");
+    }
+
 }

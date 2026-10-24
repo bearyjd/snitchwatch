@@ -9,5 +9,6 @@ QtObject {
     property bool collapsed: false
     // Height of the map body in pixels; 0 means "use the default".
     property real bodyHeight: 0
-    property var camera: ({ zoom: 1, x: 1800, y: 780 })
+    property var geoScope: ({kind:"",key:"",name:"World",countryKey:"",cityKey:""})
+    property var camera: ({ zoom: 1, x: 1800, y: 900 })
 }

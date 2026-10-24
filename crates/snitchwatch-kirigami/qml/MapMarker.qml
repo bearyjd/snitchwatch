@@ -14,6 +14,7 @@ Controls.AbstractButton {
 
     property var cluster: ({ members: [], total: 0, dominant: "none", mixed: false, summary: "" })
     property bool reducedMotion: false
+    property bool highlighted: false
     // At most one pulse per marker in this window.
     property int pulseIntervalMs: 500
     // Pulses actually started (probes read this).
@@ -58,7 +59,7 @@ Controls.AbstractButton {
             width: marker.diameter + Kirigami.Units.smallSpacing * 2
             height: width
             radius: width / 2
-            visible: marker.visualFocus || marker.hovered
+            visible: marker.visualFocus || marker.hovered || marker.highlighted
             color: "transparent"
             border.width: 2
             border.color: Kirigami.Theme.highlightColor
@@ -113,6 +114,16 @@ Controls.AbstractButton {
             font.pixelSize: Math.round(marker.diameter * 0.6)
             color: Kirigami.Theme.backgroundColor
         }
+    }
+
+    Controls.Label {
+        anchors.top: parent.bottom
+        anchors.horizontalCenter: parent.horizontalCenter
+        visible: marker.cluster.members.length===1 && marker.cluster.members[0].kind !== undefined
+        text: visible ? marker.cluster.members[0].name : ""
+        textFormat: Text.PlainText
+        font: Kirigami.Theme.smallFont
+        background: Rectangle { color: Kirigami.Theme.backgroundColor; opacity:0.85;radius:2 }
     }
 
     // Country names come from the GeoIP file, so the tip is an explicit
