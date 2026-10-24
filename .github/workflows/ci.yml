@@ -232,8 +232,10 @@ jobs:
             dbus-daemon \
             xdg-dbus-proxy \
             qt6-qtbase-devel \
+            qt6-qtbase-private-devel \
             qt6-qtdeclarative-devel \
             qt6-qttools-devel \
+            plasma-integration \
             kf6-kirigami-devel
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -249,6 +251,12 @@ jobs:
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+
+      # A generic offscreen theme false-passes KDE's tray initialization bug.
+      # This fixture requires KdePlatformTheme and exports the real tray menu
+      # on a fresh private bus; no host tray or desktop portals are contacted.
+      - name: Native KDE tray startup and exported actions
+        run: bash crates/snitchwatch-kirigami/tests/native-tray/run.sh --native
 
       - name: cargo check -p snitchwatch-kirigami
         run: cargo check -p snitchwatch-kirigami --locked
