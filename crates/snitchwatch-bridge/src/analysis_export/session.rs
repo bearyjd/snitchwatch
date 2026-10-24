@@ -167,7 +167,33 @@ impl PartialEq for ExportSession {
         Arc::ptr_eq(&self.inner, &other.inner)
     }
 }
+/// Connection metadata that retains neither the session nor its pending artifact.
+pub struct WeakExportSession(std::sync::Weak<Inner>);
+impl WeakExportSession {
+    pub fn upgrade(&self) -> Option<ExportSession> {
+        self.0.upgrade().map(|inner| ExportSession { inner })
+    }
+}
+
 impl ExportSession {
+    /// Used by service shutdown without retaining every exporting connection.
+    pub fn downgrade(&self) -> WeakExportSession {
+        WeakExportSession(Arc::downgrade(&self.inner))
+    }
+    #[cfg(test)]
+    pub(super) fn queued_wire(&self) -> Option<Arc<str>> {
+        self.inner
+            .state
+            .lock()
+            .unwrap()
+            .slot
+            .as_ref()
+            .and_then(|slot| slot.wire.clone())
+    }
+    /// Either WebSocket-side lifetime guard permanently closes the session.
+    pub fn is_closed(&self) -> bool {
+        self.inner.state.lock().unwrap().closed
+    }
     pub fn new() -> Self {
         Self {
             inner: Arc::new(Inner {

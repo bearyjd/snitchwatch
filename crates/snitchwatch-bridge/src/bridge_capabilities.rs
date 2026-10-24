@@ -68,6 +68,7 @@ pub fn advertised() -> Vec<String> {
         CURATED_BROAD_OPT_IN_V1.to_string(),
         CURATED_GROUPS_V1.to_string(),
         BLOCKLIST_LEFTOVERS.to_string(),
+        AI_CACHE_SUMMARY_EXPORT_V1.to_string(),
     ]
 }
 

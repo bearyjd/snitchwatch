@@ -60,6 +60,7 @@ pub struct RunningBridge {
     pub(crate) pause_clear_handle: tokio::task::JoinHandle<()>,
     /// The blocklist worker, its refresh loop and event pump (issue #45).
     pub(crate) blocklist_tasks: BlocklistTasks,
+    pub(crate) analysis_exports: crate::analysis_export::AnalysisExports,
     /// The profile enforcer and auto-switch tasks (issue #46).
     pub(crate) profile_tasks: Vec<tokio::task::JoinHandle<()>>,
     /// Per-rule hit counts, saved once more at shutdown, and the ticker that
@@ -102,6 +103,7 @@ impl RunningBridge {
 
     /// Signal every background task to stop. Safe to call more than once.
     pub fn shutdown(mut self) {
+        self.analysis_exports.stop();
         self.watchdog_handle.abort();
         self.pause_expiry_handle.abort();
         self.pause_clear_handle.abort();

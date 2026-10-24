@@ -4664,6 +4664,7 @@ dependencies = [
  "futures-util",
  "hyper-util",
  "libc",
+ "log",
  "mock-opensnitchd",
  "rusqlite",
  "serde_json",
