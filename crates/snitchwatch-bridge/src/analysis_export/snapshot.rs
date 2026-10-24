@@ -10,60 +10,19 @@ pub struct Snapshot {
 }
 
 pub(crate) struct SnapshotRow {
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "Task 2 builder consumes private projected fields")
-    )]
     pub(crate) app: AppIdentity,
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "Task 2 builder consumes private projected fields")
-    )]
     pub(crate) destination: String,
-    #[expect(dead_code, reason = "Task 2 builder consumes private projected fields")]
     pub(crate) dst_port: u16,
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "Task 2 builder consumes private projected fields")
-    )]
     pub(crate) started_at_ms: i64,
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "Task 2 builder consumes private projected fields")
-    )]
     pub(crate) protocol: ExportProtocol,
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "Task 2 builder consumes private projected fields")
-    )]
     pub(crate) verdict: ExportVerdict,
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "Task 2 builder consumes private projected fields")
-    )]
     pub(crate) rule_class: ExportRuleClass,
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "Task 2 builder consumes private projected fields")
-    )]
     pub(crate) auto_answer: ExportAutoAnswer,
 }
 
 pub(crate) enum AppIdentity {
-    Path {
-        #[expect(dead_code, reason = "Task 2 builder consumes private path identity")]
-        value: String,
-    },
-    MissingPath {
-        #[cfg_attr(
-            not(test),
-            expect(
-                dead_code,
-                reason = "Task 2 builder consumes private missing-path identity"
-            )
-        )]
-        process: String,
-    },
+    Path { value: String },
+    MissingPath { process: String },
 }
 
 impl Snapshot {

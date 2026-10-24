@@ -11,6 +11,7 @@ pub const MAX_TIMESTAMP_MS: i64 = 253_402_300_799_999;
 pub const MAX_INSPECTED_ROWS: usize = 10_000;
 pub const MAX_REQUIRED_FIELD_BYTES: usize = 4096;
 pub const MAX_COPIED_INPUT_BYTES: usize = 8_388_608;
+pub const MAX_EMITTED_GROUPS: usize = 2000;
 
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -199,3 +200,122 @@ impl std::fmt::Display for ExportError {
 }
 
 impl std::error::Error for ExportError {}
+
+/// Only allowlisted output fields. Raw source and request selectors cannot be serialized here.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportDocument {
+    pub(super) format: &'static str,
+    pub(super) schema_version: u8,
+    pub(super) redaction_version: u8,
+    pub(super) captured_at_ms: i64,
+    pub(super) time_semantics: &'static str,
+    pub(super) requested_window: Option<TimeWindow>,
+    pub(super) filter_kinds: FilterKinds,
+    pub(super) counts: ExportCounts,
+    pub(super) coverage: ExportCoverage,
+    pub(super) unavailable: &'static [&'static str],
+    pub(super) human_summary: &'static str,
+    pub(super) groups: Vec<ExportGroup>,
+    pub(super) dictionary: ExportDictionary,
+    pub(super) analysis_prompt: &'static str,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct FilterKinds {
+    pub time_window: bool,
+    pub application: bool,
+    pub verdicts: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ExportCounts {
+    pub retained: usize,
+    pub inspected: usize,
+    pub accepted_snapshot: usize,
+    pub selected: usize,
+    pub emitted: usize,
+    pub emitted_groups: usize,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ExportCoverage {
+    pub scope: &'static str,
+    pub completeness: &'static str,
+    pub unexamined_retained: usize,
+    pub examined_timestamp_range: Option<ObservedRange>,
+    pub row_omissions: RowOmissions,
+    pub group_omissions: GroupOmissions,
+    pub cache_evictions: &'static str,
+    pub cache_restarts: &'static str,
+    pub upstream_gaps: &'static str,
+    pub missed_events: &'static str,
+    pub selection_beyond_snapshot: &'static str,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct RowOmissions {
+    pub inspection_limit: usize,
+    pub field_too_long: usize,
+    pub input_budget: usize,
+    pub invalid_timestamp: usize,
+}
+
+#[derive(Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct GroupOmissions {
+    pub group_limit: OmittedGroups,
+    pub artifact_limit: OmittedGroups,
+    pub wire_limit: OmittedGroups,
+}
+
+#[derive(Default, Serialize)]
+pub(super) struct OmittedGroups {
+    pub groups: usize,
+    pub observations: usize,
+}
+
+#[derive(Clone, Copy)]
+pub enum GroupOmissionReason {
+    ArtifactLimit,
+    WireLimit,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ExportGroup {
+    pub id: String,
+    pub app_ref: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub app_basename: Option<String>,
+    pub destination_ref: String,
+    pub port: u16,
+    pub protocol: ExportProtocol,
+    pub verdict: ExportVerdict,
+    pub rule_class: ExportRuleClass,
+    pub auto_answer: ExportAutoAnswer,
+    pub count: usize,
+    pub first_observed_at_ms: i64,
+    pub last_observed_at_ms: i64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ExportDictionary {
+    pub observation: &'static str,
+    pub group: &'static str,
+    pub pseudonyms: &'static str,
+    pub app_basename: &'static str,
+    pub protocol: &'static str,
+    pub verdict: &'static str,
+    pub rule_class: &'static str,
+    pub auto_answer: &'static str,
+    pub timestamps: &'static str,
+    pub coverage: &'static str,
+    pub omissions: &'static str,
+    pub unavailable: &'static str,
+}
