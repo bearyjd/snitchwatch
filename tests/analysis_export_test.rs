@@ -20,6 +20,8 @@ use tracing_subscriber::util::SubscriberInitExt;
 
 type Ws = WebSocketStream<UnixStream>;
 const APP: &str = "/usr/bin/PRIVATE-SELECTOR-DIRECTORY/allowed-雪";
+const DISCLOSED_BASENAME: &str = "allowed-雪";
+const INVALID_SELECTOR_CANARY: &str = "SECRETSELECTOR-CANARY-";
 const HOST: &str = "PRIVATE-HOST-CANARY.invalid";
 const IP: &str = "192.0.2.193";
 const RULE: &str = "PRIVATE-RULE-CANARY";
@@ -257,9 +259,11 @@ async fn refusal(ws: &mut Ws, id: &str, schema: u64, filters: Value) -> Value {
     }
     panic!("no refusal within bounded fixture frames");
 }
-/// Drain both clients through the complete production snapshot. Leaving old
-/// snapshot markers on either stream could falsely satisfy a later barrier.
-async fn private_delivery_barrier(a: &mut Ws, b: &mut Ws) {
+/// Check the ordered broadcast window and drain both clients' snapshots.
+/// This does not order ReplyTo/session slots: forward_outbound selects those
+/// independently. Deterministic session-slot isolation and WS stamping
+/// regressions must supply the companion private-queue isolation evidence.
+async fn broadcast_delivery_barrier(a: &mut Ws, b: &mut Ws) {
     send(b, json!({"action":"requestSnapshot"})).await;
     for ws in [a, b] {
         let mut saw_clear = false;
@@ -268,7 +272,7 @@ async fn private_delivery_barrier(a: &mut Ws, b: &mut Ws) {
             let (value, _) = frame(ws).await;
             assert!(
                 !is_export(&value),
-                "another client's private export reached observer"
+                "unexpected export while observing the broadcast snapshot"
             );
             if value["action"] == "clearConnectionRows" {
                 saw_clear = true;
@@ -318,7 +322,7 @@ fn nine_events() -> Vec<Event> {
         event(APP, HOST, "allow", -1),
     ]
 }
-fn assert_source_private(text: &str) {
+fn assert_artifact_private(text: &str) {
     for forbidden in [
         "PRIVATE-SELECTOR-DIRECTORY",
         APP,
@@ -326,12 +330,22 @@ fn assert_source_private(text: &str) {
         IP,
         RULE,
         "PRIVATE-MISSING-HOST.invalid",
+        INVALID_SELECTOR_CANARY,
     ] {
         assert!(
             !text.contains(forbidden),
             "export evidence leaked a private source canary"
         );
     }
+}
+// A disclosed basename is legitimate artifact data, but no observation
+// metadata or selector belongs in a refusal, diagnostic report or app trace.
+fn assert_diagnostic_private(text: &str) {
+    assert_artifact_private(text);
+    assert!(
+        !text.contains(DISCLOSED_BASENAME),
+        "diagnostic evidence leaked a disclosed basename"
+    );
 }
 fn assert_base_counts(document: &Value, selected: usize, groups: usize) {
     assert_eq!(
@@ -352,6 +366,9 @@ fn assert_base_counts(document: &Value, selected: usize, groups: usize) {
     }
 }
 
+// This real-WS scenario checks positive A/B delivery and broadcast leaks.
+// Compose it with deterministic private-slot isolation/stamping regressions:
+// a completed snapshot does not prove independent private queues are empty.
 #[tokio::test]
 async fn two_clients_receive_only_their_export() {
     let mut fixture = Fixture::start(64).await;
@@ -360,22 +377,22 @@ async fn two_clients_receive_only_their_export() {
     fixture.populate(nine_events()).await;
     let (_, first, _) = export(&mut a, "a-first", selection()).await;
     assert_base_counts(&first, 2, 1);
-    private_delivery_barrier(&mut a, &mut b).await;
+    broadcast_delivery_barrier(&mut a, &mut b).await;
     let refused = refusal(&mut a, "a-version", 2, json!({})).await;
     assert_eq!(refused["reason"], "unsupportedVersion");
-    private_delivery_barrier(&mut a, &mut b).await;
+    broadcast_delivery_barrier(&mut a, &mut b).await;
     let refused = refusal(&mut a, "a-filter", 1, json!({"mode":"raw"})).await;
     assert_eq!(refused["reason"], "invalidRequest");
-    private_delivery_barrier(&mut a, &mut b).await;
+    broadcast_delivery_barrier(&mut a, &mut b).await;
     let (_, second, _) = export(&mut a, "a-second", selection()).await;
     assert_base_counts(&second, 2, 1);
     for field in ["appRef", "destinationRef"] {
         assert_ne!(first["groups"][0][field], second["groups"][0][field]);
     }
-    private_delivery_barrier(&mut a, &mut b).await;
+    broadcast_delivery_barrier(&mut a, &mut b).await;
     let (_, own, _) = export(&mut b, "b-own", selection()).await;
     assert_base_counts(&own, 2, 1);
-    private_delivery_barrier(&mut a, &mut b).await;
+    broadcast_delivery_barrier(&mut a, &mut b).await;
     fixture.finish().await;
 }
 
@@ -385,9 +402,9 @@ async fn cache_export_end_to_end_privacy() {
     let mut ws = fixture.connect().await;
     fixture.populate(nine_events()).await;
     let (artifact, document, _) = export(&mut ws, "privacy-selected", selection()).await;
-    assert_source_private(&artifact);
+    assert_artifact_private(&artifact);
     assert!(
-        artifact.contains("allowed-雪"),
+        artifact.contains(DISCLOSED_BASENAME),
         "permitted basename should be disclosed"
     );
     assert_base_counts(&document, 2, 1);
@@ -401,28 +418,34 @@ async fn cache_export_end_to_end_privacy() {
         json!({"app":{"kind":"missingPath"}}),
     )
     .await;
-    assert_source_private(&artifact);
+    assert_artifact_private(&artifact);
     assert_base_counts(&document, 1, 1);
     assert!(document["groups"][0].get("appBasename").is_none());
     let (_, document, _) = export(&mut ws, "privacy-empty", json!({"verdicts":[]})).await;
     assert_base_counts(&document, 0, 0);
     let (artifact, document, _) = export(&mut ws, "privacy-all", json!({})).await;
-    assert_source_private(&artifact);
+    assert_artifact_private(&artifact);
     assert_base_counts(&document, 7, 4);
+    let invalid_selector = format!(
+        "{INVALID_SELECTOR_CANARY}{}",
+        "x".repeat(4097 - INVALID_SELECTOR_CANARY.len())
+    );
+    assert_eq!(invalid_selector.len(), 4097);
     let refused = refusal(
         &mut ws,
         "privacy-refused",
         1,
-        json!({"app":{"kind":"path","value":"x".repeat(4097)}}),
+        json!({"app":{"kind":"path","value":invalid_selector}}),
     )
     .await;
-    assert_source_private(&refused.to_string());
+    assert_eq!(refused["reason"], "invalidRequest");
+    assert_diagnostic_private(&refused.to_string());
     send(&mut ws, json!({"action":"recheckDiagnostics"})).await;
     let mut saw_diagnostics = false;
     for _ in 0..FRAME_LIMIT {
         let (value, _) = frame(&mut ws).await;
         if value["action"] == "diagnosticsReport" {
-            assert_source_private(&value.to_string());
+            assert_diagnostic_private(&value.to_string());
             saw_diagnostics = true;
             break;
         }
@@ -433,7 +456,7 @@ async fn cache_export_end_to_end_privacy() {
     let trace = traces();
     let trace = trace.lock().unwrap();
     assert!(!trace.clipped, "trace evidence exceeded its bound");
-    assert_source_private(&String::from_utf8_lossy(&trace.bytes));
+    assert_diagnostic_private(&String::from_utf8_lossy(&trace.bytes));
 }
 
 #[tokio::test]
