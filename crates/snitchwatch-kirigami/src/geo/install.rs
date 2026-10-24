@@ -7,6 +7,20 @@ const MAX_DATABASE_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_NETWORKS: usize = 2_000_000;
 
 mod tree;
+mod worker;
+
+/// Reserved subprocess mode, handled before logging, Qt, bridge or threads.
+/// The worker receives bytes only, never filenames or privileged operations.
+pub fn validation_worker_entry() -> Option<i32> {
+    let mut args = std::env::args_os().skip(1);
+    if args.next().as_deref() != Some(std::ffi::OsStr::new(worker::FLAG)) {
+        return None;
+    }
+    if args.next().is_some() {
+        return Some(2);
+    }
+    Some(worker::run(validate_in_worker))
+}
 
 /// Always install in app data, never in a system database or an env override.
 pub fn target_path() -> PathBuf {
@@ -17,6 +31,14 @@ pub fn target_path() -> PathBuf {
 }
 
 pub fn install(source: &Path, target: &Path) -> Result<(), String> {
+    install_with_validator(source, target, worker::validate)
+}
+
+fn install_with_validator(
+    source: &Path,
+    target: &Path,
+    validate: impl FnOnce(&[u8]) -> Result<(), String>,
+) -> Result<(), String> {
     let file = crate::logging::open_no_follow(source, std::fs::OpenOptions::new().read(true))
         .map_err(|e| format!("Could not open the selected file: {e}"))?;
     let metadata = file.metadata().map_err(|e| e.to_string())?;
@@ -35,7 +57,7 @@ pub fn install(source: &Path, target: &Path) -> Result<(), String> {
         .map_err(|e| format!("Could not install the database: {e}"))
 }
 
-fn validate(bytes: &[u8]) -> Result<(), String> {
+fn validate_in_worker(bytes: &[u8]) -> Result<(), String> {
     let invalid = |e| format!("The selected file is not a valid country database: {e}");
     let reader = maxminddb::Reader::from_source(bytes).map_err(invalid)?;
     if !matches!(

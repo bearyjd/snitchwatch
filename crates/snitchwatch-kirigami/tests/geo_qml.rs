@@ -44,16 +44,25 @@ fn geo_model_registers_and_ingest_invokable_runs() {
     // test binary; an unregistered type would leave the root object null.
     let qml = r#"
 import QtQuick
+import QtQuick.Window
 import com.snitchwatch.shell
 
-Item {
-    width: 640
-    height: 720
+Window {
+    id: probeWindow
+    visible: true
+    width: 500
+    height: 320
     property GeoModel model: GeoModel {}
+    GeoPage {
+        id: geoPage
+        anchors.fill: parent
+        model: probeWindow.model
+    }
     GeoDatabaseSettings {
         id: databaseSettings
+        x: -1000
         width: parent.width
-        model: parent.model
+        model: probeWindow.model
     }
     function find(item, name) {
         if (item.objectName === name) return item;
@@ -105,7 +114,36 @@ Item {
         model.dbRestartRequired = true;
         if (!find(databaseSettings, "geoRestartNotice").visible)
             throw new Error("Restart notice is not displayed");
+        model.dbAvailable = false;
         console.warn("[test] geo database controls passed");
+    }
+    Timer {
+        interval: 100
+        running: true
+        onTriggered: {
+            try {
+                const view = geoPage.flickable;
+                if (view.contentHeight <= view.height)
+                    throw new Error("No-database setup does not participate in scrolling");
+                for (const name of ["geoDownloadButton", "geoInstallButton", "geoInstallError", "geoRestartNotice"]) {
+                    const item = find(geoPage, name);
+                    if (!item || !item.visible)
+                        throw new Error("Setup control or feedback missing: " + name);
+                    const top = item.mapToItem(view.contentItem, 0, 0).y;
+                    view.contentY = Math.max(view.originY, Math.min(top, view.originY + view.contentHeight - view.height));
+                    const visibleTop = item.mapToItem(view, 0, 0).y;
+                    if (visibleTop < -1 || visibleTop + item.height > view.height + 1)
+                        throw new Error("Cannot reveal setup control or feedback at 500x320: " + name);
+                }
+                model.dbAvailable = true;
+                const source = find(geoPage, "geoPageDatabaseSource");
+                if (!source || !source.visible || source.text !== model.dbSource)
+                    throw new Error("Active-view provider attribution disappeared");
+                console.warn("[test] minimum-window geo setup scroll passed");
+            } finally {
+                Qt.quit();
+            }
+        }
     }
 }
 "#;
@@ -125,6 +163,11 @@ Item {
                 &QUrl::from("qrc:/inline_geo_model_probe.qml"),
             );
         }
+        if root_ok.load(Ordering::SeqCst) {
+            if let Some(app) = app.as_mut() {
+                app.exec();
+            }
+        }
     });
     drop(guard);
 
@@ -138,6 +181,10 @@ Item {
         "{captured}"
     );
     assert!(!captured.contains("Error:"), "{captured}");
+    assert!(
+        captured.contains("[test] minimum-window geo setup scroll passed"),
+        "{captured}"
+    );
 
     let _ = app.as_mut();
 }

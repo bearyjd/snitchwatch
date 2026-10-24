@@ -20,6 +20,9 @@ use snitchwatch_kirigami::{
 };
 
 fn main() {
+    if let Some(code) = snitchwatch_kirigami::geo::install::validation_worker_entry() {
+        std::process::exit(code);
+    }
     // Without this, every `tracing::info!`/`tracing::error!` call in this
     // crate (including the bridge-startup log below, and any QML handler
     // diagnostics) is silently dropped: the default `tracing` dispatcher is

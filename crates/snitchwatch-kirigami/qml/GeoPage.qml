@@ -26,34 +26,34 @@ Kirigami.ScrollablePage {
         id: list
         model: page.model && page.model.dbAvailable ? page.model : null
         reuseItems: true
-        header: Controls.Label {
-            objectName: "geoPageDatabaseSource"
+        header: ColumnLayout {
             width: list.width
-            visible: page.model && page.model.dbAvailable
-            wrapMode: Text.Wrap
-            textFormat: Text.PlainText
-            padding: Kirigami.Units.smallSpacing
-            text: page.model ? page.model.dbSource : ""
-        }
-
-        ColumnLayout {
-            parent: list
-            anchors.centerIn: parent
-            width: list.width - (Kirigami.Units.largeSpacing * 4)
-            visible: page.model && !page.model.dbAvailable
             spacing: Kirigami.Units.largeSpacing
-
-            Kirigami.PlaceholderMessage {
+            Controls.Label {
+                objectName: "geoPageDatabaseSource"
                 Layout.fillWidth: true
-                icon.name: "map-globe"
-                text: "No GeoIP database installed"
-                explanation: "Install a country database below to identify public destinations. Local-network traffic does not need a database."
+                visible: page.model && page.model.dbAvailable
+                wrapMode: Text.Wrap
+                textFormat: Text.PlainText
+                padding: Kirigami.Units.smallSpacing
+                text: page.model ? page.model.dbSource : ""
             }
-            // A host path, so it sits in a PlainText label, not in the
-            // PlaceholderMessage's explanation, which renders markup (issue #51).
-            GeoDatabaseSettings {
+            ColumnLayout {
                 Layout.fillWidth: true
-                model: page.model
+                Layout.margins: Kirigami.Units.largeSpacing * 2
+                visible: page.model && !page.model.dbAvailable
+                spacing: Kirigami.Units.largeSpacing
+
+                Kirigami.PlaceholderMessage {
+                    Layout.fillWidth: true
+                    icon.name: "map-globe"
+                    text: "No GeoIP database installed"
+                    explanation: "Install a country database below to identify public destinations. Local-network traffic does not need a database."
+                }
+                GeoDatabaseSettings {
+                    Layout.fillWidth: true
+                    model: page.model
+                }
             }
         }
 
