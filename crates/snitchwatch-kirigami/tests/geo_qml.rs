@@ -93,6 +93,20 @@ Window {
             throw new Error("Install location is not displayed");
         if (!find(databaseSettings, "geoDownloadButton") || !find(databaseSettings, "geoInstallButton").enabled)
             throw new Error("Missing download or install button");
+        if (!find(databaseSettings, "geoCityDownloadButton") || !find(databaseSettings, "geoCityInstallButton").enabled)
+            throw new Error("Missing optional City data controls");
+        if (!model.dbCityInstallPath.endsWith("/snitchwatch/dbip-city-lite.mmdb"))
+            throw new Error("Missing separate City fallback location");
+        const hierarchy = JSON.parse(model.hierarchyJson());
+        if (hierarchy.version !== 1 || hierarchy.observedConnections !== 2)
+            throw new Error("Observed hierarchy does not match country model input");
+        const local = hierarchy.countries.local;
+        const localIp = local.cities["local:unknown-city"].ips["ip:192.168.1.5"];
+        if (localIp.counts.total !== 1 || localIp.connections[0].app !== "firefox" || localIp.coordinates !== null)
+            throw new Error("Local observation gained invented geographic details");
+        model.dbCityAvailable = true;
+        if (find(databaseSettings, "geoDatabaseCapability").text.indexOf("approximate") < 0)
+            throw new Error("City capability lacks approximate location explanation");
         model.dbAvailable = true;
         model.dbSource = "IP Geolocation by DB-IP · CC BY 4.0 · database build 1790818572 (Unix time)";
         if (find(databaseSettings, "geoDatabaseSource").text !== model.dbSource)

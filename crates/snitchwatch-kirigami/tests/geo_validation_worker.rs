@@ -185,3 +185,48 @@ fn official_dbip_country_passes_the_real_isolated_validator() {
     )
     .unwrap();
 }
+
+#[test]
+fn city_worker_requires_explicit_profile_and_accepts_optional_fields() {
+    let home = tempfile::tempdir().unwrap();
+    let city_command = || {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_snitchwatch-kirigami"));
+        command
+            .arg(worker::CITY_FLAG)
+            .env("HOME", home.path())
+            .env("QT_QPA_PLATFORM", "snitchwatch-worker-must-not-start-qt");
+        command
+    };
+    for bytes in [
+        fixtures::fixture("DBIP-City-Lite"),
+        fixtures::country_localized_name_fixture("es", "\tGuadeloupe"),
+        fixtures::city_fixture("Montreal", Some(45.5019), Some(-73.5674), 1),
+    ] {
+        worker::validate_with_profile(
+            &bytes,
+            city_command(),
+            Duration::from_secs(5),
+            worker::DatabaseProfile::City,
+        )
+        .unwrap();
+        assert!(worker::validate_with_command(
+            &bytes,
+            application_worker(home.path()),
+            Duration::from_secs(5)
+        )
+        .is_err());
+    }
+    for bytes in [
+        fixtures::fixture("DBIP-Country-Lite"),
+        fixtures::city_fixture("Montreal", Some(f64::NAN), Some(0.0), 1),
+    ] {
+        assert!(worker::validate_with_profile(
+            &bytes,
+            city_command(),
+            Duration::from_secs(5),
+            worker::DatabaseProfile::City
+        )
+        .is_err());
+    }
+    assert_eq!(std::fs::read_dir(home.path()).unwrap().count(), 0);
+}

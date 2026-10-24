@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 /// Country info returned by a successful public-IP lookup.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct CountryInfo {
     /// Uppercase ISO 3166-1 alpha-2 code, e.g. `"US"`.
     pub code: String,
@@ -24,12 +24,90 @@ pub struct CountryInfo {
     pub name: String,
 }
 
+/// Database capability describes available fields, never their physical accuracy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum GeoCapability {
+    None,
+    Country,
+    City,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GeoCoordinates {
+    pub latitude: f64,
+    pub longitude: f64,
+}
+impl GeoCoordinates {
+    pub fn new(latitude: Option<f64>, longitude: Option<f64>) -> Option<Self> {
+        let (latitude, longitude) = (latitude?, longitude?);
+        (latitude.is_finite()
+            && longitude.is_finite()
+            && (-90.0..=90.0).contains(&latitude)
+            && (-180.0..=180.0).contains(&longitude))
+        .then_some(Self {
+            latitude: if latitude == 0.0 { 0.0 } else { latitude },
+            longitude: if longitude == 0.0 { 0.0 } else { longitude },
+        })
+    }
+}
+
+/// No geoname ID or accuracy radius is assumed for City Lite records.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GeoPlace {
+    pub country: CountryInfo,
+    pub subdivisions: Vec<String>,
+    pub city: Option<String>,
+    pub coordinates: Option<GeoCoordinates>,
+    pub provider: String,
+    pub precision: Option<String>,
+}
+impl GeoPlace {
+    fn country(country: CountryInfo) -> Self {
+        Self {
+            country,
+            subdivisions: Vec::new(),
+            city: None,
+            coordinates: None,
+            provider: String::new(),
+            precision: None,
+        }
+    }
+    /// Length-framed components prevent name/coordinate collisions. Keys last
+    /// for one database snapshot; a restart may load a different dataset.
+    pub fn city_key(&self) -> String {
+        let components = (
+            &self.country.code,
+            self.subdivisions
+                .iter()
+                .map(|s| s.trim().to_lowercase())
+                .collect::<Vec<_>>(),
+            self.city.as_ref().map(|s| s.trim().to_lowercase()),
+            self.coordinates
+                .as_ref()
+                .map(|c| (c.latitude.to_bits(), c.longitude.to_bits())),
+        );
+        format!(
+            "city:{}",
+            serde_json::to_string(&components).expect("finite geographic identity")
+        )
+    }
+}
+
 /// A source of IP -> country data. Real production code implements this over
 /// `maxminddb::Reader` ([`MmdbLookup`]); unit tests implement it directly
 /// with a canned `HashMap`-backed fake — no real `.mmdb` file is ever
 /// required to test the aggregation logic.
 pub trait CountryLookup: Send + Sync {
     fn lookup(&self, addr: IpAddr) -> Option<CountryInfo>;
+    fn lookup_place(&self, addr: IpAddr) -> Option<GeoPlace> {
+        self.lookup(addr).map(GeoPlace::country)
+    }
+    fn capability(&self) -> GeoCapability {
+        GeoCapability::Country
+    }
 }
 
 /// The bucket a resolved connection falls into.
@@ -47,10 +125,11 @@ pub enum Bucket {
 }
 
 /// Full resolution result: the bucket plus the display name to show for it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Resolved {
     pub bucket: Bucket,
     pub display_name: String,
+    pub place: Option<GeoPlace>,
 }
 
 /// Resolve one destination IP (as the bridge sends it — a plain string) to a
@@ -60,6 +139,7 @@ pub fn resolve(ip: &str, lookup: Option<&dyn CountryLookup>) -> Resolved {
         return Resolved {
             bucket: Bucket::Unknown,
             display_name: "Unknown".to_string(),
+            place: None,
         };
     };
 
@@ -67,17 +147,20 @@ pub fn resolve(ip: &str, lookup: Option<&dyn CountryLookup>) -> Resolved {
         return Resolved {
             bucket: Bucket::Local,
             display_name: "Local network".to_string(),
+            place: None,
         };
     }
 
-    match lookup.and_then(|l| l.lookup(addr)) {
-        Some(info) => Resolved {
-            bucket: Bucket::Country(info.code),
-            display_name: info.name,
+    match lookup.and_then(|l| l.lookup_place(addr)) {
+        Some(place) => Resolved {
+            bucket: Bucket::Country(place.country.code.clone()),
+            display_name: place.country.name.clone(),
+            place: Some(place),
         },
         None => Resolved {
             bucket: Bucket::Unknown,
             display_name: "Unknown".to_string(),
+            place: None,
         },
     }
 }
@@ -86,20 +169,15 @@ pub fn resolve(ip: &str, lookup: Option<&dyn CountryLookup>) -> Resolved {
 /// [`CountryLookup`] plus a `Mutex`-guarded per-IP cache, wrapped in `Arc`
 /// internally so cloning is cheap.
 ///
-/// The point of sharing this (rather than each consumer owning its own
-/// cache) is the live feed: `GeoModel::start_bridge_feed`'s Tokio task
-/// resolves every incoming row's destination IP *before* queueing the
-/// message onto the Qt thread — that's the actual GeoIP lookup work, done
-/// off the UI thread as specced. When the message reaches the Qt thread and
-/// `GeoStore::apply` asks this same `SharedResolver` (a clone, same
-/// underlying cache) to resolve the identical IP, it's already warm: a
-/// `HashMap` get, never a database read. `GeoStore` never needs its own
-/// separate cache or to know whether it's running the first (cold) or a
-/// later (warm) resolution — the cache makes that transparent.
+/// Clones use one immutable database selection and a bounded canonical-IP
+/// working cache. Cache residency is an optimization only: live feed consumers
+/// retain off-thread prepared facts with each queued message, so an eviction
+/// never requires database decoding on the Qt thread.
 #[derive(Clone)]
 pub struct SharedResolver {
     lookup: Option<Arc<dyn CountryLookup>>,
     cache: Arc<Mutex<HashMap<String, Resolved>>>,
+    cache_limit: usize,
 }
 
 impl SharedResolver {
@@ -107,6 +185,15 @@ impl SharedResolver {
         Self {
             lookup,
             cache: Arc::new(Mutex::new(HashMap::new())),
+            cache_limit: 65_536,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_cache_limit(lookup: Option<Arc<dyn CountryLookup>>, limit: usize) -> Self {
+        Self {
+            cache_limit: limit.max(1),
+            ..Self::new(lookup)
         }
     }
 
@@ -123,16 +210,31 @@ impl SharedResolver {
         self.lookup.is_some()
     }
 
+    pub fn capability(&self) -> GeoCapability {
+        self.lookup
+            .as_ref()
+            .map_or(GeoCapability::None, |lookup| lookup.capability())
+    }
+
     /// Resolve `ip`, consulting (and populating) the shared cache first.
     pub fn resolve(&self, ip: &str) -> Resolved {
-        if let Some(cached) = self.cache.lock().unwrap().get(ip) {
+        // Invalid strings do not accumulate in the cache. Canonical spellings
+        // of the same IPv6 address share one entry for every consumer.
+        let Ok(addr) = ip.parse::<IpAddr>() else {
+            return resolve(ip, self.lookup.as_deref());
+        };
+        let key = addr.to_string();
+        if let Some(cached) = self.cache.lock().unwrap().get(&key) {
             return cached.clone();
         }
         let resolved = resolve(ip, self.lookup.as_deref());
-        self.cache
-            .lock()
-            .unwrap()
-            .insert(ip.to_string(), resolved.clone());
+        let mut cache = self.cache.lock().unwrap();
+        // Bounded working set. Existing tracked rows retain their own place;
+        // eviction only makes a later lookup cold, never changes identity.
+        if cache.len() >= self.cache_limit {
+            cache.clear();
+        }
+        cache.insert(key, resolved.clone());
         resolved
     }
 }
@@ -206,7 +308,11 @@ impl MmdbLookup {
     /// Identity comes from MMDB metadata, never a potentially renamed filename.
     pub fn source_label(&self) -> String {
         match self.reader.metadata().database_type.as_str() {
-            "DBIP-Country-Lite" => "IP Geolocation by DB-IP (https://db-ip.com) · CC BY 4.0".into(),
+            "DBIP-Country-Lite" | "DBIP-City-Lite" => {
+                "IP Geolocation by DB-IP (https://db-ip.com) · CC BY 4.0".into()
+            }
+            "GeoLite2-City" => "GeoLite2 City by MaxMind (https://www.maxmind.com)".into(),
+            "GeoIP2-City" => "GeoIP2 City by MaxMind (https://www.maxmind.com)".into(),
             "GeoLite2-Country" => "GeoLite2 Country by MaxMind (https://www.maxmind.com)".into(),
             "GeoIP2-Country" => "GeoIP2 Country by MaxMind (https://www.maxmind.com)".into(),
             kind => format!("MMDB dataset: {kind}"),
@@ -219,7 +325,68 @@ impl MmdbLookup {
 }
 
 impl CountryLookup for MmdbLookup {
+    fn capability(&self) -> GeoCapability {
+        match self.reader.metadata().database_type.as_str() {
+            "DBIP-City-Lite" | "GeoLite2-City" | "GeoIP2-City" => GeoCapability::City,
+            _ => GeoCapability::Country,
+        }
+    }
+
+    fn lookup_place(&self, addr: IpAddr) -> Option<GeoPlace> {
+        if self.capability() != GeoCapability::City {
+            let mut place = GeoPlace::country(self.lookup(addr)?);
+            place.provider = self.source_label();
+            return Some(place);
+        }
+        let result = self.reader.lookup(addr).ok()?;
+        let record: maxminddb::geoip2::City = result.decode().ok().flatten()?;
+        let code = record.country.iso_code?.to_uppercase();
+        if code.len() != 2 || !code.bytes().all(|b| b.is_ascii_uppercase()) {
+            return None;
+        }
+        let clean = |s: &str| {
+            s.len() <= 256 && !s.trim().is_empty() && !s.trim().chars().any(char::is_control)
+        };
+        let coordinates = GeoCoordinates::new(record.location.latitude, record.location.longitude);
+        let city = record
+            .city
+            .names
+            .english
+            .filter(|s| clean(s))
+            .map(|s| s.trim().to_string());
+        let precision = (city.is_some() && coordinates.is_some())
+            .then(|| "Approximate city estimate".to_string());
+        Some(GeoPlace {
+            country: CountryInfo {
+                name: record
+                    .country
+                    .names
+                    .english
+                    .filter(|s| clean(s))
+                    .unwrap_or(&code)
+                    .trim()
+                    .to_string(),
+                code,
+            },
+            subdivisions: record
+                .subdivisions
+                .iter()
+                .take(8)
+                .filter_map(|s| s.iso_code.or(s.names.english))
+                .filter(|s| clean(s))
+                .map(|s| s.trim().to_string())
+                .collect(),
+            city,
+            coordinates,
+            provider: self.source_label(),
+            precision,
+        })
+    }
+
     fn lookup(&self, addr: IpAddr) -> Option<CountryInfo> {
+        if self.capability() == GeoCapability::City {
+            return self.lookup_place(addr).map(|place| place.country);
+        }
         let result = self.reader.lookup(addr).ok()?;
         let country: maxminddb::geoip2::Country = result.decode().ok().flatten()?;
         let code = country.country.iso_code?.to_uppercase();
@@ -256,12 +423,68 @@ pub fn discover_and_open() -> DiscoveryOutcome {
     let env_override = std::env::var("SNITCHWATCH_GEOIP_DB").ok();
     let home = crate::paths::home_base_rechecked();
     let xdg_data_home = std::env::var("XDG_DATA_HOME").ok();
-    discover_and_open_with(
+    let country = discover_and_open_with(
         |p| p.exists(),
         env_override.as_deref(),
         &home,
         xdg_data_home.as_deref(),
-    )
+    );
+    // Explicit country override retains highest priority, including when stale.
+    if env_override.is_some() {
+        return country;
+    }
+    let city_override = std::env::var("SNITCHWATCH_GEOIP_CITY_DB").ok();
+    let target = super::paths::default_suggested_path(&home, xdg_data_home.as_deref());
+    selected_database(country, city_override.as_deref(), &target)
+}
+
+fn selected_database(
+    country: DiscoveryOutcome,
+    city_override: Option<&str>,
+    target: &Path,
+) -> DiscoveryOutcome {
+    let directory = target.parent().expect("application data directory");
+    let country = if let Some(path) = super::dataset::country_path(directory) {
+        match MmdbLookup::open(&path) {
+            Ok(lookup)
+                if matches!(
+                    lookup.reader.metadata().database_type.as_str(),
+                    "DBIP-Country-Lite" | "GeoLite2-Country" | "GeoIP2-Country"
+                ) =>
+            {
+                DiscoveryOutcome {
+                    source: lookup.source_label(),
+                    build_epoch: lookup.build_epoch(),
+                    lookup: Some(Arc::new(lookup)),
+                    path,
+                    available: true,
+                }
+            }
+            _ => {
+                tracing::warn!(path = %path.display(), "geo: selected Country generation unavailable; retaining Country fallback");
+                country
+            }
+        }
+    } else {
+        country
+    };
+    if let Some(path) = city_override {
+        return open_city_with_fallback(PathBuf::from(path), country);
+    }
+    match super::dataset::read(directory) {
+        super::dataset::Selection::Country
+        | super::dataset::Selection::Installed {
+            profile: super::install::DatabaseProfile::Country,
+            ..
+        } => country,
+        super::dataset::Selection::Installed {
+            profile: super::install::DatabaseProfile::City,
+            path,
+        } => open_city_with_fallback(path, country),
+        super::dataset::Selection::Automatic | super::dataset::Selection::City => {
+            open_city_with_fallback(target.with_file_name("dbip-city-lite.mmdb"), country)
+        }
+    }
 }
 
 /// Run [`super::paths::discover_with`] and try to open whatever it finds.
@@ -316,6 +539,51 @@ pub fn discover_and_open_with(
                 source: String::new(),
                 build_epoch: 0,
             }
+        }
+    }
+}
+
+struct CityFallback {
+    city: Arc<dyn CountryLookup>,
+    country: Option<Arc<dyn CountryLookup>>,
+}
+impl CountryLookup for CityFallback {
+    fn lookup(&self, addr: IpAddr) -> Option<CountryInfo> {
+        self.lookup_place(addr).map(|p| p.country)
+    }
+    fn lookup_place(&self, addr: IpAddr) -> Option<GeoPlace> {
+        self.city.lookup_place(addr).or_else(|| {
+            self.country
+                .as_ref()
+                .and_then(|lookup| lookup.lookup_place(addr))
+        })
+    }
+    fn capability(&self) -> GeoCapability {
+        GeoCapability::City
+    }
+}
+
+fn open_city_with_fallback(path: PathBuf, country: DiscoveryOutcome) -> DiscoveryOutcome {
+    match MmdbLookup::open(&path) {
+        Ok(city) if city.capability() == GeoCapability::City => DiscoveryOutcome {
+            source: city.source_label(),
+            build_epoch: city.build_epoch(),
+            path,
+            available: true,
+            lookup: Some(Arc::new(CityFallback {
+                city: Arc::new(city),
+                country: country.lookup,
+            })),
+        },
+        Ok(_) => {
+            tracing::warn!(path = %path.display(), "geo: selected City file has unsupported metadata; retaining Country fallback");
+            country
+        }
+        Err(error) => {
+            if path.exists() {
+                tracing::warn!(path = %path.display(), %error, "geo: failed to open City file; retaining Country fallback");
+            }
+            country
         }
     }
 }
@@ -578,5 +846,133 @@ mod tests {
         let resolver = SharedResolver::new(Some(Arc::new(PanicsIfCalled)));
         let r = resolver.resolve("192.168.1.1");
         assert_eq!(r.bucket, Bucket::Local);
+    }
+}
+
+#[cfg(test)]
+mod city_tests {
+    use super::*;
+
+    #[test]
+    fn country_lookup_remains_country_only_and_ipv6_keys_are_canonical() {
+        let lookup = fakes::FakeLookup::default().with("2001:4860::1", "CA", "Canada");
+        let resolver = SharedResolver::new(Some(Arc::new(lookup)));
+        let a = resolver.resolve("2001:4860::1");
+        assert!(a.place.as_ref().unwrap().city.is_none());
+        assert_eq!(resolver.capability(), GeoCapability::Country);
+        assert_eq!(a, resolver.resolve("2001:4860:0:0:0:0:0:1"));
+        assert_eq!(resolver.cache_handle().lock().unwrap().len(), 1);
+        assert!(resolver.resolve("192.168.1.1").place.is_none());
+        assert!(resolver.resolve("invalid").place.is_none());
+    }
+
+    #[test]
+    fn absent_or_invalid_coordinates_never_become_origin() {
+        assert!(GeoCoordinates::new(None, None).is_none());
+        assert!(GeoCoordinates::new(Some(f64::NAN), Some(0.0)).is_none());
+        assert!(GeoCoordinates::new(Some(91.0), Some(0.0)).is_none());
+        assert!(GeoCoordinates::new(Some(0.0), Some(181.0)).is_none());
+        assert_eq!(
+            GeoCoordinates::new(Some(0.0), Some(0.0)).unwrap().latitude,
+            0.0
+        );
+    }
+}
+
+#[cfg(test)]
+mod fallback_tests {
+    use super::*;
+    use crate::geo::install::test_fixtures as fixtures;
+
+    fn country() -> DiscoveryOutcome {
+        DiscoveryOutcome {
+            lookup: Some(Arc::new(fakes::FakeLookup::default().with(
+                "8.8.8.8",
+                "US",
+                "United States",
+            ))),
+            path: PathBuf::from("fallback"),
+            available: true,
+            source: "fallback country".into(),
+            build_epoch: 7,
+        }
+    }
+
+    #[test]
+    fn absent_corrupt_or_wrong_kind_city_retains_country() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("city.mmdb");
+        for bytes in [
+            None,
+            Some(b"broken".to_vec()),
+            Some(fixtures::fixture("DBIP-Country-Lite")),
+        ] {
+            if let Some(bytes) = bytes {
+                std::fs::write(&path, bytes).unwrap();
+            }
+            let outcome = open_city_with_fallback(path.clone(), country());
+            assert!(outcome.available);
+            assert_eq!(outcome.source, "fallback country");
+            let resolver = SharedResolver::new(outcome.lookup);
+            assert_eq!(resolver.capability(), GeoCapability::Country);
+            assert_eq!(
+                resolver.resolve("8.8.8.8").bucket,
+                Bucket::Country("US".into())
+            );
+        }
+    }
+
+    #[test]
+    fn city_missing_country_uses_same_country_fallback_for_all_consumers() {
+        struct MissingCity;
+        impl CountryLookup for MissingCity {
+            fn lookup(&self, _: IpAddr) -> Option<CountryInfo> {
+                None
+            }
+        }
+        let fallback = CityFallback {
+            city: Arc::new(MissingCity),
+            country: country().lookup,
+        };
+        let resolver = SharedResolver::new(Some(Arc::new(fallback)));
+        assert_eq!(resolver.capability(), GeoCapability::City);
+        let place = resolver.resolve("8.8.8.8").place.unwrap();
+        assert_eq!(place.country.code, "US");
+        assert!(place.city.is_none() && place.coordinates.is_none());
+    }
+
+    #[test]
+    fn selected_city_uses_latest_imported_country_for_ipv6_misses() {
+        use crate::geo::{dataset, install::DatabaseProfile};
+        let dir = tempfile::tempdir().unwrap();
+        let country_path = dataset::reserve(dir.path()).unwrap();
+        std::fs::write(
+            &country_path,
+            fixtures::tree_fixture("DBIP-Country-Lite", &[[17, 17]], 24, 6),
+        )
+        .unwrap();
+        dataset::commit(
+            dir.path(),
+            &country_path,
+            DatabaseProfile::Country,
+            crate::private_files::write_private,
+        )
+        .unwrap();
+        let city_path = dataset::reserve(dir.path()).unwrap();
+        std::fs::write(&city_path, fixtures::fixture("DBIP-City-Lite")).unwrap();
+        dataset::commit(
+            dir.path(),
+            &city_path,
+            DatabaseProfile::City,
+            crate::private_files::write_private,
+        )
+        .unwrap();
+        let outcome = selected_database(country(), None, &dir.path().join("GeoLite2-Country.mmdb"));
+        assert_eq!(outcome.path, city_path);
+        let resolver = SharedResolver::new(outcome.lookup);
+        assert_eq!(resolver.capability(), GeoCapability::City);
+        let resolved = resolver.resolve("2001:4860:4860::8888");
+        assert_eq!(resolved.bucket, Bucket::Country("US".into()));
+        assert!(resolved.place.unwrap().city.is_none());
     }
 }

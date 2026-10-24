@@ -1,8 +1,7 @@
 use super::*;
 use std::os::unix::fs::{symlink, PermissionsExt};
 
-#[path = "test_fixtures.rs"]
-mod test_fixtures;
+use super::test_fixtures;
 use super::validate_in_worker as validate;
 use test_fixtures::{fixture, tree_fixture};
 
@@ -362,4 +361,265 @@ fn symlink_source_and_target_are_rejected_without_touching_referent() {
     symlink(&source, &target).unwrap();
     assert!(install(&source, &target).is_err());
     assert_eq!(std::fs::read(&source).unwrap(), bytes);
+}
+
+#[test]
+fn city_profile_is_explicit_and_cannot_promote_country_limits() {
+    let bytes = fixture("DBIP-City-Lite");
+    assert!(validate(&bytes).is_err());
+    validate_profile(&bytes, DatabaseProfile::City).unwrap();
+    assert!(validate_profile(&fixture("DBIP-Country-Lite"), DatabaseProfile::City).is_err());
+    assert_eq!(DatabaseProfile::Country.max_input(), 32 * 1024 * 1024);
+    assert_eq!(DatabaseProfile::Country.max_networks(), 2_000_000);
+    assert_eq!(DatabaseProfile::City.max_input(), 256 * 1024 * 1024);
+}
+
+#[test]
+fn invalid_city_import_preserves_both_datasets_and_selection() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("download.mmdb");
+    let country = dir.path().join("GeoLite2-Country.mmdb");
+    let city = dir.path().join("dbip-city-lite.mmdb");
+    let selection = dir.path().join("geo-dataset");
+    std::fs::write(&country, b"country before").unwrap();
+    std::fs::write(&city, b"city before").unwrap();
+    std::fs::write(&selection, b"country").unwrap();
+    std::fs::write(&source, fixture("DBIP-Country-Lite")).unwrap();
+    assert!(
+        install_profile_with_validator(&source, &city, DatabaseProfile::City, |bytes| {
+            validate_profile(bytes, DatabaseProfile::City)
+        })
+        .is_err()
+    );
+    assert_eq!(std::fs::read(country).unwrap(), b"country before");
+    assert_eq!(std::fs::read(city).unwrap(), b"city before");
+    assert_eq!(std::fs::read(selection).unwrap(), b"country");
+}
+
+#[test]
+fn city_fields_validate_and_decode_without_promising_physical_precision() {
+    use crate::geo::resolver::{CountryLookup, GeoCapability, MmdbLookup, SharedResolver};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("city.mmdb");
+    for (latitude, longitude) in [
+        (Some(45.5019), Some(-73.5674)),
+        (None, None),
+        (Some(45.5), None),
+    ] {
+        let bytes = test_fixtures::city_fixture("Montreal", latitude, longitude, 1);
+        validate_profile(&bytes, DatabaseProfile::City).unwrap();
+        std::fs::write(&path, bytes).unwrap();
+        let lookup = MmdbLookup::open(&path).unwrap();
+        assert_eq!(lookup.capability(), GeoCapability::City);
+        let resolver = SharedResolver::new(Some(std::sync::Arc::new(lookup)));
+        let resolved = resolver.resolve("8.8.8.8");
+        let place = resolved.place.unwrap();
+        assert_eq!(place.city.as_deref(), Some("Montreal"));
+        assert_eq!(place.subdivisions, ["QC"]);
+        assert_eq!(
+            place.coordinates.is_some(),
+            latitude.is_some() && longitude.is_some()
+        );
+        assert_eq!(place.precision.is_some(), place.coordinates.is_some());
+        assert!(place.provider.contains("DB-IP"));
+    }
+    for bytes in [
+        test_fixtures::city_fixture("Montreal", Some(f64::NAN), Some(0.0), 1),
+        test_fixtures::city_fixture("Montreal", Some(f64::INFINITY), None, 1),
+        test_fixtures::city_fixture("Montreal", Some(91.0), Some(0.0), 1),
+        test_fixtures::city_fixture("Montreal", Some(0.0), Some(-181.0), 1),
+        test_fixtures::city_fixture("Bad\nname", None, None, 1),
+        test_fixtures::city_fixture(&"x".repeat(257), None, None, 1),
+        test_fixtures::city_fixture("Montreal", None, None, 9),
+    ] {
+        assert!(validate_profile(&bytes, DatabaseProfile::City).is_err());
+    }
+}
+
+#[test]
+fn successful_import_selects_dataset_and_country_reselects_with_city_present() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source.mmdb");
+    let country = dir.path().join("GeoLite2-Country.mmdb");
+    let city = dir.path().join("dbip-city-lite.mmdb");
+    let selection = dir.path().join("geo-dataset");
+    for profile in [DatabaseProfile::City, DatabaseProfile::Country] {
+        let bytes = fixture(if profile == DatabaseProfile::City {
+            "DBIP-City-Lite"
+        } else {
+            "DBIP-Country-Lite"
+        });
+        std::fs::write(&source, &bytes).unwrap();
+        let target = if profile == DatabaseProfile::City {
+            &city
+        } else {
+            &country
+        };
+        install_selected_with_validator(&source, target, profile, |bytes| {
+            validate_profile(bytes, profile)
+        })
+        .unwrap();
+        match crate::geo::dataset::read(dir.path()) {
+            crate::geo::dataset::Selection::Installed {
+                profile: selected,
+                path,
+            } => {
+                assert_eq!(selected, profile);
+                assert_eq!(std::fs::read(path).unwrap(), bytes);
+            }
+            _ => panic!("import did not commit its dataset manifest"),
+        }
+    }
+    assert!(selection.exists());
+}
+
+#[test]
+fn manifest_failure_preserves_previous_active_generation_and_manual_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source.mmdb");
+    let target = dir.path().join("dbip-city-lite.mmdb");
+    std::fs::write(&target, b"manual city before").unwrap();
+    std::fs::write(&source, fixture("DBIP-City-Lite")).unwrap();
+    install_selected_with_validator(&source, &target, DatabaseProfile::City, |bytes| {
+        validate_profile(bytes, DatabaseProfile::City)
+    })
+    .unwrap();
+    let previous_manifest = std::fs::read(dir.path().join("geo-dataset")).unwrap();
+    let previous_path = match crate::geo::dataset::read(dir.path()) {
+        crate::geo::dataset::Selection::Installed { path, .. } => path,
+        _ => unreachable!(),
+    };
+    let previous_bytes = std::fs::read(&previous_path).unwrap();
+    let before_count = std::fs::read_dir(dir.path()).unwrap().count();
+    let failing_write =
+        |_: &Path, _: &[u8]| Err(std::io::Error::other("injected manifest write failure"));
+    assert!(install_transaction(
+        &source,
+        &target,
+        DatabaseProfile::City,
+        |bytes| validate_profile(bytes, DatabaseProfile::City),
+        failing_write
+    )
+    .is_err());
+    assert_eq!(
+        std::fs::read(dir.path().join("geo-dataset")).unwrap(),
+        previous_manifest
+    );
+    assert_eq!(std::fs::read(previous_path).unwrap(), previous_bytes);
+    assert_eq!(std::fs::read(&target).unwrap(), b"manual city before");
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), before_count);
+}
+
+#[test]
+fn error_after_manifest_commit_reports_success_and_retains_selected_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source.mmdb");
+    let target = dir.path().join("dbip-city-lite.mmdb");
+    std::fs::write(&source, fixture("DBIP-City-Lite")).unwrap();
+    let sync_failure = |path: &Path, bytes: &[u8]| {
+        crate::private_files::write_private(path, bytes)?;
+        Err(std::io::Error::other("injected directory sync failure"))
+    };
+    install_transaction(
+        &source,
+        &target,
+        DatabaseProfile::City,
+        |bytes| validate_profile(bytes, DatabaseProfile::City),
+        sync_failure,
+    )
+    .unwrap();
+    assert!(
+        matches!(crate::geo::dataset::read(dir.path()), crate::geo::dataset::Selection::Installed { path, .. } if path.is_file())
+    );
+}
+
+#[test]
+#[ignore = "requires separately downloaded and hash-verified official October 2026 City MMDB"]
+fn dbip_official_city_file_profile_benchmark() {
+    let path = std::path::PathBuf::from(
+        std::env::var_os("SNITCHWATCH_DBIP_CITY_PROOF").expect("set SNITCHWATCH_DBIP_CITY_PROOF"),
+    );
+    let started = std::time::Instant::now();
+    let bytes = std::fs::read(&path).unwrap();
+    assert_eq!(bytes.len(), 126_998_165);
+    validate_profile(&bytes, DatabaseProfile::City).unwrap();
+    let validation_wall = started.elapsed();
+    let reader = maxminddb::Reader::from_source(&bytes).unwrap();
+    assert_eq!(reader.metadata().database_type, "DBIP-City-Lite");
+    assert_eq!(reader.metadata().node_count, 14_297_794);
+    let (graph_steps, height) =
+        super::tree::work_stats(&bytes, reader.metadata(), DatabaseProfile::City.max_steps())
+            .unwrap();
+    let networks = reader
+        .networks(Default::default())
+        .unwrap()
+        .map(|record| record.map(|_| 1usize))
+        .sum::<Result<usize, _>>()
+        .unwrap();
+    eprintln!("City profile evidence: bytes={} nodes={} networks={} expanded_graph_steps={} tree_height={} validation_wall={:?}", bytes.len(), reader.metadata().node_count, networks, graph_steps, height, validation_wall);
+}
+
+#[test]
+fn city_publisher_surrounding_name_whitespace_is_normalized() {
+    use crate::geo::resolver::{CountryLookup, MmdbLookup};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("city.mmdb");
+    for locale in ["en", "es"] {
+        let bytes = test_fixtures::country_localized_name_fixture(locale, "\tGuadeloupe\n");
+        validate_profile(&bytes, DatabaseProfile::City).unwrap();
+        std::fs::write(&path, bytes).unwrap();
+        let place = MmdbLookup::open(&path)
+            .unwrap()
+            .lookup_place("5.102.74.1".parse().unwrap())
+            .unwrap();
+        assert_eq!(
+            place.country.name,
+            if locale == "en" { "Guadeloupe" } else { "GL" }
+        );
+    }
+    let embedded_control = test_fixtures::country_localized_name_fixture("es", "Gua\tdeloupe");
+    assert!(validate_profile(&embedded_control, DatabaseProfile::City).is_err());
+}
+
+#[test]
+#[ignore = "requires separately downloaded and hash-verified official October 2026 City MMDB"]
+fn dbip_official_city_resolver_point_smoke() {
+    use crate::geo::resolver::{Bucket, CountryLookup, GeoCapability, MmdbLookup, SharedResolver};
+    let path = std::path::PathBuf::from(
+        std::env::var_os("SNITCHWATCH_DBIP_CITY_PROOF").expect("set SNITCHWATCH_DBIP_CITY_PROOF"),
+    );
+    let lookup = std::sync::Arc::new(MmdbLookup::open(&path).unwrap());
+    assert_eq!(lookup.capability(), GeoCapability::City);
+    for address in ["192.168.1.1", "fd00::1"] {
+        assert!(lookup.lookup_place(address.parse().unwrap()).is_none());
+    }
+    let resolver = SharedResolver::new(Some(lookup));
+    let us = resolver.resolve("8.8.8.8").place.unwrap();
+    assert_eq!(us.country.code, "US");
+    assert_eq!(us.city.as_deref(), Some("Mountain View"));
+    let location = us.coordinates.unwrap();
+    assert_eq!((location.latitude, location.longitude), (37.422, -122.085));
+    let mut positions = Vec::new();
+    for address in ["2001:4860:4860::8888", "2606:4700:4700::1111"] {
+        let place = resolver.resolve(address).place.unwrap();
+        assert_eq!(place.country.code, "CA");
+        assert_eq!(place.city.as_deref(), Some("Montreal"));
+        assert!(
+            place.provider.contains("DB-IP")
+                && place
+                    .precision
+                    .as_deref()
+                    .is_some_and(|s| s.contains("Approximate"))
+        );
+        let location = place.coordinates.unwrap();
+        assert!(location.latitude.is_finite() && location.longitude.is_finite());
+        assert_eq!((location.latitude, location.longitude), (45.5019, -73.5674));
+        positions.push(location);
+    }
+    assert_eq!(positions[0], positions[1]);
+    for address in ["192.168.1.1", "fd00::1"] {
+        let result = resolver.resolve(address);
+        assert_eq!(result.bucket, Bucket::Local);
+        assert!(result.place.is_none());
+    }
 }
