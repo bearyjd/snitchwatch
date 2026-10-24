@@ -79,13 +79,10 @@ impl Aggregate {
 /// Per-country aggregate of connection rows, fed the same connection-row
 /// `ServerMessage` variants `RowStore` consumes.
 ///
-/// Resolution goes through a [`SharedResolver`] rather than an owned
-/// lookup/cache pair: `GeoModel::start_bridge_feed`'s Tokio task holds a
-/// clone of the *same* resolver and resolves each row's destination IP
-/// before the message ever reaches this store (see that module's docs) — the
-/// actual GeoIP database read happens off the Qt thread. By the time
-/// `apply`/`add_row` calls `resolver.resolve(ip)` here, it's a warm cache hit.
-const MAX_TRACKED_ROWS: usize = 100_000;
+/// The live feed supplies off-thread prepared facts through `apply_prepared`;
+/// it never consults the evictable resolver cache on Qt. Direct `apply` remains
+/// available for explicit fixture/demo injection and pure Rust callers.
+pub(crate) const MAX_TRACKED_ROWS: usize = 100_000;
 
 pub struct GeoStore {
     resolver: SharedResolver,
@@ -143,6 +140,51 @@ impl GeoStore {
             ServerMessage::ClearConnectionRows => self.clear(),
             _ => false,
         }
+    }
+
+    /// Live feed path: all lookup work was completed off-thread. Never decode
+    /// a missing prepared record on the Qt thread, even after cache eviction.
+    pub fn apply_prepared(&mut self, prepared: &super::prepared::PreparedGeoMessage) -> bool {
+        let mut changed = if prepared.reset { self.clear() } else { false };
+        if prepared.capacity_reached && !self.capacity_reached {
+            self.capacity_reached = true;
+            changed = true;
+        }
+        let Some(message) = &prepared.message else {
+            return changed;
+        };
+        match message {
+            ServerMessage::InsertConnectionRows { rows }
+            | ServerMessage::UpdateConnectionRows { rows } => {
+                let insert = matches!(message, ServerMessage::InsertConnectionRows { .. });
+                for row in rows {
+                    if !insert && !self.tracked.contains_key(&row.id) {
+                        continue;
+                    }
+                    let Some(resolved) = prepared.resolutions.get(&row.id) else {
+                        tracing::error!(
+                            "geo: prepared row is missing geographic facts; row ignored"
+                        );
+                        continue;
+                    };
+                    if !self.tracked.contains_key(&row.id) && self.tracked.len() >= MAX_TRACKED_ROWS
+                    {
+                        self.capacity_reached = true;
+                        changed = true;
+                        continue;
+                    }
+                    if let Some((bucket, verdict)) = self.tracked.remove(&row.id) {
+                        self.decrement(&bucket, verdict);
+                    }
+                    self.add_resolved_row(row, resolved.clone());
+                    changed = true;
+                }
+            }
+            ServerMessage::RemoveConnectionRows { ids } => changed |= self.remove_rows(ids),
+            ServerMessage::ClearConnectionRows => changed |= self.clear(),
+            _ => {}
+        }
+        changed
     }
 
     fn insert_rows(&mut self, rows: &[ConnectionRow]) -> bool {
@@ -206,6 +248,10 @@ impl GeoStore {
 
     fn add_row(&mut self, row: &ConnectionRow) {
         let resolved = self.resolver.resolve(&row.dst_ip);
+        self.add_resolved_row(row, resolved);
+    }
+
+    fn add_resolved_row(&mut self, row: &ConnectionRow, resolved: super::resolver::Resolved) {
         let verdict = Verdict::of(row);
         self.observations.insert(
             row.id.clone(),
@@ -456,6 +502,44 @@ mod tests {
         assert!(store.clear());
         assert!(!store.capacity_reached());
         assert_eq!(store.hierarchy().observed_connections, 0);
+    }
+
+    #[test]
+    fn prepared_large_snapshot_does_not_decode_again_after_cache_eviction() {
+        use super::super::resolver::CountryInfo;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct Counting(Arc<AtomicUsize>);
+        impl CountryLookup for Counting {
+            fn lookup(&self, _: std::net::IpAddr) -> Option<CountryInfo> {
+                self.0.fetch_add(1, Ordering::Relaxed);
+                Some(CountryInfo {
+                    code: "US".into(),
+                    name: "United States".into(),
+                })
+            }
+        }
+        let calls = Arc::new(AtomicUsize::new(0));
+        let resolver = SharedResolver::new(Some(Arc::new(Counting(calls.clone()))));
+        let rows: Vec<_> = (0..65_537u32)
+            .map(|n| {
+                row(
+                    &format!("{n}"),
+                    &std::net::Ipv4Addr::from(0x08000000 + n).to_string(),
+                    None,
+                )
+            })
+            .collect();
+        let mut preparer = super::super::prepared::GeoMessagePreparer::new(resolver.clone());
+        let prepared = preparer.prepare(1, &ServerMessage::InsertConnectionRows { rows });
+        let before_gui = calls.load(Ordering::Relaxed);
+        let mut store = GeoStore::with_resolver(resolver);
+        store.apply_prepared(&prepared);
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            before_gui,
+            "GUI replay decoded evicted City/country records"
+        );
+        assert_eq!(store.hierarchy().observed_connections, 65_537);
     }
 
     fn store_with_us_lookup() -> GeoStore {

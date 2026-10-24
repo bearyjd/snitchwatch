@@ -580,3 +580,46 @@ fn city_publisher_surrounding_name_whitespace_is_normalized() {
     let embedded_control = test_fixtures::country_localized_name_fixture("es", "Gua\tdeloupe");
     assert!(validate_profile(&embedded_control, DatabaseProfile::City).is_err());
 }
+
+#[test]
+#[ignore = "requires separately downloaded and hash-verified official October 2026 City MMDB"]
+fn dbip_official_city_resolver_point_smoke() {
+    use crate::geo::resolver::{Bucket, CountryLookup, GeoCapability, MmdbLookup, SharedResolver};
+    let path = std::path::PathBuf::from(
+        std::env::var_os("SNITCHWATCH_DBIP_CITY_PROOF").expect("set SNITCHWATCH_DBIP_CITY_PROOF"),
+    );
+    let lookup = std::sync::Arc::new(MmdbLookup::open(&path).unwrap());
+    assert_eq!(lookup.capability(), GeoCapability::City);
+    for address in ["192.168.1.1", "fd00::1"] {
+        assert!(lookup.lookup_place(address.parse().unwrap()).is_none());
+    }
+    let resolver = SharedResolver::new(Some(lookup));
+    let us = resolver.resolve("8.8.8.8").place.unwrap();
+    assert_eq!(us.country.code, "US");
+    assert_eq!(us.city.as_deref(), Some("Mountain View"));
+    let location = us.coordinates.unwrap();
+    assert_eq!((location.latitude, location.longitude), (37.422, -122.085));
+    let mut positions = Vec::new();
+    for address in ["2001:4860:4860::8888", "2606:4700:4700::1111"] {
+        let place = resolver.resolve(address).place.unwrap();
+        assert_eq!(place.country.code, "CA");
+        assert_eq!(place.city.as_deref(), Some("Montreal"));
+        assert!(
+            place.provider.contains("DB-IP")
+                && place
+                    .precision
+                    .as_deref()
+                    .is_some_and(|s| s.contains("Approximate"))
+        );
+        let location = place.coordinates.unwrap();
+        assert!(location.latitude.is_finite() && location.longitude.is_finite());
+        assert_eq!((location.latitude, location.longitude), (45.5019, -73.5674));
+        positions.push(location);
+    }
+    assert_eq!(positions[0], positions[1]);
+    for address in ["192.168.1.1", "fd00::1"] {
+        let result = resolver.resolve(address);
+        assert_eq!(result.bucket, Bucket::Local);
+        assert!(result.place.is_none());
+    }
+}

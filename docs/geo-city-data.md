@@ -129,3 +129,28 @@ normally after capacity is reached, and country/hierarchy counters use the same
 accepted set. The flag stays set until Clear/snapshot reset, since skipped rows
 cannot be reconstructed locally. The bridge's default cache is 10,000, with an
 exception allowing pending rows to exceed its capacity.
+
+
+## Prepared live-feed contract
+
+`geo::prepared::GeoMessagePreparer::new(shared_resolver)` and
+`prepare(connection_id, &ServerMessage)` produce `PreparedGeoMessage` with
+`message: Option<ServerMessage>`, `resolutions: HashMap<connection ID, Resolved>`,
+`reset`, `capacity_reached` and `activity_codes`. Input IDs are preserved;
+`qualify_ids(connection_id)` adapts raw bridge IDs to the existing live list's
+`<connection_id>:<id>` convention. Already-qualified consumers do not call it.
+
+The preparer shadows at most 100,000 accepted IDs, processes every incoming row
+in order and deduplicates the final row/fact per accepted ID. Late updates to
+accepted IDs remain accurate after arbitrarily many overflow rows. Retained
+rows/facts/removal IDs are each bounded by the accepted-ID limit. Clear and
+session changes reset the shadow; stale older sessions do not rewind it.
+The existing Qt session guard still discards obsolete queued work.
+
+`GeoStore::apply_prepared` and live activity notifications only consume supplied
+facts. They never decode after resolver-cache eviction. A missing prepared fact
+is ignored as an invariant error rather than silently becoming Unknown or
+performing a Qt-thread lookup. Geographic filters should likewise retain supplied
+facts with live rows and exclude unavailable facts from all geographic scopes,
+including Unknown. The raw unscoped connections list may retain more rows than
+geographic aggregation; its partial-geography warning must remain visible.
