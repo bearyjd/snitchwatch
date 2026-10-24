@@ -118,7 +118,8 @@ mod tests {
                     "curatedDefaults",
                     "curatedBroadOptInV1",
                     "curatedGroupsV1",
-                    "blocklistLeftovers"
+                    "blocklistLeftovers",
+                    "aiCacheSummaryExportV1"
                 ],
             })
         );
