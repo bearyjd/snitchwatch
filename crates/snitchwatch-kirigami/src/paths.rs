@@ -18,6 +18,11 @@ pub fn data_dir() -> PathBuf {
     data_dir_from(xdg("XDG_DATA_HOME").as_deref(), home().as_deref())
 }
 
+/// Dedicated directory for explicitly saved cache summaries.
+pub fn analysis_exports_dir() -> PathBuf {
+    data_dir().join("analysis-exports")
+}
+
 pub fn config_dir() -> PathBuf {
     config_dir_from(xdg("XDG_CONFIG_HOME").as_deref(), home().as_deref())
 }
