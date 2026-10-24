@@ -59,6 +59,11 @@ Window {
         list.forceLayout();
         return list.itemAtIndex(index);
     }
+    function intersectsViewport(list, item) {
+        return item && item.height > 0 && list.height > 0
+            && item.y < list.contentY + list.height
+            && item.y + item.height > list.contentY;
+    }
     // Visit every header, including those outside the initial viewport.
     // Open collapsed headers at `depth` (0 program, 1 domain, 2 host).
     function expandDepth(depth) {
@@ -112,19 +117,28 @@ Window {
                 rows: [probe.row("pA", null, "wget", 1)] }));
             model.applyServerMessageJson(JSON.stringify({ action: "insertConnectionRows",
                 rows: [probe.row("pB", null, "curl", 2)] }));
-            probe.expect(list.itemAtIndex(model.visibleRowIndex("pA")) === null,
+            // Settle layout before the queued runAuto() callback: absence
+            // must reflect virtualization, not a deferred layout pass.
+            list.forceLayout();
+            const initial = list.itemAtIndex(model.visibleRowIndex("pA"));
+            probe.expect(!probe.intersectsViewport(list, initial),
                          "oldest pending row must start outside the viewport");
+            probe.expect(initial === null,
+                         "oldest pending row must start without a delegate");
         },
         function () {
             probe.expect(page.inspecting && page.inspectId === "pA",
                          "grouped auto-select chose '" + page.inspectId + "', not the oldest pending row");
             const list = page.connectionList;
+            list.forceLayout();
             const d = list.currentItem;
             probe.expect(list.currentIndex === model.visibleRowIndex("pA")
                          && d && d.rowId === "pA" && !d.isGroupHeader,
                          "auto-select did not select the oldest pending leaf");
             probe.expect(list.itemAtIndex(list.currentIndex) === d,
-                         "auto-selected leaf was not brought into the viewport");
+                         "auto-selected leaf is absent from the settled layout");
+            probe.expect(probe.intersectsViewport(list, d),
+                         "auto-selected leaf bounds do not intersect the viewport");
         }
     ]
 
