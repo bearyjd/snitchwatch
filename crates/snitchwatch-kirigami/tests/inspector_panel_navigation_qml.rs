@@ -67,7 +67,7 @@ Kirigami.ApplicationWindow {
             }
         }
     }
-    pageStack.initialPage: connectionsComponent
+    pageStack.initialPage: nav.createPage(connectionsComponent)
     TestCase { id: tc; name: "nav"; when: false }
 
     function expect(ok, what) { if (!ok) probe.failures.push(what); }
@@ -195,10 +195,13 @@ Kirigami.ApplicationWindow {
     );
     let bad_lines: Vec<&str> = captured
         .lines()
-        .filter(|line| line.contains(PROBE_URL) || line.contains("TypeError"))
+        .filter(|line| {
+            line.contains(PROBE_URL)
+                || line.contains("TypeError")
+                || line.contains("not placed in the graphics scene")
+                || line.contains("DelegateModel::cancel")
+        })
         .filter(|line| !line.contains(DONE_MARKER))
-        // Kirigami creates the pages of a bare Component before parenting them.
-        .filter(|line| !line.contains("not placed in the graphics scene"))
         .collect();
     assert!(
         bad_lines.is_empty(),

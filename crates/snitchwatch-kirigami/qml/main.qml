@@ -220,7 +220,7 @@ Kirigami.ApplicationWindow {
         function onStateChanged() {
             if (wizardController.state !== "connected" && !root.onboardingShown) {
                 root.onboardingShown = true;
-                root.pageStack.push(onboardingPageComponent);
+                nav.push(onboardingPageComponent);
             } else if (wizardController.state === "connected" && root.onboardingShown) {
                 root.onboardingShown = false;
                 root.pageStack.pop();
@@ -291,14 +291,14 @@ Kirigami.ApplicationWindow {
                 root.silentStepShown = false;
                 // Offer the rule groups next, only when the bridge sends them.
                 if (curatedDefaultsModel.grouped) {
-                    root.pageStack.replace(curatedGroupsPageComponent);
+                    nav.replace(curatedGroupsPageComponent);
                 } else {
                     root.pageStack.pop();
                 }
             }
             onReviewRecommendedRules: {
                 root.silentStepShown = false;
-                root.pageStack.replace(recommendedRulesPageComponent);
+                nav.replace(recommendedRulesPageComponent);
             }
         }
     }
@@ -314,7 +314,7 @@ Kirigami.ApplicationWindow {
         function onPreferencesLoadedChanged() {
             if (settingsController.silentMode === "" && !appInfo.demoMode && !root.silentStepShown) {
                 root.silentStepShown = true;
-                root.pageStack.push(silentModePageComponent);
+                nav.push(silentModePageComponent);
             }
         }
     }
@@ -789,5 +789,5 @@ Kirigami.ApplicationWindow {
         ]
     }
 
-    pageStack.initialPage: connectionsPageComponent
+    pageStack.initialPage: nav.createPage(connectionsPageComponent)
 }
