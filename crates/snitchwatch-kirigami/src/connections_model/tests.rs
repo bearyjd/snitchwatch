@@ -414,3 +414,32 @@ fn group_key_stays_the_path_whatever_the_label() {
         ]
     );
 }
+
+#[test]
+fn geographic_preparation_and_connection_rows_share_session_qualified_ids() {
+    use crate::geo::{prepared::GeoMessagePreparer, resolver::SharedResolver};
+    let raw = ServerMessage::InsertConnectionRows {
+        rows: vec![row("a", Some("allow")), row("b", None)],
+    };
+    let mut list_message = raw.clone();
+    qualify_connection_ids(&mut list_message, 42);
+    let mut list_preparer = GeoMessagePreparer::new(SharedResolver::new(None));
+    let list_prepared = list_preparer.prepare(42, &list_message);
+    let mut map_preparer = GeoMessagePreparer::new(SharedResolver::new(None));
+    let mut map_prepared = map_preparer.prepare(42, &raw);
+    map_prepared.qualify_ids(42);
+    let list_ids: HashSet<_> = list_prepared.resolutions.keys().cloned().collect();
+    let map_ids: HashSet<_> = map_prepared.resolutions.keys().cloned().collect();
+    assert_eq!(list_ids, map_ids);
+    assert_eq!(
+        map_ids,
+        HashSet::from(["42:a".to_string(), "42:b".to_string()])
+    );
+    let stale = list_preparer.prepare(41, &raw);
+    assert!(
+        stale.message.is_none() && stale.resolutions.is_empty(),
+        "stale session must produce no facts to install"
+    );
+    let late = map_preparer.prepare(41, &raw);
+    assert!(late.message.is_none() && late.resolutions.is_empty());
+}

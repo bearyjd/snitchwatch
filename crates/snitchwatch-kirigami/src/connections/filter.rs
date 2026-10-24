@@ -15,10 +15,17 @@
 //! [`super::row_store::RowStore`] owns a `ConnectionFilter` and projects a
 //! `visible` index list from it; the cxx-qt wrapper reads that projection.
 
+pub use super::geo_scope::GeoScope;
 use snitchwatch_bridge::ws_messages::ConnectionRow;
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
+use super::geo_scope::GeoIdentity;
 use super::row_store::Verdict;
-use crate::geo::resolver::{Bucket, SharedResolver};
+use crate::geo::resolver::{Resolved, SharedResolver};
+use std::borrow::Cow;
 
 /// One parsed search term. Terms are separated by whitespace and AND-ed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -121,6 +128,10 @@ fn parse_terms(query: &str) -> Vec<Term> {
 /// `since_ms` ("From now") to rows that started at or after that instant.
 #[derive(Debug, Clone, Default)]
 pub struct ConnectionFilter {
+    geo_scope: Option<GeoScope>,
+    // Some means production prepared-only mode: absent records never decode
+    // the MMDB or masquerade as unknown locations during Qt-side filtering.
+    prepared_geo: Option<Arc<HashMap<String, GeoIdentity>>>,
     query: String,
     terms: Vec<Term>,
     pending_only: bool,
@@ -134,7 +145,8 @@ pub struct ConnectionFilter {
 
 impl PartialEq for ConnectionFilter {
     fn eq(&self, other: &Self) -> bool {
-        self.query == other.query
+        self.geo_scope == other.geo_scope
+            && self.query == other.query
             && self.pending_only == other.pending_only
             && self.denied_only == other.denied_only
             && self.since_ms == other.since_ms
@@ -160,11 +172,55 @@ impl ConnectionFilter {
         self
     }
 
+    pub fn prepared_only(mut self) -> Self {
+        self.prepared_geo = Some(Arc::new(HashMap::new()));
+        self
+    }
+    pub fn merge_prepared_geo(&mut self, facts: HashMap<String, Resolved>) {
+        Arc::make_mut(
+            self.prepared_geo
+                .get_or_insert_with(|| Arc::new(HashMap::new())),
+        )
+        .extend(
+            facts
+                .into_iter()
+                .map(|(id, resolved)| (id, GeoIdentity::from(resolved))),
+        );
+    }
+    pub fn clear_prepared_geo(&mut self) {
+        self.prepared_geo = Some(Arc::new(HashMap::new()));
+    }
+    pub fn retain_prepared_geo(&mut self, ids: &HashSet<&str>) {
+        if let Some(facts) = &mut self.prepared_geo {
+            Arc::make_mut(facts).retain(|id, _| ids.contains(id.as_str()));
+        }
+    }
+    pub fn geo_scope(&self) -> Option<&GeoScope> {
+        self.geo_scope.as_ref()
+    }
+    pub fn set_geo_scope(&mut self, scope: Option<GeoScope>) {
+        self.geo_scope = scope;
+    }
+    fn resolved<'a>(&'a self, row: &ConnectionRow) -> Option<Cow<'a, GeoIdentity>> {
+        if let Some(facts) = &self.prepared_geo {
+            return facts.get(&row.id).map(Cow::Borrowed);
+        }
+        let resolved = self.geo.as_ref().map_or_else(
+            || crate::geo::resolver::resolve(&row.dst_ip, None),
+            |geo| geo.resolve(&row.dst_ip),
+        );
+        Some(Cow::Owned(GeoIdentity::from(resolved)))
+    }
+
     /// True when the filter would narrow the list. When inactive, callers can
     /// skip projection work entirely and treat the visible list as identity
     /// over the full store.
     pub fn is_active(&self) -> bool {
-        self.pending_only || self.denied_only || self.since_ms.is_some() || !self.terms.is_empty()
+        self.geo_scope.is_some()
+            || self.pending_only
+            || self.denied_only
+            || self.since_ms.is_some()
+            || !self.terms.is_empty()
     }
 
     pub fn query(&self) -> &str {
@@ -206,6 +262,9 @@ impl ConnectionFilter {
     /// showing an unexplained empty list.
     pub fn summary(&self) -> String {
         let mut parts: Vec<String> = Vec::new();
+        if let Some(scope) = &self.geo_scope {
+            parts.push(scope.description());
+        }
         if !self.terms.is_empty() {
             parts.push(format!("search \"{}\"", self.query.trim()));
         }
@@ -258,6 +317,14 @@ impl ConnectionFilter {
         if self.since_ms.is_some_and(|since| row.started_at_ms < since) {
             return false;
         }
+        if let Some(scope) = &self.geo_scope {
+            if !self
+                .resolved(row)
+                .is_some_and(|resolved| scope.matches(row, &resolved))
+            {
+                return false;
+            }
+        }
         self.terms.iter().all(|term| self.term_matches(term, row))
     }
 
@@ -275,9 +342,9 @@ impl ConnectionFilter {
             }
             Term::Port(p) => row.dst_port == *p,
             Term::BadPort(_) => false,
-            Term::Country(code) => self.geo.as_ref().is_some_and(
-                |geo| matches!(geo.resolve(&row.dst_ip).bucket, Bucket::Country(c) if c == *code),
-            ),
+            Term::Country(code) => self.resolved(row).is_some_and(|resolved| {
+                resolved.country_key.strip_prefix("country:") == Some(code.as_str())
+            }),
             Term::Free(needle) => {
                 let verdict = row.action.as_deref().unwrap_or("pending");
                 let haystack = [
@@ -722,7 +789,14 @@ mod tests {
         f.set_geo_scope(GeoScope::parse("ip", "ip:2001:4860:4860::8888"));
         let matching = ip_row("a", "firefox", "dns", "2001:4860:4860:0:0:0:0:8888", 443, 0);
         assert!(f.matches(&matching));
-        assert!(!f.matches(&ip_row("b", "firefox", "dns", "2001:4860:4860::8889", 443, 0)));
+        assert!(!f.matches(&ip_row(
+            "b",
+            "firefox",
+            "dns",
+            "2001:4860:4860::8889",
+            443,
+            0
+        )));
         assert!(!f.matches(&ip_row("c", "other", "dns", "2001:4860:4860::8888", 443, 0)));
         f.set_geo_scope(GeoScope::parse("ip", "ip:1.1.1.1"));
         assert!(!f.matches(&ip_row("d", "firefox", "dns", "11.1.1.1", 443, 0)));
@@ -749,64 +823,108 @@ mod tests {
 
     #[test]
     fn geographic_scope_city_uses_shared_composite_key_including_subdivision() {
-        use crate::geo::resolver::{CountryInfo,CountryLookup,GeoPlace,GeoCoordinates};
+        use crate::geo::resolver::{CountryInfo, CountryLookup, GeoCoordinates, GeoPlace};
         struct Cities;
         impl CountryLookup for Cities {
-            fn lookup(&self,_ip:std::net::IpAddr)->Option<CountryInfo> { None }
-            fn lookup_place(&self,ip:std::net::IpAddr)->Option<GeoPlace> {
-                Some(GeoPlace {country:CountryInfo {code:"US".into(),name:"United States".into()},
-                    subdivisions:vec![if ip.to_string()=="1.1.1.1" {"North"} else {"South"}.into()],
-                    city:Some("Same city".into()),coordinates:GeoCoordinates::new(Some(1.0),Some(2.0)),
-                    provider:"fixture".into(),precision:None})
+            fn lookup(&self, _ip: std::net::IpAddr) -> Option<CountryInfo> {
+                None
+            }
+            fn lookup_place(&self, ip: std::net::IpAddr) -> Option<GeoPlace> {
+                Some(GeoPlace {
+                    country: CountryInfo {
+                        code: "US".into(),
+                        name: "United States".into(),
+                    },
+                    subdivisions: vec![if ip.to_string() == "1.1.1.1" {
+                        "North"
+                    } else {
+                        "South"
+                    }
+                    .into()],
+                    city: Some("Same city".into()),
+                    coordinates: GeoCoordinates::new(Some(1.0), Some(2.0)),
+                    provider: "fixture".into(),
+                    precision: None,
+                })
             }
         }
-        let geo=SharedResolver::new(Some(Arc::new(Cities)));
-        let key=geo.resolve("1.1.1.1").place.unwrap().city_key();
-        let mut f=ConnectionFilter::default().with_geo(geo);
-        f.set_geo_scope(GeoScope::parse("city",&key));
+        let geo = SharedResolver::new(Some(Arc::new(Cities)));
+        let key = geo.resolve("1.1.1.1").place.unwrap().city_key();
+        let mut f = ConnectionFilter::default().with_geo(geo);
+        f.set_geo_scope(GeoScope::parse("city", &key));
         assert!(f.is_active());
-        assert!(f.matches(&ip_row("a","firefox","h","1.1.1.1",443,0)));
-        assert!(!f.matches(&ip_row("b","firefox","h","2.2.2.2",443,0)));
-        let old=f.clone();
-        f.set_geo_scope(GeoScope::parse("city","city:removed"));
-        assert_ne!(f,old,"scope participates in projection identity");
-        assert!(!f.matches(&ip_row("a","firefox","h","1.1.1.1",443,0)),"vanished city stays empty");
+        assert!(f.matches(&ip_row("a", "firefox", "h", "1.1.1.1", 443, 0)));
+        assert!(!f.matches(&ip_row("b", "firefox", "h", "2.2.2.2", 443, 0)));
+        let old = f.clone();
+        f.set_geo_scope(GeoScope::parse("city", "city:removed"));
+        assert_ne!(f, old, "scope participates in projection identity");
+        assert!(
+            !f.matches(&ip_row("a", "firefox", "h", "1.1.1.1", 443, 0)),
+            "vanished city stays empty"
+        );
     }
 
     #[test]
     fn geographic_scope_rejects_invalid_inputs() {
-        for (kind,key) in [("ip","ip:1.1.1"),("ip","1.1.1.1"),("country","country:DEU"),
-            ("country","country:de"),("city",""),("city","country:DE"),("wat","country:DE")] {
-            assert!(GeoScope::parse(kind,key).is_none(),"{kind}: {key}");
+        for (kind, key) in [
+            ("ip", "ip:1.1.1"),
+            ("ip", "1.1.1.1"),
+            ("country", "country:DEU"),
+            ("country", "country:de"),
+            ("city", ""),
+            ("city", "country:DE"),
+            ("wat", "country:DE"),
+        ] {
+            assert!(GeoScope::parse(kind, key).is_none(), "{kind}: {key}");
         }
     }
 
     #[test]
     fn prepared_geographic_scope_never_decodes_after_shared_cache_overflow() {
-        use crate::geo::resolver::{CountryInfo,CountryLookup};
-        use std::sync::atomic::{AtomicUsize,Ordering};
+        use crate::geo::resolver::{CountryInfo, CountryLookup};
+        use std::sync::atomic::{AtomicUsize, Ordering};
         struct Counting(Arc<AtomicUsize>);
         impl CountryLookup for Counting {
-            fn lookup(&self,_ip:std::net::IpAddr)->Option<CountryInfo>{
-                self.0.fetch_add(1,Ordering::SeqCst);
-                Some(CountryInfo {code:"DE".into(),name:"Germany".into()})
+            fn lookup(&self, _ip: std::net::IpAddr) -> Option<CountryInfo> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Some(CountryInfo {
+                    code: "DE".into(),
+                    name: "Germany".into(),
+                })
             }
         }
-        let calls=Arc::new(AtomicUsize::new(0));
-        let geo=SharedResolver::new(Some(Arc::new(Counting(calls.clone()))));
-        let r=ip_row("prepared","browser","dns","1.1.1.1",443,0);
-        let mut facts=std::collections::HashMap::new();facts.insert(r.id.clone(),geo.resolve(&r.dst_ip));
-        for i in 0..65_538u32 {geo.resolve(&std::net::Ipv4Addr::from(0x0b00_0000+i).to_string());}
-        let before=calls.load(Ordering::SeqCst);
-        let mut f=ConnectionFilter::default().with_geo(geo).prepared_only();
-        f.merge_prepared_geo(facts);
-        for scope in [("country","country:DE"),("city","country:DE:unknown-city"),("ip","ip:1.1.1.1")] {
-            f.set_geo_scope(GeoScope::parse(scope.0,scope.1));assert!(f.matches(&r));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let geo = SharedResolver::new(Some(Arc::new(Counting(calls.clone()))));
+        let r = ip_row("prepared", "browser", "dns", "1.1.1.1", 443, 0);
+        let mut facts = std::collections::HashMap::new();
+        facts.insert(r.id.clone(), geo.resolve(&r.dst_ip));
+        for i in 0..65_538u32 {
+            geo.resolve(&std::net::Ipv4Addr::from(0x0b00_0000 + i).to_string());
         }
-        let mut untracked=r.clone();untracked.id="outside-geo-capacity".into();
-        assert!(!f.matches(&untracked),"missing prepared facts must not masquerade as Unknown or broaden scope");
-        f.set_query("country:DE");f.set_geo_scope(None);assert!(f.matches(&r));
-        assert_eq!(calls.load(Ordering::SeqCst),before,"scope evaluation decoded MMDB on Qt-equivalent path");
+        let before = calls.load(Ordering::SeqCst);
+        let mut f = ConnectionFilter::default().with_geo(geo).prepared_only();
+        f.merge_prepared_geo(facts);
+        for scope in [
+            ("country", "country:DE"),
+            ("city", "country:DE:unknown-city"),
+            ("ip", "ip:1.1.1.1"),
+        ] {
+            f.set_geo_scope(GeoScope::parse(scope.0, scope.1));
+            assert!(f.matches(&r));
+        }
+        let mut untracked = r.clone();
+        untracked.id = "outside-geo-capacity".into();
+        assert!(
+            !f.matches(&untracked),
+            "missing prepared facts must not masquerade as Unknown or broaden scope"
+        );
+        f.set_query("country:DE");
+        f.set_geo_scope(None);
+        assert!(f.matches(&r));
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            before,
+            "scope evaluation decoded MMDB on Qt-equivalent path"
+        );
     }
-
 }

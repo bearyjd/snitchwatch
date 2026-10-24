@@ -1,13 +1,6 @@
-// The world map itself: country shapes plus clustered verdict markers.
-//
-// Shapes are one SVG path string from Rust (GeoModel.landPath, Natural Earth
-// 110m on a 0.1 degree equirectangular grid), drawn with a single ShapePath;
-// nothing is loaded from disk or the network here. Markers come from
-// GeoModel.clustersJson, which merges nearby countries at the current scale.
-// Clicking a country filters the Connections list (`country:XX`); clicking a
-// cluster focuses its existing aggregate location and lists its countries.
-//
-// `markers` is a plain JS array property so a probe can set it directly.
+// Observed country → city → IP map with one shared camera transform.
+// Hierarchy snapshots are coalesced and cached independently of navigation.
+// Country-only models retain the original cluster interface for isolated probes.
 import QtQuick
 import QtQuick.Shapes
 import QtQuick.Controls as Controls
@@ -25,9 +18,7 @@ Item {
     property bool reducedMotion: Kirigami.Units.longDuration <= 1
     // Clusters, as parsed from GeoModel.clustersJson.
     property var markers: []
-    // Marker delegates live in `markerModel`, keyed by the cluster's first
-    // country, so a refresh updates them in place instead of recreating them
-    // (a recreated marker would forget its pulse throttle).
+    // Stable membership fingerprints preserve delegates and pulse throttles.
     property var clusterByKey: ({})
     // Country code -> its cluster's key, so a pulse needs no scan of members.
     property var keyByCode: ({})
@@ -66,11 +57,13 @@ Item {
         } catch (error) { console.warn("Geographic snapshot unavailable: "+error); }
     }
     function updateSemanticLevel() {
+        if (activeGeoScope.kind==="city" || activeGeoScope.kind==="ip") { semanticLevel=2;return; }
         const zoom=camera.zoom;
         if (semanticLevel===0 && zoom>=3) semanticLevel=1;
         else if (semanticLevel===1 && zoom<2.4) semanticLevel=0;
         else if (semanticLevel===1 && zoom>=10) semanticLevel=2;
         else if (semanticLevel===2 && zoom<8) semanticLevel=zoom<2.4 ? 0 : 1;
+        if (activeGeoScope.kind==="country") semanticLevel=Math.max(1,semanticLevel);
     }
     function focusNodes(nodes, nextZoom) {
         const points=nodes.map(n=>n.position).filter(p=>p && isFinite(p.x) && isFinite(p.y));
@@ -102,6 +95,10 @@ Item {
             const children=hierarchy.children(kind,key).filter(n=>n.position && n.approximate);
             if (children.length) focusNodes(children,Math.max(4,camera.zoom));
             else if (node.position) camera.focusPoint(node.position.x,node.position.y,Math.max(4,camera.zoom));
+            // Automatic fit exposes cities first. A later deliberate zoom may
+            // cross the IP threshold; live refreshes never move the camera.
+            if (camera.zoom>8) camera.setCamera(8,camera.centerX,camera.centerY);
+            semanticLevel=1;
         } else if (kind==="city") {
             semanticLevel=2;
             if (node.position) camera.focusPoint(node.position.x,node.position.y,Math.max(12,camera.zoom));
@@ -143,8 +140,7 @@ Item {
         })));
     }
 
-    // Visible slice of the 3600x1800 grid: Antarctica and the high Arctic are
-    // cropped so the inhabited world gets the band.
+    // The full equirectangular world includes polar database estimates.
     readonly property real gridWidth: camera.gridWidth
     readonly property real gridTop: camera.gridTop
     readonly property real gridHeight: camera.gridHeight
@@ -173,7 +169,7 @@ Item {
         Qt.alpha(Kirigami.Theme.textColor, 0.16))
     readonly property color borderColor: Qt.alpha(Kirigami.Theme.textColor, 0.22)
 
-    Accessible.name: "World map of connection destinations by approximate country"
+    Accessible.name: "World map of observed connection destinations by approximate database location"
     Accessible.role: Accessible.Graphic
     clip: true
     activeFocusOnTab: true
@@ -201,7 +197,7 @@ Item {
             const cacheKey=hierarchy.revision+":"+semanticLevel+":"+activeGeoScope.kind+":"+activeGeoScope.key+":"+bucket;
             if (!semanticCache[cacheKey] && Object.keys(semanticCache).length>=8) semanticCache={};
             if (!semanticCache[cacheKey]) semanticCache[cacheKey]=hierarchy.clusters(
-                hierarchy.nodes(semanticLevel,activeGeoScope.kind,activeGeoScope.key),Math.pow(2,bucket/4),markerGap);
+                hierarchy.nodes(semanticLevel,activeGeoScope.kind,activeGeoScope.key),Math.pow(2,bucket/4),Math.max(markerGap,Kirigami.Units.gridUnit*2.2+Kirigami.Units.smallSpacing*2));
             view.applyClusters(semanticCache[cacheKey]);return;
         }
         if (!view.geoModel) {
@@ -233,6 +229,18 @@ Item {
     // Update `markers`, and sync `markerModel` in place: keep delegates whose
     // key survives, add or remove only the difference.
     function applyClusters(clusters) {
+        // Bound labels separately from geography. Nearby button centers never
+        // acquire invented positions; long names elide and remain in the tip.
+        for (const cluster of clusters) {
+            let labelWidth=160;
+            for (const other of clusters) {
+                if (other===cluster) continue;
+                const dx=Math.abs(cluster.x-other.x)*view.mapScale;
+                const dy=Math.abs(cluster.y-other.y)*view.mapScale;
+                if (dy<28 && other.members.length===1) labelWidth=Math.min(labelWidth,dx-8);
+            }
+            cluster.labelWidth=Math.max(0,labelWidth);
+        }
         const byKey = {};
         const byCode = {};
         const keys = [];
@@ -393,6 +401,8 @@ Item {
             cluster: view.clusterByKey[key] || emptyCluster
             reducedMotion: view.reducedMotion
             highlighted: view.isHighlighted(cluster)
+            labelWidth: Math.max(0,Math.min(cluster.labelWidth===undefined ? 160 : cluster.labelWidth,
+                2*(mk.x+mk.width/2-4),2*(view.width-mk.x-mk.width/2-4)))
             x: view.mapLeft + cluster.x * view.mapScale - width / 2
             y: view.mapTop + (cluster.y - view.gridTop) * view.mapScale - height / 2
             enabled: x + width > 0 && y + height > 0 && x < view.width && y < view.height
@@ -416,6 +426,8 @@ Item {
             textFormat: Text.PlainText
             wrapMode: Text.Wrap
             text: view.dbMissing ? "No GeoIP database installed"
+                : hierarchy.available && activeGeoScope.kind!=="" && scopeNodes.length===0 ? "No observed destinations in this scope"
+                : hierarchy.available && hierarchy.snapshot.observedConnections>0 ? "No coordinates for these destinations"
                 : (view.geoModel ? "No destinations to place yet" : "No map data")
         }
         Controls.Label {
@@ -426,7 +438,9 @@ Item {
             font: Kirigami.Theme.smallFont
             text: view.dbMissing
                 ? "Place a GeoLite2-Country.mmdb file at the path shown on the Geography page. Snitchwatch never downloads one automatically."
-                : "Markers appear here as connections to public addresses are seen."
+                : hierarchy.available && view.empty
+                  ? "Use Destinations for observed IPs without coordinates, or World / Back to change geographic scope."
+                  : "Markers appear here as connections to public addresses are seen."
         }
     }
 

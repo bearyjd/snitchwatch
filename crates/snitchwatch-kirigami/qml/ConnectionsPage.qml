@@ -155,6 +155,9 @@ Kirigami.Page {
                 Qt.callLater(page.runAuto);
             }
         }
+        function onGeographicSelectionRequested(id) {
+            Qt.callLater(() => page.selectGeographicRow(id));
+        }
         // Issue #49: the bridge removes a pending row when opensnitchd's ask
         // times out, a snapshot starts with ClearConnectionRows and then
         // re-inserts what is still pending, and a verdict decided elsewhere
@@ -260,6 +263,7 @@ Kirigami.Page {
 
     // Row click: select; when compact, push the detail page.
     function openInspector(row) {
+        page.mapBand.mapView.highlightRows([row.rowId]);
         inspect.snapshot(row);
         page.pushDetailPage();
     }
@@ -307,6 +311,18 @@ Kirigami.Page {
     function detailPageGone() {
         page.detailPage = null;
         page.dismissInspector();
+    }
+
+    // A map IP is an explicit inspect action. Existing inspector/forms keep
+    // their busy guard, and the queued stable ID is re-resolved after layout.
+    function selectGeographicRow(id) {
+        if (page.inspecting) return;
+        const index=page.model.visibleRowIndex(id);
+        if (index<0) return;
+        const view=listPane.view;
+        view.forceLayout();view.currentIndex=index;
+        const item=view.itemAtIndex(index);
+        if (item && !item.isGroupHeader) page.openInspector(item);
     }
 
     function selectAuto(row) {
@@ -362,6 +378,10 @@ Kirigami.Page {
     // The list's current row changed (click, auto-select, or the model moving
     // it). A wide window shows it; a compact one waits for a click.
     function followSelection(item) {
+        if (page.model && typeof page.model.destinationRowIdsJson === "function") {
+            const ids=item ? JSON.parse(page.model.destinationRowIdsJson(listPane.view.currentIndex)) : [];
+            page.mapBand.mapView.highlightRows(ids);
+        }
         if (!item || item.isGroupHeader || item.rowId === page.inspectId) {
             return;
         }

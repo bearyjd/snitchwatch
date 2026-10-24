@@ -426,6 +426,24 @@ impl RowStore {
         self.filter.is_active()
     }
 
+    /// Install off-thread facts without changing the user's filter identity.
+    pub fn merge_prepared_geo(
+        &mut self,
+        reset: bool,
+        facts: std::collections::HashMap<String, crate::geo::resolver::Resolved>,
+    ) {
+        if reset {
+            self.filter.clear_prepared_geo();
+        }
+        self.filter.merge_prepared_geo(facts);
+    }
+    /// Prune only after the complete grouped batch; later buffered inserts
+    /// may already have supplied facts before an earlier Clear is applied.
+    pub fn prune_prepared_geo(&mut self) {
+        let ids = self.rows.iter().map(|row| row.id.as_str()).collect();
+        self.filter.retain_prepared_geo(&ids);
+    }
+
     pub fn filter(&self) -> &ConnectionFilter {
         &self.filter
     }

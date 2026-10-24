@@ -38,6 +38,7 @@ Controls.Popup {
         Controls.ScrollBar.vertical: Controls.ScrollBar {}
         delegate: Controls.ItemDelegate {
             required property var modelData
+            highlighted: ListView.isCurrentItem
             width: ListView.view.width
             height: Math.max(48, implicitHeight)
             contentItem: Controls.Label {

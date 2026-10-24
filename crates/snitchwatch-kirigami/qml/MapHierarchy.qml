@@ -48,7 +48,7 @@ QtObject {
             index[cn.key] = cn;
             for (const city of Object.values(country.cities)) {
                 const position = point(city.place ? city.place.coordinates : null);
-                const label = city.cityAvailable ? city.name + (city.place && city.place.subdivisions && city.place.subdivisions.length ? ", " + city.place.subdivisions.join(", ") : "") : "City unavailable";
+                const label = (city.cityAvailable ? city.name + (city.place && city.place.subdivisions && city.place.subdivisions.length ? ", " + city.place.subdivisions.join(", ") : "") : "City unavailable") + " · " + country.name;
                 const node = {
                     kind: "city",
                     key: city.key,
@@ -131,6 +131,41 @@ QtObject {
         }
         return members.length+":"+first.toString(16)+":"+second.toString(16);
     }
+    function mergeNeighbors(bins, distance) {
+        let groups=Object.keys(bins).sort().map(key=>{
+            const members=bins[key].sort((a,b)=>a.key.localeCompare(b.key));
+            let sx=0,sy=0;
+            for (const member of members) {sx+=member.position.x;sy+=member.position.y;}
+            return {members:members,sx:sx,sy:sy};
+        });
+        // At most 400 display groups enter this pass. Merge connected near
+        // neighbors across cell boundaries, then recheck shifted aggregate
+        // centers. No pass changes any destination's database anchor.
+        for (let pass=0;pass<400;pass++) {
+            const roots=groups.map((group,index)=>index);
+            function root(index) {
+                while(roots[index]!==index) {roots[index]=roots[roots[index]];index=roots[index];}
+                return index;
+            }
+            for (let i=0;i<groups.length;i++) for(let j=i+1;j<groups.length;j++) {
+                const first=groups[i],second=groups[j];
+                const dx=first.sx/first.members.length-second.sx/second.members.length;
+                const dy=first.sy/first.members.length-second.sy/second.members.length;
+                if (dx*dx+dy*dy<distance*distance) {const a=root(i),b=root(j);if(a!==b) roots[b]=a;}
+            }
+            const merged={};
+            for (let i=0;i<groups.length;i++) {
+                const key=root(i),group=groups[i];
+                if (!merged[key]) merged[key]={members:[],sx:0,sy:0};
+                merged[key].members=merged[key].members.concat(group.members);
+                merged[key].sx+=group.sx;merged[key].sy+=group.sy;
+            }
+            const next=Object.values(merged);
+            if(next.length===groups.length) break;
+            groups=next;
+        }
+        return groups.map(group=>group.members);
+    }
     function clusters(nodes, scale, gap) {
         // At most ~400 cells, independent of the number of observed IPs.
         const positioned = nodes.filter(n => n.position);
@@ -150,7 +185,7 @@ QtObject {
             cell *= 2;
         }
         const out = [];
-        for (const members of Object.values(bins)) {
+        for (const members of mergeNeighbors(bins, gap / Math.max(scale, 0.001))) {
             members.sort((a, b) => a.key.localeCompare(b.key));
             const counts = {
                 total: 0,

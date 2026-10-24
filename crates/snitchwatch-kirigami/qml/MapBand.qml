@@ -54,7 +54,9 @@ ColumnLayout {
         : band.chromeHeight + band.minimumBody
     readonly property real maximumHeight: MapBandState.collapsed ? band.collapsedHeight
         : band.chromeHeight + band.maximumBody
-    readonly property int countryCount: map.allMembers().length
+    readonly property int locationCount: map.allMembers().length
+    readonly property int countryCount: map.hierarchy.available
+        ? map.hierarchy.countries.filter(node=>node.code!==null).length : band.locationCount
 
     // Dragging the band below this much map snaps it collapsed.
     readonly property real collapseBelow: band.minimumBody / 2
@@ -107,8 +109,9 @@ ColumnLayout {
             elide: Text.ElideRight
             textFormat: Text.PlainText
             opacity: 0.7
-            text: band.countryCount === 0 ? "no destinations yet"
+            text: band.locationCount === 0 ? "no destinations yet"
                 : band.countryCount + (band.countryCount === 1 ? " country" : " countries")
+                    + (map.hierarchy.available ? " · "+map.hierarchy.ips.length+" observed IPs" : "")
         }
         Controls.ToolButton {
             objectName: "mapZoomOut"
@@ -135,10 +138,10 @@ ColumnLayout {
         }
         Controls.ToolButton {
             id: countriesButton
-            text: "Countries"
+            text: "Places"
             icon.name: "view-list-details"
-            enabled: band.countryCount > 0
-            Accessible.description: "Lists every country on the map. Choose one to filter the connections to it."
+            enabled: band.locationCount > 0
+            Accessible.description: "Lists countries, local and unknown destinations. Choose one to scope connections while preserving search."
             onClicked: map.openCountryMenu(map.allMembers(), countriesButton)
         }
     }
