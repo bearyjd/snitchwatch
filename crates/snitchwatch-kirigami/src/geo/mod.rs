@@ -22,6 +22,8 @@
 //!   * [`world_map`] — bundled Natural Earth country shapes and marker
 //!     centroids (offline data, see `docs/map-data.md`).
 
+mod dataset;
+pub mod detail;
 pub mod flag;
 pub mod install;
 pub mod map_markers;

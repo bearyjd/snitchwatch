@@ -71,8 +71,11 @@ pub mod qobject {
         #[qml_element]
         #[base = QAbstractListModel]
         #[qproperty(i32, count)]
+        #[qproperty(bool, capacity_reached, cxx_name = "capacityReached")]
         #[qproperty(i32, max_total, cxx_name = "maxTotal")]
         #[qproperty(bool, db_available, cxx_name = "dbAvailable")]
+        #[qproperty(bool, db_city_available, cxx_name = "dbCityAvailable")]
+        #[qproperty(QString, db_city_install_path, cxx_name = "dbCityInstallPath")]
         #[qproperty(QString, db_path, cxx_name = "dbPath")]
         #[qproperty(QString, db_source, cxx_name = "dbSource")]
         #[qproperty(f64, db_build_epoch, cxx_name = "dbBuildEpoch")]
@@ -85,6 +88,19 @@ pub mod qobject {
         #[qinvokable]
         #[cxx_name = "installDatabase"]
         fn install_database(self: Pin<&mut GeoModel>, url: &QUrl);
+
+        #[qinvokable]
+        #[cxx_name = "installCityDatabase"]
+        fn install_city_database(self: Pin<&mut GeoModel>, url: &QUrl);
+
+        /// Versioned observed country -> city/unavailable -> exact IP hierarchy.
+        #[qinvokable]
+        #[cxx_name = "hierarchyJson"]
+        fn hierarchy_json(self: &GeoModel) -> QString;
+
+        #[qsignal]
+        #[cxx_name = "hierarchyChanged"]
+        fn hierarchy_changed(self: Pin<&mut GeoModel>);
 
         // --- QAbstractListModel overrides -----------------------------------
         #[qinvokable]
@@ -168,8 +184,11 @@ pub struct GeoModelRust {
     /// every applied message so `data()`/`row_count()` stay O(1) reads.
     rows: Vec<crate::geo::store::DisplayRow>,
     count: i32,
+    capacity_reached: bool,
     max_total: i32,
     db_available: bool,
+    db_city_available: bool,
+    db_city_install_path: QString,
     db_path: QString,
     db_source: QString,
     db_build_epoch: f64,
@@ -184,11 +203,18 @@ impl Default for GeoModelRust {
         let (resolver, outcome) = crate::geo::shared_discovery();
         Self {
             store: GeoStore::with_resolver(resolver.clone()),
-            resolver,
+            resolver: resolver.clone(),
             rows: Vec::new(),
             count: 0,
+            capacity_reached: false,
             max_total: 0,
             db_available: outcome.available,
+            db_city_available: resolver.capability() == crate::geo::resolver::GeoCapability::City,
+            db_city_install_path: QString::from(
+                &crate::geo::install::target_path_for(crate::geo::install::DatabaseProfile::City)
+                    .display()
+                    .to_string(),
+            ),
             db_path: QString::from(&outcome.path.display().to_string()),
             db_source: QString::from(&outcome.source),
             db_build_epoch: outcome.build_epoch as f64,
@@ -203,7 +229,23 @@ impl Default for GeoModelRust {
 }
 
 impl qobject::GeoModel {
-    fn install_database(mut self: Pin<&mut Self>, url: &QUrl) {
+    fn hierarchy_json(&self) -> QString {
+        QString::from(&self.store.hierarchy_json())
+    }
+
+    fn install_database(self: Pin<&mut Self>, url: &QUrl) {
+        self.start_install(url, crate::geo::install::DatabaseProfile::Country);
+    }
+
+    fn install_city_database(self: Pin<&mut Self>, url: &QUrl) {
+        self.start_install(url, crate::geo::install::DatabaseProfile::City);
+    }
+
+    fn start_install(
+        mut self: Pin<&mut Self>,
+        url: &QUrl,
+        profile: crate::geo::install::DatabaseProfile,
+    ) {
         if self.db_install_busy {
             return;
         }
@@ -212,20 +254,27 @@ impl qobject::GeoModel {
             return;
         };
         let source = std::path::PathBuf::from(source.to_string());
-        let target = crate::geo::install::target_path();
         self.as_mut().set_db_install_busy(true);
         self.as_mut().set_db_install_error(QString::default());
         let qt_thread = self.qt_thread();
-        std::thread::spawn(move || {
-            let result = crate::geo::install::install(&source, &target);
-            let _ = qt_thread.queue(move |mut model| {
-                model.as_mut().set_db_install_busy(false);
-                match result {
-                    Ok(()) => model.as_mut().set_db_restart_required(true),
-                    Err(error) => model.as_mut().set_db_install_error(QString::from(&error)),
-                }
+        let spawned = std::thread::Builder::new()
+            .name("geo-database-install".into())
+            .spawn(move || {
+                let result = crate::geo::install::install_selected(&source, profile);
+                let _ = qt_thread.queue(move |mut model| {
+                    model.as_mut().set_db_install_busy(false);
+                    match result {
+                        Ok(()) => model.as_mut().set_db_restart_required(true),
+                        Err(error) => model.as_mut().set_db_install_error(QString::from(&error)),
+                    }
+                });
             });
-        });
+        if let Err(error) = spawned {
+            self.as_mut().set_db_install_busy(false);
+            self.as_mut().set_db_install_error(QString::from(&format!(
+                "Could not start database installation: {error}"
+            )));
+        }
     }
 
     fn row_count(&self, _parent: &QModelIndex) -> i32 {
@@ -356,6 +405,7 @@ impl qobject::GeoModel {
             self.as_mut().end_reset_model();
         }
         self.as_mut().refresh_counts();
+        self.as_mut().hierarchy_changed();
         for code in activity {
             self.as_mut().country_activity(&QString::from(&code));
         }
@@ -364,6 +414,8 @@ impl qobject::GeoModel {
     fn refresh_counts(mut self: Pin<&mut Self>) {
         let count = self.rows.len() as i32;
         let max_total = self.rows.iter().map(|r| r.total).max().unwrap_or(0);
+        let capacity_reached = self.store.capacity_reached();
+        self.as_mut().set_capacity_reached(capacity_reached);
         self.as_mut().set_count(count);
         self.as_mut().set_max_total(max_total);
     }

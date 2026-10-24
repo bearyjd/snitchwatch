@@ -85,12 +85,16 @@ impl Aggregate {
 /// before the message ever reaches this store (see that module's docs) — the
 /// actual GeoIP database read happens off the Qt thread. By the time
 /// `apply`/`add_row` calls `resolver.resolve(ip)` here, it's a warm cache hit.
+const MAX_TRACKED_ROWS: usize = 100_000;
+
 pub struct GeoStore {
     resolver: SharedResolver,
     /// Tracked connection id -> (bucket, verdict at time of last apply), so
     /// update/remove can find and undo the row's exact prior contribution.
     tracked: HashMap<String, (Bucket, Verdict)>,
     aggregates: HashMap<Bucket, Aggregate>,
+    observations: HashMap<String, super::detail::Observation>,
+    capacity_reached: bool,
 }
 
 impl Default for GeoStore {
@@ -113,7 +117,13 @@ impl GeoStore {
             resolver,
             tracked: HashMap::new(),
             aggregates: HashMap::new(),
+            observations: HashMap::new(),
+            capacity_reached: false,
         }
+    }
+
+    pub fn capacity_reached(&self) -> bool {
+        self.capacity_reached
     }
 
     /// Number of distinct buckets currently populated.
@@ -136,8 +146,17 @@ impl GeoStore {
     }
 
     fn insert_rows(&mut self, rows: &[ConnectionRow]) -> bool {
+        self.insert_rows_with_limit(rows, MAX_TRACKED_ROWS)
+    }
+
+    fn insert_rows_with_limit(&mut self, rows: &[ConnectionRow], limit: usize) -> bool {
         let mut changed = false;
         for row in rows {
+            if !self.tracked.contains_key(&row.id) && self.tracked.len() >= limit {
+                self.capacity_reached = true;
+                changed = true;
+                continue;
+            }
             // An "insert" of an id we already track is really an update (the
             // bridge can re-send a row it already sent) — undo the old
             // contribution first, exactly like `RowStore::insert_rows`.
@@ -169,6 +188,7 @@ impl GeoStore {
         for id in ids {
             if let Some((bucket, verdict)) = self.tracked.remove(id) {
                 self.decrement(&bucket, verdict);
+                self.observations.remove(id);
                 changed = true;
             }
         }
@@ -176,15 +196,21 @@ impl GeoStore {
     }
 
     fn clear(&mut self) -> bool {
-        let changed = !self.tracked.is_empty();
+        let changed = !self.tracked.is_empty() || self.capacity_reached;
         self.tracked.clear();
         self.aggregates.clear();
+        self.observations.clear();
+        self.capacity_reached = false;
         changed
     }
 
     fn add_row(&mut self, row: &ConnectionRow) {
         let resolved = self.resolver.resolve(&row.dst_ip);
         let verdict = Verdict::of(row);
+        self.observations.insert(
+            row.id.clone(),
+            super::detail::Observation::new(row, resolved.clone()),
+        );
         self.aggregates
             .entry(resolved.bucket.clone())
             .or_insert_with(|| Aggregate {
@@ -203,6 +229,15 @@ impl GeoStore {
                 self.aggregates.remove(bucket);
             }
         }
+    }
+
+    /// Snapshot of observed rows only; no invented IP positions or traffic.
+    pub fn hierarchy(&self) -> super::detail::GeoHierarchy {
+        super::detail::hierarchy(self.observations.values(), self.capacity_reached)
+    }
+
+    pub fn hierarchy_json(&self) -> String {
+        serde_json::to_string(&self.hierarchy()).expect("finite geographic hierarchy")
     }
 
     /// Materialise the current aggregates as display rows, sorted by total
@@ -270,6 +305,157 @@ mod tests {
             deferred: false,
             decided_by_default: false,
         }
+    }
+
+    #[test]
+    fn hierarchy_conserves_counts_and_canonical_ips_across_updates_remove_and_clear() {
+        let mut store = store_with_us_lookup();
+        store.apply(&ServerMessage::InsertConnectionRows {
+            rows: vec![
+                row("a", "140.82.121.4", Some("allow")),
+                row("b", "140.82.121.4", None),
+                row("c", "192.168.1.1", Some("deny")),
+                row("d", "2001:4860::1", None),
+                row("e", "2001:4860:0:0:0:0:0:1", None),
+            ],
+        });
+        let hierarchy = store.hierarchy();
+        assert_eq!(hierarchy.observed_connections, 5);
+        assert_eq!(
+            hierarchy
+                .countries
+                .values()
+                .map(|c| c.counts.total)
+                .sum::<u32>(),
+            5
+        );
+        let us = &hierarchy.countries["country:US"];
+        let unknown = &us.cities["country:US:unknown-city"];
+        assert!(!unknown.city_available);
+        let ip = &unknown.ips["ip:140.82.121.4"];
+        assert_eq!(ip.counts.total, 2);
+        assert_eq!(ip.counts.allowed, 1);
+        assert!(ip.coordinates.is_none());
+        assert_eq!(
+            hierarchy.countries["unknown"].cities["unknown:unknown-city"]
+                .ips
+                .len(),
+            1
+        );
+        store.apply(&ServerMessage::UpdateConnectionRows {
+            rows: vec![row("b", "81.2.69.142", Some("deny"))],
+        });
+        assert_eq!(store.hierarchy().countries["country:US"].counts.total, 1);
+        assert_eq!(store.hierarchy().countries["country:GB"].counts.denied, 1);
+        store.apply(&ServerMessage::RemoveConnectionRows {
+            ids: vec!["a".into(), "b".into()],
+        });
+        assert_eq!(store.hierarchy().observed_connections, 3);
+        assert!(!store.hierarchy().countries.contains_key("country:US"));
+        store.apply(&ServerMessage::ClearConnectionRows);
+        assert!(store.hierarchy().countries.is_empty());
+    }
+
+    #[test]
+    fn city_keys_distinguish_subdivisions_and_coincident_ips_keep_one_anchor() {
+        use super::super::resolver::{CountryInfo, GeoCapability, GeoCoordinates, GeoPlace};
+        struct Cities;
+        impl CountryLookup for Cities {
+            fn lookup(&self, addr: std::net::IpAddr) -> Option<CountryInfo> {
+                self.lookup_place(addr).map(|p| p.country)
+            }
+            fn capability(&self) -> GeoCapability {
+                GeoCapability::City
+            }
+            fn lookup_place(&self, addr: std::net::IpAddr) -> Option<GeoPlace> {
+                Some(GeoPlace {
+                    country: CountryInfo {
+                        code: "CA".into(),
+                        name: "Canada".into(),
+                    },
+                    subdivisions: vec![if addr.to_string() == "8.8.4.4" {
+                        "ON".into()
+                    } else {
+                        "QC".into()
+                    }],
+                    city: Some("Montreal".into()),
+                    coordinates: GeoCoordinates::new(Some(45.5019), Some(-73.5674)),
+                    provider: "Fixture".into(),
+                    precision: Some("Approximate city estimate".into()),
+                })
+            }
+        }
+        let mut store = GeoStore::new(Some(Arc::new(Cities)));
+        store.apply(&ServerMessage::InsertConnectionRows {
+            rows: vec![
+                row("a", "2001:4860:4860::8888", None),
+                row("b", "2606:4700:4700::1111", Some("allow")),
+                row("c", "8.8.4.4", Some("deny")),
+            ],
+        });
+        let json = store.hierarchy_json();
+        let hierarchy = store.hierarchy();
+        let country = &hierarchy.countries["country:CA"];
+        assert_eq!(country.cities.len(), 2);
+        assert_eq!(country.counts.total, 3);
+        let montreal = country
+            .cities
+            .values()
+            .find(|city| city.ips.len() == 2)
+            .unwrap();
+        assert!(montreal.city_available);
+        let positions: Vec<_> = montreal
+            .ips
+            .values()
+            .map(|ip| ip.coordinates.as_ref().unwrap())
+            .collect();
+        assert_eq!(positions[0], positions[1]);
+        assert_eq!(montreal.counts.total, 2);
+        // Repeated insertion preserves one contribution; snapshot order is stable.
+        store.apply(&ServerMessage::InsertConnectionRows {
+            rows: vec![row("a", "2001:4860:4860::8888", None)],
+        });
+        assert_eq!(store.hierarchy_json(), json);
+    }
+
+    #[test]
+    fn bounded_country_and_hierarchy_keep_one_accepted_set() {
+        let mut store = store_with_us_lookup();
+        store.insert_rows_with_limit(
+            &[
+                row("a", "140.82.121.4", None),
+                row("b", "81.2.69.142", Some("allow")),
+                row("overflow", "192.168.1.1", None),
+            ],
+            2,
+        );
+        assert!(store.capacity_reached());
+        assert_eq!(store.hierarchy().observed_connections, 2);
+        assert_eq!(
+            store
+                .display_rows()
+                .iter()
+                .map(|row| row.total)
+                .sum::<i32>(),
+            2
+        );
+        store.insert_rows_with_limit(&[row("a", "140.82.121.4", Some("deny"))], 2);
+        assert_eq!(store.hierarchy().countries["country:US"].counts.denied, 1);
+        store.remove_rows(&["b".into(), "overflow".into()]);
+        store.insert_rows_with_limit(&[row("next", "192.168.1.1", None)], 2);
+        assert_eq!(store.hierarchy().observed_connections, 2);
+        assert_eq!(
+            store
+                .display_rows()
+                .iter()
+                .map(|row| row.total)
+                .sum::<i32>(),
+            2
+        );
+        assert!(store.capacity_reached());
+        assert!(store.clear());
+        assert!(!store.capacity_reached());
+        assert_eq!(store.hierarchy().observed_connections, 0);
     }
 
     fn store_with_us_lookup() -> GeoStore {

@@ -8,6 +8,15 @@ pub(super) fn validate(
     metadata: &maxminddb::Metadata,
     max_steps: usize,
 ) -> Result<(), String> {
+    work_stats(bytes, metadata, max_steps).map(|_| ())
+}
+
+/// Expanded traversal work and height, also used for offline profile evidence.
+pub(super) fn work_stats(
+    bytes: &[u8],
+    metadata: &maxminddb::Metadata,
+    max_steps: usize,
+) -> Result<(u32, u8), String> {
     let node_count = metadata.node_count as usize;
     let node_bytes = match metadata.record_size {
         24 => 6,
@@ -29,8 +38,7 @@ pub(super) fn validate(
         heights: vec![UNVISITED; node_count],
         steps: vec![0; node_count],
     };
-    tree.visit(0, 0)?;
-    Ok(())
+    tree.visit(0, 0)
 }
 
 struct Tree<'a> {

@@ -10,28 +10,98 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 pub(super) const FLAG: &str = "--snitchwatch-validate-country-database";
-const MAX_INPUT: usize = 32 * 1024 * 1024;
+pub const CITY_FLAG: &str = "--snitchwatch-validate-city-database";
+
+/// Chosen by trusted CLI arguments, never by untrusted MMDB metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DatabaseProfile {
+    Country,
+    City,
+}
+
+impl DatabaseProfile {
+    pub fn max_input(self) -> usize {
+        match self {
+            Self::Country => 32 * 1024 * 1024,
+            Self::City => 256 * 1024 * 1024,
+        }
+    }
+    pub fn max_networks(self) -> usize {
+        match self {
+            Self::Country => 2_000_000,
+            Self::City => 32_000_000,
+        }
+    }
+    pub fn max_steps(self) -> usize {
+        self.max_networks() * 4 + 1
+    }
+    fn data_limit(self) -> libc::rlim_t {
+        match self {
+            Self::Country => 256 * 1024 * 1024,
+            Self::City => 768 * 1024 * 1024,
+        }
+    }
+    fn cpu_limit(self) -> libc::rlim_t {
+        match self {
+            Self::Country => 30,
+            Self::City => 240,
+        }
+    }
+    fn wall_limit(self) -> Duration {
+        match self {
+            Self::Country => WALL_LIMIT,
+            Self::City => Duration::from_secs(300),
+        }
+    }
+    fn flag(self) -> &'static str {
+        match self {
+            Self::Country => FLAG,
+            Self::City => CITY_FLAG,
+        }
+    }
+    pub fn size_error(self) -> String {
+        format!(
+            "Choose a regular, extracted .mmdb file no larger than {} MiB.",
+            self.max_input() / (1024 * 1024)
+        )
+    }
+}
 const MAX_OUTPUT: usize = 8192;
 const WALL_LIMIT: Duration = Duration::from_secs(60);
-const LIMIT_ERROR: &str = "Database validation exceeded its resource limit. The existing database was preserved; choose another country database.";
+const LIMIT_ERROR: &str = "Database validation exceeded its resource limit. The existing database was preserved; choose another database.";
 
 pub(super) fn validate(bytes: &[u8]) -> Result<(), String> {
+    validate_profile(bytes, DatabaseProfile::Country)
+}
+
+pub(super) fn validate_profile(bytes: &[u8], profile: DatabaseProfile) -> Result<(), String> {
     let executable = std::env::current_exe()
         .map_err(|e| format!("Could not locate the database validator: {e}"))?;
     let mut command = Command::new(executable);
-    command.arg(FLAG);
-    validate_with_command(bytes, command, WALL_LIMIT)
+    command.arg(profile.flag());
+    validate_with_profile(bytes, command, profile.wall_limit(), profile)
 }
 
 // Kept separate so integration tests exercise the real producer/consumer with
 // CARGO_BIN_EXE and short deadlines, without changing production limits/argv.
+#[cfg(test)]
 pub(super) fn validate_with_command(
+    bytes: &[u8],
+    command: Command,
+    deadline: Duration,
+) -> Result<(), String> {
+    validate_with_profile(bytes, command, deadline, DatabaseProfile::Country)
+}
+
+pub fn validate_with_profile(
     bytes: &[u8],
     mut command: Command,
     deadline: Duration,
+    profile: DatabaseProfile,
 ) -> Result<(), String> {
-    if bytes.len() > MAX_INPUT {
-        return Err("The selected database exceeds 32 MiB.".into());
+    if bytes.len() > profile.max_input() {
+        return Err(profile.size_error());
     }
     let started = Instant::now();
     let child = command
@@ -137,15 +207,18 @@ impl Drop for ReapedChild {
     }
 }
 
-pub(super) fn run(check: fn(&[u8]) -> Result<(), String>) -> i32 {
-    let result = set_limits().and_then(|()| {
+pub(super) fn run(
+    profile: DatabaseProfile,
+    check: impl FnOnce(&[u8]) -> Result<(), String>,
+) -> i32 {
+    let result = set_limits(profile).and_then(|()| {
         let mut bytes = Vec::new();
         std::io::stdin()
-            .take(MAX_INPUT as u64 + 1)
+            .take(profile.max_input() as u64 + 1)
             .read_to_end(&mut bytes)
             .map_err(|e| format!("Could not read the selected database: {e}"))?;
-        if bytes.len() > MAX_INPUT {
-            return Err("The selected database exceeds 32 MiB.".into());
+        if bytes.len() > profile.max_input() {
+            return Err(profile.size_error());
         }
         check(&bytes)
     });
@@ -159,12 +232,12 @@ pub(super) fn run(check: fn(&[u8]) -> Result<(), String>) -> i32 {
     }
 }
 
-fn set_limits() -> Result<(), String> {
+fn set_limits(profile: DatabaseProfile) -> Result<(), String> {
     // Linux/Flatpak both support these per-process limits. Fail closed if a
     // launcher has imposed a lower hard limit rather than parsing unbounded.
     for (resource, value) in [
-        (libc::RLIMIT_DATA, 256 * 1024 * 1024),
-        (libc::RLIMIT_CPU, 30),
+        (libc::RLIMIT_DATA, profile.data_limit()),
+        (libc::RLIMIT_CPU, profile.cpu_limit()),
         (libc::RLIMIT_CORE, 0),
     ] {
         let limit = libc::rlimit {

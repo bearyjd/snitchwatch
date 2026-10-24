@@ -38,6 +38,14 @@ Kirigami.ScrollablePage {
                 padding: Kirigami.Units.smallSpacing
                 text: page.model ? page.model.dbSource : ""
             }
+            Controls.Label {
+                objectName: "geoCapacityWarning"
+                Layout.fillWidth: true
+                visible: page.model && page.model.capacityReached
+                wrapMode: Text.Wrap
+                color: Kirigami.Theme.neutralTextColor
+                text: "Geography reached its 100,000-connection display limit. Counts describe a subset of cached connections until the feed resets."
+            }
             ColumnLayout {
                 Layout.fillWidth: true
                 Layout.margins: Kirigami.Units.largeSpacing * 2
