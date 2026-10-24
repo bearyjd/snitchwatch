@@ -80,15 +80,8 @@ Kirigami.ApplicationWindow {
     }
     property var makeRuleControllerRef: makeRuleController
     // Page replacement must not destroy an admitted local Save or its outcome.
-    AnalysisExportController {
-        id: analysisExportController
-        objectName: "analysisExportController"
-        Component.onCompleted: startBridgeFeed()
-    }
-    AnalysisExportSheet {
-        id: analysisExportSheet
-        controller: analysisExportController
-    }
+    AnalysisExportController { id: analysisExportController; objectName: "analysisExportController"; Component.onCompleted: startBridgeFeed() }
+    AnalysisExportSheet { id: analysisExportSheet; controller: analysisExportController }
     readonly property alias analysisExport: analysisExportSheet
     MakeRuleOutcomes {
         controller: makeRuleController
