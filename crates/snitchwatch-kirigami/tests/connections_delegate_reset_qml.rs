@@ -40,7 +40,10 @@ fn production_list_preserves_navigation_across_shrinks_without_stale_cancellatio
             engine
                 .pin_mut()
                 .load_data(&QByteArray::from(qml.as_str()), &QUrl::from(PROBE_URL));
-            app.as_mut().expect("QGuiApplication").exec();
+            // A failed load has no timer to quit the event loop.
+            if root_ok.load(Ordering::SeqCst) {
+                app.as_mut().expect("QGuiApplication").exec();
+            }
         });
         drop(guard);
         assert!(root_ok.load(Ordering::SeqCst), "QML root: {captured}");
