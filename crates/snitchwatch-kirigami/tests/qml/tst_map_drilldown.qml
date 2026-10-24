@@ -150,6 +150,19 @@ Item {
             compare(map.semanticLevel,2,"deliberate further zoom exposes observed IP stage");
             map.clearScope();
         }
+        function test_known_city_without_coordinates_stays_in_list_only() {
+            const next=data(),city=next.countries["country:US"].cities["city:one"];
+            city.place.coordinates=null;
+            for (const ip of Object.values(city.ips)) ip.coordinates=null;
+            geo.data=next;geo.hierarchyChanged();wait(10);map.refresh();
+            const node=map.hierarchy.byKey[city.key];
+            compare(node.position,null,"named city cannot inherit a country-centroid position");
+            verify(map.hierarchy.children("country","country:US").some(n=>n.key===city.key),"known unplaced city stays in list");
+            map.selectNode(node);wait(10);map.refresh();
+            verify(map.empty,"known city with no coordinates has no fabricated IP pins");
+            compare(map.scopeNodes.length,2,"all unplaced observed IPs remain reachable");
+            map.clearScope();
+        }
         function test_country_only_branch_has_honest_unplaced_ip_state() {
             const next=data();
             const branch=next.countries["country:US"].cities["country:US:unknown-city"];

@@ -156,7 +156,7 @@ Kirigami.Page {
             }
         }
         function onGeographicSelectionRequested(id) {
-            Qt.callLater(() => page.selectGeographicRow(id));
+            Qt.callLater(() => listPane.view.selectGeographicRow(id));
         }
         // Issue #49: the bridge removes a pending row when opensnitchd's ask
         // times out, a snapshot starts with ClearConnectionRows and then
@@ -311,18 +311,6 @@ Kirigami.Page {
     function detailPageGone() {
         page.detailPage = null;
         page.dismissInspector();
-    }
-
-    // A map IP is an explicit inspect action. Existing inspector/forms keep
-    // their busy guard, and the queued stable ID is re-resolved after layout.
-    function selectGeographicRow(id) {
-        if (page.inspecting) return;
-        const index=page.model.visibleRowIndex(id);
-        if (index<0) return;
-        const view=listPane.view;
-        view.forceLayout();view.currentIndex=index;
-        const item=view.itemAtIndex(index);
-        if (item && !item.isGroupHeader) page.openInspector(item);
     }
 
     function selectAuto(row) {

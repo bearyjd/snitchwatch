@@ -116,20 +116,30 @@ Controls.ApplicationWindow {
                     bytesSent: 0, bytesReceived: 0, startedAtMs: 0, matchedRule: null };
         return Object.assign(r, fields);
     }
-    function delegates() {
+    function headerSnapshots() {
         const list = page.connectionList;
         list.forceLayout();
         const found = [];
         for (let i = 0; i < list.count; i++) {
+            list.positionViewAtIndex(i,ListView.Contain);
+            list.forceLayout();
             const item = list.itemAtIndex(i);
-            if (item) {
-                found.push(item);
+            if (item && item.isGroupHeader) {
+                // Copy values before scrolling can pool this delegate.
+                found.push({isGroupHeader:true,depth:item.depth,expanded:item.expanded,
+                    groupLevel:item.groupLevel,groupKey:item.groupKey,
+                    groupParentKey:item.groupParentKey,groupProcessKey:item.groupProcessKey});
             }
         }
         return found;
     }
     function rowDelegate(id) {
-        return probeWindow.delegates().find(d => !d.isGroupHeader && d.rowId === id);
+        const index=connModel.visibleRowIndex(id);
+        if(index<0) return null;
+        const list=page.connectionList;
+        list.positionViewAtIndex(index,ListView.Contain);
+        list.forceLayout();
+        return list.itemAtIndex(index);
     }
     function child(item, name) {
         if (item.objectName === name) {
@@ -300,19 +310,19 @@ Controls.ApplicationWindow {
                                       "the banner offers it for an older bridge");
                     connModel.setGroupedMode(true);
                 } else if (probeWindow.phase === 3) {
-                    for (const d of probeWindow.delegates()) {
+                    for (const d of probeWindow.headerSnapshots()) {
                         if (d.isGroupHeader && d.depth === 0 && !d.expanded) {
                             connModel.toggleProcessGroup(d.groupKey);
                         }
                     }
                 } else if (probeWindow.phase === 4) {
-                    for (const d of probeWindow.delegates()) {
+                    for (const d of probeWindow.headerSnapshots()) {
                         if (d.isGroupHeader && d.depth === 1 && !d.expanded) {
                             connModel.toggleDomainGroup(d.groupParentKey, d.groupKey);
                         }
                     }
                 } else if (probeWindow.phase === 5) {
-                    for (const d of probeWindow.delegates()) {
+                    for (const d of probeWindow.headerSnapshots()) {
                         if (d.isGroupHeader && d.groupLevel === 2 && !d.expanded) {
                             connModel.toggleHostGroup(d.groupProcessKey, d.groupParentKey, d.groupKey);
                         }

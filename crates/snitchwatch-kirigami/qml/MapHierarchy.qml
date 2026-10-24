@@ -57,7 +57,7 @@ QtObject {
                     name: label,
                     counts: city.counts,
                     summary: summary(city.counts),
-                    position: position || anchor,
+                    position: position || (!city.cityAvailable ? anchor : null),
                     approximate: !!position,
                     cityAvailable: city.cityAvailable
                 };
