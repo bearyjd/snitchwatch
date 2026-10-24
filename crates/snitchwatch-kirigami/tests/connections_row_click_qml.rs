@@ -39,15 +39,21 @@ import com.snitchwatch.shell
 Window {
     id: probe
     visible: true
-    width: 800
-    height: 600
+    width: 1400
+    height: 900
     property var failures: []
     property int phase: 0
+    property var menuRow: null
 
     QtObject {
         id: feedStub
         property bool ok: true
-        function submitVerdict(rowId, choice, scope, duration, bindableProcessPath) {}
+        property var sent: []
+        function appBoundRulesFor(rowId) { return true; }
+        function submitVerdict(rowId, choice, scope, duration, bindableProcessPath) {
+            sent = sent.concat([rowId + ":" + choice]);
+            return true;
+        }
     }
     ConnectionsPage {
         id: page
@@ -71,6 +77,49 @@ Window {
             if (f) return f;
         }
         return null;
+    }
+    function header(level, key) {
+        const list = page.connectionList;
+        for (let i = 0; i < list.count; ++i) {
+            const item = list.itemAtIndex(i);
+            if (item && item.isGroupHeader && item.groupLevel === level && item.groupKey === key)
+                return item;
+        }
+        throw new Error("missing header " + level + ":" + key);
+    }
+    function named(item, name) {
+        if (item.objectName === name) return item;
+        const children = item.children || [];
+        for (const child of children) {
+            const found = probe.named(child, name);
+            if (found) return found;
+        }
+        return null;
+    }
+    function pending(id, process, host) {
+        const r = probe.row(id, host);
+        r.process = process;
+        r.processPath = "/usr/bin/" + process;
+        r.dstIp = "1.1.1.1";
+        r.action = null;
+        return r;
+    }
+    function expectSent(ids, choice) {
+        const expected = ids.map(id => id + ":" + choice).sort();
+        probe.expect(JSON.stringify(feedStub.sent.slice().sort()) === JSON.stringify(expected),
+                     "wrong bulk scope: " + JSON.stringify(feedStub.sent) + "; expected " + JSON.stringify(expected));
+        feedStub.sent = [];
+    }
+    function rightClick(level, key) {
+        probe.menuRow = probe.header(level, key);
+        const expanded = probe.menuRow.expanded;
+        tc.mouseClick(probe.menuRow, 2, 2, Qt.RightButton);
+        probe.expect(probe.menuRow.actions.menu.visible, "right click did not open actions");
+        probe.expect(probe.menuRow.expanded === expanded, "right click expanded/collapsed group");
+    }
+    function clickPending(allow) {
+        const item = probe.menuRow.actions.menu.itemAt(allow ? 0 : 1);
+        tc.mouseClick(item, item.width / 2, item.height / 2);
     }
 
     Timer {
@@ -101,6 +150,54 @@ Window {
                                          "currentIndex not set: " + list.currentIndex);
                         }
                     }
+                    model.applyServerMessageJson(JSON.stringify({ action: "clearConnectionRows" }));
+                    model.setGroupedMode(true);
+                    model.applyServerMessageJson(JSON.stringify({ action: "insertConnectionRows", rows: [
+                        probe.pending("s:www", "app", "www.example.com"),
+                        probe.pending("s:api", "app", "api.example.com"),
+                        probe.pending("s:other", "app", "other.net"),
+                        probe.pending("s:another-app", "another", "www.example.com")
+                    ] }));
+                } else if (probe.phase === 4) {
+                    probe.rightClick(0, "/usr/bin/app");
+                } else if (probe.phase === 5) {
+                    probe.clickPending(false);
+                    probe.expectSent(["s:www", "s:api", "s:other"], "deny");
+                    // Context and inline buttons share the duplicate-submit guard.
+                    probe.menuRow.decideOnce("allow", true);
+                    probe.expectSent([], "allow");
+                    model.toggleProcessGroup("/usr/bin/app");
+                } else if (probe.phase === 7) {
+                    probe.menuRow = probe.header(1, "example.com");
+                    const handle = probe.named(probe.menuRow, "groupActionsButton");
+                    probe.expect(handle !== null, "group Actions handle missing");
+                    tc.mouseClick(handle, handle.width / 2, handle.height / 2);
+                    probe.expect(probe.menuRow.actions.menu.visible, "Actions handle did not open menu");
+                } else if (probe.phase === 8) {
+                    probe.clickPending(true);
+                    probe.expectSent(["s:www", "s:api"], "allow");
+                    model.toggleDomainGroup("/usr/bin/app", "example.com");
+                } else if (probe.phase === 10) {
+                    probe.rightClick(2, "www.example.com");
+                } else if (probe.phase === 11) {
+                    probe.clickPending(false);
+                    probe.expectSent(["s:www"], "deny");
+                    model.setFilterQuery("www.example.com");
+                } else if (probe.phase === 13) {
+                    // A filtered header still acts on its complete subtree.
+                    const domain = probe.header(1, "example.com");
+                    domain.submitted = false; // Stub feed does not apply verdict updates.
+                    probe.rightClick(1, "example.com");
+                } else if (probe.phase === 14) {
+                    probe.clickPending(false);
+                    probe.expectSent(["s:www", "s:api"], "deny");
+                    page.submitGroupVerdict("/usr/bin/app", 0, "", "", "allow", "old:");
+                    probe.expectSent([], "allow");
+                    // Recycled/changed targets must dismiss the old menu.
+                    probe.rightClick(1, "example.com");
+                    probe.menuRow.sourceSession = "replacement:";
+                    probe.expect(!probe.menuRow.actions.menu.visible,
+                                 "menu survived a source-session change");
                     done = true;
                 }
                 probe.phase++;

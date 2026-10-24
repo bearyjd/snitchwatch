@@ -482,14 +482,15 @@ Controls.ApplicationWindow {
                     }
                     // The rows above have no program path, so every one is
                     // once; the inline Allow explained itself, and each "Deny
-                    // all" that sent one explained it once (the stale
-                    // header's sent nothing).
+                    // all" that sent one explained it once. The stale
+                    // header explains why it could not send anything.
                     for (const s of feedStub.submitted) {
                         probeWindow.check(s.scope === "this_host" && s.duration === "this_time",
                                           "path-less " + s.choice + " " + s.rowId + " sent "
                                           + s.scope + "/" + s.duration);
                     }
                     probeWindow.expectShown([probeWindow.sentence, probeWindow.sentence,
+                                             "No pending connections remain in this group.",
                                              probeWindow.sentence],
                                             "path-less inline Allow and Deny all clicks");
                     probeWindow.checkCapableBridge();

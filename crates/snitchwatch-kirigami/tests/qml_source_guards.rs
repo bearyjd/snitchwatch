@@ -22,6 +22,8 @@ const CONNECTIONS_PAGE: &str = concat!(
     "\n",
     include_str!("../qml/ConnectionRow.qml"),
     "\n",
+    include_str!("../qml/ConnectionActions.qml"),
+    "\n",
     include_str!("../qml/ConnectionsHeader.qml"),
     "\n",
     include_str!("../qml/ConnectionsFilterBar.qml"),
@@ -116,6 +118,10 @@ fn verdict_buttons_all_dispatch_through_the_single_guard() {
          decideOnce), found {latches}. A second latch site means the re-entry \
          guard has been duplicated, which is how it previously ended up missing \
          from the batch handlers."
+    );
+    assert!(
+        code.contains("actions.owner.decideOnce(choice, n.header, n)"),
+        "context menu verdicts must use the same guard and copied target as inline buttons"
     );
 }
 

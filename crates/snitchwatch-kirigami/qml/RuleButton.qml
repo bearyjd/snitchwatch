@@ -143,6 +143,7 @@ Item {
 
     Controls.Menu {
         id: chooseMenu
+        popupType: Controls.Popup.Item
         Controls.MenuItem {
             text: "Allow"
             icon.name: "dialog-ok-apply"
@@ -156,6 +157,7 @@ Item {
     }
     Controls.Menu {
         id: removeMenu
+        popupType: Controls.Popup.Item
         Controls.MenuItem {
             text: "Remove rule"
             icon.name: "edit-delete"

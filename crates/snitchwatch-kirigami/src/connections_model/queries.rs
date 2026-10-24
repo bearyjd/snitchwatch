@@ -241,4 +241,21 @@ impl qobject::ConnectionsModel {
         let age = pending_age_secs(self.store.oldest_pending_started_at_ms(now), now);
         self.as_mut().set_oldest_pending_age_secs(age);
     }
+
+    pub(super) fn pending_row_ids_for_group(
+        mut self: Pin<&mut Self>,
+        program: &QString,
+        level: i32,
+        key: &QString,
+        parent_domain: &QString,
+    ) -> QString {
+        self.as_mut().flush_grouped_messages();
+        let ids = self.grouping.pending_row_ids_for_group(
+            &program.to_string(),
+            level,
+            &key.to_string(),
+            &parent_domain.to_string(),
+        );
+        QString::from(&serde_json::to_string(&ids).expect("string ids serialize"))
+    }
 }

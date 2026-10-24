@@ -84,16 +84,22 @@ Item {
     // delegate shows another row (reuseItems: `rowId` changes) or the row's
     // pending state changes.
     property bool submitted: false
-    onRowIdChanged: row.submitted = false
+    onRowIdChanged: { row.submitted = false; if (rowActions) rowActions.close(); }
     onPendingChanged: row.submitted = false
+    onGroupPendingChanged: row.submitted = false
+    onGroupKeyChanged: { row.submitted = false; if (rowActions) rowActions.close(); }
+    onGroupLevelChanged: { row.submitted = false; if (rowActions) rowActions.close(); }
+    onGroupParentKeyChanged: { row.submitted = false; if (rowActions) rowActions.close(); }
+    onGroupProcessKeyChanged: { row.submitted = false; if (rowActions) rowActions.close(); }
+    onSourceSessionChanged: { row.submitted = false; if (rowActions) rowActions.close(); }
 
     // What this row's Deny, or this header's "Deny all", does: the
     // buttons' tooltip and accessible description. Empty where the
     // button is hidden, so other delegates never look it up.
     readonly property string denyText: !row.isGroupHeader && row.pending
         ? verdictHelper.denyText(row.rowId) : ""
-    readonly property string denyAllText: row.isGroupHeader && row.groupLevel === 0
-        && row.groupPending > 0 ? verdictHelper.denyAllText(row.groupKey) : ""
+    readonly property string denyAllText: row.isGroupHeader
+        && row.groupPending > 0 ? verdictHelper.denyAllText(row.ruleProgram) : ""
     // The program a header's rule is about (only a host row carries it as
     // `groupProcessKey`) and the key below it ("" for a program).
     readonly property string ruleProgram: row.groupLevel === 0 ? row.groupKey
@@ -103,12 +109,17 @@ Item {
         target: row.ListView
         function onPooled() {
             headerRuleButton.closeMenus();
+            rowActions.close();
+            row.submitted = false;
         }
     }
     // Exposed for the headless probes.
     property alias ruleButton: headerRuleButton
     property alias denyButton: rowDenyButton
     property alias denyAllButton: batchDenyButton
+    property alias actions: rowActions
+
+    ConnectionActions { id: rowActions; page: row.page; owner: row }
 
     // Single latch-and-dispatch for all 4 verdict buttons. Kept as one
     // function so the re-entry guard can't be present on some sites
@@ -127,18 +138,22 @@ Item {
     readonly property bool decideLaterOffered: !row.isGroupHeader && row.pending
         && verdictHelper.rowDecideLater(row.rowId)
 
-    function decideOnce(choice, batch) {
+    function decideOnce(choice, batch, target) {
         if (row.submitted) {
             return;
         }
+        const n = target || { rowId: row.rowId, program: row.ruleProgram,
+            level: row.groupLevel, key: row.ruleKey, domain: row.groupParentKey,
+            session: row.sourceSession };
         row.submitted = true;
         if (batch) {
-            page.submitBatchVerdict(row.groupKey, choice, row.sourceSession);
+            if (!page.submitGroupVerdict(n.program, n.level, n.key, n.domain,
+                                         choice, n.session)) row.submitted = false;
         } else if (choice === "later") {
             // Part C "Decide later": not a verdict QML builds.
-            verdictHelper.decideLater(row.rowId);
+            verdictHelper.decideLater(n.rowId);
         } else {
-            page.submitInlineVerdict(row.rowId, choice);
+            if (!page.submitInlineVerdict(n.rowId, choice)) row.submitted = false;
         }
     }
 
@@ -148,7 +163,12 @@ Item {
     MouseArea {
         anchors.fill: parent
         z: 0
-        onClicked: {
+        acceptedButtons: Qt.LeftButton | Qt.RightButton
+        onClicked: mouse => {
+            if (mouse.button === Qt.RightButton) {
+                rowActions.open(row, mouse.x, mouse.y);
+                return;
+            }
             if (row.isGroupHeader) {
                 if (row.groupLevel === 0) {
                     page.model.toggleProcessGroup(row.groupKey);
@@ -283,12 +303,10 @@ Item {
             }
         }
 
-        // Issue #18: per-process batch actions. Only on top-level
-        // program headers (groupLevel 0) with at least one pending
-        // descendant — a domain header or a fully-decided process has
-        // nothing to batch-act on.
+        // Batch pending decisions at every tree level. The subtree includes
+        // collapsed and filtered descendants, always within this program.
         RowLayout {
-            visible: row.isGroupHeader && row.groupLevel === 0 && row.groupPending > 0
+            visible: row.isGroupHeader && row.groupPending > 0
             spacing: Kirigami.Units.smallSpacing
 
             Controls.Button {
@@ -393,6 +411,17 @@ Item {
                 level, program, key, label, choice)
             onRemoveRequested: (level, program, key, label) => row.page.levelRules.remove(
                 level, program, key, label)
+        }
+        Controls.ToolButton {
+            objectName: "groupActionsButton"
+            visible: row.isGroupHeader
+            text: "Actions"
+            icon.name: "application-menu"
+            onClicked: {
+                const point = mapToItem(row, 0, height);
+                rowActions.open(row, point.x, point.y);
+            }
+            Accessible.name: "Actions for this group"
         }
     }
 }

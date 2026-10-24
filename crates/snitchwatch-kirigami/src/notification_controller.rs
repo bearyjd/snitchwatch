@@ -257,7 +257,7 @@ where
         match look().await {
             PendingLook::WindowActive => {
                 if !held_back {
-                    tracing::info!(
+                    tracing::debug!(
                         session,
                         row_id,
                         "pending notice held back: the window is active; it is posted if the \
@@ -269,7 +269,7 @@ where
             }
             PendingLook::Done => return,
             PendingLook::Gone => {
-                tracing::info!(
+                tracing::debug!(
                     session,
                     row_id,
                     held_back,

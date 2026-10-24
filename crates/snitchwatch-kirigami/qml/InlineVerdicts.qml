@@ -85,7 +85,7 @@ QtObject {
             // a silent return here would leave a permanently un-decidable
             // row with no trace of why. Never swallow this.
             console.warn("InlineVerdicts.send: no bridgeFeed; verdict dropped for", rowId);
-            return "";
+            return "not_sent";
         }
         const appBound = verdicts.rowAppBoundRules(rowId);
         const duration = verdicts.model
@@ -123,7 +123,9 @@ QtObject {
 
     // A row's inline Allow/Deny.
     function submit(rowId, choice) {
-        verdicts.explain(verdicts.send(rowId, choice), choice);
+        const reason = verdicts.send(rowId, choice);
+        verdicts.explain(reason, choice);
+        return reason !== "not_sent";
     }
 
     // Prompt-slot plan Part C. "Decide later" is offered only while
@@ -150,12 +152,17 @@ QtObject {
     // process group `processKey`, each with its own duration. No new WS
     // protocol — this is just N SetVerdict messages.
     function submitBatch(processKey, choice, sourceSession) {
+        return verdicts.submitGroupBatch(processKey, 0, "", "", choice, sourceSession);
+    }
+
+    function submitGroupBatch(program, level, key, parentDomain, choice, sourceSession) {
         if (!verdicts.model) {
-            return;
+            return false;
         }
         let reason = "";
+        let sent = false;
         try {
-            const ids = JSON.parse(verdicts.model.pendingRowIdsForProcess(processKey));
+            const ids = JSON.parse(verdicts.model.pendingRowIdsForGroup(program, level, key, parentDomain));
             for (const id of ids) {
                 // The synchronous model flush may have installed a replacement
                 // service's snapshot since this header was displayed.
@@ -163,6 +170,7 @@ QtObject {
                     continue;
                 }
                 const why = verdicts.send(id, choice);
+                sent = sent || why !== "not_sent";
                 // A lost connection outranks why a sent Deny was once-only.
                 if (why === "not_sent" || reason === "") {
                     reason = why || reason;
@@ -175,6 +183,8 @@ QtObject {
             console.warn("InlineVerdicts.submitBatch failed:", e);
         }
         verdicts.explain(reason, choice);
+        if (!sent && reason === "") verdicts.explained("No pending connections remain in this group.");
+        return sent;
     }
 
     function onceOnlySentence(reason, choice) {

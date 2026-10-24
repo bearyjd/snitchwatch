@@ -880,23 +880,58 @@ fn a_runtime_that_could_not_start_is_failed_and_not_ok() {
     let link = link_of(&outcome);
     assert_eq!(link.state, LinkState::Failed);
     assert!(link.detail.contains("no async runtime"), "{link:?}");
-    assert_eq!(status_of(&outcome), (false, link.detail));
+    assert_eq!(startup_status_of(&outcome), (false, link.detail));
 }
 
 #[test]
-fn only_the_connected_state_is_ok() {
-    for (state, ok) in [
-        (LinkState::Connecting, false),
-        (LinkState::Connected, true),
-        (LinkState::Retrying, false),
-        (LinkState::Failed, false),
-        (LinkState::Stopped, false),
+fn a_started_runtime_is_successful_before_the_connection_completes() {
+    // No reconnect task: exercise startup reporting without contacting a service.
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    let (broadcast_tx, _) = broadcast::channel(1);
+    let (inbound_tx, _) = mpsc::channel(1);
+    let status = Arc::new(Mutex::new(LinkStatus::connecting()));
+    let outcome = Outcome::Running(Box::new(ClientRuntime {
+        handles: BridgeHandles {
+            broadcast_tx,
+            inbound_tx,
+            runtime: runtime.handle().clone(),
+            connection: Arc::new(Mutex::new(ConnectionState::default())),
+        },
+        status: status.clone(),
+        tray_tx: watch::channel(ReceivedTrayState {
+            connection_id: 0,
+            state: BridgeTrayState::Idle,
+        })
+        .0,
+        notice_tx: broadcast::channel(1).0,
+        pause_tx: pause_channel().0,
+        slot_tx: watch::channel(ReceivedPromptSlot::default()).0,
+        _runtime: runtime,
+    }));
+    for state in [
+        LinkState::Connecting,
+        LinkState::Connected,
+        LinkState::Retrying,
+        LinkState::Failed,
+        LinkState::Stopped,
     ] {
         let link = LinkStatus {
             state,
-            detail: "Connected to bridge service".to_string(),
+            detail: format!("state: {}", state.token()),
         };
-        assert_eq!(link.state == LinkState::Connected, ok, "{state:?}");
+        *status.lock().unwrap() = link.clone();
+        assert_eq!(
+            startup_status_of(&outcome),
+            (true, link.detail.clone()),
+            "{state:?}"
+        );
+        assert_eq!(
+            link_of(&outcome),
+            link,
+            "connection status stays independent"
+        );
     }
 }
 

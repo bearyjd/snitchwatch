@@ -69,12 +69,16 @@ Kirigami.Page {
     // `tests/inline_verdict_qml.rs` drives, to exercise the click -> submit ->
     // verdict-message path without synthesizing a real mouse click.
     function submitInlineVerdict(rowId, choice) {
-        verdictHelper.submit(rowId, choice);
+        return verdictHelper.submit(rowId, choice);
     }
 
     // Issue #18: a process header's "Allow all"/"Deny all".
     function submitBatchVerdict(processKey, choice, sourceSession) {
-        verdictHelper.submitBatch(processKey, choice, sourceSession);
+        return verdictHelper.submitBatch(processKey, choice, sourceSession);
+    }
+
+    function submitGroupVerdict(program, level, key, parentDomain, choice, sourceSession) {
+        return verdictHelper.submitGroupBatch(program, level, key, parentDomain, choice, sourceSession);
     }
 
     // Below this page width the inspector is a pushed page, not a column.

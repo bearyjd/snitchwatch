@@ -429,6 +429,18 @@ pub mod qobject {
         #[cxx_name = "pendingRowIdsForProcess"]
         fn pending_row_ids_for_process(self: Pin<&mut ConnectionsModel>, key: &QString) -> QString;
 
+        /// Pending descendants of this program/domain/host, including hidden rows.
+        /// Flushes grouped messages before resolving the selected subtree.
+        #[qinvokable]
+        #[cxx_name = "pendingRowIdsForGroup"]
+        fn pending_row_ids_for_group(
+            self: Pin<&mut ConnectionsModel>,
+            program: &QString,
+            level: i32,
+            key: &QString,
+            parent_domain: &QString,
+        ) -> QString;
+
         /// Recompute `oldestPendingAgeSecs` against the current wall clock.
         /// Call this from a QML `Timer` tick (elapsed time changes with no
         /// new bridge message to trigger a recompute otherwise).
