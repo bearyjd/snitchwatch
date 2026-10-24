@@ -45,6 +45,9 @@ Item {
         model: pane.page.model
         currentIndex: -1
         reuseItems: true
+        // Qt 6.10/6.11 can cancel a stale async cache index after a shrinking
+        // model reset. Render visible rows synchronously; keep delegate reuse.
+        cacheBuffer: 0
         Controls.ScrollBar.vertical: Controls.ScrollBar {}
 
         // Keyboard: Tab focuses the list, arrows move the selection (the wide

@@ -36,7 +36,7 @@ Window {
     id: probe
     visible: true
     width: 1200
-    height: 700
+    height: 600
     property var failures: []
     property int step: 0
 
@@ -52,13 +52,26 @@ Window {
                  dstIp: "203.0.113.7", dstPort: 443, protocol: "tcp", direction: "outgoing",
                  action: action, bytesSent: 0, bytesReceived: 0, startedAtMs: startedAtMs, matchedRule: null };
     }
-    // Open every collapsed header at `depth` (0 program, 1 domain, 2 host).
+    // A model row need not have a delegate until it enters the viewport.
+    function materialize(index) {
+        const list = page.connectionList;
+        list.positionViewAtIndex(index, ListView.Contain);
+        list.forceLayout();
+        return list.itemAtIndex(index);
+    }
+    function intersectsViewport(list, item) {
+        return item && item.height > 0 && list.height > 0
+            && item.y < list.contentY + list.height
+            && item.y + item.height > list.contentY;
+    }
+    // Visit every header, including those outside the initial viewport.
+    // Open collapsed headers at `depth` (0 program, 1 domain, 2 host).
     function expandDepth(depth) {
         const list = page.connectionList;
         list.forceLayout();
         const todo = [];
         for (let i = 0; i < list.count; i++) {
-            const d = list.itemAtIndex(i);
+            const d = probe.materialize(i);
             if (d && d.isGroupHeader && d.groupLevel === depth && !d.expanded) {
                 todo.push({ key: d.groupKey, parent: d.groupParentKey, process: d.groupProcessKey });
             }
@@ -84,10 +97,18 @@ Window {
             list.forceLayout();
             let leaves = 0;
             for (let i = 0; i < list.count; i++) {
-                const d = list.itemAtIndex(i);
+                const d = probe.materialize(i);
                 if (d && !d.isGroupHeader) leaves++;
             }
             probe.expect(leaves === 2 && !page.inspecting, "setup: leaves " + leaves);
+            for (const id of ["old", "oldw"]) {
+                const index = model.visibleRowIndex(id);
+                const d = probe.materialize(index);
+                probe.expect(index >= 0 && d && d.rowId === id && !d.isGroupHeader,
+                             "setup did not render the expanded leaf " + id);
+            }
+            list.positionViewAtBeginning();
+            list.forceLayout();
             // Two arrivals in the same tick: pA first, in the lower wget group,
             // then pB (newer) in the curl group above it. pB's row pushes pA's
             // down, so the index recorded for pA is stale by the time the page
@@ -96,13 +117,28 @@ Window {
                 rows: [probe.row("pA", null, "wget", 1)] }));
             model.applyServerMessageJson(JSON.stringify({ action: "insertConnectionRows",
                 rows: [probe.row("pB", null, "curl", 2)] }));
+            // Settle layout before the queued runAuto() callback: absence
+            // must reflect virtualization, not a deferred layout pass.
+            list.forceLayout();
+            const initial = list.itemAtIndex(model.visibleRowIndex("pA"));
+            probe.expect(!probe.intersectsViewport(list, initial),
+                         "oldest pending row must start outside the viewport");
+            probe.expect(initial === null,
+                         "oldest pending row must start without a delegate");
         },
         function () {
             probe.expect(page.inspecting && page.inspectId === "pA",
                          "grouped auto-select chose '" + page.inspectId + "', not the oldest pending row");
             const list = page.connectionList;
-            const d = list.itemAtIndex(list.currentIndex);
-            probe.expect(d && !d.isGroupHeader, "auto-select landed on a group header");
+            list.forceLayout();
+            const d = list.currentItem;
+            probe.expect(list.currentIndex === model.visibleRowIndex("pA")
+                         && d && d.rowId === "pA" && !d.isGroupHeader,
+                         "auto-select did not select the oldest pending leaf");
+            probe.expect(list.itemAtIndex(list.currentIndex) === d,
+                         "auto-selected leaf is absent from the settled layout");
+            probe.expect(probe.intersectsViewport(list, d),
+                         "auto-selected leaf bounds do not intersect the viewport");
         }
     ]
 
@@ -158,7 +194,11 @@ Window {
     );
     let bad_lines: Vec<&str> = captured
         .lines()
-        .filter(|line| line.contains(PROBE_URL) || line.contains("TypeError"))
+        .filter(|line| {
+            line.contains(PROBE_URL)
+                || line.contains("TypeError")
+                || line.contains("DelegateModel::cancel: index out range")
+        })
         .filter(|line| !line.contains(DONE_MARKER))
         .collect();
     assert!(
