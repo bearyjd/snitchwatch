@@ -33,10 +33,19 @@ Kirigami.ScrollablePage {
 
         Controls.Label {
             Layout.fillWidth: true
+            wrapMode: Text.WordWrap
             visible: !page.model.hasProblem
-            text: "opensnitchd is reachable, its firewall is running, and this \
-                   host's kernel supports eBPF process monitoring and \
-                   nftables — everything opensnitchd needs."
+            objectName: "daemonHealthStatus"
+            text: page.model.statusSummary
+        }
+
+        Controls.Label {
+            Layout.fillWidth: true
+            wrapMode: Text.WordWrap
+            objectName: "processMonitorSupport"
+            text: "The GUI supports both /proc and eBPF process monitoring. \
+                   opensnitchd does not report the active method to the GUI; \
+                   check the daemon log to confirm which method is running."
         }
 
         Controls.Button {
