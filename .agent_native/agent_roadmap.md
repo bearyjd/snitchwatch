@@ -119,9 +119,10 @@ immediately actionable with no further human input needed.
      (`daemon_watchdog.rs`); `RecentBlock` publishes on a Deny verdict in
      `ask_rule` with a generation-guarded revert timer.
    - `FilterOff`: owner decision (2026-07-12) — pausing keeps
-     `opensnitchd`'s `DefaultAction: deny` untouched; the bridge itself
+     `opensnitchd`'s `DefaultAction` untouched; the bridge itself
      auto-resolves every `AskRule` as Allow-Once while paused instead of
-     prompting, so a genuine bridge outage still fails closed. See
+     prompting, so a genuine bridge outage still falls back to the
+     configured default (`allow` as shipped since 2026-10-25). See
      `docs/superpowers/plans/2026-07-12-tray-filter-off.md` for the full
      design: a new `ClientMessage::SetFilteringPaused`, `UiService` gaining
      a genuine `filtering_paused` constructor parameter (unlike

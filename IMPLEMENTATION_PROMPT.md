@@ -187,6 +187,10 @@ box, opensnitchd silently **allows** all traffic once the bridge/GUI goes
 away — the exact fail-open behavior the original concern worried about,
 confirmed rather than assumed.
 
+> **Superseded 2026-10-25 (owner decision, PR #224):** Snitchwatch now ships
+> `DefaultAction: allow`; `deny` is an operator opt-in. The recommendation
+> below is kept as history.
+
 Since `DefaultAction` is a plain JSON config key (`ui/config.go:81`), not
 a compiled-in constant, Snitchwatch's packaging (bluebuild image /
 rpm-ostree-layered config / install script) should **ship

@@ -150,7 +150,7 @@ test "$(/usr/bin/snitchwatch-bridge-cli --version)" = "snitchwatch-bridge-cli $S
 XDG_RUNTIME_DIR="$(mktemp -d)" systemd-analyze verify --user \
   /usr/lib/systemd/user/snitchwatch-bridge.service
 grep -qx 'ConditionUser=!@system' /usr/lib/systemd/user/snitchwatch-bridge.service
-# the unit's gRPC bind must be what the daemon dials; deny (shipped) or allow, see below
+# the unit's gRPC bind must be what the daemon dials; allow (shipped) or a deny opt-in
 grep -q 'SNITCHWATCH_GRPC_BIND=127.0.0.1:50051' /usr/lib/systemd/user/snitchwatch-bridge.service
 jq -e '.Server.Address == "127.0.0.1:50051" and (.DefaultAction == "deny" or .DefaultAction == "allow")' \
   /etc/opensnitchd/default-config.json
@@ -161,10 +161,11 @@ test ! -e /usr/bin/opensnitch-ui   # upstream GUI would fight the bridge for the
 [#35](https://github.com/bearyjd/snitchwatch/issues/35)). TCP `127.0.0.1:50051` isn't protected against port squatting under either
 `DefaultAction` (#35): any local process that binds the port while no bridge
 holds it (before login, between restarts, a second user) gets the root
-daemon's UI authority, including config changes the daemon saves. `deny` is
-the shipped default (settled decision 5). `allow` avoids a network lockout
-before the per-user bridge starts at login, at the cost of failing open
-whenever no bridge is connected. Protection against squatting needs the
+daemon's UI authority, including config changes the daemon saves. `allow` is
+the shipped default (owner decision 2026-10-25); `deny` is an operator opt-in.
+`allow` avoids a network lockout before the per-user bridge starts at login,
+at the cost of failing open whenever no bridge is connected; opting into
+`deny` makes that lockout possible. Protection against squatting needs the
 system flavour's root-only Unix socket: see [system-bridge-integration.md](system-bridge-integration.md).
 Keep the per-user bridge out of images.
 This bridge release does not change the user unit's transport.

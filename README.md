@@ -416,11 +416,16 @@ for the system bridge, and the bluebuild recipe's per-user config). Owner
 decision 2026-10-25: the r15 images shipped `deny`, and with no decision client
 answering, a deny default blocks every new outbound connection that no rule
 covers, which left the system unusable. Prompts and rules still apply; `allow`
-only decides connections that no rule matched while nobody answers.
+only decides connections that no rule matched while nobody answers. So the
+daemon fails **open**: during a bridge outage or a failed socket, unmatched
+traffic keeps flowing.
 
 Deny enforcement is an explicit operator opt-in: set `DefaultAction` to `deny`
 in `/etc/opensnitchd/default-config.json` yourself, and keep a rollback path
-first. Do that only with the system bridge's root-only Unix socket
+first: the console recovery in
+[`docs/packaging/system-bridge-integration.md`](docs/packaging/system-bridge-integration.md#missing-socket-and-console-recovery).
+Keep the packaged fetch rule (`000-snitchwatch-bridge-fetch.json`) so blocklist
+downloads still work. Do that only with the system bridge's root-only Unix socket
 (`unix:opensnitchd.sock`). The per-user bridge's TCP port is not deny-safe
 (#35): a process that binds it first answers for the daemon. The bridge runs as
 its own service so that *closing the GUI window* is not mistaken for *the

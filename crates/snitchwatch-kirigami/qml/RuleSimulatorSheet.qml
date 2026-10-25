@@ -389,7 +389,7 @@ SizedOverlaySheet {
                 wrapMode: Text.Wrap
                 opacity: 0.8
                 font: Kirigami.Theme.smallFont
-                text: "What happens next depends on the daemon, which this simulation can't see. It usually asks you (if the Snitchwatch window is connected and no other prompt is open); otherwise the daemon's configured default action applies. That default is a setting the simulator doesn't know: Snitchwatch ships deny, opensnitchd's own default is allow."
+                text: "What happens next depends on the daemon, which this simulation can't see. It usually asks you (if the Snitchwatch window is connected and no other prompt is open); otherwise the daemon's configured default action applies. That default is a setting the simulator doesn't know: Snitchwatch ships allow, as opensnitchd does, unless you opted in to deny."
             }
             Controls.Label {
                 Layout.fillWidth: true
