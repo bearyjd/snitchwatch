@@ -232,8 +232,8 @@ fn stager_accepts_a_canonical_nonroot_destination_and_only_stages_files() {
     );
     let drop_in = std::fs::read_to_string(&drop_in).unwrap();
     let drop_in: Vec<&str> = drop_in.lines().map(str::trim).collect();
-    // PR #166 M1, owner decision: fail closed. A failed socket must not keep
-    // the daemon from starting and enforcing `deny`: Wants=, not Requires=,
+    // PR #166 M1, owner decision: a failed socket must not keep the daemon
+    // from starting and applying its DefaultAction: Wants=, not Requires=,
     // and a working directory that may be missing.
     for line in [
         "Wants=snitchwatch-system-bridge-grpc.socket",

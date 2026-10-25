@@ -607,10 +607,10 @@ client_message! {
     /// rule snapshot has been committed (`cache::rules`).
     RequestSnapshot,
     /// Pause or resume interactive filtering (tray "Pause/Resume filtering").
-    /// While paused, `opensnitchd`'s own `DefaultAction: deny` is left
+    /// While paused, `opensnitchd`'s own `DefaultAction` is left
     /// untouched — the bridge itself auto-resolves every `AskRule` as
     /// `Allow-Once` instead of prompting, so a genuine bridge outage still
-    /// fails closed. See `grpc_server::UiService::ask_rule` and
+    /// falls back to the configured default. See `grpc_server::UiService::ask_rule` and
     /// `docs/superpowers/plans/2026-07-12-tray-filter-off.md`.
     ///
     /// A pause is always timed (issue #47): `duration_secs` must be one of

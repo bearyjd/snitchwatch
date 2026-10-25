@@ -486,13 +486,11 @@ Kirigami.ApplicationWindow {
         visible: !promptSlotStatus.supported
             && pendingAgeSecs >= pendingAgeThresholdSecs && pendingAgeSecs < pendingAgeCeilingSecs
         // Deliberately does not say "silently allowed": that's only true
-        // under DefaultAction: allow, opensnitchd's own fail-open default.
-        // This repo's shipped packaging config overrides that to
-        // DefaultAction: deny (fail-closed — the system flavour's staged
-        // config under packaging/system/, CLAUDE.md's settled
-        // decision #5), so on the actual shipped product the real effect is
+        // under DefaultAction: allow. The packaged configs ship `allow`
+        // (CLAUDE.md's settled decision #5, owner decision 2026-10-25), but
+        // an operator may opt in to `deny`, where the real effect is
         // "silently denied" (a legitimate connection blackholed with no
-        // signal) — arguably worse, not better. Neither direction is
+        // signal). Neither direction is
         // hardcoded here since the configured default isn't threaded to the
         // UI (Codex review finding); "allowed or denied" stays accurate
         // regardless of DefaultAction.
