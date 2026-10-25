@@ -112,8 +112,8 @@ requirement is explained in
 modules are not CO-RE, so matching kernel headers matter more than BTF.
 
 `/etc/opensnitchd/rules/000-snitchwatch-bridge-fetch.json` lets this
-account's bridge download blocklists over HTTPS (TCP 443) under
-`DefaultAction: deny`. Denies and blocklists still win; see
+account's bridge download blocklists over HTTPS (TCP 443), which a
+`DefaultAction: deny` opt-in would otherwise block. Denies and blocklists still win; see
 [`../../packaging/README.md`](../../packaging/README.md#the-packaged-fetch-rule).
 After the first boot, confirm that
 `sudo grep 'Error compiling list rule' /var/log/opensnitchd.log` (the shipped config sets `LogFile: /var/log/opensnitchd.log`, so the journal won't show it) finds nothing for it. Enable the two `.socket` units in the image/preset; do not
@@ -123,8 +123,9 @@ The overlay also stages the daemon's config and its drop-in, as one artifact
 with the socket they dial (PR #166 H1):
 
 - `/etc/opensnitchd/default-config.json` (source:
-  `packaging/system/opensnitchd-default-config.json`): `DefaultAction: deny`
-  and `Server.Address: unix:opensnitchd.sock`. It replaces the bluebuild
+  `packaging/system/opensnitchd-default-config.json`): `DefaultAction: allow`
+  (owner decision 2026-10-25; `deny` is an operator opt-in) and
+  `Server.Address: unix:opensnitchd.sock`. It replaces the bluebuild
   recipe's own per-user TCP config, so copy the staged tree into the
   image after the recipe's `files` module.
 - `/usr/lib/systemd/system/opensnitch.service.d/snitchwatch-system-bridge.conf`
@@ -150,13 +151,15 @@ if the daemon connects through it, switch the config to it, so the address
 no longer depends on the drop-in's working directory. Either way, verify the
 daemon connects before rolling the image out.
 
-### Fail closed, and console recovery
+### Missing socket, and console recovery
 
 `Wants=` (not `Requires=`) and the `-` on `WorkingDirectory` are deliberate
 (owner decision 2026-10-16): if the socket or `/run/snitchwatch` is missing,
-`opensnitch.service` still starts, has no UI to dial, and applies
-`DefaultAction: deny`. Nothing is let through, and nothing outside the rules
-gets out either, so the desktop may have no network until the bridge is back.
+`opensnitch.service` still starts, has no UI to dial, and applies its
+`DefaultAction`. As shipped that is `allow`, so unmatched traffic keeps
+flowing. If you opted into `deny`, nothing outside the rules gets out, so the
+desktop may have no network until the bridge is back, and the recovery steps
+below apply.
 The bridge can't report this itself: without its socket it isn't running,
 so neither the GUI nor its diagnostics can see it. From a console (a VT
 login works without network), in this order:

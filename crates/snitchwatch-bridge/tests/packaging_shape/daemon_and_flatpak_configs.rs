@@ -1,33 +1,35 @@
 use super::*;
 
-/// #35 / PR #166 H1: the system overlay's config fails CLOSED and dials the
-/// system bridge's root-only socket, relative to the daemon's working
-/// directory (/run/snitchwatch, set by the drop-in stage.sh stages with it).
+/// #35 / PR #166 H1: the system overlay's config dials the system bridge's
+/// root-only socket, relative to the daemon's working directory
+/// (/run/snitchwatch, set by the drop-in stage.sh stages with it).
 /// (Whether OpenSnitch 1.8.0 accepts the absolute unix:/// form is
 /// unverified; see docs/packaging/system-bridge-integration.md.)
+/// Owner decision 2026-10-25: the packaged default is `allow` (approve all);
+/// deny enforcement is an explicit operator opt-in. A deny default with no
+/// decision client answering locked the r15 system out of the network.
 #[test]
-fn system_overlay_config_fails_closed_on_the_bridge_socket() {
+fn system_overlay_config_defaults_to_allow_on_the_bridge_socket() {
     let json = daemon_config("packaging/system/opensnitchd-default-config.json");
     assert_eq!(
-        json["DefaultAction"], "deny",
-        "the system overlay's daemon config must fail CLOSED, not inherit \
-         upstream's fail-open `allow`"
+        json["DefaultAction"], "allow",
+        "the system overlay's daemon config must default to `allow`; deny is \
+         an operator opt-in, not a packaged default"
     );
     assert_eq!(json["Server"]["Address"], "unix:opensnitchd.sock");
 }
 
 /// PR #166 H1: the recipe's own `files` module ships without the overlay,
-/// so its config must not dial the socket (a `deny` daemon with nothing to
-/// dial locks the network out). It keeps the per-user bridge's TCP address
-/// and, per settled decision 5, `deny`: it still blocks unknown traffic
-/// while no squatter holds the port; the squatter case (#35) is what the
-/// system overlay's socket fixes.
+/// so its config must not dial the socket. It keeps the per-user bridge's
+/// TCP address and, like the overlay, defaults to `allow` (owner decision
+/// 2026-10-25); the squatter case (#35) is what the system overlay's socket
+/// fixes.
 #[test]
-fn recipe_config_fails_closed_on_the_per_user_tcp_bind() {
+fn recipe_config_defaults_to_allow_on_the_per_user_tcp_bind() {
     let json =
         daemon_config("packaging/bluebuild/files/system/etc/opensnitchd/default-config.json");
     assert_eq!(json["Server"]["Address"], "127.0.0.1:50051");
-    assert_eq!(json["DefaultAction"], "deny");
+    assert_eq!(json["DefaultAction"], "allow");
 }
 
 /// The two daemon configs differ only in where the daemon dials: the

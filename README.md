@@ -408,21 +408,23 @@ snippet and smoke-test assertions:
 [`docs/packaging/bridge-release-artifact.md`](docs/packaging/bridge-release-artifact.md).
 Build one locally with `just release-bridge` (podman).
 
-### Fail-closed by default
+### Default action: `allow` (deny is an opt-in)
 
-Upstream OpenSnitch ships `DefaultAction: allow`, so the daemon silently
-**allows** all traffic whenever no UI client is connected. Snitchwatch's
-system-bridge overlay overrides this with `DefaultAction: deny`
-([`packaging/system/opensnitchd-default-config.json`](packaging/system/opensnitchd-default-config.json)):
-a firewall whose whole premise is "ask before allowing" should fail **closed**
-when its decision channel is down. That is only safe on the system bridge's
-root-only Unix socket, which that config dials (`unix:opensnitchd.sock`), so
-it ships only with that socket. The per-user bridge's config keeps `deny`
-too, but its TCP port is not deny-safe (#35): a process that binds it first
-answers for the daemon. The bridge runs as its
-own service precisely so that *closing the GUI window* is not mistaken for
-*the decision channel being down* — the daemon only reaches its deny default
-on a genuine bridge outage.
+Both packaged daemon configs ship `DefaultAction: allow`, as upstream OpenSnitch
+does ([`packaging/system/opensnitchd-default-config.json`](packaging/system/opensnitchd-default-config.json)
+for the system bridge, and the bluebuild recipe's per-user config). Owner
+decision 2026-10-25: the r15 images shipped `deny`, and with no decision client
+answering, a deny default blocks every new outbound connection that no rule
+covers, which left the system unusable. Prompts and rules still apply; `allow`
+only decides connections that no rule matched while nobody answers.
+
+Deny enforcement is an explicit operator opt-in: set `DefaultAction` to `deny`
+in `/etc/opensnitchd/default-config.json` yourself, and keep a rollback path
+first. Do that only with the system bridge's root-only Unix socket
+(`unix:opensnitchd.sock`). The per-user bridge's TCP port is not deny-safe
+(#35): a process that binds it first answers for the daemon. The bridge runs as
+its own service so that *closing the GUI window* is not mistaken for *the
+decision channel being down*.
 
 ### Coexistence with upstream `opensnitch-ui`
 
