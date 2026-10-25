@@ -6,7 +6,7 @@ Documentation=https://github.com/bearyjd/snitchwatch
 # connected; if the bridge only ran while the GUI window was open, closing
 # the window would silently take the AskRule decision channel down. Running
 # the bridge as its own user service keeps that channel up regardless of
-# whether the GUI is open, so the daemon's fail-closed default is only ever
+# whether the GUI is open, so the daemon's DefaultAction is only ever
 # reached on a genuine bridge outage, not on "user closed the window".
 After=graphical-session.target
 # Once this unit is enabled globally (`systemctl --global enable`, as an image

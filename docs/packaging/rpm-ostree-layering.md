@@ -11,14 +11,15 @@ ready-to-boot, signed image with the daemon already baked in, use the
 Neither path is "unsupported"; they are two supported shapes of the same
 install, trading image immutability for convenience.
 
-> **Not deny-safe (#35, owner decision 2026-10-16).** This page's per-user
+> **Not deny-safe (#35, owner decision 2026-10-16).** `allow` is the shipped
+> default (owner decision 2026-10-25); `deny` is an operator opt-in. This page's per-user
 > bridge serves the root daemon on TCP. TCP `127.0.0.1:50051` isn't
 > protected against port squatting under either `DefaultAction` (#35): any local process that binds the port while no bridge
 > holds it (before login, between restarts, a second user) gets the root
-> daemon's UI authority, including config changes the daemon saves. `deny` is
-> the shipped default (settled decision 5). `allow` avoids a network lockout
-> before the per-user bridge starts at login, at the cost of failing open
-> whenever no bridge is connected. Protection against squatting needs the
+> daemon's UI authority, including config changes the daemon saves. `allow`
+> avoids a network lockout before the per-user bridge starts at login, at the
+> cost of failing open whenever no bridge is connected; opting into `deny`
+> makes that lockout possible. Protection against squatting needs the
 > system flavour's root-only Unix socket: see
 > [system-bridge-integration.md](system-bridge-integration.md) (the
 > batteries-included image adds it with the system-bridge overlay).
@@ -68,12 +69,12 @@ rpm-ostree status --json | jq '.deployments[0]."requested-packages"'
 ## 2. Ship the daemon config
 
 Stock OpenSnitch ships `DefaultAction: allow`, which means that **whenever no
-UI is connected, the daemon silently allows all traffic** — the exact
-fail-open behavior a firewall product should not have. Snitchwatch overrides
-it with `deny` and points the daemon at the per-user bridge's default gRPC
+UI is connected, the daemon allows traffic no rule matched**. Snitchwatch keeps
+that default (owner decision 2026-10-25: a `deny` default locked the r15 system
+out of the network) and points the daemon at the per-user bridge's default gRPC
 bind (not deny-safe against a process that binds that port first, #35).
 
-Install the per-user flavour's config (`127.0.0.1:50051`, `deny`; the
+Install the per-user flavour's config (`127.0.0.1:50051`, `allow`; the
 system flavour's config, on the root-only socket, is `packaging/system/` and
 only ships with that socket):
 
@@ -87,7 +88,7 @@ The two fields that matter:
 
 | Field            | Upstream default        | System overlay (image)   | This TCP path       | Why |
 | ---------------- | ----------------------- | ------------------------ | ------------------- | --- |
-| `DefaultAction`  | `allow`                 | `deny`                   | `deny`              | Fail **closed** when the decision channel (bridge/GUI) is down. |
+| `DefaultAction`  | `allow`                 | `allow`                  | `allow`             | Approve unmatched connections when nobody answers; `deny` is an operator opt-in. |
 | `Server.Address` | `unix:///tmp/osui.sock` | `unix:opensnitchd.sock`  | `127.0.0.1:50051`   | Dial the bridge: the root-only socket, or the per-user bridge's TCP bind. |
 
 > `/etc` is writable on an rpm-ostree system (it is part of the writable
@@ -187,8 +188,8 @@ permission needed or granted.
 Confirm the whole chain, including the fail-open fix:
 
 ```bash
-# Daemon up, dialing the per-user bridge; deny as shipped, or allow if you
-# chose it (see the note at the top):
+# Daemon up, dialing the per-user bridge; allow as shipped, or deny if you
+# opted in (see the note at the top):
 systemctl is-active opensnitch.service
 jq -e '.Server.Address == "127.0.0.1:50051" and (.DefaultAction == "deny" or .DefaultAction == "allow")' \
   /etc/opensnitchd/default-config.json
@@ -205,7 +206,7 @@ TOKEN=$(cat "$XDG_RUNTIME_DIR/snitchwatch/token")
 
 Closing the GUI window must NOT stop `snitchwatch-bridge.service`; the daemon
 therefore keeps its interactive AskRule channel and only ever falls back to
-`DefaultAction: deny` on a genuine bridge outage.
+its `DefaultAction` (`allow` as shipped) on a genuine bridge outage.
 
 ---
 

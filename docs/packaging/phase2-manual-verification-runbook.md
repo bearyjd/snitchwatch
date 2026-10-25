@@ -43,11 +43,11 @@ bluebuild build packaging/bluebuild/recipe.yml
 
 **Pass condition:** the image builds without error and produces an OCI
 image with `opensnitchd` installed and enabled by default, plus the
-recipe's `/etc/opensnitchd/default-config.json` (`DefaultAction: deny`,
+recipe's `/etc/opensnitchd/default-config.json` (`DefaultAction: allow`,
 `Server.Address: 127.0.0.1:50051`, the per-user flavour's, from
 `packaging/bluebuild/files/system/etc/opensnitchd/default-config.json`). The
 r15 image stages the system overlay on top, which replaces it with
-`DefaultAction: deny` and `unix:opensnitchd.sock` (#35); verify that image
+`DefaultAction: allow` and `unix:opensnitchd.sock` (#35); verify that image
 per `system-bridge-integration.md`.
 
 **Verify the baked config actually landed**, don't just trust the recipe:
@@ -162,9 +162,9 @@ sudo podman run -d --name opensnitchd-dev \
                   -rules-path /etc/opensnitchd/rules'
 ```
 
-For an unattended run, consider `DefaultAction: allow` in the copied config
-so an unanswered prompt can never block live traffic; the shipped deny
-default is Step 1's image concern, not this step's dial-in concern.
+The shipped `DefaultAction: allow` means an unanswered prompt never blocks
+live traffic; if you opted into `deny` for this run, switch it back to `allow`
+for an unattended run.
 
 **False-DaemonDown caveat (issue #5) — fixed:** a healthy idle daemon sends
 no `Ping` RPCs (upstream only pings when new stats events exist). The bridge
@@ -213,8 +213,8 @@ curl -sS --max-time 2 https://some-new-unclassified-host.example > /dev/null &
 ```
 
 **Pass condition:** the pending `AskRule` still round-trips over `websocat`
-with **no GUI process running at all** — proving `opensnitchd`'s fail-closed
-default (`DefaultAction: deny`) is only reached on a genuine bridge outage,
+with **no GUI process running at all** — proving `opensnitchd`'s
+`DefaultAction` fallback is only reached on a genuine bridge outage,
 not merely because the GUI window was closed. This is the specific
 regression Phase 2 exists to prevent (see the plan doc's "fail-open stance"
 section and the systemd unit's own header comment).

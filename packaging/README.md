@@ -38,24 +38,25 @@ internet access rather than scoped loopback. See
 - **Lightweight / DIY** — layer `opensnitchd` onto stock Bazzite with
   `rpm-ostree`: [`../docs/packaging/rpm-ostree-layering.md`](../docs/packaging/rpm-ostree-layering.md).
 
-The r15 image's fail-**closed** daemon config
+The system overlay's daemon config
 ([`system/opensnitchd-default-config.json`](system/opensnitchd-default-config.json)):
-`DefaultAction: deny` and `Server.Address: unix:opensnitchd.sock`, the
+`DefaultAction: allow` (owner decision 2026-10-25; `deny` is an operator
+opt-in) and `Server.Address: unix:opensnitchd.sock`, the
 system bridge's root-only socket (#35). Only `system/stage.sh` installs it,
 together with the `opensnitch.service` drop-in the relative address relies
 on and the socket it dials: one artifact (PR #166 H1); see
 [`../docs/packaging/system-bridge-integration.md`](../docs/packaging/system-bridge-integration.md).
 The recipe's own copy
 ([`bluebuild/files/system/etc/opensnitchd/default-config.json`](bluebuild/files/system/etc/opensnitchd/default-config.json))
-is the per-user flavour's: `127.0.0.1:50051` with `DefaultAction: deny`.
-That TCP port is **not deny-safe**: any local process that binds it first
+is the per-user flavour's: `127.0.0.1:50051` with `DefaultAction: allow`.
+That TCP port is **not squat-safe**: any local process that binds it first
 gets the daemon's UI authority, whatever the default. The staged overlay
 replaces it in the image.
 
 ## The packaged fetch rule
 
-With `DefaultAction: deny` and no GUI attached, the daemon would deny the
-system bridge's own blocklist downloads. Snitchwatch therefore ships exactly
+Under a `DefaultAction: deny` opt-in with no GUI attached, the daemon would
+deny the system bridge's own blocklist downloads. Snitchwatch therefore ships exactly
 one opensnitchd rule (owner decision, 2026-10-08):
 [`bluebuild/files/system/etc/opensnitchd/rules/000-snitchwatch-bridge-fetch.json`](bluebuild/files/system/etc/opensnitchd/rules/000-snitchwatch-bridge-fetch.json).
 
@@ -111,7 +112,7 @@ packaging/
 ├── bluebuild/
 │   ├── recipe.yml                                  # batteries-included image recipe
 │   └── files/system/etc/opensnitchd/
-│       ├── default-config.json                     # per-user flavour's daemon config (TCP, deny)
+│       ├── default-config.json                     # per-user flavour's daemon config (TCP, allow)
 │       └── rules/000-snitchwatch-bridge-fetch.json # the one shipped allow rule (canonical)
 ├── flatpak/
 │   ├── org.snitchwatch.Snitchwatch.yml             # GUI-only Flatpak manifest (no --share=network)

@@ -30,7 +30,7 @@ install -Dm644 "$script_dir/snitchwatch-system-bridge-grpc.socket" \
 install -Dm644 "$script_dir/snitchwatch-system-bridge-gui.socket" \
   "$dest/usr/lib/systemd/system/snitchwatch-system-bridge-gui.socket"
 # The daemon dials the grpc socket above (`Server.Address:
-# unix:opensnitchd.sock`, `DefaultAction: deny`, #35). Its config and its
+# unix:opensnitchd.sock`, `DefaultAction: allow`, #35). Its config and its
 # drop-in ship only here, with that socket: one artifact (PR #166 H1). This
 # config replaces the bluebuild recipe's own TCP one, so the overlay
 # is copied into the image after the recipe's files module.
@@ -41,7 +41,7 @@ install -Dm644 "$script_dir/opensnitchd-default-config.json" \
 install -Dm644 "$script_dir/snitchwatch.conf" "$dest/usr/lib/tmpfiles.d/snitchwatch.conf"
 install -Dm644 "$script_dir/snitchwatch.conf.sysusers" "$dest/usr/lib/sysusers.d/snitchwatch.conf"
 # The one opensnitchd rule Snitchwatch ships: this account's bridge may make
-# HTTPS connections, so blocklist downloads work under DefaultAction: deny.
+# HTTPS connections, so blocklist downloads also work under a deny opt-in.
 # Same file as the bluebuild image's (docs/superpowers/plans/
 # 2026-10-08-packaged-bridge-fetch-rule.md).
 fetch_rule=000-snitchwatch-bridge-fetch.json

@@ -167,10 +167,10 @@ after real back-and-forth. Read the source doc before proposing a change.
    This is a large, still-in-progress rewrite (`docs/superpowers/plans/
    2026-07-04-kirigami-shell-rewrite.md`); the Tauri crate remains in the
    tree during the migration, not as the long-term target.
-5. **opensnitchd's shipped default is fail-open (`DefaultAction: allow`)**,
-   confirmed from `vendor/opensnitch/daemon/data/default-config.json:18`.
-   Snitchwatch's own shipped config must override this to `deny` — don't
-   assume the vendored default is what ships.
+5. **Snitchwatch ships `DefaultAction: allow`** (owner decision 2026-10-25),
+   the same as `vendor/opensnitch/daemon/data/default-config.json:18`. The r15
+   `deny` default left the system unusable when no decision client answered.
+   Deny is an explicit operator opt-in, never a packaged default.
 6. **Component B's atomic-baseline problem** is solved by delegating to
    `rpm-ostree status/db diff`, `rpm -V`, and OSTree's content-addressed
    store (not reimplemented manifest diffing), via a 5-step classification

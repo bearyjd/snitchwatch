@@ -272,12 +272,12 @@ mod tests {
 
     const VENDOR_DEFAULT: &str =
         include_str!("../../../vendor/opensnitch/daemon/data/default-config.json");
-    /// The system overlay's fail-closed config (PR #166 H1).
+    /// The system overlay's packaged config (PR #166 H1); defaults to `allow`.
     const PACKAGED: &str =
         include_str!("../../../packaging/system/opensnitchd-default-config.json");
 
     #[test]
-    fn the_vendor_default_config_allows_and_the_packaged_one_denies() {
+    fn the_vendor_default_config_and_the_packaged_one_both_allow() {
         assert_eq!(
             DaemonConfigView::parse(VENDOR_DEFAULT),
             DaemonConfigView {
@@ -287,8 +287,8 @@ mod tests {
             }
         );
         let packaged = DaemonConfigView::parse(PACKAGED);
-        assert_eq!(packaged.default_action.as_deref(), Some("deny"));
-        assert_eq!(packaged.default_row_action(), Some("deny"));
+        assert_eq!(packaged.default_action.as_deref(), Some("allow"));
+        assert_eq!(packaged.default_row_action(), Some("allow"));
     }
 
     #[test]
@@ -404,7 +404,7 @@ mod tests {
         assert_eq!(shared.get(), None);
         assert_eq!(shared.default_row_action(), None);
         shared.set(DaemonConfigView::parse(PACKAGED));
-        assert_eq!(shared.default_row_action(), Some("deny"));
+        assert_eq!(shared.default_row_action(), Some("allow"));
         assert_eq!(shared.clone().get().unwrap().max_events, Some(250));
     }
 }
