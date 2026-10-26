@@ -9,9 +9,13 @@ use cxx_qt_lib::{QDateTime, QTime};
 use super::*;
 use crate::connections::grouping::{Clock, GroupCounts};
 
-/// Now, and the local midnight that starts today, in local time (the C
-/// library's, as QML's `Date` reads it), so a DST change moves midnight
-/// correctly.
+/// Now, and the local midnight that starts today, in local time, so a DST
+/// change moves midnight correctly. Qt's local time is the C library's
+/// (`TZ`, else the contents of `/etc/localtime`, symlink or not), the same
+/// source QML's `Date` and `Qt.formatTime` use for every other local time the
+/// Connections page shows. Not `QTimeZone::systemTimeZone()`: it needs an
+/// IANA id and fell back to UTC in a sandbox whose `/etc/localtime` is a
+/// plain file (the connections_verdict_counts_qml probe checks the two agree).
 pub(super) fn local_clock() -> Clock {
     let mut midnight = QDateTime::current_date_time();
     let now_ms = midnight.to_msecs_since_epoch();

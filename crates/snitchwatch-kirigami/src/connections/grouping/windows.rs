@@ -2,17 +2,26 @@
 //!
 //! Every group keeps sparse one-minute buckets for the hour and one total for
 //! the local day, both updated as rows are inserted, updated and removed, so
-//! the coarse tick never rescans rows: it only re-reads at most 60 buckets per
-//! header on screen ([`GroupTree::refresh_window_figures`]). Buckets that fell
-//! out of the hour are skipped on read and pruned on the next write; the day
-//! total starts again on the first read or write after local midnight.
+//! the coarse tick never rescans rows: it only re-reads a header's buckets
+//! ([`GroupTree::refresh_window_figures`]). Buckets that fell out of the hour
+//! are skipped on read and pruned on the next write; the day total starts
+//! again after local midnight.
+//!
+//! A start in a later minute than now (clock skew) counts in neither window
+//! until its minute comes: it waits in a separate bucket list, at most
+//! [`FUTURE_MINUTES`] ahead. A start further out is not bucketed at all; the
+//! tree rebuilds every group's windows from its rows once one comes within
+//! reach. It also rebuilds when the clock goes back, or when today's start
+//! moves without the clock passing it (a time zone change), since buckets
+//! already pruned can't be restored any other way. Each rebuild reads every
+//! row once and is rare; steady forward time never does it.
 //!
 //! A row is placed by its own `started_at_ms`, so a row standing for collapsed
 //! repeats counts once, at its first start. "By default" means the firewall's
 //! default action decided the row: `decided_by_default`, or a decided row with
 //! no matched rule (a user's answer always records its once-off rule).
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 
 use snitchwatch_bridge::ws_messages::ConnectionRow;
 
@@ -21,7 +30,9 @@ use super::{GroupCounts, GroupTree, VisibleEntry};
 
 const MINUTE_MS: i64 = 60_000;
 /// Minutes in the "last hour" window, the current one included.
-const HOUR_MINUTES: i64 = 60;
+pub(super) const HOUR_MINUTES: i64 = 60;
+/// How far ahead of now a skewed start is kept in buckets.
+pub(super) const FUTURE_MINUTES: i64 = 24 * 60;
 
 /// The time the windows are read against.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -163,10 +174,21 @@ fn minute_of(ms: i64) -> i64 {
 #[derive(Debug, Default)]
 pub(super) struct GroupStats {
     pub counts: GroupCounts,
-    /// Sorted by minute; only minutes inside the hour are written.
+    /// The clock the buckets below are up to date with.
+    seen: Clock,
+    /// Sorted by minute; only minutes inside the hour, up to `seen`'s.
     minutes: VecDeque<(i64, WindowCounts)>,
-    /// The day these counts belong to (its local midnight) and the counts.
-    day: (i64, WindowCounts),
+    /// Starts from `seen`'s today, up to `seen`'s minute.
+    day: WindowCounts,
+    /// Starts after `seen`'s minute, at most [`FUTURE_MINUTES`] ahead.
+    future: BTreeMap<i64, WindowCounts>,
+}
+
+fn bump_bucket(buckets: &mut VecDeque<(i64, WindowCounts)>, minute: i64, c: WindowCounts) {
+    match buckets.binary_search_by_key(&minute, |(m, _)| *m) {
+        Ok(i) => buckets[i].1 = buckets[i].1.plus(c),
+        Err(i) => buckets.insert(i, (minute, c)),
+    }
 }
 
 impl GroupStats {
@@ -182,13 +204,60 @@ impl GroupStats {
         self.tally(facts, clock, false);
     }
 
-    fn tally(&mut self, facts: &RowFacts, clock: &Clock, up: bool) {
-        let floor = minute_of(clock.now_ms) - (HOUR_MINUTES - 1);
+    /// Forget the windows (not the totals), as of `clock`.
+    pub(super) fn reset_windows(&mut self, clock: &Clock) {
+        self.seen = *clock;
+        self.minutes.clear();
+        self.day = WindowCounts::default();
+        self.future.clear();
+    }
+
+    /// Move the buckets forward to `clock` (the tree rebuilds instead of
+    /// calling this when time went back): promote future minutes that came,
+    /// prune the hour, and start the day again after midnight.
+    fn catch_up(&mut self, clock: &Clock) {
+        if self.seen == *clock {
+            return;
+        }
+        let now_minute = minute_of(clock.now_ms);
+        let floor = now_minute - (HOUR_MINUTES - 1);
+        let day_minute = minute_of(clock.today_start_ms);
+        if self.seen.today_start_ms != clock.today_start_ms {
+            self.day = WindowCounts::default();
+        }
+        while let Some(entry) = self.future.first_entry() {
+            if *entry.key() > now_minute {
+                break;
+            }
+            let (minute, c) = entry.remove_entry();
+            if minute >= floor {
+                bump_bucket(&mut self.minutes, minute, c);
+            }
+            if minute >= day_minute {
+                self.day = self.day.plus(c);
+            }
+        }
         while self.minutes.front().is_some_and(|(m, _)| *m < floor) {
             self.minutes.pop_front();
         }
+        self.seen = *clock;
+    }
+
+    pub(super) fn tally(&mut self, facts: &RowFacts, clock: &Clock, up: bool) {
+        self.catch_up(clock);
+        let now_minute = minute_of(clock.now_ms);
         let minute = minute_of(facts.started_at_ms);
-        if minute >= floor {
+        if minute > now_minute {
+            if minute <= now_minute + FUTURE_MINUTES {
+                let c = self.future.entry(minute).or_default();
+                c.bump(facts, up);
+                if *c == WindowCounts::default() {
+                    self.future.remove(&minute);
+                }
+            }
+            return;
+        }
+        if minute >= now_minute - (HOUR_MINUTES - 1) {
             match self.minutes.binary_search_by_key(&minute, |(m, _)| *m) {
                 Ok(i) => {
                     self.minutes[i].1.bump(facts, up);
@@ -204,27 +273,37 @@ impl GroupStats {
                 Err(_) => {}
             }
         }
-        if self.day.0 != clock.today_start_ms {
-            self.day = (clock.today_start_ms, WindowCounts::default());
-        }
         if facts.started_at_ms >= clock.today_start_ms {
-            self.day.1.bump(facts, up);
+            self.day.bump(facts, up);
         }
     }
 
-    /// Both windows as of `clock`.
+    /// Both windows as of `clock`, which is never behind `seen` (see
+    /// [`catch_up`](Self::catch_up)); reads only, so a tick needs no write.
     pub(super) fn figures(&self, clock: &Clock) -> WindowFigures {
-        let floor = minute_of(clock.now_ms) - (HOUR_MINUTES - 1);
+        let now_minute = minute_of(clock.now_ms);
+        let floor = now_minute - (HOUR_MINUTES - 1);
+        let day_minute = minute_of(clock.today_start_ms);
+        let came = self.future.range(..=now_minute);
         let last_hour = self
             .minutes
             .iter()
+            .chain(
+                came.clone()
+                    .map(|(m, c)| (*m, *c))
+                    .collect::<Vec<_>>()
+                    .iter(),
+            )
             .filter(|(m, _)| *m >= floor)
             .fold(WindowCounts::default(), |acc, (_, c)| acc.plus(*c));
-        let today = if self.day.0 == clock.today_start_ms {
-            self.day.1
+        let day = if self.seen.today_start_ms == clock.today_start_ms {
+            self.day
         } else {
             WindowCounts::default()
         };
+        let today = came
+            .filter(|(m, _)| **m >= day_minute)
+            .fold(day, |acc, (_, c)| acc.plus(*c));
         WindowFigures { last_hour, today }
     }
 
@@ -235,12 +314,84 @@ impl GroupStats {
             ..self.counts
         }
     }
+
+    #[cfg(test)]
+    pub(super) fn buckets(&self) -> usize {
+        self.minutes.len() + self.future.len()
+    }
 }
 
 impl GroupTree {
     /// Set the time later writes and projections read the windows against.
+    /// Rebuilds every group's windows from its rows when time went back,
+    /// when today's start moved without the clock passing it, or when a
+    /// start beyond the future buckets' reach came within it.
     pub fn set_clock(&mut self, clock: Clock) {
+        let old = self.clock;
+        let midnight_passed =
+            clock.today_start_ms > old.today_start_ms && clock.today_start_ms > old.now_ms;
+        let moved_midnight = clock.today_start_ms != old.today_start_ms && !midnight_passed;
+        let far_due = self
+            .far_future_minute
+            .is_some_and(|m| m <= minute_of(clock.now_ms) + FUTURE_MINUTES);
         self.clock = clock;
+        if clock.now_ms < old.now_ms || moved_midnight || far_due {
+            self.rebuild_windows();
+        }
+    }
+
+    /// Remember a start too far ahead to bucket, so [`set_clock`] rebuilds
+    /// once it comes within reach.
+    pub(super) fn note_far_future(&mut self, facts: &RowFacts) {
+        let minute = minute_of(facts.started_at_ms);
+        if minute > minute_of(self.clock.now_ms) + FUTURE_MINUTES {
+            self.far_future_minute = Some(self.far_future_minute.map_or(minute, |m| m.min(minute)));
+        }
+    }
+
+    /// Recount every group's windows from the rows' kept facts.
+    fn rebuild_windows(&mut self) {
+        let clock = self.clock;
+        for pg in self.processes.values_mut() {
+            pg.stats.reset_windows(&clock);
+            for dg in pg.domains.values_mut() {
+                dg.stats.reset_windows(&clock);
+                for hg in dg.hosts.values_mut() {
+                    hg.stats.reset_windows(&clock);
+                }
+            }
+        }
+        self.far_future_minute = None;
+        let metas: Vec<_> = self.id_meta.values().cloned().collect();
+        for meta in metas {
+            self.note_far_future(&meta.facts);
+            let Some(pg) = self.processes.get_mut(&meta.process_key) else {
+                continue;
+            };
+            pg.stats.tally(&meta.facts, &clock, true);
+            let Some(dg) = pg.domains.get_mut(&meta.domain_key) else {
+                continue;
+            };
+            dg.stats.tally(&meta.facts, &clock, true);
+            if let Some(hg) = dg.hosts.get_mut(&meta.host_key) {
+                hg.stats.tally(&meta.facts, &clock, true);
+            }
+        }
+    }
+
+    /// The most buckets any group holds (test helper for the bound).
+    #[cfg(test)]
+    pub(super) fn max_window_buckets(&self) -> usize {
+        self.processes
+            .values()
+            .flat_map(|p| {
+                std::iter::once(p.stats.buckets()).chain(p.domains.values().flat_map(|d| {
+                    std::iter::once(d.stats.buckets())
+                        .chain(d.hosts.values().map(|h| h.stats.buckets()))
+                }))
+            })
+            .max()
+            .unwrap_or(0)
     }
 
     /// Re-read the windows of every header in `projection` as of the current

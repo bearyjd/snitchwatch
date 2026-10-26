@@ -314,3 +314,164 @@ fn window_text_names_every_verdict_in_words() {
         "Today: no connections"
     );
 }
+
+// --- clock skew, rollback and day-boundary changes (#228 review) -----
+
+fn replayed(clock: Clock, rows: &[ConnectionRow]) -> Vec<VisibleEntry> {
+    let mut tree = GroupTree::new();
+    tree.set_clock(clock);
+    for r in rows {
+        tree.upsert_row(r);
+    }
+    projection(&tree, rows)
+}
+
+#[test]
+fn a_future_start_counts_only_once_its_minute_comes() {
+    let mut tree = tree_at(T0);
+    let rows = vec![at(
+        row("f", "p", "a.example", "", None),
+        T0 + 2 * HOUR,
+        None,
+    )];
+    tree.upsert_row(&rows[0]);
+    let mut proj = projection(&tree, &rows);
+    assert_eq!(process_windows(&proj, "p"), WindowFigures::default());
+
+    tree.set_clock(clock(T0 + 2 * HOUR + MIN));
+    assert_eq!(tree.refresh_window_figures(&mut proj).len(), 1);
+    let w = process_windows(&proj, "p");
+    assert_eq!((w.last_hour.pending, w.today.pending), (1, 1));
+    assert_eq!(proj, projection(&tree, &rows), "tick agrees with a rebuild");
+
+    tree.set_clock(clock(T0 + 3 * HOUR + 2 * MIN));
+    tree.refresh_window_figures(&mut proj);
+    let w = process_windows(&proj, "p");
+    assert_eq!((w.last_hour.pending, w.today.pending), (0, 1));
+    tree.remove_row("f");
+    assert!(projection(&tree, &[]).is_empty());
+}
+
+#[test]
+fn a_start_skewed_past_midnight_counts_on_the_day_it_falls_on() {
+    let late = DAY + 24 * HOUR - 10 * MIN;
+    let mut tree = GroupTree::new();
+    tree.set_clock(Clock {
+        now_ms: late,
+        today_start_ms: DAY,
+    });
+    let rows = vec![at(
+        row("s", "p", "a.example", "", None),
+        DAY + 24 * HOUR + 2 * MIN,
+        None,
+    )];
+    tree.upsert_row(&rows[0]);
+    let mut proj = projection(&tree, &rows);
+    assert_eq!(process_windows(&proj, "p"), WindowFigures::default());
+
+    let next = Clock {
+        now_ms: DAY + 24 * HOUR + 5 * MIN,
+        today_start_ms: DAY + 24 * HOUR,
+    };
+    tree.set_clock(next);
+    tree.refresh_window_figures(&mut proj);
+    let w = process_windows(&proj, "p");
+    assert_eq!((w.last_hour.pending, w.today.pending), (1, 1));
+    assert_eq!(proj, replayed(next, &rows));
+}
+
+#[test]
+fn far_future_starts_keep_the_buckets_bounded_and_still_count_later() {
+    let mut tree = tree_at(T0);
+    let step = 30 * MIN;
+    let rows: Vec<ConnectionRow> = (1..=2000)
+        .map(|k| {
+            at(
+                row(&format!("f{k}"), "p", "a.example", "", None),
+                T0 + k * step,
+                None,
+            )
+        })
+        .collect();
+    for r in &rows {
+        tree.upsert_row(r);
+    }
+    let bound = (windows::HOUR_MINUTES + windows::FUTURE_MINUTES) as usize;
+    assert!(
+        tree.max_window_buckets() <= bound,
+        "{} buckets, bound {bound}",
+        tree.max_window_buckets()
+    );
+    // Long after: f1000 started 10 minutes ago, f999 40 minutes ago.
+    let later = Clock {
+        now_ms: T0 + 1000 * step + 10 * MIN,
+        today_start_ms: T0 + 1000 * step + 10 * MIN - 5 * HOUR,
+    };
+    tree.set_clock(later);
+    let proj = projection(&tree, &rows);
+    let w = process_windows(&proj, "p");
+    assert_eq!((w.last_hour.pending, w.today.pending), (2, 10));
+    assert_eq!(proj, replayed(later, &rows));
+}
+
+#[test]
+fn a_clock_set_back_rebuilds_the_windows_from_the_rows() {
+    let mut tree = tree_at(T0);
+    let a = at(row("a", "p", "a.example", "", Some("allow")), T0, Some("r"));
+    tree.upsert_row(&a);
+    tree.set_clock(clock(T0 + 90 * MIN));
+    let b = at(
+        row("b", "p", "a.example", "", Some("deny")),
+        T0 + 90 * MIN,
+        None,
+    );
+    tree.upsert_row(&b);
+    let rows = vec![a, b];
+    assert_eq!(hour(&tree, &rows, "p").allowed_by_rule, 0, "A aged out");
+
+    let back = clock(T0 + 30 * MIN);
+    tree.set_clock(back);
+    let mut proj = projection(&tree, &rows);
+    let w = process_windows(&proj, "p");
+    assert_eq!(w.last_hour.allowed_by_rule, 1, "A is back in the hour");
+    assert_eq!(w.last_hour.denied_by_default, 0, "B has not started yet");
+    assert_eq!(proj, replayed(back, &rows));
+
+    // The tick path sees the same figures.
+    tree.set_clock(clock(T0 + 90 * MIN));
+    tree.refresh_window_figures(&mut proj);
+    tree.set_clock(back);
+    tree.refresh_window_figures(&mut proj);
+    assert_eq!(proj, replayed(back, &rows));
+}
+
+#[test]
+fn a_moved_midnight_rebuilds_today_from_the_rows() {
+    let mut tree = tree_at(T0);
+    let rows = vec![
+        at(
+            row("early", "p", "a.example", "", None),
+            DAY + 30 * MIN,
+            None,
+        ),
+        at(row("late", "p", "a.example", "", None), T0, None),
+    ];
+    for r in &rows {
+        tree.upsert_row(r);
+    }
+    assert_eq!(
+        process_windows(&projection(&tree, &rows), "p")
+            .today
+            .pending,
+        2
+    );
+    // A time zone change moves today's start an hour later, same instant.
+    let moved = Clock {
+        now_ms: T0,
+        today_start_ms: DAY + HOUR,
+    };
+    tree.set_clock(moved);
+    let proj = projection(&tree, &rows);
+    assert_eq!(process_windows(&proj, "p").today.pending, 1);
+    assert_eq!(proj, replayed(moved, &rows));
+}

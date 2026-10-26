@@ -161,6 +161,8 @@ pub struct GroupTree {
     expanded_hosts: HashSet<String>,
     /// What the window figures are read against (`windows::Clock`).
     clock: Clock,
+    /// Earliest start too far ahead to bucket (`windows::note_far_future`).
+    far_future_minute: Option<i64>,
 }
 
 impl GroupTree {
@@ -187,6 +189,7 @@ impl GroupTree {
     /// place" semantics.
     pub fn upsert_row(&mut self, row: &ConnectionRow) {
         let facts = RowFacts::of(row);
+        self.note_far_future(&facts);
         let pkey = process_key(row);
         let dkey = domain_key(row);
         let hkey = host_key(row);
@@ -287,6 +290,7 @@ impl GroupTree {
         self.process_order.clear();
         self.processes.clear();
         self.id_meta.clear();
+        self.far_future_minute = None;
         self.expanded_processes.clear();
         self.expanded_domains.clear();
         self.expanded_hosts.clear();
