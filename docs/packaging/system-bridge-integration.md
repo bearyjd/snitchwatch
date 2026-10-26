@@ -219,8 +219,8 @@ rebooting into the new deployment:
 
 ```bash
 sudo ostree admin config-diff | grep opensnitchd
-jq .Server.Address /etc/opensnitchd/default-config.json
-jq .DefaultAction /etc/opensnitchd/default-config.json
+sudo jq .Server.Address /etc/opensnitchd/default-config.json
+sudo jq .DefaultAction /etc/opensnitchd/default-config.json
 ```
 
 A locally modified file keeps its `DefaultAction` too: an r15 host can carry
@@ -238,7 +238,7 @@ sudo ostree admin config-diff | grep opensnitchd   # now lists nothing
 `/usr/etc` holds the booted deployment's pristine copy; with `/etc` equal to
 it again, the merge at reboot (rpm-ostree finalizes staged deployments at
 shutdown) takes the new image's file. After the reboot,
-`jq .Server.Address /etc/opensnitchd/default-config.json` must print
+`sudo jq .Server.Address /etc/opensnitchd/default-config.json` must print
 `"unix:opensnitchd.sock"`. If it doesn't (the change was made after the
 check, or deployments weren't staged), repeat the `cp` from the new
 deployment's `/usr/etc` from a console and `sudo systemctl restart

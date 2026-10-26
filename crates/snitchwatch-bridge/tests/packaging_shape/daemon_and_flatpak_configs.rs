@@ -253,7 +253,13 @@ fn the_deny_opt_in_restarts_the_daemon_and_has_a_way_back() {
         "### Before rebooting into the image: the `/etc` merge",
     );
     assert!(
-        merge.contains("jq .DefaultAction /etc/opensnitchd/default-config.json"),
+        merge.contains("sudo jq .DefaultAction /etc/opensnitchd/default-config.json"),
         "the /etc merge check must cover DefaultAction, not only Server.Address"
+    );
+    // The daemon saves this file root-only (0600): unprivileged reads fail.
+    let unprivileged = merge.lines().find(|l| l.trim_start().starts_with("jq "));
+    assert!(
+        unprivileged.is_none(),
+        "/etc merge check reads the 0600 config without sudo: {unprivileged:?}"
     );
 }
