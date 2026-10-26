@@ -1,6 +1,17 @@
-# Linux App Firewall + Bazzite Security Scanner — Handoff (updated 2026-10-25)
+# Linux App Firewall + Bazzite Security Scanner — Handoff (updated 2026-10-26)
 
-> Start with the 2026-10-25 section below and local `.omc/STATE.md`. Earlier sections are dated history.
+> Start with the 2026-10-26 section below and local `.omc/STATE.md`. Earlier sections are dated history.
+
+## 2026-10-26 — clarity counts in review, new bridge image published
+
+- **Source:** `main` at `420342b`. Since `8136b41` (packaged DefaultAction `allow`) only docs have merged: #226 (deny opt-in procedure and the way back) and #227 (plan `docs/superpowers/plans/2026-10-26-clarity-0b-0d2-overnight.md`).
+- **In review, not merged:**
+  - #228 per-group verdict counts for the last hour and today (roadmap C03, phase-0 item 0b). CI is green; the `/codex` adversarial pass is still open.
+  - PR A "notice held back N times in the last hour" (roadmap P01, item 0d part 2), branch `feat/held-back-notice-count`. Not yet pushed.
+- **Held for the owner:** item 0c, the exception-first default. It needs parent-plan question 3 answered: hide the "Background and system" group, or only collapse it. Recommended: collapse.
+- **Image:** the tower's base-refresh run 40339052450 published `:snitchwatch-system` `sha256:5ff3751f…` from the `8136b41` bridge at 2026-10-26T15:16Z. No VM gate ran and the image's runtime is unverified. The host still has the older `3286d17f` staged. Staging the new image and rebooting is the owner's call.
+- **After the new image boots:** check that the network works and the GUI connects, then run export/save/reconnect acceptance and confirm #35 (root-only socket, no TCP 50051) before closing it.
+- The installed GUI is still the `8136b41` build (`--user`, branch `r15.1-candidate`, commit `9a563964`). Rebuild from merged main once PR A or #228 lands.
 
 ## 2026-10-25 — AI-ready cache export handoff (delivered 2026-10-24)
 
