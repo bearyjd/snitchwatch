@@ -54,52 +54,13 @@ use super::filter::ConnectionFilter;
 use super::row_store::Verdict;
 use snitchwatch_bridge::ws_messages::ConnectionRow;
 
+mod counts;
 mod keys;
 
+pub use counts::GroupCounts;
 pub(crate) use keys::is_ip;
 pub use keys::registrable_domain;
 use keys::{composite_key, domain_key, host_composite_key, host_key, process_key};
-
-/// Running aggregate counts for a group (process or domain level).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct GroupCounts {
-    pub total: usize,
-    pub pending: usize,
-    pub allowed: usize,
-    pub denied: usize,
-    pub blocklisted: usize,
-    pub other: usize,
-    pub bytes_sent: u64,
-    pub bytes_received: u64,
-}
-
-impl GroupCounts {
-    fn add(&mut self, verdict: Verdict, bytes_sent: u64, bytes_received: u64) {
-        self.total += 1;
-        self.bytes_sent += bytes_sent;
-        self.bytes_received += bytes_received;
-        match verdict {
-            Verdict::Pending => self.pending += 1,
-            Verdict::Allowed => self.allowed += 1,
-            Verdict::Denied => self.denied += 1,
-            Verdict::Blocklisted => self.blocklisted += 1,
-            Verdict::Other => self.other += 1,
-        }
-    }
-
-    fn sub(&mut self, verdict: Verdict, bytes_sent: u64, bytes_received: u64) {
-        self.total = self.total.saturating_sub(1);
-        self.bytes_sent = self.bytes_sent.saturating_sub(bytes_sent);
-        self.bytes_received = self.bytes_received.saturating_sub(bytes_received);
-        match verdict {
-            Verdict::Pending => self.pending = self.pending.saturating_sub(1),
-            Verdict::Allowed => self.allowed = self.allowed.saturating_sub(1),
-            Verdict::Denied => self.denied = self.denied.saturating_sub(1),
-            Verdict::Blocklisted => self.blocklisted = self.blocklisted.saturating_sub(1),
-            Verdict::Other => self.other = self.other.saturating_sub(1),
-        }
-    }
-}
 
 #[derive(Debug, Default)]
 struct HostGroup {
