@@ -23,6 +23,7 @@ fn main() {
                 "qml/SizedOverlaySheet.qml",
                 "qml/ConnectionsPage.qml",
                 "qml/ConnectionRow.qml",
+                "qml/PendingAgeTicker.qml",
                 "qml/ConnectionActions.qml",
                 "qml/ClipboardCopy.qml",
                 "qml/ConnectionDetailsCopy.qml",

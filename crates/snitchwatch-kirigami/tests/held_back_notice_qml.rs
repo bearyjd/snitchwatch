@@ -56,6 +56,7 @@ Window {
         bridgeFeed: feedStub
         model: ConnectionsModel { id: model }
     }
+    PendingAgeTicker { id: ticker; connections: model }
 
     function expect(ok, what) { if (!ok) probe.failures.push(what); }
     function row(id, host, at) {
@@ -148,25 +149,33 @@ Window {
             probe.expect(probe.heldBack("ask-1") === "", "a cleared count still shows");
             probe.expect(!model.heldBackShown, "heldBackShown with no count shown");
             // Codex review of #230: a row unanswered for over 120 s (an older
-            // bridge's stuck row) is not "actively" pending, so the pending
-            // age is -1 and main.qml's age timer alone would stop. The count's
-            // own expiry must still be refreshed: `heldBackShown` keeps it on.
+            // bridge's stuck row) is not "actively" pending, so with nothing
+            // else waiting the pending age is -1. The real tick
+            // (PendingAgeTicker, used by main.qml) must still run while the
+            // count shows, so its hour ends, and stop once it is gone.
+            model.applyServerMessageJson(JSON.stringify({ action: "updateConnectionRows", rows: [
+                Object.assign(probe.row("ask-1", "example.com", probe.t0), { action: "allow", matchedRule: "allow-python" }),
+                Object.assign(probe.row("ask-3", "example.org", probe.t0 + 2000), { action: "allow", matchedRule: "allow-python" })] }));
             model.applyServerMessageJson(JSON.stringify({ action: "insertConnectionRows", rows: [
                 probe.row("stuck-9", "stuck.example", Date.now() - 200000)] }));
             model.holdBackNoticesForTests("/usr/bin/python3", "stuck.example", 2, 1);
-            probe.deadline = Date.now() + 1100;
+            // Past the window end, plus a full tick after it.
+            probe.deadline = Date.now() + 2300;
         },
         function () {
+            probe.expect(model.oldestPendingAgeSecs === -1,
+                         "setup: something is still actively pending: " + model.oldestPendingAgeSecs);
             probe.expect(probe.heldBack("stuck-9") === "notice held back 2 times in the last hour",
                          "stuck row's note: '" + probe.heldBack("stuck-9") + "'");
-            probe.expect(model.heldBackShown, "a shown count does not keep the refresh on");
+            probe.expect(model.heldBackShown, "heldBackShown is false while a count shows");
+            probe.expect(ticker.running, "the tick stopped while a count shows");
         },
         function () { if (Date.now() < probe.deadline) probe.step--; },
         function () {
-            // What main.qml's timer does each tick, with no new message.
-            model.refreshPendingAge();
+            // No manual refresh: only the ticker ran.
             probe.expect(probe.heldBack("stuck-9") === "", "an ended window still shows its count");
             probe.expect(!model.heldBackShown, "heldBackShown after the window ended");
+            probe.expect(!ticker.running, "the tick kept running with nothing to refresh");
         }
     ]
 
