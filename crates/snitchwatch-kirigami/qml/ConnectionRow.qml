@@ -254,26 +254,9 @@ Item {
             Layout.alignment: Qt.AlignVCenter
         }
 
-        Rectangle {
-            // Collapsed groups expose pending connections through this badge.
-            // Use a border: Fusion/Basic can give neutral background and text
-            // the same color, making a filled badge unreadable (issue #31).
+        GroupPendingBadge {
             visible: row.isGroupHeader && row.groupPending > 0
-            color: "transparent"
-            border.color: Kirigami.Theme.neutralTextColor
-            border.width: 1
-            radius: height / 2
-            implicitWidth: pendingBadgeLabel.implicitWidth + Kirigami.Units.largeSpacing
-            implicitHeight: pendingBadgeLabel.implicitHeight + Kirigami.Units.smallSpacing
-            Layout.alignment: Qt.AlignVCenter
-
-            Controls.Label {
-                id: pendingBadgeLabel
-                anchors.centerIn: parent
-                text: row.groupPending + " pending"
-                color: Kirigami.Theme.neutralTextColor
-                font: Kirigami.Theme.smallFont
-            }
+            count: row.groupPending
         }
 
         // Batch pending decisions at every tree level. The subtree includes

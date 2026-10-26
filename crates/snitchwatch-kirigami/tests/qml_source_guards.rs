@@ -48,6 +48,8 @@ const CONNECTIONS_PAGE: &str = concat!(
     "\n",
     include_str!("../qml/GroupVerdictCounts.qml"),
     "\n",
+    include_str!("../qml/GroupPendingBadge.qml"),
+    "\n",
     include_str!("../qml/InspectorPanel.qml"),
     "\n",
     include_str!("../qml/ConnectionDetailPage.qml"),
