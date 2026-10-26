@@ -1,12 +1,44 @@
-# Linux App Firewall + Bazzite Security Scanner — Handoff (updated 2026-10-22)
+# Linux App Firewall + Bazzite Security Scanner — Handoff (updated 2026-10-25)
 
-> **Start with the "2026-10-23 (learning mode built)" section, then "2026-10-22 (current)" (its `main` sha is stale).** It is the
-> current status. (A local, gitignored `.omc/STATE.md` may also exist on the
-> owner's machine; it is not in a fresh clone.)
-> Everything after that section is a dated history: accurate as a record of what was
-> decided and why, but stale as a status report. The 2026-10-09 section was
-> current then; roughly 100 commits have merged since (r14/r15 work, up to
-> `bfc76e6`). For the open items, see `gh issue view 178`.
+> Start with the 2026-10-25 section below and local `.omc/STATE.md`. Earlier sections are dated history.
+
+## 2026-10-25 — AI-ready cache export handoff (delivered 2026-10-24)
+
+- **Source complete:** `main` at `5c0fa0b917eb8a607b981093e060733610461987`; tree identical to reviewed head `8e6bd102301103d45c13228d4e3969b8aa1579e1`.
+- PRs **220–223 merged**. TDD, independent adversarial reviews/fixes/re-reviews and all six final CI checks passed (run **40140784042**).
+- Implemented manual **current-cache summary JSON**, dictionary and provider-neutral prompt; independent UTC/app/missing-path/verdict filters; fresh HMAC references; exact plain-text preview and explicit private Save. Older bridges show export unavailable.
+- Roadmap: `docs/superpowers/specs/2026-10-24-competitive-feature-roadmap.md`. History, detailed/raw formats, JSONL/CSV, provider APIs/uploads, scheduling and automatic policy remain future scope.
+- Local gates: **2,056 backend passed / one existing ignored**; **1,642 GUI passed / four existing ignored**; strict Clippy and packaging checks passed. Qt test-thread teardown warnings remain documented.
+- Final CI exposed a test-client assumption: success may arrive before admission guards retire. Controlled reproduction captured Busy on a fourth follow-up. The reviewed fix keeps initial requests strict and bounds follow-ups to correlated Busy only (3 seconds / 32 fresh IDs); 32 constrained suites / 96 scenarios passed. Production guards were preserved.
+
+### Matched local artifacts — source `5c0fa0b`
+
+- GUI: `dist/snitchwatch-system-r15.1-analysis-export.flatpak` — 7,411,984 bytes; SHA256 `50f06d1ec13206b21c539b45ed054d39b6c07b126448a594fa1accf2ad3747c8`.
+- SYSTEM overlay: `dist/analysis-export-final-build/bridge/artifacts/snitchwatch-system-bridge-analysis-export.tar.gz` — SHA256 `47d3c24fe156b96d7f33dbcfa595159595e98d33095445d2ab58a6fc6b90d658`.
+- USER archive: `dist/analysis-export-final-build/bridge/artifacts/snitchwatch-bridge-0.1.1-x86_64.tar.gz` — SHA256 `26f3d20f12d5d19d0defca921e7ea1951d6a4b0d81ad44626ebb8b700654e8d9`.
+- Both bridge profiles contain ELF SHA256 `8c10bad27eee68f41a13ed9071df2ec11b2a5fd5aa066215bbce707a0f9e8338`. SYSTEM and USER units are distinct deployment profiles.
+- Independent static verification passed: all **75 QML resources** match Git, source/tree/lock/gitlink agreement, permissions, hardening, inventories and license evidence. Builders and independent writers are closed.
+- Start with `dist/analysis-export-final-build/README.md`, `delivery.json` and `DELIVERY-SHA256SUMS` (checksum paths relative to repository root).
+- Reports: `dist/analysis-export-final-build/independent-verification/{gui,bridge}/verification.md`; source/test/CI receipts: `dist/analysis-export-final-build/source-verification/`.
+
+### Next actions — deployment and acceptance
+
+1. Obtain owner direction before host/image changes. Integrate the matching **SYSTEM overlay** into the system image using `docs/packaging/system-bridge-integration.md`; a GUI reinstall alone does not supply the new bridge capability.
+2. Install the GUI when ready:
+   ```sh
+   flatpak install --user --reinstall /var/home/user/Documents/vibe-code/snitchwatch/dist/snitchwatch-system-r15.1-analysis-export.flatpak
+   flatpak run --user --branch=r15.1-candidate org.snitchwatch.Snitchwatch
+   ```
+3. Perform actual Flatpak/host acceptance: authorization, default save-path compatibility, exact preview/save, reconnect behavior, and physical Wayland/map/menu/deep-scan behavior. Native Qt/Mock tests and static artifacts do not establish these runtime results.
+4. Select further roadmap work explicitly; no source implementation remains pending for this increment.
+
+### Boundaries and preservation
+
+- No host app/service installation or activation, policy edit, release publication, or candidate Git ref/variable change occurred. The tower owns candidate refs/variables; do not change them implicitly.
+- **Superseded 2026-10-25:** PR #224 merged (main `8136b41`): packaged DefaultAction is now `allow`, deny is opt-in. New artifacts from `8136b41` are in `dist/default-allow-build/` (SYSTEM overlay SHA256 `f444073b…`) and `dist/snitchwatch-system-r15.1-default-allow.flatpak` (`ac702261…`). The 5c0fa0b overlay ships deny, so don't use it. #35 host evidence is posted; it closes after the tower confirms. The new GUI is installed (`--user`, commit `9a563964…`, matching the build provenance) and passed a 20 s launch smoke. The new bridge ELF (`3d8dbfe0…`) differs from `8c10bad…` only in LLVM and mangling hash suffixes, caused by the doc-comment change. The SYSTEM overlay has been sent to the tower for the next image.
+- Preserve unrelated untracked `graft/`, prior map/overnight artifacts, optional `dist/geo-city-proof/dbip-city-lite-2026-10.mmdb`, worktrees and evidence. Do not clean/reset/stash them.
+- This handoff is a local documentation update after the verified build; artifacts remain tied to immutable source `5c0fa0b`. Do not rebuild merely to include handoff text.
+- Read `.omc/STATE.md` first (under 60 lines). Earlier sections below are history, not current status.
 
 ## 2026-10-23 (learning mode built)
 GUI learning mode is merged to `main` (#195 setting + fail-closed end, #196 recorder + banner,
