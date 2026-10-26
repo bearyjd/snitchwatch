@@ -197,14 +197,16 @@ journal and a fix; under `deny` the network stays closed meanwhile.
 #### Restoring the `allow` default
 
 If the bridge can't be brought back (missing binary, crash on every start),
-undo a `deny` opt-in from the console instead. The Unix transport stays as is:
+undo a `deny` opt-in from the console instead. The Unix transport stays as is.
+The daemon saves this file root-only (0600), so build and check the
+replacement as root, swap it in only if `jq` succeeded, and restart only then:
 
 ```bash
-sudo cp /etc/opensnitchd/default-config.json /etc/opensnitchd/default-config.json.deny
-jq '.DefaultAction = "allow"' /etc/opensnitchd/default-config.json.deny \
-  | sudo tee /etc/opensnitchd/default-config.json >/dev/null
-sudo systemctl restart opensnitch.service
-jq .DefaultAction /etc/opensnitchd/default-config.json   # "allow"
+sudo sh -c 'set -e; f=/etc/opensnitchd/default-config.json
+  jq -e ".DefaultAction = \"allow\"" "$f" > "$f.new"
+  chmod 600 "$f.new"; cp -p "$f" "$f.deny"; mv "$f.new" "$f"' \
+  && sudo systemctl restart opensnitch.service
+sudo jq .DefaultAction /etc/opensnitchd/default-config.json   # "allow"
 ```
 
 ### Before rebooting into the image: the `/etc` merge

@@ -215,20 +215,39 @@ fn the_deny_opt_in_restarts_the_daemon_and_has_a_way_back() {
         "sudo systemctl restart opensnitch.service",
         "127.0.0.53",
         "#restoring-the-allow-default",
+        "only to roll back",
     ] {
         assert!(
             readme.contains(needle),
             "README deny opt-in lacks {needle:?}"
         );
     }
+    // The way back is prepared before deny is set, and is not a step to run.
+    let link = readme.find("#restoring-the-allow-default").unwrap();
+    let set_deny = readme
+        .find("Set `DefaultAction` to `deny`")
+        .expect("README opt-in names the deny step");
+    assert!(link < set_deny, "prepare the rollback before setting deny");
+
     let integration = read("docs/packaging/system-bridge-integration.md");
     let back = doc_section(&integration, "#### Restoring the `allow` default");
+    // One root shell builds and validates the replacement, then swaps it in;
+    // the restart only runs if that succeeded. A pipeline into `sudo tee`
+    // truncates the live file when an unprivileged read of the 0600 config
+    // fails (vendor config.go Save()).
     for needle in [
-        "DefaultAction = \"allow\"",
-        "sudo systemctl restart opensnitch.service",
+        "sudo sh -c",
+        r#"jq -e ".DefaultAction = \"allow\"" "$f" > "$f.new""#,
+        r#"mv "$f.new" "$f"'"#,
+        "&& sudo systemctl restart opensnitch.service",
     ] {
         assert!(back.contains(needle), "allow restore lacks {needle:?}");
     }
+    assert!(
+        !back.contains("| sudo tee"),
+        "allow restore must not pipe into sudo tee"
+    );
+
     let merge = doc_section(
         &integration,
         "### Before rebooting into the image: the `/etc` merge",

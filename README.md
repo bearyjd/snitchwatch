@@ -423,18 +423,19 @@ traffic keeps flowing.
 Deny enforcement is an explicit operator opt-in. Do it only with the system
 bridge's root-only Unix socket (`unix:opensnitchd.sock`), and in this order:
 
-1. Allow DNS first. The packaged fetch rule (`000-snitchwatch-bridge-fetch.json`)
+1. Keep a way back at hand before changing anything:
+   [restoring the `allow` default](docs/packaging/system-bridge-integration.md#restoring-the-allow-default)
+   is a console procedure that works even if the bridge never starts again.
+   Read it now; run it only to roll back.
+2. Allow DNS. The packaged fetch rule (`000-snitchwatch-bridge-fetch.json`)
    covers only the bridge's TCP 443, so with no GUI attached blocklist refreshes
    also need the system resolver's upstream queries (e.g. `systemd-resolved`)
    and loopback DNS to `127.0.0.53:53` allowed by rules
    ([`packaging/README.md`](packaging/README.md)).
-2. Set `DefaultAction` to `deny` in `/etc/opensnitchd/default-config.json`.
-3. Run `sudo systemctl restart opensnitch.service`. A running daemon applies a
+3. Set `DefaultAction` to `deny` in `/etc/opensnitchd/default-config.json`.
+4. Run `sudo systemctl restart opensnitch.service`. A running daemon applies a
    changed `DefaultAction` only to its disconnected and error fallbacks; the
    fallback for a connected UI keeps the old value until the daemon restarts.
-4. Keep a way back. From a console, follow
-   [restoring the `allow` default](docs/packaging/system-bridge-integration.md#restoring-the-allow-default),
-   which works even if the bridge never starts again.
 
 The per-user bridge's TCP port is not deny-safe
 (#35): a process that binds it first answers for the daemon. The bridge runs as
