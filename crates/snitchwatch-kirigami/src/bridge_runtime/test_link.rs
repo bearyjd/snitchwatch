@@ -36,6 +36,7 @@ impl TestLink {
                 inbound_tx,
                 runtime,
                 connection: connection.clone(),
+                held_back: HeldBackNotices::default(),
             },
             feed: broadcast_tx,
             queued,

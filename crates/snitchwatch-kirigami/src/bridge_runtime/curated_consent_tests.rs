@@ -13,6 +13,7 @@ async fn modern_queue_requires_current_capable_origin_and_never_replays() {
         inbound_tx,
         runtime: Handle::current(),
         connection: connection.clone(),
+        held_back: HeldBackNotices::default(),
     };
     let session = mark_connected(&connection, false);
     assert!(handles.try_send_for_session(session, prepare()).is_err());

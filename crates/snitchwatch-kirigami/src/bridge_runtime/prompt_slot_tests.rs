@@ -14,6 +14,7 @@ pub(super) fn handles(connection: &Arc<Mutex<ConnectionState>>) -> BridgeHandles
         inbound_tx,
         runtime: Handle::current(),
         connection: connection.clone(),
+        held_back: HeldBackNotices::default(),
     }
 }
 

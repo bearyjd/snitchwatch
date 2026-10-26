@@ -169,6 +169,7 @@ async fn app_bound_rules_for_row_answers_only_for_the_live_capable_session() {
         inbound_tx,
         runtime: Handle::current(),
         connection: connection.clone(),
+        held_back: HeldBackNotices::default(),
     };
     let for_row = crate::bridge_feed::app_bound_rules_for_row;
 
@@ -193,6 +194,7 @@ async fn disconnect_discards_queued_actions_and_rejects_new_ones() {
         inbound_tx,
         runtime: Handle::current(),
         connection: connection.clone(),
+        held_back: HeldBackNotices::default(),
     };
 
     mark_connected(&connection, false);
@@ -898,6 +900,7 @@ fn a_started_runtime_is_successful_before_the_connection_completes() {
             inbound_tx,
             runtime: runtime.handle().clone(),
             connection: Arc::new(Mutex::new(ConnectionState::default())),
+            held_back: HeldBackNotices::default(),
         },
         status: status.clone(),
         tray_tx: watch::channel(ReceivedTrayState {
@@ -1005,6 +1008,7 @@ async fn level_rule_mutations_never_recapture_a_replacement_session() {
         inbound_tx,
         runtime: Handle::current(),
         connection: connection.clone(),
+        held_back: HeldBackNotices::default(),
     };
     let shown_session = mark_connected(&connection, false);
     // The QML check already passed. Settings I/O or another thread now permits

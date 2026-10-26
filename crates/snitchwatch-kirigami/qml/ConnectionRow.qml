@@ -65,6 +65,7 @@ Item {
     required property bool needsRule
     // Issue #55: daemon events this row stands for, and the last one's time.
     required property int repeatCount
+    required property int retriedCount // 0d part 2: notices held back, newest pending row only
     required property real lastSeenMs
     required property string programPathFull
     required property string programLabel
@@ -217,6 +218,8 @@ Item {
                 elide: Text.ElideMiddle
                 Layout.fillWidth: true
             }
+            Controls.Label { objectName: "heldBackLabel"; visible: row.pending && row.retriedCount > 0; textFormat: Text.PlainText; opacity: 0.7; font: Kirigami.Theme.smallFont
+                text: "notice held back " + row.retriedCount + (row.retriedCount === 1 ? " time" : " times") + " in the last hour" }
         }
 
         Controls.Label {

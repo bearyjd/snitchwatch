@@ -18,6 +18,7 @@ fn handles_and_queue() -> (
         inbound_tx,
         runtime: Handle::current(),
         connection: connection.clone(),
+        held_back: HeldBackNotices::default(),
     };
     (handles, connection, inbound_rx)
 }

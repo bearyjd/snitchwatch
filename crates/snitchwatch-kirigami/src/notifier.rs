@@ -51,6 +51,18 @@ pub struct FlowKey {
     pub host: String,
 }
 
+impl FlowKey {
+    /// The one derivation both sides use, so they cannot drift: the
+    /// program's path, or its name when the daemon sent no path.
+    pub fn of(session: u64, process_path: Option<&str>, process: &str, host: &str) -> Self {
+        Self {
+            session,
+            program: process_path.unwrap_or(process).to_string(),
+            host: host.to_string(),
+        }
+    }
+}
+
 /// A flow's posted notice, whose repeats coalesce for the repeat window.
 #[derive(Debug)]
 struct LiveFlow {
@@ -178,10 +190,18 @@ impl CooldownGate {
         self.live_flows.remove(flow);
     }
 
-    /// How many repeats of the flow's posted notice were held back. Read by
-    /// the "retried N times" counter (0d part 2).
+    /// How many repeats of the flow's posted notice were held back.
     pub fn suppressed(&self, flow: &FlowKey) -> u32 {
         self.live_flows.get(flow).map_or(0, |live| live.suppressed)
+    }
+
+    /// [`suppressed`](Self::suppressed) and when the flow's repeat window
+    /// ends, while it has a posted notice: what the held-back count shown on
+    /// its row is copied from (0d part 2).
+    pub fn held_back(&self, flow: &FlowKey) -> Option<(u32, Instant)> {
+        self.live_flows
+            .get(flow)
+            .map(|live| (live.suppressed, live.posted_at + self.repeat_window))
     }
 
     pub fn should_fire(&mut self, notice: &Notice, now: Instant) -> bool {
@@ -536,5 +556,33 @@ mod tests {
         assert_eq!(gate.live_flows.len(), 2);
         assert!(gate.live_flows.contains_key(&fresh));
         assert!(gate.live_flows.contains_key(&newer));
+    }
+
+    /// 0d part 2: the notice side and the row side key a flow the same way,
+    /// with the program's path, or its name when the daemon sent no path.
+    #[test]
+    fn a_flow_is_keyed_by_the_path_or_else_the_name() {
+        assert_eq!(
+            FlowKey::of(1, Some("/usr/bin/curl"), "curl", "example.com"),
+            flow(1, "/usr/bin/curl", "example.com")
+        );
+        assert_eq!(
+            FlowKey::of(1, None, "curl", "example.com"),
+            flow(1, "curl", "example.com")
+        );
+    }
+
+    #[test]
+    fn held_back_reports_the_count_and_when_the_window_ends() {
+        let mut gate = CooldownGate::new();
+        let t0 = Instant::now();
+        let curl = flow(1, "/usr/bin/curl", "example.com");
+        assert_eq!(gate.held_back(&curl), None);
+        gate.decide_for_flow(&pending(1), Some(&curl), t0);
+        assert_eq!(gate.held_back(&curl), Some((0, t0 + HOUR)));
+        gate.decide_for_flow(&pending(2), Some(&curl), t0 + Duration::from_secs(5));
+        assert_eq!(gate.held_back(&curl), Some((1, t0 + HOUR)));
+        gate.clear_flow(&curl);
+        assert_eq!(gate.held_back(&curl), None);
     }
 }

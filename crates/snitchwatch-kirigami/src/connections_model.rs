@@ -46,6 +46,7 @@ mod helpers;
 mod program_label;
 mod qt_interface;
 mod queries;
+mod retries;
 mod roles;
 #[cfg(test)]
 mod tests;
@@ -505,12 +506,23 @@ pub mod qobject {
             parent_domain: &QString,
         ) -> QString;
 
-        /// Recompute `oldestPendingAgeSecs` against the current wall clock.
-        /// Call this from a QML `Timer` tick (elapsed time changes with no
-        /// new bridge message to trigger a recompute otherwise).
+        /// Recompute `oldestPendingAgeSecs` (and the `retriedCount` role)
+        /// against the current clock. Call this from a QML `Timer` tick
+        /// (elapsed time changes with no new bridge message to trigger a
+        /// recompute otherwise).
         #[qinvokable]
         #[cxx_name = "refreshPendingAge"]
         fn refresh_pending_age(self: Pin<&mut ConnectionsModel>);
+
+        /// Test seam (`connections_model::retries`): a held-back count.
+        #[qinvokable]
+        #[cxx_name = "holdBackNoticesForTests"]
+        fn hold_back_notices_for_tests(
+            self: Pin<&mut ConnectionsModel>,
+            program: &QString,
+            host: &QString,
+            count: i32,
+        );
     }
 
     // Protected base-class helpers inherited from QAbstractListModel.
@@ -619,6 +631,9 @@ pub struct ConnectionsModelRust {
     filter_denied_only: bool,
     /// The Settings default duration the rule roles are computed with.
     duration: level_rule_actions::DurationCache,
+    /// Behind the `retriedCount` role (`retries`), and its test seam.
+    held_back_rows: HashMap<String, u32>,
+    held_back_for_tests: Option<crate::bridge_runtime::HeldBackNotices>,
 }
 
 impl Default for ConnectionsModelRust {
@@ -653,6 +668,8 @@ impl Default for ConnectionsModelRust {
             filter_pending_only: false,
             filter_denied_only: false,
             duration: level_rule_actions::DurationCache::default(),
+            held_back_rows: HashMap::new(),
+            held_back_for_tests: None,
         }
     }
 }

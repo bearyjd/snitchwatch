@@ -26,6 +26,9 @@ impl qobject::ConnectionsModel {
         ) {
             return self.level_rule_role(index.row(), role);
         }
+        if role == ROLE_RETRIED_COUNT {
+            return self.retried_role(index.row());
+        }
         if matches!(role, ROLE_REPEAT_COUNT | ROLE_LAST_SEEN_MS) {
             return self.repeat_role(index.row(), role);
         }
@@ -136,6 +139,7 @@ impl qobject::ConnectionsModel {
         );
         roles.insert(ROLE_PROGRAM_PATH_TAIL, QByteArray::from("programPathTail"));
         roles.insert(ROLE_PROGRAM_PATH_FULL, QByteArray::from("programPathFull"));
+        roles.insert(ROLE_RETRIED_COUNT, QByteArray::from("retriedCount"));
         roles
     }
 

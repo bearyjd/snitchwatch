@@ -92,3 +92,7 @@ pub(super) const ROLE_PROGRAM_PATH_TAIL: i32 = 39;
 /// visible escapes (`program_label::path_full_display`), for the tooltip;
 /// empty when there is no path.
 pub(super) const ROLE_PROGRAM_PATH_FULL: i32 = 40;
+/// How many desktop notices of the row's flow were held back within the
+/// hour (0d part 2, `connections_model::retries`): only on the flow's newest
+/// pending row, 0 elsewhere and on headers.
+pub(super) const ROLE_RETRIED_COUNT: i32 = 41;

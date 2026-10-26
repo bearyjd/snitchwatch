@@ -29,6 +29,7 @@ pub struct BridgeHandles {
     inbound_tx: mpsc::Sender<QueuedClientMessage>,
     runtime: Handle,
     connection: Arc<Mutex<ConnectionState>>,
+    held_back: HeldBackNotices,
 }
 
 /// Senders for the shell state the runtime forwards next to the model feed:
@@ -321,6 +322,7 @@ fn start_inner() -> anyhow::Result<ClientRuntime> {
         inbound_tx,
         runtime: runtime.handle().clone(),
         connection: connection.clone(),
+        held_back: HeldBackNotices::default(),
     };
     runtime.handle().spawn(client_loop(
         socket_path(),
@@ -781,6 +783,9 @@ pub use received::{
     ReceivedTrayState,
 };
 
+#[path = "bridge_runtime/held_back.rs"]
+mod held_back;
+pub use held_back::HeldBackNotices;
 #[path = "bridge_runtime/link.rs"]
 mod link;
 pub use link::{LinkState, LinkStatus};
