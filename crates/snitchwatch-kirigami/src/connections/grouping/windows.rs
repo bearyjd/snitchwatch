@@ -10,23 +10,24 @@
 //! A start in a later minute than now (clock skew) counts in neither window
 //! until its minute comes: it waits in a separate bucket list, at most
 //! [`FUTURE_MINUTES`] ahead. A start further out is not bucketed at all; the
-//! tree rebuilds every group's windows from its rows once one comes within
-//! reach. It also rebuilds when the clock goes back, or when today's start
-//! moves without the clock passing it (a time zone change), since buckets
-//! already pruned can't be restored any other way. Each rebuild reads every
-//! row once and is rare; steady forward time never does it.
+//! tree keeps it in an ordered index and adds just that row once the clock
+//! brings it within reach. The tree rebuilds every group's windows from its
+//! rows only when the clock goes back, or when today's start moves without
+//! the clock passing it (a time zone change), since buckets already pruned
+//! can't be restored any other way; steady forward time never rescans.
 //!
 //! A row is placed by its own `started_at_ms`, so a row standing for collapsed
 //! repeats counts once, at its first start. "By default" means the firewall's
 //! default action decided the row: `decided_by_default`, or a decided row with
 //! no matched rule (a user's answer always records its once-off rule).
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use snitchwatch_bridge::ws_messages::ConnectionRow;
 
 use super::super::row_store::{matched_rule_name, Verdict};
-use super::{GroupCounts, GroupTree, VisibleEntry};
+
+use super::{GroupCounts, GroupTree, ProcessGroup, RowMeta, VisibleEntry};
 
 const MINUTE_MS: i64 = 60_000;
 /// Minutes in the "last hour" window, the current one included.
@@ -321,36 +322,86 @@ impl GroupStats {
     }
 }
 
+/// Add one row's facts to its program, domain and host windows.
+fn tally_row(processes: &mut HashMap<String, ProcessGroup>, meta: &RowMeta, clock: &Clock) {
+    let Some(pg) = processes.get_mut(&meta.process_key) else {
+        return;
+    };
+    pg.stats.tally(&meta.facts, clock, true);
+    let Some(dg) = pg.domains.get_mut(&meta.domain_key) else {
+        return;
+    };
+    dg.stats.tally(&meta.facts, clock, true);
+    if let Some(hg) = dg.hosts.get_mut(&meta.host_key) {
+        hg.stats.tally(&meta.facts, clock, true);
+    }
+}
+
 impl GroupTree {
     /// Set the time later writes and projections read the windows against.
-    /// Rebuilds every group's windows from its rows when time went back,
-    /// when today's start moved without the clock passing it, or when a
-    /// start beyond the future buckets' reach came within it.
+    /// Rebuilds every group's windows from its rows only when time went back
+    /// or today's start moved without the clock passing it; otherwise it
+    /// admits just the far-future rows that came within the buckets' reach.
     pub fn set_clock(&mut self, clock: Clock) {
         let old = self.clock;
         let midnight_passed =
             clock.today_start_ms > old.today_start_ms && clock.today_start_ms > old.now_ms;
         let moved_midnight = clock.today_start_ms != old.today_start_ms && !midnight_passed;
-        let far_due = self
-            .far_future_minute
-            .is_some_and(|m| m <= minute_of(clock.now_ms) + FUTURE_MINUTES);
         self.clock = clock;
-        if clock.now_ms < old.now_ms || moved_midnight || far_due {
+        if clock.now_ms < old.now_ms || moved_midnight {
             self.rebuild_windows();
+        } else {
+            self.admit_far_future();
         }
     }
 
-    /// Remember a start too far ahead to bucket, so [`set_clock`] rebuilds
-    /// once it comes within reach.
-    pub(super) fn note_far_future(&mut self, facts: &RowFacts) {
-        let minute = minute_of(facts.started_at_ms);
-        if minute > minute_of(self.clock.now_ms) + FUTURE_MINUTES {
-            self.far_future_minute = Some(self.far_future_minute.map_or(minute, |m| m.min(minute)));
+    /// Keep [`far_future`](GroupTree::far_future) in step as a row's start
+    /// is replaced (`old` → `new`) or removed (`new` = `None`). A row is in
+    /// it exactly while its groups skipped it as too far ahead.
+    pub(super) fn track_far_future(
+        &mut self,
+        id: &str,
+        old: Option<&RowFacts>,
+        new: Option<&RowFacts>,
+    ) {
+        if let Some(old) = old {
+            self.far_future
+                .remove(&(minute_of(old.started_at_ms), id.to_string()));
+        }
+        if let Some(new) = new.filter(|f| self.is_far_future(f)) {
+            self.far_future
+                .insert((minute_of(new.started_at_ms), id.to_string()));
         }
     }
 
-    /// Recount every group's windows from the rows' kept facts.
+    fn is_far_future(&self, facts: &RowFacts) -> bool {
+        minute_of(facts.started_at_ms) > minute_of(self.clock.now_ms) + FUTURE_MINUTES
+    }
+
+    /// Count the deferred rows that the clock brought within reach, and only
+    /// those (no rescan).
+    fn admit_far_future(&mut self) {
+        let reach = minute_of(self.clock.now_ms) + FUTURE_MINUTES;
+        let later = self.far_future.split_off(&(reach + 1, String::new()));
+        let due = std::mem::replace(&mut self.far_future, later);
+        let clock = self.clock;
+        for (_, id) in due {
+            let GroupTree {
+                processes, id_meta, ..
+            } = self;
+            if let Some(meta) = id_meta.get(&id) {
+                tally_row(processes, meta, &clock);
+            }
+        }
+    }
+
+    /// Recount every group's windows from the rows' kept facts: only after
+    /// the clock went back or today's start moved.
     fn rebuild_windows(&mut self) {
+        #[cfg(test)]
+        {
+            self.rebuilds += 1;
+        }
         let clock = self.clock;
         for pg in self.processes.values_mut() {
             pg.stats.reset_windows(&clock);
@@ -361,21 +412,20 @@ impl GroupTree {
                 }
             }
         }
-        self.far_future_minute = None;
-        let metas: Vec<_> = self.id_meta.values().cloned().collect();
-        for meta in metas {
-            self.note_far_future(&meta.facts);
-            let Some(pg) = self.processes.get_mut(&meta.process_key) else {
-                continue;
-            };
-            pg.stats.tally(&meta.facts, &clock, true);
-            let Some(dg) = pg.domains.get_mut(&meta.domain_key) else {
-                continue;
-            };
-            dg.stats.tally(&meta.facts, &clock, true);
-            if let Some(hg) = dg.hosts.get_mut(&meta.host_key) {
-                hg.stats.tally(&meta.facts, &clock, true);
+        let GroupTree {
+            processes,
+            id_meta,
+            far_future,
+            ..
+        } = self;
+        far_future.clear();
+        let reach = minute_of(clock.now_ms) + FUTURE_MINUTES;
+        for (id, meta) in id_meta.iter() {
+            let minute = minute_of(meta.facts.started_at_ms);
+            if minute > reach {
+                far_future.insert((minute, id.clone()));
             }
+            tally_row(processes, meta, &clock);
         }
     }
 
@@ -396,8 +446,8 @@ impl GroupTree {
 
     /// Re-read the windows of every header in `projection` as of the current
     /// clock, in place, and return the indices whose figures changed (the
-    /// model's `dataChanged` set). Cost: at most 60 buckets per header shown;
-    /// no row is read.
+    /// model's `dataChanged` set). Cost: at most 60 + [`FUTURE_MINUTES`]
+    /// buckets per header shown; no row is read.
     pub fn refresh_window_figures(&self, projection: &mut [VisibleEntry]) -> Vec<usize> {
         let mut changed = Vec::new();
         for (i, entry) in projection.iter_mut().enumerate() {

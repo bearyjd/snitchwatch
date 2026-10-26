@@ -475,3 +475,43 @@ fn a_moved_midnight_rebuilds_today_from_the_rows() {
     assert_eq!(process_windows(&proj, "p").today.pending, 1);
     assert_eq!(proj, replayed(moved, &rows));
 }
+
+#[test]
+fn far_future_starts_entering_reach_are_admitted_without_a_rebuild() {
+    let mut tree = tree_at(T0);
+    let rows: Vec<ConnectionRow> = (1..=30)
+        .map(|k| {
+            let start = T0 + (windows::FUTURE_MINUTES + k) * MIN;
+            at(
+                row(&format!("f{k}"), "p", "a.example", "", None),
+                start,
+                None,
+            )
+        })
+        .collect();
+    for r in &rows {
+        tree.upsert_row(r);
+    }
+    // Replacing and removing deferred rows keeps the index in step.
+    tree.upsert_row(&at(
+        row("f3", "p", "a.example", "", None),
+        T0 + 5 * HOUR,
+        None,
+    ));
+    tree.upsert_row(&rows[2]);
+    tree.remove_row("f30");
+    let rows = &rows[..29];
+    let mut proj = projection(&tree, rows);
+    for j in 1..=40 {
+        tree.set_clock(clock(T0 + j * MIN));
+        tree.refresh_window_figures(&mut proj);
+    }
+    assert_eq!(tree.rebuilds, 0, "the advancing horizon never rescans");
+    let at_last = clock(T0 + (windows::FUTURE_MINUTES + 29) * MIN + 10_000);
+    tree.set_clock(at_last);
+    tree.refresh_window_figures(&mut proj);
+    assert_eq!(tree.rebuilds, 0);
+    let w = process_windows(&proj, "p");
+    assert_eq!(w.last_hour.pending, 29, "each deferred row counts once");
+    assert_eq!(proj, replayed(at_last, rows));
+}

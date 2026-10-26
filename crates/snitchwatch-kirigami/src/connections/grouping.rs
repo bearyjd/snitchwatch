@@ -48,7 +48,7 @@
 //! pragmatic heuristic (last two labels, with a small hardcoded set of
 //! common two-part TLDs such as `co.uk`/`com.au`) — see its doc comment.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use super::filter::ConnectionFilter;
 use super::row_store::Verdict;
@@ -161,8 +161,12 @@ pub struct GroupTree {
     expanded_hosts: HashSet<String>,
     /// What the window figures are read against (`windows::Clock`).
     clock: Clock,
-    /// Earliest start too far ahead to bucket (`windows::note_far_future`).
-    far_future_minute: Option<i64>,
+    /// Rows whose start is too far ahead to bucket, by start minute
+    /// (`windows::track_far_future`).
+    far_future: BTreeSet<(i64, String)>,
+    /// Full window rebuilds so far (test hook for their cost).
+    #[cfg(test)]
+    rebuilds: usize,
 }
 
 impl GroupTree {
@@ -189,7 +193,8 @@ impl GroupTree {
     /// place" semantics.
     pub fn upsert_row(&mut self, row: &ConnectionRow) {
         let facts = RowFacts::of(row);
-        self.note_far_future(&facts);
+        let old_facts = self.id_meta.get(&row.id).map(|m| m.facts);
+        self.track_far_future(&row.id, old_facts.as_ref(), Some(&facts));
         let pkey = process_key(row);
         let dkey = domain_key(row);
         let hkey = host_key(row);
@@ -238,6 +243,7 @@ impl GroupTree {
             return;
         };
         self.remove_from_group(&meta.process_key, &meta.domain_key, &meta.host_key, id);
+        self.track_far_future(id, Some(&meta.facts), None);
         self.id_meta.remove(id);
     }
 
@@ -290,7 +296,7 @@ impl GroupTree {
         self.process_order.clear();
         self.processes.clear();
         self.id_meta.clear();
-        self.far_future_minute = None;
+        self.far_future.clear();
         self.expanded_processes.clear();
         self.expanded_domains.clear();
         self.expanded_hosts.clear();
