@@ -1,6 +1,7 @@
 //! Per-group aggregate counts, kept incrementally by [`super::GroupTree`].
 
 use super::super::row_store::Verdict;
+use super::windows::WindowFigures;
 
 /// Running aggregate counts for a group (process or domain level).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -13,6 +14,9 @@ pub struct GroupCounts {
     pub other: usize,
     pub bytes_sent: u64,
     pub bytes_received: u64,
+    /// The last hour's and today's figures. Not kept by `add`/`sub`: a
+    /// projection fills them in from the group's window buckets.
+    pub windows: WindowFigures,
 }
 
 impl GroupCounts {
