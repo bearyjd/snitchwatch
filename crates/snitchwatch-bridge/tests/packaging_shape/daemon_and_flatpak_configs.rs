@@ -184,3 +184,82 @@ fn flatpak_icon_grants_are_read_only_and_narrow() {
         }
     }
 }
+
+/// The markdown section under `heading` (exact line), up to the next heading
+/// of the same or a higher level.
+fn doc_section(body: &str, heading: &str) -> String {
+    let level = heading.chars().take_while(|c| *c == '#').count();
+    let mut lines = body.lines().skip_while(|line| *line != heading);
+    assert!(lines.next().is_some(), "heading {heading:?} not found");
+    lines
+        .take_while(|line| {
+            let hashes = line.chars().take_while(|c| *c == '#').count();
+            hashes == 0 || hashes > level || !line[hashes..].starts_with(' ')
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Adversarial review of #224: the deny opt-in must be a procedure a user
+/// can follow without locking themselves out. Editing the file alone leaves
+/// a connected daemon on its cached fallback (`clientConnectedRule`,
+/// vendor/opensnitch/daemon/ui/config_utils.go), the fetch rule covers only
+/// TCP 443 (not DNS), and recovery must be able to undo `deny` itself.
+#[test]
+fn the_deny_opt_in_restarts_the_daemon_and_has_a_way_back() {
+    let readme = doc_section(
+        &read("README.md"),
+        "### Default action: `allow` (deny is an opt-in)",
+    );
+    for needle in [
+        "sudo systemctl restart opensnitch.service",
+        "127.0.0.53",
+        "#restoring-the-allow-default",
+        "only to roll back",
+    ] {
+        assert!(
+            readme.contains(needle),
+            "README deny opt-in lacks {needle:?}"
+        );
+    }
+    // The way back is prepared before deny is set, and is not a step to run.
+    let link = readme.find("#restoring-the-allow-default").unwrap();
+    let set_deny = readme
+        .find("Set `DefaultAction` to `deny`")
+        .expect("README opt-in names the deny step");
+    assert!(link < set_deny, "prepare the rollback before setting deny");
+
+    let integration = read("docs/packaging/system-bridge-integration.md");
+    let back = doc_section(&integration, "#### Restoring the `allow` default");
+    // One root shell builds and validates the replacement, then swaps it in;
+    // the restart only runs if that succeeded. A pipeline into `sudo tee`
+    // truncates the live file when an unprivileged read of the 0600 config
+    // fails (vendor config.go Save()).
+    for needle in [
+        "sudo sh -c",
+        r#"jq -e ".DefaultAction = \"allow\"" "$f" > "$f.new""#,
+        r#"mv "$f.new" "$f"'"#,
+        "&& sudo systemctl restart opensnitch.service",
+    ] {
+        assert!(back.contains(needle), "allow restore lacks {needle:?}");
+    }
+    assert!(
+        !back.contains("| sudo tee"),
+        "allow restore must not pipe into sudo tee"
+    );
+
+    let merge = doc_section(
+        &integration,
+        "### Before rebooting into the image: the `/etc` merge",
+    );
+    assert!(
+        merge.contains("sudo jq .DefaultAction /etc/opensnitchd/default-config.json"),
+        "the /etc merge check must cover DefaultAction, not only Server.Address"
+    );
+    // The daemon saves this file root-only (0600): unprivileged reads fail.
+    let unprivileged = merge.lines().find(|l| l.trim_start().starts_with("jq "));
+    assert!(
+        unprivileged.is_none(),
+        "/etc merge check reads the 0600 config without sudo: {unprivileged:?}"
+    );
+}

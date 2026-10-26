@@ -194,6 +194,21 @@ limit and leaving the bridge and its sockets failed until someone runs the
 `reset-failed` above. A bridge that crashes on every start still needs the
 journal and a fix; under `deny` the network stays closed meanwhile.
 
+#### Restoring the `allow` default
+
+If the bridge can't be brought back (missing binary, crash on every start),
+undo a `deny` opt-in from the console instead. The Unix transport stays as is.
+The daemon saves this file root-only (0600), so build and check the
+replacement as root, swap it in only if `jq` succeeded, and restart only then:
+
+```bash
+sudo sh -c 'set -e; f=/etc/opensnitchd/default-config.json
+  jq -e ".DefaultAction = \"allow\"" "$f" > "$f.new"
+  chmod 600 "$f.new"; cp -p "$f" "$f.deny"; mv "$f.new" "$f"' \
+  && sudo systemctl restart opensnitch.service
+sudo jq .DefaultAction /etc/opensnitchd/default-config.json   # "allow"
+```
+
 ### Before rebooting into the image: the `/etc` merge
 
 An image update keeps a locally edited `/etc` file: ostree's three-way merge
@@ -204,8 +219,13 @@ rebooting into the new deployment:
 
 ```bash
 sudo ostree admin config-diff | grep opensnitchd
-jq .Server.Address /etc/opensnitchd/default-config.json
+sudo jq .Server.Address /etc/opensnitchd/default-config.json
+sudo jq .DefaultAction /etc/opensnitchd/default-config.json
 ```
+
+A locally modified file keeps its `DefaultAction` too: an r15 host can carry
+`deny` forward without anyone opting in (the daemon saves CHANGE_CONFIG to
+this file). Unless you chose `deny`, expect `"allow"`.
 
 If `config-diff` lists `M etc/opensnitchd/default-config.json` (locally
 modified), the merge will keep it. Undo the local change before rebooting:
@@ -218,7 +238,7 @@ sudo ostree admin config-diff | grep opensnitchd   # now lists nothing
 `/usr/etc` holds the booted deployment's pristine copy; with `/etc` equal to
 it again, the merge at reboot (rpm-ostree finalizes staged deployments at
 shutdown) takes the new image's file. After the reboot,
-`jq .Server.Address /etc/opensnitchd/default-config.json` must print
+`sudo jq .Server.Address /etc/opensnitchd/default-config.json` must print
 `"unix:opensnitchd.sock"`. If it doesn't (the change was made after the
 check, or deployments weren't staged), repeat the `cp` from the new
 deployment's `/usr/etc` from a console and `sudo systemctl restart
