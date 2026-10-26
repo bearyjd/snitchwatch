@@ -29,6 +29,7 @@ async fn generic_export_cannot_acquire_an_unreviewed_session() {
         inbound_tx,
         runtime: Handle::current(),
         connection: connection.clone(),
+        held_back: HeldBackNotices::default(),
     };
     let session = mark_connected(&connection, false);
     for cancel in [false, true] {

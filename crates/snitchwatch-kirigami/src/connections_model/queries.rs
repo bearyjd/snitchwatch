@@ -352,6 +352,7 @@ impl qobject::ConnectionsModel {
         let now = now_ms();
         let age = pending_age_secs(self.store.oldest_pending_started_at_ms(now), now);
         self.as_mut().set_oldest_pending_age_secs(age);
+        self.refresh_held_back();
     }
 
     pub(super) fn pending_row_ids_for_group(

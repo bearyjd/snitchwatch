@@ -63,7 +63,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 
-use crate::bridge_runtime::{BridgeHandles, BridgeNotice, ReceivedNotice};
+use crate::bridge_runtime::{BridgeHandles, BridgeNotice, HeldBackNotices, ReceivedNotice};
 use crate::notifier::{CooldownGate, FlowDecision, FlowKey};
 use crate::pending_notice::{show_and_answer, show_plain, PendingTarget};
 use crate::silent_mode;
@@ -328,21 +328,41 @@ pub(crate) fn may_post(
     }
 }
 
+/// Copy the gate's held-back count for `flow` to the rows' copy (0d part
+/// 2), after every [`may_post`] for that flow, whatever it decided: a Post
+/// starts the count at 0, a Repeat raises it. The gate's lock is released
+/// before the copy's is taken; the epoch read with the count keeps a clear
+/// that lands in between from being undone.
+pub(crate) fn record_held_back(
+    gate: &Mutex<CooldownGate>,
+    flow: &FlowKey,
+    notices: &HeldBackNotices,
+    now: Instant,
+) {
+    let held = gate
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .held_back(flow);
+    notices.record(flow, held, now);
+}
+
 /// Ends a flow's posted-notice entry when dropped, unless it is told to
 /// hold: only a notice that ran its course (its row stopped waiting, or
 /// the user dismissed it) keeps its repeats coalesced; whatever
 /// else ends the task (answered, voided, not shown, no session bus,
-/// aborted) lets the flow's next ask notify.
+/// aborted) lets the flow's next ask notify. Its held-back count goes with it.
 struct ClearFlowOnDrop {
     gate: Arc<Mutex<CooldownGate>>,
+    notices: HeldBackNotices,
     flow: FlowKey,
     hold: bool,
 }
 
 impl ClearFlowOnDrop {
-    fn new(gate: Arc<Mutex<CooldownGate>>, flow: FlowKey) -> Self {
+    fn new(gate: Arc<Mutex<CooldownGate>>, notices: HeldBackNotices, flow: FlowKey) -> Self {
         Self {
             gate,
+            notices,
             flow,
             hold: false,
         }
@@ -359,10 +379,13 @@ impl Drop for ClearFlowOnDrop {
         if self.hold {
             return;
         }
-        self.gate
+        let cleared = self
+            .gate
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clear_flow(&self.flow);
+        // The gate's lock is released above, before this one is taken.
+        self.notices.record(&self.flow, cleared, Instant::now());
     }
 }
 
@@ -403,7 +426,11 @@ impl qobject::NotificationController {
         let front_active =
             front_is_active(current_session, *self.window_active(), *self.alert_active());
         let flow = target.as_ref().map(PendingTarget::flow_key);
-        let verdict = may_post(&notice, flow.as_ref(), front_active, &gate, Instant::now());
+        let now = Instant::now();
+        let verdict = may_post(&notice, flow.as_ref(), front_active, &gate, now);
+        if let (Some(flow), Some(target)) = (&flow, &target) {
+            record_held_back(&gate, flow, target.handles().held_back_notices(), now);
+        }
         match verdict {
             Gate::WindowActive => {}
             Gate::CooledDown => {
@@ -436,7 +463,8 @@ impl qobject::NotificationController {
         let runtime = target.handles().runtime().clone();
         // Made here, not in the future, so a future dropped before its first
         // poll clears the flow too.
-        let live = ClearFlowOnDrop::new(gate, target.flow_key());
+        let notices = target.handles().held_back_notices().clone();
+        let live = ClearFlowOnDrop::new(gate, notices, target.flow_key());
         runtime.spawn(async move {
             let mut live = live;
             let conn = match zbus::Connection::session().await {

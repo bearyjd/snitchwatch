@@ -540,27 +540,11 @@ Kirigami.ApplicationWindow {
         onReviewRequested: nav.replaceMain(learningReviewPageComponent)
     }
 
-    // Keeps ConnectionsModel.oldestPendingAgeSecs (and therefore
-    // pendingExposureBanner above) live: that property only changes
-    // automatically on the next bridge message, so elapsed wall-clock time
-    // otherwise needs an explicit poke. Declared at window scope, not as a
-    // child of the banner it drives — the banner is invisible in exactly the
-    // state (age < threshold) where this timer's ticks matter most, and a Qt
-    // child-of-invisible-item is not guaranteed to keep behaving identically
-    // across every InlineMessage implementation. Only runs while something
-    // is *actively* pending (Codex review: gating on pendingCount > 0 alone
-    // ticks forever once a stuck/expired row exists — see
-    // oldest_pending_started_at_ms's doc comment in row_store.rs — since a
-    // stuck row never resolves and never expires from pendingCount either;
-    // oldestPendingAgeSecs is already -1 in exactly that case, so gating on
-    // it here stops the wakeups once the real exposure window closes,
-    // regardless of whether the stuck row itself is ever cleaned up).
-    Timer {
-        interval: 1000
-        running: root.connectionsModelRef.oldestPendingAgeSecs >= 0
-        repeat: true
-        onTriggered: root.connectionsModelRef.refreshPendingAge()
-    }
+    // Keeps oldestPendingAgeSecs (and so pendingExposureBanner above) and
+    // the held-back notice counts live; see PendingAgeTicker.qml. At window
+    // scope, not inside the banner it drives (invisible exactly when its
+    // ticks matter most).
+    PendingAgeTicker { connections: root.connectionsModelRef }
 
     // Page components, swapped into pageStack by the drawer actions below.
     Component {

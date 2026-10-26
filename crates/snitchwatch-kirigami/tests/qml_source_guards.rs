@@ -184,6 +184,7 @@ fn pending_badge_does_not_fill_with_neutral_background_color() {
 #[test]
 fn pending_exposure_banner_stays_wired_to_oldest_pending_age() {
     let code = code_lines(MAIN_QML);
+    let ticker = code_lines(include_str!("../qml/PendingAgeTicker.qml"));
     assert!(
         code.contains("pendingAgeSecs >= pendingAgeThresholdSecs")
             && code.contains("pendingAgeSecs < pendingAgeCeilingSecs"),
@@ -204,9 +205,11 @@ fn pending_exposure_banner_stays_wired_to_oldest_pending_age() {
          ever changes, update this guard to match it, not just main.qml."
     );
     assert!(
-        code.contains("running: root.connectionsModelRef.oldestPendingAgeSecs >= 0")
-            && code.contains("repeat: true")
-            && code.contains("root.connectionsModelRef.refreshPendingAge()"),
+        code.contains("PendingAgeTicker { connections: root.connectionsModelRef }")
+            && ticker.contains("running: ticker.connections.oldestPendingAgeSecs >= 0")
+            && ticker.contains("oldestPendingAgeSecs >= 0 || ticker.connections.heldBackShown")
+            && ticker.contains("repeat: true")
+            && ticker.contains("ticker.connections.refreshPendingAge()"),
         "main.qml's pending-age poll Timer is no longer wired the way the banner needs: \
          running only while something is ACTIVELY pending (oldestPendingAgeSecs >= 0, not \
          merely pendingCount > 0 — a Codex review finding: gating on pendingCount alone \
@@ -214,7 +217,9 @@ fn pending_exposure_banner_stays_wired_to_oldest_pending_age() {
          resolves and never leaves pendingCount either), repeating, and calling \
          refreshPendingAge() each tick — oldestPendingAgeSecs would go stale between \
          bridge messages otherwise, since elapsed wall-clock time advances with nothing \
-         to trigger a recompute."
+         to trigger a recompute. It also keeps running while a held-back notice count \
+         is shown (heldBackShown, 0d part 2), so that count's hour still ends on a row \
+         unanswered past 120 s."
     );
 }
 

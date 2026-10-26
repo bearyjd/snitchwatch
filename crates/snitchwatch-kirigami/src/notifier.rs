@@ -51,11 +51,35 @@ pub struct FlowKey {
     pub host: String,
 }
 
+impl FlowKey {
+    /// The one derivation both sides use, so they cannot drift: the
+    /// program's path, or its name when the daemon sent no path.
+    pub fn of(session: u64, process_path: Option<&str>, process: &str, host: &str) -> Self {
+        Self {
+            session,
+            program: process_path.unwrap_or(process).to_string(),
+            host: host.to_string(),
+        }
+    }
+}
+
 /// A flow's posted notice, whose repeats coalesce for the repeat window.
 #[derive(Debug)]
 struct LiveFlow {
     posted_at: Instant,
     suppressed: u32,
+    epoch: u64,
+}
+
+/// A flow's held-back count as the gate saw it (0d part 2): how many
+/// repeats were held back, when its repeat window ends, and the epoch of
+/// that sighting. Every posted notice and every clear takes a newer epoch,
+/// so a copy read before a clear can't overwrite what the clear wrote.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HeldBack {
+    pub count: u32,
+    pub until: Instant,
+    pub epoch: u64,
 }
 
 /// What to do with a notice that may belong to a flow.
@@ -77,6 +101,8 @@ pub struct CooldownGate {
     live_flows: HashMap<FlowKey, LiveFlow>,
     cooldown: Duration,
     repeat_window: Duration,
+    /// The last epoch handed out (see [`HeldBack`]).
+    epoch: u64,
 }
 
 impl CooldownGate {
@@ -95,6 +121,7 @@ impl CooldownGate {
             live_flows: HashMap::new(),
             cooldown,
             repeat_window,
+            epoch: 0,
         }
     }
 
@@ -138,11 +165,13 @@ impl CooldownGate {
         if let Some(flow) = flow {
             self.last_fired_flow.insert(flow.clone(), now);
             self.prune(now);
+            self.epoch += 1;
             self.live_flows.insert(
                 flow.clone(),
                 LiveFlow {
                     posted_at: now,
                     suppressed: 0,
+                    epoch: self.epoch,
                 },
             );
         }
@@ -173,15 +202,32 @@ impl CooldownGate {
     }
 
     /// The flow's notice ended in a way that lets its next ask notify.
-    /// The cooldowns stay.
-    pub fn clear_flow(&mut self, flow: &FlowKey) {
-        self.live_flows.remove(flow);
+    /// The cooldowns stay. Returns the cleared count (0) under a newer
+    /// epoch, for the copy shown on the row; `None` if nothing was live.
+    pub fn clear_flow(&mut self, flow: &FlowKey) -> Option<HeldBack> {
+        let live = self.live_flows.remove(flow)?;
+        self.epoch += 1;
+        Some(HeldBack {
+            count: 0,
+            until: live.posted_at + self.repeat_window,
+            epoch: self.epoch,
+        })
     }
 
-    /// How many repeats of the flow's posted notice were held back. Read by
-    /// the "retried N times" counter (0d part 2).
+    /// How many repeats of the flow's posted notice were held back.
     pub fn suppressed(&self, flow: &FlowKey) -> u32 {
         self.live_flows.get(flow).map_or(0, |live| live.suppressed)
+    }
+
+    /// [`suppressed`](Self::suppressed), when the flow's repeat window
+    /// ends and its epoch, while it has a posted notice: what the held-back
+    /// count shown on its row is copied from (0d part 2).
+    pub fn held_back(&self, flow: &FlowKey) -> Option<HeldBack> {
+        self.live_flows.get(flow).map(|live| HeldBack {
+            count: live.suppressed,
+            until: live.posted_at + self.repeat_window,
+            epoch: live.epoch,
+        })
     }
 
     pub fn should_fire(&mut self, notice: &Notice, now: Instant) -> bool {
@@ -536,5 +582,42 @@ mod tests {
         assert_eq!(gate.live_flows.len(), 2);
         assert!(gate.live_flows.contains_key(&fresh));
         assert!(gate.live_flows.contains_key(&newer));
+    }
+
+    /// 0d part 2: the notice side and the row side key a flow the same way,
+    /// with the program's path, or its name when the daemon sent no path.
+    #[test]
+    fn a_flow_is_keyed_by_the_path_or_else_the_name() {
+        assert_eq!(
+            FlowKey::of(1, Some("/usr/bin/curl"), "curl", "example.com"),
+            flow(1, "/usr/bin/curl", "example.com")
+        );
+        assert_eq!(
+            FlowKey::of(1, None, "curl", "example.com"),
+            flow(1, "curl", "example.com")
+        );
+    }
+
+    #[test]
+    fn held_back_reports_the_count_and_when_the_window_ends() {
+        let mut gate = CooldownGate::new();
+        let t0 = Instant::now();
+        let curl = flow(1, "/usr/bin/curl", "example.com");
+        assert_eq!(gate.held_back(&curl), None);
+        gate.decide_for_flow(&pending(1), Some(&curl), t0);
+        let posted = gate.held_back(&curl).expect("posted");
+        assert_eq!((posted.count, posted.until), (0, t0 + HOUR));
+        gate.decide_for_flow(&pending(2), Some(&curl), t0 + Duration::from_secs(5));
+        let repeat = gate.held_back(&curl).expect("repeat");
+        assert_eq!((repeat.count, repeat.epoch), (1, posted.epoch));
+        // A clear leaves a newer epoch with no count, until the same end.
+        let cleared = gate.clear_flow(&curl).expect("cleared");
+        assert_eq!((cleared.count, cleared.until), (0, t0 + HOUR));
+        assert!(cleared.epoch > repeat.epoch);
+        assert_eq!(gate.held_back(&curl), None);
+        assert_eq!(gate.clear_flow(&curl), None);
+        // The next posted notice is newer than the clear.
+        gate.decide_for_flow(&pending(3), Some(&curl), t0 + Duration::from_secs(40));
+        assert!(gate.held_back(&curl).expect("reposted").epoch > cleared.epoch);
     }
 }

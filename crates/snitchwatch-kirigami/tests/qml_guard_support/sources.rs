@@ -180,6 +180,10 @@ pub const ALL_QML: &[(&str, &str)] = &[
     ),
     ("HoverTip.qml", include_str!("../../qml/HoverTip.qml")),
     (
+        "PendingAgeTicker.qml",
+        include_str!("../../qml/PendingAgeTicker.qml"),
+    ),
+    (
         "ProgramLabel.qml",
         include_str!("../../qml/ProgramLabel.qml"),
     ),
