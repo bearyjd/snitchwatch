@@ -37,19 +37,43 @@ to each project's original intent. So:
 ## Data path
 
 ```
-opensnitchd --(Loggers: syslog, JSON)--> journal --(shipper, TLS, field allowlist)--> Vigie input
+opensnitchd --(remote logger, JSON lines, TCP 127.0.0.1:514)--> rsyslog --(allowlist, TLS)--> Vigie input
 ```
 
-1. **Daemon to journal.** Add a `syslog` logger with `Format: json`. Don't
-   use the `remote` or `remote_syslog` loggers across the LAN: they speak plain
-   TCP or UDP only (`vendor/opensnitch/daemon/log/loggers/remote.go:165-172`).
-2. **Journal to Vigie.** A standard shipper with TLS reads the
-   opensnitchd entries, keeps only allowlisted fields, and sends them to a new
-   Vigie input. Candidates: rsyslog with omfwd over TLS, systemd-journal-upload,
-   Fluent Bit. The choice depends on what Bazzite ships and what Vigie's ingest
-   accepts; this doc doesn't pick one.
-3. **Vigie.** It stores these events as a new source next to its router
-   collector, with the same provenance rules, and joins them to conntrack.
+(Revised 2026-10-26 after reading the logger code. The first draft used the
+local `syslog` logger with JSON, but that logger only writes RFC 5424 or CSV,
+`log/loggers/syslog.go:35-38`.)
+
+1. **Daemon to a loopback listener.** Use a `remote` logger with
+   `Format: json`, `Protocol: tcp`, `Server: 127.0.0.1:514`. It is the only
+   logger with JSON output (`log/loggers/remote.go:85-91`) and writes one
+   object per line (`json.go:77-79`, `remote.go:208-214`).
+   - **Port.** 514 is below `net.ipv4.ip_unprivileged_port_start` (1024 on this
+     host), so an unprivileged local process can't bind it first and receive
+     the stream (the #35 squatting problem).
+   - **Filtering.** The daemon accepts its own connections without filtering
+     (`main.go:414`).
+   - **Never across the LAN.** The `remote` logger is plain TCP or UDP only
+     (`remote.go:165-172`).
+2. **rsyslog to Vigie.** rsyslog is a standard Fedora package, not in the
+   image today. It listens only on 127.0.0.1:514 with a ruleset that:
+   - takes the raw line as the message (no syslog header is sent);
+   - parses the JSON (`mmjsonparse`);
+   - renders only the allowlisted fields;
+   - forwards them over TLS with a pinned server certificate (`omfwd` with the
+     gnutls or openssl stream driver).
+   The other two shippers considered are ruled out:
+   - systemd-journal-upload can't drop fields;
+   - Fluent Bit isn't in Fedora's default repos.
+3. **Vigie.** It needs a TLS syslog input (RFC 5425 framing). It stores these
+   events as a new source next to its router collector, with the same
+   provenance rules, and joins them to conntrack.
+
+Why not CSV or RFC 5424 through the local logger:
+- They interpolate values without escaping (`formats/csv.go:24-38`,
+  `formats/formats.go:45-61`).
+- A program controls its own path and arguments, so it could forge or shift
+  fields. JSON comes from `json.Marshal`, so it's escaped.
 
 ## What the daemon actually emits (v1.8.0, verified in source)
 
@@ -126,11 +150,23 @@ those fields.
   network monitor: on". It would need the bridge to read the daemon config's
   `Loggers`, so it's out of scope until the rest works.
 
+## Also needed
+
+- rsyslog packages in the image (`rsyslog`, `rsyslog-mmjsonparse`, and a TLS
+  driver package). That's a tower/image change, separate from the Snitchwatch
+  packaging PR. Until then, it's an operator `rpm-ostree install`.
+- Under the deny opt-in, rsyslog's outbound TLS to Vigie needs an allow rule
+  for `/usr/sbin/rsyslogd` to that one host and port. The packaged default
+  (`allow`) needs none.
+- If rsyslog isn't running, the daemon drops events (`remote.go:200-206`
+  writes only while connected). Vigie's "guard went quiet" incident covers
+  this case.
+
 ## Open questions
 
-1. Which shipper (needs a look at the Bazzite image and Vigie's ingest).
-2. Vigie's input format: a new endpoint-events endpoint, or the existing
-   signed batch with a new record type.
+1. Vigie's input: a TLS syslog listener (RFC 5425), and how it maps into its
+   provenance model.
+2. Whether the image should ship rsyslog, or leave it as an operator step.
 3. How to identify this computer in Vigie: a stable host identity in the
    shipper config, joined to Vigie's device inventory.
 4. Matching tolerance and how loss is shown (measure on real traffic before
