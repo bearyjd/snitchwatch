@@ -50,6 +50,7 @@ mod retries;
 mod roles;
 #[cfg(test)]
 mod tests;
+mod verdict_windows;
 
 use helpers::*;
 use roles::*;
@@ -527,6 +528,12 @@ pub mod qobject {
             count: i32,
             window_secs: i32,
         );
+
+        /// Roll the headers' "last hour" / "today" counts to the wall clock
+        /// (60 s QML `Timer`; `connections_model::verdict_windows`).
+        #[qinvokable]
+        #[cxx_name = "refreshVerdictWindows"]
+        fn refresh_verdict_windows(self: Pin<&mut ConnectionsModel>);
     }
 
     // Protected base-class helpers inherited from QAbstractListModel.

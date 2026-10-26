@@ -206,6 +206,7 @@ pub(super) fn grouped_entry_data(entry: &VisibleEntry, role: i32, store: &RowSto
             ROLE_GROUP_ALLOWED => QVariant::from(&(counts.allowed as i32)),
             ROLE_GROUP_DENIED => QVariant::from(&(counts.denied as i32)),
             ROLE_GROUP_BLOCKLISTED => QVariant::from(&(counts.blocklisted as i32)),
+            ROLE_GROUP_LAST_HOUR | ROLE_GROUP_TODAY => verdict_windows::window_role(counts, role),
             ROLE_MATCHED_RULE | ROLE_MATCHED_RULE_DISPLAY | ROLE_OUTCOME_TEXT => {
                 QVariant::from(&QString::from(""))
             }
@@ -244,6 +245,7 @@ pub(super) fn grouped_entry_data(entry: &VisibleEntry, role: i32, store: &RowSto
             ROLE_GROUP_ALLOWED => QVariant::from(&(counts.allowed as i32)),
             ROLE_GROUP_DENIED => QVariant::from(&(counts.denied as i32)),
             ROLE_GROUP_BLOCKLISTED => QVariant::from(&(counts.blocklisted as i32)),
+            ROLE_GROUP_LAST_HOUR | ROLE_GROUP_TODAY => verdict_windows::window_role(counts, role),
             ROLE_MATCHED_RULE | ROLE_MATCHED_RULE_DISPLAY | ROLE_OUTCOME_TEXT => {
                 QVariant::from(&QString::from(""))
             }
@@ -312,6 +314,7 @@ pub(super) fn grouped_entry_data(entry: &VisibleEntry, role: i32, store: &RowSto
                 | ROLE_GROUP_ALLOWED
                 | ROLE_GROUP_DENIED
                 | ROLE_GROUP_BLOCKLISTED => QVariant::from(&0i32),
+                ROLE_GROUP_LAST_HOUR | ROLE_GROUP_TODAY => QVariant::from(&QString::from("[]")),
                 ROLE_MATCHED_RULE => QVariant::from(&QString::from(matched_rule_name(row))),
                 ROLE_MATCHED_RULE_DISPLAY => {
                     QVariant::from(&QString::from(&matched_rule_display(row)))

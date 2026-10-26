@@ -63,6 +63,7 @@ impl qobject::ConnectionsModel {
             | ROLE_GROUP_ALLOWED
             | ROLE_GROUP_DENIED
             | ROLE_GROUP_BLOCKLISTED => QVariant::from(&0i32),
+            ROLE_GROUP_LAST_HOUR | ROLE_GROUP_TODAY => QVariant::from(&QString::from("[]")),
             ROLE_MATCHED_RULE => QVariant::from(&QString::from(matched_rule_name(row))),
             ROLE_MATCHED_RULE_DISPLAY => QVariant::from(&QString::from(&matched_rule_display(row))),
             ROLE_ANSWERED_WHILE_PAUSED => QVariant::from(&answered_while_paused(row)),
@@ -105,6 +106,8 @@ impl qobject::ConnectionsModel {
         roles.insert(ROLE_GROUP_ALLOWED, QByteArray::from("groupAllowed"));
         roles.insert(ROLE_GROUP_DENIED, QByteArray::from("groupDenied"));
         roles.insert(ROLE_GROUP_BLOCKLISTED, QByteArray::from("groupBlocklisted"));
+        roles.insert(ROLE_GROUP_LAST_HOUR, QByteArray::from("groupLastHour"));
+        roles.insert(ROLE_GROUP_TODAY, QByteArray::from("groupToday"));
         roles.insert(ROLE_MATCHED_RULE, QByteArray::from("matchedRule"));
         roles.insert(
             ROLE_MATCHED_RULE_DISPLAY,

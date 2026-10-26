@@ -411,10 +411,13 @@ Controls.ApplicationWindow {
         feedStub.appBound = true;
     }
 
-    // The delegate whose `prop` is `value`, or null.
+    // The delegate whose `prop` is `value`, or null. Rows below the fold
+    // have no delegate until scrolled to (headers grew a counts line, 0b).
     function delegateWhere(prop, value) {
         const list = page.connectionList;
         for (let i = 0; i < list.count; i++) {
+            list.positionViewAtIndex(i, ListView.Contain);
+            list.forceLayout();
             const item = list.itemAtIndex(i);
             if (item && item[prop] === value) {
                 return item;

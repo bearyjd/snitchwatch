@@ -96,3 +96,8 @@ pub(super) const ROLE_PROGRAM_PATH_FULL: i32 = 40;
 /// hour (0d part 2, `connections_model::retries`): only on the flow's newest
 /// pending row, 0 elsewhere and on headers.
 pub(super) const ROLE_RETRIED_COUNT: i32 = 41;
+/// A header's verdict counts for the last hour / today (phase 0b,
+/// `connections::grouping::windows`): a JSON list of `{kind, text}`, one per
+/// verdict present; `[]` on connection rows.
+pub(super) const ROLE_GROUP_LAST_HOUR: i32 = 42;
+pub(super) const ROLE_GROUP_TODAY: i32 = 43;
