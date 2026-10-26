@@ -14,6 +14,7 @@
 - Off by default: no shipped daemon config enables a logger; recipe, staging scripts and image don't install rsyslog or the drop-in.
 - Never forwarded: `process_env`, `process_args`, `process_cwd`, `process_tree`, `process_checksums` (nor `process_id`). Forwarded: time, protocol, src/dst IP and port, `dst_host`, `process_path`, `user_id`, `Action`, `Rule`, `Type`, plus a configured host id.
 - Loopback listener on a port below 1024 (#35 squatting); TLS mandatory on the forward with an authenticated server (pinned CA + `x509/name`).
+- Vigie's receiver contract (2026-10-26): mutual TLS required (per-host client cert/key; host identity comes from that cert, `host_id` is informational); frames over 8 KiB are dropped; Vigie records its own receive time, so `time` is rsyslog's `timegenerated`.
 - No disk-assisted queue: rsyslog would serialize the raw event (environment included) to disk. Bounded in-memory queue; drop when full.
 - Daemon config is root-only 0600: edit with the validate-then-swap pattern of "Restoring the `allow` default" (`docs/packaging/system-bridge-integration.md`); restart `opensnitch.service` (issue #92).
 - Tests never touch the host's `/etc`, `sudo` or a live daemon; the real-rsyslog proof runs in the pinned container only.
@@ -39,9 +40,14 @@
 
 - [x] `packaging/endpoint-events/opensnitchd-logger.json`, `snitchwatch-endpoint-events.conf`, `README.md` (install, CA/placeholders, SELinux check, start, merge, `/etc` merge note, deny-mode rule template, way back, loss model).
 
+### Task 2b: Vigie receiver contract
+
+- [x] Tests: client `CertFile`/`KeyFile` required, auth mode `x509/name` (or `x509/fingerprint` with SHA peers) only; `maxMessageSize` 64k in, template caps (`process_path` 768, `dst_host` 253, `rule` 128) keep the worst-case escaped frame under 8 KiB; `sample-event.json` has exactly the allowlist.
+- [x] Drop-in, README (exact TLS settings table, host cert generation/registration, size bounds, time source) and `sample-event.json` from the proof's receiver.
+
 ### Task 3: Real config proof
 
-- [x] `packaging/endpoint-events/verify.sh` + `just endpoint-events-verify` (podman; not in `package-check`): `-N1` under stock and minimal main configs; e2e to a TLS rsyslog receiver with a fake token in env/args, blank and non-JSON frames, a task notification; wrong-CA receiver gets nothing; README merge (twice) and way-back snippets run against the packaged config copy, mode stays 0600.
+- [x] `packaging/endpoint-events/verify.sh` + `just endpoint-events-verify` (podman; not in `package-check`): `-N1` under stock and minimal main configs; e2e to a TLS rsyslog receiver with a fake token in env/args, blank and non-JSON frames, a task notification; worst-case event (45 KB raw) forwarded as one frame under 8 KiB; wrong-CA receiver gets nothing; receiver requiring this host's client cert rejects one from another CA; README merge (twice) and way-back snippets run against the packaged config copy, mode stays 0600.
 - [x] `package-check` gains `bash -n`/shellcheck of `verify.sh` and a JSON parse of the logger entry.
 
 ## Open items (not verifiable here)

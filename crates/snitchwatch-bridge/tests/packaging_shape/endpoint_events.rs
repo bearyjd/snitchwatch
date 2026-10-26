@@ -226,15 +226,33 @@ fn forward_requires_tls_with_an_authenticated_peer_and_then_stops() {
     let driver = param(fwd, "StreamDriver").expect("StreamDriver set");
     assert!(driver == "gtls" || driver == "ossl", "driver `{driver}`");
     assert_eq!(param(fwd, "StreamDriverMode").as_deref(), Some("1"));
+    // The server is pinned: by name under the pinned CA, or by fingerprint.
+    // `x509/certvalid` alone accepts any certificate the CA signed, and
+    // `anon` none at all.
     let auth = param(fwd, "StreamDriverAuthMode").expect("auth mode set");
+    let peers = param(fwd, "StreamDriverPermittedPeers").unwrap_or_default();
+    let peers: Vec<&str> = peers.split(',').map(str::trim).collect();
     assert!(
-        auth == "x509/name" || auth == "x509/certvalid",
-        "auth mode `{auth}` doesn't authenticate the server"
+        peers.iter().all(|peer| !peer.is_empty()),
+        "StreamDriverPermittedPeers must name the server"
     );
-    assert!(param(fwd, "streamDriver.CAFile").is_some(), "pinned CA");
-    if auth == "x509/name" {
-        assert!(param(fwd, "StreamDriverPermittedPeers").is_some());
+    match auth.as_str() {
+        "x509/name" => {}
+        "x509/fingerprint" => assert!(
+            peers.iter().all(|peer| peer.starts_with("SHA")),
+            "fingerprint mode needs SHA fingerprints, got {peers:?}"
+        ),
+        other => panic!("auth mode `{other}` doesn't pin the server"),
     }
+    let file_param = |key: &str| param(fwd, key).filter(|path| path.starts_with('/'));
+    assert!(file_param("streamDriver.CAFile").is_some(), "pinned CA");
+    // Mutual TLS (Vigie's receiver contract): this computer presents its own
+    // certificate, which is how Vigie identifies it.
+    assert!(
+        file_param("streamDriver.CertFile").is_some(),
+        "client certificate"
+    );
+    assert!(file_param("streamDriver.KeyFile").is_some(), "client key");
     assert_eq!(
         param(fwd, "template").as_deref(),
         Some("snitchwatch_endpoint_event")
@@ -301,6 +319,45 @@ fn template_forwards_only_the_privacy_allowlist() {
     }
 }
 
+/// Vigie drops frames over 8 KiB. Input accepts the daemon's large raw lines
+/// (environment included) so they parse rather than truncate, and the
+/// template caps every variable-length field so the worst-case output (each
+/// capped byte escaped as `\u00XX`, six bytes) stays under 8 KiB.
+#[test]
+fn frames_are_bounded_for_vigie() {
+    let active = rsyslog_active();
+    let globals = statements(&active, "global");
+    let max = globals
+        .iter()
+        .find_map(|body| param(body, "maxMessageSize"))
+        .expect("maxMessageSize is set");
+    assert_eq!(max, "64k", "input limit for the daemon's raw lines");
+
+    let start = active
+        .find("template(name=\"snitchwatch_endpoint_event\"")
+        .unwrap();
+    let template = &active[start..start + active[start..].find('}').unwrap()];
+    let property = |outname: &str| {
+        statements(template, "property")
+            .into_iter()
+            .find(|body| param(body, "outname").as_deref() == Some(outname))
+            .unwrap_or_else(|| panic!("no `{outname}` property"))
+    };
+    let mut worst_case = 0;
+    for (outname, cap) in [("process_path", 768), ("dst_host", 253), ("rule", 128)] {
+        let to: usize = param(&property(outname), "position.to")
+            .unwrap_or_else(|| panic!("`{outname}` is not capped"))
+            .parse()
+            .unwrap();
+        assert_eq!(to, cap, "`{outname}` cap");
+        worst_case += 6 * to;
+    }
+    // Everything else: keys, punctuation, time, IPs, numbers, action, a
+    // 64-character host id (escaped), protocol.
+    worst_case += 1024;
+    assert!(worst_case < 8192, "worst-case frame {worst_case} bytes");
+}
+
 fn logger_configs(dir: &Path, found: &mut Vec<PathBuf>) {
     for entry in std::fs::read_dir(dir).unwrap() {
         let path = entry.unwrap().path();
@@ -364,6 +421,10 @@ fn readme_merges_atomically_as_root_and_restarts_the_fedora_unit() {
         "rsyslog-mmjsonparse",
         "rsyslog-gnutls",
         "/usr/bin/rsyslogd",
+        "host-cert.pem",
+        "host-key.pem",
+        "informational",
+        "maxMessageSize",
     ] {
         assert!(body.contains(needle), "README missing `{needle}`");
     }
@@ -382,4 +443,25 @@ fn readme_merges_atomically_as_root_and_restarts_the_fedora_unit() {
         !body.contains("opensnitchd.service"),
         "the Fedora unit is opensnitch.service (issue #92)"
     );
+}
+
+/// The hand-off sample for Vigie is the line the podman proof's receiver got:
+/// one JSON object with exactly the allowlisted keys.
+#[test]
+fn sample_event_has_exactly_the_allowlisted_fields() {
+    let json = daemon_config("packaging/endpoint-events/sample-event.json");
+    let mut keys: Vec<&str> = json
+        .as_object()
+        .expect("one JSON object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    let mut allowed = ALLOWED_FIELDS.to_vec();
+    allowed.sort_unstable();
+    assert_eq!(keys, allowed);
+    let body = read("packaging/endpoint-events/sample-event.json");
+    for field in FORBIDDEN_FIELDS {
+        assert!(!body.contains(field), "sample carries `{field}`");
+    }
 }

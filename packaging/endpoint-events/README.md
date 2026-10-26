@@ -18,6 +18,7 @@ Flatpak sandbox are unchanged. Vigie never decides anything on this computer.
 | ---- | ------- | ---------- |
 | [`opensnitchd-logger.json`](opensnitchd-logger.json) | merged into `Server.Loggers` of `/etc/opensnitchd/default-config.json` | the daemon's `remote` logger: JSON, TCP, `127.0.0.1:514` |
 | [`snitchwatch-endpoint-events.conf`](snitchwatch-endpoint-events.conf) | `/etc/rsyslog.d/` | loopback listener, field allowlist, TLS forward to Vigie |
+| [`sample-event.json`](sample-event.json) | nowhere | one forwarded event exactly as the proof's receiver got it (the hand-off sample for Vigie) |
 | [`verify.sh`](verify.sh) | nowhere | `just endpoint-events-verify`: the real-rsyslog proof below |
 
 ## What leaves this computer, and what doesn't
@@ -26,7 +27,11 @@ The daemon's event is the whole connection, including each process's
 environment and arguments, which can hold tokens and passwords. The drop-in's
 template forwards **only**:
 
-- `time` (when rsyslog received the event), `host_id` (yours, see below);
+- `time`: when rsyslog received the event from the daemon (rsyslog's
+  `timegenerated`, RFC 3339 with microseconds and offset). The daemon's JSON
+  carries no timestamp of its own. Vigie also records its own receive time;
+- `host_id`: informational only. Vigie identifies this computer by its
+  client certificate, never by this field;
 - `protocol`, `src_ip`, `src_port`, `dst_ip`, `dst_port`, `dst_host`;
 - `process_path`, `user_id`;
 - `action`, `rule`, `type` (the daemon's `Action`, `Rule`, `Type`; rsyslog
@@ -38,10 +43,37 @@ It never forwards `process_env`, `process_args`, `process_cwd`,
 dropped. The `packaging_shape` tests pin this, and `verify.sh` proves it
 against real rsyslog with a fake token in the environment and arguments.
 
-Each event goes out as one JSON object per RFC 5425 (octet-counted) frame over
-TLS, with no syslog header. The server must present a certificate signed by
-the pinned CA and carrying the configured name (`x509/name`); there is no
-fallback to plain TCP.
+## TLS and framing settings (exact)
+
+The forward is mutual TLS; there is no fallback to plain TCP. From the
+drop-in's `omfwd` action:
+
+| Setting | Value | Meaning |
+| ------- | ----- | ------- |
+| `protocol` | `tcp` | |
+| `tcp_framing` | `octet-counted` | RFC 5425 framing: `<length> <payload>` |
+| `StreamDriver` | `gtls` | GnuTLS (`rsyslog-gnutls`) |
+| `StreamDriverMode` | `1` | TLS required |
+| `StreamDriverAuthMode` | `x509/name` | Vigie's certificate must chain to the pinned CA **and** name `@VIGIE_CERT_NAME@` (SAN or CN) |
+| `StreamDriverPermittedPeers` | `@VIGIE_CERT_NAME@` | |
+| `streamDriver.CAFile` | `/etc/pki/snitchwatch-endpoint-events/vigie-ca.pem` | the pinned CA (Vigie's) |
+| `streamDriver.CertFile` | `/etc/pki/snitchwatch-endpoint-events/host-cert.pem` | this computer's client certificate |
+| `streamDriver.KeyFile` | `/etc/pki/snitchwatch-endpoint-events/host-key.pem` | its key, root-only 0600 |
+
+TLS versions and ciphers are GnuTLS's system defaults (Fedora's crypto policy).
+
+Each frame's payload is one JSON object (no syslog header, no trailing
+newline), as in [`sample-event.json`](sample-event.json). Sizes:
+
+- **Out: under 8 KiB per frame.** Vigie drops larger frames. The template cuts
+  `process_path` to 768 bytes, `dst_host` to 253 and `rule` to 128 before JSON
+  escaping, so even if every byte needs six-byte `\u00XX` escaping the frame
+  stays under 8 KiB, given a `@HOST_ID@` of at most 64 characters. A cut can
+  split a multi-byte UTF-8 character at the end of a long path.
+- **In: 64k** (`global(maxMessageSize="64k")`, rsyslog-wide). The daemon's raw
+  line includes the whole environment and arguments and often exceeds
+  rsyslog's 8k default; a cut line would fail to parse and be dropped. Raw
+  lines over 64k are still dropped.
 
 ## Why port 514 on loopback
 
@@ -95,16 +127,39 @@ Do this as root, from a checkout of this repository (the merge reads
    journal does. If you don't want that, trim `/etc/rsyslog.conf` to
    `include(file="/etc/rsyslog.d/*.conf")` plus a `global(workDirectory=...)`.
 
-2. **Place Vigie's CA and the drop-in.** Put the CA that signed Vigie's TLS
-   certificate at `/etc/pki/snitchwatch-endpoint-events/vigie-ca.pem` (0644).
-   Copy the drop-in to `/etc/rsyslog.d/` and fill the four placeholders:
+2. **Certificates.** Vigie owns registration, so follow its instructions for
+   how a host certificate is issued and registered; this is the generic shape.
+   Create this computer's key and a certificate signing request on the host,
+   so the key never leaves it:
+
+   ```bash
+   sudo install -d -m 0755 /etc/pki/snitchwatch-endpoint-events
+   sudo openssl req -newkey rsa:3072 -nodes -subj "/CN=HOST_NAME" \
+     -addext "subjectAltName=DNS:HOST_NAME" \
+     -keyout /etc/pki/snitchwatch-endpoint-events/host-key.pem \
+     -out /etc/pki/snitchwatch-endpoint-events/host.csr
+   sudo chmod 600 /etc/pki/snitchwatch-endpoint-events/host-key.pem
+   ```
+
+   - Have Vigie sign the CSR (or issue a certificate for this host's key) and
+     register the host: its certificate's SAN, or its fingerprint
+     (`sudo openssl x509 -in /etc/pki/snitchwatch-endpoint-events/host-cert.pem
+     -noout -fingerprint -sha256`), joined to Vigie's device inventory. That
+     registration, not `host_id`, is what identifies this computer to Vigie.
+   - Install the signed certificate as
+     `/etc/pki/snitchwatch-endpoint-events/host-cert.pem` (0644), and the CA
+     that signed Vigie's server certificate as
+     `/etc/pki/snitchwatch-endpoint-events/vigie-ca.pem` (0644).
+   - A self-signed host certificate works too, if Vigie pins its fingerprint.
+
+   **The drop-in.** Copy it to `/etc/rsyslog.d/` and fill the four placeholders:
 
    | Placeholder | Value |
    | ----------- | ----- |
    | `@VIGIE_ADDRESS@` | Vigie's IP address (an IP, so rsyslog needs no DNS under `deny`) |
    | `@VIGIE_PORT@` | Vigie's TLS syslog port, e.g. `6514` |
    | `@VIGIE_CERT_NAME@` | the name in Vigie's certificate (checked by `x509/name`) |
-   | `@HOST_ID@` | this computer's stable id in Vigie's device inventory |
+   | `@HOST_ID@` | a label for this computer, at most 64 characters; informational only (Vigie identifies the host by its client certificate) |
 
    ```bash
    sudo install -D -m 0644 packaging/endpoint-events/snitchwatch-endpoint-events.conf \
@@ -212,7 +267,7 @@ Then:
 ```bash
 sudo systemctl disable --now rsyslog.service
 sudo rm /etc/rsyslog.d/snitchwatch-endpoint-events.conf
-sudo rm /etc/pki/snitchwatch-endpoint-events/vigie-ca.pem
+sudo rm -f /etc/pki/snitchwatch-endpoint-events/{vigie-ca.pem,host-cert.pem,host-key.pem,host.csr}
 sudo rmdir /etc/pki/snitchwatch-endpoint-events
 sudo rm -f /etc/opensnitchd/rules/endpoint-events-rsyslog-to-vigie.json   # if you added it
 sudo rpm-ostree uninstall rsyslog rsyslog-mmjsonparse rsyslog-gnutls       # then reboot
@@ -230,9 +285,11 @@ just endpoint-events-verify
 Runs [`verify.sh`](verify.sh) in the digest-pinned Fedora 44 image
 (`packaging/release/pins.env`) with rootless podman: `rsyslogd -N1` on the
 drop-in under Fedora's stock config and a minimal one; an end-to-end run
-against a local TLS receiver asserting the allowlisted fields arrive and a fake
-token in `process_env`/`process_args` doesn't; a receiver from another CA that
-must get nothing; and the merge and way-back snippets above (marked
+against a local mutual-TLS receiver asserting the allowlisted fields arrive and
+a fake token in `process_env`/`process_args` doesn't; a worst-case event (large
+environment, long escaped path, host and rule) that must arrive in one frame
+under 8 KiB; a receiver from another CA, and a client certificate from another
+CA, that must both get nothing; and the merge and way-back snippets above (marked
 `verify.sh:`) against a copy of the packaged daemon config. It needs the
 Fedora mirrors, so it isn't part of `just package-check`.
 
