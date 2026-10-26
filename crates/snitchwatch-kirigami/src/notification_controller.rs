@@ -330,8 +330,9 @@ pub(crate) fn may_post(
 
 /// Copy the gate's held-back count for `flow` to the rows' copy (0d part
 /// 2), after every [`may_post`] for that flow, whatever it decided: a Post
-/// starts the count at 0 (removing it), a Repeat raises it. The gate's
-/// lock is released before the copy's is taken.
+/// starts the count at 0, a Repeat raises it. The gate's lock is released
+/// before the copy's is taken; the epoch read with the count keeps a clear
+/// that lands in between from being undone.
 pub(crate) fn record_held_back(
     gate: &Mutex<CooldownGate>,
     flow: &FlowKey,
@@ -378,12 +379,13 @@ impl Drop for ClearFlowOnDrop {
         if self.hold {
             return;
         }
-        self.gate
+        let cleared = self
+            .gate
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clear_flow(&self.flow);
         // The gate's lock is released above, before this one is taken.
-        self.notices.remove(&self.flow);
+        self.notices.record(&self.flow, cleared, Instant::now());
     }
 }
 

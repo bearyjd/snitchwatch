@@ -3,13 +3,16 @@
 //! pending row only. The count is copied from the gate by the notification
 //! controller into `BridgeHandles::held_back_notices`; it is read here on
 //! the pending-age tick (`refreshPendingAge`), so it lags up to a second.
-//! It only adds a label: no row, banner or count depends on it.
+//! That tick also runs while `heldBackShown` is true (`main.qml`), so a
+//! count on a row unanswered past 120 s (no longer "actively" pending)
+//! still hides when its hour ends. It only adds a label: no row, banner or
+//! count depends on it.
 
 use std::time::Instant;
 
 use super::*;
 use crate::bridge_runtime::HeldBackNotices;
-use crate::notifier::FlowKey;
+use crate::notifier::{FlowKey, HeldBack};
 
 /// Row id to count, for the newest pending row (greatest `started_at_ms`,
 /// the later row in the store on a tie) of each flow with notices held
@@ -56,11 +59,12 @@ impl qobject::ConnectionsModel {
     }
 
     /// Recompute the role from the held-back counts, repainting only that
-    /// role and only when a count moved.
+    /// role and only when a count moved. The bridge's counts always win: the
+    /// test seam's are read only when no bridge runs.
     pub(super) fn refresh_held_back(mut self: Pin<&mut Self>) {
-        let notices = self.held_back_for_tests.clone().or_else(|| {
-            crate::bridge_runtime::handles().map(|handles| handles.held_back_notices().clone())
-        });
+        let notices = crate::bridge_runtime::handles()
+            .map(|handles| handles.held_back_notices().clone())
+            .or_else(|| self.held_back_for_tests.clone());
         let counts = notices.map_or_else(HashMap::new, |notices| {
             held_back_by_row(
                 self.store.rows(),
@@ -69,6 +73,7 @@ impl qobject::ConnectionsModel {
                 Instant::now(),
             )
         });
+        self.as_mut().set_held_back_shown(!counts.is_empty());
         if counts == self.held_back_rows {
             return;
         }
@@ -88,13 +93,15 @@ impl qobject::ConnectionsModel {
     }
 
     /// Test seam: the probes have no bridge, so no notice gate. Sets the
-    /// held-back count of the model session's flow `program` to `host`
-    /// (0 removes it), for the hour.
+    /// held-back count of the model session's flow `program` to `host` for
+    /// `window_secs`. Read only while no bridge runs, so it can never stand
+    /// in for, or hide, a running bridge's counts.
     pub(super) fn hold_back_notices_for_tests(
         mut self: Pin<&mut Self>,
         program: &QString,
         host: &QString,
         count: i32,
+        window_secs: i32,
     ) {
         let notices = self.held_back_for_tests.clone().unwrap_or_default();
         let flow = FlowKey {
@@ -103,8 +110,13 @@ impl qobject::ConnectionsModel {
             host: host.to_string(),
         };
         let now = Instant::now();
-        let until = now + std::time::Duration::from_secs(3600);
-        notices.record(&flow, Some((count.max(0) as u32, until)), now);
+        let secs = u64::try_from(window_secs).unwrap_or(0);
+        let held = HeldBack {
+            count: u32::try_from(count).unwrap_or(0),
+            until: now + std::time::Duration::from_secs(secs),
+            epoch: 0,
+        };
+        notices.record(&flow, Some(held), now);
         self.as_mut().rust_mut().held_back_for_tests = Some(notices);
         self.refresh_held_back();
     }
@@ -139,7 +151,16 @@ mod tests {
 
     fn held(flow: &FlowKey, count: u32, now: Instant) -> HeldBackNotices {
         let notices = HeldBackNotices::default();
-        notices.record(flow, Some((count, now + Duration::from_secs(3600))), now);
+        let until = now + Duration::from_secs(3600);
+        notices.record(
+            flow,
+            Some(HeldBack {
+                count,
+                until,
+                epoch: 0,
+            }),
+            now,
+        );
         notices
     }
 

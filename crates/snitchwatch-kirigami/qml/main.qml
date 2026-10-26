@@ -557,7 +557,7 @@ Kirigami.ApplicationWindow {
     // regardless of whether the stuck row itself is ever cleaned up).
     Timer {
         interval: 1000
-        running: root.connectionsModelRef.oldestPendingAgeSecs >= 0
+        running: root.connectionsModelRef.oldestPendingAgeSecs >= 0 || root.connectionsModelRef.heldBackShown
         repeat: true
         onTriggered: root.connectionsModelRef.refreshPendingAge()
     }

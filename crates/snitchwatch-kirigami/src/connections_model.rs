@@ -101,6 +101,9 @@ pub mod qobject {
         /// call — QML must poll the latter on a timer, since elapsed time
         /// advances with no new message to trigger recomputation.
         #[qproperty(i32, oldest_pending_age_secs, cxx_name = "oldestPendingAgeSecs")]
+        /// A held-back notice count is shown (`retries`): `main.qml` keeps
+        /// its refresh tick running for it, so the count's hour ends too.
+        #[qproperty(bool, held_back_shown, cxx_name = "heldBackShown")]
         /// Whether the view is currently in grouped (Process -> Domain ->
         /// connection) mode as opposed to the flat list. Defaults to `true`
         /// per the design spec ("defaulting to grouped"). Toggle via the
@@ -522,6 +525,7 @@ pub mod qobject {
             program: &QString,
             host: &QString,
             count: i32,
+            window_secs: i32,
         );
     }
 
@@ -633,6 +637,7 @@ pub struct ConnectionsModelRust {
     duration: level_rule_actions::DurationCache,
     /// Behind the `retriedCount` role (`retries`), and its test seam.
     held_back_rows: HashMap<String, u32>,
+    held_back_shown: bool,
     held_back_for_tests: Option<crate::bridge_runtime::HeldBackNotices>,
 }
 
@@ -669,6 +674,7 @@ impl Default for ConnectionsModelRust {
             filter_denied_only: false,
             duration: level_rule_actions::DurationCache::default(),
             held_back_rows: HashMap::new(),
+            held_back_shown: false,
             held_back_for_tests: None,
         }
     }

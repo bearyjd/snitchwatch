@@ -205,6 +205,7 @@ fn pending_exposure_banner_stays_wired_to_oldest_pending_age() {
     );
     assert!(
         code.contains("running: root.connectionsModelRef.oldestPendingAgeSecs >= 0")
+            && code.contains("oldestPendingAgeSecs >= 0 || root.connectionsModelRef.heldBackShown")
             && code.contains("repeat: true")
             && code.contains("root.connectionsModelRef.refreshPendingAge()"),
         "main.qml's pending-age poll Timer is no longer wired the way the banner needs: \
@@ -214,7 +215,9 @@ fn pending_exposure_banner_stays_wired_to_oldest_pending_age() {
          resolves and never leaves pendingCount either), repeating, and calling \
          refreshPendingAge() each tick — oldestPendingAgeSecs would go stale between \
          bridge messages otherwise, since elapsed wall-clock time advances with nothing \
-         to trigger a recompute."
+         to trigger a recompute. It also keeps running while a held-back notice count \
+         is shown (heldBackShown, 0d part 2), so that count's hour still ends on a row \
+         unanswered past 120 s."
     );
 }
 

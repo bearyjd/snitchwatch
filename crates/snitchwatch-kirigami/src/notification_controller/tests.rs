@@ -353,8 +353,8 @@ fn a_pending_notice_has_no_plain_text_form() {
 }
 
 /// 0d part 2: the held-back count follows the gate on every outcome, so it
-/// never goes stale: a Post removes it, a Repeat sets it, the window being
-/// active leaves it, a cooldown with no live notice removes it.
+/// never goes stale: a Post resets it, a Repeat sets it, the window being
+/// active leaves it, a clear zeroes it and a cooldown leaves that 0.
 #[test]
 fn the_held_back_count_follows_every_outcome() {
     let gate = Mutex::new(CooldownGate::new());
@@ -380,7 +380,9 @@ fn the_held_back_count_follows_every_outcome() {
     // A new hour starts from 0.
     assert_eq!(step(5, false, at(3600)), (Gate::Post, 0));
     assert_eq!(step(6, false, at(3610)), (Gate::Repeat, 1));
-    gate.lock().unwrap().clear_flow(&curl);
+    // Cleared as the guard clears it: the gate, then the copy.
+    let cleared = gate.lock().unwrap().clear_flow(&curl);
+    notices.record(&curl, cleared, at(3615));
     assert_eq!(step(7, false, at(3620)), (Gate::CooledDown, 0));
 }
 
@@ -410,4 +412,41 @@ fn the_guard_clears_the_held_back_count_unless_it_holds() {
         let expected = if hold { 1 } else { 0 };
         assert_eq!(notices.count(&curl, soon), expected, "hold: {hold}");
     }
+}
+
+/// Codex review of #230: `record_held_back` reads the gate, releases it,
+/// then writes the count. A clear landing in between must win: the late
+/// write carries the epoch it read, older than the clear's.
+#[test]
+fn a_clear_between_the_read_and_the_write_keeps_the_count_at_zero() {
+    let gate = Arc::new(Mutex::new(CooldownGate::new()));
+    let notices = HeldBackNotices::default();
+    let curl = FlowKey::of(1, Some("/usr/bin/curl"), "curl", "example.com");
+    let notice = BridgeNotice::Pending {
+        row_id: 1,
+        process: "curl".into(),
+    };
+    let t0 = Instant::now();
+    let at = |secs| t0 + Duration::from_secs(secs);
+    may_post(&notice, Some(&curl), false, &gate, t0);
+    let guard = ClearFlowOnDrop::new(gate.clone(), notices.clone(), curl.clone());
+    may_post(&notice, Some(&curl), false, &gate, at(5));
+    record_held_back(&gate, &curl, &notices, at(5));
+    assert_eq!(notices.count(&curl, at(5)), 1);
+    may_post(&notice, Some(&curl), false, &gate, at(10));
+    // Read under the gate lock, as `record_held_back` does...
+    let read = gate.lock().unwrap().held_back(&curl);
+    // ...then the notice ends (say, a new notification server)...
+    drop(guard);
+    // ...and only then the write.
+    notices.record(&curl, read, at(10));
+    assert_eq!(notices.count(&curl, at(10)), 0);
+    // The flow's next posted notice counts again.
+    assert_eq!(
+        may_post(&notice, Some(&curl), false, &gate, at(40)),
+        Gate::Post
+    );
+    may_post(&notice, Some(&curl), false, &gate, at(45));
+    record_held_back(&gate, &curl, &notices, at(45));
+    assert_eq!(notices.count(&curl, at(45)), 1);
 }

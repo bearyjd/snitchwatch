@@ -43,6 +43,7 @@ Window {
     property var failures: []
     property int step: 0
     property var before: null
+    property real deadline: 0
 
     QtObject {
         id: feedStub
@@ -108,7 +109,7 @@ Window {
             probe.expect(probe.before.count === 3 && probe.before.pending === 3,
                          "setup: " + JSON.stringify(probe.before));
             probe.expect(probe.heldBack("ask-2") === "", "a note before anything was held back");
-            model.holdBackNoticesForTests("/usr/bin/python3", "example.com", 3);
+            model.holdBackNoticesForTests("/usr/bin/python3", "example.com", 3, 3600);
         },
         function () {
             const text = probe.heldBack("ask-2");
@@ -126,7 +127,7 @@ Window {
                          "a held-back notice changed the list or the banner: " + JSON.stringify(after));
             for (const id of ["ask-1", "ask-2", "ask-3"])
                 probe.expect(probe.delegateFor(id) !== null, id + " is no longer listed");
-            model.holdBackNoticesForTests("/usr/bin/python3", "example.com", 1);
+            model.holdBackNoticesForTests("/usr/bin/python3", "example.com", 1, 3600);
         },
         function () {
             probe.expect(probe.heldBack("ask-2") === "notice held back 1 time in the last hour",
@@ -141,10 +142,31 @@ Window {
             probe.expect(probe.heldBack("ask-2") === "", "an answered row keeps the note");
             probe.expect(probe.heldBack("ask-1") === "notice held back 1 time in the last hour",
                          "the note did not move to ask-1: '" + probe.heldBack("ask-1") + "'");
-            model.holdBackNoticesForTests("/usr/bin/python3", "example.com", 0);
+            model.holdBackNoticesForTests("/usr/bin/python3", "example.com", 0, 3600);
         },
         function () {
             probe.expect(probe.heldBack("ask-1") === "", "a cleared count still shows");
+            probe.expect(!model.heldBackShown, "heldBackShown with no count shown");
+            // Codex review of #230: a row unanswered for over 120 s (an older
+            // bridge's stuck row) is not "actively" pending, so the pending
+            // age is -1 and main.qml's age timer alone would stop. The count's
+            // own expiry must still be refreshed: `heldBackShown` keeps it on.
+            model.applyServerMessageJson(JSON.stringify({ action: "insertConnectionRows", rows: [
+                probe.row("stuck-9", "stuck.example", Date.now() - 200000)] }));
+            model.holdBackNoticesForTests("/usr/bin/python3", "stuck.example", 2, 1);
+            probe.deadline = Date.now() + 1100;
+        },
+        function () {
+            probe.expect(probe.heldBack("stuck-9") === "notice held back 2 times in the last hour",
+                         "stuck row's note: '" + probe.heldBack("stuck-9") + "'");
+            probe.expect(model.heldBackShown, "a shown count does not keep the refresh on");
+        },
+        function () { if (Date.now() < probe.deadline) probe.step--; },
+        function () {
+            // What main.qml's timer does each tick, with no new message.
+            model.refreshPendingAge();
+            probe.expect(probe.heldBack("stuck-9") === "", "an ended window still shows its count");
+            probe.expect(!model.heldBackShown, "heldBackShown after the window ended");
         }
     ]
 
