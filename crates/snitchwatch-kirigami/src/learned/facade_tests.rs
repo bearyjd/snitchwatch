@@ -17,7 +17,12 @@ fn row() -> PendingRow {
 #[test]
 fn nothing_is_recorded_without_a_running_window() {
     let _lock = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    // Start empty: an ended window keeps its record for review, so another
+    // test that ran first (silent_answer_tests ends one) can leave a program
+    // behind. A new window clears it; ending that one records nothing.
+    set_active(true);
     set_active(false);
+    assert_eq!(status(), Status::default());
     record("1:a", &row());
     note_lagged();
     assert_eq!(status().programs_seen, 0);
