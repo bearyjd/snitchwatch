@@ -420,13 +420,23 @@ only decides connections that no rule matched while nobody answers. So the
 daemon fails **open**: during a bridge outage or a failed socket, unmatched
 traffic keeps flowing.
 
-Deny enforcement is an explicit operator opt-in: set `DefaultAction` to `deny`
-in `/etc/opensnitchd/default-config.json` yourself, and keep a rollback path
-first: the console recovery in
-[`docs/packaging/system-bridge-integration.md`](docs/packaging/system-bridge-integration.md#missing-socket-and-console-recovery).
-Keep the packaged fetch rule (`000-snitchwatch-bridge-fetch.json`) so blocklist
-downloads still work. Do that only with the system bridge's root-only Unix socket
-(`unix:opensnitchd.sock`). The per-user bridge's TCP port is not deny-safe
+Deny enforcement is an explicit operator opt-in. Do it only with the system
+bridge's root-only Unix socket (`unix:opensnitchd.sock`), and in this order:
+
+1. Allow DNS first. The packaged fetch rule (`000-snitchwatch-bridge-fetch.json`)
+   covers only the bridge's TCP 443, so with no GUI attached blocklist refreshes
+   also need the system resolver's upstream queries (e.g. `systemd-resolved`)
+   and loopback DNS to `127.0.0.53:53` allowed by rules
+   ([`packaging/README.md`](packaging/README.md)).
+2. Set `DefaultAction` to `deny` in `/etc/opensnitchd/default-config.json`.
+3. Run `sudo systemctl restart opensnitch.service`. A running daemon applies a
+   changed `DefaultAction` only to its disconnected and error fallbacks; the
+   fallback for a connected UI keeps the old value until the daemon restarts.
+4. Keep a way back. From a console, follow
+   [restoring the `allow` default](docs/packaging/system-bridge-integration.md#restoring-the-allow-default),
+   which works even if the bridge never starts again.
+
+The per-user bridge's TCP port is not deny-safe
 (#35): a process that binds it first answers for the daemon. The bridge runs as
 its own service so that *closing the GUI window* is not mistaken for *the
 decision channel being down*.

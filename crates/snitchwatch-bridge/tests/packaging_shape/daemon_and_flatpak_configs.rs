@@ -184,3 +184,57 @@ fn flatpak_icon_grants_are_read_only_and_narrow() {
         }
     }
 }
+
+/// The markdown section under `heading` (exact line), up to the next heading
+/// of the same or a higher level.
+fn doc_section(body: &str, heading: &str) -> String {
+    let level = heading.chars().take_while(|c| *c == '#').count();
+    let mut lines = body.lines().skip_while(|line| *line != heading);
+    assert!(lines.next().is_some(), "heading {heading:?} not found");
+    lines
+        .take_while(|line| {
+            let hashes = line.chars().take_while(|c| *c == '#').count();
+            hashes == 0 || hashes > level || !line[hashes..].starts_with(' ')
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Adversarial review of #224: the deny opt-in must be a procedure a user
+/// can follow without locking themselves out. Editing the file alone leaves
+/// a connected daemon on its cached fallback (`clientConnectedRule`,
+/// vendor/opensnitch/daemon/ui/config_utils.go), the fetch rule covers only
+/// TCP 443 (not DNS), and recovery must be able to undo `deny` itself.
+#[test]
+fn the_deny_opt_in_restarts_the_daemon_and_has_a_way_back() {
+    let readme = doc_section(
+        &read("README.md"),
+        "### Default action: `allow` (deny is an opt-in)",
+    );
+    for needle in [
+        "sudo systemctl restart opensnitch.service",
+        "127.0.0.53",
+        "#restoring-the-allow-default",
+    ] {
+        assert!(
+            readme.contains(needle),
+            "README deny opt-in lacks {needle:?}"
+        );
+    }
+    let integration = read("docs/packaging/system-bridge-integration.md");
+    let back = doc_section(&integration, "#### Restoring the `allow` default");
+    for needle in [
+        "DefaultAction = \"allow\"",
+        "sudo systemctl restart opensnitch.service",
+    ] {
+        assert!(back.contains(needle), "allow restore lacks {needle:?}");
+    }
+    let merge = doc_section(
+        &integration,
+        "### Before rebooting into the image: the `/etc` merge",
+    );
+    assert!(
+        merge.contains("jq .DefaultAction /etc/opensnitchd/default-config.json"),
+        "the /etc merge check must cover DefaultAction, not only Server.Address"
+    );
+}

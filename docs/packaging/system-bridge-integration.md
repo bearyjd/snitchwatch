@@ -194,6 +194,19 @@ limit and leaving the bridge and its sockets failed until someone runs the
 `reset-failed` above. A bridge that crashes on every start still needs the
 journal and a fix; under `deny` the network stays closed meanwhile.
 
+#### Restoring the `allow` default
+
+If the bridge can't be brought back (missing binary, crash on every start),
+undo a `deny` opt-in from the console instead. The Unix transport stays as is:
+
+```bash
+sudo cp /etc/opensnitchd/default-config.json /etc/opensnitchd/default-config.json.deny
+jq '.DefaultAction = "allow"' /etc/opensnitchd/default-config.json.deny \
+  | sudo tee /etc/opensnitchd/default-config.json >/dev/null
+sudo systemctl restart opensnitch.service
+jq .DefaultAction /etc/opensnitchd/default-config.json   # "allow"
+```
+
 ### Before rebooting into the image: the `/etc` merge
 
 An image update keeps a locally edited `/etc` file: ostree's three-way merge
@@ -205,7 +218,12 @@ rebooting into the new deployment:
 ```bash
 sudo ostree admin config-diff | grep opensnitchd
 jq .Server.Address /etc/opensnitchd/default-config.json
+jq .DefaultAction /etc/opensnitchd/default-config.json
 ```
+
+A locally modified file keeps its `DefaultAction` too: an r15 host can carry
+`deny` forward without anyone opting in (the daemon saves CHANGE_CONFIG to
+this file). Unless you chose `deny`, expect `"allow"`.
 
 If `config-diff` lists `M etc/opensnitchd/default-config.json` (locally
 modified), the merge will keep it. Undo the local change before rebooting:
