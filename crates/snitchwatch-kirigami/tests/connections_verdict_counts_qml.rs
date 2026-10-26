@@ -115,6 +115,42 @@ Window {
                      what + ": delegate text '" + shown + "'");
     }
 
+    function find(item, name) {
+        if (item.objectName === name) return item;
+        const kids = item.children || [];
+        for (let i = 0; i < kids.length; ++i) {
+            const f = probe.find(kids[i], name);
+            if (f) return f;
+        }
+        return null;
+    }
+    // A narrow pane wraps the icon+word pairs instead of clipping them: every
+    // count lies inside the header delegate.
+    function checkBounds() {
+        const header = probe.at(0);
+        const counts = probe.find(header, "groupVerdictCounts");
+        probe.expect(counts !== null, "no GroupVerdictCounts in the header");
+        if (!counts) return;
+        probe.expect(counts.note.indexOf("connections it still holds") >= 0
+                     && counts.note.indexOf("10,000") < 0, "tooltip: " + counts.note);
+        const kids = [];
+        probe.collect(header, kids);
+        probe.expect(kids.length === 6, "counts shown at 360 px: " + kids.length);
+        for (const label of kids) {
+            const p = label.mapToItem(header, 0, 0);
+            probe.expect(p.x >= 0 && p.x + label.width <= header.width + 0.5
+                         && p.y >= 0 && p.y + label.height <= header.height + 0.5,
+                         "'" + label.text + "' at " + p.x + "," + p.y + " size " + label.width
+                         + "x" + label.height + " outside the " + header.width + "x"
+                         + header.height + " header");
+        }
+    }
+    function collect(item, out) {
+        if (item.objectName === "verdictCount" && item.visible) out.push(item);
+        const kids = item.children || [];
+        for (let i = 0; i < kids.length; ++i) probe.collect(kids[i], out);
+    }
+
     Timer {
         interval: 100
         running: true
@@ -136,13 +172,16 @@ Window {
                     probe.checkHeader("first load");
                     model.refreshVerdictWindows();
                     probe.checkHeader("after the tick");
-                    model.toggleProcessGroup("p");
+                    probe.width = 360;
                 } else if (probe.phase === 2) {
+                    probe.checkBounds();
+                    model.toggleProcessGroup("p");
+                } else if (probe.phase === 3) {
                     probe.expect(list.count >= 2, "domain row after expanding: " + list.count);
                     model.toggleDomainGroup("p", "example.com");
-                } else if (probe.phase === 3) {
-                    model.toggleHostGroup("p", "example.com", "a.example.com");
                 } else if (probe.phase === 4) {
+                    model.toggleHostGroup("p", "example.com", "a.example.com");
+                } else if (probe.phase === 5) {
                     let leaf = null;
                     for (let i = 0; i < list.count; ++i) {
                         const item = probe.at(i);
@@ -155,7 +194,7 @@ Window {
                     }
                     model.applyServerMessageJson(JSON.stringify({ action: "clearConnectionRows" }));
                     probe.insert();
-                } else if (probe.phase === 5) {
+                } else if (probe.phase === 6) {
                     probe.checkHeader("after clear and replay");
                     done = true;
                 }
