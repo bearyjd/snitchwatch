@@ -119,6 +119,7 @@ packaging/
 │   ├── org.snitchwatch.Snitchwatch.system.yml      # alternative system-bridge profile (same app-id)
 │   ├── org.snitchwatch.Snitchwatch.desktop
 │   └── org.snitchwatch.Snitchwatch.metainfo.xml
+├── endpoint-events/                                # opt-in: share connection events with Vigie (not installed)
 ├── systemd/
 │   └── snitchwatch-bridge.service                  # legacy host-side user bridge
 └── system/                                         # pending system-bridge overlay

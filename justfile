@@ -140,15 +140,24 @@ package-check:
     bash -n packaging/scanner/stage.sh
     python3 packaging/scanner/test-staging.py
     python3 -c "import yaml,sys; yaml.safe_load(open('packaging/bluebuild/recipe.yml')); yaml.safe_load(open('packaging/flatpak/org.snitchwatch.Snitchwatch.yml')); yaml.safe_load(open('.github/workflows/release.yml')); print('YAML ok')"
-    python3 -c "import json; json.load(open('packaging/bluebuild/files/system/etc/opensnitchd/default-config.json')); json.load(open('packaging/bluebuild/files/system/etc/opensnitchd/rules/000-snitchwatch-bridge-fetch.json')); json.load(open('packaging/system/opensnitchd-default-config.json')); print('JSON ok')"
+    python3 -c "import json; json.load(open('packaging/bluebuild/files/system/etc/opensnitchd/default-config.json')); json.load(open('packaging/bluebuild/files/system/etc/opensnitchd/rules/000-snitchwatch-bridge-fetch.json')); json.load(open('packaging/system/opensnitchd-default-config.json')); json.load(open('packaging/endpoint-events/opensnitchd-logger.json')); print('JSON ok')"
+    bash -n packaging/endpoint-events/verify.sh
     bash packaging/release/verify-unit.sh
-    if command -v shellcheck >/dev/null 2>&1; then shellcheck packaging/release/*.sh packaging/scanner/stage.sh; else echo "shellcheck not installed — skipped"; fi
+    if command -v shellcheck >/dev/null 2>&1; then shellcheck packaging/release/*.sh packaging/scanner/stage.sh packaging/endpoint-events/verify.sh; else echo "shellcheck not installed — skipped"; fi
     cargo test -p snitchwatch-bridge --test packaging_shape --test release_shape --test release_artifact
     # The release tarball's feature set (no embedded web UI, decision I) —
     # nothing else builds it, so lint and test it here.
     cargo clippy -p snitchwatch-bridge --no-default-features --all-targets --locked -- -D warnings
     cargo clippy -p snitchwatch-bridge-cli --no-default-features --locked -- -D warnings
     cargo test -p snitchwatch-bridge --no-default-features --lib --locked ws_server
+
+# Real-rsyslog proof of the opt-in Vigie endpoint-events recipe
+# (packaging/endpoint-events/README.md): -N1, an end-to-end TLS run that the
+# privacy allowlist holds, a wrong-CA receiver, and the README's merge/way-back
+# snippets. Needs rootless podman and the Fedora mirrors, so package-check
+# doesn't depend on it.
+endpoint-events-verify:
+    bash packaging/endpoint-events/verify.sh
 
 # --- Bridge release tarball (docs/packaging/bridge-release-artifact.md) ---
 # These run packaging/release/*.sh inside a fresh container from the
