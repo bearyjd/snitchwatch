@@ -229,7 +229,6 @@ impl qobject::ConnectionsModel {
         // below, hence matching on `&msg` here.
         {
             let mut rust = self.as_mut().rust_mut();
-            rust.grouping.set_clock(verdict_windows::local_clock());
             mirror_into_grouping(&mut rust, &msg);
         }
 

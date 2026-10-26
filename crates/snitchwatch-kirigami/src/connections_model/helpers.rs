@@ -91,6 +91,9 @@ pub(super) fn take_current_grouped_messages(
 /// and incremental (see `connections::grouping` module docs) — shared by the
 /// immediate and debounced apply paths.
 pub(super) fn mirror_into_grouping(rust: &mut ConnectionsModelRust, msg: &ServerMessage) {
+    // Every tree write reads the windows against the wall clock (phase 0b),
+    // on the immediate and the buffered grouped path alike.
+    rust.grouping.set_clock(verdict_windows::local_clock());
     match msg {
         ServerMessage::InsertConnectionRows { rows }
         | ServerMessage::UpdateConnectionRows { rows } => {

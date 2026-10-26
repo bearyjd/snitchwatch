@@ -21,6 +21,7 @@ Item {
         interval: 60000
         running: !!pane.page && !!pane.page.model
         repeat: true
+        triggeredOnStart: true
         onTriggered: pane.page.model.refreshVerdictWindows()
     }
 
