@@ -197,6 +197,12 @@ Kirigami.ApplicationWindow {
         Component.onCompleted: startBridgeFeed()
     }
 
+    // Deny-mode status from the tower helper's snapshot, display only; the
+    // Daemon Health page refreshes it while shown.
+    DenyStatusModel {
+        id: denyStatusModel
+    }
+
     // Guards against pushing the onboarding page more than once and against
     // popping when it was never pushed (e.g. "Continue anyway" already
     // dismissed it before a stray stateChanged fires).
@@ -635,6 +641,7 @@ Kirigami.ApplicationWindow {
         id: daemonHealthPageComponent
         DaemonHealthPage {
             model: daemonHealthModel
+            denyStatus: denyStatusModel
         }
     }
     // A new prompt does NOT raise this window. The alert (AlertHost.qml ->

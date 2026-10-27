@@ -32,6 +32,8 @@ pub mod curated_groups;
 pub mod curated_orphans;
 pub mod daemon_health_model;
 pub mod demo;
+pub mod deny_status;
+pub mod deny_status_model;
 pub mod geo;
 pub mod geo_model;
 pub(crate) mod inline_deny;

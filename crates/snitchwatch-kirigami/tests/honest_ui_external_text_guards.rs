@@ -47,6 +47,13 @@ const PAGES: &[(&str, &str, &[&str], usize)] = &[
         1,
     ),
     (
+        // The tower helper's blocker lines; the commands are fixed text.
+        "DenyStatusSection.qml",
+        include_str!("../qml/DenyStatusSection.qml"),
+        &["blockersText", "modelData"],
+        2,
+    ),
+    (
         "DiagnosticsPage.qml",
         include_str!("../qml/DiagnosticsPage.qml"),
         &["autostartError", "coexistenceDetail"],
