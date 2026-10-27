@@ -49,7 +49,9 @@ pub fn derive_tooltip(state: &TrayState, pause: &PauseState, paused_until: &str)
         }
         _ if is_paused(state, pause) => "Snitchwatch — prompting paused".into(),
         TrayState::Pending(n) => format!("{n} pending decisions"),
-        TrayState::Idle | TrayState::FilterOff => "Snitchwatch — prompting on".into(),
+        TrayState::Idle | TrayState::FilterOff => {
+            "Snitchwatch — connected, prompts not paused".into()
+        }
     }
 }
 
@@ -155,7 +157,7 @@ mod tests {
     fn tooltip_idle() {
         assert_eq!(
             derive_tooltip(&TrayState::Idle, &NOT_PAUSED, ""),
-            "Snitchwatch — prompting on"
+            "Snitchwatch — connected, prompts not paused"
         );
     }
 

@@ -61,16 +61,18 @@ monitor-state alert on start and fallback), which belongs with Q05/r16.
    Local time comes from `QDateTime::current_date_time()` plus
    `set_msecs_since_epoch`, also now used for "paused until", replacing
    `QTimeZone::system_time_zone()` (UTC in the sandbox).
-3. Visible "filtering" wording becomes "prompting": idle "Snitchwatch —
-   prompting on", "prompting paused [until HH:MM]", "Resume prompting",
-   "Prompting is paused, but …", "Snitchwatch — prompting resumed", "Allowed
+3. Visible "filtering" wording becomes prompt wording: idle "Snitchwatch —
+   connected, prompts not paused" (not "prompting on": silent mode answers
+   prompts without asking, so that would be false there), "prompting
+   paused [until HH:MM]", "Resume prompting", "Prompting is paused, but …", "Snitchwatch — prompting resumed", "Allowed
    once (prompting was paused)". A pause only auto-answers prompts; existing
    rules keep applying. Internal tokens (`pause_filtering`,
    `resume_filtering`, `resumeFiltering`, `SetFilteringPaused`) are contracts
    and stay. The Tauri shell (being replaced) and bridge comments are out of
    scope.
 
-Tests (written first): `tray_health` unit tests for each firewall rule above,
+Tests: `tray_health` unit tests (written with the module; their red was
+shown by mutation runs) for each firewall rule above,
 including the stale re-send and first-seen cases; monitor text unchanged for
 `EbpfSupport` Ok/Failed/Unknown reports and an `AboutInfo` with an
 `ebpf_commit`; tooltip composition never hides down/paused/pending; a source

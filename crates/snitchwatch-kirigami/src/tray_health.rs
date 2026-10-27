@@ -254,8 +254,8 @@ mod tests {
     #[test]
     fn the_tooltip_appends_firewall_then_monitor_after_the_state() {
         assert_eq!(
-            compose_tooltip("Snitchwatch — prompting on", None),
-            "Snitchwatch — prompting on. Process monitor: not reported by opensnitchd"
+            compose_tooltip("Snitchwatch — connected, prompts not paused", None),
+            "Snitchwatch — connected, prompts not paused. Process monitor: not reported by opensnitchd"
         );
         assert_eq!(
             compose_tooltip("3 pending decisions", Some("Firewall issue")),

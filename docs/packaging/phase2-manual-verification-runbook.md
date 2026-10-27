@@ -252,8 +252,8 @@ podman stop opensnitchd-dev
 **Pass condition:** the tray tooltip changes to "opensnitchd not reachable"
 within ~10-12 seconds (the `DAEMON_DOWN_TIMEOUT` in `daemon_watchdog.rs`
 plus one watchdog tick). Restart `opensnitchd-dev` and confirm the tooltip
-returns to "Snitchwatch — prompting on" (or the correct `Pending(n)` count if
-a decision was queued while it was down) within a couple more seconds.
+returns to "Snitchwatch — connected, prompts not paused" (or the correct
+`Pending(n)` count if a decision was queued while it was down) within a couple more seconds.
 Every tooltip ends with "Process monitor: not reported by opensnitchd"
 (Q04: opensnitchd never reports the running method, on `/proc` or eBPF
 hosts alike). If the daemon reports its firewall not running, the tooltip
