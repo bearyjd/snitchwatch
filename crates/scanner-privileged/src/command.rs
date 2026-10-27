@@ -49,25 +49,52 @@ impl Drop for Guard {
     }
 }
 
+const TRUSTED_DIRS: [&str; 2] = ["/usr/bin", "/usr/sbin"];
+
+/// A single path component: joining it to a trusted directory cannot leave it.
+fn bare_name(name: &str) -> bool {
+    !name.is_empty() && name != "." && name != ".." && !name.contains('/')
+}
+
 pub fn trusted_program(program: &str) -> Option<std::path::PathBuf> {
     // pkexec's environment is already sanitized; never trust caller PATH here.
-    ["/usr/bin", "/usr/sbin"]
+    if !bare_name(program) {
+        return None;
+    }
+    TRUSTED_DIRS
         .iter()
         .map(|dir| std::path::Path::new(dir).join(program))
         .find(|path| path.is_file())
 }
 
-pub fn run(program: &str, args: &[&str]) -> io::Result<String> {
-    let path = if program.starts_with("/usr/bin/") || program.starts_with("/usr/sbin/") {
-        std::path::PathBuf::from(program)
-    } else {
-        trusted_program(program).ok_or_else(|| {
+/// Accept a bare name, or an absolute path naming a direct child of a trusted
+/// directory; anything else could escape it (`/usr/bin/../../tmp/x`).
+fn resolve(program: &str) -> io::Result<std::path::PathBuf> {
+    if !program.contains('/') {
+        return trusted_program(program).ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,
                 "trusted system primitive not installed",
             )
-        })?
-    };
+        });
+    }
+    let direct_child = TRUSTED_DIRS.iter().any(|dir| {
+        program
+            .strip_prefix(dir)
+            .and_then(|rest| rest.strip_prefix('/'))
+            .is_some_and(bare_name)
+    });
+    if !direct_child {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "system primitive path is outside the trusted directories",
+        ));
+    }
+    Ok(std::path::PathBuf::from(program))
+}
+
+pub fn run(program: &str, args: &[&str]) -> io::Result<String> {
+    let path = resolve(program)?;
     let not_owned = if program == "rpm" && args.len() == 2 && args[0] == "-qf" {
         Some(format!("file {} is not owned by any package\n", args[1]))
     } else {
@@ -270,6 +297,27 @@ mod tests {
             run("snitchwatch-no-such-command", &[]).unwrap_err().kind(),
             io::ErrorKind::NotFound
         );
+    }
+    #[test]
+    fn program_paths_cannot_escape_the_trusted_directories() {
+        assert!(trusted_program("sh").is_some());
+        // These resolve to real files today, so the check must be syntactic.
+        for escape in ["/usr/bin/sh", "../bin/sh", "./sh", "", ".", ".."] {
+            assert_eq!(trusted_program(escape), None, "{escape:?}");
+        }
+        for escape in [
+            "/usr/bin/../../tmp/payload",
+            "/usr/bin/./sh",
+            "/usr/bin/nested/sh",
+            "/usr/bin/",
+            "/tmp/payload",
+        ] {
+            assert_eq!(
+                run(escape, &[]).unwrap_err().kind(),
+                io::ErrorKind::InvalidInput,
+                "{escape:?}"
+            );
+        }
     }
     #[test]
     fn bounds_both_streams_and_child_held_pipe() {
