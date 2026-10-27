@@ -212,7 +212,7 @@ Exactly this allowlist per event (an insert API that takes only these fields):
 | `answered_by` | Classification table below |
 | `rule_name`, `rule_hash`, `rule_class` | D7. `rule_class` derived from rule-name prefixes already in use (`snitchwatch-default-*`, `z00-blocklist:*`, else `user`); NULL name/hash for default events |
 | `repeat_count` | Default 1; exact count of identical coalesced events (D5) |
-| `src_port` | Source port of the connection, stored (decision 11) so a prompt event and a later ping event can be correlated exactly (D7). NULL when the event does not carry one |
+| `src_port`, `src_ip` | Source port (decision 11) and the local source address of the connection, stored so a prompt event and a later ping event can be correlated exactly (D7). The source address is needed because two sockets can share a source port with different local addresses. NULL when the event does not carry them |
 | `uid` | **Not stored in v1** (per-uid tagging deferred, decision 1) |
 
 **Never stored, enforced by test (below):** `process_args`, the command line,
@@ -423,11 +423,14 @@ rule has since been edited or deleted.
     do not identify a connection: rule names are deterministic and the source
     port is not carried, so two distinct connections can share all of them.
     The bridge therefore **merges only on verified correlation**: the stored
-    `src_port` (decision 11) together with protocol, destination and process
-    path, within the prompt's settlement window; the implementation must prove
-    that this tuple is unique per live socket inside that window (S-style
-    proof obligation, see Owner decisions). Where `src_port` is missing from
-    either event, or the proof does not hold, both events are kept and marked `possible-duplicate`, and any
+    `src_ip` and `src_port` (decision 11) together with protocol, destination
+    address and port, and process path, within the prompt's settlement window.
+    **Uniqueness is required, not assumed:** the match counts only when
+    exactly one candidate exists for the whole key. If the match is ambiguous
+    (more than one candidate), or `src_ip`/`src_port` is missing from either
+    event, or the uniqueness proof (see Owner decisions) does not hold, **both
+    events are kept and marked `possible-duplicate`, even when ports are
+    present**, and any
     count that could include both says so ("may include decisions counted
     twice"). Nothing is silently dropped or merged.
 
@@ -601,15 +604,25 @@ Tests (each with a blocked writer and a non-empty queue):
   so no reader holds the old file. **Invariant C2: clear-all deletes only the
   previewed set or fewer.** Under the same writer barrier as the deletion, the
   bridge checks that no row exists above the previewed maximum row id and that
-  the previewed checksum still matches; if either fails nothing is deleted and
-  a fresh preview is required (owner decision 12: refuse, no fallback). The UI reports counts and bytes only after confirmation; on
+  the previewed checksum still matches, **and that nothing has been accepted
+  after the preview's acceptance boundary** (below); if any check fails nothing
+  is deleted and a fresh preview is required (owner decision 12: refuse, no fallback). The UI reports counts and bytes only after confirmation; on
   failure it says exactly what remains. Range delete and limit reduction use
   bounded chunks obeying S2, plus snapshot cleanup.
 - **Retention preview** (for clear, a range delete, or lowering a limit):
   the bridge returns `N events from A to B, about X MB` plus an **expiring
-  preview token** (60 s) bound to the generation, the maximum row id, and a
+  preview token** (60 s) bound to the generation, the maximum row id, a
   checksum of the previewed set (row count, sum of row ids and of
-  `repeat_count`). A cutoff row id alone does not fix the set, because
+  `repeat_count`), **and an acceptance-sequence boundary**. Every item the
+  bridge accepts (queued daemon event, in-flight batch, pending guard,
+  loss counter; the same set W1 pins) takes a monotonically increasing
+  acceptance sequence number; the token records the highest number assigned at
+  preview time. Persisted-row checks alone cannot see queued or in-flight
+  items, so with a blocked writer a new event could otherwise be accepted
+  after the preview, leave the checksum and maximum row id unchanged, and be
+  discarded by a clear whose scope is "everything". At confirmation, under the
+  control barrier and **before** any destructive step (C1 step 1), the bridge
+  refuses if the current acceptance sequence is above the recorded boundary. A cutoff row id alone does not fix the set, because
   retention can remove rows and coalescing can raise a `repeat_count` before
   the user confirms. On confirm the bridge recomputes the checksum; if it
   differs, or the token expired, nothing is deleted and the user is shown a
@@ -647,7 +660,7 @@ inventory, work patterns, and sensitive sites. It is a profile of the user.
 
 **Sensitive-data minimisation.** The D4 allowlist and the recursive snapshot
 allowlist (D7) are the controls. Residual, stated exposure: raw
-`process_path`, `dst_host` and non-withheld rule operand values, which can
+`process_path`, `dst_host`, the local `src_ip`/`src_port` and non-withheld rule operand values, which can
 embed secrets. Mitigations on the table, not in v1 by default: basename+hash
 paths and per-app / per-host exclusions are deferred to v2 (decisions 3, 9). Hashing
 hostnames at rest is rejected: it removes the feature's purpose.
@@ -712,8 +725,12 @@ writes; copies outside the file are not reachable.
   socket cannot read history; two authorised clients each see all rows (the
   documented multi-user behaviour); the per-user bridge keeps the per-user
   path.
-- **Correlation tests:** a prompt and ping event with equal `src_port` merge;
-  missing `src_port` keeps both flagged `possible-duplicate`.
+- **Correlation tests:** a prompt and ping event with equal `src_ip`,
+  `src_port` and the rest of the key merge; missing `src_ip` or `src_port`
+  keeps both flagged `possible-duplicate`; **collision test:** two sockets from
+  the same executable with the same source port, protocol and destination but
+  different source IPs are never merged, and an ambiguous match (two
+  candidates) keeps all events flagged.
 - **Disable/keep tests:** disabling keeps history by default; "Delete
   history" requires a preview token.
 - **Invariant tests** S1-S5, W1, L1, G1, C1 and C2 as tabled above, each
@@ -724,9 +741,18 @@ writes; copies outside the file are not reachable.
   enforcement.
 - **Flood tests:** alternating-destination flood from one process cannot evict
   another application's history beyond its quota; drops are counted.
-- **Barrier tests:** blocked writer with a non-empty queue; clear/disable
-  leaves zero rows afterwards; a preview token is refused after retention or
-  coalescing changes the set, and when expired.
+- **Barrier tests:** blocked writer with a non-empty queue.
+  - **Clear** removes exactly the approved scope: afterwards no row, snapshot
+    or pin from within that scope exists.
+  - **Disable** (keeps history by default) leaves existing rows and the
+    accepted queued events in place, and invalidates every pending guard with
+    a durable gap committed before its pin is released.
+  - A preview token is refused after retention or coalescing changes the set,
+    and when expired.
+  - **Preview with the writer blocked:** take a clear preview, then accept
+    another event into the queue; confirmation is refused (the acceptance
+    boundary moved), the queued event is not discarded, and a fresh preview is
+    required.
 - **Gap tests:** clean stop, kill -9, daemon disconnect, full queue, full
   disk, counter reset (`rule_hits` module cases), `nolog`/stock-default
   labels. Watermark never covers uncommitted events.
@@ -775,9 +801,13 @@ Resolved by the owner; each is reflected in the sections named.
     backup-exclude recipe. **Disabling keeps history by default**; "Delete
     history" is a separate, confirmed action (reverses the earlier default).
     (D2, H02.)
-11. **Source port: stored**, used for exact prompt-to-event correlation. The
-    `possible-duplicate` path applies only where the port is missing. Added
-    to the D4 allowlist and the threat model. (D4, D7.)
+11. **Source port: stored**, used for exact prompt-to-event correlation. For
+    exactness the correlation key also includes the source address, so the
+    local source address is stored with it (precision within this decision:
+    the port alone does not identify a socket). The `possible-duplicate` path
+    applies wherever the key is missing or the match is ambiguous, not only
+    when the port is missing. Added to the D4 allowlist and the threat model.
+    (D4, D7.)
 12. **A stale preview is refused and a fresh one required; clear-all refuses
     if newer rows exist.** (H02, C2.)
 
@@ -807,6 +837,7 @@ Resolved by the owner; each is reflected in the sections named.
   from the schema and caps (including indexes, snapshots and orphan cleanup).
   If it cannot, the fallback is reserving a full-database rollback journal
   (main-file share at most half of the budget).
-- **Correlation uniqueness:** the implementation must prove that `src_port`
-  plus protocol, destination and process path identify one live socket within
-  the settlement window; where it cannot, events are kept and flagged.
+- **Correlation uniqueness:** the implementation must prove that `src_ip`,
+  `src_port`, protocol, destination and process path identify one live socket
+  within the settlement window; where it cannot, or the match is ambiguous,
+  events are kept and flagged.
