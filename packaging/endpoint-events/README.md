@@ -17,7 +17,9 @@ Flatpak sandbox are unchanged. Vigie never decides anything on this computer.
 | File | Goes to | What it is |
 | ---- | ------- | ---------- |
 | [`opensnitchd-logger.json`](opensnitchd-logger.json) | merged into `Server.Loggers` of `/etc/opensnitchd/default-config.json` | the daemon's `remote` logger: JSON, TCP, `127.0.0.1:514` |
-| [`snitchwatch-endpoint-events.conf`](snitchwatch-endpoint-events.conf) | `/etc/rsyslog.d/` | loopback listener, field allowlist, TLS forward to Vigie |
+| [`snitchwatch-endpoint-events.conf`](snitchwatch-endpoint-events.conf) | `/etc/rsyslog.d/` | loopback listener, field validation and allowlist, mutual-TLS forward to Vigie |
+| [`snitchwatch-endpoint-events.nft`](snitchwatch-endpoint-events.nft) | `/etc/nftables/` | its own nftables table: only root may connect to `127.0.0.1:514` |
+| [`snitchwatch-endpoint-events-nft.service`](snitchwatch-endpoint-events-nft.service) | `/etc/systemd/system/` | oneshot that loads that table before rsyslog and the daemon start |
 | [`sample-event.json`](sample-event.json) | nowhere | one forwarded event exactly as the proof's receiver got it (the hand-off sample for Vigie) |
 | [`verify.sh`](verify.sh) | nowhere | `just endpoint-events-verify`: the real-rsyslog proof below |
 
@@ -39,9 +41,47 @@ template forwards **only**:
 
 It never forwards `process_env`, `process_args`, `process_cwd`,
 `process_tree` or `process_checksums`, nor `process_id`. Only connection events
-(`Type` 0) that parse as JSON are forwarded; anything else on the listener is
-dropped. The `packaging_shape` tests pin this, and `verify.sh` proves it
-against real rsyslog with a fake token in the environment and arguments.
+(`Type` 0) that parse as JSON and whose every forwarded field passes
+validation are forwarded; anything else on the listener is dropped. The
+`packaging_shape` tests pin this, and `verify.sh` proves it against real
+rsyslog with a fake token in the environment and arguments.
+
+That guarantee covers **this forwarding path only**:
+
+- **Other daemon loggers get everything.** Any other entry already in
+  `Server.Loggers` receives the full event, environment and arguments included.
+  Check before enabling (step 4) and remove any you don't recognise.
+- **No rsyslog debug output.** Running rsyslog with `-d`, `-dn` or
+  `RSYSLOG_DEBUG`/`RSYSLOG_DEBUGLOG` prints raw messages, so the whole event
+  ends up in the debug log. Never enable it on a host with this drop-in.
+- **Validation drops, it doesn't trim.** A field over its cap drops the whole
+  event (see "Sizes" below), so a very long path or rule name means that
+  connection is missing in Vigie, not shortened.
+
+## Provenance: what Vigie can trust
+
+Events are **"reported by this host"**, nothing more:
+
+- **Only root can feed the forward.** rsyslog's listener is on loopback, and
+  binding 514 needs root. A separate nftables table
+  ([`snitchwatch-endpoint-events.nft`](snitchwatch-endpoint-events.nft))
+  rejects any connection to `127.0.0.1:514` (or `[::1]:514`) from a non-root
+  socket, whether or not the daemon is up. Without it, any local user could
+  connect and inject daemon-shaped events that rsyslog would forward under
+  this host's certificate.
+- **Every forwarded field is validated** in the ruleset: type `0`, protocol,
+  IPs, ports (0-65535), `dst_host`, `process_path` (absolute or empty, at most
+  768 bytes), `user_id`, `action` (`allow`, `deny`, `reject` or `<nil>`) and
+  `rule` (at most 128 bytes). Anything else is dropped.
+- **Root can still forge.** Root on this host (or anything running as root)
+  can connect and send whatever it likes. The client certificate proves which
+  host sent an event, not that `opensnitchd` saw it.
+
+The table is its own `inet snitchwatch_endpoint_events` table, not firewalld
+policy: firewalld (nftables backend) and opensnitchd each manage only their own
+tables (`vendor/opensnitch/daemon/firewall/nftables/tables.go:66-79`), and a
+`firewall-cmd --reload` leaves it alone. Not verified on a live Bazzite host
+with firewalld running.
 
 ## TLS and framing settings (exact)
 
@@ -65,11 +105,12 @@ TLS versions and ciphers are GnuTLS's system defaults (Fedora's crypto policy).
 Each frame's payload is one JSON object (no syslog header, no trailing
 newline), as in [`sample-event.json`](sample-event.json). Sizes:
 
-- **Out: under 8 KiB per frame.** Vigie drops larger frames. The template cuts
-  `process_path` to 768 bytes, `dst_host` to 253 and `rule` to 128 before JSON
-  escaping, so even if every byte needs six-byte `\u00XX` escaping the frame
-  stays under 8 KiB, given a `@HOST_ID@` of at most 64 characters. A cut can
-  split a multi-byte UTF-8 character at the end of a long path.
+- **Out: under 8 KiB per frame.** Vigie drops larger frames. The ruleset drops
+  any event whose `process_path` exceeds 768 bytes, `rule` 128 bytes or
+  `dst_host` 253 ASCII characters; the other fields are short by pattern.
+  Even if every byte of the path and rule needs six-byte `\u00XX` escaping,
+  the frame stays under 8 KiB, given a `@HOST_ID@` of at most 64 characters.
+  Nothing is truncated, so a frame is always valid UTF-8 JSON.
 - **In: 64k** (`global(maxMessageSize="64k")`, rsyslog-wide). The daemon's raw
   line includes the whole environment and arguments and often exceeds
   rsyslog's 8k default; a cut line would fail to parse and be dropped. Raw
@@ -169,20 +210,54 @@ Do this as root, from a checkout of this repository (the merge reads
    sudo rsyslogd -N1                                                          # must report no errors
    ```
 
-3. **Start rsyslog**, before the daemon starts logging to it:
+3. **Restrict the listener to root, then restart rsyslog**, before the daemon
+   starts logging to it. `restart`, not `enable --now`: a running rsyslog
+   (for example one started for the journal) doesn't reread its config until
+   restarted, so the drop-in wouldn't load.
 
    ```bash
-   sudo systemctl enable --now rsyslog.service
+   sudo install -D -m 0644 packaging/endpoint-events/snitchwatch-endpoint-events.nft \
+     /etc/nftables/snitchwatch-endpoint-events.nft
+   sudo install -m 0644 packaging/endpoint-events/snitchwatch-endpoint-events-nft.service \
+     /etc/systemd/system/snitchwatch-endpoint-events-nft.service
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now snitchwatch-endpoint-events-nft.service
+   sudo nft list table inet snitchwatch_endpoint_events   # the two reject rules
+
+   sudo rsyslogd -N1 \
+     && sudo systemctl enable rsyslog.service \
+     && sudo systemctl restart rsyslog.service
    sudo ss -ltnp 'sport = :514'   # rsyslogd on 127.0.0.1:514 only
+   bash -c 'exec 3<>/dev/tcp/127.0.0.1/514' && echo "OPEN TO USERS: stop" || echo "refused: good"
    ```
 
-   If nothing listens, look for a `bind` error in `journalctl -u rsyslog` and an
-   SELinux denial in `sudo ausearch -m avc -ts recent`. Fedora's policy allows
-   rsyslog to bind TCP 514 (see "Why port 514" above), so a denial means this
-   host's policy differs; stop and report it rather than relabelling the port.
+   The last line runs as you, not root, and must print `refused: good`.
 
-4. **Add the logger to the daemon config.** The daemon keeps this file
-   root-only (0600), so build and check the replacement as root, swap it in only
+   **Never restart rsyslog over a failing `-N1`.** If the drop-in fails to
+   parse, rsyslog still opens the listener but routes it to its *default*
+   ruleset, so raw events, environment included, would go to the journal and
+   `/var/log` (seen in the proof: `ruleset 'snitchwatch_endpoint_events' for
+   port 514 not found - using default ruleset instead`). Step 4 enables the
+   logger only after the listener and the drop-in are confirmed.
+
+   **If nothing listens on 514**, don't go on to step 4:
+   - `sudo rsyslogd -N1` reports the config error, if any;
+   - `systemctl status rsyslog.service` must show it restarted after you placed
+     the drop-in (check the start time);
+   - `journalctl -u rsyslog` shows a `bind` error, and
+     `sudo ausearch -m avc -ts recent` an SELinux denial. Fedora's policy allows
+     rsyslog to bind TCP 514 (see "Why port 514" above), so a denial means this
+     host's policy differs; stop and report it rather than relabelling the port.
+
+4. **Add the logger to the daemon config.** First check what's already there:
+   every other entry in `Server.Loggers` gets the full event, environment
+   included.
+
+   ```bash
+   sudo jq .Server.Loggers /etc/opensnitchd/default-config.json   # null, [] or only ours
+   ```
+
+   The daemon keeps this file root-only (0600), so build and check the replacement as root, swap it in only
    if `jq` succeeded, and restart only then. Running it twice is harmless: an
    existing `remote` entry for `127.0.0.1:514` is replaced, not duplicated. The
    first run keeps the original as `default-config.json.pre-endpoint-events`.
@@ -267,6 +342,10 @@ Then:
 ```bash
 sudo systemctl disable --now rsyslog.service
 sudo rm /etc/rsyslog.d/snitchwatch-endpoint-events.conf
+sudo systemctl disable --now snitchwatch-endpoint-events-nft.service   # deletes the table
+sudo rm /etc/systemd/system/snitchwatch-endpoint-events-nft.service \
+  /etc/nftables/snitchwatch-endpoint-events.nft
+sudo systemctl daemon-reload
 sudo rm -f /etc/pki/snitchwatch-endpoint-events/{vigie-ca.pem,host-cert.pem,host-key.pem,host.csr}
 sudo rmdir /etc/pki/snitchwatch-endpoint-events
 sudo rm -f /etc/opensnitchd/rules/endpoint-events-rsyslog-to-vigie.json   # if you added it
@@ -283,16 +362,34 @@ just endpoint-events-verify
 ```
 
 Runs [`verify.sh`](verify.sh) in the digest-pinned Fedora 44 image
-(`packaging/release/pins.env`) with rootless podman: `rsyslogd -N1` on the
-drop-in under Fedora's stock config and a minimal one; an end-to-end run
-against a local mutual-TLS receiver asserting the allowlisted fields arrive and
-a fake token in `process_env`/`process_args` doesn't; a worst-case event (large
-environment, long escaped path, host and rule) that must arrive in one frame
-under 8 KiB; a receiver from another CA, and a client certificate from another
-CA, that must both get nothing; and the merge and way-back snippets above (marked
-`verify.sh:`) against a copy of the packaged daemon config. It needs the
-Fedora mirrors, so it isn't part of `just package-check`.
+(`packaging/release/pins.env`) with rootless podman. `--cap-add=NET_ADMIN` is
+scoped to the container's own network namespace, so the table loads there and
+never on the host. It checks:
+
+- **nftables.** `nft -c` and a load (twice, to show a reload replaces the
+  table); uid 65534 can't connect to `127.0.0.1:514`, root can. The `::1` rule
+  is loaded but not exercised.
+- **Config checks.** `rsyslogd -N1` under Fedora's stock config and a minimal
+  one.
+- **End to end under the stock `rsyslog.conf`,** with a disk-only, slowed main
+  queue, to a local mutual-TLS receiver. Only the valid connection event
+  arrives, and it equals [`sample-event.json`](sample-event.json) in values
+  and types. Malformed and oversize events are dropped, and the fake token in
+  env/args/cwd/tree/checksums is in no frame and no file under `/var/log`,
+  `/var/lib/rsyslog` or `/var/spool`.
+- **Frame bound.** A worst-case event arrives in one frame under 8 KiB. A
+  path and a rule exactly at their caps, ending in a two-byte character,
+  arrive intact as strict UTF-8; one byte over is dropped.
+- **TLS refusals.** Nothing is delivered to a server from another CA or from
+  the pinned CA with the wrong name. Nothing is accepted from a client
+  certificate of another CA, or a sender with no certificate or no key.
+- **README snippets.** The merge and way-back snippets above (marked
+  `verify.sh:`) run against a copy of the packaged daemon config.
+
+It needs the Fedora mirrors, so it isn't part of `just package-check`. With
+slow mirrors, `SW_VERIFY_DNF_CACHE=<volume> just endpoint-events-verify` keeps
+dnf's cache in that podman volume between runs.
 
 Not verified anywhere yet: a live `opensnitchd` dialing the listener, rsyslog
-binding 514 under enforcing SELinux on a real Bazzite host (step 3), and Vigie's
-receiving side.
+binding 514 under enforcing SELinux on a real Bazzite host (step 3), the
+nftables table alongside a running firewalld, and Vigie's receiving side.

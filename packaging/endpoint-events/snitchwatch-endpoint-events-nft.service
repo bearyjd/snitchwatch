@@ -1,0 +1,15 @@
+[Unit]
+Description=Snitchwatch endpoint events: only root may connect to 127.0.0.1:514
+Documentation=https://github.com/bearyjd/snitchwatch/blob/main/packaging/endpoint-events/README.md
+# Loaded before either end of the loopback stream starts.
+Before=rsyslog.service opensnitch.service
+After=firewalld.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/nftables/snitchwatch-endpoint-events.nft
+ExecStop=/usr/sbin/nft delete table inet snitchwatch_endpoint_events
+
+[Install]
+WantedBy=multi-user.target

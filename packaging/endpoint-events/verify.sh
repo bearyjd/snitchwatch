@@ -4,22 +4,28 @@
 # Fedora mirrors; deliberately not part of package-check).
 #
 # Inside the digest-pinned Fedora 44 image from packaging/release/pins.env it:
-#   1. installs the README's packages and checks the drop-in with
-#      `rsyslogd -N1`, both under Fedora's stock /etc/rsyslog.conf and under
-#      a minimal main config;
-#   2. starts the drop-in against a local TLS receiver (a second rsyslog),
-#      sends daemon-shaped JSON whose process_env/process_args carry a fake
-#      token, plus a blank frame, a non-JSON line and a task notification,
-#      and asserts the receiver got exactly one event, holding only the
-#      allowlisted fields, and no token anywhere;
-#   3. sends a worst-case event (64k-scale environment, long control-character
-#      path, host and rule) and asserts it is forwarded in one frame under
-#      Vigie's 8 KiB bound;
-#   4. asserts mutual TLS both ways: a receiver whose certificate comes from
-#      another CA gets nothing, and the real receiver (which requires this
+#   1. installs the README's packages, checks the nftables table with
+#      `nft -c` and loads it, and checks the drop-in with `rsyslogd -N1` under
+#      Fedora's stock /etc/rsyslog.conf and under a minimal main config;
+#   2. proves the table: a non-root connect to 127.0.0.1:514 is refused, a
+#      root one accepted;
+#   3. runs the drop-in under the STOCK rsyslog.conf, with a disk-only, slowed
+#      main queue, against a local mutual-TLS receiver; sends daemon-shaped
+#      JSON whose env/args/cwd/tree/checksums carry a fake token, plus a blank
+#      frame, a non-JSON line, a task notification and invalid events
+#      (oversize protocol, unknown action, port 70000, relative path); asserts
+#      the receiver got exactly the one valid event, equal in values and types
+#      to sample-event.json, and that no file under /var/log, /var/lib/rsyslog
+#      or /var/spool holds the token;
+#   4. sends worst-case and UTF-8 boundary events: a path or rule exactly at
+#      its byte cap ending in a two-byte character is forwarded as strict
+#      UTF-8 JSON; one byte over is dropped; every frame is under 8 KiB;
+#   5. asserts mutual TLS: a server from another CA, or from the pinned CA
+#      with the wrong name, gets nothing; the receiver (which requires this
 #      host's client certificate by name) gets nothing from a sender whose
-#      client certificate comes from another CA, or that presents none;
-#   5. runs the README's own merge and way-back snippets against a copy of the
+#      client certificate comes from another CA, or that has no certificate,
+#      or no key;
+#   6. runs the README's own merge and way-back snippets against a copy of the
 #      packaged daemon config, with sudo and systemctl stubbed.
 #
 # Everything runs in the container's own network namespace and filesystem:
@@ -33,7 +39,15 @@ if [[ "${1:-}" != "--inside" ]]; then
     repo_root="$(cd "$here/../.." && pwd -P)"
     # shellcheck source=/dev/null # pins.env: plain KEY=value lines (SW_*)
     source "$repo_root/packaging/release/pins.env"
-    exec podman run --rm \
+    # NET_ADMIN is namespaced to the container's own network: it lets the
+    # proof load the nftables table there, never on the host.
+    # Optional: SW_VERIFY_DNF_CACHE=<podman volume name> keeps dnf's
+    # metadata and packages between runs (slow mirrors); off by default.
+    cache=()
+    if [[ -n "${SW_VERIFY_DNF_CACHE:-}" ]]; then
+        cache=(-v "$SW_VERIFY_DNF_CACHE:/var/cache/libdnf5" -e SW_VERIFY_DNF_CACHE=1)
+    fi
+    exec podman run --rm --cap-add=NET_ADMIN "${cache[@]}" \
         -v "$repo_root/packaging:/src/packaging:ro,Z" \
         "$SW_BUILDER_IMAGE" bash /src/packaging/endpoint-events/verify.sh --inside
 fi
@@ -56,9 +70,11 @@ host_id=verify-host
 pki=/etc/pki/snitchwatch-endpoint-events
 
 echo "== install"
-dnf -q -y install --setopt=install_weak_deps=False \
-    rsyslog rsyslog-mmjsonparse rsyslog-gnutls openssl jq >/dev/null
-rpm -q rsyslog rsyslog-mmjsonparse rsyslog-gnutls
+keepcache=()
+[[ -n "${SW_VERIFY_DNF_CACHE:-}" ]] && keepcache=(--setopt=keepcache=True)
+dnf -q -y install --setopt=install_weak_deps=False "${keepcache[@]}" \
+    rsyslog rsyslog-mmjsonparse rsyslog-gnutls nftables openssl jq util-linux >/dev/null
+rpm -q rsyslog rsyslog-mmjsonparse rsyslog-gnutls nftables
 rsyslogd_path=$(command -v rsyslogd)
 echo "rsyslogd: $rsyslogd_path -> $(readlink -f "$rsyslogd_path")"
 
@@ -80,6 +96,7 @@ make_ca rogue-ca
 make_cert pinned-ca server "$peer"
 make_cert pinned-ca host "$client"
 make_cert rogue-ca rogue "$peer"
+make_cert pinned-ca wrongname "other.test"
 make_cert rogue-ca rogue-host "$client"
 install_client() { # name: the client certificate the drop-in presents
     install -m 0644 "$work/$1.pem" "$pki/host-cert.pem"
@@ -100,6 +117,18 @@ drop_in() { # port -> path
     echo "$work/drop-in-$1.conf"
 }
 
+echo "== nftables: only root may connect to 127.0.0.1:514"
+nft -c -f "$src/snitchwatch-endpoint-events.nft"
+nft -f "$src/snitchwatch-endpoint-events.nft"
+nft -f "$src/snitchwatch-endpoint-events.nft" # reloading replaces, doesn't stack
+nft list table inet snitchwatch_endpoint_events
+[[ $(nft list table inet snitchwatch_endpoint_events | grep -c 'reject') -eq 2 ]] ||
+    fail "the table doesn't hold exactly the two reject rules after a reload"
+can_connect() { # uid
+    setpriv --reuid="$1" --regid="$1" --clear-groups \
+        bash -c 'exec 3<>/dev/tcp/127.0.0.1/514' 2>/dev/null
+}
+
 echo "== rsyslogd -N1, stock Fedora main config"
 cp "$(drop_in 6514)" /etc/rsyslog.d/snitchwatch-endpoint-events.conf
 rsyslogd -N1 -f /etc/rsyslog.conf 2>&1 | tee n1-stock.log
@@ -107,15 +136,18 @@ grep -qi 'error' n1-stock.log && fail "stock config check reported errors"
 rm /etc/rsyslog.d/snitchwatch-endpoint-events.conf
 
 # A minimal main config: the drop-in plus only what a test run needs.
-# With a second argument `nocert`, the drop-in loses its client certificate
-# and key (the negative mutual-TLS case).
-sender_conf() { # port [nocert]
+# With a second argument `nocert` the drop-in loses its client certificate
+# and key, with `nokey` only its key (the negative mutual-TLS cases).
+sender_conf() { # port [nocert|nokey]
     local dir="$work/sender-$1" conf
     mkdir -p "$dir"
     conf=$(drop_in "$1")
-    if [[ "${2:-}" == nocert ]]; then
-        sed -i -e '/streamDriver\.CertFile/d' -e '/streamDriver\.KeyFile/d' "$conf"
-        grep -q 'streamDriver\.\(Cert\|Key\)File' "$conf" && fail "client cert still configured"
+    case "${2:-}" in
+    nocert) sed -i -e '/streamDriver\.CertFile/d' -e '/streamDriver\.KeyFile/d' "$conf" ;;
+    nokey) sed -i -e '/streamDriver\.KeyFile/d' "$conf" ;;
+    esac
+    if [[ -n "${2:-}" ]] && grep -q 'streamDriver\.KeyFile' "$conf"; then
+        fail "client key still configured"
     fi
     printf 'global(workDirectory="%s")\ninclude(file="%s")\n' "$dir" "$conf" >"$dir.conf"
     echo "$dir.conf"
@@ -145,10 +177,22 @@ EOF
     : >"$work/$1.out"
     rsyslogd -f "$work/$1.conf" -i "$work/$1.pid"
 }
-start_sender() { # port [nocert]
-    rsyslogd -f "$(sender_conf "$1" "${2:-}")" -i "$work/sender.pid"
+# Port `stock` runs Fedora's own /etc/rsyslog.conf with the drop-in in
+# /etc/rsyslog.d, and a disk-only main queue slowed to one message a second:
+# a raw event that went through the main queue would sit in its spool.
+start_sender() { # port|stock [nocert|nokey]
+    if [[ "$1" == stock ]]; then
+        cp "$(drop_in 6514)" /etc/rsyslog.d/snitchwatch-endpoint-events.conf
+        cat >/etc/rsyslog.d/00-verify-main-queue.conf <<'EOF'
+main_queue(queue.type="Disk" queue.filename="verify-mainq"
+           queue.dequeueSlowdown="1000000" queue.saveOnShutdown="on")
+EOF
+        rsyslogd -f /etc/rsyslog.conf -i "$work/sender.pid"
+    else
+        rsyslogd -f "$(sender_conf "$1" "${2:-}")" -i "$work/sender.pid"
+    fi
     for _ in $(seq 50); do
-        (exec 3<>/dev/tcp/127.0.0.1/514) 2>/dev/null && return 0
+        can_connect 0 && return 0
         sleep 0.2
     done
     fail "sender never listened on 127.0.0.1:514"
@@ -174,22 +218,51 @@ event() { # type
               process_tree: [{key: ("/usr/bin/bash " + $t), value: 1}]},
       Rule: "<nil>", Action: "<nil>", Type: $type}'
 }
-# Worst case for frame size: every capped field at length, in characters
-# that each need six bytes of JSON escaping, plus a large environment.
+# Worst case for frame size: every capped field exactly at its cap, the path
+# and rule in characters that each need six bytes of JSON escaping, the
+# longest valid IPv6 addresses, plus a large environment.
 big_event() {
-    jq -cn --arg t "$token" '("\u0001" * 2000) as $ctl | {
-      Event: {protocol: "tcp", src_ip: "192.168.1.20", src_port: 43211,
-              dst_ip: "93.184.215.14", dst_host: ("\u0001" * 300), dst_port: 443,
-              user_id: 1000, process_id: 4243, process_path: ("/usr/bin/" + $ctl),
+    jq -cn --arg t "$token" '{
+      Event: {protocol: "tcp", src_ip: ("f" * 45), src_port: 43211,
+              dst_ip: ("f" * 45), dst_host: ("a" * 253), dst_port: 65535,
+              user_id: 4294967295, process_id: 4243,
+              process_path: ("/" + ("\u0001" * 767)),
               process_args: ["big", $t],
               process_env: {API_TOKEN: $t, BLOB: ("x" * 30000)}},
-      Rule: ("\u0001" * 300), Action: "allow", Type: 0}'
+      Rule: ("\u0001" * 128), Action: "allow", Type: 0}'
+}
+# Events the validation must drop, each also carrying the token.
+bad_events() {
+    event 0 | jq -c '.Event.protocol = ("t" * 10000)'
+    event 0 | jq -c '.Action = "allow-forged"'
+    event 0 | jq -c '.Event.dst_port = 70000'
+    event 0 | jq -c '.Event.process_path = "usr/bin/curl"'
+    event 0 | jq -c '.Event.src_ip = "1.2.3.4\"}"'
+    event 0 | jq -c '.Event.dst_host = ("a" * 254)'
+}
+# A value of exactly N bytes ending in "é" (2 bytes); a path starts with "/".
+utf8_value() { # path|rule total-bytes
+    local value
+    case "$1" in
+    path) value="/$(printf '%*s' $(($2 - 3)) '' | tr ' ' a)é" ;;
+    rule) value="$(printf '%*s' $(($2 - 2)) '' | tr ' ' a)é" ;;
+    esac
+    [[ $(printf '%s' "$value" | wc -c) -eq $2 ]] || fail "boundary value is not $2 bytes"
+    printf '%s' "$value"
+}
+# An event whose process_path, or rule, is N bytes ending in "é".
+utf8_event() { # path|rule total-bytes
+    case "$1" in
+    path) event 0 | jq -c --arg v "$(utf8_value path "$2")" '.Event.process_path = $v' ;;
+    rule) event 0 | jq -c --arg v "$(utf8_value rule "$2")" '.Rule = $v' ;;
+    esac
 }
 send_all() {
     {
         printf '\n'
         printf 'not json %s\n\n' "$token"
         printf '%s\n\n' "$(event 2)"
+        bad_events | while read -r line; do printf '%s\n\n' "$line"; done
         printf '%s\n\n' "$(event 0)"
     } >/dev/tcp/127.0.0.1/514
 }
@@ -201,13 +274,27 @@ wait_for_lines() { # file count seconds
     return 1
 }
 
-echo "== end to end: pinned receiver"
+echo "== nftables: non-root connect refused, root accepted"
 receiver server 6514
-start_sender 6514
+start_sender stock
+can_connect 0 || fail "root can't connect to the listener"
+can_connect 65534 && fail "a non-root user can connect to 127.0.0.1:514"
+echo "OK: uid 65534 refused, uid 0 accepted"
+
+echo "== end to end: stock rsyslog.conf, pinned receiver"
 send_all
+# Look while the slowed main queue still holds whatever reached it: its spool
+# files are deleted once drained.
+sleep 2
+in_spool=$(grep -rlsF "$token" /var/lib/rsyslog || true)
+[[ -z "$in_spool" ]] || fail "the raw event went through the main queue's disk spool: $in_spool"
 wait_for_lines "$work/server.out" 1 20 || fail "receiver got nothing"
-sleep 2 # let any stray extra frame arrive before counting
+sleep 3 # let any stray extra frame arrive before counting
 stop_sender
+sinks=$(grep -rlsF "$token" /var/log /var/lib/rsyslog /var/spool || true)
+[[ -z "$sinks" ]] || fail "the raw event reached local files: $sinks"
+echo "OK: no local sink (journal files, /var/log, main-queue spool) holds the token"
+rm /etc/rsyslog.d/snitchwatch-endpoint-events.conf /etc/rsyslog.d/00-verify-main-queue.conf
 echo "receiver got:"
 cat "$work/server.out"
 [[ $(grep -c . "$work/server.out") -eq 1 ]] || fail "expected exactly one event"
@@ -216,12 +303,12 @@ got_keys=$(jq -c 'keys' "$work/server.out")
 # The hand-off sample's keys are the contract, so the sample can't drift.
 want_keys=$(jq -c 'keys' "$src/sample-event.json")
 [[ "$got_keys" == "$want_keys" ]] || fail "fields $got_keys, want $want_keys"
-jq -e --arg h "$host_id" '.src_port == 43210 and .dst_port == 443
-    and .user_id == 1000 and .type == 0 and .host_id == $h
-    and .process_path == "/usr/bin/curl" and .dst_host == "example.com"
-    and .action == "<nil>" and .rule == "<nil>" and (.time | test("^[0-9]{4}-"))' \
-    "$work/server.out" >/dev/null || fail "forwarded values are wrong"
-echo "OK: one event, allowlisted fields only, no token"
+# Values and types, not just keys: the frame equals the sample but for time.
+[[ $(jq -cS 'del(.time)' "$work/server.out") == $(jq -cS 'del(.time)' "$src/sample-event.json") ]] ||
+    fail "forwarded event differs from sample-event.json"
+jq -e '.time | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+[+-][0-9]{2}:[0-9]{2}$")' \
+    "$work/server.out" >/dev/null || fail "time is not RFC 3339"
+echo "OK: one event (invalid ones dropped), equal to sample-event.json, no token"
 echo "SAMPLE: $(head -n1 "$work/server.out")"
 
 echo "== end to end: worst-case frame size"
@@ -239,6 +326,27 @@ jq -e '.src_port == 43211 and .action == "allow"' <<<"$frame" >/dev/null ||
     fail "the large event's frame is not the expected JSON"
 echo "OK: the large event arrives in one frame under 8 KiB"
 
+echo "== UTF-8 boundaries: at the cap forwarded intact, one byte over dropped"
+before=$(grep -c . "$work/server.out")
+start_sender 6514
+for event_line in "$(utf8_event path 768)" "$(utf8_event rule 128)" \
+    "$(utf8_event path 769)" "$(utf8_event rule 129)"; do
+    printf '%s\n\n' "$event_line" >/dev/tcp/127.0.0.1/514
+done
+wait_for_lines "$work/server.out" $((before + 2)) 20 || fail "the at-cap events weren't forwarded"
+sleep 3
+stop_sender
+[[ $(grep -c . "$work/server.out") -eq $((before + 2)) ]] || fail "an over-cap event was forwarded"
+tail -n 2 "$work/server.out" >boundary.out
+iconv -f UTF-8 -t UTF-8 boundary.out >/dev/null || fail "a frame is not valid UTF-8"
+want_path=$(utf8_value path 768)
+want_rule=$(utf8_value rule 128)
+sed -n 1p boundary.out | jq -e --arg v "$want_path" '.process_path == $v' >/dev/null ||
+    fail "the 768-byte path didn't arrive intact"
+sed -n 2p boundary.out | jq -e --arg v "$want_rule" '.rule == $v' >/dev/null ||
+    fail "the 128-byte rule didn't arrive intact"
+echo "OK: 768-byte path and 128-byte rule intact as strict UTF-8; 769/129 dropped"
+
 echo "== end to end: receiver from another CA"
 receiver rogue 6515
 start_sender 6515
@@ -248,6 +356,16 @@ stop_sender
 [[ -s "$work/rogue.out" ]] && fail "a receiver outside the pinned CA got events"
 echo # rsyslog's own TLS-rejection message above ends without a newline
 echo "OK: the rogue receiver got nothing"
+
+echo "== end to end: server from the pinned CA with the wrong name"
+receiver wrongname 6516
+start_sender 6516
+send_all
+sleep 8
+stop_sender
+[[ -s "$work/wrongname.out" ]] && fail "a server with the wrong name got events"
+echo
+echo "OK: the wrong-name server got nothing"
 
 echo "== end to end: client certificate from another CA"
 before=$(grep -c . "$work/server.out")
@@ -272,6 +390,17 @@ stop_sender
     fail "the receiver accepted a sender without a client certificate"
 echo
 echo "OK: the receiver rejected a sender without a client certificate"
+
+echo "== end to end: client certificate without its key"
+before=$(grep -c . "$work/server.out")
+start_sender 6514 nokey
+send_all
+sleep 8
+stop_sender
+[[ $(grep -c . "$work/server.out") -eq $before ]] ||
+    fail "the receiver accepted a sender without a client key"
+echo
+echo "OK: no events from a sender without a client key"
 
 echo "== README merge and way back"
 mkdir -p /etc/opensnitchd stubs

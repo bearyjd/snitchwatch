@@ -45,6 +45,12 @@
 - [x] Tests: client `CertFile`/`KeyFile` required, auth mode `x509/name` (or `x509/fingerprint` with SHA peers) only; `maxMessageSize` 64k in, template caps (`process_path` 768, `dst_host` 253, `rule` 128) keep the worst-case escaped frame under 8 KiB; `sample-event.json` has exactly the allowlist.
 - [x] Drop-in, README (exact TLS settings table, host cert generation/registration, size bounds, time source) and `sample-event.json` from the proof's receiver.
 
+### Task 2c: /codex review of #233 (1 HIGH, 3 MEDIUM, 2 LOW)
+
+- [x] HIGH, local forgery: opt-in `snitchwatch-endpoint-events.nft` (own `inet` table; non-root `meta skuid` connects to 127.0.0.0/8 and ::1 tcp/514 rejected) plus a oneshot unit ordered before rsyslog and the daemon; every forwarded field validated by pattern or byte cap in the ruleset, failures dropped; README "Provenance" ("reported by this host"; root can still forge).
+- [x] MEDIUM: ruleset's own memory-only bounded queue (`saveOnShutdown` off); over-cap fields drop the event instead of truncating (no split UTF-8); README restarts rsyslog after `-N1` and checks the listener (and a non-root refusal) before the logger.
+- [x] LOW: verify.sh compares values/types with the sample, forwards under the stock config with a disk-only main queue and greps the sinks, adds wrong-name-server and no-key cases and UTF-8 boundary events; README scopes the privacy guarantee (other loggers, debug output).
+
 ### Task 3: Real config proof
 
 - [x] `packaging/endpoint-events/verify.sh` + `just endpoint-events-verify` (podman; not in `package-check`): `-N1` under stock and minimal main configs; e2e to a TLS rsyslog receiver with a fake token in env/args, blank and non-JSON frames, a task notification; worst-case event (45 KB raw) forwarded as one frame under 8 KiB; wrong-CA receiver gets nothing; receiver requiring this host's client cert rejects one from another CA; README merge (twice) and way-back snippets run against the packaged config copy, mode stays 0600.

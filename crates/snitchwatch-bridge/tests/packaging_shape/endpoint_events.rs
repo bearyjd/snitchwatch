@@ -319,43 +319,181 @@ fn template_forwards_only_the_privacy_allowlist() {
     }
 }
 
+/// The ruleset block (`ruleset(...) { ... }`) of the drop-in's active text.
+fn ruleset_block(active: &str) -> &str {
+    let start = active.find("ruleset(").expect("a ruleset");
+    let body = &active[start..];
+    let mut depth = 0;
+    for (at, c) in body.char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &body[..=at];
+                }
+            }
+            _ => {}
+        }
+    }
+    panic!("unclosed ruleset block");
+}
+
+/// The cap in `strlen(<property>) <= N` inside the ruleset, if any.
+fn strlen_cap(ruleset: &str, property: &str) -> Option<usize> {
+    let needle = format!("strlen({property}) <= ");
+    let at = ruleset.find(&needle)? + needle.len();
+    let digits: String = ruleset[at..]
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    digits.parse().ok()
+}
+
+/// The `$!` properties the forwarded template reads.
+fn template_properties(active: &str) -> Vec<String> {
+    let start = active
+        .find("template(name=\"snitchwatch_endpoint_event\"")
+        .expect("the forward's template is defined");
+    let template = &active[start..start + active[start..].find('}').unwrap()];
+    template
+        .match_indices("name=\"$!")
+        .map(|(at, needle)| {
+            let value = &template[at + needle.len() - 2..];
+            value[..value.find('"').unwrap()].to_string()
+        })
+        .collect()
+}
+
+/// Provenance and frame size (codex review of #233, HIGH): every field the
+/// template forwards is validated in the ruleset (a pattern or a byte cap)
+/// before the forward, so injected or oversize events are dropped. Nothing is
+/// truncated, which could split a UTF-8 character.
+#[test]
+fn every_forwarded_field_is_validated_before_the_forward() {
+    let active = rsyslog_active();
+    let ruleset = ruleset_block(&active);
+    let gate = &ruleset[..ruleset.find("type=\"omfwd\"").expect("a forward")];
+    let properties = template_properties(&active);
+    assert_eq!(properties.len(), 11, "{properties:?}");
+    for property in &properties {
+        let checked = gate.contains(&format!("re_match({property}, \"^"))
+            || strlen_cap(gate, property).is_some();
+        assert!(checked, "`{property}` is forwarded unvalidated");
+    }
+    assert!(
+        !active.contains("position."),
+        "no truncation: a byte cut can split a UTF-8 character"
+    );
+    assert!(gate.contains("if $parsesuccess != \"OK\" then stop"));
+}
+
 /// Vigie drops frames over 8 KiB. Input accepts the daemon's large raw lines
-/// (environment included) so they parse rather than truncate, and the
-/// template caps every variable-length field so the worst-case output (each
-/// capped byte escaped as `\u00XX`, six bytes) stays under 8 KiB.
+/// (environment included) so they parse rather than truncate; output caps
+/// make the worst case (every capped byte escaped as `\u00XX`, six bytes)
+/// fit.
 #[test]
 fn frames_are_bounded_for_vigie() {
     let active = rsyslog_active();
-    let globals = statements(&active, "global");
-    let max = globals
+    let max = statements(&active, "global")
         .iter()
         .find_map(|body| param(body, "maxMessageSize"))
         .expect("maxMessageSize is set");
     assert_eq!(max, "64k", "input limit for the daemon's raw lines");
 
-    let start = active
-        .find("template(name=\"snitchwatch_endpoint_event\"")
-        .unwrap();
-    let template = &active[start..start + active[start..].find('}').unwrap()];
-    let property = |outname: &str| {
-        statements(template, "property")
-            .into_iter()
-            .find(|body| param(body, "outname").as_deref() == Some(outname))
-            .unwrap_or_else(|| panic!("no `{outname}` property"))
-    };
-    let mut worst_case = 0;
-    for (outname, cap) in [("process_path", 768), ("dst_host", 253), ("rule", 128)] {
-        let to: usize = param(&property(outname), "position.to")
-            .unwrap_or_else(|| panic!("`{outname}` is not capped"))
-            .parse()
-            .unwrap();
-        assert_eq!(to, cap, "`{outname}` cap");
-        worst_case += 6 * to;
-    }
-    // Everything else: keys, punctuation, time, IPs, numbers, action, a
-    // 64-character host id (escaped), protocol.
-    worst_case += 1024;
+    let ruleset = ruleset_block(&active);
+    let path = strlen_cap(ruleset, "$!Event!process_path").expect("path cap");
+    let rule = strlen_cap(ruleset, "$!Rule").expect("rule cap");
+    assert_eq!((path, rule), (768, 128));
+    assert!(ruleset.contains("re_match($!Event!dst_host, \"^[A-Za-z0-9._:-]{0,253}\\$\")"));
+    // Everything else is short by pattern: keys, punctuation, time, IPs,
+    // numbers, protocol, action and a 64-character host id (escaped).
+    let worst_case = 6 * (path + rule) + 253 + 1024;
     assert!(worst_case < 8192, "worst-case frame {worst_case} bytes");
+}
+
+/// Raw events (environment included) must not pass through rsyslog's main
+/// queue, which a host may have made disk-assisted: the ruleset has its own
+/// bounded, memory-only queue that is never saved (codex review, MEDIUM).
+#[test]
+fn ruleset_queue_is_bounded_and_memory_only() {
+    let active = rsyslog_active();
+    let ruleset = ruleset_block(&active);
+    let header = &ruleset[..ruleset.find('{').unwrap()];
+    assert!(
+        param(header, "queue.type").is_some_and(|t| t.eq_ignore_ascii_case("LinkedList")),
+        "ruleset queue: {header}"
+    );
+    assert!(param(header, "queue.size").is_some());
+    assert_eq!(param(header, "queue.timeoutEnqueue").as_deref(), Some("0"));
+    assert_eq!(
+        param(header, "queue.saveOnShutdown").as_deref(),
+        Some("off")
+    );
+    assert!(
+        !active.to_ascii_lowercase().contains("queue.filename"),
+        "no disk-assisted queue anywhere in the drop-in"
+    );
+}
+
+const NFT: &str = "packaging/endpoint-events/snitchwatch-endpoint-events.nft";
+const NFT_UNIT: &str = "packaging/endpoint-events/snitchwatch-endpoint-events-nft.service";
+
+/// Only root may connect to the loopback listener (codex review, HIGH): a
+/// separate nftables table rejects any non-root socket's connection to the
+/// logger's port on 127.0.0.0/8 and ::1.
+#[test]
+fn nft_table_lets_only_root_connect_to_the_listener() {
+    let body = read(NFT);
+    let active: Vec<&str> = body
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .collect();
+    let port = daemon_config(LOGGER)["Server"]
+        .as_str()
+        .and_then(|s| s.rsplit_once(':'))
+        .map(|(_, port)| port.to_string())
+        .unwrap();
+    assert!(active.contains(&"table inet snitchwatch_endpoint_events {"));
+    assert!(active
+        .iter()
+        .any(|line| line.starts_with("type filter hook output ")));
+    for daddr in ["ip daddr 127.0.0.0/8", "ip6 daddr ::1"] {
+        let rule = format!("{daddr} tcp dport {port} meta skuid != 0 reject");
+        assert!(
+            active.iter().any(|line| line.starts_with(&rule)),
+            "missing `{rule}`"
+        );
+    }
+    assert!(
+        !active.iter().any(|line| line.contains("flush ruleset")),
+        "never touch other tables (firewalld, opensnitchd)"
+    );
+}
+
+#[test]
+fn nft_unit_loads_the_table_before_either_end_starts() {
+    let body = read(NFT_UNIT);
+    for needle in [
+        "Type=oneshot",
+        "RemainAfterExit=yes",
+        "ExecStart=/usr/sbin/nft -f /etc/nftables/snitchwatch-endpoint-events.nft",
+        "ExecStop=/usr/sbin/nft delete table inet snitchwatch_endpoint_events",
+        "WantedBy=multi-user.target",
+    ] {
+        assert!(body.contains(needle), "nft unit missing `{needle}`");
+    }
+    let before = body
+        .lines()
+        .find_map(|line| line.strip_prefix("Before="))
+        .expect("Before=");
+    for unit in ["rsyslog.service", "opensnitch.service"] {
+        assert!(
+            before.split_whitespace().any(|u| u == unit),
+            "Before= {unit}"
+        );
+    }
 }
 
 fn logger_configs(dir: &Path, found: &mut Vec<PathBuf>) {
@@ -425,6 +563,11 @@ fn readme_merges_atomically_as_root_and_restarts_the_fedora_unit() {
         "host-key.pem",
         "informational",
         "maxMessageSize",
+        "systemctl restart rsyslog.service",
+        "snitchwatch-endpoint-events-nft.service",
+        "reported by this host",
+        "debug",
+        "Server.Loggers",
     ] {
         assert!(body.contains(needle), "README missing `{needle}`");
     }
@@ -460,6 +603,11 @@ fn sample_event_has_exactly_the_allowlisted_fields() {
     let mut allowed = ALLOWED_FIELDS.to_vec();
     allowed.sort_unstable();
     assert_eq!(keys, allowed);
+    for (key, value) in json.as_object().unwrap() {
+        let numeric = ["src_port", "dst_port", "user_id", "type"].contains(&key.as_str());
+        assert_eq!(value.is_u64(), numeric, "`{key}` type in the sample");
+        assert!(numeric || value.is_string(), "`{key}` is a string");
+    }
     let body = read("packaging/endpoint-events/sample-event.json");
     for field in FORBIDDEN_FIELDS {
         assert!(!body.contains(field), "sample carries `{field}`");
