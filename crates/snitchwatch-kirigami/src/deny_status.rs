@@ -202,9 +202,8 @@ pub fn evaluate(bytes: &[u8], boot_id: Option<&str>, now_ms: i64) -> DenyView {
     if updated_ms > now_ms + SKEW_MS {
         return DenyView::unknown(UnknownReason::ClockBehind);
     }
-    if let Some(expires_ms) = expires_ms {
-        let length = expires_ms - updated_ms;
-        if snapshot.pending && !(0 < length && length <= MAX_TRIAL_MS + SKEW_MS) {
+    if let (true, Some(expires_ms)) = (snapshot.pending, expires_ms) {
+        if !plausible_deadline(expires_ms, updated_ms, snapshot.expired) {
             return DenyView::unknown(UnknownReason::ImplausibleDeadline);
         }
     }
@@ -236,7 +235,20 @@ pub fn evaluate(bytes: &[u8], boot_id: Option<&str>, now_ms: i64) -> DenyView {
     }
 }
 
-/// `YYYY-MM-DDTHH:MM:SSZ` (the helper's `TIME_FORMAT`) as Unix milliseconds.
+/// Whether a pending trial's deadline is one the helper could have written.
+/// It sets `expiresAt` 1 to 60 minutes after the trial starts, and every
+/// later write (`updatedAt`) is at or after that start, so the deadline is
+/// never more than 60 minutes (plus skew) past `updatedAt`. It computes
+/// `expired` at write time as now > `expiresAt`, so an expired snapshot was
+/// written after its deadline (a revert that failed, then republished), and a
+/// live one before it.
+fn plausible_deadline(expires_ms: i64, updated_ms: i64, expired: bool) -> bool {
+    let ahead = expires_ms - updated_ms;
+    ahead <= MAX_TRIAL_MS + SKEW_MS && if expired { ahead <= SKEW_MS } else { ahead > 0 }
+}
+
+/// `YYYY-MM-DDTHH:MM:SSZ` (the helper's `TIME_FORMAT`, whole seconds, always
+/// UTC "Z") as Unix milliseconds.
 pub fn parse_utc(text: &str) -> Option<i64> {
     let bytes = text.as_bytes();
     if bytes.len() != 20

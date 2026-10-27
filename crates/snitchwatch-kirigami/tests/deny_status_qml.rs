@@ -58,6 +58,18 @@ fn the_deny_section_shows_each_state_and_only_copy_buttons() {
     init_headless_qt_env();
     let dir = tempfile::tempdir().unwrap();
     let trial = live_trial(dir.path());
+    // Rewritten from allow to confirmed while the window is hidden.
+    let mutable = dir.path().join("mutable.json");
+    std::fs::copy(fixture("allow.json"), &mutable).unwrap();
+    let writer = {
+        let mutable = mutable.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+            let staged = mutable.with_extension("tmp");
+            std::fs::copy(fixture("confirmed.json"), &staged).unwrap();
+            std::fs::rename(&staged, &mutable).unwrap();
+        })
+    };
 
     let mut app = QGuiApplication::new();
     let mut engine = QQmlApplicationEngine::new();
@@ -99,7 +111,36 @@ Window {
     }
     function check(condition, message) { if (!condition) throw new Error(message); }
     function show(path) { deny.statusPath = path; deny.refresh(); }
-    Component.onCompleted: {
+    function fail(message) { console.warn("Error: " + message); Qt.quit(); }
+    Timer { interval: 15000; running: true; onTriggered: root.fail("TIMEOUT") }
+    // The file turns from allow to confirmed 1.5 s after load, while hidden:
+    // not read until the window is shown again.
+    Timer {
+        id: hiddenWait
+        interval: 3000
+        onTriggered: {
+            try {
+                check(find("denyHeadline").text === "Deny mode: off (allow)",
+                      "a change was read while hidden: " + find("denyHeadline").text);
+                root.visible = true;
+                check(find("denyStatusSection").refreshing, "refresh didn't resume on show");
+                shownWait.start();
+            } catch (e) { root.fail(e.message); }
+        }
+    }
+    Timer {
+        id: shownWait
+        interval: 600
+        onTriggered: {
+            try {
+                check(find("denyHeadline").text === "Deny mode: on (confirmed)",
+                      "the change wasn't read after show: " + find("denyHeadline").text);
+                console.info("DENY_STATUS_OK");
+            } catch (e) { root.fail(e.message); return; }
+            Qt.quit();
+        }
+    }
+    Component.onCompleted: { try {
         show("FIXTURE/absent.json");
         check(deny.state === "unknown" && deny.asOf === "", "missing file not unknown");
         const headline = find("denyHeadline");
@@ -138,16 +179,17 @@ Window {
         // The once-a-second re-read runs only while the window is shown.
         const section = find("denyStatusSection");
         check(section && section.refreshing, "not refreshing while shown");
+        show("MUTABLE");
+        check(find("denyHeadline").text === "Deny mode: off (allow)", "mutable: " + deny.headline);
         root.visible = false;
         check(!section.refreshing, "still refreshing while the window is hidden");
-        root.visible = true;
-        check(section.refreshing, "refresh didn't resume on show");
-        console.info("DENY_STATUS_OK");
-    }
+        hiddenWait.start();
+    } catch (e) { root.fail(e.message); } }
 }
 "#
     .replace("FIXTURE/", &fixture(""))
-    .replace("\"TRIAL\"", &format!("{trial:?}"));
+    .replace("\"TRIAL\"", &format!("{trial:?}"))
+    .replace("\"MUTABLE\"", &format!("{:?}", mutable.display().to_string()));
 
     let guard = engine.as_mut().map(|engine| {
         let root_ok = root_ok.clone();
@@ -163,11 +205,17 @@ Window {
                 &QUrl::from(&QString::from("qrc:/deny_status_probe.qml")),
             );
         }
+        if root_ok.load(Ordering::SeqCst) {
+            if let Some(app) = app.as_mut() {
+                app.exec();
+            }
+        }
     });
     drop(guard);
+    writer.join().unwrap();
     assert!(stderr.contains("DENY_STATUS_OK"), "{stderr}");
     assert!(root_ok.load(Ordering::SeqCst), "{stderr}");
-    let _ = app.as_mut();
+    assert!(!stderr.contains("Error:"), "{stderr}");
 }
 
 /// The section stays small, under the shell's 400-line QML budget.

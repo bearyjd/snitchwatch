@@ -126,7 +126,8 @@ mod tests {
         let today = local_time(&noon, noon_ms + 5 * 60_000);
         assert!(is_hh_mm(&today), "{today}");
         assert_eq!(today, "12:05");
-        let tomorrow = local_time(&noon, noon_ms + 24 * 3_600_000);
+        // Calendar days, not 24 elapsed hours, so a DST change can't move it.
+        let tomorrow = local_time(&noon, noon.add_days(1).to_msecs_since_epoch());
         assert_eq!(tomorrow.len(), "yyyy-MM-dd HH:mm".len(), "{tomorrow}");
         assert!(tomorrow.ends_with(" 12:00"), "{tomorrow}");
     }

@@ -84,15 +84,59 @@ fn a_trial_past_its_deadline_is_a_revert_overdue() {
     }
 }
 
+/// The helper's revert failed and a later `publish-status` rewrote the file
+/// after the deadline: `pending: true`, `expired: true`, `updatedAt` after
+/// `expiresAt` (helper source, bazzite-tower #138: `expired` is computed at
+/// write time as now > expiresAt). That is a genuine overdue revert.
 #[test]
-fn a_stored_expired_flag_on_a_pending_trial_is_overdue_too() {
+fn a_snapshot_rewritten_after_the_deadline_is_a_revert_overdue() {
     let text = std::fs::read_to_string(fixture("trial.json"))
         .unwrap()
-        .replace("\"expired\":false", "\"expired\":true");
+        .replace("\"expired\":false", "\"expired\":true")
+        .replace(
+            "\"updatedAt\":\"2026-10-26T12:00:00Z\"",
+            "\"updatedAt\":\"2026-10-26T12:06:00Z\"",
+        );
+    for now in [UPDATED_MS + 6 * MINUTE_MS, UPDATED_MS + 600 * MINUTE_MS] {
+        assert_eq!(
+            evaluate(text.as_bytes(), Some(BOOT), now).state,
+            DenyState::RevertOverdue {
+                expires_ms: Some(UPDATED_MS + 5 * MINUTE_MS)
+            },
+            "now {now}"
+        );
+    }
+    // Days later, too: the helper may republish long after the deadline.
+    let days = text.replace("2026-10-26T12:06:00Z", "2026-10-29T08:00:00Z");
     assert!(matches!(
-        evaluate(text.as_bytes(), Some(BOOT), UPDATED_MS).state,
+        evaluate(
+            days.as_bytes(),
+            Some(BOOT),
+            UPDATED_MS + 5 * 1440 * MINUTE_MS
+        )
+        .state,
         DenyState::RevertOverdue { .. }
     ));
+}
+
+/// `expired: true` written before the deadline, or `expired: false` written
+/// after it, contradicts how the helper computes the flag.
+#[test]
+fn an_expired_flag_that_contradicts_its_times_is_unknown() {
+    let trial = std::fs::read_to_string(fixture("trial.json")).unwrap();
+    let early = trial.replace("\"expired\":false", "\"expired\":true");
+    assert_eq!(
+        evaluate(early.as_bytes(), Some(BOOT), UPDATED_MS + 10 * MINUTE_MS).state,
+        DenyState::Unknown(UnknownReason::ImplausibleDeadline)
+    );
+    let late = trial.replace(
+        "\"updatedAt\":\"2026-10-26T12:00:00Z\"",
+        "\"updatedAt\":\"2026-10-26T12:06:00Z\"",
+    );
+    assert_eq!(
+        evaluate(late.as_bytes(), Some(BOOT), UPDATED_MS + 10 * MINUTE_MS).state,
+        DenyState::Unknown(UnknownReason::ImplausibleDeadline)
+    );
 }
 
 #[test]
