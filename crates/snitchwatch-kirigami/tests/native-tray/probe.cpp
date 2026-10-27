@@ -168,7 +168,7 @@ int main(int argc, char **argv) {
         controller->menuLabel = QStringLiteral("resume_filtering");
         emit controller->stateChanged();
         QApplication::processEvents();
-        click(QStringLiteral("Resume filtering"));
+        click(QStringLiteral("Resume prompting"));
         require(controller->resumes == 1, QStringLiteral("exported resume action did not run"));
         click(QStringLiteral("Hide window"));
         auto *window = tray->findChild<QObject *>(QStringLiteral("windowProbe"));

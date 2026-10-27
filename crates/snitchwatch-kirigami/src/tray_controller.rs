@@ -8,11 +8,12 @@
 //! The tray icon/menu itself is declared directly in `main.qml`; this
 //! `QObject` only feeds it the tooltip/menu-label strings derived from the
 //! bridge's `TrayState` and `FilterPauseState` by [`crate::tray`]'s pure,
-//! unit-tested functions.
+//! unit-tested functions, plus Q04's firewall and process-monitor lines from
+//! [`crate::tray_health`] (the bridge's `DiagnosticsReport`).
 
 use core::pin::Pin;
 use cxx_qt::{CxxQtType, Threading};
-use cxx_qt_lib::{QDateTime, QString, QTimeZone};
+use cxx_qt_lib::{QDateTime, QString};
 
 use tokio::sync::watch;
 
@@ -22,8 +23,10 @@ use crate::bridge_runtime::{
 };
 use crate::tray::{
     build_set_filtering_paused_json, derive_menu_label, derive_tooltip_with_slot,
-    live_slot_holders, menu_label_token,
+    live_slot_holders, menu_label_token, startup_tooltip,
 };
+use crate::tray_health::{compose_tooltip, firewall_report, FirewallSeen};
+use snitchwatch_bridge::ws_messages::{ClientMessage, ServerMessage};
 
 #[cxx_qt::bridge]
 pub mod qobject {
@@ -98,12 +101,14 @@ pub struct TrayControllerRust {
     /// `PromptSlot` messages), as of session `slot_session`.
     slot_holders: u32,
     slot_session: u64,
+    /// The firewall as the bridge's diagnostics last reported it (Q04).
+    firewall: FirewallSeen,
 }
 
 impl Default for TrayControllerRust {
     fn default() -> Self {
         Self {
-            tooltip: QString::from("Snitchwatch — filtering"),
+            tooltip: QString::from(&startup_tooltip()),
             menu_label: QString::from("default"),
             paused_until: QString::default(),
             pause_answers_waiting: false,
@@ -111,6 +116,7 @@ impl Default for TrayControllerRust {
             pause_state: BridgePauseState::NOT_PAUSED,
             slot_holders: 0,
             slot_session: 0,
+            firewall: FirewallSeen::default(),
         }
     }
 }
@@ -149,7 +155,8 @@ impl qobject::TrayController {
             spawn_slot_feed(&handles, qt_thread.clone(), slot_rx);
         }
         spawn_tray_feed(&handles, qt_thread.clone(), tray_rx);
-        spawn_pause_feed(&handles, qt_thread, pause_rx);
+        spawn_pause_feed(&handles, qt_thread.clone(), pause_rx);
+        spawn_diagnostics_feed(&handles, qt_thread);
     }
 }
 
@@ -220,6 +227,39 @@ fn spawn_pause_feed(
     });
 }
 
+/// The firewall check from every `DiagnosticsReport`. Broadcasts don't
+/// replay and the snapshot resync carries no report, so the tray asks for
+/// one itself rather than rely on `DaemonHealthModel` starting first.
+fn spawn_diagnostics_feed(handles: &BridgeHandles, qt_thread: TrayThread) {
+    let session_handles = handles.clone();
+    crate::bridge_dispatch::spawn_feed(
+        handles,
+        "TrayController",
+        crate::bridge_dispatch::interests_diagnostics,
+        move |connection_id, msg, _json| {
+            let ServerMessage::DiagnosticsReport { checks } = msg else {
+                return;
+            };
+            let report = firewall_report(checks);
+            let session_handles = session_handles.clone();
+            let _ = qt_thread.queue(move |mut qobject| {
+                if !session_handles.is_current_session(connection_id) {
+                    return;
+                }
+                let seen = qobject
+                    .rust()
+                    .firewall
+                    .observe(connection_id, report, local_now_hh_mm);
+                qobject.as_mut().rust_mut().firewall = seen;
+                qobject.refresh();
+            });
+        },
+    );
+    if let Err(error) = handles.try_send(ClientMessage::RecheckDiagnostics) {
+        tracing::warn!(error = %error, "TrayController: initial diagnostics recheck ignored");
+    }
+}
+
 impl qobject::TrayController {
     fn pause_for(self: Pin<&mut Self>, secs: i32) {
         let Ok(secs) = u64::try_from(secs) else {
@@ -251,7 +291,13 @@ impl qobject::TrayController {
             .as_ref()
             .is_some_and(|handles| handles.advertises_pause_answers_waiting());
         let holders = live_slot_holders(self.rust().slot_holders, session_is_current);
-        let tooltip = derive_tooltip_with_slot(&self.rust().tray_state, &pause, &until, holders);
+        let state_text = derive_tooltip_with_slot(&self.rust().tray_state, &pause, &until, holders);
+        let firewall_session = self.rust().firewall.session();
+        let firewall = handles
+            .as_ref()
+            .filter(|handles| handles.is_current_session(firewall_session))
+            .and_then(|_| self.rust().firewall.line());
+        let tooltip = compose_tooltip(&state_text, firewall.as_deref());
         let label = derive_menu_label(&self.rust().tray_state, &pause);
         self.as_mut().set_tooltip(QString::from(&tooltip));
         self.as_mut()
@@ -261,12 +307,41 @@ impl qobject::TrayController {
     }
 }
 
-/// `unix_ms` as a local "HH:MM" time, in the system time zone.
+/// `unix_ms` as a local "HH:MM" time. Qt's local time (`TZ`, else
+/// `/etc/localtime`), as `connections_model::verdict_windows` reads it: not
+/// `QTimeZone::system_time_zone()`, which fell back to UTC in a sandbox whose
+/// `/etc/localtime` is a plain file.
 fn local_hh_mm(unix_ms: u64) -> String {
-    let ms = i64::try_from(unix_ms).unwrap_or(i64::MAX);
-    let time_zone = QTimeZone::system_time_zone();
-    QDateTime::from_msecs_since_epoch(ms, &time_zone)
+    let mut local = QDateTime::current_date_time();
+    local.set_msecs_since_epoch(i64::try_from(unix_ms).unwrap_or(i64::MAX));
+    local.time().format(&QString::from("HH:mm")).to_string()
+}
+
+/// Now, as a local "HH:MM" time.
+fn local_now_hh_mm() -> String {
+    QDateTime::current_date_time()
         .time()
         .format(&QString::from("HH:mm"))
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// "Paused until" and the firewall line's "noticed" time read the same
+    /// local clock (Q04), so one tooltip never mixes UTC and local time.
+    #[test]
+    fn pause_end_and_noticed_times_share_the_local_clock() {
+        let agree = (0..3).any(|_| {
+            let now_ms = u64::try_from(QDateTime::current_msecs_since_epoch()).unwrap();
+            local_hh_mm(now_ms) == local_now_hh_mm()
+        });
+        assert!(
+            agree,
+            "{} vs {}",
+            local_hh_mm(u64::try_from(QDateTime::current_msecs_since_epoch()).unwrap()),
+            local_now_hh_mm()
+        );
+    }
 }

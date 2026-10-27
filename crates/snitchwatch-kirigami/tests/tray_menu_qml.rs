@@ -239,10 +239,10 @@ fn assert_menu_states(captured: &str) {
                 .clone()
         };
         let (can_pause, resume_text, can_resume) = match label {
-            "pause_filtering" => (true, "Resume filtering", false),
-            "resume_filtering" => (false, "Resume filtering (until 14:30)", true),
+            "pause_filtering" => (true, "Resume prompting", false),
+            "resume_filtering" => (false, "Resume prompting (until 14:30)", true),
             // Not connected yet, or the daemon is unreachable.
-            "startup" | "default" | "reconnect" => (false, "Resume filtering", false),
+            "startup" | "default" | "reconnect" => (false, "Resume prompting", false),
             other => panic!("unexpected state {other}"),
         };
         let suffix = if answers_waiting { WAITING_SUFFIX } else { "" };

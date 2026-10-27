@@ -23,26 +23,33 @@ fn is_paused(state: &TrayState, pause: &PauseState) -> bool {
     pause.paused || *state == TrayState::FilterOff
 }
 
-/// `paused_until` is the pause's local end time ("HH:MM"), or empty when
+/// The tooltip before the bridge's first state arrives (Q04): it claims
+/// nothing about prompting yet.
+pub fn startup_tooltip() -> String {
+    crate::tray_health::compose_tooltip("Snitchwatch — waiting for the bridge", None)
+}
+
+/// A pause only auto-answers prompts: rules keep applying, so the tooltip
+/// speaks of prompting, never of filtering (Q04). `paused_until` is the pause's local end time ("HH:MM"), or empty when
 /// unknown (a bridge that predates `FilterPauseState`).
 pub fn derive_tooltip(state: &TrayState, pause: &PauseState, paused_until: &str) -> String {
     match state {
         // The daemon being down must not hide a pause the user set: it is
         // still in effect, and the menu still offers Resume.
         TrayState::DaemonDown if is_paused(state, pause) && !paused_until.is_empty() => {
-            format!("opensnitchd not reachable — filtering paused until {paused_until}")
+            format!("opensnitchd not reachable — prompting paused until {paused_until}")
         }
         TrayState::DaemonDown if is_paused(state, pause) => {
-            "opensnitchd not reachable — filtering paused".into()
+            "opensnitchd not reachable — prompting paused".into()
         }
         TrayState::DaemonDown => "opensnitchd not reachable".into(),
         TrayState::RecentBlock { what, .. } => format!("Blocked: {what}"),
         _ if is_paused(state, pause) && !paused_until.is_empty() => {
-            format!("Snitchwatch — filtering paused until {paused_until}")
+            format!("Snitchwatch — prompting paused until {paused_until}")
         }
-        _ if is_paused(state, pause) => "Snitchwatch — filtering disabled".into(),
+        _ if is_paused(state, pause) => "Snitchwatch — prompting paused".into(),
         TrayState::Pending(n) => format!("{n} pending decisions"),
-        TrayState::Idle | TrayState::FilterOff => "Snitchwatch — filtering".into(),
+        TrayState::Idle | TrayState::FilterOff => "Snitchwatch — prompting on".into(),
     }
 }
 
@@ -64,7 +71,7 @@ pub fn derive_tooltip_with_slot(
             format!(" until {paused_until}")
         };
         return format!(
-            "Snitchwatch — filtering paused{until}. {}",
+            "Snitchwatch — prompting paused{until}. {}",
             crate::prompt_slot_text::paused_while_waiting(slot_holders)
         );
     }
@@ -118,7 +125,7 @@ pub fn menu_label_token(label: &MenuLabel) -> &'static str {
 }
 
 /// Build the JSON-encoded `ClientMessage::SetFilteringPaused` the tray menu's
-/// "Pause for …" items and "Resume filtering" item send via
+/// "Pause for …" items and "Resume prompting" item send via
 /// `BridgeFeed::sendClientJson` (the same in-process path
 /// `BridgeFeed::submitVerdict` and friends use — see
 /// `docs/superpowers/plans/2026-07-12-tray-filter-off.md`). Pure and
@@ -148,7 +155,7 @@ mod tests {
     fn tooltip_idle() {
         assert_eq!(
             derive_tooltip(&TrayState::Idle, &NOT_PAUSED, ""),
-            "Snitchwatch — filtering"
+            "Snitchwatch — prompting on"
         );
     }
 
@@ -177,7 +184,7 @@ mod tests {
         // A bridge that predates `FilterPauseState` gives no end time.
         assert_eq!(
             derive_tooltip(&TrayState::FilterOff, &NOT_PAUSED, ""),
-            "Snitchwatch — filtering disabled"
+            "Snitchwatch — prompting paused"
         );
     }
 
@@ -185,7 +192,7 @@ mod tests {
     fn tooltip_paused_shows_when_the_pause_ends() {
         assert_eq!(
             derive_tooltip(&TrayState::FilterOff, &PAUSED, "14:30"),
-            "Snitchwatch — filtering paused until 14:30"
+            "Snitchwatch — prompting paused until 14:30"
         );
     }
 
@@ -194,12 +201,12 @@ mod tests {
         // The daemon being down must not hide a pause the user set.
         assert_eq!(
             derive_tooltip(&TrayState::DaemonDown, &PAUSED, "14:30"),
-            "opensnitchd not reachable — filtering paused until 14:30"
+            "opensnitchd not reachable — prompting paused until 14:30"
         );
         // A pause with no end time on record.
         assert_eq!(
             derive_tooltip(&TrayState::DaemonDown, &PAUSED, ""),
-            "opensnitchd not reachable — filtering paused"
+            "opensnitchd not reachable — prompting paused"
         );
         // A bridge that predates the pause state reports FilterOff only; the
         // daemon being down then shows as down alone, as before.
@@ -358,14 +365,14 @@ mod tests {
         assert_eq!(
             tooltip,
             format!(
-                "Snitchwatch — filtering paused until 14:30. {}",
+                "Snitchwatch — prompting paused until 14:30. {}",
                 crate::prompt_slot_text::paused_while_waiting(1)
             )
         );
         assert_eq!(
             derive_tooltip_with_slot(&TrayState::FilterOff, &PAUSED, "", 2),
             format!(
-                "Snitchwatch — filtering paused. {}",
+                "Snitchwatch — prompting paused. {}",
                 crate::prompt_slot_text::paused_while_waiting(2)
             )
         );
@@ -379,6 +386,33 @@ mod tests {
                 derive_tooltip(&state, &pause, "14:30"),
                 "{state:?} {holders}"
             );
+        }
+    }
+
+    /// Q04: until the bridge's state arrives the tray claims nothing about
+    /// prompting, and no tray sentence calls the GUI's prompting
+    /// "filtering", which reads as the firewall enforcing.
+    #[test]
+    fn tray_text_says_prompting_never_filtering() {
+        assert_eq!(
+            startup_tooltip(),
+            "Snitchwatch — waiting for the bridge. Process monitor: not reported by opensnitchd"
+        );
+        let states = [
+            TrayState::Idle,
+            TrayState::Pending(2),
+            TrayState::FilterOff,
+            TrayState::DaemonDown,
+        ];
+        for state in &states {
+            for pause in [NOT_PAUSED, PAUSED] {
+                for until in ["", "14:30"] {
+                    for holders in [0, 2] {
+                        let text = derive_tooltip_with_slot(state, &pause, until, holders);
+                        assert!(!text.to_lowercase().contains("filtering"), "{text}");
+                    }
+                }
+            }
         }
     }
 

@@ -52,7 +52,7 @@ Item {
     // they aren't a single decided connection.
     required property string matchedRule
     required property string matchedRuleDisplay
-    // Allowed once because filtering was paused (issue #78); false on headers.
+    // Allowed once because prompting was paused (issue #78); false on headers.
     required property bool answeredWhilePaused
     // Prompt-slot plan Part C: a put-off or default-decided row's
     // label (empty otherwise), when the bridge answers a pending one
@@ -232,7 +232,7 @@ Item {
             textFormat: Text.PlainText
             text: row.pending ? "pending"
                 : row.outcomeText !== "" ? row.outcomeText
-                : row.answeredWhilePaused ? "Allowed once (filtering was paused)"
+                : row.answeredWhilePaused ? "Allowed once (prompting was paused)"
                 : row.needsRule ? row.verdict + " once, needs a rule"
                 : row.verdict
             color: row.needsRule ? Theme.needsRule : Theme.verdictColor(row.verdict)

@@ -9,6 +9,14 @@ fn verdict_not_remembered_is_explained() {
     assert_eq!(body, RuleRefusal::ProcessFileUnknown.describe());
 }
 
+/// Q04: a pause ends prompting's pause; it never switched the firewall off.
+#[test]
+fn a_pause_expiry_says_prompting_resumed() {
+    let (summary, body) = notice_text(&BridgeNotice::FilterPauseExpired).unwrap();
+    assert_eq!(summary, "Snitchwatch — prompting resumed");
+    assert_eq!(body, "Your pause timer expired.");
+}
+
 /// Prompt-slot plan, part A: the release summary, fixed text around
 /// the count, with no "Review" (the prompt is already answered).
 #[test]

@@ -77,6 +77,9 @@ pub mod qobject {
         /// Joined troubleshooting detail for every failed check, empty when
         /// healthy.
         #[qproperty(QString, troubleshooting_text, cxx_name = "troubleshootingText")]
+        /// Q04: always `tray_health::MONITOR_NOT_REPORTED`. opensnitchd
+        /// never reports the running process monitor, so no report sets it.
+        #[qproperty(QString, monitor_status, cxx_name = "monitorStatus")]
         type DaemonHealthModel = super::DaemonHealthModelRust;
 
         /// Apply a JSON-encoded `ServerMessage` — only `DiagnosticsReport`
@@ -105,6 +108,7 @@ pub struct DaemonHealthModelRust {
     has_problem: bool,
     status_summary: QString,
     troubleshooting_text: QString,
+    monitor_status: QString,
 }
 
 impl Default for DaemonHealthModelRust {
@@ -113,6 +117,7 @@ impl Default for DaemonHealthModelRust {
             has_problem: false,
             status_summary: QString::from(SUMMARY_PENDING),
             troubleshooting_text: QString::default(),
+            monitor_status: QString::from(crate::tray_health::MONITOR_NOT_REPORTED),
         }
     }
 }

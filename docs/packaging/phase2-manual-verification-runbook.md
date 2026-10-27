@@ -252,8 +252,14 @@ podman stop opensnitchd-dev
 **Pass condition:** the tray tooltip changes to "opensnitchd not reachable"
 within ~10-12 seconds (the `DAEMON_DOWN_TIMEOUT` in `daemon_watchdog.rs`
 plus one watchdog tick). Restart `opensnitchd-dev` and confirm the tooltip
-returns to "Snitchwatch — filtering" (or the correct `Pending(n)` count if
+returns to "Snitchwatch — prompting on" (or the correct `Pending(n)` count if
 a decision was queued while it was down) within a couple more seconds.
+Every tooltip ends with "Process monitor: not reported by opensnitchd"
+(Q04: opensnitchd never reports the running method, on `/proc` or eBPF
+hosts alike). If the daemon reports its firewall not running, the tooltip
+also says "Firewall not running as of opensnitchd's last connection
+(noticed HH:MM)", or "(time not known)" when it was already so when the
+tray started.
 
 **RecentBlock** — trigger a Deny verdict (allow-list a connection then deny
 one, or use the existing `tests/mock_opensnitchd/examples/fire_ask_rule.rs`
@@ -266,17 +272,17 @@ before reverting.
 ```
 The menu is flat, with no submenu: "Show window", then "Pause for 5
   minutes", "Pause for 30 minutes", "Pause for 1 hour", then "Resume
-  filtering", then "Quit". All are always listed; while not paused the
-  three pause items are enabled and "Resume filtering" is greyed out.
-Click "Pause for 5 minutes" -> tooltip becomes "Snitchwatch — filtering
+  prompting", then "Quit". All are always listed; while not paused the
+  three pause items are enabled and "Resume prompting" is greyed out.
+Click "Pause for 5 minutes" -> tooltip becomes "Snitchwatch — prompting
   paused until HH:MM"; the pause items grey out and the resume item reads
-  "Resume filtering (until HH:MM)" and is enabled.
+  "Resume prompting (until HH:MM)" and is enabled.
 Trigger a new connection (curl to an unclassified host) -> confirm it is
   silently allowed with NO pending-decision prompt shown.
-Click "Resume filtering (until HH:MM)" -> tooltip returns to normal, the
+Click "Resume prompting (until HH:MM)" -> tooltip returns to normal, the
   pause items are enabled again, and a fresh AskRule prompts normally.
 Pause for 5 minutes again and wait it out -> at HH:MM the "Snitchwatch —
-  filtering resumed" notification ("Your pause timer expired.") appears,
+  prompting resumed" notification ("Your pause timer expired.") appears,
   the menu returns to the not-paused state, and the next connection
   prompts.
 ```

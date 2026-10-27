@@ -42,6 +42,14 @@ Kirigami.ScrollablePage {
         Controls.Label {
             Layout.fillWidth: true
             wrapMode: Text.WordWrap
+            objectName: "processMonitorReported"
+            textFormat: Text.PlainText
+            text: page.model.monitorStatus
+        }
+
+        Controls.Label {
+            Layout.fillWidth: true
+            wrapMode: Text.WordWrap
             objectName: "processMonitorSupport"
             text: "The GUI supports both /proc and eBPF process monitoring. \
                    opensnitchd does not report the active method to the GUI; \
