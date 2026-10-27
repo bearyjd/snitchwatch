@@ -19,6 +19,7 @@ pub use super::geo_scope::GeoScope;
 use snitchwatch_bridge::ws_messages::ConnectionRow;
 use std::{collections::HashMap, sync::Arc};
 
+use super::attention::AttentionFacts;
 use super::geo_scope::GeoIdentity;
 use super::row_store::Verdict;
 use crate::geo::resolver::{Resolved, SharedResolver};
@@ -135,6 +136,13 @@ pub struct ConnectionFilter {
     denied_only: bool,
     /// Session-only: set when "From now" is turned on, never persisted.
     since_ms: Option<i64>,
+    /// Exception-first default (0c): collapse handled rows
+    /// (`super::attention`). ON in the model's filter by default.
+    needs_attention: bool,
+    /// What "handled" reads. Not part of the filter's identity, like `geo`:
+    /// it changes with the rules list and the seen set, through
+    /// [`Self::set_attention_facts`]. `None` handles nothing (fail open).
+    attention: Option<Arc<AttentionFacts>>,
     /// Resolves a row's country for `country:`. Not part of the filter's
     /// identity (see the `PartialEq` impl): it is fixed for the model's life.
     geo: Option<SharedResolver>,
@@ -147,6 +155,7 @@ impl PartialEq for ConnectionFilter {
             && self.pending_only == other.pending_only
             && self.denied_only == other.denied_only
             && self.since_ms == other.since_ms
+            && self.needs_attention == other.needs_attention
     }
 }
 
@@ -218,6 +227,43 @@ impl ConnectionFilter {
             || self.denied_only
             || self.since_ms.is_some()
             || !self.terms.is_empty()
+            || self.collapses()
+    }
+
+    /// Whether handled rows are being collapsed now: the switch is on and
+    /// some recommended rule is known. Off while the rules list is empty or
+    /// unknown, so the default never narrows the list then (fail open).
+    fn collapses(&self) -> bool {
+        self.needs_attention
+            && self
+                .attention
+                .as_ref()
+                .is_some_and(|facts| facts.collapses_anything())
+    }
+
+    pub fn needs_attention(&self) -> bool {
+        self.needs_attention
+    }
+
+    pub fn set_needs_attention(&mut self, needs_attention: bool) {
+        self.needs_attention = needs_attention;
+    }
+
+    /// Replace what "handled" reads. Callers recompute the projection: a
+    /// facts change never changes the filter's identity.
+    pub fn set_attention_facts(&mut self, facts: Arc<AttentionFacts>) {
+        self.attention = Some(facts);
+    }
+
+    pub fn attention_facts(&self) -> Option<&AttentionFacts> {
+        self.attention.as_deref()
+    }
+
+    /// Whether `row` is handled, whether or not it is collapsed now.
+    pub fn is_handled(&self, row: &ConnectionRow) -> bool {
+        self.attention
+            .as_ref()
+            .is_some_and(|facts| facts.is_handled(row))
     }
 
     pub fn query(&self) -> &str {
@@ -302,6 +348,9 @@ impl ConnectionFilter {
 
     /// Does `row` pass this filter?
     pub fn matches(&self, row: &ConnectionRow) -> bool {
+        if self.collapses() && self.is_handled(row) {
+            return false;
+        }
         if self.pending_only && !super::outcome::is_pending(row) {
             return false;
         }

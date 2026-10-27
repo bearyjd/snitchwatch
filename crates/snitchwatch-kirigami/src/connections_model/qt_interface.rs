@@ -146,15 +146,23 @@ impl qobject::ConnectionsModel {
         roles
     }
 
-    pub(super) fn load_demo_rows(self: Pin<&mut Self>) {
+    pub(super) fn load_demo_rows(mut self: Pin<&mut Self>) {
         if !crate::demo::enabled() {
             return;
         }
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_millis() as i64);
-        self.apply_server_message(ServerMessage::InsertConnectionRows {
-            rows: crate::demo::demo_rows(now_ms),
+        // A bridge snapshot's order: clear, row replay, rules (the 0c
+        // baseline, kept in memory in demo mode).
+        self.as_mut()
+            .apply_server_message(ServerMessage::ClearConnectionRows);
+        self.as_mut()
+            .apply_server_message(ServerMessage::InsertConnectionRows {
+                rows: crate::demo::demo_rows(now_ms),
+            });
+        self.apply_server_message(ServerMessage::SetRules {
+            rules: crate::demo::demo_rules(),
         });
     }
 
@@ -204,11 +212,12 @@ impl qobject::ConnectionsModel {
         self.as_mut().rust_mut().current_row_id = id.to_string();
     }
 
-    pub(super) fn start_bridge_feed(self: Pin<&mut Self>) {
+    pub(super) fn start_bridge_feed(mut self: Pin<&mut Self>) {
         let Some(handles) = crate::bridge_runtime::handles() else {
             tracing::warn!("ConnectionsModel: bridge not running; live feed disabled");
             return;
         };
+        self.as_mut().use_persisted_seen_programs();
         let qt_thread = self.qt_thread();
         let icons_thread = qt_thread.clone();
         crate::app_icons::when_ready(move || {

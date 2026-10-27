@@ -80,13 +80,22 @@ impl qobject::ConnectionsModel {
         msg: ServerMessage,
         connection_id: Option<u64>,
     ) {
+        if matches!(msg, ServerMessage::RuleCommandResult { .. }) {
+            self.apply_rules_message(&msg);
+            return;
+        }
         if matches!(
             msg,
-            ServerMessage::SetRules { .. }
-                | ServerMessage::UpdateRules { .. }
-                | ServerMessage::RuleCommandResult { .. }
+            ServerMessage::SetRules { .. } | ServerMessage::UpdateRules { .. }
         ) {
-            self.apply_rules_message(&msg);
+            // Rows buffered in grouped mode land first, so rules apply in the
+            // bridge's order: the snapshot's row replay before its rules,
+            // which is what the first-seen baseline reads (0c).
+            if !self.pending_grouped_msgs.is_empty() {
+                self.as_mut().flush_grouped_messages();
+            }
+            self.as_mut().apply_rules_message(&msg);
+            self.after_rules_applied();
             return;
         }
         if matches!(msg, ServerMessage::ClearConnectionRows) {
@@ -403,6 +412,8 @@ impl qobject::ConnectionsModel {
         self.as_mut().set_filter_since_ms(since);
         self.as_mut().set_filter_pending_only(pending_only);
         self.as_mut().set_filter_denied_only(denied_only);
+        let needs_attention = self.store.filter().needs_attention();
+        self.as_mut().set_filter_needs_attention(needs_attention);
     }
 
     /// Apply the auto-select-on-new-pending-row policy. Sets `autoSelectRowId`
@@ -585,6 +596,7 @@ impl qobject::ConnectionsModel {
         self.as_mut().set_matching_count(matching);
         self.as_mut().set_total_count(total);
         self.as_mut().set_pending_count(pending);
+        self.as_mut().refresh_attention_counts();
         self.as_mut().refresh_pending_age();
     }
 }

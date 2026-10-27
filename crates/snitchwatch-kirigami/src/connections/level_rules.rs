@@ -502,6 +502,11 @@ impl LevelRules {
             .collect()
     }
 
+    /// The rules list the firewall reported last (empty while unknown).
+    pub fn rules(&self) -> &[Rule] {
+        self.store.rules()
+    }
+
     /// Whether the rule `name` may be deleted from Snitchwatch.
     pub fn is_deletable(&self, name: &str) -> bool {
         self.store.is_deletable(name)

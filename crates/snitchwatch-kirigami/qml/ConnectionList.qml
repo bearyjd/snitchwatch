@@ -40,11 +40,14 @@ Item {
         width: parent.width - (Kirigami.Units.largeSpacing * 4)
         visible: !page.model || page.model.count === 0
         icon.name: (page.model && page.model.totalCount > 0) ? "search" : "network-connect"
+        readonly property bool allCollapsed: !!page.model && page.model.filterNeedsAttention
+              && page.model.backgroundCount > 0 && !page.model.filterSummary
         text: (page.model && page.model.totalCount > 0)
-              ? "No matching connections"
+              ? (allCollapsed ? "Nothing needs attention" : "No matching connections")
               : "No connections yet"
         explanation: (page.model && page.model.totalCount > 0)
-              ? "No rows match the current filter."
+              ? (allCollapsed ? "Background and system connections are collapsed above."
+                              : "No rows match the current filter.")
               : "New connection prompts and recent decisions will appear here."
     }
 

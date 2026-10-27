@@ -522,3 +522,63 @@ fn prepared_geographic_scope_never_decodes_after_shared_cache_overflow() {
         "scope evaluation decoded MMDB on Qt-equivalent path"
     );
 }
+
+fn recommended_row(id: &str) -> ConnectionRow {
+    ConnectionRow {
+        process_path: Some("/usr/sbin/chronyd".to_string()),
+        matched_rule: Some("snitchwatch-default-chronyd".to_string()),
+        ..row(id, "chronyd", "pool.ntp.org", 123, Some("allow"))
+    }
+}
+
+fn attention_facts() -> Arc<AttentionFacts> {
+    let rule = crate::rules::row_store::Rule {
+        name: "snitchwatch-default-chronyd".to_string(),
+        enabled: true,
+        ..Default::default()
+    };
+    Arc::new(AttentionFacts::new(&[rule], ["/usr/sbin/chronyd"]))
+}
+
+#[test]
+fn needs_attention_collapses_handled_rows_only_while_on() {
+    let mut f = ConnectionFilter::default();
+    f.set_attention_facts(attention_facts());
+    assert!(!f.is_active(), "off by default in the bare filter");
+    assert!(f.matches(&recommended_row("a")));
+    assert!(f.is_handled(&recommended_row("a")));
+
+    f.set_needs_attention(true);
+    assert!(f.needs_attention());
+    assert!(f.is_active());
+    assert!(!f.matches(&recommended_row("a")));
+    let pending = ConnectionRow {
+        action: None,
+        ..recommended_row("p")
+    };
+    assert!(f.matches(&pending), "a pending row always shows");
+    assert!(f.matches(&row("b", "firefox", "github.com", 443, Some("allow"))));
+}
+
+#[test]
+fn needs_attention_fails_open_without_recommended_rules() {
+    let mut f = ConnectionFilter::default();
+    f.set_needs_attention(true);
+    assert!(!f.is_active(), "no facts: nothing collapses");
+    assert!(f.matches(&recommended_row("a")));
+    f.set_attention_facts(Arc::new(AttentionFacts::new(&[], ["/usr/sbin/chronyd"])));
+    assert!(!f.is_active(), "an empty rules list collapses nothing");
+    assert!(f.matches(&recommended_row("a")));
+    assert!(!f.is_handled(&recommended_row("a")));
+    assert_eq!(f.summary(), "", "the default adds no filter text");
+}
+
+#[test]
+fn needs_attention_is_part_of_the_filter_identity_but_the_facts_are_not() {
+    let mut a = ConnectionFilter::default();
+    let b = ConnectionFilter::default();
+    a.set_attention_facts(attention_facts());
+    assert_eq!(a, b);
+    a.set_needs_attention(true);
+    assert_ne!(a, b);
+}

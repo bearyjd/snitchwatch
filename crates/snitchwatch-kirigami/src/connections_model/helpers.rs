@@ -100,6 +100,9 @@ pub(super) fn mirror_into_grouping(rust: &mut ConnectionsModelRust, msg: &Server
             for row in rows {
                 rust.grouping.upsert_row(row);
             }
+            // First-seen state (0c): flags only, never visibility.
+            let paths = rows.iter().filter_map(|row| row.process_path.as_deref());
+            rust.seen.observe(paths, now_ms());
         }
         ServerMessage::RemoveConnectionRows { ids } => {
             for id in ids {
@@ -111,6 +114,8 @@ pub(super) fn mirror_into_grouping(rust: &mut ConnectionsModelRust, msg: &Server
         }
         ServerMessage::ClearConnectionRows => {
             rust.grouping.clear();
+            // A reconnect's clear resets neither the seen set nor the flags.
+            rust.seen.note_clear_applied();
         }
         _ => {}
     }

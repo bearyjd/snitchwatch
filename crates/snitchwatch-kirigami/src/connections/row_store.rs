@@ -462,6 +462,13 @@ impl RowStore {
         true
     }
 
+    /// Replace what the filter's "handled" check reads (0c) and recompute
+    /// `visible`: unlike [`Self::set_filter`], never a no-op.
+    pub fn set_attention_facts(&mut self, facts: std::sync::Arc<super::attention::AttentionFacts>) {
+        self.filter.set_attention_facts(facts);
+        self.recompute_visible();
+    }
+
     /// Recompute `visible` from the current filter. No-op-ish when inactive
     /// (clears `visible`; the visible list is then identity over `rows`).
     pub fn recompute_visible(&mut self) {

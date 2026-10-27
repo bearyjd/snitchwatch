@@ -41,6 +41,7 @@ use snitchwatch_bridge::ws_messages::{AutoAnswer, ConnectionRow, ServerMessage};
 pub(crate) mod level_rule_actions;
 
 mod apply;
+mod attention;
 mod geography;
 mod helpers;
 mod program_label;
@@ -131,6 +132,18 @@ pub mod qobject {
         #[qproperty(bool, filter_pending_only, cxx_name = "filterPendingOnly")]
         /// Whether "Denied only" is on (see `filterPendingOnly`).
         #[qproperty(bool, filter_denied_only, cxx_name = "filterDeniedOnly")]
+        /// Whether handled rows collapse into "Background and system" (0c,
+        /// `connections::attention`). ON by default; set with
+        /// `setNeedsAttention`.
+        #[qproperty(bool, filter_needs_attention, cxx_name = "filterNeedsAttention")]
+        /// Rows (and their programs) allowed by an enabled recommended rule
+        /// for a program seen before: the group's one-line summary.
+        #[qproperty(i32, background_count, cxx_name = "backgroundCount")]
+        #[qproperty(i32, background_programs, cxx_name = "backgroundPrograms")]
+        /// Programs first seen this session, shown until `markNewProgramsSeen`.
+        #[qproperty(i32, new_program_count, cxx_name = "newProgramCount")]
+        /// The one-time first-seen baseline notice; empty when none.
+        #[qproperty(QString, baseline_notice, cxx_name = "baselineNotice")]
         type ConnectionsModel = super::ConnectionsModelRust;
 
         /// Emitted when the auto-select policy decides a freshly arrived pending
@@ -227,6 +240,20 @@ pub mod qobject {
         #[qinvokable]
         #[cxx_name = "setFromNow"]
         fn set_from_now(self: Pin<&mut ConnectionsModel>, from_now: bool);
+
+        /// Collapse handled rows (on) or show the full list (off).
+        #[qinvokable]
+        #[cxx_name = "setNeedsAttention"]
+        fn set_needs_attention(self: Pin<&mut ConnectionsModel>, on: bool);
+
+        /// The user marked this session's new programs as seen.
+        #[qinvokable]
+        #[cxx_name = "markNewProgramsSeen"]
+        fn mark_new_programs_seen(self: Pin<&mut ConnectionsModel>);
+
+        #[qinvokable]
+        #[cxx_name = "dismissBaselineNotice"]
+        fn dismiss_baseline_notice(self: Pin<&mut ConnectionsModel>);
 
         // --- Selection tracking (Task 8 auto-select) ------------------------
         /// Tell the model which row the user currently has selected (empty =
@@ -641,6 +668,13 @@ pub struct ConnectionsModelRust {
     filter_since_ms: i64,
     filter_pending_only: bool,
     filter_denied_only: bool,
+    filter_needs_attention: bool,
+    background_count: i32,
+    background_programs: i32,
+    new_program_count: i32,
+    baseline_notice: QString,
+    /// First-seen state behind "handled" (0c).
+    seen: crate::connections::seen_programs::SeenPrograms,
     /// The Settings default duration the rule roles are computed with.
     duration: level_rule_actions::DurationCache,
     /// Behind the `retriedCount` role (`retries`), and its test seam.
@@ -652,11 +686,13 @@ pub struct ConnectionsModelRust {
 impl Default for ConnectionsModelRust {
     fn default() -> Self {
         Self {
-            store: RowStore::with_filter(
-                ConnectionFilter::default()
+            store: RowStore::with_filter({
+                let mut filter = ConnectionFilter::default()
                     .with_geo(crate::geo::shared_resolver())
-                    .prepared_only(),
-            ),
+                    .prepared_only();
+                filter.set_needs_attention(true);
+                filter
+            }),
             collapse: RowCollapse::default(),
             grouping: GroupTree::default(),
             grouped_projection: Vec::new(),
@@ -680,6 +716,12 @@ impl Default for ConnectionsModelRust {
             filter_since_ms: 0,
             filter_pending_only: false,
             filter_denied_only: false,
+            filter_needs_attention: true,
+            background_count: 0,
+            background_programs: 0,
+            new_program_count: 0,
+            baseline_notice: QString::default(),
+            seen: Default::default(),
             duration: level_rule_actions::DurationCache::default(),
             held_back_rows: HashMap::new(),
             held_back_shown: false,

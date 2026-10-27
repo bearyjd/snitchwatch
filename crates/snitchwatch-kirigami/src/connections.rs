@@ -7,6 +7,7 @@
 //!   all of a QML module's `#[cxx_qt::bridge]` `rust_files` to share one
 //!   directory (Qt bug QTBUG-93443), alongside `bridge_bindings.rs`.
 
+pub mod attention;
 pub mod collapse;
 pub mod filter;
 pub mod geo_scope;
@@ -15,3 +16,4 @@ pub mod level_rules;
 pub mod outcome;
 pub mod projection_diff;
 pub mod row_store;
+pub mod seen_programs;
