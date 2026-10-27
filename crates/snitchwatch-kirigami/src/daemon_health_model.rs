@@ -159,18 +159,10 @@ impl qobject::DaemonHealthModel {
                 });
             },
         );
-
-        // The bridge's one-time startup `DiagnosticsReport` fires from
-        // `ensure_started()` in `main()`, before QML (and thus this
-        // subscription) exists — tokio broadcast channels don't replay to
-        // late subscribers, so that report is otherwise lost forever. Pull
-        // the current state immediately so a kernel-prerequisite problem
-        // still surfaces without the user having to click "Recheck".
-        if let Err(error) =
-            handles.try_send(snitchwatch_bridge::ws_messages::ClientMessage::RecheckDiagnostics)
-        {
-            tracing::warn!(error = %error, "DaemonHealthModel: initial diagnostics recheck ignored");
-        }
+        // The current report arrives in the snapshot `spawn_feed` requests.
+        // No automatic `RecheckDiagnostics`: the bridge clears its stored
+        // daemon alerts before answering one, so opening the GUI would erase
+        // a reported firewall or monitor failure. Only "Recheck" sends it.
     }
 
     fn recheck(self: Pin<&mut Self>) {

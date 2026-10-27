@@ -75,5 +75,6 @@ pub mod traffic_model;
 pub mod tray;
 pub mod tray_controller;
 pub mod tray_health;
+pub mod tray_session;
 pub mod wizard;
 pub mod wizard_controller;

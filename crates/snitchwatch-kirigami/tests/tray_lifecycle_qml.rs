@@ -4,7 +4,7 @@
 //! can't see what the controller renders between those events:
 //! - unavailable: the waiting tooltip and no pause offer, not the default Idle;
 //! - a disconnect drops the firewall line and its time;
-//! - no `RecheckDiagnostics` (`tray_diagnostics_qml.rs` checks it while
+//! - no `RecheckDiagnostics` (`gui_diagnostics_snapshot_qml.rs` checks it while
 //!   connected at start; here the bridge is unavailable then).
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;

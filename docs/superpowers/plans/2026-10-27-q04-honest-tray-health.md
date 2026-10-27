@@ -65,8 +65,14 @@ monitor-state alert on start and fallback), which belongs with Q05/r16.
    session. Until a live session's tray state arrives (bridge unavailable,
    starting) it keeps "Snitchwatch — waiting for the bridge" and offers no
    pause. A 250 ms session watch (the link has no change notification)
-   forgets a disconnected or replaced session's tray, pause and firewall
-   state. `tests/tray_lifecycle_qml.rs` and `tests/tray_diagnostics_qml.rs`
+   reconciles on its first pass and on every session change: each part of
+   the tray's state carries its session id, and the cleanup reads the live
+   session when it runs on the Qt thread, so a late cleanup can't erase the
+   next session's state (`src/tray_session.rs`, deterministic ordering
+   tests). The controller owns the watch's stop sender, so the watch ends
+   with it. Daemon Health also stops sending a startup `RecheckDiagnostics`
+   (the bridge clears stored alerts before answering one); the snapshot
+   carries the report. `tests/tray_lifecycle_qml.rs` and `tests/gui_diagnostics_snapshot_qml.rs`
    drive a real `TrayController` against a fixture bridge service.
    Local time comes from `QDateTime::current_date_time()` plus
    `set_msecs_since_epoch`, also now used for "paused until", replacing

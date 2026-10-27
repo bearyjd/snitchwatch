@@ -1,5 +1,7 @@
 //! Fixture bridge service for the tray QML tests: one authenticated session
 //! that answers the tray's snapshot request, no live daemon.
+// Each test binary uses a different part of this module.
+#![allow(dead_code)]
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
@@ -33,6 +35,16 @@ pub fn report(firewall: CheckStatus) -> String {
 pub fn firewall_off() -> CheckStatus {
     CheckStatus::Failed {
         detail: FIREWALL_NOT_RUNNING_TROUBLESHOOTING.to_string(),
+    }
+}
+
+/// A stored daemon alert the bridge overlays on the firewall check.
+pub const ALERT: &str = "error: nftables backend failed to start";
+
+/// The firewall check as the bridge reports it with a stored daemon alert.
+pub fn firewall_alert() -> CheckStatus {
+    CheckStatus::Failed {
+        detail: format!("{FIREWALL_NOT_RUNNING_TROUBLESHOOTING}\n\n{ALERT}"),
     }
 }
 

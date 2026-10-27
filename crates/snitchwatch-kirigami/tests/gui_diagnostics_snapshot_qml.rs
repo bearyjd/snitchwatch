@@ -1,7 +1,8 @@
-//! Q04: a tray started on a live bridge learns the firewall from the snapshot
-//! its feed requests, and never sends `RecheckDiagnostics`, which clears the
-//! bridge's stored daemon alerts (an alert that arrived after the health
-//! model's own startup request would vanish). Fixture service, no daemon.
+//! Q04: the tray and the Daemon Health model, started on a live bridge, learn
+//! the diagnostics from the snapshot their feeds request and never send
+//! `RecheckDiagnostics`, which clears the bridge's stored daemon alerts: just
+//! opening the GUI would erase a reported firewall or monitor failure.
+//! Fixture service, no daemon.
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -10,15 +11,17 @@ use cxx_qt_lib::{QByteArray, QGuiApplication, QQmlApplicationEngine, QUrl};
 use tokio::net::UnixListener;
 
 #[allow(unused_imports)]
+use snitchwatch_kirigami::daemon_health_model as _;
+#[allow(unused_imports)]
 use snitchwatch_kirigami::tray_controller as _;
 
 mod common;
 #[path = "support/tray_bridge_fixture.rs"]
 mod tray_bridge_fixture;
-use tray_bridge_fixture::{firewall_off, serve_session, TOKEN};
+use tray_bridge_fixture::{firewall_alert, serve_session, ALERT, TOKEN};
 
 #[test]
-fn a_tray_started_while_connected_sends_no_diagnostics_recheck() {
+fn tray_and_health_started_while_connected_send_no_diagnostics_recheck() {
     common::init_headless_qt_env();
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let dir = tempfile::tempdir().unwrap();
@@ -36,7 +39,7 @@ fn a_tray_started_while_connected_sends_no_diagnostics_recheck() {
         async move {
             serve_session(
                 &listener,
-                firewall_off(),
+                firewall_alert(),
                 None,
                 Duration::from_secs(30),
                 &rechecks,
@@ -65,7 +68,7 @@ fn a_tray_started_while_connected_sends_no_diagnostics_recheck() {
     });
     let captured = common::capture_stderr(|| {
         engine.as_mut().unwrap().load_data(
-            &QByteArray::from(PROBE),
+            &QByteArray::from(&PROBE.replace("ALERT_TEXT", ALERT)),
             &QUrl::from("qrc:/tray_diagnostics_probe.qml"),
         );
         if created.load(Ordering::SeqCst) {
@@ -81,11 +84,12 @@ fn a_tray_started_while_connected_sends_no_diagnostics_recheck() {
     assert_eq!(
         rechecks.load(Ordering::SeqCst),
         0,
-        "the tray asked for a destructive diagnostics recheck"
+        "the GUI asked for a destructive diagnostics recheck"
     );
 }
 
-/// Started after the session is live; waits for the snapshot's firewall line.
+/// Started after the session is live; waits for the snapshot's firewall
+/// alert in both the tray and the health model.
 const PROBE: &str = r#"
 import QtQuick
 import QtQuick.Window
@@ -97,20 +101,26 @@ Window {
     height: 100
 
     TrayController { id: controller }
+    DaemonHealthModel { id: health }
     property real started: Date.now()
 
-    Component.onCompleted: controller.startBridgeFeed()
+    Component.onCompleted: {
+        controller.startBridgeFeed();
+        health.startBridgeFeed();
+    }
 
     Timer {
         interval: 50
         running: true
         repeat: true
         onTriggered: {
-            if (controller.tooltip.indexOf("Firewall not running as of opensnitchd's last connection") >= 0) {
+            if (controller.tooltip.indexOf("Firewall issue reported by opensnitchd") >= 0
+                    && health.hasProblem && health.troubleshootingText.indexOf("ALERT_TEXT") >= 0) {
                 console.warn("TRAY_DIAGNOSTICS_OK");
                 Qt.quit();
             } else if (Date.now() - started > 10000) {
-                console.warn("Error: no firewall line from the snapshot: " + controller.tooltip);
+                console.warn("Error: no stored alert from the snapshot: " + controller.tooltip
+                             + " / " + health.troubleshootingText);
                 Qt.quit();
             }
         }
