@@ -1,8 +1,10 @@
 # Connection history (r17): opt-in storage, retention, gaps, event-time rule identity
 
-Status: **PROPOSED, awaiting owner approval.** Design only; no code is
-authorized by this document. Implementation waits for the owner to resolve the
-[open questions](#open-questions-for-the-owner) and approve.
+Status: **Design decisions resolved by the owner 2026-10-27; awaiting final
+approval to merge.** Design only; no code is authorized by this document. The
+owner's decisions are collected in
+[Owner decisions](#owner-decisions-2026-10-27); the only items still open are
+two implementation-proof obligations (S1, S2).
 Baseline: main `c4430bd` (2026-10-27). Revised after adversarial design and
 security review (round 1).
 Roadmap items: **H01** (opt-in persistent allowed/denied history bounded by
@@ -22,14 +24,14 @@ limits in [D8](#d8-reading-history) are part of this design.
 |---|----------|----------------|
 | D1 | Who writes history | The **host bridge**, not the GUI. It records what the bridge *receives*, which is not everything the daemon decides (see D1 coverage) |
 | D2 | Default | **Off.** Enabled only by an explicit user action, consent stored in the bridge |
-| D3 | Store | One SQLite file in the bridge state directory; strict 0700 directory, 0600 files, via `sqlite_file::open_owner_only` |
+| D3 | Store | One SQLite file in the bridge state directory (per-user bridge: the user state dir; system bridge: `/var/lib/snitchwatch`, service-account owned); strict 0700 directory, 0600 files, via `sqlite_file::open_owner_only` |
 | D4 | What is stored | A fixed field allowlist. Command line, `process_args`, `process_env` and rule conditions on them are never stored. **Raw executable and destination strings are stored and may contain user-chosen text; this is a stated limit, not a guarantee** |
 | D5 | Retention and disk | Age (default 30 days) and a 64 MiB total budget split into main-file, journal and slack shares; invariants S1-S5 (field caps, page-bounded transactions, no full VACUUM); oldest first; admission quotas against floods |
 | D6 | Gaps | Session ledger; invariant: coverage never passes an uncommitted item; every discontinuity is an explicit gap; permanently unobservable traffic is labelled as such |
 | D7 | Rule identity | Rule name + semantic hash + a redacted display snapshot (hash and snapshot are separate); captured by a per-prompt outcome guard for interactive decisions; `sensitive` is hashed |
 | D8 | Reads | Paged, byte-bounded, bridge-wide admission, read-only opener, off the verdict path |
 | D9 | Encryption at rest | Not in v1; rely on file permissions and say so |
-| D10 | Multi-user (system bridge) | **Not supported in v1**; history is disabled there |
+| D10 | System bridge | **Supported in v1.** Reads only through the bridge to clients already authorised for the live stream; per-uid tagging and uid-scoped reads deferred, so on a multi-user machine every authorised client sees every user's history |
 
 ## What exists today (grounding)
 
@@ -99,7 +101,10 @@ limits in [D8](#d8-reading-history) are part of this design.
 WS.** The bridge sees events while the GUI is closed, already owns durable
 state and the degrade-to-memory pattern, and holds the daemon's `Rule`.
 Cost: a new WS request/response family and a capability flag so an older
-bridge shows "history unavailable", never an empty list.
+bridge shows "history unavailable", never an empty list. This applies to both
+bridge modes: the per-user bridge (a `systemd --user` service) and the system
+bridge (`packaging/system/snitchwatch-system-bridge.service`, GUI socket
+`/run/snitchwatch/bridge.sock`).
 
 **Coverage is what the bridge receives, not what the system did.** History is
 labelled "events the bridge received" and the doc does not claim continuous
@@ -118,6 +123,19 @@ resulting standing labels:
 The capabilities of the connected daemon (stock vs fork) are part of the
 history status, so the UI states which of the rows above applies today.
 
+**System bridge coverage re-checked.** The system bridge talks to the
+root-run opensnitchd over a root-owned gRPC socket
+(`snitchwatch-system-bridge-grpc.socket`, `SocketUser=root`) and serves GUIs
+over `/run/snitchwatch/bridge.sock` (`SocketGroup=snitchwatch-ui`). The table
+above holds unchanged: ping events, `nolog`, stock-vs-fork default events and
+the no-GUI-prompt case are properties of the daemon and the bridge, not of
+the bridge mode. Two differences: (a) the daemon sees **every user's**
+connections, so history covers all users, with no per-user attribution in v1
+(decision 1); (b) it is the system bridge that runs when the machine is up
+with no one logged in, so its history can show activity while no GUI session
+exists, but prompts still need an authenticated GUI, so those rows are
+absent exactly as the table says.
+
 ## D2. Opt-in
 
 - Off by default, on every install including upgrades. No migration turns it
@@ -126,11 +144,14 @@ history status, so the UI states which of the rows above applies today.
   the stored fields (D4) **and that raw program paths and destination names
   are stored**; the bridge's actual file location (reported by the bridge, D3);
   who can read it (threat model); the default retention; what is not
-  observable (D1 table); how to turn it off and delete it.
+  observable (D1 table); how to turn it off, how to delete it, **a backup-exclude recipe for the
+  reported path**, and that the data is stored unencrypted, protected only by
+  file permissions.
 - The enabled flag and retention settings live in bridge state, so the bridge
   never records on a stale GUI preference.
-- Disabling stops recording at once, via the barrier in H02. The dialog offers
-  "Disable and delete history" (default) and "Disable and keep".
+- Disabling stops recording at once, via the barrier in H02, and **keeps**
+  existing history by default. "Delete history" is a separate, confirmed
+  action (H02 preview and token), also offered next to the disable control.
 - If storage is unusable the bridge keeps running, history reports
   `unavailable: <reason>`, and it never retries into another location.
 
@@ -141,13 +162,24 @@ history status, so the UI states which of the rows above applies today.
   `secure_delete=ON`. Chosen over JSONL because retention, counts for
   preview, and range delete need indexes and transactions.
 - **Path:** the bridge's state directory, `<state>/history/history.db`. The
-  Flatpak ships only the GUI; **the bridge runs on the host** as a systemd
-  user service (`packaging/flatpak/...yml` header; unit `StateDirectory=
-  snitchwatch`), so the path is the host path, normally
-  `~/.local/state/snitchwatch/history/`, **not** under `~/.var/app/...`.
-  The GUI cannot compute it; the bridge reports the actual path in the history
-  status and the opt-in and backup text use that reported value. A
-  sandbox-resident writer would be a separate deployment decision and is not
+  Flatpak ships only the GUI; **the bridge always runs on the host**, so the
+  path is a host path, never under `~/.var/app/...`:
+  - **Per-user bridge** (systemd user service, `StateDirectory=snitchwatch`):
+    normally `~/.local/state/snitchwatch/history/`, owned by the user.
+  - **System bridge:** `/var/lib/snitchwatch/history/`. The unit runs as
+    `User=snitchwatch`/`Group=snitchwatch` (created by
+    `packaging/system/snitchwatch.conf.sysusers`, home `/var/lib/snitchwatch`)
+    with `StateDirectory=snitchwatch` and `StateDirectoryMode=0700`, and sets
+    `XDG_STATE_HOME=/var/lib`. History is therefore **owned by the
+    `snitchwatch` service account, in a directory only that account (and
+    root) can enter**; desktop users cannot open the file, and `snitchwatch-ui`
+    group membership grants access to the bridge socket, not to the file.
+    The existing system check (`check_system_state_dir`: owned by the service
+    account and mode 0700) already applies to the parent; the history
+    subdirectory adds the exact-0700 check below.
+  The GUI cannot compute either path; the bridge reports the actual path in
+  the history status and the opt-in and backup text use that reported value.
+  A sandbox-resident writer would be a separate deployment decision and is not
   proposed.
 - **Permissions and validation, explicit (not inherited):**
   - The history directory is created 0700 and **must be exactly 0700 owned by
@@ -176,7 +208,8 @@ Exactly this allowlist per event (an insert API that takes only these fields):
 | `answered_by` | Classification table below |
 | `rule_name`, `rule_hash`, `rule_class` | D7. `rule_class` derived from rule-name prefixes already in use (`snitchwatch-default-*`, `z00-blocklist:*`, else `user`); NULL name/hash for default events |
 | `repeat_count` | Default 1; exact count of identical coalesced events (D5) |
-| `uid` | Only if open question 1 is approved; otherwise not stored |
+| `src_port` | Source port of the connection, stored (decision 11) so a prompt event and a later ping event can be correlated exactly (D7). NULL when the event does not carry one |
+| `uid` | **Not stored in v1** (per-uid tagging deferred, decision 1) |
 
 **Never stored, enforced by test (below):** `process_args`, the command line,
 `process_env`, payloads, URL path/query, byte counters and direction (still
@@ -188,9 +221,11 @@ over paths/hosts are user- or attacker-chosen text and can embed secrets
 (a token in a file name, a credential in a hostname). Heuristic detection
 cannot make this absolute, so the design does **not** promise "no secrets";
 it promises no *fields* that routinely carry them. Reducing the exposure
-further is an owner decision (open question 9: store basename plus path hash,
-or a user exclusion list). Strings are length-capped (path 4096, host 255)
-and shown as plain text.
+further (basename plus path hash, or exclusion lists) was considered and
+**deferred to v2** (decisions 3 and 9): v1 stores full paths and hosts, with
+this limit stated in the opt-in text. Strings are capped at the S1 values
+(`rule_name` 256 B, `process_path` 4096 B, `dst_host` 253 B, and S1 adds a cap
+for every other stored string) and shown as plain text.
 
 `answered_by` classification (exhaustive; unknown provenance is stored as
 unknown, not guessed):
@@ -204,8 +239,9 @@ unknown, not guessed):
 | Verdict arriving from an authenticated GUI via `SetVerdict` | `gui` — **human or silent mode is not distinguishable today**: silent mode sends an ordinary `SetVerdict` with no provenance (`silent_mode.rs`, `ws_messages.rs`) |
 | `AutoAnswer::Unknown` or any other | `unknown` |
 
-Adding explicit provenance to `SetVerdict` (so `silent-mode` can be recorded)
-is a protocol change and is open question 6; until approved it is `gui`.
+Explicit provenance on `SetVerdict` is **not added in v1** (decision 6; no
+protocol change). The value is `gui` and the UI labels it **"answered in GUI
+(may be silent mode)"**.
 
 ## D5. Retention, disk budget, admission
 
@@ -215,8 +251,8 @@ Two independent limits; whichever trips first evicts.
 - **Disk: invariants.** `B` is a single total budget for everything the
   feature may put on disk (default 64 MiB; choices 16 / 64 / 256 MiB; ceiling
   256 MiB). Each invariant has one enforcement mechanism and one test; where a
-  number is not yet known, the implementation must prove it (see open
-  question 2) and this design does not guess it.
+  number is not yet known, the implementation must prove it (see
+  "Remaining implementation-proof obligations") and this design does not guess it.
 
 | # | Invariant | Enforcement mechanism | Test |
 |---|-----------|-----------------------|------|
@@ -263,8 +299,8 @@ Two independent limits; whichever trips first evicts.
     refusal; the ledger tables are capped (D6) and use the 2% reserved
     ledger space, so refusals cannot fill the database or stop unrelated
     recording.
-  - The numbers are initial proposals needing owner confirmation (open
-    question 2); the mechanism is part of the design.
+  - The numbers are the owner's decision 2 (burst sizes are implementation
+    defaults); the mechanism is part of the design.
 
 ## D6. Gap and loss labelling
 
@@ -382,9 +418,12 @@ rule has since been edited or deleted.
     the available fields (program, destination, port, protocol, rule name)
     do not identify a connection: rule names are deterministic and the source
     port is not carried, so two distinct connections can share all of them.
-    The bridge therefore **merges only on verified correlation** (a shared
-    connection id, or a source port if open question 11 approves storing it).
-    Otherwise both events are kept and marked `possible-duplicate`, and any
+    The bridge therefore **merges only on verified correlation**: the stored
+    `src_port` (decision 11) together with protocol, destination and process
+    path, within the prompt's settlement window; the implementation must prove
+    that this tuple is unique per live socket inside that window (S-style
+    proof obligation, see Owner decisions). Where `src_port` is missing from
+    either event, or the proof does not hold, both events are kept and marked `possible-duplicate`, and any
     count that could include both says so ("may include decisions counted
     twice"). Nothing is silently dropped or merged.
 
@@ -433,8 +472,8 @@ without the rule changing (the blocklist materializer replaces list contents
 at the same location). The rule hash therefore does not capture what matched.
 The UI qualifier is mandatory: "rule definition unchanged; the contents of
 the referenced list are not recorded". Recording a list revision requires the
-blocklist subsystem to expose an applied-content revision (open question 7);
-until then history makes no claim about list contents.
+blocklist subsystem to expose an applied-content revision (decision 7:
+not in v1); history makes no claim about list contents.
 
 ### Bounds
 
@@ -494,9 +533,9 @@ rule never rewrites stored events.
 its deletion scope is readable or writable, and nothing outside its scope is
 lost without a durable gap.** Writers *and* readers are covered by one control
 gate. The **scope** of a control operation is the set it is approved to
-delete: everything for clear and disable-and-delete; the previewed set for a
-range delete; the rows the new limit would evict for a retention change;
-nothing for disable-and-keep. Enforcement, in this order:
+delete: everything for clear and for the separate "Delete history" action; the
+previewed set for a range delete; the rows the new limit would evict for a
+retention change; nothing for disable (which keeps history by default). Enforcement, in this order:
 
 1. **Validate before any destructive step.** Under the control gate, but
    before touching the queue, readers or files: check the preview token and
@@ -559,9 +598,7 @@ Tests (each with a blocked writer and a non-empty queue):
   previewed set or fewer.** Under the same writer barrier as the deletion, the
   bridge checks that no row exists above the previewed maximum row id and that
   the previewed checksum still matches; if either fails nothing is deleted and
-  a fresh preview is required. (The alternative, falling back to bounded
-  deletion that preserves newer rows, is allowed instead of refusal; open
-  question 12.) The UI reports counts and bytes only after confirmation; on
+  a fresh preview is required (owner decision 12: refuse, no fallback). The UI reports counts and bytes only after confirmation; on
   failure it says exactly what remains. Range delete and limit reduction use
   bounded chunks obeying S2, plus snapshot cleanup.
 - **Retention preview** (for clear, a range delete, or lowering a limit):
@@ -593,9 +630,10 @@ inventory, work patterns, and sensitive sites. It is a profile of the user.
 
 | Reader | Can read? | Notes |
 |--------|-----------|-------|
-| Same-uid processes | **Yes** | 0600 stops other users, not other processes of the user. A same-uid process can also use the socket plus token to read history through the bridge |
-| Any holder of the socket path **and** token | **Yes** | History is exposed over the WS exactly as live rows are |
-| Other local users | No | 0700/0600; the system-bridge case is why D10 |
+| Same-uid processes (per-user bridge) | **Yes** | 0600 stops other users, not other processes of the user. A same-uid process can also use the socket plus token to read history through the bridge |
+| Any holder of the socket path **and** token (per-user bridge) | **Yes** | History is exposed over the WS exactly as live rows are |
+| Clients allowed on `/run/snitchwatch/bridge.sock` (system bridge: members of `snitchwatch-ui`; the token there is compatibility-only and socket access is the authorization boundary) | **Yes, all users' history** | Decision 1: reads go only through the bridge to clients already authorised for the live stream. This widens how **far back** they can see, not **who** can see connections. Per-uid scoping is deferred, so on a multi-user machine every authorised client sees every user's history |
+| Other local users (not in `snitchwatch-ui`; not the service account) | No | System: `/var/lib/snitchwatch` is 0700 `snitchwatch`; per-user: 0700/0600 |
 | root | Yes | Out of scope |
 | Backups of `~` or the host state directory | **Yes** | Long-lived, often off-box. The opt-in text names the bridge-reported path so the user can exclude it |
 | Other Flatpak apps | **Only if they have been granted host access** | The database is a host file owned by the user. Snitchwatch adds no permission for it, but another Flatpak granted `--filesystem=home`/`host` (or the state directory) can read it as the same uid, and any app that can reach the bridge socket and token can read history through the bridge. Snitchwatch cannot control other apps' grants; the opt-in text says so |
@@ -606,7 +644,7 @@ inventory, work patterns, and sensitive sites. It is a profile of the user.
 allowlist (D7) are the controls. Residual, stated exposure: raw
 `process_path`, `dst_host` and non-withheld rule operand values, which can
 embed secrets. Mitigations on the table, not in v1 by default: basename+hash
-paths, per-app and per-host exclusions (open questions 3 and 9). Hashing
+paths and per-app / per-host exclusions are deferred to v2 (decisions 3, 9). Hashing
 hostnames at rest is rejected: it removes the feature's purpose.
 
 **At-rest encryption.** (a) none, rely on permissions and disk encryption
@@ -662,7 +700,17 @@ writes; copies outside the file are not reachable.
   `Operator.sensitive` and asserts the hash changes. Separate tests
   assert that a canary placed in a *path* or *host* **does** appear (documenting
   the stated limit) so the limit cannot silently change either way.
-- **Allowlist test** that fails if a new field reaches the insert API.
+- **Allowlist test** that fails if a new field reaches the insert API
+  (including `src_port`; `uid` must not appear).
+- **System-bridge tests:** the file is created under the service account's
+  0700 state directory with 0600 mode; a client without access to the GUI
+  socket cannot read history; two authorised clients each see all rows (the
+  documented multi-user behaviour); the per-user bridge keeps the per-user
+  path.
+- **Correlation tests:** a prompt and ping event with equal `src_port` merge;
+  missing `src_port` keeps both flagged `possible-duplicate`.
+- **Disable/keep tests:** disabling keeps history by default; "Delete
+  history" requires a preview token.
 - **Invariant tests** S1-S5, W1, L1, G1, C1 and C2 as tabled above, each
   adversarial (worst-case rows, kill -9, stale prompts, mid-query clear,
   newer-row-after-preview), not only happy path.
@@ -689,44 +737,54 @@ writes; copies outside the file are not reachable.
 - A GUI test for each gap label, each standing "not observable" note, and
   "unavailable" on an older bridge.
 
-## Open questions for the owner
+## Owner decisions (2026-10-27)
 
-1. **Multi-user.** The system bridge sees all users' events; v1 disables
-   history there (D10). Per-uid rows with uid-scoped reads (needs an
-   authorization design), or per-user-bridge only?
-2. **Numbers.** Confirm defaults: 30 days; 64 MiB total budget (ceiling
-   256 MiB); admission 200 events/s global, 20/s per process and a 25% byte
-   share per process. The per-row page constant behind S2 and the field caps
-   behind S1 are not guessed here: the implementation must derive and prove
-   them from the schema, and if S2 cannot be proved the fallback is
-   reserving a full-database journal (main file ≤ half of B). Which cap
-   values to use for `rule_name`, `process_path` and `dst_host` is for the
-   owner to confirm.
-3. **Exclusions.** Per-application and per-host "don't record" lists in v1
-   (recommended, small) or defer?
-4. **Eviction bias.** Oldest-first regardless of verdict (proposed), or keep
-   denies longer than allows?
-5. **Daemon-side loss.** The `upstream-loss` gap is a lower bound from the
-   existing counters. Is that enough, or should daemon changes be pursued for
-   exact counts, `nolog` visibility, or no-GUI prompt capture?
-6. **Provenance.** Add explicit provenance to `SetVerdict` so silent-mode
-   answers can be recorded as such (protocol change), or keep `gui` meaning
-   "human or silent mode"?
-7. **List-backed rules.** Have the blocklist subsystem expose an
-   applied-content revision so history can say what a list contained, or
-   accept the "list contents not recorded" qualifier permanently?
-8. **Encryption.** Accept "none, rely on permissions" for v1, or require a
-   keyring-backed option first?
-9. **Raw path/host retention.** Store full process paths and destinations
-   (proposed, with the stated limit), or basename + path hash, or require the
-   exclusion lists (question 3) before shipping?
-10. **Backups and disable default.** Should the opt-in text give a specific
-    backup-exclude recipe for the reported path, and is "Disable and delete"
-    the right default button?
-11. **Source port.** Store the connection's source port so prompt and ping
-    events can be correlated exactly (more precise, one more stored field
-    that identifies a connection), or keep `possible-duplicate` flags and
-    qualified counts only?
-12. **Preview scope and clear-all.** Is refusing a stale preview (and refusing
-    clear-all when newer rows exist) acceptable, or should clear-all fall
-    back to bounded deletion that keeps the newer rows?
+Resolved by the owner; each is reflected in the sections named.
+
+1. **System bridge: allowed in v1** (reverses the earlier D10). The owner's
+   installed GUI talks to the system bridge at `/run/snitchwatch/bridge.sock`.
+   History is owned by the `snitchwatch` service account under
+   `/var/lib/snitchwatch/history/` (D3, citing `packaging/system/`). Reads go
+   only through the bridge to clients already authorised for the live event
+   stream: this does not widen who can see connections, only how far back.
+   **Per-uid row tagging and uid-scoped reads are deferred; on a multi-user
+   machine every authorised client sees every user's history.** The per-user
+   bridge keeps the per-user location. D1 coverage re-checked for the system
+   bridge. (D1, D3, D4, D10, threat model.)
+2. **Numbers.** 30 days; 64 MiB budget, 256 MiB ceiling; admission 200
+   events/s global, 20/s per process, 25% byte share per process; field caps
+   `rule_name` 256 B, `process_path` 4096 B, `dst_host` 253 B, and S1 adds a
+   cap for every other stored string. (D4, D5, S1.)
+3. **Exclusion lists: deferred to v2.** (D4, threat model.)
+4. **Eviction: oldest first regardless of verdict.** (D5.)
+5. **Daemon-side loss:** the lower-bound `upstream-loss` gap is enough for v1;
+   no daemon changes. (D1, D6.)
+6. **Provenance:** no protocol change in v1; the UI says "answered in GUI (may
+   be silent mode)". (D4.)
+7. **List-backed rules:** keep the "list contents not recorded" qualifier; no
+   blocklist revision in v1. (D7.)
+8. **Encryption: none in v1.** Rely on the 0600/0700 permissions and say so in
+   the opt-in text. (D2, D9, threat model.)
+9. **Raw paths and hosts:** stored in full, with the limit stated. (D4.)
+10. **Backups:** the opt-in text names the bridge-reported path and gives a
+    backup-exclude recipe. **Disabling keeps history by default**; "Delete
+    history" is a separate, confirmed action (reverses the earlier default).
+    (D2, H02.)
+11. **Source port: stored**, used for exact prompt-to-event correlation. The
+    `possible-duplicate` path applies only where the port is missing. Added
+    to the D4 allowlist and the threat model. (D4, D7.)
+12. **A stale preview is refused and a fresh one required; clear-all refuses
+    if newer rows exist.** (H02, C2.)
+
+### Remaining implementation-proof obligations (not owner decisions)
+
+- **S1:** the implementation must derive the field-cap table for every stored
+  string beyond the three the owner set, and prove from the schema that no
+  value can exceed it.
+- **S2:** the implementation must prove the worst-case pages-per-row constant
+  from the schema and caps (including indexes, snapshots and orphan cleanup).
+  If it cannot, the fallback is reserving a full-database rollback journal
+  (main-file share at most half of the budget).
+- **Correlation uniqueness:** the implementation must prove that `src_port`
+  plus protocol, destination and process path identify one live socket within
+  the settlement window; where it cannot, events are kept and flagged.
