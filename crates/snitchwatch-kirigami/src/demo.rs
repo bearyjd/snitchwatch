@@ -42,6 +42,10 @@ const SPOTIFY: &str =
     "/var/lib/flatpak/app/com.spotify.Client/x86_64/stable/9f3c/files/extra/share/spotify/spotify";
 const CURL: &str = "/usr/bin/curl";
 const SSH: &str = "/usr/bin/ssh";
+/// Recommended (`snitchwatch-default-`) rules, so the exception-first
+/// default (0c) has a "Background and system" group to show.
+const NM_RULE: &str = "snitchwatch-default-networkmanager";
+const RESOLVED_RULE: &str = "snitchwatch-default-resolved";
 
 struct Spec {
     process: &'static str,
@@ -170,7 +174,7 @@ const SPECS: [Spec; 26] = [
         "tcp",
         OUT,
         Some("allow"),
-        Some("allow-networkmanager"),
+        Some(NM_RULE),
         300,
     ),
     s(
@@ -182,7 +186,7 @@ const SPECS: [Spec; 26] = [
         "udp",
         OUT,
         Some("allow"),
-        Some("allow-networkmanager"),
+        Some(NM_RULE),
         600,
     ),
     s(
@@ -194,7 +198,7 @@ const SPECS: [Spec; 26] = [
         "udp",
         OUT,
         Some("allow"),
-        Some("allow-networkmanager"),
+        Some(NM_RULE),
         610,
     ),
     s(
@@ -206,7 +210,7 @@ const SPECS: [Spec; 26] = [
         "tcp",
         OUT,
         Some("allow"),
-        Some("allow-resolved"),
+        Some(RESOLVED_RULE),
         20,
     ),
     s(
@@ -218,7 +222,7 @@ const SPECS: [Spec; 26] = [
         "tcp",
         OUT,
         Some("allow"),
-        Some("allow-resolved"),
+        Some(RESOLVED_RULE),
         21,
     ),
     s(
@@ -470,6 +474,14 @@ pub fn demo_rows(now_ms: i64) -> Vec<ConnectionRow> {
             deferred: false,
             decided_by_default: false,
         })
+        .collect()
+}
+
+/// The demo rows' recommended rules, as `SetRules` carries them.
+pub fn demo_rules() -> Vec<serde_json::Value> {
+    [NM_RULE, RESOLVED_RULE]
+        .into_iter()
+        .map(|name| serde_json::json!({ "name": name, "enabled": true, "action": "allow", "toggleable": true }))
         .collect()
 }
 

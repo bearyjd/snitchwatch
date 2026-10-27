@@ -41,6 +41,7 @@ use snitchwatch_bridge::ws_messages::{AutoAnswer, ConnectionRow, ServerMessage};
 pub(crate) mod level_rule_actions;
 
 mod apply;
+mod attention;
 mod geography;
 mod helpers;
 mod program_label;
@@ -50,6 +51,7 @@ mod retries;
 mod roles;
 #[cfg(test)]
 mod tests;
+mod toggles;
 mod verdict_windows;
 
 use helpers::*;
@@ -130,6 +132,21 @@ pub mod qobject {
         #[qproperty(bool, filter_pending_only, cxx_name = "filterPendingOnly")]
         /// Whether "Denied only" is on (see `filterPendingOnly`).
         #[qproperty(bool, filter_denied_only, cxx_name = "filterDeniedOnly")]
+        /// Whether handled rows collapse into "Background and system" (0c,
+        /// `connections::attention`). ON by default; set with
+        /// `setNeedsAttention`.
+        #[qproperty(bool, filter_needs_attention, cxx_name = "filterNeedsAttention")]
+        /// Rows (and their programs) allowed by an enabled recommended rule
+        /// for a program seen before: the group's one-line summary.
+        #[qproperty(i32, background_count, cxx_name = "backgroundCount")]
+        #[qproperty(i32, background_programs, cxx_name = "backgroundPrograms")]
+        /// Whether an enabled recommended rule from the current session's
+        /// rules is known, so rows can collapse at all.
+        #[qproperty(bool, background_available, cxx_name = "backgroundAvailable")]
+        /// Programs first seen this session, shown until `markNewProgramsSeen`.
+        #[qproperty(i32, new_program_count, cxx_name = "newProgramCount")]
+        /// The one-time first-seen baseline notice; empty when none.
+        #[qproperty(QString, baseline_notice, cxx_name = "baselineNotice")]
         type ConnectionsModel = super::ConnectionsModelRust;
 
         /// Emitted when the auto-select policy decides a freshly arrived pending
@@ -226,6 +243,26 @@ pub mod qobject {
         #[qinvokable]
         #[cxx_name = "setFromNow"]
         fn set_from_now(self: Pin<&mut ConnectionsModel>, from_now: bool);
+
+        /// Collapse handled rows (on) or show the full list (off).
+        #[qinvokable]
+        #[cxx_name = "setNeedsAttention"]
+        fn set_needs_attention(self: Pin<&mut ConnectionsModel>, on: bool);
+
+        /// The user marked this session's new programs as seen.
+        #[qinvokable]
+        #[cxx_name = "markNewProgramsSeen"]
+        fn mark_new_programs_seen(self: Pin<&mut ConnectionsModel>);
+
+        #[qinvokable]
+        #[cxx_name = "dismissBaselineNotice"]
+        fn dismiss_baseline_notice(self: Pin<&mut ConnectionsModel>);
+
+        /// Test seam: queue a JSON message in the grouped debounce buffer
+        /// as the live feed does, for the next flush to apply.
+        #[qinvokable]
+        #[cxx_name = "bufferServerMessageJsonForTests"]
+        fn buffer_server_message_json_for_tests(self: Pin<&mut ConnectionsModel>, json: &QString);
 
         // --- Selection tracking (Task 8 auto-select) ------------------------
         /// Tell the model which row the user currently has selected (empty =
@@ -640,6 +677,20 @@ pub struct ConnectionsModelRust {
     filter_since_ms: i64,
     filter_pending_only: bool,
     filter_denied_only: bool,
+    filter_needs_attention: bool,
+    background_count: i32,
+    background_programs: i32,
+    new_program_count: i32,
+    baseline_notice: QString,
+    background_available: bool,
+    /// First-seen state behind "handled" (0c).
+    seen: crate::connections::seen_programs::SeenPrograms,
+    /// The group's figures, per row (0c).
+    handled_counts: crate::connections::attention::HandledCounts,
+    /// Whether this session's rules snapshot has arrived: a clear revokes
+    /// collapsing until the next `SetRules`, so replayed rows are never
+    /// collapsed by the previous session's rules.
+    attention_armed: bool,
     /// The Settings default duration the rule roles are computed with.
     duration: level_rule_actions::DurationCache,
     /// Behind the `retriedCount` role (`retries`), and its test seam.
@@ -651,11 +702,13 @@ pub struct ConnectionsModelRust {
 impl Default for ConnectionsModelRust {
     fn default() -> Self {
         Self {
-            store: RowStore::with_filter(
-                ConnectionFilter::default()
+            store: RowStore::with_filter({
+                let mut filter = ConnectionFilter::default()
                     .with_geo(crate::geo::shared_resolver())
-                    .prepared_only(),
-            ),
+                    .prepared_only();
+                filter.set_needs_attention(true);
+                filter
+            }),
             collapse: RowCollapse::default(),
             grouping: GroupTree::default(),
             grouped_projection: Vec::new(),
@@ -679,89 +732,19 @@ impl Default for ConnectionsModelRust {
             filter_since_ms: 0,
             filter_pending_only: false,
             filter_denied_only: false,
+            filter_needs_attention: true,
+            background_count: 0,
+            background_programs: 0,
+            new_program_count: 0,
+            baseline_notice: QString::default(),
+            background_available: false,
+            seen: Default::default(),
+            handled_counts: Default::default(),
+            attention_armed: false,
             duration: level_rule_actions::DurationCache::default(),
             held_back_rows: HashMap::new(),
             held_back_shown: false,
             held_back_for_tests: None,
         }
-    }
-}
-
-impl qobject::ConnectionsModel {
-    /// Switch between grouped and flat views. A no-op if already in the
-    /// requested mode. Bracketed by a reset since the entire visible row set
-    /// changes shape.
-    fn set_grouped_mode(mut self: Pin<&mut Self>, grouped: bool) {
-        if grouped == self.grouped {
-            return;
-        }
-        // Buffered grouped-mode messages must apply before the mode flips so
-        // the flat view starts from current data.
-        self.as_mut().flush_grouped_messages();
-        unsafe {
-            self.as_mut().begin_reset_model();
-        }
-        self.as_mut().set_grouped(grouped);
-        if grouped {
-            self.as_mut().rebuild_grouped_projection();
-        }
-        unsafe {
-            self.as_mut().end_reset_model();
-        }
-    }
-
-    /// Toggle a process group's expand/collapse state and refresh the
-    /// grouped projection. No-op when not currently in grouped mode.
-    fn toggle_process_group(mut self: Pin<&mut Self>, key: &QString) {
-        if !self.grouped {
-            return;
-        }
-        self.as_mut().flush_grouped_messages();
-        self.as_mut()
-            .rust_mut()
-            .grouping
-            .toggle_process(&key.to_string());
-        let projection = self.compute_grouped_projection();
-        self.as_mut().apply_grouped_projection(projection);
-        self.refresh_counts();
-    }
-
-    /// Toggle a domain subgroup's expand/collapse state within its parent
-    /// process group and refresh the grouped projection. No-op when not
-    /// currently in grouped mode.
-    fn toggle_domain_group(mut self: Pin<&mut Self>, process_key: &QString, domain_key: &QString) {
-        if !self.grouped {
-            return;
-        }
-        self.as_mut().flush_grouped_messages();
-        self.as_mut()
-            .rust_mut()
-            .grouping
-            .toggle_domain(&process_key.to_string(), &domain_key.to_string());
-        let projection = self.compute_grouped_projection();
-        self.as_mut().apply_grouped_projection(projection);
-        self.refresh_counts();
-    }
-
-    /// Toggle a host's expand/collapse state and refresh the grouped
-    /// projection. No-op when not currently in grouped mode.
-    fn toggle_host_group(
-        mut self: Pin<&mut Self>,
-        process_key: &QString,
-        domain_key: &QString,
-        host_key: &QString,
-    ) {
-        if !self.grouped {
-            return;
-        }
-        self.as_mut().flush_grouped_messages();
-        self.as_mut().rust_mut().grouping.toggle_host(
-            &process_key.to_string(),
-            &domain_key.to_string(),
-            &host_key.to_string(),
-        );
-        let projection = self.compute_grouped_projection();
-        self.as_mut().apply_grouped_projection(projection);
-        self.refresh_counts();
     }
 }

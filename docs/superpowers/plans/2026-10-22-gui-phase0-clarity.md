@@ -418,4 +418,7 @@ A. (answered 2026-10-22: Google is the default engine; the hostname is included 
 1. (decided for phase 0: only recommended rules count as "handled"; user-written
    rules are revisited later with the exact-path restriction above.)
 2. (answered 2026-10-22: one hour is the right window.)
-3. Hide the background group by default, or only collapse it?
+3. (answered 2026-10-26: COLLAPSE the "Background and system" group, never hide
+   it. A handled row may collapse into that group with a one-line summary; the
+   group stays visible and expandable. Build plan:
+   `2026-10-27-exception-first-default.md`.)

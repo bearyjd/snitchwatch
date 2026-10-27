@@ -38,6 +38,7 @@ fn main() {
                 "qml/ProgramLabel.qml",
                 "qml/GroupVerdictCounts.qml",
                 "qml/GroupPendingBadge.qml",
+                "qml/BackgroundGroupBar.qml",
                 "qml/InspectorState.qml",
                 "qml/InspectorPanel.qml",
                 "qml/ConnectionDetailPage.qml",

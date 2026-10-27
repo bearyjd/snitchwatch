@@ -398,6 +398,10 @@ fn connections_files_stay_within_their_line_budgets() {
         ),
         ("MapMarker.qml", include_str!("../qml/MapMarker.qml")),
         ("MonitorPane.qml", include_str!("../qml/MonitorPane.qml")),
+        (
+            "BackgroundGroupBar.qml",
+            include_str!("../qml/BackgroundGroupBar.qml"),
+        ),
     ] {
         let lines = source.lines().count();
         assert!(

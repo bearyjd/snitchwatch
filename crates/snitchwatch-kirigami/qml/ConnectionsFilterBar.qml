@@ -1,5 +1,6 @@
-// Connections filter bar: the Pending only / Denied only / From now switches
-// and the filter summary. Hosted as the page's `header`, above the list and
+// Connections filter bar: the Pending only / Denied only / From now / Full
+// list switches, the exception-first controls (BackgroundGroupBar) and the
+// filter summary. Hosted as the page's `header`, above the list and
 // outside the fixed-height title row, so a wrapping Flow pushes the list down
 // instead of covering its first rows. Every switch is bound to the model's
 // state, so it follows external changes; a toggle forwards to the model and
@@ -58,6 +59,23 @@ Item {
                     checked = Qt.binding(() => fromNow.on)
                 }
             }
+            // Off by default: handled rows collapse into "Background and
+            // system" (clarity 0c). On shows every row.
+            Controls.Switch {
+                id: fullList
+                objectName: "fullListSwitch"
+                text: "Full list"
+                checked: bar.model ? !bar.model.filterNeedsAttention : false
+                onToggled: {
+                    bar.model.setNeedsAttention(!checked)
+                    checked = Qt.binding(() => bar.model ? !bar.model.filterNeedsAttention : false)
+                }
+            }
+        }
+
+        BackgroundGroupBar {
+            width: column.width
+            model: bar.model
         }
 
         Controls.Label {

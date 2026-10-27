@@ -1,6 +1,7 @@
 //! The filter switches and the summary must sit above the list, not over it:
 //! the first list row has to start at or below the bottom of the filter bar,
-//! with the bar's Flow wrapped (narrow window) and its summary showing. The
+//! with the bar's Flow wrapped (narrow window), its summary showing, and
+//! the exception-first rows (BackgroundGroupBar) showing. The
 //! bar was once part of the page's fixed-height title row and covered the
 //! first rows. Drives the real `ConnectionsPage`; geometry is compared in page
 //! coordinates. Run headless with `QT_QPA_PLATFORM=offscreen`.
@@ -117,6 +118,27 @@ Window {
                     probe.expect(page.header.height > probe.barHeightBefore,
                                  "the summary did not grow the bar: " + page.header.height);
                     probe.check("summary showing");
+                    // The exception-first rows (0c): Showing N of M, the
+                    // collapsed group and the baseline notice, each with a
+                    // button, wrap at this width and must still push the list.
+                    model.setFilterQuery("");
+                    probe.barHeightBefore = page.header.height;
+                    const handled = probe.row("h", "ntp.example.com");
+                    handled.processPath = "/usr/sbin/chronyd";
+                    handled.matchedRule = "snitchwatch-default-chronyd";
+                    model.applyServerMessageJson(JSON.stringify({ action: "clearConnectionRows" }));
+                    model.applyServerMessageJson(JSON.stringify({
+                        action: "insertConnectionRows",
+                        rows: [probe.row("a", "x.example.com"), probe.row("b", "y.example.com"), handled]
+                    }));
+                    model.applyServerMessageJson(JSON.stringify({ action: "setRules", rules: [
+                        { name: "snitchwatch-default-chronyd", enabled: true, action: "allow", toggleable: true }] }));
+                } else if (probe.phase === 6) {
+                    probe.expect(model.backgroundCount === 1 && model.baselineNotice !== "",
+                                 "the background group is not showing: " + model.backgroundCount);
+                    probe.expect(page.header.height > probe.barHeightBefore,
+                                 "the background rows did not grow the bar: " + page.header.height);
+                    probe.check("background group showing");
                     done = true;
                 }
                 probe.phase++;

@@ -100,10 +100,30 @@ pub(super) fn mirror_into_grouping(rust: &mut ConnectionsModelRust, msg: &Server
             for row in rows {
                 rust.grouping.upsert_row(row);
             }
+            let ConnectionsModelRust {
+                store,
+                handled_counts,
+                seen,
+                ..
+            } = &mut *rust;
+            let update = matches!(msg, ServerMessage::UpdateConnectionRows { .. });
+            // The store ignores an update for an id it does not hold, so
+            // neither the group nor the first-seen state may count one.
+            let held: Vec<&ConnectionRow> = rows
+                .iter()
+                .filter(|row| !update || store.row_by_id(&row.id).is_some())
+                .collect();
+            // First-seen state (0c): flags only, never visibility.
+            let paths = held.iter().filter_map(|row| row.process_path.as_deref());
+            seen.observe(paths, now_ms());
+            for row in held {
+                handled_counts.upsert(store.filter().attention_facts(), row);
+            }
         }
         ServerMessage::RemoveConnectionRows { ids } => {
             for id in ids {
                 rust.grouping.remove_row(id);
+                rust.handled_counts.remove(id);
             }
         }
         ServerMessage::MoveConnetionRows { ids } => {
@@ -111,6 +131,15 @@ pub(super) fn mirror_into_grouping(rust: &mut ConnectionsModelRust, msg: &Server
         }
         ServerMessage::ClearConnectionRows => {
             rust.grouping.clear();
+            // A reconnect's clear resets neither the seen set nor the flags,
+            // but nothing collapses again until this session's rules arrive:
+            // the previous session's may name a rule deleted meanwhile.
+            rust.seen.note_clear_applied();
+            rust.attention_armed = false;
+            rust.store.set_attention_facts(std::sync::Arc::new(
+                crate::connections::attention::AttentionFacts::default(),
+            ));
+            rust.handled_counts.clear();
         }
         _ => {}
     }
