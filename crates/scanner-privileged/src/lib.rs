@@ -27,6 +27,7 @@
 //! the production implementation that shells out to the real primitives.
 
 pub mod checks;
+pub mod command;
 pub mod error;
 pub mod facts;
 pub mod model;
