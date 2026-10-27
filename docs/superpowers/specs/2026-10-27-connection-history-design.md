@@ -803,8 +803,8 @@ Resolved by the owner; each is reflected in the sections named.
     (D2, H02.)
 11. **Source port: stored**, used for exact prompt-to-event correlation. For
     exactness the correlation key also includes the source address, so the
-    local source address is stored with it (precision within this decision:
-    the port alone does not identify a socket). The `possible-duplicate` path
+    local source address is stored with it (the port alone does not identify
+    a socket; the owner confirmed storing `src_ip` on 2026-10-27). The `possible-duplicate` path
     applies wherever the key is missing or the match is ambiguous, not only
     when the port is missing. Added to the D4 allowlist and the threat model.
     (D4, D7.)
