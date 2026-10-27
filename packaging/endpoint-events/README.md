@@ -83,7 +83,7 @@ Events are **"reported by this host"**, nothing more:
   - ports are 0-65535, `user_id` a uint32;
   - `dst_host` is up to 253 hostname characters;
   - `process_path` is an absolute path (at most 768 bytes), empty, the daemon's
-    `Kernel connection` marker, or the up-to-15-byte process name (`comm`) it
+    `Kernel connection` marker, or the process name (`comm`, up to 15 bytes, or 45 once Go has replaced invalid UTF-8 bytes with U+FFFD) it
     reports when the executable can't be resolved
     (`vendor/opensnitch/daemon/procmon/details.go:258-275`). A value without a
     leading `/` is therefore a marker or a process name, never a path;
@@ -248,17 +248,35 @@ Do this as root, from a checkout of this repository (the merge reads
 
    **SELinux and Vigie's port.** Under enforcing SELinux, rsyslog may connect
    out only to ports labelled for syslog. `6514` is (`syslog_tls_port_t`), so
-   the default needs nothing. For any other port, check it first:
+   the default needs nothing. Without the right label the listener runs but
+   nothing reaches Vigie (`ausearch -m avc` shows the `name_connect` denial).
 
+   For any other port, run this with `port=` set to it. It needs `semanage`,
+   from `policycoreutils-python-utils` (`sudo rpm-ostree install
+   policycoreutils-python-utils` if `command -v semanage` finds nothing). It
+   looks at the **tcp** rows only, ranges included (`7500-7600`), and acts on
+   the owner:
+   - none: labels the port for syslog and records that this install did, so
+     the way back can remove exactly that mapping;
+   - a syslog type: nothing to do;
+   - anything else: stops. Don't relabel it; ask Vigie for `6514` or a free
+     port.
+
+   <!-- verify.sh: port -->
    ```bash
-   sudo semanage port -l | grep -w 7514   # your port
+   port=7514   # Vigie's port
+   m=/etc/snitchwatch-endpoint-events/selinux-port-added
+   ports=$(sudo semanage port -l) || { echo "semanage failed: is policycoreutils-python-utils installed?"; false; }
+   owner=$(awk -v p="$port" '$2 == "tcp" { for (i = 3; i <= NF; i++) {
+       n = split($i, r, "-"); lo = r[1] + 0; hi = (n > 1 ? r[2] : r[1]) + 0
+       if (p >= lo && p <= hi) print $1 } }' <<<"$ports" | sort -u | paste -sd' ')
+   case "$owner" in
+   "") sudo semanage port -a -t syslogd_port_t -p tcp "$port" &&
+       echo "$port" | sudo tee "$m" >/dev/null && echo "tcp $port labelled syslogd_port_t" ;;
+   syslogd_port_t | syslog_tls_port_t) echo "tcp $port is already a syslog port" ;;
+   *) echo "tcp $port belongs to $owner: ask Vigie for 6514 or a free port"; false ;;
+   esac
    ```
-
-   If it prints nothing, the port is unassigned: label it with
-   `sudo semanage port -a -t syslogd_port_t -p tcp 7514`. If it's already
-   assigned to another type, don't relabel it; ask Vigie to use `6514` or
-   another free port. Without this the listener runs but nothing reaches Vigie
-   (`ausearch -m avc` shows the `name_connect` denial).
 
 3. **Install and start the table and the listener**, before the daemon starts
    logging to it.
@@ -401,22 +419,35 @@ sudo sh -c 'set -e; f=/etc/opensnitchd/default-config.json
   && sudo systemctl restart opensnitch.service
 ```
 
-Then:
+Then everything else the recipe added: the units and table, the instance's
+config and work directory, the certificates, the deny-mode rule if you added
+it, and the SELinux port mapping only if the port step recorded adding it.
 
+<!-- verify.sh: rollback -->
 ```bash
 # The listener first; stopping the table's unit would stop it anyway.
 sudo systemctl disable --now snitchwatch-endpoint-events.service
 sudo systemctl disable --now snitchwatch-endpoint-events-nft.service   # deletes the table
-sudo rm /etc/systemd/system/snitchwatch-endpoint-events.service \
+sudo rm -f /etc/systemd/system/snitchwatch-endpoint-events.service \
   /etc/systemd/system/snitchwatch-endpoint-events-nft.service \
   /etc/nftables/snitchwatch-endpoint-events.nft \
   /etc/snitchwatch-endpoint-events/rsyslog.conf
-sudo rmdir /etc/snitchwatch-endpoint-events
 sudo systemctl daemon-reload
+m=/etc/snitchwatch-endpoint-events/selinux-port-added
+if sudo test -e "$m"; then
+  sudo semanage port -d -p tcp "$(sudo cat "$m")" && sudo rm "$m"
+fi
+sudo rmdir /etc/snitchwatch-endpoint-events
+sudo find /var/lib/rsyslog/snitchwatch-endpoint-events -delete
 sudo rm -f /etc/pki/snitchwatch-endpoint-events/{vigie-ca.pem,host-cert.pem,host-key.pem,host.csr}
 sudo rmdir /etc/pki/snitchwatch-endpoint-events
 sudo rm -f /etc/opensnitchd/rules/endpoint-events-rsyslog-to-vigie.json   # if you added it
-sudo rpm-ostree uninstall rsyslog rsyslog-mmjsonparse rsyslog-gnutls       # then reboot
+```
+
+Finally the packages, if nothing else uses them:
+
+```bash
+sudo rpm-ostree uninstall rsyslog rsyslog-mmjsonparse rsyslog-gnutls   # then reboot
 ```
 
 `default-config.json.pre-endpoint-events` is your
@@ -463,7 +494,11 @@ the container's own namespaces, so nothing touches the host's firewall or `/etc`
   with the wrong name. Nothing is accepted from a client certificate of
   another CA, or a sender with no certificate or no key.
 - **README snippets.** The merge and way-back snippets above (marked
-  `verify.sh:`) run against a copy of the packaged daemon config.
+  `verify.sh:`) run against a copy of the packaged daemon config. The port
+  snippet runs against a seeded `semanage port -l` listing (semanage itself
+  is stubbed): a tcp range owner refuses, a udp-only port counts as free and
+  is labelled and recorded, `6514` needs nothing, and a failing semanage
+  stops it.
 
 **Phase 2, the same image booted with systemd,** installed by running the
 README's `prepare`, `check` and `start` snippets verbatim on a fresh system
@@ -477,7 +512,9 @@ README's `prepare`, `check` and `start` snippets verbatim on a fresh system
 - a reload keeps the table and the listener's PID;
 - stopping the table's unit stops the listener;
 - a broken config means no listener;
-- nothing sent to the listener reaches the live journal or `/var`.
+- nothing sent to the listener reaches the live journal or `/var`;
+- the complete way back (logger, units, table, config, work directory,
+  certificates, the recorded port mapping) leaves nothing the recipe added.
 
 It needs the Fedora mirrors, so it isn't part of `just package-check`. With
 slow mirrors, `SW_VERIFY_DNF_CACHE=<volume> just endpoint-events-verify` keeps

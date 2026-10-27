@@ -218,7 +218,7 @@ producer_events() {
 }
 # comm may hold any byte (prctl PR_SET_NAME): checked by length only, and
 # jsonf must escape it into valid JSON.
-comm_values=($'tab\there' 'quo"te' 'back\\slash' 'é1')
+comm_values=($'tab\there' 'quo"te' 'back\\slash' 'é1' 'aaaaaaaaaaaaaa�')
 comm_events() {
     local comm
     for comm in "${comm_values[@]}"; do
@@ -234,7 +234,7 @@ bad_events() {
     event 0 | jq -c '.Event.user_id = 4294967296'
     event 0 | jq -c '.Event.src_ip = "999.1.1.1"'
     event 0 | jq -c '.Event.dst_ip = "deadbeef"'
-    event 0 | jq -c '.Event.process_path = "a-comm-longer-than-15"'
+    event 0 | jq -c '.Event.process_path = ("c" * 46)'
     event 0 | jq -c '.Event.src_ip = "1.2.3.4\"}"'
     event 0 | jq -c '.Event.dst_host = ("a" * 254)'
 }
@@ -294,7 +294,7 @@ snippet() { # marker
         }
         inside { print substr($0, indent + 1) }' "$src/README.md"
 }
-for marker in prepare check start enable way-back; do
+for marker in prepare check port start enable way-back rollback; do
     [[ -n "$(snippet "$marker")" ]] || fail "README has no '$marker' snippet"
 done
 # sudo runs the command (we are root); restorecon is a no-op with SELinux
@@ -302,7 +302,34 @@ done
 mkdir -p "$work/stubs"
 printf '#!/bin/sh\nexec "$@"\n' >"$work/stubs/sudo"
 printf '#!/bin/sh\necho "restorecon $*" >>%s/restorecon.log\n' "$work" >"$work/stubs/restorecon"
+# semanage, seeded: a tcp owner of a range and of single ports, a udp-only
+# port, the syslog types; `-a`/`-d` keep their own state. SEMANAGE_FAIL=1
+# makes `port -l` fail.
+cat >"$work/semanage.fixture" <<'EOF'
+syslog_tls_port_t              tcp      6514, 10514
+syslog_tls_port_t              udp      6514, 10514
+syslogd_port_t                 tcp      601, 20514
+foo_port_t                     tcp      7400, 7500-7600, 8000
+udp_only_port_t                udp      7700
+EOF
+cat >"$work/stubs/semanage" <<EOF
+#!/bin/bash
+state="$work/semanage.state"
+case "\$1 \$2" in
+"port -l") [[ -z "\${SEMANAGE_FAIL:-}" ]] || exit 1
+    cat "$work/semanage.fixture"
+    [[ ! -e "\$state" ]] || cat "\$state" ;;
+"port -a") echo "\$4 \$6 \$7" >>"\$state" ;;
+"port -d") awk -v p="\$5" -v t="\$4" '!(\$2 == t && \$3 == p)' "\$state" >"\$state.new" &&
+    mv "\$state.new" "\$state" ;;
+*) echo "semanage stub: unexpected \$*" >&2; exit 2 ;;
+esac
+EOF
 chmod +x "$work/stubs/"*
+port_check() { # port: the README's port snippet for that port
+    (cd /src && PATH="$work/stubs:$PATH" bash -e -c "$(snippet port | sed "s/^port=7514 /port=$1 /")")
+}
+port_marker=/etc/snitchwatch-endpoint-events/selinux-port-added
 run_snippet() { # marker [extra PATH dir]
     (cd /src && PATH="${2:+$2:}$work/stubs:$PATH" bash -e -c "$(snippet "$1")")
 }
@@ -426,6 +453,40 @@ if [[ "$1" == --systemd-inside ]]; then
         fail "no config error logged"
     echo "OK: ExecStartPre refused the broken config, no listener"
     reset
+
+    echo "== systemd: the complete way back leaves nothing the recipe added"
+    cp "$(fill_conf 6514)" "$instance_conf"
+    run_snippet start
+    port_check 7700
+    [[ -e "$port_marker" ]] || fail "port step didn't record its mapping"
+    mkdir -p /etc/opensnitchd "$work/opensnitch-stub"
+    cp /src/packaging/system/opensnitchd-default-config.json /etc/opensnitchd/default-config.json
+    chmod 600 /etc/opensnitchd/default-config.json
+    original=$(jq -S . /etc/opensnitchd/default-config.json)
+    # Only opensnitch.service is absent here; everything else is real systemd.
+    cat >"$work/opensnitch-stub/systemctl" <<'EOF'
+#!/bin/bash
+for arg; do [[ "$arg" == opensnitch.service ]] && exit 0; done
+exec /usr/bin/systemctl "$@"
+EOF
+    chmod +x "$work/opensnitch-stub/systemctl"
+    for marker in enable way-back rollback; do
+        run_snippet "$marker" "$work/opensnitch-stub"
+    done
+    for path in /etc/systemd/system/snitchwatch-endpoint-events.service \
+        /etc/systemd/system/snitchwatch-endpoint-events-nft.service \
+        /etc/nftables/snitchwatch-endpoint-events.nft /etc/snitchwatch-endpoint-events \
+        /var/lib/rsyslog/snitchwatch-endpoint-events "$pki"; do
+        [[ ! -e "$path" ]] || fail "the way back left $path"
+    done
+    systemctl cat snitchwatch-endpoint-events.service >/dev/null 2>&1 && fail "listener unit still known"
+    systemctl cat snitchwatch-endpoint-events-nft.service >/dev/null 2>&1 && fail "table unit still known"
+    table_up && fail "the way back left the table"
+    can_connect 0 && fail "the way back left a listener"
+    [[ $(jq -S . /etc/opensnitchd/default-config.json) == "$original" ]] ||
+        fail "the way back left the logger entry"
+    [[ ! -s "$work/semanage.state" ]] || fail "the way back left the port mapping: $(cat "$work/semanage.state")"
+    echo "OK: units, table, listener, config, work dir, certificates, logger and port mapping gone"
     echo "SYSTEMD OK"
     exit 0
 fi
@@ -441,6 +502,23 @@ nft list table inet snitchwatch_endpoint_events
 
 echo "== the README's fresh install (prepare, check)"
 fresh_install
+
+echo "== the README's SELinux port check (seeded semanage)"
+for refused in 7550 7500 7600 8000 7400; do
+    out=$(port_check "$refused") && fail "tcp $refused is foo_port_t's, but the check passed"
+    [[ "$out" == "tcp $refused belongs to foo_port_t: "* ]] || fail "tcp $refused refused for the wrong reason: $out"
+done
+[[ ! -e "$port_marker" && ! -s "$work/semanage.state" ]] || fail "a refused port was labelled"
+[[ $(port_check 6514) == "tcp 6514 is already a syslog port" ]] || fail "6514 not seen as syslog"
+[[ ! -e "$port_marker" && ! -s "$work/semanage.state" ]] || fail "6514 was relabelled"
+out=$(SEMANAGE_FAIL=1 port_check 7701) && fail "a failing semanage passed the check"
+[[ "$out" == "semanage failed"* ]] || fail "semanage failure not reported: $out"
+port_check 7700 # udp-only: free for tcp
+[[ $(cat "$port_marker") == 7700 ]] || fail "the added mapping wasn't recorded"
+grep -qx 'syslogd_port_t tcp 7700' "$work/semanage.state" || fail "7700 wasn't labelled"
+rm "$port_marker" "$work/semanage.state"
+echo "OK: tcp range and list owners refused, 6514 left alone, semanage failure stops,"
+echo "    udp-only 7700 labelled for tcp and recorded"
 rsyslogd -N1 -f "$instance_conf" 2>&1 | tee n1.log
 grep -qi 'error' n1.log && fail "config check reported errors"
 
@@ -556,13 +634,13 @@ fi
 
 echo "== end to end: host rsyslog alongside, pinned receiver"
 send_all
-wait_for_lines "$work/server.out" 7 20 || fail "receiver got $(lines "$work/server.out") of 7 events"
+wait_for_lines "$work/server.out" 8 20 || fail "receiver got $(lines "$work/server.out") of 8 events"
 sleep 3 # let any stray extra frame arrive before counting
 stop_sender
 kill "$(cat /run/host-rsyslog.pid)"
 echo "receiver got:"
 cat "$work/server.out"
-[[ $(lines "$work/server.out") -eq 7 ]] || fail "expected exactly seven events"
+[[ $(lines "$work/server.out") -eq 8 ]] || fail "expected exactly eight events"
 grep -q "$token" "$work/server.out" && fail "the fake token reached the receiver"
 # Values and types, not just keys: the frame equals the sample but for time.
 [[ $(head -n1 "$work/server.out" | jq -cS 'del(.time)') == $(jq -cS 'del(.time)' "$src/sample-event.json") ]] ||
@@ -583,8 +661,8 @@ done
 grep -q $'\t' "$work/server.out" && fail "a raw tab reached a frame (not escaped)"
 iconv -f UTF-8 -t UTF-8 "$work/server.out" >/dev/null || fail "a frame is not valid UTF-8"
 no_token_in /var/log /var/lib /var/spool
-echo "OK: tab, quote, backslash and UTF-8 comm values arrive escaped, as valid JSON"
-echo "OK: seven events (invalid ones dropped); the first equals sample-event.json;"
+echo "OK: tab, quote, backslash, UTF-8 and U+FFFD-replaced comm values arrive escaped, as valid JSON"
+echo "OK: eight events (invalid ones dropped); the first equals sample-event.json;"
 echo "    no token in frames or under /var/log, /var/lib, /var/spool"
 echo "SAMPLE: $(head -n1 "$work/server.out")"
 

@@ -638,7 +638,9 @@ fn path_gate_accepts_the_daemons_kernel_and_comm_values() {
     assert!(ruleset.contains("$!Event!process_path == \"Kernel connection\""));
     // comm by its byte length only (codex round 3): a character class would
     // drop a comm holding a tab; jsonf escapes whatever it holds.
-    assert!(ruleset.contains("or strlen($!Event!process_path) <= 15)"));
+    // 15 bytes of comm, each possibly a byte Go's json.Marshal replaced with
+    // U+FFFD (3 bytes) after the kernel cut a UTF-8 character (codex final).
+    assert!(ruleset.contains("or strlen($!Event!process_path) <= 45)"));
     assert!(!ruleset.contains("[[:print:]]"));
     assert!(ruleset.contains("re_match($!Event!protocol, \"^(tcp|udp|udplite|sctp|icmp)6?\\$\")"));
     // uint32 by pattern: a RainerScript number literal can't hold 4294967295.
@@ -727,6 +729,51 @@ fn readme_creates_and_labels_the_work_dir_before_the_config_check() {
     assert!(body[check..start].contains("rsyslogd -N1 -f"));
 }
 
+/// codex final: the port check covers tcp ranges and a failed semanage, the
+/// install records a port mapping it added, and the complete rollback
+/// removes everything the recipe added (verify.sh runs both).
+#[test]
+fn readme_port_check_and_complete_rollback() {
+    let body = read(README);
+    let block = |name: &str| {
+        let at = body
+            .find(&format!("<!-- verify.sh: {name} -->"))
+            .unwrap_or_else(|| panic!("README has no `{name}` snippet"));
+        let start = at + body[at..].find("```bash").unwrap();
+        let end = start + 7 + body[start + 7..].find("```").unwrap();
+        body[start..end].to_string()
+    };
+    let marker = "/etc/snitchwatch-endpoint-events/selinux-port-added";
+    let port = block("port");
+    assert!(body.contains("policycoreutils-python-utils"));
+    assert!(port.contains("$2 == \"tcp\""), "tcp rows only");
+    assert!(port.contains("split($i, r, \"-\")"), "ranges");
+    assert!(
+        port.contains("semanage port -l") && port.contains("|| {"),
+        "semanage must succeed"
+    );
+    assert!(port.contains("semanage port -a -t syslogd_port_t -p tcp"));
+    assert!(port.contains(marker), "records the mapping it added");
+
+    let rollback = block("rollback");
+    for needle in [
+        "disable --now snitchwatch-endpoint-events.service",
+        "disable --now snitchwatch-endpoint-events-nft.service",
+        "/etc/systemd/system/snitchwatch-endpoint-events.service",
+        "/etc/systemd/system/snitchwatch-endpoint-events-nft.service",
+        "/etc/nftables/snitchwatch-endpoint-events.nft",
+        "/etc/snitchwatch-endpoint-events/rsyslog.conf",
+        WORK_DIR,
+        "/etc/pki/snitchwatch-endpoint-events",
+        marker,
+        "semanage port -d -p tcp",
+        "daemon-reload",
+    ] {
+        assert!(rollback.contains(needle), "rollback misses `{needle}`");
+    }
+    assert!(body.find("<!-- verify.sh: way-back -->") < body.find("<!-- verify.sh: rollback -->"));
+}
+
 #[test]
 fn readme_merges_atomically_as_root_and_restarts_the_fedora_unit() {
     let body = read(README);
@@ -750,7 +797,7 @@ fn readme_merges_atomically_as_root_and_restarts_the_fedora_unit() {
         "debug",
         "Server.Loggers",
         "restorecon -RFv",
-        "semanage port -l | grep -w",
+        "semanage port -l)",
         "semanage port -a -t syslogd_port_t -p tcp",
         "6514",
     ] {
