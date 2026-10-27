@@ -59,7 +59,7 @@ if [[ -z "${1:-}" ]]; then
     fi
     run_id="snitchwatch-ee-verify-$$"
     image="localhost/$run_id:tmp"
-    # shellcheck disable=SC2329 # invoked by the EXIT trap
+    # shellcheck disable=SC2317,SC2329 # invoked by the EXIT trap (older shellcheck says SC2317)
     cleanup() {
         podman rm -f "$run_id-prep" "$run_id-systemd" >/dev/null 2>&1 || true
         podman rmi -f "$image" >/dev/null 2>&1 || true
