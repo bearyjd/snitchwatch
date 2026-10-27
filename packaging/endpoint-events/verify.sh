@@ -139,7 +139,7 @@ install_client host
 #   name-other  permits other.test (positive control for the wrong-name one)
 fill_conf() { # port [variant] -> path
     local out="$work/instance-$1-${2:-plain}.conf"
-    sed -e "s/@VIGIE_ADDRESS@/127.0.0.1/" -e "s/@VIGIE_PORT@/$1/" \
+    sed -e "s/@VIGIE_ADDRESS@/127.0.0.1/" -e "s/port=\"6514\" protocol=\"tcp\"/port=\"$1\" protocol=\"tcp\"/" \
         -e "s/@VIGIE_CERT_NAME@/$peer/" -e "s/@HOST_ID@/$host_id/" \
         "$src/snitchwatch-endpoint-events.conf" >"$out"
     case "${2:-}" in
@@ -151,6 +151,7 @@ fill_conf() { # port [variant] -> path
     if grep -q '@[A-Z_]*@' "$out"; then
         fail "unfilled placeholder in the instance's config"
     fi
+    grep -q "port=\"$1\" protocol=\"tcp\"" "$out" || fail "forward port not set to $1"
     if [[ "${2:-}" == nocert || "${2:-}" == nokey ]] && grep -q 'streamDriver\.KeyFile' "$out"; then
         fail "client key still configured"
     fi
@@ -294,7 +295,7 @@ snippet() { # marker
         }
         inside { print substr($0, indent + 1) }' "$src/README.md"
 }
-for marker in prepare check port start enable way-back rollback; do
+for marker in prepare check start enable way-back rollback; do
     [[ -n "$(snippet "$marker")" ]] || fail "README has no '$marker' snippet"
 done
 # sudo runs the command (we are root); restorecon is a no-op with SELinux
@@ -302,34 +303,13 @@ done
 mkdir -p "$work/stubs"
 printf '#!/bin/sh\nexec "$@"\n' >"$work/stubs/sudo"
 printf '#!/bin/sh\necho "restorecon $*" >>%s/restorecon.log\n' "$work" >"$work/stubs/restorecon"
-# semanage, seeded: a tcp owner of a range and of single ports, a udp-only
-# port, the syslog types; `-a`/`-d` keep their own state. SEMANAGE_FAIL=1
-# makes `port -l` fail.
-cat >"$work/semanage.fixture" <<'EOF'
-syslog_tls_port_t              tcp      6514, 10514
-syslog_tls_port_t              udp      6514, 10514
-syslogd_port_t                 tcp      601, 20514
-foo_port_t                     tcp      7400, 7500-7600, 8000
-udp_only_port_t                udp      7700
-EOF
-cat >"$work/stubs/semanage" <<EOF
-#!/bin/bash
-state="$work/semanage.state"
-case "\$1 \$2" in
-"port -l") [[ -z "\${SEMANAGE_FAIL:-}" ]] || exit 1
-    cat "$work/semanage.fixture"
-    [[ ! -e "\$state" ]] || cat "\$state" ;;
-"port -a") echo "\$4 \$6 \$7" >>"\$state" ;;
-"port -d") awk -v p="\$5" -v t="\$4" '!(\$2 == t && \$3 == p)' "\$state" >"\$state.new" &&
-    mv "\$state.new" "\$state" ;;
-*) echo "semanage stub: unexpected \$*" >&2; exit 2 ;;
-esac
-EOF
+# semanage: the recipe never runs it (owner decision on #233: 6514 only).
+# The stub records any call, and the run fails on one.
+printf '#!/bin/sh\necho "semanage $*" >>%s/semanage.calls\nexit 1\n' "$work" >"$work/stubs/semanage"
 chmod +x "$work/stubs/"*
-port_check() { # port: the README's port snippet for that port
-    (cd /src && PATH="$work/stubs:$PATH" bash -e -c "$(snippet port | sed "s/^port=7514 /port=$1 /")")
+no_semanage_calls() {
+    [[ ! -e "$work/semanage.calls" ]] || fail "something ran semanage: $(cat "$work/semanage.calls")"
 }
-port_marker=/etc/snitchwatch-endpoint-events/selinux-port-added
 run_snippet() { # marker [extra PATH dir]
     (cd /src && PATH="${2:+$2:}$work/stubs:$PATH" bash -e -c "$(snippet "$1")")
 }
@@ -457,8 +437,6 @@ if [[ "$1" == --systemd-inside ]]; then
     echo "== systemd: the complete way back leaves nothing the recipe added"
     cp "$(fill_conf 6514)" "$instance_conf"
     run_snippet start
-    port_check 7700
-    [[ -e "$port_marker" ]] || fail "port step didn't record its mapping"
     mkdir -p /etc/opensnitchd "$work/opensnitch-stub"
     cp /src/packaging/system/opensnitchd-default-config.json /etc/opensnitchd/default-config.json
     chmod 600 /etc/opensnitchd/default-config.json
@@ -485,8 +463,8 @@ EOF
     can_connect 0 && fail "the way back left a listener"
     [[ $(jq -S . /etc/opensnitchd/default-config.json) == "$original" ]] ||
         fail "the way back left the logger entry"
-    [[ ! -s "$work/semanage.state" ]] || fail "the way back left the port mapping: $(cat "$work/semanage.state")"
-    echo "OK: units, table, listener, config, work dir, certificates, logger and port mapping gone"
+    no_semanage_calls
+    echo "OK: units, table, listener, config, work dir, certificates and logger gone; no semanage call"
     echo "SYSTEMD OK"
     exit 0
 fi
@@ -503,22 +481,7 @@ nft list table inet snitchwatch_endpoint_events
 echo "== the README's fresh install (prepare, check)"
 fresh_install
 
-echo "== the README's SELinux port check (seeded semanage)"
-for refused in 7550 7500 7600 8000 7400; do
-    out=$(port_check "$refused") && fail "tcp $refused is foo_port_t's, but the check passed"
-    [[ "$out" == "tcp $refused belongs to foo_port_t: "* ]] || fail "tcp $refused refused for the wrong reason: $out"
-done
-[[ ! -e "$port_marker" && ! -s "$work/semanage.state" ]] || fail "a refused port was labelled"
-[[ $(port_check 6514) == "tcp 6514 is already a syslog port" ]] || fail "6514 not seen as syslog"
-[[ ! -e "$port_marker" && ! -s "$work/semanage.state" ]] || fail "6514 was relabelled"
-out=$(SEMANAGE_FAIL=1 port_check 7701) && fail "a failing semanage passed the check"
-[[ "$out" == "semanage failed"* ]] || fail "semanage failure not reported: $out"
-port_check 7700 # udp-only: free for tcp
-[[ $(cat "$port_marker") == 7700 ]] || fail "the added mapping wasn't recorded"
-grep -qx 'syslogd_port_t tcp 7700' "$work/semanage.state" || fail "7700 wasn't labelled"
-rm "$port_marker" "$work/semanage.state"
-echo "OK: tcp range and list owners refused, 6514 left alone, semanage failure stops,"
-echo "    udp-only 7700 labelled for tcp and recorded"
+no_semanage_calls
 rsyslogd -N1 -f "$instance_conf" 2>&1 | tee n1.log
 grep -qi 'error' n1.log && fail "config check reported errors"
 

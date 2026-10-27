@@ -729,33 +729,38 @@ fn readme_creates_and_labels_the_work_dir_before_the_config_check() {
     assert!(body[check..start].contains("rsyslogd -N1 -f"));
 }
 
-/// codex final: the port check covers tcp ranges and a failed semanage, the
-/// install records a port mapping it added, and the complete rollback
-/// removes everything the recipe added (verify.sh runs both).
+/// Owner decision on #233: the recipe supports Vigie on 6514
+/// (syslog_tls_port_t) only. Labelling any other port is the operator's
+/// call, outside the recipe: nothing in it adds or deletes a port mapping or
+/// keeps a marker for one. The complete way back still removes everything
+/// the recipe did add.
 #[test]
-fn readme_port_check_and_complete_rollback() {
+fn recipe_targets_6514_and_never_runs_semanage() {
+    let active = rsyslog_active();
+    let forwards: Vec<String> = statements(&active, "action")
+        .into_iter()
+        .filter(|body| param(body, "type").as_deref() == Some("omfwd"))
+        .collect();
+    assert_eq!(param(&forwards[0], "port").as_deref(), Some("6514"));
+    for rel in [README, RSYSLOG, "packaging/endpoint-events/verify.sh"] {
+        let body = read(rel);
+        for needle in [
+            "semanage port -a",
+            "semanage port -d",
+            "selinux-port-added",
+            "@VIGIE_PORT@",
+        ] {
+            assert!(!body.contains(needle), "{rel} contains `{needle}`");
+        }
+    }
     let body = read(README);
-    let block = |name: &str| {
-        let at = body
-            .find(&format!("<!-- verify.sh: {name} -->"))
-            .unwrap_or_else(|| panic!("README has no `{name}` snippet"));
-        let start = at + body[at..].find("```bash").unwrap();
-        let end = start + 7 + body[start + 7..].find("```").unwrap();
-        body[start..end].to_string()
-    };
-    let marker = "/etc/snitchwatch-endpoint-events/selinux-port-added";
-    let port = block("port");
-    assert!(body.contains("policycoreutils-python-utils"));
-    assert!(port.contains("$2 == \"tcp\""), "tcp rows only");
-    assert!(port.contains("split($i, r, \"-\")"), "ranges");
-    assert!(
-        port.contains("semanage port -l") && port.contains("|| {"),
-        "semanage must succeed"
-    );
-    assert!(port.contains("semanage port -a -t syslogd_port_t -p tcp"));
-    assert!(port.contains(marker), "records the mapping it added");
-
-    let rollback = block("rollback");
+    assert!(!body.contains("<!-- verify.sh: port -->"));
+    let at = body
+        .find("<!-- verify.sh: rollback -->")
+        .expect("rollback snippet");
+    let start = at + body[at..].find("```bash").unwrap();
+    let end = start + 7 + body[start + 7..].find("```").unwrap();
+    let rollback = &body[start..end];
     for needle in [
         "disable --now snitchwatch-endpoint-events.service",
         "disable --now snitchwatch-endpoint-events-nft.service",
@@ -765,8 +770,6 @@ fn readme_port_check_and_complete_rollback() {
         "/etc/snitchwatch-endpoint-events/rsyslog.conf",
         WORK_DIR,
         "/etc/pki/snitchwatch-endpoint-events",
-        marker,
-        "semanage port -d -p tcp",
         "daemon-reload",
     ] {
         assert!(rollback.contains(needle), "rollback misses `{needle}`");
@@ -797,8 +800,6 @@ fn readme_merges_atomically_as_root_and_restarts_the_fedora_unit() {
         "debug",
         "Server.Loggers",
         "restorecon -RFv",
-        "semanage port -l)",
-        "semanage port -a -t syslogd_port_t -p tcp",
         "6514",
     ] {
         assert!(body.contains(needle), "README missing `{needle}`");
