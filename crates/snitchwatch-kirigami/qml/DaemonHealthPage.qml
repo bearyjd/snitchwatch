@@ -8,6 +8,9 @@ Kirigami.ScrollablePage {
     title: "Daemon Health"
 
     required property var model
+    // Deny-mode status (DenyStatusModel); main.qml passes it, so a page made
+    // without one shows nothing and reads no file.
+    property var denyStatus: null
 
     ColumnLayout {
         width: page.width
@@ -59,6 +62,14 @@ Kirigami.ScrollablePage {
         Controls.Button {
             text: "Recheck"
             onClicked: page.model.recheck()
+        }
+
+        Loader {
+            Layout.fillWidth: true
+            active: page.denyStatus !== null
+            sourceComponent: DenyStatusSection {
+                model: page.denyStatus
+            }
         }
     }
 }

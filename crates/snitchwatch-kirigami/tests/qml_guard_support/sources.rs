@@ -257,6 +257,10 @@ pub const ALL_QML: &[(&str, &str)] = &[
         include_str!("../../qml/DaemonHealthPage.qml"),
     ),
     (
+        "DenyStatusSection.qml",
+        include_str!("../../qml/DenyStatusSection.qml"),
+    ),
+    (
         "DiagnosticsPage.qml",
         include_str!("../../qml/DiagnosticsPage.qml"),
     ),

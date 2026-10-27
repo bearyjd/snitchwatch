@@ -9,7 +9,6 @@
 //! individual sub-check to a "skipped" note instead of failing the scan.
 
 use std::path::Path;
-use std::process::Command;
 
 use crate::error::{Result, ScanError};
 
@@ -85,31 +84,20 @@ impl LiveSystem {
     /// Run `program args...`, returning stdout on success. A missing binary
     /// maps to `PrimitiveUnavailable` so the caller can skip cleanly.
     fn run(program: &str, args: &[&str]) -> Result<String> {
-        let output = Command::new(program)
-            .args(args)
-            .output()
-            .map_err(|source| {
-                if source.kind() == std::io::ErrorKind::NotFound {
-                    ScanError::PrimitiveUnavailable(format!("{program} not found on PATH"))
-                } else {
-                    ScanError::Io {
-                        path: program.to_string(),
-                        source,
-                    }
+        crate::command::run(program, args).map_err(|source| {
+            if source.kind() == std::io::ErrorKind::NotFound {
+                ScanError::PrimitiveUnavailable(format!("{program} not installed"))
+            } else {
+                ScanError::Io {
+                    path: program.to_string(),
+                    source,
                 }
-            })?;
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+            }
+        })
     }
 
     fn which(program: &str) -> Option<String> {
-        let path = std::env::var_os("PATH")?;
-        for dir in std::env::split_paths(&path) {
-            let candidate = dir.join(program);
-            if candidate.is_file() {
-                return Some(candidate.to_string_lossy().into_owned());
-            }
-        }
-        None
+        crate::command::trusted_program(program).map(|path| path.to_string_lossy().into_owned())
     }
 
     fn uname_release() -> Result<String> {

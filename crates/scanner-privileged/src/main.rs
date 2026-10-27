@@ -14,7 +14,6 @@
 //! run against a writable path.
 
 use std::path::PathBuf;
-use std::process::Command;
 
 use scanner_privileged::facts::LiveSystem;
 use scanner_privileged::{run_privileged_scan, ScanReport, ScanStore};
@@ -66,6 +65,7 @@ fn start_privileged_watchdog_after(timeout: std::time::Duration) -> anyhow::Resu
     std::thread::spawn(move || {
         std::thread::sleep(timeout);
         notify_watchdog_timeout();
+        scanner_privileged::command::kill_active_group();
         unsafe {
             libc::killpg(pid, libc::SIGKILL);
         }
@@ -104,14 +104,10 @@ fn notify_watchdog_timeout() {
 /// Falls back to "unknown" when rpm-ostree is unavailable (e.g. in a sandbox
 /// or non-ostree host) so the scan can still run and record results.
 fn deployment_checksum() -> String {
-    let output = match Command::new("rpm-ostree")
-        .args(["status", "--json"])
-        .output()
-    {
-        Ok(o) => o,
+    let text = match scanner_privileged::command::run("rpm-ostree", &["status", "--json"]) {
+        Ok(text) => text,
         Err(_) => return "unknown".to_string(),
     };
-    let text = String::from_utf8_lossy(&output.stdout);
     serde_json::from_str::<serde_json::Value>(&text)
         .ok()
         .and_then(|v| {
@@ -181,20 +177,78 @@ fn init_logging() {
         .init();
 }
 
+/// All ancestors are immutable to non-root; final directory is private.
+/// Existing SQLite database and sidecars must be ordinary private root files.
+fn validate_private_state(db: &std::path::Path, owner: u32) -> anyhow::Result<()> {
+    let parent = db
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("missing state parent"))?;
+    for ancestor in parent.ancestors() {
+        validate_state_directory(ancestor, owner, ancestor == parent)?;
+    }
+    validate_database_files(db, owner)
+}
+
+fn validate_state_directory(
+    path: &std::path::Path,
+    owner: u32,
+    private: bool,
+) -> anyhow::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let m = std::fs::symlink_metadata(path)?;
+    anyhow::ensure!(
+        m.is_dir() && m.uid() == owner && m.gid() == owner && m.mode() & 0o022 == 0,
+        "unsafe scanner state ancestor: {}",
+        path.display()
+    );
+    anyhow::ensure!(
+        !private || m.mode() & 0o7777 == 0o700,
+        "scanner state must be provisioned root:root 0700 by tmpfiles"
+    );
+    Ok(())
+}
+
+fn validate_database_files(db: &std::path::Path, owner: u32) -> anyhow::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    for suffix in ["", "-wal", "-shm", "-journal"] {
+        let path = std::path::PathBuf::from(format!("{}{suffix}", db.display()));
+        match std::fs::symlink_metadata(&path) {
+            Ok(m) => anyhow::ensure!(
+                m.is_file()
+                    && m.uid() == owner
+                    && m.gid() == owner
+                    && m.nlink() == 1
+                    && m.mode() & 0o7777 == 0o600,
+                "unsafe scanner database: {}",
+                path.display()
+            ),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(())
+}
+
 fn main() -> anyhow::Result<()> {
     init_logging();
     let elevated = unsafe { libc::geteuid() } == 0;
     let args = parse_args_from(std::env::args().skip(1), elevated)?;
     if elevated {
         start_privileged_watchdog()?;
+        // tmpfiles provisions this state; never create/chown an unsafe tree.
+        unsafe {
+            libc::umask(0o077);
+        }
+        validate_private_state(&args.db, 0)?;
     }
 
-    if let Some(parent) = args.db.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)?;
+    if !elevated {
+        if let Some(parent) = args.db.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)?;
+            }
         }
     }
-
     let store = ScanStore::open(&args.db)?;
     let facts = LiveSystem::new();
     let checksum = deployment_checksum();
@@ -220,6 +274,66 @@ fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod argument_tests {
     use super::*;
+    use std::process::Command;
+    #[test]
+    fn private_directory_requires_safe_preprovisioning() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let work = tempfile::tempdir().unwrap();
+        let dir = work.path().join("private");
+        let uid = unsafe { libc::geteuid() };
+        assert!(validate_state_directory(&dir, uid, true).is_err());
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(validate_state_directory(&dir, uid, true).is_ok());
+        assert!(validate_state_directory(&dir, uid.wrapping_add(1), true).is_err());
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(validate_state_directory(&dir, uid, false).is_ok());
+        assert!(validate_state_directory(&dir, uid, true).is_err());
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(validate_state_directory(&dir, uid, false).is_err());
+        let link = work.path().join("link");
+        symlink(&dir, &link).unwrap();
+        assert!(validate_state_directory(&link, uid, false).is_err());
+    }
+
+    #[test]
+    fn rejects_unsafe_existing_database_and_sidecars() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let work = tempfile::tempdir().unwrap();
+        let db = work.path().join("scans.db");
+        let uid = unsafe { libc::geteuid() };
+        assert!(validate_database_files(&db, uid).is_ok());
+        std::fs::write(&db, b"fixture").unwrap();
+        std::fs::set_permissions(&db, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(validate_database_files(&db, uid).is_ok());
+        assert!(validate_database_files(&db, uid.wrapping_add(1)).is_err());
+        for suffix in ["-wal", "-shm", "-journal"] {
+            let sidecar = work.path().join(format!("scans.db{suffix}"));
+            symlink(&db, &sidecar).unwrap();
+            assert!(validate_database_files(&db, uid).is_err());
+            std::fs::remove_file(&sidecar).unwrap();
+            std::fs::hard_link(&db, &sidecar).unwrap();
+            assert!(validate_database_files(&db, uid).is_err());
+            std::fs::remove_file(&sidecar).unwrap();
+            std::fs::create_dir(&sidecar).unwrap();
+            assert!(validate_database_files(&db, uid).is_err());
+            std::fs::remove_dir(&sidecar).unwrap();
+            std::fs::write(&sidecar, b"fixture").unwrap();
+            std::fs::set_permissions(&sidecar, std::fs::Permissions::from_mode(0o644)).unwrap();
+            assert!(validate_database_files(&db, uid).is_err());
+            std::fs::set_permissions(&sidecar, std::fs::Permissions::from_mode(0o600)).unwrap();
+            assert!(validate_database_files(&db, uid).is_ok());
+            std::fs::remove_file(&sidecar).unwrap();
+        }
+        std::fs::set_permissions(&db, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(validate_database_files(&db, uid).is_err());
+        std::fs::remove_file(&db).unwrap();
+        symlink("/dev/null", &db).unwrap();
+        assert!(validate_database_files(&db, uid).is_err());
+        // /tmp is intentionally writable; no elevated state may live below it.
+        assert!(validate_private_state(&db, uid).is_err());
+    }
+
     #[test]
     fn watchdog_kills_its_group_with_a_bounded_best_effort_diagnostic() {
         use std::os::unix::process::ExitStatusExt;
@@ -246,8 +360,7 @@ mod argument_tests {
             start_privileged_watchdog_after(Duration::from_millis(50)).unwrap();
             // This check child inherits the scanner's group and both pipes. A
             // surviving check would prevent wait_with_output from completing.
-            let mut check = Command::new("sleep").arg("20").spawn().unwrap();
-            let _ = check.wait();
+            let _ = scanner_privileged::command::run("sleep", &["20"]);
             panic!("watchdog did not terminate the fixture");
         }
         for mode in ["normal", "full", "closed"] {

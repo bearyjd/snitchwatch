@@ -93,6 +93,7 @@ fn main() {
                 "qml/GeoDatabaseSettings.qml",
                 "qml/ScannerPage.qml",
                 "qml/DaemonHealthPage.qml",
+                "qml/DenyStatusSection.qml",
             ]),
     )
     .qt_module("Widgets")
@@ -127,7 +128,8 @@ fn main() {
     .file("src/geo_model.rs")
     .file("src/scanner_controller.rs")
     .file("src/learning_review_controller.rs")
-    .file("src/daemon_health_model.rs");
+    .file("src/daemon_health_model.rs")
+    .file("src/deny_status_model.rs");
     // SAFETY: only add the crate-owned header directory; preserve builder flags.
     unsafe {
         builder.cc_builder(|cc| {
