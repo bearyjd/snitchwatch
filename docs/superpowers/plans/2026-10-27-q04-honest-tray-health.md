@@ -1,9 +1,9 @@
 # Q04: honest tray and health state
 
-Status: plan only, stopped before implementation (2026-10-26). The actual
-process-monitor mode is not available to the GUI, and the change that would
-expose it is an upstream daemon change, not a GUI or bridge one. The owner
-chooses how to proceed (options at the end). Roadmap:
+Status: the owner chose option A on 2026-10-26 (GUI-only, no bridge or wire
+change); implemented test-first on `feat/tray-health-honest-state`. The actual
+process-monitor mode stays "not reported by opensnitchd" until an upstream
+daemon change exposes it (tracked with Q05/r16). Roadmap:
 `../specs/2026-10-24-competitive-feature-roadmap.md` Q04 and "Dual-mode GUI
 requirement"; parent: `2026-10-24-overnight-gui-fixes-and-features.md` Task 2.
 
@@ -35,7 +35,50 @@ receives is the configured one, and showing that as the mode would break the
 upstream daemon change (for example, the running method in `ClientConfig` or a
 monitor-state alert on start and fallback), which belongs with Q05/r16.
 
-## What could still ship GUI-only (not started)
+## Option A as built
+1. Tray tooltip and Daemon Health page both carry the fixed line "Process
+   monitor: not reported by opensnitchd". It is a constant: no diagnostics
+   report, About info (`ebpf_commit`), or daemon config value can turn it into
+   a mode. `DaemonHealthPage.qml`'s "does not report the active method" sentence
+   stays.
+2. Tray tooltip adds a firewall line when the `FirewallRunning` check failed.
+   The bridge stores `is_firewall_running` at `subscribe()` and re-sends that
+   same value in every later report (alert, recheck, watchdog), so the arrival
+   time of a report is not the snapshot's time, and the connect time itself is
+   not on the wire. Rule, in `src/tray_health.rs`:
+   - the time is stamped only when the GUI sees the status change from a value
+     it saw earlier in the same bridge session (for example Unknown after the
+     watchdog reset, then Failed): "Firewall not running as of opensnitchd's
+     last connection (noticed HH:MM)". The snapshot is from that time or
+     earlier; "noticed" says so.
+   - an identical re-sent value never re-stamps, so a stale snapshot keeps its
+     first time.
+   - a failure already present in the first report the tray sees gets no time:
+     "... (time not known)".
+   - a failure carrying a daemon alert (detail other than the bare snapshot
+     text) reads "Firewall issue reported by opensnitchd", not "not running".
+   - a new bridge session clears the stamp.
+   Local time comes from `QDateTime::current_date_time()` plus
+   `set_msecs_since_epoch`, also now used for "paused until", replacing
+   `QTimeZone::system_time_zone()` (UTC in the sandbox).
+3. Visible "filtering" wording becomes "prompting": idle "Snitchwatch —
+   prompting on", "prompting paused [until HH:MM]", "Resume prompting",
+   "Prompting is paused, but …", "Snitchwatch — prompting resumed", "Allowed
+   once (prompting was paused)". A pause only auto-answers prompts; existing
+   rules keep applying. Internal tokens (`pause_filtering`,
+   `resume_filtering`, `resumeFiltering`, `SetFilteringPaused`) are contracts
+   and stay. The Tauri shell (being replaced) and bridge comments are out of
+   scope.
+
+Tests (written first): `tray_health` unit tests for each firewall rule above,
+including the stale re-send and first-seen cases; monitor text unchanged for
+`EbpfSupport` Ok/Failed/Unknown reports and an `AboutInfo` with an
+`ebpf_commit`; tooltip composition never hides down/paused/pending; a source
+guard that tray and health sources carry "not reported by opensnitchd" and no
+daemon-config reads; updated tray/menu/notice wording tests. Mutation runs are
+recorded in the PR.
+
+## What the plan listed as GUI-only (before the decision)
 1. Tray: add a monitor line that's always "Process monitor: not reported by
    opensnitchd" until the wire carries it, so the tray never implies a mode.
 2. Tray: show "firewall not running" from the `FirewallRunning` check, and say
