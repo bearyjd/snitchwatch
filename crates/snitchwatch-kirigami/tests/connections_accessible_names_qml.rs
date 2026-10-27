@@ -104,6 +104,12 @@ Window {
         }
         return null;
     }
+    // A shown decision selector, by objectName.
+    function selector(key) {
+        const box = probe.find(page, it => it.objectName === key && it.visible && it.enabled);
+        probe.expect(box !== null, "no visible, enabled " + key);
+        return box;
+    }
     function headerOrNull(level, key) {
         for (let i = 0; i < probe.list.count; ++i) {
             const item = probe.list.itemAtIndex(i);
@@ -146,6 +152,8 @@ Window {
     // Controls checked per sweep, by role.
     property var seen: ({})
     property var names: ({})
+    // What each decision selector must be called after the change.
+    property var want: ({})
     // Words that name a kind of control, not this one.
     readonly property var generic: ["button", "push button", "combobox", "combo box", "switch",
         "checkbox", "check box", "menuitem", "menu item", "item", "textfield", "text field",
@@ -232,16 +240,29 @@ Window {
                     probe.expect(absent.length === 0, "expected names not found: " + JSON.stringify(absent));
                     probe.expect(Object.keys(probe.names).some(n => n.indexOf("Search connections.") === 0),
                                  "the search field lost its name");
-                    // A choice and a model change: names follow the values.
-                    const scope = probe.find(page, it => String(it.Accessible && it.Accessible.name).indexOf("Scope:") === 0);
-                    scope.currentIndex = 1;
+                    // A choice in each selector, found by objectName (never by
+                    // its name): both names must follow the new values.
+                    for (const [key, label] of [["scopeSelector", "Scope: "], ["durationSelector", "Duration: "]]) {
+                        const box = probe.selector(key);
+                        if (!box) continue;
+                        const before = String(box.Accessible.name);
+                        box.currentIndex = (box.currentIndex + 1) % box.count;
+                        probe.want[key] = label + box.textAt(box.currentIndex);
+                        probe.expect(probe.want[key] !== before, key + " has a single choice");
+                        probe.expect(String(box.Accessible.name) === probe.want[key],
+                                     key + " is called '" + box.Accessible.name + "' after the choice, not '"
+                                     + probe.want[key] + "'");
+                    }
                     probe.send({ action: "insertConnectionRows", rows: [probe.row("n", "new.example.org", null, null)] });
                 } else if (probe.phase === 9) {
                     probe.names = {};
                     probe.sweep("after a change");
-                    probe.expect(probe.names["Scope: Any host on this domain"] === true,
-                                 "the Scope name did not follow its value: "
-                                 + JSON.stringify(Object.keys(probe.names).filter(n => n.indexOf("Scope") === 0)));
+                    for (const key of ["scopeSelector", "durationSelector"]) {
+                        const box = probe.selector(key);
+                        probe.expect(!!box && String(box.Accessible.name) === probe.want[key],
+                                     key + " after the model change: '" + (box && box.Accessible.name)
+                                     + "', expected '" + probe.want[key] + "'");
+                    }
                     const bad = Object.keys(probe.missing);
                     probe.expect(bad.length === 0, bad.length + " interactive controls lack a meaningful Accessible.name: "
                         + bad.map(k => k + " (" + probe.missing[k] + ")").join("; "));

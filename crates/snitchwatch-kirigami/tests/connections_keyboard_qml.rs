@@ -343,9 +343,10 @@ Window {
                 } else if (probe.phase === 20) {
                     probe.expect(!probe.menu.visible, "the menu opened from the search field");
                     // Nor does the decision prompt in the inspector.
-                    const scope = probe.find(page, it => it.Accessible && String(it.Accessible.name).indexOf("Scope:") === 0);
-                    probe.expect(scope !== null, "no decision prompt in the inspector");
+                    const scope = probe.find(page, it => it.objectName === "scopeSelector" && it.visible && it.enabled);
+                    probe.expect(scope !== null, "no visible, enabled Scope selector in the inspector");
                     if (scope) scope.forceActiveFocus();
+                    probe.expect(!!scope && scope.activeFocus, "the Scope selector did not take focus");
                     tc.keyClick(Qt.Key_Menu);
                     tc.keyClick(Qt.Key_F10, Qt.ShiftModifier);
                 } else if (probe.phase === 21) {

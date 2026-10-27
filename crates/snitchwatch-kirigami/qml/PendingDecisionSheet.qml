@@ -136,6 +136,7 @@ ColumnLayout {
         }
         Controls.ComboBox {
             id: scopeBox
+            objectName: "scopeSelector"
             Layout.fillWidth: true
             Accessible.name: "Scope: " + displayText
             textRole: "label"
@@ -167,6 +168,7 @@ ColumnLayout {
         }
         Controls.ComboBox {
             id: durationBox
+            objectName: "durationSelector"
             Layout.fillWidth: true
             Accessible.name: "Duration: " + displayText
             textRole: "label"
