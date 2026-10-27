@@ -132,7 +132,7 @@ Window {
                         rows: [probe.row("a", "x.example.com"), probe.row("b", "y.example.com"), handled]
                     }));
                     model.applyServerMessageJson(JSON.stringify({ action: "setRules", rules: [
-                        { name: "snitchwatch-default-chronyd", enabled: true, action: "allow" }] }));
+                        { name: "snitchwatch-default-chronyd", enabled: true, action: "allow", toggleable: true }] }));
                 } else if (probe.phase === 6) {
                     probe.expect(model.backgroundCount === 1 && model.baselineNotice !== "",
                                  "the background group is not showing: " + model.backgroundCount);

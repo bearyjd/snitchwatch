@@ -258,6 +258,12 @@ pub mod qobject {
         #[cxx_name = "dismissBaselineNotice"]
         fn dismiss_baseline_notice(self: Pin<&mut ConnectionsModel>);
 
+        /// Test seam: queue a JSON message in the grouped debounce buffer
+        /// as the live feed does, for the next flush to apply.
+        #[qinvokable]
+        #[cxx_name = "bufferServerMessageJsonForTests"]
+        fn buffer_server_message_json_for_tests(self: Pin<&mut ConnectionsModel>, json: &QString);
+
         // --- Selection tracking (Task 8 auto-select) ------------------------
         /// Tell the model which row the user currently has selected (empty =
         /// none), so the auto-select policy can avoid stealing focus from a

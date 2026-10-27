@@ -35,6 +35,7 @@ fn collapsing_store() -> RowStore {
     let rule = Rule {
         name: RULE.to_string(),
         enabled: true,
+        toggleable: Some(true),
         ..Rule::default()
     };
     store.set_attention_facts(Arc::new(AttentionFacts::new(

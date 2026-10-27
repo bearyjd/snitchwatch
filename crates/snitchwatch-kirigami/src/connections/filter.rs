@@ -266,6 +266,12 @@ impl ConnectionFilter {
         self.attention = Some(facts);
     }
 
+    /// This filter with `current`'s "handled" facts instead of its own.
+    pub fn with_attention_of(mut self, current: &Self) -> Self {
+        self.attention = current.attention.clone();
+        self
+    }
+
     pub fn attention_facts(&self) -> Option<&AttentionFacts> {
         self.attention.as_deref()
     }

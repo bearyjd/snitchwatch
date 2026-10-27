@@ -126,3 +126,14 @@ returns early on equal filters. The model forces this on
   the model queues the last save and waits at most 1 s, never syncing on
   the Qt thread.
 - The group counts an update only for a row the store holds.
+
+## Review fixes, round 3 (2026-10-27)
+- A rule counts only if `Rule::source()` is `Recommended` (the reserved
+  prefix AND the bridge marking it toggleable); a prefixed rule with
+  `toggleable` false or missing is a user rule.
+- `apply_filter` keeps the "handled" facts its flush left, never those of
+  the filter cloned before it, so a control after a buffered reconnect
+  cannot restore the old session's rules.
+- An update for an id the store does not hold flags no new program.
+- Known limit: a final save still contended at shutdown (1 s wait) is lost;
+  the next run's sightings save it again.

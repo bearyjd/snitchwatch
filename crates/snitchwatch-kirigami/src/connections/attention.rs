@@ -4,7 +4,8 @@
 //!
 //! A row is handled only if ALL hold: it is not deferred and not decided by
 //! the firewall's default action; its verdict is allow; the rule that matched
-//! it is a recommended rule (reserved `snitchwatch-default-` prefix) that is
+//! it is a recommended rule (`RuleSource::Recommended`: the reserved
+//! `snitchwatch-default-` prefix and marked toggleable by the bridge) that is
 //! in the CURRENT rules list and enabled; and its program has been seen
 //! before. Everything else needs attention. Recommended rules match an exact
 //! `/usr` executable path, so a program cannot reach this by choosing its
@@ -13,11 +14,10 @@
 
 use std::collections::{HashMap, HashSet};
 
-use snitchwatch_bridge::rule_name::CURATED_DEFAULT_RULE_NAME_PREFIX;
 use snitchwatch_bridge::ws_messages::ConnectionRow;
 
 use super::row_store::{matched_rule_name, Verdict};
-use crate::rules::row_store::Rule;
+use crate::rules::row_store::{Rule, RuleSource};
 
 /// What the "handled" decision reads besides the row itself.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -32,7 +32,9 @@ impl AttentionFacts {
     pub fn new<'a>(rules: &[Rule], seen: impl IntoIterator<Item = &'a str>) -> Self {
         let recommended = rules
             .iter()
-            .filter(|rule| rule.enabled && rule.name.starts_with(CURATED_DEFAULT_RULE_NAME_PREFIX))
+            // `Recommended` is the reserved prefix AND the bridge marking the
+            // rule toggleable; a rule merely named like one is a user rule.
+            .filter(|rule| rule.enabled && rule.source() == RuleSource::Recommended)
             .map(|rule| rule.name.clone())
             .collect();
         Self {

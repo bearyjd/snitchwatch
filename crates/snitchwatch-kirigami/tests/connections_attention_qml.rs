@@ -71,7 +71,7 @@ Window {
     function send(msg) { model.applyServerMessageJson(JSON.stringify(msg)); }
     function rules(enabled) {
         probe.send({ action: "setRules", rules: [
-            { name: probe.rec, enabled: enabled, action: "allow" },
+            { name: probe.rec, enabled: enabled, action: "allow", toggleable: true },
             { name: "allow-ntp-host", enabled: true, action: "allow" }] });
     }
     function expect(ok, what) { if (!ok) probe.failures.push(what); }
@@ -93,7 +93,7 @@ Window {
         probe.expect(model.backgroundCount === 0 && model.matchingCount === model.totalCount,
                      mode + ": replayed rows collapsed on the old session's rules: "
                      + model.matchingCount + "/" + model.totalCount);
-        probe.send({ action: "updateRules", rules: [{ name: probe.rec, enabled: true, action: "allow" }] });
+        probe.send({ action: "updateRules", rules: [{ name: probe.rec, enabled: true, action: "allow", toggleable: true }] });
         probe.expect(model.matchingCount === model.totalCount,
                      mode + ": an UpdateRules restored collapsing before the snapshot");
         probe.send({ action: "setRules", rules: [{ name: "allow-ntp-host", enabled: true, action: "allow" }] });
@@ -180,13 +180,32 @@ Window {
                     probe.expect(probe.shows("pending") && !probe.shows("one") && !probe.shows("two")
                                  && !probe.shows("denied"), "a delta mis-decided a row");
                     probe.expect(model.backgroundCount === 3, "per-row counts: " + model.backgroundCount);
-                    // An update for an id the store does not hold changes nothing.
+                    // An update for an id the store does not hold changes
+                    // nothing, not even for a program never seen.
+                    const newBefore = model.newProgramCount;
                     probe.send({ action: "updateConnectionRows", rows: [
-                        probe.row("ghost", "/usr/sbin/chronyd", "allow", probe.rec)] });
+                        probe.row("ghost", "/usr/sbin/chronyd", "allow", probe.rec),
+                        probe.row("ghost2", "/usr/sbin/ghost", "allow", probe.rec)] });
                     probe.expect(model.backgroundCount === 3 && model.totalCount === 8,
                                  "a phantom update was counted: " + model.backgroundCount);
+                    probe.expect(model.newProgramCount === newBefore,
+                                 "a phantom update flagged a new program: " + model.newProgramCount);
                     model.setGroupedMode(true);
                     probe.reconnectWithoutTheRule("grouped");
+                    // A genuinely buffered reconnect, then a control: the
+                    // control's filter was cloned before its flush revoked
+                    // collapsing, and must not bring the old facts back.
+                    model.setNeedsAttention(false);
+                    const buffer = msg => model.bufferServerMessageJsonForTests(JSON.stringify(msg));
+                    buffer({ action: "clearConnectionRows" });
+                    buffer({ action: "insertConnectionRows", rows: probe.snapshotRows() });
+                    model.setNeedsAttention(true);
+                    probe.expect(model.totalCount === 7, "the buffer was not flushed: " + model.totalCount);
+                    probe.expect(model.backgroundCount === 0 && model.matchingCount === model.totalCount,
+                                 "a control restored the old session's rules: "
+                                 + model.matchingCount + "/" + model.totalCount);
+                    probe.rules(true);
+                    probe.expect(model.matchingCount === model.totalCount - 1, "rules did not re-arm");
                     model.setGroupedMode(false);
                 } else if (probe.phase === 3) {
                     // A disabled rule, then an empty (unknown) list: fail open.

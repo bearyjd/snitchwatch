@@ -32,6 +32,21 @@ impl qobject::ConnectionsModel {
         self.refresh_attention_counts();
     }
 
+    pub(super) fn buffer_server_message_json_for_tests(mut self: Pin<&mut Self>, json: &QString) {
+        match serde_json::from_str::<ServerMessage>(&json.to_string()) {
+            Ok(message) => {
+                self.as_mut()
+                    .rust_mut()
+                    .pending_grouped_msgs
+                    .push(BufferedConnectionMessage {
+                        connection_id: None,
+                        message,
+                    })
+            }
+            Err(e) => tracing::warn!(error = %e, "ConnectionsModel: bad ServerMessage JSON"),
+        }
+    }
+
     /// The live GUI keeps its seen set in the config directory; headless
     /// tests and demo mode never touch it (`SeenPrograms::default`).
     pub(super) fn use_persisted_seen_programs(mut self: Pin<&mut Self>) {

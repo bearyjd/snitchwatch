@@ -464,6 +464,7 @@ fn another_guis_acknowledgement_never_counts_as_this_ones() {
     let rule = crate::rules::row_store::Rule {
         name: "snitchwatch-default-x".to_string(),
         enabled: true,
+        toggleable: Some(true),
         ..Default::default()
     };
     let facts = AttentionFacts::new(&[rule], a.seen_paths());

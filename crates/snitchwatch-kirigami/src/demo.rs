@@ -481,7 +481,7 @@ pub fn demo_rows(now_ms: i64) -> Vec<ConnectionRow> {
 pub fn demo_rules() -> Vec<serde_json::Value> {
     [NM_RULE, RESOLVED_RULE]
         .into_iter()
-        .map(|name| serde_json::json!({ "name": name, "enabled": true, "action": "allow" }))
+        .map(|name| serde_json::json!({ "name": name, "enabled": true, "action": "allow", "toggleable": true }))
         .collect()
 }
 

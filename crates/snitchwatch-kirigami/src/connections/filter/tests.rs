@@ -535,6 +535,7 @@ fn attention_facts() -> Arc<AttentionFacts> {
     let rule = crate::rules::row_store::Rule {
         name: "snitchwatch-default-chronyd".to_string(),
         enabled: true,
+        toggleable: Some(true),
         ..Default::default()
     };
     Arc::new(AttentionFacts::new(&[rule], ["/usr/sbin/chronyd"]))

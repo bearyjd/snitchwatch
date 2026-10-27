@@ -8,6 +8,7 @@ fn rule(name: &str, enabled: bool) -> Rule {
         name: name.to_string(),
         enabled,
         action: "allow".to_string(),
+        toggleable: Some(true),
         ..Rule::default()
     }
 }
@@ -216,4 +217,17 @@ fn handled_counts_follow_each_row_delta() {
     assert_eq!(counts.rows(), 0, "no facts, nothing handled");
     counts.rebuild(false, Some(&facts), &[handled_row()]);
     assert_eq!(counts.rows(), 0, "off does no work");
+}
+
+#[test]
+fn a_prefixed_rule_the_bridge_does_not_mark_toggleable_is_a_user_rule() {
+    for toggleable in [Some(false), None] {
+        let named = Rule {
+            toggleable,
+            ..rule(RECOMMENDED, true)
+        };
+        let facts = AttentionFacts::new(&[named], [SSHD]);
+        assert!(!facts.collapses_anything(), "{toggleable:?}");
+        assert!(!facts.is_handled(&handled_row()), "{toggleable:?}");
+    }
 }

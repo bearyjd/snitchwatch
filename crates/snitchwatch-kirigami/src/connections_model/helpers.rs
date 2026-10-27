@@ -100,21 +100,23 @@ pub(super) fn mirror_into_grouping(rust: &mut ConnectionsModelRust, msg: &Server
             for row in rows {
                 rust.grouping.upsert_row(row);
             }
-            // First-seen state (0c): flags only, never visibility.
-            let paths = rows.iter().filter_map(|row| row.process_path.as_deref());
-            rust.seen.observe(paths, now_ms());
             let ConnectionsModelRust {
                 store,
                 handled_counts,
+                seen,
                 ..
             } = &mut *rust;
             let update = matches!(msg, ServerMessage::UpdateConnectionRows { .. });
-            for row in rows {
-                // The store ignores an update for an id it does not hold, so
-                // the group must not count one either.
-                if update && store.row_by_id(&row.id).is_none() {
-                    continue;
-                }
+            // The store ignores an update for an id it does not hold, so
+            // neither the group nor the first-seen state may count one.
+            let held: Vec<&ConnectionRow> = rows
+                .iter()
+                .filter(|row| !update || store.row_by_id(&row.id).is_some())
+                .collect();
+            // First-seen state (0c): flags only, never visibility.
+            let paths = held.iter().filter_map(|row| row.process_path.as_deref());
+            seen.observe(paths, now_ms());
+            for row in held {
                 handled_counts.upsert(store.filter().attention_facts(), row);
             }
         }

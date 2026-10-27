@@ -399,6 +399,10 @@ impl qobject::ConnectionsModel {
         // Anything still in the grouped debounce buffer must land first so the
         // filter is computed over current data.
         self.as_mut().flush_grouped_messages();
+        // `filter` was cloned before that flush: keep the "handled" facts
+        // the flush left (a clear in it revokes collapsing until the new
+        // session's rules), never the clone's older ones (0c).
+        let filter = filter.with_attention_of(self.store.filter());
         if self.grouped {
             self.as_mut().rust_mut().store.set_filter(filter);
             let projection = self.compute_grouped_projection();
