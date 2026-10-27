@@ -466,33 +466,185 @@ fn nft_table_lets_only_root_connect_to_the_listener() {
             "missing `{rule}`"
         );
     }
+    assert!(active
+        .iter()
+        .any(|line| line.starts_with("type filter hook input ")));
+    for daddr in ["ip daddr 127.0.0.0/8", "ip6 daddr ::1"] {
+        let rule = format!("iifname != \"lo\" {daddr} tcp dport {port} reject");
+        assert!(
+            active.iter().any(|line| line.starts_with(&rule)),
+            "missing routed-packet rule `{rule}`"
+        );
+    }
     assert!(
         !active.iter().any(|line| line.contains("flush ruleset")),
         "never touch other tables (firewalld, opensnitchd)"
     );
 }
 
+const LISTENER_UNIT: &str = "packaging/endpoint-events/snitchwatch-endpoint-events.service";
+
+/// The `Key=` values of a unit's active lines, split on whitespace.
+fn unit_values(body: &str, key: &str) -> Vec<String> {
+    let prefix = format!("{key}=");
+    body.lines()
+        .map(str::trim)
+        .filter(|line| !line.starts_with('#'))
+        .filter_map(|line| line.strip_prefix(&prefix))
+        .flat_map(|value| value.split_whitespace().map(str::to_string))
+        .collect()
+}
+
+/// codex round 2, HIGH: the table's unit loads it, reloads it atomically
+/// (never deleting it), and deletes it only on stop.
 #[test]
-fn nft_unit_loads_the_table_before_either_end_starts() {
+fn nft_unit_loads_reloads_atomically_and_deletes_only_on_stop() {
     let body = read(NFT_UNIT);
-    for needle in [
-        "Type=oneshot",
-        "RemainAfterExit=yes",
-        "ExecStart=/usr/sbin/nft -f /etc/nftables/snitchwatch-endpoint-events.nft",
-        "ExecStop=/usr/sbin/nft delete table inet snitchwatch_endpoint_events",
-        "WantedBy=multi-user.target",
-    ] {
-        assert!(body.contains(needle), "nft unit missing `{needle}`");
-    }
-    let before = body
+    let load = "/usr/sbin/nft -f /etc/nftables/snitchwatch-endpoint-events.nft";
+    assert_eq!(unit_values(&body, "Type"), ["oneshot"]);
+    assert_eq!(unit_values(&body, "RemainAfterExit"), ["yes"]);
+    assert_eq!(unit_values(&body, "ExecStart").join(" "), load);
+    assert_eq!(unit_values(&body, "ExecReload").join(" "), load);
+    assert_eq!(
+        unit_values(&body, "ExecStop").join(" "),
+        "/usr/sbin/nft delete table inet snitchwatch_endpoint_events"
+    );
+    // The file itself replaces the table in one transaction.
+    let nft = read(NFT);
+    let active: Vec<&str> = nft
         .lines()
-        .find_map(|line| line.strip_prefix("Before="))
-        .expect("Before=");
-    for unit in ["rsyslog.service", "opensnitch.service"] {
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .collect();
+    assert_eq!(
+        &active[..2],
+        [
+            "table inet snitchwatch_endpoint_events",
+            "delete table inet snitchwatch_endpoint_events"
+        ]
+    );
+}
+
+/// codex round 2, HIGH + MEDIUM: the listener is its own rsyslog instance,
+/// which exists only while the table does and never starts on a config
+/// error.
+#[test]
+fn listener_is_a_separate_rsyslog_instance_bound_to_the_table() {
+    let body = read(LISTENER_UNIT);
+    let nft_unit = "snitchwatch-endpoint-events-nft.service";
+    for key in ["BindsTo", "After", "PartOf"] {
         assert!(
-            before.split_whitespace().any(|u| u == unit),
-            "Before= {unit}"
+            unit_values(&body, key).iter().any(|unit| unit == nft_unit),
+            "listener {key}= must name {nft_unit}"
         );
+    }
+    assert!(unit_values(&body, "Before").contains(&"opensnitch.service".to_string()));
+    let conf = "/etc/snitchwatch-endpoint-events/rsyslog.conf";
+    assert_eq!(
+        unit_values(&body, "ExecStartPre").join(" "),
+        format!("/usr/sbin/rsyslogd -N1 -f {conf}")
+    );
+    assert_eq!(
+        unit_values(&body, "ExecStart").join(" "),
+        format!("/usr/sbin/rsyslogd -n -iNONE -f {conf}")
+    );
+    assert_eq!(unit_values(&body, "UMask"), ["0077"]);
+
+    // Its config is a whole main config of its own: no host inputs or
+    // sinks, and it refuses to start unclean.
+    let active = rsyslog_active();
+    let global = statements(&active, "global").join(" ");
+    assert_eq!(
+        param(&global, "abortOnUncleanConfig").as_deref(),
+        Some("on")
+    );
+    assert_eq!(
+        param(&global, "workDirectory").as_deref(),
+        Some("/var/lib/snitchwatch-endpoint-events")
+    );
+    let modules: Vec<String> = statements(&active, "module")
+        .iter()
+        .filter_map(|body| param(body, "load"))
+        .collect();
+    assert_eq!(modules, ["imtcp", "mmjsonparse"]);
+    assert!(!active.contains("include("), "no includes");
+
+    // The host's rsyslog never carries the listener.
+    let readme = read(README);
+    assert!(!readme.contains("/etc/rsyslog.d/snitchwatch"));
+}
+
+/// The drop-in's uint32 pattern, applied by hand (no regex crate): each
+/// alternative is a fixed-length digit template.
+fn regex_lite_uint32() -> impl Fn(&str) -> bool {
+    let active = rsyslog_active();
+    let needle = "re_match($!Event!user_id, \"^(";
+    let start = active.find(needle).unwrap() + needle.len();
+    let end = start + active[start..].find(")\\$").unwrap();
+    let alternatives: Vec<String> = active[start..end].split('|').map(str::to_string).collect();
+    move |value: &str| alternatives.iter().any(|alt| template_matches(alt, value))
+}
+
+/// Whether `value` matches a template like `42[0-8][0-9]{7}` or `[0-9]{1,9}`
+/// (literal digits, `[a-b]` ranges, `{n}` or `{m,n}` repeats).
+fn template_matches(template: &str, value: &str) -> bool {
+    let mut atoms: Vec<(char, char, usize, usize)> = Vec::new();
+    let chars: Vec<char> = template.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let (lo, hi) = if chars[i] == '[' {
+            let atom = (chars[i + 1], chars[i + 3]);
+            i += 5;
+            atom
+        } else {
+            i += 1;
+            (chars[i - 1], chars[i - 1])
+        };
+        let (mut min, mut max) = (1, 1);
+        if i < chars.len() && chars[i] == '{' {
+            let close = i + chars[i..].iter().position(|c| *c == '}').unwrap();
+            let spec: String = chars[i + 1..close].iter().collect();
+            let (a, b) = spec.split_once(',').unwrap_or((&spec, &spec));
+            (min, max) = (a.parse().unwrap(), b.parse().unwrap());
+            i = close + 1;
+        }
+        atoms.push((lo, hi, min, max));
+    }
+    fn walk(atoms: &[(char, char, usize, usize)], value: &[char]) -> bool {
+        let Some(&(lo, hi, min, max)) = atoms.first() else {
+            return value.is_empty();
+        };
+        (min..=max.min(value.len())).any(|n| {
+            value[..n].iter().all(|c| (lo..=hi).contains(c)) && walk(&atoms[1..], &value[n..])
+        })
+    }
+    walk(&atoms, &value.chars().collect::<Vec<_>>())
+}
+
+/// codex round 2, MEDIUM: the daemon emits non-absolute paths for kernel
+/// connections and unresolved executables (procmon/details.go:258-275); the
+/// gate must keep those events. Patterns are checked as rsyslog would apply
+/// them to these producer-derived values.
+#[test]
+fn path_gate_accepts_the_daemons_kernel_and_comm_values() {
+    let active = rsyslog_active();
+    let ruleset = ruleset_block(&active);
+    assert!(ruleset.contains("$!Event!process_path == \"Kernel connection\""));
+    assert!(ruleset.contains("re_match($!Event!process_path, \"^[[:print:]]{1,15}\\$\")"));
+    assert!(ruleset.contains("re_match($!Event!protocol, \"^(tcp|udp|udplite|sctp|icmp)6?\\$\")"));
+    // uint32 by pattern: a RainerScript number literal can't hold 4294967295.
+    assert!(ruleset.contains("|429496729[0-5])\\$\")"));
+    assert!(!ruleset.contains("4294967295"));
+    let uint32 = regex_lite_uint32();
+    for (value, ok) in [
+        ("0", true),
+        ("1000", true),
+        ("4294967295", true),
+        ("4294967296", false),
+        ("9999999999", false),
+        ("42949672950", false),
+    ] {
+        assert_eq!(uint32(value), ok, "uid {value}");
     }
 }
 
@@ -563,7 +715,7 @@ fn readme_merges_atomically_as_root_and_restarts_the_fedora_unit() {
         "host-key.pem",
         "informational",
         "maxMessageSize",
-        "systemctl restart rsyslog.service",
+        "snitchwatch-endpoint-events.service",
         "snitchwatch-endpoint-events-nft.service",
         "reported by this host",
         "debug",

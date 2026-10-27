@@ -17,9 +17,19 @@ table inet snitchwatch_endpoint_events
 delete table inet snitchwatch_endpoint_events
 
 table inet snitchwatch_endpoint_events {
+    # Local sockets: only root's may connect.
     chain output {
         type filter hook output priority filter; policy accept;
         ip daddr 127.0.0.0/8 tcp dport 514 meta skuid != 0 reject with tcp reset
         ip6 daddr ::1 tcp dport 514 meta skuid != 0 reject with tcp reset
+    }
+    # Routed packets: with net.ipv4.conf.<if>.route_localnet=1 (netavark sets
+    # it on the bridges it manages), a container can send packets for
+    # 127.0.0.1 into this host. They arrive on INPUT from an interface other
+    # than lo, with no local socket for the output rule to check.
+    chain input {
+        type filter hook input priority filter; policy accept;
+        iifname != "lo" ip daddr 127.0.0.0/8 tcp dport 514 reject with tcp reset
+        iifname != "lo" ip6 daddr ::1 tcp dport 514 reject with tcp reset
     }
 }

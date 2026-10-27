@@ -51,6 +51,14 @@
 - [x] MEDIUM: ruleset's own memory-only bounded queue (`saveOnShutdown` off); over-cap fields drop the event instead of truncating (no split UTF-8); README restarts rsyslog after `-N1` and checks the listener (and a non-root refusal) before the logger.
 - [x] LOW: verify.sh compares values/types with the sample, forwards under the stock config with a disk-only main queue and greps the sinks, adds wrong-name-server and no-key cases and UTF-8 boundary events; README scopes the privacy guarantee (other loggers, debug output).
 
+### Task 2d: /codex review round 2 of #233 (2 HIGH, 2 MEDIUM, 2 LOW)
+
+- [x] HIGH, fail-open activation: the listener is `snitchwatch-endpoint-events.service` (its own rsyslog instance), `BindsTo`/`After`/`PartOf` the table's unit; the table's unit reloads atomically (`ExecReload` re-applies the replace-in-one-transaction file) and deletes only on stop. Proven under systemd: broken table means no listener; no unprotected moment across restarts.
+- [x] HIGH, routed ingress: input-hook rejects for tcp/514 to 127.0.0.0/8 and ::1 from any interface but `lo`.
+- [x] MEDIUM, broken-config fallback: separate instance, `ExecStartPre=rsyslogd -N1`, `abortOnUncleanConfig`, a default ruleset with no actions; proven a misspelt ruleset never opens 514.
+- [x] MEDIUM, path gate: accepts the daemon's `Kernel connection` and comm values (procmon/details.go:258-275); producer-derived fixtures in verify.sh.
+- [x] LOW: protocol allowlist from conman/connection.go, dotted-quad IPv4, uint32 user_id; the rest documented as shape checks Vigie must validate. verify.sh: receiver readiness plus positive controls, error-aware sink reads, the live journal, the broken-config test.
+
 ### Task 3: Real config proof
 
 - [x] `packaging/endpoint-events/verify.sh` + `just endpoint-events-verify` (podman; not in `package-check`): `-N1` under stock and minimal main configs; e2e to a TLS rsyslog receiver with a fake token in env/args, blank and non-JSON frames, a task notification; worst-case event (45 KB raw) forwarded as one frame under 8 KiB; wrong-CA receiver gets nothing; receiver requiring this host's client cert rejects one from another CA; README merge (twice) and way-back snippets run against the packaged config copy, mode stays 0600.
