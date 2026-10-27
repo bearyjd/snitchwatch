@@ -13,7 +13,7 @@ Item {
     property var page
     readonly property var verdictHelper: row.page.inlineVerdicts
     width: ListView.view ? ListView.view.width : implicitWidth
-    implicitHeight: content.implicitHeight + Kirigami.Units.smallSpacing * 2
+    implicitHeight: content.implicitHeight + verdictCounts.height + Kirigami.Units.smallSpacing * 2
 
     required property int index
     required property string rowId
@@ -40,6 +40,8 @@ Item {
     required property int groupAllowed
     required property int groupDenied
     required property int groupBlocklisted
+    required property string groupLastHour
+    required property string groupToday
     // Rule button roles (headers only; "none" and "" elsewhere).
     required property string levelRuleState
     required property string levelRuleName
@@ -161,10 +163,12 @@ Item {
         }
     }
 
+    GroupVerdictCounts { id: verdictCounts; src: row }
     RowLayout {
         id: content
         anchors.fill: parent
         anchors.margins: Kirigami.Units.smallSpacing
+        anchors.bottomMargin: Kirigami.Units.smallSpacing + verdictCounts.height
         anchors.rightMargin: Kirigami.Units.largeSpacing
         z: 1
         spacing: Kirigami.Units.largeSpacing
@@ -250,26 +254,9 @@ Item {
             Layout.alignment: Qt.AlignVCenter
         }
 
-        Rectangle {
-            // Collapsed groups expose pending connections through this badge.
-            // Use a border: Fusion/Basic can give neutral background and text
-            // the same color, making a filled badge unreadable (issue #31).
+        GroupPendingBadge {
             visible: row.isGroupHeader && row.groupPending > 0
-            color: "transparent"
-            border.color: Kirigami.Theme.neutralTextColor
-            border.width: 1
-            radius: height / 2
-            implicitWidth: pendingBadgeLabel.implicitWidth + Kirigami.Units.largeSpacing
-            implicitHeight: pendingBadgeLabel.implicitHeight + Kirigami.Units.smallSpacing
-            Layout.alignment: Qt.AlignVCenter
-
-            Controls.Label {
-                id: pendingBadgeLabel
-                anchors.centerIn: parent
-                text: row.groupPending + " pending"
-                color: Kirigami.Theme.neutralTextColor
-                font: Kirigami.Theme.smallFont
-            }
+            count: row.groupPending
         }
 
         // Batch pending decisions at every tree level. The subtree includes

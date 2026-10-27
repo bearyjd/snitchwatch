@@ -369,6 +369,14 @@ fn connections_files_stay_within_their_line_budgets() {
         ("HoverTip.qml", include_str!("../qml/HoverTip.qml")),
         ("ProgramLabel.qml", include_str!("../qml/ProgramLabel.qml")),
         (
+            "GroupVerdictCounts.qml",
+            include_str!("../qml/GroupVerdictCounts.qml"),
+        ),
+        (
+            "GroupPendingBadge.qml",
+            include_str!("../qml/GroupPendingBadge.qml"),
+        ),
+        (
             "InspectorPanel.qml",
             include_str!("../qml/InspectorPanel.qml"),
         ),

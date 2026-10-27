@@ -43,6 +43,10 @@ Window {
     height: 900
     property var failures: []
     property int phase: 0
+    // Phases 24-25 wait for readiness instead of a fixed tick: ticks spent
+    // waiting, and the remove item's last seen geometry.
+    property int waited: 0
+    property string lastGeometry: ""
     property var menuRow: null
     readonly property var liveActions: page.connectionActions
 
@@ -316,15 +320,34 @@ Window {
                         probe.pending("s:remove-refresh", "zzz", "last.net")
                     ] }));
                 } else if (probe.phase === 24) {
-                    probe.expect(probe.liveActions.menu.visible, "live reset dismissed remove-rule popup");
-                    probe.expect(probe.liveActions.target.ruleName === "rule-A", "popup did not snapshot exact rule identity");
-                    // The same node now represents another rule; keep the captured menu open
-                    // and click its actual remove item. The unseen rule must not be deleted.
-                    ruleStub.currentRule = "rule-B";
-                    probe.header(1, "example.com").levelRuleName = "rule-B";
-                    sessionModel.dataChanged();
+                    if (probe.waited === 0) {
+                        probe.expect(probe.liveActions.menu.visible, "live reset dismissed remove-rule popup");
+                        probe.expect(probe.liveActions.target.ruleName === "rule-A", "popup did not snapshot exact rule identity");
+                        // The same node now represents another rule; keep the captured menu open
+                        // and click its actual remove item. The unseen rule must not be deleted.
+                        ruleStub.currentRule = "rule-B";
+                        probe.header(1, "example.com").levelRuleName = "rule-B";
+                        sessionModel.dataChanged();
+                    }
+                    // Click only once the menu is open and the item is shown,
+                    // enabled and has kept its geometry for a tick.
+                    const menu = probe.liveActions.menu;
                     const item = probe.menuItem("removeGroupRuleAction");
+                    const g = item.mapToItem(null, 0, 0);
+                    const geometry = [g.x, g.y, item.width, item.height].join(",");
+                    const ready = menu.opened && item.visible && item.enabled && item.width > 0
+                        && geometry === probe.lastGeometry;
+                    probe.lastGeometry = geometry;
+                    if (!ready) {
+                        if (++probe.waited < 100) return;
+                        throw new Error("remove-rule item never settled: " + geometry);
+                    }
+                    probe.waited = 0;
                     tc.mouseClick(item, item.width / 2, item.height / 2);
+                } else if (probe.phase === 25) {
+                    // Wait for the delete callback before asserting.
+                    if (ruleStub.origins.length < 2 && ++probe.waited < 100) return;
+                    probe.waited = 0;
                     probe.expect(ruleStub.calls.length === 1,
                                  "remove-rule pick deleted replacement: " + JSON.stringify(ruleStub.calls));
                     probe.expect(JSON.stringify(ruleStub.origins[1]) === JSON.stringify(["delete", "1:", "rule-A", "allow"]),

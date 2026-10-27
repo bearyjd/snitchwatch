@@ -36,6 +36,8 @@ fn main() {
                 "qml/StackNav.qml",
                 "qml/HoverTip.qml",
                 "qml/ProgramLabel.qml",
+                "qml/GroupVerdictCounts.qml",
+                "qml/GroupPendingBadge.qml",
                 "qml/InspectorState.qml",
                 "qml/InspectorPanel.qml",
                 "qml/ConnectionDetailPage.qml",

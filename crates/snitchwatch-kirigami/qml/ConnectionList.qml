@@ -15,6 +15,16 @@ Item {
     Kirigami.Theme.colorSet: Kirigami.Theme.View
     Kirigami.Theme.inherit: false
 
+    // Phase 0b: the headers' "last hour" / "today" counts age with the clock
+    // even when no row arrives; one coarse tick rolls them forward.
+    Timer {
+        interval: 60000
+        running: !!pane.page && !!pane.page.model
+        repeat: true
+        triggeredOnStart: true
+        onTriggered: pane.page.model.refreshVerdictWindows()
+    }
+
     function openCurrent() {
         const item = list.currentItem;
         if (item && !item.isGroupHeader) {

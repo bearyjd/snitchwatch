@@ -48,64 +48,28 @@
 //! pragmatic heuristic (last two labels, with a small hardcoded set of
 //! common two-part TLDs such as `co.uk`/`com.au`) — see its doc comment.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use super::filter::ConnectionFilter;
 use super::row_store::Verdict;
 use snitchwatch_bridge::ws_messages::ConnectionRow;
 
+mod counts;
 mod keys;
+mod windows;
 
+pub use counts::GroupCounts;
 pub(crate) use keys::is_ip;
 pub use keys::registrable_domain;
 use keys::{composite_key, domain_key, host_composite_key, host_key, process_key};
-
-/// Running aggregate counts for a group (process or domain level).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct GroupCounts {
-    pub total: usize,
-    pub pending: usize,
-    pub allowed: usize,
-    pub denied: usize,
-    pub blocklisted: usize,
-    pub other: usize,
-    pub bytes_sent: u64,
-    pub bytes_received: u64,
-}
-
-impl GroupCounts {
-    fn add(&mut self, verdict: Verdict, bytes_sent: u64, bytes_received: u64) {
-        self.total += 1;
-        self.bytes_sent += bytes_sent;
-        self.bytes_received += bytes_received;
-        match verdict {
-            Verdict::Pending => self.pending += 1,
-            Verdict::Allowed => self.allowed += 1,
-            Verdict::Denied => self.denied += 1,
-            Verdict::Blocklisted => self.blocklisted += 1,
-            Verdict::Other => self.other += 1,
-        }
-    }
-
-    fn sub(&mut self, verdict: Verdict, bytes_sent: u64, bytes_received: u64) {
-        self.total = self.total.saturating_sub(1);
-        self.bytes_sent = self.bytes_sent.saturating_sub(bytes_sent);
-        self.bytes_received = self.bytes_received.saturating_sub(bytes_received);
-        match verdict {
-            Verdict::Pending => self.pending = self.pending.saturating_sub(1),
-            Verdict::Allowed => self.allowed = self.allowed.saturating_sub(1),
-            Verdict::Denied => self.denied = self.denied.saturating_sub(1),
-            Verdict::Blocklisted => self.blocklisted = self.blocklisted.saturating_sub(1),
-            Verdict::Other => self.other = self.other.saturating_sub(1),
-        }
-    }
-}
+pub use windows::{Clock, WindowCounts, WindowFigures};
+use windows::{GroupStats, RowFacts};
 
 #[derive(Debug, Default)]
 struct HostGroup {
     /// Row ids in display order, same ordering rule as [`DomainGroup::row_order`].
     row_order: Vec<String>,
-    counts: GroupCounts,
+    stats: GroupStats,
 }
 
 #[derive(Debug, Default)]
@@ -116,7 +80,7 @@ struct DomainGroup {
     row_order: Vec<String>,
     host_order: Vec<String>,
     hosts: HashMap<String, HostGroup>,
-    counts: GroupCounts,
+    stats: GroupStats,
 }
 
 #[derive(Debug, Default)]
@@ -124,7 +88,7 @@ struct ProcessGroup {
     label: String,
     domain_order: Vec<String>,
     domains: HashMap<String, DomainGroup>,
-    counts: GroupCounts,
+    stats: GroupStats,
 }
 
 /// Cached per-row metadata needed to reverse a row's group membership and to
@@ -135,9 +99,7 @@ struct RowMeta {
     process_key: String,
     domain_key: String,
     host_key: String,
-    verdict: Verdict,
-    bytes_sent: u64,
-    bytes_received: u64,
+    facts: RowFacts,
 }
 
 /// One row of the flattened, display-ready grouped projection.
@@ -197,6 +159,14 @@ pub struct GroupTree {
     expanded_processes: HashSet<String>,
     expanded_domains: HashSet<String>,
     expanded_hosts: HashSet<String>,
+    /// What the window figures are read against (`windows::Clock`).
+    clock: Clock,
+    /// Rows whose start is too far ahead to bucket, by start minute
+    /// (`windows::track_far_future`).
+    far_future: BTreeSet<(i64, String)>,
+    /// Full window rebuilds so far (test hook for their cost).
+    #[cfg(test)]
+    rebuilds: usize,
 }
 
 impl GroupTree {
@@ -222,20 +192,21 @@ impl GroupTree {
     /// `RowStore::insert_rows`/`update_rows`'s "existing id = update in
     /// place" semantics.
     pub fn upsert_row(&mut self, row: &ConnectionRow) {
-        let verdict = Verdict::of(row);
+        let facts = RowFacts::of(row);
+        let old_facts = self.id_meta.get(&row.id).map(|m| m.facts);
+        self.track_far_future(&row.id, old_facts.as_ref(), Some(&facts));
         let pkey = process_key(row);
         let dkey = domain_key(row);
         let hkey = host_key(row);
-        let bytes_sent = row.bytes_sent;
-        let bytes_received = row.bytes_received;
 
         match self.id_meta.get(&row.id).cloned() {
             Some(old)
                 if old.process_key == pkey && old.domain_key == dkey && old.host_key == hkey =>
             {
-                self.with_counts(&pkey, &dkey, &hkey, |c| {
-                    c.sub(old.verdict, old.bytes_sent, old.bytes_received);
-                    c.add(verdict, bytes_sent, bytes_received);
+                let clock = self.clock;
+                self.with_stats(&pkey, &dkey, &hkey, |s| {
+                    s.sub(&old.facts, &clock);
+                    s.add(&facts, &clock);
                 });
                 self.relabel(&pkey, &dkey, row);
             }
@@ -254,9 +225,7 @@ impl GroupTree {
                 process_key: pkey,
                 domain_key: dkey,
                 host_key: hkey,
-                verdict,
-                bytes_sent,
-                bytes_received,
+                facts,
             },
         );
     }
@@ -274,6 +243,7 @@ impl GroupTree {
             return;
         };
         self.remove_from_group(&meta.process_key, &meta.domain_key, &meta.host_key, id);
+        self.track_far_future(id, Some(&meta.facts), None);
         self.id_meta.remove(id);
     }
 
@@ -326,6 +296,7 @@ impl GroupTree {
         self.process_order.clear();
         self.processes.clear();
         self.id_meta.clear();
+        self.far_future.clear();
         self.expanded_processes.clear();
         self.expanded_domains.clear();
         self.expanded_hosts.clear();
@@ -484,7 +455,7 @@ impl GroupTree {
                 self.id_meta
                     .get(id.as_str())
                     .map(|meta| {
-                        meta.verdict == Verdict::Pending
+                        meta.facts.verdict == Verdict::Pending
                             && match level {
                                 0 => true,
                                 1 => meta.domain_key == key,
@@ -571,7 +542,7 @@ impl GroupTree {
                 key: pkey.clone(),
                 label: pg.label.clone(),
                 expanded: process_expanded,
-                counts: pg.counts,
+                counts: pg.stats.snapshot(&self.clock),
             });
             if !process_expanded {
                 continue;
@@ -586,7 +557,7 @@ impl GroupTree {
                     key: dkey.clone(),
                     label: dg.label.clone(),
                     expanded: domain_expanded,
-                    counts: dg.counts,
+                    counts: dg.stats.snapshot(&self.clock),
                 });
                 if !domain_expanded {
                     continue;
@@ -646,7 +617,7 @@ impl GroupTree {
                 key: hkey.clone(),
                 label: hkey.clone(),
                 expanded,
-                counts: hg.counts,
+                counts: hg.stats.snapshot(&self.clock),
             });
             if !expanded {
                 continue;
@@ -663,7 +634,8 @@ impl GroupTree {
     }
 
     fn insert_into_group(&mut self, pkey: &str, dkey: &str, hkey: &str, row: &ConnectionRow) {
-        let verdict = Verdict::of(row);
+        let facts = RowFacts::of(row);
+        let clock = self.clock;
         if !self.processes.contains_key(pkey) {
             self.process_order.push(pkey.to_string());
             self.processes.insert(
@@ -685,20 +657,21 @@ impl GroupTree {
                 },
             );
         }
-        pg.counts.add(verdict, row.bytes_sent, row.bytes_received);
+        pg.stats.add(&facts, &clock);
         let dg = pg.domains.get_mut(dkey).expect("just inserted");
         dg.row_order.push(row.id.clone());
-        dg.counts.add(verdict, row.bytes_sent, row.bytes_received);
+        dg.stats.add(&facts, &clock);
         if !dg.hosts.contains_key(hkey) {
             dg.host_order.push(hkey.to_string());
             dg.hosts.insert(hkey.to_string(), HostGroup::default());
         }
         let hg = dg.hosts.get_mut(hkey).expect("just inserted");
         hg.row_order.push(row.id.clone());
-        hg.counts.add(verdict, row.bytes_sent, row.bytes_received);
+        hg.stats.add(&facts, &clock);
     }
 
     fn remove_from_group(&mut self, pkey: &str, dkey: &str, hkey: &str, id: &str) {
+        let clock = self.clock;
         let Some(pg) = self.processes.get_mut(pkey) else {
             return;
         };
@@ -707,10 +680,8 @@ impl GroupTree {
             if let Some(pos) = dg.row_order.iter().position(|r| r == id) {
                 dg.row_order.remove(pos);
                 if let Some(meta) = self.id_meta.get(id) {
-                    dg.counts
-                        .sub(meta.verdict, meta.bytes_sent, meta.bytes_received);
-                    pg.counts
-                        .sub(meta.verdict, meta.bytes_sent, meta.bytes_received);
+                    dg.stats.sub(&meta.facts, &clock);
+                    pg.stats.sub(&meta.facts, &clock);
                 }
             }
             let mut host_now_empty = false;
@@ -718,8 +689,7 @@ impl GroupTree {
                 if let Some(pos) = hg.row_order.iter().position(|r| r == id) {
                     hg.row_order.remove(pos);
                     if let Some(meta) = self.id_meta.get(id) {
-                        hg.counts
-                            .sub(meta.verdict, meta.bytes_sent, meta.bytes_received);
+                        hg.stats.sub(&meta.facts, &clock);
                     }
                 }
                 host_now_empty = hg.row_order.is_empty();
@@ -744,13 +714,13 @@ impl GroupTree {
         }
     }
 
-    fn with_counts(&mut self, pkey: &str, dkey: &str, hkey: &str, f: impl Fn(&mut GroupCounts)) {
+    fn with_stats(&mut self, pkey: &str, dkey: &str, hkey: &str, f: impl Fn(&mut GroupStats)) {
         if let Some(pg) = self.processes.get_mut(pkey) {
-            f(&mut pg.counts);
+            f(&mut pg.stats);
             if let Some(dg) = pg.domains.get_mut(dkey) {
-                f(&mut dg.counts);
+                f(&mut dg.stats);
                 if let Some(hg) = dg.hosts.get_mut(hkey) {
-                    f(&mut hg.counts);
+                    f(&mut hg.stats);
                 }
             }
         }
@@ -770,3 +740,5 @@ impl GroupTree {
 mod host_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod window_tests;
