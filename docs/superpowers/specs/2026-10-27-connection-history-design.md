@@ -490,28 +490,52 @@ rule never rewrites stored events.
 
 ## H02. Clear, preview, barrier, health
 
-**Invariant C1: after a control operation is acknowledged, nothing from
-before it is readable or writable.** Writers *and* readers are covered by one
-control gate. Enforcement for disable, clear and retention change:
+**Invariant C1: after a control operation is acknowledged, nothing inside
+its deletion scope is readable or writable, and nothing outside its scope is
+lost without a durable gap.** Writers *and* readers are covered by one control
+gate. The **scope** of a control operation is the set it is approved to
+delete: everything for clear and disable-and-delete; the previewed set for a
+range delete; the rows the new limit would evict for a retention change;
+nothing for disable-and-keep. Enforcement, in this order:
 
-1. Increment the generation under the queue gate (new events carry the new
-   generation; guards from before are handled by G1).
-2. **Close read admission** (D8 gate refuses new queries with `busy`),
+1. **Validate before any destructive step.** Under the control gate, but
+   before touching the queue, readers or files: check the preview token and
+   its checksum, the C2 conditions, and compute the exact scope. If
+   validation fails, the operation is rejected and **nothing has changed**:
+   queued events, pending guards and pins are untouched and ingestion was
+   never closed.
+2. Increment the generation under the queue gate. Events accepted from now on
+   carry the new generation. Guards created earlier are handled by G1.
+3. **Close read admission** (D8 gate refuses new queries with `busy`),
    **cancel and join every reader worker, and close every SQLite handle**,
    including the read-only connection.
-3. The writer discards every older-generation queued item and its pending
-   snapshots and releases their pins.
-4. Only then perform the operation (below), and acknowledge after cleanup.
-5. **Invalidate** any already-produced response and GUI page of an older
-   generation: responses carry the generation, the bridge refuses to deliver a
-   stale one, and the GUI drops pages whose generation differs.
+4. **Split the queue by scope; do not discard wholesale.** Accepted queued
+   events and pending guards **outside the scope are kept** and re-stamped
+   to the new generation (a retention change keeps what the new retention
+   keeps; a rejected or narrower range delete keeps everything it does not
+   cover). Items **inside the scope** are discarded together with their
+   pending snapshots. **Any accepted item discarded outside an approved scope
+   (for example because it cannot be kept) first gets a durable gap row, and
+   only then is its pin released** (W1): a pin is never released by a
+   discard alone.
+5. Perform the operation (below) and acknowledge after cleanup.
+6. **Invalidate** any already-produced response and GUI page of an older
+   generation: responses carry the generation, the bridge refuses to deliver
+   a stale one, and the GUI drops pages whose generation differs.
 
-Tests: blocked writer with a non-empty queue; a reader mid-query when clear
-arrives (its handle is closed before unlink, no deleted row is delivered
-afterwards); stale page after clear is dropped.
+Tests (each with a blocked writer and a non-empty queue):
+- a **retention change** keeps the queued events the new retention keeps,
+  discards only those it evicts, and leaves the watermark correct;
+- a **rejected stale preview** leaves the queue, guards, pins and watermark
+  exactly as before, and ingestion was never interrupted;
+- an accepted item that must be dropped outside scope leaves a durable gap
+  before its pin is released (kill -9 right after shows the gap);
+- a reader mid-query when clear arrives (its handle is closed before unlink,
+  no deleted row is delivered afterwards); a stale page after clear is
+  dropped.
 
 - **Clear all** unlinks the database and sidecars and recreates it empty (no
-  giant delete transaction, no journal growth) **only after** step 1-3 above,
+  giant delete transaction, no journal growth) **only after** steps 1-4 above,
   so no reader holds the old file. **Invariant C2: clear-all deletes only the
   previewed set or fewer.** Under the same writer barrier as the deletion, the
   bridge checks that no row exists above the previewed maximum row id and that
