@@ -18,7 +18,7 @@
 #   4. asserts mutual TLS both ways: a receiver whose certificate comes from
 #      another CA gets nothing, and the real receiver (which requires this
 #      host's client certificate by name) gets nothing from a sender whose
-#      client certificate comes from another CA;
+#      client certificate comes from another CA, or that presents none;
 #   5. runs the README's own merge and way-back snippets against a copy of the
 #      packaged daemon config, with sudo and systemctl stubbed.
 #
@@ -107,11 +107,17 @@ grep -qi 'error' n1-stock.log && fail "stock config check reported errors"
 rm /etc/rsyslog.d/snitchwatch-endpoint-events.conf
 
 # A minimal main config: the drop-in plus only what a test run needs.
-sender_conf() { # port
-    local dir="$work/sender-$1"
+# With a second argument `nocert`, the drop-in loses its client certificate
+# and key (the negative mutual-TLS case).
+sender_conf() { # port [nocert]
+    local dir="$work/sender-$1" conf
     mkdir -p "$dir"
-    printf 'global(workDirectory="%s")\ninclude(file="%s")\n' \
-        "$dir" "$(drop_in "$1")" >"$dir.conf"
+    conf=$(drop_in "$1")
+    if [[ "${2:-}" == nocert ]]; then
+        sed -i -e '/streamDriver\.CertFile/d' -e '/streamDriver\.KeyFile/d' "$conf"
+        grep -q 'streamDriver\.\(Cert\|Key\)File' "$conf" && fail "client cert still configured"
+    fi
+    printf 'global(workDirectory="%s")\ninclude(file="%s")\n' "$dir" "$conf" >"$dir.conf"
     echo "$dir.conf"
 }
 echo "== rsyslogd -N1, minimal main config"
@@ -139,8 +145,8 @@ EOF
     : >"$work/$1.out"
     rsyslogd -f "$work/$1.conf" -i "$work/$1.pid"
 }
-start_sender() { # port
-    rsyslogd -f "$(sender_conf "$1")" -i "$work/sender.pid"
+start_sender() { # port [nocert]
+    rsyslogd -f "$(sender_conf "$1" "${2:-}")" -i "$work/sender.pid"
     for _ in $(seq 50); do
         (exec 3<>/dev/tcp/127.0.0.1/514) 2>/dev/null && return 0
         sleep 0.2
@@ -207,7 +213,8 @@ cat "$work/server.out"
 [[ $(grep -c . "$work/server.out") -eq 1 ]] || fail "expected exactly one event"
 grep -q "$token" "$work/server.out" && fail "the fake token reached the receiver"
 got_keys=$(jq -c 'keys' "$work/server.out")
-want_keys='["action","dst_host","dst_ip","dst_port","host_id","process_path","protocol","rule","src_ip","src_port","time","type","user_id"]'
+# The hand-off sample's keys are the contract, so the sample can't drift.
+want_keys=$(jq -c 'keys' "$src/sample-event.json")
 [[ "$got_keys" == "$want_keys" ]] || fail "fields $got_keys, want $want_keys"
 jq -e --arg h "$host_id" '.src_port == 43210 and .dst_port == 443
     and .user_id == 1000 and .type == 0 and .host_id == $h
@@ -254,6 +261,17 @@ install_client host
     fail "the receiver accepted a client certificate outside its CA"
 echo
 echo "OK: the receiver rejected a client certificate from another CA"
+
+echo "== end to end: no client certificate"
+before=$(grep -c . "$work/server.out")
+start_sender 6514 nocert
+send_all
+sleep 8
+stop_sender
+[[ $(grep -c . "$work/server.out") -eq $before ]] ||
+    fail "the receiver accepted a sender without a client certificate"
+echo
+echo "OK: the receiver rejected a sender without a client certificate"
 
 echo "== README merge and way back"
 mkdir -p /etc/opensnitchd stubs
